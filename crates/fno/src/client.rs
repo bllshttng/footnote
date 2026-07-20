@@ -3632,14 +3632,26 @@ impl View {
     /// place in a table, so they are suppressed; the density cycle is one press
     /// away from all of them.
     fn table_rows(&self) -> Vec<DisplayRow<'_>> {
-        let mut agents: Vec<&AgentRow> = self
-            .tree_rows()
-            .into_iter()
-            .filter_map(|r| match r {
-                DisplayRow::Agent(a) => Some(a),
-                _ => None,
-            })
-            .collect();
+        // Built from the full agent catalog, NOT from `tree_rows` - the table's
+        // job is to list every agent, so it must not inherit the tree's section
+        // state. Filtering tree rows made a collapsed squad (the normal resting
+        // state for an inactive workspace) and a LiveOnly section drop their
+        // agents from the very view that exists to show them.
+        //
+        // By-squad still means the tree's ORDER: squads in layout order, their
+        // agents in catalog order, squadless rows last. Only the visibility
+        // gating is dropped, not the ordering.
+        let mut agents: Vec<&AgentRow> = Vec::with_capacity(self.layout.agents.len());
+        for s in &self.layout.squads {
+            agents.extend(self.layout.agents.iter().filter(|a| a.squad == Some(s.id)));
+        }
+        let known: HashSet<u64> = self.layout.squads.iter().map(|s| s.id).collect();
+        agents.extend(
+            self.layout
+                .agents
+                .iter()
+                .filter(|a| a.squad.is_none_or(|id| !known.contains(&id))),
+        );
         if self.agent_sort == AgentSort::Status {
             // ONE ordering authority (Locked 3): the severity contract lives on
             // `PaneState`'s declaration-order `Ord`, the same one the needs-me
@@ -15240,6 +15252,56 @@ mod tests {
                 "external row must render EMPTY, not {fake:?}: {ext_line:?}"
             );
         }
+    }
+
+    // (codex P1) The extended table must show EVERY agent, not just the ones the
+    // tree happens to be showing. Deriving it from tree_rows() inherited the
+    // section view state, so a collapsed squad or a LiveOnly section silently
+    // dropped its rows from a view whose whole purpose is to list them all.
+    #[test]
+    fn extended_table_lists_agents_from_collapsed_and_live_only_sections() {
+        let mut exited = agent_row("dead", 6, None, false);
+        exited.exited = true;
+        let mut v = wide_view(vec![
+            agent_row("alive", 4, Some(AgentBadge::Working), false),
+            exited,
+        ]);
+        // Collapse the squad: in the tree these rows are hidden.
+        let key = squad_key(&v.layout, v.layout.active_squad).unwrap();
+        v.set_section_view(key.clone(), SectionView::Collapsed);
+        v.density = Density::Regular;
+        assert!(
+            !v.display_rows()
+                .iter()
+                .any(|r| matches!(r, DisplayRow::Agent(_))),
+            "precondition: the collapsed tree hides its agent rows"
+        );
+
+        v.density = Density::Extended;
+        let names: Vec<String> = v
+            .display_rows()
+            .iter()
+            .filter_map(|r| match r {
+                DisplayRow::Agent(a) => Some(a.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.contains(&"alive".to_string()) && names.contains(&"dead".to_string()),
+            "the table lists every agent regardless of section state: {names:?}"
+        );
+
+        // LiveOnly hides exited rows in the tree; the table still lists them.
+        v.set_section_view(key, SectionView::LiveOnly);
+        let names: Vec<String> = v
+            .display_rows()
+            .iter()
+            .filter_map(|r| match r {
+                DisplayRow::Agent(a) => Some(a.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.contains(&"dead".to_string()), "{names:?}");
     }
 
     // AC3-UI: the sort toggle re-bands rows worst-first AND relabels the header,

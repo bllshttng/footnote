@@ -660,25 +660,51 @@ fn find_transcripts(uuids: &[String]) -> HashMap<String, PathBuf> {
     if wanted.is_empty() {
         return out;
     }
-    let Ok(dirs) = std::fs::read_dir(claude_projects_dir()) else {
-        return out;
-    };
-    for dir in dirs.flatten() {
-        let Ok(files) = std::fs::read_dir(dir.path()) else {
-            continue; // an unreadable project dir degrades to no tails, never fatal
+    for root in transcript_roots() {
+        let Ok(dirs) = std::fs::read_dir(root) else {
+            continue; // an absent/unreadable root degrades to no tails, never fatal
         };
-        for f in files.flatten() {
-            let name = f.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if let Some(uuid) = wanted.get(name) {
-                out.insert((*uuid).to_string(), f.path());
+        for dir in dirs.flatten() {
+            let Ok(files) = std::fs::read_dir(dir.path()) else {
+                continue; // an unreadable project dir degrades the same way
+            };
+            for f in files.flatten() {
+                let name = f.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if let Some(uuid) = wanted.get(name) {
+                    out.insert((*uuid).to_string(), f.path());
+                }
             }
-        }
-        if out.len() == wanted.len() {
-            break; // every wanted transcript found; skip the remaining dirs
+            if out.len() == wanted.len() {
+                return out; // every wanted transcript found; skip the rest
+            }
         }
     }
     out
+}
+
+/// Every directory that can hold a session transcript.
+///
+/// The ambient root first, then each ISOLATED account's `<config_dir>/projects`.
+/// An isolated account relocates its whole config dir (`CLAUDE_CONFIG_DIR`), so
+/// a worker launched under one writes its transcript there and not under the
+/// server's own `~/.claude` - searching only the ambient root left the tail
+/// column permanently empty for every such worker. Same account set the roster
+/// union already reads, so the two agree on which accounts exist.
+///
+/// A test override replaces the whole list: a scratch dir is the only root.
+fn transcript_roots() -> Vec<PathBuf> {
+    #[cfg(test)]
+    if let Some(p) = TEST_PROJECTS_DIR.with(|c| c.borrow().clone()) {
+        return vec![p];
+    }
+    let mut roots = vec![claude_projects_dir()];
+    roots.extend(
+        isolated_account_dirs()
+            .into_iter()
+            .map(|(_, dir)| dir.join("projects")),
+    );
+    roots
 }
 
 /// The most recent assistant text in a transcript tail, as one display line.

@@ -434,6 +434,13 @@ enum CoreMsg {
         branches: HashMap<String, String>,
         tails: HashMap<String, String>,
     },
+    /// (x-b186) A fresh session-uuid -> message-tail map with no row change
+    /// behind it. Transcripts grow independently of the registry, so the tail
+    /// pass runs every tick; when only it moved, this pushes the map alone
+    /// rather than forcing an unchanged row set through.
+    AgentTails {
+        tails: HashMap<String, String>,
+    },
     /// (x-6f77) A fresh board-ordered work-queue card set from the off-loop graph
     /// reader, claim-overlaid (x-54fa). Sent only when the set changed; the core
     /// stores it and re-pushes layouts so the sideline backlog lane tracks
@@ -5740,6 +5747,11 @@ impl Core {
                 let _ = reply.send(ServerMsg::Ok);
                 Flow::Continue
             }
+            CoreMsg::AgentTails { tails } => {
+                self.tail_by_session = tails;
+                self.push_layout(false);
+                Flow::Continue
+            }
             CoreMsg::AgentRows {
                 rows,
                 branches,
@@ -5997,6 +6009,11 @@ async fn serve(
         let mut count_rx = client_count_rx.clone();
         tokio::spawn(async move {
             let mut state = agents_view::ReaderState::default();
+            // (x-b186) Carried across ticks so the tail pass can run even when
+            // the row set did not move: the uuid set to look up, and the last
+            // map pushed, so an unchanged result stays off the wire.
+            let mut last_uuids: Vec<String> = Vec::new();
+            let mut last_tails: HashMap<String, String> = HashMap::new();
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // Stat + conditional read of one file behind an mtime+len gate,
@@ -6063,19 +6080,37 @@ async fn serve(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                if let Some(rows) = state.tick(
+                let changed = state.tick(
                     reg_stamp,
                     move || reg_raw,
                     roster_stamp,
                     move || roster_raw,
                     isolated,
                     now,
-                ) {
+                );
+                if let Some(rows) = &changed {
+                    last_uuids = rows
+                        .iter()
+                        .filter_map(|r| r.claude_session_uuid.clone())
+                        .collect();
+                }
+                // (x-b186) Message tails are resolved on EVERY tick, not only
+                // when the registry row set moved. A transcript grows (or first
+                // becomes readable) independently of the registry, so gating
+                // this on a row change would leave the column stale or blank
+                // indefinitely while the agent kept talking. Still one scan for
+                // the whole batch, on the blocking pool, and only while a viewer
+                // is attached (the zero-viewer guard above skips the tick).
+                let uuids = last_uuids.clone();
+                let tails = tokio::task::spawn_blocking(move || agents_view::session_tails(&uuids))
+                    .await
+                    .unwrap_or_default();
+                if let Some(rows) = changed {
                     // (x-cd67 US4) Resolve the git branch per UNIQUE row cwd,
                     // off the core loop, on the blocking pool - bounded file
                     // reads only, per-cwd degradation on failure (AC1-FR). This
-                    // rides the same change-gated emit as the row set, so the
-                    // reads happen only when the set moved, never on idle ticks.
+                    // rides the change-gated emit: a branch only moves when the
+                    // row set does, so the reads stay off idle ticks.
                     let cwds: Vec<String> = {
                         let mut seen = std::collections::HashSet::new();
                         rows.iter()
@@ -6093,18 +6128,7 @@ async fn serve(
                     })
                     .await
                     .unwrap_or_default();
-                    // (x-b186) The extended table's message tails, resolved on
-                    // the same change-gated off-loop pass as the branches above:
-                    // ONE scan of the transcript dirs for the whole batch, never
-                    // a per-row shellout and never a read on the UI loop.
-                    let uuids: Vec<String> = rows
-                        .iter()
-                        .filter_map(|r| r.claude_session_uuid.clone())
-                        .collect();
-                    let tails =
-                        tokio::task::spawn_blocking(move || agents_view::session_tails(&uuids))
-                            .await
-                            .unwrap_or_default();
+                    last_tails = tails.clone();
                     if core_tx
                         .send(CoreMsg::AgentRows {
                             rows,
@@ -6115,6 +6139,13 @@ async fn serve(
                         .is_err()
                     {
                         return; // core loop gone; the server is shutting down
+                    }
+                } else if tails != last_tails {
+                    // Rows unchanged but somebody said something: push the tails
+                    // alone rather than forcing a whole row set through.
+                    last_tails = tails.clone();
+                    if core_tx.send(CoreMsg::AgentTails { tails }).await.is_err() {
+                        return;
                     }
                 }
             }
@@ -9344,6 +9375,30 @@ mod tests {
             "uuid with no readable transcript -> empty cell, not a placeholder"
         );
         assert_eq!(get("codexer").tail, None, "no uuid -> no tail");
+    }
+
+    #[test]
+    fn agent_tails_push_updates_rows_without_a_row_change() {
+        // (codex P1) A transcript grows independently of the registry, so the
+        // tail must be able to land with no row change behind it. Before this,
+        // the tail pass only ran when the merged row set moved, which left the
+        // column stale (or blank) indefinitely while an agent kept talking.
+        let mut core = empty_core();
+        let mut row = bg_row("worker", "/tmp/repos/footnote", Some("j1"));
+        row.claude_session_uuid = Some("uuid-live".into());
+        core.agents = vec![row];
+        assert_eq!(core.agent_rows()[0].tail, None);
+
+        core.handle_msg(CoreMsg::AgentTails {
+            tails: [("uuid-live".to_string(), "said something new".to_string())]
+                .into_iter()
+                .collect(),
+        });
+        assert_eq!(
+            core.agent_rows()[0].tail.as_deref(),
+            Some("said something new"),
+            "a tail-only push reaches the row"
+        );
     }
 
     #[test]
