@@ -72,11 +72,14 @@ def test_ac4_edge_session_id_shorter_than_eight():
     assert canonical_handle("") == ""
 
 
-def test_legacy_handle_re_matches_only_the_retired_form():
-    """The pattern exists to RECOGNIZE a retired address so the send path can
-    refuse it by name - never to accept one."""
-    assert LEGACY_HANDLE_RE.match("claude-019f48e1")
-    assert LEGACY_HANDLE_RE.match("codex-abcdef01")
+@pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "agy", "opencode"])
+def test_legacy_handle_re_matches_every_retired_provider(provider):
+    """The pattern recognizes every retired provider address so callers can
+    refuse or report it by name - never accept one."""
+    assert LEGACY_HANDLE_RE.fullmatch(f"{provider}-019f48e1")
+
+
+def test_legacy_handle_re_rejects_non_retired_shapes():
     assert not LEGACY_HANDLE_RE.match("019f48e1")  # the real address
     assert not LEGACY_HANDLE_RE.match("fno-019f48e1")  # friendly project alias
     assert not LEGACY_HANDLE_RE.match("tgt-node-claude-g1")  # a mesh name

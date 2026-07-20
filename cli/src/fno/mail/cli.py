@@ -416,6 +416,8 @@ def cmd_reply(
     # in_reply_to. Anything else falls through to the thread-store reply below.
     from fno.bus.log import iter_messages
 
+    from fno.harness_identity import LEGACY_HANDLE_RE
+
     orig = next((m for m in iter_messages() if m.id == to_msg), None)
     if orig is not None and orig.to_kind == "name":
         from fno.agents import discover as discover_mod
@@ -429,6 +431,20 @@ def cmd_reply(
                 body_text, from_name=from_project, resolved=resolved, reply_to=to_msg
             )
         else:
+            # A retired `<harness>-<short8>` sender is not an address any more:
+            # nothing drains one, so queuing here would write mail that can never
+            # be delivered and report it as success. Refuse instead, and name the
+            # bare id so the reply can be re-aimed by hand.
+            if LEGACY_HANDLE_RE.match(orig.from_ or ""):
+                bare = orig.from_.split("-", 1)[1][:8]
+                print(
+                    f"error: {orig.from_!r} is a retired address form; nothing "
+                    f"drains it, so this reply would be undeliverable. The sender's "
+                    f"address is {bare!r} - if it is live, "
+                    f'`fno mail send {bare} "..."`.',
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=16)
             # AC1-FR: the original sender is no longer live -> durable floor
             # addressed to their canonical handle (orig.from_), still drainable.
             # No provider: it is only consulted on the live-inject path, which a

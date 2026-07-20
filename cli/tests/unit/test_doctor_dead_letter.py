@@ -67,6 +67,14 @@ def test_doctor_dead_letter_stale_unread_surfaces(bus):
     assert [f["handle"] for f in found] == ["claude-deadbeef"]
 
 
+@pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "agy", "opencode"])
+def test_doctor_dead_letter_covers_every_retired_provider_prefix(bus, provider):
+    handle = f"{provider}-deadbeef"
+    _seed(handle, "stranded", ts="2020-01-01T00:00:00Z")
+
+    assert [f["handle"] for f in doctor._stale_dead_letters(live_handles=set())] == [handle]
+
+
 def test_doctor_dead_letter_fresh_mail_not_flagged(bus):
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     _seed("claude-deadbeef", "just sent", ts=now)

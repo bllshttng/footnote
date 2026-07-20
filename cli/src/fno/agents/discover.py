@@ -936,7 +936,10 @@ def _default_alias(project: Optional[str], short_id: str) -> str:
     construction; the disambiguation pass only fires on hand-edited collisions.
     """
     base = os.path.basename(project) if project else "session"
-    return f"{base}-{short_id}"
+    alias = f"{base}-{short_id}"
+    from fno.harness_identity import LEGACY_HANDLE_RE
+
+    return f"project-{alias}" if LEGACY_HANDLE_RE.fullmatch(alias) else alias
 
 
 def _load_name_map(path: Path) -> dict:
@@ -1088,17 +1091,19 @@ def resolve_or_suggest(
         project_resolver=project_resolver,
         psutil_mod=psutil_mod,
     )
+    retired = bool(handle and LEGACY_HANDLE_RE.fullmatch(handle))
     # An address is the friendly <project>-<short8> alias, the bare hex short-id,
     # or a stored row name. The retired <harness>-<short8> form is NOT accepted:
     # nothing generates it any more, so a caller still passing one is a bug, and
     # translating it silently would hide the bug forever.
-    for s in sessions:
-        if handle and (
-            s.handle == handle
-            or s.short_id == handle
-            or canonical_handle(s.session_id) == handle
-        ):
-            return s, []
+    if not retired:
+        for s in sessions:
+            if handle and (
+                s.handle == handle
+                or s.short_id == handle
+                or canonical_handle(s.session_id) == handle
+            ):
+                return s, []
     import difflib
 
     candidates: list[str] = []
@@ -1110,7 +1115,7 @@ def resolve_or_suggest(
     # address means some caller (a stale binary, a hardcoded string, a note
     # copied out of an old transcript) is still building addresses the retired
     # way. Lead the suggestions with the bare form it should have used.
-    if handle and LEGACY_HANDLE_RE.match(handle):
+    if retired:
         bare = handle.split("-", 1)[1][:8]
         return None, [bare] + [c for c in candidates if c != bare][: max(limit - 1, 0)]
     return None, difflib.get_close_matches(handle or "", candidates, n=limit, cutoff=0.3)

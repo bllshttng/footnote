@@ -190,6 +190,21 @@ def test_ac1fr_offline_sender_queues_durably_with_correlation(
     assert f'reply_to="{msg}"' in rep.body  # wrapped-body wire attr (never split)
 
 
+def test_reply_to_retired_sender_refuses_instead_of_queuing_dead_mail(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    _isolate_empty_discovery(monkeypatch, tmp_path)
+    msg = _seed_name_lane_inbound(
+        to="meeeeeee", from_="claude-deadbeef", body="ping"
+    )
+
+    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+
+    assert r.exit_code == 16
+    assert "deadbeef" in r.output
+    assert [m for m in _bus_msgs() if m.in_reply_to == msg] == []
+
+
 def test_ac1fr_offline_full_uuid_handle_wire_to_matches_durable(
     runner, mailbox, monkeypatch, tmp_path
 ):

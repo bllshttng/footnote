@@ -792,6 +792,37 @@ def test_us3_resolve_bare_short_id_across_harnesses(tmp_path):
     assert suggestions[0] == "019f48e1"
 
 
+def test_retired_shape_refused_even_when_stored_as_friendly_alias(tmp_path):
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    codex = tmp_path / "codex"
+    _write_codex_rollout(codex, session_id=sid, cwd="/x")
+    name_map = tmp_path / ".fno" / "session-names.json"
+    name_map.parent.mkdir(parents=True)
+    name_map.write_text(json.dumps({sid: "codex-019f48e1"}), encoding="utf-8")
+
+    resolved, suggestions = discover.resolve_or_suggest(
+        "codex-019f48e1",
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex,
+        name_map_path=name_map,
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=lambda c: None,
+    )
+
+    assert resolved is None
+    assert suggestions[0] == "019f48e1"
+
+
+@pytest.mark.parametrize("project", ["claude", "codex", "gemini", "agy", "opencode"])
+def test_default_alias_never_generates_retired_handle_shape(project):
+    from fno.harness_identity import LEGACY_HANDLE_RE
+
+    alias = discover._default_alias(project, "deadbeef")
+
+    assert not LEGACY_HANDLE_RE.fullmatch(alias)
+
+
 def test_ac2_edge_harness_prefix_no_longer_disambiguates(tmp_path):
     """The harness prefix used to break an 8-hex collision across harnesses. It
     is not an address any more, so it is refused like any other retired form and

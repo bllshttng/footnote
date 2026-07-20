@@ -1196,7 +1196,20 @@ _DEAD_LETTER_AGE_HOURS = 24.0
 # A session address: the bare short-id, or the retired <harness>-<short8> form
 # still carried by pre-flip envelopes. Bare must be listed or the dead-letter
 # scan silently stops covering every newly generated address.
-_A2A_HANDLE_RE = re.compile(r"^(?:(?:claude|codex|gemini)-)?[0-9a-fA-F]{6,}$")
+def _a2a_handle_re() -> "re.Pattern[str]":
+    """A session address: the bare short-id, or a retired ``<harness>-<short8>``.
+
+    The retired form is still MATCHED here on purpose - mail queued to one before
+    the flip is undeliverable, so the dead-letter report is the only thing that
+    surfaces it. Prefixes come from the harness map so adding a harness cannot
+    silently drop it out of the scan.
+    """
+    from fno.agents.harness_map import known_harnesses
+
+    return re.compile(rf"^(?:(?:{'|'.join(known_harnesses())})-)?[0-9a-fA-F]{{6,}}$")
+
+
+_A2A_HANDLE_RE = _a2a_handle_re()
 
 
 def _plugin_hooks_json() -> Optional[Path]:

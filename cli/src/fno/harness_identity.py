@@ -41,7 +41,17 @@ def canonical_handle(session_id: str) -> str:
 # one and refuse it with a message naming the fix, and so `fno doctor` can still
 # report mail queued to one before the flip as the dead letter it is. Never an
 # accepted address, never generated.
-LEGACY_HANDLE_RE = re.compile(r"^(?:claude|codex|gemini|opencode)-[0-9a-fA-F]{6,}$")
+#
+# Built from the harness map rather than a literal list: a hardcoded copy silently
+# stops covering a harness the moment one is added, which is the same drift that
+# produced the two-conventions mess this address change exists to end.
+def _legacy_handle_re() -> "re.Pattern[str]":
+    from fno.agents.harness_map import known_harnesses
+
+    return re.compile(rf"^(?:{'|'.join(known_harnesses())})-[0-9a-fA-F]{{6,}}$")
+
+
+LEGACY_HANDLE_RE = _legacy_handle_re()
 
 
 def sync_harness_aliases(data: dict, legacy_session_keys: Mapping[str, str]) -> dict:
