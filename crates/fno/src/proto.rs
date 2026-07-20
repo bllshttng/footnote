@@ -192,7 +192,11 @@ use crate::tree::{Dir, Rect, TabId};
 /// ([`BacklogVerb`]) shells the existing `fno backlog rank --top` / `defer`
 /// porcelain server-side - the mux never writes `graph.json` itself. All new reads
 /// are `#[serde(default)]`, keeping a v35 reader wire-tolerant.
-pub const PROTO_VERSION: u32 = 36;
+///
+/// v37 (x-b186): `AgentRow { tail }` carries the row's most recent assistant
+/// line for the extended sideline table's message column. Additive and
+/// `#[serde(default)]`, so a v36 reader parses it as `None` (no tail cell).
+pub const PROTO_VERSION: u32 = 37;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -603,6 +607,15 @@ pub struct AgentRow {
     /// `#[serde(default)]` keeps a v33 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<u64>,
+    /// (v37, x-b186) The row's most recent assistant line, for the extended
+    /// sideline table's message-tail column. Composed server-side off the UI
+    /// loop from the session transcript; claude rows only (the transcript is a
+    /// claude artifact). `None` when the row has no resolvable transcript or its
+    /// tail carries no prose - the cell then renders EMPTY rather than a
+    /// placeholder, so an external/roster row never shows an inferred message.
+    /// `#[serde(default)]` keeps a v36 reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail: Option<String>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -2032,6 +2045,7 @@ mod tests {
                         account: None,
                         updated_at: None,
                         pr: None,
+                        tail: None,
                     },
                     AgentRow {
                         squad: None,
@@ -2051,6 +2065,7 @@ mod tests {
                         account: None,
                         updated_at: None,
                         pr: None,
+                        tail: None,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),

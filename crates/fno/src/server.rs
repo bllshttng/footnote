@@ -425,9 +425,14 @@ enum CoreMsg {
     /// the row cwds, joined into each row's `subline` at layout time; a cwd
     /// with no resolvable branch is simply absent (the subline degrades to the
     /// cwd tail).
+    /// `tails` (x-b186) is the same shape one level over: the reader's off-loop
+    /// session-uuid -> most-recent-assistant-line map, joined into each row's
+    /// `tail` at layout time. A uuid with no readable transcript is absent, so
+    /// the extended table's cell renders empty rather than fabricated.
     AgentRows {
         rows: Vec<RegistryAgent>,
         branches: HashMap<String, String>,
+        tails: HashMap<String, String>,
     },
     /// (x-6f77) A fresh board-ordered work-queue card set from the off-loop graph
     /// reader, claim-overlaid (x-54fa). Sent only when the set changed; the core
@@ -908,6 +913,12 @@ struct Core {
     /// subline then degrades to the cwd tail. Display-only, so staleness across
     /// a git checkout is cosmetic.
     branch_by_cwd: HashMap<String, String>,
+    /// (x-b186) Latest session-uuid -> most-recent-assistant-line map from the
+    /// off-loop reader, joined into each agent row's `tail` at layout time for
+    /// the extended sideline table. A uuid absent from the map has no readable
+    /// transcript or no prose in its tail; the cell renders empty. Display-only,
+    /// so a stale line between reader ticks is cosmetic.
+    tail_by_session: HashMap<String, String>,
     /// Latest board-ordered work-queue cards (x-6f77), from the off-loop graph
     /// reader; packed into every `Layout` for the sideline backlog lane.
     backlog: Vec<BacklogCard>,
@@ -3254,6 +3265,16 @@ impl Core {
         subline_from(self.branch_by_cwd.get(cwd).map(String::as_str), cwd)
     }
 
+    /// (x-b186) A registry row's message tail from the off-loop transcript map.
+    /// `None` for a row with no claude session uuid (a bare pane, a tombstone, a
+    /// non-claude worker) or one whose transcript yielded no prose - the
+    /// extended table then renders an EMPTY cell, never an inferred value.
+    fn compose_tail(&self, a: &RegistryAgent) -> Option<String> {
+        self.tail_by_session
+            .get(a.claude_session_uuid.as_deref()?)
+            .cloned()
+    }
+
     fn agent_rows(&self) -> Vec<AgentRow> {
         let mut out = Vec::new();
         // Which registry agents a pane row already claimed (so they don't
@@ -3338,6 +3359,7 @@ impl Core {
                                     .or_else(|| pane_entry.and_then(|e| e.account.clone())),
                                 updated_at: a.updated_at,
                                 pr: pr_by_holder.get(a.name.as_str()).copied(),
+                                tail: self.compose_tail(a),
                             }
                         }
                         None => {
@@ -3367,9 +3389,10 @@ impl Core {
                                     .compose_subline(e.map(|e| e.cwd.as_str()).unwrap_or("")),
                                 account: e.and_then(|e| e.account.clone()),
                                 // A bare shell pane is not a registry worker: no
-                                // activity stamp, no claim, no pr.
+                                // activity stamp, no claim, no pr, no transcript.
                                 updated_at: None,
                                 pr: None,
+                                tail: None,
                             }
                         }
                     };
@@ -3410,6 +3433,7 @@ impl Core {
                         account: a.account.clone(),
                         updated_at: a.updated_at,
                         pr: pr_by_holder.get(a.name.as_str()).copied(),
+                        tail: self.compose_tail(a),
                     });
                 }
                 None => {
@@ -3450,6 +3474,7 @@ impl Core {
                         account: a.account.clone(),
                         updated_at: a.updated_at,
                         pr: pr_by_holder.get(a.name.as_str()).copied(),
+                        tail: self.compose_tail(a),
                     });
                 }
             }
@@ -3489,6 +3514,7 @@ impl Core {
                     // A dead member carries no live claim or activity stamp.
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 });
             }
         }
@@ -3551,10 +3577,12 @@ impl Core {
                 tombstone: false,
                 subline: self.compose_subline(&r.cwd),
                 account: None,
-                // An external row is never joined (respawn/pr are fno-registry
-                // concerns); its stamps live in its own daemon.
+                // An external row is never joined (respawn/pr/tail are
+                // fno-registry concerns); its state lives in its own daemon, so
+                // those cells stay EMPTY rather than inferred (AC4-ERR).
                 updated_at: None,
                 pr: None,
+                tail: None,
             });
         }
         out
@@ -5712,9 +5740,14 @@ impl Core {
                 let _ = reply.send(ServerMsg::Ok);
                 Flow::Continue
             }
-            CoreMsg::AgentRows { rows, branches } => {
+            CoreMsg::AgentRows {
+                rows,
+                branches,
+                tails,
+            } => {
                 self.agents = rows;
                 self.branch_by_cwd = branches;
+                self.tail_by_session = tails;
                 // Rects are unchanged; only the Layout's agent rows moved -
                 // push without re-emitting frames (AC1-UI: visible within one
                 // layout push; AC2-UI: the read happened off-loop).
@@ -5928,6 +5961,7 @@ async fn serve(
         self_tx: core_tx.clone(),
         agents: Vec::new(),
         branch_by_cwd: HashMap::new(),
+        tail_by_session: HashMap::new(),
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
@@ -6059,8 +6093,25 @@ async fn serve(
                     })
                     .await
                     .unwrap_or_default();
+                    // (x-b186) The extended table's message tails, resolved on
+                    // the same change-gated off-loop pass as the branches above:
+                    // ONE scan of the transcript dirs for the whole batch, never
+                    // a per-row shellout and never a read on the UI loop.
+                    let uuids: Vec<String> = rows
+                        .iter()
+                        .filter_map(|r| r.claude_session_uuid.clone())
+                        .collect();
+                    let tails = tokio::task::spawn_blocking(move || {
+                        agents_view::session_tails(&uuids)
+                    })
+                    .await
+                    .unwrap_or_default();
                     if core_tx
-                        .send(CoreMsg::AgentRows { rows, branches })
+                        .send(CoreMsg::AgentRows {
+                            rows,
+                            branches,
+                            tails,
+                        })
                         .await
                         .is_err()
                     {
@@ -9268,6 +9319,35 @@ mod tests {
     }
 
     #[test]
+    fn agent_rows_join_tail_from_session_map_and_leave_others_empty() {
+        // (x-b186 AC2-HP / AC4-ERR) The tail joins on the row's claude session
+        // uuid. Data honesty is the point: a row with no uuid, or a uuid with no
+        // readable transcript, carries None so the table renders an EMPTY cell -
+        // never an inferred or placeholder message.
+        let mut core = empty_core();
+        let mut with_tail = bg_row("worker", "/tmp/repos/footnote", Some("j1"));
+        with_tail.claude_session_uuid = Some("uuid-live".into());
+        let mut no_transcript = bg_row("silent", "/tmp/repos/footnote", Some("j2"));
+        no_transcript.claude_session_uuid = Some("uuid-missing".into());
+        // A codex row never carries a claude session uuid at all.
+        let no_uuid = bg_row("codexer", "/tmp/repos/footnote", None);
+        core.agents = vec![with_tail, no_transcript, no_uuid];
+        core.tail_by_session = [("uuid-live".to_string(), "wired the reader".to_string())]
+            .into_iter()
+            .collect();
+
+        let rows = core.agent_rows();
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        assert_eq!(get("worker").tail.as_deref(), Some("wired the reader"));
+        assert_eq!(
+            get("silent").tail,
+            None,
+            "uuid with no readable transcript -> empty cell, not a placeholder"
+        );
+        assert_eq!(get("codexer").tail, None, "no uuid -> no tail");
+    }
+
+    #[test]
     fn external_lifecycle_row_carries_cwd_base_when_squad_matched() {
         // x-6851 US3 (codex review): a squad-matched external-lifecycle tombstone
         // must carry its cwd_base (the every-row wire contract), so a foreign-cwd
@@ -10303,6 +10383,7 @@ mod tests {
             self_tx,
             agents: Vec::new(),
             branch_by_cwd: HashMap::new(),
+        tail_by_session: HashMap::new(),
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,

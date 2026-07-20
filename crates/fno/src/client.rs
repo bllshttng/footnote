@@ -8594,6 +8594,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         // A pane-hosted row focuses regardless of the active squad.
         assert!(
@@ -8641,6 +8642,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         match agent_hit(&row, 1) {
             ChromeHit::OpenAttachPlace { id, squad } => {
@@ -8887,6 +8889,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }
     }
 
@@ -9293,6 +9296,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }
     }
 
@@ -10051,6 +10055,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         view_with_agents(vec![
             row("live-a", false),
@@ -10219,6 +10224,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }]);
         let hdr = view
             .display_rows()
@@ -10517,6 +10523,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let mut view = view_with_agents(vec![
             orphan("stray-live", false),
@@ -10562,6 +10569,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let mut view = view_with_agents(vec![orphan("a", false), orphan("b", true)]);
         assert!(frame_text(&view.compose()).contains("▾~ elsewhere"));
@@ -10665,6 +10673,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         // A watch-only bg row with a claude jobId: a click opens the placement
         // picker (x-9c5f) so the operator chooses the split direction.
@@ -10686,6 +10695,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         // A watch-only row with no attach target: a click can only hint.
         let bg_plain = AgentRow {
@@ -10706,6 +10716,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         // Agents-first display order (x-0090; no tab rows) with x-cd67 US1
@@ -10754,6 +10765,7 @@ mod tests {
                 account: None,
                 updated_at: None,
                 pr: None,
+                tail: None,
             })
             .collect();
         let view = view_with_agents(agents);
@@ -11044,6 +11056,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let bg = super::build_row_menu(&mk("bg", None, Some("id"), false), Anchor::Center);
         assert!(bg.actions.contains(&super::MenuAction::NewTab));
@@ -11216,6 +11229,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let mut v = view_with_agents(vec![mk("dup", Some(5)), mk("dup", Some(9))]);
         // Open the menu on the SECOND "dup" (pane 9) and pick Focus.
@@ -11478,6 +11492,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
                 AgentRow {
                     squad: Some(1),
@@ -11497,6 +11512,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
                 AgentRow {
                     squad: None,
@@ -11516,6 +11532,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
             ],
             focus_node: None,
@@ -11590,6 +11607,7 @@ mod tests {
                 account: None,
                 updated_at: None,
                 pr: None,
+                tail: None,
             }
         }
         let mut view = two_pane_view();
@@ -11795,6 +11813,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
                 AgentRow {
                     squad: None,
@@ -11814,6 +11833,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
                 AgentRow {
                     squad: None,
@@ -11833,6 +11853,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
                 // x-df4c AC1-UI: an EXTERNAL row that is also Blocked - the
                 // load-bearing "attention is never dimmed" branch. The accent
@@ -11855,6 +11876,7 @@ mod tests {
                     account: None,
                     updated_at: None,
                     pr: None,
+                    tail: None,
                 },
             ],
             focus_node: None,
@@ -12150,6 +12172,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let card = |id: &str, state| BacklogCard {
             id: id.into(),
@@ -12787,6 +12810,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let loading = PeekView {
             cursor: 0,
@@ -13207,6 +13231,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let mut v = view_with_agents(vec![tomb]);
         v.set_squad_view(1, SectionView::Expanded);
@@ -13247,6 +13272,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }
     }
 
@@ -13842,6 +13868,7 @@ mod tests {
                 account: None,
                 updated_at: None,
                 pr: None,
+                tail: None,
             },
             AgentRow {
                 squad: Some(1),
@@ -13861,6 +13888,7 @@ mod tests {
                 account: None,
                 updated_at: None,
                 pr: None,
+                tail: None,
             },
         ];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
@@ -13916,6 +13944,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         };
         let bare = row("zsh", 10, None);
         let blocked = row("claude", 11, Some(AgentBadge::Blocked));
@@ -13975,6 +14004,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }];
         let composed = NavView {
             query: "notes".into(),
@@ -14023,6 +14053,7 @@ mod tests {
                 account: None,
                 updated_at: None,
                 pr: None,
+                tail: None,
             },
             AgentRow {
                 squad: Some(2),
@@ -14042,6 +14073,7 @@ mod tests {
                 account: None,
                 updated_at: None,
                 pr: None,
+                tail: None,
             },
         ];
         let rows = v.nav_rows();
@@ -14125,6 +14157,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }];
         let idx = v
             .nav_rows()
@@ -14535,6 +14568,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
         assert!(
@@ -14692,6 +14726,7 @@ mod tests {
             account: None,
             updated_at: None,
             pr: None,
+            tail: None,
         }
     }
 
