@@ -785,11 +785,19 @@ def test_daemon_rpc_params_contract_pin(monkeypatch) -> None:
 
     captured_params: list[dict] = []
 
+    import threading
+
+    listening = threading.Event()
+
     def _capturing_daemon(path: Path) -> None:
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(str(path))
         srv.listen(1)
+        # Signal AFTER listen(): bind() already created the socket file, so a
+        # client that waits on the file can connect into the gap before anyone
+        # is listening and get refused - captured nothing, no error raised.
+        listening.set()
         conn, _ = srv.accept()
         try:
             header = b""
@@ -816,14 +824,9 @@ def test_daemon_rpc_params_contract_pin(monkeypatch) -> None:
             conn.close()
             srv.close()
 
-    import threading
     t = threading.Thread(target=_capturing_daemon, args=(sock_path,), daemon=True)
     t.start()
-    import time
-    for _ in range(50):
-        if sock_path.exists():
-            break
-        time.sleep(0.01)
+    assert listening.wait(timeout=10.0), "capturing daemon never reached listen()"
 
     monkeypatch.setenv("FNO_AGENTS_HOME", str(home_dir))
 
