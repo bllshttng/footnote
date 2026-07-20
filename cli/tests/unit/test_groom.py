@@ -622,3 +622,53 @@ def test_shim_translates_the_old_dry_run_short_flag():
         capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "FNO": "echo"},
     )
     assert "backlog groom --dry-run" in proc.stdout, proc.stdout
+
+
+# ── refresh onto a new binary (fno update tail) ─────────────────────────────
+
+
+def test_refresh_is_a_no_op_when_no_agent_is_installed(tmp_path):
+    # An operator who never ran --install-agent must get nothing from an update.
+    r = G.refresh_groom_agent(launch_agents_dir=tmp_path)
+    assert r["status"] == "skipped"
+
+
+def test_refresh_preserves_the_installed_hour_and_workdir(tmp_path, monkeypatch):
+    """A refresh re-renders, so it must not reset the operator's schedule.
+
+    Re-resolving would also point WorkingDirectory at whatever directory
+    `fno update` happened to run from.
+    """
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setattr("fno.pr_watch._install.bounce", lambda **kw: ("ok", 0))
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: Path("/repo/original"))
+
+    G.install_groom_agent(
+        launch_agents_dir=tmp_path, fno_binary="/old/fno", install_path="/bin", hour=5
+    )
+
+    # An update runs from somewhere else entirely, with a new binary on PATH.
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: Path("/somewhere/else"))
+    monkeypatch.setattr(G.shutil if hasattr(G, "shutil") else __import__("shutil"), "which", lambda _: "/new/fno")
+
+    r = G.refresh_groom_agent(launch_agents_dir=tmp_path)
+    xml = (tmp_path / f"{G.GROOM_LABEL}.plist").read_text()
+
+    assert r["status"] == "installed"
+    assert "<integer>5</integer>" in xml, "the operator's hour must survive a refresh"
+    assert "/repo/original" in xml, "the installed workdir must survive a refresh"
+    assert "/new/fno" in xml, "the point of a refresh is picking up the new binary"
+
+
+def test_refresh_survives_a_corrupt_plist(tmp_path, monkeypatch):
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setattr("fno.pr_watch._install.bounce", lambda **kw: ("ok", 0))
+    (tmp_path / f"{G.GROOM_LABEL}.plist").write_text("not a plist")
+
+    r = G.refresh_groom_agent(launch_agents_dir=tmp_path)
+    assert r["status"] == "installed"
+    assert r["hour"] == G.GROOM_HOUR_DEFAULT

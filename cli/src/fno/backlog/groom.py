@@ -388,6 +388,7 @@ def install_groom_agent(
     fno_binary: Optional[str] = None,
     install_path: Optional[str] = None,
     hour: int = GROOM_HOUR_DEFAULT,
+    workdir: Optional[str] = None,
 ) -> dict[str, Any]:
     """Write the plist and bootstrap it into launchd. Returns a receipt.
 
@@ -415,13 +416,15 @@ def install_groom_agent(
 
     # Captured at install time: the scheduled run has no cwd of its own, and
     # maintain's validity sweep needs a real repo to read source evidence from.
-    workdir: Optional[str] = None
-    try:
-        from fno.paths import resolve_repo_root
+    # A refresh passes the installed value so it is not re-resolved against
+    # whatever directory `fno update` happened to run from.
+    if workdir is None:
+        try:
+            from fno.paths import resolve_repo_root
 
-        workdir = str(resolve_repo_root())
-    except Exception:  # noqa: BLE001 - falls back to $HOME, same as before
-        workdir = None
+            workdir = str(resolve_repo_root())
+        except Exception:  # noqa: BLE001 - falls back to $HOME, same as before
+            workdir = None
 
     plist_path = launch_agents_dir / f"{GROOM_LABEL}.plist"
     try:
@@ -443,5 +446,53 @@ def install_groom_agent(
         "status": "installed" if rc == 0 else "failed",
         "plist": str(plist_path),
         "hour": hour,
+        "workdir": workdir,
         "detail": msg,
     }
+
+
+def _installed_agent_settings(plist_path: Path) -> tuple[Optional[int], Optional[str]]:
+    """Read the installed plist's hour and working directory.
+
+    A refresh re-renders, so without this it would silently reset an operator's
+    chosen ``--hour`` back to the default. plistlib parses what launchd itself
+    reads, rather than pattern-matching the XML we happened to write.
+    """
+    import plistlib
+
+    try:
+        data = plistlib.loads(plist_path.read_bytes())
+    except Exception:  # noqa: BLE001 - a hand-edited or corrupt plist falls back to defaults
+        return None, None
+    hour = None
+    cal = data.get("StartCalendarInterval")
+    if isinstance(cal, dict) and isinstance(cal.get("Hour"), int):
+        hour = cal["Hour"]
+    workdir = data.get("WorkingDirectory")
+    return hour, (workdir if isinstance(workdir, str) else None)
+
+
+def refresh_groom_agent(*, launch_agents_dir: Optional[Path] = None) -> dict[str, Any]:
+    """Re-render the installed plist onto the current binary and re-bootstrap it.
+
+    The tail of ``fno update``: an update replaces the binary but never re-renders
+    the plist, so a migration that breaks the old entry point leaves the agent
+    pointing at it with no self-heal. A no-op when no groom agent is installed,
+    so an operator who never ran ``--install-agent`` gets nothing. Never raises:
+    the update chain calls this best-effort.
+    """
+    import sys
+
+    launch_agents_dir = launch_agents_dir or (Path.home() / "Library" / "LaunchAgents")
+    plist_path = launch_agents_dir / f"{GROOM_LABEL}.plist"
+    if sys.platform != "darwin" or not plist_path.exists():
+        return {"status": "skipped", "detail": "no groom agent installed"}
+
+    # Carry the installed schedule and cwd forward; only the binary and PATH
+    # are meant to change on a refresh.
+    hour, workdir = _installed_agent_settings(plist_path)
+    return install_groom_agent(
+        launch_agents_dir=launch_agents_dir,
+        hour=hour if hour is not None else GROOM_HOUR_DEFAULT,
+        workdir=workdir,
+    )

@@ -825,10 +825,11 @@ def _install_then_mark(
 
     ``post_install`` runs AFTER a successful install (also gated by ``&&`` on
     the install exit), best-effort (``|| true``) so it can never override a
-    successful installer exit. Used to refresh the pr-watch daemon onto the
-    freshly-installed binary; it must run the NEW binary, which is why it is
+    successful installer exit. Used to refresh the launchd agents onto the
+    freshly-installed binary; they must run the NEW binary, which is why this is
     chained here (after the install) rather than executed in the pre-exec
-    interpreter.
+    interpreter. Multiple commands arrive ``;``-separated, so one failing
+    refresh still lets the rest run.
     """
     q = shlex.quote
     tmp = marker.parent / f".installed-rev.{pid}.tmp"
@@ -955,13 +956,21 @@ def update_command(
     # fno-py to an ABSOLUTE, PATH-independent path (a cargo/front-door install may
     # not have fno-py on PATH, and the post-install shell inherits that PATH), and
     # carry it as an argv list so the Windows subprocess quotes it correctly.
-    refresh_argv: Optional[list[str]] = None
+    # Every launchd agent fno installs needs this, not just the watcher: each
+    # embeds an absolute binary path and none is re-rendered by the install.
+    # Each verb self-gates (disabled watcher / no groom plist), so listing one
+    # here costs nothing on a machine that does not use it.
+    refresh_cmds: list[list[str]] = []
     try:
         from fno.pr_watch.cli import _resolve_fno_binary
 
-        refresh_argv = [_resolve_fno_binary(), "pr-watch", "refresh"]
+        _fno = _resolve_fno_binary()
+        refresh_cmds = [
+            [_fno, "pr-watch", "refresh"],
+            [_fno, "backlog", "groom", "--refresh-agent"],
+        ]
     except Exception:
-        refresh_argv = None
+        refresh_cmds = []
 
     if sys.platform == "win32":
         # On Windows, os.execvp does NOT replace the process: it spawns the
@@ -972,11 +981,12 @@ def update_command(
         result = subprocess.run(cmd, check=False)
         if result.returncode == 0 and rev:
             _write_installed_rev(rev)
-        if result.returncode == 0 and refresh_argv:
-            # Best-effort, mirroring the Unix chain: refresh the watcher onto the
-            # new binary but never let its failure change the update exit code.
+        if result.returncode == 0:
+            # Best-effort, mirroring the Unix chain: refresh each agent onto the
+            # new binary but never let a failure change the update exit code.
             # List form (no shell) so subprocess handles Windows quoting.
-            subprocess.run(refresh_argv, check=False)
+            for _argv in refresh_cmds:
+                subprocess.run(_argv, check=False)
         raise typer.Exit(result.returncode)
 
     # On Unix, execvp replaces this Python process with the installer; uv
@@ -984,7 +994,9 @@ def update_command(
     # the running interpreter. Because execvp never returns, the installed-rev
     # marker write (and the best-effort pr-watch refresh) are chained onto the
     # installer via the shell so they run iff the install exits 0.
-    post_install = shlex.join(refresh_argv) if refresh_argv else None
+    # `;` not `&&`: the refreshes are independent and best-effort, so a wedged
+    # watcher must not skip the groom agent.
+    post_install = "; ".join(shlex.join(c) for c in refresh_cmds) or None
     if rev:
         os.execvp(
             "/bin/sh",

@@ -1863,3 +1863,38 @@ def test_fresh_path_complete_triad_short_circuits(
     result = update._refresh_rust_bins(source)
     assert result == "fresh"
     assert not [c for c in ran if c and c[0] == "cargo"], "complete fresh triad must skip cargo"
+
+
+def test_install_then_mark_runs_every_refresh_even_when_one_fails(tmp_path: Path) -> None:
+    """The refreshes are independent, so a wedged one must not skip the rest.
+
+    They are `;`-separated rather than `&&`-chained for exactly this reason: a
+    watcher that fails to refresh would otherwise leave every later agent
+    pointing at the pre-update binary, which is the wedge the chain exists to
+    repair.
+    """
+    import subprocess as _sp
+
+    marker = tmp_path / "state" / "installed-rev"
+    second = tmp_path / "second-refreshed"
+    line = update._install_then_mark(
+        ["true"], "feedface", marker=marker, pid=3,
+        post_install=f"false; touch {second}",
+    )
+    result = _sp.run(["/bin/sh", "-c", line], check=False)
+
+    assert second.exists(), "a failing refresh must not skip the ones after it"
+    assert result.returncode == 0, "a refresh failure must not override a successful install"
+
+
+def test_update_refreshes_the_groom_agent_too(monkeypatch) -> None:
+    """Every launchd agent fno installs embeds an absolute binary path.
+
+    Refreshing only pr-watch leaves the groom agent pointing at the pre-update
+    entry point with no self-heal.
+    """
+    import inspect
+
+    src = inspect.getsource(update.update_command)
+    assert '"pr-watch", "refresh"' in src
+    assert '"backlog", "groom", "--refresh-agent"' in src

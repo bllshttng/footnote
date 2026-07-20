@@ -176,6 +176,10 @@ fno backlog groom --install-agent          # daily LaunchAgent at 2am local (mac
 fno backlog groom --install-agent --hour 3 # pick another hour
 ```
 
+`fno update` re-renders the agent onto the freshly-installed binary (`--refresh-agent`, run automatically at the tail of an update alongside the pr-watch refresh), preserving the hour and working directory you installed with.
+Without that, an update replaces the binary the plist points at and a migration that breaks the old entry point leaves the agent wedged with no self-heal.
+The verb is a no-op when no agent is installed, so it costs nothing if you schedule grooming another way.
+
 Non-macOS gets a cron line instead; the verb itself is scheduler-agnostic:
 
 ```cron

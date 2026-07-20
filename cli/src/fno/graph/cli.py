@@ -3062,6 +3062,11 @@ def cmd_groom(
     install_agent: bool = typer.Option(
         False, "--install-agent", help="Install the daily LaunchAgent and exit (macOS)."
     ),
+    refresh_agent: bool = typer.Option(
+        False,
+        "--refresh-agent",
+        help="Re-render an installed LaunchAgent onto the current binary and exit.",
+    ),
     hour: Optional[int] = typer.Option(
         None, "--hour", help="Local hour for --install-agent (default: 2)."
     ),
@@ -3080,8 +3085,15 @@ def cmd_groom(
         GROOM_HOUR_DEFAULT,
         GROOM_MODEL_DEFAULT,
         install_groom_agent,
+        refresh_groom_agent,
         run_groom,
     )
+
+    if refresh_agent:
+        # The tail of `fno update`, so it must never fail the update: a skipped
+        # or failed refresh reports and exits 0.
+        typer.echo(json.dumps(refresh_groom_agent(), indent=2))
+        return
 
     if install_agent:
         receipt = install_groom_agent(hour=hour if hour is not None else GROOM_HOUR_DEFAULT)
