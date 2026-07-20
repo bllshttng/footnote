@@ -291,8 +291,14 @@ step that had nothing to do.
   uniform pattern is:
 
   ```bash
-  FAILURES=()   # once, before Step 2
-  <verb> || { echo "post-merge: <verb> failed" >&2; FAILURES+=("<verb>"); }
+  # The accumulator MUST be a FILE, not a shell array. Each fenced block below
+  # runs as its own invocation and only the working directory survives between
+  # them, so a `FAILURES=()` array would be re-created empty in every block and
+  # Step 7 would report `none` on a failed run - the exact invisible no-op this
+  # discipline exists to kill. Recompute this path in any block that needs it.
+  FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
+
+  <verb> || { echo "post-merge: <verb> failed" >&2; echo "<verb>" >> "$FAILURES_FILE"; }
   ```
 
 - **Fatal - fail loud, exit non-zero.** Per-project context resolution (Step 1)
@@ -310,7 +316,7 @@ under this discipline its "No such option" rejection would have surfaced as
 
 A *designed skip* is not a failure: a verb that warns and exits 0 because it
 refuses to guess (an ambiguous PR->node match, a backfill slot with no owning
-session) stays OUT of `FAILURES`. Only a non-zero exit goes in.
+session) stays OUT of `$FAILURES_FILE`. Only a non-zero exit goes in.
 
 ## Step 2: Completion stamp
 
@@ -318,7 +324,11 @@ Close the backlog node whose PR merged outside the ship gate and stamp its
 plan. If you know the node id, scope it; otherwise sweep:
 
 ```bash
-FAILURES=()   # the Step 7 accumulator; declared here, before the first mutation
+# The Step 7 accumulator. A FILE, because shell state does not survive between
+# fenced blocks (see "Failure discipline" above). Truncated here, before the
+# first mutation, so a re-run reports only its own failures.
+FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
+: > "$FAILURES_FILE"
 
 # Capture the ids reconcile closed into NODE_IDS (Step 8a reaps each closed
 # node's build-worker row). --json runs the same mutations; only the output
@@ -327,7 +337,7 @@ RECONCILE_ERR="$(mktemp)"
 if ! RECONCILE_JSON="$(fno backlog reconcile --json 2>"$RECONCILE_ERR")"; then
   echo "post-merge: reconcile FAILED - record in report" >&2
   cat "$RECONCILE_ERR" >&2
-  FAILURES+=("backlog reconcile")
+  echo "backlog reconcile" >> "$FAILURES_FILE";
 fi
 rm -f "$RECONCILE_ERR"
 NODE_IDS="$(printf '%s' "$RECONCILE_JSON" | jq -r '.closed[]?.node_id // empty' 2>/dev/null | tr '\n' ' ')"
@@ -358,7 +368,7 @@ merged to `done`). Idempotent, best-effort, never blocks the ritual.
 
 ```bash
 fno plan reconcile-status --apply \
-  || { echo "post-merge: plan reconcile-status failed" >&2; FAILURES+=("plan reconcile-status"); }
+  || { echo "post-merge: plan reconcile-status failed" >&2; echo "plan reconcile-status" >> "$FAILURES_FILE"; }
 ```
 
 ### Step 2b: Stamp ship provenance (post-merge takeover, x-b6e4)
@@ -372,7 +382,7 @@ exactly one same-repo PR-linked node and warns+skips on zero or multiple
 
 ```bash
 fno backlog session add --pr-number "$PR" --phase ship \
-  || { echo "post-merge: backlog session add failed" >&2; FAILURES+=("backlog session add"); }
+  || { echo "post-merge: backlog session add failed" >&2; echo "backlog session add" >> "$FAILURES_FILE"; }
 ```
 
 The verb resolves THIS repo's slug itself (git origin, then `gh`), so the
@@ -385,7 +395,7 @@ slug degrades to the bare number, which is a safe skip, never a wrong stamp.
 
 Harness + session id default from the ambient identity; idempotent (this exact
 session's `ship` entry is added once). A no-match or ambiguous PR is a *designed
-skip*, so the verb warns and exits 0 - it does not enter `FAILURES`. A non-zero
+skip*, so the verb warns and exits 0 - it does not enter `$FAILURES_FILE`. A non-zero
 exit here is a real failure (missing identity, unwritable graph) and must show
 up on the Step 7 `Failures:` line.
 
@@ -398,7 +408,7 @@ up on the Step 7 `Failures:` line.
 KEEP_GOING_FLAG=()
 if [[ "$AUTONOMOUS" == "1" ]]; then KEEP_GOING_FLAG=(--keep-going); fi
 # Guarded expansion: under Bash 3.2 + set -u, "${arr[@]}" on an empty array errors.
-fno retro run --pr-number "$PR" "${KEEP_GOING_FLAG[@]+"${KEEP_GOING_FLAG[@]}"}" || { echo "post-merge: retro run FAILED" >&2; FAILURES+=("retro run"); }
+fno retro run --pr-number "$PR" "${KEEP_GOING_FLAG[@]+"${KEEP_GOING_FLAG[@]}"}" || { echo "post-merge: retro run FAILED" >&2; echo "retro run" >> "$FAILURES_FILE"; }
 # Processes any retro/.triage-pending sentinels AND explicitly harvests this
 # PR's carve-outs. The bare `retro run` only fires when a sentinel exists; a
 # manual merge with no node<->PR link drops none, so its carve-outs (now stored
@@ -609,7 +619,7 @@ under the wrong PR/project). The verb does the `ledger.json` join itself:
 
 ```bash
 BACKFILLS="$(fno carveout list --kind backfill --pr-number "$PR" --json)" \
-  || { echo "post-merge: carveout list failed" >&2; FAILURES+=("carveout list"); }
+  || { echo "post-merge: carveout list failed" >&2; echo "carveout list" >> "$FAILURES_FILE"; }
 ```
 
 One JSON object: `{pr_number, sessions_resolved, reason, consumable, carveouts}`.
@@ -646,7 +656,7 @@ via two paths - operator-run AND this slot - would double-apply):
     --details "Enabled by PR #$PR. Precondition: <need>. Command: <description>." \
     --priority "<carve-out priority or p2>" \
     --project "$PROJECT" --cwd "$CANON_ROOT" \
-    || { echo "post-merge: backfill backlog idea FAILED" >&2; FAILURES+=("backlog idea (backfill)"); }
+    || { echo "post-merge: backfill backlog idea FAILED" >&2; echo "backlog idea (backfill)" >> "$FAILURES_FILE"; }
   ```
 
 Once a backfill is handled (run OR filed as a node), remove it from the ledger so
@@ -733,7 +743,7 @@ as a duplicate:
   --why "<one line: what the diff deferred>" \
   --where "<file/area, optional>" \
   --priority p2 ) \
-  || { echo "post-merge: capture add FAILED for '<title>'" >&2; FAILURES+=("backlog capture add"); }
+  || { echo "post-merge: capture add FAILED for '<title>'" >&2; echo "backlog capture add" >> "$FAILURES_FILE"; }
 ```
 
 `capture add` has no `--cwd`, so run it in a `cd "$CANON_ROOT"` subshell (like the
@@ -758,7 +768,7 @@ fno backlog idea "<concise title>" \
   --priority p2 \
   --project "$PROJECT" \
   --cwd "$CANON_ROOT" \
-  || { echo "post-merge: backlog idea FAILED for '<title>'" >&2; FAILURES+=("backlog idea"); }
+  || { echo "post-merge: backlog idea FAILED for '<title>'" >&2; echo "backlog idea" >> "$FAILURES_FILE"; }
 ```
 
 **`fno backlog idea` does NOT dedupe** - it appends a fresh node every call.
@@ -779,7 +789,7 @@ crash accumulated four backlog nodes.
 - **Diff-derived** (a follow-up the merged PR's content implies) -> `capture add`
   for below-node items, `backlog idea` for node-worthy work, as above. Run
   `fno backlog find` first (the search-first rule).
-- **Environment failure** (anything in `FAILURES`) -> **NEVER `backlog idea`.**
+- **Environment failure** (any line in `$FAILURES_FILE`) -> **NEVER `backlog idea`.**
   It gets the Step 7 `Failures:` line plus exactly one deduped capture item with
   a mechanically derived key:
 
@@ -837,19 +847,21 @@ run. That is what makes a partial run unreadable as a clean success: the line's
 a report that simply omits failures is indistinguishable from one that had none.
 
 ```bash
-if [[ ${#FAILURES[@]} -eq 0 ]]; then
-  echo "Failures: none"
-else
+# Recompute the path: this block is a fresh invocation and inherits no state.
+FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
+if [[ -s "$FAILURES_FILE" ]]; then
   # One line, comma-separated, in execution order. Never split across lines.
-  printf 'Failures: %s\n' "$(printf '%s, ' "${FAILURES[@]}" | sed 's/, $//')"
+  printf 'Failures: %s\n' "$(paste -sd, - < "$FAILURES_FILE" | sed 's/,/, /g')"
+else
+  echo "Failures: none"
 fi
 ```
 
-In the headless watcher path, exit non-zero when `FAILURES` is non-empty so the
-watcher logs it.
+In the headless watcher path, exit non-zero when `$FAILURES_FILE` is non-empty
+so the watcher logs it.
 
 Then file the environment failures - **and only as capture items** (Step 6's
-provenance rule below): for each entry in `FAILURES`, one deduped
+provenance rule below): for each line in `$FAILURES_FILE`, one deduped
 `fno backlog capture add "ritual failure: <verb>" --where "<verb>"`. Never a
 `backlog idea` node.
 
