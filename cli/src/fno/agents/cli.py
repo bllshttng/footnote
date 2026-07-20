@@ -353,7 +353,8 @@ def cmd_spawn(
         help=(
             "Provider-specific dangerous-mode bypass. For codex: passes "
             "--dangerously-bypass-approvals-and-sandbox. "
-            "For claude: no-op with a stderr note."
+            "For claude: --permission-mode bypassPermissions (an explicit "
+            "--permission-mode wins)."
         ),
     ),
     fresh: bool = typer.Option(
@@ -1118,8 +1119,9 @@ def cmd_ask(
         help=(
             "Provider-specific dangerous-mode bypass. For codex: passes "
             "--dangerously-bypass-approvals-and-sandbox (replaces the "
-            "default --sandbox workspace-write). For claude: no-op with "
-            "a single-line stderr note. Opt-in; you own the blast radius."
+            "default --sandbox workspace-write). For claude: "
+            "--permission-mode bypassPermissions (an explicit "
+            "--permission-mode wins). Opt-in; you own the blast radius."
         ),
     ),
     to_project: str | None = typer.Option(

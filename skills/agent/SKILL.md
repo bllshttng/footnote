@@ -132,7 +132,7 @@ see below):
 - **`drive`** (alias `interactive`, optional): route codex/gemini to a drivable
   `host` session instead of an autonomous `spawn`. No-op for claude. "drive it"
   / "interactive" map here.
-- **`yolo`** (alias `auto`, optional): typing `yolo` drops the sandbox for this
+- **`yolo`** (aliases `auto`, `-Y`, `--yolo`, optional): typing `yolo` drops the sandbox for this
   launch - codex runs `--dangerously-bypass-approvals-and-sandbox`, gemini runs
   bare `--yolo` (unsandboxed full-auto). You rarely need it: with NO flag, a
   headless codex/gemini worker is already BOUNDED - sandboxed AND never-prompt

@@ -112,7 +112,7 @@ while [[ $# -gt 0 ]]; do
     --no-merge)       ALLOW_MERGE=0; shift ;;
     -y|--yes)         YES=1; shift ;;
     -i|--interactive) MODE="interactive"; shift ;;
-    --yolo)           YOLO=1; shift ;;
+    -Y|--yolo)        YOLO=1; shift ;;
     --handoff)        HANDOFF_MODE=1; shift ;;
     -P|--project)     PROJECT="${2:-}"; PROJECT_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
     # -f here = override the node's own cwd with --project. NOT `fno agents spawn
@@ -200,6 +200,9 @@ if [[ "$HANDOFF_MODE" -eq 0 ]]; then
       continue
     fi
     _lt=$(printf '%s' "$_t" | tr '[:upper:]' '[:lower:]')
+    # -Y matches the RAW token: lowercased it would collide with -y (--yes),
+    # which must keep refusing loud via the flag-lookalike guard below.
+    if [[ "$_t" == "-Y" ]]; then YOLO=1; _end=$_i; continue; fi
     # A provider bareword is any non-claude token in VALID_PROVIDERS (which
     # mirrors the Rust KNOWN_PROVIDERS source of truth), so a newly-supported
     # harness needs no parser edit - just widen VALID_PROVIDERS. claude is the
@@ -286,7 +289,7 @@ if [[ "$HANDOFF_MODE" -eq 0 ]] && { [[ "$msg" == /* ]] || printf '%s' "$_scan_ft
       "$ENDASH"*) scan_cano="--${scan_cano#"$ENDASH"}" ;;
     esac
     case "$scan_cano" in
-      -y|--yes|-m|--allow-merge|--no-merge|-n|--name|-i|--interactive|--yolo|--provider|--model|--effort|-P|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
+      -y|--yes|-m|--allow-merge|--no-merge|-n|--name|-i|--interactive|-Y|--yolo|--provider|--model|--effort|-P|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
         emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the payload. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the task text."
         ;;
     esac

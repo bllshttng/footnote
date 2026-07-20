@@ -331,6 +331,25 @@ check_eq 'codex yolo -> no permission_mode injected'       "$(field "$out" permi
 out="$(run 'ab-99999999' --provider claude)"
 check_eq 'claude no-yolo -> permission_mode stays empty'   "$(field "$out" permission_mode)" ''
 
+# --- -Y is a --yolo alias (flag, trailing-run, and guard semantics) -----------
+# The fno CLI spawn/ask verbs already take -Y for --yolo; the skill layer must
+# match or the flag silently degrades (a real spawn launched permission-manual
+# because -Y was coerced to -y upstream). Trailing -Y matches the RAW token:
+# lowercased it would collide with -y (--yes), which must keep refusing loud.
+out="$(run '/think x-1234 model fable bg' -Y --provider claude)"
+check_eq '-Y flag status'                "$(field "$out" status)" 'ok'
+check_eq '-Y flag claude -> permission_mode' "$(field "$out" permission_mode)" 'bypassPermissions'
+out="$(run '/think x-1234 -Y model fable bg' --provider claude)"
+check_eq '-Y trailing status'            "$(field "$out" status)" 'ok'
+check_eq '-Y trailing consumed from msg' "$(field "$out" message)" '/think x-1234'
+check_eq '-Y trailing claude -> permission_mode' "$(field "$out" permission_mode)" 'bypassPermissions'
+out="$(run 'ab-1234abcd codex -Y merge')"
+check_eq '-Y trailing codex yolo'        "$(field "$out" yolo)" '1'
+out="$(run '/fix the -Y handling then ship')"
+check_eq 'mid-text -Y in /command -> guard error' "$(field "$out" status)" 'error'
+out="$(run '/think x-1234 -y model fable bg')"
+check_eq 'trailing lowercase -y stays guarded (never yolo)' "$(field "$out" status)" 'error'
+
 # --- mid-task `as` stays task text -------------------------------------------
 out="$(run 'refactor the module as a plugin')"
 check_eq   'mid-task as keeps default name' "$(field "$out" name)" "$(field "$(run 'refactor the module as a plugin')" name)"

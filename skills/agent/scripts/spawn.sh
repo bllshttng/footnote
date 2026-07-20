@@ -85,7 +85,7 @@ while [[ $# -gt 0 ]]; do
     --effort)       EFFORT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --payload-mode) PAYLOAD_MODE="${2:-}"; shift 2 ;;
     --substrate)    SUBSTRATE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
-    --yolo)         YOLO=1; shift ;;
+    -Y|--yolo)      YOLO=1; shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; shift 2 ;;
     -r|--role)      ROLE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -t|--timeout)   TIMEOUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
