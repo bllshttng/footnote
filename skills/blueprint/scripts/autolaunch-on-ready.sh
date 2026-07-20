@@ -6,10 +6,10 @@
 # After /blueprint writes a plan and intakes its claimed backlog node, this
 # script decides whether to fire-and-forget dispatch that node as a bg /target
 # worker (reusing skills/target/scripts/dispatch-node.sh). It NEVER launches a
-# blocked/deferred node (pre-planned future work is parked), defaults to
-# no-merge (an auto-fired full pipeline lands a PR for review, not an
-# auto-merge - Locked Decision 4), and on any dispatch failure leaves the node
-# ready and the blueprinted plan intact for a manual `/target bg <node>` retry.
+# blocked/deferred node (pre-planned future work is parked), leaves the
+# decision of whether the worker may merge entirely to config (x-4391 made it
+# per-node - see step 5), and on any dispatch failure leaves the node ready and
+# the blueprinted plan intact for a manual `/target bg <node>` retry.
 #
 # Usage: autolaunch-on-ready.sh <plan-path> [--dry-run]
 #
@@ -252,9 +252,12 @@ if [[ -f "$_MANIFEST" ]]; then
   fi
 fi
 
-# 5. Dispatch via the target dispatch primitive (no-merge default; the script
-#    injects no-merge unless --allow-merge). Surface the outcome; on failure the
-#    node stays ready and the plan is intact (AC6-FR).
+# 5. Dispatch via the target dispatch primitive. Whether the worker may merge
+#    is not decided here: since x-4391 dispatch-node.sh resolves it per node
+#    from that node's own config.dispatch.auto_merge (default false), so an
+#    autolaunched worker merges exactly when its project's config says it may.
+#    Surface the outcome; on failure the node stays ready and the plan is
+#    intact (AC6-FR).
 DISPATCH="$REPO_ROOT/skills/target/scripts/dispatch-node.sh"
 if [[ ! -f "$DISPATCH" ]]; then
   echo "autolaunch-failed $node reason=\"dispatch primitive missing at $DISPATCH\""
