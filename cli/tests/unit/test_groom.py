@@ -290,10 +290,23 @@ def test_relatedness_builds_last_over_the_post_groom_graph():
     assert names == ["archive", "reconcile", "maintain", "relatedness"]
 
 
-def test_quiet_night_legs_are_ok_not_failures(monkeypatch):
-    # Exit 4 is this CLI's "nothing to do" - a quiet night, not a failure.
-    monkeypatch.setattr(G.subprocess, "run", lambda cmd, **k: _Proc(returncode=4))
+def test_quiet_night_legs_are_ok(monkeypatch):
+    # The quiet paths all exit 0: reconcile prints "Backlog is in sync." and
+    # returns, archive/maintain report nothing to do and return.
+    monkeypatch.setattr(G.subprocess, "run", lambda cmd, **k: _Proc(returncode=0))
     assert set(REAL_MECHANICAL(14).values()) == {"ok"}
+
+
+def test_exit_4_is_partial_not_ok(monkeypatch):
+    # Every exit-4 site in this CLI is a DEGRADED outcome, never "nothing to do":
+    # reconcile raises it when PR queries could not be resolved. Recording that
+    # as `ok` would log a reconcile that silently stopped closing nodes as
+    # healthy every night - the exact staleness this pipeline exists to kill.
+    monkeypatch.setattr(G.subprocess, "run", lambda cmd, **k: _Proc(returncode=4, stderr="2 node(s) could not be resolved"))
+    results = REAL_MECHANICAL(14)
+
+    assert all(v.startswith("partial: 4:") for v in results.values()), results
+    assert G._leg_trouble(results) == ["archive", "maintain", "reconcile", "relatedness"]
 
 
 def test_one_failing_leg_does_not_abort_the_rest(monkeypatch):
@@ -441,3 +454,58 @@ def test_every_mechanical_leg_exists_on_the_real_cli():
         available = {opt for param in cmd.params for opt in param.opts}
         missing = [a for a in args[1:] if a.startswith("--") and a not in available]
         assert not missing, f"`fno backlog {args[0]}` has no {missing}"
+
+
+# ── a broken leg must reach a human ─────────────────────────────────────────
+
+
+def test_a_failed_leg_degrades_the_receipt(claims_root, spawns, monkeypatch):
+    monkeypatch.setattr(G, "_run_mechanical", lambda age: {"archive": "ok", "reconcile": "failed: 1: boom"})
+    r = G.run_groom(cwd="/tmp", today=DAY)
+
+    # The worker still dispatched - the pass is best-effort - but the status must
+    # not read clean, because status is what reaches the exit code.
+    assert r["status"] == "degraded"
+    assert r["degraded_legs"] == ["reconcile"]
+
+
+def test_degraded_exits_nonzero_so_the_break_is_not_log_only(monkeypatch):
+    # The receipt's only other sink under launchd is a log file with no reader.
+    from typer.testing import CliRunner
+
+    from fno.graph.cli import cli as graph_cli
+
+    monkeypatch.setattr(
+        "fno.backlog.groom.run_groom",
+        lambda **kw: {"status": "degraded", "day": "2026-07-19", "mechanical": {"reconcile": "failed: 1: x"}},
+    )
+    result = CliRunner().invoke(graph_cli, ["groom"])
+    assert result.exit_code == 1
+
+
+def test_the_worker_is_told_what_the_mechanical_pass_did(claims_root, spawns, monkeypatch):
+    # AC1-HP asks the mailed report to itemize every leg. The worker is the only
+    # thing that reaches a human, and it cannot report outcomes it never got.
+    monkeypatch.setattr(
+        G, "_run_mechanical", lambda age: {"archive": "ok", "reconcile": "failed: 1: boom"}
+    )
+    G.run_groom(cwd="/tmp", today=DAY)
+
+    brief = spawns[0]["brief"]
+    assert "archive ok" in brief
+    assert "reconcile failed: 1: boom" in brief
+    assert "Mechanical" in brief
+
+
+def test_a_clean_pass_leaves_the_brief_unadorned(claims_root, spawns):
+    G.run_groom(cwd="/tmp", today=DAY)
+    assert "fno:groom" in spawns[0]["brief"]
+
+
+def test_a_lost_correlation_id_is_flagged_not_silent(claims_root, monkeypatch):
+    # The worker launched, so the pass stands; but `fno agents logs` has no
+    # handle, which is worth counting rather than reading as a normal dispatch.
+    monkeypatch.setattr(G, "_spawn_groom_worker", lambda *a, **k: "unknown")
+    r = G.run_groom(cwd="/tmp", today=DAY)
+
+    assert r["short_id_lost"] is True

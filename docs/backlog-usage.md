@@ -164,6 +164,8 @@ fno backlog reconcile              # close nodes whose PR merged outside the gat
 
 1. The mechanical legs, in order - `archive --apply` (age-gated, `--age`, default 14 days), `reconcile`, `maintain --apply`, then `relatedness build` last so the map reflects the post-groom graph.
    Best-effort: one failing leg is named in the receipt and does not cost you the other three.
+   A leg is `ok` only on exit 0; exit 4 is recorded as `partial` (in this CLI it always means a degraded result, such as PR queries `reconcile` could not resolve, never "nothing to do").
+   If any leg comes back other than `ok` the receipt status is `degraded` and the verb exits non-zero, and the worker names the leg in its report - a scheduler log nobody reads is not a signal.
 2. One Sonnet worker for the judgment calls, working from a fixed allowlist of reversible levers, finishing by mailing a one-screen report that leads with the mechanical outcomes.
 
 A UTC-day claim, not the scheduler, enforces once-a-day, so a double-fire or a manual run on a day that already groomed is a no-op (`already-ran`, zero subprocesses).

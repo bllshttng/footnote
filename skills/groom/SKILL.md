@@ -86,7 +86,7 @@ fno mail send --to-project fno --kind fyi "groom <YYYY-MM-DD>" --body-file <repo
 
 The report carries, in this order:
 
-0. **Mechanical** - one leading line itemizing every leg of the dispatcher's pass by name with its outcome, e.g. `Mechanical: archive ok, reconcile ok, maintain ok, relatedness failed: 1: ...`. Name all four legs every time; an aggregate count alone hides which one broke, and a leg that starts failing nightly is exactly what this line exists to surface.
+0. **Mechanical** - one leading line itemizing every leg of the dispatcher's pass by name with its outcome, e.g. `Mechanical: archive ok, reconcile ok, maintain ok, relatedness failed: 1: ...`. Your seed brief carries these verbatim; report them as given. Name all four legs every time; an aggregate count alone hides which one broke. Anything other than `ok` (`failed:` or `partial:`) also belongs under **Anomalies** - this line is the only signal an operator gets that a leg has quietly stopped working, and a nightly job that degrades unnoticed is what this pipeline was built to prevent.
 1. **Mutations** - every lever you pulled, one line each, with its receipt (node id + what changed).
 2. **Pile** - what is in the triage pile now, and what you added to it today.
 3. **Anomalies** - starvation receipts, guard exclusions, anything that looks wrong but was not yours to fix.

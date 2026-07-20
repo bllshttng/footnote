@@ -45,10 +45,26 @@ def groom_day_key(today: Optional[date] = None) -> str:
     return f"groom:{day.isoformat()}"
 
 
-def groom_brief(day: str) -> str:
-    """The worker seed. Deliberately thin: the skill carries the contract."""
+def groom_brief(day: str, mechanical: Optional[dict[str, str]] = None) -> str:
+    """The worker seed. Deliberately thin: the skill carries the contract.
+
+    The mechanical outcomes are interpolated because the worker is the only
+    thing that reaches a human. The receipt goes to a launchd log nobody reads,
+    so a leg that fails silently every night is invisible unless the mailed
+    report names it - which the worker cannot do without being told.
+    """
+    legs = ""
+    if mechanical:
+        itemized = ", ".join(f"{name} {outcome}" for name, outcome in mechanical.items())
+        legs = (
+            f"\n\nToday's mechanical pass already ran: {itemized}.\n"
+            "Report these verbatim as the leading Mechanical line, naming every "
+            "leg. Any leg that did not come back `ok` is an anomaly: say so "
+            "plainly in the report - that line is the only signal an operator gets."
+        )
     return (
-        f"Daily backlog grooming pass for {day}.\n\n"
+        f"Daily backlog grooming pass for {day}."
+        f"{legs}\n\n"
         "Load the `fno:groom` skill and follow it end to end. "
         "Use ONLY the levers it allowlists - never edit graph files directly. "
         "Anything the patterns do not support goes to the triage pile as a "
@@ -56,9 +72,12 @@ def groom_brief(day: str) -> str:
     )
 
 
-# 4 is this CLI's "nothing to do" exit (e.g. reconcile found nothing to close) -
-# a quiet night, not a failure.
-_QUIET_EXIT = 4
+# Exit 4 is a PARTIAL result, never "nothing to do" - every site that raises it
+# in this CLI is a degraded outcome (unresolved PR queries in reconcile, a
+# retryable gh outage, nothing intaked). The quiet paths all exit 0. The old
+# nightly script's comment claimed the opposite, which would have logged a
+# reconcile that silently stopped resolving PRs as `ok` every night.
+_PARTIAL_EXIT = 4
 _LEG_TIMEOUT_S = 600
 
 
@@ -95,12 +114,18 @@ def _run_mechanical(age: int) -> dict[str, str]:
         except Exception as exc:  # noqa: BLE001 - a wedged leg must not abort the pass
             results[name] = f"failed: {type(exc).__name__}: {str(exc)[:120]}"
             continue
-        if proc.returncode in (0, _QUIET_EXIT):
+        if proc.returncode == 0:
             results[name] = "ok"
-        else:
-            detail = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")
-            results[name] = f"failed: {proc.returncode}: {detail[:120]}"
+            continue
+        detail = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")
+        label = "partial" if proc.returncode == _PARTIAL_EXIT else "failed"
+        results[name] = f"{label}: {proc.returncode}: {detail[:120]}"
     return results
+
+
+def _leg_trouble(mechanical: dict[str, str]) -> list[str]:
+    """The legs that did not come back clean, for the receipt and the report."""
+    return sorted(name for name, outcome in mechanical.items() if outcome != "ok")
 
 
 def _spawn_groom_worker(brief: str, cwd: str, model: str, day: str) -> str:
@@ -150,7 +175,8 @@ def run_groom(
 
     The mechanical legs run first (under the claim, so a same-day rerun skips
     them too), then the judgment worker is dispatched. Returns a receipt whose
-    ``status`` is one of ``dispatched`` | ``already-ran`` | ``dry-run`` |
+    ``status`` is one of ``dispatched`` | ``degraded`` (dispatched, but a
+    mechanical leg did not come back clean) | ``already-ran`` | ``dry-run`` |
     ``failed``, carrying a ``mechanical`` map of per-leg outcomes. Never raises:
     a grooming pass is hygiene, so a failed dispatch reports and leaves the day
     retryable.
@@ -165,7 +191,6 @@ def run_groom(
 
     key = groom_day_key(today)
     day = key.split(":", 1)[1]
-    brief = groom_brief(day)
 
     if dry_run:
         return {
@@ -173,7 +198,7 @@ def run_groom(
             "day": day,
             "key": key,
             "model": model,
-            "brief": brief,
+            "brief": groom_brief(day),
             "mechanical": [name for name, _ in _mechanical_legs(age)],
         }
 
@@ -183,11 +208,15 @@ def run_groom(
     # Read before acquiring: `acquire_claim` is idempotent for the SAME holder, so
     # a second call from one process would re-acquire and re-dispatch. The status
     # read catches that; the acquire below still catches the cross-process race.
+    claim_read_error: Optional[str] = None
     try:
         if claim_status(key, root=root).get("state") in ("live", "suspect"):
             return {"status": "already-ran", "day": day, "key": key}
-    except Exception:  # noqa: BLE001 - an unreadable marker falls through to acquire
-        pass
+    except Exception as exc:  # noqa: BLE001 - an unreadable marker falls through to acquire
+        # Safe (the acquire below still catches the cross-process race), but a
+        # persistently unreadable claims root degrades same-process dedup, so
+        # carry the reason instead of dropping it.
+        claim_read_error = str(exc)[:200]
 
     try:
         acquire_claim(
@@ -206,6 +235,7 @@ def run_groom(
     # step re-derives today's proposals from the live graph, so it must see the
     # post-mechanical state.
     mechanical = _run_mechanical(age)
+    brief = groom_brief(day, mechanical)
 
     try:
         short_id = _spawn_groom_worker(brief, cwd, model, day)
@@ -240,13 +270,26 @@ def run_groom(
             "mechanical": mechanical,
         }
 
-    return {
-        "status": "dispatched",
+    # A leg that fails must reach the exit code. The receipt's only other sink is
+    # a launchd log with no reader, which is precisely how the surface this
+    # replaced went stale for ten days unnoticed.
+    trouble = _leg_trouble(mechanical)
+    receipt = {
+        "status": "degraded" if trouble else "dispatched",
         "day": day,
         "short_id": short_id,
         "model": model,
         "mechanical": mechanical,
     }
+    if trouble:
+        receipt["degraded_legs"] = trouble
+    if short_id == "unknown":
+        # The worker launched but its correlation id was lost, so `fno agents
+        # logs` has no handle. Not worth failing the pass; worth counting.
+        receipt["short_id_lost"] = True
+    if claim_read_error:
+        receipt["claim_read_error"] = claim_read_error
+    return receipt
 
 
 # ── daily cadence (macOS LaunchAgent) ───────────────────────────────────────

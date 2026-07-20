@@ -3097,7 +3097,9 @@ def cmd_groom(
         age=age if age is not None else GROOM_AGE_DEFAULT,
     )
     typer.echo(json.dumps(receipt, indent=2))
-    if receipt.get("status") == "failed":
+    # `degraded` exits non-zero too: the pass ran, but a mechanical leg is broken
+    # and a scheduler log nobody reads is not a signal.
+    if receipt.get("status") in ("failed", "degraded"):
         raise typer.Exit(code=1)
 
 
