@@ -24,6 +24,17 @@ def claims_root(tmp_path, monkeypatch) -> Path:
     return root
 
 
+# Bound before the autouse stub replaces the module attribute, so the tests that
+# exercise the real leg runner reach it rather than the stub.
+REAL_MECHANICAL = G._run_mechanical
+
+
+@pytest.fixture(autouse=True)
+def no_real_mechanical(monkeypatch):
+    """Never shell out to the real CLI; tests that care use REAL_MECHANICAL."""
+    monkeypatch.setattr(G, "_run_mechanical", lambda age: {"archive": "ok"})
+
+
 @pytest.fixture
 def spawns(monkeypatch) -> list:
     """Capture spawn calls instead of launching a real worker."""
@@ -235,3 +246,143 @@ def test_skill_forbids_direct_state_edits():
     assert "graph.json" in text and "Never" in text
     for forbidden in ("jq -i", "sed -i"):
         assert forbidden in text, "the brief must name the direct-edit paths it forbids"
+
+
+# ── the mechanical pass ─────────────────────────────────────────────────────
+
+
+class _Proc:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+@pytest.fixture
+def legs(monkeypatch) -> list:
+    """Capture mechanical leg subprocesses; returns the recorded commands."""
+    monkeypatch.undo()  # drop the autouse stub so the real _run_mechanical runs
+    calls: list = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _Proc()
+
+    monkeypatch.setattr(G.subprocess, "run", _fake_run)
+    return calls
+
+
+def test_mechanical_legs_run_in_order_after_the_claim(claims_root, spawns, monkeypatch):
+    seen: list = []
+    monkeypatch.setattr(G, "_run_mechanical", lambda age: seen.append(age) or {"archive": "ok"})
+
+    r = G.run_groom(cwd="/tmp", today=DAY, age=7)
+
+    assert r["status"] == "dispatched"
+    assert seen == [7], "--age must reach the archive leg"
+    assert r["mechanical"] == {"archive": "ok"}
+
+
+def test_relatedness_builds_last_over_the_post_groom_graph():
+    # Build must see the post-archive corpus, or this run's archived nodes stay
+    # in the map as dangling edges until tomorrow.
+    names = [name for name, _ in G._mechanical_legs(14)]
+    assert names == ["archive", "reconcile", "maintain", "relatedness"]
+
+
+def test_quiet_night_legs_are_ok_not_failures(monkeypatch):
+    # Exit 4 is this CLI's "nothing to do" - a quiet night, not a failure.
+    monkeypatch.setattr(G.subprocess, "run", lambda cmd, **k: _Proc(returncode=4))
+    assert set(REAL_MECHANICAL(14).values()) == {"ok"}
+
+
+def test_one_failing_leg_does_not_abort_the_rest(monkeypatch):
+    def _fake_run(cmd, **kwargs):
+        if "reconcile" in cmd:
+            return _Proc(returncode=1, stderr="boom")
+        return _Proc()
+
+    monkeypatch.setattr(G.subprocess, "run", _fake_run)
+    results = REAL_MECHANICAL(14)
+
+    assert results["reconcile"].startswith("failed: 1: boom")
+    assert results["maintain"] == "ok" and results["relatedness"] == "ok"
+
+
+def test_a_wedged_leg_is_named_not_raised(monkeypatch):
+    def _boom(cmd, **kwargs):
+        raise G.subprocess.TimeoutExpired(cmd="fno", timeout=G._LEG_TIMEOUT_S)
+
+    monkeypatch.setattr(G.subprocess, "run", _boom)
+    assert "TimeoutExpired" in REAL_MECHANICAL(14)["archive"]
+
+
+def test_same_day_rerun_runs_zero_mechanical_verbs(claims_root, spawns, legs):
+    # AC1-EDGE: the claim guards the WHOLE pipeline, so a second run must not
+    # re-mutate the graph, not merely skip the worker.
+    G.run_groom(cwd="/tmp", today=DAY)
+    before = len(legs)
+    assert G.run_groom(cwd="/tmp", today=DAY)["status"] == "already-ran"
+    assert len(legs) == before, "already-ran must spawn no mechanical subprocess"
+
+
+def test_spawn_failure_keeps_mechanical_results_in_the_receipt(claims_root, monkeypatch):
+    # AC1-ERR: the mutations already landed; the receipt must still report them.
+    monkeypatch.setattr(G, "_spawn_groom_worker", lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
+    r = G.run_groom(cwd="/tmp", today=DAY)
+
+    assert r["status"] == "failed" and r["released"] is True
+    assert r["mechanical"] == {"archive": "ok"}
+
+
+def test_dry_run_names_the_legs_without_running_them(claims_root, spawns, legs):
+    r = G.run_groom(cwd="/tmp", today=DAY, dry_run=True)
+    assert r["mechanical"] == ["archive", "reconcile", "maintain", "relatedness"]
+    assert not legs
+
+
+# ── cadence installer ───────────────────────────────────────────────────────
+
+
+def test_install_renders_a_daily_plist_at_the_requested_hour():
+    xml = G.render_groom_plist(fno_binary="/usr/local/bin/fno", install_path="/bin", hour=3)
+
+    assert f"<string>{G.GROOM_LABEL}</string>" in xml
+    assert "<key>StartCalendarInterval</key>" in xml
+    assert "<integer>3</integer>" in xml
+    # RunAtLoad false: installing at 4pm must not fire a pass immediately.
+    assert "<key>RunAtLoad</key>\n  <false/>" in xml
+    assert "backlog" in xml and "groom" in xml
+
+
+def test_install_escapes_a_binary_path_that_would_break_the_xml():
+    xml = G.render_groom_plist(fno_binary="/opt/a&b/fno", install_path="/bin")
+    assert "/opt/a&amp;b/fno" in xml
+
+
+def test_install_on_non_macos_reports_the_cron_fallback(monkeypatch):
+    monkeypatch.setattr(G.sys if hasattr(G, "sys") else __import__("sys"), "platform", "linux")
+    r = G.install_groom_agent()
+    assert r["status"] == "unsupported"
+    assert "backlog groom" in r["cron"]
+
+
+def test_install_bounces_rather_than_loads(tmp_path, monkeypatch):
+    # `launchctl load` cannot cure the wedge class an `fno update` bounce leaves
+    # behind; reusing pr_watch's bootout->bootstrap->kickstart is the point.
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    called: dict = {}
+
+    def _fake_bounce(*, plist_path, label=None, **kwargs):
+        called["plist"] = plist_path
+        called["label"] = label
+        return ("bounced", 0)
+
+    monkeypatch.setattr("fno.pr_watch._install.bounce", _fake_bounce)
+    r = G.install_groom_agent(launch_agents_dir=tmp_path, fno_binary="/bin/fno", install_path="/bin")
+
+    assert r["status"] == "installed"
+    assert called["label"] == G.GROOM_LABEL
+    assert (tmp_path / f"{G.GROOM_LABEL}.plist").exists()

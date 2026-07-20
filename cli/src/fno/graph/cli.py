@@ -3056,20 +3056,45 @@ def cmd_groom(
     dry_run: bool = typer.Option(
         False, "--dry-run", "-N", help="Print the brief and day key without dispatching."
     ),
+    age: Optional[int] = typer.Option(
+        None, "--age", help="Archive-leg age gate in days (default: 14)."
+    ),
+    install_agent: bool = typer.Option(
+        False, "--install-agent", help="Install the daily LaunchAgent and exit (macOS)."
+    ),
+    hour: Optional[int] = typer.Option(
+        None, "--hour", help="Local hour for --install-agent (default: 2)."
+    ),
 ) -> None:
-    """Dispatch today's Sonnet grooming pass over the backlog (at most once a day).
+    """Run today's grooming pass over the backlog (at most once a day).
 
-    Grooming is levers-only: the worker may supersede, defer/undefer, re-prioritize,
-    rank, promote, and file ideas - never anything else - and mails a one-screen
-    report of every mutation with its receipt. A second run on the same UTC day
-    exits 0 with an ``already-ran`` receipt and spawns nothing.
+    One pipeline: the mechanical legs (archive, reconcile, maintain, relatedness)
+    run first under the daily claim, then ONE Sonnet worker makes the judgment
+    calls. Judgment is levers-only: the worker may supersede, defer/undefer,
+    re-prioritize, rank, promote, and file ideas - never anything else - and mails
+    a one-screen report of every mutation with its receipt. A second run on the
+    same UTC day exits 0 with an ``already-ran`` receipt, running nothing at all.
     """
-    from fno.backlog.groom import GROOM_MODEL_DEFAULT, run_groom
+    from fno.backlog.groom import (
+        GROOM_AGE_DEFAULT,
+        GROOM_HOUR_DEFAULT,
+        GROOM_MODEL_DEFAULT,
+        install_groom_agent,
+        run_groom,
+    )
+
+    if install_agent:
+        receipt = install_groom_agent(hour=hour if hour is not None else GROOM_HOUR_DEFAULT)
+        typer.echo(json.dumps(receipt, indent=2))
+        if receipt.get("status") == "failed":
+            raise typer.Exit(code=1)
+        return
 
     receipt = run_groom(
         cwd=os.getcwd(),
         model=model or GROOM_MODEL_DEFAULT,
         dry_run=dry_run,
+        age=age if age is not None else GROOM_AGE_DEFAULT,
     )
     typer.echo(json.dumps(receipt, indent=2))
     if receipt.get("status") == "failed":
