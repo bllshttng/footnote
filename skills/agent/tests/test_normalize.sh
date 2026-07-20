@@ -23,6 +23,17 @@ field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1; }
 # run <input> [extra argv...] -> echoes normalize.sh stdout
 run() { bash "$NORM" --input "$1" "${@:2}"; }
 
+# run_nofno shadows `fno` with an exit-1 stub so assertions about BUILTIN
+# defaults (no-merge posture, static fallback tables) hold regardless of the
+# host's installed fno and its config (e.g. dispatch.auto_merge=true would
+# otherwise flip allow_merge via the x-4391 rung-2 read).
+_de43_stub="$(mktemp -d)"
+# Guard the mktemp: an empty _de43_stub would write the stub to /fno.
+[[ -n "$_de43_stub" && -d "$_de43_stub" ]] || { echo "mktemp -d failed" >&2; exit 1; }
+printf '#!/usr/bin/env bash\nexit 1\n' > "$_de43_stub/fno"; chmod +x "$_de43_stub/fno"
+trap 'rm -rf "$_de43_stub"' EXIT
+run_nofno() { PATH="$_de43_stub:$PATH" bash "$NORM" --input "$1" "${@:2}"; }
+
 # run_guarded caps a run at 5s when a timeout binary exists (coreutils `timeout`,
 # or `gtimeout` on macOS), so a regressed $#-guard that spins is caught, not hung.
 # Where neither exists (bare macOS), it runs unguarded - the status/value asserts
@@ -81,7 +92,7 @@ out="$(run 'codex yolo merge')"
 check_eq   'AC1-ERR bareword-only status' "$(field "$out" status)" 'error'
 
 # --- AC1-EDGE: posture word mid-task stays task text --------------------------
-out="$(run 'spawn the node that will merge two branches')"
+out="$(run_nofno 'spawn the node that will merge two branches')"
 check_eq   'AC1-EDGE merge not consumed' "$(field "$out" allow_merge)" '0'
 check_contains 'AC1-EDGE merge stays in message' "$(field "$out" message)" 'merge two branches'
 
@@ -164,7 +175,7 @@ check_eq   'dangling as is error' "$(field "$out" status)" 'error'
 out="$(run 'ab-99999999 as gemini')"
 check_eq   'as gemini -> name=gemini'        "$(field "$out" name)" 'gemini'
 check_eq   'as gemini -> provider NOT gemini' "$(field "$out" provider)" 'claude'
-out="$(run 'ab-99999999 as merge')"
+out="$(run_nofno 'ab-99999999 as merge')"
 check_eq   'as merge -> name=merge'           "$(field "$out" name)" 'merge'
 check_eq   'as merge -> allow_merge stays 0'  "$(field "$out" allow_merge)" '0'
 # a posture word BEFORE the `as <name>` pair still binds normally
@@ -183,12 +194,9 @@ check_eq   'hermes not a spawn provider'       "$(field "$out" provider)" 'claud
 check_contains 'hermes stays in message'       "$(field "$out" message)" 'hermes'
 
 # --- x-de43: per-harness native invocation (opencode /fno:verb, gemini refused)
-# Force the STATIC fallback table (stub `fno` to exit 1) so the rendered surface
-# is asserted against the in-tree mirror, not the installed fno (which may lag
-# until redeployed). This is the mirror the parity python test also guards.
-_de43_stub="$(mktemp -d)"
-printf '#!/usr/bin/env bash\nexit 1\n' > "$_de43_stub/fno"; chmod +x "$_de43_stub/fno"
-run_nofno() { PATH="$_de43_stub:$PATH" bash "$NORM" --input "$1" "${@:2}"; }
+# run_nofno (defined at top) forces the STATIC fallback table so the rendered
+# surface is asserted against the in-tree mirror, not the installed fno (which
+# may lag until redeployed). This is the mirror the parity python test guards.
 
 # AC1-HP: an opencode node-id build renders the plugin-namespaced /fno:target
 # (+ no-merge). Free text no longer builds (x-cbb0) - only a resolved node id
@@ -223,8 +231,6 @@ check_contains 'gemini build names agy'       "$(field "$out" error)"  'agy'
 out="$(run_nofno '/target ship it' --provider gemini)"
 check_eq       'gemini passthrough refused'   "$(field "$out" status)" 'error'
 check_contains 'gemini passthrough names agy' "$(field "$out" error)"  'agy'
-
-rm -rf "$_de43_stub"
 
 # --- model <name> two-word posture -------------------------------------------
 out="$(run 'ab-99999999 model opus')"
@@ -327,6 +333,25 @@ check_eq 'codex yolo -> no permission_mode injected'       "$(field "$out" permi
 out="$(run 'ab-99999999' --provider claude)"
 check_eq 'claude no-yolo -> permission_mode stays empty'   "$(field "$out" permission_mode)" ''
 
+# --- -Y is a --yolo alias (flag, trailing-run, and guard semantics) -----------
+# The fno CLI spawn/ask verbs already take -Y for --yolo; the skill layer must
+# match or the flag silently degrades (a real spawn launched permission-manual
+# because -Y was coerced to -y upstream). Trailing -Y matches the RAW token:
+# lowercased it would collide with -y (--yes), which must keep refusing loud.
+out="$(run '/think x-1234 model fable bg' -Y --provider claude)"
+check_eq '-Y flag status'                "$(field "$out" status)" 'ok'
+check_eq '-Y flag claude -> permission_mode' "$(field "$out" permission_mode)" 'bypassPermissions'
+out="$(run '/think x-1234 -Y model fable bg' --provider claude)"
+check_eq '-Y trailing status'            "$(field "$out" status)" 'ok'
+check_eq '-Y trailing consumed from msg' "$(field "$out" message)" '/think x-1234'
+check_eq '-Y trailing claude -> permission_mode' "$(field "$out" permission_mode)" 'bypassPermissions'
+out="$(run 'ab-1234abcd codex -Y merge')"
+check_eq '-Y trailing codex yolo'        "$(field "$out" yolo)" '1'
+out="$(run '/fix the -Y handling then ship')"
+check_eq 'mid-text -Y in /command -> guard error' "$(field "$out" status)" 'error'
+out="$(run '/think x-1234 -y model fable bg')"
+check_eq 'trailing lowercase -y stays guarded (never yolo)' "$(field "$out" status)" 'error'
+
 # --- mid-task `as` stays task text -------------------------------------------
 out="$(run 'refactor the module as a plugin')"
 check_eq   'mid-task as keeps default name' "$(field "$out" name)" "$(field "$(run 'refactor the module as a plugin')" name)"
@@ -345,7 +370,7 @@ check_contains 'multiline line2 NOT discarded' "$(msg_block "$out")" 'and the si
 check_not_contains 'multiline trailing posture stripped from message' "$(msg_block "$out")" 'codex'
 # mid-text posture across lines stays task text (right-anchored run)
 ml2="$(printf 'refactor the merge module\ninto two files')"
-out="$(run "$ml2")"
+out="$(run_nofno "$ml2")"
 check_eq       'multiline mid-merge not consumed' "$(field "$out" allow_merge)" '0'
 check_contains 'multiline mid-text keeps both lines' "$(msg_block "$out")" 'into two files'
 
