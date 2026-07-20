@@ -72,15 +72,18 @@ if [[ $rc -eq 1 && -d "$S/wt" ]]; then pass "dirty worktree refused (exit 1, kep
 rm -rf "$S"
 
 # 1e. Modern manifest (no status field) with a LIVE owner_pid -> preserved
-# (exit 0, kept). Guards the P1 where a running claimed target's cwd would be
+# (exit 1, kept). Guards the P1 where a running claimed target's cwd would be
 # removed because the status-only guard missed the modern liveness signal.
+# Exit 1, not 0: the harness reads exit 0 as "removed" and deletes the job
+# record, which would orphan the very worktree this branch is protecting.
+# Matches the other two did-not-remove branches (main checkout, dirty).
 S=$(new_sandbox)
 ( cd "$S" && git worktree add -q wt >/dev/null 2>&1 )
 mkdir -p "$S/wt/.fno"
 ( exec sleep 30 ) & LIVE=$!
 printf 'graph_node_id: x-live\nowner_pid: %s\n' "$LIVE" > "$S/wt/.fno/target-state.md"
 out=$(cd "$S" && echo "{\"worktree_path\":\"$S/wt\"}" | bash "$HOOK" 2>&1); rc=$?
-if [[ $rc -eq 0 && -d "$S/wt" ]] && echo "$out" | grep -q 'preserving'; then pass "live owner_pid (modern manifest) preserved (exit 0, kept)"; else fail "live owner_pid preserve" "rc=$rc wt-exists=$([[ -d "$S/wt" ]] && echo y || echo n) out=$out"; fi
+if [[ $rc -eq 1 && -d "$S/wt" ]] && echo "$out" | grep -q 'preserving'; then pass "live owner_pid (modern manifest) preserved (exit 1, kept)"; else fail "live owner_pid preserve" "rc=$rc wt-exists=$([[ -d "$S/wt" ]] && echo y || echo n) out=$out"; fi
 kill "$LIVE" 2>/dev/null
 rm -rf "$S"
 

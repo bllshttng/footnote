@@ -1132,3 +1132,19 @@ def resolve_plugin_script(relpath: str) -> Path:
     if persisted is not None:
         return persisted / relpath
     return resolve_repo_root() / relpath
+
+
+def resolve_plugin_script_durable(relpath: str) -> Path:
+    """``resolve_plugin_script`` mapped onto the canonical checkout.
+
+    Use this whenever the resolved path gets PERSISTED somewhere outside the
+    session (a user-level settings file, a generated launcher). The env-hint
+    branch above honors ``CLAUDE_PLUGIN_ROOT``/``FNO_REPO_ROOT`` raw, so from a
+    linked worktree it hands back that worktree's path - fine to execute now,
+    dead the moment the worktree is archived."""
+    resolved = resolve_plugin_script(relpath)
+    depth = len(Path(relpath).parts)
+    root = resolved
+    for _ in range(depth):
+        root = root.parent
+    return _canonical_plugin_root(root) / relpath

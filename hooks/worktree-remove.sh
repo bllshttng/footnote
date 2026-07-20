@@ -2,11 +2,16 @@
 # WorktreeRemove hook: cleanup with lifecycle awareness
 #
 # Contract (Claude Code delegation): when this hook is configured, the harness
-# does NOT remove the worktree itself - it expects THIS hook to remove it, then
-# verifies the path is gone. A log-only hook strands every hook-created
-# worktree as an unremovable bg job ("WorktreeRemove hook did not remove
-# worktree"). So: preserve active target sessions, refuse the main checkout,
-# otherwise actually remove.
+# does NOT remove the worktree itself - it expects THIS hook to remove it. A
+# log-only hook strands every hook-created worktree as an unremovable bg job
+# ("WorktreeRemove hook did not remove worktree"). So: preserve active target
+# sessions, refuse the main checkout, otherwise actually remove.
+#
+# EXIT CODE IS THE WHOLE SIGNAL. The harness never stats the path afterward; it
+# reads exit 0 as "removed" and deletes the job record. So exit 0 ONLY when the
+# worktree is actually gone - a preserve or a refusal must exit non-zero, or the
+# job record is deleted out from under a worktree that still exists and nothing
+# points at it anymore.
 set -uo pipefail
 
 INPUT=$(cat)
@@ -59,9 +64,9 @@ if [[ -f "$ST" ]]; then
         [[ -n "$OWNER_PID" ]] && kill -0 "$OWNER_PID" 2>/dev/null && PRESERVE="live_owner_pid"
     fi
     if [[ -n "$PRESERVE" ]]; then
-        echo "Active target session in worktree, preserving" >&2
+        echo "Active target session in worktree, preserving: $WORKTREE_PATH" >&2
         log_event "skip_remove" "\"reason\":\"$PRESERVE\""
-        exit 0
+        exit 1
     fi
 fi
 

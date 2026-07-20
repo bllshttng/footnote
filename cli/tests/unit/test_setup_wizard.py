@@ -314,6 +314,8 @@ def test_cli_hook_offer_accepts_combined_installer():
             "codex_config": None,
             "codex_hooks_json": None,
             "migrate_legacy_hooks_json": False,
+            "claude": True,
+            "claude_settings": None,
         }
     ]
 

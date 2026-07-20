@@ -6,12 +6,14 @@ hooks/settings, backup-before-write, Codex needs_trust, and the CLI surface.
 from __future__ import annotations
 
 import json
+import shlex
 
 import pytest
 from typer.testing import CliRunner
 
 from fno.setup.cli_hooks import (
     inspect_codex_hooks,
+    install_claude_worktree_remove_hook,
     install_codex_hook,
     install_gemini_hook,
 )
@@ -541,7 +543,8 @@ def test_cli_cli_hooks_writes_both(tmp_path, monkeypatch):
     cconf = tmp_path / "c" / "config.toml"
     res = CliRunner().invoke(
         app,
-        ["cli-hooks", "--gemini-settings", str(gset), "--codex-config", str(cconf)],
+        ["cli-hooks", "--no-claude", "--gemini-settings", str(gset),
+         "--codex-config", str(cconf)],
     )
     assert res.exit_code == 0, res.output
     assert gset.exists() and cconf.exists()
@@ -641,6 +644,7 @@ def test_cli_cli_hooks_no_gemini_writes_only_codex(tmp_path, monkeypatch):
         app,
         [
             "cli-hooks",
+            "--no-claude",
             "--no-gemini",
             "--gemini-settings",
             str(gset),
@@ -739,3 +743,362 @@ def test_cli_cli_hooks_codex_defaults_hooks_json_next_to_codex_config(
     assert str(codex_home / "config.toml") in res.output
     assert "manual consolidation" in res.output
     assert foreign in (codex_home / "hooks.json").read_text()
+
+
+# --- Claude WorktreeRemove --------------------------------------------------
+
+WT_CMD = "/opt/footnote/hooks/worktree-remove.sh"
+
+
+def test_claude_worktree_remove_fresh_install(tmp_path):
+    settings = tmp_path / "settings.json"
+    res = install_claude_worktree_remove_hook(WT_CMD, settings_path=settings)
+    assert res.changed and not res.already_present
+    data = json.loads(settings.read_text())
+    group = data["hooks"]["WorktreeRemove"][0]
+    assert "matcher" not in group
+    hook = group["hooks"][0]
+    assert hook["type"] == "command"
+    assert hook["command"] == f"bash {WT_CMD}"
+    assert res.backup is None  # nothing existed to back up
+
+
+def test_claude_worktree_remove_idempotent(tmp_path):
+    script = tmp_path / "hooks" / "worktree-remove.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/usr/bin/env bash\n")
+
+    settings = tmp_path / "settings.json"
+    install_claude_worktree_remove_hook(str(script), settings_path=settings)
+    before = settings.read_text()
+    res = install_claude_worktree_remove_hook(str(script), settings_path=settings)
+    assert res.already_present and not res.changed
+    assert settings.read_text() == before
+    data = json.loads(settings.read_text())
+    assert len(data["hooks"]["WorktreeRemove"]) == 1
+
+
+def test_claude_worktree_remove_preserves_other_hooks_and_settings(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "model": "opus",
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "/my/own.sh"}]}
+                    ],
+                    "WorktreeRemove": [
+                        {"hooks": [{"type": "command", "command": "/other/plugin.sh"}]}
+                    ],
+                },
+            }
+        )
+    )
+    res = install_claude_worktree_remove_hook(WT_CMD, settings_path=settings)
+    assert res.changed and res.backup is not None
+
+    data = json.loads(settings.read_text())
+    assert data["model"] == "opus"
+    assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "/my/own.sh"
+    commands = [
+        h["command"]
+        for g in data["hooks"]["WorktreeRemove"]
+        for h in g["hooks"]
+    ]
+    assert commands == ["/other/plugin.sh", f"bash {WT_CMD}"]
+
+
+def test_claude_worktree_remove_malformed_left_unchanged(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text("{not json")
+    res = install_claude_worktree_remove_hook(WT_CMD, settings_path=settings)
+    assert not res.changed and not res.already_present
+    assert "malformed" in (res.note or "")
+    assert res.error == res.note  # the caller must see this as a refusal
+    assert settings.read_text() == "{not json"
+
+
+def test_cli_wires_claude_worktree_remove(tmp_path, monkeypatch):
+    import fno.paths as paths
+
+    plugin = tmp_path / "plugin" / "hooks"
+    plugin.mkdir(parents=True)
+    for name in ("session-start.sh", "worktree-remove.sh"):
+        (plugin / name).write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: plugin / rel.split("/")[-1])
+    monkeypatch.setattr(
+        paths, "resolve_plugin_script_durable", lambda rel: plugin / rel.split("/")[-1]
+    )
+
+    from fno.setup_cli import app
+
+    settings = tmp_path / "claude-settings.json"
+    res = CliRunner().invoke(
+        app,
+        ["cli-hooks", "--no-codex", "--no-gemini", "--claude-settings", str(settings)],
+    )
+    assert res.exit_code == 0, res.output
+    data = json.loads(settings.read_text())
+    command = data["hooks"]["WorktreeRemove"][0]["hooks"][0]["command"]
+    assert command == f"bash {plugin / 'worktree-remove.sh'}"
+def test_claude_worktree_remove_repairs_a_dead_path(tmp_path):
+    """An entry whose script no longer exists is the stranding bug wearing a
+    different hat, so re-running must repair it rather than report success."""
+    settings = tmp_path / "settings.json"
+    dead = tmp_path / "archived-worktree" / "hooks" / "worktree-remove.sh"
+    install_claude_worktree_remove_hook(str(dead), settings_path=settings)
+
+    live = tmp_path / "canonical" / "hooks" / "worktree-remove.sh"
+    live.parent.mkdir(parents=True)
+    live.write_text("#!/usr/bin/env bash\n")
+    res = install_claude_worktree_remove_hook(str(live), settings_path=settings)
+
+    assert res.changed and not res.already_present and res.error is None
+    data = json.loads(settings.read_text())
+    groups = data["hooks"]["WorktreeRemove"]
+    assert len(groups) == 1  # repaired in place, not appended alongside
+    assert groups[0]["hooks"][0]["command"] == f"bash {live}"
+
+
+def test_claude_worktree_remove_quotes_a_spacey_path(tmp_path):
+    settings = tmp_path / "settings.json"
+    spacey = tmp_path / "My Plugins" / "hooks" / "worktree-remove.sh"
+    spacey.parent.mkdir(parents=True)
+    spacey.write_text("#!/usr/bin/env bash\n")
+
+    install_claude_worktree_remove_hook(str(spacey), settings_path=settings)
+    command = json.loads(settings.read_text())["hooks"]["WorktreeRemove"][0]["hooks"][0][
+        "command"
+    ]
+    # Unquoted, bash would resolve this to ".../My" and exit 127.
+    assert shlex.split(command) == ["bash", str(spacey)]
+    # And the quoted form must still read back as already-wired.
+    assert install_claude_worktree_remove_hook(
+        str(spacey), settings_path=settings
+    ).already_present
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '[{"my": "settings"}]',
+        '"a string"',
+        "null",
+        '{"hooks": []}',
+        '{"hooks": {"WorktreeRemove": {}}}',
+    ],
+)
+def test_claude_worktree_remove_refuses_unmergeable_settings(tmp_path, raw):
+    """None of these may be treated as 'empty' - doing so writes a fresh object
+    over real user settings and reports success."""
+    settings = tmp_path / "settings.json"
+    settings.write_text(raw)
+    res = install_claude_worktree_remove_hook(WT_CMD, settings_path=settings)
+    assert not res.changed and not res.already_present
+    assert res.error is not None
+    assert settings.read_text() == raw
+
+
+def test_gemini_refuses_non_object_root(tmp_path):
+    """Same hole, same guard - the Gemini installer shares the loader."""
+    settings = tmp_path / "settings.json"
+    settings.write_text('[{"my": "settings"}]')
+    res = install_gemini_hook(CMD, settings_path=settings)
+    assert not res.changed and res.note is not None
+    assert settings.read_text() == '[{"my": "settings"}]'
+
+
+def test_claude_worktree_remove_tolerates_junk_entries(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "WorktreeRemove": [
+                        "junk",
+                        {"hooks": None},
+                        {"hooks": ["junk"]},
+                    ]
+                }
+            }
+        )
+    )
+    res = install_claude_worktree_remove_hook(WT_CMD, settings_path=settings)
+    assert res.changed
+    groups = json.loads(settings.read_text())["hooks"]["WorktreeRemove"]
+    assert groups[-1]["hooks"][0]["command"] == f"bash {WT_CMD}"
+
+
+def test_cli_claude_missing_script_exits_nonzero_but_wires_gemini(tmp_path, monkeypatch):
+    """Partial success with a nonzero exit is the actual contract here."""
+    import fno.paths as paths
+
+    plugin = tmp_path / "plugin" / "hooks"
+    plugin.mkdir(parents=True)
+    (plugin / "session-start.sh").write_text("#!/usr/bin/env bash\n")  # no worktree-remove.sh
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: plugin / rel.split("/")[-1])
+    monkeypatch.setattr(
+        paths, "resolve_plugin_script_durable", lambda rel: plugin / rel.split("/")[-1]
+    )
+
+    from fno.setup_cli import app
+
+    gsettings = tmp_path / "gemini.json"
+    csettings = tmp_path / "claude.json"
+    res = CliRunner().invoke(
+        app,
+        [
+            "cli-hooks", "--no-codex",
+            "--gemini-settings", str(gsettings),
+            "--claude-settings", str(csettings),
+        ],
+    )
+    assert res.exit_code == 1
+    assert "could not locate worktree-remove.sh" in res.output
+    assert not csettings.exists()
+    assert gsettings.exists()
+
+
+def test_cli_no_claude_leaves_settings_untouched(tmp_path, monkeypatch):
+    import fno.paths as paths
+
+    plugin = tmp_path / "plugin" / "hooks"
+    plugin.mkdir(parents=True)
+    for name in ("session-start.sh", "worktree-remove.sh"):
+        (plugin / name).write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: plugin / rel.split("/")[-1])
+
+    from fno.setup_cli import app
+
+    settings = tmp_path / "claude.json"
+    res = CliRunner().invoke(
+        app,
+        ["cli-hooks", "--no-codex", "--no-gemini", "--no-claude",
+         "--claude-settings", str(settings)],
+    )
+    assert res.exit_code == 0
+    assert not settings.exists()
+
+
+def test_claude_repair_only_fixes_a_dead_path(tmp_path):
+    settings = tmp_path / "settings.json"
+    dead = tmp_path / "fno" / "0.3.0" / "hooks" / "worktree-remove.sh"
+    install_claude_worktree_remove_hook(str(dead), settings_path=settings)
+
+    upgraded = tmp_path / "fno" / "0.3.1" / "hooks" / "worktree-remove.sh"
+    upgraded.parent.mkdir(parents=True)
+    upgraded.write_text("#!/usr/bin/env bash\n")
+    res = install_claude_worktree_remove_hook(
+        str(upgraded), settings_path=settings, repair_only=True
+    )
+
+    assert res.changed
+    command = json.loads(settings.read_text())["hooks"]["WorktreeRemove"][0]["hooks"][0][
+        "command"
+    ]
+    assert command == f"bash {upgraded}"
+
+
+def test_claude_repair_only_never_wires_an_unwired_hook(tmp_path):
+    """Wiring a GLOBAL hook stays an explicit opt-in; repair only keeps a hook
+    the user already asked for alive."""
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"model": "opus"}))
+    res = install_claude_worktree_remove_hook(
+        WT_CMD, settings_path=settings, repair_only=True
+    )
+    assert not res.changed and not res.already_present
+    assert json.loads(settings.read_text()) == {"model": "opus"}
+
+
+def test_claude_repair_only_leaves_a_healthy_hook_alone(tmp_path):
+    live = tmp_path / "hooks" / "worktree-remove.sh"
+    live.parent.mkdir(parents=True)
+    live.write_text("#!/usr/bin/env bash\n")
+    settings = tmp_path / "settings.json"
+    install_claude_worktree_remove_hook(str(live), settings_path=settings)
+    before = settings.read_text()
+
+    res = install_claude_worktree_remove_hook(
+        str(live), settings_path=settings, repair_only=True
+    )
+    assert res.already_present and not res.changed
+    assert settings.read_text() == before
+
+
+def test_cli_repair_only_skips_codex_and_gemini(tmp_path, monkeypatch):
+    import fno.paths as paths
+
+    plugin = tmp_path / "plugin" / "hooks"
+    plugin.mkdir(parents=True)
+    for name in ("session-start.sh", "worktree-remove.sh"):
+        (plugin / name).write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: plugin / rel.split("/")[-1])
+    monkeypatch.setattr(
+        paths, "resolve_plugin_script_durable", lambda rel: plugin / rel.split("/")[-1]
+    )
+
+    from fno.setup_cli import app
+
+    gset = tmp_path / "gemini.json"
+    cset = tmp_path / "claude.json"
+    res = CliRunner().invoke(
+        app,
+        ["cli-hooks", "--repair-only", "--gemini-settings", str(gset),
+         "--claude-settings", str(cset)],
+    )
+    assert res.exit_code == 0, res.output
+    assert not gset.exists()  # repair-only never touches the Codex/Gemini legs
+    assert not cset.exists()  # and never wires an absent Claude hook
+
+
+def test_claude_explicit_install_repoints_a_live_but_stale_version(tmp_path):
+    """An upgrade that leaves the old version on disk must not make an explicit
+    install a silent no-op pointing at the stale one."""
+    old = tmp_path / "fno" / "0.3.0" / "hooks" / "worktree-remove.sh"
+    old.parent.mkdir(parents=True)
+    old.write_text("#!/usr/bin/env bash\n")
+    new = tmp_path / "fno" / "0.3.1" / "hooks" / "worktree-remove.sh"
+    new.parent.mkdir(parents=True)
+    new.write_text("#!/usr/bin/env bash\n")
+
+    settings = tmp_path / "settings.json"
+    install_claude_worktree_remove_hook(str(old), settings_path=settings)
+    res = install_claude_worktree_remove_hook(str(new), settings_path=settings)
+
+    assert res.changed
+    groups = json.loads(settings.read_text())["hooks"]["WorktreeRemove"]
+    assert len(groups) == 1
+    assert groups[0]["hooks"][0]["command"] == f"bash {new}"
+
+
+def test_claude_repair_only_leaves_a_live_other_root_alone(tmp_path):
+    """The automatic heal must not ping-pong global settings between a dev
+    checkout and a marketplace install on alternating sessions."""
+    a = tmp_path / "a" / "hooks" / "worktree-remove.sh"
+    a.parent.mkdir(parents=True)
+    a.write_text("#!/usr/bin/env bash\n")
+    b = tmp_path / "b" / "hooks" / "worktree-remove.sh"
+    b.parent.mkdir(parents=True)
+    b.write_text("#!/usr/bin/env bash\n")
+
+    settings = tmp_path / "settings.json"
+    install_claude_worktree_remove_hook(str(a), settings_path=settings)
+    before = settings.read_text()
+    res = install_claude_worktree_remove_hook(
+        str(b), settings_path=settings, repair_only=True
+    )
+    assert res.already_present and not res.changed
+    assert settings.read_text() == before
+
+
+def test_claude_worktree_remove_survives_a_scalar_hooks_value(tmp_path):
+    """A hand-edited settings file must produce the actionable leave-unchanged
+    error, not a TypeError out of the installer."""
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"hooks": {"WorktreeRemove": [{"hooks": 1}]}}))
+    res = install_claude_worktree_remove_hook(WT_CMD, settings_path=settings)
+    assert res.changed  # the junk group is skipped, ours is appended
+    groups = json.loads(settings.read_text())["hooks"]["WorktreeRemove"]
+    assert groups[-1]["hooks"][0]["command"] == f"bash {WT_CMD}"

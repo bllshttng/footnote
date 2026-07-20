@@ -45,6 +45,30 @@ ensure_fno_gitignored() {
 }
 ensure_fno_gitignored || true
 
+# ── heal a wired Claude WorktreeRemove hook after a plugin move ──────
+# That hook lives in ~/.claude/settings.json (claude rm runs with no session,
+# so it never loads plugin hooks) and holds an ABSOLUTE script path. A plugin
+# upgrade moves the versioned install dir out from under it and every
+# hook-created worktree strands again, semi-silently. Gate on the plugin root
+# actually changing, so the common session pays one string compare and no
+# subprocess. Repair-only: never wires the hook for someone who did not ask.
+heal_claude_worktree_hook() {
+    local settings="$HOME/.claude/settings.json"
+    [[ -f "$settings" ]] || return 0
+    grep -q 'worktree-remove\.sh' "$settings" 2>/dev/null || return 0
+    local home="${FNO_HOME:-$HOME/.fno}" stamp
+    stamp="$home/.worktree-hook-root"
+    [[ -f "$stamp" && "$(cat "$stamp" 2>/dev/null)" == "$PLUGIN_ROOT" ]] && return 0
+    command -v fno >/dev/null 2>&1 || return 0
+    # Stamp only on success. Stamping a failed repair (fno missing, or too old
+    # to know --repair-only) would mark the heal done and never retry it.
+    fno setup cli-hooks --no-codex --no-gemini --claude --repair-only \
+        >/dev/null 2>&1 || return 0
+    mkdir -p "$home" 2>/dev/null || return 0
+    printf '%s\n' "$PLUGIN_ROOT" > "$stamp" 2>/dev/null || true
+}
+heal_claude_worktree_hook || true
+
 # ── Platform detection ─────────────────────────────────────────────────
 detect_platform() {
     # Explicit override wins. The Codex/Gemini hook installers set FNO_PLATFORM
