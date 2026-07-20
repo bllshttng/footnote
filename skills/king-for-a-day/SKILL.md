@@ -55,7 +55,11 @@ What a reign actually requires is a frontier-class model at high reasoning effor
 How you spell that depends on your provider, so take the requirement and not this line's defaults.
 
 - **`--effort high`** is the portable half: it is validated against whichever provider is selected, and unset just takes that provider's default.
-- **`--model`** is provider-specific by nature. Name your own provider's frontier model; there is no cross-provider alias for "the good one".
+- **`--model`** takes a provider-specific id, so name your own provider's current frontier model. Do not expect any list of those to stay true; the frontier turns over every few months and a model named in a doc is a doc with an expiry date.
+
+There is a rot-proof abstraction for this, `--model-tier high`, which resolves to the cheapest model at or above a quality tier using a cached benchmark snapshot rather than a hardcoded name.
+It is not reachable from here yet: `fno backlog update` accepts it, `fno agents spawn` does not, and the snapshot is empty until someone runs `fno providers benchmarks refresh`.
+Until both are true, naming the model at spawn time is the only honest option.
 - **Substrate** defaults to `pane`, which works on every provider and is the right answer here. `bg` is a detached claude-only thread and hard-errors elsewhere. `headless` is a one-shot and does **not** fit a multi-step reign, whatever the provider.
 
 **Authority for the worker you crown.**
