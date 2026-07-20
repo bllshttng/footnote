@@ -48,11 +48,21 @@ A pass makes judgment calls (which wave, what to park, what to supersede) and th
 Grooming stays on a small model because it is daily and levers-only; a reign is rare and bounded, so the cost argument does not apply to it.
 
 ```bash
-fno agents spawn king-<epic> "<brief>" --model fable --substrate bg
+fno agents spawn king-<epic> "<brief>" --effort high --model <your frontier model>
 ```
 
-Note for claude workers: `--yolo` is a no-op (it only maps to a real bypass on codex).
-Permission posture on claude comes from `--permission-mode`, and bypass is already the default.
+What a reign actually requires is a frontier-class model at high reasoning effort, in a session that can run many steps.
+How you spell that depends on your provider, so take the requirement and not this line's defaults.
+
+- **`--effort high`** is the portable half: it is validated against whichever provider is selected, and unset just takes that provider's default.
+- **`--model`** is provider-specific by nature. Name your own provider's frontier model; there is no cross-provider alias for "the good one".
+- **Substrate** defaults to `pane`, which works on every provider and is the right answer here. `bg` is a detached claude-only thread and hard-errors elsewhere. `headless` is a one-shot and does **not** fit a multi-step reign, whatever the provider.
+
+**Authority for the worker you crown.**
+`--yolo` means "full auto, no gates", and the *skill* surface translates it per provider: through `/fno:agent spawn` it maps to `--permission-mode bypassPermissions` on claude, while codex gets its literal bypass flag.
+An explicit `--permission-mode` you pass always wins over the mapping.
+The trap is that this translation lives in the skill's normalize step, so `fno agents spawn --yolo` called directly on claude is a genuine no-op with only a stderr note.
+Prefer the skill surface, or pass your provider's own posture flag when you go straight to the CLI.
 
 ## Your hands
 
@@ -92,7 +102,8 @@ Config is the consent: merge only when `auto_merge.enabled` (or the project's eq
 This is the difference between a track that walks and one that silently wedges, so check it before you conclude a wave is stuck.
 
 **Take over.**
-`fno agents attach <name>` joins a running claude session; `resume` restarts one in its recorded cwd; `stop` ends it.
+`fno agents attach <name>` joins a running session interactively (claude only); `resume` restarts one in its recorded cwd via the provider's own resume CLI; `stop` ends it.
+`stop` and `peek` work everywhere, so on a non-claude provider observe with `peek` and end with `stop`.
 Prefer `peek` first: attaching is a drive action, and a king that starts driving has stopped ruling.
 
 **Orient yourself after a compaction.**
