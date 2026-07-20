@@ -1,7 +1,7 @@
 ---
 name: target
 description: "Use when: build this feature, get it done end-to-end, or execute a plan from idea to PR."
-argument-hint: "[S|small|M|medium|L|large] [agent|fork] [beastmode] [clean] [adversarial] [auto-merge | no-merge] [combo <name>] [resume|cancel] [expertise] <ab-xxxxxxxx | feature-description | plan-path> [--max-iterations N] [--budget N] [--no-ship] [--no-external] [--no-docs] [--no-browser]"
+argument-hint: "[S|small|M|medium|L|large] [agent|fork] [beastmode|beast] [clean] [adversarial] [auto-merge | no-merge] [combo <name>] [resume|cancel] [expertise] <ab-xxxxxxxx | feature-description | plan-path> [--max-iterations N] [--budget N] [--no-ship] [--no-external] [--no-docs] [--no-browser]"
 metadata:
   internal: true
 requires:
@@ -135,6 +135,11 @@ Its one meaning is the provider dangerous-mode bypass (`fno agents spawn --yolo`
 A judgment grant is a different axis entirely, so it gets a different word and deliberately carries **no short flag** at all.
 This matters most when spawning: in `/agent spawn /target <node> beastmode yolo`, `beastmode` binds to the target session's judgment and `yolo` to the spawn's permissions, with no token doing double duty.
 A beastmode session still asks the harness for permission exactly as before, and a yolo-spawned worker still stops on an architecture fork unless it also holds an authority grant.
+
+**Spellings.** `beastmode`, `beast`, and `beast mode` all mean the same modifier, case-insensitively.
+The two-word form exists because mobile autocorrect splits `beastmode`, and it is the dangerous one: the stray `mode` token must be stripped along with the modifier.
+Whatever the spelling, pass ONLY the bare node id to `fno target start --beastmode <node>` - init's node guard is anchored, so any leftover token means no node, therefore no claim, therefore a refused grant.
+The CLI accepts `--beastmode` and `--beast`.
 
 **The grant needs a BACKLOG NODE; free text cannot hold it, and neither can an unlinked plan.**
 Authority is anchored to the session's claim, and init claims only `node:<id>` - resolved from a node input, or from a plan that resolves to a node in the graph.
@@ -275,7 +280,8 @@ When unsure whether ceremony applies, prefer running it. But never let "did ever
 /target bg --all-ready                   # dispatch every ready, non-deferred node; planning session keeps going
 
 # Modifiers
-/target beastmode <node|plan>                 # walk-away authority: decide judgment calls, never stall
+/target beastmode <node>                 # walk-away authority: decide judgment calls, never stall
+/target beast <node>                     # same thing (also accepts a mobile-autocorrected "beast mode")
 /target clean "feature"                  # run /simplify after execute
 /target adversarial "feature"            # add adversarial challenge
 /target auto-merge "feature"             # auto-merge after external approves
@@ -359,7 +365,7 @@ Quick summary:
   - **Attended** (`attended: true`, interactive human present): OFFER, do not just refuse. Ask `On canonical <branch> - create a worktree at ~/conductor/workspaces/<repo>/<slug> and continue there? [Y/n]`. On **y/Enter**: `git worktree add ~/conductor/workspaces/<repo>/<slug> -b feature/<slug>`, `cd` into it, `bash scripts/setup/setup-worktree.sh` (if present), then run init and the rest of the pipeline FROM the new worktree. Derive `<slug>` from the resolved backlog-node slug if one was resolved, else a filesystem-safe slug of the feature/branch; collision-check against existing conductor paths. On **any failure** of `git worktree add` / `setup-worktree.sh`: abort the offer, stay in place, and fall through to the refusal (never leave a half-relocated session). On **n**: fall through to the refusal.
   - **Unattended / headless** (`attended: false`, or no interactive surface): do NOT prompt. Rely on the `init-target-state.sh` refusal backstop. A bg `/target` self-creates its worktree before building, so it inits from inside a worktree and the verdict is `ok`.
   - **Refusal backstop:** `init-target-state.sh` itself refuses a canonical-protected branch and prints the worktree / `git checkout -b feature/<slug>` / `TARGET_LOCATION_OK=main-acknowledged` options. See backlog ab-efcde945.
-- **MANDATORY:** Bootstrap the session with `fno target init --input "<original arg>"` (add `--plan-path <path>` for plan inputs). This discoverable verb wraps the canonical `hooks/helpers/init-target-state.sh` (with `TARGET_START=1` + `TARGET_INPUT`/`TARGET_PLAN_PATH`), records the `owner_cwd` worktree binding, and REFUSES to write a stub. Do NOT substitute `fno state init` - it writes an empty stub the stop hook archives (and will redirect you here). If `fno` is unavailable, run `hooks/helpers/init-target-state.sh` directly with `TARGET_START=1` and `TARGET_INPUT` set. On this path you MUST also set `TARGET_BEASTMODE` explicitly - `1` when the invocation carried the `beastmode` modifier, empty otherwise. The helper reads the bare env var and cannot tell an explicit grant from one inherited from an ancestor shell or a spawning parent; `fno target init` scrubs that for you, and this path has no such scrub.
+- **MANDATORY:** Bootstrap the session with `fno target init --input "<original arg>"` (add `--plan-path <path>` for plan inputs). This discoverable verb wraps the canonical `hooks/helpers/init-target-state.sh` (with `TARGET_START=1` + `TARGET_INPUT`/`TARGET_PLAN_PATH`), records the `owner_cwd` worktree binding, and REFUSES to write a stub. Do NOT substitute `fno state init` - it writes an empty stub the stop hook archives (and will redirect you here). If `fno` is unavailable, run `hooks/helpers/init-target-state.sh` directly with `TARGET_START=1` and `TARGET_INPUT` set. On this path you MUST also set `TARGET_BEASTMODE` explicitly - `1` when the invocation carried the `beastmode` / `beast` modifier, empty otherwise. The helper reads the bare env var and cannot tell an explicit grant from one inherited from an ancestor shell or a spawning parent; `fno target init` scrubs that for you, and this path has no such scrub.
 - **`fno target init` owns the node claim - do NOT claim it yourself.** Init acquires `node:<id>` via `fno claim` (TTL-anchored to the durable session PID) and records `target_claim_key`/`holder`/`ttl` in the manifest on success. A `note: legacy graph-claim skipped (non-fatal)` line is EXPECTED and is not a failure - the authoritative `fno claim` runs right after it. Never run `fno claim acquire` manually to "fix" it: a claim from a transient shell PID dies instantly and goes `stale`, clobbering init's good claim. To confirm ownership, run `fno claim status node:<id>` and check that the live `holder` equals your own session_id (`fno whoami` prints it). Do NOT trust the `target_claim_*` manifest fields for this: they are an init-time SNAPSHOT and can lie after the supervisor PID is respawned - the live lockfile holder is the only ownership truth (x-ba4b). A `suspect` state (TTL-unexpired but dead pid) still belongs to your session; it is never up for grabs.
 - For plan inputs, run `validate-plan.sh` against the plan folder. Skip for single-file (quick) plans which the validator does not understand.
 - Resolve domain from CLI flag → plan → settings → `code` default.

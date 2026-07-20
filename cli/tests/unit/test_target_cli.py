@@ -171,6 +171,35 @@ def test_target_init_beastmode_sets_authority_env(monkeypatch, tmp_path):
     _clear_root_cache()
 
 
+def test_target_init_beast_alias_grants_too(monkeypatch, tmp_path):
+    """x-6390: `--beast` is an accepted alias of `--beastmode`.
+
+    Mobile autocorrect splits `beastmode` into `beast mode`, so the short
+    spelling has to work or an operator on a phone silently loses the grant -
+    and a dropped grant looks exactly like never asking for one.
+    """
+    captured = {}
+
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        if list(cmd)[:1] == ["bash"]:
+            captured["env"] = dict(env or {})
+        return _Result()
+
+    fake_root = _fake_plugin_root(tmp_path)
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x", "--beast"])
+    assert result.exit_code == 0, result.output
+    assert captured["env"].get("TARGET_BEASTMODE") == "1"
+    _clear_root_cache()
+
+
 def test_target_init_clears_ambient_beastmode_without_flag(monkeypatch, tmp_path):
     """x-6390: an inherited TARGET_BEASTMODE must NEVER grant authority.
 

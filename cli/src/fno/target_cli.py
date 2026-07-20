@@ -299,6 +299,7 @@ def init(
     beastmode: bool = typer.Option(
         False,
         "--beastmode",
+        "--beast",
         help="Grant walk-away authority (writes `authority: full` to the "
         "manifest). Judgment calls that would emit <help> and stall are decided "
         "and recorded to an Autonomous Decisions ledger instead. Never grants "
@@ -884,7 +885,7 @@ def start(
         help="Pin a provider for this session's dispatched workers (forwarded to init).",
     ),
     beastmode: bool = typer.Option(
-        False, "--beastmode",
+        False, "--beastmode", "--beast",
         help="Grant walk-away authority for this session (forwarded to init).",
     ),
 ) -> None:
