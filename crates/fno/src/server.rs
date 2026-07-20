@@ -4294,9 +4294,8 @@ impl Core {
         }
     }
 
-    /// Toggle the git working-diff pane. `agent` names a sideline row
-    /// (menu path, resolved to its registry cwd); `None` takes the focused
-    /// pane's spawn cwd (keybind path).
+    /// Toggle the git working-diff pane, for the row the menu pinned or the
+    /// focused pane (keybind).
     ///
     /// Close runs before open so a press is always a close when one is live -
     /// never a queued reopen. That is what makes a double-press converge: the
@@ -4311,16 +4310,32 @@ impl Core {
         view: (u64, TabId),
         vp: Rect,
         agent: Option<String>,
+        pane: Option<u64>,
     ) -> Flow {
         let focus = self.viewed_tab(view).map(|t| t.focus);
-        let src = match &agent {
-            Some(name) => self
-                .agents
-                .iter()
-                .find(|a| &a.name == name)
-                .map(|a| a.cwd.clone())
-                .unwrap_or_default(),
-            None => focus
+        let mut ambiguous = false;
+        let src = match (&agent, pane) {
+            // A pinned pane is the exact row that was clicked and carries its
+            // own spawn cwd, so it resolves a row `agent_rows` synthesized from
+            // the tree (never in `self.agents`) and separates two rows that
+            // share a name.
+            (_, Some(p)) if self.panes.contains_key(&p) => self.panes[&p].cwd.clone(),
+            (Some(name), _) => {
+                let mut hits = self.agents.iter().filter(|a| &a.name == name);
+                match (hits.next(), hits.next()) {
+                    (Some(a), None) => a.cwd.clone(),
+                    // Names are not unique. Diffing the first match would show
+                    // one worker's worktree under another's row - the wrong
+                    // answer, delivered convincingly.
+                    (Some(_), Some(_)) => {
+                        ambiguous = true;
+                        String::new()
+                    }
+                    _ => String::new(),
+                }
+            }
+            // Keybind path, and the fallback when a named pane has since died.
+            _ => focus
                 .and_then(|p| self.panes.get(&p))
                 .map(|p| p.cwd.clone())
                 .unwrap_or_default(),
@@ -4339,7 +4354,12 @@ impl Core {
             }
         }
         if src.is_empty() {
-            self.notice(client_id, "no worktree to diff for this row");
+            let why = if ambiguous {
+                "more than one row goes by that name - focus its pane and press the diff key"
+            } else {
+                "no worktree to diff for this row"
+            };
+            self.notice(client_id, why);
             return Flow::Continue;
         }
         // A spawn silently ignores a cwd that is not a directory and lands in
@@ -4442,7 +4462,9 @@ impl Core {
                 }
                 Flow::Continue
             }
-            Command::ToggleDiffPane { agent } => self.toggle_diff_pane(client_id, view, vp, agent),
+            Command::ToggleDiffPane { agent, pane } => {
+                self.toggle_diff_pane(client_id, view, vp, agent, pane)
+            }
             Command::ClosePane => {
                 let Some(tab) = self.viewed_tab(view) else {
                     return Flow::Continue;
@@ -9482,6 +9504,7 @@ mod tests {
             client_id,
             Command::ToggleDiffPane {
                 agent: Some("worker".into()),
+                pane: None,
             },
         );
     }
@@ -9618,6 +9641,7 @@ mod tests {
             client_id,
             Command::ToggleDiffPane {
                 agent: Some("nobody-here".into()),
+                pane: None,
             },
         );
 
@@ -9654,6 +9678,75 @@ mod tests {
     }
 
     #[test]
+    fn diff_pane_refuses_a_name_two_rows_share() {
+        // Registry names are not unique. Resolving to the first match would
+        // render one worker's worktree under another worker's row - a wrong
+        // answer the operator has no way to spot. Refuse instead.
+        let repo_a = scratch_repo("dupe-a");
+        let repo_b = scratch_repo("dupe-b");
+        set_diff_shell("/bin/echo");
+        let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+        core.agents = vec![
+            bg_row("twin", repo_a.to_str().unwrap(), None),
+            bg_row("twin", repo_b.to_str().unwrap(), None),
+        ];
+        let panes_before = core.panes.len();
+
+        core.command(
+            client_id,
+            Command::ToggleDiffPane {
+                agent: Some("twin".into()),
+                pane: None,
+            },
+        );
+
+        assert_eq!(core.panes.len(), panes_before, "nothing spawned");
+        assert!(core.diff_pane.is_none());
+        assert!(
+            drain_notices(&mut rx)
+                .iter()
+                .any(|t| t.contains("more than one row")),
+            "the ambiguity is named, not silently resolved"
+        );
+        let _ = std::fs::remove_dir_all(&repo_a);
+        let _ = std::fs::remove_dir_all(&repo_b);
+    }
+
+    #[test]
+    fn diff_pane_resolves_a_pinned_pane_the_registry_never_had() {
+        // The sideline synthesizes rows from the pane tree, so a row can be
+        // advertised with no `self.agents` entry at all. The pinned pane
+        // carries its own cwd, which is what keeps the menu entry from being
+        // dead on exactly those rows.
+        let repo = scratch_repo("synth");
+        set_diff_shell("/bin/echo");
+        let (mut core, client_id, _p1, _p2, _rx) = seen_test_core();
+        core.agents.clear();
+        let host = core
+            .spawn_pane_cmd(&["/bin/echo".to_string()], 24, 40, repo.to_str().unwrap())
+            .expect("host pane");
+
+        core.command(
+            client_id,
+            Command::ToggleDiffPane {
+                agent: Some("not-in-the-registry".into()),
+                pane: Some(host),
+            },
+        );
+
+        assert_eq!(
+            core.diff_pane.as_ref().map(|(c, _)| c.as_str()),
+            Some(repo.to_str().unwrap()),
+            "the pane's own cwd resolved it despite an unknown name"
+        );
+        if let Some((_, p)) = core.diff_pane.clone() {
+            core.reap_pane(p);
+        }
+        core.reap_pane(host);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
     fn diff_pane_switching_source_never_leaves_two_panes() {
         // Invariant: at most one live diff pane. Toggling a second row closes
         // the first's pane rather than accumulating one per source.
@@ -9668,6 +9761,7 @@ mod tests {
             client_id,
             Command::ToggleDiffPane {
                 agent: Some("worker-b".into()),
+                pane: None,
             },
         );
 
@@ -9734,6 +9828,7 @@ mod tests {
             client_id,
             Command::ToggleDiffPane {
                 agent: Some("worker-b".into()),
+                pane: None,
             },
         );
 

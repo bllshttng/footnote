@@ -7111,10 +7111,14 @@ async fn execute_row_menu_action(
             None => view.set_notice("agent has no pane here".into()),
         },
         MenuAction::Diff => {
+            // Send the pane too: the server prefers it, which keeps the diff on
+            // the row that was clicked when two share a name, and reaches a row
+            // the registry never had.
             write_msg(
                 sock_w,
                 &ClientMsg::Command(Command::ToggleDiffPane {
                     agent: Some(a.name.clone()),
+                    pane: a.pane_id,
                 }),
             )
             .await

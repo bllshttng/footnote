@@ -402,7 +402,10 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         b(
             b'D',
             "D",
-            Cmd(C::ToggleDiffPane { agent: None }),
+            Cmd(C::ToggleDiffPane {
+                agent: None,
+                pane: None,
+            }),
             Panes,
             "toggle git diff pane",
         ),
