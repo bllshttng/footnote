@@ -66,6 +66,21 @@ fn priority_rank(p: &str) -> u8 {
 /// (`docs/architecture/backlog-board-ordering.md`): project lane (unscoped
 /// last), rank band (ranked before unranked, ascending), priority, created_at.
 pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
+    derive_queue(raw).map(|q| q.cards)
+}
+
+/// The card set plus the UNCAPPED count it was cut from (x-1d91): the section's
+/// `+N more` must state how many cards exist, not how many were dropped from a
+/// list the caller cannot see. `cards.len() <= total` always.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Queue {
+    pub cards: Vec<BacklogCard>,
+    pub total: usize,
+}
+
+/// [`derive_cards`] plus the uncapped total. The single derivation; `derive_cards`
+/// is the cards-only view of it.
+pub fn derive_queue(raw: &str) -> Option<Queue> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
     let entries = doc
         .get("entries")
@@ -97,6 +112,14 @@ pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
         let unscoped = project.is_none();
         let rank = e.get("rank").and_then(|v| v.as_f64());
         let created = e.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        // The board's column authority (x-1d91): the lane half of the row's
+        // attribution and the mini-kanban's grouping key. Rank never moves it.
+        let lane = e
+            .get("_kanban_column")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string);
         rows.push((
             project.unwrap_or("").to_string(),
             unscoped,
@@ -113,6 +136,10 @@ pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
                 pane_id: None,
                 attach_id: None,
                 where_hint: None,
+                project: project.map(str::to_string),
+                lane,
+                // Set below, once the board order is known.
+                next: false,
             },
         ));
     }
@@ -131,7 +158,22 @@ pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
             .then_with(|| a.4.cmp(&b.4))
     });
 
-    Some(rows.into_iter().take(CARD_CAP).map(|r| r.5).collect())
+    let total = rows.len();
+    let mut cards: Vec<BacklogCard> = rows.into_iter().take(CARD_CAP).map(|r| r.5).collect();
+    mark_next(&mut cards);
+    Some(Queue { cards, total })
+}
+
+/// Mark the on-deck card: the first Ready card in board order, which is the pick
+/// `fno backlog next` makes. Applied AFTER the claims overlay too, so a claimed
+/// head-of-queue card hands the marker to the next genuinely-ready one rather
+/// than leaving the section pointing at work already in flight.
+pub fn mark_next(cards: &mut [BacklogCard]) {
+    let mut seen = false;
+    for c in cards.iter_mut() {
+        c.next = !seen && c.state == CardState::Ready;
+        seen |= c.next;
+    }
 }
 
 /// (x-9c5f) node id -> `pr_number` from the same graph read `derive_cards`
@@ -376,7 +418,7 @@ pub fn overlay_claims(cards: &mut [BacklogCard], live: &HashMap<String, String>)
 pub struct ReaderState {
     cached_raw: Option<String>,
     cached_stamp: Option<(std::time::SystemTime, u64)>,
-    last_sent: Option<Vec<BacklogCard>>,
+    last_sent: Option<Queue>,
     /// The live-claims map as of the last publish. Holders ride the publish
     /// (they feed the server's `where_hint` join), so a holder-only change -
     /// same card states, different/new holder - must republish too, not wait
@@ -417,7 +459,7 @@ impl ReaderState {
         stamp: Option<(std::time::SystemTime, u64)>,
         read_if_changed: impl FnOnce() -> Option<String>,
         live: Option<&HashMap<String, String>>,
-    ) -> Option<(Vec<BacklogCard>, HashMap<String, u64>, MissionMap)> {
+    ) -> Option<(Queue, HashMap<String, u64>, MissionMap)> {
         if stamp != self.cached_stamp {
             match (read_if_changed(), stamp) {
                 // Only commit the new stamp once we have matching content, so a
@@ -443,14 +485,17 @@ impl ReaderState {
                 (None, Some(_)) => {} // torn read: keep last-good AND retry next tick
             }
         }
-        let mut cards = match &self.cached_raw {
-            Some(raw) => derive_cards(raw)
+        let mut queue = match &self.cached_raw {
+            Some(raw) => derive_queue(raw)
                 .or_else(|| self.last_sent.clone())
                 .unwrap_or_default(),
-            None => Vec::new(),
+            None => Queue::default(),
         };
         if let Some(live) = live {
-            overlay_claims(&mut cards, live);
+            overlay_claims(&mut queue.cards, live);
+            // The overlay can flip the on-deck card to InFlight, so re-mark:
+            // on-deck must name work that is actually still up for grabs.
+            mark_next(&mut queue.cards);
         }
         // A holder-only change (same cards, new/different claim holder) also
         // republishes: the holders map travels with the cards and feeds the
@@ -466,12 +511,12 @@ impl ReaderState {
         // unrelated card/claim flip (x-9c5f).
         let pr_changed = self.last_pr.as_ref() != Some(&self.pr);
         let missions_changed = self.last_missions.as_ref() != Some(&self.missions);
-        if live_changed || pr_changed || missions_changed || self.last_sent.as_ref() != Some(&cards)
+        if live_changed || pr_changed || missions_changed || self.last_sent.as_ref() != Some(&queue)
         {
-            self.last_sent = Some(cards.clone());
+            self.last_sent = Some(queue.clone());
             self.last_pr = Some(self.pr.clone());
             self.last_missions = Some(self.missions.clone());
-            Some((cards, self.pr.clone(), self.missions.clone()))
+            Some((queue, self.pr.clone(), self.missions.clone()))
         } else {
             None
         }

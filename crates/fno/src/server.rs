@@ -436,6 +436,9 @@ enum CoreMsg {
     /// consumed at publish time for the `where_hint` of unroutable cards.
     BacklogCards {
         cards: Vec<BacklogCard>,
+        /// (x-1d91) The UNCAPPED card count `cards` was cut from, for the
+        /// section's exact `+N more`.
+        total: usize,
         holders: HashMap<String, String>,
         /// (x-9c5f) node id -> pr_number, from the same graph read as `cards`.
         prs: HashMap<String, u64>,
@@ -906,6 +909,9 @@ struct Core {
     /// Latest board-ordered work-queue cards (x-6f77), from the off-loop graph
     /// reader; packed into every `Layout` for the sideline backlog lane.
     backlog: Vec<BacklogCard>,
+    /// (x-1d91) The UNCAPPED queue-card count `backlog` was cut from, so the
+    /// sideline's `+N more` states a true remainder rather than a guess.
+    backlog_total: usize,
     /// Claim holder per in-flight node id (x-54fa), from the reader's sweep;
     /// joined at publish time into card routes / `where_hint`.
     backlog_holders: HashMap<String, String>,
@@ -1279,6 +1285,30 @@ async fn run_mail_send(name: &str, text: &str) -> String {
         Ok(Ok(o)) => first_line_or(
             &String::from_utf8_lossy(&o.stderr),
             &format!("mail {name}: failed"),
+        ),
+    }
+}
+
+/// (x-1d91) Shell one `fno backlog` reorder verb off-loop. The `fno` porcelain is
+/// the ONLY writer of `graph.json`; the mux shells it and reads the verdict. A
+/// 5s bound: these are graph mutations under a lock, not spawns, so a slow one is
+/// contention worth surfacing rather than waiting out. Failure returns the first
+/// stderr line so the footer names what went wrong, not just that it did.
+async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String {
+    const VERB_TIMEOUT: Duration = Duration::from_secs(5);
+    let label = verb.label();
+    let fut = tokio::process::Command::new(fno_bin())
+        .args(verb.args(node))
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(VERB_TIMEOUT, fut).await {
+        Err(_) => format!("{label} {node}: timed out"),
+        Ok(Err(_)) => format!("{label} {node}: unavailable"),
+        Ok(Ok(o)) if o.status.success() => format!("{label}: {node}"),
+        Ok(Ok(o)) => first_line_or(
+            &String::from_utf8_lossy(&o.stderr),
+            &format!("{label} {node}: failed"),
         ),
     }
 }
@@ -2400,6 +2430,18 @@ impl Core {
         });
     }
 
+    /// (x-1d91) Shell one `fno backlog` reorder verb OFF the core loop, mirroring
+    /// `agent_action`. The notice is the CLI's verdict; the AUTHORITATIVE order
+    /// change is the graph reader's next republish, never an optimistic local
+    /// reorder - so a verb that fails loudly leaves the rendered order truthful.
+    fn backlog_verb(&self, id: u64, node: String, verb: crate::proto::BacklogVerb) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let notice = run_backlog_verb(&node, verb).await;
+            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
+        });
+    }
+
     /// Shell `fno agents peek <name>` OFF the core loop (x-c376), the
     /// `dispatch_next` pattern: the transcript routes back as a `PeekResult` the
     /// core loop turns into a `PeekBody` for the requesting client only. `seq`
@@ -3088,6 +3130,7 @@ impl Core {
             // The work-queue lane (x-6f77); already board-ordered by the
             // reader, routes joined on at publish time (x-54fa).
             backlog: self.routed_backlog(),
+            backlog_total: self.backlog_total,
         }
     }
 
@@ -5210,6 +5253,20 @@ impl Core {
                 }
                 Flow::Continue
             }
+            Command::BacklogVerb { node, verb } => {
+                // (x-1d91) A reorder verb from the Backlog section. Fail closed on
+                // a node the server's own card set does not hold: a card that
+                // raced out between menu-open and dispatch must launch no
+                // subprocess (the same stale-target stance as the lifecycle
+                // verbs). The argv is fixed by the `verb` enum, so nothing from
+                // the wire composes a command line.
+                if !self.backlog.iter().any(|c| c.id == node) {
+                    self.notice(client_id, format!("{node}: no longer in the backlog"));
+                    return Flow::Continue;
+                }
+                self.backlog_verb(client_id, node, verb);
+                Flow::Continue
+            }
             Command::CopySelection => {
                 // Keyboard copy (leader+y): the focused pane's selection, else the
                 // newest completed block (precedence + refusals in copy_source).
@@ -5661,6 +5718,7 @@ impl Core {
             }
             CoreMsg::BacklogCards {
                 cards,
+                total,
                 holders,
                 prs,
                 missions,
@@ -5668,6 +5726,7 @@ impl Core {
                 // Same as AgentRows: only sideline data moved, so push the
                 // Layout without a frame re-emit (x-6f77).
                 self.backlog = cards;
+                self.backlog_total = total;
                 self.backlog_holders = holders;
                 self.backlog_pr = prs;
                 self.missions = missions;
@@ -5863,6 +5922,7 @@ async fn serve(
         agents: Vec::new(),
         branch_by_cwd: HashMap::new(),
         backlog: Vec::new(),
+        backlog_total: 0,
         backlog_holders: HashMap::new(),
         backlog_pr: HashMap::new(),
         missions: backlog_view::MissionMap::default(),
@@ -6077,13 +6137,14 @@ async fn serve(
                 } else {
                     None
                 };
-                if let Some((cards, prs, missions)) =
+                if let Some((queue, prs, missions)) =
                     state.tick(stamp, move || raw, last_live.as_ref())
                 {
                     let holders = last_live.clone().unwrap_or_default();
                     if core_tx
                         .send(CoreMsg::BacklogCards {
-                            cards,
+                            cards: queue.cards,
+                            total: queue.total,
                             holders,
                             prs,
                             missions,

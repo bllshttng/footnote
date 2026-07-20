@@ -366,6 +366,9 @@ struct LayoutView {
     /// lane; empty when the graph is unreadable or has no ready/blocked/in-flight
     /// work (the lane then renders nothing - the agents section is unaffected).
     backlog: Vec<BacklogCard>,
+    /// (v36, x-1d91) The UNCAPPED queue-card count `backlog` was cut from, for
+    /// the section's exact `+N more` line.
+    backlog_total: usize,
 }
 
 /// One selectable sideline row: a squad, or one of its tabs when expanded.
@@ -4569,6 +4572,7 @@ async fn attach_and_run(
             agents: Vec::new(),
             focus_node: None,
             backlog: Vec::new(),
+            backlog_total: 0,
         },
     );
     // Latch the focus-follows-mouse off-switch once (x-a496); a direct
@@ -4611,6 +4615,7 @@ async fn attach_and_run(
                 agents,
                 focus_node,
                 backlog,
+                backlog_total,
             }) => {
                 view.set_layout(LayoutView {
                     squads,
@@ -4621,6 +4626,7 @@ async fn attach_and_run(
                     agents,
                     focus_node,
                     backlog,
+                    backlog_total,
                 });
                 break;
             }
@@ -4842,8 +4848,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog });
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_total }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_total });
                     // x-c376: a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).

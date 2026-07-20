@@ -183,7 +183,15 @@ use crate::tree::{Dir, Rect, TabId};
 /// and `Command::RespawnAgent { name }` are the two new off-loop server verbs;
 /// `AgentRow { updated_at, pr }` carry the peek header's `changed Ns ago` stamp
 /// and `PR #N` label.
-pub const PROTO_VERSION: u32 = 35;
+///
+/// v36 (x-1d91, the Backlog section): `BacklogCard { project, lane, next }` carry
+/// the sideline's `project · lane` attribution subline and the explicit on-deck
+/// marker; `Layout::backlog_total` is the UNCAPPED card count so the section can
+/// render an exact `+N more`; `Command::BacklogVerb { node, verb }`
+/// ([`BacklogVerb`]) shells the existing `fno backlog rank --top` / `defer`
+/// porcelain server-side - the mux never writes `graph.json` itself. All new reads
+/// are `#[serde(default)]`, keeping a v35 reader wire-tolerant.
+pub const PROTO_VERSION: u32 = 36;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -622,6 +630,20 @@ pub struct BacklogCard {
     /// known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_hint: Option<String>,
+    /// (v36) The node's `project`, for the row's `project · lane` attribution
+    /// subline. `None` for an unscoped node (the board's UNSCOPED lane).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// (v36) The node's kanban column (`_kanban_column`) - the lane half of the
+    /// attribution subline, and the grouping key of the mini-kanban overlay.
+    /// `_kanban_column` is the sole column authority; rank never changes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+    /// (v36) The on-deck card: the first Ready card in board order, which is what
+    /// `fno backlog next` would pick. Marked explicitly so on-deck reads as a fact
+    /// rather than being inferred from row position.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub next: bool,
 }
 
 /// The queue state a card renders as. Classified from `_status` alone
@@ -900,6 +922,54 @@ pub enum Command {
     RespawnAgent {
         name: String,
     },
+    /// (v36, x-1d91) Run one reorder verb against a Backlog card. The server
+    /// validates `node` against its own card set (fail-closed: a card that raced
+    /// out between menu-open and dispatch launches no subprocess), then shells the
+    /// fixed [`BacklogVerb`] argv OFF-loop and surfaces the CLI's verdict as a
+    /// notice. `verb` is an enum, never operator text, so no argv is composed from
+    /// the wire. The mux never writes `graph.json`; `fno backlog` is the only
+    /// writer, and there is no optimistic reorder - the order changes when the
+    /// graph reader republishes.
+    BacklogVerb {
+        node: String,
+        verb: BacklogVerb,
+    },
+}
+
+/// (v36, x-1d91) The v1 reorder verb set on a Backlog card, each a fixed
+/// `fno backlog` invocation. An enum (not a string) so the wire can never widen
+/// the server's argv.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BacklogVerb {
+    /// `fno backlog rank <node> --top` - float the card to the head of its column.
+    /// Never changes the column (`_kanban_column` is the sole column authority).
+    RankTop,
+    /// `fno backlog defer <node>` - pause the node (reversible via `undefer`).
+    Defer,
+}
+
+impl BacklogVerb {
+    /// The `fno backlog` argv tail for this verb, `<node>` interpolated by the
+    /// caller. Fixed literals: nothing here is derived from operator text.
+    pub fn args(self, node: &str) -> Vec<String> {
+        match self {
+            BacklogVerb::RankTop => vec![
+                "backlog".into(),
+                "rank".into(),
+                node.into(),
+                "--top".into(),
+            ],
+            BacklogVerb::Defer => vec!["backlog".into(), "defer".into(), node.into()],
+        }
+    }
+
+    /// The verb's human label, for the menu entry and the outcome notice.
+    pub fn label(self) -> &'static str {
+        match self {
+            BacklogVerb::RankTop => "float to top",
+            BacklogVerb::Defer => "defer",
+        }
+    }
 }
 
 impl Command {
@@ -967,6 +1037,11 @@ pub enum ServerMsg {
         /// wire-tolerant.
         #[serde(default)]
         backlog: Vec<BacklogCard>,
+        /// (v36, x-1d91) The UNCAPPED count of queue cards the graph held, so the
+        /// Backlog section can render an exact `+N more` under the capped
+        /// `backlog` list above. Equal to `backlog.len()` when nothing was cut.
+        #[serde(default)]
+        backlog_total: usize,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
