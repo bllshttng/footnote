@@ -353,17 +353,31 @@ GJ="$(python3 -c 'from fno.paths import graph_json; print(graph_json())' 2>/dev/
 # but never scopes it, because a finished foreign row is exactly a non-live row.
 # git remote FIRST: it needs no network and no auth, so an offline or
 # unauthenticated run still scopes the scan instead of skipping it wholesale.
+# Anchored on github.com so a non-GitHub remote (a gitlab mirror, a local path)
+# yields nothing and falls through to gh, rather than producing a confident slug
+# that no pr_url can ever match. Mirrors resolve_current_repo_slug.
 ORIGIN_SLUG="$(git remote get-url origin 2>/dev/null \
-  | sed -e 's#^git@[^:]*:##' -e 's#^ssh://[^/]*/##' -e 's#^https\{0,1\}://[^/]*/##' -e 's#\.git$##')"
+  | sed -n 's#.*github\.com[:/]\([^/][^/]*\)/\(.*\)#\1/\2#p' | sed -e 's#\.git$##' -e 's#/$##')"
 if [ -z "$ORIGIN_SLUG" ]; then
   ORIGIN_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
 fi
 # Canonical repo root, NOT `--show-toplevel`: the ritual usually runs from a
-# worktree, while graph `cwd` values point at the canonical checkout.
-GIT_COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+# worktree, while graph `cwd` values point at the canonical checkout. Resolved
+# via cd/pwd because --path-format=absolute is git >= 2.31 only (same reason as
+# Step 1). Under `git init --separate-git-dir` the common dir is EXTERNAL, so
+# its parent is not a checkout at all - the .git probe detects that and takes
+# the working tree git reports for this cwd instead.
+GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || true)"
 REPO_ROOT=""
 if [ -n "$GIT_COMMON_DIR" ]; then
   REPO_ROOT="$(cd "$GIT_COMMON_DIR/.." 2>/dev/null && pwd -P || true)"
+fi
+if [ -z "$REPO_ROOT" ] || [ ! -e "$REPO_ROOT/.git" ]; then
+  GIT_TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  REPO_ROOT=""
+  if [ -n "$GIT_TOPLEVEL" ]; then
+    REPO_ROOT="$(cd "$GIT_TOPLEVEL" 2>/dev/null && pwd -P || true)"
+  fi
 fi
 if [ -z "$REPO_ROOT" ]; then
   echo "post-merge: repo root unresolved; url-less nodes cannot be scoped and are SKIPPED (pr_url matches still union)" >&2

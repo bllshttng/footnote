@@ -149,13 +149,22 @@ case "$*" in
   *--git-common-dir*)
     [ -n "${FAKE_GIT_COMMON_DIR:-}" ] || exit 1
     printf '%s\n' "$FAKE_GIT_COMMON_DIR" ;;
+  *--show-toplevel*)
+    [ -n "${FAKE_GIT_TOPLEVEL:-}" ] || exit 1
+    printf '%s\n' "$FAKE_GIT_TOPLEVEL" ;;
   *) exit 1 ;;
 esac
 SHIM
 chmod +x "$UBIN/git"
-# gh must never be the silent rescuer: if a scoping assertion only passes
-# because gh reached the network, the git-first path is untested.
-printf '#!/usr/bin/env bash\nexit 1\n' > "$UBIN/gh"
+# gh is the documented fallback for a checkout whose GitHub remote is not
+# `origin`, so it must be reachable - but it returns a DIFFERENT slug than the
+# git remote does, so any assertion that passes via gh when it should have used
+# git remote (or the reverse) fails loudly instead of coincidentally passing.
+cat > "$UBIN/gh" <<'SHIM'
+#!/usr/bin/env bash
+[ -n "${FAKE_GH_SLUG:-}" ] || exit 1
+printf '%s\n' "$FAKE_GH_SLUG"
+SHIM
 chmod +x "$UBIN/gh"
 
 # A real directory, because the block derives the repo root by cd-ing to
@@ -175,6 +184,8 @@ run_step2() {
   FAKE_RECONCILE_JSON="$1" PR="$3" HOME="$UHOME" PATH="$UBIN:$PATH" \
     FAKE_ORIGIN_URL="${FAKE_ORIGIN_URL-$ORIGIN_FIXTURE}" \
     FAKE_GIT_COMMON_DIR="${FAKE_GIT_COMMON_DIR-$TMP/repo/.git}" \
+    FAKE_GIT_TOPLEVEL="${FAKE_GIT_TOPLEVEL-$TMP/repo}" \
+    FAKE_GH_SLUG="${FAKE_GH_SLUG-}" \
     TMPDIR="$TMP" bash "$runner"
 }
 count_id() { printf '%s' "$1" | tr ' ' '\n' | grep -c "^$2\$"; }
@@ -271,6 +282,36 @@ NI="$(FAKE_ORIGIN_URL="" run_step2 '{"closed":[{"node_id":"x-closed"}]}' "$GRAPH
   && grep -q "union SKIPPED" "$TMP/noslug.err" \
   && pass "AC8: no origin slug skips the union loudly, keeping reconcile-closed ids" \
   || fail "AC8: expected only x-closed + a SKIPPED line, got: $(printf '%q' "$NI")"
+
+# A non-GitHub origin (a mirror, a local path) must yield NOTHING from the git
+# read rather than a confident slug no pr_url can match, so gh - which covers a
+# checkout whose GitHub remote is not named `origin` - still gets its turn.
+NI="$(FAKE_ORIGIN_URL="git@gitlab.com:mirror/x.git" FAKE_GH_SLUG="o/r" \
+      run_step2 '{"closed":[]}' "$GRAPH_MATCH" 292)"
+[[ "$(count_id "$NI" x-1234)" == "1" ]] \
+  && pass "AC9: a non-GitHub origin falls through to gh instead of scoping on a bad slug" \
+  || fail "AC9: expected x-1234 via the gh fallback, got: $(printf '%q' "$NI")"
+
+# Every GitHub remote form resolves without gh. If the git-side regex ever
+# regresses, gh is unset here so the assertion cannot pass by accident.
+for U in "git@github.com:o/r.git" "https://github.com/o/r" "ssh://git@github.com/o/r.git" "git://github.com/o/r"; do
+  NI="$(FAKE_ORIGIN_URL="$U" FAKE_GH_SLUG="" run_step2 '{"closed":[]}' "$GRAPH_MATCH" 292)"
+  [[ "$(count_id "$NI" x-1234)" == "1" ]] \
+    || { fail "AC9b: origin form '$U' did not resolve, got: $(printf '%q' "$NI")"; BAD_FORM=1; }
+done
+[[ "${BAD_FORM:-0}" == "0" ]] \
+  && pass "AC9b: scp, https, ssh and git:// GitHub remotes all resolve without gh"
+
+# `git init --separate-git-dir` puts the common dir OUTSIDE the checkout, so its
+# parent is not a working tree. Deriving the root as "<common-dir>/.." would
+# silently exclude every url-less node; the .git probe must catch it and fall
+# back to the working tree git reports.
+mkdir -p "$TMP/external-gitdir"
+NI="$(FAKE_GIT_COMMON_DIR="$TMP/external-gitdir" run_step2 '{"closed":[]}' \
+      '{"entries":[{"id":"x-sep","pr_number":292,"cwd":"'"$REPO_FIXTURE"'"}]}' 292)"
+[[ "$(count_id "$NI" x-sep)" == "1" ]] \
+  && pass "AC10: separate-git-dir falls back to the real checkout for the repo root" \
+  || fail "AC10: expected x-sep via the --show-toplevel fallback, got: $(printf '%q' "$NI")"
 
 # AC3 (no node): pr_number matches nothing -> NODE_IDS stays empty.
 NI="$(run_step2 '{"closed":[]}' '{"entries":[{"id":"x-9999","pr_number":999}]}' 292)"
