@@ -2536,6 +2536,100 @@ def stop_agent(
         ) from exc
 
 
+def _teardown_harness_session(
+    existing,
+    *,
+    name: str,
+    force: bool,
+    shellout_timeout: float,
+) -> None:
+    """Delete a non-claude agent's record from its own harness store.
+
+    Record-only (Locked Decision 1): the harness's index/db row goes, the
+    transcript files stay. Upholds the ordering invariant by raising
+    before the caller touches the registry -- unless ``force``, which
+    downgrades every failure to a stderr WARN naming the orphan so the
+    operator can clean it later.
+
+    An already-absent harness record is success, not an error: a manually
+    cleaned store must not wedge ``fno agents rm``.
+    """
+    harness = existing.harness
+    sid = existing.harness_session_id
+
+    def _fail(message: str, *, exit_code: int) -> None:
+        if not force:
+            events.emit(
+                "agent_removed",
+                name=name,
+                provider=harness,
+                force=False,
+                registry_changed=False,
+                teardown_error=message,
+            )
+            raise DispatchAskError(message, exit_code=exit_code)
+        sys.stderr.write(
+            f"WARN: {message}; --force given, removing registry only. "
+            f"Orphan {harness} session record: {sid}\n"
+        )
+
+    if not sid:
+        # Nothing addresses a harness record here, so there is no action to
+        # refuse -- unlike claude, whose shellout also removes the worktree.
+        sys.stderr.write(
+            f"WARN: registry entry has no {harness} session id on file; "
+            "removing registry row only.\n"
+        )
+        return
+
+    if harness == "codex":
+        from fno.agents.providers import codex as codex_mod
+
+        try:
+            removed = codex_mod.remove_session_index_entry(sid)
+        except ValueError as exc:
+            _fail(str(exc), exit_code=12)
+            return
+        except OSError as exc:
+            _fail(f"codex session index rewrite failed: {exc}", exit_code=1)
+            return
+        if removed:
+            print(f"torn down: codex session index entry {sid}", flush=True)
+        return
+
+    if harness == "opencode":
+        from fno.agents.providers import opencode as opencode_mod
+
+        if shutil.which("opencode") is None:
+            _fail("opencode CLI not on PATH", exit_code=14)
+            return
+        try:
+            rc, output = opencode_mod.session_delete(sid, timeout=shellout_timeout)
+        except ValueError as exc:
+            _fail(str(exc), exit_code=12)
+            return
+        except FileNotFoundError:
+            _fail("opencode CLI not on PATH", exit_code=14)
+            return
+        except subprocess.TimeoutExpired:
+            _fail(
+                f"opencode session delete timed out after {int(shellout_timeout)}s",
+                exit_code=15,
+            )
+            return
+        except OSError as exc:
+            _fail(f"opencode session delete failed: {exc}", exit_code=1)
+            return
+        if rc == 0:
+            print(f"torn down: opencode session {sid}", flush=True)
+        elif not opencode_mod.looks_already_gone(output):
+            _fail(
+                f"opencode session delete {sid} exited {rc}: {output.strip()}",
+                exit_code=1,
+            )
+        return
+
+
 def rm_agent(
     name: str,
     *,
@@ -2552,11 +2646,17 @@ def rm_agent(
     registry entry is removed even when ``claude rm`` fails, with a
     stderr WARN about the orphan supervisor session.
 
-    codex / gemini: registry-only. The on-disk session files stay
-    (Locked Decision 1). Operator cleans manually if desired.
+    codex / opencode: the harness's own session RECORD is torn down
+    first (codex's ``session_index.jsonl`` entry, opencode's session via
+    ``opencode session delete``), registry row after -- same ordering
+    invariant, same ``--force`` override. Transcript files always stay
+    (Locked Decision 1).
+
+    gemini: registry-only; no teardown arm for a deprecated provider.
 
     Emits ``agent_removed`` with ``provider``, ``force``, ``claude_exit``
     fields.
+
     """
     _validate_lifecycle_name(name)
     # Accept any of the three address forms (x-1b1e); lock on the canonical name.
@@ -2672,13 +2772,20 @@ def rm_agent(
                             f"{short_id} to clean later.\n"
                         )
 
-            elif existing.harness not in ("codex", "gemini"):
+            elif existing.harness in ("codex", "opencode"):
+                _teardown_harness_session(
+                    existing,
+                    name=name,
+                    force=force,
+                    shellout_timeout=shellout_timeout,
+                )
+            elif existing.harness != "gemini":
                 raise DispatchAskError(
                     f"rm for provider {existing.harness!r} is not implemented",
                     exit_code=2,
                 )
-            # codex / gemini: registry-only removal per Locked Decision 1;
-            # the on-disk session files stay.
+            # gemini: registry-only. No teardown arm -- the provider is
+            # deprecated, so a speculative one would be untestable guesswork.
 
             try:
                 update_registry(lambda entries: [e for e in entries if e.name != name])
@@ -2701,11 +2808,10 @@ def rm_agent(
             # Stdout "removed:" prints come AFTER update_registry succeeds so
             # a write failure cannot leave the operator with a misleading
             # confirmation. (Sigma-review C3 finding.)
-            if existing.harness == "codex" and existing.harness_session_id:
+            if existing.harness in ("codex", "opencode") and existing.harness_session_id:
                 print(
-                    f"removed: {name} (codex session files left on "
-                    f"disk; clean via 'rm -rf ~/.codex/sessions/...' if "
-                    "desired)",
+                    f"removed: {name} ({existing.harness} transcript files "
+                    "left on disk)",
                     flush=True,
                 )
             else:
