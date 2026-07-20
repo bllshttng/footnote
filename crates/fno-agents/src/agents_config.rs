@@ -429,7 +429,14 @@ mod tests {
 
     fn clear_config_env() {
         std::env::remove_var("FNO_CONFIG");
-        std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH");
+        // Point the global tier at an empty directory rather than unsetting it:
+        // an unset FNO_GLOBAL_SETTINGS_PATH falls back to the REAL
+        // $HOME/.fno/config.toml, so every "absent key -> default" assertion
+        // would read the developer's own config. Clean CI has no global config,
+        // which is why this only ever failed on a configured machine.
+        let iso = std::env::temp_dir().join(format!("fno-agents-noglobal-{}", std::process::id()));
+        std::fs::create_dir_all(&iso).unwrap();
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", iso.join("settings.json"));
     }
 
     fn write_project_settings(name: &str, body: &str) -> PathBuf {

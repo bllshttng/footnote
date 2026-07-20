@@ -35,15 +35,22 @@ class FakeRunner:
         run_stdout: str = "7\n",
         run_stderr: str = "",
         ls_stdout: Optional[str] = None,
+        db_stdout: str = "",
     ) -> None:
         self.calls: list[list[str]] = []
         self.run_returncode = run_returncode
         self.run_stdout = run_stdout
         self.run_stderr = run_stderr
         self.ls_stdout = ls_stdout
+        self.db_stdout = db_stdout
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
+        # The opencode spawn path reads opencode's session store through this
+        # same seam (x-830c); default empty output = "no session captured", the
+        # live-only row every non-opencode test already expects.
+        if argv[:2] == ["opencode", "db"]:
+            return subprocess.CompletedProcess(argv, 0, self.db_stdout, "")
         if argv[1:4] == ["mux", "pane", "run"]:
             return subprocess.CompletedProcess(
                 argv, self.run_returncode, self.run_stdout, self.run_stderr
@@ -73,6 +80,70 @@ def _spawn(monkeypatch, tmp_path, **kwargs):
         **kwargs,
     )
     return result, runner
+
+
+def test_opencode_spawn_stamps_the_captured_session_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """x-830c: a unique store match lands on the row as harness_session_id.
+
+    This is what makes the opencode resume lane reachable at all - the mapping
+    and the resume argv both key on this field.
+    """
+    from fno.agents.registry import load_registry
+
+    ses = "ses_09679f284ffeJv7NdBAoLQLnLZ"
+    _spawn(
+        monkeypatch, tmp_path,
+        provider="opencode",
+        runner=FakeRunner(db_stdout=f"id\n{ses}\n"),
+    )
+    rows = load_registry()
+    assert [r.harness_session_id for r in rows] == [ses]
+
+
+def test_opencode_spawn_never_claims_another_rows_session_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two panes racing in one cwd must not both stamp the same session id.
+
+    The second pane's session may not exist yet when both backfills query, so
+    each sees the SAME lone candidate and the ambiguity rule cannot fire. The
+    loser drops to live-only rather than pointing resume at the other pane.
+    """
+    from fno.agents.registry import load_registry
+
+    ses = "ses_09679f284ffeJv7NdBAoLQLnLZ"
+    _spawn(
+        monkeypatch, tmp_path, name="oc-a",
+        provider="opencode", runner=FakeRunner(db_stdout=f"{ses}\n"),
+    )
+    # Second pane, same cwd, backfill returns the SAME id (the race).
+    _spawn(
+        monkeypatch, tmp_path, name="oc-b",
+        provider="opencode", runner=FakeRunner(db_stdout=f"{ses}\n"),
+    )
+    rows = {r.name: r.harness_session_id for r in load_registry()}
+    assert rows["oc-a"] == ses, "the first pane to land owns the id"
+    assert rows["oc-b"] is None, "the loser must not share the id"
+
+
+def test_opencode_spawn_without_capture_stays_live_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-FR: a missed capture leaves the row exactly as it was before x-830c.
+
+    The pane itself is unaffected - the spawn still succeeds and reports its
+    pane id; only resume is unavailable until an id is captured.
+    """
+    from fno.agents.registry import load_registry
+
+    result, _ = _spawn(
+        monkeypatch, tmp_path, provider="opencode", runner=FakeRunner(db_stdout=""),
+    )
+    assert result.pane_id == 7
+    rows = load_registry()
+    assert [r.harness_session_id for r in rows] == [None]
 
 
 def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(

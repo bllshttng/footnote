@@ -33,7 +33,7 @@ from typing import Mapping, Optional
 
 # Bump when a capability KEY is added/removed or a value's meaning changes, so a
 # consumer can assert the shape it was written against.
-MAP_VERSION = 4  # opencode slash+fno: prefix; gemini refused; prose surface gone (x-de43)
+MAP_VERSION = 5  # opencode resume: native-continue -> native-session (x-830c)
 
 # Command surface: HOW a footnote slash `/verb` is natively invoked on a harness.
 # One axis, the single source both dispatch surfaces normalize through
@@ -114,7 +114,10 @@ _HARNESS_CAPS: dict[str, dict] = {
         # registered), so a slash surface expands in both lanes - not a no-op.
         # Plugin-namespaced, so `slash_prefix` is "fno:" (palette `/fno:verb`).
         "permission_bypass": ["--dangerously-skip-permissions"],
-        "resume": "native-continue",  # opencode run --continue
+        # x-830c: session store + `--session <ses_id>`, the same strict id-keyed
+        # shape as claude. NOT `--continue`, which creates a NEW session when the
+        # project has none rather than refusing - never a resume.
+        "resume": "native-session",
         "bg": False,
         "stop_hook": "native",
         "command_surface": _SLASH,

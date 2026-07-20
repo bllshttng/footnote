@@ -1200,11 +1200,19 @@ def test_harness_session_id_fields_covers_known_providers() -> None:
     session_id / _session_id_for how to resolve its resume id (which
     would silently return None for the new harness). Keyed on the sole
     HARNESS_SESSION_ID_FIELDS map (x-880e removed the provider alias).
+
+    Containment, not equality: a pane-hostable harness can carry a resume
+    field without a Python dispatch adapter. opencode is exactly that (x-830c) -
+    it resumes via harness_session_id but is driven through the Rust spawn
+    paths, and promoting it into KNOWN_PROVIDERS would leak it into headless/bg
+    Python dispatch that has no opencode codepath. The upper bound stays
+    READABLE_PROVIDERS so a typo'd harness still fails.
     """
-    from fno.agents.providers import KNOWN_PROVIDERS
+    from fno.agents.providers import KNOWN_PROVIDERS, READABLE_PROVIDERS
     from fno.agents.registry import HARNESS_SESSION_ID_FIELDS
 
-    assert set(HARNESS_SESSION_ID_FIELDS) == set(KNOWN_PROVIDERS)
+    assert set(KNOWN_PROVIDERS) <= set(HARNESS_SESSION_ID_FIELDS)
+    assert set(HARNESS_SESSION_ID_FIELDS) <= set(READABLE_PROVIDERS)
 
 
 # ---------------------------------------------------------------------------

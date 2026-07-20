@@ -925,6 +925,57 @@ def test_ac1_edge_source_overlap_dedups(tmp_path, monkeypatch):
     assert [s.session_id for s in sessions] == [sid]
 
 
+def test_opencode_row_without_captured_id_yields_no_live_recipient(tmp_path, monkeypatch):
+    """AC3-EDGE: opencode joining HARNESS_SESSION_ID_FIELDS must not widen discovery.
+
+    The harness gate now admits opencode rows, so an id-less one (backfill
+    missed, or a pane spawned before capture existed) reaches the `if not sid`
+    guard instead of the harness guard. It must still contribute nothing, or
+    mail would queue to a handle nobody drains.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="oc-live-only", harness="opencode", cwd="/x",
+                log_path="/tmp/oc.log", harness_session_id=None,
+            )
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+    assert discover.discover_live_sessions(registry_path=reg, **_empty_seams(tmp_path)) == []
+
+
+def test_opencode_row_with_captured_id_resolves_live(tmp_path, monkeypatch):
+    """AC3-EDGE counterpart: a captured ses_ id DOES make the row addressable.
+
+    This is the half-wire hazard the node names: admitting opencode to the
+    harness map resolves such a row as live, so the store probe must ship in
+    the same change to tell a live pane from a dead one.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    sid = "ses_09679f284ffeJv7NdBAoLQLnLZ"
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="oc", harness="opencode", cwd="/x",
+                log_path="/tmp/oc.log", harness_session_id=sid,
+            )
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+    sessions = discover.discover_live_sessions(registry_path=reg, **_empty_seams(tmp_path))
+    assert [s.session_id for s in sessions] == [sid]
+
+
 def test_us2_registry_dead_status_rows_excluded(tmp_path, monkeypatch):
     """codex review: an orphaned/exited registry row must NOT resolve as live."""
     use_tmpdir(monkeypatch, tmp_path)

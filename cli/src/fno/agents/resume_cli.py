@@ -80,6 +80,11 @@ def _build_resume_argv(provider: str, session_id: str) -> Optional[list[str]]:
         # gemini.resume's own argv in this repo). Codex review caught
         # the earlier `--session` form was wrong.
         return ["gemini", "--resume", session_id]
+    if provider == "opencode":
+        # Bare `opencode --session <id>` is the interactive TUI attach (the
+        # `codex resume <id>` precedent). The Rust provider's headless
+        # `opencode run ... --session <id>` argv is a separate lane.
+        return ["opencode", "--session", session_id]
     return None
 
 

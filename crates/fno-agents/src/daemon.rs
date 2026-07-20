@@ -3197,7 +3197,14 @@ where
         }
         let new_status = match probe(entry) {
             Ok(true) => {
-                if entry.status == AgentStatus::Orphaned {
+                // Recovery needs BOTH signals. A store hit alone means "the
+                // session still exists" (= resumable), which for a store that
+                // never evicts is permanently true - opencode's session table
+                // keeps a row forever, so a dead pane would be resurrected to
+                // `live` on every sweep and discovery would hand out a
+                // recipient nobody drains. A row with no recorded pid keeps the
+                // old behavior (`pid_live` is true), so exec rows are untouched.
+                if entry.status == AgentStatus::Orphaned && pid_live(entry) {
                     out.recovered.push(entry.name.clone());
                     out.updated.push(entry.name.clone());
                     Some(AgentStatus::Live)
@@ -3326,6 +3333,14 @@ fn to_agent_entry(e: &RegistryEntry) -> crate::provider::AgentEntry {
         "claude" => e
             .transport_short()
             .map(str::to_string)
+            .or_else(|| e.session_id.clone()),
+        // Python writes opencode ids to the canonical harness_session_id and
+        // drops `session_id` on write (it is Rust-set only), so falling through
+        // to `session_id` would hand the probe None for every pane row and make
+        // it a permanent no-op.
+        "opencode" => e
+            .harness_session_id
+            .clone()
             .or_else(|| e.session_id.clone()),
         _ => e.session_id.clone(),
     };
@@ -4987,6 +5002,60 @@ mod tests {
         // Reaped to Exited, never orphaned.
         assert!(out.orphans.is_empty());
         assert_eq!(out.updated, vec!["dead-tui".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_store_hit_does_not_resurrect_a_pid_dead_row() {
+        // x-830c: a store that never evicts (opencode keeps its session rows
+        // forever) answers Ok(true) long after the pane is gone. Recovery needs
+        // the pid too, or every sweep would flip a dead orphan back to Live and
+        // discovery would hand out a recipient nobody drains.
+        let entries = vec![
+            rentry("dead-orphan", AgentStatus::Orphaned, None),
+            rentry("live-orphan", AgentStatus::Orphaned, None),
+        ];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(true), // session still in the store for both
+            || false,
+            |e| e.name == "live-orphan",
+        );
+        assert_eq!(
+            changes[0].new_status, None,
+            "a store hit must not recover a row whose pid is dead"
+        );
+        assert_eq!(
+            changes[1].new_status,
+            Some(AgentStatus::Live),
+            "a store hit on a live pid still recovers"
+        );
+        assert_eq!(out.recovered, vec!["live-orphan".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_pidless_orphan_still_recovers_on_store_hit() {
+        // Guards the blast radius of the pid gate above: `pid_live` is true for a
+        // row with no recorded pid, so exec rows keep their old behavior.
+        let entries = vec![rentry("pidless", AgentStatus::Orphaned, None)];
+        let (changes, out) = plan_reconcile(&entries, |_| Ok(true), || false, |_| true);
+        assert_eq!(changes[0].new_status, Some(AgentStatus::Live));
+        assert_eq!(out.recovered, vec!["pidless".to_string()]);
+    }
+
+    #[test]
+    fn to_agent_entry_projects_the_opencode_session_id() {
+        // Python persists opencode ids to harness_session_id and drops
+        // `session_id` on write, so without this arm the probe would receive
+        // None for every pane row and never run.
+        let mut e = rentry("oc", AgentStatus::Live, None);
+        e.legacy_provider = "opencode".into();
+        e.harness = Some("opencode".into());
+        e.harness_session_id = Some("ses_09679f284ffeJv7NdBAoLQLnLZ".into());
+        e.session_id = None;
+        assert_eq!(
+            to_agent_entry(&e).session_id.as_deref(),
+            Some("ses_09679f284ffeJv7NdBAoLQLnLZ")
+        );
     }
 
     #[test]

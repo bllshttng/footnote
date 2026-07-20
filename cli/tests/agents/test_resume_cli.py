@@ -282,6 +282,57 @@ def test_gemini_argv_uses_resume_flag_not_session() -> None:
     assert "--session" not in res.output
 
 
+def test_opencode_argv_attaches_the_tui_by_session() -> None:
+    """AC2-HP: opencode resume builds `opencode --session <ses_id>`.
+
+    Bare `opencode --session` is the interactive TUI attach; the provider's
+    headless `opencode run ... --session` argv is a separate lane. Must stay
+    byte-identical to the Rust build_resume_argv arm (parity test there).
+    """
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="oc", harness="opencode",
+        cwd="/cwd",
+        harness_session_id="ses_09679f284ffeJv7NdBAoLQLnLZ",
+    )
+    res = resume_logic(
+        name="oc",
+        print_command=True,
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        execvp=_no_exec,
+    )
+    assert res.exit_code == 0
+    assert res.exec_argv == [
+        "opencode", "--session", "ses_09679f284ffeJv7NdBAoLQLnLZ",
+    ]
+    assert "run" not in res.exec_argv
+
+
+def test_opencode_without_captured_session_id_errors_clearly() -> None:
+    """AC1-UI: an id-less opencode row (backfill missed) refuses, never execs.
+
+    opencode joining HARNESS_SESSION_ID_FIELDS makes the row resolvable, so
+    this is the state a live-only pane lands in until its id is captured.
+    """
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="oc", harness="opencode", cwd="/cwd", harness_session_id=None,
+    )
+    res = resume_logic(
+        name="oc",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        execvp=_no_exec,
+    )
+    assert res.exit_code == 13
+    assert "no recorded session_id" in res.stderr
+    assert "oc" in res.stderr
+    assert res.exec_argv is None
+
+
 # ---------------------------------------------------------------------------
 # Sigma-review fixes — regression guards
 # ---------------------------------------------------------------------------

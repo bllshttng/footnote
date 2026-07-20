@@ -905,7 +905,7 @@ pub fn run_trace(rest: &[String], home: &AgentsHome) -> i32 {
 fn session_id_field(harness: &str) -> Option<&'static str> {
     match harness {
         "claude" => Some("short_id"),
-        "codex" | "gemini" => Some("harness_session_id"),
+        "codex" | "gemini" | "opencode" => Some("harness_session_id"),
         _ => None,
     }
 }
@@ -1061,6 +1061,14 @@ fn build_resume_argv(provider: &str, session_id: &str) -> Option<Vec<String>> {
         "codex" => Some(vec!["codex".into(), "resume".into(), session_id.into()]),
         "claude" => Some(vec!["claude".into(), "attach".into(), session_id.into()]),
         "gemini" => Some(vec!["gemini".into(), "--resume".into(), session_id.into()]),
+        // Bare `opencode --session <id>` is the interactive TUI attach (the
+        // `codex resume <id>` precedent). The provider's headless
+        // `opencode run ... --session <id>` argv is a separate lane.
+        "opencode" => Some(vec![
+            "opencode".into(),
+            "--session".into(),
+            session_id.into(),
+        ]),
         _ => None,
     }
 }
@@ -2653,6 +2661,7 @@ mod tests {
         assert_eq!(session_id_field("claude"), Some("short_id"));
         assert_eq!(session_id_field("codex"), Some("harness_session_id"));
         assert_eq!(session_id_field("gemini"), Some("harness_session_id"));
+        assert_eq!(session_id_field("opencode"), Some("harness_session_id"));
         assert_eq!(session_id_field("unknown"), None);
 
         assert_eq!(
@@ -2667,7 +2676,11 @@ mod tests {
             build_resume_argv("gemini", "g-1"),
             Some(vec!["gemini".into(), "--resume".into(), "g-1".into()])
         );
-        assert_eq!(build_resume_argv("opencode", "x"), None);
+        assert_eq!(
+            build_resume_argv("opencode", "ses_1"),
+            Some(vec!["opencode".into(), "--session".into(), "ses_1".into()])
+        );
+        assert_eq!(build_resume_argv("agy", "x"), None);
     }
 
     #[test]
