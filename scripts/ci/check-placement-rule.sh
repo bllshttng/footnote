@@ -35,6 +35,12 @@
 #      scripts/save-session.py's read of the ~/.claude/.session-context.json
 #      statusline sidecar (its OWN transcript writes were re-homed to
 #      ${FNO_HOME}/sessions - see below - so only the sidecar READ remains).
+#      setup/cli_hooks.py WRITES ~/.claude/settings.json for the same reason
+#      its siblings write ~/.gemini/settings.json and ~/.codex/config.toml:
+#      it wires a hook into the CLI's OWN config. `claude rm` runs with no
+#      agent session and so never loads plugin hooks, which leaves the
+#      settings file the only place a WorktreeRemove hook can reach it. That
+#      is Claude Code config, not footnote state - nothing accumulates there.
 #      This is a large, actively-developed surface (multi-provider agent
 #      discovery) - allowlisted by file below rather than re-derived here.
 #      The mux Connections UI (crates/fno/src/connections_view.rs) belongs
@@ -165,6 +171,7 @@ cli/src/fno/runtime/probe.py
 cli/src/fno/runtime/worktree.py
 cli/src/fno/scoreboard/fold.py
 cli/src/fno/setup_cli.py
+cli/src/fno/setup/cli_hooks.py
 cli/src/fno/setup/integration.py
 cli/src/fno/setup/recommended_rules.py
 cli/src/fno/setup/test_recommended_rules.py
