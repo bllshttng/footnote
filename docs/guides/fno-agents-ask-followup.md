@@ -73,6 +73,6 @@ Use `claude logs <short-id>` directly, or `fno agents logs <name>`.
 
 ## See also
 
-- [fno-agents-send.md](fno-agents-send.md) - async sibling: fire-and-forget delivery (durable-first, no reply wait)
+- [fno-agents-send.md](fno-agents-send.md) - async sibling: fire-and-forget delivery (live-inject first, durable only on a miss, no reply wait)
 - [docs/architecture/fno-agents-followup.md](../architecture/fno-agents-followup.md) — substrate details, exit-code reference, schema migration
 - [docs/architecture/fno-agents-registry-and-dispatch.md](../architecture/fno-agents-registry-and-dispatch.md) — registry storage + dispatch primitives

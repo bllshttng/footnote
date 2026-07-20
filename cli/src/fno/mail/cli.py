@@ -817,16 +817,28 @@ def _warn_deferred(target: str, *, project: bool = False) -> None:
     """Fail loud on a dead-letter miss: the envelope hit only the durable floor
     with no live inject path, so the sender learns delivery deferred instead of
     the message vanishing silently until the recipient's next SessionStart drain.
+
+    The durable copy is RECOVERY, not delivery - it waits on a drain the
+    recipient may never run. So this names the recovery ladder rather than
+    leaving the sender to wait: a session that is merely idle can be brought
+    back and re-sent to immediately, which beats waiting on a drain every time.
+
     Warning only - the durable enqueue succeeded, so exit stays 0."""
     if project:
         msg = (
             f"mail: project inbox {target} has no live drain; queued durably - "
-            "delivery waits for a drain"
+            "delivery waits for a drain\n"
+            "  this is NOT delivery. Address a live session instead: "
+            "`fno agents top` to find one, then `fno mail send <short-id>`"
         )
     else:
         msg = (
             f"mail: {target} has no live pane; queued durably - "
-            "delivery waits for its next SessionStart drain"
+            "delivery waits for its next SessionStart drain\n"
+            "  this is NOT delivery. Do not wait for a reply - recover:\n"
+            f"    fno agents resume {target}   # idle session -> live, then re-send\n"
+            f"    fno agents attach {target}   # drive it yourself (claude)\n"
+            f"    fno agents peek {target}     # read-only, is it actually alive?"
         )
     print(msg, file=sys.stderr)
 

@@ -18,8 +18,9 @@ fno agents register
 ```
 
 It resolves this session's ambient harness identity and writes an `idle` row named
-by the canonical `<harness>-<shortid>` handle (e.g. `claude-3ad1f42d`) - the same
-string this session self-stamps and drains, so delivery is coherent. Idempotent
+by the canonical bare short-id handle (e.g. `3ad1f42d`) - the same string this
+session self-stamps and drains, and the same one `resume` / `attach` / `peek`
+take, so delivery is coherent and a missed send is recoverable by the same id. Idempotent
 (safe to re-run) and needs no arguments; pass `--name <name>` only to override the
 derived handle. Exit 3 means the session has no addressable harness identity
 (nothing to register) - report that rather than inventing a handle.

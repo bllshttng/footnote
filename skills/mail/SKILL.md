@@ -1,6 +1,6 @@
 ---
 name: mail
-description: "Message background agent workers and projects from a runner-less surface (phone / Happy app). One front door over the shipped `fno mail` durable mailbox: send (message a peer or a project), reply (correlated response), unread / list / view / status (read your inbox), ack (advance your read cursor), drain (batch-consume at a loop boundary). Normalizes messy input (smart quotes, recipient, body), refuses an empty recipient or body before writing anything, runs the genuine `fno mail` command, and reports the real msg-id receipt - never a fabricated one. Messaging is free and async, so it never confirms. Use when: 'send tgt-foo a message', 'mail target about X', 'check my unread', 'reply to msg-abc', 'tell everyone on project Y', 'what's in my inbox'."
+description: "Message background agent workers and projects from a runner-less surface (phone / Happy app). One front door over the shipped `fno mail` messaging surface (live-inject first, durable queue as the fallback): send (message a peer or a project), reply (correlated response), unread / list / view / status (read your inbox), ack (advance your read cursor), drain (batch-consume at a loop boundary). Normalizes messy input (smart quotes, recipient, body), refuses an empty recipient or body before writing anything, runs the genuine `fno mail` command, and reports the real msg-id receipt - never a fabricated one. Messaging is free, so it never confirms - but it never reports a durable queue as delivered either. Use when: 'send tgt-foo a message', 'mail target about X', 'check my unread', 'reply to msg-abc', 'tell everyone on project Y', 'what's in my inbox'."
 argument-hint: "<verb> [args]  |  send <name> \"<body>\"  |  reply <msg-id> \"<body>\"  |  unread|list|status [name]"
 metadata:
   internal: false
@@ -14,7 +14,7 @@ requires:
 **Message background workers and projects from anywhere - even your phone.**
 
 `/fno:mail` is the runner-less front door over the shipped `fno mail`
-durable mailbox. `fno mail send|reply|unread|...` needs exact shell quoting, and
+messaging surface. `fno mail send|reply|unread|...` needs exact shell quoting, and
 a phone has no `!` local-command runner, so a typed command either splits on bad
 smart quotes or never executes at all. This skill fixes that the same way
 `/agent` does: **you (the agent) are the runner.** You read the messy input,
@@ -29,14 +29,39 @@ local command.
 
 `SKILL_DIR` below is `skills/mail` inside this plugin.
 
-## The mailbox model (so the verbs make sense)
+## The delivery model (so the verbs make sense)
 
-`fno mail` is a **durable polled mailbox**, not a live chat: a `send` appends an
-addressed envelope to the durable `messages.jsonl` bus log and returns a msg-id
-immediately (async, fire-and-forget). The recipient consumes its own unread by
-polling its cursor (`unread` / `ack`) at a turn or loop boundary. Delivery is
-NOT instant - a not-currently-live recipient is queued durably and drained later,
-which is success, not an error.
+**A send injects into the recipient's live session. The durable queue is what
+happens when that misses, and it is recovery, not delivery.**
+
+`fno mail send` tries a live inject first. On success nothing is written to the
+bus at all: the `<fno_mail>` turn lands in the recipient's session and it acts on
+it this turn. Only when there is no live inject path does the envelope fall to
+the durable `messages.jsonl` log, where it waits on a drain the recipient may
+never run. Both exit 0, so **read the receipt, not the exit code**:
+
+- `msg-<id> delivered (hosted)` - it landed. This is the normal outcome.
+- `msg-<id> queued (durable)` - **not delivered.** Nobody checks their voicemail.
+
+The recipient's own `unread` / `ack` / `drain-self` verbs exist to consume that
+fallback queue, which is why they read like a mailbox. They are the recovery
+path, not the main one.
+
+### A miss is recoverable now - do not wait
+
+A durable receipt usually means the session is idle rather than gone, and an
+idle session can be brought back. There is no reason to wait on a drain when you
+can get an answer immediately:
+
+```bash
+fno agents peek <short-id>     # read-only: is it actually alive?
+fno agents resume <short-id>   # idle -> live, then re-send
+fno agents attach <short-id>   # drive it yourself (claude)
+```
+
+The address you send to IS the id these take: one bare 8-hex short-id keys mail,
+resume, attach, peek, and the transcript. If a send missed, the same string gets
+you in.
 
 ## Verb router
 
@@ -104,13 +129,16 @@ fno mail send --to-project "<to_project>" "<body>"
 
 #### 3. REPORT (echo ONLY what actually happened)
 
-`fno mail send` prints exactly one line on success and exits 0 for both outcomes:
+`fno mail send` exits 0 for both outcomes, so the receipt line is the only signal:
 
-- `msg-<id> delivered (hosted)` - a live recipient took it now.
-- `msg-<id> queued (durable)` - no live recipient; queued durably, drained later.
+- `msg-<id> delivered (hosted)` - a live recipient took it now. Report it plainly.
+- `msg-<id> queued (durable)` - **report this as NOT delivered**, not as success.
+  The CLI prints the recovery ladder on stderr; relay it. Offer to `resume` the
+  session and re-send rather than telling the user to wait for a drain.
 
 Relay the **real** msg-id and the resolved recipient/project so delivery is
-auditable. Both lines are success.
+auditable. Never round a durable receipt up to "sent" - that is the phrasing that
+lets a message sit unread for a day while both sides believe it arrived.
 
 #### Send-and-hold: make your reply reachable
 
@@ -207,13 +235,16 @@ fno mail drain --max 25   # raise the per-call cap
 2. **Refuse empty input.** An empty recipient, empty body, or empty msg-id is a
    refusal **before any command runs** (AC4-ERR) - the normalizer enforces it for
    `send`/`reply`; you enforce it for `ack`.
-3. **Never confirm.** Messaging is free and async; there is nothing billed or
-   destructive to gate. (`send` is fire-and-forget; even a queued message is
-   success.)
-4. **Do not reinvent the bus.** Addressed delivery, the cursor, the render, and
+3. **Never confirm.** Messaging is free; there is nothing billed or destructive
+   to gate. Sending without asking is fine - reporting a durable queue as
+   delivered is not (rule 4).
+4. **A durable receipt is not delivery.** Say so, and offer the recovery ladder
+   (`peek` / `resume` + re-send / `attach`). Waiting on a drain is the last
+   resort, never the advice you lead with.
+5. **Do not reinvent the bus.** Addressed delivery, the cursor, the render, and
    rotation all live in `fno mail`. This skill routes verbs, normalizes input, and
    reports honestly; it never duplicates that machinery.
-5. **Use the genuine CLI shapes.** `send <name> <body>` and `--to-project <X>` are
+6. **Use the genuine CLI shapes.** `send <name> <body>` and `--to-project <X>` are
    positional/flag; `reply` is `--to <id> --body <text>`; `unread`/`ack` name is
    `-n`. Do not pass a body as a positional to `reply`.
 
