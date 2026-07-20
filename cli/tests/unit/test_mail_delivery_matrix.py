@@ -495,6 +495,63 @@ def test_ambiguous_short_id_wakes_nothing_and_names_both_candidates(
 # ---------------------------------------------------------------------------
 
 
+CANONICAL_ADDRESS_FORMS = [
+    pytest.param("9a063cd3", id="bare-8-hex"),
+    pytest.param("9a063cd3-69d4-415a-ada5-649b0164189c", id="full-uuid"),
+    pytest.param("footnote-9a063cd3", id="friendly-alias"),
+    pytest.param("myproj-a1b2c3d4", id="canonical-handle"),
+]
+
+
+@pytest.mark.parametrize("address", CANONICAL_ADDRESS_FORMS)
+def test_no_guard_rejects_a_canonical_address_before_resolution(address):
+    """AC11-EDGE: a validator must never swallow an address that would resolve.
+
+    The guard sweep this pins exists because of a real regression class, not a
+    hypothetical one: ``_validate_inputs``' short-id-shape guard rejected
+    ``fno mail send <bare-8-hex>`` at exit 2, while the send path's fallback to
+    handle resolution only fires on exit 16. The canonical address therefore
+    never reached resolution at all -- and it was invisible for as long as it was
+    because handles used to carry a harness prefix, so nobody sent a bare id.
+
+    Any NEW guard added ahead of resolution that rejects one of these forms
+    fails here rather than silently swallowing mail again.
+    """
+    from fno.agents.dispatch import _validate_inputs
+
+    _validate_inputs(
+        name=address, message="hi", from_name="web", name_is_address=True
+    )
+
+
+def test_short_id_shape_guard_still_rejects_a_NAME(monkeypatch):
+    """The counterpart: the guard is correct for its actual input class.
+
+    Refusing to NAME an agent like an id prevents a name/id collision, so the
+    fix was to scope the guard by caller intent (``name_is_address``), never to
+    delete it. Without this assertion the sweep above could be 'satisfied' by
+    dropping the guard entirely.
+    """
+    from fno.agents.dispatch import DispatchAskError, _validate_inputs
+
+    with pytest.raises(DispatchAskError) as err:
+        _validate_inputs(name="9a063cd3", message="hi", from_name="web")
+    assert err.value.exit_code == 2
+
+
+def test_full_uuid_fits_the_name_length_ceiling():
+    """A 36-char uuid must clear ``_NAME_MAX_LEN``.
+
+    Checked explicitly because the ceiling is a plain constant with no test
+    tying it to the address forms it has to admit: lowering it below 36 would
+    reject every full-uuid send at exit 2, which is the same swallow-before-
+    resolution failure in a different guard.
+    """
+    from fno.agents.dispatch import _NAME_MAX_LEN
+
+    assert _NAME_MAX_LEN >= 36
+
+
 @pytest.mark.parametrize(
     "inject_ok,wake,expected",
     [
