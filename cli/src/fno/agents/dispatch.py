@@ -3842,6 +3842,11 @@ def _switchboard_exchange(
 # for ~10s (40 * 250ms) before reporting not-confirmed; give it headroom.
 _MAIL_INJECT_TIMEOUT_S = 20.0
 
+# Wake spawns key on the target session uuid, not on a fresh agent name: spawn
+# dedup scopes NAME, so two senders waking one session must derive the same name
+# to collide on its flock. Prefixed because a bare 8-hex name is refused.
+_WAKE_NAME_PREFIX = "wake-"
+
 
 @dataclass(frozen=True)
 class _MailCtx:
@@ -4042,6 +4047,58 @@ def _mail_inject_claude(recipient: str, text: str) -> bool:
         return bool(json.loads(proc.stdout.strip()).get("delivered"))
     except (ValueError, AttributeError):
         return False
+
+
+def wake_and_deliver(
+    session_uuid: str, wrapped: str, *, cwd: Optional[Path] = None
+) -> tuple[bool, str]:
+    """Revive an asleep claude session with ``wrapped`` as its waking prompt.
+
+    Asleep is a resumable state, not voicemail: the mail IS the prompt that
+    brings the session back, and it returns as an attachable bg thread rather
+    than a one-shot. Returns ``(True, short_id)`` naming the revived thread, or
+    ``(False, reason)`` where the reason is a lane-failure token the sender's
+    receipt prints verbatim.
+
+    Rides the existing revive-in-place substrate rather than shelling ``claude
+    -r`` by hand, which buys three things the hand-rolled version lacks: the
+    session-writer claim, the liveness fail-safe that refuses to open a second
+    writer on one transcript, and the per-name flock that serializes two senders
+    waking the same session. ``claude -p`` is never reachable from here -- a
+    one-shot cannot host the multi-turn session the recipient resumes into.
+
+    The name is derived from the uuid so concurrent wakes of one session collide
+    on the same flock: spawn dedup scopes NAME, so a fresh random name per wake
+    would defeat the very serialization this depends on. It is prefixed rather
+    than bare hex because a bare 8-hex name is refused as an id/name collision.
+    """
+    if not session_uuid:
+        return False, "no-session-uuid"
+
+    try:
+        result = dispatch_spawn(
+            name=f"{_WAKE_NAME_PREFIX}{session_uuid[:8]}",
+            message=wrapped,
+            provider="claude",
+            cwd=cwd or Path.cwd(),
+            resume_session_id=session_uuid,
+        )
+    except DispatchAskError as exc:
+        # Exit 11 is the writer claim refusing: another writer holds the
+        # transcript, so the session is not actually asleep. Exit 2 is the name
+        # collision, which for a uuid-derived name means a concurrent wake won
+        # the race. Both are honest "do not wake" answers, and the caller
+        # re-probes the now-live session before demoting.
+        if exc.exit_code == 11:
+            return False, "writer-possibly-live"
+        if exc.exit_code == 2:
+            return False, "wake-already-in-flight"
+        return False, f"spawn-exit-{exc.exit_code}"
+    except (OSError, RuntimeError) as exc:
+        return False, f"spawn-error-{type(exc).__name__}"
+
+    short = getattr(result, "short_id", None) or getattr(result, "name", "") or "unknown"
+    return True, short
 
 
 def _mail_inject_codex(thread_id: str, text: str) -> bool:

@@ -1127,6 +1127,159 @@ def resolve_or_suggest(
     return None, difflib.get_close_matches(handle or "", candidates, n=limit, cutoff=0.3)
 
 
+@dataclass(frozen=True)
+class ReachableSession:
+    """A session some durable store knows about, whether or not it is live.
+
+    Distinct from :class:`DiscoveredSession` on purpose: that one answers "what
+    should I list?" and is liveness-gated, while this one answers "is this token
+    reachable at all?" and is deliberately liveness-blind. Conflating the two is
+    the root cause this type exists to prevent -- an asleep session is absent
+    from every listing yet fully resumable.
+    """
+
+    session_id: str
+    source: str  # transcript | registry | roster | graph
+    agent: str = "claude"
+
+
+def _reachable_from_transcripts(token: str, projects_dir: Path) -> list[str]:
+    """Session uuids whose transcript file exists on disk, matched on token.
+
+    The transcript store is the broadest source: a session that ever ran wrote a
+    ``<uuid>.jsonl`` here, and the file outlives the process. No recency cutoff
+    is applied -- staleness is precisely what makes a session asleep rather than
+    absent.
+    """
+    hits: list[str] = []
+    try:
+        entries = list(projects_dir.glob("*/*.jsonl"))
+    except OSError:
+        return hits
+    for path in entries:
+        sid = path.name[: -len(".jsonl")]
+        if _token_matches(token, sid) and sid not in hits:
+            hits.append(sid)
+    return hits
+
+
+def _token_matches(token: str, session_id: str) -> bool:
+    """A token addresses a session by full uuid or by its 8-hex short form.
+
+    Deliberately NOT a loose prefix match: a 2-char token would otherwise sweep
+    in half the store and turn every send into an ambiguity error.
+    """
+    if not token or not session_id:
+        return False
+    return token == session_id or token == session_id[:8]
+
+
+def _reachable_from_registry(token: str, registry_path: Optional[Path]) -> list[str]:
+    """Registry rows including dead-pid and exited ones.
+
+    An exited row is exactly the case the live lane drops and this lane keeps:
+    the row is a durable record that this uuid exists, not a liveness claim.
+    """
+    from fno.agents.registry import RegistryVersionError, load_registry
+
+    try:
+        entries = load_registry(registry_path)
+    except (OSError, ValueError, RegistryVersionError):
+        # A torn or version-drifted registry contributes no rows; the other
+        # sources still answer. Never let one unreadable store refuse a send.
+        return []
+    hits: list[str] = []
+    for e in entries:
+        sid = getattr(e, "session_id", None)
+        if sid and _token_matches(token, sid) and sid not in hits:
+            hits.append(sid)
+    return hits
+
+
+def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> list[str]:
+    """Daemon roster rows, including ones stamped exited."""
+    base = daemon_dir or Path(os.environ.get("FNO_CLAUDE_DAEMON_DIR", "")) or None
+    if base is None or not str(base):
+        return []
+    try:
+        raw = json.loads((Path(base) / "roster.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    hits: list[str] = []
+    for row in (raw.get("workers") or {}).values():
+        sid = (row or {}).get("sessionId")
+        if sid and _token_matches(token, sid) and sid not in hits:
+            hits.append(sid)
+    return hits
+
+
+def _reachable_from_graph(token: str) -> list[str]:
+    """Session ids stamped onto backlog nodes (``sessions[]`` provenance).
+
+    The weakest source and the last consulted: a node stamp proves a session
+    once existed for some phase of some node, which is enough to attempt a wake
+    but never enough to claim liveness.
+    """
+    try:
+        from fno.graph.io import load_graph
+    except ImportError:
+        return []
+    try:
+        graph = load_graph()
+    except Exception:
+        return []
+    hits: list[str] = []
+    for node in (graph or {}).get("nodes", {}).values() if isinstance(graph, dict) else []:
+        for entry in (node or {}).get("sessions", []) or []:
+            sid = (entry or {}).get("session_id")
+            if sid and _token_matches(token, sid) and sid not in hits:
+                hits.append(sid)
+    return hits
+
+
+def resolve_reachable(
+    token: str,
+    *,
+    projects_dir: Optional[Path] = None,
+    registry_path: Optional[Path] = None,
+    daemon_dir: Optional[Path] = None,
+) -> tuple[Optional[ReachableSession], list[str]]:
+    """Resolve ``token`` against the durable stores, ignoring liveness entirely.
+
+    This is the rung below discovery. ``discover_live_sessions`` answers a
+    LISTING question and is liveness-gated by design; when it misses, the token
+    may still name a session that is merely asleep -- and asleep is a resumable
+    state, not voicemail. Consulting the stores here is what turns a wall into a
+    wake.
+
+    Returns ``(session, [])`` on a unique hit, ``(None, [uuids])`` when the token
+    is ambiguous across two stored sessions (never guess -- waking the wrong one
+    means waking a stranger's session), and ``(None, [])`` on a full miss, which
+    is the only case that still earns exit 16.
+
+    Sources are consulted in descending confidence and the FIRST source that
+    answers wins; a store that is unreadable contributes nothing rather than
+    failing the resolve.
+    """
+    if not token or not token.strip():
+        return None, []
+
+    pdir = projects_dir or default_projects_dir()
+    sources = (
+        ("transcript", lambda: _reachable_from_transcripts(token, pdir)),
+        ("registry", lambda: _reachable_from_registry(token, registry_path)),
+        ("roster", lambda: _reachable_from_roster(token, daemon_dir)),
+        ("graph", lambda: _reachable_from_graph(token)),
+    )
+    for source, lookup in sources:
+        hits = lookup()
+        if len(hits) == 1:
+            return ReachableSession(session_id=hits[0], source=source), []
+        if len(hits) > 1:
+            return None, sorted(hits)
+    return None, []
+
+
 def discover_live_sessions(
     *,
     sessions_dir: Optional[Path] = None,
