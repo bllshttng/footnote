@@ -1359,3 +1359,134 @@ def test_opencode_broken_db_does_not_resurrect_legacy_sessions(tmp_path):
     storage.mkdir(parents=True, exist_ok=True)
     (storage.parent / "opencode.db").write_text("not a database", encoding="utf-8")
     assert _run_opencode(tmp_path, storage) == []
+
+
+# ---------------------------------------------------------------------------
+# resolve_reachable (x-e864): the liveness-blind rung below discovery.
+# Each source gets its own test because a source that silently never fires is
+# indistinguishable from one that fired and missed -- the exact bug class this
+# node exists to kill. Two of these caught real defects: the roster reader fell
+# back to Path('') (which is Path('.'), not falsy, so it read ./roster.json),
+# and the graph reader imported a module path that does not exist.
+# ---------------------------------------------------------------------------
+
+
+def _stale(path):
+    old = time.time() - 7200
+    os.utime(path, (old, old))
+
+
+def test_resolve_reachable_finds_an_asleep_transcript(tmp_path, monkeypatch):
+    from fno.agents import discover
+
+    sid = "5b17e2f0-1c44-4d9a-8e3b-2f6a7c081d55"
+    proj = tmp_path / "projects" / "-Users-x-proj"
+    proj.mkdir(parents=True)
+    t = proj / f"{sid}.jsonl"
+    t.write_text("{}\n", encoding="utf-8")
+    _stale(t)
+
+    found, ambiguous = discover.resolve_reachable(sid[:8], projects_dir=tmp_path / "projects")
+
+    assert ambiguous == []
+    assert found is not None and found.session_id == sid
+    assert found.source == "transcript"
+
+
+def test_resolve_reachable_reads_the_roster_without_an_env_override(tmp_path, monkeypatch):
+    """The roster source must resolve its own default dir.
+
+    Regression pin: the fallback used to be ``Path(os.environ.get(k, ""))``,
+    and ``Path("")`` is ``Path(".")`` -- truthy -- so with the env var unset the
+    reader looked for ./roster.json and this source never fired in production.
+    """
+    from fno.agents import discover
+
+    sid = "aa11bb22-3344-5566-7788-99aabbccddee"
+    monkeypatch.delenv("FNO_CLAUDE_DAEMON_DIR", raising=False)
+    home = tmp_path / "home"
+    daemon = home / ".claude" / "daemon"
+    daemon.mkdir(parents=True)
+    (daemon / "roster.json").write_text(
+        json.dumps({"proto": 1, "workers": {sid[:8]: {"sessionId": sid, "pid": 1}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    found, _ = discover.resolve_reachable(sid[:8], projects_dir=tmp_path / "no-projects")
+
+    assert found is not None, "the roster source did not fire on its default dir"
+    assert found.session_id == sid and found.source == "roster"
+
+
+def test_resolve_reachable_reads_backlog_session_stamps(tmp_path, monkeypatch):
+    """The graph source must actually import and parse.
+
+    Regression pin: it imported ``fno.graph.io`` (no such module) and indexed
+    the result as a dict-with-nodes, while ``load_graph`` lives in
+    ``fno.graph.load`` and returns a flat ``list[dict]``. Both failures were
+    swallowed, so the source returned [] forever.
+    """
+    from fno.agents import discover
+
+    sid = "ccdd1122-3344-5566-7788-99aabbccddee"
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        json.dumps({"entries": [
+            {"id": "x-0001", "sessions": [
+                {"phase": "ship", "harness": "claude", "session_id": sid}
+            ]}
+        ]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("fno.graph.load.GRAPH_JSON", graph)
+
+    found, _ = discover.resolve_reachable(sid[:8], projects_dir=tmp_path / "no-projects")
+
+    assert found is not None, "the graph source did not fire"
+    assert found.session_id == sid and found.source == "graph"
+
+
+def test_resolve_reachable_reports_ambiguity_instead_of_guessing(tmp_path, monkeypatch):
+    from fno.agents import discover
+
+    a = "c0ffee11-1111-2222-3333-444444444444"
+    b = "c0ffee11-9999-8888-7777-666666666666"
+    projects = tmp_path / "projects"
+    for sid in (a, b):
+        proj = projects / f"-Users-x-{sid[-4:]}"
+        proj.mkdir(parents=True)
+        t = proj / f"{sid}.jsonl"
+        t.write_text("{}\n", encoding="utf-8")
+        _stale(t)
+
+    found, ambiguous = discover.resolve_reachable("c0ffee11", projects_dir=projects)
+
+    assert found is None
+    assert sorted(ambiguous) == sorted([a, b])
+
+
+def test_resolve_reachable_misses_cleanly_on_an_unknown_token(tmp_path):
+    from fno.agents import discover
+
+    found, ambiguous = discover.resolve_reachable(
+        "deadbeef", projects_dir=tmp_path / "nothing"
+    )
+
+    assert found is None and ambiguous == []
+
+
+def test_resolve_reachable_does_not_match_on_a_short_prefix(tmp_path):
+    """A loose prefix match would sweep half the store into an ambiguity error."""
+    from fno.agents import discover
+
+    sid = "5b17e2f0-1c44-4d9a-8e3b-2f6a7c081d55"
+    proj = tmp_path / "projects" / "-Users-x-proj"
+    proj.mkdir(parents=True)
+    t = proj / f"{sid}.jsonl"
+    t.write_text("{}\n", encoding="utf-8")
+    _stale(t)
+
+    found, _ = discover.resolve_reachable("5b", projects_dir=tmp_path / "projects")
+
+    assert found is None

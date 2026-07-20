@@ -1197,13 +1197,23 @@ def _reachable_from_registry(token: str, registry_path: Optional[Path]) -> list[
 
 
 def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> list[str]:
-    """Daemon roster rows, including ones stamped exited."""
-    base = daemon_dir or Path(os.environ.get("FNO_CLAUDE_DAEMON_DIR", "")) or None
-    if base is None or not str(base):
-        return []
+    """Daemon roster rows, including ones stamped exited.
+
+    Resolves the daemon dir the same way every other roster reader does. An
+    earlier version fell back to ``Path(os.environ.get(..., ""))``, which is
+    ``Path('.')`` rather than a falsy value -- so with the env var unset (the
+    normal case) it read ``./roster.json`` and this whole source silently
+    never fired.
+    """
+    base = daemon_dir
+    if base is None:
+        override = os.environ.get("FNO_CLAUDE_DAEMON_DIR")
+        base = Path(override) if override else Path.home() / ".claude" / "daemon"
     try:
-        raw = json.loads((Path(base) / "roster.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        raw = json.loads((base / "roster.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return []
+    if not isinstance(raw, dict):
         return []
     hits: list[str] = []
     for row in (raw.get("workers") or {}).values():
@@ -1221,17 +1231,22 @@ def _reachable_from_graph(token: str) -> list[str]:
     but never enough to claim liveness.
     """
     try:
-        from fno.graph.io import load_graph
+        from fno.graph.load import load_graph
     except ImportError:
         return []
     try:
-        graph = load_graph()
+        entries = load_graph()
     except Exception:
+        # A corrupt or hash-mismatched graph raises; it contributes no rows
+        # rather than failing the resolve, since three other sources still
+        # have an answer and this is the weakest of the four.
         return []
     hits: list[str] = []
-    for node in (graph or {}).get("nodes", {}).values() if isinstance(graph, dict) else []:
-        for entry in (node or {}).get("sessions", []) or []:
-            sid = (entry or {}).get("session_id")
+    for node in entries or []:
+        if not isinstance(node, dict):
+            continue
+        for entry in node.get("sessions") or []:
+            sid = (entry or {}).get("session_id") if isinstance(entry, dict) else None
             if sid and _token_matches(token, sid) and sid not in hits:
                 hits.append(sid)
     return hits
