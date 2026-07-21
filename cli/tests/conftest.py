@@ -65,6 +65,22 @@ os.environ["FNO_SPAWN_GATE"] = "0"
 # for hours. spawn_server inherits the env (no env_clear), so the marker reaches
 # even a client-autospawned setsid server.
 os.environ["FNO_E2E"] = "1"
+# Ambient origin provenance. Node-birth capture reads the running session's
+# identity, so a suite run from inside a live /target worktree inherited that
+# session's node as the origin of every node any test filed: the manifest's
+# ownership proof passes (the session id genuinely matches), and FNO_NODE is
+# exported by every fno-spawned worker. Harmless-looking until something reads
+# the field back - then it is a foreign edge on a fixture node, or a receipt
+# landing in output the test parses as JSON.
+#
+# Scrubbed at module load like the gates above. Tests that exercise capture arm
+# what they need per-test via monkeypatch.setenv.
+for _ambient_key in (
+    "FNO_NODE", "FNO_SLUG", "FNO_PLAN",
+    "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID", "GEMINI_SESSION_ID",
+):
+    os.environ.pop(_ambient_key, None)
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:

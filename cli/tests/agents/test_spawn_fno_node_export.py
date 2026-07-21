@@ -57,7 +57,12 @@ def spawned_env(monkeypatch: pytest.MonkeyPatch) -> Dict[str, Any]:
 def test_ac6_hp_node_driven_spawn_exports_fno_node(
     spawned_env: Dict[str, Any], substrate: str
 ) -> None:
-    """AC6-HP: both non-pane substrates carry the bound node id to the worker."""
+    """AC6-HP: both non-pane substrates carry the bound node id to the worker.
+
+    The two substrates share one code path by construction (the export sits
+    after the pane arm returns, with no substrate branch), so this parametrize
+    pins that they are NOT allowed to diverge rather than covering two branches.
+    """
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
@@ -105,3 +110,40 @@ def test_ac6_hp_nodeless_spawn_exports_no_key(spawned_env: Dict[str, Any]) -> No
     )
     assert result.exit_code == 0, result.output
     assert "FNO_NODE" not in spawned_env["env"]
+
+
+def test_the_real_resolver_yields_nothing_for_a_nodeless_spawn() -> None:
+    """The fixture above stubs resolve_provenance, so pin the real one here too.
+
+    Without this, the nodeless assertion only proves the stub behaves as
+    written, not that production does.
+    """
+    from fno.agents.mux_spawn import resolve_provenance
+
+    assert resolve_provenance(None) == {}
+    assert "" not in resolve_provenance("x-aaaa", "a-slug", "").values()
+
+
+def test_provenance_keys_are_set_or_cleared_as_a_group(
+    spawned_env: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parent's FNO_PLAN must not ride along with a child's FNO_NODE.
+
+    A worker dispatching a child for a plan-less node would otherwise hand down
+    its own plan path beside someone else's node id.
+    """
+    from fno.agents.cli import agents_app
+
+    monkeypatch.setenv("FNO_PLAN", "/parent/plan.md")
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "w1", "hi", "--provider", "claude",
+         "--substrate", "bg", "--node", "x-aaaa"],
+    )
+    assert result.exit_code == 0, result.output
+    assert spawned_env["env"]["FNO_NODE"] == "x-aaaa"
+    assert "FNO_PLAN" not in spawned_env["env"]
+    # and the parent's own env is put back afterwards
+    import os
+
+    assert os.environ["FNO_PLAN"] == "/parent/plan.md"

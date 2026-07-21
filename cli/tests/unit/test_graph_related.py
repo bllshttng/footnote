@@ -73,12 +73,21 @@ def test_related_defaults_to_empty_on_a_legacy_node():
     assert e["related"] == []
 
 
-def test_related_survives_canonicalization():
-    """The field is in CANONICAL_FIELD_ORDER, so a write round-trips it."""
+def test_related_is_ordered_with_the_other_edges():
+    """related sits in CANONICAL_FIELD_ORDER, next to blocked_by.
+
+    Asserting POSITION, not presence: canonicalize_entries appends unknown keys
+    rather than dropping them, so a presence check passes even with the field
+    absent from the order list and proves nothing.
+    """
     from fno.graph.store import canonicalize_entries
 
-    (e,) = canonicalize_entries([_node("x-aaaa", related=["x-bbbb"])])
+    (e,) = canonicalize_entries(
+        [_node("x-aaaa", related=["x-bbbb"], blocked_by=[], created_at="2026-01-01")]
+    )
+    keys = list(e)
     assert e["related"] == ["x-bbbb"]
+    assert keys.index("blocked_by") < keys.index("related") < keys.index("created_at")
 
 
 # ---------------------------------------------------------------------------
@@ -231,3 +240,19 @@ def test_ac2_fr_opposite_endpoint_declarations_both_survive(tmp_graph):
     assert sorted(_related(tmp_graph, "x-bbbb")) == ["x-aaaa", "x-cccc"]
     assert _related(tmp_graph, "x-aaaa") == ["x-bbbb"]
     assert _related(tmp_graph, "x-cccc") == ["x-bbbb"]
+
+
+def test_removing_a_node_unlinks_it_from_every_peer(tmp_graph):
+    """remove is the one path that can strand a half-edge permanently.
+
+    set_related only touches peers in the declaring node's own delta, so a peer
+    left naming a deleted node is unreachable by any repair verb.
+    """
+    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb,x-cccc"])
+    assert _related(tmp_graph, "x-bbbb") == ["x-aaaa"]
+
+    assert runner.invoke(
+        app, ["backlog", "remove", "x-aaaa", "--force"]
+    ).exit_code == 0
+    assert _related(tmp_graph, "x-bbbb") == []
+    assert _related(tmp_graph, "x-cccc") == []

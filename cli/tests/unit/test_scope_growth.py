@@ -129,24 +129,20 @@ def test_ac3_fr_low_coverage_suppresses_the_headline():
     """AC3-FR: below the floor, the figure is withheld and the coverage is stated."""
     growth = scope_growth(_window(with_origin=2, without_origin=8), "x-epic", floor=0.5)
     assert growth.reportable is False
-    assert growth.coverage < 0.5
-    # The evidence is still reported -- suppression is not silence -- and the
-    # ratio is exactly the two counts, not an independently computed number.
-    assert growth.window_total > 0
-    assert growth.coverage == pytest.approx(
-        growth.window_with_origin / growth.window_total
-    )
+    # Fixture-derived, not recomputed from the result's own fields: the window
+    # is x-c1 + x-seed + x-grew + 2 with-origin + 8 without = 13, of which
+    # x-grew and the 2 fillers carry a joinable origin.
+    assert (growth.window_total, growth.window_with_origin) == (13, 3)
+    # Suppression is not silence: the count is withheld, the evidence is not.
+    assert growth.follow_up_ids is None
 
 
 def test_ac3_fr_the_same_epic_reports_once_coverage_clears_the_floor():
     """AC3-FR: above the floor the figure prints, with its coverage alongside."""
     growth = scope_growth(_window(with_origin=8, without_origin=2), "x-epic", floor=0.5)
     assert growth.reportable is True
-    assert growth.coverage > 0.5
-    assert growth.coverage == pytest.approx(
-        growth.window_with_origin / growth.window_total
-    )
-    assert len(growth.follow_up_ids) > 0
+    assert (growth.window_total, growth.window_with_origin) == (13, 9)
+    assert growth.follow_up_ids == ("x-grew",)
 
 
 def test_coverage_window_excludes_nodes_older_than_the_epic():
@@ -222,3 +218,38 @@ def test_epic_status_json_never_emits_a_count_it_cannot_support(graph):
     assert sg["follow_ups"] is None, "a suppressed figure must be null, not 0"
     # Coverage evidence ships regardless, so the null explains itself.
     assert sg["window_total"] > 0
+
+
+def test_a_dangling_origin_is_not_counted_as_capture():
+    """An origin naming a node the graph no longer has joins nothing.
+
+    Counting it would inflate coverage past the floor while the walk finds
+    zero follow-ups, licensing a confidently-measured zero - the same
+    flattering error the floor exists to prevent, arriving from the other side.
+    """
+    entries = [_epic(), _node("x-c1", parent="x-epic")]
+    for i in range(9):
+        entries.append(_node(f"x-d{i:03d}", source_node_id="x-vanished"))
+
+    growth = scope_growth(entries, "x-epic", floor=0.5)
+    assert growth.window_with_origin == 0
+    assert growth.window_dangling == 9
+    assert growth.reportable is False
+
+
+def test_an_undated_epic_has_no_window_rather_than_the_whole_graph():
+    """`created_at >= ""` would admit every node ever filed."""
+    entries = [_node("x-epic", type="epic", created_at=None),
+               _node("x-other", source_node_id="x-other")]
+    growth = scope_growth(entries, "x-epic", floor=0.5)
+    assert growth.window_total == 0
+    assert growth.reportable is False
+
+
+def test_epic_status_renders_the_reportable_line(graph):
+    """The happy-path line is user-facing surface and needs rendering at least once."""
+    graph(_window(with_origin=9, without_origin=1))
+    out = runner.invoke(app, ["backlog", "epic", "status", "x-epic"]).output
+    assert "scope growth: 1 follow-ups" in out
+    assert "origin capture" in out
+    assert "realized" in out

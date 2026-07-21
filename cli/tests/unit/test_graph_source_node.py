@@ -148,3 +148,48 @@ def test_ac2_hp_env_origin_is_stamped_when_it_resolves(tmp_graph, monkeypatch):
     node = _by_id(tmp_graph, json.loads(result.stdout)["id"])
     assert node["source_harness"] == "codex"
     assert node["source_node_id"] == "x-aaaa"
+
+
+def test_ac3_err_ambient_failure_prints_no_traceback_on_either_stream(
+    tmp_graph, monkeypatch
+):
+    """AC3-ERR: a malformed manifest degrades quietly - exit 0, node created, no trace.
+
+    Asserted through the filing verb rather than _session_provenance directly:
+    the AC is about what an operator sees, and a traceback reaching either
+    stream is the visible half of the failure.
+    """
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-bad")
+    (tmp_graph.parent / ".fno").mkdir(parents=True, exist_ok=True)
+    (tmp_graph.parent / ".fno" / "target-state.md").write_bytes(b"\xff\xfe not utf8")
+    monkeypatch.chdir(tmp_graph.parent)
+
+    result = runner.invoke(app, ["backlog", "idea", "follow-up"])
+    assert result.exit_code == 0, result.output
+    assert "Traceback" not in result.output
+    assert _by_id(tmp_graph, json.loads(result.stdout)["id"])["source_node_id"] is None
+
+
+def test_a_stamped_origin_is_named_but_a_signalless_filing_is_quiet(tmp_graph):
+    """The receipt fires on a stamped or dropped origin, never on silence.
+
+    An always-on line would be noise on the most-used verb in the CLI, and it
+    lands in the mixed output stream that callers parse as JSON.
+    """
+    quiet = runner.invoke(app, ["backlog", "idea", "no signal at all"])
+    assert "origin:" not in quiet.output
+
+    named = runner.invoke(
+        app, ["backlog", "idea", "with an origin", "--source-node", "x-aaaa"]
+    )
+    assert "origin: x-aaaa" in named.output
+
+
+def test_a_dropped_stale_origin_is_reported_not_swallowed(tmp_graph, monkeypatch):
+    """Capture regressing to nothing must leave a trace at the moment it happens."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-stale")
+    monkeypatch.setenv("FNO_NODE", "x-deleted")
+
+    result = runner.invoke(app, ["backlog", "idea", "orphaned"])
+    assert result.exit_code == 0, result.output
+    assert "dropped 'x-deleted'" in result.output

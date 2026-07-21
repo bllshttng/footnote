@@ -348,6 +348,7 @@ def test_ambient_edge_no_env_all_none(tmp_path, monkeypatch):
         "source_cwd": None,
         "source_node_id": None,
         "source_plan_path": None,
+        "source_node_dropped": None,
     }
 
 
@@ -493,12 +494,15 @@ def test_ac3_edge_stale_fno_node_degrades_to_null(tmp_path, monkeypatch):
 
     prov = _session_provenance(str(tmp_path), known_ids={"x-alive"})
     assert prov["source_node_id"] is None
-    assert "x-deleted" not in json.dumps(prov)
+    # Reported back rather than swallowed: the caller warns, so capture
+    # regressing to nothing leaves a trace. The AC's "appears nowhere" is about
+    # the created NODE, asserted end-to-end in test_graph_source_node.py.
+    assert prov["source_node_dropped"] == "x-deleted"
 
-    # present in the snapshot -> stamped
-    assert _session_provenance(
-        str(tmp_path), known_ids={"x-deleted"}
-    )["source_node_id"] == "x-deleted"
+    # present in the snapshot -> stamped, nothing dropped
+    live = _session_provenance(str(tmp_path), known_ids={"x-deleted"})
+    assert live["source_node_id"] == "x-deleted"
+    assert live["source_node_dropped"] is None
 
 
 def test_ac3_edge_empty_fno_node_is_no_signal(tmp_path, monkeypatch):
