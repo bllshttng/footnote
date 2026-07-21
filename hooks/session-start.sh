@@ -298,6 +298,11 @@ if command -v fno >/dev/null 2>&1; then
         mkdir -p .fno 2>/dev/null; printf '%s\n' "$rs_today" >"$rs_watermark" 2>/dev/null || true
         ( fno plan reconcile-status --apply >/dev/null 2>&1 & ) 2>/dev/null || true
     fi
+    # Grooming fallback, for the codex/gemini path only: claude registers the
+    # same script directly in hooks.json (this wrapper is not in that list), and
+    # its own watermark makes a double invocation a no-op regardless.
+    gsh_helper="${SCRIPT_DIR}/groom-self-heal-session-start.sh"
+    [[ -f "$gsh_helper" ]] && ( bash "$gsh_helper" >/dev/null 2>&1 & ) 2>/dev/null || true
     # Graph->doc mirror sweep: bare `plan sync` self-gates on graph.json mtime
     # (one stat, cheap on no change), so no shell watermark; backgrounded + output
     # discarded so it can never corrupt this hook's JSON.

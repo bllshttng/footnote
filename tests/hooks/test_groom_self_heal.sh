@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# tests/hooks/test_groom_self_heal.sh
+#
+# The SessionStart grooming fallback (x-1c7b). Four grooming surfaces have
+# shipped and never run; this is the trigger of last resort, so what it must NOT
+# do matters as much as what it does:
+#
+#   AC1-EDGE - a healthy pass (>= threshold fresh) spawns nothing and writes no
+#              watermark, so the LaunchAgent keeps sole ownership of the cadence
+#   AC2-EDGE - N concurrent worktree sessions collapse to exactly one dispatch
+#   AC1-FR   - a dispatch that fails leaves nothing claiming success
+#
+# A FAKE `fno` on PATH means no real grooming pass, claim, or graph write ever
+# happens. NOTE: this repo has two test trees - a green `fno test cli/tests` is
+# NOT evidence for this file. Run it directly.
+#
+# Run: bash tests/hooks/test_groom_self_heal.sh
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT_REAL="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+HELPER="${REPO_ROOT_REAL}/hooks/groom-self-heal-session-start.sh"
+
+log()  { printf '[groom-heal] %s\n' "$*"; }
+fail() { printf '[groom-heal] FAIL: %s\n' "$*" >&2; exit 1; }
+pass() { printf '[groom-heal] PASS: %s\n' "$*"; }
+
+[[ -f "$HELPER" ]] || fail "helper not found at $HELPER"
+
+WORK=$(mktemp -d -t groom-heal-XXXXXX)
+trap 'rm -rf "$WORK"' EXIT
+
+# --- Fake `fno`: logs every call; `--check` exit code is harness-controlled. ---
+FAKEBIN="$WORK/bin"
+mkdir -p "$FAKEBIN"
+export FNO_CALL_LOG="$WORK/fno-calls.log"
+cat > "$FAKEBIN/fno" <<'FAKE'
+#!/usr/bin/env bash
+echo "$*" >> "$FNO_CALL_LOG"
+if [[ "${1:-}" == "backlog" && "${2:-}" == "groom" && "${3:-}" == "--check" ]]; then
+    echo '{"state": "ran", "hours": 96.0}'
+    exit "${FAKE_CHECK_EXIT:-0}"   # 0 = a pass is due
+fi
+if [[ "${1:-}" == "backlog" && "${2:-}" == "groom" ]]; then
+    # The dispatch itself. Slow enough that a caller which waited would show it.
+    exit "${FAKE_GROOM_EXIT:-0}"
+fi
+exit 0
+FAKE
+chmod +x "$FAKEBIN/fno"
+export PATH="$FAKEBIN:$PATH"
+
+TODAY="$(date -u +%Y-%m-%d)"
+
+# Count dispatches (a `backlog groom` call with no --check), tolerating the
+# backgrounded subshell by polling briefly.
+# `grep -c` exits 1 on zero matches, so its count is captured and the exit
+# status discarded - an `|| echo 0` fallback would emit a SECOND line.
+count_lines() {
+    local n
+    n="$(grep -c -- "$1" "$FNO_CALL_LOG" 2>/dev/null)" || true
+    printf '%s' "${n:-0}"
+}
+dispatch_count() { count_lines '^backlog groom$'; }
+
+# The dispatch is fully detached, so a fixed sleep is a load-dependent flake:
+# under a busy machine (a parallel CI job, a concurrent lint sweep) the fake fno
+# has not appended its line yet. Poll for the expected count instead, and only
+# then settle briefly to catch a SECOND dispatch that should never come.
+wait_for_dispatches() {
+    local want="$1" i=0
+    while [ "$i" -lt 60 ]; do
+        [ "$(dispatch_count)" = "$want" ] && break
+        sleep 0.25; i=$((i + 1))
+    done
+    sleep 0.5
+}
+settle() { wait_for_dispatches 0; }
+
+# A real git repo: the helper refuses a non-repo cwd, because grooming's
+# validity sweep reads its evidence from there.
+fresh_project() {
+    local dir="$WORK/$1"
+    rm -rf "$dir"; mkdir -p "$dir/.fno"
+    git init -q "$dir" 2>/dev/null
+    : > "$FNO_CALL_LOG"
+    echo "$dir"
+}
+
+fresh_non_repo() {
+    local dir="$WORK/$1"
+    rm -rf "$dir"; mkdir -p "$dir/.fno"
+    : > "$FNO_CALL_LOG"
+    echo "$dir"
+}
+
+# --- AC1-EDGE: a healthy pass stays dormant -----------------------------------
+proj="$(fresh_project healthy)"
+( cd "$proj" && FAKE_CHECK_EXIT=1 bash "$HELPER" )
+settle
+[[ "$(dispatch_count)" == "0" ]] || fail "AC1-EDGE: a fresh pass must not dispatch"
+if compgen -G "$proj/.fno/.groom-heal-*" >/dev/null; then
+    fail "AC1-EDGE: a fresh pass must not write a watermark (it would burn the day)"
+fi
+pass "AC1-EDGE: healthy grooming spawns nothing and writes no watermark"
+
+# --- happy path: a stale pass dispatches once and watermarks ------------------
+proj="$(fresh_project stale)"
+( cd "$proj" && bash "$HELPER" )
+wait_for_dispatches 1
+[[ "$(dispatch_count)" == "1" ]] || fail "a stale pass must dispatch exactly once"
+[[ -e "$proj/.fno/.groom-heal-${TODAY}" ]] || fail "the winner must write today's watermark"
+pass "stale grooming dispatches once and claims the day"
+
+# --- the watermark is a day gate: a second session the same day is a no-op ----
+: > "$FNO_CALL_LOG"
+( cd "$proj" && bash "$HELPER" )
+settle
+[[ "$(dispatch_count)" == "0" ]] || fail "a second session the same day must not re-dispatch"
+[[ "$(count_lines "\-\-check")" == "0" ]] \
+    || fail "the watermark must short-circuit BEFORE the freshness probe"
+pass "today's watermark short-circuits before the probe"
+
+# --- AC2-EDGE: concurrent sessions collapse to one dispatch -------------------
+proj="$(fresh_project concurrent)"
+for _ in 1 2 3 4 5; do
+    ( cd "$proj" && bash "$HELPER" ) &
+done
+wait
+wait_for_dispatches 1
+n="$(dispatch_count)"
+[[ "$n" == "1" ]] || fail "AC2-EDGE: 5 concurrent sessions dispatched $n times, want 1"
+pass "AC2-EDGE: five concurrent sessions dispatch exactly once"
+
+# --- AC1-FR: a failing dispatch claims nothing --------------------------------
+proj="$(fresh_project failing)"
+( cd "$proj" && FAKE_GROOM_EXIT=1 bash "$HELPER" )
+settle
+# The helper must exit 0 regardless (it is advisory and must never block a
+# session), and must not report success anywhere - the marker not advancing is
+# what keeps the failure visible on the next `fno doctor`.
+( cd "$proj" && FAKE_GROOM_EXIT=1 bash "$HELPER" ) || fail "AC1-FR: helper must never exit nonzero"
+pass "AC1-FR: a failed dispatch neither blocks the session nor reports success"
+
+# --- degradation: no fno on PATH is silent and clean --------------------------
+proj="$(fresh_project no-fno)"
+( cd "$proj" && PATH="/usr/bin:/bin" bash "$HELPER" ) || fail "missing fno must exit 0"
+if compgen -G "$proj/.fno/.groom-heal-*" >/dev/null; then
+    fail "missing fno must not write a watermark"
+fi
+pass "no fno on PATH degrades silently"
+
+
+
+# --- a non-repo cwd must not burn the day on a degraded pass ------------------
+proj="$(fresh_non_repo non-repo)"
+( cd "$proj" && bash "$HELPER" ) || fail "a non-repo cwd must exit 0"
+settle
+[[ "$(dispatch_count)" == "0" ]] || fail "grooming must not run from outside a git repo"
+if compgen -G "$proj/.fno/.groom-heal-*" >/dev/null; then
+    fail "a non-repo cwd must not claim the day"
+fi
+pass "a non-repo cwd is skipped, leaving the day retryable"
+
+# --- the fallback must actually be REGISTERED for claude ----------------------
+# hooks/session-start.sh is the codex/gemini wrapper and is NOT in hooks.json;
+# claude runs its SessionStart scripts individually. A fallback reachable only
+# from the wrapper would ship and never run on the primary platform - which is
+# the exact failure this whole node exists to end.
+HOOKS_JSON="${REPO_ROOT_REAL}/hooks/hooks.json"
+grep -q 'hooks/groom-self-heal-session-start\.sh' "$HOOKS_JSON" \
+    || fail "the fallback is not registered in hooks.json; it would never run under claude"
+python3 -c "import json,sys; json.load(open('$HOOKS_JSON'))" 2>/dev/null \
+    || fail "hooks.json is not valid JSON"
+pass "the fallback is registered in hooks.json and the file still parses"
+log "all groom self-heal tests passed"

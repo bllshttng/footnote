@@ -64,6 +64,17 @@ def _stub_signals(
     monkeypatch.setattr(doctor, "_read_rust_marker", lambda: rust_marker)
     monkeypatch.setattr(doctor, "_rust_source_rev", lambda source: rust_source_rev)
     monkeypatch.setattr(doctor, "_cargo_bin_present", lambda: cargo_bin_present)
+    # Agent health (x-1c7b): default to a quiet, healthy machine. Left unstubbed
+    # these shell out to the real `launchctl` and read the real claims root, so
+    # every verdict test would inherit the developer's own dead agents.
+    monkeypatch.setattr(
+        doctor,
+        "_groom_health",
+        lambda: {"state": "ran", "hours": 3.0, "stale": False, "agent_installed": True},
+    )
+    monkeypatch.setattr(
+        doctor, "_launch_agent_failures", lambda: {"applicable": True, "dead": []}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1586,3 +1597,185 @@ def test_python_content_drift_none_when_source_missing(tmp_path: Path) -> None:
 
 def test_python_content_drift_none_when_source_arg_none() -> None:
     assert doctor._python_content_drift(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Agent health (x-1c7b): four grooming surfaces shipped and never ran, every
+# time because nothing reported the silence.
+# ---------------------------------------------------------------------------
+
+
+def _fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+    )
+
+
+def test_dead_launch_agent_is_named_with_its_exit_and_reddens_doctor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC1-ERR: an installed-but-failing agent must not be a quiet line."""
+    _fresh(monkeypatch)
+    monkeypatch.setattr(
+        doctor,
+        "_launch_agent_failures",
+        lambda: {"applicable": True, "dead": [{"label": "sh.fno.pr-watcher", "exit": 78}]},
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 1, "a dead agent must fail the exit code, not just print"
+    assert "sh.fno.pr-watcher" in result.stdout
+    assert "78" in result.stdout
+
+
+def test_missing_launchctl_degrades_without_crying_wolf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC2-ERR: no launchctl (Linux) must never read as a dead agent."""
+    _fresh(monkeypatch)
+    monkeypatch.setattr(
+        doctor, "_launch_agent_failures", lambda: {"applicable": False, "dead": []}
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "not applicable" in result.stdout
+    assert "last exited" not in result.stdout
+
+
+def test_never_run_grooming_reads_differently_from_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC1-UI: "never" names the install remedy and prints no hour count."""
+    _fresh(monkeypatch)
+    monkeypatch.setattr(
+        doctor,
+        "_groom_health",
+        lambda: {"state": "never", "hours": None, "stale": True, "agent_installed": False},
+    )
+    # The remedy is platform-specific, so pin it: a Linux CI runner gets the
+    # cron advice and would otherwise fail a macOS-shaped assertion.
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")
+    result = runner.invoke(app, ["doctor"])
+    assert "NEVER run" in result.stdout
+    assert "--install-agent" in result.stdout
+    assert "h ago" not in result.stdout
+    assert result.exit_code == 0, "a fresh install has legitimately never groomed"
+
+
+def test_stale_grooming_reports_the_age(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fresh(monkeypatch)
+    monkeypatch.setattr(
+        doctor,
+        "_groom_health",
+        lambda: {"state": "ran", "hours": 96.0, "stale": True, "agent_installed": True},
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert "96h ago" in result.stdout
+    assert "NEVER" not in result.stdout
+
+
+def test_fix_installs_the_groom_agent_when_nothing_schedules_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fresh(monkeypatch)
+    monkeypatch.setattr(
+        doctor,
+        "_groom_health",
+        lambda: {"state": "never", "hours": None, "stale": True, "agent_installed": False},
+    )
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")  # the install is launchd-only
+    calls: list = []
+    monkeypatch.setattr(
+        "fno.backlog.groom.install_groom_agent",
+        lambda **kw: calls.append(kw) or {"status": "installed", "detail": "ok"},
+    )
+    result = runner.invoke(app, ["doctor", "--fix"])
+    assert len(calls) == 1
+    assert "--fix groom agent: installed" in result.stderr
+
+
+def test_fix_skips_the_install_when_the_agent_is_already_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fresh(monkeypatch)
+    monkeypatch.setattr(
+        doctor,
+        "_groom_health",
+        lambda: {"state": "never", "hours": None, "stale": True, "agent_installed": True},
+    )
+
+    # Pinned to darwin so this proves the already-installed guard, not the
+    # platform guard - off launchd it would pass without exercising anything.
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")
+
+    def _boom(**kw):
+        raise AssertionError("must not reinstall an agent that is already installed")
+
+    monkeypatch.setattr("fno.backlog.groom.install_groom_agent", _boom)
+    runner.invoke(app, ["doctor", "--fix"])
+
+
+def test_agent_scan_parses_last_exit_not_current_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `-` in the PID column is normal for a periodic job; only col 2 counts."""
+    import subprocess as sp
+
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/bin/launchctl")
+    listing = (
+        "PID\tStatus\tLabel\n"
+        "-\t0\tsh.fno.groom\n"
+        "-\t78\tsh.fno.pr-watcher\n"
+        "412\t0\tsh.fno.mux\n"
+        "-\t127\tcom.other.thing\n"
+        "-\t-\tsh.fno.idle\n"
+    )
+    monkeypatch.setattr(
+        doctor.subprocess,
+        "run",
+        lambda *a, **kw: sp.CompletedProcess(a[0], 0, listing, ""),
+    )
+    report = doctor._launch_agent_failures()
+    assert report["applicable"] is True
+    assert report["dead"] == [{"label": "sh.fno.pr-watcher", "exit": 78}], (
+        "only nonzero-exit sh.fno.* labels count; foreign labels and `-` do not"
+    )
+
+
+def test_never_run_remedy_is_platform_appropriate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--install-agent is launchd-only; off darwin it would report `unsupported`."""
+    _fresh(monkeypatch)
+    monkeypatch.setattr(
+        doctor,
+        "_groom_health",
+        lambda: {"state": "never", "hours": None, "stale": True, "agent_installed": False},
+    )
+    monkeypatch.setattr(doctor.sys, "platform", "linux")
+    result = runner.invoke(app, ["doctor"])
+    assert "NEVER run" in result.stdout
+    assert "--install-agent" not in result.stdout, "that flag does nothing off launchd"
+    assert "docs/backlog-usage.md" in result.stdout
+
+
+def test_fix_does_not_attempt_a_launchd_install_off_darwin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unguarded call would warn `unsupported` on every --fix, unactionably."""
+    _fresh(monkeypatch)
+    monkeypatch.setattr(
+        doctor,
+        "_groom_health",
+        lambda: {"state": "never", "hours": None, "stale": True, "agent_installed": False},
+    )
+    monkeypatch.setattr(doctor.sys, "platform", "linux")
+
+    def _boom(**kw):
+        raise AssertionError("must not attempt a launchd install off darwin")
+
+    monkeypatch.setattr("fno.backlog.groom.install_groom_agent", _boom)
+    result = runner.invoke(app, ["doctor", "--fix"])
+    assert "groom agent" not in result.stderr

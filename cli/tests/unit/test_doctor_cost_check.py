@@ -176,6 +176,17 @@ def test_default_doctor_run_never_touches_cost_collectors(
     monkeypatch.setattr(doctor, "_read_rust_marker", lambda: None)
     monkeypatch.setattr(doctor, "_rust_source_rev", lambda source: None)
     monkeypatch.setattr(doctor, "_cargo_bin_present", lambda: False)
+    # A default doctor run reaches the agent-health collectors, and a dead
+    # sh.fno.* agent legitimately exits 1 - so leaving these live would make this
+    # assertion depend on the developer's own launchctl.
+    monkeypatch.setattr(
+        doctor, "_launch_agent_failures", lambda: {"applicable": True, "dead": []}
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_groom_health",
+        lambda: {"state": "ran", "hours": 1.0, "stale": False, "agent_installed": True},
+    )
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     assert "cost-check" not in result.stdout

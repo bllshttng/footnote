@@ -28,6 +28,11 @@ baseline:
   note: "pre-step-1 main; the collapse must end below this number"
 
 entries:
+  - date: 2026-07-20
+    pr: 518
+    branch: feature/x-1c7b
+    delta: 42
+    reason: 'grooming alarm + SessionStart self-heal: +42 across hooks/groom-self-heal-session-start.sh (+37, new, registered in hooks.json for claude) and hooks/session-start.sh (+5, the guarded two-line invocation). Four grooming surfaces have now shipped and never run, and the residual gap is precisely that NO trigger exists in the case where the scheduled one never fired - so a trigger is the deliverable and cannot be net-zero. It is already trimmed: comments were cut to the load-bearing why (why the gate is >48h staleness rather than "no marker today", why the watermark create uses noclobber, why the helper is backgrounded whole, why it refuses a non-repo cwd), taking the delta from +44. Each of the four irreducible legs earns its line: a `command -v fno` guard, a `git rev-parse` guard (the LaunchAgent pins a repo root because maintain validity sweep reads git evidence from cwd and marks every symbol unavailable from a non-repo while still reporting ok), a date-named noclobber watermark that arbitrates concurrent worktree sessions, and the `--check` probe that reaches the shared freshness predicate rather than re-implementing the marker scan in shell. It adds NO gate and NO loop authority: the helper reads one predicate through an existing verb, dispatches an existing verb, and every failure path exits 0 dispatching nothing; a healthy LaunchAgent means it never fires at all. The predicate itself (cli/src/fno/backlog/groom.py), the doctor alarm (cli/src/fno/doctor.py), the CLI flag, and all tests live OFF the ratchet manifest. Cumulative control-plane LOC stays ~3900 lines below baseline (debt repaid).'
   - date: 2026-07-18
     pr: 456
     branch: feature/x-3248

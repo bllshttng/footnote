@@ -91,6 +91,7 @@ The report carries, in this order:
 2. **Pile** - what is in the triage pile now, and what you added to it today.
 3. **Anomalies** - starvation receipts, guard exclusions, anything that looks wrong but was not yours to fix.
 4. **Net mint rate** - nodes opened minus nodes closed today, so the trend is visible without asking.
+5. **PR ratio** - PRs opened vs nodes closed over the same window, one line. A ratio well above 1 means work is being split across more PRs than it closes, against the standing preference for batching small work; report the number and leave the judgment to the reader.
 
 A day with no defensible action is a valid day: report "no action", exit 0, mutate nothing.
 Still send the report, and still lead it with the Mechanical line - a quiet night and a night the pass never ran look identical otherwise.

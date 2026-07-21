@@ -712,6 +712,60 @@ def _pr_watch_liveness() -> dict[str, Any]:
         }
 
 
+def _groom_health() -> dict[str, Any]:
+    """Freshness of the daily grooming pass, plus whether its agent is installed.
+
+    Four grooming surfaces have now shipped and never run, every time because
+    nothing reported the silence. This is the report.
+    """
+    try:
+        from fno.backlog.groom import GROOM_LABEL, GROOM_STALE_HOURS, groom_staleness
+
+        state, hours = groom_staleness()
+        plist = Path.home() / "Library" / "LaunchAgents" / f"{GROOM_LABEL}.plist"
+        return {
+            "state": state,
+            "hours": hours,
+            "stale": state == "never" or (state == "ran" and hours > GROOM_STALE_HOURS),
+            "agent_installed": plist.exists(),
+        }
+    except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
+        return {"state": "unknown", "hours": None, "stale": False, "agent_installed": False}
+
+
+def _launch_agent_failures() -> dict[str, Any]:
+    """Every ``sh.fno.*`` LaunchAgent whose LAST EXIT was nonzero.
+
+    Generic over the label prefix rather than groom-specific: two unrelated fno
+    agents were dead and silent when this was written, so one loop is both
+    smaller and wider than a bespoke check per agent. Column 2 is the last exit,
+    not current state - a ``-`` in column 1 is normal for a periodic job.
+    """
+    if sys.platform != "darwin" or not shutil.which("launchctl"):
+        return {"applicable": False, "dead": []}
+    try:
+        proc = subprocess.run(
+            ["launchctl", "list"], capture_output=True, text=True, timeout=10
+        )
+    except Exception:  # noqa: BLE001 - an unrunnable probe must not fabricate an alarm
+        return {"applicable": False, "dead": []}
+    if proc.returncode != 0:
+        return {"applicable": False, "dead": []}
+
+    dead: list[dict[str, Any]] = []
+    for line in (proc.stdout or "").splitlines():
+        cols = line.split("\t")
+        if len(cols) < 3 or not cols[2].startswith("sh.fno."):
+            continue
+        try:
+            status = int(cols[1])
+        except ValueError:
+            continue  # "-" or a header; only a numeric exit proves a failure
+        if status != 0:
+            dead.append({"label": cols[2].strip(), "exit": status})
+    return {"applicable": True, "dead": dead}
+
+
 # ---------------------------------------------------------------------------
 # Verdict
 # ---------------------------------------------------------------------------
@@ -1055,6 +1109,38 @@ def _emit_human(
             f"marketplace source ({', '.join(dupes)}); remove the extras with "
             "`codex plugin marketplace remove <name>`."
         )
+    # Agent health (x-1c7b). Grooming freshness is advisory - a fresh install has
+    # legitimately never groomed - but a nonzero-exit agent reddens the exit code
+    # below, because "installed" has repeatedly not meant "running".
+    gr = result.get("groom") or {}
+    if gr.get("state") == "never":
+        if gr.get("agent_installed"):
+            remedy = " despite an installed agent; check ~/.fno/groom.err.log."
+        elif sys.platform == "darwin":
+            remedy = "; run `fno backlog groom --install-agent` to schedule it daily."
+        else:
+            # --install-agent is launchd-only and would report `unsupported`.
+            remedy = "; schedule `fno backlog groom` daily (see docs/backlog-usage.md)."
+        out("fno doctor: backlog grooming has NEVER run" + remedy)
+    elif gr.get("stale"):
+        out(
+            f"fno doctor: backlog grooming last ran {gr['hours']:.0f}h ago "
+            "(the daily pass is not running); check `launchctl list | grep sh.fno.groom` "
+            "and ~/.fno/groom.err.log."
+        )
+
+    agents = result.get("launch_agents") or {}
+    if not agents.get("applicable"):
+        # No launchctl (Linux) or an unrunnable probe. Say so rather than let a
+        # silent scan read as a clean bill of health.
+        out("fno doctor: LaunchAgent health: not applicable (no launchctl on this host).")
+    for entry in agents.get("dead") or []:
+        out(
+            f"fno doctor: LaunchAgent {entry['label']} last exited {entry['exit']} "
+            "(it is installed but failing); check its log under ~/.fno/ and re-run "
+            "`fno update` if the entry point moved."
+        )
+
     if surf.get("codex_hooks_dual"):
         out(
             "fno doctor: codex hooks load from both config.toml and hooks.json; "
@@ -1541,6 +1627,12 @@ def doctor_command(
     # surfaces `fno update` does not cover. Never changes status/exit.
     result["harness_surface"] = _harness_surface_report()
 
+    # Agent health (x-1c7b): grooming freshness is advisory, but a nonzero-exit
+    # LaunchAgent DOES change the exit code - an installed-but-dead agent is
+    # exactly the silence this check exists to break.
+    result["groom"] = _groom_health()
+    result["launch_agents"] = _launch_agent_failures()
+
     if json_out:
         # Single JSON object on stdout; human text to stderr (LLM-caller contract).
         typer.echo(json.dumps(result))
@@ -1560,6 +1652,28 @@ def doctor_command(
 
             hmsg, _ = heal_watcher(launch_agents_dir=_LAUNCH_AGENTS_DIR)
             typer.echo(f"fno doctor: --fix pr-watch heal: {hmsg}", err=True)
+
+        # Install the groom agent when the pass has never run and nothing is
+        # scheduled to run it. The receipt already reports the BOOTSTRAP result
+        # rather than the plist write, so a plist that lands but fails to load
+        # reads `failed` here too. Advisory, like the pr-watch heal above.
+        # darwin-gated: off launchd this only ever returns `unsupported`, so an
+        # unguarded call is a warning on every --fix that nothing can act on.
+        gr = result.get("groom") or {}
+        if (
+            sys.platform == "darwin"
+            and gr.get("stale")
+            and not gr.get("agent_installed")
+            and not json_out
+        ):
+            from fno.backlog.groom import install_groom_agent
+
+            receipt = install_groom_agent()
+            typer.echo(
+                f"fno doctor: --fix groom agent: {receipt.get('status')}"
+                f" ({receipt.get('detail') or receipt.get('plist')})",
+                err=True,
+            )
 
         if json_out:
             # Preserve the single-JSON-object stdout contract: any repair
@@ -1621,4 +1735,5 @@ def doctor_command(
         else:
             typer.echo("fno doctor: nothing to fix.", err=True)
 
-    raise typer.Exit(1 if result["status"] == "stale" else 0)
+    dead_agents = bool((result.get("launch_agents") or {}).get("dead"))
+    raise typer.Exit(1 if result["status"] == "stale" or dead_agents else 0)
