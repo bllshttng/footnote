@@ -3842,6 +3842,11 @@ def _switchboard_exchange(
 # for ~10s (40 * 250ms) before reporting not-confirmed; give it headroom.
 _MAIL_INJECT_TIMEOUT_S = 20.0
 
+# Wake spawns key on the target session uuid, not on a fresh agent name: spawn
+# dedup scopes NAME, so two senders waking one session must derive the same name
+# to collide on its flock. Prefixed because a bare 8-hex name is refused.
+_WAKE_NAME_PREFIX = "wake-"
+
 
 @dataclass(frozen=True)
 class _MailCtx:
@@ -4042,6 +4047,102 @@ def _mail_inject_claude(recipient: str, text: str) -> bool:
         return bool(json.loads(proc.stdout.strip()).get("delivered"))
     except (ValueError, AttributeError):
         return False
+
+
+def wake_and_deliver(
+    session_uuid: str, wrapped: str, *, cwd: Optional[Path] = None
+) -> tuple[bool, str]:
+    """Revive an asleep claude session with ``wrapped`` as its waking prompt.
+
+    Asleep is a resumable state, not voicemail: the mail IS the prompt that
+    brings the session back, and it returns as an attachable bg thread rather
+    than a one-shot. Returns ``(True, short_id)`` naming the revived thread, or
+    ``(False, reason)`` where the reason is a lane-failure token the sender's
+    receipt prints verbatim.
+
+    Rides the existing revive-in-place spawn substrate rather than shelling
+    ``claude -r`` by hand. ``claude -p`` is never reachable from here -- a
+    one-shot cannot host the multi-turn session the recipient resumes into.
+
+    The name is derived from the uuid so concurrent wakes of one session collide
+    on the same flock: spawn dedup scopes NAME, so a fresh random name per wake
+    would defeat the serialization this depends on. It is prefixed rather than
+    bare hex because a bare 8-hex name is refused as an id/name collision. That
+    flock plus the same-name collision check is what serializes two senders --
+    the second wake finds the first's row live and is refused as
+    ``wake-already-in-flight``.
+
+    The uuid-scoped writer claim below is NOT redundant with the substrate's
+    own fail-safe. That one lives inside ``_is_revival``, which runs only when
+    a same-name row ALREADY exists -- and a wake derives a fresh name, so the
+    FIRST wake of a session would skip it entirely. This rung also fires
+    whenever the inject probe returned False, which happens for reasons
+    unrelated to being asleep (the runtime binary absent, a subprocess error,
+    an unconfirmed poll budget), so the target may well be live.
+
+    The claim is taken rather than a bare liveness probe because a probe is not
+    atomic: a daemon adoption or a differently-named ``--resume`` could acquire
+    ``session:<uuid>`` between the check and the spawn, and we would start a
+    second writer on one transcript anyway.
+    ``acquire_session_writer_claim`` folds the liveness check and the atomic
+    acquire into one step. Same-holder re-acquire is idempotent, so the
+    substrate taking the same claim on the revival path composes cleanly, and
+    release is a no-op when unheld.
+    """
+    if not session_uuid:
+        return False, "no-session-uuid"
+
+    from fno.agents.providers import claude as claude_mod
+
+    holder = f"revive:{os.getpid()}"
+    try:
+        claude_mod.acquire_session_writer_claim(
+            session_uuid=session_uuid,
+            holder=holder,
+            claude_short_id=session_uuid[:8],
+        )
+    except claude_mod.SessionWriterClaimError:
+        return False, "writer-possibly-live"
+    except Exception:
+        # Cannot establish single-writer safety -> do not wake. A missed wake
+        # demotes to durable; a second writer corrupts a transcript.
+        return False, "writer-probe-failed"
+
+    try:
+        result = dispatch_spawn(
+            name=f"{_WAKE_NAME_PREFIX}{session_uuid[:8]}",
+            message=wrapped,
+            provider="claude",
+            cwd=cwd or Path.cwd(),
+            resume_session_id=session_uuid,
+        )
+    except DispatchAskError as exc:
+        # Exit 11 is the writer claim refusing: another writer holds the
+        # transcript, so the session is not actually asleep. Exit 2 is the name
+        # collision, which for a uuid-derived name means a concurrent wake won
+        # the race. Both are honest "do not wake" answers, and the caller
+        # re-probes the now-live session before demoting.
+        if exc.exit_code == 11:
+            return False, "writer-possibly-live"
+        if exc.exit_code == 2:
+            return False, "wake-already-in-flight"
+        return False, f"spawn-exit-{exc.exit_code}"
+    except (OSError, RuntimeError) as exc:
+        return False, f"spawn-error-{type(exc).__name__}"
+    finally:
+        # The spawned supervisor's own liveness is the ongoing single-writer
+        # guard; holding this claim past the spawn would hoard the writer and
+        # block a native attach. Idempotent, so releasing after a failed spawn
+        # is safe too.
+        try:
+            claude_mod.release_session_writer_claim(
+                session_uuid=session_uuid, holder=holder
+            )
+        except Exception:
+            pass
+
+    short = getattr(result, "short_id", None) or getattr(result, "name", "") or "unknown"
+    return True, short
 
 
 def _mail_inject_codex(thread_id: str, text: str) -> bool:

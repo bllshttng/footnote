@@ -1127,6 +1127,426 @@ def resolve_or_suggest(
     return None, difflib.get_close_matches(handle or "", candidates, n=limit, cutoff=0.3)
 
 
+@dataclass(frozen=True)
+class ReachableSession:
+    """A session some durable store knows about, whether or not it is live.
+
+    Distinct from :class:`DiscoveredSession` on purpose: that one answers "what
+    should I list?" and is liveness-gated, while this one answers "is this token
+    reachable at all?" and is deliberately liveness-blind. Conflating the two is
+    the root cause this type exists to prevent -- an asleep session is absent
+    from every listing yet fully resumable.
+    """
+
+    session_id: str
+    source: str  # transcript | registry | roster | graph
+    agent: str = "claude"
+    # Claude resume is cwd-scoped, so a wake launched from the sender's
+    # directory would fail to revive a recipient that lives in another repo.
+    # None means no store recorded one and the caller must fall back.
+    cwd: Optional[str] = None
+
+
+class StoreReadError(Exception):
+    """A reachability store could not be read, so absence cannot be proven.
+
+    The distinction this exists to preserve: "read the store, the token is not
+    there" and "could not read the store" look identical as an empty list, but
+    they must not be treated identically. The first earns exit 16 (nothing is
+    queued, because nothing would ever drain it); the second must NOT, because
+    demoting to the durable queue costs one stranded envelope while a wrong
+    exit 16 costs the message permanently. When we cannot prove unreachable, we
+    fall toward keeping the mail.
+    """
+
+    def __init__(self, failed: list[str], resolved=None) -> None:
+        super().__init__(f"unreadable reachability stores: {', '.join(failed)}")
+        self.failed = failed
+        # The lone candidate, when one was found but uniqueness could not be
+        # proven. Carrying it lets the caller address the durable copy to a real
+        # session rather than to the raw token it was handed.
+        self.resolved = resolved
+
+
+# Each helper returns ``(hits, read_ok)``. ``read_ok=False`` means the store
+# could not be consulted at all -- never that it was consulted and came back
+# empty. Collapsing those two into one empty list is what loses mail.
+# (session_id, agent, cwd, cwd_is_verbatim). The last flag matters: a cwd
+# decoded from a transcript directory name is a lossy GUESS, while a registry
+# or roster row records the path verbatim. A verbatim cwd must be able to
+# correct a decoded one even though the decoding source ranks higher overall.
+_Hits = list[tuple[str, str, Optional[str], bool]]
+
+
+def _decode_project_dir(name: str) -> Optional[str]:
+    """Best-effort cwd for a transcript directory name (``-Users-x-proj``).
+
+    The encoding replaces every non-alphanumeric character with ``-``, so it is
+    lossy and cannot be inverted exactly: ``-repo-foo-bar`` is produced by both
+    ``/repo/foo-bar`` and ``/repo/foo/bar``. Validating with ``is_dir()`` rules
+    out nonsense but CANNOT disambiguate two real paths, so this stays a guess
+    and is flagged non-verbatim by its caller. Any source that records the cwd
+    literally overrides it.
+    """
+    if not name.startswith("-"):
+        return None
+    candidate = "/" + name[1:].replace("-", "/")
+    try:
+        if Path(candidate).is_dir():
+            return candidate
+    except OSError:
+        return None
+    return None
+
+
+def _alias_to_session_ids(
+    token: str, name_map_path: Optional[Path]
+) -> tuple[list[str], bool]:
+    """Session ids whose persisted friendly alias equals ``token``.
+
+    A user who addressed ``<project>-<short8>`` while a session was live should
+    not lose that address the moment it falls out of the live listing. The map
+    is keyed session_id -> alias, so resolving an alias means inverting it.
+
+    Partial by nature: the alias map is pruned of non-live sessions on any scan
+    that sees at least one live session, so a long-asleep session may have no
+    alias left to resolve. That is a miss, not a wrong answer.
+
+    Returns ``(session_ids, read_ok)``. The read is done here rather than via
+    ``_load_name_map`` because that helper folds OSError, ValueError and decode
+    failures into an empty dict -- fine for a display path, but here it would
+    make an existing-but-unreadable map look absent and send a session that is
+    only addressable by its alias to exit 16 with nothing queued.
+    """
+    path = name_map_path or default_name_map_path()
+    if not path.exists():
+        return [], True
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return [], False
+    if not isinstance(stored, dict):
+        return [], False
+    return [
+        sid
+        for sid, alias in stored.items()
+        if isinstance(sid, str) and alias == token
+    ], True
+
+
+def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, bool]:
+    """Session uuids whose transcript file exists on disk, matched on token.
+
+    The transcript store is the broadest source: a session that ever ran wrote a
+    ``<uuid>.jsonl`` here, and the file outlives the process. No recency cutoff
+    is applied -- staleness is precisely what makes a session asleep rather than
+    absent.
+
+    An ABSENT directory is a definitive empty answer, not a read failure: no
+    transcript store means no claude session ever ran under this HOME, so
+    "nothing is reachable" is true rather than unknown. A directory that exists
+    but cannot be read (permissions, EIO, a torn mount) IS a read failure --
+    that is the case where absence is unproven.
+
+    The distinction matters in both directions. Treating absent as unreadable
+    makes every typo queue durably on a host that has never run claude, which
+    strands envelopes and destroys the exit-16 typo guard. Treating a read
+    ERROR as empty loses real mail.
+    """
+    hits: _Hits = []
+    try:
+        entries = list(projects_dir.glob("*/*.jsonl"))
+    except OSError:
+        return [], False
+    seen: set[str] = set()
+    for path in entries:
+        sid = path.name[: -len(".jsonl")]
+        if _token_matches(token, sid) and sid not in seen:
+            seen.add(sid)
+            hits.append((sid, "claude", _decode_project_dir(path.parent.name), False))
+    return hits, True
+
+
+def _token_matches(token: str, session_id: str) -> bool:
+    """A token addresses a session by full uuid or by its 8-hex short form.
+
+    Deliberately NOT a loose prefix match: a 2-char token would otherwise sweep
+    in half the store and turn every send into an ambiguity error.
+
+    Case folding applies to HEX-shaped ids only. Uuids and 8-hex short ids are
+    case-insensitive by definition, so a token pasted from a UI or typed in caps
+    names the same session. An opencode id (``ses_...``) is mixed-case BY
+    CONSTRUCTION, so folding it would let two distinct sessions differing only
+    in case collide -- and a wrong collision here wakes a stranger's session.
+    Matches the normalization rule in ``agents.store_fallback`` deliberately;
+    the two must not drift.
+    """
+    if not token or not session_id:
+        return False
+    tok = _fold_token(token)
+    sid = _fold_token(session_id)
+    return tok == sid or tok == sid[:8]
+
+
+_OPENCODE_ID_RE = re.compile(r"^ses_[A-Za-z0-9]+$")
+
+
+def _fold_token(value: str) -> str:
+    """Lowercase a hex-shaped id; leave a mixed-case opencode id untouched."""
+    v = (value or "").strip()
+    return v if _OPENCODE_ID_RE.match(v) else v.lower()
+
+
+def _reachable_from_registry(
+    token: str, registry_path: Optional[Path]
+) -> tuple[_Hits, bool]:
+    """Registry rows including dead-pid and exited ones.
+
+    An exited row is exactly the case the live lane drops and this lane keeps:
+    the row is a durable record that this uuid exists, not a liveness claim.
+
+    Carries each row's harness through: the registry holds rows for every
+    provider, and waking a codex thread as claude would resume the wrong
+    session entirely.
+    """
+    from fno.agents.registry import RegistryVersionError, load_registry
+
+    try:
+        entries = load_registry(registry_path)
+    except (OSError, ValueError, RegistryVersionError):
+        # A torn or version-drifted registry cannot be consulted. It reports
+        # unreadable rather than empty, so the aggregate can tell "this token
+        # is unknown" from "we could not look".
+        return [], False
+    hits: _Hits = []
+    seen: set[str] = set()
+    for e in entries:
+        # NOT ``AgentEntry.session_id``: that property is harness-polymorphic
+        # and resolves to ``short_id`` for claude -- the 8-hex daemon transport
+        # key, not a resumable uuid. Feeding it to a wake would run
+        # ``claude -r <jobId>`` against a session id that does not exist.
+        # ``harness_session_id`` is the canonical uuid for every harness.
+        sid = getattr(e, "harness_session_id", None)
+        if not isinstance(sid, str):
+            continue
+        if _token_matches(token, sid) and sid not in seen:
+            seen.add(sid)
+            harness = getattr(e, "harness", None)
+            cwd = getattr(e, "cwd", None)
+            hits.append((
+                sid,
+                harness if isinstance(harness, str) and harness else "claude",
+                cwd if isinstance(cwd, str) and cwd else None,
+                True,
+            ))
+    return hits, True
+
+
+def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> tuple[_Hits, bool]:
+    """Daemon roster rows, including ones stamped exited.
+
+    Resolves the daemon dir the same way every other roster reader does. An
+    earlier version fell back to ``Path(os.environ.get(..., ""))``, which is
+    ``Path('.')`` rather than a falsy value -- so with the env var unset (the
+    normal case) it read ``./roster.json`` and this whole source silently
+    never fired.
+    """
+    base = daemon_dir
+    if base is None:
+        override = os.environ.get("FNO_CLAUDE_DAEMON_DIR")
+        base = Path(override) if override else Path.home() / ".claude" / "daemon"
+    if not (base / "roster.json").exists():
+        # No roster file is a real, readable answer: the claude daemon is not
+        # running, so it hosts nothing. Distinct from an unreadable one.
+        return [], True
+    try:
+        raw = json.loads((base / "roster.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return [], False
+    if not isinstance(raw, dict):
+        return [], False
+    workers = raw.get("workers")
+    if workers is None:
+        return [], True
+    if not isinstance(workers, dict):
+        # A type-drifted roster is unreadable, not empty. Calling .values() on
+        # a list here would raise straight out through `fno mail send`.
+        return [], False
+    hits: _Hits = []
+    seen: set[str] = set()
+    for row in workers.values():
+        if not isinstance(row, dict):
+            continue
+        sid = row.get("sessionId")
+        if not isinstance(sid, str):
+            # A type-drifted leaf must not reach _token_matches, which would
+            # call .lower() on it and raise straight out of `fno mail send`.
+            continue
+        if _token_matches(token, sid) and sid not in seen:
+            seen.add(sid)
+            cwd = row.get("cwd")
+            hits.append((sid, "claude", cwd if isinstance(cwd, str) and cwd else None, True))
+    return hits, True
+
+
+def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
+    """Session ids stamped onto backlog nodes (``sessions[]`` provenance).
+
+    The weakest source and the last consulted: a node stamp proves a session
+    once existed for some phase of some node, which is enough to attempt a wake
+    but never enough to claim liveness.
+    """
+    try:
+        from fno.graph.load import GraphCorruptionError, load_graph
+    except ImportError:
+        return [], False
+    try:
+        entries = load_graph()
+    except (OSError, ValueError, GraphCorruptionError):
+        # Corrupt, torn, or hash-mismatched: unreadable, NOT empty. Reporting
+        # empty here would let a graph problem masquerade as "this token names
+        # nothing" and drop the mail.
+        return [], False
+    hits: _Hits = []
+    seen: set[str] = set()
+    malformed = False
+    for node in entries or []:
+        if not isinstance(node, dict):
+            malformed = True
+            continue
+        sessions = node.get("sessions")
+        if sessions is None:
+            continue
+        if not isinstance(sessions, list):
+            # Malformed, NOT absent. Skipping it silently while reporting the
+            # store readable would let a corrupt node hide the only durable
+            # record of the addressed session, turning a demotion into exit 16.
+            malformed = True
+            continue
+        for entry in sessions:
+            if not isinstance(entry, dict):
+                malformed = True
+                continue
+            sid = entry.get("session_id")
+            if not isinstance(sid, str):
+                malformed = True
+                continue
+            if _token_matches(token, sid) and sid not in seen:
+                seen.add(sid)
+                harness = entry.get("harness")
+                cwd = node.get("cwd")
+                hits.append((
+                    sid,
+                    harness if isinstance(harness, str) and harness else "claude",
+                    cwd if isinstance(cwd, str) and cwd else None,
+                    True,
+                ))
+    return hits, not malformed
+
+
+def resolve_reachable(
+    token: str,
+    *,
+    projects_dir: Optional[Path] = None,
+    registry_path: Optional[Path] = None,
+    daemon_dir: Optional[Path] = None,
+    name_map_path: Optional[Path] = None,
+) -> tuple[Optional[ReachableSession], list[str]]:
+    """Resolve ``token`` against the durable stores, ignoring liveness entirely.
+
+    This is the rung below discovery. ``discover_live_sessions`` answers a
+    LISTING question and is liveness-gated by design; when it misses, the token
+    may still name a session that is merely asleep -- and asleep is a resumable
+    state, not voicemail. Consulting the stores here is what turns a wall into a
+    wake.
+
+    Returns ``(session, [])`` on a unique hit, ``(None, [uuids])`` when the token
+    is ambiguous across two stored sessions (never guess -- waking the wrong one
+    means waking a stranger's session), and ``(None, [])`` on a full miss, which
+    is the only case that still earns exit 16.
+
+    EVERY readable store is consulted before uniqueness is declared. Returning
+    on the first source that answers would let an 8-hex token with one
+    transcript hit and a DIFFERENT matching uuid in the registry look unique,
+    and the never-guess rule would be violated by an early return rather than
+    by a bad choice. Richer metadata wins on merge: sources are ordered by
+    confidence, so the first source to contribute a uuid also supplies its
+    agent, and a later source only fills a cwd the earlier one lacked.
+    """
+    if not token or not token.strip():
+        return None, []
+
+    pdir = projects_dir or default_projects_dir()
+    # A friendly <project>-<short8> alias must keep working once its session
+    # falls out of the live listing; resolve it to real uuids and match those
+    # alongside the raw token.
+    alias_sids, alias_ok = _alias_to_session_ids(token, name_map_path)
+
+    sources = (
+        ("transcript", lambda t: _reachable_from_transcripts(t, pdir)),
+        ("registry", lambda t: _reachable_from_registry(t, registry_path)),
+        ("roster", lambda t: _reachable_from_roster(t, daemon_dir)),
+        ("graph", lambda t: _reachable_from_graph(t)),
+    )
+    tokens = [token, *alias_sids]
+
+    degraded: list[str] = [] if alias_ok else ["alias-map"]
+    # Keyed case-insensitively: _token_matches is case-insensitive, so keying on
+    # the stored spelling would make one uuid recorded lowercase in one store and
+    # uppercase in another look like two sessions -- a false ambiguity, and one
+    # the raw-token/alias expansion below would hit routinely.
+    found: dict[str, ReachableSession] = {}
+    cwd_verbatim: dict[str, bool] = {}
+    for source, lookup in sources:
+        for tok in tokens:
+            hits, read_ok = lookup(tok)
+            if not read_ok:
+                if source not in degraded:
+                    degraded.append(source)
+                continue
+            for sid, agent, cwd, verbatim in hits:
+                key = sid.lower()
+                prior = found.get(key)
+                if prior is None:
+                    found[key] = ReachableSession(
+                        session_id=sid, source=source, agent=agent, cwd=cwd
+                    )
+                    cwd_verbatim[key] = verbatim and cwd is not None
+                    continue
+                # Keep the higher-confidence source and agent. Take a cwd only
+                # when it improves on what we have: filling a missing one, or
+                # replacing a lossy decoded guess with a verbatim record.
+                take = (prior.cwd is None and cwd is not None) or (
+                    cwd is not None and verbatim and not cwd_verbatim.get(key, False)
+                )
+                if take:
+                    found[key] = ReachableSession(
+                        session_id=prior.session_id,
+                        source=prior.source,
+                        agent=prior.agent,
+                        cwd=cwd,
+                    )
+                    cwd_verbatim[key] = verbatim
+
+    if len(found) > 1:
+        return None, sorted(f.session_id for f in found.values())
+    if len(found) == 1:
+        if degraded:
+            # Exactly one hit, but a store we could not read might hold a
+            # colliding session. Uniqueness is therefore unproven, and waking on
+            # an unproven-unique short id is the guess this refuses to make.
+            # StoreReadError demotes durably to a real recipient rather than
+            # waking a possible stranger.
+            raise StoreReadError(degraded, resolved=next(iter(found.values())))
+        return next(iter(found.values())), []
+    if degraded:
+        # Every source that COULD be read came back empty, but at least one
+        # could not be read at all -- so absence is unproven. Refusing here
+        # would exit 16 and queue nothing; the caller demotes durably instead.
+        raise StoreReadError(degraded)
+    return None, []
+
+
 def discover_live_sessions(
     *,
     sessions_dir: Optional[Path] = None,

@@ -143,8 +143,8 @@ def test_ac1_fr_vanished_or_dead_pid_not_live(tmp_path, monkeypatch):
     """AC1-FR: a session whose PID is no longer running is dropped, not phantom."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
-    ct = _write_session(sdir, 401, session_id="uuid-dead", job_id="dead0000",
-                        cwd="/Users/x/code/proj")
+    _write_session(sdir, 401, session_id="uuid-dead", job_id="dead0000",
+                   cwd="/Users/x/code/proj")
     # 401 is NOT in the alive map -> dead.
     sessions = _run(sdir, {}, tmp_path)
     assert sessions == []
@@ -1359,3 +1359,459 @@ def test_opencode_broken_db_does_not_resurrect_legacy_sessions(tmp_path):
     storage.mkdir(parents=True, exist_ok=True)
     (storage.parent / "opencode.db").write_text("not a database", encoding="utf-8")
     assert _run_opencode(tmp_path, storage) == []
+
+
+# ---------------------------------------------------------------------------
+# resolve_reachable (x-e864): the liveness-blind rung below discovery.
+# Each source gets its own test because a source that silently never fires is
+# indistinguishable from one that fired and missed -- the exact bug class this
+# node exists to kill. Two of these caught real defects: the roster reader fell
+# back to Path('') (which is Path('.'), not falsy, so it read ./roster.json),
+# and the graph reader imported a module path that does not exist.
+# ---------------------------------------------------------------------------
+
+
+def _stale(path):
+    old = time.time() - 7200
+    os.utime(path, (old, old))
+
+
+def test_resolve_reachable_finds_an_asleep_transcript(tmp_path, monkeypatch):
+    from fno.agents import discover
+
+    sid = "5b17e2f0-1c44-4d9a-8e3b-2f6a7c081d55"
+    proj = tmp_path / "projects" / "-Users-x-proj"
+    proj.mkdir(parents=True)
+    t = proj / f"{sid}.jsonl"
+    t.write_text("{}\n", encoding="utf-8")
+    _stale(t)
+
+    found, ambiguous = discover.resolve_reachable(sid[:8], projects_dir=tmp_path / "projects")
+
+    assert ambiguous == []
+    assert found is not None and found.session_id == sid
+    assert found.source == "transcript"
+
+
+def test_resolve_reachable_reads_the_roster_without_an_env_override(tmp_path, monkeypatch):
+    """The roster source must resolve its own default dir.
+
+    Regression pin: the fallback used to be ``Path(os.environ.get(k, ""))``,
+    and ``Path("")`` is ``Path(".")`` -- truthy -- so with the env var unset the
+    reader looked for ./roster.json and this source never fired in production.
+    """
+    from fno.agents import discover
+
+    sid = "aa11bb22-3344-5566-7788-99aabbccddee"
+    monkeypatch.delenv("FNO_CLAUDE_DAEMON_DIR", raising=False)
+    home = tmp_path / "home"
+    daemon = home / ".claude" / "daemon"
+    daemon.mkdir(parents=True)
+    (daemon / "roster.json").write_text(
+        json.dumps({"proto": 1, "workers": {sid[:8]: {"sessionId": sid, "pid": 1}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    empty_projects = tmp_path / "no-projects"
+    empty_projects.mkdir()
+    found, _ = discover.resolve_reachable(sid[:8], projects_dir=empty_projects)
+
+    assert found is not None, "the roster source did not fire on its default dir"
+    assert found.session_id == sid and found.source == "roster"
+
+
+def test_resolve_reachable_reads_backlog_session_stamps(tmp_path, monkeypatch):
+    """The graph source must actually import and parse.
+
+    Regression pin: it imported ``fno.graph.io`` (no such module) and indexed
+    the result as a dict-with-nodes, while ``load_graph`` lives in
+    ``fno.graph.load`` and returns a flat ``list[dict]``. Both failures were
+    swallowed, so the source returned [] forever.
+    """
+    from fno.agents import discover
+
+    sid = "ccdd1122-3344-5566-7788-99aabbccddee"
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        json.dumps({"entries": [
+            {"id": "x-0001", "sessions": [
+                {"phase": "ship", "harness": "claude", "session_id": sid}
+            ]}
+        ]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("fno.graph.load.GRAPH_JSON", graph)
+
+    empty_projects = tmp_path / "no-projects"
+    empty_projects.mkdir()
+    found, _ = discover.resolve_reachable(sid[:8], projects_dir=empty_projects)
+
+    assert found is not None, "the graph source did not fire"
+    assert found.session_id == sid and found.source == "graph"
+
+
+def test_resolve_reachable_reports_ambiguity_instead_of_guessing(tmp_path, monkeypatch):
+    from fno.agents import discover
+
+    a = "c0ffee11-1111-2222-3333-444444444444"
+    b = "c0ffee11-9999-8888-7777-666666666666"
+    projects = tmp_path / "projects"
+    for sid in (a, b):
+        proj = projects / f"-Users-x-{sid[-4:]}"
+        proj.mkdir(parents=True)
+        t = proj / f"{sid}.jsonl"
+        t.write_text("{}\n", encoding="utf-8")
+        _stale(t)
+
+    found, ambiguous = discover.resolve_reachable("c0ffee11", projects_dir=projects)
+
+    assert found is None
+    assert sorted(ambiguous) == sorted([a, b])
+
+
+def test_resolve_reachable_misses_cleanly_on_an_unknown_token(tmp_path, monkeypatch):
+    """A clean miss across READABLE stores is the only case that earns exit 16."""
+    from fno.agents import discover
+
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+
+    found, ambiguous = discover.resolve_reachable(
+        "deadbeef", projects_dir=projects, registry_path=tmp_path / "registry.json"
+    )
+
+    assert found is None and ambiguous == []
+
+
+def test_resolve_reachable_does_not_match_on_a_short_prefix(tmp_path):
+    """A loose prefix match would sweep half the store into an ambiguity error."""
+    from fno.agents import discover
+
+    sid = "5b17e2f0-1c44-4d9a-8e3b-2f6a7c081d55"
+    proj = tmp_path / "projects" / "-Users-x-proj"
+    proj.mkdir(parents=True)
+    t = proj / f"{sid}.jsonl"
+    t.write_text("{}\n", encoding="utf-8")
+    _stale(t)
+
+    found, _ = discover.resolve_reachable("5b", projects_dir=tmp_path / "projects")
+
+    assert found is None
+
+
+def test_unreadable_store_raises_instead_of_reporting_absence(tmp_path, monkeypatch):
+    """The mail-loss guard: a store that ERRORS must not read as 'not found'.
+
+    The caller turns a clean miss into exit 16 and queues nothing, so absence
+    has to be proven rather than assumed. A torn registry is the realistic
+    trigger: it raises, and reporting that as "no rows" would drop mail for a
+    session the registry actually knows about.
+    """
+    from fno.agents import discover
+    from fno.agents.registry import RegistryVersionError
+
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+
+    def _torn(*_a, **_k):
+        raise RegistryVersionError("schema drift")
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", _torn)
+
+    with pytest.raises(discover.StoreReadError) as err:
+        discover.resolve_reachable("deadbeef", projects_dir=projects)
+    assert "registry" in err.value.failed
+
+
+def test_an_absent_store_is_a_clean_answer_not_a_read_failure(tmp_path, monkeypatch):
+    """An absent transcript store means no claude session ever ran here.
+
+    That is definitive, so it must stay a clean miss. Classifying it as
+    unreadable would make every typo queue durably on a host that has never
+    run claude, stranding envelopes and destroying the exit-16 typo guard.
+    """
+    from fno.agents import discover
+
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+
+    found, ambiguous = discover.resolve_reachable(
+        "deadbeef",
+        projects_dir=tmp_path / "never-created",
+        registry_path=tmp_path / "registry.json",
+    )
+
+    assert found is None and ambiguous == []
+
+
+def test_one_hit_plus_a_degraded_store_is_unproven_not_unique(tmp_path, monkeypatch):
+    """A lone hit is not proof of uniqueness while a store is unreadable.
+
+    The unreadable store could hold a session colliding on the same short id,
+    so waking the one hit would be exactly the guess the never-guess rule
+    forbids. The candidate rides along on the error so the caller can still
+    address a durable copy to a real session instead of demoting blind.
+    """
+    from fno.agents import discover
+
+    sid = "aa11bb22-3344-5566-7788-99aabbccddee"
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    (daemon / "roster.json").write_text(
+        json.dumps({"proto": 1, "workers": {sid[:8]: {"sessionId": sid, "pid": 1}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+
+    def _torn(*_a, **_k):
+        raise OSError("registry unreadable")
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", _torn)
+    projects = tmp_path / "projects"
+    projects.mkdir()
+
+    with pytest.raises(discover.StoreReadError) as err:
+        discover.resolve_reachable(sid[:8], projects_dir=projects)
+    assert "registry" in err.value.failed
+    assert err.value.resolved is not None
+    assert err.value.resolved.session_id == sid
+
+
+def test_registry_source_yields_the_resumable_uuid_not_the_job_id(tmp_path, monkeypatch):
+    """`AgentEntry.session_id` is harness-polymorphic: for claude it resolves to
+    `short_id`, the 8-hex daemon transport key, NOT a resumable uuid. Waking on
+    that value would run `claude -r <jobId>` against a session that does not
+    exist, so this source must read `harness_session_id` directly.
+    """
+    from fno.agents import discover
+
+    sid = "bb22cc33-4455-6677-8899-aabbccddeeff"
+
+    class _Row:
+        harness = "claude"
+        harness_session_id = sid
+        short_id = "deadbeef"
+
+        @property
+        def session_id(self):  # what the buggy version read
+            return self.short_id
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda *_a, **_k: [_Row()]
+    )
+    projects = tmp_path / "projects"
+    projects.mkdir()
+
+    found, _ = discover.resolve_reachable(sid[:8], projects_dir=projects)
+
+    assert found is not None
+    assert found.session_id == sid, "resolved the job id instead of the uuid"
+    assert found.agent == "claude"
+
+
+def test_registry_source_carries_a_non_claude_harness_through(tmp_path, monkeypatch):
+    """The harness must survive resolution so the wake lane can refuse it.
+
+    The registry holds rows for every provider; handing a codex thread id to a
+    claude resume would revive the wrong session entirely.
+    """
+    from fno.agents import discover
+
+    sid = "cc33dd44-5566-7788-99aa-bbccddeeff00"
+
+    class _Row:
+        harness = "codex"
+        harness_session_id = sid
+        short_id = "cc33dd44"
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda *_a, **_k: [_Row()]
+    )
+    projects = tmp_path / "projects"
+    projects.mkdir()
+
+    found, _ = discover.resolve_reachable(sid[:8], projects_dir=projects)
+
+    assert found is not None and found.agent == "codex"
+
+
+# ---------------------------------------------------------------------------
+# Review-round fixes (PR 501): every store consulted before uniqueness, alias
+# survival, cwd propagation, case-insensitive tokens, malformed-store guards.
+# ---------------------------------------------------------------------------
+
+
+def test_short_id_colliding_across_two_stores_is_ambiguous_not_unique(
+    tmp_path, monkeypatch
+):
+    """Returning on the first source that answers is itself a guess.
+
+    A transcript hit plus a DIFFERENT uuid in the registry sharing the same
+    short id would look unique under an early return, and the never-guess rule
+    would be violated by the control flow rather than by a bad choice.
+    """
+    from fno.agents import discover
+
+    a = "c0ffee11-1111-2222-3333-444444444444"
+    b = "c0ffee11-9999-8888-7777-666666666666"
+
+    projects = tmp_path / "projects"
+    proj = projects / "-Users-x-proj"
+    proj.mkdir(parents=True)
+    t = proj / f"{a}.jsonl"
+    t.write_text("{}\n", encoding="utf-8")
+    _stale(t)
+
+    class _Row:
+        harness = "claude"
+        harness_session_id = b
+        short_id = "c0ffee11"
+        cwd = "/Users/x/other"
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda *_a, **_k: [_Row()])
+
+    found, ambiguous = discover.resolve_reachable("c0ffee11", projects_dir=projects)
+
+    assert found is None, "a cross-store short-id collision resolved as unique"
+    assert sorted(ambiguous) == sorted([a, b])
+
+
+def test_friendly_alias_still_resolves_once_the_session_is_asleep(
+    tmp_path, monkeypatch
+):
+    """An address that worked while live must not vanish when the session sleeps."""
+    from fno.agents import discover
+
+    sid = "5b17e2f0-1c44-4d9a-8e3b-2f6a7c081d55"
+    projects = tmp_path / "projects"
+    proj = projects / "-Users-x-proj"
+    proj.mkdir(parents=True)
+    t = proj / f"{sid}.jsonl"
+    t.write_text("{}\n", encoding="utf-8")
+    _stale(t)
+
+    name_map = tmp_path / "session-names.json"
+    name_map.write_text(json.dumps({sid: "fno-5b17e2f0"}), encoding="utf-8")
+
+    found, _ = discover.resolve_reachable(
+        "fno-5b17e2f0", projects_dir=projects, name_map_path=name_map
+    )
+
+    assert found is not None, "a friendly alias stopped resolving once asleep"
+    assert found.session_id == sid
+
+
+def test_token_matching_is_case_insensitive(tmp_path):
+    """Uuids and hex short ids are case-insensitive by definition."""
+    from fno.agents import discover
+
+    sid = "5b17e2f0-1c44-4d9a-8e3b-2f6a7c081d55"
+    projects = tmp_path / "projects"
+    proj = projects / "-Users-x-proj"
+    proj.mkdir(parents=True)
+    t = proj / f"{sid}.jsonl"
+    t.write_text("{}\n", encoding="utf-8")
+    _stale(t)
+
+    found, _ = discover.resolve_reachable("5B17E2F0", projects_dir=projects)
+
+    assert found is not None and found.session_id == sid
+
+
+def test_roster_cwd_is_carried_so_a_wake_resumes_in_the_right_repo(
+    tmp_path, monkeypatch
+):
+    """Claude resume is cwd-scoped: waking a cross-repo recipient from the
+    sender's directory would fail to revive the resolved session."""
+    from fno.agents import discover
+
+    sid = "aa11bb22-3344-5566-7788-99aabbccddee"
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    (daemon / "roster.json").write_text(
+        json.dumps({"proto": 1, "workers": {
+            sid[:8]: {"sessionId": sid, "pid": 1, "cwd": "/Users/x/other-repo"}
+        }}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+    projects = tmp_path / "projects"
+    projects.mkdir()
+
+    found, _ = discover.resolve_reachable(sid[:8], projects_dir=projects)
+
+    assert found is not None and found.cwd == "/Users/x/other-repo"
+
+
+def test_type_drifted_roster_is_unreadable_not_empty(tmp_path, monkeypatch):
+    """`workers` as a list would raise AttributeError straight out of the send."""
+    from fno.agents import discover
+
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    (daemon / "roster.json").write_text(
+        json.dumps({"proto": 1, "workers": ["not", "a", "dict"]}), encoding="utf-8"
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+    projects = tmp_path / "projects"
+    projects.mkdir()
+
+    with pytest.raises(discover.StoreReadError) as err:
+        discover.resolve_reachable(
+            "deadbeef", projects_dir=projects, registry_path=tmp_path / "reg.json"
+        )
+    assert "roster" in err.value.failed
+
+
+def test_malformed_graph_is_reported_unreadable_not_empty(tmp_path, monkeypatch):
+    """`sessions` as a non-list must not raise, and must not read as absent.
+
+    Skipping the bad node while still reporting the store readable would let a
+    corrupt entry hide the only durable record of the addressed session,
+    turning a durable demotion into exit 16 with nothing queued.
+    """
+    from fno.agents import discover
+
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        json.dumps({"entries": [{"id": "x-0001", "sessions": 42}]}), encoding="utf-8"
+    )
+    monkeypatch.setattr("fno.graph.load.GRAPH_JSON", graph)
+    daemon = tmp_path / "daemon"
+    daemon.mkdir()
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+    projects = tmp_path / "projects"
+    projects.mkdir()
+
+    with pytest.raises(discover.StoreReadError) as err:
+        discover.resolve_reachable(
+            "deadbeef", projects_dir=projects, registry_path=tmp_path / "reg.json"
+        )
+    assert "graph" in err.value.failed
+
+
+def test_opencode_ids_keep_their_case_while_hex_folds(tmp_path):
+    """Case folding is for hex ids only.
+
+    An opencode id (`ses_...`) is mixed-case by construction, so folding it
+    would let two sessions differing only in case collide -- and a wrong
+    collision here wakes a stranger's session. Mirrors the normalization rule
+    in `agents.store_fallback`; the two must not drift.
+    """
+    from fno.agents.discover import _token_matches
+
+    # Hex folds: same session, different spelling.
+    assert _token_matches("5B17E2F0", "5b17e2f0-1c44-4d9a-8e3b-2f6a7c081d55")
+    assert _token_matches("5b17e2f0", "5B17E2F0-1C44-4D9A-8E3B-2F6A7C081D55")
+
+    # opencode does NOT fold: case is meaningful, so these are distinct.
+    assert _token_matches("ses_AbC123", "ses_AbC123")
+    assert not _token_matches("ses_abc123", "ses_AbC123")
