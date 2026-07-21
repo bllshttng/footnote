@@ -70,20 +70,40 @@ path = "hatch_build.py"
 "../NOTICE" = "_license_vendor/NOTICE"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-cov>=5", "mypy>=1.0", "types-PyYAML>=6", "ruff>=0.4"]
+dev = ["pytest>=8", "pytest-cov>=5", "mypy==2.1.0", "types-PyYAML>=6", "ruff>=0.4"]
 
 [tool.ruff]
 line-length = 100
 
+# Explicit permissive base. Without one, `strict = true` in the override below
+# hoists to a global default and leaks strict mode to all ~370 modules (x-18ac).
+[tool.mypy]
+python_version = "3.11"
+
+# The path-config modules are held to mypy --strict. strict is expanded to its
+# component flags rather than `strict = true`, because the meta-flag leaks
+# globally from a per-module override (x-18ac). Keep this list == the strict set.
 [[tool.mypy.overrides]]
 module = [
     "fno.paths",
     "fno.config",
     "fno.config.*",
+    "fno.config_io",
     "fno.setup.migrate_paths",
     "fno.setup.emit_shell",
 ]
-strict = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+warn_unused_ignores = true
+warn_return_any = true
+implicit_reexport = false
+strict_equality = true
+extra_checks = true
 
 [tool.pytest.ini_options]
 markers = [
