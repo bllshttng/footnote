@@ -176,8 +176,7 @@ fn in_progress_epics(entries: &[serde_json::Value]) -> HashSet<&str> {
         let Some(parent) = e.get("parent").and_then(|v| v.as_str()) else {
             continue;
         };
-        let done = has_stamp(e, "completed_at")
-            || node_status(e) == Some("claimed");
+        let done = has_stamp(e, "completed_at") || node_status(e) == Some("claimed");
         if done {
             underway.insert(parent);
         }
