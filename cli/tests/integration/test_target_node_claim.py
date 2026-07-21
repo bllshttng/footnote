@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,16 @@ def _sandbox(tmp_path: Path):
     mock.write_text(MOCK_ABI)
     mock.chmod(0o755)
     log = tmp_path / "fno.log"
+
+    # Pin the init script's `python3` to the interpreter running these tests.
+    # The graph locked_by stamp shells out to scripts/roadmap-tasks.py, which
+    # needs fno's dependencies importable; an ambient python3 (homebrew's, say)
+    # has no typer, so the stamp degrades to its non-fatal warning and the
+    # stamped-node assertion fails for a reason unrelated to the shell wiring
+    # under test. Which python3 sits first on PATH must not decide that.
+    py = bindir / "python3"
+    py.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n')
+    py.chmod(0o755)
 
     env = os.environ.copy()
     env.update({
