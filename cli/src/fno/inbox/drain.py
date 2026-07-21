@@ -97,7 +97,7 @@ def drain_thread(repo_root: Path, project: str, h: ThreadHandle) -> DrainResult:
     thread file) is dropped exactly once. A message with no id is un-dedupable
     and processed normally.
     """
-    from fno.inbox.drain_dedup import already_seen, envelope_id, mark_seen
+    from fno.inbox.drain_dedup import already_seen, dedup_key, mark_seen
 
     # read_unread_threads returns a lightweight handle (messages unpopulated), so
     # read the rendered thread file for the <fno_mail id="..."> envelope.
@@ -105,8 +105,8 @@ def drain_thread(repo_root: Path, project: str, h: ThreadHandle) -> DrainResult:
         body = h.path.read_text(encoding="utf-8")
     except OSError:
         body = ""
-    eid = envelope_id(body)
-    if eid and already_seen(project, eid):
+    key = dedup_key(body)
+    if key and already_seen(project, key):
         try:
             mark_thread_read(h.path)  # consume the duplicate file
         except (OSError, ValueError, TimeoutError):
@@ -119,8 +119,8 @@ def drain_thread(repo_root: Path, project: str, h: ThreadHandle) -> DrainResult:
         )
 
     result = _dispatch_thread(repo_root, project, h)
-    if eid and result.action in _CONSUMED_ACTIONS:
-        mark_seen(project, eid)
+    if key and result.action in _CONSUMED_ACTIONS:
+        mark_seen(project, key)
     return result
 
 

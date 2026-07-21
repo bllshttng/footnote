@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from fno.inbox.drain_dedup import already_seen, envelope_id, mark_seen
+from fno.inbox.drain_dedup import already_seen, dedup_key, mark_seen
 
 
 @pytest.fixture
@@ -20,18 +20,29 @@ def repo_root(tmp_path, monkeypatch):
     return tmp_path
 
 
-# ---- envelope_id (pure) ----------------------------------------------------
+# ---- dedup_key (pure) ------------------------------------------------------
 
-def test_envelope_id_extracted_from_tag():
+def test_dedup_key_present_for_id_bearing_envelope():
     body = '<fno_mail from="bob1234" harness="claude-code" model="opus" id="msg-abc">\nhi\n</fno_mail>'
-    assert envelope_id(body) == "msg-abc"
+    assert dedup_key(body) is not None
 
 
-def test_envelope_id_none_when_no_id_attr():
+def test_dedup_key_none_when_no_id_attr():
     # A pre-redesign producer: the tag is present but carries no id -> un-dedupable.
     body = '<fno_mail from="bob1234" harness="claude-code" model="opus">\nhi\n</fno_mail>'
-    assert envelope_id(body) is None
-    assert envelope_id("plain body, no envelope") is None
+    assert dedup_key(body) is None
+    assert dedup_key("plain body, no envelope") is None
+
+
+def test_dedup_key_stable_for_identical_envelope_but_differs_by_content():
+    # A byte-identical duplicate keys the same (true duplicate); an envelope with
+    # the SAME id but different from/body keys differently, so a 24-bit id
+    # collision between two distinct messages never causes a false drop.
+    a1 = '<fno_mail from="aaaa1111" model="opus" id="msg-x">\nhello\n</fno_mail>'
+    a2 = '<fno_mail from="aaaa1111" model="opus" id="msg-x">\nhello\n</fno_mail>'
+    b = '<fno_mail from="bbbb2222" model="opus" id="msg-x">\ngoodbye\n</fno_mail>'
+    assert dedup_key(a1) == dedup_key(a2)
+    assert dedup_key(a1) != dedup_key(b)
 
 
 # ---- seen-set roundtrip + bound --------------------------------------------
