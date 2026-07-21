@@ -4018,13 +4018,39 @@ enum ProbeGate {
     },
 }
 
-/// Strip one layer of matching surrounding quotes.
+/// Unwrap a YAML scalar to the string a YAML parser would produce.
+///
+/// Decoding escapes is not cosmetic: the recommended block form routinely
+/// carries an inner quote (`- "test -n \"$(cmd)\""`). Leaving the backslashes in
+/// would hand `sh -c` literal `\"` characters - a DIFFERENT command than the
+/// plan declared, whose result the gate would then trust - and would also key
+/// the event by a string the PyYAML-side grader never matches.
 fn unquote_scalar(s: &str) -> String {
     let s = s.trim();
-    for q in ['"', '\''] {
-        if s.len() >= 2 && s.starts_with(q) && s.ends_with(q) {
-            return s[1..s.len() - 1].to_string();
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        let inner = &s[1..s.len() - 1];
+        let mut out = String::with_capacity(inner.len());
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('0') => out.push('\0'),
+                // `\"`, `\\`, `\/` and anything else: keep the escaped char.
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
         }
+        return out;
+    }
+    if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
+        // YAML single-quoted scalars escape only the quote, by doubling it.
+        return s[1..s.len() - 1].replace("''", "'");
     }
     s.to_string()
 }
@@ -4145,18 +4171,34 @@ fn parse_done_probes(content: &str) -> ProbeDecl {
     }
 }
 
-/// Truncate to at most `cap` BYTES without splitting a UTF-8 character.
-/// `String::truncate` panics off a char boundary, and probe stderr routinely
-/// carries multibyte output (arrows, box-drawing, accented words).
-fn truncate_on_char_boundary(s: &mut String, cap: usize) {
+/// Keep at most the LAST `cap` bytes, without splitting a UTF-8 character.
+///
+/// The tail, not the head: a failing command's real error is almost always its
+/// last line, so keeping the prefix would routinely drop the one diagnostic the
+/// block reason exists to surface. Char-boundary aware because `String::drain`
+/// and `truncate` panic mid-character, and probe stderr regularly carries
+/// arrows, box-drawing, and accented words.
+fn keep_last_on_char_boundary(s: &mut String, cap: usize) {
     if s.len() <= cap {
         return;
     }
-    let cut = (0..=cap)
-        .rev()
+    let start = s.len() - cap;
+    let cut = (start..=s.len())
         .find(|i| s.is_char_boundary(*i))
-        .unwrap_or(0);
-    s.truncate(cut);
+        .unwrap_or(s.len());
+    s.drain(..cut);
+}
+
+/// SIGKILL a process group, ignoring "already gone".
+fn killpg(pgid: i32) {
+    if pgid <= 0 {
+        return;
+    }
+    // SAFETY: pgid is our own spawned group leader's pid; ESRCH is expected
+    // once every member has exited and is deliberately ignored.
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
 }
 
 /// Run one probe under a native timeout.
@@ -4164,10 +4206,16 @@ fn truncate_on_char_boundary(s: &mut String, cap: usize) {
 /// Two things here are load-bearing rather than defensive. stderr is drained by
 /// a reader thread because reading a piped stderr only after exit deadlocks any
 /// probe that writes past the pipe buffer. And the child leads its own process
-/// group, because a probe is typically a PIPELINE (`... | grep -q x`): `sh`
-/// forks, so killing `sh` alone leaves grandchildren holding the stderr write
-/// end open, the drain thread never sees EOF, and the join hangs forever - past
-/// the very timeout meant to bound it. Killing the group closes the pipe.
+/// group, which is killed on EVERY exit path - not just the timeout.
+///
+/// The group kill has to cover normal exit too, because `sh` is not the only
+/// process holding the stderr write end. A pipeline (`... | grep -q x`) forks,
+/// and a probe that backgrounds anything (`sleep 3600 &`, or any command that
+/// daemonizes) lets `sh` exit IMMEDIATELY while the descendant keeps the pipe
+/// open. `try_wait` then reports success and leaves the timeout loop, so the
+/// timer is never consulted again and the drain join blocks for the
+/// descendant's whole lifetime - wedging the stop hook well past the 60s the
+/// gate promises. Killing the group closes the pipe and bounds the join.
 fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcome {
     use std::os::unix::process::CommandExt;
 
@@ -4190,6 +4238,9 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
             }
         }
     };
+
+    // Capture the pgid before any wait() can reap the leader.
+    let pgid = child.id() as i32;
 
     let mut pipe = child.stderr.take();
     let drain = std::thread::spawn(move || {
@@ -4230,15 +4281,20 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
         }
     };
 
+    // Reap any descendant still holding the stderr write end, so the drain sees
+    // EOF. Without this a backgrounding probe blocks the join indefinitely even
+    // though the shell itself exited cleanly.
+    killpg(pgid);
+
     // On timeout the stderr tail is worthless (the reason names the timeout) and
-    // joining risks the very hang we just escaped if any grandchild survived the
-    // group kill. Drop the handle instead: the thread ends when the pipe closes.
+    // joining risks the very hang we just escaped if anything outlived the group
+    // kill. Drop the handle instead: the thread ends when the pipe closes.
     if matches!(outcome, ProbeOutcome::Timeout) {
         return outcome;
     }
 
     let mut stderr = drain.join().unwrap_or_default();
-    truncate_on_char_boundary(&mut stderr, PROBE_STDERR_CAP);
+    keep_last_on_char_boundary(&mut stderr, PROBE_STDERR_CAP);
     match outcome {
         ProbeOutcome::Fail { code, stderr: s } if s.is_empty() => {
             ProbeOutcome::Fail { code, stderr }
@@ -4251,12 +4307,7 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
 /// grandchildren hold the stderr pipe open; killing only the direct child would
 /// leave the drain thread blocked on a pipe that never reaches EOF.
 fn kill_process_group(child: &mut std::process::Child) {
-    let pid = child.id() as i32;
-    // SAFETY: killpg on our own just-spawned group leader. A failure (the group
-    // already exited) is ignored; the child.kill() below is the fallback.
-    unsafe {
-        libc::killpg(pid, libc::SIGKILL);
-    }
+    killpg(child.id() as i32);
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -4304,7 +4355,11 @@ fn evaluate_done_probes(
     // cwd: plan_path is repo-relative in practice, and reading nothing here
     // would degrade to Absent - a silent gate bypass.
     let plan = plan_path.and_then(|p| {
-        let p = Path::new(p);
+        // A plan_path may carry a `#wave-1`-style fragment; the Python plan
+        // readers strip it, and reading the literal name would fail, which on
+        // the first fire (no probe history) degrades to Absent - a silent
+        // bypass of a gate the plan actually declared.
+        let p = Path::new(p.split('#').next().unwrap_or(p));
         let abs = if p.is_absolute() {
             p.to_path_buf()
         } else {
@@ -7556,11 +7611,72 @@ mod done_probe_tests {
 
     #[test]
     fn multibyte_stderr_is_truncated_without_panicking() {
-        // String::truncate panics off a char boundary; probe stderr routinely
+        // String::drain panics off a char boundary; probe stderr routinely
         // carries arrows and box-drawing characters.
-        let mut s = "→".repeat(400); // 3 bytes each, straddles byte 500
-        truncate_on_char_boundary(&mut s, PROBE_STDERR_CAP);
+        let mut s = "→".repeat(400); // 3 bytes each, straddles the cut
+        keep_last_on_char_boundary(&mut s, PROBE_STDERR_CAP);
         assert!(s.len() <= PROBE_STDERR_CAP);
         assert!(s.chars().all(|c| c == '→'), "must not split a character");
+    }
+
+    #[test]
+    fn stderr_cap_keeps_the_tail_where_the_error_is() {
+        let mut s = format!("{}\nthe actual error", "noise ".repeat(200));
+        keep_last_on_char_boundary(&mut s, PROBE_STDERR_CAP);
+        assert!(
+            s.ends_with("the actual error"),
+            "the last line is the diagnostic; keeping the prefix drops it: {s}"
+        );
+    }
+
+    #[test]
+    fn block_scalar_escapes_decode_to_the_command_the_plan_meant() {
+        // Leaving `\"` in would hand sh a DIFFERENT command than declared, and
+        // would key the event by a string the PyYAML-side grader never matches.
+        let doc = fm("done_probes:\n  - \"test -n \\\"$(echo hi)\\\"\"");
+        assert_eq!(probes_of(&doc), vec![r#"test -n "$(echo hi)""#.to_string()]);
+    }
+
+    #[test]
+    fn single_quoted_scalar_undoubles_its_quote() {
+        let doc = fm("done_probes:\n  - 'echo it''s fine'");
+        assert_eq!(probes_of(&doc), vec!["echo it's fine".to_string()]);
+    }
+
+    #[test]
+    fn plan_path_fragment_is_stripped_before_reading() {
+        // `plans/p.md#wave-1` must resolve to plans/p.md, not a literal filename
+        // containing the fragment (which would read nothing -> silent Absent).
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("plan.md"), fm("done_probes:\n  - exit 0")).unwrap();
+        let events = tmp.path().join("events.jsonl");
+        assert!(
+            matches!(
+                evaluate_done_probes(
+                    Some("plan.md#wave-1"),
+                    tmp.path(),
+                    &events,
+                    "s1",
+                    Duration::from_secs(10)
+                ),
+                ProbeGate::Pass(_)
+            ),
+            "a fragment in plan_path must not silently disable the gate"
+        );
+    }
+
+    #[test]
+    fn a_backgrounding_probe_does_not_block_the_drain() {
+        // sh exits immediately while the descendant keeps stderr open, so the
+        // timeout loop is already over and only the group kill bounds the join.
+        let tmp = tempfile::tempdir().unwrap();
+        let start = std::time::Instant::now();
+        let outcome = run_probe("sleep 300 & exit 0", tmp.path(), Duration::from_secs(30));
+        assert_eq!(outcome.render(), "pass");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "a backgrounded descendant must not hold the drain open (took {:?})",
+            start.elapsed()
+        );
     }
 }
