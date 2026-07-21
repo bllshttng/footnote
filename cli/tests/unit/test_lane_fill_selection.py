@@ -324,3 +324,22 @@ def test_node_without_plan_path_dispatches(tmp_path, monkeypatch):
     monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
 
     assert [n["id"] for n in advance.select_lane_fill(1, claims_root=tmp_path)] == ["n-a"]
+
+
+def test_unevaluated_surface_is_logged_not_silently_clean(tmp_path, monkeypatch, caplog):
+    """A plan_path pointing at a missing file parses to an empty surface, which
+    is the same empty result as a genuine non-overlap. It must be logged."""
+    ready = [
+        {"id": "n-a", "domain": "code", "title": "a",
+         "plan_path": _plan(tmp_path, "a", ["cli/src/fno/graph/cli.py"])},
+        {"id": "n-b", "domain": "docs", "title": "b",
+         "plan_path": str(tmp_path / "vanished.md")},
+    ]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    with caplog.at_level("WARNING"):
+        sel = advance.select_lane_fill(2, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-a", "n-b"]  # unevaluated never blocks
+    assert "UNEVALUATED" in caplog.text
+    assert "n-b" in caplog.text

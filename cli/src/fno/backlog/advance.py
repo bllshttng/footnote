@@ -362,12 +362,22 @@ def _live_lane_entries(claims_root: Optional[Path] = None) -> list[dict]:
             held.add(holder[len(LANE_HOLDER_PREFIX):])
     if not held:
         return []
-    return [
+    entries = [
         {"id": e["id"], "title": e.get("title", ""), "plan_path": e.get("plan_path"),
          "created_at": e.get("created_at", ""), "status": "ready"}
         for e in read_graph(graph_json())
         if e.get("id") in held and e.get("plan_path")
     ]
+    # read_graph degrades a corrupt graph to [] and list_claims drops a corrupt
+    # lockfile, either of which shrinks the comparison set to nothing while the
+    # gate still reports "no collision". One line makes that visible.
+    if len(entries) < len(held):
+        _LOG.warning(
+            "collision gate: %d of %d live lanes have no comparable plan; "
+            "those nodes cannot be collided against",
+            len(held) - len(entries), len(held),
+        )
+    return entries
 
 
 def _high_collision(node: dict, inflight: list[dict]):
@@ -381,11 +391,18 @@ def _high_collision(node: dict, inflight: list[dict]):
     if not plan or not inflight:
         return None
     try:
-        from fno.graph.collision import find_collisions, resolve_plan_path
+        from fno.graph.collision import find_collisions, has_file_surface, resolve_plan_path
 
-        for c in find_collisions(
-            resolve_plan_path(plan), inflight, self_id=node.get("id")
-        ):
+        resolved = resolve_plan_path(plan)
+        # An empty surface (missing plan file, or one with no file table) yields
+        # the same empty result as a genuine non-overlap. Say which one happened.
+        if not has_file_surface(resolved):
+            _LOG.warning(
+                "collision gate UNEVALUATED for %s: %s states no file surface",
+                node.get("id"), resolved,
+            )
+            return None
+        for c in find_collisions(resolved, inflight, self_id=node.get("id")):
             if c.severity == "high":
                 return c
     except Exception as exc:  # noqa: BLE001 - fail open, never wedge dispatch

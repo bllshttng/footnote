@@ -798,33 +798,33 @@ def mutate(
         return 3, f"Atomic write failed: {exc}"
 
     _sync_graph_status(new_fm.get("node"), resolved)
-    _warn_no_file_surface(resolved, proposed_doc)
+    _warn_no_file_surface(resolved)
 
     return 0, proposed_doc
 
 
-# A File Ownership Map with only a header and separator states no files.
-_EMPTY_OWNERSHIP_MAP_ROWS = 2
-
-
-def _warn_no_file_surface(plan_path: Path, doc: str) -> None:
+def _warn_no_file_surface(plan_path: Path) -> None:
     """Warn when the written plan states no file surface.
 
     Collision detection compares plans by the files they touch, so a plan with
     no file table is invisible to it - and an empty surface is indistinguishable
     from a genuinely non-overlapping one. Deliberately does NOT auto-populate the
     map: the point is to force the surface to be stated at planning time.
+
+    Asks the collision parser itself rather than counting table rows: a second
+    heuristic would diverge from the thing it warns about, staying quiet on a
+    table whose cells parse to nothing and firing on a heading it does not know.
+    Without the CLI importable there is no oracle, so it says nothing.
     """
-    for heading in ("## Files to Modify", "## File Ownership Map"):
-        if heading not in doc:
-            continue
-        body = doc.split(heading, 1)[1].split("\n## ", 1)[0]
-        rows = [ln for ln in body.splitlines() if ln.strip().startswith("|")]
-        if len(rows) > _EMPTY_OWNERSHIP_MAP_ROWS:
-            return
+    try:
+        from fno.graph.collision import has_file_surface
+    except ImportError:
+        return
+    if has_file_surface(plan_path):
+        return
     print(
-        f"WARNING: {plan_path.name} states no file surface (no populated "
-        "'## Files to Modify' or '## File Ownership Map' table). Collision "
+        f"WARNING: {plan_path.name} states no file surface (no parseable "
+        "'## File Ownership Map' or '## Files to Modify' table). Collision "
         "detection cannot compare this plan against in-flight work; fill the "
         "table in before dispatch.",
         file=sys.stderr,
