@@ -31,13 +31,18 @@ declare -a LEAKS
 # Entry count of the developer's REAL graph, read-only. A smoke test that
 # forgets to redirect HOME writes here, and the suite stays green: the pytest
 # tree solved this class once (conftest.py's module-load HOME redirect); the
-# shell tree had no counterpart. Any read failure prints nothing, which
-# disables the check rather than reddening the suite on unrelated breakage.
+# shell tree had no counterpart. A missing graph counts as 0 so the first leak
+# onto a fresh machine still trips; any other read failure prints nothing,
+# disabling the check rather than reddening the suite on unrelated breakage.
 graph_entry_count() {
   python3 -c "
 import json, os, sys
+path = os.path.expanduser('~/.fno/graph.json')
+if not os.path.exists(path):
+    print(0)
+    sys.exit(0)
 try:
-    with open(os.path.expanduser('~/.fno/graph.json')) as fh:
+    with open(path) as fh:
         print(len(json.load(fh)['entries']))
 except Exception:
     sys.exit(0)
