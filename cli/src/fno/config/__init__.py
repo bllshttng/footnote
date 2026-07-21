@@ -362,6 +362,13 @@ class PostMergeBlock(BaseModel):
     sync_command: Optional[str] = None
     sync_paths: list[str] = Field(default_factory=list)
     auto_run: bool = False
+    # Catch-up sweep: both triggers for the sync are event-time-only, so
+    # a merge the watcher never saw was never synced. The sweep bounds its gh
+    # lookback to this window (a fresh clone must not re-sweep all history) and
+    # the doctor alarm fires only after the newest merge has sat markerless this
+    # long (a merge from two minutes ago is not yet an outage).
+    catchup_window_days: int = 3
+    sync_stale_hours: int = 24
     # Model tier for post-merge ritual workers. Sonnet (not haiku): the Step-6
     # diff-judgment needs real reasoning. A tier default, not an opt-in, so it
     # carries a non-None string rather than the block's feature-toggle None.

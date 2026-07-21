@@ -6667,6 +6667,31 @@ def cmd_reconcile(
         except Exception as exc:  # noqa: BLE001 - never abort the sweep
             typer.echo(f"warning: revert detection skipped: {exc}", err=True)
 
+    # Canonical-sync catch-up. reconcile auto-fires on SessionStart, so
+    # this is the leg that breaks the circularity: when the pr-watch daemon is
+    # dead AGAIN, the next interactive session catches the canonical up instead
+    # of the outage waiting for a human to notice. Same self-heal posture as
+    # hooks/groom-self-heal-session-start.sh. Skipped under --dry-run (a preview
+    # must mutate nothing) and strictly non-fatal to the sweep.
+    sync_catchup: dict = {"outcome": "not-run"}
+    if not dry_run:
+        try:
+            from fno.pr._sync_canonical import run_sync_catchup
+
+            _cu = run_sync_catchup()
+            sync_catchup = {
+                "outcome": _cu.outcome,
+                "pr_number": _cu.pr_number,
+                "swept": _cu.swept,
+                "detail": _cu.detail,
+            }
+            if _cu.outcome not in ("disabled", "fresh") and not json_out:
+                typer.echo(f"sync catch-up: {_cu.outcome}", err=True)
+        except Exception as _cu_exc:  # noqa: BLE001 - never abort the sweep
+            sync_catchup = {"outcome": "error", "detail": str(_cu_exc)[:200]}
+            if not json_out:
+                typer.echo(f"warning: sync catch-up skipped: {_cu_exc}", err=True)
+
     if json_out:
         payload = {
             "dry_run": dry_run,
@@ -6685,6 +6710,11 @@ def cmd_reconcile(
             "healed_epics": healed_epics,
             # Nodes whose ship a merged revert PR names (stamped unless --dry-run).
             "reverted": reverted_stamped,
+            # Canonical-sync catch-up outcome. In the JSON payload rather than
+            # only on stderr because the SessionStart hook invokes reconcile with
+            # --json and discards stderr - a leg whose result is unobservable is
+            # the exact failure mode this feature exists to end.
+            "sync_catchup": sync_catchup,
             "failures": [
                 {"node_id": r.node_id, "pr_number": r.pr_number, "error": r.error}
                 for r in failures
