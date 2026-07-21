@@ -260,7 +260,7 @@ def test_record_dispatch_silent_on_unwritable_dir(
         # Block opens to the sidecar path regardless of how the path was given
         if str(file) == str(sidecar_path):
             raise PermissionError("permission denied (monkeypatched)")
-        return original_open(file, *args, **kwargs)
+        return original_open(file, *args, **kwargs)  # type: ignore[call-overload]
 
     # Patch builtins.open globally; record_dispatch calls open() which resolves
     # through builtins, not Path.open. Monkeypatched back to original after test.
@@ -890,7 +890,7 @@ class TestCaptureStdout:
             file_str = str(file)
             if f"{agent_name}.out" in file_str or f"{agent_name}.err" in file_str:
                 raise PermissionError("permission denied (monkeypatched)")
-            return original_open(file, *args, **kwargs)
+            return original_open(file, *args, **kwargs)  # type: ignore[call-overload]  # type: ignore[call-overload]
 
         monkeypatch.setattr(builtins, "open", mock_open)
 
@@ -1050,7 +1050,7 @@ def test_subprocess_communicate_timeout_emits_complete_with_124(
         # Second call (after kill) returns empty.
         return (b"", b"")
 
-    fake_popen.communicate = patched_communicate
+    fake_popen.communicate = patched_communicate  # type: ignore[method-assign]
 
     def fake_spawn(cmd, *, settings_path=None, env=None, **kwargs):
         return fake_popen

@@ -122,6 +122,7 @@ class TestUpdateProviderHealth:
             # where old_level = expected_level - 1.
             old_level = expected_level - 1
             expected_cooldown_s = (BASE_BACKOFF_MS * (2 ** old_level)) / 1000.0
+            assert health.rate_limited_until is not None
             elapsed = health.rate_limited_until - before
             # Tolerate up to 200ms of test wall time.
             assert expected_cooldown_s - 0.2 <= elapsed <= expected_cooldown_s + 0.2, (
@@ -148,6 +149,7 @@ class TestUpdateProviderHealth:
 
         # And the cooldown stays at MAX_BACKOFF_MS (5min) - BASE * 2**15
         # is well over the cap.
+        assert health.rate_limited_until is not None
         elapsed_ms = (health.rate_limited_until - before) * 1000
         assert MAX_BACKOFF_MS - 200 < elapsed_ms <= MAX_BACKOFF_MS + 200
 
