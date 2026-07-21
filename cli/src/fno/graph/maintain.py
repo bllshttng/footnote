@@ -263,6 +263,65 @@ def detect_temp_leaks(entries: list[dict]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Leg 2b: pr_url backfill (url-less pr_number rows)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PrUrlFix:
+    """One url-less ``pr_number`` row. ``pr_url`` is None when unresolvable."""
+
+    node_id: str
+    pr_number: int
+    cwd: Optional[str]
+    pr_url: Optional[str]
+
+
+def _slug_from_node_cwd(cwd: Optional[str]) -> Optional[str]:
+    """Repo slug for a node's recorded cwd, or None when it is gone.
+
+    Deliberately does NOT degrade to the invocation cwd the way a writer does:
+    a bulk pass that did would stamp every stale-cwd row with the sweeping
+    repo's slug, which is the mis-attribution this leg exists to remove.
+    """
+    from fno.graph._reconcile import resolve_current_repo_slug
+
+    if not cwd:
+        return None
+    path = os.path.expanduser(cwd)
+    return resolve_current_repo_slug(path) if os.path.isdir(path) else None
+
+
+def detect_url_less_prs(
+    entries: list[dict],
+    resolver: Optional[Callable[[Optional[str]], Optional[str]]] = None,
+) -> list[PrUrlFix]:
+    """Rows carrying a ``pr_number`` with no ``pr_url``, with a derived url.
+
+    Keys off the node's durable ``cwd`` - never ``source_cwd`` (a session cwd,
+    not repo identity). A row whose cwd is gone or whose repo will not resolve
+    comes back with ``pr_url=None`` so the caller reports it instead of
+    guessing.
+    """
+    from fno.graph._reconcile import pr_url_from_slug
+
+    resolver = resolver or _slug_from_node_cwd
+    # One resolution per distinct cwd: the gh leg carries a 30s timeout and a
+    # whole repo's worth of rows share one checkout.
+    slugs: dict[Optional[str], Optional[str]] = {}
+    fixes: list[PrUrlFix] = []
+    for e in entries:
+        nid, pr = e.get("id"), e.get("pr_number")
+        if not isinstance(nid, str) or not isinstance(pr, int) or e.get("pr_url"):
+            continue
+        cwd = e.get("cwd") if isinstance(e.get("cwd"), str) else None
+        if cwd not in slugs:
+            slugs[cwd] = resolver(cwd)
+        slug = slugs[cwd]
+        fixes.append(PrUrlFix(nid, pr, cwd, pr_url_from_slug(slug, pr) if slug else None))
+    return fixes
+
+
+# ---------------------------------------------------------------------------
 # Leg 3: dedup (propose-only)
 # ---------------------------------------------------------------------------
 

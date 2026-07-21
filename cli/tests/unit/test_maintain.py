@@ -141,6 +141,52 @@ def test_detect_temp_leaks():
     assert m.detect_temp_leaks(entries) == ["ab-leak"]
 
 
+# --- leg 2b: pr_url backfill ------------------------------------------------
+
+
+def _slugs(mapping: dict):
+    return lambda cwd: mapping.get(cwd)
+
+
+def test_url_less_rows_get_a_derived_url():
+    entries = [
+        _n("ab-1", cwd="/repo/a", pr_number=7),
+        _n("ab-2", cwd="/repo/a", pr_number=8, pr_url="https://github.com/o/a/pull/8"),
+        _n("ab-3", cwd="/repo/a"),
+    ]
+    fixes = m.detect_url_less_prs(entries, resolver=_slugs({"/repo/a": "o/a"}))
+    assert [(f.node_id, f.pr_url) for f in fixes] == [
+        ("ab-1", "https://github.com/o/a/pull/7")
+    ]
+
+
+def test_unresolvable_cwd_is_reported_not_guessed():
+    """A wrong slug attributes a foreign PR - the defect this leg removes."""
+    entries = [
+        _n("ab-1", cwd="/gone", pr_number=7),
+        _n("ab-2", cwd=None, pr_number=9),
+    ]
+    fixes = m.detect_url_less_prs(entries, resolver=_slugs({"/repo/a": "o/a"}))
+    assert [(f.node_id, f.pr_url) for f in fixes] == [("ab-1", None), ("ab-2", None)]
+
+
+def test_slug_resolved_once_per_distinct_cwd():
+    calls: list = []
+
+    def counting(cwd):
+        calls.append(cwd)
+        return "o/a"
+
+    entries = [_n(f"ab-{i}", cwd="/repo/a", pr_number=i) for i in range(1, 5)]
+    fixes = m.detect_url_less_prs(entries, resolver=counting)
+    assert len(fixes) == 4
+    assert calls == ["/repo/a"]
+
+
+def test_empty_graph_is_a_clean_no_op():
+    assert m.detect_url_less_prs([], resolver=_slugs({})) == []
+
+
 # --- leg 3: dedup ----------------------------------------------------------
 
 

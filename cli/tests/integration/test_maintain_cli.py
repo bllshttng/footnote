@@ -560,3 +560,97 @@ def test_validity_skipped_with_no_validity_flag(tmp_graph, validity_env):
     assert r.exit_code == 0, r.output
     assert "validity:" not in r.output
     assert not (validity_env / "validity-decks").exists()
+
+
+# --- leg 2b: pr_url backfill ------------------------------------------------
+
+
+@pytest.fixture
+def stub_slugs(monkeypatch):
+    """Map a node cwd to a repo slug without shelling out to git/gh."""
+    import fno.graph.maintain as gm
+
+    mapping: dict[str, str] = {}
+    monkeypatch.setattr(gm, "_slug_from_node_cwd", lambda cwd: mapping.get(cwd))
+    return mapping
+
+
+def test_pr_url_backfill_applies(tmp_graph, stub_slugs):
+    stub_slugs["/repo/a"] = "o/a"
+    _seed(tmp_graph, [_node("ab-url0001", cwd="/repo/a", pr_number=7)])
+
+    result = _invoke(["--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert _read(tmp_graph)[0]["pr_url"] == "https://github.com/o/a/pull/7"
+    assert "pr-url written 1" in result.output
+
+
+def test_pr_url_backfill_dry_run_proposes_without_writing(tmp_graph, stub_slugs):
+    stub_slugs["/repo/a"] = "o/a"
+    _seed(tmp_graph, [_node("ab-url0001", cwd="/repo/a", pr_number=7)])
+
+    result = _invoke([])
+
+    assert result.exit_code == 0, result.output
+    assert _read(tmp_graph)[0].get("pr_url") is None
+    assert "pr-url proposed 1" in result.output
+
+
+def test_pr_url_backfill_reports_unresolvable(tmp_graph, stub_slugs):
+    _seed(tmp_graph, [_node("ab-url0002", cwd="/gone", pr_number=7)])
+
+    result = _invoke(["--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert _read(tmp_graph)[0].get("pr_url") is None
+    assert "pr-url unresolvable 1" in result.output
+    assert "ab-url0002" in result.output
+
+
+def test_pr_url_backfill_counts_print_when_zero(tmp_graph, stub_slugs):
+    """A silent category reads as "nothing to do" when it may be "nothing resolved"."""
+    result = _invoke(["--apply"])
+
+    assert "pr-url written 0" in result.output
+    assert "pr-url unresolvable 0" in result.output
+
+
+def test_pr_url_backfill_is_idempotent(tmp_graph, stub_slugs):
+    stub_slugs["/repo/a"] = "o/a"
+    _seed(tmp_graph, [_node("ab-url0001", cwd="/repo/a", pr_number=7)])
+
+    _invoke(["--apply"])
+    second = _invoke(["--apply"])
+
+    assert "pr-url written 0" in second.output
+    assert _read(tmp_graph)[0]["pr_url"] == "https://github.com/o/a/pull/7"
+
+
+def test_pr_url_backfill_never_overwrites_a_present_url(tmp_graph, stub_slugs):
+    stub_slugs["/repo/a"] = "o/a"
+    _seed(tmp_graph, [_node(
+        "ab-url0003", cwd="/repo/a", pr_number=7,
+        pr_url="https://github.com/other/repo/pull/7",
+    )])
+
+    _invoke(["--apply"])
+
+    assert _read(tmp_graph)[0]["pr_url"] == "https://github.com/other/repo/pull/7"
+
+
+def test_pr_url_backfill_keys_off_each_nodes_own_cwd(tmp_graph, stub_slugs):
+    """No node may end with a url derived from a different node's cwd."""
+    stub_slugs.update({"/repo/a": "o/a", "/repo/b": "o/b"})
+    _seed(tmp_graph, [
+        _node("ab-url0001", cwd="/repo/a", pr_number=7),
+        _node("ab-url0002", cwd="/repo/b", pr_number=7),
+    ])
+
+    _invoke(["--apply"])
+
+    urls = {n["id"]: n["pr_url"] for n in _read(tmp_graph)}
+    assert urls == {
+        "ab-url0001": "https://github.com/o/a/pull/7",
+        "ab-url0002": "https://github.com/o/b/pull/7",
+    }

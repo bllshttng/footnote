@@ -6425,6 +6425,9 @@ def cmd_maintain(
     workspaces = _maintain.load_workspaces()
     rescope_fixes = _maintain.detect_rescope_fixes(entries, workspaces)
     prune_ids = _maintain.detect_temp_leaks(entries)
+    pr_url_fixes = _maintain.detect_url_less_prs(entries)
+    pr_url_writable = [f for f in pr_url_fixes if f.pr_url]
+    pr_url_unresolvable = [f for f in pr_url_fixes if not f.pr_url]
     dup_groups = _maintain.detect_dup_groups(entries)
     # Propose-only in v1 even under --apply: a bulk reparent has no human
     # reading a receipt the way intake's one-at-a-time auto-link does.
@@ -6487,9 +6490,12 @@ def cmd_maintain(
     applied_prune: list[str] = []
     applied_defers: list[dict] = []
     applied_stale_ready: list[dict] = []
+    applied_pr_urls: list[dict] = []
     skipped_claimed: list[str] = []
 
-    if apply and (rescope_fixes or prune_ids or defer_cands or stale_ready_cands):
+    if apply and (
+        rescope_fixes or prune_ids or defer_cands or stale_ready_cands or pr_url_writable
+    ):
         # Batch every change under ONE locked mutation so the board renders once,
         # not per node (Domain Pitfall). Each item is guarded so one failure
         # never strands the rest (AC1-ERR).
@@ -6498,6 +6504,7 @@ def cmd_maintain(
             applied_prune.clear()
             applied_defers.clear()
             applied_stale_ready.clear()
+            applied_pr_urls.clear()
             skipped_claimed.clear()
             prune_set: set[str] = set()
             for fix in rescope_fixes:
@@ -6529,6 +6536,26 @@ def cmd_maintain(
                     if blocked:
                         e["blocked_by"] = [b for b in blocked if b not in prune_set]
                 ents = [e for e in ents if e.get("id") not in prune_set]
+            # Leg 2b: backfill a derived pr_url onto url-less pr_number rows.
+            # Re-check inside the lock so a url written since the pre-lock scan
+            # is never overwritten (a present url always outranks a derived one).
+            for fix in pr_url_writable:
+                if fix.node_id in claimed:
+                    skipped_claimed.append(fix.node_id)
+                    continue
+                try:
+                    n = _find_node(ents, fix.node_id)
+                    if not n or n.get("pr_url") or n.get("pr_number") != fix.pr_number:
+                        continue
+                    n["pr_url"] = fix.pr_url
+                    applied_pr_urls.append(
+                        {"node_id": fix.node_id, "pr_url": fix.pr_url}
+                    )
+                except Exception as exc:  # noqa: BLE001 - one bad row must not abort
+                    typer.echo(
+                        f"warning: pr_url backfill of {fix.node_id} failed: {exc}",
+                        err=True,
+                    )
             # Leg 7: auto-defer failure-prone nodes (#34). Mirrors cmd_defer's
             # field-set. Re-check live state INSIDE the lock (Concurrency): a
             # node done or deferred between the read and now must not be touched.
@@ -6667,6 +6694,8 @@ def cmd_maintain(
         "applied": apply,
         "rescoped": len(applied_rescope) if apply else len(rescope_fixes),
         "pruned": len(applied_prune) if apply else len(prune_ids),
+        "pr_url_backfilled": len(applied_pr_urls) if apply else len(pr_url_writable),
+        "pr_url_unresolvable": len(pr_url_unresolvable),
         "dedup_groups": len(dup_groups),
         "rollup_candidates": len(rollup_cands),
         "stale_ideas": len(stale),
@@ -6710,6 +6739,17 @@ def cmd_maintain(
                 "applied": applied_prune if apply else [],
                 "candidates": prune_ids,
             },
+            "pr_url_backfill": {
+                "applied": applied_pr_urls if apply else [],
+                "candidates": [
+                    {"node_id": f.node_id, "pr_number": f.pr_number, "pr_url": f.pr_url}
+                    for f in pr_url_writable
+                ],
+                "unresolvable": [
+                    {"node_id": f.node_id, "pr_number": f.pr_number, "cwd": f.cwd}
+                    for f in pr_url_unresolvable
+                ],
+            },
             "dedup_groups": dup_groups,
             "rollup_candidates": [
                 {"node_id": n, "epic_id": e, "score": sc} for n, e, sc in rollup_cands
@@ -6748,6 +6788,23 @@ def cmd_maintain(
         return
 
     # --- human per-leg summary (a no-op run is visibly distinct, AC1-UI) ---
+    # AC1-UI: every category prints its count, zero included - a silent
+    # category reads as "nothing to do" when it may be "nothing resolved".
+    if apply:
+        typer.echo(
+            f"pr-url written {len(applied_pr_urls)} | "
+            f"pr-url unresolvable {len(pr_url_unresolvable)}"
+        )
+    else:
+        typer.echo(
+            f"pr-url proposed {len(pr_url_writable)} | "
+            f"pr-url unresolvable {len(pr_url_unresolvable)}"
+        )
+    for f in pr_url_unresolvable:
+        typer.echo(
+            f"  unresolvable pr_url {f.node_id} (PR #{f.pr_number}, cwd={f.cwd or 'unset'})"
+        )
+
     if apply:
         typer.echo(
             f"re-scoped {len(applied_rescope)} | pruned {len(applied_prune)} | "

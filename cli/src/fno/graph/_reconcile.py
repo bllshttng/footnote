@@ -96,6 +96,11 @@ def resolve_current_repo_slug(
     return (out.strip() or None) if rc == 0 else None
 
 
+def pr_url_from_slug(slug: str, pr: int) -> str:
+    """The one place a PR url is built, so ``repo_slug_from_url`` round-trips it."""
+    return f"https://github.com/{slug}/pull/{pr}"
+
+
 def pr_url_for_repo(
     pr: int,
     cwd: Optional[str] = None,
@@ -107,15 +112,15 @@ def pr_url_for_repo(
     A writer must resolve the url at least as capably as the reader resolves
     the slug, so this shares ``resolve_current_repo_slug``'s origin-then-gh
     chain: a url-less ``pr_number`` names no repo, and PR numbers collide
-    across repos. A recorded ``cwd`` that no longer exists falls back to the
-    invocation cwd rather than failing the whole resolution.
+    across repos. A recorded ``cwd`` that no longer exists degrades to the
+    invocation cwd - a writer is standing in the repo it is stamping.
     """
     if cwd:
         cwd = os.path.expanduser(cwd)
         if not os.path.isdir(cwd):
             cwd = None
     slug = resolve_current_repo_slug(cwd or None, runner=runner)
-    return f"https://github.com/{slug}/pull/{pr}" if slug else None
+    return pr_url_from_slug(slug, pr) if slug else None
 
 # GitHub PR states we resolve from gh, plus the "UNKNOWN" sentinel used on a
 # drift record whose query failed. Kept here as the single home for the
