@@ -1655,6 +1655,9 @@ def test_never_run_grooming_reads_differently_from_stale(
         "_groom_health",
         lambda: {"state": "never", "hours": None, "stale": True, "agent_installed": False},
     )
+    # The remedy is platform-specific, so pin it: a Linux CI runner gets the
+    # cron advice and would otherwise fail a macOS-shaped assertion.
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")
     result = runner.invoke(app, ["doctor"])
     assert "NEVER run" in result.stdout
     assert "--install-agent" in result.stdout
@@ -1683,6 +1686,7 @@ def test_fix_installs_the_groom_agent_when_nothing_schedules_it(
         "_groom_health",
         lambda: {"state": "never", "hours": None, "stale": True, "agent_installed": False},
     )
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")  # the install is launchd-only
     calls: list = []
     monkeypatch.setattr(
         "fno.backlog.groom.install_groom_agent",
@@ -1702,6 +1706,10 @@ def test_fix_skips_the_install_when_the_agent_is_already_there(
         "_groom_health",
         lambda: {"state": "never", "hours": None, "stale": True, "agent_installed": True},
     )
+
+    # Pinned to darwin so this proves the already-installed guard, not the
+    # platform guard - off launchd it would pass without exercising anything.
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")
 
     def _boom(**kw):
         raise AssertionError("must not reinstall an agent that is already installed")
