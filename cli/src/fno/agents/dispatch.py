@@ -1355,20 +1355,30 @@ def _claude_create_path(
 
     from fno.agents.providers import claude as claude_mod
 
-    # x-9844 Lane 2: guard the detached revival's critical section with the
-    # session single-writer claim so a concurrent revival of the same uuid (the
-    # residual window the per-agent flock's name-scoped serialization leaves
-    # open, plus the cross-name case) can't spawn a second supervisor onto one
-    # transcript. Released right after the registry write below - the new
-    # supervisor's own liveness is the ongoing guard, and holding it longer would
-    # hoard the writer (the documented regression where footnote blocks native
-    # attach).
-    revive_claim_holder: Optional[str] = None
-    if revive and resume_session_id:
-        revive_claim_holder = f"revive:{os.getpid()}"
+    # x-9844 Lane 2 / x-7fef: every resume takes the session single-writer claim
+    # here, so a concurrent resume of the same uuid (the residual window the
+    # per-agent flock's name-scoped serialization leaves open, plus the
+    # cross-name case) can't spawn a second supervisor onto one transcript.
+    #
+    # x-7fef: the claim is PINNED to the spawned supervisor's pid below and then
+    # deliberately outlives this process. Releasing after the spawn (the old
+    # lifetime) left the transcript guarded only by `session_is_live(uuid[:8])`,
+    # which a revived supervisor defeats by registering under a NEW short id. A
+    # supervisor-pinned claim needs no such lookup: a dead supervisor makes it
+    # dead-pid and the next acquire reclaims it via stale recovery, while a live
+    # one truthfully refuses a second writer. That also answers the old
+    # "holding past spawn hoards the writer and blocks native attach" objection.
+    writer_claim_holder: Optional[str] = None
+    if resume_session_id:
+        writer_claim_holder = f"revive:{os.getpid()}"
         try:
             claude_mod.acquire_session_writer_claim(
-                session_uuid=resume_session_id, holder=revive_claim_holder
+                session_uuid=resume_session_id,
+                holder=writer_claim_holder,
+                # Guard 1: refuse a transcript whose original bg supervisor is
+                # still reachable. Carried in from wake_and_deliver's acquire so
+                # moving the claim inward does not drop the probe.
+                claude_short_id=resume_session_id[:8],
             )
         except claude_mod.SessionWriterClaimError as exc:
             raise DispatchAskError(
@@ -1376,6 +1386,18 @@ def _claude_create_path(
                 f"to open a second writer on one transcript ({exc})",
                 exit_code=11,
             ) from exc
+
+    def _release_writer_claim() -> None:
+        """Free the claim. Only correct when NO child was spawned - once a
+        supervisor exists it IS the writer, and the claim must say so."""
+        if writer_claim_holder is None or not resume_session_id:
+            return
+        try:
+            claude_mod.release_session_writer_claim(
+                session_uuid=resume_session_id, holder=writer_claim_holder
+            )
+        except Exception:
+            pass
 
     try:
         result: ProviderResult = claude_mod.bg_create(
@@ -1396,6 +1418,7 @@ def _claude_create_path(
             account_env=account_env,
         )
     except claude_mod.ProviderSubprocessError as exc:
+        _release_writer_claim()
         events.emit(
             "agent_ask_failed",
             stage="subprocess",
@@ -1405,6 +1428,7 @@ def _claude_create_path(
         )
         raise DispatchAskError(exc.stderr, exit_code=1) from exc
     except claude_mod.ProviderParseError as exc:
+        _release_writer_claim()
         events.emit(
             "agent_ask_failed",
             stage="parse",
@@ -1416,9 +1440,33 @@ def _claude_create_path(
             f"unable to parse short-id from claude --bg output: {exc.stdout_head}",
             exit_code=1,
         ) from exc
+    except BaseException:
+        # Anything else out of bg_create means no child; do not strand the claim.
+        _release_writer_claim()
+        raise
 
     short_id = result.session_id_out
     assert short_id is not None  # parse_short_id raises otherwise
+
+    # x-7fef: re-pin the claim off this transient process and onto the spawned
+    # supervisor. A same-holder re-acquire rewrites the claim file with the given
+    # pid (claims/core.py resolution step 1), so no new primitive is needed.
+    pinned_to_supervisor = False
+    if writer_claim_holder is not None and resume_session_id:
+        try:
+            locator = claude_mod.locate_session(short_id)
+        except Exception:
+            locator = None
+        if locator is not None:
+            try:
+                claude_mod.acquire_session_writer_claim(
+                    session_uuid=resume_session_id,
+                    holder=writer_claim_holder,
+                    pid=locator.pid,
+                )
+                pinned_to_supervisor = True
+            except Exception:
+                pinned_to_supervisor = False
 
     # Best-effort full session-UUID capture (ab-f1b0ccd1, AC1-HP): persist the
     # stream-json `--resume` target alongside the 8-hex short-id so the worker
@@ -1478,20 +1526,35 @@ def _claude_create_path(
         # mid-cycle: the subprocess already created the
         # supervisor, so the orphan signal stays valid.
         lock_handle.detach()
+        # x-7fef: do NOT release the writer claim here. The orphaned supervisor
+        # is the transcript's writer even though no registry row names it, so a
+        # supervisor-pinned claim is the only thing that stops a later wake from
+        # opening a second one. Name it so an operator can read the refusal.
+        held_note = (
+            f" session writer claim session:{resume_session_id} is held for the "
+            f"orphan (pid-pinned); later wakes of this session will refuse until "
+            f"that supervisor exits."
+            if pinned_to_supervisor
+            else ""
+        )
         raise DispatchAskError(
             f"registry write failed: {exc}. "
             f"orphaned supervisor session: claude rm {short_id} "
-            f"(registry not updated)",
+            f"(registry not updated).{held_note}",
             exit_code=12,
         ) from exc
 
-    # Revival succeeded and the row is live: release the critical-section claim
-    # so the new supervisor's own liveness (not a lingering lockfile) is the
-    # ongoing single-writer guard. Idempotent, so a never-recorded claim is a
-    # no-op.
-    if revive_claim_holder is not None and resume_session_id:
-        claude_mod.release_session_writer_claim(
-            session_uuid=resume_session_id, holder=revive_claim_holder
+    # x-7fef degrade: the supervisor pid was never resolved (sidecar race), so
+    # the claim is still pinned to this exiting process and would go dead-pid on
+    # exit anyway. Fall back to the pre-x-7fef lifetime - release and warn -
+    # rather than leave a claim whose pid lies about who is writing.
+    if writer_claim_holder is not None and resume_session_id and not pinned_to_supervisor:
+        _release_writer_claim()
+        print(
+            f"warning: could not resolve supervisor pid for {short_id}; released "
+            f"session:{resume_session_id} writer claim (transcript guarded only by "
+            f"supervisor liveness)",
+            file=sys.stderr,
         )
 
     # Spawn event (Task 2.2, x-30f6): exactly one per successful create.
@@ -4193,41 +4256,27 @@ def wake_and_deliver(
     the second wake finds the first's row live and is refused as
     ``wake-already-in-flight``.
 
-    The uuid-scoped writer claim below is NOT redundant with the substrate's
-    own fail-safe. That one lives inside ``_is_revival``, which runs only when
-    a same-name row ALREADY exists -- and a wake derives a fresh name, so the
-    FIRST wake of a session would skip it entirely. This rung also fires
-    whenever the inject probe returned False, which happens for reasons
-    unrelated to being asleep (the runtime binary absent, a subprocess error,
-    an unconfirmed poll budget), so the target may well be live.
+    The uuid-scoped single-writer claim lives in ``_claude_create_path`` (x-7fef),
+    not here: it is taken for every resume, pinned to the SPAWNED supervisor's
+    pid, and outlives this process. Holding it here instead would pin liveness to
+    the short-lived ``fno mail send`` process, so the claim would guard only the
+    probe->spawn window and go reclaimable the moment this command exits.
 
-    The claim is taken rather than a bare liveness probe because a probe is not
+    That claim is NOT redundant with the substrate's own fail-safe. That one
+    lives inside ``_is_revival``, which runs only when a same-name row ALREADY
+    exists -- and a wake derives a fresh name, so the FIRST wake of a session
+    would skip it entirely. This rung also fires whenever the inject probe
+    returned False, which happens for reasons unrelated to being asleep (the
+    runtime binary absent, a subprocess error, an unconfirmed poll budget), so
+    the target may well be live.
+
+    A claim is taken rather than a bare liveness probe because a probe is not
     atomic: a daemon adoption or a differently-named ``--resume`` could acquire
     ``session:<uuid>`` between the check and the spawn, and we would start a
     second writer on one transcript anyway.
-    ``acquire_session_writer_claim`` folds the liveness check and the atomic
-    acquire into one step. Same-holder re-acquire is idempotent, so the
-    substrate taking the same claim on the revival path composes cleanly, and
-    release is a no-op when unheld.
     """
     if not session_uuid:
         return False, "no-session-uuid"
-
-    from fno.agents.providers import claude as claude_mod
-
-    holder = f"revive:{os.getpid()}"
-    try:
-        claude_mod.acquire_session_writer_claim(
-            session_uuid=session_uuid,
-            holder=holder,
-            claude_short_id=session_uuid[:8],
-        )
-    except claude_mod.SessionWriterClaimError:
-        return False, "writer-possibly-live"
-    except Exception:
-        # Cannot establish single-writer safety -> do not wake. A missed wake
-        # demotes to durable; a second writer corrupts a transcript.
-        return False, "writer-probe-failed"
 
     try:
         result = dispatch_spawn(
@@ -4250,17 +4299,6 @@ def wake_and_deliver(
         return False, f"spawn-exit-{exc.exit_code}"
     except (OSError, RuntimeError) as exc:
         return False, f"spawn-error-{type(exc).__name__}"
-    finally:
-        # The spawned supervisor's own liveness is the ongoing single-writer
-        # guard; holding this claim past the spawn would hoard the writer and
-        # block a native attach. Idempotent, so releasing after a failed spawn
-        # is safe too.
-        try:
-            claude_mod.release_session_writer_claim(
-                session_uuid=session_uuid, holder=holder
-            )
-        except Exception:
-            pass
 
     short = getattr(result, "short_id", None) or getattr(result, "name", "") or "unknown"
     return True, short
