@@ -3852,9 +3852,36 @@ impl View {
             } else {
                 (Color::Default, cell_flags::DIM)
             };
+            let (r, start, end) = (grow as usize, gcols.start as usize, gcols.end as usize);
+            if r >= rows {
+                continue;
+            }
+            // A grip cell is one column wide, but the pane content underneath is
+            // arbitrary program output that may hold a DOUBLE-width glyph. The
+            // compositor skips any WIDE_SPACER cell, so stamping over half of
+            // such a pair leaves either a lead with no spacer or a spacer with
+            // no lead - and the row then emits the wrong number of columns,
+            // shifting every cell after it. Blank whichever half survives at the
+            // stamp's edges before writing (the interior is fully overwritten,
+            // so no orphan can survive in there).
+            let blank = Cell {
+                c: ' ',
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: 0,
+            };
+            if start > 0
+                && start < cols
+                && cells[r * cols + start].flags & cell_flags::WIDE_SPACER != 0
+            {
+                cells[r * cols + start - 1] = blank;
+            }
+            if end < cols && cells[r * cols + end].flags & cell_flags::WIDE_SPACER != 0 {
+                cells[r * cols + end] = blank;
+            }
             for (i, ch) in GRIP.chars().enumerate() {
-                let (r, c) = (grow as usize, gcols.start as usize + i);
-                if r < rows && c < cols {
+                let c = start + i;
+                if c < cols {
                     cells[r * cols + c] = Cell {
                         c: ch,
                         fg,
@@ -18789,6 +18816,69 @@ mod tests {
     }
 
     #[test]
+    fn the_grip_never_bisects_a_double_width_glyph() {
+        // The compositor SKIPS a WIDE_SPACER cell, so a lead left without its
+        // spacer (or vice versa) makes the row emit the wrong column count and
+        // shifts everything after it. Pane content is arbitrary program output,
+        // so a CJK glyph can sit anywhere - including straddling the grip.
+        let mut view = two_pane_view();
+        let rect = view.pane_rect(10).expect("pane 10 exists");
+        let (grow, gcols) = view.grip_span(rect).expect("pane 10 has room");
+
+        // Straddle BOTH edges: a wide pair whose spacer is the grip's first
+        // cell, and another whose lead is the grip's last cell.
+        let panel_w = view.panel_w();
+        let frow = (grow - TAB_BAR_ROWS - rect.y) as usize;
+        let local = |outer: u16| (outer - panel_w - rect.x) as usize;
+        let (lead_before, last_cell) = (local(gcols.start) - 1, local(gcols.end) - 1);
+        let frame = view.frames.get_mut(&10).expect("pane 10 has a frame");
+        let fcols = frame.cols as usize;
+        for (at, ch, spacer) in [
+            (lead_before, '\u{4f60}', true),
+            (last_cell, '\u{597d}', true),
+        ] {
+            frame.cells[frow * fcols + at] = Cell {
+                c: ch,
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: 0,
+            };
+            if spacer {
+                frame.cells[frow * fcols + at + 1] = Cell {
+                    c: ' ',
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    flags: cell_flags::WIDE_SPACER,
+                };
+            }
+        }
+
+        let out = view.compose();
+        let cols = view.term.1 as usize;
+        let row = &out.cells[grow as usize * cols..(grow as usize + 1) * cols];
+        // Every surviving WIDE_SPACER must still be preceded by a real
+        // double-width lead; every wide lead must still own its spacer.
+        for (i, cell) in row.iter().enumerate() {
+            if cell.flags & cell_flags::WIDE_SPACER != 0 {
+                assert!(
+                    i > 0 && glyph_cols(row[i - 1].c) == 2,
+                    "orphaned spacer at column {i}: the row would shift left"
+                );
+            }
+            if glyph_cols(cell.c) == 2 {
+                assert!(
+                    i + 1 < cols && row[i + 1].flags & cell_flags::WIDE_SPACER != 0,
+                    "wide glyph at column {i} lost its spacer: the row would shift right"
+                );
+            }
+        }
+        // And the grip still drew.
+        for (i, ch) in GRIP.chars().enumerate() {
+            assert_eq!(row[gcols.start as usize + i].c, ch);
+        }
+    }
+
+    #[test]
     fn a_drag_ends_when_the_pane_it_moves_disappears() {
         // AC7-FR: the dragged pane's process exits mid-gesture.
         let mut view = two_pane_view();
@@ -18807,4 +18897,43 @@ mod tests {
             "and it says why rather than dying silently"
         );
     }
+    #[test]
+    fn probe_right_rim_band() {
+        let mut view = two_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        let rect = view.pane_rect(11).unwrap();
+        let r = TAB_BAR_ROWS + rect.y + 5;
+        let c = view.panel_w() + rect.x + rect.cols - 1; // rightmost content col
+        let z = view.edge_zone_at(r, c).expect("rim zone");
+        eprintln!("zone={:?}", z);
+        let band = view.drop_band(z).expect("band");
+        eprintln!("band rows={:?} cols={:?} termcols={}", band.0, band.1, view.term.1);
+        assert!(view.pane_drag_to(r, c, Instant::now()));
+        let frame = view.compose();
+        let cols = view.term.1 as usize;
+        let lit = (0..view.term.0 as usize).flat_map(|rr| (0..cols).map(move |cc| (rr,cc)))
+            .filter(|(rr,cc)| frame.cells[rr*cols+cc].flags & cell_flags::INVERSE != 0).count();
+        eprintln!("inverse cells = {}", lit);
+        assert!(lit > 0, "right-rim drop zone lit NOTHING");
+    }
+
+    #[test]
+    fn probe_bottom_rim_band() {
+        let mut view = two_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        let rect = view.pane_rect(11).unwrap();
+        let r = TAB_BAR_ROWS + rect.y + rect.rows - 1;
+        let c = view.panel_w() + rect.x + 5;
+        let z = view.edge_zone_at(r, c).expect("rim zone");
+        eprintln!("zone={:?}", z);
+        eprintln!("band={:?}", view.drop_band(z));
+        assert!(view.pane_drag_to(r, c, Instant::now()));
+        let frame = view.compose();
+        let cols = view.term.1 as usize;
+        let lit = (0..view.term.0 as usize).flat_map(|rr| (0..cols).map(move |cc| (rr,cc)))
+            .filter(|(rr,cc)| frame.cells[rr*cols+cc].flags & cell_flags::INVERSE != 0).count();
+        eprintln!("inverse cells = {}", lit);
+        assert!(lit > 0, "bottom-rim drop zone lit NOTHING");
+    }
+
 }

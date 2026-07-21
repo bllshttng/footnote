@@ -2121,3 +2121,64 @@ mod tests {
         assert!(r2.y > r3.y, "2 sits below 3 after a Down move");
     }
 }
+
+#[cfg(test)]
+mod adversarial_move_tests {
+    use super::*;
+
+    // xorshift, no dev-deps
+    struct R(u64);
+    impl R {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            self.0 = x; x
+        }
+        fn pick(&mut self, n: usize) -> usize { (self.next() % n as u64) as usize }
+    }
+
+    const BIG: Rect = Rect { x: 0, y: 0, rows: 24, cols: 60 };
+
+    fn dirs() -> [Dir; 4] { [Dir::Left, Dir::Right, Dir::Up, Dir::Down] }
+
+    #[test]
+    fn adversarial_move_leaf_preserves_invariants() {
+        for seed in 1..800u64 {
+            let mut r = R(seed);
+            let mut tab = Tab { id: 0, root: Node::Leaf(1), focus: 1, name: None };
+            let mut next_id = 2;
+            // build a random tree
+            for _ in 0..r.pick(8) + 2 {
+                let ls = leaves(&tab.root);
+                tab.focus = ls[r.pick(ls.len())];
+                let d = dirs()[r.pick(4)];
+                if split_directional(&mut tab, BIG, d, next_id).is_ok() { next_id += 1; }
+            }
+            check_invariants(&tab).unwrap_or_else(|e| panic!("seed {seed}: build broke: {e}"));
+
+            for step in 0..300 {
+                let ls = leaves(&tab.root);
+                if ls.len() < 2 { break; }
+                let mover = ls[r.pick(ls.len())];
+                let target = ls[r.pick(ls.len())];
+                let d = dirs()[r.pick(4)];
+                let before = tab.clone();
+                let mut sorted_before = ls.clone();
+                sorted_before.sort_unstable();
+                match move_leaf(&mut tab, BIG, mover, target, d) {
+                    Ok(()) => {
+                        let mut after = leaves(&tab.root);
+                        after.sort_unstable();
+                        assert_eq!(sorted_before, after,
+                            "seed {seed} step {step}: pane set changed moving {mover}->{target:?} {d:?}\nbefore={:?}\nafter={:?}", before.root, tab.root);
+                        check_invariants(&tab).unwrap_or_else(|e| panic!(
+                            "seed {seed} step {step}: INVARIANT {e}\nmove {mover} -> {target} {d:?}\nbefore={:?}\nafter={:?}", before.root, tab.root));
+                    }
+                    Err(_) => {
+                        assert_eq!(before, tab, "seed {seed} step {step}: tree mutated on Err");
+                    }
+                }
+            }
+        }
+    }
+}
