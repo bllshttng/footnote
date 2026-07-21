@@ -165,8 +165,10 @@ def test_related_is_non_blocking(tmp_graph):
     status derivation) instead of whatever the fixture happens to derive to.
     """
     def _statuses() -> dict[str, tuple]:
+        # Read back the CANONICAL key: the writer migrates the legacy `_status`
+        # to `status` and deletes it, so a round-tripped entry has only `status`.
         entries = json.loads(tmp_graph.read_text())["entries"]
-        return {e["id"]: (e["_status"], tuple(e["blocked_by"])) for e in entries}
+        return {e["id"]: (e["status"], tuple(e["blocked_by"])) for e in entries}
 
     # A no-op write first, so the baseline reflects derivation, not the seed.
     runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "null"])
@@ -256,3 +258,29 @@ def test_removing_a_node_unlinks_it_from_every_peer(tmp_graph):
     ).exit_code == 0
     assert _related(tmp_graph, "x-bbbb") == []
     assert _related(tmp_graph, "x-cccc") == []
+
+
+def test_archive_holds_back_a_node_an_open_peer_is_related_to():
+    """A terminal node related to an OPEN node must not be swept.
+
+    Archiving one side leaves the open node naming an id the working graph no
+    longer has, with the inverse beyond set_related's reach - the symmetry
+    contract broken by routine daily grooming rather than by any explicit edit.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from fno.graph.archive import partition_for_archive
+
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=400)).isoformat()
+    entries = [
+        _node("x-open", status="ready", related=["x-done"]),
+        _node("x-done", status="done", completed_at=old, related=["x-open"]),
+        _node("x-lonely", status="done", completed_at=old),
+    ]
+    to_archive, _remaining, skipped = partition_for_archive(entries, 30, now)
+
+    archived_ids = {e["id"] for e in to_archive}
+    assert "x-done" not in archived_ids, "an open peer's related target is held back"
+    assert "x-lonely" in archived_ids, "an unreferenced terminal node still sweeps"
+    assert "x-done" in {e["id"] for e in skipped}

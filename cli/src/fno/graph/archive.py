@@ -11,6 +11,8 @@ Never archived (an open node still points at them):
   - a blocker in any open node's ``blocked_by``
   - the parent of any open child
   - a ``supersedes`` / ``superseded_by`` target of an open node
+  - a ``related`` peer of an open node (the edge is symmetric; archiving one
+    side would strand the other)
 """
 from __future__ import annotations
 
@@ -71,6 +73,15 @@ def _guard_ids(entries: list[Entry]) -> set[str]:
             for s in supersedes:
                 if isinstance(s, str):
                     guard.add(s)
+        # related is symmetric and stored on both endpoints, so archiving one
+        # side of a live pair strands the other: the open node names an id the
+        # working graph no longer has, and the inverse is beyond set_related's
+        # reach. Broken by routine grooming rather than by any explicit edit.
+        related = e.get("related")
+        if isinstance(related, list):
+            for r in related:
+                if isinstance(r, str):
+                    guard.add(r)
         sup = e.get("superseded_by")
         if isinstance(sup, str):
             guard.add(sup)

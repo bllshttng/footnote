@@ -550,8 +550,17 @@ def _mesh_env_wrapper(
             # on an unset var is a harmless no-op.
             unset = ["-u", "ANTHROPIC_API_KEY", "-u", "CLAUDE_CODE_OAUTH_TOKEN"]
             pairs += [f"{k}={v}" for k, v in route.items()]
-    if provenance:
-        pairs += [f"{k}={v}" for k, v in provenance.items() if v]
+    # Set-or-clear the whole triple, never merge. A pane spawned from a
+    # node-bound worker inherits that worker's env, so adding only what this
+    # spawn resolved would leave an ad-hoc pane carrying the parent's FNO_NODE
+    # and a plan-less child carrying the parent's FNO_PLAN - which ambient
+    # origin capture would then persist into every node the pane files.
+    # `env -u` on an unset var is a harmless no-op.
+    resolved_prov = {k: v for k, v in (provenance or {}).items() if v}
+    for _k in PROVENANCE_KEYS:
+        if _k not in resolved_prov:
+            unset += ["-u", _k]
+    pairs += [f"{k}={v}" for k, v in resolved_prov.items()]
     # Per-spawn account overlay (x-d012), applied LAST so an explicit --account
     # beats a stale parent CLAUDE_CONFIG_DIR (env(1) assignments are
     # left-to-right, last wins). --account + --route/--role is refused at the
