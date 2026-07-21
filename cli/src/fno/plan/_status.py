@@ -32,9 +32,17 @@ STATUS_PROGRESSION: tuple[str, ...] = (
 # into STATUS_PROGRESSION would break the forward-transition index math.
 TERMINAL_STATUSES: tuple[str, ...] = ("done", "archived")
 
-# The full canonical plan-status vocabulary: axis + terminals. The reconcile
-# sweep leaves any status in this set untouched (it corrects drift only).
-KNOWN_STATUSES: frozenset[str] = frozenset(STATUS_PROGRESSION) | frozenset(TERMINAL_STATUSES)
+# Retired spellings, accepted on read and never written. Mirrors the read-and-
+# write shape of STATUS_MIGRATION in fno.graph.statuses: a doc stamped under the
+# old vocabulary keeps parsing at its correct rung, and nothing rewrites it.
+STATUS_ALIASES: dict[str, str] = {}
+
+# The full plan-status vocabulary the reconcile sweep leaves untouched: canonical
+# axis + terminals + every retired spelling. A retired spelling is valid input,
+# not drift, so the sweep must not "correct" it.
+KNOWN_STATUSES: frozenset[str] = (
+    frozenset(STATUS_PROGRESSION) | frozenset(TERMINAL_STATUSES) | frozenset(STATUS_ALIASES)
+)
 
 # Graph derived `_status` -> plan `status` projection (x-f34f). Total over the
 # graph vocabulary; None means "no plan write" (a graph-side gate that must not
@@ -71,6 +79,16 @@ def _norm_status(raw: object) -> str:
     return str(raw if raw is not None else "").strip().strip("'\"").lower()
 
 
+def canonical_status(raw: object) -> str:
+    """Normalized status with any retired spelling resolved to its survivor.
+
+    Read-path translation only: callers compare and rank against the result,
+    they never write it back over the doc that supplied it.
+    """
+    s = _norm_status(raw)
+    return STATUS_ALIASES.get(s, s)
+
+
 def project_plan_status(current: object, graph_status: str) -> Optional[str]:
     """Plan status to WRITE for a node in ``graph_status``, or None to leave it.
 
@@ -83,7 +101,7 @@ def project_plan_status(current: object, graph_status: str) -> Optional[str]:
     target = GRAPH_TO_PLAN_STATUS.get(graph_status)
     if not target:
         return None
-    cur = _norm_status(current)
+    cur = canonical_status(current)
     if target == cur:
         return None
     if target == "archived":
@@ -108,7 +126,12 @@ def validate_transition(old: str, new: str) -> None:
     - identity transition (old == new)
 
     Allow: forward transitions (new index > old index) by any number of steps.
+
+    ``old`` typically comes off a doc, so a retired spelling resolves to its
+    survivor before the index math.
     """
+    old = STATUS_ALIASES.get(old, old)
+    new = STATUS_ALIASES.get(new, new)
     if old not in STATUS_PROGRESSION:
         raise StatusTransitionError(
             f"Unknown status {old!r}. Valid statuses: {list(STATUS_PROGRESSION)}"
@@ -160,6 +183,7 @@ def coerce_status_from_yaml(value: Any) -> str:
     else:
         coerced = str(value)
 
+    coerced = STATUS_ALIASES.get(coerced, coerced)
     if coerced not in STATUS_PROGRESSION:
         raise StatusTransitionError(
             f"Unknown status {coerced!r} (coerced from {value!r}). "

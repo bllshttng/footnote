@@ -22,7 +22,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from fno.plan._status import STATUS_PROGRESSION, TERMINAL_STATUSES
+from fno.plan._status import STATUS_ALIASES, STATUS_PROGRESSION, TERMINAL_STATUSES
 
 # Str-enum built directly from the _status axis + terminals. Functional API so
 # the members are *derived*, never hand-listed here - the drift lint asserts
@@ -91,15 +91,19 @@ class PlanFrontmatter(BaseModel):
     @field_validator("status", mode="before")
     @classmethod
     def _coerce_status_bool(cls, v: Any) -> Any:
-        """Coerce a YAML-parsed bool back to a string before enum validation.
+        """Normalize a raw frontmatter status before enum validation.
 
-        Unquoted `status: true` in YAML parses to Python `True`; without this
-        the enum would see a bool and reject it with a confusing type error
-        instead of naming the (coerced) invalid value. Same bug `_status.py`'s
-        coerce_status_from_yaml exists to catch - reproduced here rather than
-        reused because that helper rejects `done`/`archived`, which are valid
-        for this model's superset enum.
+        Two jobs. Unquoted `status: true` in YAML parses to Python `True`;
+        without the bool coercion the enum would reject it with a confusing type
+        error instead of naming the (coerced) invalid value - the same bug
+        `_status.py`'s coerce_status_from_yaml exists to catch, reproduced here
+        rather than reused because that helper rejects `done`/`superseded`, which
+        are valid for this model's superset enum. Then a retired spelling
+        resolves to its survivor, so a doc stamped under the old vocabulary
+        validates without the enum having to carry dead members.
         """
         if isinstance(v, bool):
             return str(v).lower()
+        if isinstance(v, str):
+            return STATUS_ALIASES.get(v.strip().strip("'\"").lower(), v)
         return v
