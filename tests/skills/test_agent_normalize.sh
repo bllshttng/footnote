@@ -46,6 +46,11 @@ export NODE_SLUG_RESOLVER="$STUB_EMPTY"
 # a stale installed fno reports opencode=prose, a fresh one opencode=slash).
 FBIN="$TMP/failing-fno"; mkdir -p "$FBIN"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$FBIN/fno"; chmod +x "$FBIN/fno"
+# Pin it for the WHOLE suite, not per call site: an assertion about a builtin
+# default (no-merge posture, static surface tables) silently inverts on a host
+# whose config sets dispatch.auto_merge=true. Cases that exercise the config read
+# prepend their own fno stub, which still wins.
+export PATH="$FBIN:$PATH"
 
 field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1; }
 
