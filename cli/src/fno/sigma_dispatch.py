@@ -828,7 +828,6 @@ def resolve_dispatch_target(
     before ``TARGET_COMBO``.
     """
     import logging
-    import os
 
     from fno.adapters.providers.loader import (
         load_combos,

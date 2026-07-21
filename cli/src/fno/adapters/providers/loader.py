@@ -19,7 +19,6 @@ import pydantic
 import tomllib
 import yaml
 
-from fno import paths as _paths
 from fno.adapters.providers.model import (
     AgentProviderBinding,
     ProviderConfigError,

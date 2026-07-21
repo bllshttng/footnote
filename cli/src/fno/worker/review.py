@@ -22,7 +22,6 @@ import yaml
 
 from fno.review.runners.claude_runner import (
     make_async_runner,
-    run_via_claude_code,
 )
 from fno.review.orchestrator import (
     load_prompts,
@@ -317,7 +316,6 @@ def review(
     # This layer runs BEFORE calling orchestrate_review_parallel so we can
     # return "cached" correctly even for suspicious (all-clean) results that
     # the orchestrator's inner cache declines to memoize.
-    cached = False
     if not no_cache:
         resolved_sha = git_sha_value if git_sha_value is not None else _cache.git_sha()
         # Use the cross-model prompts (JSON-contract-appended) + provider-set

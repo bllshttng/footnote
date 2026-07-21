@@ -939,7 +939,6 @@ def combos_add(
     """Add a new combo. Validates each provider exists; refuses if combo already exists."""
     from fno.adapters.providers.loader import (
         atomic_mutate_settings,
-        load_providers,
     )
     from fno.adapters.providers.rotation import Combo
 

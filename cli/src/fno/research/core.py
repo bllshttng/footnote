@@ -35,7 +35,7 @@ from html.parser import HTMLParser
 from fno import _subprocess_util
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 
 # A topic must carry at least this many whitespace tokens. Empty or one-word

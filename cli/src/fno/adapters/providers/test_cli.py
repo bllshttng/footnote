@@ -4,10 +4,8 @@ Run: cd cli && uv run pytest src/fno/adapters/providers/test_cli.py -v
 """
 from __future__ import annotations
 
-import os
 import stat
 from pathlib import Path
-from typing import Any
 
 import pytest
 import tomli_w

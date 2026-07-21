@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
-import os
 import re
-import stat
 import subprocess
 from pathlib import Path
 
@@ -695,7 +693,6 @@ class TestDispatchSubprocess:
 
         call_count = 0
         original_provider_id = "gemini-pro-original"
-        swapped_provider_id = "claude-fallback-after-swap"
 
         def fake_spawn(cmd, *, settings_path=None, env=None, **kwargs):
             nonlocal call_count

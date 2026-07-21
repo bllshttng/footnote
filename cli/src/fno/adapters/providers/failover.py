@@ -31,7 +31,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
 
 from fno.adapters.providers.error_taxonomy import (
     NormalizedError,
@@ -41,7 +40,6 @@ from fno.adapters.providers.loader import (
     _extract_providers_block,
     _read_parsed,
     atomic_mutate_settings,
-    load_providers,
 )
 from fno.adapters.providers.runtime_state import (
     reset_provider_health,

@@ -392,7 +392,6 @@ class TestCursorTTL:
     def test_read_returns_none_when_cursor_is_25h_old(
         self, cursor_state_path: Path
     ):
-        import time
         from fno.adapters.providers.runtime_state import (
             advance_cursor,
             read_cursor,

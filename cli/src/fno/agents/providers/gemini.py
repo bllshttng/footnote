@@ -32,7 +32,6 @@ sees both for forensics.
 """
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 import signal as _signal
@@ -422,7 +421,6 @@ def _run_gemini(
     exit_code: int = -1
     sigkill_escalated: bool = False
     stdout_text = ""
-    stderr_text = ""
 
     # Inject FNO_AGENT_* env vars so nested `fno agents ask` calls
     # from inside this gemini session attribute back to the parent agent.
@@ -490,7 +488,6 @@ def _run_gemini(
         # thread is a daemon so a wedged peer cannot prevent process
         # shutdown; we join with a generous timeout after stdout EOFs.
         tee_lock = threading.Lock()
-        stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
         stderr_thread = threading.Thread(
             target=_drain_pipe_into_list,
@@ -544,7 +541,7 @@ def _run_gemini(
         # exits). A generous 5s join handles the rare race where the
         # daemon thread hasn't reached EOF yet at proc.wait() return.
         stderr_thread.join(timeout=5.0)
-        stderr_text = "".join(stderr_chunks)
+        "".join(stderr_chunks)
     finally:
         for t in timers:
             t.cancel()
