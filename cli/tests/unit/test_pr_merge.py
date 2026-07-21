@@ -144,6 +144,48 @@ def test_merge_immediate_exit_0(enabled, monkeypatch, capsys, tmp_path):
     assert "invoker" not in obj
 
 
+def _write_manifest(tmp_path, body: str) -> None:
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    (tmp_path / ".fno" / "target-state.md").write_text(body, encoding="utf-8")
+
+
+def test_per_run_no_merge_skips_even_when_config_enabled(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """`auto_merge.enabled` is policy; the manifest carries THIS run's decision.
+
+    A per-run `no-merge` (which `/target bg` injects by default) resolves to
+    `auto_merge_approved: false` while `enabled` stays true. Gating on config
+    alone made the sanctioned verb a weaker gate than raw `gh pr merge`, which
+    the git-protection hook already guards on this same field.
+    """
+    _write_manifest(tmp_path, "session_id: s1\nauto_merge_enabled: true\nauto_merge_approved: false\n")
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "skipped"
+    assert "no-merge" in obj["reason"]
+
+
+def test_manifest_approved_true_still_merges(enabled, monkeypatch, capsys, tmp_path):
+    _write_manifest(tmp_path, "session_id: s1\nauto_merge_approved: true\n")
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
+def test_manifest_without_the_field_merges(enabled, monkeypatch, capsys, tmp_path):
+    """Absent field -> proceed. A manual `fno pr merge` outside a target session,
+    or against a pre-field manifest, must not start refusing."""
+    _write_manifest(tmp_path, "session_id: s1\n")
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
 def test_merge_queued_exit_0(enabled, monkeypatch, capsys, tmp_path):
     (tmp_path / ".fno").mkdir()
     fake = FakeRun(

@@ -555,6 +555,29 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         )
         return 2
 
+    # (1b) Honor THIS run's resolved decision, not just the project policy.
+    # `auto_merge.enabled` is standing policy; the manifest's
+    # `auto_merge_approved` is what init resolved after folding in the per-run
+    # modifiers, and a per-run `no-merge` (which `/target bg` injects by
+    # default) sets it false while `enabled` stays true. Without this the
+    # sanctioned verb is a WEAKER gate than raw `gh pr merge`, which the
+    # git-protection hook already guards on this same field.
+    # Absent manifest or absent field -> proceed: a manual `fno pr merge`
+    # outside a target session is legitimate and must not start refusing.
+    approved = _read_state_field(
+        os.path.join(_repo_state_dir(repo), "target-state.md"),
+        "auto_merge_approved",
+    )
+    if approved and approved.strip().lower() not in ("true", "yes", "1"):
+        _emit(
+            pr_number,
+            "skipped",
+            "per-run no-merge (manifest auto_merge_approved is not true)",
+            "none",
+            err=False,
+        )
+        return 2
+
     # (2) gh must be installed.
     if shutil.which("gh") is None:
         _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)

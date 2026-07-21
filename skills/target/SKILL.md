@@ -81,7 +81,7 @@ Emit `<promise>MISSION COMPLETE: ...</promise>` when the PR is up and CI is gree
 sed -n 's/^auto_merge_approved:[[:space:]]*//p' .fno/target-state.md
 ```
 
-Read that RESOLVED field, never `fno config get auto_merge` directly. Init folds the config together with this run's modifiers, and a per-run `no-merge` - which `/target bg` injects **by default** - sets it false even when `auto_merge.enabled` is true. `fno pr merge` itself checks only `auto_merge.enabled`, so keying off the raw config would merge against an explicit per-run prohibition.
+Read that RESOLVED field, never `fno config get auto_merge` directly. Init folds the config together with this run's modifiers, and a per-run `no-merge` - which `/target bg` injects **by default** - sets it false even when `auto_merge.enabled` is true, so the raw config would tell you to merge against an explicit per-run prohibition. `fno pr merge` reads the same field and refuses too, but that is a backstop: decide from the manifest rather than firing the verb and hoping it catches you.
 
 When it is `true` and `auto_merge.require_checks_pass` is satisfied, **MERGE FIRST, THEN promise**: `fno pr merge <n>`, then `fno backlog reconcile` to close the node (a merge from inside a worktree skips the local post-merge step). Order matters - a promise emitted first terminates the loop as `DonePRGreen` the moment CI goes green, so the session is never re-invoked and the merge silently never happens. Config set once IS the standing authorization; re-asking each time re-imposes the step it was configured to delete.
 
