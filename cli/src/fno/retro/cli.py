@@ -761,7 +761,7 @@ def run(
         # unavailable - otherwise carve-outs would harvest but never consume and
         # re-file as duplicate nodes next run (gemini HIGH on PR #405). The
         # sentinel path keeps its conservative retain-on-no-url behavior.
-        synthetic_comments = None if slug else []
+        synthetic_comments: Optional[list] = None if slug else []
         try:
             _report, clean = _process_payload(
                 payload,

@@ -205,6 +205,7 @@ class LazyTypeGroup(typer.core.TyperGroup):
 
     def _make_stub(self, name: str) -> _LazyStub:
         entry = self._lazy[name]
+        options: dict
         if isinstance(entry, str):
             import_path, short_help, options = entry, "", {}
         elif isinstance(entry, tuple) and len(entry) == 2:
