@@ -1388,6 +1388,58 @@ def cmd_discovered_json(
     sys.stdout.write(_json.dumps(out))
 
 
+#: `heal-token` exit codes. 13 mirrors the lifecycle verbs' not-found code; the
+#: ambiguity code is distinct from BOTH that and typer's internal-error 1 so the
+#: Rust caller can tell "refuse loudly with these candidates" from "degrade to
+#: the original not-found error" (x-da8c AC4 vs AC5).
+HEAL_TOKEN_MISS_EXIT = 13
+HEAL_TOKEN_AMBIGUOUS_EXIT = 3
+
+
+@agents_app.command("heal-token", hidden=True)
+def cmd_heal_token(
+    token: str = typer.Argument(..., help="Session-shaped token (8-hex, UUID, ses_...)."),
+    registry: str = typer.Option(
+        None,
+        "--registry",
+        help="Adopt into THIS registry file (default: the configured one).",
+    ),
+) -> None:
+    """Internal: adopt the session TOKEN names from its harness store, as JSON.
+
+    The one x-9cc5 healer behind ``registry.resolve_agent``, exposed so the Rust
+    lifecycle verbs (logs/attach/resume) heal a registry miss through the SAME
+    probe rather than growing a second one. Exit 0 with the adopted row on
+    stdout; 13 on a miss or a non-session-shaped token; 3 with the candidate
+    list on stderr when the token is ambiguous.
+
+    ``--registry`` exists because the two runtimes resolve the registry
+    differently -- Rust honors ``FNO_AGENTS_HOME``, this side does not -- so a
+    caller that read one file would otherwise heal into another and re-heal on
+    every later call. The caller names the file it read from; agreement is then
+    by construction rather than by two resolvers happening to match.
+
+    Python-only by construction: keeping it out of ``RUST_CLIENT_VERBS`` is what
+    stops the Rust shellout from re-entering the Rust client.
+    """
+    import json as _json
+    from dataclasses import asdict
+
+    from fno.agents.registry import AgentResolutionError, resolve_from_harness_store
+
+    try:
+        entry = resolve_from_harness_store(
+            token, registry_path=Path(registry) if registry else None
+        )
+    except AgentResolutionError as exc:
+        sys.stderr.write(f"{exc}\n")
+        raise typer.Exit(code=HEAL_TOKEN_AMBIGUOUS_EXIT)
+    if entry is None:
+        raise typer.Exit(code=HEAL_TOKEN_MISS_EXIT)
+    sys.stdout.write(_json.dumps(asdict(entry)))
+    sys.stdout.write("\n")
+
+
 @agents_app.command("nudge-peek", hidden=True)
 def cmd_nudge_peek(
     session: str = typer.Option(..., "--session-id", help="Loop session id."),
