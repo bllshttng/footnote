@@ -5770,7 +5770,7 @@ def cmd_done(
     from fno.graph._reconcile import (
         node_pr_refs,
         repo_slug_from_url,
-        ReconcileError,
+        resolve_merge_evidence,
     )
 
     if not has_node_id_prefix(task_id):
@@ -5811,51 +5811,20 @@ def cmd_done(
 
     if refs and not force:
         # There are PR references; require evidence before closing.
-        first_pr_number, first_pr_url = refs[0]
-        repo = repo_slug_from_url(first_pr_url)
-        cwd = node.get("cwd")
+        first_pr_number = refs[0][0]
 
-        # Try each ref in order; the first MERGED ref is closing evidence
-        # (x-aba7: graph done = merged). An OPEN ref means the node is awaiting
-        # merge - success-shaped (exit 5), never closing evidence. CI state is
-        # NOT consulted: whether CI is green is the session's finish-line concern
-        # (loop-check), not the graph-close decision.
-        evidence_found = False
-        refusal_reason: Optional[str] = None
-        outage_error: Optional[str] = None
-        open_pr_number: Optional[int] = None  # first OPEN ref -> awaiting merge
-
-        for pr_number, pr_url in refs:
-            pr_repo = repo_slug_from_url(pr_url) or repo
-            pr_cwd = cwd if pr_repo is None else None
-
-            try:
-                pr_state = _done_gh_query(pr_number, repo=pr_repo, cwd=pr_cwd)
-            except ReconcileError as exc:
-                outage_error = str(exc)
-                continue
-
-            if pr_state.state == "MERGED":
-                evidence_found = True
-                evidence_pr_url = pr_url
-                break
-
-            if pr_state.state == "OPEN":
-                if open_pr_number is None:
-                    open_pr_number = pr_number
-            else:
-                # CLOSED (not merged) or UNKNOWN
-                refusal_reason = (
-                    f"PR #{pr_number} state={pr_state.state} (not merged)"
-                )
-
-        if not evidence_found:
-            # A definitive OPEN ref wins over an outage: we KNOW the node has a
-            # live PR awaiting merge, so exit 5 (success-shaped, retryable on
-            # merge) rather than the conservative outage retry.
-            if open_pr_number is not None:
+        # Shared with `fno done` so the two verbs cannot drift apart on what
+        # counts as evidence (x-47a3).
+        evidence = resolve_merge_evidence(
+            refs, cwd=node.get("cwd"), query=_done_gh_query
+        )
+        evidence_found = evidence.outcome == "merged"
+        if evidence_found:
+            evidence_pr_url = evidence.pr_url
+        else:
+            if evidence.outcome == "awaiting_merge":
                 typer.echo(
-                    f"awaiting merge: PR #{open_pr_number} is OPEN, not merged. "
+                    f"awaiting merge: PR #{evidence.open_pr_number} is OPEN, not merged. "
                     f"{task_id} stays in_review and closes on merge "
                     f"(reconcile / merge-triggered advance). "
                     f"Use --force --reason TEXT for an early close.",
@@ -5863,19 +5832,16 @@ def cmd_done(
                 )
                 raise typer.Exit(code=5)
 
-            # No MERGED, no OPEN. An outage on any ref is a retryable outage
-            # (covers pure outage AND the partial CLOSED+outage conservatism:
-            # never refuse when a ref we could not query might be evidence).
-            if outage_error:
+            if evidence.outcome == "outage":
                 typer.echo(
-                    f"Error: gh cross-check failed for {task_id}: {outage_error}\n"
+                    f"Error: gh cross-check failed for {task_id}: {evidence.error}\n"
                     f"The check is retryable once gh is available again. Node stays open.",
                     err=True,
                 )
                 raise typer.Exit(code=4)
 
             # Pure policy refusal - CLOSED-unmerged / UNKNOWN only.
-            msg = refusal_reason or f"PR #{first_pr_number}: no merged evidence"
+            msg = evidence.reason or f"PR #{first_pr_number}: no merged evidence"
             typer.echo(
                 f"Refused: {task_id} cross-check failed: {msg}\n"
                 f"Use --force --reason TEXT to bypass.",

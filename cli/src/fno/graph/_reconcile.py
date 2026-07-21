@@ -266,6 +266,73 @@ def node_pr_refs(node: dict) -> list[tuple[int, Optional[str]]]:
     return refs
 
 
+@dataclass
+class MergeEvidence:
+    """The close decision for a node's PR refs, shared by every done verb.
+
+    ``outcome`` maps 1:1 onto the exit-code contract the Rust loop keys on
+    (loop_megawalk maps 5 -> AwaitingMerge), so the verbs must not fork it:
+    ``merged`` -> close, ``awaiting_merge`` -> 5, ``outage`` -> 4 (retryable),
+    ``refused`` -> 3.
+    """
+
+    outcome: Literal["merged", "awaiting_merge", "outage", "refused"]
+    pr_url: Optional[str] = None
+    open_pr_number: Optional[int] = None
+    error: Optional[str] = None
+    reason: Optional[str] = None
+
+
+def resolve_merge_evidence(
+    refs: list[tuple[int, Optional[str]]],
+    *,
+    cwd: Optional[str] = None,
+    query: Optional[Callable[..., PrMergeState]] = None,
+) -> MergeEvidence:
+    """Decide whether a node's PR refs are closing evidence.
+
+    The first MERGED ref closes; an OPEN ref means awaiting merge and outranks
+    an outage, because a live PR is a definite answer where an unreachable ref
+    is not. CI state is deliberately not consulted: green CI is the session's
+    finish line, not the graph's close condition.
+
+    ``query`` is injected so callers can pass their own monkeypatchable shim.
+    """
+    query = query or query_pr_merge_state
+    refusal_reason: Optional[str] = None
+    outage_error: Optional[str] = None
+    open_pr_number: Optional[int] = None
+    repo = repo_slug_from_url(refs[0][1]) if refs else None
+
+    for pr_number, pr_url in refs:
+        pr_repo = repo_slug_from_url(pr_url) or repo
+        pr_cwd = cwd if pr_repo is None else None
+
+        try:
+            pr_state = query(pr_number, repo=pr_repo, cwd=pr_cwd)
+        except ReconcileError as exc:
+            outage_error = str(exc)
+            continue
+
+        if pr_state.state == "MERGED":
+            return MergeEvidence(outcome="merged", pr_url=pr_url)
+
+        if pr_state.state == "OPEN":
+            if open_pr_number is None:
+                open_pr_number = pr_number
+        else:
+            refusal_reason = f"PR #{pr_number} state={pr_state.state} (not merged)"
+
+    if open_pr_number is not None:
+        return MergeEvidence(outcome="awaiting_merge", open_pr_number=open_pr_number)
+    if outage_error:
+        return MergeEvidence(outcome="outage", error=outage_error)
+    return MergeEvidence(
+        outcome="refused",
+        reason=refusal_reason or f"PR #{refs[0][0]}: no merged evidence",
+    )
+
+
 def query_pr_merge_state(
     pr_number: int,
     *,

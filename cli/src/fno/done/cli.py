@@ -46,6 +46,7 @@ from fno.graph._reconcile import (
     pr_number_from_url,
     pr_url_for_repo,
     repo_slug_from_url,
+    resolve_merge_evidence,
 )
 from fno.graph.fuzzy import resolve_id
 from fno.graph.store import locked_mutate_graph, read_graph
@@ -303,6 +304,12 @@ def _apply_rollup(
     return tags
 
 
+def _gh_query(pr_number, **kwargs):
+    """Query gh for PR merge state. Injectable test seam, mirroring graph.cli."""
+    from fno.graph._reconcile import query_pr_merge_state
+    return query_pr_merge_state(pr_number, **kwargs)
+
+
 def done_command(
     query: Optional[str] = typer.Argument(
         None,
@@ -473,6 +480,38 @@ def done_command(
 
     now = datetime.now(timezone.utc).isoformat()
 
+    # -- merge gate --
+    # Keyed on having a PR, not on domain: a PR is what makes merge evidence
+    # meaningful, and cmd_done keys on its refs the same way. A node closing on
+    # --link/--note alone has no PR to gate and is unaffected.
+    merge_status_to_write: Optional[str] = None
+    if pr is not None:
+        evidence = resolve_merge_evidence(
+            [(pr, node.get("pr_url"))], cwd=node.get("cwd"), query=_gh_query
+        )
+        if evidence.outcome == "awaiting_merge":
+            typer.echo(
+                f"awaiting merge: PR #{pr} is OPEN, not merged. "
+                f"{node_id} stays in_review and closes on merge "
+                f"(reconcile / merge-triggered advance).",
+                err=True,
+            )
+            raise typer.Exit(code=5)
+        if evidence.outcome == "outage":
+            typer.echo(
+                f"Error: gh cross-check failed for {node_id}: {evidence.error}\n"
+                f"The check is retryable once gh is available again. Node stays open.",
+                err=True,
+            )
+            raise typer.Exit(code=4)
+        if evidence.outcome == "refused":
+            typer.echo(
+                f"Refused: {node_id} cross-check failed: {evidence.reason}",
+                err=True,
+            )
+            raise typer.Exit(code=3)
+        merge_status_to_write = "merged"
+
     # Resolve pr_url + ledger rollup outside the mutator so subprocess / disk
     # I/O stays out of the graph lock.
     pr_url_to_write: Optional[str] = None
@@ -522,7 +561,8 @@ def done_command(
             # same six assignments.
             if pr is not None:
                 e["pr_number"] = pr
-                e["merge_status"] = "merged"
+                # From the gh-resolved state above, never a literal.
+                e["merge_status"] = merge_status_to_write
                 e["pr_url"] = pr_url_to_write
             if link is not None:
                 e["artifact_url"] = link

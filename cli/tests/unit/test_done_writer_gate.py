@@ -103,3 +103,128 @@ def test_register_module_has_no_graph_sync_leg() -> None:
 
     for name in ("_sync_to_graph", "_match_graph_node", "_normalize_plan_path"):
         assert not hasattr(_register, name), f"{name} must stay deleted"
+
+
+# ---------------------------------------------------------------------------
+# AC2-HP / AC3-ERR / AC5-EDGE: `fno done` gates like `backlog done`
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def done_graph(tmp_path, monkeypatch) -> Path:
+    """A graph routed to the done command's code path, with an empty ledger."""
+    g = tmp_path / "graph.json"
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text('{"entries": []}\n')
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    monkeypatch.setattr(gc, "GRAPH_JSON", g)
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
+    monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
+    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
+    monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)
+    return g
+
+
+def _seed(g: Path, entry: dict) -> None:
+    g.write_text(json.dumps({"entries": [entry]}, indent=2) + "\n")
+
+
+def _node(g: Path, node_id: str) -> dict:
+    return next(e for e in json.loads(g.read_text())["entries"] if e["id"] == node_id)
+
+
+def _stub_gh(monkeypatch, state: str | None, *, calls: list | None = None):
+    """Point `fno done`'s gh seam at a fixed state, or raise for an outage."""
+    import fno.done.cli as done_cli
+    from fno.graph._reconcile import PrMergeState, ReconcileError
+
+    def _q(pr_number, **kwargs):
+        if calls is not None:
+            calls.append(pr_number)
+        if state is None:
+            raise ReconcileError("gh: not authenticated")
+        return PrMergeState(
+            number=pr_number, state=state, url=None,
+            merged_at="2026-01-01T00:00:00Z" if state == "MERGED" else None,
+        )
+
+    monkeypatch.setattr(done_cli, "_gh_query", _q)
+
+
+def test_ac2_hp_done_on_open_pr_exits_5_after_querying_gh(done_graph, monkeypatch):
+    """AC2-HP: an OPEN PR is awaiting merge, not a close - and gh is consulted.
+
+    The call is asserted, not just the exit code: an implementation that
+    exits 5 without querying would pass a code-only check while being blind
+    to the actual PR state.
+    """
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(done_graph, {"id": "ab-open001", "title": "Open PR node", "domain": "code"})
+    calls: list = []
+    _stub_gh(monkeypatch, "OPEN", calls=calls)
+
+    r = CliRunner().invoke(app, ["done", "ab-open001", "--pr", "42"])
+
+    assert r.exit_code == 5
+    assert calls == [42], "the gate must query gh, not assume"
+
+    entry = _node(done_graph, "ab-open001")
+    assert entry.get("completed_at") is None
+    assert entry.get("_status") != "done"
+    assert entry.get("merge_status") is None
+
+
+def test_ac3_err_gh_failure_fails_closed(done_graph, monkeypatch):
+    """AC3-ERR: an unreachable gh refuses the close rather than trusting --pr."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(done_graph, {"id": "ab-out001", "title": "Outage node", "domain": "code"})
+    _stub_gh(monkeypatch, None)
+
+    r = CliRunner().invoke(app, ["done", "ab-out001", "--pr", "42"])
+
+    assert r.exit_code == 4
+    entry = _node(done_graph, "ab-out001")
+    assert entry.get("completed_at") is None
+    assert entry.get("merge_status") is None
+
+
+def test_merged_pr_closes_and_records_resolved_merge_status(done_graph, monkeypatch):
+    """merge_status is written from the gh-resolved state, never a literal."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(done_graph, {"id": "ab-mrg001", "title": "Merged node", "domain": "code"})
+    _stub_gh(monkeypatch, "MERGED")
+
+    r = CliRunner().invoke(app, ["done", "ab-mrg001", "--pr", "42"])
+
+    assert r.exit_code == 0
+    entry = _node(done_graph, "ab-mrg001")
+    assert entry.get("completed_at") is not None
+    assert entry.get("merge_status") == "merged"
+
+
+def test_ac5_edge_non_pr_close_is_ungated(done_graph, monkeypatch):
+    """AC5-EDGE: a node closing on --note has no PR, so the gate never applies."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(done_graph, {"id": "ab-doc001", "title": "Docs node", "domain": "docs"})
+    calls: list = []
+    _stub_gh(monkeypatch, None, calls=calls)  # would raise if consulted
+
+    r = CliRunner().invoke(app, ["done", "ab-doc001", "--note", "shipped brief"])
+
+    assert r.exit_code == 0
+    assert calls == [], "a PR-less close must not query gh"
+    entry = _node(done_graph, "ab-doc001")
+    assert entry.get("completed_at") is not None
+    assert entry.get("completion_note") == "shipped brief"
