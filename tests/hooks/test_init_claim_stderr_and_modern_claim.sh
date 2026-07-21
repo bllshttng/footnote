@@ -11,9 +11,13 @@
 #       moved off the ambient python3 path; .init-claim.log is now a transient
 #       stamp-failure log that is removed on success, so it is no longer
 #       asserted here.)
-#   (b) Boundary + AC1-FR: graph.json missing entirely => graph_node_id null
-#       even though the modern claim succeeds (the `-f $_GRAPH_FILE` guard), and
-#       it is written exactly once.
+#   (b) Boundary + AC3-FR: graph.json missing entirely => fail-closed. No
+#       readable graph means no resolvable node means no claim, so graph_node_id
+#       is null (written once) AND no phantom node:ab-<id> lockfile is acquired.
+#       (x-8e98: the guard no longer has an ungrep'd ab- arm; an ab-id resolves
+#       only when it is a real graph entry, matching _resolve_plan_for_blast.)
+#   (c) AC1-HP: an ab-id absent from an existing graph => graph_node_id null AND
+#       no phantom claim (the codex P2 the ab- arm removal closes).
 #
 # Exit codes: 0 pass / 1 assertion failed / 77 skipped (missing deps)
 
@@ -56,6 +60,13 @@ graph_node_id_of() {  # $1 = state file
   grep '^graph_node_id:' "$1" | sed 's/^graph_node_id:[[:space:]]*//' | tr -d '\r'
 }
 
+# Node claims land in the GLOBAL root ($HOME/.fno/claims/), url-encoded as
+# node%3A<id>.lock -- not the project .fno/claims/. Match the id substring so
+# the encoding is not hard-coded. A hit means a phantom claim was acquired.
+node_claim_exists() {  # $1 = HOME dir, $2 = node id
+  ls "$1/.fno/claims/" 2>/dev/null | grep -qi "node.*${2}"
+}
+
 # ── (a) legacy fails, modern wins => node id + captured stderr ────────
 log "(a): legacy-claim failure + modern-claim win => graph_node_id=node, stderr captured"
 
@@ -87,12 +98,14 @@ _count_a="$(grep -c '^graph_node_id:' "$STATE_A")"
 [[ "$_count_a" == "1" ]] || fail "(a): graph_node_id written ${_count_a}x, expected 1 (AC1-FR)"
 pass "(a): graph_node_id written exactly once"
 
-# ── (b) graph.json missing => null even when modern claim wins ────────
-log "(b): graph.json missing => graph_node_id null despite modern-claim win (Boundary guard)"
+# ── (b) graph.json missing => fail-closed: null AND no phantom claim ──
+log "(b): graph.json missing => graph_node_id null AND no claim (fail-closed, x-8e98)"
 
 make_repo TMP_B
 _ALL_TMPS+=("$TMP_B")
-# No graph.json written. Use an ab-<8hex> id so _NODE_ID is set without a graph.
+# No graph.json written. An ab-<8hex> id no longer resolves without a graph:
+# the guard's single arm needs a graph-presence grep, so a missing graph means
+# no resolvable node -> no claim (parity with _resolve_plan_for_blast).
 rm -f "${TMP_B}/home/.fno/graph.json"
 
 (cd "$TMP_B" && \
@@ -115,14 +128,21 @@ _count_b="$(grep -c '^graph_node_id:' "$STATE_B")"
 [[ "$_count_b" == "1" ]] || fail "(b): graph_node_id written ${_count_b}x, expected 1 (AC1-FR)"
 pass "(b): graph_node_id written exactly once"
 
-# ── (c) ab-id absent from an existing graph => null (codex P2 guard) ───
-log "(c): ab-id not present in an existing graph.json => graph_node_id null"
+# No phantom claim: graph_node_id null was already true in the buggy state, so
+# it alone does not prove the fix. Assert the lockfile is absent (AC3-FR).
+if node_claim_exists "${TMP_B}/home" "ab-1100b0b0"; then
+  fail "(b): phantom claim for node:ab-1100b0b0 acquired despite missing graph (fail-open regression)"
+fi
+pass "(b): no phantom claim acquired when graph.json missing (fail-closed)"
+
+# ── (c) ab-id absent from an existing graph => null AND no claim (codex P2) ─
+log "(c): ab-id not present in an existing graph.json => graph_node_id null AND no claim"
 
 make_repo TMP_C
 _ALL_TMPS+=("$TMP_C")
-# Graph exists but does NOT contain the requested ab-id. The legacy claim fails
-# ("node not found") yet the modern lock acquires fine; the node-presence grep
-# must still keep graph_node_id null so no successor is spawned for a bogus node.
+# Graph exists but does NOT contain the requested ab-id. The guard's single arm
+# greps for the id and misses, so the node never resolves: graph_node_id stays
+# null (no successor for a bogus node) AND no phantom claim is acquired (x-8e98).
 cat > "${TMP_C}/home/.fno/graph.json" <<'JSON'
 {"entries":[{"id":"tst-other0","title":"some other node","session_id":null}]}
 JSON
@@ -141,5 +161,11 @@ GNID_C="$(graph_node_id_of "$STATE_C")"
 [[ "$GNID_C" == "null" ]] \
   || fail "(c): expected graph_node_id 'null' for ab-id absent from graph, got '${GNID_C}'"
 pass "(c): graph_node_id null when node id is absent from an existing graph"
+
+# Pin the phantom-claim regression: an absent ab-id must take no claim.
+if node_claim_exists "${TMP_C}/home" "ab-deadbeef"; then
+  fail "(c): phantom claim for node:ab-deadbeef acquired for an id absent from the graph"
+fi
+pass "(c): no phantom claim acquired for an ab-id absent from an existing graph"
 
 log "All init-claim scenarios passed"
