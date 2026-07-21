@@ -2961,6 +2961,9 @@ def cmd_ready(
         "id": e["id"], "title": e.get("title"), "priority": e.get("priority"),
         "domain": e.get("domain"), "project": e.get("project"),
         "cwd": e.get("cwd"), "parent": e.get("parent"),
+        # select_lane_fill's dispatch-time collision gate compares plan file
+        # surfaces; without this it has nothing to read.
+        "plan_path": e.get("plan_path"),
         # x-571f: carry the model pin so the lane-fill dispatcher (select_lane_fill
         # -> _ready_nodes -> `fno backlog ready`) can thread it into the spawn.
         # model_tier rides alongside so the tier resolver sees the annotation.
@@ -7563,11 +7566,12 @@ def cmd_collisions_check(
     """
     from dataclasses import asdict
 
-    from fno.graph.collision import find_collisions
+    from fno.graph.collision import find_collisions, has_file_surface
     from fno.graph.store import read_graph
 
     entries = read_graph(_graph_path())
-    collisions = find_collisions(plan_path, entries, self_id=self_id)
+    evaluated = has_file_surface(plan_path)
+    collisions = find_collisions(plan_path, entries, self_id=self_id) if evaluated else []
 
     if json_output:
         # Drop the private _other_created_at field from JSON output.
@@ -7576,7 +7580,18 @@ def cmd_collisions_check(
             d = asdict(c)
             d.pop("_other_created_at", None)
             payload.append(d)
-        typer.echo(json.dumps(payload, indent=2))
+        typer.echo(json.dumps({
+            "status": "ok" if evaluated else "unevaluated",
+            "collisions": payload,
+        }, indent=2))
+        return
+
+    if not evaluated:
+        typer.echo(
+            f"UNEVALUATED: {plan_path} states no file surface, so nothing was "
+            "compared. Add a '## Files to Modify' or '## File Ownership Map' table.",
+            err=True,
+        )
         return
 
     if not collisions:
