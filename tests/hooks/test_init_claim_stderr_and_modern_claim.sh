@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # test_init_claim_stderr_and_modern_claim.sh
 #
-# init-target-state.sh: stop swallowing the legacy-claim error + let the modern
-# `fno claim` be the authority for graph_node_id.
+# init-target-state.sh: let the modern `fno claim` be the authority for
+# graph_node_id.
 #
 # Covers:
-#   (a) AC1-ERR + defect 2: legacy roadmap-tasks.py claim fails but the modern
-#       `fno claim acquire` wins => graph_node_id is the node id (NOT null) and
-#       the legacy stderr is preserved in .fno/.init-claim.log (NOT /dev/null).
+#   (a) defect 2: the modern `fno claim acquire` wins => graph_node_id is the
+#       node id (NOT null), written exactly once. (The old legacy-claim stderr
+#       capture into .fno/.init-claim.log was removed when the graph lock stamp
+#       moved off the ambient python3 path; .init-claim.log is now a transient
+#       stamp-failure log that is removed on success, so it is no longer
+#       asserted here.)
 #   (b) Boundary + AC1-FR: graph.json missing entirely => graph_node_id null
 #       even though the modern claim succeeds (the `-f $_GRAPH_FILE` guard), and
 #       it is written exactly once.
@@ -83,11 +86,6 @@ pass "(a): graph_node_id falls back to node id when modern claim wins"
 _count_a="$(grep -c '^graph_node_id:' "$STATE_A")"
 [[ "$_count_a" == "1" ]] || fail "(a): graph_node_id written ${_count_a}x, expected 1 (AC1-FR)"
 pass "(a): graph_node_id written exactly once"
-
-# legacy stderr preserved (defect 1 / AC1-ERR)
-CLAIM_LOG_A="${TMP_A}/.fno/.init-claim.log"
-[[ -s "$CLAIM_LOG_A" ]] || fail "(a): legacy-claim stderr not captured to ${CLAIM_LOG_A}"
-pass "(a): legacy-claim stderr captured to .fno/.init-claim.log ($(wc -c < "$CLAIM_LOG_A" | tr -d ' ') bytes)"
 
 # ── (b) graph.json missing => null even when modern claim wins ────────
 log "(b): graph.json missing => graph_node_id null despite modern-claim win (Boundary guard)"
