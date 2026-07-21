@@ -168,4 +168,38 @@ if node_claim_exists "${TMP_C}/home" "ab-deadbeef"; then
 fi
 pass "(c): no phantom claim acquired for an ab-id absent from an existing graph"
 
+# ── (d) config-relocated graph (config.paths.graph_json) resolves ab-id ────
+# The guard greps _GRAPH_FILE, which honors GRAPH_JSON_PATH (config.sh's stub)
+# instead of a hard-coded $HOME/.fno/graph.json. A real ab-id living only in a
+# relocated graph must still resolve (codex P2 on PR #536, x-8e98).
+log "(d): config.paths.graph_json relocation resolves a real ab-id"
+
+make_repo TMP_D
+_ALL_TMPS+=("$TMP_D")
+mkdir -p "${TMP_D}/relocated"
+cat > "${TMP_D}/home/.fno/config.toml" <<EOF
+[paths]
+graph_json = "${TMP_D}/relocated/graph.json"
+EOF
+cat > "${TMP_D}/relocated/graph.json" <<'JSON'
+{"entries":[{"id":"ab-1100b0b0","title":"real node in a relocated graph","session_id":null}]}
+JSON
+printf '{"entries":[]}\n' > "${TMP_D}/home/.fno/graph.json"
+
+(cd "$TMP_D" && \
+  HOME="${TMP_D}/home" \
+  FNO_GLOBAL_SETTINGS_PATH="${TMP_D}/home/.fno/config.toml" \
+  TARGET_START=1 \
+  TARGET_INPUT="ab-1100b0b0" \
+  TARGET_LOCATION_OK="main-acknowledged" \
+  bash "$INIT" >/dev/null 2>&1) \
+  || fail "(d): init exited non-zero"
+
+STATE_D="${TMP_D}/.fno/target-state.md"
+[[ -f "$STATE_D" ]] || fail "(d): target-state.md was not created"
+GNID_D="$(graph_node_id_of "$STATE_D")"
+[[ "$GNID_D" == "ab-1100b0b0" ]] \
+  || fail "(d): expected graph_node_id 'ab-1100b0b0' from the relocated graph, got '${GNID_D}'"
+pass "(d): ab-id in a config-relocated graph resolves (not hard-coded to \$HOME/.fno)"
+
 log "All init-claim scenarios passed"
