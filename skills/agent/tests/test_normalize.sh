@@ -399,18 +399,21 @@ check_eq 'AC4-ERR unknown dash-flag is error' "$(field "$out" status)" 'error'
 # Node slugs + id-free entry modes (ab-f82e8083)
 # ===========================================================================
 
-# --- tier 3 (AC4-HP): bare 8-hex re-prefixes to ab- ---------------------------
+# --- bare hex rides tier 2, never a guessed prefix (x-b948) -------------------
+# Tier 3 used to re-prefix a bare 8-hex token to `ab-`, which minted ids that
+# need not exist and was wrong outright in a repo with a configured prefix. The
+# resolver accepts bare hex directly, so classification hands it over as a query.
 out="$(run '1234abcd')"
-check_eq   'tier3 bare-hex status'   "$(field "$out" status)" 'ok'
-check_eq   'tier3 bare-hex node'     "$(field "$out" node)"   'ab-1234abcd'
-check_contains 'tier3 bare-hex message carries canonical id' "$(field "$out" message)" '/target ab-1234abcd'
+check_eq   'bare hex status'      "$(field "$out" status)"     'ok'
+check_eq   'bare hex not a node'  "$(field "$out" node)"       ''
+check_eq   'bare hex is a query'  "$(field "$out" node_query)" '1234abcd'
+check_not_contains 'bare hex is not re-prefixed to ab-' "$out" 'ab-1234abcd'
 
-# --- tier 3 (AC4-ERR): NOT exactly 8 hex is NOT a bare-hex id ------------------
-# 10 hex chars: falls through to the slug-candidate tier as free text, never a
-# malformed id. node stays empty (no malformed id reaches VALIDATE).
+# Over-long hex is not an id either (the shape caps hex at 8), so it reaches the
+# resolver as a query rather than a malformed id.
 out="$(run '1234abcdef')"
-check_eq   'tier3 10-hex not a node'        "$(field "$out" node)" ''
-check_eq   'tier3 10-hex is a slug-candidate' "$(field "$out" node_query)" '1234abcdef'
+check_eq   '10-hex not a node'        "$(field "$out" node)" ''
+check_eq   '10-hex is a slug-candidate' "$(field "$out" node_query)" '1234abcdef'
 
 # --- tier 2 (AC1-HP): a single slug-shaped token is a slug candidate -----------
 out="$(run 'dashless-spawn')"
@@ -653,6 +656,58 @@ out="$(bash "$NORM" --input 'backend work' -P)"
 check_eq       'bare trailing -P status' "$(field "$out" status)" 'error'
 
 rm -f "$_proj_res"
+
+# --- x-b948: the node-id shape is config-agnostic, not hardcoded to ab- -------
+# run_nofno pins the no-merge posture to the builtin default so the message
+# assertions do not inherit the host repo's dispatch.auto_merge.
+out="$(run_nofno 'x-2aad bg')"
+check_eq 'configured-prefix node classifies'      "$(field "$out" node)" 'x-2aad'
+check_eq 'configured-prefix build mode'           "$(field "$out" payload_mode)" 'build'
+check_eq 'configured-prefix substrate survives'   "$(field "$out" substrate)" 'bg'
+check_eq 'configured-prefix message'              "$(field "$out" message)" '/target x-2aad no-merge'
+
+out="$(run_nofno 'ab-4040eee8')"
+check_eq 'ab- id still classifies (regression)'   "$(field "$out" node)" 'ab-4040eee8'
+check_eq 'ab- id still builds (regression)'       "$(field "$out" payload_mode)" 'build'
+
+# Hex is capped at 8, so an over-long run is not an id - the resolver decides.
+out="$(run_nofno 'x-0123456789ab')"
+check_eq 'over-long hex is not a node'            "$(field "$out" node)" ''
+check_eq 'over-long hex becomes a query'          "$(field "$out" node_query)" 'x-0123456789ab'
+check_eq 'over-long hex seeds'                    "$(field "$out" payload_mode)" 'seed'
+
+# Bare hex rides the tier-2 slug lane (tier 3 deleted): normalize must NOT
+# re-prefix it, and the id the resolver returns must classify as tier 1 - that
+# is what terminates the SKILL's re-normalize loop.
+out="$(run_nofno 'b948')"
+check_eq 'bare hex is a query, not a guessed id'  "$(field "$out" node)" ''
+check_eq 'bare hex query value'                   "$(field "$out" node_query)" 'b948'
+out="$(run_nofno 'x-b948')"
+check_eq 'resolved id classifies as tier 1'       "$(field "$out" node)" 'x-b948'
+check_eq 'resolved id terminates as a build'      "$(field "$out" payload_mode)" 'build'
+
+out="$(run_nofno 'dead code cleanup')"
+check_eq 'hex-led prose stays a seed'             "$(field "$out" payload_mode)" 'seed'
+check_eq 'hex-led prose names no node'            "$(field "$out" node)" ''
+check_eq 'hex-led prose message verbatim'         "$(field "$out" message)" 'dead code cleanup'
+
+# Passthrough extraction reads a configured-prefix id out of a plan filename.
+out="$(run_nofno '/target internal/fno/plans/20260711-dark-mode-x-8af8.md')"
+check_eq 'passthrough extracts configured id'     "$(field "$out" node)" 'x-8af8'
+check_eq 'passthrough mode'                       "$(field "$out" payload_mode)" 'passthrough'
+
+# The flag-scan mirrors tier 1, so a glued flag on a configured-prefix build
+# refuses just as it always has on an ab- build.
+out="$(run_nofno 'x-2aad --yolo')"
+check_eq 'flag-scan fires on configured prefix'   "$(field "$out" status)" 'error'
+
+# LC_ALL=C: BSD sed/tr abort on bytes invalid in UTF-8 under a UTF-8 locale,
+# which silently truncated the derived name.
+# field() runs the harness's own sed over a message= line carrying the raw byte,
+# so it needs the C locale too or it prints the very error under test.
+out="$(LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 run_nofno "$(printf 'task \x80 text')" 2>/dev/null)"
+check_eq       'invalid utf8 byte does not abort' "$(LC_ALL=C field "$out" status)" 'ok'
+check_contains 'invalid utf8 keeps the full name' "$(LC_ALL=C field "$out" name)" 'text'
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

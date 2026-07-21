@@ -471,6 +471,64 @@ fi
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider claude --input "ab-deadbeef -i")"
 [[ "$(field "$OUT" status)" == "error" ]] && pass "P2-2 node build still fails loud on a glued -i" || fail "build -i scan: $OUT"
 
+# --- x-b948: node-id detection is config-agnostic, not hardcoded to ab- -------
+# PATH="$FBIN:..." pins the builtin no-merge posture so the message assertion
+# does not inherit the host repo's dispatch.auto_merge.
+norm_b948() { PATH="$FBIN:$PATH" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "$1"; }
+
+OUT="$(norm_b948 'x-2aad bg')"
+if [[ "$(field "$OUT" node)" == "x-2aad" ]] \
+   && [[ "$(field "$OUT" payload_mode)" == "build" ]] \
+   && [[ "$(field "$OUT" substrate)" == "bg" ]] \
+   && [[ "$(field "$OUT" message)" == "/target x-2aad no-merge" ]]; then
+  pass "x-b948 configured-prefix id builds via /target"
+else
+  fail "x-b948 configured-prefix build: $OUT"
+fi
+
+OUT="$(norm_b948 'ab-4040eee8')"
+[[ "$(field "$OUT" node)" == "ab-4040eee8" && "$(field "$OUT" payload_mode)" == "build" ]] \
+  && pass "x-b948 ab- id unchanged (regression guard)" || fail "x-b948 ab- regression: $OUT"
+
+# Hex caps at 8: a longer run is not an id, so the resolver decides on the
+# SKILL pass rather than normalize guessing.
+OUT="$(norm_b948 'x-0123456789ab')"
+[[ -z "$(field "$OUT" node)" && "$(field "$OUT" payload_mode)" == "seed" ]] \
+  && pass "x-b948 over-long hex is not a node" || fail "x-b948 over-long hex: $OUT"
+
+# Tier 3 deleted: bare hex must become a query for the format-agnostic resolver,
+# never a blind ab- re-prefix that could name a node that does not exist.
+OUT="$(norm_b948 'b948')"
+[[ -z "$(field "$OUT" node)" && "$(field "$OUT" node_query)" == "b948" ]] \
+  && pass "x-b948 bare hex queries the resolver, no prefix guess" || fail "x-b948 bare hex: $OUT"
+# The id the resolver returns must classify as tier 1 - this terminates the
+# SKILL's re-normalize loop.
+OUT="$(norm_b948 'x-b948')"
+[[ "$(field "$OUT" payload_mode)" == "build" ]] \
+  && pass "x-b948 resolved id classifies tier 1 (loop terminates)" || fail "x-b948 re-normalize: $OUT"
+
+OUT="$(norm_b948 'dead code cleanup')"
+[[ -z "$(field "$OUT" node)" && "$(field "$OUT" message)" == "dead code cleanup" ]] \
+  && pass "x-b948 hex-led prose stays a verbatim seed" || fail "x-b948 hex-led prose: $OUT"
+
+OUT="$(norm_b948 '/target internal/fno/plans/20260711-dark-mode-x-8af8.md')"
+[[ "$(field "$OUT" node)" == "x-8af8" && "$(field "$OUT" payload_mode)" == "passthrough" ]] \
+  && pass "x-b948 passthrough extracts a configured-prefix id" || fail "x-b948 passthrough: $OUT"
+
+# The flag-scan mirrors tier 1, so it now fires for a configured-prefix build too.
+OUT="$(norm_b948 'x-2aad --yolo')"
+[[ "$(field "$OUT" status)" == "error" ]] \
+  && pass "x-b948 flag-scan fires on a configured-prefix build" || fail "x-b948 flag-scan: $OUT"
+
+# LC_ALL=C guard: BSD sed/tr abort on bytes invalid in UTF-8 under a UTF-8
+# locale, which silently truncated the derived name.
+OUT="$(LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PATH="$FBIN:$PATH" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" \
+       bash "$NORM" --input "$(printf 'task \x80 text')" 2>/dev/null)"
+# field() runs the harness's own sed over a message= line carrying the raw byte,
+# so it needs the C locale too or it prints the very error under test.
+[[ "$(LC_ALL=C field "$OUT" status)" == "ok" && "$(LC_ALL=C field "$OUT" name)" == *text* ]] \
+  && pass "x-b948 invalid-utf8 byte does not abort or truncate" || fail "x-b948 locale guard: $OUT"
+
 echo ""
 echo "test_agent_normalize: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
