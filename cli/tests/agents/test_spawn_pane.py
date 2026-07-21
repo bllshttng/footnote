@@ -93,7 +93,7 @@ def test_opencode_spawn_stamps_the_captured_session_id(
     from fno.agents.registry import load_registry
 
     ses = "ses_09679f284ffeJv7NdBAoLQLnLZ"
-    _spawn(
+    result, _ = _spawn(
         monkeypatch, tmp_path,
         provider="opencode",
         runner=FakeRunner(db_stdout=f"id\n{ses}\n"),
@@ -101,8 +101,11 @@ def test_opencode_spawn_stamps_the_captured_session_id(
     rows = load_registry()
     assert [r.harness_session_id for r in rows] == [ses]
     # US8: opencode resumes off harness_session_id, so short_id stays empty -
-    # the jobId population is claude-only.
+    # the jobId population is claude-only. Assert BOTH the row and the
+    # receipt-facing result: a regressed claude guard would otherwise hand out a
+    # non-hex `ses_0967` result handle while the row-only check still passed.
     assert rows[0].short_id == ""
+    assert result.short_id == ""
 
 
 def test_opencode_spawn_never_claims_another_rows_session_id(
