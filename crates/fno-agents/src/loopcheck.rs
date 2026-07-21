@@ -3902,6 +3902,7 @@ fn async_wait_class(
 /// invocations until the watcher fires. The `gh pr checks` shape is a template
 /// (gh's `--watch` exit varies by version); the design depends only on the task
 /// EXITING, never on its exit code.
+///
 /// The bound uses shell builtins, never `timeout(1)`: stock macOS has neither
 /// it nor `gtimeout`, so naming it makes the watcher no-op and the session idle
 /// forever on a wait that never started.
@@ -4567,7 +4568,7 @@ mod tests {
             assert!(
                 !tail.starts_with(|c: char| c.is_ascii_digit()),
                 "bare timeout invocation: ...{}",
-                &tail[..tail.len().min(60)]
+                tail.chars().take(60).collect::<String>()
             );
         }
     }
