@@ -244,3 +244,123 @@ def test_catchup_fresh_when_all_marked(tmp_path):
         sync=lambda pr, **_kw: pytest.fail("must not sync a current canonical"),
     )
     assert res.outcome == "fresh"
+
+
+def test_catchup_survives_a_wedged_events_bus(tmp_path, monkeypatch):  # AC5-FR
+    """The cure must survive the disease: the outage was an events-bus deadlock."""
+    import fno.events as events
+
+    monkeypatch.setattr(
+        events, "append_event",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("lock timeout")),
+        raising=False,
+    )
+    res = sc.run_sync_catchup(
+        settings=_pm(), canonical_root=tmp_path, runner=_git(0),
+        gh_list=_gh([_merged(52, "ccc", 30), _merged(51, "bbb", 40)]),
+        sync=lambda pr, **_kw: (_stamp(tmp_path, "ccc"), 0)[1],
+    )
+    assert res.outcome == "synced"
+    assert _marker(tmp_path, "bbb").exists()
+
+
+# --- the three firing legs --------------------------------------------------
+
+
+def _tick_settings(**over):
+    s = _pm(**over)
+    s.pr_watch = SimpleNamespace(max_age_days=7, retries=3)
+    s.recovery = SimpleNamespace(enabled=False)
+    return s
+
+
+def _run_tick(monkeypatch, catchup_result):
+    """Invoke `fno pr-watch tick` with everything but the catch-up leg stubbed."""
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as pw
+    from fno.pr import _sync_canonical as sc_mod
+
+    monkeypatch.setattr(pw, "load_settings", _tick_settings)
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: SimpleNamespace(
+            lock_held=False, lock_holder=None, open_prs=0, acted=0, skipped=0
+        ),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(pw, "_notify_parked", lambda msg: calls.append(msg))
+    monkeypatch.setattr(sc_mod, "run_sync_catchup", lambda **_kw: catchup_result)
+    result = CliRunner().invoke(pw.cli, ["tick"])
+    return result, calls
+
+
+def test_tick_alarms_only_when_catchup_fails(monkeypatch):  # AC8-HP
+    res, notes = _run_tick(
+        monkeypatch, sc.CatchupResult("failed", 52, detail="exit 1")
+    )
+    assert res.exit_code == 0
+    assert "ALARM" in res.output and "#52" in res.output
+    assert len(notes) == 1
+
+
+def test_tick_is_silent_when_catchup_succeeds(monkeypatch):  # AC8-HP, no cry-wolf
+    res, notes = _run_tick(monkeypatch, sc.CatchupResult("synced", 52, swept=2))
+    assert res.exit_code == 0
+    assert "sync catch-up: synced" in res.output  # the leg ran (not vacuous)
+    assert "ALARM" not in res.output
+    assert notes == []
+
+
+def test_tick_survives_a_catchup_exception(monkeypatch):  # US2 non-fatal
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as pw
+    from fno.pr import _sync_canonical as sc_mod
+
+    monkeypatch.setattr(pw, "load_settings", _tick_settings)
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: SimpleNamespace(
+            lock_held=False, lock_holder=None, open_prs=0, acted=0, skipped=0
+        ),
+    )
+    monkeypatch.setattr(
+        sc_mod, "run_sync_catchup",
+        lambda **_kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    res = CliRunner().invoke(pw.cli, ["tick"])
+    assert res.exit_code == 0
+    assert "pr-watch tick:" in res.output  # the tick itself still reported
+
+
+def test_tick_prints_nothing_when_disabled(monkeypatch):  # AC6-EDGE
+    res, notes = _run_tick(monkeypatch, sc.CatchupResult("disabled"))
+    assert "sync catch-up" not in res.output
+    assert notes == []
+
+
+def test_doctor_reports_staleness(monkeypatch):  # AC2-HP
+    from fno import doctor
+    from fno.pr import _sync_canonical as sc_mod
+
+    monkeypatch.setattr(
+        sc_mod, "sync_staleness",
+        lambda **_kw: sc.SyncStaleness("stale", (), 7, "PR #50 merged 48h ago"),
+    )
+    health = doctor._post_merge_sync_health()
+    assert health["stale"] is True
+    assert "#50" in health["detail"]
+
+
+def test_doctor_health_never_raises(monkeypatch):
+    from fno import doctor
+    from fno.pr import _sync_canonical as sc_mod
+
+    monkeypatch.setattr(
+        sc_mod, "sync_staleness",
+        lambda **_kw: (_ for _ in ()).throw(RuntimeError("gh exploded")),
+    )
+    assert doctor._post_merge_sync_health() == {
+        "state": "unknown", "stale": False, "behind": None, "detail": ""
+    }

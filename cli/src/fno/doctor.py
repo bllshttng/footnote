@@ -733,6 +733,29 @@ def _groom_health() -> dict[str, Any]:
         return {"state": "unknown", "hours": None, "stale": False, "agent_installed": False}
 
 
+def _post_merge_sync_health() -> dict[str, Any]:
+    """Is the canonical checkout current with recently-merged PRs? (x-8a26)
+
+    The failure class here is "the daemon runs but does nothing" - five merges
+    went unsynced while process-liveness checks all read green. Only outcome
+    truth (sync markers, commit distance) can see it, which is what the
+    predicate below reads. Read-only, so it reports regardless of
+    ``post_merge.auto_run``: reporting is not acting.
+    """
+    try:
+        from fno.pr._sync_canonical import sync_staleness
+
+        st = sync_staleness()
+        return {
+            "state": st.state,
+            "stale": st.state == "stale",
+            "behind": st.behind,
+            "detail": st.detail,
+        }
+    except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
+        return {"state": "unknown", "stale": False, "behind": None, "detail": ""}
+
+
 def _launch_agent_failures() -> dict[str, Any]:
     """Every ``sh.fno.*`` LaunchAgent whose LAST EXIT was nonzero.
 
@@ -1127,6 +1150,16 @@ def _emit_human(
             f"fno doctor: backlog grooming last ran {gr['hours']:.0f}h ago "
             "(the daily pass is not running); check `launchctl list | grep sh.fno.groom` "
             "and ~/.fno/groom.err.log."
+        )
+
+    # Canonical-sync freshness (x-8a26). Advisory like grooming: the alarm
+    # exists because process-liveness reads green through this exact failure.
+    pms = result.get("post_merge_sync") or {}
+    if pms.get("stale"):
+        out(
+            f"fno doctor: the canonical checkout is not synced with recent merges "
+            f"({pms.get('detail')}); run `fno pr sync-canonical --pr-number <n>` "
+            "and check ~/.fno/pr-watcher.err.log."
         )
 
     agents = result.get("launch_agents") or {}
@@ -1631,6 +1664,7 @@ def doctor_command(
     # LaunchAgent DOES change the exit code - an installed-but-dead agent is
     # exactly the silence this check exists to break.
     result["groom"] = _groom_health()
+    result["post_merge_sync"] = _post_merge_sync_health()
     result["launch_agents"] = _launch_agent_failures()
 
     if json_out:

@@ -221,6 +221,35 @@ def tick() -> None:
         except Exception as exc:  # noqa: BLE001 - never let recovery break pr-watch
             log.warning("pr-watch: recovery sweep failed: %s", exc)
 
+    # Canonical-sync catch-up (x-8a26). The dispatch above is event-time-only:
+    # it acts on merges it DETECTS, so a merge that landed while the daemon was
+    # wedged is never synced by it. This leg is keyed on outcome instead - it
+    # asks whether recent merges have markers, not whether we saw them happen.
+    # Wrapped exactly like the recovery sweep: a catch-up failure logs and never
+    # breaks the tick. auto_run gating lives inside run_sync_catchup.
+    try:
+        from fno.pr._sync_canonical import run_sync_catchup
+
+        res = run_sync_catchup(settings=settings)
+        if res.outcome != "disabled":
+            typer.echo(f"sync catch-up: {res.outcome}")
+        # Detected AND failed is the alarm case: a successful catch-up is the
+        # system working, and alarming on it is how a check trains people to
+        # ignore it. The notify is best-effort and never load-bearing.
+        if res.outcome == "failed":
+            typer.echo(
+                f"ALARM: canonical sync is behind and catch-up failed for PR "
+                f"#{res.pr_number} ({res.detail}). The canonical checkout and its "
+                f"installed tooling are stale; run `fno pr sync-canonical "
+                f"--pr-number {res.pr_number}` by hand.",
+                err=True,
+            )
+            _notify_parked(
+                f"canonical sync stuck: PR #{res.pr_number} catch-up failed"
+            )
+    except Exception as exc:  # noqa: BLE001 - never let catch-up break pr-watch
+        log.warning("pr-watch: sync catch-up failed: %s", exc)
+
 
 # ---------------------------------------------------------------------------
 # install

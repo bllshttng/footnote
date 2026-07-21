@@ -6709,6 +6709,23 @@ def cmd_reconcile(
         except Exception as exc:  # noqa: BLE001 - never abort the sweep
             typer.echo(f"warning: revert detection skipped: {exc}", err=True)
 
+    # Canonical-sync catch-up (x-8a26). reconcile auto-fires on SessionStart, so
+    # this is the leg that breaks the circularity: when the pr-watch daemon is
+    # dead AGAIN, the next interactive session catches the canonical up instead
+    # of the outage waiting for a human to notice. Same self-heal posture as
+    # hooks/groom-self-heal-session-start.sh. Skipped under --dry-run (a preview
+    # must mutate nothing) and strictly non-fatal to the sweep.
+    if not dry_run:
+        try:
+            from fno.pr._sync_canonical import run_sync_catchup
+
+            _cu = run_sync_catchup()
+            if _cu.outcome not in ("disabled", "fresh") and not json_out:
+                typer.echo(f"sync catch-up: {_cu.outcome}", err=True)
+        except Exception as _cu_exc:  # noqa: BLE001 - never abort the sweep
+            if not json_out:
+                typer.echo(f"warning: sync catch-up skipped: {_cu_exc}", err=True)
+
     if json_out:
         payload = {
             "dry_run": dry_run,
