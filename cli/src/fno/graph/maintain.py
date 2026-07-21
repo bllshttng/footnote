@@ -709,13 +709,23 @@ def node_fingerprint(node: dict) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+# The exact machine trailer ``land`` writes into a retro-triage node's details
+# (mirrors ``fno.retro.dedup._TRAILER_RE``). Matched locally rather than imported
+# so ``graph`` does not depend on ``fno.retro`` (the dependency runs retro ->
+# graph). Anchored to the full HTML-comment shape, NOT a bare ``retro-triage
+# source_pr=`` substring, so ordinary prose that merely mentions the trailer
+# cannot masquerade as a filed node (codex review, PR #530).
+_RETRO_TRAILER_RE = re.compile(
+    r"<!--\s*retro-triage\s+source_pr=(?:\d+|None)\s+finding_hash=[0-9a-f]+\s*-->"
+)
+
+
 def is_retro_triage_node(node: dict) -> bool:
-    """True for a node retro-triage filed: land writes the machine trailer
+    """True for a node retro-triage filed: ``land`` writes the machine trailer
     ``<!-- retro-triage source_pr=N finding_hash=H -->`` into its details. Detect
-    the class by that stable trailer substring - a boolean needs no regex, and a
-    substring check avoids coupling ``graph`` to ``fno.retro.dedup`` (the
-    dependency runs retro -> graph, not the reverse)."""
-    return "retro-triage source_pr=" in str(node.get("details") or "")
+    the class by that full trailer, so a node whose prose merely discusses
+    retro-triage is not falsely age-exempted."""
+    return _RETRO_TRAILER_RE.search(str(node.get("details") or "")) is not None
 
 
 def select_validity_candidates(

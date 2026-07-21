@@ -505,6 +505,14 @@ def test_is_retro_triage_node():
     # Never raises on a missing / non-str details field.
     assert m.is_retro_triage_node({}) is False
     assert m.is_retro_triage_node({"details": None}) is False
+    # Prose that merely mentions the marker, without the full HTML-comment
+    # trailer, is NOT a filed retro node (codex review, unanchored-substring P2).
+    assert m.is_retro_triage_node(
+        {"details": "we file a `retro-triage source_pr=` trailer into details"}
+    ) is False
+    assert m.is_retro_triage_node(
+        {"details": "<!-- retro-triage source_pr=525 -->"}  # missing finding_hash
+    ) is False
 
 
 def test_select_validity_retro_node_age_exempt():
