@@ -17,6 +17,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # source so file-path invocations of _session_cost resolve `from fno.cost...`.
 export PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:${PYTHONPATH}}"
 REGISTER_PY="$REPO_ROOT/cli/src/fno/cost/_register.py"
+# _register imports fno.config, which needs tomli_w/pydantic. Ambient python3
+# has neither, so every invocation must use the project interpreter. A worktree
+# has no .venv of its own; fall back to uv, which resolves the shared one.
+PY="$REPO_ROOT/cli/.venv/bin/python"
+[[ -x "$PY" ]] || PY="$(cd "$REPO_ROOT/cli" 2>/dev/null && uv run python -c 'import sys; print(sys.executable)' 2>/dev/null)"
+[[ -n "${PY:-}" && -x "$PY" ]] || PY="python3"
 TMP=$(mktemp -d -t register-task-test.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -71,7 +77,7 @@ run_change4_with_node() {
 
     # Run register-task.py from inside the sandbox so root_path becomes sandbox.
     HOME="$sandbox" \
-        python3 "$REGISTER_PY" \
+        "$PY" "$REGISTER_PY" \
         "$sandbox/.fno/target-state.md" \
         "transcript-uuid-abc" \
         > "$sandbox/output.json" 2> "$sandbox/stderr.log"
@@ -85,7 +91,7 @@ run_change4_with_node() {
 
     # AC1-HP: scalar session_id set
     local sid_val
-    sid_val=$(python3 -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(e.get('session_id') or '')" "$ledger")
+    sid_val=$("$PY" -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(e.get('session_id') or '')" "$ledger")
     if [[ "$sid_val" == "20260429T000000Z-1234-aabbcc" ]]; then
         pass "C4-AC1-HP: ledger entry has scalar session_id from target-state"
     else
@@ -94,7 +100,7 @@ run_change4_with_node() {
 
     # AC2-HP: graph_node_id set
     local node_val
-    node_val=$(python3 -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(e.get('graph_node_id') or '')" "$ledger")
+    node_val=$("$PY" -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(e.get('graph_node_id') or '')" "$ledger")
     if [[ "$node_val" == "ab-deadbeef" ]]; then
         pass "C4-AC2-HP: ledger entry has graph_node_id from target-state body"
     else
@@ -110,7 +116,7 @@ run_change4_no_node() {
         "20260429T010101Z-9999-bbccdd" ""
 
     HOME="$sandbox" \
-        python3 "$REGISTER_PY" \
+        "$PY" "$REGISTER_PY" \
         "$sandbox/.fno/target-state.md" \
         "transcript-uuid-no-node" \
         > "$sandbox/output.json" 2> "$sandbox/stderr.log"
@@ -123,7 +129,7 @@ run_change4_no_node() {
 
     # AC3-EDGE: missing graph_node_id stays null (do not synthesize one)
     local node_val
-    node_val=$(python3 -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(repr(e.get('graph_node_id')))" "$ledger")
+    node_val=$("$PY" -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(repr(e.get('graph_node_id')))" "$ledger")
     if [[ "$node_val" == "None" ]]; then
         pass "C4-AC3-EDGE: missing graph_node_id stays null in entry"
     else
@@ -158,7 +164,7 @@ Some notes mention `graph_node_id: ab-old (deprecated)` in passing.
 EOF
 
     HOME="$sandbox" \
-        python3 "$REGISTER_PY" \
+        "$PY" "$REGISTER_PY" \
         "$sandbox/.fno/target-state.md" \
         "transcript-uuid-prose" \
         > "$sandbox/output.json" 2> "$sandbox/stderr.log"
@@ -167,7 +173,7 @@ EOF
     [[ -f "$ledger" ]] || { fail "C4-AC4-EDGE: ledger not written"; return; }
 
     local node_val
-    node_val=$(python3 -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(repr(e.get('graph_node_id')))" "$ledger")
+    node_val=$("$PY" -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(repr(e.get('graph_node_id')))" "$ledger")
     # The prose line has `(deprecated)` which fails the ab-[0-9a-f]{6,}$
     # shape check. graph_node_id must stay None, NOT be set to the bogus value.
     if [[ "$node_val" == "None" ]]; then
@@ -225,7 +231,7 @@ print(json.dumps({"matched_id": node.get("id") if node else None}))
 PYEOF
 
     local result
-    result=$(python3 "$sandbox/harness.py" 2>&1)
+    result=$("$PY" "$sandbox/harness.py" 2>&1)
     if [[ "$result" == *'"matched_id": "ab-relpath"'* ]]; then
         pass "C2-AC1-HP: matcher resolves abs ledger path against rel graph path"
     else
@@ -268,7 +274,7 @@ print(json.dumps({"matched_id": node.get("id") if node else None}))
 PYEOF
 
     local result
-    result=$(python3 "$sandbox/harness.py" 2>&1)
+    result=$("$PY" "$sandbox/harness.py" 2>&1)
     if [[ "$result" == *'"matched_id": "ab-id-match"'* ]]; then
         pass "C2-AC2-HP: matcher prefers graph_node_id over plan_path"
     else
@@ -298,7 +304,7 @@ print(json.dumps({"matched": node is not None}))
 PYEOF
 
     local result
-    result=$(python3 "$sandbox/harness.py" 2>&1)
+    result=$("$PY" "$sandbox/harness.py" 2>&1)
     if [[ "$result" == *'"matched": false'* ]]; then
         pass "C2-AC3-EDGE: matcher returns None when nothing matches"
     else
@@ -323,7 +329,7 @@ run_commit_a_distinct_scalars_append() {
 
     # First entry: session target-A
     make_state_file "$sandbox/.fno/target-state.md" "target-A" ""
-    HOME="$sandbox" python3 "$REGISTER_PY" \
+    HOME="$sandbox" "$PY" "$REGISTER_PY" \
         "$sandbox/.fno/target-state.md" "transcript-uuid-A" \
         > "$sandbox/out1.log" 2> "$sandbox/err1.log"
 
@@ -332,13 +338,13 @@ run_commit_a_distinct_scalars_append() {
 
     # Second entry: session target-B
     make_state_file "$sandbox/.fno/target-state.md" "target-B" ""
-    HOME="$sandbox" python3 "$REGISTER_PY" \
+    HOME="$sandbox" "$PY" "$REGISTER_PY" \
         "$sandbox/.fno/target-state.md" "transcript-uuid-B" \
         > "$sandbox/out2.log" 2> "$sandbox/err2.log"
 
     local ledger="$sandbox/.fno/ledger.json"
     local count
-    count=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['entries']))" "$ledger")
+    count=$("$PY" -c "import json,sys; print(len(json.load(open(sys.argv[1]))['entries']))" "$ledger")
     if [[ "$count" == "2" ]]; then
         pass "cA-AC1-HP: distinct scalar session_ids both appended"
     else
@@ -352,21 +358,21 @@ run_commit_a_same_scalar_rejected() {
     mkdir -p "$sandbox/.fno"
 
     make_state_file "$sandbox/.fno/target-state.md" "target-A" ""
-    HOME="$sandbox" python3 "$REGISTER_PY" \
+    HOME="$sandbox" "$PY" "$REGISTER_PY" \
         "$sandbox/.fno/target-state.md" "transcript-uuid-A" \
         > "$sandbox/out1.log" 2> "$sandbox/err1.log"
 
     sed -i.bak 's/^ledger_updated: true$/ledger_updated: false/' "$sandbox/.fno/target-state.md"
 
     # Second invocation with the SAME target-state session_id -> reject
-    HOME="$sandbox" python3 "$REGISTER_PY" \
+    HOME="$sandbox" "$PY" "$REGISTER_PY" \
         "$sandbox/.fno/target-state.md" "transcript-uuid-A2" \
         > "$sandbox/out2.log" 2> "$sandbox/err2.log"
 
     local ledger="$sandbox/.fno/ledger.json"
     local count
-    count=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['entries']))" "$ledger")
-    if [[ "$count" == "1" ]] && grep -q "Skipping duplicate entry for target session_id" "$sandbox/err2.log"; then
+    count=$("$PY" -c "import json,sys; print(len(json.load(open(sys.argv[1]))['entries']))" "$ledger")
+    if [[ "$count" == "1" ]] && grep -q "Skipping duplicate entry for target fno_id" "$sandbox/err2.log"; then
         pass "cA-AC2-ERR: duplicate scalar session_id rejected with explicit stderr"
     else
         fail "cA-AC2-ERR: expected 1 entry + stderr message; count=$count stderr=$(cat "$sandbox/err2.log")"
@@ -398,13 +404,13 @@ run_commit_a_legacy_null_does_not_dedupe() {
 JSON
 
     make_state_file "$sandbox/.fno/target-state.md" "target-B" ""
-    HOME="$sandbox" python3 "$REGISTER_PY" \
+    HOME="$sandbox" "$PY" "$REGISTER_PY" \
         "$sandbox/.fno/target-state.md" "transcript-uuid-shared" \
         > "$sandbox/out.log" 2> "$sandbox/err.log"
 
     local ledger="$sandbox/.fno/ledger.json"
     local count
-    count=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['entries']))" "$ledger")
+    count=$("$PY" -c "import json,sys; print(len(json.load(open(sys.argv[1]))['entries']))" "$ledger")
     if [[ "$count" == "2" ]]; then
         pass "cA-AC4-EDGE: legacy null-scalar entry does NOT block scalar-keyed append"
     else
@@ -423,17 +429,17 @@ run_commit_a_quick_entry_dedup_symmetric() {
     mkdir -p "$fake_home/.fno"
 
     # Use --type so build_quick_entry is invoked (no target-state path).
-    HOME="$fake_home" python3 "$REGISTER_PY" \
+    HOME="$fake_home" "$PY" "$REGISTER_PY" \
         --type think --title "first" --session "quick-sid-1" \
         > "$sandbox/out1.log" 2> "$sandbox/err1.log"
-    HOME="$fake_home" python3 "$REGISTER_PY" \
+    HOME="$fake_home" "$PY" "$REGISTER_PY" \
         --type think --title "second" --session "quick-sid-1" \
         > "$sandbox/out2.log" 2> "$sandbox/err2.log"
 
     local ledger="$fake_home/.fno/ledger.json"
     local count
-    count=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['entries']))" "$ledger")
-    if [[ "$count" == "1" ]] && grep -q "Skipping duplicate entry for target session_id" "$sandbox/err2.log"; then
+    count=$("$PY" -c "import json,sys; print(len(json.load(open(sys.argv[1]))['entries']))" "$ledger")
+    if [[ "$count" == "1" ]] && grep -q "Skipping duplicate entry for target fno_id" "$sandbox/err2.log"; then
         pass "cA-AC-quick: build_quick_entry sets scalar session_id; dedup rejects duplicate"
     else
         fail "cA-AC-quick: expected 1 entry + stderr message; count=$count stderr=$(cat "$sandbox/err2.log")"
@@ -457,7 +463,7 @@ make_worktree_fixture() {
     local fx_root="$1"
     # Canonicalize fx_root via Python so macOS /var -> /private/var symlinks
     # don't trip equality checks (git rev-parse returns the resolved path).
-    fx_root=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$fx_root")
+    fx_root=$("$PY" -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$fx_root")
     REPO_ROOT_FIXTURE="$fx_root/repo"
     WORKTREE_FIXTURE="$fx_root/worktree-x"
 
@@ -485,13 +491,13 @@ run_commit_b_root_path_in_worktree() {
 
     # Run from the worktree so git resolves toplevel to the worktree path.
     HOME="$sandbox" \
-        bash -c "cd '$WORKTREE_FIXTURE' && python3 '$REGISTER_PY' '$WORKTREE_FIXTURE/.fno/target-state.md' 'transcript-cB-1'" \
+        bash -c "cd '$WORKTREE_FIXTURE' && "$PY" '$REGISTER_PY' '$WORKTREE_FIXTURE/.fno/target-state.md' 'transcript-cB-1'" \
         > "$sandbox/out.log" 2> "$sandbox/err.log"
 
     # AC1-HP: root_path equals the worktree top, not the canonical repo top.
     local ledger="$sandbox/.fno/ledger.json"
     local root_val
-    root_val=$(python3 -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(e.get('root_path') or '')" "$ledger")
+    root_val=$("$PY" -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(e.get('root_path') or '')" "$ledger")
     if [[ "$root_val" == "$WORKTREE_FIXTURE" ]]; then
         pass "cB-AC1-HP: root_path equals worktree top in a worktree session"
     else
@@ -500,18 +506,20 @@ run_commit_b_root_path_in_worktree() {
 
     # AC7-INV: entry["worktree"] is None.
     local wt_val
-    wt_val=$(python3 -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(repr(e.get('worktree')))" "$ledger")
+    wt_val=$("$PY" -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(repr(e.get('worktree')))" "$ledger")
     if [[ "$wt_val" == "None" ]]; then
         pass "cB-AC7-INV: entry['worktree'] is None unconditionally"
     else
         fail "cB-AC7-INV: expected None, got $wt_val"
     fi
 
-    # AC5-FR: project-local ledger.json went to the worktree, not the canonical repo.
+    # AC5-FR: the ledger has a single global writer. The former project-local
+    # dual-write was the split-brain that corrupted node-level joins, so
+    # neither the worktree nor the canonical repo may grow a stray ledger.
     if [[ -f "$WORKTREE_FIXTURE/.fno/ledger.json" ]]; then
-        pass "cB-AC5-FR: project-local ledger.json written to worktree path"
+        fail "cB-AC5-FR: project-local ledger leaked into worktree"
     else
-        fail "cB-AC5-FR: worktree ledger.json missing"
+        pass "cB-AC5-FR: no project-local ledger written to worktree path"
     fi
     if [[ -f "$REPO_ROOT_FIXTURE/.fno/ledger.json" ]]; then
         fail "cB-AC5-FR: project-local ledger leaked into canonical repo"
@@ -537,7 +545,7 @@ os.chdir("$WORKTREE_FIXTURE")
 print(rt._resolve_repo_root())
 PYEOF
     local result
-    result=$(python3 "$sandbox/harness.py" 2>&1 | tail -1)
+    result=$("$PY" "$sandbox/harness.py" 2>&1 | tail -1)
     if [[ "$result" == "$REPO_ROOT_FIXTURE" ]]; then
         pass "cB-AC6-INV: _resolve_repo_root returns canonical repo from inside worktree"
     else
@@ -573,7 +581,7 @@ ledger_updated: false
 EOF
 
     HOME="$sandbox" \
-        bash -c "cd '$WORKTREE_FIXTURE' && python3 '$REGISTER_PY' '$WORKTREE_FIXTURE/.fno/target-state.md' 'transcript-cB-emit'" \
+        bash -c "cd '$WORKTREE_FIXTURE' && "$PY" '$REGISTER_PY' '$WORKTREE_FIXTURE/.fno/target-state.md' 'transcript-cB-emit'" \
         > "$sandbox/out.log" 2> "$sandbox/err.log"
 
     # Event MUST land in the worktree's events.jsonl, not the canonical repo's.
@@ -627,9 +635,9 @@ run_commit_c_since_filters_before_cutoff() {
     cp "$fx" "$fake_home/.claude/projects/test/11111111-2222-3333-4444-555555555555.jsonl"
 
     local out
-    out=$(HOME="$fake_home" python3 "$SESSION_COST_PY" --json --since 2026-05-13T22:00:00Z 11111111-2222-3333-4444-555555555555 2>&1)
+    out=$(HOME="$fake_home" "$PY" "$SESSION_COST_PY" --json --since 2026-05-13T22:00:00Z 11111111-2222-3333-4444-555555555555 2>&1)
     local total_in
-    total_in=$(echo "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['tokens']['input'])" 2>/dev/null || echo "ERR")
+    total_in=$(echo "$out" | "$PY" -c "import json,sys; d=json.load(sys.stdin); print(d['tokens']['input'])" 2>/dev/null || echo "ERR")
 
     # Expected: only the 22:30 entry counted (2000 input tokens). The
     # 21:00 entry is before cutoff; the no-timestamp entry is also
@@ -649,8 +657,8 @@ run_commit_c_since_unset_accumulates_all() {
     make_cost_fixture "$fake_home/.claude/projects/test/22222222-3333-4444-5555-666666666666.jsonl"
 
     local out total_in
-    out=$(HOME="$fake_home" python3 "$SESSION_COST_PY" --json 22222222-3333-4444-5555-666666666666 2>&1)
-    total_in=$(echo "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['tokens']['input'])" 2>/dev/null || echo "ERR")
+    out=$(HOME="$fake_home" "$PY" "$SESSION_COST_PY" --json 22222222-3333-4444-5555-666666666666 2>&1)
+    total_in=$(echo "$out" | "$PY" -c "import json,sys; d=json.load(sys.stdin); print(d['tokens']['input'])" 2>/dev/null || echo "ERR")
 
     # All three entries accumulate: 1000 + 2000 + 4000 = 7000.
     if [[ "$total_in" == "7000" ]]; then
@@ -668,7 +676,7 @@ run_commit_c_malformed_since_rejected() {
     make_cost_fixture "$fake_home/.claude/projects/test/33333333-4444-5555-6666-777777777777.jsonl"
 
     local rc stderr_out
-    stderr_out=$(HOME="$fake_home" python3 "$SESSION_COST_PY" --since not-an-iso-string --json 33333333-4444-5555-6666-777777777777 2>&1 >/dev/null)
+    stderr_out=$(HOME="$fake_home" "$PY" "$SESSION_COST_PY" --since not-an-iso-string --json 33333333-4444-5555-6666-777777777777 2>&1 >/dev/null)
     rc=$?
     if [[ "$rc" == "2" ]] && [[ -n "$stderr_out" ]]; then
         pass "cC-AC2-ERR: malformed --since exits rc=2 with stderr message"
@@ -694,8 +702,8 @@ run_commit_c_tz_mixed_does_not_crash() {
 JSON
 
     local out total_in
-    out=$(HOME="$fake_home" python3 "$SESSION_COST_PY" --json --since 2026-05-13T22:00:00Z "$sid" 2>&1)
-    total_in=$(echo "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['tokens']['input'])" 2>/dev/null || echo "ERR")
+    out=$(HOME="$fake_home" "$PY" "$SESSION_COST_PY" --json --since 2026-05-13T22:00:00Z "$sid" 2>&1)
+    total_in=$(echo "$out" | "$PY" -c "import json,sys; d=json.load(sys.stdin); print(d['tokens']['input'])" 2>/dev/null || echo "ERR")
 
     # Only the 23:00 entry should accumulate (3000 input tokens). The
     # 20:30 entry is before cutoff. The crash-free behavior is the
@@ -721,8 +729,8 @@ run_commit_c_since_boundary_equality() {
 {"type":"assistant","timestamp":"2026-05-13T22:00:00Z","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1234,"output_tokens":500,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
 JSON
     local out total_in
-    out=$(HOME="$fake_home" python3 "$SESSION_COST_PY" --json --since 2026-05-13T22:00:00Z "$sid" 2>&1)
-    total_in=$(echo "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['tokens']['input'])" 2>/dev/null || echo "ERR")
+    out=$(HOME="$fake_home" "$PY" "$SESSION_COST_PY" --json --since 2026-05-13T22:00:00Z "$sid" 2>&1)
+    total_in=$(echo "$out" | "$PY" -c "import json,sys; d=json.load(sys.stdin); print(d['tokens']['input'])" 2>/dev/null || echo "ERR")
     if [[ "$total_in" == "1234" ]]; then
         pass "cC-AC-boundary: entry timestamp exactly equal to --since is INCLUDED"
     else
@@ -745,7 +753,7 @@ run_commit_c_unparseable_ts_warns() {
 {"type":"assistant","timestamp":"2026-05-13T23:00:00Z","message":{"model":"claude-opus-4-8","usage":{"input_tokens":2000,"output_tokens":1000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
 JSON
     local stderr_capture
-    stderr_capture=$(HOME="$fake_home" python3 "$SESSION_COST_PY" --json --since 2026-05-13T22:00:00Z "$sid" 2>&1 >/dev/null)
+    stderr_capture=$(HOME="$fake_home" "$PY" "$SESSION_COST_PY" --json --since 2026-05-13T22:00:00Z "$sid" 2>&1 >/dev/null)
     if echo "$stderr_capture" | grep -q "unparseable timestamps"; then
         pass "cC-AC-bad-ts: unparseable timestamp under --since emits stderr warning"
     else
