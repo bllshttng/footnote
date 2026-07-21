@@ -34,6 +34,13 @@ echo "ARGS:$* ROOT:${FNO_CLAIMS_ROOT:-UNSET}" >> "$MOCK_ABI_LOG"
 if [[ "$1" == "claim" && "$2" == "acquire" ]]; then
   exit "${MOCK_ABI_ACQUIRE_RC:-0}"
 fi
+# The graph lock stamp is the one call whose EFFECT a test asserts, so swallowing
+# it as a bare success would hollow out the identity assertion. Delegate to the
+# real writer under the pinned python3; the shim exposes graph.cli directly, so
+# the leading `backlog` token is dropped.
+if [[ "$1" == "backlog" && "$2" == "update" ]]; then
+  exec python3 "$MOCK_ABI_SHIM" "${@:2}"
+fi
 exit 0
 """
 
@@ -57,12 +64,11 @@ def _sandbox(tmp_path: Path):
     mock.chmod(0o755)
     log = tmp_path / "fno.log"
 
-    # Pin the init script's `python3` to the interpreter running these tests.
-    # The graph locked_by stamp shells out to scripts/roadmap-tasks.py, which
-    # needs fno's dependencies importable; an ambient python3 (homebrew's, say)
-    # has no typer, so the stamp degrades to its non-fatal warning and the
-    # stamped-node assertion fails for a reason unrelated to the shell wiring
-    # under test. Which python3 sits first on PATH must not decide that.
+    # Pin `python3` to the interpreter running these tests. Production no longer
+    # shells an interpreter for the stamp, but the mock's delegation to the
+    # real writer below does, and it needs fno's dependencies importable; an
+    # ambient python3 (homebrew's, say) has no typer. Which python3 sits first on
+    # PATH must not decide whether the stamped-node assertion holds.
     py = bindir / "python3"
     py.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n')
     py.chmod(0o755)
@@ -75,6 +81,7 @@ def _sandbox(tmp_path: Path):
         "HOME": str(home),
         "PATH": f"{bindir}:{env['PATH']}",
         "MOCK_ABI_LOG": str(log),
+        "MOCK_ABI_SHIM": str(REPO_ROOT / "scripts" / "roadmap-tasks.py"),
     })
     return repo, home, log, env
 
