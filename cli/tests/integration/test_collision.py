@@ -386,10 +386,11 @@ def test_cli_collisions_check_emits_json(tmp_graph, tmp_path):
     res = _invoke("backlog", "collisions", "check", str(cand), "--json")
     assert res.exit_code == 0, res.output
     payload = json.loads(res.output)
-    assert isinstance(payload, list)
-    assert len(payload) == 1
-    assert payload[0]["with_node_id"] == "ab-other"
-    assert "_other_created_at" not in payload[0]
+    assert payload["status"] == "ok"
+    found = payload["collisions"]
+    assert len(found) == 1
+    assert found[0]["with_node_id"] == "ab-other"
+    assert "_other_created_at" not in found[0]
 
 
 # ---------------------------------------------------------------------------
@@ -693,3 +694,88 @@ def test_triage_health_emits_well_formed_json(tmp_graph):
     for key in ("idea_pile_depth", "stale_ready_nodes", "failure_prone_nodes",
                 "collisions", "acknowledged_resolved", "totals"):
         assert key in report
+
+
+# ---------------------------------------------------------------------------
+# Unevaluated surface: "nothing to compare" != "compared, clean"
+# ---------------------------------------------------------------------------
+
+
+def _write_ownership_map_plan(path: Path, files: list[str]) -> Path:
+    rows = "\n".join(f"| `{f}` | modify | /blueprint |" for f in files)
+    path.write_text(
+        "# Plan\n\n## File Ownership Map\n\n"
+        f"| File | Action | Owner |\n|---|---|---|\n{rows}\n"
+    )
+    return path
+
+
+def test_file_ownership_map_is_a_parseable_surface(tmp_path):
+    """/blueprint writes File Ownership Map, not Files to Modify; the parser
+    must read it or every blueprint-generated plan is invisible to collisions."""
+    from fno.graph.collision import parse_files_to_modify
+
+    p = _write_ownership_map_plan(tmp_path / "p.md", ["cli/src/fno/graph/cli.py"])
+
+    assert parse_files_to_modify(p) == {"cli/src/fno/graph/cli.py"}
+
+
+def test_has_file_surface_distinguishes_empty_from_clean(tmp_path):
+    from fno.graph.collision import has_file_surface
+
+    empty = tmp_path / "empty.md"
+    empty.write_text("# Plan\n\n## Context\n\nNo file table here.\n")
+    populated = _write_ownership_map_plan(tmp_path / "full.md", ["a.py"])
+
+    assert has_file_surface(empty) is False
+    assert has_file_surface(populated) is True
+
+
+def test_collisions_check_json_reports_unevaluated(tmp_graph, tmp_path):
+    plan = tmp_path / "surfaceless.md"
+    plan.write_text("# Plan\n\n## Context\n\nNothing to compare.\n")
+
+    res = _invoke("backlog", "collisions", "check", str(plan), "--json")
+
+    assert res.exit_code == 0
+    payload = json.loads(res.stdout)
+    assert payload["status"] == "unevaluated"
+    assert payload["collisions"] == []
+
+
+def test_collisions_check_json_reports_ok_when_clean(tmp_graph, tmp_path):
+    plan = _write_ownership_map_plan(tmp_path / "clean.md", ["only/mine.py"])
+
+    res = _invoke("backlog", "collisions", "check", str(plan), "--json")
+
+    assert res.exit_code == 0
+    payload = json.loads(res.stdout)
+    assert payload["status"] == "ok"
+    assert payload["collisions"] == []
+
+
+def test_collisions_check_human_output_says_unevaluated(tmp_graph, tmp_path):
+    """The non-JSON path must not read as 'no collisions found'."""
+    plan = tmp_path / "surfaceless.md"
+    plan.write_text("# Plan\n\n## Context\n\nNothing to compare.\n")
+
+    res = _invoke("backlog", "collisions", "check", str(plan))
+
+    assert res.exit_code == 0
+    assert "UNEVALUATED" in res.output
+    assert "No collisions found" not in res.output
+
+
+def test_parse_folder_plan_scans_index_and_phase_files(tmp_path):
+    """Reading a directory raises IsADirectoryError, which degrades to an empty
+    set - indistinguishable from a plan stating no surface, so every folder plan
+    bypassed the gate."""
+    from fno.graph.collision import has_file_surface, parse_files_to_modify
+
+    folder = tmp_path / "plan"
+    folder.mkdir()
+    _write_quick_plan(folder / "00-INDEX.md", ["src/index.py"])
+    _write_quick_plan(folder / "01-phase.md", ["src/phase.py"])
+
+    assert parse_files_to_modify(folder) == {"src/index.py", "src/phase.py"}
+    assert has_file_surface(folder) is True

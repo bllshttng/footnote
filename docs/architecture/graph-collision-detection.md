@@ -10,7 +10,7 @@ status: shipped
 Graph collision detection catches the failure mode where two specs written
 hours apart silently target the same files and surface, and neither plan
 author realizes they are stepping on each other until merge time. The fix
-is a deterministic file-overlap primitive that three independent surfaces
+is a deterministic file-overlap primitive that four independent surfaces
 consume:
 
 1. **`/blueprint`** runs a check between writing the plan and auto-intake.
@@ -20,6 +20,10 @@ consume:
    pending backlog plus four other "is this backlog healthy?" metrics.
 3. **`fno backlog collisions check`** is the direct CLI surface for
    checking a plan against the graph from a script or one-off prompt.
+4. **Dispatch** (`select_lane_fill`, shared by `lane-fill` / `dispatch-lanes`
+   and the active-backlog daemon) compares each candidate against every node a
+   live worker already holds before filling a lane. See
+   [Dispatch-time gate](#dispatch-time-gate) below.
 
 The primitive deliberately scopes to *file overlap* in v1. Concept overlap
 (two plans both adding a "status" field without sharing files) requires
@@ -58,7 +62,9 @@ dependencies. It exposes:
 
 | Function | Purpose |
 |----------|---------|
-| `parse_files_to_modify(plan_path)` | Extract file paths from a plan's "Files to Modify" table. Handles single-file quick plans and folder plans (00-INDEX.md plus every NN-* phase file). |
+| `parse_files_to_modify(plan_path)` | Extract file paths from a plan's file table. Recognized headings: `Files to Modify`, `Files to Change`, `Files Touched`, `File Ownership Map`, `Files`. Handles single-file quick plans and folder plans (every `*.md` under the folder, so 00-INDEX.md plus each NN-* phase file). |
+| `has_file_surface(plan_path)` | Whether the plan states a surface at all. `find_collisions` returns `[]` both when it compared and found nothing and when it had nothing to compare; this separates the two. |
+| `resolve_plan_path(plan_path)` | Public resolver for a graph-stored `plan_path` (absolute, `~`, or repo-relative). |
 | `find_collisions(candidate, graph, *, self_id, thresholds)` | Compare a candidate plan's file set against every pending plan on the graph. Returns sorted `Collision` records (high severity first). |
 | `find_acknowledged_collisions(graph)` | Find nodes whose `collisions_acknowledged` references nodes that have since shipped. Surfaces the "your acknowledged collision is now resolved" reconciliation in triage health. |
 | `_load_thresholds(project, user)` | Resolve severity thresholds from layered config. Project beats user beats the v1 defaults baked into `DEFAULT_THRESHOLDS`. |
@@ -102,6 +108,58 @@ plan ages:
 
 Severity-low cases get a `coordinate` action with a "split into a shared
 dependency" rationale appended to the message.
+
+## Dispatch-time gate
+
+`/blueprint` catches a collision between two plans written hours apart.
+It cannot catch a collision between two plans that are already `ready` and get
+dispatched to concurrent workers in the same round.
+That happened: three nodes describing one root cause, filed by three authors in
+three phrasings, all landing in the same file, all fired in parallel.
+
+`select_lane_fill` (`cli/src/fno/backlog/advance.py`) now consults the primitive
+before it fills a lane.
+For each candidate it compares the plan's file surface against the surfaces of
+every node a live worker holds, plus this round's own picks.
+Both claim shapes count, because both mean somebody is editing those files: a
+`lane-slot:` holder (a peer lane) and a bare `node:<id>` claim (a hand-run
+`/target`, which holds no slot).
+A comparator whose own plan states no surface is reported rather than counted -
+`find_collisions` would skip it silently and the gate would read clean without
+having compared against it at all.
+A `high`-severity overlap skips the candidate and logs the node it collides with
+and the shared files.
+
+Two properties are load-bearing:
+
+- **The node stays `ready`, never parked.** Skipping is the reversible option:
+  the node is retried next round once the colliding lane finishes.
+- **The gate fails OPEN end to end**, seeding included.
+  An error reading a plan surface, the claims directory, or the graph lets the dispatch proceed with a warning.
+  A dedup check that can wedge the dispatcher is worse than the duplicate work it
+  prevents.
+
+## Empty surfaces: unevaluated is not clean
+
+The gate is only as good as its input, and the input was empty.
+
+`parse_files_to_modify` originally matched `Files to Modify` and its synonyms but
+not `File Ownership Map` - the one section `/blueprint` actually writes.
+Every blueprint-generated plan therefore parsed to an empty surface and silently
+could not collide with anything.
+The heading is now recognized.
+
+A plan with no file table at all is still possible, and there `find_collisions`
+returns an empty list - the same value it returns for "compared, no overlap".
+Callers that need to tell those apart ask `has_file_surface` first:
+
+- `fno backlog collisions check --json` emits
+  `{"status": "ok" | "unevaluated", "collisions": [...]}`.
+  A bare list was the earlier shape.
+- `/blueprint` warns on stderr when the plan it just wrote states no file
+  surface. It deliberately does NOT auto-populate the table: the point is to
+  force the surface to be stated at planning time, not to manufacture one that
+  makes the warning go away.
 
 ## Audit trail
 

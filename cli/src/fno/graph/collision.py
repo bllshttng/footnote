@@ -83,10 +83,13 @@ class Collision:
 # Recognized headings under which the file list lives. Plans in this repo
 # settled on "Files to Modify"; we accept a couple of synonyms in case a
 # templating tool ever drifts.
+# "file ownership map" is the section /blueprint writes; without it every
+# blueprint-generated plan parses to an empty surface and silently cannot collide.
 _FILE_HEADINGS = (
     "files to modify",
     "files to change",
     "files touched",
+    "file ownership map",
     "files",
 )
 
@@ -179,8 +182,32 @@ def parse_files_to_modify(plan_path: Path) -> set[str]:
     """
     if not plan_path.exists():
         return set()
+    if plan_path.is_dir():
+        # A folder plan spreads its file tables across 00-INDEX.md and the
+        # NN-* phase files. Reading the directory itself raises IsADirectoryError,
+        # which _scan_one degrades to an empty set - indistinguishable from a
+        # plan that states no surface, so every folder plan bypassed the gate.
+        found: set[str] = set()
+        for child in sorted(plan_path.glob("*.md")):
+            found |= _scan_one(child)
+        return found
 
     return _scan_one(plan_path)
+
+
+def has_file_surface(plan_path: Path) -> bool:
+    """True when a plan states a file surface the collision check can compare.
+
+    False means the check is UNEVALUATED, not clean: ``find_collisions`` returns
+    an empty list either way, so a caller that needs to tell "compared, no
+    overlap" from "had nothing to compare" must ask here first.
+    """
+    return bool(parse_files_to_modify(plan_path))
+
+
+def resolve_plan_path(plan_path: str) -> Path:
+    """Resolve a graph-stored ``plan_path`` (absolute, ``~``, or repo-relative)."""
+    return _resolve_plan_path(plan_path, _find_repo_root())
 
 
 def _scan_one(path: Path) -> set[str]:

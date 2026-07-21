@@ -262,3 +262,223 @@ def test_cli_ready_mission_filter(tmp_path, monkeypatch):
     assert res.exit_code == 0, res.output
     ids = [e["id"] for e in json.loads(res.output)]
     assert ids == ["x-in"]
+
+
+# --- dispatch-time collision gate ----------------------------------------
+
+
+import json
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolated_graph(tmp_path, monkeypatch):
+    """Point the graph read at an empty tmp graph for EVERY test in this file.
+
+    `_live_worked_entries` calls `read_graph(graph_json())` whenever a lane slot is
+    held, so a test with an isolated claims_root would otherwise read the
+    developer's real ~/.fno/graph.json. Tests that need entries overwrite this
+    file via `_seed_graph`.
+    """
+    g = tmp_path / "graph.json"
+    g.write_text('{"entries": []}\n')
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    return g
+
+
+def _seed_graph(graph_path, entries):
+    graph_path.write_text(json.dumps({"entries": entries}))
+
+
+def _plan(tmp_path, name: str, files: list[str]) -> str:
+    """Write a plan with a populated File Ownership Map; return its path."""
+    rows = "\n".join(f"| `{f}` | modify | /blueprint |" for f in files)
+    p = tmp_path / f"{name}.md"
+    p.write_text(
+        f"# {name}\n\n## File Ownership Map\n\n"
+        f"| File | Action | Owner |\n|---|---|---|\n{rows}\n"
+    )
+    return str(p)
+
+
+def test_skips_node_colliding_with_a_pick_from_this_round(tmp_path, monkeypatch):
+    """Two ready nodes on the same file surface: only the first dispatches.
+
+    The incident this closes: three nodes on one root cause, all landing in
+    the same file, fired in parallel because nothing consulted the check.
+    """
+    shared = ["cli/src/fno/graph/cli.py", "cli/src/fno/graph/store.py"]
+    ready = [
+        {"id": "n-a", "domain": "code", "title": "a", "plan_path": _plan(tmp_path, "a", shared)},
+        {"id": "n-b", "domain": "docs", "title": "b", "plan_path": _plan(tmp_path, "b", shared)},
+        {"id": "n-c", "domain": "infra", "title": "c",
+         "plan_path": _plan(tmp_path, "c", ["docs/unrelated.md"])},
+    ]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    sel = advance.select_lane_fill(3, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-a", "n-c"]
+    assert find_lane_slot("n-b", root=tmp_path) is None  # left ready, not parked
+
+
+def test_collision_gate_fails_open_on_error(tmp_path, monkeypatch):
+    """An unreadable collision surface must let dispatch proceed, not wedge it."""
+    shared = ["cli/src/fno/graph/cli.py", "cli/src/fno/graph/store.py"]
+    ready = [
+        {"id": "n-a", "domain": "code", "title": "a", "plan_path": _plan(tmp_path, "a", shared)},
+        {"id": "n-b", "domain": "docs", "title": "b", "plan_path": _plan(tmp_path, "b", shared)},
+    ]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    def boom(*a, **k):
+        raise OSError("collision surface unreadable")
+
+    monkeypatch.setattr("fno.graph.collision.find_collisions", boom)
+
+    sel = advance.select_lane_fill(2, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-a", "n-b"]
+
+
+def test_node_without_plan_path_dispatches(tmp_path, monkeypatch):
+    """No plan means no surface to compare; the gate must not block it.
+
+    The plan-less node is evaluated SECOND, so `inflight` is non-empty and the
+    guard's `not plan` clause is what carries the case.
+    """
+    ready = [
+        {"id": "n-a", "domain": "code", "title": "a",
+         "plan_path": _plan(tmp_path, "a", ["cli/src/fno/graph/cli.py"])},
+        {"id": "n-b", "domain": "docs", "title": "b"},  # no plan_path
+    ]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    assert [n["id"] for n in advance.select_lane_fill(2, claims_root=tmp_path)] == ["n-a", "n-b"]
+
+
+def test_unevaluated_surface_is_logged_not_silently_clean(tmp_path, monkeypatch, caplog):
+    """A plan_path pointing at a missing file parses to an empty surface, which
+    is the same empty result as a genuine non-overlap. It must be logged."""
+    ready = [
+        {"id": "n-a", "domain": "code", "title": "a",
+         "plan_path": _plan(tmp_path, "a", ["cli/src/fno/graph/cli.py"])},
+        {"id": "n-b", "domain": "docs", "title": "b",
+         "plan_path": str(tmp_path / "vanished.md")},
+    ]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    with caplog.at_level("WARNING"):
+        sel = advance.select_lane_fill(2, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-a", "n-b"]  # unevaluated never blocks
+    assert "UNEVALUATED" in caplog.text
+    assert "n-b" in caplog.text
+
+
+def test_skips_node_colliding_with_a_live_peer_lane(tmp_path, monkeypatch, _isolated_graph):
+    """The cross-tick case: a peer lane from an EARLIER round holds the collider.
+
+    Within-round dedup only catches nodes picked together. The incident had
+    workers dispatched across ticks, so the comparison set must include what
+    live lanes already hold.
+    """
+    shared = ["cli/src/fno/graph/cli.py", "cli/src/fno/graph/store.py"]
+    peer_plan = _plan(tmp_path, "peer", shared)
+    _seed_graph(_isolated_graph, [
+        {"id": "n-peer", "title": "peer", "plan_path": peer_plan,
+         "status": "ready", "created_at": "2026-07-01T00:00:00+00:00"},
+    ])
+    acquire_lane_slot(max_lanes=3, lane_id="n-peer", extra_metadata={"domain": "code"}, root=tmp_path)
+
+    ready = [
+        {"id": "n-b", "domain": "docs", "title": "b", "plan_path": _plan(tmp_path, "b", shared)},
+        {"id": "n-c", "domain": "infra", "title": "c",
+         "plan_path": _plan(tmp_path, "c", ["docs/unrelated.md"])},
+    ]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    sel = advance.select_lane_fill(3, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-c"]
+    assert find_lane_slot("n-b", root=tmp_path) is None  # left ready
+
+
+def test_finished_node_holding_a_stale_lane_never_blocks(tmp_path, monkeypatch, _isolated_graph):
+    """A lane slot outliving its node must not resurrect it into the comparison.
+
+    Synthesizing a ready status for every held node would let a done node's
+    corpse claim block a genuinely dispatchable one indefinitely.
+    """
+    shared = ["cli/src/fno/graph/cli.py", "cli/src/fno/graph/store.py"]
+    _seed_graph(_isolated_graph, [
+        {"id": "n-done", "title": "done", "plan_path": _plan(tmp_path, "done", shared),
+         "status": "done", "completed_at": "2026-07-02T00:00:00+00:00"},
+    ])
+    acquire_lane_slot(max_lanes=3, lane_id="n-done", extra_metadata={"domain": "code"}, root=tmp_path)
+
+    ready = [{"id": "n-b", "domain": "docs", "title": "b",
+              "plan_path": _plan(tmp_path, "b", shared)}]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    assert [n["id"] for n in advance.select_lane_fill(3, claims_root=tmp_path)] == ["n-b"]
+
+
+def test_bare_node_claim_counts_as_in_flight(tmp_path, monkeypatch, _isolated_graph):
+    """A hand-run /target holds `node:<id>` and no lane slot.
+
+    Reading only lane slots leaves the gate blind to every manually started
+    worker, which is the shape the original incident's sessions had.
+    """
+    from fno.claims.core import acquire_claim
+
+    shared = ["cli/src/fno/graph/cli.py", "cli/src/fno/graph/store.py"]
+    _seed_graph(_isolated_graph, [
+        {"id": "n-manual", "title": "manual", "plan_path": _plan(tmp_path, "manual", shared),
+         "status": "ready", "created_at": "2026-07-01T00:00:00+00:00"},
+    ])
+    acquire_claim("node:n-manual", "target-session:manual", root=tmp_path)
+
+    ready = [
+        {"id": "n-b", "domain": "docs", "title": "b", "plan_path": _plan(tmp_path, "b", shared)},
+        {"id": "n-c", "domain": "infra", "title": "c",
+         "plan_path": _plan(tmp_path, "c", ["docs/unrelated.md"])},
+    ]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    sel = advance.select_lane_fill(3, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-c"]
+
+
+def test_inflight_seed_failure_fails_open(tmp_path, monkeypatch):
+    """Seeding runs outside the main try; a read error must not wedge dispatch."""
+    def boom(*a, **k):
+        raise OSError("claims dir unreadable")
+
+    monkeypatch.setattr(advance, "_live_worked_entries", boom)
+    ready = _nodes(("n-a", "code"), ("n-c", "docs"))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    assert [n["id"] for n in advance.select_lane_fill(2, claims_root=tmp_path)] == ["n-a", "n-c"]
+
+
+def test_peer_with_unparseable_plan_is_reported_not_counted(tmp_path, monkeypatch, _isolated_graph, caplog):
+    """A comparator with no surface is skipped inside find_collisions, so the
+    gate would read clean without ever having compared against it."""
+    _seed_graph(_isolated_graph, [
+        {"id": "n-peer", "title": "peer", "plan_path": str(tmp_path / "gone.md"),
+         "status": "ready", "created_at": "2026-07-01T00:00:00+00:00"},
+    ])
+    acquire_lane_slot(max_lanes=3, lane_id="n-peer", extra_metadata={"domain": "code"}, root=tmp_path)
+
+    ready = [{"id": "n-b", "domain": "docs", "title": "b",
+              "plan_path": _plan(tmp_path, "b", ["cli/src/fno/graph/cli.py"])}]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    with caplog.at_level("WARNING"):
+        sel = advance.select_lane_fill(3, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-b"]  # fails open
+    assert "no comparable file surface" in caplog.text

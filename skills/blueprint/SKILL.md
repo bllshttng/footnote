@@ -610,7 +610,13 @@ fi
    fno backlog collisions check "$PLAN_PATH" --json > /tmp/collisions.json
    ```
 
-   Read `/tmp/collisions.json`. If any entry has `severity: "high"`, present
+   Read `/tmp/collisions.json`: `{"status": "ok"|"unevaluated", "collisions": [...]}`.
+   A `status` of `unevaluated` means the plan states no file surface, so nothing
+   was compared - that is NOT a clean result. Fill in the plan's
+   `## File Ownership Map` (or `## Files to Modify`) table and re-run before
+   adopting.
+
+   If any entry in `collisions` has `severity: "high"`, present
    them via AskUserQuestion before adopting - unless `fno target status` shows
    `authority: full` on the `attended` line (a live `/target beastmode` session), in
    which case take the `recommended_action` for each entry, append one
