@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.cost import update, _append_to_ledger
+from fno.cost import update
 
 
 # ---------------------------------------------------------------------------

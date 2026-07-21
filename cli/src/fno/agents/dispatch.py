@@ -36,8 +36,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Mapping, Optional
 
-DispatchKind = Literal["create", "followup"]
-
 from fno import paths
 from fno.agents import events
 from fno.agents.context import EventContext, build_context
@@ -47,11 +45,12 @@ from fno.agents.providers.base import ProviderResult, ReachabilityProbeError
 from fno.agents.registry import (
     AgentEntry,
     RegistryVersionError,
-    _agent_lock_path,
     load_registry,
     update_registry,
 )
 from fno.harness_identity import resolve_harness_identity
+
+DispatchKind = Literal["create", "followup"]
 
 
 # ---------------------------------------------------------------------------
@@ -2076,8 +2075,8 @@ def dispatch_spawn(
     # since there is no state to protect).
     if provider == "claude" and once and not headless:
         raise DispatchAskError(
-            f"--once is not supported for provider 'claude' "
-            f"(claude peers are persistent bg threads; use plain spawn)",
+            "--once is not supported for provider 'claude' "
+            "(claude peers are persistent bg threads; use plain spawn)",
             exit_code=2,
         )
 

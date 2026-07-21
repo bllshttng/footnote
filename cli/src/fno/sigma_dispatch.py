@@ -62,6 +62,7 @@ FILE AUTHORITY DISTINCTION
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import datetime
 import fcntl
 import hashlib
@@ -784,9 +785,6 @@ def dispatch_sigma_subagent(
 # ---------------------------------------------------------------------------
 
 
-import dataclasses
-
-
 @dataclasses.dataclass(frozen=True)
 class DispatchTarget:
     """What the orchestrator should do for one subagent dispatch.
@@ -828,7 +826,6 @@ def resolve_dispatch_target(
     before ``TARGET_COMBO``.
     """
     import logging
-    import os
 
     from fno.adapters.providers.loader import (
         load_combos,

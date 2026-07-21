@@ -36,10 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
-import signal
-import sys
 import threading
 from typing import Any
 

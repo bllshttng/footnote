@@ -1776,7 +1776,7 @@ def _intake_impl(
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
         _prepare_intake, _build_intake_node,
-        _collect_intake_paths, _validate_cli_deps, _match_plan_in_graph,
+        _validate_cli_deps,
     )
 
     # Reject removed --batch flag
@@ -7912,7 +7912,6 @@ def _collect_intake_paths_typer(plan_paths: list[str], from_list: Optional[str])
 
 def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None:
     """Multi-path intake flow delegating to intake helpers."""
-    from fno.graph._constants import PRIORITY_ORDER
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
         _prepare_intake, _build_intake_node, _validate_cli_deps,
@@ -8281,7 +8280,6 @@ def cmd_rehash(
     then update the sidecar to match.
     """
     import hashlib
-    import shutil
     import tempfile
 
     path = _graph_path()

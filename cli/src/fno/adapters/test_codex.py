@@ -1,22 +1,18 @@
 """Tests for the Codex CLI adapter."""
 from __future__ import annotations
 
-import os
 import subprocess
 from unittest import mock
 
 import pytest
 
-from fno.adapters import codex as codex_mod
 from fno.adapters.codex import (
     CodexCliAdapter,
-    MIN_CODEX_VERSION,
     _version_at_least,
     map_codex_error,
 )
 from fno.adapters.providers.error_taxonomy import (
     ErrorClass,
-    NormalizedError,
 )
 
 

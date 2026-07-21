@@ -35,6 +35,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Literal, Optional
 
+from fno import paths
+from fno.harness_identity import canonical_handle, sync_harness_aliases
+
 # registry.status is a projection of state.status (LD10), so it can be ANY
 # AgentStatus variant. The daemon writes "live" on spawn and "exited" on child
 # exit (retained until rm), and reconcile writes "orphaned". The earlier
@@ -96,9 +99,6 @@ HARNESS_SESSION_ID_FIELDS = {
     "gemini": "harness_session_id",
     "opencode": "harness_session_id",
 }
-
-from fno import paths
-from fno.harness_identity import canonical_handle, sync_harness_aliases
 
 # The registry's legacy per-harness session-id keys (x-ec59). Distinct from the
 # manifest's map (which uses claude_session_id): the registry's claude identity

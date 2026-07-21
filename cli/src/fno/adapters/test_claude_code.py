@@ -6,7 +6,6 @@ when the helper was extracted to ``_shared.py``.
 """
 from __future__ import annotations
 
-import subprocess
 from unittest import mock
 
 from fno.adapters.claude_code import ClaudeCodeAdapter

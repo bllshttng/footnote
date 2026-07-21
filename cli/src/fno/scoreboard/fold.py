@@ -1378,9 +1378,11 @@ if __name__ == "__main__":
     # a malformed cost never crashes the fold
     assert _num("junk") == 0.0 and _num(None) == 0.0 and _num("5.5") == 5.5
     # {"entries": null} is valid JSON, junk shape -> empty, never a crash
-    import tempfile as _tf, os as _os
+    import tempfile as _tf
+    import os as _os
     _fd, _p = _tf.mkstemp()
-    _os.write(_fd, b'{"entries": null}'); _os.close(_fd)
+    _os.write(_fd, b'{"entries": null}')
+    _os.close(_fd)
     assert load_ledger_rows(Path(_p)) == []
     _os.unlink(_p)
 

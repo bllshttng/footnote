@@ -849,7 +849,7 @@ def _iter_settings_projects() -> Iterator[tuple[str, str]]:
     different settings files. Silent on any read/parse failure.
     """
     try:
-        import yaml
+        import yaml  # noqa: F401  availability probe: return early if PyYAML absent
 
         from fno.graph._intake import _settings_candidate_paths
     except ImportError:

@@ -633,7 +633,7 @@ def backfill_tasks_json(dry_run: bool = True):
             entry["compactions"] = combined.compaction_count
 
     if dry_run:
-        print(f"\n  Dry run — no changes written. Use --backfill without --dry-run to apply.")
+        print("\n  Dry run — no changes written. Use --backfill without --dry-run to apply.")
         return
 
     # Atomic write: temp file then rename to prevent corruption on interrupt
