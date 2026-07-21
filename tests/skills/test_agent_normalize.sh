@@ -46,6 +46,11 @@ export NODE_SLUG_RESOLVER="$STUB_EMPTY"
 # a stale installed fno reports opencode=prose, a fresh one opencode=slash).
 FBIN="$TMP/failing-fno"; mkdir -p "$FBIN"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$FBIN/fno"; chmod +x "$FBIN/fno"
+# Pin it for the WHOLE suite, not per call site: an assertion about a builtin
+# default (no-merge posture, static surface tables) silently inverts on a host
+# whose config sets dispatch.auto_merge=true. Cases that exercise the config read
+# prepend their own fno stub, which still wins.
+export PATH="$FBIN:$PATH"
 
 field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1; }
 
@@ -465,6 +470,65 @@ fi
 # loud - a flag folded into the /target command line would corrupt it.
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider claude --input "ab-deadbeef -i")"
 [[ "$(field "$OUT" status)" == "error" ]] && pass "P2-2 node build still fails loud on a glued -i" || fail "build -i scan: $OUT"
+
+# --- node-id detection is config-agnostic, not hardcoded to ab- ---------------
+norm_gen() { DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "$1"; }
+
+OUT="$(norm_gen 'x-2aad bg')"
+if [[ "$(field "$OUT" node)" == "x-2aad" ]] \
+   && [[ "$(field "$OUT" payload_mode)" == "build" ]] \
+   && [[ "$(field "$OUT" substrate)" == "bg" ]] \
+   && [[ "$(field "$OUT" message)" == "/target x-2aad no-merge" ]]; then
+  pass "configured-prefix id builds via /target"
+else
+  fail "configured-prefix build: $OUT"
+fi
+
+OUT="$(norm_gen 'ab-4040eee8')"
+[[ "$(field "$OUT" node)" == "ab-4040eee8" && "$(field "$OUT" payload_mode)" == "build" ]] \
+  && pass "ab- id unchanged (regression guard)" || fail "ab- regression: $OUT"
+
+OUT="$(norm_gen 'x-0123456789ab')"
+[[ -z "$(field "$OUT" node)" && "$(field "$OUT" payload_mode)" == "seed" ]] \
+  && pass "over-long hex is not a node" || fail "over-long hex: $OUT"
+
+OUT="$(norm_gen '1234abcd')"
+[[ -z "$(field "$OUT" node)" && "$(field "$OUT" node_query)" == "1234abcd" ]] \
+  && pass "bare hex queries the resolver, no prefix guess" || fail "bare hex: $OUT"
+
+OUT="$(norm_gen 'x-1a2b')"
+[[ "$(field "$OUT" payload_mode)" == "build" ]] \
+  && pass "resolved id classifies tier 1 (re-normalize terminates)" || fail "re-normalize: $OUT"
+
+OUT="$(norm_gen '/target internal/fno/plans/20260711-dark-mode-x-8af8.md')"
+[[ "$(field "$OUT" node)" == "x-8af8" && "$(field "$OUT" payload_mode)" == "passthrough" ]] \
+  && pass "passthrough extracts a configured-prefix id" || fail "passthrough: $OUT"
+
+OUT="$(norm_gen 'x-2aad --yolo')"
+[[ "$(field "$OUT" status)" == "error" ]] \
+  && pass "flag-scan fires on a configured-prefix build" || fail "flag-scan: $OUT"
+
+# --- node_bare: did the user TYPE an id, or did prose merely look like one? ---
+OUT="$(norm_gen 'x-2aad')"
+[[ "$(field "$OUT" node_bare)" == "1" ]] && pass "bare id is deliberate" || fail "bare id: $OUT"
+OUT="$(norm_gen 'x-2aad bg')"
+[[ "$(field "$OUT" node_bare)" == "1" ]] && pass "posture words do not spoil bareness" || fail "posture bareness: $OUT"
+OUT="$(norm_gen 'dead-beef cleanup')"
+[[ "$(field "$OUT" node_bare)" == "0" ]] && pass "hex-shaped prose word is inferred, not deliberate" || fail "dead-beef: $OUT"
+OUT="$(norm_gen 'ab-4040eee8 fix the login')"
+[[ "$(field "$OUT" node_bare)" == "0" ]] && pass "id plus trailing prose is inferred" || fail "id+prose: $OUT"
+OUT="$(norm_gen 'dead code cleanup')"
+[[ -z "$(field "$OUT" node)" && "$(field "$OUT" message)" == "dead code cleanup" ]] \
+  && pass "unhyphenated prose stays a verbatim seed" || fail "unhyphenated prose: $OUT"
+OUT="$(norm_gen '/target x-2aad')"
+[[ "$(field "$OUT" node_bare)" == "1" ]] && pass "explicit /target <id> is deliberate" || fail "/target id: $OUT"
+OUT="$(norm_gen '/target re-added the deleted cache layer')"
+[[ "$(field "$OUT" node_bare)" == "0" ]] && pass "id grepped out of prose is inferred" || fail "/target prose: $OUT"
+
+OUT="$(LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" \
+       bash "$NORM" --input "$(printf 'task \x80 text')" 2>/dev/null)"
+[[ "$(LC_ALL=C field "$OUT" status)" == "ok" && "$(LC_ALL=C field "$OUT" name)" == *text* ]] \
+  && pass "invalid-utf8 byte does not abort or truncate" || fail "locale guard: $OUT"
 
 echo ""
 echo "test_agent_normalize: $PASS passed, $FAIL failed"
