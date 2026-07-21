@@ -3290,10 +3290,10 @@ mod tests {
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
         // Unknown schema_version -> Err (Python RegistryVersionError -> exit 12/13).
-        // v11 is the future-drift case a pre-bump reader would have on v10.
+        // v12 is the future-drift case a pre-bump reader would have on v11.
         fs::write(&reg, r#"{"schema_version":99,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
-        fs::write(&reg, r#"{"schema_version":11,"agents":[]}"#).unwrap();
+        fs::write(&reg, r#"{"schema_version":12,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
         // x-8dfc: an unknown provider no longer bricks the read -- it loads as
