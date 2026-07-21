@@ -3725,6 +3725,69 @@ impl View {
                 }
             }
         }
+        // x-aa95: pane grips, drawn on cells the pane owns, hence after the blit
+        // - but BEFORE the scroll indicator, which is state rather than an
+        // affordance and so wins the cells they contend for on a narrow pane. The dragged pane's own grip stays lit for the
+        // whole gesture, which is what keeps the origin marked (AC3-UI) once
+        // the pointer has run off to a zone somewhere else.
+        let dragged = self.pane_drag.map(|d| d.mover);
+        // Hidden on a single-pane tab, matching `grip_at`: no grip is drawn
+        // where none can be pressed.
+        for (pid, rect) in self
+            .layout
+            .panes
+            .iter()
+            .filter(|_| self.layout.panes.len() >= 2)
+        {
+            let Some((grow, gcols)) = self.grip_span(*rect) else {
+                continue;
+            };
+            let lit = dragged == Some(*pid) || (dragged.is_none() && self.hover_grip == Some(*pid));
+            let (fg, flags) = if lit {
+                (LATTICE_ACCENT, cell_flags::BOLD)
+            } else {
+                (Color::Default, cell_flags::DIM)
+            };
+            let (r, start, end) = (grow as usize, gcols.start as usize, gcols.end as usize);
+            if r >= rows {
+                continue;
+            }
+            // A grip cell is one column wide, but the pane content underneath is
+            // arbitrary program output that may hold a DOUBLE-width glyph. The
+            // compositor skips any WIDE_SPACER cell, so stamping over half of
+            // such a pair leaves either a lead with no spacer or a spacer with
+            // no lead - and the row then emits the wrong number of columns,
+            // shifting every cell after it. Blank whichever half survives at the
+            // stamp's edges before writing (the interior is fully overwritten,
+            // so no orphan can survive in there).
+            let blank = Cell {
+                c: ' ',
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: 0,
+            };
+            if start > 0
+                && start < cols
+                && cells[r * cols + start].flags & cell_flags::WIDE_SPACER != 0
+            {
+                cells[r * cols + start - 1] = blank;
+            }
+            if end < cols && cells[r * cols + end].flags & cell_flags::WIDE_SPACER != 0 {
+                cells[r * cols + end] = blank;
+            }
+            for (i, ch) in GRIP.chars().enumerate() {
+                let c = start + i;
+                if c < cols {
+                    cells[r * cols + c] = Cell {
+                        c: ch,
+                        fg,
+                        bg: Color::Default,
+                        flags,
+                    };
+                }
+            }
+        }
+
         // Scroll indicator (US1, AC1-UI): a minimal `[+N]` at a scrolled pane's
         // top-right, inverse-video so it reads over content. Present iff the
         // pane's frame reports a non-zero offset (group 2's status row becomes
@@ -3847,68 +3910,6 @@ impl View {
                         cell.fg = LATTICE_ACCENT;
                         cell.flags |= cell_flags::INVERSE;
                     }
-                }
-            }
-        }
-
-        // x-aa95: pane grips, drawn after the pane blit because they sit on
-        // cells the pane owns. The dragged pane's own grip stays lit for the
-        // whole gesture, which is what keeps the origin marked (AC3-UI) once
-        // the pointer has run off to a zone somewhere else.
-        let dragged = self.pane_drag.map(|d| d.mover);
-        // Hidden on a single-pane tab, matching `grip_at`: no grip is drawn
-        // where none can be pressed.
-        for (pid, rect) in self
-            .layout
-            .panes
-            .iter()
-            .filter(|_| self.layout.panes.len() >= 2)
-        {
-            let Some((grow, gcols)) = self.grip_span(*rect) else {
-                continue;
-            };
-            let lit = dragged == Some(*pid) || (dragged.is_none() && self.hover_grip == Some(*pid));
-            let (fg, flags) = if lit {
-                (LATTICE_ACCENT, cell_flags::BOLD)
-            } else {
-                (Color::Default, cell_flags::DIM)
-            };
-            let (r, start, end) = (grow as usize, gcols.start as usize, gcols.end as usize);
-            if r >= rows {
-                continue;
-            }
-            // A grip cell is one column wide, but the pane content underneath is
-            // arbitrary program output that may hold a DOUBLE-width glyph. The
-            // compositor skips any WIDE_SPACER cell, so stamping over half of
-            // such a pair leaves either a lead with no spacer or a spacer with
-            // no lead - and the row then emits the wrong number of columns,
-            // shifting every cell after it. Blank whichever half survives at the
-            // stamp's edges before writing (the interior is fully overwritten,
-            // so no orphan can survive in there).
-            let blank = Cell {
-                c: ' ',
-                fg: Color::Default,
-                bg: Color::Default,
-                flags: 0,
-            };
-            if start > 0
-                && start < cols
-                && cells[r * cols + start].flags & cell_flags::WIDE_SPACER != 0
-            {
-                cells[r * cols + start - 1] = blank;
-            }
-            if end < cols && cells[r * cols + end].flags & cell_flags::WIDE_SPACER != 0 {
-                cells[r * cols + end] = blank;
-            }
-            for (i, ch) in GRIP.chars().enumerate() {
-                let c = start + i;
-                if c < cols {
-                    cells[r * cols + c] = Cell {
-                        c: ch,
-                        fg,
-                        bg: Color::Default,
-                        flags,
-                    };
                 }
             }
         }
@@ -18838,6 +18839,112 @@ mod tests {
         );
         assert_eq!(view.pane_drag.and_then(|d| d.zone), None);
         assert_eq!(view.commit_pane_drag(), None);
+    }
+
+    #[test]
+    fn every_rim_drop_zone_actually_lights_something() {
+        // The right and bottom rims resolve to a cell one PAST the terminal.
+        // Clamping only the low side left those bands empty once compose()
+        // trimmed them to the buffer, so the zone rendered nothing while a
+        // release there still relocated the pane - and an unlit zone means
+        // "this does nothing" everywhere else in this UI.
+        //
+        // two_pane_view tiles the content area exactly (35 + divider + 36 =
+        // 72); three_pane_view leaves its last column uncovered, so its right
+        // rim is filler rather than a pane and resolves to no zone at all.
+        let mut view = two_pane_view();
+        let panel_w = view.panel_w();
+        let (term_rows, term_cols) = (view.term.0, view.term.1);
+        let (a_rows, a_cols) = view.layout.area;
+        let mid_col = panel_w + a_cols / 2;
+        let mid_row = TAB_BAR_ROWS + a_rows / 2;
+
+        for (row, col, want) in [
+            (mid_row, panel_w, Dir::Left),
+            (mid_row, panel_w + a_cols - 1, Dir::Right),
+            (TAB_BAR_ROWS, mid_col, Dir::Up),
+            (TAB_BAR_ROWS + a_rows - 1, mid_col, Dir::Down),
+        ] {
+            // A cell the hit-test really resolves to a rim zone; a fabricated
+            // zone would prove nothing, since an interior pane's outward band
+            // belongs to a seam zone instead.
+            let zone = view
+                .edge_zone_at(row, col)
+                .unwrap_or_else(|| panic!("{want:?} rim cell ({row},{col}) is not a zone"));
+            assert_eq!(zone.dir, want, "rim cell ({row},{col}) resolved oddly");
+
+            // The regression itself: after compose()'s clamp to the cell
+            // buffer, the band must still cover at least one real cell.
+            let (br, bc) = view.drop_band(zone).expect("the target has a rect");
+            assert!(
+                br.start < term_rows && br.end.min(term_rows) > br.start,
+                "{want:?} band rows {br:?} clamp to nothing against {term_rows}"
+            );
+            assert!(
+                bc.start < term_cols && bc.end.min(term_cols) > bc.start,
+                "{want:?} band cols {bc:?} clamp to nothing against {term_cols}"
+            );
+        }
+
+        // And end to end for the right rim, the half that regressed: dragging
+        // there really does light more than the resting frame does.
+        let baseline = view
+            .compose()
+            .cells
+            .iter()
+            .filter(|c| c.flags & cell_flags::INVERSE != 0)
+            .count();
+        let (row, col) = (mid_row, panel_w + a_cols - 1);
+        let target = view.edge_zone_at(row, col).expect("right rim zone").target;
+        let mover = view
+            .layout
+            .panes
+            .iter()
+            .map(|(p, _)| *p)
+            .find(|p| *p != target)
+            .expect("a second pane to drag");
+        view.begin_pane_drag(mover, Instant::now());
+        assert!(view.pane_drag_to(row, col, Instant::now()));
+        let lit = view
+            .compose()
+            .cells
+            .iter()
+            .filter(|c| c.flags & cell_flags::INVERSE != 0)
+            .count();
+        assert!(
+            lit > baseline,
+            "right rim lit nothing (lit={lit} baseline={baseline})"
+        );
+    }
+
+    #[test]
+    fn the_scroll_indicator_outranks_the_grip() {
+        // They contend for the same top row on a narrow pane. The indicator is
+        // state, the grip is an affordance that has a keyboard equivalent, so
+        // the indicator wins.
+        let mut view = three_pane_view();
+        let rect = view.pane_rect(10).expect("pane 10 exists");
+        let narrow = Rect { cols: 9, ..rect };
+        view.layout.panes[0].1 = narrow;
+        let f = view.frames.get_mut(&10).expect("pane 10 has a frame");
+        f.scroll_offset = 7;
+
+        let (grow, gcols) = view.grip_span(narrow).expect("9 cols still fits a grip");
+        let cols = view.term.1 as usize;
+        let out = view.compose();
+        let row: String = (0..cols)
+            .map(|c| out.cells[grow as usize * cols + c].c)
+            .collect();
+        assert!(
+            row.contains("[+7]"),
+            "the scroll indicator must survive the grip: {row:?}"
+        );
+        // Precondition: they really did overlap, or this proves nothing.
+        let ind_start = view.panel_w() + narrow.x + narrow.cols - 4;
+        assert!(
+            gcols.contains(&ind_start) || (ind_start..ind_start + 4).contains(&gcols.start),
+            "fixture no longer overlaps: grip={gcols:?} indicator at {ind_start}"
+        );
     }
 
     #[test]
