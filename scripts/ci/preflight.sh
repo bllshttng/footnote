@@ -97,8 +97,11 @@ acquire_lock() {
             if [[ "$reaped" == "$holder_line" ]]; then
                 rm -rf "$LOCKDIR.reap.$$"
                 mkdir "$LOCKDIR" 2>/dev/null && { stamp_holder; return 0; }
-            else
-                mv "$LOCKDIR.reap.$$" "$LOCKDIR" 2>/dev/null || rm -rf "$LOCKDIR.reap.$$"
+            elif [[ -e "$LOCKDIR" ]] || ! mv "$LOCKDIR.reap.$$" "$LOCKDIR" 2>/dev/null; then
+                # Someone already re-took the path. Renaming onto an existing
+                # directory NESTS inside it rather than replacing it, which would
+                # bury a live holder under a stray reap dir, so drop the corpse.
+                rm -rf "$LOCKDIR.reap.$$"
             fi
             # Lost the race: re-read so we name the live winner rather than the
             # corpse we just reaped.
@@ -131,7 +134,13 @@ holder_pid_now() { sed -n 's/.*pid=\([0-9]*\).*/\1/p' "$LOCKDIR/holder" 2>/dev/n
 # our own stamp having failed, and leaving it would wedge every later run.
 # Parse the pid rather than matching the stamp's layout, so reordering the
 # fields in stamp_holder cannot silently stop every run from releasing.
+# Once-only: the INT/TERM handler exits, which fires the EXIT trap and would run
+# this a second time. By then our own lockdir is gone, so the unreadable-holder
+# release below would delete whatever lock a successor had just taken.
+CLEANED=0
 cleanup() {
+    [[ $CLEANED -eq 1 ]] && return 0
+    CLEANED=1
     local pid_now; pid_now="$(holder_pid_now)"
     [[ -z "$pid_now" || "$pid_now" == "$$" ]] && rm -rf "$LOCKDIR"
     [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"
@@ -288,8 +297,10 @@ fi
 # loud VOID instead of a GREEN or RED silently earned by another checkout.
 # Compare shas only; the preflight worktree is always detached HEAD.
 VOID_REASON=""
-if ! WT_HEAD_NOW="$(git -C "$PREFLIGHT_WT" rev-parse HEAD 2>&1)"; then
-    VOID_REASON="cannot read the preflight worktree at $PREFLIGHT_WT: $WT_HEAD_NOW"
+# 2>/dev/null, never 2>&1: merging stderr into the value means any benign git
+# warning makes the captured string differ from the sha and VOIDs a good run.
+if ! WT_HEAD_NOW="$(git -C "$PREFLIGHT_WT" rev-parse HEAD 2>/dev/null)"; then
+    VOID_REASON="cannot read the preflight worktree at $PREFLIGHT_WT"
 elif [[ "$WT_HEAD_NOW" != "$CANDIDATE_SHA" ]]; then
     VOID_REASON="worktree moved off our candidate mid-run (now ${WT_HEAD_NOW:0:12}, expected $CANDIDATE_SHORT)"
 elif [[ "$(holder_pid_now)" != "$$" ]]; then
