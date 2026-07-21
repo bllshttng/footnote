@@ -57,9 +57,9 @@ _RECENT_CREATED = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
 
 def _two_ready_entries():
     return [
-        {"id": "ab-aaaaaaaa", "title": "A", "_status": "ready", "priority": "p2",
+        {"id": "ab-aaaaaaaa", "title": "A", "status": "ready", "priority": "p2",
          "created_at": _RECENT_CREATED, "project": "p", "blocked_by": [], "plan_path": "a.md"},
-        {"id": "ab-bbbbbbbb", "title": "B", "_status": "ready", "priority": "p2",
+        {"id": "ab-bbbbbbbb", "title": "B", "status": "ready", "priority": "p2",
          "created_at": _RECENT_CREATED, "project": "p", "blocked_by": [], "plan_path": "b.md"},
     ]
 

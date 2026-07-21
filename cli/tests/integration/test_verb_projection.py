@@ -61,7 +61,7 @@ def _node(plan: Path, **over) -> dict:
         "id": "x-1234",
         "slug": "the-node",
         "title": "The node",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
         "project": "fno",
         "priority": "p2",
@@ -89,7 +89,7 @@ def test_update_size_and_parent_repaint(tmp_graph, tmp_path):
     """AC3-HP end-to-end: --size/--parent flow through the verb into the doc."""
     plan = _plan(tmp_path)
     _seed(tmp_graph, [
-        {"id": "x-epic", "slug": "the-epic", "title": "Epic", "_status": "ready",
+        {"id": "x-epic", "slug": "the-epic", "title": "Epic", "status": "ready",
          "domain": "code", "project": "fno", "type": "epic"},
         _node(plan),
     ])
@@ -129,7 +129,7 @@ def test_update_parent_null_clears_doc_mirror(tmp_graph, tmp_path):
         _PLAN.replace("size: S", "size: S\nparent: x-epic\nparent_slug: the-epic"),
     )
     _seed(tmp_graph, [
-        {"id": "x-epic", "slug": "the-epic", "title": "Epic", "_status": "ready",
+        {"id": "x-epic", "slug": "the-epic", "title": "Epic", "status": "ready",
          "domain": "code", "project": "fno", "type": "epic"},
         _node(plan, parent="x-epic"),
     ])
@@ -193,7 +193,7 @@ def test_malformed_tag_refused_node_unchanged(tmp_graph, tmp_path):
 
 def _epic(nid, slug, parent=None):
     return {
-        "id": nid, "slug": slug, "title": slug, "_status": "ready",
+        "id": nid, "slug": slug, "title": slug, "status": "ready",
         "domain": "code", "project": "fno", "type": "epic", "parent": parent,
     }
 

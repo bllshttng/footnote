@@ -76,7 +76,7 @@ cat > "$WORK/bin/fno" <<'STUB'
 if [[ "${1:-}" == "backlog" && "${2:-}" == "get" ]]; then
   for p in ${FNO_STUB_PHANTOM:-}; do [[ "${3:-}" == "$p" ]] && exit 1; done
   for w in ${FNO_STUB_INPROGRESS:-}; do
-    [[ "${3:-}" == "$w" ]] && { printf '{"pr_number":207,"_status":"claimed"}\n'; exit 0; }
+    [[ "${3:-}" == "$w" ]] && { printf '{"pr_number":207,"status":"claimed"}\n'; exit 0; }
   done
   # Resolves (exit 0) but emits NON-DICT JSON (null): the underway predicate must
   # not crash on d.get -> it exits 1 and the offer surfaces (fail safe).

@@ -55,12 +55,12 @@ case "$sub $verb" in
       [[ -f "$S/verb_$id" ]] && verb_fragment=",\"dispatch_verb\":\"$(cat "$S/verb_$id")\""
       # Emit _resolved_cwd when set, otherwise omit the field (stale-abi sim).
       if [[ -f "$S/resolved_cwd_$id" ]]; then
-        printf '{"id":"%s","_status":"%s","_resolved_cwd":"%s","cwd":"%s"%s%s}\n' \
+        printf '{"id":"%s","status":"%s","_resolved_cwd":"%s","cwd":"%s"%s%s}\n' \
           "$id" "$(cat "$S/status_$id")" \
           "$(cat "$S/resolved_cwd_$id")" \
           "$(cat "$S/cwd_$id" 2>/dev/null || echo "")" "$pr_fragment" "$verb_fragment"
       else
-        printf '{"id":"%s","_status":"%s","cwd":"%s"%s%s}\n' \
+        printf '{"id":"%s","status":"%s","cwd":"%s"%s%s}\n' \
           "$id" "$(cat "$S/status_$id")" "$(cat "$S/cwd_$id" 2>/dev/null || echo "")" "$pr_fragment" "$verb_fragment"
       fi
     else
@@ -393,7 +393,7 @@ out="$(bash "$DISPATCH" ab-ffff6666 ab-7777aaaa 2>&1)"
   || fail "gate: blocked/deferred not parked: $out"
 
 # ---- gate: an EXPLICITLY-NAMED idea node dispatches (naming is the vet) ----
-# A triage-pile node is _status: idea (there is no distinct `triage` status), so
+# A triage-pile node is status: idea (there is no distinct `triage` status), so
 # this covers the whole "idea/triage" surface. A real launch (not dry-run)
 # exercises the reserving spawn-guard + Guard 3 + receipt path for a non-ready
 # status, not just the --no-reserve dry-run short-circuit.

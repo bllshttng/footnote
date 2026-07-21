@@ -10,9 +10,9 @@ with PyYAML; it never re-serializes a plan. `_stamp.py`'s hand-rolled writer
 stays byte-preserving (Locked Decision 1) - a YAML round-trip would reorder
 keys and reformat opaque blocks like `kill_criteria`.
 
-`PlanStatus` is derived FROM `_status.STATUS_PROGRESSION` (never re-listed) so
+`PlanStatus` is derived FROM `status.STATUS_PROGRESSION` (never re-listed) so
 the two definitions cannot drift; `done`/`superseded` join as off-axis sibling
-terminals, matching `_status`'s own split (Locked Decision 2).
+terminals, matching `status`'s own split (Locked Decision 2).
 """
 from __future__ import annotations
 
@@ -24,9 +24,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from fno.plan._status import STATUS_ALIASES, STATUS_PROGRESSION, TERMINAL_STATUSES
 
-# Str-enum built directly from the _status axis + terminals. Functional API so
+# Str-enum built directly from the status axis + terminals. Functional API so
 # the members are *derived*, never hand-listed here - the drift lint asserts
-# this stays set-equal to _status's own vocabulary.
+# this stays set-equal to status's own vocabulary.
 PlanStatus = enum.Enum(  # type: ignore[misc]
     "PlanStatus",
     {name: name for name in (*STATUS_PROGRESSION, *TERMINAL_STATUSES)},
@@ -96,7 +96,7 @@ class PlanFrontmatter(BaseModel):
         Two jobs. Unquoted `status: true` in YAML parses to Python `True`;
         without the bool coercion the enum would reject it with a confusing type
         error instead of naming the (coerced) invalid value - the same bug
-        `_status.py`'s coerce_status_from_yaml exists to catch, reproduced here
+        `status.py`'s coerce_status_from_yaml exists to catch, reproduced here
         rather than reused because that helper rejects `done`/`superseded`, which
         are valid for this model's superset enum. Then a retired spelling
         resolves to its survivor, so a doc stamped under the old vocabulary

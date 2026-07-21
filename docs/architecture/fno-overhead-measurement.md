@@ -16,7 +16,7 @@ Per the plan's decision rule:
 | `0.15 <= ratio < 0.30` | `reads_only_v1` | Ship daemon with 8 read handlers; skip the 4 write handlers |
 | `>= 0.30` | `full_v1` | Ship full daemon (8 reads + 4 writes) per the original spec |
 
-The decision is `abort_daemon`. The backlog node is marked `_status: deferred` with the rationale recorded on the node itself.
+The decision is `abort_daemon`. The backlog node is marked `status: deferred` with the rationale recorded on the node itself.
 
 ## Why this matters
 

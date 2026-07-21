@@ -77,7 +77,7 @@ def _node(
     return {
         "id": node_id,
         "title": f"Node {node_id}",
-        "_status": "done" if completed_at else "ready",
+        "status": "done" if completed_at else "ready",
         "domain": "code",
         "pr_number": pr_number,
         "pr_url": pr_url,
@@ -157,7 +157,7 @@ def test_advisory_node_no_refs_closes_without_gh(tmp_graph, monkeypatch):
     assert not gh_called
     node = _read(tmp_graph)[0]
     assert node["completed_at"] is not None
-    assert node.get("_status") == "done"
+    assert node.get("status") == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +186,7 @@ def test_merged_pr_closes_successfully(tmp_graph, monkeypatch):
 
     assert result.exit_code == 0, result.output
     node = _read(tmp_graph)[0]
-    assert node.get("_status") == "done"
+    assert node.get("status") == "done"
     assert node["completed_at"] is not None
 
 
@@ -228,7 +228,7 @@ def test_open_green_pr_awaits_merge_exit5_no_ci_query(tmp_graph, monkeypatch):
     assert result.exit_code == 5, f"expected 5 (awaiting merge), got {result.exit_code}. output: {result.output}"
     node = _read(tmp_graph)[0]
     assert not node.get("completed_at")
-    assert node.get("_status") != "done"
+    assert node.get("status") != "done"
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +302,7 @@ def test_merged_ref_wins_over_open_ref(tmp_graph, monkeypatch):
             {
                 "id": "ab-oo000001",
                 "title": "multi",
-                "_status": "ready",
+                "status": "ready",
                 "domain": "code",
                 "pr_number": 10,
                 "pr_url": "https://github.com/org/repo/pull/10",
@@ -329,7 +329,7 @@ def test_merged_ref_wins_over_open_ref(tmp_graph, monkeypatch):
 
     assert result.exit_code == 0, f"expected 0 (merged wins), got {result.exit_code}. output: {result.output}"
     node = _read(tmp_graph)[0]
-    assert node.get("_status") == "done"
+    assert node.get("status") == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +405,7 @@ def test_force_with_reason_closes_and_journals(tmp_graph, monkeypatch):
 
     assert result.exit_code == 0, f"expected 0 (force close), got {result.exit_code}. output: {result.output}"
     node = _read(tmp_graph)[0]
-    assert node.get("_status") == "done"
+    assert node.get("status") == "done"
     assert node["completed_at"] is not None
     # Reason should appear in output (journaling)
     combined = result.output + (result.stderr or "")
@@ -547,7 +547,7 @@ def test_open_ref_wins_over_outaged_ref(tmp_graph, monkeypatch):
             {
                 "id": "ab-pp000001",
                 "title": "multi",
-                "_status": "ready",
+                "status": "ready",
                 "domain": "code",
                 "pr_number": 20,
                 "pr_url": "https://github.com/org/repo/pull/20",
@@ -589,7 +589,7 @@ def test_closed_ref_plus_outage_is_retryable(tmp_graph, monkeypatch):
             {
                 "id": "ab-qq000001",
                 "title": "multi",
-                "_status": "ready",
+                "status": "ready",
                 "domain": "code",
                 "pr_number": 30,
                 "pr_url": "https://github.com/org/repo/pull/30",
@@ -634,7 +634,7 @@ def test_done_real_stamp_marks_never_shipped_plan_done(tmp_graph, monkeypatch, t
             {
                 "id": "ab-done0001",
                 "title": "t",
-                "_status": "ready",
+                "status": "ready",
                 "domain": "code",
                 "pr_number": 900,
                 "pr_url": "https://github.com/org/repo/pull/900",
@@ -678,7 +678,7 @@ def test_done_skip_stamp_leaves_plan_untouched(tmp_graph, monkeypatch, tmp_path)
             {
                 "id": "ab-done0002",
                 "title": "t",
-                "_status": "ready",
+                "status": "ready",
                 "domain": "code",
                 "pr_number": 901,
                 "pr_url": "https://github.com/org/repo/pull/901",

@@ -20,7 +20,7 @@ def _make_folder_plan(plans_root: Path, name: str) -> Path:
 
 def test_non_terminal_owner_counted(tmp_path: Path) -> None:
     _make_folder_plan(tmp_path, "live-folder")
-    entries = [{"id": "ab-1", "_status": "ready", "plan_path": "internal/fno/plans/live-folder"}]
+    entries = [{"id": "ab-1", "status": "ready", "plan_path": "internal/fno/plans/live-folder"}]
     owners = scan(tmp_path, entries)
     assert owners is not None
     assert [o.node_id for o in owners] == ["ab-1"]
@@ -29,14 +29,14 @@ def test_non_terminal_owner_counted(tmp_path: Path) -> None:
 def test_terminal_owner_not_counted(tmp_path: Path) -> None:
     # Frontmatter says "ready" (stale) but the owning node is done - must not count.
     _make_folder_plan(tmp_path, "done-folder")
-    entries = [{"id": "ab-2", "_status": "done", "plan_path": "internal/fno/plans/done-folder"}]
+    entries = [{"id": "ab-2", "status": "done", "plan_path": "internal/fno/plans/done-folder"}]
     owners = scan(tmp_path, entries)
     assert owners == []
 
 
 def test_folder_with_no_owning_node_not_counted(tmp_path: Path) -> None:
     _make_folder_plan(tmp_path, "orphan-folder")
-    entries = [{"id": "ab-3", "_status": "ready", "plan_path": "internal/fno/plans/some-other-doc.md"}]
+    entries = [{"id": "ab-3", "status": "ready", "plan_path": "internal/fno/plans/some-other-doc.md"}]
     owners = scan(tmp_path, entries)
     assert owners == []
 
@@ -46,7 +46,7 @@ def test_basename_join_ignores_absolute_root_mismatch(tmp_path: Path) -> None:
     # (abilities-vs-fno rename); basename join must still match.
     _make_folder_plan(tmp_path, "renamed-root-folder")
     entries = [
-        {"id": "ab-4", "_status": "ready", "plan_path": "/Users/other/abilities/plans/renamed-root-folder"}
+        {"id": "ab-4", "status": "ready", "plan_path": "/Users/other/abilities/plans/renamed-root-folder"}
     ]
     owners = scan(tmp_path, entries)
     assert owners is not None
@@ -55,7 +55,7 @@ def test_basename_join_ignores_absolute_root_mismatch(tmp_path: Path) -> None:
 
 def test_unscannable_plans_root_returns_none(tmp_path: Path) -> None:
     missing = tmp_path / "does-not-exist"
-    owners = scan(missing, [{"id": "ab-5", "_status": "ready", "plan_path": "x"}])
+    owners = scan(missing, [{"id": "ab-5", "status": "ready", "plan_path": "x"}])
     assert owners is None
 
 

@@ -248,8 +248,8 @@ def test_cli_ready_mission_filter(tmp_path, monkeypatch):
         json.dumps(
             {
                 "entries": [
-                    {"id": "x-in", "title": "in", "_status": "ready", "mission_id": "m-7"},
-                    {"id": "x-out", "title": "out", "_status": "ready"},
+                    {"id": "x-in", "title": "in", "status": "ready", "mission_id": "m-7"},
+                    {"id": "x-out", "title": "out", "status": "ready"},
                 ]
             }
         ),

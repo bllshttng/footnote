@@ -69,12 +69,12 @@ def _write_idea_nodes(graph_path: Path, n: int) -> None:
                 "completed_at": None,
                 "has_brief": False,
                 "compacted": False,
-                "plan_path": None,  # no plan_path -> derives to _status: idea
+                "plan_path": None,  # no plan_path -> derives to status: idea
                 "pr_number": None,
                 "pr_url": None,
                 "merge_status": None,
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "_status": "idea",
+                "status": "idea",
                 "collisions_acknowledged": [],
                 "supersedes": [],
                 "superseded_by": None,
@@ -717,7 +717,7 @@ def _make_pending_node(
         "pr_url": None,
         "merge_status": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "_status": "done" if completed_at else "ready",
+        "status": "done" if completed_at else "ready",
         "collisions_acknowledged": [],
         "supersedes": [],
         "superseded_by": None,

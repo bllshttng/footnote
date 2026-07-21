@@ -118,7 +118,7 @@ def epic_candidates(
         eid = e.get("id")
         if not isinstance(eid, str) or eid == nid:
             continue
-        if e.get("_status") in _RETIRED_EPIC_STATUSES:
+        if e.get("status") in _RETIRED_EPIC_STATUSES:
             continue
         score, reason = _score(entry, e, ta, _tokens(e))
         if score > 0.0:

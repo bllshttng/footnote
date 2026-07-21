@@ -12,7 +12,7 @@ from fno.graph._intake import _find_node
 
 
 def _entry(id: str, title: str = "T", *, status: str = "ready") -> dict:
-    return {"id": id, "title": title, "_status": status}
+    return {"id": id, "title": title, "status": status}
 
 
 # -- regression: full-id behavior must not change --

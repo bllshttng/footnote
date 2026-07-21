@@ -481,7 +481,7 @@ event_types:
 
   - name: graph_status_drift
     description: |
-      Emitted when an Entry is deserialized with a persisted `_status`
+      Emitted when an Entry is deserialized with a persisted `status`
       value that differs from the computed derivation (e.g. legacy
       graph.json with stale field). The computed value wins; this
       event records the drift for forensic audit.
@@ -494,13 +494,13 @@ event_types:
       properties:
         entry_id:
           type: string
-          description: "The id field of the Entry whose persisted _status diverged."
+          description: "The id field of the Entry whose persisted status diverged."
         persisted:
           type: string
-          description: "The _status value read from disk."
+          description: "The status value read from disk."
         computed:
           type: string
-          description: "The _status value derived from the entry's own fields."
+          description: "The status value derived from the entry's own fields."
     consumers: [operator]
 
   - name: phase_0_decision
@@ -589,7 +589,7 @@ event_types:
     consumers: [operator]
 
   - name: done_race_collision
-    description: "Two fno done calls landed on the same node; second saw _status already done."
+    description: "Two fno done calls landed on the same node; second saw status already done."
     sources: [abi-loop]
     data:
       required: [node_id, first_completed_at, second_attempt_at]

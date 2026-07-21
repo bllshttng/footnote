@@ -99,7 +99,7 @@ def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
     Sessions claim the leaf CHILDREN of an epic, never the container, so an
     in-progress epic carries no claim/session of its own and would otherwise sit
     in its priority column. The board surfaces it in Now by id, derived purely
-    from its children - the epic's own ``_status`` is never mutated, so the
+    from its children - the epic's own ``status`` is never mutated, so the
     ``claimed => session_id`` invariant holds (x-33b2). Mirrors the epics-first
     in-progress signal in ``_intake.make_selection_sort_key``.
     """
@@ -112,7 +112,7 @@ def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
             children_by_parent.setdefault(pid, []).append(e)
     return frozenset(
         pid for pid, kids in children_by_parent.items()
-        if any(k.get("completed_at") or k.get("_status") == "in_progress" for k in kids)
+        if any(k.get("completed_at") or k.get("status") == "in_progress" for k in kids)
     )
 
 
@@ -143,7 +143,7 @@ def _kanban_column(
         return None
     if entry.get("completed_at"):
         return "Done"
-    status = entry.get("_status", "ready")
+    status = entry.get("status", "ready")
     if status in ("deferred", "superseded"):
         return None
     if status == "in_progress":
@@ -151,19 +151,19 @@ def _kanban_column(
     # In-progress epic (x-33b2): a container with a done/claimed child has no
     # claim of its own (sessions claim the children) but is genuinely underway,
     # so surface it in Now. The set is derived from children by the caller; the
-    # epic's `_status` stays honest (never a claim without a session_id).
+    # epic's `status` stays honest (never a claim without a session_id).
     if entry.get("id") in in_progress_epics:
         return "Now"
     # Live-claim overlay (x-4845): a node another session is actively driving
     # holds a LIVE `node:<id>` lockfile but may never write a graph session_id,
-    # so its `_status` is not "in_progress" and it would otherwise route by bare
+    # so its `status` is not "in_progress" and it would otherwise route by bare
     # priority. Surface it in Now off the lockfile truth. Display-only — the
-    # graph `_status` is never mutated (x-33b2: claimed => session_id stays a
+    # graph `status` is never mutated (x-33b2: claimed => session_id stays a
     # pure derivation). Additive: placed below the exclusions so a dead/off-board
     # node is never resurrected, and it only ever promotes to Now.
     if entry.get("id") in live_claimed:
         return "Now"
-    # Queued is orthogonal to _status (the field stays set across blocked,
+    # Queued is orthogonal to status (the field stays set across blocked,
     # idea, etc.). It routes to the Triage lane - a queued node is "awaiting
     # human ack" (via `fno backlog pick`), not active work, so it must NOT
     # inflate Now. Still below claimed: a claimed node is actively in progress

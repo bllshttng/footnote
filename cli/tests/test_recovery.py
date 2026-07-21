@@ -838,15 +838,15 @@ class TestNodeIsDone:
         monkeypatch.setattr(gl, "load_graph", lambda *a, **k: entries)
 
     def test_true_when_done(self, monkeypatch):
-        self._patch_graph(monkeypatch, [{"id": "x-370f", "_status": "done"}])
+        self._patch_graph(monkeypatch, [{"id": "x-370f", "status": "done"}])
         assert recovery._node_is_done("x-370f") is True
 
     def test_false_when_not_done(self, monkeypatch):
-        self._patch_graph(monkeypatch, [{"id": "x-370f", "_status": "claimed"}])
+        self._patch_graph(monkeypatch, [{"id": "x-370f", "status": "claimed"}])
         assert recovery._node_is_done("x-370f") is False
 
     def test_false_when_absent(self, monkeypatch):
-        self._patch_graph(monkeypatch, [{"id": "x-other", "_status": "done"}])
+        self._patch_graph(monkeypatch, [{"id": "x-other", "status": "done"}])
         assert recovery._node_is_done("x-370f") is False
 
     def test_load_error_degrades_to_false(self, monkeypatch):

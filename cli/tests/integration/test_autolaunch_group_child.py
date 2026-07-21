@@ -35,11 +35,11 @@ def _epic_plan(tmp_path: Path) -> Path:
 def _write_graph(tmp_path: Path, child1_status: str, child1_plan) -> Path:
     g = tmp_path / "graph.json"
     g.write_text(json.dumps({"entries": [
-        {"id": EPIC, "parent": None, "_status": "ready", "plan_path": "epic.md"},
+        {"id": EPIC, "parent": None, "status": "ready", "plan_path": "epic.md"},
         {"id": CHILD1, "parent": EPIC, "group_slug": "1",
-         "plan_path": child1_plan, "_status": child1_status},
+         "plan_path": child1_plan, "status": child1_status},
         {"id": CHILD2, "parent": EPIC, "group_slug": "2",
-         "plan_path": None, "_status": "blocked"},
+         "plan_path": None, "status": "blocked"},
     ]}))
     return g
 

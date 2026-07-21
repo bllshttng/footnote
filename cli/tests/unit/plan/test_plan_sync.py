@@ -62,7 +62,7 @@ def test_sweep_converges_vault(env):
         d = _doc(tmp_path, f"p{i}.md", f"x-000{i}", "p3")  # doc says p3
         docs.append(d)
         entries.append({"id": f"x-000{i}", "slug": f"s{i}", "plan_path": str(d),
-                        "priority": "p1", "_status": "ready"})  # graph says p1
+                        "priority": "p1", "status": "ready"})  # graph says p1
     _seed(g, entries)
 
     res = runner.invoke(app, ["plan", "sync"])
@@ -89,7 +89,7 @@ def test_idempotent_second_run(env):
     tmp_path, g = env
     d = _doc(tmp_path, "p.md", "x-0001", "p3")
     _seed(g, [{"id": "x-0001", "slug": "s", "plan_path": str(d),
-               "priority": "p1", "_status": "ready"}])
+               "priority": "p1", "status": "ready"}])
 
     first = runner.invoke(app, ["plan", "sync", "--all"])  # --all: no gate
     assert "1 docs repainted" in first.output
@@ -102,7 +102,7 @@ def test_watermark_short_circuits_unchanged_graph(env):
     tmp_path, g = env
     d = _doc(tmp_path, "p.md", "x-0001", "p3")
     _seed(g, [{"id": "x-0001", "slug": "s", "plan_path": str(d),
-               "priority": "p1", "_status": "ready"}])
+               "priority": "p1", "status": "ready"}])
 
     first = runner.invoke(app, ["plan", "sync"])
     assert "1 docs repainted" in first.output
@@ -120,7 +120,7 @@ def test_all_bypasses_watermark(env):
     tmp_path, g = env
     d = _doc(tmp_path, "p.md", "x-0001", "p3")
     _seed(g, [{"id": "x-0001", "slug": "s", "plan_path": str(d),
-               "priority": "p1", "_status": "ready"}])
+               "priority": "p1", "status": "ready"}])
 
     runner.invoke(app, ["plan", "sync"])  # sets watermark to current graph mtime
     d.write_text(_PLAN.format(node="x-0001", prio="p3"), encoding="utf-8")  # re-drift doc only

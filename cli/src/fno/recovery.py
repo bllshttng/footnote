@@ -485,7 +485,7 @@ def _node_is_done(node: str) -> bool:
 
         for entry in load_graph():
             if entry.get("id") == node:
-                return entry.get("_status") == "done"
+                return entry.get("status") == "done"
     except Exception:  # noqa: BLE001 - a status read must never crash the sweep
         return False
     return False

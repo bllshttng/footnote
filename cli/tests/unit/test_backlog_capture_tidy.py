@@ -2,7 +2,7 @@
 
 Covers the one-idempotent-pass contract:
   - AC3: eject filed ``ab-*`` lines whose node completed (read concrete fields,
-    not ``_status``); incomplete filed nodes stay.
+    not ``status``); incomplete filed nodes stay.
   - AC5: ``tidy`` is idempotent (a second run is byte-identical to the first
     run's output) and the pinned digest lists every open ``#jc`` action exactly
     once, dated items ascending by date then undated in stable source order.

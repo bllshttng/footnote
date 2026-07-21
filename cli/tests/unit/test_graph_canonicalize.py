@@ -4,7 +4,7 @@ derived ``children`` summary index.
 Canonicalization runs inside ``locked_mutate_graph`` after ``recompute_statuses``
 so every write produces a consistent, status-near-top key order and a fresh
 inverse-of-``parent`` ``children`` index. The index entries are compact
-summaries ``{id, title, project, _status}`` -- enough to scan a node's children
+summaries ``{id, title, project, status}`` -- enough to scan a node's children
 without a second lookup, light enough not to denormalize the flat store.
 """
 from __future__ import annotations
@@ -34,13 +34,13 @@ def _noop(entries):
 
 
 def test_status_is_second_key_after_id(tmp_path):
-    """After a mutation, every written entry has ``_status`` as its 2nd key."""
+    """After a mutation, every written entry has ``status`` as its 2nd key."""
     path = _make_graph(tmp_path, [{"id": "ab-aaaa0001", "title": "T"}])
     locked_mutate_graph(path, _noop)
     raw = _read_json(path)  # raw read preserves on-disk key order
     keys = list(raw[0].keys())
     assert keys[0] == "id"
-    assert keys[1] == "_status"
+    assert keys[1] == "status"
 
 
 def test_canonical_order_is_applied(tmp_path):
@@ -64,7 +64,7 @@ def test_extra_keys_preserved_at_end(tmp_path):
     assert raw[0]["points"] == 5
     # appended after the canonical block
     keys = list(raw[0].keys())
-    assert keys.index("points") > keys.index("_status")
+    assert keys.index("points") > keys.index("status")
 
 
 # -- children index --
@@ -72,7 +72,7 @@ def test_extra_keys_preserved_at_end(tmp_path):
 
 def test_children_summary_for_parent(tmp_path):
     """A parent node's ``children`` lists compact summaries of its direct
-    children: {id, title, project, _status}."""
+    children: {id, title, project, status}."""
     path = _make_graph(
         tmp_path,
         [
@@ -94,7 +94,7 @@ def test_children_summary_for_parent(tmp_path):
             "id": "ab-child001",
             "title": "Child A",
             "project": "fno",
-            "_status": "ready",
+            "status": "ready",
         }
     ]
 
@@ -210,12 +210,12 @@ def test_rank_value_persists_across_column_change(tmp_path):
 
 def test_canonicalize_entries_pure():
     entries = [
-        {"id": "ab-p", "title": "P", "_status": "idea"},
-        {"id": "ab-c", "title": "C", "parent": "ab-p", "_status": "idea"},
+        {"id": "ab-p", "title": "P", "status": "idea"},
+        {"id": "ab-c", "title": "C", "parent": "ab-p", "status": "idea"},
     ]
     out = canonicalize_entries(entries)
     by_id = {e["id"]: e for e in out}
     assert by_id["ab-p"]["children"] == [
-        {"id": "ab-c", "title": "C", "project": None, "_status": "idea"}
+        {"id": "ab-c", "title": "C", "project": None, "status": "idea"}
     ]
-    assert list(by_id["ab-c"].keys())[:2] == ["id", "_status"]
+    assert list(by_id["ab-c"].keys())[:2] == ["id", "status"]

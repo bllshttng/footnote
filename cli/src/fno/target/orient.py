@@ -98,7 +98,7 @@ def _node_line(
         return f"unknown (graph unreadable: {exc}) | {resolve}"
     if entry is None:
         return f"unknown (not in graph) | {resolve}"
-    status = str(entry.get("_status") or entry.get("status") or "").strip()
+    status = str(entry.get("status") or "").strip()
     pr = entry.get("pr_number")
     # `done` is terminal FIRST, before any PR-metadata branch: an advisory /
     # no-ship / manually-completed node is `done` without a PR, and must not

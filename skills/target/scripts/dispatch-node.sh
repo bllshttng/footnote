@@ -247,7 +247,7 @@ for id in "${NODES[@]}"; do
     continue
   fi
 
-  status="$(printf '%s' "$node_json" | jq -r '._status // "unknown"')"
+  status="$(printf '%s' "$node_json" | jq -r '.status // "unknown"')"
 
   case "$status" in
     done)
@@ -415,7 +415,7 @@ for id in "${NODES[@]}"; do
   # The race-critical node:<id> claim probe (Guard 1) + create-only dispatch:<id>
   # reservation (Guard 2) live in `fno agents spawn-guard` so this path and
   # /agent spawn (spawn.sh) can never drift on the part that matters. A dry-run,
-  # or a node whose _status is `claimed` (the recovery-park policy below), uses
+  # or a node whose status is `claimed` (the recovery-park policy below), uses
   # --no-reserve so NO reservation is taken; a real ready dispatch reserves.
   # Fail CLOSED: a stale `fno` without the verb (or any non-clean/unparseable
   # verdict) leaves the node `ready` and launches nothing.
@@ -465,7 +465,7 @@ for id in "${NODES[@]}"; do
       continue ;;
     dispatchable)
       if [[ "$status" == "claimed" ]]; then
-        # _status: claimed but node:<id> claim not live. Do NOT auto-recover via
+        # status: claimed but node:<id> claim not live. Do NOT auto-recover via
         # dispatch (external review P2): the worker init may see a stale legacy
         # graph session_id, refuse to record graph_node_id, run anyway, then be
         # unable to clear the legacy graph claim on exit - leaving the node stuck

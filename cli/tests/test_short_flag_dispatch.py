@@ -84,9 +84,9 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 def test_backlog_find_short_flags_match_long(tmp_graph: Path) -> None:
     """AC4: `backlog find -p X -s Y -J` is byte-identical to the long form."""
     tmp_graph.write_text(json.dumps({"entries": [
-        {"id": "ab-sf000001", "title": "Short flag rollout", "_status": "done",
+        {"id": "ab-sf000001", "title": "Short flag rollout", "status": "done",
          "domain": "code", "project": "fno"},
-        {"id": "ab-sf000002", "title": "Unrelated thing", "_status": "ready",
+        {"id": "ab-sf000002", "title": "Unrelated thing", "status": "ready",
          "domain": "code", "project": "other"},
     ]}) + "\n")
     long = runner.invoke(app, [

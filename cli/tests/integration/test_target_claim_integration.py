@@ -52,7 +52,7 @@ def test_init_target_state_acquires_claim_when_node_id_present(tmp_path):
     graph = abi_home / "graph.json"
     graph.write_text(
         '{"entries":[{"id":"ab-testit","plan_path":"plans/test.md",'
-        '"_status":"ready","priority":"p2","project":"fno"}]}'
+        '"status":"ready","priority":"p2","project":"fno"}]}'
     )
 
     # Set up a fake repo root with .fno/ and the resolvable plan path

@@ -57,7 +57,7 @@ def scan(plans_root: Path, graph_entries: list[dict]) -> list[NonTerminalOwner] 
         base = Path(plan_path.rstrip("/")).name
         if base not in folder_basenames:
             continue
-        status = entry.get("_status") or ""
+        status = entry.get("status") or ""
         if status in TERMINAL_STATUSES:
             continue
         owners.append(

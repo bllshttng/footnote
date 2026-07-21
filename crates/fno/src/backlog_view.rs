@@ -36,9 +36,17 @@ pub fn graph_path() -> PathBuf {
     base.join(".fno").join("graph.json")
 }
 
-/// Classify a node's `_status` into a queue state, or `None` to drop it (done /
+/// Read a node's derived status, tolerating the pre-rename `_status` key so a
+/// graph.json not yet re-written by the Python side still classifies.
+fn node_status(e: &serde_json::Value) -> Option<&str> {
+    e.get("status")
+        .or_else(|| e.get("_status"))
+        .and_then(|v| v.as_str())
+}
+
+/// Classify a node's `status` into a queue state, or `None` to drop it (done /
 /// idea / deferred / superseded are not actionable queue work). Authoritative
-/// on `_status` alone: a claimed node with a stale `blocked_by` is in-flight,
+/// on `status` alone: a claimed node with a stale `blocked_by` is in-flight,
 /// not blocked.
 fn classify(status: &str) -> Option<CardState> {
     match status {
@@ -118,7 +126,7 @@ fn lane_rank(lane: &str) -> usize {
 /// sits. Kept deliberately close to the Python, ordering included, so a change
 /// there is easy to mirror here.
 ///
-/// `claimed` folds the graph `_status` and the live-lockfile claim together (a
+/// `claimed` folds the graph `status` and the live-lockfile claim together (a
 /// node another session drives may never write a graph status - x-4845);
 /// `underway` is [`in_progress_epics`] membership.
 fn kanban_column(e: &serde_json::Value, claimed: bool, underway: bool) -> Option<&'static str> {
@@ -128,14 +136,14 @@ fn kanban_column(e: &serde_json::Value, claimed: bool, underway: bool) -> Option
     if has_stamp(e, "completed_at") {
         return Some("Done");
     }
-    let status = e.get("_status").and_then(|v| v.as_str()).unwrap_or("ready");
+    let status = node_status(e).unwrap_or("ready");
     if matches!(status, "deferred" | "superseded") {
         return None; // off-board until reactivated
     }
     if claimed || underway {
         return Some("Now");
     }
-    // Queued is orthogonal to `_status`: a node awaiting human ack is not active
+    // Queued is orthogonal to `status`: a node awaiting human ack is not active
     // work, so it must not inflate Now - but a claimed node stays in Now.
     if has_stamp(e, "queued_at") {
         return Some("Triage");
@@ -168,8 +176,7 @@ fn in_progress_epics(entries: &[serde_json::Value]) -> HashSet<&str> {
         let Some(parent) = e.get("parent").and_then(|v| v.as_str()) else {
             continue;
         };
-        let done = has_stamp(e, "completed_at")
-            || e.get("_status").and_then(|v| v.as_str()) == Some("claimed");
+        let done = has_stamp(e, "completed_at") || node_status(e) == Some("claimed");
         if done {
             underway.insert(parent);
         }
@@ -204,7 +211,7 @@ pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option
     let mut rows: Vec<(String, bool, Option<f64>, u8, String, BacklogCard)> =
         Vec::with_capacity(entries.len().min(CARD_CAP * 2));
     for e in entries {
-        let status = e.get("_status").and_then(|v| v.as_str()).unwrap_or("");
+        let status = node_status(e).unwrap_or("");
         let Some(state) = classify(status) else {
             continue;
         };
@@ -247,7 +254,7 @@ pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option
                 slug: slug.to_string(),
                 priority: priority.to_string(),
                 // A live lockfile claim marks a node in flight even when its
-                // graph `_status` never says so (x-54fa / x-4845): the claim is
+                // graph `status` never says so (x-54fa / x-4845): the claim is
                 // the fact, the status is a report.
                 state: if claimed { CardState::InFlight } else { state },
                 // Routes are a publish-time server join (panes/registry),
@@ -412,7 +419,7 @@ pub fn derive_missions(raw: &str) -> Option<MissionMap> {
                 slug: e.get("slug").and_then(|v| v.as_str()).unwrap_or(""),
                 is_epic: e.get("type").and_then(|v| v.as_str()) == Some("epic"),
                 mission_active: e.get("mission_active").and_then(|v| v.as_bool()) == Some(true),
-                done: e.get("_status").and_then(|v| v.as_str()) == Some("done"),
+                done: node_status(e) == Some("done"),
             },
         );
     }
@@ -467,7 +474,7 @@ pub fn derive_missions(raw: &str) -> Option<MissionMap> {
     })
 }
 
-/// Leaf done/total under `epic`: a leaf child counts once (done iff `_status ==
+/// Leaf done/total under `epic`: a leaf child counts once (done iff `status ==
 /// "done"`); an epic child recurses and folds its leaves in, never counting an
 /// epic as a unit. `seen`/`depth` bound a malformed parent cycle.
 fn rollup<'a>(
@@ -697,11 +704,11 @@ mod tests {
     #[test]
     fn only_queue_states_survive_classification() {
         let raw = graph(
-            r#"{"id":"a","slug":"ready-one","priority":"p1","_status":"ready"},
-               {"id":"b","slug":"blocked-one","priority":"p2","_status":"blocked"},
-               {"id":"c","slug":"live-one","priority":"p0","_status":"claimed"},
-               {"id":"d","slug":"done-one","priority":"p1","_status":"done"},
-               {"id":"e","slug":"idea-one","priority":"p2","_status":"idea"}"#,
+            r#"{"id":"a","slug":"ready-one","priority":"p1","status":"ready"},
+               {"id":"b","slug":"blocked-one","priority":"p2","status":"blocked"},
+               {"id":"c","slug":"live-one","priority":"p0","status":"claimed"},
+               {"id":"d","slug":"done-one","priority":"p1","status":"done"},
+               {"id":"e","slug":"idea-one","priority":"p2","status":"idea"}"#,
         );
         let cards = derive_cards(&raw).unwrap();
         let ids: Vec<_> = cards.iter().map(|c| c.id.as_str()).collect();
@@ -719,9 +726,9 @@ mod tests {
     fn board_order_project_then_rank_then_priority() {
         // fno before (unscoped); within fno, ranked before unranked; then prio.
         let raw = graph(
-            r#"{"id":"unscoped","slug":"u","priority":"p0","_status":"ready"},
-               {"id":"fno-unranked","slug":"fu","priority":"p1","_status":"ready","project":"fno"},
-               {"id":"fno-ranked","slug":"fr","priority":"p3","_status":"ready","project":"fno","rank":1.0}"#,
+            r#"{"id":"unscoped","slug":"u","priority":"p0","status":"ready"},
+               {"id":"fno-unranked","slug":"fu","priority":"p1","status":"ready","project":"fno"},
+               {"id":"fno-ranked","slug":"fr","priority":"p3","status":"ready","project":"fno","rank":1.0}"#,
         );
         let ids: Vec<_> = derive_cards(&raw)
             .unwrap()
@@ -738,8 +745,8 @@ mod tests {
         // A `""`/whitespace project must land in the unscoped lane (last), not
         // sort as a named lane before real projects (gemini/codex P2).
         let raw = graph(
-            r#"{"id":"blank","slug":"b","priority":"p0","_status":"ready","project":"  "},
-               {"id":"fno","slug":"f","priority":"p3","_status":"ready","project":"fno"}"#,
+            r#"{"id":"blank","slug":"b","priority":"p0","status":"ready","project":"  "},
+               {"id":"fno","slug":"f","priority":"p3","status":"ready","project":"fno"}"#,
         );
         let ids: Vec<_> = derive_cards(&raw)
             .unwrap()
@@ -758,7 +765,7 @@ mod tests {
         assert!(derive_cards("not json").is_none());
         // last-good is kept across a torn write by ReaderState.
         let mut st = ReaderState::default();
-        let good = graph(r#"{"id":"a","slug":"s","priority":"p1","_status":"ready"}"#);
+        let good = graph(r#"{"id":"a","slug":"s","priority":"p1","status":"ready"}"#);
         let s1 = Some((std::time::SystemTime::UNIX_EPOCH, good.len() as u64));
         assert_eq!(
             st.tick(s1, || Some(good.clone()), None)
@@ -775,8 +782,8 @@ mod tests {
                                                        // Retry at the same stamp now succeeds with two cards -> republished
                                                        // (proves the torn read did not pin the stale set).
         let two = graph(
-            r#"{"id":"a","slug":"s","priority":"p1","_status":"ready"},
-               {"id":"b","slug":"t","priority":"p2","_status":"blocked"}"#,
+            r#"{"id":"a","slug":"s","priority":"p1","status":"ready"},
+               {"id":"b","slug":"t","priority":"p2","status":"blocked"}"#,
         );
         assert_eq!(
             st.tick(s2, || Some(two.clone()), None)
@@ -796,11 +803,11 @@ mod tests {
         // intent mapping, computed here to match `graph/render.py`. Getting this
         // wrong renders every attribution blank, so pin the mapping.
         let raw = graph(
-            r#"{"id":"x-now","slug":"n","priority":"p1","_status":"ready","project":"fno"},
-               {"id":"x-next","slug":"x","priority":"p2","_status":"ready"},
-               {"id":"x-later","slug":"l","priority":"p3","_status":"ready"},
-               {"id":"x-tri","slug":"t","priority":"p2","_status":"ready","queued_at":"2026-07-19T00:00:00Z"},
-               {"id":"x-held","slug":"h","priority":"p2","_status":"claimed"}"#,
+            r#"{"id":"x-now","slug":"n","priority":"p1","status":"ready","project":"fno"},
+               {"id":"x-next","slug":"x","priority":"p2","status":"ready"},
+               {"id":"x-later","slug":"l","priority":"p3","status":"ready"},
+               {"id":"x-tri","slug":"t","priority":"p2","status":"ready","queued_at":"2026-07-19T00:00:00Z"},
+               {"id":"x-held","slug":"h","priority":"p2","status":"claimed"}"#,
         );
         let cards = derive_cards(&raw).unwrap();
         let lane = |id: &str| {
@@ -834,8 +841,8 @@ mod tests {
         // onto the finished card list) is what keeps the lane counts honest - a
         // card past the render cap would otherwise be counted in the wrong lane.
         let raw = graph(
-            r#"{"id":"x-a","slug":"a","priority":"p3","_status":"ready"},
-               {"id":"x-b","slug":"b","priority":"p3","_status":"ready"}"#,
+            r#"{"id":"x-a","slug":"a","priority":"p3","status":"ready"},
+               {"id":"x-b","slug":"b","priority":"p3","status":"ready"}"#,
         );
         let cold = derive_queue(&raw, None).unwrap();
         assert_eq!(cold.lanes, vec![("Later".to_string(), 2)]);
@@ -855,10 +862,10 @@ mod tests {
         // to Done/Triage while the board left it in its priority column - the two
         // boards must never name different lanes for the same node.
         let raw = graph(
-            r#"{"id":"x-a","slug":"a","priority":"p2","_status":"ready","completed_at":""},
-               {"id":"x-b","slug":"b","priority":"p2","_status":"ready","queued_at":""},
-               {"id":"x-kid","slug":"k","priority":"p2","_status":"ready","parent":"x-e","completed_at":""},
-               {"id":"x-e","slug":"e","type":"epic","priority":"p2","_status":"ready"}"#,
+            r#"{"id":"x-a","slug":"a","priority":"p2","status":"ready","completed_at":""},
+               {"id":"x-b","slug":"b","priority":"p2","status":"ready","queued_at":""},
+               {"id":"x-kid","slug":"k","priority":"p2","status":"ready","parent":"x-e","completed_at":""},
+               {"id":"x-e","slug":"e","type":"epic","priority":"p2","status":"ready"}"#,
         );
         let cards = derive_cards(&raw).unwrap();
         let lane = |id: &str| cards.iter().find(|c| c.id == id).unwrap().lane.clone();
@@ -885,8 +892,8 @@ mod tests {
         // in-progress epic carries no claim of its own and would otherwise sit in
         // its priority column (mirrors in_progress_epic_ids).
         let raw = graph(
-            r#"{"id":"x-epic","slug":"e","type":"epic","priority":"p3","_status":"ready"},
-               {"id":"x-kid","slug":"k","priority":"p2","_status":"claimed","parent":"x-epic"}"#,
+            r#"{"id":"x-epic","slug":"e","type":"epic","priority":"p3","status":"ready"},
+               {"id":"x-kid","slug":"k","priority":"p2","status":"claimed","parent":"x-epic"}"#,
         );
         let cards = derive_cards(&raw).unwrap();
         let epic = cards.iter().find(|c| c.id == "x-epic").unwrap();
@@ -902,9 +909,9 @@ mod tests {
         // AC1-HP: exactly one `next`, on the first READY card in board order -
         // an in-flight card ahead of it never takes the marker.
         let raw = graph(
-            r#"{"id":"x-fly","slug":"f","priority":"p0","_status":"claimed","project":"fno"},
-               {"id":"x-r1","slug":"r1","priority":"p1","_status":"ready","project":"fno"},
-               {"id":"x-r2","slug":"r2","priority":"p2","_status":"ready","project":"fno"}"#,
+            r#"{"id":"x-fly","slug":"f","priority":"p0","status":"claimed","project":"fno"},
+               {"id":"x-r1","slug":"r1","priority":"p1","status":"ready","project":"fno"},
+               {"id":"x-r2","slug":"r2","priority":"p2","status":"ready","project":"fno"}"#,
         );
         let cards = derive_cards(&raw).unwrap();
         let marked: Vec<&str> = cards
@@ -922,8 +929,8 @@ mod tests {
         // running.
         let mut st = ReaderState::default();
         let raw = graph(
-            r#"{"id":"x-r1","slug":"r1","priority":"p1","_status":"ready","project":"fno"},
-               {"id":"x-r2","slug":"r2","priority":"p2","_status":"ready","project":"fno"}"#,
+            r#"{"id":"x-r1","slug":"r1","priority":"p1","status":"ready","project":"fno"},
+               {"id":"x-r2","slug":"r2","priority":"p2","status":"ready","project":"fno"}"#,
         );
         let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
         let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
@@ -942,10 +949,10 @@ mod tests {
         // arrive in KANBAN_COLUMNS order. Sorting by name would render it
         // backwards (Later, Next, Now) - the board's own order is the contract.
         let raw = graph(
-            r#"{"id":"x-l","slug":"l","priority":"p3","_status":"ready"},
-               {"id":"x-t","slug":"t","priority":"p2","_status":"ready","queued_at":"2026-07-19T00:00:00Z"},
-               {"id":"x-n","slug":"n","priority":"p1","_status":"ready"},
-               {"id":"x-x","slug":"x","priority":"p2","_status":"ready"}"#,
+            r#"{"id":"x-l","slug":"l","priority":"p3","status":"ready"},
+               {"id":"x-t","slug":"t","priority":"p2","status":"ready","queued_at":"2026-07-19T00:00:00Z"},
+               {"id":"x-n","slug":"n","priority":"p1","status":"ready"},
+               {"id":"x-x","slug":"x","priority":"p2","status":"ready"}"#,
         );
         let names: Vec<String> = derive_queue(&raw, None)
             .unwrap()
@@ -962,8 +969,8 @@ mod tests {
         // Python. Bucketing it as unlaned instead would render a row the
         // canonical board says does not exist.
         let raw = graph(
-            r#"{"id":"x-road","slug":"r","type":"roadmap","priority":"p1","_status":"ready"},
-               {"id":"x-real","slug":"n","priority":"p1","_status":"ready"}"#,
+            r#"{"id":"x-road","slug":"r","type":"roadmap","priority":"p1","status":"ready"},
+               {"id":"x-real","slug":"n","priority":"p1","status":"ready"}"#,
         );
         let q = derive_queue(&raw, None).unwrap();
         let ids: Vec<&str> = q.cards.iter().map(|c| c.id.as_str()).collect();
@@ -980,7 +987,7 @@ mod tests {
         // AC5-EDGE: the section's `+N more` needs the uncapped count, so `total`
         // must survive the cap.
         let nodes: Vec<String> = (0..CARD_CAP + 7)
-            .map(|i| format!(r#"{{"id":"x-{i}","slug":"s{i}","priority":"p2","_status":"ready"}}"#))
+            .map(|i| format!(r#"{{"id":"x-{i}","slug":"s{i}","priority":"p2","status":"ready"}}"#))
             .collect();
         let q = derive_queue(&graph(&nodes.join(",")), None).unwrap();
         assert_eq!(q.cards.len(), CARD_CAP, "the wire frame stays bounded");
@@ -994,7 +1001,7 @@ mod tests {
         // again clears the marker with no restart. One torn read is a normal
         // write race and must NOT trip it.
         let mut st = ReaderState::default();
-        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"ready"}"#);
+        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"ready"}"#);
         let s0 = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
         assert!(!st.tick(s0, || Some(raw.clone()), None).unwrap().0.stale);
 
@@ -1029,7 +1036,7 @@ mod tests {
         // old cards forever with no marker - the exact situation the marker is
         // for.
         let mut st = ReaderState::default();
-        let good = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"ready"}"#);
+        let good = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"ready"}"#);
         let s0 = Some((std::time::SystemTime::UNIX_EPOCH, good.len() as u64));
         assert!(!st.tick(s0, || Some(good.clone()), None).unwrap().0.stale);
 
@@ -1055,9 +1062,9 @@ mod tests {
         // US8 (x-9c5f): node id -> pr_number, skipping a missing / non-u64 value
         // (matching AgentRow.pr: Option<u64>). Keyed by node id, not unique pr.
         let raw = graph(
-            r#"{"id":"x-a","slug":"a","priority":"p1","_status":"claimed","pr_number":385},
-               {"id":"x-b","slug":"b","priority":"p2","_status":"ready"},
-               {"id":"x-c","slug":"c","priority":"p2","_status":"claimed","pr_number":"nope"}"#,
+            r#"{"id":"x-a","slug":"a","priority":"p1","status":"claimed","pr_number":385},
+               {"id":"x-b","slug":"b","priority":"p2","status":"ready"},
+               {"id":"x-c","slug":"c","priority":"p2","status":"claimed","pr_number":"nope"}"#,
         );
         let m = derive_pr_map(&raw);
         assert_eq!(m.get("x-a"), Some(&385));
@@ -1071,13 +1078,13 @@ mod tests {
         // US8: a node gaining a pr_number (same card set + holders) must
         // republish so the PR label is not stale until an unrelated flip.
         let mut st = ReaderState::default();
-        let raw0 = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"claimed"}"#);
+        let raw0 = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"claimed"}"#);
         let s0 = Some((std::time::SystemTime::UNIX_EPOCH, raw0.len() as u64));
         assert!(st.tick(s0, || Some(raw0.clone()), None).is_some());
         // Same claimed card, now with a pr_number: a new stamp (mtime bumped),
         // same card state -> still republishes because the pr map changed.
         let raw1 =
-            graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"claimed","pr_number":42}"#);
+            graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"claimed","pr_number":42}"#);
         let s1 = Some((std::time::SystemTime::UNIX_EPOCH, raw1.len() as u64));
         let out = st.tick(s1, || Some(raw1.clone()), None);
         assert!(out.is_some(), "pr-only change republishes");
@@ -1098,9 +1105,9 @@ mod tests {
         // beats Blocked. Ids not in the live map are untouched; live ids not
         // in the card set are ignored (no phantom cards).
         let raw = graph(
-            r#"{"id":"x-rdy","slug":"r","priority":"p1","_status":"ready"},
-               {"id":"x-blk","slug":"b","priority":"p2","_status":"blocked","blocked_by":["x-rdy"]},
-               {"id":"x-free","slug":"f","priority":"p2","_status":"ready"}"#,
+            r#"{"id":"x-rdy","slug":"r","priority":"p1","status":"ready"},
+               {"id":"x-blk","slug":"b","priority":"p2","status":"blocked","blocked_by":["x-rdy"]},
+               {"id":"x-free","slug":"f","priority":"p2","status":"ready"}"#,
         );
         let cards = derive_queue(
             &raw,
@@ -1124,7 +1131,7 @@ mod tests {
         // AC1-HP/AC1-EDGE: a claim appearing (and later releasing) flips the
         // card within a tick even though the graph stamp never moves.
         let mut st = ReaderState::default();
-        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"ready"}"#);
+        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"ready"}"#);
         let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
         let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
         assert_eq!(first.cards[0].state, CardState::Ready);
@@ -1147,7 +1154,7 @@ mod tests {
         // in-flight card) must republish; a `None` tick (no sweep yet /
         // failing sweep retaining last-good) must NOT churn publishes.
         let mut st = ReaderState::default();
-        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","_status":"claimed"}"#);
+        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"claimed"}"#);
         let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
         let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
         assert_eq!(
@@ -1198,10 +1205,10 @@ mod tests {
         // epic is unmapped.
         let raw = graph(
             r#"{"id":"x-e","slug":"mission-e","type":"epic","mission_active":true},
-               {"id":"x-c1","slug":"c1","_status":"done","parent":"x-e"},
-               {"id":"x-c2","slug":"c2","_status":"claimed","parent":"x-e"},
+               {"id":"x-c1","slug":"c1","status":"done","parent":"x-e"},
+               {"id":"x-c2","slug":"c2","status":"claimed","parent":"x-e"},
                {"id":"x-off","slug":"off","type":"epic","parent":null},
-               {"id":"x-c3","slug":"c3","_status":"ready","parent":"x-off"}"#,
+               {"id":"x-c3","slug":"c3","status":"ready","parent":"x-off"}"#,
         );
         let m = derive_missions(&raw).unwrap();
         assert_eq!(m.node_to_epic.get("x-c1"), Some(&"x-e".to_string()));
@@ -1229,7 +1236,7 @@ mod tests {
         // with no in-flight work.
         let raw = graph(
             r#"{"id":"x-e","slug":"m","type":"epic","mission_active":true},
-               {"id":"x-c1","_status":"done","parent":"x-e"}"#,
+               {"id":"x-c1","status":"done","parent":"x-e"}"#,
         );
         let m = derive_missions(&raw).unwrap();
         assert_eq!(m.missions.len(), 1);
@@ -1259,9 +1266,9 @@ mod tests {
         let raw = graph(
             r#"{"id":"x-m","slug":"mission","type":"epic","mission_active":true},
                {"id":"x-sub","slug":"sub","type":"epic","parent":"x-m"},
-               {"id":"x-l1","_status":"done","parent":"x-sub"},
-               {"id":"x-l2","_status":"ready","parent":"x-sub"},
-               {"id":"x-direct","_status":"done","parent":"x-m"}"#,
+               {"id":"x-l1","status":"done","parent":"x-sub"},
+               {"id":"x-l2","status":"ready","parent":"x-sub"},
+               {"id":"x-direct","status":"done","parent":"x-m"}"#,
         );
         let m = derive_missions(&raw).unwrap();
         assert_eq!(m.missions.len(), 1);
@@ -1299,7 +1306,7 @@ mod tests {
                 format!("n{}", i - 1)
             };
             parts.push(format!(
-                r#"{{"id":"n{i}","_status":"ready","parent":"{parent}"}}"#
+                r#"{{"id":"n{i}","status":"ready","parent":"{parent}"}}"#
             ));
         }
         let raw = graph(&parts.join(","));

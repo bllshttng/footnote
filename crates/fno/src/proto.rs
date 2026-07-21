@@ -686,7 +686,7 @@ pub struct BacklogCard {
     pub head: bool,
 }
 
-/// The queue state a card renders as. Classified from `_status` alone
+/// The queue state a card renders as. Classified from `status` alone
 /// (backlog_view::classify): a claimed node with a stale `blocked_by` is
 /// in-flight, not blocked.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

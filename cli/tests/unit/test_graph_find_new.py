@@ -46,9 +46,9 @@ def _read(g: Path) -> list[dict]:
 def test_scenario1_hp_find_single_match(tmp_graph):
     """Scenario 1 (HP): single fuzzy match prints one line."""
     _seed(tmp_graph, [
-        {"id": "ab-q2000001", "title": "Q2 outreach campaign", "_status": "ready",
+        {"id": "ab-q2000001", "title": "Q2 outreach campaign", "status": "ready",
          "domain": "research", "project": "acme"},
-        {"id": "ab-other0001", "title": "Unrelated", "_status": "ready",
+        {"id": "ab-other0001", "title": "Unrelated", "status": "ready",
          "domain": "code", "project": "fno"},
     ])
     result = runner.invoke(app, ["find", "outreach"])
@@ -63,9 +63,9 @@ def test_scenario1_hp_find_single_match(tmp_graph):
 def test_scenario2_hp_find_with_status_filter(tmp_graph):
     """Scenario 2 (HP): --status filter narrows results."""
     _seed(tmp_graph, [
-        {"id": "ab-pl000001", "title": "Plan 01", "_status": "ready",
+        {"id": "ab-pl000001", "title": "Plan 01", "status": "ready",
          "domain": "code", "project": "fno"},
-        {"id": "ab-pl000002", "title": "Plan 02", "_status": "done",
+        {"id": "ab-pl000002", "title": "Plan 02", "status": "done",
          "domain": "code", "project": "fno"},
     ])
     result = runner.invoke(app, ["find", "plan", "--status", "ready"])
@@ -77,9 +77,9 @@ def test_scenario2_hp_find_with_status_filter(tmp_graph):
 def test_find_with_project_filter(tmp_graph):
     """--project filter narrows by project."""
     _seed(tmp_graph, [
-        {"id": "ab-aa000001", "title": "shared title", "_status": "ready",
+        {"id": "ab-aa000001", "title": "shared title", "status": "ready",
          "domain": "code", "project": "fno"},
-        {"id": "ab-aa000002", "title": "shared title", "_status": "ready",
+        {"id": "ab-aa000002", "title": "shared title", "status": "ready",
          "domain": "code", "project": "another-project"},
     ])
     result = runner.invoke(app, ["find", "shared", "--project", "fno"])
@@ -91,9 +91,9 @@ def test_find_with_project_filter(tmp_graph):
 def test_find_with_domain_filter(tmp_graph):
     """--domain filter narrows by domain."""
     _seed(tmp_graph, [
-        {"id": "ab-aa000001", "title": "task", "_status": "ready",
+        {"id": "ab-aa000001", "title": "task", "status": "ready",
          "domain": "research", "project": "p"},
-        {"id": "ab-aa000002", "title": "task", "_status": "ready",
+        {"id": "ab-aa000002", "title": "task", "status": "ready",
          "domain": "code", "project": "p"},
     ])
     result = runner.invoke(app, ["find", "task", "--domain", "research"])
@@ -106,7 +106,7 @@ def test_scenario3_hp_find_json_output(tmp_graph):
     """Scenario 3 (HP): --json output is parseable as a JSON array."""
     _seed(tmp_graph, [
         {"id": "ab-js000001", "title": "Q2 outreach",
-         "_status": "ready", "domain": "research", "project": "p"},
+         "status": "ready", "domain": "research", "project": "p"},
     ])
     result = runner.invoke(app, ["find", "outreach", "--json"])
     assert result.exit_code == 0, result.output
@@ -118,7 +118,7 @@ def test_scenario3_hp_find_json_output(tmp_graph):
 def test_scenario7_err_find_no_matches(tmp_graph):
     """Scenario 7 (ERR): no matches exits 1 with a clear message."""
     _seed(tmp_graph, [
-        {"id": "ab-aa000001", "title": "some title", "_status": "ready",
+        {"id": "ab-aa000001", "title": "some title", "status": "ready",
          "domain": "code", "project": "p"},
     ])
     result = runner.invoke(app, ["find", "xyzzy"])
@@ -131,9 +131,9 @@ def test_scenario7_err_find_no_matches(tmp_graph):
 def test_find_shows_multiple_matches(tmp_graph):
     """Multi-match: all candidates printed."""
     _seed(tmp_graph, [
-        {"id": "ab-pp000001", "title": "Plan 01", "_status": "ready",
+        {"id": "ab-pp000001", "title": "Plan 01", "status": "ready",
          "domain": "code", "project": "p"},
-        {"id": "ab-pp000002", "title": "Plan 02", "_status": "ready",
+        {"id": "ab-pp000002", "title": "Plan 02", "status": "ready",
          "domain": "code", "project": "p"},
     ])
     result = runner.invoke(app, ["find", "plan"])
@@ -164,7 +164,7 @@ def test_scenario4_hp_new_creates_entry(tmp_graph):
     assert e["domain"] == "research"
     # `fno new` creates plan-less nodes, so they derive to idea (not ready).
     # The `ready` state requires a plan_path.
-    assert e["_status"] == "idea"
+    assert e["status"] == "idea"
     assert e["source"] == "abi-new"
 
 
@@ -195,7 +195,7 @@ def test_new_sets_project_and_priority(tmp_graph):
 def test_scenario5_edge_new_fuzzy_domain_warns(tmp_graph):
     """Scenario 5 (EDGE): fuzzy domain match asks for --force-domain."""
     _seed(tmp_graph, [
-        {"id": "ab-seed0001", "title": "seed", "_status": "done",
+        {"id": "ab-seed0001", "title": "seed", "status": "done",
          "domain": "research", "project": "p"},
     ])
     result = runner.invoke(app, ["new", "New task", "--domain", "res"])
@@ -212,7 +212,7 @@ def test_scenario5_edge_new_fuzzy_domain_warns(tmp_graph):
 def test_scenario6_edge_new_force_domain_bypasses(tmp_graph):
     """Scenario 6 (EDGE): --force-domain bypasses the suggestion."""
     _seed(tmp_graph, [
-        {"id": "ab-seed0001", "title": "seed", "_status": "done",
+        {"id": "ab-seed0001", "title": "seed", "status": "done",
          "domain": "research", "project": "p"},
     ])
     result = runner.invoke(
@@ -229,7 +229,7 @@ def test_scenario6_edge_new_force_domain_bypasses(tmp_graph):
 def test_new_exact_domain_match_no_warning(tmp_graph):
     """Exact domain match (confidence=exact) does NOT trigger warning."""
     _seed(tmp_graph, [
-        {"id": "ab-seed0001", "title": "seed", "_status": "done",
+        {"id": "ab-seed0001", "title": "seed", "status": "done",
          "domain": "research", "project": "p"},
     ])
     result = runner.invoke(app, ["new", "New task", "--domain", "research"])
@@ -239,7 +239,7 @@ def test_new_exact_domain_match_no_warning(tmp_graph):
 def test_new_unfamiliar_domain_passes_through(tmp_graph):
     """Truly new domain (confidence=new, no prefix collision) passes through."""
     _seed(tmp_graph, [
-        {"id": "ab-seed0001", "title": "seed", "_status": "done",
+        {"id": "ab-seed0001", "title": "seed", "status": "done",
          "domain": "code", "project": "p"},
     ])
     result = runner.invoke(app, ["new", "New task", "--domain", "trading"])
@@ -273,7 +273,7 @@ def test_new_sets_created_at_iso8601(tmp_graph):
 def test_find_under_graph_also_works(tmp_graph):
     """`fno backlog find ...` alias works the same as `fno find`."""
     _seed(tmp_graph, [
-        {"id": "ab-fi000001", "title": "findable", "_status": "ready",
+        {"id": "ab-fi000001", "title": "findable", "status": "ready",
          "domain": "code", "project": "p"},
     ])
     result = runner.invoke(app, ["backlog", "find", "findable"])

@@ -54,7 +54,7 @@ def _read_entries(g: Path) -> list[dict]:
 
 
 def test_idea_status_derived_from_no_plan_path(tmp_graph):
-    """A node added without a plan_path derives to _status: idea."""
+    """A node added without a plan_path derives to status: idea."""
     r = _invoke("--json", "backlog", "add", "Just an idea")
     assert r.exit_code == 0, r.output
     node_id = json.loads(r.stdout)["id"]
@@ -62,8 +62,8 @@ def test_idea_status_derived_from_no_plan_path(tmp_graph):
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
     assert node.get("plan_path") is None
-    assert node.get("_status") == "idea", (
-        f"plan-less node should derive to 'idea', got {node.get('_status')!r}"
+    assert node.get("status") == "idea", (
+        f"plan-less node should derive to 'idea', got {node.get('status')!r}"
     )
 
 
@@ -78,8 +78,8 @@ def test_idea_status_overridden_by_in_progress(tmp_graph):
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
     assert node.get("session_id") == "session-X"
-    assert node.get("_status") == "in_progress", (
-        f"in_progress beats idea; got {node.get('_status')!r}"
+    assert node.get("status") == "in_progress", (
+        f"in_progress beats idea; got {node.get('status')!r}"
     )
 
 
@@ -93,8 +93,8 @@ def test_idea_status_overridden_by_blocked(tmp_graph):
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
     assert node.get("plan_path") is None
-    assert node.get("_status") == "blocked", (
-        f"blocked beats idea; got {node.get('_status')!r}"
+    assert node.get("status") == "blocked", (
+        f"blocked beats idea; got {node.get('status')!r}"
     )
 
 
@@ -107,8 +107,8 @@ def test_node_with_plan_path_derives_to_ready(tmp_graph, tmp_path):
 
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e.get("plan_path"))
-    assert node.get("_status") == "ready", (
-        f"plan-having node should derive to 'ready', got {node.get('_status')!r}"
+    assert node.get("status") == "ready", (
+        f"plan-having node should derive to 'ready', got {node.get('status')!r}"
     )
 
 
@@ -402,8 +402,8 @@ def test_global_settings_consulted_when_inside_project(tmp_path, monkeypatch):
 
 
 def test_legacy_ready_row_migrates_to_idea(tmp_graph):
-    """Pre-existing graph.json rows with `plan_path: None, _status: "ready"`
-    flip to `_status: "idea"` after the next mutation triggers
+    """Pre-existing graph.json rows with `plan_path: None, status: "ready"`
+    flip to `status: "idea"` after the next mutation triggers
     `recompute_statuses()`.
 
     This locks in plan verification step 8: existing rows with no
@@ -413,7 +413,7 @@ def test_legacy_ready_row_migrates_to_idea(tmp_graph):
     # Seed a graph that pretends to predate this feature: a "ready" row
     # with no plan_path. Real legacy graph.json files have exactly this
     # shape because pre-feature `add` set plan_path=None and the old
-    # cascade derived _status="ready".
+    # cascade derived status="ready".
     tmp_graph.write_text(json.dumps({
         "entries": [
             {
@@ -442,7 +442,7 @@ def test_legacy_ready_row_migrates_to_idea(tmp_graph):
                 "pr_number": None,
                 "pr_url": None,
                 "merge_status": None,
-                "_status": "ready",  # the pre-feature derivation
+                "status": "ready",  # the pre-feature derivation
                 "created_at": "2026-04-01T00:00:00+00:00",
             }
         ]
@@ -455,9 +455,9 @@ def test_legacy_ready_row_migrates_to_idea(tmp_graph):
 
     entries = _read_entries(tmp_graph)
     legacy = next(e for e in entries if e["id"] == "ab-legacy01")
-    assert legacy.get("_status") == "idea", (
+    assert legacy.get("status") == "idea", (
         f"legacy ready-with-no-plan row should migrate to idea on next "
-        f"recompute; got {legacy.get('_status')!r}"
+        f"recompute; got {legacy.get('status')!r}"
     )
 
 
@@ -548,7 +548,7 @@ def test_backlog_idea_creates_plan_less_node(tmp_graph):
     node = next(e for e in entries if e["id"] == node_id)
     assert node["title"] == "Capture this thought"
     assert node.get("plan_path") is None
-    assert node.get("_status") == "idea"
+    assert node.get("status") == "idea"
 
 
 def test_backlog_idea_accepts_description(tmp_graph):

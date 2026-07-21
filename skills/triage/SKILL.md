@@ -112,16 +112,16 @@ translate positional words into the equivalent flag:
 
    The context JSON has two top-level arrays:
 
-   - `candidates`: claim-ready rows (`_status: ready` or `blocked`).
+   - `candidates`: claim-ready rows (`status: ready` or `blocked`).
      These are what the LLM should reason about for ordering, blocker
      edges, and priority changes.
-   - `ideas`: plan-less rows (`_status: idea`). These are NOT claimable
+   - `ideas`: plan-less rows (`status: idea`). These are NOT claimable
      work - they are captured thoughts waiting for a spec. The LLM
      should mention them in its summary with the recommendation
      "write a spec for this idea before claiming it" rather than
      proposing dependency edges or claim ordering. Run `/blueprint` against
      the idea's title + details, then `fno backlog intake <plan_path>`
-     to flip the node to `_status: ready`.
+     to flip the node to `status: ready`.
 
    If `candidates` is empty AND `ideas` is empty, print "no pending
    nodes to triage" and exit. Done. If `candidates` is empty but

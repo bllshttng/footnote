@@ -65,7 +65,7 @@ def _member_node(nid: str) -> dict:
     return {
         "id": nid, "title": nid, "domain": "code", "project": "fno",
         "blocked_by": [], "pr_number": None, "pr_url": None, "batch": "batch-xxxx",
-        "completed_at": None, "_status": "ready",
+        "completed_at": None, "status": "ready",
     }
 
 

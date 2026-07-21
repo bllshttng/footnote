@@ -27,7 +27,7 @@ def test_node_line_not_in_graph(monkeypatch) -> None:
 
 def test_node_line_shipped(monkeypatch) -> None:
     monkeypatch.setattr(
-        orient, "_graph_entry", lambda *_: {"_status": "done", "pr_number": 42}
+        orient, "_graph_entry", lambda *_: {"status": "done", "pr_number": 42}
     )
     assert orient._node_line("x-1", Path("/"), manifest_raw={}) == "shipped (PR #42 merged)"
 
@@ -35,7 +35,7 @@ def test_node_line_shipped(monkeypatch) -> None:
 def test_node_line_done_without_pr(monkeypatch) -> None:
     # A done node with no PR (advisory/no-ship/manual) must read terminal, not
     # fall through to in-progress/fresh.
-    monkeypatch.setattr(orient, "_graph_entry", lambda *_: {"_status": "done"})
+    monkeypatch.setattr(orient, "_graph_entry", lambda *_: {"status": "done"})
     raw = {"target_claim_key": "node:x-1", "target_claim_holder": "ts:me"}
     line = orient._node_line("x-1", Path("/"), manifest_raw=raw)
     assert line == "done (no PR)"
@@ -43,13 +43,13 @@ def test_node_line_done_without_pr(monkeypatch) -> None:
 
 def test_node_line_half_done(monkeypatch) -> None:
     monkeypatch.setattr(
-        orient, "_graph_entry", lambda *_: {"_status": "ready", "pr_number": 7}
+        orient, "_graph_entry", lambda *_: {"status": "ready", "pr_number": 7}
     )
     assert orient._node_line("x-1", Path("/"), manifest_raw={}) == "half-done (PR #7)"
 
 
 def test_node_line_in_progress_from_manifest_claim(monkeypatch) -> None:
-    monkeypatch.setattr(orient, "_graph_entry", lambda *_: {"_status": "ready"})
+    monkeypatch.setattr(orient, "_graph_entry", lambda *_: {"status": "ready"})
     raw = {"target_claim_key": "node:x-1", "target_claim_holder": "target-session:abc"}
     line = orient._node_line("x-1", Path("/"), manifest_raw=raw)
     assert "in-progress" in line and "target-session:abc" in line
@@ -331,7 +331,7 @@ def test_read_manifest_merges_body_keys(tmp_path, monkeypatch) -> None:
     assert raw["target_claim_key"] == "node:x-7"
     # and the node line then reports in-progress from that claim
     line = orient._node_line("x-7", tmp_path, manifest_raw=raw)
-    monkeypatch.setattr(orient, "_graph_entry", lambda *_: {"_status": "ready"})
+    monkeypatch.setattr(orient, "_graph_entry", lambda *_: {"status": "ready"})
     assert "in-progress" in orient._node_line("x-7", tmp_path, manifest_raw=raw)
 
 

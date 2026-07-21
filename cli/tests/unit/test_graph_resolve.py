@@ -10,7 +10,7 @@ from fno.graph.fuzzy import resolve_node, search_entries
 
 
 def _node(id, title, *, slug=None, details=None, status="ready"):
-    n = {"id": id, "title": title, "_status": status}
+    n = {"id": id, "title": title, "status": status}
     if slug is not None:
         n["slug"] = slug
     if details is not None:

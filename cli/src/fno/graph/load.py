@@ -80,14 +80,28 @@ def load_graph(path: Path | None = None) -> list[dict]:
         # First run: write sidecar lazily, trust the file
         sidecar.write_text(actual_hash + "\n")
         data = json.loads(raw_bytes)
-        return data.get("entries", []) if isinstance(data, dict) else []
+        return _entries(data)
 
     expected_hash = sidecar.read_text().strip()
     if actual_hash != expected_hash:
         raise GraphCorruptionError(path, actual_hash, expected_hash)
 
     data = json.loads(raw_bytes)
-    return data.get("entries", []) if isinstance(data, dict) else []
+    return _entries(data)
+
+
+def _entries(data: object) -> list[dict]:
+    """Extract the entry list, folding the pre-rename `_status` key into `status`.
+
+    A key rename, not a default: raw callers here bypass ``_apply_graph_defaults``
+    but must still read a graph.json an older fno wrote.
+    """
+    entries = data.get("entries", []) if isinstance(data, dict) else []
+    for e in entries:
+        if isinstance(e, dict) and "_status" in e:
+            e.setdefault("status", e["_status"])
+            del e["_status"]
+    return entries
 
 
 def query_by_source_inbox_msg(msg_id: str, path: Path | None = None) -> list[dict]:

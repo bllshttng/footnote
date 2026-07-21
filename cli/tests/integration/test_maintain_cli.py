@@ -163,7 +163,7 @@ def test_maintain_cli_judgment_legs_propose_only(tmp_graph):
     _seed(
         tmp_graph,
         [
-            # two near-duplicate ideas (no plan_path -> _status idea)
+            # two near-duplicate ideas (no plan_path -> status idea)
             _node("ab-dup01", title="Same idea", created_at=old),
             _node("ab-dup02", title="same  idea!", created_at=old),
         ],
@@ -253,7 +253,7 @@ def _clean_events():
 
 
 def _ready(node_id: str, **over) -> dict:
-    # A node with a plan_path and no completed/deferred state derives _status:
+    # A node with a plan_path and no completed/deferred state derives status:
     # ready (the auto-defer candidate filter only considers ready nodes).
     return _node(node_id, plan_path=f"plans/{node_id}.md", **over)
 
@@ -269,7 +269,7 @@ def test_maintain_cli_auto_defer_at_threshold(tmp_graph):
     node = _read(tmp_graph)[0]
     assert node["deferred_at"] is not None
     assert node["deferred_reason"] == "auto-failure: 3 consecutive failed attempts"
-    assert node["_status"] == "deferred"  # no longer surfaced by `backlog next`
+    assert node["status"] == "deferred"  # no longer surfaced by `backlog next`
     assert "auto-deferred ab-fail01" in result.output  # named in the run summary
 
 
@@ -360,12 +360,12 @@ def test_health_stranded_lists_dependents_of_auto_deferred_blocker(tmp_graph):
         [
             _node(
                 "ab-blk01",
-                _status="deferred",
+                status="deferred",
                 deferred_at="2026-06-10T00:00:00Z",
                 deferred_reason="auto-failure: 3 consecutive failed attempts",
             ),
-            _node("ab-dep01", _status="blocked", blocked_by=["ab-blk01"]),
-            _node("ab-dep02", _status="blocked", blocked_by=["ab-blk01"]),
+            _node("ab-dep01", status="blocked", blocked_by=["ab-blk01"]),
+            _node("ab-dep02", status="blocked", blocked_by=["ab-blk01"]),
         ],
     )
     result = _invoke_health(["--json", "--all"])
@@ -375,12 +375,12 @@ def test_health_stranded_lists_dependents_of_auto_deferred_blocker(tmp_graph):
     assert len(section) == 1
     assert section[0]["blocker"] == "ab-blk01"
     assert {d["id"] for d in section[0]["dependents"]} == {"ab-dep01", "ab-dep02"}
-    # AC3-UI: dependents' own _status is unchanged (surfacing only).
+    # AC3-UI: dependents' own status is unchanged (surfacing only).
     assert all(d["status"] == "blocked" for d in section[0]["dependents"])
     assert payload["totals"]["stranded_by_failed_blocker"] == 2
     # The deferred blocker was not mutated either.
     blk = next(e for e in _read(tmp_graph) if e["id"] == "ab-blk01")
-    assert blk["_status"] == "deferred"
+    assert blk["status"] == "deferred"
 
 
 def test_health_stranded_ignores_manual_defer(tmp_graph):
@@ -390,11 +390,11 @@ def test_health_stranded_ignores_manual_defer(tmp_graph):
         [
             _node(
                 "ab-blk02",
-                _status="deferred",
+                status="deferred",
                 deferred_at="2026-06-10T00:00:00Z",
                 deferred_reason="parked by hand",
             ),
-            _node("ab-dep03", _status="blocked", blocked_by=["ab-blk02"]),
+            _node("ab-dep03", status="blocked", blocked_by=["ab-blk02"]),
         ],
     )
     result = _invoke_health(["--json", "--all"])
@@ -405,7 +405,7 @@ def test_health_stranded_ignores_manual_defer(tmp_graph):
 def test_health_stranded_section_always_runs(tmp_graph):
     # The section always runs (read-only): an absent entry means "none
     # stranded", never "not checked" - the key is present with an empty list.
-    _seed(tmp_graph, [_node("ab-r01", _status="ready", plan_path="p.md")])
+    _seed(tmp_graph, [_node("ab-r01", status="ready", plan_path="p.md")])
     result = _invoke_health(["--json", "--all"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -455,8 +455,8 @@ def test_e2e_blocker_done_auto_readies_dependents(tmp_graph):
     )
     assert r.exit_code == 0, r.output
     by_id = {e["id"]: e for e in _read(tmp_graph)}
-    assert by_id["ab-blkE2E"]["_status"] == "done"
-    assert by_id["ab-depE2E"]["_status"] == "ready"  # auto-unblocked
+    assert by_id["ab-blkE2E"]["status"] == "done"
+    assert by_id["ab-depE2E"]["status"] == "ready"  # auto-unblocked
 
 
 # --- leg 8: validity sweep ----------------------------------------

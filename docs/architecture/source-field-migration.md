@@ -90,7 +90,7 @@ never get migrated will continue to read correctly forever via
   shifts.
 - The `roadmap-tasks.py` shim retains its argument vocabulary; only
   internal symbols moved.
-- The `_status` enum, the lifecycle phrase
+- The `status` enum, the lifecycle phrase
   (`intake -> triage -> ready/next -> done`), and every other graph
   schema field are unchanged.
 

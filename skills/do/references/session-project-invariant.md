@@ -34,7 +34,7 @@ WAVE_PROJECT == "" or == SESSION_PROJECT   ->  execute locally (unchanged)
 foreign wave:
   no `node:` on the wave                    ->  REFUSE (authoring error)
   fno backlog project-root <WAVE_PROJECT>   ->  exit 1 (unmapped)  ->  REFUSE by name
-  fno backlog get <node> --field _status:
+  fno backlog get <node> --field status:
       ready  (unblocked, has a plan)        ->  SPAWN into <root>
       blocked                               ->  DEFER (carveout) + rely on G1
       idea   (unblocked but plan-less)      ->  skip; needs /blueprint first, not
@@ -62,7 +62,7 @@ if [[ -z "$WAVE_NODE" ]]; then
 fi
 
 # 3. Branch on the foreign node's status.
-STATUS=$(fno backlog get "$WAVE_NODE" --field _status)
+STATUS=$(fno backlog get "$WAVE_NODE" --field status)
 case "$STATUS" in
   ready)
     # SPAWN into the foreign project. --cwd (never -P); subscription lane (never -p/--bare).

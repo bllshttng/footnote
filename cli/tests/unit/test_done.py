@@ -109,7 +109,7 @@ def test_scenario1_hp_abi_done_noargs_auto_detects_pr(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-tot00001",
         "title": "Implement tot init command",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
     }])
     _stub_subprocess(
@@ -121,7 +121,7 @@ def test_scenario1_hp_abi_done_noargs_auto_detects_pr(tmp_graph, monkeypatch):
     result = runner.invoke(app, ["done"])
     assert result.exit_code == 0, result.stdout
     entry = next(e for e in _read(tmp_graph) if e["id"] == "ab-tot00001")
-    assert entry["_status"] == "done"
+    assert entry["status"] == "done"
     assert entry["completed_at"]
     assert entry["pr_number"] == 42
     assert entry["pr_url"] == "https://github.com/org/repo/pull/42"
@@ -133,7 +133,7 @@ def test_scenario2_hp_abi_done_id_pr_explicit(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-54e461b6",
         "title": "Whatever",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
     }])
     _stub_subprocess(
@@ -149,7 +149,7 @@ def test_scenario2_hp_abi_done_id_pr_explicit(tmp_graph, monkeypatch):
     assert entry["pr_number"] == 9
     assert entry["pr_url"] == "https://github.com/bllshttng/footnote/pull/9"
     assert entry["merge_status"] == "merged"
-    assert entry["_status"] == "done"
+    assert entry["status"] == "done"
 
 
 def test_scenario3_hp_non_code_link(tmp_graph, monkeypatch):
@@ -157,7 +157,7 @@ def test_scenario3_hp_non_code_link(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-q2000001",
         "title": "Q2 outreach research",
-        "_status": "ready",
+        "status": "ready",
         "domain": "research",
     }])
     _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1)
@@ -167,7 +167,7 @@ def test_scenario3_hp_non_code_link(tmp_graph, monkeypatch):
     )
     assert result.exit_code == 0, result.stdout
     entry = _read(tmp_graph)[0]
-    assert entry["_status"] == "done"
+    assert entry["status"] == "done"
     assert entry["artifact_url"] == "obsidian://vault/myvault/q2"
     assert entry["pr_number"] is None  # NOT auto-detected for non-code
     assert entry["pr_url"] is None
@@ -176,8 +176,8 @@ def test_scenario3_hp_non_code_link(tmp_graph, monkeypatch):
 def test_scenario4_err_ambiguous_query_exits_2(tmp_graph, monkeypatch):
     """Scenario 4 (ERR): ambiguous fuzzy query exits 2, no mutation."""
     _seed(tmp_graph, [
-        {"id": "ab-plan00001", "title": "Plan 01: one", "_status": "ready", "domain": "code"},
-        {"id": "ab-plan00002", "title": "Plan 02: two", "_status": "ready", "domain": "code"},
+        {"id": "ab-plan00001", "title": "Plan 01: one", "status": "ready", "domain": "code"},
+        {"id": "ab-plan00002", "title": "Plan 02: two", "status": "ready", "domain": "code"},
     ])
     _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1)
     before = _read(tmp_graph)
@@ -190,7 +190,7 @@ def test_scenario4_err_ambiguous_query_exits_2(tmp_graph, monkeypatch):
 def test_scenario5_err_no_match_exits_2(tmp_graph, monkeypatch):
     """Scenario 5 (ERR): no match exits 2 with 'no match' message."""
     _seed(tmp_graph, [
-        {"id": "ab-aa000001", "title": "something else", "_status": "ready", "domain": "code"},
+        {"id": "ab-aa000001", "title": "something else", "status": "ready", "domain": "code"},
     ])
     _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1)
     before = _read(tmp_graph)
@@ -206,7 +206,7 @@ def test_scenario6_err_non_code_no_artifact_exits_2(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-res00001",
         "title": "Research task",
-        "_status": "ready",
+        "status": "ready",
         "domain": "research",
     }])
     _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1)
@@ -223,7 +223,7 @@ def test_scenario7_edge_detached_head(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-aa000001",
         "title": "anything",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
     }])
     _stub_subprocess(monkeypatch, branch=None, pr_view_rc=1)
@@ -236,7 +236,7 @@ def test_scenario8_edge_pr_explicit_gh_missing(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-xx000001",
         "title": "T",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
     }])
     _stub_subprocess(
@@ -265,7 +265,7 @@ def test_note_is_preserved(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-tr000001",
         "title": "trade 2026-04-22 AAPL",
-        "_status": "ready",
+        "status": "ready",
         "domain": "trading",
     }])
     _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1)
@@ -275,7 +275,7 @@ def test_note_is_preserved(tmp_graph, monkeypatch):
     )
     assert result.exit_code == 0, result.stdout
     entry = _read(tmp_graph)[0]
-    assert entry["_status"] == "done"
+    assert entry["status"] == "done"
     assert entry["completion_note"] == "closed AAPL $180 strangle"
     assert entry["pr_number"] is None
     assert entry["artifact_url"] is None
@@ -286,7 +286,7 @@ def test_link_and_note_both_set(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-de000001",
         "title": "Design mockup",
-        "_status": "ready",
+        "status": "ready",
         "domain": "design",
     }])
     _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1)
@@ -312,7 +312,7 @@ def test_completed_at_is_iso8601(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-ts000001",
         "title": "T",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
     }])
     _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1, repo_rc=1)
@@ -334,7 +334,7 @@ def test_rollup_populates_cost_usd_from_ledger(tmp_graph, tmp_ledger, monkeypatc
     _seed(tmp_graph, [{
         "id": "ab-roll0001",
         "title": "Rollup target",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
         "plan_path": "/repo/plans/2026-04-22-thing",
         "cost_usd": None,
@@ -366,7 +366,7 @@ def test_rollup_session_id_from_latest_ledger_entry(tmp_graph, tmp_ledger, monke
     _seed(tmp_graph, [{
         "id": "ab-late0001",
         "title": "T",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
         "plan_path": "/p",
     }])
@@ -390,7 +390,7 @@ def test_rollup_env_session_id_overrides_ledger(tmp_graph, tmp_ledger, monkeypat
     _seed(tmp_graph, [{
         "id": "ab-env00001",
         "title": "T",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
         "plan_path": "/p",
     }])
@@ -413,7 +413,7 @@ def test_rollup_empty_ledger_leaves_fields_null(tmp_graph, tmp_ledger, monkeypat
     _seed(tmp_graph, [{
         "id": "ab-emp00001",
         "title": "T",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
         "plan_path": "/unknown-plan",
         "cost_usd": None,
@@ -436,7 +436,7 @@ def test_rollup_preserves_existing_session_id(tmp_graph, tmp_ledger, monkeypatch
     _seed(tmp_graph, [{
         "id": "ab-pre00001",
         "title": "T",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
         "plan_path": "/p",
         "session_id": "sticky-session",
@@ -459,7 +459,7 @@ def test_rollup_cost_sessions_dedups_across_runs(tmp_graph, tmp_ledger, monkeypa
     _seed(tmp_graph, [{
         "id": "ab-dup00001",
         "title": "T",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
         "plan_path": "/p",
     }])
@@ -484,7 +484,7 @@ def test_rollup_handles_ledger_entry_with_no_sessions(tmp_graph, tmp_ledger, mon
     _seed(tmp_graph, [{
         "id": "ab-nos00001",
         "title": "T",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
         "plan_path": "/p",
     }])
@@ -511,7 +511,7 @@ def test_backfill_single_node_fills_without_flipping_status(tmp_graph, tmp_ledge
     _seed(tmp_graph, [{
         "id": "ab-bfl00001",
         "title": "T",
-        "_status": "done",
+        "status": "done",
         "completed_at": "2026-04-20T10:00:00Z",  # prior completion
         "domain": "code",
         "plan_path": "/p",
@@ -528,7 +528,7 @@ def test_backfill_single_node_fills_without_flipping_status(tmp_graph, tmp_ledge
     assert result.exit_code == 0, result.stdout
     entry = _read(tmp_graph)[0]
     # Status + completed_at untouched.
-    assert entry["_status"] == "done"
+    assert entry["status"] == "done"
     assert entry["completed_at"] == "2026-04-20T10:00:00Z"
     # Rollup fields now present.
     assert entry["cost_usd"] == 7.5
@@ -537,13 +537,13 @@ def test_backfill_single_node_fills_without_flipping_status(tmp_graph, tmp_ledge
 
 
 def test_backfill_sweep_all_done_nodes(tmp_graph, tmp_ledger, monkeypatch):
-    """`fno done --backfill` with no id sweeps every node with _status=done."""
+    """`fno done --backfill` with no id sweeps every node with status=done."""
     _seed(tmp_graph, [
-        {"id": "ab-d1000001", "title": "done one", "_status": "done",
+        {"id": "ab-d1000001", "title": "done one", "status": "done",
          "domain": "code", "plan_path": "/p1"},
-        {"id": "ab-d2000002", "title": "done two", "_status": "done",
+        {"id": "ab-d2000002", "title": "done two", "status": "done",
          "domain": "code", "plan_path": "/p2"},
-        {"id": "ab-r1000003", "title": "not done", "_status": "ready",
+        {"id": "ab-r1000003", "title": "not done", "status": "ready",
          "domain": "code", "plan_path": "/p3"},
     ])
     _seed_ledger(tmp_ledger, [
@@ -568,7 +568,7 @@ def test_backfill_sweep_all_done_nodes(tmp_graph, tmp_ledger, monkeypatch):
 def test_backfill_no_done_nodes_noop(tmp_graph, tmp_ledger, monkeypatch):
     """Sweep with no done nodes reports cleanly and does not crash."""
     _seed(tmp_graph, [
-        {"id": "ab-rd000001", "title": "ready", "_status": "ready",
+        {"id": "ab-rd000001", "title": "ready", "status": "ready",
          "domain": "code", "plan_path": "/p"},
     ])
     _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1, repo_rc=1)
@@ -582,7 +582,7 @@ def test_backfill_reports_counts(tmp_graph, tmp_ledger, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-cnt00001",
         "title": "T",
-        "_status": "done",
+        "status": "done",
         "completed_at": "2026-04-20T00:00:00Z",
         "domain": "code",
         "plan_path": "/p",
@@ -604,7 +604,7 @@ def test_rollup_tags_in_normal_output(tmp_graph, tmp_ledger, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-tag00001",
         "title": "T",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
         "plan_path": "/p",
     }])
@@ -671,7 +671,7 @@ def test_ac4_hp_current_pr_success_no_stderr(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-ac4hp001",
         "title": "HP target",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
     }])
     _stub_subprocess_with_stderr(
@@ -684,7 +684,7 @@ def test_ac4_hp_current_pr_success_no_stderr(tmp_graph, monkeypatch):
     result = runner.invoke(app, ["done", "ab-ac4hp001"])
     assert result.exit_code == 0, result.output
     entry = _read(tmp_graph)[0]
-    assert entry["_status"] == "done"
+    assert entry["status"] == "done"
     assert entry["pr_number"] == 123
     assert entry["pr_url"] == "https://github.com/x/y/pull/123"
     # No gh failure noise on stderr.
@@ -697,7 +697,7 @@ def test_ac4_err_gh_fails_no_explicit_args_prints_stderr(tmp_graph, monkeypatch)
     _seed(tmp_graph, [{
         "id": "ab-ac4er001",
         "title": "ERR target",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
     }])
     _stub_subprocess_with_stderr(
@@ -715,7 +715,7 @@ def test_ac4_err_gh_fails_no_explicit_args_prints_stderr(tmp_graph, monkeypatch)
     assert "not authenticated" in combined_err
     # Node is still marked done (no pr_number since gh failed).
     entry = _read(tmp_graph)[0]
-    assert entry["_status"] == "done"
+    assert entry["status"] == "done"
     assert entry.get("pr_number") is None
 
 
@@ -724,7 +724,7 @@ def test_ac4_fr_explicit_pr_bypasses_current_pr(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-ac4fr001",
         "title": "FR target",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
     }])
     current_pr_called = []
@@ -758,7 +758,7 @@ def test_ac4_edge_rc0_parse_failure_stays_silent(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-ac4ed001",
         "title": "EDGE target",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
     }])
     _stub_subprocess_with_stderr(
@@ -774,7 +774,7 @@ def test_ac4_edge_rc0_parse_failure_stays_silent(tmp_graph, monkeypatch):
     assert "gh pr view failed" not in result.output
     # Node still marked done, but no pr_number.
     entry = _read(tmp_graph)[0]
-    assert entry["_status"] == "done"
+    assert entry["status"] == "done"
     assert entry.get("pr_number") is None
 
 
@@ -801,13 +801,13 @@ def test_done_audit_tags_operator_when_driving(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-drv00001",
         "title": "Drive completion",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
     }])
     _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
     result = runner.invoke(app, ["done", "ab-drv00001"])
     assert result.exit_code == 0, result.stdout
-    assert _read(tmp_graph)[0]["_status"] == "done"
+    assert _read(tmp_graph)[0]["status"] == "done"
     assert captured.get("type") == "backlog_done_operator_initiated"
     assert captured["kw"]["source"] == "backlog"
     assert captured["kw"]["task_id"] == "ab-drv00001"
@@ -825,13 +825,13 @@ def test_done_no_audit_tag_when_not_driving(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-ndr00001",
         "title": "No-drive completion",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
     }])
     _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
     result = runner.invoke(app, ["done", "ab-ndr00001"])
     assert result.exit_code == 0, result.stdout
-    assert _read(tmp_graph)[0]["_status"] == "done"
+    assert _read(tmp_graph)[0]["status"] == "done"
     assert calls["n"] == 0
 
 
@@ -845,7 +845,7 @@ def test_done_audit_tag_adds_no_stdout(tmp_graph, monkeypatch):
     def _run(driving: bool, node_id: str) -> str:
         monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: driving)
         _seed(tmp_graph, [{
-            "id": node_id, "title": "Same line", "_status": "ready", "domain": "code",
+            "id": node_id, "title": "Same line", "status": "ready", "domain": "code",
         }])
         _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
         r = runner.invoke(app, ["done", node_id])
@@ -871,7 +871,7 @@ def test_done_no_tag_on_collision_even_when_driving(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-col00001",
         "title": "Already done",
-        "_status": "done",
+        "status": "done",
         "completed_at": "2026-04-20T10:00:00Z",
         "domain": "code",
     }])
@@ -894,7 +894,7 @@ def test_done_no_tag_on_backfill_even_when_driving(tmp_graph, tmp_ledger, monkey
     _seed(tmp_graph, [{
         "id": "ab-bfd00001",
         "title": "Backfill target",
-        "_status": "done",
+        "status": "done",
         "completed_at": "2026-04-20T10:00:00Z",
         "domain": "code",
         "plan_path": "/p",
@@ -922,10 +922,10 @@ def test_done_completes_even_when_audit_emit_raises(tmp_graph, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-fr000001",
         "title": "Emit fails",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
     }])
     _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
     result = runner.invoke(app, ["done", "ab-fr000001"], catch_exceptions=False)
     assert result.exit_code == 0, result.stdout
-    assert _read(tmp_graph)[0]["_status"] == "done"
+    assert _read(tmp_graph)[0]["status"] == "done"

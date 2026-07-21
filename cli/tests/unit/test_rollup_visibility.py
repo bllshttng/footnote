@@ -189,7 +189,7 @@ def test_per_project_board_does_not_invent_orphans():
 
 def test_done_cards_are_not_flagged_as_orphans():
     """The metric excludes closed work, so the board must too."""
-    assert orphan_ids([node("x-1", _status="done")]) == frozenset()
+    assert orphan_ids([node("x-1", status="done")]) == frozenset()
 
 
 def test_rate_severity_can_reach_alert():

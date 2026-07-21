@@ -150,7 +150,7 @@ def _split_by_status(entries: list[Entry]) -> tuple[list[Entry], list[Entry]]:
     non_done: list[Entry] = []
     done: list[Entry] = []
     for e in entries:
-        if e.get("_status") == "done":
+        if e.get("status") == "done":
             done.append(e)
         else:
             non_done.append(e)

@@ -104,7 +104,7 @@ is that contested or ambiguous liveness degrades to **skip**, never to
   refuse as `contested` (`RESULT: BLOCKED`) rather than steal.
 
 The live lockfile holder is the only ownership truth: the `target_claim_*`
-manifest fields are an init-time snapshot and graph `_status: claimed` names no
+manifest fields are an init-time snapshot and graph `status: claimed` names no
 holder, so all guidance compares `fno claim status` against the session's own
 id, never a snapshot.
 

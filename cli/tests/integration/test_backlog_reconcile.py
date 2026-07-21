@@ -598,7 +598,7 @@ def test_reconcile_happy_path_then_noop(cli_env, monkeypatch):
     entries = _read_entries(graph_path)
     node = next(e for e in entries if e["id"] == "ab-hp")
     assert node["completed_at"] is not None
-    assert node["_status"] == "done"
+    assert node["status"] == "done"
     assert (sentinel_dir / "ab-hp.json").exists()
 
     # Second run: node now done -> scan skips it -> completed_at unchanged.

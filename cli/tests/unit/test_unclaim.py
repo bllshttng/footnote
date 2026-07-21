@@ -71,7 +71,7 @@ def test_unclaim_reverts_claimed_to_ready(tmp_graph, claims_root):
     node = _read(tmp_graph)[0]
     assert node["session_id"] is None
     assert node["claimed_at"] is None
-    assert node["_status"] == "ready"
+    assert node["status"] == "ready"
 
 
 def test_release_alias_behaves_like_unclaim(tmp_graph, claims_root):
@@ -89,7 +89,7 @@ def test_unclaim_idempotent_on_ready_node(tmp_graph, claims_root):
     ])
     result = runner.invoke(app, ["backlog", "unclaim", "ab-1234abcd"])
     assert result.exit_code == 0, result.output
-    assert _read(tmp_graph)[0]["_status"] == "ready"
+    assert _read(tmp_graph)[0]["status"] == "ready"
 
 
 def test_unclaim_unknown_node_exits_1(tmp_graph, claims_root):

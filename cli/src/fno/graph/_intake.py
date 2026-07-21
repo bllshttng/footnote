@@ -280,7 +280,7 @@ def make_selection_sort_key(entries: list[dict], orphans: Optional[frozenset[str
     # An epic is "in progress" when any of its children is done or claimed.
     epic_in_progress: dict[str, bool] = {
         pid: any(
-            kid.get("_status") == "done" or kid.get("session_id")
+            kid.get("status") == "done" or kid.get("session_id")
             for kid in kids
         )
         for pid, kids in children_by_parent.items()
@@ -885,7 +885,7 @@ def _warn_similar_idea_titles(
     the author can re-run with ``--claims <id>``.
 
     The scan is bounded by ``threshold`` (default 0.7 via
-    ``difflib.SequenceMatcher``). Only ``_status: idea`` nodes are
+    ``difflib.SequenceMatcher``). Only ``status: idea`` nodes are
     considered; non-idea states are skipped because claiming them is
     refused upstream anyway. ``new_id`` is excluded so a node never
     triggers a warning about itself.
@@ -898,7 +898,7 @@ def _warn_similar_idea_titles(
     for e in entries:
         if e.get("id") == new_id:
             continue
-        if e.get("_status") != "idea":
+        if e.get("status") != "idea":
             continue
         title = (e.get("title") or "").strip().lower()
         if not title:
@@ -936,7 +936,7 @@ def _prepare_intake(
     # input; the caller surfaces those as non-zero exits via Typer.
     claim_node, claim_source = _resolve_claim(cli_claim, plan_path, entries)
     if claim_node is not None:
-        node_status = claim_node.get("_status")
+        node_status = claim_node.get("status")
         if node_status not in ("idea", None):
             raise ValueError(
                 f'node {claim_node.get("id")} is in state {node_status!r}; '

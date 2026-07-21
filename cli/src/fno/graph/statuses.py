@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from fno.graph._constants import LOCK_TTL_HOURS, PRIORITY_MIGRATION
 
 
-# Canonical set of derived ``_status`` values. Anything else is a typo or
+# Canonical set of derived ``status`` values. Anything else is a typo or
 # a stale value that ``recompute_statuses`` should overwrite. Kept here
 # (next to the only writer) so the cascade and the validation set live
 # together; importers go through this name rather than hard-coding the
@@ -22,7 +22,7 @@ VALID_STATUSES: frozenset[str] = frozenset(
      "design", "ready"}
 )
 
-# Legacy `_status` values -> current vocabulary. Applied on BOTH the read path
+# Legacy `status` values -> current vocabulary. Applied on BOTH the read path
 # (`_apply_graph_defaults`, so a not-yet-remutated row reads correctly) and here
 # on the write path, mirroring PRIORITY_MIGRATION. `claimed` was renamed to
 # `in_progress` so the graph vocabulary matches the lifecycle ladder the rest of
@@ -56,7 +56,7 @@ def is_stale_lock(task: dict) -> bool:
 
 
 def recompute_statuses(entries: list[dict]) -> list[dict]:
-    """Recompute _status for all entries based on graph state.
+    """Recompute status for all entries based on graph state.
 
     Called inside locked_mutate_graph() after every mutation.
     Derives status from: completed_at, superseded_by, deferred_at, pr_number,
@@ -76,9 +76,9 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
         old_priority = e.get("priority")
         if old_priority in PRIORITY_MIGRATION:
             e["priority"] = PRIORITY_MIGRATION[old_priority]
-        old_status = e.get("_status")
+        old_status = e.get("status")
         if old_status in STATUS_MIGRATION:
-            e["_status"] = STATUS_MIGRATION[old_status]
+            e["status"] = STATUS_MIGRATION[old_status]
 
     # One-shot defer-vocabulary backfill: pre-feature rows used
     # ``completed_at: "deferred:<ts>"`` to fake deferral. Detect that shape
@@ -99,7 +99,7 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             continue
 
         if e.get("completed_at"):
-            e["_status"] = "done"
+            e["status"] = "done"
             continue
 
         # Superseded sits between done and deferred: a node whose work has
@@ -110,7 +110,7 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
         # just undefer) because the user must consciously revive a plan
         # that another plan has already supplanted.
         if e.get("superseded_by"):
-            e["_status"] = "superseded"
+            e["status"] = "superseded"
             continue
 
         # Deferred wins over blocked/claimed/idea/ready. An explicit
@@ -118,7 +118,7 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
         # ready candidate or a blocked-by graph hint - the LLM and the
         # user both want it in its own bucket.
         if e.get("deferred_at"):
-            e["_status"] = "deferred"
+            e["status"] = "deferred"
             continue
 
         # Reap a stale lock BEFORE the in_review branch: a PR-bearing node with
@@ -140,7 +140,7 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
         # just the `next`/`ready` candidate filter. Wins over blocked/claimed/
         # idea/ready; defer/supersede/done still win above.
         if e.get("pr_number"):
-            e["_status"] = "in_review"
+            e["status"] = "in_review"
             continue
 
         has_open_blockers = False
@@ -161,22 +161,22 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
         # `in_progress`, one with an open blocker shows `blocked` rather than
         # `idea`, and a deferred node never re-surfaces in either bucket.
         if has_open_blockers:
-            e["_status"] = "blocked"
+            e["status"] = "blocked"
         elif e.get("locked_by"):
-            e["_status"] = "in_progress"
+            e["status"] = "in_progress"
         elif not e.get("plan_path"):
             # Treat both None and empty string as "no plan" - matches the
             # falsy check in triage._read_plan_excerpt so a graph row that
             # was assigned `plan_path: ""` somewhere doesn't slip into ready.
-            e["_status"] = "idea"
+            e["status"] = "idea"
         elif is_design_stage(e):
             # Linked doc exists but is still a design doc, not a blueprint.
             # Persisted so every reader sees the rung (boards, `backlog get`,
             # the Rust mux). Selection does NOT trust this value - it re-probes
             # the file live - so a stale `design` can never block dispatch.
-            e["_status"] = "design"
+            e["status"] = "design"
         else:
-            e["_status"] = "ready"
+            e["status"] = "ready"
 
     return entries
 
@@ -187,7 +187,7 @@ def live_claimed_node_ids() -> set[str]:
     The claim lockfile at ``~/.fno/claims/node:<id>`` is the liveness truth a
     ``/target`` session (or walker-dispatched target) writes; ``classify`` (via
     ``include_stale=False``) filters to only LIVE claims. Homed here — next to
-    the ``_status`` derivation it complements — so both selection (graph/cli.py)
+    the ``status`` derivation it complements — so both selection (graph/cli.py)
     and the board renderers can overlay it without a cli<->render import cycle.
 
     Best-effort: any fault in the claims subsystem degrades to an empty set so

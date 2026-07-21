@@ -323,7 +323,7 @@ def _is_pending_for_collision(entry: dict) -> bool:
         return False
     if entry.get("completed_at"):
         return False
-    status = entry.get("_status", "ready")
+    status = entry.get("status", "ready")
     if status in ("done", "deferred", "superseded"):
         return False
     if not entry.get("plan_path"):
@@ -524,7 +524,7 @@ def find_acknowledged_collisions(graph: Iterable[dict]) -> list[AcknowledgedReco
 
     A node carries ``collisions_acknowledged: list[str]`` of ab-IDs the user
     accepted at spec time. When any of those referenced nodes have
-    ``_status == "done"`` (or a ``merge_status == "merged"``), surface a
+    ``status == "done"`` (or a ``merge_status == "merged"``), surface a
     reconciliation entry so the user can verify the conflict resolved.
 
     The ``__skipped_check__`` sentinel (written by ``--no-collision-check``)
@@ -543,7 +543,7 @@ def find_acknowledged_collisions(graph: Iterable[dict]) -> list[AcknowledgedReco
             other = by_id.get(ref_id)
             if other is None:
                 continue
-            status = other.get("_status", "")
+            status = other.get("status", "")
             merge_status = other.get("merge_status", "")
             if status == "done" or merge_status == "merged":
                 out.append(

@@ -21,7 +21,7 @@ WS = {
 
 
 def _n(node_id: str, **over) -> dict:
-    base = {"id": node_id, "title": node_id, "project": None, "cwd": None, "_status": "ready"}
+    base = {"id": node_id, "title": node_id, "project": None, "cwd": None, "status": "ready"}
     base.update(over)
     return base
 
@@ -146,10 +146,10 @@ def test_detect_temp_leaks():
 
 def test_detect_dup_groups_idea_only():
     entries = [
-        _n("ab-a", title="Fix the thing", _status="idea"),
-        _n("ab-b", title="fix the  thing!", _status="idea"),  # normalizes same
-        _n("ab-c", title="Fix the thing", _status="ready"),   # ready -> ignored
-        _n("ab-d", title="Unrelated", _status="idea"),
+        _n("ab-a", title="Fix the thing", status="idea"),
+        _n("ab-b", title="fix the  thing!", status="idea"),  # normalizes same
+        _n("ab-c", title="Fix the thing", status="ready"),   # ready -> ignored
+        _n("ab-d", title="Unrelated", status="idea"),
     ]
     groups = m.detect_dup_groups(entries)
     assert len(groups) == 1
@@ -165,11 +165,11 @@ def test_detect_stale_ideas_strictly_older_than():
     exactly = (now - timedelta(days=30)).isoformat()
     fresh = (now - timedelta(days=5)).isoformat()
     entries = [
-        _n("ab-old", _status="idea", created_at=old),
-        _n("ab-edge", _status="idea", created_at=exactly),  # exactly N -> NOT stale
-        _n("ab-fresh", _status="idea", created_at=fresh),
-        _n("ab-ready", _status="ready", created_at=old),    # not an idea
-        _n("ab-nots", _status="idea"),                       # no created_at
+        _n("ab-old", status="idea", created_at=old),
+        _n("ab-edge", status="idea", created_at=exactly),  # exactly N -> NOT stale
+        _n("ab-fresh", status="idea", created_at=fresh),
+        _n("ab-ready", status="ready", created_at=old),    # not an idea
+        _n("ab-nots", status="idea"),                       # no created_at
     ]
     stale = m.detect_stale_ideas(entries, 30, now=now)
     assert [s.node_id for s in stale] == ["ab-old"]
@@ -325,10 +325,10 @@ def test_read_events_absent_file_is_empty(tmp_path):
 
 def test_stranded_dependents_maps_auto_failure_deferred():
     entries = [
-        _n("ab-block", _status="deferred", deferred_at="t",
+        _n("ab-block", status="deferred", deferred_at="t",
            deferred_reason="auto-failure: 3 consecutive failed attempts"),
-        _n("ab-dep1", _status="blocked", blocked_by=["ab-block"]),
-        _n("ab-dep2", _status="blocked", blocked_by=["ab-block"]),
+        _n("ab-dep1", status="blocked", blocked_by=["ab-block"]),
+        _n("ab-dep2", status="blocked", blocked_by=["ab-block"]),
     ]
     stranded = f.stranded_dependents(entries)
     assert set(stranded["ab-block"]) == {"ab-dep1", "ab-dep2"}
@@ -337,16 +337,16 @@ def test_stranded_dependents_maps_auto_failure_deferred():
 def test_stranded_dependents_ignores_manual_defer():
     # A hand-deferred blocker (no auto-failure sentinel) is NOT strand-reported.
     entries = [
-        _n("ab-block", _status="deferred", deferred_at="t",
+        _n("ab-block", status="deferred", deferred_at="t",
            deferred_reason="parked by hand"),
-        _n("ab-dep1", _status="blocked", blocked_by=["ab-block"]),
+        _n("ab-dep1", status="blocked", blocked_by=["ab-block"]),
     ]
     assert f.stranded_dependents(entries) == {}
 
 
 def test_stranded_dependents_omits_blocker_with_no_dependents():
     entries = [
-        _n("ab-block", _status="deferred", deferred_at="t",
+        _n("ab-block", status="deferred", deferred_at="t",
            deferred_reason="auto-failure: 4 consecutive failed attempts"),
     ]
     assert f.stranded_dependents(entries) == {}
@@ -358,7 +358,7 @@ def test_stranded_dependents_omits_blocker_with_no_dependents():
 def test_detect_failure_defers_threshold_boundary():
     # N-1 must not trigger; >= N must (Boundaries).
     events = [_fail("ab-x"), _fail("ab-x")]
-    node = _n("ab-x")  # _status ready
+    node = _n("ab-x")  # status ready
     assert m.detect_failure_defers([node], events, 3) == []
     cands = m.detect_failure_defers([node], events + [_fail("ab-x")], 3)
     assert [(c.node_id, c.streak) for c in cands] == [("ab-x", 3)]
@@ -366,10 +366,10 @@ def test_detect_failure_defers_threshold_boundary():
 
 def test_detect_failure_defers_skips_non_ready_and_deferred():
     events = [_fail("ab-x")] * 5
-    assert m.detect_failure_defers([_n("ab-x", _status="idea")], events, 3) == []
+    assert m.detect_failure_defers([_n("ab-x", status="idea")], events, 3) == []
     assert (
         m.detect_failure_defers(
-            [_n("ab-x", _status="deferred", deferred_at="t")], events, 3
+            [_n("ab-x", status="deferred", deferred_at="t")], events, 3
         )
         == []
     )
@@ -385,7 +385,7 @@ def test_detect_failure_defers_event_for_absent_node_noops():
 
 def _idea(node_id: str, age_days: int, now: datetime, **over) -> dict:
     created = (now - timedelta(days=age_days)).isoformat()
-    return _n(node_id, _status="idea", created_at=created, **over)
+    return _n(node_id, status="idea", created_at=created, **over)
 
 
 def test_clamp_validity_bounds_defaults_and_hard_cap():
@@ -408,7 +408,7 @@ def test_select_validity_strict_age_and_oldest_first():
         _idea("ab-70", 70, now),
         _idea("ab-60", 60, now),   # exactly 60 -> excluded (strict)
         _idea("ab-30", 30, now),   # too fresh
-        _n("ab-ready", _status="ready", created_at=(now - timedelta(days=99)).isoformat()),
+        _n("ab-ready", status="ready", created_at=(now - timedelta(days=99)).isoformat()),
     ]
     cands = m.select_validity_candidates(entries, 60, 25, now=now)
     assert [c["id"] for c in cands] == ["ab-90", "ab-70"]  # oldest first
@@ -455,7 +455,7 @@ def test_collect_evidence_allowlisted_ids_and_graph_dup():
         plan_path="internal/plans/p.md",
         blocked_by=["ab-dep"],
     )
-    entries = [node, _n("ab-done", title="add spinner", _status="done")]
+    entries = [node, _n("ab-done", title="add spinner", status="done")]
     pkt = m.collect_evidence(
         node, entries, now=now,
         exists=lambda p: p == "cli/src/fno/ui.py",
@@ -643,7 +643,7 @@ def test_run_validity_sweep_reread_marks_stale_after_analysis(tmp_path):
 
     # reread (called AFTER analyze) returns the node now claimed -> no longer idea.
     def reread():
-        return [dict(node, _status="claimed", locked_by="someone")]
+        return [dict(node, status="claimed", locked_by="someone")]
 
     res = m.run_validity_sweep(
         entries, validity_days=60, batch_size=25, out_dir=tmp_path,
@@ -772,10 +772,10 @@ def test_detect_stale_ready_only_ready_and_unmoved():
     now = _sr_now()
     old = (now - timedelta(days=80)).isoformat()
     entries = [
-        {"id": "a", "_status": "ready", "created_at": old},
-        {"id": "b", "_status": "idea", "created_at": old},        # not ready
-        {"id": "c", "_status": "ready", "created_at": old, "pr_number": 1},  # moved
-        {"id": "d", "_status": "ready", "created_at": (now - timedelta(days=2)).isoformat()},
+        {"id": "a", "status": "ready", "created_at": old},
+        {"id": "b", "status": "idea", "created_at": old},        # not ready
+        {"id": "c", "status": "ready", "created_at": old, "pr_number": 1},  # moved
+        {"id": "d", "status": "ready", "created_at": (now - timedelta(days=2)).isoformat()},
     ]
     got = {s.node_id for s in m.detect_stale_ready(entries, 21, now=now)}
     assert got == {"a"}

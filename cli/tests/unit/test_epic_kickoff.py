@@ -46,9 +46,9 @@ def _epic_graph(tmp_path, monkeypatch, *, children_done=False):
     entries = [
         {"id": "x-EPIC", "title": "mission", "type": "epic", "project": "fno"},
         {"id": "x-web", "title": "web child", "parent": "x-EPIC", "project": "web",
-         "slug": "web-child", "_status": "ready", **done},
+         "slug": "web-child", "status": "ready", **done},
         {"id": "x-etl", "title": "etl child", "parent": "x-EPIC", "project": "etl",
-         "slug": "etl-child", "_status": "ready", **done},
+         "slug": "etl-child", "status": "ready", **done},
     ]
     _write_graph(tmp_path, entries, monkeypatch)
     return entries
@@ -385,8 +385,8 @@ def test_per_project_lane_cap(iso, tmp_path, monkeypatch):
     """config.parallel.max_lanes bounds per-project concurrency (both children same project)."""
     entries = [
         {"id": "x-EPIC", "title": "mission", "project": "fno"},
-        {"id": "x-a", "parent": "x-EPIC", "project": "web", "slug": "a", "_status": "ready"},
-        {"id": "x-b", "parent": "x-EPIC", "project": "web", "slug": "b", "_status": "ready"},
+        {"id": "x-a", "parent": "x-EPIC", "project": "web", "slug": "a", "status": "ready"},
+        {"id": "x-b", "parent": "x-EPIC", "project": "web", "slug": "b", "status": "ready"},
     ]
     _write_graph(tmp_path, entries, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web")})

@@ -378,14 +378,14 @@ SEAM_DRIVER
       fail "seam_happy: could not parse node id from: $SEAM_NODE_JSON"
     }
 
-    # Patch _status to ready and set cwd to proj
+    # Patch status to ready and set cwd to proj
     python3 -c "
 import json, pathlib, os
 g = pathlib.Path('$SEAM_HOME/.fno/graph.json')
 data = json.loads(g.read_text())
 for e in data['entries']:
     if e['id'] == '$SEAM_NODE_ID':
-        e['_status'] = 'ready'
+        e['status'] = 'ready'
         e['cwd'] = '$PROJ3'
 g.write_text(json.dumps(data, indent=2))
 " 2>/dev/null || fail "seam_happy: graph patch failed"
@@ -454,7 +454,7 @@ g = pathlib.Path('$SEAM_HOME/.fno/graph.json')
 data = json.loads(g.read_text())
 for e in data['entries']:
     if e['id'] == '$SEAM_NODE_ID':
-        e['_status'] = 'ready'
+        e['status'] = 'ready'
         e['cwd'] = '$PROJ4'
         e['pr_number'] = 9999
         e['pr_url'] = 'https://github.com/nonexistent-org-xyz/nonexistent-repo-xyz/pull/9999'
