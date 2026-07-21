@@ -6299,6 +6299,24 @@ def cmd_reconcile(
         # after the lock - else an epic-level dependent stalls.
         cascade_closed_acc: list = []
 
+        # Ledger rollup, precomputed outside the lock (ledger I/O must not block
+        # other graph mutations). Reconcile is the MAINSTREAM close: a session
+        # lands its PR open, `done` exits 5 awaiting merge, and reconcile closes
+        # it at the merge - so without the rollup here, session_id / cost /
+        # points are never recorded on the normal path at all.
+        reconcile_rollups: dict = {}
+        try:
+            from fno.done.cli import _rollup_from_ledger
+
+            for record in closeable:
+                node_obj = _find_node(entries, record.node_id)
+                if node_obj:
+                    reconcile_rollups[record.node_id] = _rollup_from_ledger(
+                        node_obj.get("plan_path")
+                    )
+        except Exception:
+            reconcile_rollups = {}
+
         def mutator(entries):
             actually_closed.clear()
             cascade_closed_acc.clear()
@@ -6306,6 +6324,22 @@ def cmd_reconcile(
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
                     _apply_completion_fields(node_obj, merge_status="merged")
+                    if record.node_id in reconcile_rollups:
+                        try:
+                            from fno.done.cli import _apply_rollup
+
+                            # No env_session here: reconcile is the detached
+                            # SessionStart sweep, so CLAUDECODE_SESSION_ID names
+                            # whatever session happened to start it, NOT the one
+                            # that did the closed node's work. Trust the ledger's
+                            # attribution.
+                            _apply_rollup(
+                                node_obj,
+                                reconcile_rollups[record.node_id],
+                                env_session=None,
+                            )
+                        except Exception:
+                            pass
                     # Backfill the PR ref for a reverse-mapped node (dead before
                     # the node<->PR stamp): the recovered number/url live only on
                     # the record, so without this the closed node stays
