@@ -285,14 +285,15 @@ is_code_payload() {
     *) return 1 ;;      # seed | handoff
   esac
 }
-# A claude `/target` worker isolates ITSELF at cold-start (`fno target start` ->
-# `fno worktree ensure` -> the harness `EnterWorktree` tool), which moves the
-# session's cwd while leaving its PROJECT at the launch dir. Pre-creating here
-# instead binds the project to the worktree: claude keys ~/.claude/projects/ off
-# the launch cwd with no rename hook, so every such spawn mints a throwaway
-# project dir holding one transcript, orphaned once the worktree is reaped. The
-# spawn-side creation is also strictly worse than the cold-start's -- it bypasses
-# the per-project `worktree` policy and picks a spawn-derived branch name.
+# A claude `/target <node>` worker isolates ITSELF at cold-start (`fno target
+# start` -> `fno worktree ensure` -> the harness `EnterWorktree` tool), which
+# moves the session's cwd while leaving its PROJECT at the launch dir. Pre-
+# creating here instead binds the project to the worktree: claude keys
+# ~/.claude/projects/ off the launch cwd with no rename hook, so every such spawn
+# mints a throwaway project dir holding one transcript, orphaned once the
+# worktree is reaped. Both paths reach the same `fno worktree ensure` and so
+# honor the per-project policy identically; what differs is the project binding
+# (and the branch name, spawn-derived vs `/target`'s own).
 #
 # Gated on claude because `EnterWorktree` is a Claude Code harness tool: a
 # codex/opencode worker can run `fno target start` but cannot move its session
@@ -300,21 +301,19 @@ is_code_payload() {
 # and its transcripts never land in ~/.claude/projects/ anyway. `/do` and `/fix`
 # refuse on a protected branch rather than isolating, so they keep it everywhere.
 #
-# A NODE is required, not incidental: the cold-start that does the isolating is
-# `fno target start <node>`, which has nothing to start from without one. A
-# free-text `/target ship the thing` never reaches it -- unattended, that path
-# hits the location-refusal backstop on canonical main and aborts -- so
-# delegating there would strand the worker instead of isolating it.
+# Both a NODE and a literal `/target` message are required, and neither is
+# incidental. The cold-start that does the isolating is `fno target start
+# <node>`, so a free-text `/target ship the thing` has nothing to resolve --
+# unattended it hits the location-refusal backstop and aborts. And PAYLOAD_MODE
+# defaults to `build`, so a caller that omits --payload-mode while passing a
+# prose task would otherwise be assumed to run `/target` when it never will.
+# Delegate only when the worker demonstrably receives a node-backed /target.
 self_isolating_payload() {
   [[ "$PROVIDER" == "claude" ]] || return 1
   [[ -n "$NODE" ]] || return 1
-  case "$PAYLOAD_MODE" in
-    build) return 0 ;;   # node dispatch: renders `/target <id>` on claude
-    passthrough)
-      case "$MESSAGE" in
-        /target|/target\ *) return 0 ;;
-        *) return 1 ;;
-      esac ;;
+  case "$PAYLOAD_MODE" in build|passthrough) ;; *) return 1 ;; esac
+  case "$MESSAGE" in
+    /target|/target\ *) return 0 ;;
     *) return 1 ;;
   esac
 }

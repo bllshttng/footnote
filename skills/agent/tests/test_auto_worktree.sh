@@ -3,7 +3,10 @@
 #
 # When spawn.sh launches a code-implementing payload (/target | /do | /fix) into
 # a repo's MAIN checkout, it deterministically creates a conductor worktree and
-# launches THERE (worker born isolated). These tests drive spawn.sh end-to-end
+# launches THERE (worker born isolated). ONE case is delegated instead (x-6c22):
+# a claude, node-backed `/target` isolates itself at cold-start, so spawn.sh
+# launches it at the repo root and creates nothing - see tests 13-17.
+# These tests drive spawn.sh end-to-end
 # against a real temp git repo with a stubbed `fno` (no daemon), and assert the
 # three failure modes from the design:
 #   1. a /think (non-code) payload is NOT worktree'd
@@ -293,15 +296,46 @@ has  "build delegated at repo root" "$(cat "$TMP/spawn-args")" "cwd $REPO_PHYS "
 no   "build delegated not at subdir" "$(cat "$TMP/spawn-args")" "src/deep"
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-deleg-build" ]] && { FAIL=$((FAIL+1)); echo "FAIL: claude build got a pre-created worktree"; } || PASS=$((PASS+1))
 
-# 15. a `worktree: never` project gets no worktree from the spawn path at all -
-#     cold-start's policy resolution is authoritative and is never pre-empted.
-out17="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-deleg-never" \
+# 15. a `worktree: never` project is delegated too, so cold-start's policy
+#     resolution decides and is never pre-empted. Asserting the DELEGATED note
+#     (not merely the absence of a worktree) is what keeps this non-vacuous: the
+#     pre-creation path also creates nothing here, but says "policy=never".
+NEVREPO_PHYS="$(cd "$NEVREPO" && pwd -P)"
+: > "$TMP/spawn-args"
+out17="$(HOME="$TMP" PATH="$STUBDIR:$PATH" SPAWN_ARGS_LOG="$TMP/spawn-args" \
+  bash "$SPAWN" --name "spawn-deleg-never" \
   --provider claude --payload-mode passthrough --message "/target x-nev2" --node "x-nev2" \
   --cwd "$NEVREPO" 2>"$TMP/err17")"
 err17="$(cat "$TMP/err17")"
 has  "never+delegated launched" "$out17" "result=launched"
+has  "never+delegated note" "$err17" "delegated to the worker cold-start (launching at $NEVREPO_PHYS)"
+no   "never+delegated did not consult ensure" "$err17" "policy=never"
+has  "never+delegated launches at root" "$(cat "$TMP/spawn-args")" "cwd $NEVREPO_PHYS "
 no   "never+delegated no cwd field" "$out17" "cwd="
 [[ -f "$NEVREPO/.setup-ran" ]] && { FAIL=$((FAIL+1)); echo "FAIL: setup-worktree.sh ran on a delegated never checkout"; } || PASS=$((PASS+1))
+
+# 15b. a claude /target whose cwd is ALREADY a linked worktree: not re-isolated
+#      and not nested. `--show-toplevel` returns that linked root, so the worker
+#      launches there and keeps the worktree it was pointed at.
+WT2="$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo"  # created by test 1
+: > "$TMP/spawn-args"
+WT2_PHYS="$(cd "$WT2" && pwd -P)"
+out20="$(HOME="$TMP" PATH="$STUBDIR:$PATH" SPAWN_ARGS_LOG="$TMP/spawn-args" \
+  bash "$SPAWN" --name "spawn-deleg-nested" --provider claude --payload-mode passthrough \
+  --message "/target x-nest" --node "x-nest" --cwd "$WT2" 2>"$TMP/err20")"
+has  "linked-wt /target launched" "$out20" "result=launched"
+has  "linked-wt /target stays put" "$(cat "$TMP/spawn-args")" "cwd $WT2_PHYS "
+[[ -d "$TMP/conductor/workspaces/myrepo/spawn-deleg-nested" ]] && { FAIL=$((FAIL+1)); echo "FAIL: linked worktree got nested by a /target"; } || PASS=$((PASS+1))
+
+# 15c. PAYLOAD_MODE defaults to `build`, so a caller that omits --payload-mode
+#      while passing a PROSE task must NOT be assumed to run /target - it never
+#      will, and delegating would strand it with no isolation at all.
+out21="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-prose-build" \
+  --provider claude --node "x-prose" \
+  --message "Implement backlog node x-prose following AGENTS.md." --cwd "$REPO" 2>"$TMP/err21")"
+err21="$(cat "$TMP/err21")"
+has  "prose build pre-created" "$err21" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-prose-build"
+no   "prose build not delegated" "$err21" "delegated to the worker cold-start"
 
 # 16. non-claude keeps pre-creation: a codex/opencode worker can run `fno target
 #     start` but has no EnterWorktree tool to move its session into the result,
