@@ -621,24 +621,33 @@ const STALE_MUTEX_STEAL: Duration = Duration::from_secs(120);
 /// should wait exactly as before. Removal happens only via an atomic rename the
 /// remover won, so two stealers can never both clear the same corpse.
 fn steal_if_stale(lock_dir: &Path) -> bool {
-    let age = match std::fs::metadata(lock_dir).and_then(|m| m.modified()) {
+    // symlink_metadata, not metadata: a dangling symlink at the lock path is
+    // stattable only without following it, and `create_dir` reports it as
+    // AlreadyExists. Following would yield NotFound here, and a caller that
+    // retries on true would spin against a lock it can never acquire.
+    let age = match std::fs::symlink_metadata(lock_dir).and_then(|m| m.modified()) {
         // A clock that runs backwards yields Err here -> zero age -> no steal.
         Ok(t) => t.elapsed().unwrap_or_default(),
-        Err(_) => return true, // vanished between contention and stat: freed
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false, // unstattable for any other reason: wait, never spin
     };
     if age <= STALE_MUTEX_STEAL {
         return false;
     }
 
+    // Unique per attempt (see the Python twin): one name per pid means a reap
+    // dir left by a failed cleanup collides forever, silently disabling every
+    // future steal by this process.
+    static REAP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let reaped = lock_dir.with_file_name(format!(
-        "{}.reap.{}",
+        "{}.reap.{}.{}",
         lock_dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),
-        std::process::id()
+        std::process::id(),
+        REAP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    let _ = std::fs::remove_dir_all(&reaped);
     match std::fs::rename(lock_dir, &reaped) {
         Ok(()) => {
             eprintln!(
@@ -650,7 +659,13 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
             true
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-        Err(_) => false,
+        Err(e) => {
+            eprintln!(
+                "claims: could not steal stale mutex {}: {e}",
+                lock_dir.display()
+            );
+            false
+        }
     }
 }
 
@@ -1867,7 +1882,9 @@ mod tests {
             tv_usec: 0,
         };
         let times = [t, t];
-        assert_eq!(unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) }, 0);
+        // lutimes, not utimes: identical for a real dir, and the only one that
+        // works on the dangling-symlink case below.
+        assert_eq!(unsafe { libc::lutimes(c.as_ptr(), times.as_ptr()) }, 0);
     }
 
     #[test]
@@ -1910,6 +1927,34 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(!lock.exists());
         assert_eq!(std::fs::read_to_string(&events).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn dangling_symlink_lock_never_spins() {
+        // EEXIST to create_dir but NotFound to a following metadata(): a
+        // "retry now" there spins the caller forever with its deadline
+        // unreachable. Stale -> stolen; fresh -> waited on.
+        let td = TempDir::new().unwrap();
+        let lock = td.path().join("events.jsonl.lock.d");
+        std::os::unix::fs::symlink(td.path().join("nonexistent"), &lock).unwrap();
+
+        assert!(!steal_if_stale(&lock), "fresh dangling link was stolen");
+
+        age_dir(&lock, STALE_MUTEX_STEAL.as_secs() + 60);
+        assert!(steal_if_stale(&lock), "stale dangling link was not stolen");
+        assert!(std::fs::symlink_metadata(&lock).is_err());
+    }
+
+    #[test]
+    fn repeated_steals_never_collide_on_the_reap_name() {
+        let td = TempDir::new().unwrap();
+        let lock = td.path().join("events.jsonl.lock.d");
+        for _ in 0..3 {
+            std::fs::create_dir(&lock).unwrap();
+            age_dir(&lock, STALE_MUTEX_STEAL.as_secs() + 60);
+            assert!(steal_if_stale(&lock));
+            assert!(!lock.exists());
+        }
     }
 
     #[test]

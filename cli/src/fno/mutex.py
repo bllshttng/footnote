@@ -31,31 +31,42 @@ log = logging.getLogger(__name__)
 STALE_MUTEX_STEAL_S = 120
 
 
-def steal_if_stale(lock_dir: Path, *, threshold_s: float = STALE_MUTEX_STEAL_S) -> bool:
-    """Rename-steal ``lock_dir`` when it is older than ``threshold_s``.
+def steal_if_stale(lock_dir: Path) -> bool:
+    """Rename-steal ``lock_dir`` when it is older than ``STALE_MUTEX_STEAL_S``.
 
     Returns True when the caller should retry its ``mkdir`` immediately: either
     the corpse was stolen, or the lock turned out to be gone already. False
     means the lock is honestly held and the caller should wait exactly as it
     did before.
     """
+    # lstat, not stat: a dangling symlink at the lock path is stattable only
+    # without following it, and `mkdir` reports it as EEXIST. Following would
+    # raise ENOENT here, and a caller that retries on True would then spin
+    # against a lock it can never acquire.
     try:
-        age = time.time() - lock_dir.stat().st_mtime
+        age = time.time() - lock_dir.lstat().st_mtime
+    except FileNotFoundError:
+        return True  # released between contention and stat: retry the mkdir
     except OSError:
-        return True  # vanished between contention and stat: freed, retry
+        return False  # unstattable for any other reason: wait, never spin
 
-    if age <= threshold_s:
+    if age <= STALE_MUTEX_STEAL_S:
         return False
 
-    reaped = lock_dir.with_name(f"{lock_dir.name}.reap.{os.getpid()}")
-    shutil.rmtree(reaped, ignore_errors=True)  # our own leftover from a prior steal
+    # Unique per attempt: reusing one name per pid means a reap dir left behind
+    # by a failed cleanup collides forever, silently disabling every future
+    # steal by this process.
+    reaped = lock_dir.with_name(f"{lock_dir.name}.reap.{os.getpid()}.{time.monotonic_ns()}")
     try:
         os.rename(lock_dir, reaped)
     except FileNotFoundError:
         return True  # released while we were looking
-    except OSError:
-        return False  # another stealer won; fall back to the normal wait loop
+    except OSError as exc:
+        # Usually another stealer won the rename. Anything else (EACCES, EXDEV)
+        # would otherwise disable stealing silently, so say which lock and why.
+        log.warning("could not steal stale mutex %s: %s", lock_dir, exc)
+        return False
 
     log.warning("stole stale mutex %s (age %ds) -> %s", lock_dir, int(age), reaped)
-    shutil.rmtree(reaped, ignore_errors=True)  # inert if it fails
+    shutil.rmtree(reaped, ignore_errors=True)
     return True

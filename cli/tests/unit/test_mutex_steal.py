@@ -34,6 +34,12 @@ def _age(path: Path, seconds: float) -> None:
     os.utime(path, (old, old))
 
 
+def _age_nofollow(path: Path, seconds: float) -> None:
+    """Backdate a symlink itself rather than the target it points at."""
+    old = time.time() - seconds
+    os.utime(path, (old, old), follow_symlinks=False)
+
+
 def _event() -> dict:
     return mission_started(mission_id="m-steal")
 
@@ -83,7 +89,11 @@ class TestStealHelper:
         assert len([r for r in caplog.records if "stole stale mutex" in r.message]) == 1
 
     def test_AC1_EDGE_prior_reap_leftover_does_not_block(self, tmp_path):
-        """A leftover reap dir from our own earlier steal is inert, not fatal."""
+        """A leftover reap dir from an earlier steal is inert, not fatal.
+
+        Reap names are unique per attempt, so an undeletable leftover cannot
+        collide and permanently disable stealing for this process.
+        """
         lock = tmp_path / "a.lock.d"
         lock.mkdir()
         leftover = tmp_path / f"a.lock.d.reap.{os.getpid()}"
@@ -92,6 +102,37 @@ class TestStealHelper:
         _age(lock, STALE_MUTEX_STEAL_S + 60)
         assert steal_if_stale(lock) is True
         assert not lock.exists()
+
+    def test_AC1_EDGE_repeated_steals_never_collide(self, tmp_path):
+        """Two steals of the same path in one process must both succeed."""
+        for _ in range(3):
+            lock = tmp_path / "a.lock.d"
+            lock.mkdir()
+            _age(lock, STALE_MUTEX_STEAL_S + 60)
+            assert steal_if_stale(lock) is True
+            assert not lock.exists()
+
+    def test_AC2_ERR_dangling_symlink_never_spins(self, tmp_path):
+        """A dangling symlink is EEXIST to mkdir but ENOENT to a following stat.
+
+        Returning "retry now" there would spin the caller's loop forever at
+        100% CPU with its timeout unreachable, so the age must be read with
+        lstat and an old dangling link stolen like any other corpse.
+        """
+        lock = tmp_path / "a.lock.d"
+        lock.symlink_to(tmp_path / "nonexistent-target")
+        _age_nofollow(lock, STALE_MUTEX_STEAL_S + 60)
+
+        assert steal_if_stale(lock) is True
+        assert not lock.is_symlink()
+
+    def test_AC2_ERR_fresh_dangling_symlink_is_waited_on(self, tmp_path):
+        """The same path, still fresh, must fall through to the wait loop."""
+        lock = tmp_path / "a.lock.d"
+        lock.symlink_to(tmp_path / "nonexistent-target")
+
+        assert steal_if_stale(lock) is False
+        assert lock.is_symlink()
 
 
 class TestEventsMutex:
