@@ -1829,8 +1829,10 @@ def cmd_update(
     locked_by_harness_session: Optional[str] = typer.Option(None, "--locked-by-harness-session", help="Holder's harness session UUID. 'null' clears."),
     has_brief: Optional[str] = typer.Option(None, "--has-brief", help="Set has_brief flag"),
     plan_path: Optional[str] = typer.Option(None, "--plan-path", help="Plan directory path"),
-    pr_number: Optional[str] = typer.Option(None, "--pr-number", help="PR number"),
-    pr_url: Optional[str] = typer.Option(None, "--pr-url", help="PR URL"),
+    pr_number: Optional[str] = typer.Option(
+        None, "--pr-number", help="PR number. 'null' clears."
+    ),
+    pr_url: Optional[str] = typer.Option(None, "--pr-url", help="PR URL. 'null' clears."),
     merge_status: Optional[str] = typer.Option(None, "--merge-status", help="Merge status"),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority"),
     title: Optional[str] = typer.Option(None, "--title", "-t", help="Update display title"),
@@ -2116,9 +2118,13 @@ def cmd_update(
             if linked_size and not node.get("size"):
                 node["size"] = linked_size
         if pr_number is not None:
-            node["pr_number"] = int(pr_number)
+            # 'null' clears, like every other nullable scalar here. Without it a
+            # node linked to the wrong PR could not be unlinked at all, and the
+            # graph is hand-edit-forbidden - so a mislink would ride to a merge
+            # and close a node that shipped nothing.
+            node["pr_number"] = None if pr_number.lower() == "null" else int(pr_number)
         if pr_url is not None:
-            node["pr_url"] = pr_url
+            node["pr_url"] = None if pr_url.lower() == "null" else pr_url
         if merge_status is not None:
             node["merge_status"] = merge_status
         if batch is not None:
