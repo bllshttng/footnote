@@ -163,7 +163,7 @@ fno backlog provenance <id> --spawned    # invert the origin edge: what did this
 
 `--spawned` walks transitively with traversal-derived depth. A cycle truncates the walk and says so, keeping the descendants it already found.
 
-`fno backlog epic status <epic>` reports **scope growth**: follow-ups the epic accumulated after decomposition (reachable by `source_node_id`, not already children by `parent`). The figure is withheld when origin-capture coverage across the epic's window sits below 50%, since at low capture a small number is indistinguishable from poor capture. Coverage and realized node/PR counts print either way, so a withheld figure explains itself.
+`fno backlog epic status <epic>` reports **scope growth**: follow-ups the epic accumulated after decomposition (reachable by `source_node_id`, not already children by `parent`). The figure is withheld when origin-capture coverage across the epic's window sits below 50%, since at low capture a small number is indistinguishable from a missed one. Coverage counts only origins that still resolve to a live node, because an origin naming a deleted node joins nothing and would otherwise inflate coverage while contributing no growth; any such danglers are reported separately. Realized node and PR counts print either way, so a withheld figure explains itself.
 
 **done = merged.** `fno backlog done` closes a node only when a referenced PR is
 MERGED. An OPEN PR (even with green CI) exits 5 (awaiting merge): the node stays
