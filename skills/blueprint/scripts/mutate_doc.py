@@ -542,6 +542,16 @@ def _append_sections_to_body(body: str, new_sections: dict[str, str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+# rc 7 = the plan states no file surface, matching _VALIDATE_SNIPPET's "the
+# thing we warn about happened" code. Any other rc means no verdict was earned.
+_SURFACE_SNIPPET = r"""
+import sys
+from pathlib import Path
+from fno.graph.collision import has_file_surface
+sys.exit(0 if has_file_surface(Path(sys.argv[1])) else 7)
+"""
+
+
 _VALIDATE_SNIPPET = r"""
 import json, sys
 from pydantic import ValidationError
@@ -814,14 +824,28 @@ def _warn_no_file_surface(plan_path: Path) -> None:
     Asks the collision parser itself rather than counting table rows: a second
     heuristic would diverge from the thing it warns about, staying quiet on a
     table whose cells parse to nothing and firing on a heading it does not know.
-    Without the CLI importable there is no oracle, so it says nothing.
+
+    Runs it out-of-process on the Pydantic-capable interpreter, same as
+    ``_validate_proposed_frontmatter``. Importing the parser in-process looks
+    simpler but never fires under the ambient python3 /blueprint actually uses:
+    the module builds its thresholds from the config model at import time, so
+    the import raises ModuleNotFoundError - an ImportError subclass - and a
+    handler that degrades on ImportError swallows it silently.
     """
+    py = _pydantic_python()
+    if py is None:
+        return
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(_CLI_SRC), env.get("PYTHONPATH", "")]))
     try:
-        from fno.graph.collision import has_file_surface
-    except ImportError:
-        return
-    if has_file_surface(plan_path):
-        return
+        proc = subprocess.run(
+            [py, "-c", _SURFACE_SNIPPET, str(plan_path)],
+            capture_output=True, text=True, env=env,
+        )
+    except OSError:
+        return  # interpreter vanished mid-run - degrade, never block the write
+    if proc.returncode != 7:
+        return  # rc 0 = has a surface; any other rc = no oracle, stay quiet
     print(
         f"WARNING: {plan_path.name} states no file surface (no parseable "
         "'## File Ownership Map' or '## Files to Modify' table). Collision "

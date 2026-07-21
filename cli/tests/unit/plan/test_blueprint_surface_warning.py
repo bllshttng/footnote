@@ -69,6 +69,44 @@ def test_quiet_when_ownership_map_is_populated(tmp_path, capsys):
     assert capsys.readouterr().err == ""
 
 
+def test_warns_without_the_parser_importable_in_process(tmp_path, capsys, monkeypatch):
+    """The production path is /blueprint's ambient python3, which lacks Pydantic.
+
+    `fno.graph.collision` builds its thresholds from the config model at import
+    time, so an in-process import raises ModuleNotFoundError - an ImportError
+    subclass - and a handler degrading on ImportError swallows it silently. The
+    check must therefore run out-of-process.
+
+    Patches `__import__` in the module's OWN builtins dict, not the `builtins`
+    module: a module loaded via `module_from_spec` receives a dict snapshot, so
+    a `setattr(builtins, ...)` patch never reaches its frames and the test could
+    not fail no matter what the implementation did.
+    """
+    def blocked(name, *a, **k):
+        if name.startswith("fno.graph.collision"):
+            raise ModuleNotFoundError("No module named 'pydantic'")
+        return _real_import(name, *a, **k)
+
+    mod_builtins = _mutate.__dict__["__builtins__"]
+    _real_import = mod_builtins["__import__"]
+    monkeypatch.setitem(mod_builtins, "__import__", blocked)
+    p = _plan(tmp_path, "# Plan\n\n## Context\n\nbody\n")
+
+    _mutate._warn_no_file_surface(p)
+
+    assert "states no file surface" in capsys.readouterr().err
+
+
+def test_quiet_when_no_pydantic_interpreter_resolves(tmp_path, capsys, monkeypatch):
+    """No oracle means no verdict; it must not guess a warning either way."""
+    monkeypatch.setattr(_mutate, "_pydantic_python", lambda: None)
+    p = _plan(tmp_path, "# Plan\n\n## Context\n\nbody\n")
+
+    _mutate._warn_no_file_surface(p)
+
+    assert capsys.readouterr().err == ""
+
+
 def test_quiet_on_any_heading_the_parser_accepts(tmp_path, capsys):
     """`Files Touched` is a recognized heading; warning on it would contradict
     the parser this check is supposed to speak for."""
