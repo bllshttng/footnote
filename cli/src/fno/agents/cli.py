@@ -783,8 +783,8 @@ def cmd_spawn(
         no_wait=no_wait,
     )
 
-    # Prior values of the FNO_NODE/FNO_SLUG/FNO_PLAN keys the bg/headless arm
-    # exports below, so the finally can put the process env back (x-d157).
+    # Prior values of the provenance keys the bg/headless arm exports below, so
+    # the finally can put the process env back.
     prov_prev: dict[str, "str | None"] = {}
 
     # `--once` is the pre-substrate spelling of headless (the Rust client maps
@@ -846,21 +846,23 @@ def cmd_spawn(
         if substrate == "headless":
             once = True
 
-        # x-d157: carry the bound node to bg/headless workers. The pane path
-        # gets this through dispatch_spawn_pane's explicit provenance wrapper;
-        # bg and headless build their child env from os.environ, so exporting
-        # here is what reaches them. Without it FNO_NODE exists only inside
-        # panes and the origin-capture fallback can never fire where the miss
-        # actually concentrates. A nodeless spawn resolves to {} and adds
-        # nothing, so an ad-hoc worker never sees an empty-string origin.
+        # Carry the bound node to bg/headless workers. The pane path gets this
+        # through dispatch_spawn_pane's explicit provenance wrapper; bg and
+        # headless build their child env from os.environ, so exporting here is
+        # what reaches them.
         #
-        # Restored in the finally below: the child inherits during the dispatch
-        # call and nothing survives it, so an in-process caller spawning twice
-        # cannot leak the first spawn's node into the second.
-        from fno.agents.mux_spawn import resolve_provenance
+        # All three keys are set or cleared together, never merged with what
+        # this process inherited: a worker dispatching a child for a plan-less
+        # node would otherwise pass down its OWN FNO_PLAN alongside the child's
+        # FNO_NODE. Restored in the finally, so the child inherits during the
+        # dispatch call and an in-process caller spawning twice cannot leak the
+        # first spawn's node into the second.
+        from fno.agents.mux_spawn import PROVENANCE_KEYS, resolve_provenance
 
         prov_env = resolve_provenance(node, slug, plan)
-        prov_prev.update({k: os.environ.get(k) for k in prov_env})
+        prov_prev.update({k: os.environ.get(k) for k in PROVENANCE_KEYS})
+        for _k in PROVENANCE_KEYS:
+            os.environ.pop(_k, None)
         os.environ.update(prov_env)
 
         try:

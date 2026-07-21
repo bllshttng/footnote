@@ -182,15 +182,13 @@ def receipt_lines(
 
 
 # ---------------------------------------------------------------------------
-# Scope growth (x-d157): how much did an epic grow after it was decomposed?
+# Scope growth: how much did an epic grow after it was decomposed?
 # ---------------------------------------------------------------------------
 
-# Below this fraction of the epic's window carrying an origin, the growth figure
-# is suppressed rather than printed. At the capture rate this feature shipped
-# against (27%), a low number is indistinguishable from poor capture, and that
-# ambiguity flatters the process in the direction nobody would question. A
-# constant, not config: the right level is a judgment about the data, and a
-# per-project knob would let a low-capture project tune the check away.
+# Below this fraction of the epic's window carrying a joinable origin, the growth
+# figure is withheld: at low capture a small number is indistinguishable from a
+# missed one, and it errs low. A constant rather than config, so a low-capture
+# project cannot tune the check away.
 SCOPE_GROWTH_COVERAGE_FLOOR = 0.50
 
 
@@ -208,9 +206,14 @@ class ScopeGrowth(NamedTuple):
     """
 
     epic_id: str
-    follow_up_ids: tuple[str, ...]
+    # None when coverage is below the floor: a caller that forgets to check
+    # `reportable` gets a TypeError at the len(), not a number it should not
+    # have printed. Mirrors how Resolution leaves epic_id unset off the
+    # `linked` path rather than trusting the reader.
+    follow_up_ids: Optional[tuple[str, ...]]
     window_total: int
     window_with_origin: int
+    window_dangling: int
     coverage: float
     reportable: bool
     realized_nodes: int
@@ -279,25 +282,44 @@ def scope_growth(
             follow_ups.add(child_id)
             frontier.append(child_id)
 
-    epic = _id_index(entries).get(epic_id, {})
+    by_id = _id_index(entries)
+    epic = by_id.get(epic_id, {})
     epic_born = epic.get("created_at") or ""
-    window = [
-        e for e in entries
-        if isinstance(e, dict)
-        and e.get("id") != epic_id
-        and (e.get("created_at") or "") >= epic_born
-    ]
-    with_origin = sum(1 for e in window if e.get("source_node_id"))
+    # An undated epic has no window to measure, so coverage is undefined rather
+    # than total: `>= ""` would otherwise admit the entire graph and report a
+    # confident number over a population that was never the epic's.
+    window = (
+        [
+            e for e in entries
+            if isinstance(e, dict)
+            and e.get("id") != epic_id
+            and (e.get("created_at") or "") >= epic_born
+        ]
+        if epic_born
+        else []
+    )
+    # Counted by JOINABILITY, not truthiness. The follow-up walk traverses ids,
+    # so an origin naming a node the graph no longer has contributes nothing to
+    # growth - counting it as captured would inflate coverage past the floor and
+    # license a zero the walk could never have found. That is the same
+    # flattering-the-process error the floor exists to prevent, arriving by the
+    # other direction.
+    with_origin = sum(1 for e in window if e.get("source_node_id") in by_id)
+    dangling = sum(
+        1 for e in window if e.get("source_node_id") and e.get("source_node_id") not in by_id
+    )
     coverage = (with_origin / len(window)) if window else 0.0
 
     realized = [e for e in entries if isinstance(e, dict) and e.get("id") in descendants]
+    reportable = coverage >= floor
     return ScopeGrowth(
         epic_id=epic_id,
-        follow_up_ids=tuple(sorted(follow_ups)),
+        follow_up_ids=tuple(sorted(follow_ups)) if reportable else None,
         window_total=len(window),
         window_with_origin=with_origin,
+        window_dangling=dangling,
         coverage=coverage,
-        reportable=coverage >= floor,
+        reportable=reportable,
         realized_nodes=len(realized),
         realized_prs=len({e["pr_number"] for e in realized if e.get("pr_number")}),
         declared_size=epic.get("size"),

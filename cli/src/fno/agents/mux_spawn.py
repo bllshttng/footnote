@@ -568,6 +568,12 @@ def _mesh_env_wrapper(
     return ["env", *unset, *pairs, *argv]
 
 
+#: The provenance env keys, as one set. Callers that export them must set or
+#: clear the whole triple together so a child never sees a mix of its own node
+#: and its parent's slug/plan.
+PROVENANCE_KEYS: tuple[str, ...] = ("FNO_NODE", "FNO_SLUG", "FNO_PLAN")
+
+
 def resolve_provenance(
     node: Optional[str],
     slug: Optional[str] = None,
@@ -584,7 +590,13 @@ def resolve_provenance(
     no linked plan; ``FNO_PR`` is intentionally absent (unknown at spawn)."""
     if not node:
         return {}
-    if slug is None or plan is None:
+    # The graph read also NORMALIZES a slug input to an id. Skipping it when the
+    # caller supplied slug+plan would export FNO_NODE=<slug>, and the ambient
+    # origin-capture consumer matches ids exactly - so a slug-driven spawn would
+    # silently file its nodes with no origin at all.
+    from fno.graph._constants import has_node_id_prefix
+
+    if slug is None or plan is None or not has_node_id_prefix(node):
         try:
             from fno.graph.load import load_graph
 

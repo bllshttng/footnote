@@ -59,11 +59,8 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "cwd",
     "domain",
     "blocked_by",
-    # Asserted symmetric affinity (x-d157): "two sides of the same coin", "these
-    # work well together". Distinct from the computed relatedness sidecar, which
-    # is regenerable and would destroy an assertion on the next build, and from
-    # blocked_by, which gates. related is navigational only: it never touches
-    # _status, dispatch eligibility, or selection order.
+    # Asserted affinity, symmetric and non-gating. Distinct from the computed
+    # relatedness sidecar, which is regenerable and would destroy an assertion.
     "related",
     # Contract-tier dependency classification (G2). Present ONLY on a
     # `dep=contract` dependent (it stubs against a pinned ## Interface Contract);
@@ -143,10 +140,10 @@ def _mirror_related(
     Split out from :func:`set_related` so a test can fault exactly this step and
     prove the half-edge state is unreachable rather than merely unlikely.
 
-    A peer in ``added`` that is missing raises: refusing the whole mutation is
-    correct when a node is deleted between resolution and write, since the
-    alternative is persisting an edge that dangles. A peer in ``removed`` that
-    is missing is ignored - the edge is already gone.
+    A missing peer in ``added`` raises rather than being skipped. Callers resolve
+    peers against this same snapshot under the same lock, so it is a programming
+    error, not a race - and failing loudly beats writing an edge that dangles. A
+    missing peer in ``removed`` is ignored: the edge is already gone.
     """
     for peer_id in added:
         peer = by_id[peer_id]
