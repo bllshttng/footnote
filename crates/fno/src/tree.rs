@@ -387,6 +387,71 @@ fn replace_leaf_node(node: &mut Node, old: PaneId, new: PaneId) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// move_leaf (drag-to-relocate + keyboard move-pane, x-aa95)
+// ---------------------------------------------------------------------------
+
+/// Relocate the `mover` leaf to sit adjacent to `target` on its `dir` side.
+/// Returns `false` with the tab COMPLETELY unchanged when the move is refused,
+/// so a rejected drop needs no re-sync - the client flashes and keeps drawing
+/// what it already has.
+///
+/// Deliberately a remove-then-insert composed from [`remove_leaf`] (which owns
+/// ratio redistribution and single-child collapse) and [`split_node`] (which
+/// owns adjacent insertion and cross-axis wrapping), rather than rect swapping
+/// or bespoke ratio arithmetic. Relocation is exactly a close plus a split at a
+/// different slot, and reusing both halves is why the ratio sum, the
+/// no-single-child-branch rule, and the same-axis merge all keep holding here
+/// for free.
+///
+/// Refuses (`false`, unchanged) when: `mover == target` (an origin drop, which
+/// is a cancel); either id is absent (a stale drop naming a pane another client
+/// closed); `mover` is the tab's only pane; or the resulting layout would push
+/// any pane below [`MIN_ROWS`]/[`MIN_COLS`].
+pub fn move_leaf(tab: &mut Tab, viewport: Rect, mover: PaneId, target: PaneId, dir: Dir) -> bool {
+    if mover == target {
+        return false;
+    }
+    // Both ends are validated BEFORE any surgery: the target must survive the
+    // removal to be insertable next to, and checking after would mean undoing.
+    let present = leaves(&tab.root);
+    if !present.contains(&mover) || !present.contains(&target) {
+        return false;
+    }
+    // `Some(None)` means the root itself was the mover - a single-pane tab has
+    // nowhere to move to.
+    let Some(Some(without)) = remove_leaf(&tab.root, mover) else {
+        return false;
+    };
+    // Normalizing HERE is load-bearing: the removal can leave a nested
+    // same-axis branch, and inserting into one would place `mover` in the
+    // wrong branch relative to the seam the operator pointed at.
+    let without = normalize(without);
+
+    let (axis, before) = match dir {
+        Dir::Left => (Axis::Horizontal, true),
+        Dir::Right => (Axis::Horizontal, false),
+        Dir::Up => (Axis::Vertical, true),
+        Dir::Down => (Axis::Vertical, false),
+    };
+    let Some(candidate) = split_node(&without, target, axis, before, mover) else {
+        return false;
+    };
+
+    // Same per-pane, per-axis check as `split_directional`: a pane fails on
+    // either dimension independently.
+    if layout(&candidate, viewport)
+        .iter()
+        .any(|(_, r)| r.rows < MIN_ROWS || r.cols < MIN_COLS)
+    {
+        return false;
+    }
+
+    tab.root = candidate;
+    tab.focus = mover;
+    true
+}
+
+// ---------------------------------------------------------------------------
 // close
 // ---------------------------------------------------------------------------
 
@@ -1830,5 +1895,174 @@ mod tests {
         };
         assert!(replace_leaf(&mut tab, 2, 9));
         assert_eq!(tab.focus, 1);
+    }
+
+    // -- move_leaf (x-aa95) -------------------------------------------------
+
+    /// Wider than [`VIEWPORT`] because a move concentrates panes into one row:
+    /// three panes side by side need `3 * MIN_COLS` plus two divider cells, so
+    /// the shared 21-column viewport would refuse every relocation on size
+    /// alone and prove nothing about the surgery.
+    const MOVE_VIEWPORT: Rect = Rect {
+        x: 0,
+        y: 0,
+        rows: 21,
+        cols: 40,
+    };
+
+    fn grid_2x2_tab() -> Tab {
+        Tab {
+            id: 0,
+            root: grid_2x2(),
+            focus: 2,
+            name: None,
+        }
+    }
+
+    #[test]
+    fn tree_move_leaf_relocates_a_pane_into_a_sibling_row() {
+        // AC1-HP: grid 1 2 / 3 4; move 2 to the seam between 3 and 4 =>
+        // 1 spans the top, 3 2 4 share the bottom.
+        let mut tab = grid_2x2_tab();
+        assert!(move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right));
+        let Node::Branch { axis, children } = &tab.root else {
+            panic!("root collapsed to a leaf: {:?}", tab.root);
+        };
+        assert_eq!(*axis, Axis::Vertical);
+        assert_eq!(children.len(), 2, "still a top row and a bottom row");
+        assert_eq!(children[0].1, Node::Leaf(1), "1 absorbed the whole top row");
+        let Node::Branch {
+            axis: bottom_axis,
+            children: bottom,
+        } = &children[1].1
+        else {
+            panic!("bottom row is not a branch: {:?}", children[1].1);
+        };
+        assert_eq!(*bottom_axis, Axis::Horizontal);
+        assert_eq!(
+            bottom.iter().map(|(_, n)| n.clone()).collect::<Vec<_>>(),
+            vec![Node::Leaf(3), Node::Leaf(2), Node::Leaf(4)],
+            "2 landed between 3 and 4, in that order"
+        );
+    }
+
+    #[test]
+    fn tree_move_leaf_preserves_the_pane_set_and_invariants() {
+        // Invariant: relocation is pure surgery - no pane is lost, duplicated,
+        // or minted, and the tree stays well-formed.
+        let mut tab = grid_2x2_tab();
+        let before: Vec<PaneId> = {
+            let mut v = leaves(&tab.root);
+            v.sort_unstable();
+            v
+        };
+        assert!(move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right));
+        let after: Vec<PaneId> = {
+            let mut v = leaves(&tab.root);
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(before, after, "the pane set must be identical");
+        check_invariants(&tab).expect("tree must stay well-formed after a move");
+    }
+
+    #[test]
+    fn tree_move_leaf_focus_follows_the_moved_pane() {
+        let mut tab = grid_2x2_tab();
+        tab.focus = 1;
+        assert!(move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right));
+        assert_eq!(tab.focus, 2, "the relocated pane takes focus");
+    }
+
+    #[test]
+    fn tree_move_leaf_refuses_a_move_that_would_undersize_a_pane() {
+        // AC4-ERR: the refusal leaves the tree byte-identical, so the client
+        // can flash a rejection without re-syncing.
+        let mut tab = grid_2x2_tab();
+        let before = tab.clone();
+        // Wide enough for the 2x2 it starts as, too narrow for the three-pane
+        // row the move would produce - so the refusal is the move's doing, not
+        // a viewport that was already illegal.
+        let cramped = Rect {
+            x: 0,
+            y: 0,
+            rows: 8,
+            cols: 20,
+        };
+        assert!(
+            layout(&tab.root, cramped)
+                .iter()
+                .all(|(_, r)| r.rows >= MIN_ROWS && r.cols >= MIN_COLS),
+            "precondition: the starting grid must itself be legal here"
+        );
+        assert!(
+            !move_leaf(&mut tab, cramped, 2, 3, Dir::Right),
+            "three panes cannot share a row this narrow"
+        );
+        assert_eq!(tab, before, "tree must be unchanged on refusal");
+    }
+
+    #[test]
+    fn tree_move_leaf_is_a_no_op_for_ids_not_in_the_tree() {
+        // AC6-FR: a stale drop names a pane another client already closed.
+        let mut tab = grid_2x2_tab();
+        let before = tab.clone();
+        assert!(!move_leaf(&mut tab, MOVE_VIEWPORT, 99, 3, Dir::Right));
+        assert_eq!(tab, before);
+        assert!(!move_leaf(&mut tab, MOVE_VIEWPORT, 2, 99, Dir::Right));
+        assert_eq!(tab, before);
+    }
+
+    #[test]
+    fn tree_move_leaf_onto_itself_is_a_no_op() {
+        // AC5-EDGE: dropping a pane on its own origin cancels rather than
+        // running a remove+reinsert that would churn ratios for no reason.
+        let mut tab = grid_2x2_tab();
+        let before = tab.clone();
+        assert!(!move_leaf(&mut tab, MOVE_VIEWPORT, 2, 2, Dir::Right));
+        assert_eq!(tab, before);
+    }
+
+    #[test]
+    fn tree_move_leaf_refuses_to_move_the_only_pane() {
+        // A single-pane tab has nowhere to move to; the keyboard path renders
+        // this as a visible no-op notice rather than a layout change.
+        let mut tab = Tab {
+            id: 0,
+            root: Node::Leaf(1),
+            focus: 1,
+            name: None,
+        };
+        let before = tab.clone();
+        assert!(!move_leaf(&mut tab, MOVE_VIEWPORT, 1, 1, Dir::Right));
+        assert_eq!(tab, before);
+    }
+
+    #[test]
+    fn tree_move_leaf_collapses_the_branch_it_emptied() {
+        // Moving 2 out of the top row leaves that row single-child; the
+        // collapse+normalize pass must fold it away rather than leave a
+        // one-child branch standing (which check_invariants rejects).
+        let mut tab = grid_2x2_tab();
+        assert!(move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right));
+        check_invariants(&tab).expect("no single-child branch may survive");
+        // And the fold is real: the top row is the bare leaf, not a wrapper.
+        let Node::Branch { children, .. } = &tab.root else {
+            panic!("root collapsed unexpectedly");
+        };
+        assert!(matches!(children[0].1, Node::Leaf(1)));
+    }
+
+    #[test]
+    fn tree_move_leaf_across_axes_wraps_the_target() {
+        // Moving below a target whose parent runs Horizontal must wrap that
+        // target in a Vertical branch, the same way split_directional does.
+        let mut tab = grid_2x2_tab();
+        assert!(move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Down));
+        check_invariants(&tab).expect("cross-axis relocation stays well-formed");
+        let panes = layout(&tab.root, MOVE_VIEWPORT);
+        let r2 = leaf_rect(&panes, 2);
+        let r3 = leaf_rect(&panes, 3);
+        assert!(r2.y > r3.y, "2 sits below 3 after a Down move");
     }
 }
