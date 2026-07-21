@@ -1180,10 +1180,14 @@ def maybe_spawn_think(
     #     `bug` or a size-`S` node is a reproduce-and-fix, not a design
     #     exploration; auto-spawning a full /think design session for it is
     #     disproportionate ceremony (the residual-edge bug that motivated this
-    #     gate was a size-S bug that fanned out to a whole /think). The explicit
-    #     conversational verb bypasses this - the operator invoking it IS the
-    #     opt-in, so a think on anything is still one command away.
-    if reason != REASON_CONVERSATIONAL:
+    #     gate was a size-S bug that fanned out to a whole /think). CONSENTED
+    #     fan-outs bypass this, because neither is an automatic trigger: the
+    #     explicit conversational verb (the operator invoking it IS the opt-in)
+    #     and a forced decompose child (`chain_blueprint` - a `needs_think` group
+    #     the operator flagged for a design pass, decompose.py's forced lane). A
+    #     consented small-bug child must still be designed + linked, never left an
+    #     unlinked idea by this size/type gate.
+    if reason != REASON_CONVERSATIONAL and not chain_blueprint:
         node_type = (node.get("type") or "").strip().lower()
         node_size = (node.get("size") or "").strip().upper()
         if node_type == "bug" or node_size == "S":

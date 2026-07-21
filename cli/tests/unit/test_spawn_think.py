@@ -315,6 +315,21 @@ def test_conversational_bypasses_design_warranting_gate(iso, monkeypatch, patch_
     assert len(spawn_calls) == 1
 
 
+def test_forced_decompose_child_bypasses_design_warranting_gate(iso, monkeypatch, patch_spawn):
+    # A `needs_think` decompose child rides chain_blueprint=True as operator
+    # consent (decompose is the opt-in). Even a bug/size-S child must get its
+    # forced design pass, not be left an unlinked idea by the size gate (Codex P1).
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    monkeypatch.setenv("FNO_THINK_SPAWN_ATTENDED", "spawn")
+    spawn_calls, _ = patch_spawn
+    res = st.maybe_spawn_think(_node(type="bug", size="S"),
+                               chain_blueprint=True,
+                               env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "spawned"
+    assert len(spawn_calls) == 1
+
+
 def test_exactly_one_event_per_evaluation(iso, monkeypatch, patch_spawn):
     """AC1-UI: a gate-on evaluation emits exactly one decision event."""
     monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
