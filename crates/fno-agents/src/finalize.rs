@@ -1540,7 +1540,7 @@ fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
     // G1: planner-only sessions exit via Budget/NoProgress/Interrupted, and a doc
     // ship (DoneAdvisory) authors no branch commits, so G4 would skip it anyway.
     if !matches!(reason, "DonePRGreen" | "DoneAwaitingMerge") {
-        return;
+        return skip("G1", format!("{reason} is not a ship terminal"));
     }
     // G2 input: an absent id cannot prove continuity, so it is not stamped.
     let Some(session) = m.harness_session_id.as_deref() else {
