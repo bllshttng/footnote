@@ -47,9 +47,15 @@ export PATH="$T/bin:$PATH" CAPTURE="$T/capture.txt"
 
 cd "$T/repo" || exit 1
 git init -q . && git config user.email t@t && git config user.name t
+# Commits change a file: work evidence requires a content change, so an
+# --allow-empty fixture would exercise a case the guard deliberately rejects.
 commit_at() {  # msg author_epoch committer_epoch
+    local name
+    name=$(printf '%s' "$1" | tr -cd '[:alnum:]')
+    printf '%s\n' "$1" > "$name.txt"
+    git add -A
     GIT_AUTHOR_DATE="@$2 +0000" GIT_COMMITTER_DATE="@$3 +0000" \
-        git commit -q --allow-empty -m "$1"
+        git commit -q -m "$1"
 }
 commit_at base 1000 1000
 BASE=$(git rev-parse HEAD)

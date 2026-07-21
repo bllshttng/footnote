@@ -3553,6 +3553,18 @@ def cmd_session_add(
     # caller can satisfy by asserting its own answer is not a guard. No ambient
     # identity at all therefore also skips - continuity is unprovable.
     if require_session is not None:
+        # The row must record the identity the guard actually checked. Allowing an
+        # override would verify one identity and permanently write another, which
+        # is the same self-certification hole in a different shape. Refused rather
+        # than ignored, like --guard-plan with --pr-number.
+        if session_id is not None or harness is not None:
+            typer.echo(
+                "session add: --require-session cannot be combined with "
+                "--session-id/--harness (it would verify one identity and "
+                "record another).",
+                err=True,
+            )
+            raise typer.Exit(code=2)
         ambient = (ident.session_id or "").strip()
         if ambient != require_session.strip():
             return _skip(

@@ -1615,8 +1615,18 @@ fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
 /// author-date floor cannot catch them. The session's own commits sit on HEAD's
 /// first-parent chain, so they still count.
 ///
+/// The `:/` pathspec (repo root, cwd-independent) requires the commit to have
+/// actually changed a file, so an empty commit is not evidence of work.
+///
 /// The range survives a rebased-away `initial_head`; any git failure (GC'd
-/// baseline, deleted worktree) reads as no evidence.
+/// baseline, deleted worktree) reads as no evidence, and so does a single
+/// unparseable timestamp - partial evidence is not evidence.
+///
+/// Accepted residual: the floor is inclusive at one-second resolution, so a
+/// predecessor commit authored in the same second as this session's init would
+/// count. Tightening to exclusive would instead drop a legitimate commit
+/// authored in the same second as init; both windows are one second wide, and
+/// this direction keeps the fast-implementer case covered.
 fn authored_work_since(cwd: &Path, initial_head: &str, floor: i64) -> bool {
     let range = format!("{initial_head}..HEAD");
     let args = [
@@ -1625,13 +1635,20 @@ fn authored_work_since(cwd: &Path, initial_head: &str, floor: i64) -> bool {
         "--first-parent",
         "--format=%at",
         &range,
+        "--",
+        ":/",
     ];
     let Some(out) = git_capture(cwd, &args) else {
         return false;
     };
-    out.lines()
-        .filter_map(|l| l.trim().parse::<i64>().ok())
-        .any(|at| at >= floor)
+    let mut any_after_floor = false;
+    for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let Ok(at) = line.parse::<i64>() else {
+            return false; // unreadable evidence, not partial evidence
+        };
+        any_after_floor |= at >= floor;
+    }
+    any_after_floor
 }
 
 /// Parse a manifest ISO-8601 UTC instant to epoch seconds.
@@ -1966,12 +1983,32 @@ mod tests {
         run(&["config", "user.name", "t"]);
     }
 
+    /// A commit that changes a file. Evidence requires a content change, so a
+    /// fixture built on `--allow-empty` would test a case the guard rejects.
+    /// The filename is derived from the message so parallel branches do not
+    /// collide when merged.
     fn commit_at(dir: &Path, msg: &str, author_epoch: i64, committer_epoch: i64) {
+        let name: String = msg.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        fs::write(dir.join(format!("{name}.txt")), msg).unwrap();
         Command::new("git")
-            .args(["commit", "-q", "--allow-empty", "-m", msg])
+            .args(["add", "-A"])
             .current_dir(dir)
-            .env("GIT_AUTHOR_DATE", format!("@{author_epoch} +0000"))
-            .env("GIT_COMMITTER_DATE", format!("@{committer_epoch} +0000"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        commit_raw(dir, msg, author_epoch, committer_epoch, false);
+    }
+
+    fn commit_raw(dir: &Path, msg: &str, author: i64, committer: i64, empty: bool) {
+        let mut args = vec!["commit", "-q", "-m", msg];
+        if empty {
+            args.insert(1, "--allow-empty");
+        }
+        Command::new("git")
+            .args(&args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_DATE", format!("@{author} +0000"))
+            .env("GIT_COMMITTER_DATE", format!("@{committer} +0000"))
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .status()
             .unwrap();
@@ -2050,6 +2087,23 @@ mod tests {
         // ...and the session's own commit still counts: it lands on HEAD's
         // first-parent chain.
         commit_at(d, "my own work", 6000, 6000);
+        assert!(authored_work_since(d, &base, 2000));
+    }
+
+    #[test]
+    fn work_evidence_rejects_an_empty_commit() {
+        // An empty commit moves HEAD and carries a fresh author date, so without
+        // a pathspec it reads as work. Evidence has to be a content change.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        git_fixture(d);
+        commit_at(d, "base", 1000, 1000);
+        let base = head_of(d);
+        commit_raw(d, "empty", 3000, 3000, true);
+        assert!(!authored_work_since(d, &base, 2000));
+
+        // ...and a commit that actually changes a file still counts.
+        commit_at(d, "real work", 4000, 4000);
         assert!(authored_work_since(d, &base, 2000));
     }
 
