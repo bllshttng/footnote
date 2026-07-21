@@ -12,6 +12,16 @@ two stealers can never both conclude they cleared the same corpse.
 Mirrored in ``crates/fno-agents/src/claims.rs`` (``STALE_MUTEX_STEAL`` /
 ``steal_if_stale``); the ``.recovery.d`` mutex is wire protocol between the two,
 so the threshold and the steal rule must change in lockstep.
+
+Accepted race: a steal is unilateral, so a holder suspended past the threshold
+(laptop sleep, SIGSTOP) can resume inside its critical section while the stealer
+is also in one, and its release then rmdirs whatever now sits at the path. That
+is deliberate. Every operation these mutexes guard already arbitrates a single
+winner on its own - archive is a rename, claim creation is an exclusive create,
+and an event is one whole-line O_APPEND write - so the worst case degrades to
+the benign pre-mutex race. These locks suppress spurious retries; they are not
+the correctness boundary, which is why an unrecoverable corpse was the far
+worse failure.
 """
 
 from __future__ import annotations
