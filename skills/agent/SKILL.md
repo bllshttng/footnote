@@ -422,6 +422,24 @@ worktree cwd is not re-isolated; any creation error fails safe to repo root. Thi
 is in `spawn.sh` (deterministic), so you do nothing here except relay the receipt
 - its `cwd="<worktree>"` field on the launched line surfaces the real launch dir.
 
+**Delegation for a self-isolating payload (x-6c22).** One case skips the
+pre-creation above: a **claude** `/target` (a `build` dispatch, or an explicit
+`/target` passthrough). That worker isolates itself at cold-start - `fno target
+start` runs `fno worktree ensure` and then the harness `EnterWorktree` tool -
+so `spawn.sh` launches it at the repo ROOT and lets it own the worktree. Doing
+both would be strictly worse: `EnterWorktree` moves the session's cwd but leaves
+its PROJECT at the launch dir, and claude keys `~/.claude/projects/` off that
+launch dir with no rename hook, so pre-creating binds the project to the worktree
+and mints a throwaway project dir per spawn that is orphaned when the worktree is
+reaped. Cold-start creation also honors the per-project `worktree` policy (a
+project set to `never` stays in place) that spawn-side creation bypassed.
+Isolation is unchanged - still a worktree off `origin/main`, only later and owned
+by the worker. The gate is claude-specific because `EnterWorktree` is a Claude
+Code harness tool: a codex/opencode `/fno:target` worker cannot move its session
+into a worktree it creates, so it keeps pre-creation. A delegated launch prints
+`auto-worktree: delegated to the worker cold-start (launching at <root>)` on
+stderr and carries NO `cwd=` receipt field, since no worktree was made here.
+
 #### 5. REPORT (echo ONLY what actually happened)
 
 **Receipt-echo invariant (every skip path).** When the confirm was auto-skipped

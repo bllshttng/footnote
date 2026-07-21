@@ -40,7 +40,11 @@ cat > "$STUBDIR/fno" <<'STUB'
 case "$1 $2" in
   "agents spawn-guard")  printf '{"verdict":"dispatchable"}\n'; exit 0 ;;
   "agents list")         printf '{"agents":[]}\n'; exit 0 ;;
-  "agents spawn"|"agents host") printf '{"short_id":"deadbeef"}\n'; exit 0 ;;
+  "agents spawn"|"agents host")
+    # Record the arg vector so a test can assert the --cwd the worker launches
+    # at (the whole point of the delegation path: repo root, not a worktree).
+    printf '%s\n' "$*" >> "${SPAWN_ARGS_LOG:-/dev/null}"
+    printf '{"short_id":"deadbeef"}\n'; exit 0 ;;
   "claim release")       exit 0 ;;
   "worktree ensure")
     shift 2  # drop "worktree ensure"; parse "--repo R --name N [--harness H]"
@@ -84,20 +88,27 @@ chmod +x "$STUBDIR/fno"
 # --- a real main checkout to dispatch into ------------------------------------
 REPO="$TMP/myrepo"
 git init -q "$REPO"
+# `git rev-parse --show-toplevel` resolves symlinks, and macOS's /var -> /private/var
+# makes that differ from $REPO. Assertions on a launch cwd must use the physical form.
+REPO_PHYS="$(cd "$REPO" && pwd -P)"
 git -C "$REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 # spawn.sh reuses <repo>/scripts/setup/setup-worktree.sh if present; absent here,
 # so the "footnote-ecosystem only" link step is correctly skipped.
 
 run_spawn() { # <msg> [extra args...]: HOME-pinned, stubbed-fno spawn.sh run
   local msg="$1"; shift
-  # claude /target passthrough = payload_mode passthrough (msg leads with `/`).
+  # claude /fix passthrough = payload_mode passthrough (msg leads with `/`).
+  # /fix (like /do) refuses on a protected branch rather than isolating itself,
+  # so it is the code payload that still needs spawn-side pre-creation -- and so
+  # exercises the worktree mechanics below. A claude /target DELEGATES instead
+  # (tests 13-15); this helper deliberately does not use one.
   HOME="$TMP" PATH="$STUBDIR:$PATH" \
     bash "$SPAWN" --name "spawn-x-9c4c-demo" --provider claude --payload-mode passthrough \
     --message "$msg" --node "x-9c4c" --cwd "$REPO" "$@" 2>"$TMP/err"
 }
 
 # 1. code payload into a MAIN checkout -> worktree created, receipt carries cwd.
-out="$(run_spawn "/target no-merge x-9c4c")"; rc=$?
+out="$(run_spawn "/fix no-merge x-9c4c")"; rc=$?
 err="$(cat "$TMP/err")"
 ok   "code-payload exit 0" "$rc" "0"
 has  "code-payload launched" "$out" "result=launched"
@@ -112,7 +123,7 @@ ok   "code-payload on feature branch" "$br" "feature/spawn-x-9c4c-demo"
 # 2. re-spawn of the same node -> reuse (ensure is idempotent), no second
 #    worktree. spawn.sh emits the same `auto-worktree: <path>` note either way;
 #    the reuse guarantee is structural (one worktree, not two).
-out2="$(run_spawn "/target no-merge x-9c4c")"; err2="$(cat "$TMP/err")"
+out2="$(run_spawn "/fix no-merge x-9c4c")"; err2="$(cat "$TMP/err")"
 has  "re-spawn note" "$err2" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo"
 cnt="$(git -C "$REPO" worktree list | grep -c "spawn-x-9c4c-demo")"
 ok   "re-spawn single worktree" "$cnt" "1"
@@ -156,7 +167,7 @@ no   "fail-safe no cwd field" "$out5" "cwd="
 #    pwd -P canonicalization must still resolve it to the repo root).
 mkdir -p "$REPO/src/deep"
 out6="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-subdir-demo" \
-  --provider claude --message "/target x-sub" --node "x-sub" \
+  --provider claude --payload-mode passthrough --message "/do x-sub" --node "x-sub" \
   --cwd "$REPO/src/deep" 2>"$TMP/err6")"
 err6="$(cat "$TMP/err6")"
 has  "subdir worktree'd" "$err6" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-subdir-demo"
@@ -197,7 +208,7 @@ no  "handoff no worktree note" "$err9" "auto-worktree:"
 : > "$TMP/ensure-args"
 out10="$(HOME="$TMP" PATH="$STUBDIR:$PATH" ENSURE_ARGS_LOG="$TMP/ensure-args" \
   bash "$SPAWN" --name "spawn-harness-demo" --provider claude --payload-mode passthrough \
-  --message "/target x-hn" --node "x-hn" --cwd "$REPO" 2>"$TMP/err10")"
+  --message "/fix x-hn" --node "x-hn" --cwd "$REPO" 2>"$TMP/err10")"
 # fragment omits the leading dashes so the grep-based `has` helper does not parse
 # "--harness" as its own option; the recorded arg vector still proves forwarding.
 has  "harness forwarded to ensure" "$(cat "$TMP/ensure-args")" "harness claude"
@@ -215,7 +226,7 @@ touch "${WORKTREE:-$PWD}/.setup-ran"
 S
 chmod +x "$NEVREPO/scripts/setup/setup-worktree.sh"
 out11="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-never-demo" \
-  --provider claude --payload-mode passthrough --message "/target x-nev" --node "x-nev" \
+  --provider claude --payload-mode passthrough --message "/do x-nev" --node "x-nev" \
   --cwd "$NEVREPO" 2>"$TMP/err11")"
 err11="$(cat "$TMP/err11")"
 has  "never launched in place note" "$err11" "policy=never, launching in place"
@@ -248,6 +259,60 @@ out14="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-oc-think"
 err14="$(cat "$TMP/err14")"
 no   "opencode /fno:think no worktree note" "$err14" "auto-worktree:"
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-oc-think" ]] && { FAIL=$((FAIL+1)); echo "FAIL: /fno:think got a worktree"; } || PASS=$((PASS+1))
+
+# --- delegation: a claude /target isolates itself, so spawn.sh must NOT (x-6c22)
+# The session's PROJECT is fixed at launch cwd with no rename hook, so launching
+# in a pre-created worktree mints a throwaway ~/.claude/projects/ dir per spawn.
+# The worker's own cold-start (`fno target start` -> EnterWorktree) creates the
+# worktree instead, keeping the transcript in the repo's canonical project dir.
+
+# 13. claude /target passthrough -> no worktree here, launched at the repo ROOT.
+: > "$TMP/spawn-args"
+out15="$(HOME="$TMP" PATH="$STUBDIR:$PATH" SPAWN_ARGS_LOG="$TMP/spawn-args" \
+  bash "$SPAWN" --name "spawn-deleg-pass" --provider claude --payload-mode passthrough \
+  --message "/target x-dlg" --node "x-dlg" --cwd "$REPO" 2>"$TMP/err15")"
+err15="$(cat "$TMP/err15")"
+has  "delegated launched" "$out15" "result=launched"
+has  "delegated note names repo root" "$err15" "delegated to the worker cold-start (launching at $REPO_PHYS)"
+no   "delegated no cwd receipt field" "$out15" "cwd="
+# fragment omits the leading dashes so the grep-based `has` helper does not parse
+# "--cwd" as its own option (same trick as the harness-forwarding test above).
+has  "delegated launches at repo root" "$(cat "$TMP/spawn-args")" "cwd $REPO_PHYS "
+[[ -d "$TMP/conductor/workspaces/myrepo/spawn-deleg-pass" ]] && { FAIL=$((FAIL+1)); echo "FAIL: claude /target got a pre-created worktree"; } || PASS=$((PASS+1))
+
+# 14. a node BUILD dispatch renders `/target <id>` on claude -> also delegates.
+: > "$TMP/spawn-args"
+mkdir -p "$REPO/src/deep"
+out16="$(HOME="$TMP" PATH="$STUBDIR:$PATH" SPAWN_ARGS_LOG="$TMP/spawn-args" \
+  bash "$SPAWN" --name "spawn-deleg-build" --provider claude --payload-mode build \
+  --message "/target no-merge x-bld" --node "x-bld" --cwd "$REPO/src/deep" 2>"$TMP/err16")"
+err16="$(cat "$TMP/err16")"
+# from a SUBDIR: launching there would slug its own project dir, so the repo root
+# (not the caller cwd) is what gets passed through.
+has  "build delegated at repo root" "$(cat "$TMP/spawn-args")" "cwd $REPO_PHYS "
+no   "build delegated not at subdir" "$(cat "$TMP/spawn-args")" "src/deep"
+[[ -d "$TMP/conductor/workspaces/myrepo/spawn-deleg-build" ]] && { FAIL=$((FAIL+1)); echo "FAIL: claude build got a pre-created worktree"; } || PASS=$((PASS+1))
+
+# 15. a `worktree: never` project gets no worktree from the spawn path at all -
+#     cold-start's policy resolution is authoritative and is never pre-empted.
+out17="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-deleg-never" \
+  --provider claude --payload-mode passthrough --message "/target x-nev2" --node "x-nev2" \
+  --cwd "$NEVREPO" 2>"$TMP/err17")"
+err17="$(cat "$TMP/err17")"
+has  "never+delegated launched" "$out17" "result=launched"
+no   "never+delegated no cwd field" "$out17" "cwd="
+[[ -f "$NEVREPO/.setup-ran" ]] && { FAIL=$((FAIL+1)); echo "FAIL: setup-worktree.sh ran on a delegated never checkout"; } || PASS=$((PASS+1))
+
+# 16. non-claude keeps pre-creation: a codex/opencode worker can run `fno target
+#     start` but has no EnterWorktree tool to move its session into the result,
+#     so removing pre-creation there would strand it on the main checkout.
+out18="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-oc-target" \
+  --provider opencode --payload-mode build \
+  --message "/fno:target x-oc" --node "x-oc" --cwd "$REPO" 2>"$TMP/err18")"
+err18="$(cat "$TMP/err18")"
+has  "opencode build still pre-created" "$err18" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-oc-target"
+no   "opencode build not delegated" "$err18" "delegated to the worker cold-start"
+[[ -d "$TMP/conductor/workspaces/myrepo/spawn-oc-target" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: opencode build lost its worktree"; }
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
