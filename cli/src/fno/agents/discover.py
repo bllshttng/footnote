@@ -1273,15 +1273,28 @@ def _token_matches(token: str, session_id: str) -> bool:
     Deliberately NOT a loose prefix match: a 2-char token would otherwise sweep
     in half the store and turn every send into an ambiguity error.
 
-    Case-insensitive: uuids and hex short ids are case-insensitive by
-    definition, and a token pasted from a UI or typed in caps addresses the
-    same session as its lowercase form.
+    Case folding applies to HEX-shaped ids only. Uuids and 8-hex short ids are
+    case-insensitive by definition, so a token pasted from a UI or typed in caps
+    names the same session. An opencode id (``ses_...``) is mixed-case BY
+    CONSTRUCTION, so folding it would let two distinct sessions differing only
+    in case collide -- and a wrong collision here wakes a stranger's session.
+    Matches the normalization rule in ``agents.store_fallback`` deliberately;
+    the two must not drift.
     """
     if not token or not session_id:
         return False
-    tok = token.lower()
-    sid = session_id.lower()
+    tok = _fold_token(token)
+    sid = _fold_token(session_id)
     return tok == sid or tok == sid[:8]
+
+
+_OPENCODE_ID_RE = re.compile(r"^ses_[A-Za-z0-9]+$")
+
+
+def _fold_token(value: str) -> str:
+    """Lowercase a hex-shaped id; leave a mixed-case opencode id untouched."""
+    v = (value or "").strip()
+    return v if _OPENCODE_ID_RE.match(v) else v.lower()
 
 
 def _reachable_from_registry(

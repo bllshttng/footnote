@@ -1796,3 +1796,22 @@ def test_malformed_graph_is_reported_unreadable_not_empty(tmp_path, monkeypatch)
             "deadbeef", projects_dir=projects, registry_path=tmp_path / "reg.json"
         )
     assert "graph" in err.value.failed
+
+
+def test_opencode_ids_keep_their_case_while_hex_folds(tmp_path):
+    """Case folding is for hex ids only.
+
+    An opencode id (`ses_...`) is mixed-case by construction, so folding it
+    would let two sessions differing only in case collide -- and a wrong
+    collision here wakes a stranger's session. Mirrors the normalization rule
+    in `agents.store_fallback`; the two must not drift.
+    """
+    from fno.agents.discover import _token_matches
+
+    # Hex folds: same session, different spelling.
+    assert _token_matches("5B17E2F0", "5b17e2f0-1c44-4d9a-8e3b-2f6a7c081d55")
+    assert _token_matches("5b17e2f0", "5B17E2F0-1C44-4D9A-8E3B-2F6A7C081D55")
+
+    # opencode does NOT fold: case is meaningful, so these are distinct.
+    assert _token_matches("ses_AbC123", "ses_AbC123")
+    assert not _token_matches("ses_abc123", "ses_AbC123")

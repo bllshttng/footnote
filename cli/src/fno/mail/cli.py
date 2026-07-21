@@ -1055,7 +1055,17 @@ def _name_lane_send(
             probe_target = (
                 token_reachable.session_id if token_reachable is not None else token
             )
-            injected = _mail_inject_claude(probe_target, wrapped)
+            # Probe the harness we resolved; when nothing resolved, try both,
+            # because an unregistered live session of either harness is exactly
+            # the case with no store record to read the harness off. Both
+            # injectors are cheap and side-effect-free on a miss.
+            probe_agent = token_reachable.agent if token_reachable is not None else None
+            if probe_agent == "codex":
+                injected = _mail_inject_codex(probe_target, wrapped)
+            else:
+                injected = _mail_inject_claude(probe_target, wrapped)
+                if not injected and probe_agent is None:
+                    injected = _mail_inject_codex(probe_target, wrapped)
             if not injected:
                 lanes.append("inject=not-delivered")
                 if token_reachable is None:

@@ -495,6 +495,65 @@ def test_ambiguous_short_id_wakes_nothing_and_names_both_candidates(
 # ---------------------------------------------------------------------------
 
 
+def test_cell1_codex_is_probed_too_when_nothing_resolved(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """The discovery-miss probe must not be claude-only.
+
+    A live codex session that live-discovery misses is the same blind spot this
+    node fixes for claude: with no store record there is no harness to read off,
+    so both injectors are tried. Both are cheap and side-effect-free on a miss.
+    """
+    tried: list[str] = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda *_a: (tried.append("claude"), False)[1],
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_codex",
+        lambda *_a: (tried.append("codex"), True)[1],
+    )
+
+    res = runner.invoke(app, ["mail", "send", LIVE_SID[:8], "hi", "--from-name", "web"])
+
+    assert res.exit_code == 0, res.output
+    assert tried == ["claude", "codex"], f"probe order/coverage wrong: {tried}"
+    assert "delivered (hosted)" in res.output
+    assert "queued (durable)" not in res.output
+
+
+def test_a_resolved_codex_session_is_probed_on_its_own_harness(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """When a store DID record the harness, probe that one rather than both."""
+    from fno.agents import discover
+
+    monkeypatch.setattr(
+        discover,
+        "resolve_reachable",
+        lambda *_a, **_k: (
+            discover.ReachableSession(
+                session_id=ASLEEP_SID, source="registry", agent="codex"
+            ),
+            [],
+        ),
+    )
+    tried: list[str] = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda *_a: (tried.append("claude"), False)[1],
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_codex",
+        lambda *_a: (tried.append("codex"), True)[1],
+    )
+
+    res = runner.invoke(app, ["mail", "send", ASLEEP_SID[:8], "hi", "--from-name", "web"])
+
+    assert res.exit_code == 0, res.output
+    assert tried == ["codex"], f"a resolved codex session was probed as claude: {tried}"
+
+
 def test_an_unreadable_store_demotes_durably_rather_than_exiting_16(
     runner, mailbox, monkeypatch, tmp_path
 ):
