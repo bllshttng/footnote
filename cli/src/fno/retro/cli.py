@@ -77,8 +77,8 @@ def _resolve_pr_session_ids(
     Mirrors the post-merge Step 4b ledger scan (skills/pr/references/merged.md). Because
     ``ledger.json`` is GLOBAL and GitHub PR numbers collide across repos, a known
     ``repo_slug`` is REQUIRED to attribute any entry: an entry matches when its
-    ``pr_url`` ends in ``/<slug>/pull/<pr>``, or (for a url-less entry) its bare
-    ``pr``/``pr_number`` equals ``pr``. When ``repo_slug`` is None - the repo
+    ``pr_url`` ends in ``/<slug>/pull/<pr>``. A url-less entry names no repo, so
+    it attributes nothing and never matches. When ``repo_slug`` is None - the repo
     could not be resolved (no ``--repo``, ``gh`` down, or run outside a checkout)
     - ownership CANNOT be confirmed, so the scan returns ``[]`` and the caller
     falls through to the read-only path rather than risk consuming a same-numbered
@@ -92,11 +92,7 @@ def _resolve_pr_session_ids(
     """
     from fno.ledger_join import reason_is_infra_failure, resolve_pr_sessions
 
-    # allow_unattributed: retro's harvest is additive (it files nodes), never
-    # destructive, so it keeps the legacy bare-number match for url-less rows.
-    sessions, reason = resolve_pr_sessions(
-        ledger_path, pr, repo_slug, allow_unattributed=True
-    )
+    sessions, reason = resolve_pr_sessions(ledger_path, pr, repo_slug)
     # Flattening to [] hides WHY. A benign no-match is the designed read-only
     # case and stays quiet; a broken environment must not read as "no owning
     # session", or nobody ever investigates it.

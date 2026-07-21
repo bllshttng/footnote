@@ -370,19 +370,28 @@ def test_resolve_pr_session_ids_matches_and_misses(tmp_path):
     assert _resolve_pr_session_ids(tmp_path / "nope.json", 522, "o/r") == []
 
 
-def test_resolve_pr_session_ids_bare_number_when_no_url(tmp_path):
-    """An entry with no pr_url falls back to the bare numeric match, coercing a
-    string-stored pr; a non-list `sessions` is ignored, not spread into chars."""
+def test_resolve_pr_session_ids_url_less_attributes_nothing(tmp_path):
+    """A url-less entry names no repo, so it attributes no ownership no matter
+    which bare number field it carries - the ledger is global and the number
+    alone could be any repo's PR. Every caller gets the read-only []."""
     led = tmp_path / "ledger.json"
     led.write_text(json.dumps({"entries": [
-        {"session_id": "s1", "pr": 522},          # no url -> numeric match
+        {"session_id": "s1", "pr": 522},          # no url
         {"session_id": "s2", "pr_number": 522},   # legacy field name
-        {"session_id": "s3", "pr": "522"},        # string-stored pr -> coerced
-        {"session_id": "s4", "pr": 522, "sessions": "oops"},  # non-list -> ignored
+        {"session_id": "s3", "pr": "522"},        # string-stored pr
+        {"session_id": "s4", "pr": 522, "sessions": ["s5"]},
     ]}), encoding="utf-8")
-    assert _resolve_pr_session_ids(led, 522, "o/r") == ["s1", "s2", "s3", "s4"]
-    # `sessions: "oops"` must contribute nothing beyond the entry's session_id.
-    assert "o" not in _resolve_pr_session_ids(led, 522, "o/r")
+    assert _resolve_pr_session_ids(led, 522, "o/r") == []
+
+
+def test_resolve_pr_session_ids_ignores_non_list_sessions(tmp_path):
+    """A non-list `sessions` is ignored, not spread into per-character ids."""
+    led = tmp_path / "ledger.json"
+    led.write_text(json.dumps({"entries": [
+        {"session_id": "s1", "pr": 522, "pr_url": "https://github.com/o/r/pull/522",
+         "sessions": "oops"},
+    ]}), encoding="utf-8")
+    assert _resolve_pr_session_ids(led, 522, "o/r") == ["s1"]
 
 
 def test_resolve_pr_session_ids_requires_repo_scope(tmp_path):
@@ -396,8 +405,9 @@ def test_resolve_pr_session_ids_requires_repo_scope(tmp_path):
         {"session_id": "s2", "pr": 522},  # bare number is also cross-repo-ambiguous
     ]}), encoding="utf-8")
     assert _resolve_pr_session_ids(led, 522, None) == []
-    # ... but a known slug still resolves the matching entry.
-    assert _resolve_pr_session_ids(led, 522, "o/r") == ["s1", "s2"]
+    # ... but a known slug still resolves the url-carrying entry. s2 stays out:
+    # a bare number attributes nothing even once the repo IS known.
+    assert _resolve_pr_session_ids(led, 522, "o/r") == ["s1"]
 
 
 def test_resolve_pr_session_ids_warns_on_infra_failure(tmp_path, capsys):

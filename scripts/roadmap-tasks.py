@@ -24,10 +24,18 @@ if str(_cli_src) not in sys.path:
 
 try:
     from fno.graph.cli import cli as app
-except ImportError:
+except ImportError as exc:
+    # Name the import that actually failed. cli/src is already on sys.path
+    # above, so the usual cause is a MISSING DEPENDENCY under whichever
+    # interpreter ran this shim (a bare system python3 has no typer), not an
+    # absent fno. Hence the remedy is a dependency-complete interpreter, NOT
+    # `uv tool install` - that installs a separate tool venv and leaves the
+    # interpreter running this shim exactly as broken.
     sys.stderr.write(
-        f"error: fno CLI required. Install with: uv tool install '{_repo_root / 'cli'}'\n"
-        "       (or add cli/src to PYTHONPATH for in-development use)\n"
+        f"error: cannot import fno.graph.cli under {sys.executable}: {exc}\n"
+        "       Re-run under an interpreter that has fno's dependencies:\n"
+        f"       uv run --project '{_repo_root / 'cli'}' "
+        f"python '{Path(__file__).resolve()}' ...\n"
     )
     sys.exit(3)
 

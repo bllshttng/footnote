@@ -487,22 +487,21 @@ def test_list_pr_number_refuses_url_less_ledger_rows(_repo: Path, monkeypatch):
     assert out["sessions_resolved"] == [] and out["consumable"] is False
 
 
-def test_resolve_pr_sessions_allow_unattributed_is_opt_in(_repo: Path):
-    """retro's additive harvest opts back into the url-less bare match; the
-    default (the consuming path) does not."""
+def test_resolve_pr_sessions_url_less_row_attributes_nothing(_repo: Path):
+    """A url-less row names no repo, so it resolves no ownership for ANY caller.
+
+    There is no opt-in: a per-caller trust flag would make correctness depend on
+    every future caller reasoning right about a GLOBAL ledger, and one that
+    guessed wrong would silently consume a same-numbered foreign PR's carve-outs.
+    """
     from fno.ledger_join import resolve_pr_sessions
 
     lj = _repo / "ledger.json"
     lj.write_text(json.dumps({"entries": [{"pr_number": 480, "session_id": "S1"}]}),
                   encoding="utf-8")
 
-    strict, reason = resolve_pr_sessions(lj, 480, "bllshttng/footnote")
-    assert strict == [] and reason == "no ledger entry for PR #480"
-
-    lenient, reason2 = resolve_pr_sessions(
-        lj, 480, "bllshttng/footnote", allow_unattributed=True
-    )
-    assert lenient == ["S1"] and reason2 is None
+    sessions, reason = resolve_pr_sessions(lj, 480, "bllshttng/footnote")
+    assert sessions == [] and reason == "no ledger entry for PR #480"
 
 
 def test_list_rejects_pr_number_with_session_id(_repo: Path):
