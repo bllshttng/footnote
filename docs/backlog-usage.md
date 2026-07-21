@@ -154,7 +154,7 @@ fno backlog find "query"          # high-recall search over title/slug/details
 
 ```bash
 fno backlog triage health          # idea pile, stale ready, collisions, dupes
-fno backlog maintain --apply       # recurring sweep: re-scope, prune, auto-defer
+fno backlog maintain --apply       # recurring sweep: re-scope, prune, pr_url backfill, auto-defer
 fno backlog reconcile              # close nodes whose PR merged outside the gate
 ```
 

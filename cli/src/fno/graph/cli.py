@@ -6371,7 +6371,8 @@ def cmd_maintain(
         False,
         "--apply",
         help=(
-            "Apply the DETERMINISTIC legs (re-scope drift, prune pytest leaks). "
+            "Apply the DETERMINISTIC legs (re-scope drift, prune pytest leaks, "
+            "backfill url-less pr_url). "
             "The judgment legs (dedup, drain-stale, cap-Now) are ALWAYS "
             "proposal-only regardless of this flag."
         ),
@@ -6394,8 +6395,9 @@ def cmd_maintain(
 ) -> None:
     """Keep graph.json + the kanban board clean by composing existing verbs.
 
-    Six legs (ab-9c144a4c). Two are deterministic and apply under ``--apply``:
-    re-scope project/cwd drift, and prune pytest-temp leak nodes. Three are
+    Deterministic legs apply under ``--apply``: re-scope project/cwd drift,
+    prune pytest-temp leak nodes, and backfill a derived ``pr_url`` onto rows
+    carrying a ``pr_number`` with no url. Three are
     judgment calls and only ever PROPOSE (never mutate, regardless of
     ``--apply``): surface near-duplicate idea titles, propose a reversible
     ``defer`` for stale ideas, and report a Now column over its WIP cap. The
