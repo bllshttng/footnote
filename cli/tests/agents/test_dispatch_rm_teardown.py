@@ -132,14 +132,15 @@ def test_codex_rm_preserves_row_when_index_unwritable(isolated_state, monkeypatc
         lambda *a, **k: (_ for _ in ()).throw(OSError("read-only file system")),
     )
 
-    with pytest.raises(DispatchAskError):
+    with pytest.raises(DispatchAskError) as exc:
         rm_agent("worker")
 
+    assert exc.value.exit_code == 1
     assert _names() == ["worker"]
 
 
 def test_codex_rm_force_drops_row_and_warns(isolated_state, monkeypatch, capsys):
-    """AC2-ERR."""
+    """AC2-ERR: the orphan is named by BOTH harness and session id."""
     _seed("worker", harness="codex", session_id=GONE_ID, cwd=isolated_state)
     monkeypatch.setattr(
         codex_mod,
@@ -152,7 +153,43 @@ def test_codex_rm_force_drops_row_and_warns(isolated_state, monkeypatch, capsys)
     err = capsys.readouterr().err
     assert "WARN" in err
     assert GONE_ID in err, "the orphan record must be named for manual cleanup"
+    assert "codex" in err, "the orphan's harness must be named too"
     assert _names() == []
+
+
+def test_codex_malformed_stored_id_preserves_row(isolated_state):
+    """AC2-EDGE end-to-end: the refusal must reach the registry, not just the arm."""
+    index = _write_index(Path.home(), [KEEP_ID])
+    before = index.read_text(encoding="utf-8")
+    _seed("worker", harness="codex", session_id="not-a-uuid", cwd=isolated_state)
+
+    with pytest.raises(DispatchAskError) as exc:
+        rm_agent("worker")
+
+    assert exc.value.exit_code == 12
+    assert _names() == ["worker"], "a refused teardown must not drop the row"
+    assert index.read_text(encoding="utf-8") == before
+
+
+def test_codex_rewrite_is_atomic_and_leaves_no_temp_file(isolated_state, monkeypatch):
+    """The atomicity claim, mutation-tested: a failed rename must change nothing.
+
+    Guards the temp-file cleanup too -- a direct in-place write, or a missing
+    unlink, both show up here.
+    """
+    index = _write_index(Path.home(), [KEEP_ID, GONE_ID])
+    before = index.read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        codex_mod.os,
+        "replace",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("rename failed")),
+    )
+
+    with pytest.raises(OSError):
+        codex_mod.remove_session_index_entry(GONE_ID)
+
+    assert index.read_text(encoding="utf-8") == before, "index must survive intact"
+    assert list(index.parent.glob("*.fno-rm.*.tmp")) == [], "no stranded temp file"
 
 
 # ------------------------------------------------------------------ opencode
@@ -247,6 +284,7 @@ def test_opencode_rm_force_drops_row_and_warns(isolated_state, monkeypatch, caps
 
     err = capsys.readouterr().err
     assert "WARN" in err and SES in err
+    assert "opencode" in err, "the orphan's harness must be named too"
     assert _names() == []
 
 

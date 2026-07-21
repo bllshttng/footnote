@@ -2537,7 +2537,7 @@ def stop_agent(
 
 
 def _teardown_harness_session(
-    existing,
+    existing: AgentEntry,
     *,
     name: str,
     force: bool,
@@ -2637,6 +2637,15 @@ def _teardown_harness_session(
                 exit_code=1,
             )
         return
+
+    # Fail loud rather than fall off the end: the caller's harness tuple and
+    # the arms above are two lists nothing ties together, and a silent return
+    # would drop the registry row while leaving the session record behind --
+    # the exact orphan this function exists to prevent.
+    raise DispatchAskError(
+        f"no teardown arm for harness {harness!r}",
+        exit_code=2,
+    )
 
 
 def rm_agent(
