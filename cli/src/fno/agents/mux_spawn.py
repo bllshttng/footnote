@@ -781,9 +781,9 @@ def dispatch_spawn_pane(
                 exit_code=2,
             )
         if provider == "opencode" and effort:
-            apply_opencode_variant(
-                model or _PER_HARNESS_DEFAULT_MODEL.get(provider), effort
-            )
+            _variant_model = model or _PER_HARNESS_DEFAULT_MODEL.get(provider)
+            if _variant_model:
+                apply_opencode_variant(_variant_model, effort)
 
         # --claim marks the pane writer-claim eligible (agent panes only);
         # mail's live inject holds it around each burst.

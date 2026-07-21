@@ -6,9 +6,14 @@ Every `fno agents spawn` / `/agent spawn` passes the Python dispatch seam
 and the Rust route with zero Rust changes (Locked Decision 9).
 
 Precedence per field: explicit CLI flag > `agents.defaults` > built-in. Fields
-resolve independently, so `-p claude` still inherits a config `model`. Scope is
-the operator-initiated spawn surface only; autonomous dispatch computes its own
-routing and reaches the seam as explicit flags, never displaced by these.
+resolve independently, with ONE exception: the `model` default is provider-
+scoped. A bare scalar `model` with no `provider` belongs to the harness it was
+written for (the config `provider`, else the inferred one), so a spawn that
+resolves to a DIFFERENT harness (e.g. `-p codex` over a claude-shaped `model`)
+leaves the model to that harness rather than forcing an incompatible one. An
+explicit `-m/--model` always wins. Scope is the operator-initiated spawn surface
+only; autonomous dispatch computes its own routing and reaches the seam as
+explicit flags, never displaced by these.
 """
 from __future__ import annotations
 
@@ -406,7 +411,7 @@ def inject_spawn_defaults(
                 file=err,
             )
             implied = None
-        if implied is not None:
+        if implied:
             resolved = (explicit_provider or "").strip() or implied
             if resolved == implied:
                 inject += ["--model", cfg_model]
