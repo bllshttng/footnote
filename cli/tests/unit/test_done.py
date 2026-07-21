@@ -48,7 +48,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 @pytest.fixture(autouse=True)
 def merged_pr(monkeypatch):
-    """Default every `--pr` close to a MERGED PR (x-47a3).
+    """Default every `--pr` close to a MERGED PR.
 
     `fno done --pr N` now demands gh-resolved merge evidence, so without a stub
     every close in this module would exit 4 (gh outage). Tests that exercise the

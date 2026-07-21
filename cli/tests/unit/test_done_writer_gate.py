@@ -1,4 +1,4 @@
-"""Regression guards for the done=merged invariant (x-47a3).
+"""Regression guards for the done=merged invariant.
 
 A backlog node may only close on MERGED evidence. Historically the finalize
 ledger append shelled an ungated ``update --completed`` leg and closed nodes
@@ -279,17 +279,156 @@ def test_us5_no_writer_closes_a_node_whose_pr_is_open(done_graph, monkeypatch):
 
 
 def test_ac4_fr_completed_at_never_precedes_merged_at(done_graph, monkeypatch):
-    """AC4-FR: the invariant the incident violated by 2h05m."""
-    from datetime import datetime
+    """AC4-FR: the invariant the incident violated by 2h05m.
+
+    The merge time is stamped just before the close rather than hardcoded to a
+    past date: against a constant already in the past, `completed_at = now()`
+    satisfies the assertion no matter what the gate does, so the incident it
+    names (close 2h05m BEFORE merge) would still pass.
+    """
+    from datetime import datetime, timezone
     from typer.testing import CliRunner
     from fno.cli import app
+    import fno.done.cli as done_cli
+    from fno.graph._reconcile import PrMergeState
 
-    merged_at = "2026-01-01T00:00:00+00:00"
     _seed(done_graph, {"id": "ab-mrg002", "title": "Merged node", "domain": "code"})
-    _stub_gh(monkeypatch, "MERGED")
+    merged_at = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(
+        done_cli, "_gh_query",
+        lambda n, **kw: PrMergeState(number=n, state="MERGED", url=None, merged_at=merged_at),
+    )
 
     r = CliRunner().invoke(app, ["done", "ab-mrg002", "--pr", "42"])
     assert r.exit_code == 0
 
     entry = _node(done_graph, "ab-mrg002")
     assert datetime.fromisoformat(entry["completed_at"]) >= datetime.fromisoformat(merged_at)
+
+
+def test_ac4_fr_an_unmerged_pr_can_never_stamp_completed_at(done_graph, monkeypatch):
+    """The same invariant from the failing side: no merge, no completed_at.
+
+    This is what actually catches a regression - the >= assertion above holds
+    trivially once a close happens at all, so the guard that bites is proving
+    the close does not happen while the PR is open.
+    """
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(done_graph, {"id": "ab-mrg003", "title": "Open node", "domain": "code"})
+    _stub_gh(monkeypatch, "OPEN")
+
+    r = CliRunner().invoke(app, ["done", "ab-mrg003", "--pr", "42"])
+
+    assert r.exit_code == 5
+    assert _node(done_graph, "ab-mrg003").get("completed_at") is None
+
+
+def test_exit_code_contract_is_owned_by_one_table():
+    """The Rust loop keys on 5 for AwaitingMerge, so these numbers are frozen.
+
+    Both done verbs raise `evidence.exit_code` rather than re-deriving the
+    mapping, which is what keeps them from drifting apart.
+    """
+    from fno.graph._reconcile import MergeEvidence
+
+    assert MergeEvidence(outcome="merged").exit_code == 0
+    assert MergeEvidence(outcome="awaiting_merge").exit_code == 5
+    assert MergeEvidence(outcome="outage").exit_code == 4
+    assert MergeEvidence(outcome="refused").exit_code == 3
+
+
+def test_empty_refs_refuses_instead_of_crashing():
+    """A shared helper taking a list must not IndexError on an empty one."""
+    from fno.graph._reconcile import resolve_merge_evidence
+
+    assert resolve_merge_evidence([]).outcome == "refused"
+
+
+def _stub_no_git(monkeypatch):
+    """git/gh subprocesses all fail, so PR auto-detect resolves to nothing."""
+    import fno.done.cli as done_cli
+
+    class _Res:
+        stdout = ""
+        stderr = ""
+        returncode = 1
+
+    monkeypatch.setattr(done_cli.subprocess, "run", lambda *a, **kw: _Res())
+
+
+def test_bare_done_gates_on_the_nodes_pr_when_autodetect_fails(done_graph, monkeypatch):
+    """`fno done <id>` must gate on the node's stored PR, not the --pr argument.
+
+    Auto-detect returns None when gh is unreachable, so a gate keyed on the
+    argument would skip entirely and close a node whose PR is open - the
+    original incident, on the default invocation.
+    """
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(done_graph, {
+        "id": "ab-bare001", "title": "Bare close", "domain": "code",
+        "pr_number": 42, "pr_url": "https://github.com/o/r/pull/42",
+    })
+    _stub_no_git(monkeypatch)
+    calls: list = []
+    _stub_gh(monkeypatch, "OPEN", calls=calls)
+
+    r = CliRunner().invoke(app, ["done", "ab-bare001"])
+
+    assert r.exit_code == 5
+    assert calls == [42], "the node's own PR must be consulted"
+    assert _node(done_graph, "ab-bare001").get("completed_at") is None
+
+
+def test_note_close_cannot_bypass_the_gate_on_a_node_with_an_open_pr(
+    done_graph, monkeypatch
+):
+    """--note suppresses auto-detect, so it must not also suppress the gate."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(done_graph, {
+        "id": "ab-note001", "title": "Note close", "domain": "code",
+        "pr_number": 42, "pr_url": "https://github.com/o/r/pull/42",
+    })
+    _stub_no_git(monkeypatch)
+    _stub_gh(monkeypatch, "OPEN")
+
+    r = CliRunner().invoke(app, ["done", "ab-note001", "--note", "shipped"])
+
+    assert r.exit_code == 5
+    assert _node(done_graph, "ab-note001").get("completed_at") is None
+
+
+def test_each_ref_is_evidenced_against_its_own_repo(done_graph, monkeypatch):
+    """A --pr number must not be evidenced against another PR's repo url."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.done.cli as done_cli
+    from fno.graph._reconcile import PrMergeState
+
+    _seed(done_graph, {
+        "id": "ab-repo001", "title": "Two repos", "domain": "code",
+        "pr_number": 7, "pr_url": "https://github.com/o/repo-a/pull/7",
+    })
+    # gh resolves the CURRENT repo, so the explicit --pr carries repo-b.
+    monkeypatch.setattr(done_cli, "_pr_url_from_gh",
+                        lambda n: f"https://github.com/o/repo-b/pull/{n}")
+    seen: list = []
+
+    def _q(pr_number, **kwargs):
+        seen.append((pr_number, kwargs.get("repo")))
+        return PrMergeState(number=pr_number, state="OPEN", url=None, merged_at=None)
+
+    monkeypatch.setattr(done_cli, "_gh_query", _q)
+
+    CliRunner().invoke(app, ["done", "ab-repo001", "--pr", "99"])
+
+    # PR 7 is evidenced against repo-a; PR 99 against the repo gh resolved for
+    # it, never inheriting repo-a and silently reading a stranger's PR #99.
+    assert (7, "o/repo-a") in seen
+    assert (99, "o/repo-b") in seen
+    assert (99, "o/repo-a") not in seen

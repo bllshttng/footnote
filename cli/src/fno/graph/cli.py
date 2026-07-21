@@ -2070,7 +2070,6 @@ def cmd_update(
         None, "--pr-number", help="PR number. 'null' clears."
     ),
     pr_url: Optional[str] = typer.Option(None, "--pr-url", help="PR URL. 'null' clears."),
-    merge_status: Optional[str] = typer.Option(None, "--merge-status", help="Merge status"),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority"),
     title: Optional[str] = typer.Option(None, "--title", "-t", help="Update display title"),
     details: Optional[str] = typer.Option(
@@ -2507,8 +2506,6 @@ def cmd_update(
             node["pr_url"] = None if pr_url.lower() == "null" else pr_url
         elif derived_pr_url is not None:
             node["pr_url"] = derived_pr_url
-        if merge_status is not None:
-            node["merge_status"] = merge_status
         if batch is not None:
             # 'null' clears the mark (requeue as individual ship on abandon); any
             # other value records the batch id this node is a member of.
@@ -2685,7 +2682,7 @@ def cmd_update(
 
         # `update` deliberately cannot close a node. Closing is merge-gated and
         # belongs to done/reconcile; an ungated, event-silent close flag here is
-        # the shape every bypass has taken (x-47a3).
+        # the shape every bypass has taken.
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -5814,7 +5811,7 @@ def cmd_done(
         first_pr_number = refs[0][0]
 
         # Shared with `fno done` so the two verbs cannot drift apart on what
-        # counts as evidence (x-47a3).
+        # counts as evidence.
         evidence = resolve_merge_evidence(
             refs, cwd=node.get("cwd"), query=_done_gh_query
         )
@@ -5827,10 +5824,11 @@ def cmd_done(
                     f"awaiting merge: PR #{evidence.open_pr_number} is OPEN, not merged. "
                     f"{task_id} stays in_review and closes on merge "
                     f"(reconcile / merge-triggered advance). "
-                    f"Use --force --reason TEXT for an early close.",
+                    f"Use --force --reason TEXT for an early close."
+                    + (f" (note: {evidence.error})" if evidence.error else ""),
                     err=True,
                 )
-                raise typer.Exit(code=5)
+                raise typer.Exit(code=evidence.exit_code)
 
             if evidence.outcome == "outage":
                 typer.echo(
@@ -5838,7 +5836,7 @@ def cmd_done(
                     f"The check is retryable once gh is available again. Node stays open.",
                     err=True,
                 )
-                raise typer.Exit(code=4)
+                raise typer.Exit(code=evidence.exit_code)
 
             # Pure policy refusal - CLOSED-unmerged / UNKNOWN only.
             msg = evidence.reason or f"PR #{first_pr_number}: no merged evidence"
@@ -5858,7 +5856,7 @@ def cmd_done(
                 _evts.append_event(event)
             except Exception:
                 pass
-            raise typer.Exit(code=3)
+            raise typer.Exit(code=evidence.exit_code)
 
     # -- Step 3: Force path - proceed and journal loudly --
     if force and refs:

@@ -43,6 +43,7 @@ from fno.events import (
     ValidationError as _ValidationError,
 )
 from fno.graph._reconcile import (
+    node_pr_refs,
     pr_number_from_url,
     pr_url_for_repo,
     repo_slug_from_url,
@@ -480,36 +481,50 @@ def done_command(
 
     now = datetime.now(timezone.utc).isoformat()
 
-    # -- merge gate --
-    # Keyed on having a PR, not on domain: a PR is what makes merge evidence
-    # meaningful, and cmd_done keys on its refs the same way. A node closing on
-    # --link/--note alone has no PR to gate and is unaffected.
-    merge_status_to_write: Optional[str] = None
+    # Resolved before the gate so an explicit --pr enters it carrying its OWN
+    # url. Without that the number would inherit the node's stored repo slug and
+    # could be evidenced against a same-numbered PR in a different repo.
+    pr_url_to_write: Optional[str] = None
     if pr is not None:
+        pr_url_to_write = auto_url or _pr_url_from_gh(pr)
+
+    # -- merge gate --
+    # Keyed on the NODE's refs (plus an explicit --pr), not on the --pr argument
+    # alone, exactly as cmd_done keys on node_pr_refs. Reading only the argument
+    # would let `fno done <id>` reopen the original bypass whenever gh
+    # auto-detect fails, and let `--note` close a node whose PR is still open.
+    # A node with no ref anywhere has nothing to gate (--link/--note).
+    gate_refs = node_pr_refs(node)
+    if pr is not None and pr not in [n for n, _ in gate_refs]:
+        gate_refs.append((pr, node.get("pr_url")))
+
+    merge_status_to_write: Optional[str] = None
+    if gate_refs:
         evidence = resolve_merge_evidence(
-            [(pr, node.get("pr_url"))], cwd=node.get("cwd"), query=_gh_query
+            gate_refs, cwd=node.get("cwd"), query=_gh_query
         )
         if evidence.outcome == "awaiting_merge":
             typer.echo(
-                f"awaiting merge: PR #{pr} is OPEN, not merged. "
+                f"awaiting merge: PR #{evidence.open_pr_number} is OPEN, not merged. "
                 f"{node_id} stays in_review and closes on merge "
-                f"(reconcile / merge-triggered advance).",
+                f"(reconcile / merge-triggered advance)."
+                + (f" (note: {evidence.error})" if evidence.error else ""),
                 err=True,
             )
-            raise typer.Exit(code=5)
+            raise typer.Exit(code=evidence.exit_code)
         if evidence.outcome == "outage":
             typer.echo(
                 f"Error: gh cross-check failed for {node_id}: {evidence.error}\n"
                 f"The check is retryable once gh is available again. Node stays open.",
                 err=True,
             )
-            raise typer.Exit(code=4)
+            raise typer.Exit(code=evidence.exit_code)
         if evidence.outcome == "refused":
             typer.echo(
                 f"Refused: {node_id} cross-check failed: {evidence.reason}",
                 err=True,
             )
-            raise typer.Exit(code=3)
+            raise typer.Exit(code=evidence.exit_code)
         merge_status_to_write = "merged"
 
     # Resolve pr_url + ledger rollup outside the mutator so subprocess / disk

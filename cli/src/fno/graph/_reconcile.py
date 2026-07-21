@@ -266,21 +266,25 @@ def node_pr_refs(node: dict) -> list[tuple[int, Optional[str]]]:
     return refs
 
 
+# The exit-code contract, owned here so no verb can fork it. loop_megawalk keys
+# on 5 for AwaitingMerge, so these numbers are load-bearing: do not renumber.
+REFUSAL_EXIT_CODES = {"awaiting_merge": 5, "outage": 4, "refused": 3}
+
+
 @dataclass
 class MergeEvidence:
-    """The close decision for a node's PR refs, shared by every done verb.
-
-    ``outcome`` maps 1:1 onto the exit-code contract the Rust loop keys on
-    (loop_megawalk maps 5 -> AwaitingMerge), so the verbs must not fork it:
-    ``merged`` -> close, ``awaiting_merge`` -> 5, ``outage`` -> 4 (retryable),
-    ``refused`` -> 3.
-    """
+    """The close decision for a node's PR refs, shared by every done verb."""
 
     outcome: Literal["merged", "awaiting_merge", "outage", "refused"]
     pr_url: Optional[str] = None
     open_pr_number: Optional[int] = None
     error: Optional[str] = None
     reason: Optional[str] = None
+
+    @property
+    def exit_code(self) -> int:
+        """The exit code this outcome must produce. 0 when it closes."""
+        return REFUSAL_EXIT_CODES.get(self.outcome, 0)
 
 
 def resolve_merge_evidence(
@@ -299,10 +303,12 @@ def resolve_merge_evidence(
     ``query`` is injected so callers can pass their own monkeypatchable shim.
     """
     query = query or query_pr_merge_state
+    if not refs:
+        return MergeEvidence(outcome="refused", reason="no PR ref to evidence")
     refusal_reason: Optional[str] = None
     outage_error: Optional[str] = None
     open_pr_number: Optional[int] = None
-    repo = repo_slug_from_url(refs[0][1]) if refs else None
+    repo = repo_slug_from_url(refs[0][1])
 
     for pr_number, pr_url in refs:
         pr_repo = repo_slug_from_url(pr_url) or repo
@@ -324,7 +330,13 @@ def resolve_merge_evidence(
             refusal_reason = f"PR #{pr_number} state={pr_state.state} (not merged)"
 
     if open_pr_number is not None:
-        return MergeEvidence(outcome="awaiting_merge", open_pr_number=open_pr_number)
+        # Carry any outage alongside: a ref we could not reach stays invisible
+        # across every retry otherwise, since OPEN outranks it.
+        return MergeEvidence(
+            outcome="awaiting_merge",
+            open_pr_number=open_pr_number,
+            error=outage_error,
+        )
     if outage_error:
         return MergeEvidence(outcome="outage", error=outage_error)
     return MergeEvidence(
