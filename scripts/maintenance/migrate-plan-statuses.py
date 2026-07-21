@@ -82,7 +82,7 @@ def _graph_truth(graph_path: Path, archive_path: Path | None) -> dict[str, str]:
                 continue
             if e.get("completed_at"):
                 truth[nid] = "done"
-            elif e.get("superseded_by") or e.get("status") == "superseded":
+            elif e.get("superseded_by") or (e.get("status") or e.get("_status")) == "superseded":
                 truth[nid] = "superseded"
     return truth
 
