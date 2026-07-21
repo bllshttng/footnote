@@ -1175,6 +1175,23 @@ def maybe_spawn_think(
     if not (node.get("source_session_id") or "").strip():
         return skip("no-origin")
 
+    # 3b. Eligibility: automatic /think fan-out is for design-warranting work
+    #     (a new feature, an epic needing decomposition), NOT a small bug. A
+    #     `bug` or a size-`S` node is a reproduce-and-fix, not a design
+    #     exploration; auto-spawning a full /think design session for it is
+    #     disproportionate ceremony (the residual-edge bug that motivated this
+    #     gate was a size-S bug that fanned out to a whole /think). The explicit
+    #     conversational verb bypasses this - the operator invoking it IS the
+    #     opt-in, so a think on anything is still one command away.
+    if reason != REASON_CONVERSATIONAL:
+        node_type = (node.get("type") or "").strip().lower()
+        node_size = (node.get("size") or "").strip().upper()
+        if node_type == "bug" or node_size == "S":
+            return skip(
+                "not-design-warranting",
+                detail=f"type={node_type or '?'} size={node_size or '?'}",
+            )
+
     # 4. Blast-radius cap (AC4-EDGE): a bulk run over the cap skips the rest and
     #    logs the truncation (never silent).
     cap = _max_per_run(project_root)
