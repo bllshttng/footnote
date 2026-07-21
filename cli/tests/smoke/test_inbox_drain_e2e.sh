@@ -19,6 +19,13 @@ cat > "$WORK/.fno/settings.yaml" <<YAML
 project: $PROJECT
 YAML
 
+# The drain's graph-node creation shells out to the REAL `fno new`: a fake on
+# PATH cannot intercept it, because `uv run` prepends the project venv's bin
+# ahead of anything we set. Redirect HOME instead so `state_dir()` resolves
+# here and not to the developer's ~/.fno.
+export HOME="$WORK"
+echo '{"_lock_version": 1, "entries": []}' > "$WORK/.fno/graph.json"
+
 # Triage stub returning a deterministic create_node plan.
 STUB="$WORK/triage_stub.sh"
 cat > "$STUB" <<'STUB_SCRIPT'
@@ -27,29 +34,6 @@ cat > /dev/null
 echo '{"action":"create_node","title":"Stubbed node","priority":"p2","body":"Auto-created.","follow_up_question":null}'
 STUB_SCRIPT
 chmod +x "$STUB"
-
-# Fake `fno new` so drain's graph-node creation succeeds without a real CLI.
-FAKE_BIN="$WORK/bin"
-mkdir -p "$FAKE_BIN"
-cat > "$FAKE_BIN/fno-py" <<'FAKE_ABI'
-#!/usr/bin/env bash
-case "${1:-}" in
-  new)
-    if [[ "${2:-}" == "--help" ]]; then
-      echo "fake new help with --source-inbox-thread"
-      exit 0
-    fi
-    echo "ab-smoketest1"
-    ;;
-  *)
-    # Fall through to real fno for everything else (send/drain/etc).
-    exec "$REAL_ABI" "$@"
-    ;;
-esac
-FAKE_ABI
-chmod +x "$FAKE_BIN/fno-py"
-# Resolve the real fno only when the fake needs to delegate.
-export REAL_ABI=$(command -v fno-py || echo "")
 
 # Inject one of each kind via the real CLI. Use --project so cwd stays at $WORK
 # (so drain's _git_root() / cwd resolves against $WORK/.fno/).
@@ -63,9 +47,9 @@ FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py mail send \
   --to-project "$PROJECT" --from-name "sender-proj" --kind fyi \
   --body "build complete in 4 minutes"
 
-# Drain (with fake fno on PATH for graph creation, triage stub for LLM).
+# Drain (triage stub stands in for the LLM; graph writes land in $WORK/.fno).
 DRAIN_JSON=$(FNO_INBOX_ROOT="$INBOX_ROOT" \
-  FNO_INBOX_TRIAGE_STUB="$STUB" PATH="$FAKE_BIN:$PATH" \
+  FNO_INBOX_TRIAGE_STUB="$STUB" \
   uv run --project "$CLI_DIR" fno-py mail drain --from "$PROJECT" --json --max 10)
 
 # 3 results, 3 distinct actions.
@@ -78,6 +62,18 @@ assert actions.get('heads-up') == 'created_node', actions
 assert actions.get('question') == 'wake_signal_dropped', actions
 assert actions.get('fyi') == 'dismissed', actions
 print(f'ok: heads-up={actions[\"heads-up\"]} question={actions[\"question\"]} fyi={actions[\"fyi\"]}')
+"
+
+# The heads-up's node really landed. Asserting only the drain's self-reported
+# `created_node` above would pass against a graph that was never written.
+WORK="$WORK" python3 -c "
+import json, os
+entries = json.load(open(os.path.join(os.environ['WORK'], '.fno', 'graph.json')))['entries']
+assert len(entries) == 1, entries
+node = entries[0]
+assert node['title'] == 'Stubbed node', node
+assert node['source_kind'] == 'from_inbox', node
+print(f'ok: node {node[\"id\"]} created in the scratch graph')
 "
 
 # Filesystem-level checks: convo-signals capture removed + wake-signals.
