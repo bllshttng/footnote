@@ -268,30 +268,37 @@ the real node.
   opencode, `$fno:verb` on codex (so `/agent spawn /blueprint -p codex` runs the
   real skill). gemini is deprecated and refused (route to claude/codex/opencode/agy).
 
-#### 1b. RESOLVE (id-free entry modes -> a concrete ab-id) (ab-f82e8083)
+#### 1b. RESOLVE (id-free entry modes -> a concrete node id) (ab-f82e8083)
 
-A backlog node id is an opaque `ab-{8hex}`. Three id-free ways to name a NODE
-resolve to a concrete id here, in order. Resolve to ONE `ab-<id>`, then
-**re-run normalize** with `--input "<that ab-id>"` (carrying the same
+A backlog node id is opaque and matches `^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$`, so
+a repo's configured `id_prefix`/`id_hex_width` classifies exactly like `ab-`.
+Two id-free ways to name a NODE resolve to a concrete id here, in order. Resolve
+to ONE id, then **re-run normalize** with `--input "<that id>"` (carrying the same
 `--provider`/`--name`/posture flags) so `message`/`name`/`node` are rebuilt as a
 node build. Skip this whole step when `node` is already a concrete id. Free text
 that names no node is NOT resolved here (x-cbb0: it is a verbatim seed, never a
 fuzzy node search) - when `node`/`node_query`/`spawn_next` are all empty, take the
 `seed` payload straight to SPAWN.
 
-1. **`node` non-empty** (tier 1 exact id, or tier 3 a re-prefixed bare 8-hex) ->
-   use it as-is.
+1. **`node` non-empty** (tier 1 exact id) -> use it as-is.
 2. **`spawn_next=1`** (tier 5) -> `fno backlog next $( [[ "$next_scope" == all ]] && echo --all || true )`
    (it already emits JSON; there is no `-J` flag on `next`). Take `.id`. If it is
    `null`/empty, report **"no ready node"** and launch nothing (AC3-ERR).
    Otherwise that id is the node.
 3. **`node_query` non-empty** (tier 2 slug candidate) -> `fno backlog get "$node_query" --field id`.
-   On exit 0 that is the node (exact slug -> ab-id): re-normalize with it for a
-   node build. On a non-zero exit the slug missed - do NOT fuzzy-search; the
-   token stays a verbatim `seed` (its `payload_mode`/`message` from normalize),
-   so proceed to SPAWN with the seed as-is.
+   On exit 0 that is the node (exact slug -> id): re-normalize with it for a
+   node build. A bare hex token arrives here too - the resolver is
+   format-agnostic and accepts it, so normalize never guesses a prefix. On a
+   non-zero exit the slug missed - do NOT fuzzy-search; the token stays a
+   verbatim `seed` (its `payload_mode`/`message` from normalize), so proceed to
+   SPAWN with the seed as-is.
 
-After resolving to an ab-id, re-normalize and continue. A resolution that names
+**Termination invariant:** a canonical id returned by the resolver MUST classify
+as tier 1 on the re-normalize pass. Re-normalize exactly ONCE per resolution; if
+the second pass still yields `node_query` (a repo whose ids fall outside the
+shape), fall through to `seed` rather than resolving again.
+
+After resolving to an id, re-normalize and continue. A resolution that names
 a node in another project will boot the worker in that node's `_resolved_cwd`
 (see SPAWN); the REPORT receipt names the resolved `slug (ab-id) + project + cwd`
 so even a delegated `next`/`all` is never a silent surprise.
@@ -300,6 +307,11 @@ so even a delegated `next`/`all` is never a silent surprise.
 
 - **Node must resolve.** If `node` is non-empty, run `fno backlog get "$node"`.
   If it exits non-zero or returns no `.id`, STOP and tell the user. Do NOT spawn.
+  **Exception - `payload_mode=passthrough`:** the id there is grep'd out of a
+  free-form `/target` line, so a hex-shaped prose word (`re-added`) can match.
+  A miss degrades to `node=""` with a one-line note and the spawn proceeds on
+  the passthrough message as typed; only the receipt loses its node suffix. A
+  `build`-mode miss still refuses loud - the user named that node deliberately.
 - **Collision pre-check (read-only), with a self-handoff exception.** If `node`
   is non-empty, run `fno claim status "node:$node" --json` and inspect `.state`
   and `.holder`. If `live`, decide whether the holder is a FOREIGN worker or
