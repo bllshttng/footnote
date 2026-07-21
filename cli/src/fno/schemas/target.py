@@ -217,6 +217,10 @@ class TargetState(BaseModel):
     execution_mode: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    # HEAD at init: the baseline finalize diffs against to prove this session's
+    # lineage authored work before stamping do-provenance. Absent on legacy
+    # manifests and on a repo with no commits.
+    initial_head: Optional[str] = None
     cross_project: bool = False
     # Legacy aliases of the harness_* block (one release). provider == harness,
     # provider_mode == harness_mode; back-filled bidirectionally by _backfill_harness.
