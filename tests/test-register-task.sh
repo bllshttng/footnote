@@ -185,135 +185,6 @@ EOF
 run_change4_prose_line_rejected
 
 # ---------------------------------------------------------------------------
-# Change #2: graph-sync matcher tolerates absolute-vs-relative plan_path
-# and prefers graph_node_id lookup when present.
-# ---------------------------------------------------------------------------
-echo ""
-echo "=== Change #2: graph-sync matcher robustness ==="
-
-# Use the helper functions directly via a Python harness rather than running
-# the full subprocess (the real _sync_to_graph spawns roadmap-tasks.py update,
-# which would mutate the user's home graph.json). The harness imports the
-# module and exercises the matcher in isolation.
-
-run_change2_relative_vs_absolute() {
-    local sandbox="$TMP/c2-paths"
-    mkdir -p "$sandbox"
-    cat > "$sandbox/graph.json" <<'JSON'
-{
-  "entries": [
-    {
-      "id": "ab-relpath",
-      "plan_path": "internal/fno/plans/test-fixture.md",
-      "status": "ready"
-    }
-  ]
-}
-JSON
-
-    # Write a small harness that invokes the matcher's lookup logic directly.
-    cat > "$sandbox/harness.py" <<PYEOF
-import importlib.util, json, os, sys
-spec = importlib.util.spec_from_file_location("rt", "$REGISTER_PY")
-rt = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rt)
-
-graph = json.load(open("$sandbox/graph.json"))
-# Simulate what _sync_to_graph does internally: look up by absolute plan_path
-# against graph entries that store relative paths. Anchor relative paths at
-# repo root via git rev-parse - use the sandbox as a fake repo root for the test.
-repo_root = "$REPO_ROOT"
-abs_plan = os.path.join(repo_root, "internal/fno/plans/test-fixture.md")
-entry = {"plan_path": abs_plan, "graph_node_id": None}
-
-node = rt._match_graph_node(graph["entries"], entry, repo_root=repo_root)
-print(json.dumps({"matched_id": node.get("id") if node else None}))
-PYEOF
-
-    local result
-    result=$("$PY" "$sandbox/harness.py" 2>&1)
-    if [[ "$result" == *'"matched_id": "ab-relpath"'* ]]; then
-        pass "C2-AC1-HP: matcher resolves abs ledger path against rel graph path"
-    else
-        fail "C2-AC1-HP: matcher returned $result"
-    fi
-}
-run_change2_relative_vs_absolute
-
-run_change2_prefer_node_id() {
-    local sandbox="$TMP/c2-id"
-    mkdir -p "$sandbox"
-    cat > "$sandbox/graph.json" <<'JSON'
-{
-  "entries": [
-    {
-      "id": "ab-nomatch-path",
-      "plan_path": "some/other/plan.md",
-      "status": "ready"
-    },
-    {
-      "id": "ab-id-match",
-      "plan_path": "different/path.md",
-      "status": "ready"
-    }
-  ]
-}
-JSON
-
-    cat > "$sandbox/harness.py" <<PYEOF
-import importlib.util, json, sys
-spec = importlib.util.spec_from_file_location("rt", "$REGISTER_PY")
-rt = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rt)
-
-graph = json.load(open("$sandbox/graph.json"))
-entry = {"plan_path": "/absolutely/wrong/path.md", "graph_node_id": "ab-id-match"}
-
-node = rt._match_graph_node(graph["entries"], entry, repo_root="$REPO_ROOT")
-print(json.dumps({"matched_id": node.get("id") if node else None}))
-PYEOF
-
-    local result
-    result=$("$PY" "$sandbox/harness.py" 2>&1)
-    if [[ "$result" == *'"matched_id": "ab-id-match"'* ]]; then
-        pass "C2-AC2-HP: matcher prefers graph_node_id over plan_path"
-    else
-        fail "C2-AC2-HP: matcher returned $result"
-    fi
-}
-run_change2_prefer_node_id
-
-run_change2_no_match() {
-    local sandbox="$TMP/c2-nomatch"
-    mkdir -p "$sandbox"
-    cat > "$sandbox/graph.json" <<'JSON'
-{"entries": [{"id": "ab-other", "plan_path": "x.md"}]}
-JSON
-
-    cat > "$sandbox/harness.py" <<PYEOF
-import importlib.util, json, sys
-spec = importlib.util.spec_from_file_location("rt", "$REGISTER_PY")
-rt = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rt)
-
-graph = json.load(open("$sandbox/graph.json"))
-entry = {"plan_path": "/totally/different.md", "graph_node_id": None}
-
-node = rt._match_graph_node(graph["entries"], entry, repo_root="$REPO_ROOT")
-print(json.dumps({"matched": node is not None}))
-PYEOF
-
-    local result
-    result=$("$PY" "$sandbox/harness.py" 2>&1)
-    if [[ "$result" == *'"matched": false'* ]]; then
-        pass "C2-AC3-EDGE: matcher returns None when nothing matches"
-    else
-        fail "C2-AC3-EDGE: matcher returned $result (expected no match)"
-    fi
-}
-run_change2_no_match
-
-# ---------------------------------------------------------------------------
 # Commit A (ab-c00da95d): scalar session_id is the dedup key
 # ---------------------------------------------------------------------------
 # Replaces the union-of-sessions set intersection with a primary-key check
@@ -452,8 +323,7 @@ run_commit_a_quick_entry_dedup_symmetric
 # ---------------------------------------------------------------------------
 # build_entry and build_quick_entry now derive root_path from
 # `git rev-parse --show-toplevel` (worktree-aware). The `worktree` field
-# is set to None unconditionally - legacy JSON readers still find the
-# key. _resolve_repo_root stays on --git-common-dir for graph-node lookup.
+# is set to None unconditionally - legacy JSON readers still find the key.
 echo ""
 echo "=== Commit B: root_path is worktree-aware ==="
 
@@ -528,31 +398,6 @@ run_commit_b_root_path_in_worktree() {
     fi
 }
 run_commit_b_root_path_in_worktree
-
-run_commit_b_resolve_repo_root_canonical() {
-    # AC6-INV: _resolve_repo_root still returns canonical-repo path
-    # (uses --git-common-dir) even when called from inside a worktree.
-    local sandbox="$TMP/cB-resolve"
-    mkdir -p "$sandbox"
-    make_worktree_fixture "$sandbox"
-
-    cat > "$sandbox/harness.py" <<PYEOF
-import importlib.util, os, sys
-spec = importlib.util.spec_from_file_location("rt", "$REGISTER_PY")
-rt = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rt)
-os.chdir("$WORKTREE_FIXTURE")
-print(rt._resolve_repo_root())
-PYEOF
-    local result
-    result=$("$PY" "$sandbox/harness.py" 2>&1 | tail -1)
-    if [[ "$result" == "$REPO_ROOT_FIXTURE" ]]; then
-        pass "cB-AC6-INV: _resolve_repo_root returns canonical repo from inside worktree"
-    else
-        fail "cB-AC6-INV: expected $REPO_ROOT_FIXTURE, got $result"
-    fi
-}
-run_commit_b_resolve_repo_root_canonical
 
 run_commit_b_emit_event_to_worktree() {
     # AC4-EDGE: _emit_ledger_transition reads worktree state file +
