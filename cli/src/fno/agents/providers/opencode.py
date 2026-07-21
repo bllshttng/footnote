@@ -28,6 +28,13 @@ file count matches its message-row count exactly, because the migration
 copied rather than moved. So a session created since the migration has no
 on-disk copy to fall back to.
 
+Expect the vendor docs to disagree. The troubleshooting page still
+describes session and message data as files under
+``project/<slug>/storage/`` and never mentions sqlite, while v1.14.50
+announces a one-time sqlite migration on first run and writes nothing to
+any of those paths. This module follows the binary's observed behavior,
+not the page.
+
 That makes opencode teardown irreversible destruction of conversation
 history, which is a different act from the index-record cleanup ``rm``
 performs for codex. ``rm`` therefore drops the registry row only and
