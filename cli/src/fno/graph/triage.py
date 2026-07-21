@@ -95,11 +95,14 @@ def _pr_states_by_repo(pr_refs: list[tuple], *, limit: int = 200) -> tuple[dict,
     return states, outages
 
 
-def _forced_close_node_ids(roots=None) -> set:
-    """Node ids carrying a backlog_done_forced receipt.
+def _forced_close_receipts(roots=None) -> set:
+    """`(node_id, pr_number)` pairs carrying a backlog_done_forced receipt.
 
     A deliberate force-close over an unmerged PR is the documented bypass, not a
-    violation - it is the one close that leaves a reason on the record.
+    violation - it is the one close that leaves a reason on the record. The pair
+    scopes the exemption to the PR the force actually authorized: a node reopened
+    (`defer` clears completed_at) and later closed over a DIFFERENT open PR is
+    not shielded by the old receipt. ``pr_number`` is None for a ref-less force.
 
     ``roots`` names extra project roots to read receipts from: under ``--all``
     or a foreign ``--project`` a node's receipt lives in ITS repo's events log,
@@ -107,7 +110,7 @@ def _forced_close_node_ids(roots=None) -> set:
     a legitimately force-closed foreign node as a violation. None reads the
     invocation repo alone (the same-project default).
     """
-    ids: set = set()
+    pairs: set = set()
     paths: list[Path] = []
     seen: set = set()
 
@@ -134,16 +137,15 @@ def _forced_close_node_ids(roots=None) -> set:
                         continue
                     # `data` is where the canonical envelope puts it; the other
                     # two are tolerated for older lines.
-                    nid = (
-                        (ev.get("data") or {}).get("node_id")
-                        or (ev.get("payload") or {}).get("node_id")
-                        or ev.get("node_id")
-                    )
-                    if nid:
-                        ids.add(nid)
+                    body = ev.get("data") or ev.get("payload") or ev
+                    nid = body.get("node_id") or ev.get("node_id")
+                    if not nid:
+                        continue
+                    pr = body.get("pr_number")
+                    pairs.add((nid, pr if isinstance(pr, int) else None))
         except OSError:
             continue
-    return ids
+    return pairs
 
 
 def done_not_merged_report(entries: list[dict], *, window_days: int = DONE_NOT_MERGED_WINDOW_DAYS) -> dict:
@@ -192,18 +194,22 @@ def done_not_merged_report(entries: list[dict], *, window_days: int = DONE_NOT_M
     all_pairs = [(repo, num) for _, refs in candidates for repo, num, _ in refs]
     states, outage_repos = _pr_states_by_repo(all_pairs)
     roots = {r for e, _ in candidates if (r := (e.get("_resolved_cwd") or e.get("cwd")))}
-    forced = _forced_close_node_ids(roots)
+    forced = _forced_close_receipts(roots)
 
     violations: list[dict] = []
     unknown: list[dict] = []
     for node, refs in candidates:
+        nid = node.get("id")
         record = {
-            "id": node.get("id"),
+            "id": nid,
             "title": node.get("title", ""),
             "pr_number": refs[0][1],  # primary is the node's identity
             "completed_at": node.get("completed_at"),
         }
-        if node.get("id") in forced:
+        # Exempt only the closure the force actually authorized: a receipt for
+        # one of THIS node's current refs (or a ref-less force). A node reopened
+        # and re-closed over a new PR is not shielded by an old receipt.
+        if (nid, None) in forced or any((nid, num) in forced for _, num, _ in refs):
             continue
 
         ref_states = [states.get((repo, num)) for repo, num, _ in refs]

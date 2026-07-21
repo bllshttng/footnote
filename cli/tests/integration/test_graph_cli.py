@@ -2274,3 +2274,43 @@ def test_reconcile_close_applies_the_ledger_rollup(tmp_graph, tmp_path, monkeypa
     assert node["session_id"] == "sess-recon"  # ledger, not "ambient-reconcile-runner"
     assert node["points"] == 3
     assert node["cost_usd"] == 2.0
+
+
+def test_reconcile_rollup_preserves_an_existing_cost(tmp_graph, tmp_path, monkeypatch):
+    """A prior cost stamp (fno backlog cost / a loop writer) timestamps its rows
+    at recording time while the ledger row carries the completion time, so
+    _apply_rollup would read the same run as distinct and double-count. Cost is
+    fill-only here, matching cmd_done."""
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"entries": [{
+        "plan_path": "recon.md", "cost_usd": 2.0, "points": 3,
+        "sessions": ["sess-recon"], "completed": "2026-01-02T00:00:00Z",
+    }]}) + "\n")
+    import fno.graph._constants as gc
+    monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
+    monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)
+
+    entries = [
+        {"id": "ab-recon002", "title": "Pre-costed", "status": "in_review",
+         "project": "p", "domain": "code", "plan_path": "recon.md",
+         "pr_number": 778, "pr_url": "https://github.com/o/r/pull/778",
+         "cost_usd": 9.99, "cost_sessions": [{"session_id": "pre", "cost_usd": 9.99}],
+         "blocked_by": []},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    from fno.graph import _reconcile as rec
+    monkeypatch.setattr(
+        rec, "query_pr_merge_state",
+        lambda n, **kw: rec.PrMergeState(
+            number=778, state="MERGED",
+            url="https://github.com/o/r/pull/778", merged_at="2026-01-02T00:00:00Z",
+        ),
+    )
+
+    r = _invoke("graph", "reconcile", "--node", "ab-recon002")
+    assert r.exit_code == 0, r.stdout + r.stderr
+    node = _by_id(tmp_graph)["ab-recon002"]
+    assert node["cost_usd"] == 9.99  # prior stamp preserved, not 11.99
+    assert node["cost_sessions"] == [{"session_id": "pre", "cost_usd": 9.99}]
+    assert node["points"] == 3  # non-cost rollup still applied

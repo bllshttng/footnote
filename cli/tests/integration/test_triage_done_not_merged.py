@@ -46,7 +46,7 @@ def gh(monkeypatch):
         )
 
     monkeypatch.setattr(triage, "_pr_states_by_repo", _fake)
-    monkeypatch.setattr(triage, "_forced_close_node_ids", lambda *a, **k: box.get("forced", set()))
+    monkeypatch.setattr(triage, "_forced_close_receipts", lambda *a, **k: box.get("forced", set()))
     return box
 
 
@@ -94,7 +94,7 @@ def test_a_forced_close_carries_its_own_receipt(gh):
     """`done --force --reason` is the documented bypass and the one close that
     leaves a reason on the record."""
     gh["states"] = {999: "CLOSED"}
-    gh["forced"] = {"x-frc0"}
+    gh["forced"] = {("x-frc0", 999)}
     report = triage.done_not_merged_report([_node("x-frc0")])
 
     assert report["violations"] == []
@@ -143,7 +143,7 @@ def test_a_forced_close_receipt_is_read_from_the_canonical_envelope(tmp_path, mo
     )
     monkeypatch.setattr(triage, "_events_path", lambda: events_file)
 
-    assert "x-frc9" in triage._forced_close_node_ids()
+    assert ("x-frc9", None) in triage._forced_close_receipts()
 
 
 def test_a_merged_additional_pr_clears_an_open_primary(gh):
@@ -188,5 +188,17 @@ def test_forced_receipt_is_read_from_a_scoped_foreign_root(tmp_path, monkeypatch
     (inv / "events.jsonl").write_text("")
     monkeypatch.setattr(triage, "_events_path", lambda: inv / "events.jsonl")
 
-    assert "x-foreign" not in triage._forced_close_node_ids(None)
-    assert "x-foreign" in triage._forced_close_node_ids([str(foreign_root)])
+    assert ("x-foreign", None) not in triage._forced_close_receipts(None)
+    assert ("x-foreign", None) in triage._forced_close_receipts([str(foreign_root)])
+
+
+def test_a_stale_receipt_does_not_exempt_a_close_over_a_different_pr(gh):
+    """The exemption is scoped to the PR the force authorized. A node reopened
+    and re-closed over a NEW open PR must not be shielded by the old receipt."""
+    gh["states"] = {1001: "OPEN"}
+    # The receipt authorized force-closing PR 999; the node now points at 1001.
+    gh["forced"] = {("x-reforce", 999)}
+    node = _node("x-reforce", pr=1001, url="https://github.com/o/r/pull/1001")
+    report = triage.done_not_merged_report([node])
+
+    assert [v["id"] for v in report["violations"]] == ["x-reforce"]

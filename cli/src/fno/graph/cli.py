@@ -6328,16 +6328,28 @@ def cmd_reconcile(
                         try:
                             from fno.done.cli import _apply_rollup
 
-                            # No env_session here: reconcile is the detached
+                            # Cost is fill-only, matching cmd_done. _apply_rollup
+                            # merges cost_sessions and recomputes the total, but
+                            # a prior stamp (fno backlog cost / a loop writer)
+                            # timestamps its rows at recording time while the
+                            # ledger row carries the completion time, so the same
+                            # run reads as distinct and gets double-counted.
+                            # Preserve any existing cost; the rollup's job here is
+                            # session_id / points.
+                            prior_cost = node_obj.get("cost_usd")
+                            prior_sessions = list(node_obj.get("cost_sessions") or [])
+                            # No env_session: reconcile is the detached
                             # SessionStart sweep, so CLAUDECODE_SESSION_ID names
-                            # whatever session happened to start it, NOT the one
-                            # that did the closed node's work. Trust the ledger's
-                            # attribution.
+                            # whoever started it, NOT the closed node's work.
+                            # Trust the ledger's attribution.
                             _apply_rollup(
                                 node_obj,
                                 reconcile_rollups[record.node_id],
                                 env_session=None,
                             )
+                            if prior_cost is not None:
+                                node_obj["cost_usd"] = prior_cost
+                                node_obj["cost_sessions"] = prior_sessions
                         except Exception:
                             pass
                     # Backfill the PR ref for a reverse-mapped node (dead before
