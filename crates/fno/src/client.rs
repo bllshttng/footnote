@@ -11393,10 +11393,9 @@ mod tests {
         // hovered or dragged, distinct from idle DIM chrome. x-d807 shipped the
         // drag with this render missing, so the border was a draggable-but-
         // invisible 1-cell target; this is the regression guard.
+        // One frame per state; assert against that snapshot.
         let mut view = two_pane_view();
-        let border = view.panel_w() as usize - 1; // last sideline column
-                                                  // Compose once per state and assert on that snapshot, rather than
-                                                  // re-rendering per cell read.
+        let border = view.panel_w() as usize - 1;
         let cell = |f: &Frame, row: usize, col: usize| f.cells[row * f.cols as usize + col];
 
         let idle_f = view.compose();
@@ -11404,7 +11403,6 @@ mod tests {
         assert_eq!(idle.c, '│', "the divider glyph itself is unchanged");
         assert_eq!(idle.flags, cell_flags::DIM, "idle border is dim chrome");
 
-        // Hover the border column.
         view.on_hover(5, border as u16, Instant::now());
         assert!(view.hover_sideline_border, "hover state set");
         let lit_f = view.compose();
@@ -11420,7 +11418,6 @@ mod tests {
             "hovered border is visibly distinct from idle"
         );
 
-        // Leaving the column clears it.
         view.on_hover(5, border as u16 - 1, Instant::now());
         let off_f = view.compose();
         assert_eq!(
