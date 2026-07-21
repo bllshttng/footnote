@@ -70,6 +70,17 @@ SCRIPT_DIR_REAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_REPO_ROOT="$(cd "$SCRIPT_DIR_REAL/../.." && pwd)"
 FRONTMATTER_CHECKER="$SCRIPT_REPO_ROOT/scripts/lib/check-skill-frontmatter.py"
 
+# PyYAML: prefer the host interpreter, else an ephemeral uv env. Homebrew's
+# python3 is PEP 668 externally-managed, so pyyaml is routinely absent there and
+# `pip install` refuses; uv is already this repo's standard everywhere else.
+# When neither is available, leave PY as plain python3 - the checker's own
+# rc=2 "PyYAML not available" path reports it better than a lint-level abort.
+if python3 -c 'import yaml' 2>/dev/null || ! command -v uv >/dev/null 2>&1; then
+  PY=(python3)
+else
+  PY=(uv run --no-project --with pyyaml python3)
+fi
+
 # ---------------------------------------------------------------------------
 # Driver skill list. Fixtures pass --root pointing at a tree where these
 # subdirs exist. Missing dirs are tolerated (lint just skips them)
@@ -137,7 +148,7 @@ for skill in "${SELF_CONTAINED_SKILLS[@]}"; do
   # problem). The `if ...; then : ; else rc=$?; fi` pattern is tested
   # context, so `set -e` does NOT abort when the helper exits non-zero.
   rc=0
-  if python3 "$FRONTMATTER_CHECKER" "$SKILL_FILE" --require fno; then
+  if "${PY[@]}" "$FRONTMATTER_CHECKER" "$SKILL_FILE" --require fno; then
     :  # frontmatter OK and declares fno
   else
     rc=$?

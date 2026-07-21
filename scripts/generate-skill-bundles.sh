@@ -12,7 +12,8 @@
 # always reflects the manifest. CI verifies via check-skill-bundles-fresh.sh.
 #
 # Pure shell + python3 (stdlib + PyYAML when references/agents are used).
-# No external deps beyond python3.
+# PyYAML comes from the host interpreter when it has it, else from `uv run
+# --with pyyaml`; no host provisioning either way.
 #
 # Usage:
 #   bash scripts/generate-skill-bundles.sh           # generate into repo root
@@ -60,6 +61,19 @@ if [[ ! -f "$FRONTMATTER_HELPER" ]]; then
   exit 1
 fi
 
+# PyYAML: prefer the host interpreter, else an ephemeral uv env. Homebrew's
+# python3 is PEP 668 externally-managed, so pyyaml is routinely absent there and
+# `pip install` refuses; uv is already this repo's standard everywhere else and
+# needs no host provisioning at all.
+if python3 -c 'import yaml' 2>/dev/null; then
+  PY=(python3)
+elif command -v uv >/dev/null 2>&1; then
+  PY=(uv run --no-project --with pyyaml python3)
+else
+  echo "ERROR: need PyYAML - install it for python3, or install uv" >&2
+  exit 1
+fi
+
 # Capture parser output to a tempfile and check its exit code. Piping
 # through process substitution would discard a non-zero parser rc - if
 # the manifest is malformed the loop would silently process partial
@@ -67,7 +81,7 @@ fi
 ROWS_FILE="$(mktemp)"
 META_FILE="$(mktemp)"
 trap 'rm -f "$ROWS_FILE" "$META_FILE"' EXIT
-if ! python3 "$PARSER" "$MANIFEST" > "$ROWS_FILE"; then
+if ! "${PY[@]}" "$PARSER" "$MANIFEST" > "$ROWS_FILE"; then
   echo "ERROR: parse-bundle-manifest.py failed" >&2
   exit 1
 fi
@@ -103,7 +117,7 @@ while IFS=$'\t' read -r TYPE SKILL SOURCE DEST META; do
       ;;
     reference)
       # Strip frontmatter from the source; write body to dest.
-      python3 "$FRONTMATTER_HELPER" strip "$SRC_PATH" > "$TMP_DST"
+      "${PY[@]}" "$FRONTMATTER_HELPER" strip "$SRC_PATH" > "$TMP_DST"
       ;;
     agent)
       # Rewrite frontmatter as subagent prompt. The parser emits
@@ -117,8 +131,8 @@ while IFS=$'\t' read -r TYPE SKILL SOURCE DEST META; do
       # parameters (width=10000, sort_keys=False, allow_unicode=True) stay
       # in one place. Previously this was an inline `python3 -c ...` that
       # could drift from _render_subagent_frontmatter's parameters.
-      python3 "$FRONTMATTER_HELPER" json-to-yaml "$META" > "$META_FILE"
-      python3 "$FRONTMATTER_HELPER" rewrite "$SRC_PATH" \
+      "${PY[@]}" "$FRONTMATTER_HELPER" json-to-yaml "$META" > "$META_FILE"
+      "${PY[@]}" "$FRONTMATTER_HELPER" rewrite "$SRC_PATH" \
         --as subagent --meta-file "$META_FILE" > "$TMP_DST"
       ;;
     *)
