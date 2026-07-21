@@ -30,7 +30,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Literal, TypedDict
+from typing import Iterable, Literal, TypedDict, cast
 
 Severity = Literal["low", "medium", "high"]
 Action = Literal["coordinate", "absorb", "supersede"]
@@ -270,7 +270,7 @@ def _load_thresholds(
             "using defaults",
             file=sys.stderr,
         )
-        return dict(DEFAULT_THRESHOLDS)
+        return cast("dict[str, float]", dict(DEFAULT_THRESHOLDS))
 
 
 # ---------------------------------------------------------------------------

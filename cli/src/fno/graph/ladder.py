@@ -68,6 +68,8 @@ def is_design_stage(entry: object) -> bool:
     `/blueprint quick` deliberately omits that heading (blueprint SKILL.md),
     so the heading would misread every quick-plan as unfinished.
     """
+    if not isinstance(entry, dict):
+        return False
     probe = resolve_plan_probe(entry)
     if not probe:
         return False

@@ -835,7 +835,7 @@ def _switch_locked(
     stamp_active_slot(target.cli, target.id, root)
     _set_slot_taint(target.cli, root, bool(pinned_by))
     if emit_fn is not None:
-        event = {
+        event: dict[str, object] = {
             "provider": target.id,
             "account_id": target.account_id or target.id,
             "outgoing": outgoing_id or "",
