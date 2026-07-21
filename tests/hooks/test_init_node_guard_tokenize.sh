@@ -86,31 +86,43 @@ CK1b="$(claim_key_of "$STATE")"
   || fail "AC1-HP: bare-id claim '${CK1b}' != modifier-prefixed claim '${CK1}'"
 pass "AC1-HP: bare id produces an identical claim key"
 
-# ── AC3-ERR: two distinct ids => ambiguous, no claim ──────────────────────
-log "AC3-ERR: 'tst-aa00aa00 tst-bb00bb00' is ambiguous => no claim"
+# ── AC3-ERR: two distinct ids => ambiguous, no claim, one ambiguity line ──
+log "AC3-ERR: 'tst-aa00aa00 tst-bb00bb00' is ambiguous => no claim, one line"
 
 make_repo TMP2; _ALL_TMPS+=("$TMP2")
 run_init "$TMP2" "tst-aa00aa00 tst-bb00bb00"
 CK2="$(claim_key_of "$STATE")"
 [[ -z "$CK2" ]] || fail "AC3-ERR: ambiguous input still claimed '${CK2}'"
-pass "AC3-ERR: ambiguous input claims nothing"
+grep -qi 'ambiguous' "$ERRLOG" || fail "AC3-ERR: no ambiguity line printed"
+pass "AC3-ERR: ambiguous input claims nothing and prints an ambiguity line"
 
-# ── AC3-ERR: free-text description => no claim ─────────────────────────────
-log "AC3-ERR: 'add dark mode' => no claim"
+# ── AC3-ERR: free-text description => no claim, no ambiguity line ──────────
+log "AC3-ERR: 'add dark mode' => no claim, no ambiguity line"
 
 make_repo TMP3; _ALL_TMPS+=("$TMP3")
 run_init "$TMP3" "add dark mode"
 CK3="$(claim_key_of "$STATE")"
 [[ -z "$CK3" ]] || fail "AC3-ERR: free-text input claimed '${CK3}'"
-pass "AC3-ERR: free-text input claims nothing"
+grep -qi 'ambiguous' "$ERRLOG" && fail "AC3-ERR: free-text wrongly printed an ambiguity line"
+pass "AC3-ERR: free-text input claims nothing and prints no ambiguity line"
 
-# ── AC3-ERR: empty input => no claim ──────────────────────────────────────
-log "AC3-ERR: empty input => no claim"
+# ── AC4-FR: a non-empty unresolved input prints exactly one guard line ─────
+log "AC4-FR: 'add dark mode' prints exactly one 'no backlog node resolved' line"
+_n="$(grep -ciE 'no backlog node resolved' "$ERRLOG" || true)"
+[[ "$_n" == "1" ]] \
+  || fail "AC4-FR: expected exactly one 'no backlog node resolved' line, got ${_n}"
+pass "AC4-FR: exactly one guard-diagnostic line for a non-empty unresolved input"
+
+# ── AC3-ERR: empty input => no claim AND no guard-diagnostic line at all ───
+log "AC3-ERR: empty input => no claim, and NO guard-diagnostic line"
 
 make_repo TMP4; _ALL_TMPS+=("$TMP4")
 run_init "$TMP4" ""
 CK4="$(claim_key_of "$STATE")"
 [[ -z "$CK4" ]] || fail "AC3-ERR: empty input claimed '${CK4}'"
-pass "AC3-ERR: empty input claims nothing"
+if grep -qiE 'ambiguous|no backlog node resolved' "$ERRLOG"; then
+  fail "AC3-ERR: empty input printed a guard-diagnostic line ($(cat "$ERRLOG"))"
+fi
+pass "AC3-ERR: empty input prints no guard-diagnostic line"
 
-log "All node-guard tokenize (claim) scenarios passed"
+log "All node-guard tokenize scenarios passed"

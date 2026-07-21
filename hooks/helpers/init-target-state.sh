@@ -1008,6 +1008,22 @@ PYEOF
 )
   fi
 
+  # Never lose a claim silently: when input was supplied but resolved to no
+  # node, the claim block below is skipped with no trace, so a modifier that hid
+  # a node id (or a plain free-text run) looks identical to a nodeless one. Emit
+  # exactly one line naming what happened, on the resolution path itself and
+  # before the claim block, so the absence of a target_claim_key is discoverable
+  # from stderr alone. The manifest is already written, so the session proceeds
+  # unclaimed rather than aborting. Empty input prints nothing (nothing to fail
+  # to resolve).
+  if [[ -z "$_NODE_ID" && -n "${INITIAL_INPUT// /}" ]]; then
+    if [[ "$_GUARD_AMBIGUOUS" -eq 1 ]]; then
+      echo "target: input names multiple node ids ($_GUARD_MATCHES); ambiguous, no node claimed" >&2
+    else
+      echo "target: no backlog node resolved from input '$INITIAL_INPUT'; running unclaimed" >&2
+    fi
+  fi
+
   if [[ -n "$_NODE_ID" && -n "$claim_owner_id" ]]; then
     # Does THIS session own the node? Set by `fno claim` below, the sole liveness
     # authority (x-4af4). The TTL claim runs FIRST and the graph lock is stamped
