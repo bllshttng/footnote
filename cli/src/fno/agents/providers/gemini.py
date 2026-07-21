@@ -541,7 +541,6 @@ def _run_gemini(
         # exits). A generous 5s join handles the rare race where the
         # daemon thread hasn't reached EOF yet at proc.wait() return.
         stderr_thread.join(timeout=5.0)
-        "".join(stderr_chunks)
     finally:
         for t in timers:
             t.cancel()
