@@ -479,14 +479,70 @@ def _scan_md_field(text: str, key: str) -> Optional[str]:
     return None
 
 
-def _session_provenance(running_cwd: Optional[str] = None) -> dict:
-    """Ambient parent-edge provenance for a node born inside a live session.
+def _resolve_asserted_id(
+    token: str,
+    entries: list,
+    *,
+    flag: str,
+    self_id: Optional[str] = None,
+) -> str:
+    """Resolve a caller-asserted node reference to a canonical id, or refuse.
+
+    The counterpart to ambient capture's degrade-to-null: a caller who names an
+    origin or a peer has asserted something, and silently dropping an assertion
+    that does not resolve would leave a node looking organically filed. So this
+    FAILS CLOSED (x-d157 Locked Decision 6) - non-zero exit, the unresolved
+    token named, no write.
+
+    Accepts anything the graph resolver accepts (id, slug, bare hex) rather than
+    refusing on shape; passing a slug where an id is expected is the likely
+    mistake and the resolver already handles it.
+    """
+    from fno.graph.fuzzy import resolve_node
+
+    match = resolve_node(token, entries)
+    if match.kind != "exact":
+        typer.echo(f"Error: {flag} '{token}' does not resolve to a node", err=True)
+        raise typer.Exit(code=1)
+    resolved = match.candidates[0]["id"]
+    if self_id is not None and resolved == self_id:
+        typer.echo(f"Error: {flag} cannot reference the node itself ({self_id})", err=True)
+        raise typer.Exit(code=1)
+    return resolved
+
+
+def _session_provenance(
+    running_cwd: Optional[str] = None,
+    *,
+    source_node: Optional[str] = None,
+    known_ids: Optional[set] = None,
+) -> dict:
+    """Parent-edge provenance for a node born inside a live session.
 
     Reads the running session's env + ``.fno/target-state.md`` and returns
     ``source_session_id`` / ``source_harness`` / ``source_cwd`` /
-    ``source_node_id`` / ``source_plan_path``. Capture is AMBIENT, never
-    volunteered (x-30f6): no caller passes anything. Every key degrades to
-    ``None`` and the function NEVER raises (AC-EDGE).
+    ``source_node_id`` / ``source_plan_path``. Every key degrades to ``None``
+    and the function NEVER raises (AC-EDGE).
+
+    The origin node resolves through three branches in strict precedence
+    (x-d157). Only the first is volunteered; the other two stay ambient:
+
+    1. ``source_node`` - an explicit ``--source-node``, already resolved and
+       validated by the CLI verb, which fails closed on an unresolvable id. It
+       is taken as given here: re-judging it would need a raise this function
+       has promised not to make.
+    2. The owned manifest (below, unchanged, claude-only and ownership-proven).
+    3. ``FNO_NODE`` - written at spawn time from the node the spawner bound.
+       Deliberately NOT gated on harness: it is the only origin signal a
+       codex/opencode worker has, and that is where the capture miss
+       concentrates. Its weakness is staleness, not forgery.
+
+    ``known_ids`` is the caller's live snapshot of node ids. When supplied, an
+    ambiently-resolved id absent from it degrades to ``None`` rather than
+    stamping an edge that dangles (FNO_NODE outlives the node it names). Real
+    filing paths resolve it inside their locked mutator, so the check costs no
+    extra graph read; a caller with no graph in hand omits it and skips the
+    check.
 
     ``source_cwd`` is the originating SESSION's cwd, which is the key claude
     transcript dirs are slugged by -- distinct from the node's durable ``cwd``
@@ -522,8 +578,17 @@ def _session_provenance(running_cwd: Optional[str] = None) -> dict:
                 plan = _scan_md_field(text, "plan_path")
                 if plan and plan.lower() != "null":
                     source_plan_path = plan
-        except OSError:
+        except (OSError, ValueError):
             pass
+
+    if source_node_id is None:
+        source_node_id = (os.environ.get("FNO_NODE") or "").strip() or None
+
+    if source_node_id is not None and known_ids is not None and source_node_id not in known_ids:
+        source_node_id = None
+
+    if source_node:
+        source_node_id = source_node
 
     return {
         "source_session_id": session,
@@ -552,6 +617,8 @@ def _build_backlog_node(
     batch: Optional[str] = None,
     plan_path: Optional[str] = None,
     tags: Optional[list[str]] = None,
+    source_node: Optional[str] = None,
+    known_ids: Optional[set] = None,
 ) -> _NodeFields:
     """Build a backlog node dict shared by ``cmd_add`` and ``cmd_idea``.
 
@@ -561,10 +628,10 @@ def _build_backlog_node(
     so duplicate-ID checks happen against the live snapshot.
     """
     from fno.graph._constants import ID_PREFIX  # noqa: F401 (kept for symmetry)
-    # Parent-edge provenance (x-30f6): stamped ambiently from the running
-    # session's env + manifest. Centralized here so every creator verb
-    # (add/idea/decompose) self-describes its origin with no caller arg.
-    prov = _session_provenance()
+    # Parent-edge provenance (x-30f6): stamped from the running session's env +
+    # manifest, or from an explicit --source-node (x-d157). Centralized here so
+    # every creator verb (add/idea/decompose) self-describes its origin.
+    prov = _session_provenance(source_node=source_node, known_ids=known_ids)
     return {
         "id": None,  # caller fills inside locked mutator
         "parent": parent,
@@ -617,6 +684,7 @@ def _create_node_impl(
     size: Optional[str] = None,
     batch: Optional[str] = None,
     tags: Optional[list[str]] = None,
+    source_node: Optional[str] = None,
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
 
@@ -677,7 +745,15 @@ def _create_node_impl(
     rollup_error: list[Optional[str]] = [None]
 
     def mutator(entries):
-        new_id = mint_node_id({e.get("id") for e in entries})
+        live_ids = {e.get("id") for e in entries}
+        # Fail closed BEFORE minting: an unresolvable assertion must leave the
+        # graph untouched, and raising here aborts the locked write.
+        resolved_source_node = (
+            _resolve_asserted_id(source_node, entries, flag="--source-node")
+            if source_node
+            else None
+        )
+        new_id = mint_node_id(live_ids)
         new_id_holder[0] = new_id
         node = _build_backlog_node(
             title=title,
@@ -694,6 +770,8 @@ def _create_node_impl(
             size=size,
             batch=batch,
             tags=resolved_tags,
+            source_node=resolved_source_node,
+            known_ids=live_ids,
         )
         node["id"] = new_id
         # Enforce the epic-nesting cap on the create path too, or `add --type
@@ -824,6 +902,14 @@ def cmd_add(
     tag: Optional[List[str]] = typer.Option(
         None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
     ),
+    source_node: Optional[str] = typer.Option(
+        None,
+        "--source-node",
+        help=(
+            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
+            "ambient capture. Refuses if it does not resolve."
+        ),
+    ),
 ) -> None:
     _create_node_impl(
         title=title,
@@ -841,6 +927,7 @@ def cmd_add(
         size=size,
         batch=batch,
         tags=tag,
+        source_node=source_node,
     )
 
 
@@ -883,6 +970,14 @@ def cmd_idea(
     tag: Optional[List[str]] = typer.Option(
         None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
     ),
+    source_node: Optional[str] = typer.Option(
+        None,
+        "--source-node",
+        help=(
+            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
+            "ambient capture. Refuses if it does not resolve."
+        ),
+    ),
 ) -> None:
     """Capture an idea (a plan-less backlog node) with minimal ceremony.
 
@@ -909,6 +1004,7 @@ def cmd_idea(
         size=size,
         batch=batch,
         tags=tag,
+        source_node=source_node,
     )
 
 
@@ -1881,6 +1977,14 @@ def cmd_update(
     public: Optional[bool] = typer.Option(None, "--public/--no-public", help="Mark node for the public roadmap (fno backlog roadmap)"),
     project: Optional[str] = typer.Option(None, "--project", help="Reproject this node (use for migrating wrong-scope nodes)"),
     cwd: Optional[str] = typer.Option(None, "--cwd", "-c", help="Update cwd (pair with --project for migration)"),
+    source_node: Optional[str] = typer.Option(
+        None,
+        "--source-node",
+        help=(
+            "Set the origin node this node came out of (id, slug, or bare hex). "
+            "Pass 'null' to clear. Refuses a self-reference or an id that does not resolve."
+        ),
+    ),
     blocked_by: Optional[List[str]] = typer.Option(None, "--blocked-by", help="Replace blocked_by list"),
     add_blocker: Optional[List[str]] = typer.Option(None, "--add-blocker", help="Append blocker IDs"),
     remove_blocker: Optional[List[str]] = typer.Option(None, "--remove-blocker", help="Remove blocker IDs"),
@@ -2174,6 +2278,15 @@ def cmd_update(
             typer.echo(f"Error: graph node {task_id} not found", err=True)
             raise typer.Exit(code=1)
         projected_node[0] = node
+
+        if source_node is not None:
+            node["source_node_id"] = (
+                None
+                if source_node == "null"
+                else _resolve_asserted_id(
+                    source_node, entries, flag="--source-node", self_id=node["id"]
+                )
+            )
 
         if has_blocker_edit:
             if blocked_by is not None:
