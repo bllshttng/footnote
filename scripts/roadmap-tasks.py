@@ -24,9 +24,15 @@ if str(_cli_src) not in sys.path:
 
 try:
     from fno.graph.cli import cli as app
-except ImportError:
+except ImportError as exc:
+    # Name the import that actually failed. cli/src is already on sys.path
+    # above, so the usual cause is a MISSING DEPENDENCY under whichever
+    # interpreter ran this shim (a bare system python3 has no typer), not an
+    # absent fno. Without the real error the advice below reads as the whole
+    # diagnosis, and reinstalling the CLI changes nothing.
     sys.stderr.write(
-        f"error: fno CLI required. Install with: uv tool install '{_repo_root / 'cli'}'\n"
+        f"error: cannot import fno.graph.cli under {sys.executable}: {exc}\n"
+        f"       Install with: uv tool install '{_repo_root / 'cli'}'\n"
         "       (or add cli/src to PYTHONPATH for in-development use)\n"
     )
     sys.exit(3)
