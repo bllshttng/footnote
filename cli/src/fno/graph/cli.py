@@ -7997,8 +7997,13 @@ def cmd_new(
     new_id_holder: list[Optional[str]] = [None]
 
     def mutator(es: list[dict]) -> list[dict]:
-        new_id = mint_node_id({e.get("id") for e in es})
+        live_ids = {e.get("id") for e in es}
+        new_id = mint_node_id(live_ids)
         new_id_holder[0] = new_id
+        # This verb builds its node inline rather than through
+        # _build_backlog_node, so ambient origin capture has to be wired
+        # explicitly or `new` stays the one creation path outside the contract.
+        prov = _session_provenance(known_ids=live_ids)
         node = {
             "id": new_id,
             "parent": None,
@@ -8030,7 +8035,11 @@ def cmd_new(
             "created_at": datetime.now(timezone.utc).isoformat(),
             "source_kind": source_kind,
             "source_project": source_project,
-            "source_session_id": source_session_id,
+            "source_session_id": source_session_id or prov["source_session_id"],
+            "source_harness": prov["source_harness"],
+            "source_cwd": prov["source_cwd"],
+            "source_node_id": prov["source_node_id"],
+            "source_plan_path": prov["source_plan_path"],
             "source_inbox_msg": source_inbox_msg,
         }
         es.append(node)

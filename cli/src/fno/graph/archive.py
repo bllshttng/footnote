@@ -131,6 +131,30 @@ def partition_for_archive(
             continue
         to_archive.append(e)
 
+    # A related pair must move together. `_guard_ids` only protects references
+    # held by OPEN nodes, so two terminal peers of different ages would split:
+    # the older sweeps while the newer stays behind naming an id the working
+    # graph no longer has, and set_related resolves peers against the working
+    # graph only, so nothing could repair it. Hold back any candidate whose
+    # related peer is staying. Iterated to a fixed point because holding one
+    # back can strand the next along a chain; each pass moves at least one
+    # entry out, so it terminates.
+    while True:
+        staying = {
+            e.get("id") for e in remaining if isinstance(e.get("id"), str)
+        }
+        held = [
+            e for e in to_archive
+            if any(r in staying for r in (e.get("related") or []) if isinstance(r, str))
+        ]
+        if not held:
+            break
+        held_ids = {e.get("id") for e in held}
+        to_archive = [e for e in to_archive if e.get("id") not in held_ids]
+        for e in held:
+            remaining.append(e)
+            skipped.append({**e, "_skip": "related-peer-not-archived"})
+
     return to_archive, remaining, skipped
 
 

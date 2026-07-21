@@ -324,3 +324,52 @@ def test_removing_an_origin_clears_its_dependents_reference(tmp_graph):
     entries = json.loads(tmp_graph.read_text())["entries"]
     node = next(e for e in entries if e["id"] == new_id)
     assert node["source_node_id"] is None
+
+
+def test_two_terminal_related_peers_are_swept_together_or_not_at_all():
+    """A related pair must not split across the archive boundary.
+
+    _guard_ids only protects references held by OPEN nodes, so two terminal
+    peers of different ages would otherwise split: the older sweeps and the
+    newer stays behind naming an id the working graph no longer has, which
+    set_related cannot repair since it resolves peers against that graph.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from fno.graph.archive import partition_for_archive
+
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=400)).isoformat()
+    recent = (now - timedelta(days=2)).isoformat()
+
+    entries = [
+        _node("x-old", status="done", completed_at=old, related=["x-new"]),
+        _node("x-new", status="done", completed_at=recent, related=["x-old"]),
+    ]
+    to_archive, _remaining, skipped = partition_for_archive(entries, 30, now)
+    assert to_archive == [], "the old peer waits for its partner"
+    assert "related-peer-not-archived" in {e.get("_skip") for e in skipped}
+
+    # Once both are old enough, they move together and the edge stays intact.
+    entries[1]["completed_at"] = old
+    to_archive, _remaining, _skipped = partition_for_archive(entries, 30, now)
+    assert {e["id"] for e in to_archive} == {"x-old", "x-new"}
+
+
+def test_a_related_chain_holds_back_transitively():
+    """Holding one node back can strand the next; the fixed point must catch it."""
+    from datetime import datetime, timedelta, timezone
+
+    from fno.graph.archive import partition_for_archive
+
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=400)).isoformat()
+    recent = (now - timedelta(days=2)).isoformat()
+
+    entries = [
+        _node("x-a", status="done", completed_at=old, related=["x-b"]),
+        _node("x-b", status="done", completed_at=old, related=["x-a", "x-c"]),
+        _node("x-c", status="done", completed_at=recent, related=["x-b"]),
+    ]
+    to_archive, _remaining, _skipped = partition_for_archive(entries, 30, now)
+    assert to_archive == [], "b waits on c, and a waits on b"
