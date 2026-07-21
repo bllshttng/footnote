@@ -2424,6 +2424,22 @@ impl View {
         self.hover_grip = self.grip_at(row, col);
     }
 
+    /// End a seam drag and recompute hover from `(row, col)`. Both the release
+    /// arm and the non-left cancellation arm (a wheel, another button) route
+    /// through here: a Drag event never refreshes hover, so however the gesture
+    /// ends, the accent must be recomputed or it lingers until the next bare
+    /// Move (codex peer review of the sideline-border affordance).
+    fn end_seam_drag(&mut self, row: u16, col: u16) {
+        self.seam_drag = None;
+        self.refresh_hover_affordances(row, col);
+    }
+
+    /// End a sideline-border drag and recompute hover; see [`View::end_seam_drag`].
+    fn end_sideline_drag(&mut self, row: u16, col: u16) {
+        self.sideline_drag = None;
+        self.refresh_hover_affordances(row, col);
+    }
+
     /// True on the sideline's right border column - the grab band for the
     /// density drag. False when the sideline is hidden: there is no border to
     /// grab, so revealing it stays on the existing toggle.
@@ -6969,16 +6985,13 @@ async fn handle_stdin(
                     continue;
                 }
                 MouseKind::Release(MouseButton::Left) => {
-                    // The last applied ratio stands. Refresh the accent from the
-                    // release coords so it does not linger on a seam the pointer
-                    // has left.
-                    view.seam_drag = None;
-                    view.refresh_hover_affordances(rep.row, rep.col);
+                    // The last applied ratio stands (no command travels).
+                    view.end_seam_drag(rep.row, rep.col);
                     continue;
                 }
                 // Anything else (a wheel, another button) means the gesture is
                 // over; drop the drag and let the event route normally.
-                _ => view.seam_drag = None,
+                _ => view.end_seam_drag(rep.row, rep.col),
             }
         }
         // x-aa95: a relocation drag owns the mouse, for the same reason a seam
@@ -7014,6 +7027,10 @@ async fn handle_stdin(
                 }
                 _ => {
                     view.cancel_pane_drag();
+                    // A non-left termination ends the drag with no Release;
+                    // recompute hover so a grip accent the drag left on does not
+                    // linger (codex peer review).
+                    view.refresh_hover_affordances(rep.row, rep.col);
                 }
             }
         }
@@ -7032,14 +7049,11 @@ async fn handle_stdin(
                     continue;
                 }
                 MouseKind::Release(MouseButton::Left) => {
-                    // Refresh the accent from the release coords: a drag that
-                    // ends off the border must not leave it lit (Drag events
-                    // never refresh hover state).
-                    view.sideline_drag = None;
-                    view.refresh_hover_affordances(rep.row, rep.col);
+                    view.end_sideline_drag(rep.row, rep.col);
                     continue;
                 }
-                _ => view.sideline_drag = None,
+                // A non-left termination (a wheel, another button) ends the drag.
+                _ => view.end_sideline_drag(rep.row, rep.col),
             }
         }
         // A card-dispatch confirm is modal (x-a496): while it is open, any mouse
@@ -11463,6 +11477,33 @@ mod tests {
             view.hover_seam.map(|s| (s.a, s.b)),
             Some((11, 12)),
             "release on a seam accents that seam"
+        );
+    }
+
+    #[test]
+    fn ending_a_drag_off_its_target_clears_the_stale_accent() {
+        // The non-left cancellation arm (a wheel, another button) ends a drag
+        // the same way a release does - both route through end_{seam,sideline}
+        // _drag. A Drag event never refreshes hover, so a gesture that ends off
+        // its target must recompute or the accent lingers until the next Move.
+        // The release arms already had this; the cancel arms did not (codex peer
+        // review), so both paths now share one method that recomputes.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+
+        view.begin_seam_drag(seam, Instant::now());
+        view.hover_seam = Some(seam); // the drag left the accent lit
+        view.end_seam_drag(5, 40); // ended inside pane 10 - off the seam
+        assert!(view.seam_drag.is_none(), "the seam drag ended");
+        assert!(view.hover_seam.is_none(), "stale seam accent cleared on cancel");
+
+        view.sideline_drag = Some(view.density);
+        view.hover_sideline_border = true;
+        view.end_sideline_drag(5, 40); // off the border column
+        assert!(view.sideline_drag.is_none(), "the sideline drag ended");
+        assert!(
+            !view.hover_sideline_border,
+            "stale border accent cleared on cancel"
         );
     }
 
