@@ -1196,7 +1196,7 @@ def validate_row(raw: object, packet: EvidencePacket) -> ValidityRow:
     if cls not in VALIDITY_CLASSES:
         return needs_human(f"unknown classification {cls!r}")
     try:
-        conf = float(raw.get("confidence"))
+        conf = float(raw.get("confidence"))  # type: ignore[arg-type]  # None/bad -> caught below
     except (TypeError, ValueError):
         conf = 0.0
     rationale = str(raw.get("rationale") or "")

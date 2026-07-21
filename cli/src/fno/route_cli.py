@@ -22,6 +22,10 @@ import shlex
 import sys
 
 import typer
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fno.config import ModelRoutingBlock
 
 route_app = typer.Typer(
     name="route",
@@ -30,7 +34,7 @@ route_app = typer.Typer(
 )
 
 
-def _block() -> object:
+def _block() -> "ModelRoutingBlock":
     from fno.config import load_settings
 
     return load_settings().model_routing

@@ -22,6 +22,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Callable, Optional
 
 from fno.agents.registry import AgentEntry
@@ -151,7 +152,7 @@ def _find_by_session(
 
 
 def resolve_self(
-    env: dict,
+    env: Mapping[str, str],
     registry: list[AgentEntry],
     registry_error: Optional[str] = None,
     session_uuid: Optional[str] = None,

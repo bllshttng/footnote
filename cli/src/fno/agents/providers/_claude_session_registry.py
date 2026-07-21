@@ -158,7 +158,7 @@ def roster_sessions() -> list[dict]:
             continue
         seen.add(sid)
         try:
-            pid = int(w.get("pid"))
+            pid = int(w.get("pid"))  # type: ignore[arg-type]  # None/bad -> caught below
         except (TypeError, ValueError):
             pid = 0
         rows.append(
