@@ -63,13 +63,68 @@ def test_pr_number_still_sets_an_int(tmp_graph):
 
     result = runner.invoke(app, [
         "backlog", "update", "ab-00000001",
-        "--pr-number", "77", "--pr-url", "https://example.com/pull/77",
+        "--pr-number", "77", "--pr-url", "https://github.com/o/r/pull/77",
     ])
 
     assert result.exit_code == 0, result.output
     node = _first(tmp_graph)
     assert node["pr_number"] == 77
-    assert node["pr_url"] == "https://example.com/pull/77"
+    assert node["pr_url"] == "https://github.com/o/r/pull/77"
+
+
+def test_pr_number_alone_derives_the_url(tmp_graph, monkeypatch):
+    """A url-less pr_number names no repo, and PR numbers collide across repos."""
+    import fno.graph._reconcile as rec
+    monkeypatch.setattr(rec, "pr_url_for_repo", lambda pr, cwd=None: f"https://github.com/o/r/pull/{pr}")
+    _seed(tmp_graph, [
+        {"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"},
+    ])
+
+    result = runner.invoke(app, ["backlog", "update", "ab-00000001", "--pr-number", "77"])
+
+    assert result.exit_code == 0, result.output
+    assert _first(tmp_graph)["pr_url"] == "https://github.com/o/r/pull/77"
+
+
+def test_pr_number_refused_when_repo_unresolvable(tmp_graph, monkeypatch):
+    import fno.graph._reconcile as rec
+    monkeypatch.setattr(rec, "pr_url_for_repo", lambda pr, cwd=None: None)
+    _seed(tmp_graph, [
+        {"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"},
+    ])
+
+    result = runner.invoke(app, ["backlog", "update", "ab-00000001", "--pr-number", "77"])
+
+    assert result.exit_code != 0
+    # Both remedies must be named: naming only one leaves the caller stuck.
+    assert "gh auth login" in result.output and "--pr-url" in result.output
+    assert _first(tmp_graph).get("pr_number") is None
+
+
+def test_unparseable_pr_url_is_rejected(tmp_graph):
+    _seed(tmp_graph, [
+        {"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"},
+    ])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--pr-number", "77", "--pr-url", "not-a-url",
+    ])
+
+    assert result.exit_code != 0
+    assert _first(tmp_graph).get("pr_url") is None
+
+
+def test_clearing_the_url_while_setting_a_number_is_refused(tmp_graph):
+    _seed(tmp_graph, [
+        {"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"},
+    ])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--pr-number", "77", "--pr-url", "null",
+    ])
+
+    assert result.exit_code != 0
+    assert _first(tmp_graph).get("pr_number") is None
 
 
 def test_plan_path_can_be_cleared(tmp_graph):

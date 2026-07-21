@@ -2052,6 +2052,55 @@ def cmd_update(
         )
         raise typer.Exit(code=2)
 
+    # pr_number and pr_url travel together: a url-less pr_number names no repo,
+    # and PR numbers collide across repos, so any consumer matching on the bare
+    # number can attribute a foreign PR. Resolve here (subprocess I/O stays out
+    # of the graph lock) and fail closed when the repo will not resolve.
+    derived_pr_url: Optional[str] = None
+    if pr_number is not None and pr_number.lower() != "null":
+        from fno.graph._reconcile import pr_url_for_repo, repo_slug_from_url
+
+        if not pr_number.strip().isdigit():
+            typer.echo(
+                f"Error: --pr-number {pr_number!r} is not a number (or 'null')",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+        if pr_url is not None and pr_url.lower() == "null":
+            typer.echo(
+                "Error: --pr-url null cannot accompany --pr-number: that writes a "
+                "url-less pr_number. Clear both, or supply a url.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+        if pr_url is not None:
+            if repo_slug_from_url(pr_url) is None:
+                typer.echo(
+                    f"Error: --pr-url {pr_url!r} is not a GitHub PR url "
+                    "(expected https://github.com/<owner>/<repo>/pull/<n>)",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+        else:
+            from fno.graph._intake import _find_node as _find
+            from fno.graph.load import load_graph
+
+            node_now = _find(load_graph(_graph_path()), task_id)
+            slug_cwd = derived_cwd_for_update or cwd or (node_now or {}).get("cwd")
+            derived_pr_url = pr_url_for_repo(int(pr_number), slug_cwd)
+            if derived_pr_url is None:
+                typer.echo(
+                    f"Error: cannot resolve the repo for PR #{pr_number} - refusing "
+                    "to stamp an unattributable pr_number. Fix with either "
+                    "`gh auth login` or `--pr-url https://github.com/<owner>/<repo>"
+                    f"/pull/{pr_number}`.",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            typer.echo(f"note: derived --pr-url {derived_pr_url}", err=True)
+
     projected_node: list = [None]
     cascade_closed_update: list = []
     reparent_old_parent: list = [None]
@@ -2134,6 +2183,8 @@ def cmd_update(
             node["pr_number"] = None if pr_number.lower() == "null" else int(pr_number)
         if pr_url is not None:
             node["pr_url"] = None if pr_url.lower() == "null" else pr_url
+        elif derived_pr_url is not None:
+            node["pr_url"] = derived_pr_url
         if merge_status is not None:
             node["merge_status"] = merge_status
         if batch is not None:
