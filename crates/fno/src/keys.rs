@@ -8,7 +8,8 @@
 //!
 //! Table (leader = Ctrl-b, tmux-compatible where a binding exists):
 //! `%`/`"` split H/V · `h j k l` + arrows focus · `H J K L` + Ctrl-arrows
-//! resize · `x` close pane · `c` new tab · `n`/`p` cycle tabs · `1`-`9`
+//! resize · Shift-arrows move the pane · `x` close pane · `c` new tab ·
+//! `n`/`p` cycle tabs · `1`-`9`
 //! select tab · `&` close tab · `w` panel selector · `b` toggle sideline ·
 //! `s` toggle status row · `?` key-table overlay · `d` detach · `[`/`]` jump
 //! prev/next command block · `v` select block · `y` copy selection · `r` rerun
@@ -127,8 +128,8 @@ enum State {
     Normal(usize),
     /// Saw the leader; the next key (or escape sequence) is a chord.
     Leader,
-    /// Accumulating an escape sequence after the leader (arrows /
-    /// Ctrl-arrows / a paste-open marker), possibly split across reads.
+    /// Accumulating an escape sequence after the leader (arrows / Ctrl-arrows
+    /// / Shift-arrows / a paste-open marker), possibly split across reads.
     LeaderEsc(Vec<u8>),
     /// Inside a bracketed paste: everything forwards verbatim; `usize` is
     /// the rolling PASTE_CLOSE match index.
@@ -534,13 +535,19 @@ enum EscScan {
     Invalid,
 }
 
-/// Arrows (`ESC [ A..D` -> focus) and Ctrl-arrows (`ESC [ 1 ; 5 A..D` ->
-/// resize) after the leader. Anything that stops matching either prefix is
-/// swallowed as one Bell. (The paste-open marker is peeled off by the caller
-/// before this runs.)
+/// Arrows (`ESC [ A..D` -> focus), Ctrl-arrows (`ESC [ 1 ; 5 A..D` -> resize)
+/// and Shift-arrows (`ESC [ 1 ; 2 A..D` -> move the pane, x-aa95) after the
+/// leader. Anything that stops matching every prefix is swallowed as one Bell.
+/// (The paste-open marker is peeled off by the caller before this runs.)
+///
+/// Shift-arrow rather than shifted `HJKL`, which the resize binds already own:
+/// the arrow forms share one modifier ladder (plain focus -> ctrl resize ->
+/// shift move), so the move bind reads as one more rung rather than as a
+/// letter picked because the obvious one was taken.
 fn esc_chord(seq: &[u8]) -> EscScan {
     const PLAIN: &[u8] = b"\x1b[";
     const CTRL: &[u8] = b"\x1b[1;5";
+    const SHIFT: &[u8] = b"\x1b[1;2";
     let arrow = |b: u8| -> Option<Dir> {
         match b {
             b'A' => Some(Dir::Up),
@@ -567,7 +574,20 @@ fn esc_chord(seq: &[u8]) -> EscScan {
             None => EscScan::Invalid,
         };
     }
-    if seq.len() < 6 && (CTRL.starts_with(seq) || seq.starts_with(PLAIN) && CTRL.starts_with(seq)) {
+    // Complete Shift-arrow: ESC [ 1 ; 2 X. `target: None` - the server resolves
+    // the destination by direction, so this rides the same `move_leaf` the drop
+    // path does (Locked Decision 4: one mutation path, two gestures).
+    if seq.len() == 6 && seq.starts_with(SHIFT) {
+        return match arrow(seq[5]) {
+            Some(dir) => EscScan::Complete(Event::Cmd(Command::MovePane {
+                mover: None,
+                target: None,
+                dir,
+            })),
+            None => EscScan::Invalid,
+        };
+    }
+    if seq.len() < 6 && (CTRL.starts_with(seq) || SHIFT.starts_with(seq)) {
         return EscScan::Partial;
     }
     if seq.len() < 3 && PLAIN.starts_with(seq) {
@@ -665,6 +685,38 @@ mod tests {
             ]
         );
         assert_eq!(scan_all(&[b"\x02g"]), vec![Event::DispatchNext]);
+    }
+
+    #[test]
+    fn client_keys_shift_arrow_moves_the_pane() {
+        // x-aa95: the arrow ladder is plain=focus, ctrl=resize, shift=move.
+        // Both ids ride as None - the bind knows a direction and nothing else,
+        // so the server resolves the focused pane and its neighbour.
+        assert_eq!(
+            scan_all(&[b"\x02\x1b[1;2B"]),
+            vec![Event::Cmd(Command::MovePane {
+                mover: None,
+                target: None,
+                dir: Dir::Down
+            })]
+        );
+        assert_eq!(
+            scan_all(&[b"\x02\x1b[1;2D"]),
+            vec![Event::Cmd(Command::MovePane {
+                mover: None,
+                target: None,
+                dir: Dir::Left
+            })]
+        );
+        // The neighbouring rungs are untouched.
+        assert_eq!(
+            scan_all(&[b"\x02\x1b[1;5A"]),
+            vec![Event::Cmd(Command::ResizeDir(Dir::Up))]
+        );
+        assert_eq!(
+            scan_all(&[b"\x02\x1b[A"]),
+            vec![Event::Cmd(Command::FocusDir(Dir::Up))]
+        );
     }
 
     #[test]

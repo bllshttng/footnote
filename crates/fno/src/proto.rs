@@ -780,9 +780,18 @@ pub enum Command {
     /// cannot name a branch path. Sent once on drop rather than streamed like a
     /// resize, so the server validates against the tree the drop actually lands
     /// on and refuses a stale address out loud.
+    /// Both ids are `None` for the keyboard bind and `Some` for a drop, because
+    /// a pointer has a position and a keypress does not: a drag can pick up any
+    /// pane and name the exact slot it lands in, while the bind always moves
+    /// whatever is focused to whatever lies that way. `None` therefore means
+    /// "resolve it server-side" - `mover` from the tab's focus, `target` from
+    /// the same `navigate` geometry [`Command::FocusDir`] uses.
+    ///
+    /// One verb rather than two: both forms end in the same relocation, and
+    /// only the addressing differs.
     MovePane {
-        mover: u64,
-        target: u64,
+        mover: Option<u64>,
+        target: Option<u64>,
         dir: Dir,
     },
     NewTab,

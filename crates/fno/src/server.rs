@@ -4527,6 +4527,16 @@ impl Core {
                 // nothing would read as the feature being broken. The tree is
                 // untouched on every error, so co-viewers need no correction
                 // push - only the sender learns anything.
+                // The keyboard bind names neither end: it moves the focused
+                // pane, and resolves its destination with the same geometry
+                // FocusDir uses, so "move down" lands where "focus down" would
+                // have gone. A drop names both and skips all of this.
+                let mover = mover.unwrap_or(tab.focus);
+                let Some(target) = target.or_else(|| tree::navigate(&tab.root, vp, mover, dir))
+                else {
+                    self.notice(client_id, "no pane in that direction");
+                    return Flow::Continue;
+                };
                 match tree::move_leaf(tab, vp, mover, target, dir) {
                     Ok(()) => self.push_layout(true),
                     // An origin drop is a cancel the client should not have sent;
