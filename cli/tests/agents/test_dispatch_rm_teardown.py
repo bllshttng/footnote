@@ -1,18 +1,17 @@
 """Per-harness session teardown in ``fno agents rm``.
 
-``rm`` used to be registry-only for every non-claude harness, so a removed
-codex/opencode session kept resurfacing in discovery. These cover the real
-teardown arms.
+``rm`` used to be registry-only for every non-claude harness, leaving the
+harness's own session record behind. codex now gets a real teardown arm;
+opencode stays registry-only on purpose (see its section below).
 
 ACs:
 - AC1-HP  : codex teardown drops the index entry, every other line survives
             byte-identical, registry row gone, transcripts untouched.
-- AC2-HP  : opencode teardown shells the supported delete verb, row gone.
 - AC1-ERR : teardown failure without --force preserves the registry row.
 - AC2-ERR : --force drops the row and WARNs, naming the orphan record.
 - AC1-EDGE: an already-absent harness record is idempotent success.
-- AC2-EDGE: a non-UUID codex id refuses rather than matching every line
-            (the silent-index-wipe guard).
+- AC2-EDGE: a malformed id refuses and preserves the row, rather than
+            matching lines it should not (the silent-index-wipe guard).
 """
 from __future__ import annotations
 
@@ -21,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from fno.agents import dispatch as dispatch_mod
 from fno.agents.dispatch import DispatchAskError, rm_agent
 from fno.agents.providers import codex as codex_mod
 from fno.agents.providers import opencode as opencode_mod
@@ -219,6 +219,29 @@ def test_codex_rm_force_drops_row_and_warns(isolated_state, monkeypatch, capsys)
     assert GONE_ID in err, "the orphan record must be named for manual cleanup"
     assert "codex" in err, "the orphan's harness must be named too"
     assert _names() == []
+
+
+def test_forced_teardown_failure_emits_exactly_one_truthful_event(
+    isolated_state, monkeypatch
+):
+    """The forced path must not emit twice, nor claim a mutation not yet made."""
+    emitted: list[dict] = []
+    monkeypatch.setattr(
+        dispatch_mod.events, "emit", lambda kind, **kw: emitted.append({"kind": kind, **kw})
+    )
+    _seed("worker", harness="codex", session_id=GONE_ID, cwd=isolated_state)
+    monkeypatch.setattr(
+        codex_mod,
+        "remove_session_index_entry",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("boom")),
+    )
+
+    rm_agent("worker", force=True)
+
+    removed = [e for e in emitted if e["kind"] == "agent_removed"]
+    assert len(removed) == 1, f"expected one agent_removed, got {len(removed)}"
+    assert removed[0]["registry_changed"] is True
+    assert "boom" in (removed[0].get("teardown_error") or "")
 
 
 def test_codex_malformed_stored_id_preserves_row(isolated_state):

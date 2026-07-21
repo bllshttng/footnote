@@ -2541,8 +2541,13 @@ def _teardown_harness_session(
     *,
     name: str,
     force: bool,
-) -> None:
+) -> Optional[str]:
     """Delete a non-claude agent's record from its own harness store.
+
+    Returns the teardown error message when ``force`` swallowed a failure,
+    else None. The caller folds it into the ONE terminal ``agent_removed``
+    event: emitting from in here would both duplicate that event and
+    report a registry mutation that has not happened yet.
 
     Record-only: the harness's index record goes, the conversation stays.
     Upholds the ordering invariant by raising before the caller touches
@@ -2558,24 +2563,23 @@ def _teardown_harness_session(
     harness = existing.harness
     sid = existing.harness_session_id
 
-    def _fail(message: str, *, exit_code: int) -> None:
-        # Emit on BOTH paths: a forced removal is exactly the case a later
-        # registry-vs-store diff has to explain, so it must leave a greppable
-        # record, not just a stderr line the operator saw once.
-        events.emit(
-            "agent_removed",
-            name=name,
-            provider=harness,
-            force=force,
-            registry_changed=force,
-            teardown_error=message,
-        )
+    def _fail(message: str, *, exit_code: int) -> str:
         if not force:
+            # Terminal here, so this IS the only event for this rm.
+            events.emit(
+                "agent_removed",
+                name=name,
+                provider=harness,
+                force=False,
+                registry_changed=False,
+                teardown_error=message,
+            )
             raise DispatchAskError(message, exit_code=exit_code)
         sys.stderr.write(
             f"WARN: {message}; --force given, removing registry only. "
             f"Orphan {harness} session record: {sid}\n"
         )
+        return message
 
     if harness == "opencode":
         # No record-only teardown exists for opencode: removing the session
@@ -2585,19 +2589,18 @@ def _teardown_harness_session(
 
         if sid:
             print(opencode_mod.REGISTRY_ONLY_NOTE.format(sid=sid), flush=True)
-        return
+        return None
 
     if not sid:
         # Refuse rather than assume there is nothing to clean: the harness
         # record may well exist, and this row simply lost the id that
         # addresses it. Silently dropping the row would orphan it for good.
-        _fail(
+        return _fail(
             f"registry entry has no {harness} session id on file; cannot "
             "tear down the harness record. Re-run with --force to drop the "
             "registry row anyway.",
             exit_code=12,
         )
-        return
 
     if harness == "codex":
         from fno.agents.providers import codex as codex_mod
@@ -2605,18 +2608,16 @@ def _teardown_harness_session(
         try:
             removed = codex_mod.remove_session_index_entry(sid)
         except ValueError as exc:
-            _fail(str(exc), exit_code=12)
-            return
+            return _fail(str(exc), exit_code=12)
         except OSError as exc:
-            _fail(f"codex session index rewrite failed: {exc}", exit_code=1)
-            return
+            return _fail(f"codex session index rewrite failed: {exc}", exit_code=1)
         print(
             f"torn down: codex session index entry {sid}"
             if removed
             else f"already gone: codex session index entry {sid}",
             flush=True,
         )
-        return
+        return None
 
     # Fail loud rather than fall off the end: the caller's harness tuple and
     # the arms above are two lists nothing ties together, and a silent return
@@ -2675,6 +2676,9 @@ def rm_agent(
             existing,
         ):
             claude_exit: Optional[int] = None
+            # Non-None only when --force swallowed a teardown failure; rides
+            # the terminal event so the forensic stream stays single and true.
+            teardown_error: Optional[str] = None
 
             if existing.harness == "claude":
                 short_id = existing.short_id
@@ -2771,7 +2775,7 @@ def rm_agent(
                         )
 
             elif existing.harness in ("codex", "opencode"):
-                _teardown_harness_session(
+                teardown_error = _teardown_harness_session(
                     existing,
                     name=name,
                     force=force,
@@ -2794,6 +2798,7 @@ def rm_agent(
                     claude_exit=claude_exit,
                     force=force,
                     registry_changed=False,
+                    teardown_error=teardown_error,
                     error=str(exc),
                     error_type=type(exc).__name__,
                 )
@@ -2820,6 +2825,7 @@ def rm_agent(
                 claude_exit=claude_exit,
                 force=force,
                 registry_changed=True,
+                teardown_error=teardown_error,
             )
             return RmResult(
                 name=name,
