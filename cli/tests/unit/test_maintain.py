@@ -491,6 +491,69 @@ def test_select_validity_excludes_claimed_and_watermarked():
     assert [c["id"] for c in cands] == ["ab-fresh-idea"]
 
 
+_RETRO_TRAILER = "<!-- retro-triage source_pr=525 finding_hash=deff167a7b09df6d -->"
+
+
+def _retro_idea(node_id: str, age_days: int, now: datetime, **over) -> dict:
+    details = over.pop("details", f"finding body\n\n{_RETRO_TRAILER}")
+    return _idea(node_id, age_days, now, details=details, **over)
+
+
+def test_is_retro_triage_node():
+    assert m.is_retro_triage_node({"details": f"x\n{_RETRO_TRAILER}"}) is True
+    assert m.is_retro_triage_node({"details": "an ordinary idea"}) is False
+    # Never raises on a missing / non-str details field.
+    assert m.is_retro_triage_node({}) is False
+    assert m.is_retro_triage_node({"details": None}) is False
+    # Prose that merely mentions the marker, without the full HTML-comment
+    # trailer, is NOT a filed retro node (codex review, unanchored-substring P2).
+    assert m.is_retro_triage_node(
+        {"details": "we file a `retro-triage source_pr=` trailer into details"}
+    ) is False
+    assert m.is_retro_triage_node(
+        {"details": "<!-- retro-triage source_pr=525 -->"}  # missing finding_hash
+    ) is False
+
+
+def test_select_validity_retro_node_age_exempt():
+    """A retro-triage node younger than validity_days IS selected; an identical
+    non-retro node of the same age is excluded by the strict age gate."""
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    entries = [
+        _retro_idea("ab-retro3", 3, now),   # 3 days old, retro -> eligible
+        _idea("ab-plain3", 3, now),         # 3 days old, not retro -> excluded
+    ]
+    cands = m.select_validity_candidates(entries, 60, 25, now=now)
+    assert [c["id"] for c in cands] == ["ab-retro3"]
+
+
+def test_select_validity_retro_sorted_first():
+    """A fresh retro node floats ahead of a genuinely-old non-retro idea so the
+    phantom-prone class is actually reached under the batch cap."""
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    entries = [
+        _idea("ab-old90", 90, now),         # old stale idea
+        _retro_idea("ab-retro1", 1, now),   # brand-new retro node
+    ]
+    cands = m.select_validity_candidates(entries, 60, 25, now=now)
+    assert cands[0]["id"] == "ab-retro1"
+    assert [c["id"] for c in cands] == ["ab-retro1", "ab-old90"]
+
+
+def test_select_validity_retro_still_watermark_deduped():
+    """An age-exempt retro node whose fingerprint is already watermarked is
+    excluded - the daily sweep never re-reviews it until its content changes."""
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    seen = _retro_idea("ab-retro-seen", 2, now)
+    fresh = _retro_idea("ab-retro-new", 2, now, details=f"other\n{_RETRO_TRAILER}")
+    entries = [seen, fresh]
+    cands = m.select_validity_candidates(
+        entries, 60, 25, now=now,
+        seen_fingerprints=frozenset({m.node_fingerprint(seen)}),
+    )
+    assert [c["id"] for c in cands] == ["ab-retro-new"]
+
+
 def test_node_fingerprint_changes_on_edit():
     base = _n("ab-x", title="original", details="d")
     fp1 = m.node_fingerprint(base)
