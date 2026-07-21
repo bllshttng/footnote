@@ -98,6 +98,13 @@ Behavior:
   the-fixture class of failure.
 - Serializes with an atomic lock (exit 3 if another run holds it, printing the
   holder). A dead holder's lock is stolen so a crashed run never wedges you.
+  The steal is a single atomic rename, so when several runs find the same dead
+  holder exactly one wins and the rest exit 3.
+- Exits 5 (VOID) if the shared preflight worktree or the lock changed hands
+  mid-run, printing which of the two it lost. The run earned no verdict, so it
+  prints neither GREEN nor RED. Treat 5 as re-run, never as a code failure:
+  the verdict it would otherwise have reported was earned by another checkout,
+  which is the misattribution this tripwire exists to catch.
 - Exit 0 iff every non-advisory suite passed; `cargo audit` findings are shown
   in an advisory row and never flip the exit code.
 - `--retry-failed` runs only smoke's recorded failures (a fast SUBSET); run a
