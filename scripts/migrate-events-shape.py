@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -55,35 +54,17 @@ def _migrate_row(row: dict) -> dict:
     }
 
 
-# Mirrors fno.mutex.STALE_MUTEX_STEAL_S. Inlined rather than imported: this
-# script runs under whatever ambient python3 the operator has, which need not
-# have the fno wheel installed.
-STALE_MUTEX_STEAL_S = 120
-
-
-def _steal_if_stale(lock_dir: Path) -> bool:
-    """Rename-steal a lock dir older than the threshold (see fno/mutex.py).
-
-    True means retry the mkdir now; False means the lock is honestly held.
-    """
-    try:
-        age = time.time() - lock_dir.stat().st_mtime
-    except OSError:
-        return True
-    if age <= STALE_MUTEX_STEAL_S:
+try:
+    from fno.mutex import steal_if_stale as _steal_if_stale
+except ImportError:
+    # This script runs under whatever ambient python3 the operator has, which
+    # need not have the fno wheel. Degrade to the pre-steal behavior (time out
+    # and exit 2, leaving the corpse for the operator) rather than keeping a
+    # second copy of the steal: an inlined duplicate already drifted from the
+    # real one inside a single change set, which is the whole failure class
+    # this module exists to close.
+    def _steal_if_stale(lock_dir: Path) -> bool:
         return False
-
-    reaped = lock_dir.with_name(f"{lock_dir.name}.reap.{os.getpid()}")
-    shutil.rmtree(reaped, ignore_errors=True)
-    try:
-        os.rename(lock_dir, reaped)
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    print(f"stole stale mutex {lock_dir} (age {int(age)}s)", file=sys.stderr)
-    shutil.rmtree(reaped, ignore_errors=True)
-    return True
 
 
 def _acquire_lock(lock_dir: Path, timeout: int) -> bool:

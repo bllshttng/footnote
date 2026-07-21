@@ -202,7 +202,7 @@ def tick() -> None:
     )
 
     if result.lock_held:
-        typer.echo(f"pr-watch tick: lock held by {result.lock_holder} - skipped")
+        typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
     else:
         typer.echo(
             f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"

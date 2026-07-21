@@ -507,26 +507,44 @@ class TestTickOrchestrator:
         assert deps["events"] == []
 
     def test_AC7_EDGE_lock_held_tick_leaves_state_untouched(self, tmp_path):
-        """The stale `Last tick:` stays the corroborating staleness signal."""
+        """The stale `Last tick:` stays the corroborating staleness signal.
+
+        Runs the SAME candidate both ways. An empty candidate list never
+        writes the store at all, so asserting absence on its own would pass
+        with the fix reverted and prove nothing.
+        """
         from fno.pr_watch._dispatch import tick
 
-        store_path = tmp_path / "state.json"
-        deps = _make_tick_deps(tmp_path, candidates=[], claim_held=True)
-        tick(
-            graph_path=tmp_path / "graph.json",
-            store_path=store_path,
-            discover_fn=deps["discover"],
-            read_pr_state_fn=deps["read_pr_state"],
-            fire_skill_fn=deps["fire_skill"],
-            emit=deps["emit"],
-            reviewers_for=deps["reviewers_for"],
-            claim=deps["claim"],
-            notify=deps["notify"],
-            post_merge_readiness_fn=deps["post_merge_readiness"],
-            now_iso="2026-06-14T12:00:00Z",
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+
+        def run(store_path, *, claim_held):
+            deps = _make_tick_deps(
+                tmp_path, candidates=[candidate], claim_held=claim_held
+            )
+            tick(
+                graph_path=tmp_path / "graph.json",
+                store_path=store_path,
+                discover_fn=deps["discover"],
+                read_pr_state_fn=deps["read_pr_state"],
+                fire_skill_fn=deps["fire_skill"],
+                emit=deps["emit"],
+                reviewers_for=deps["reviewers_for"],
+                claim=deps["claim"],
+                notify=deps["notify"],
+                post_merge_readiness_fn=deps["post_merge_readiness"],
+                now_iso="2026-06-14T12:00:00Z",
+            )
+
+        healthy = tmp_path / "healthy.json"
+        run(healthy, claim_held=False)
+        assert healthy.exists(), (
+            "this candidate must write the store on a healthy tick, "
+            "otherwise the lock-held assertion below is vacuous"
         )
 
-        assert not store_path.exists()
+        held = tmp_path / "held.json"
+        run(held, claim_held=True)
+        assert not held.exists()
 
     def test_AC6_FR_healthy_tick_keeps_open_prs_reporting(self, tmp_path):
         """The lock_held state is additive: a real sweep is unchanged."""

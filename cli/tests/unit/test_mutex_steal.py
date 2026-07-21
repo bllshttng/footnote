@@ -8,8 +8,11 @@ waiter spun against the corpse for eight days.
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 import socket
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -17,6 +20,7 @@ from pathlib import Path
 import psutil
 import pytest
 
+from fno import mutex
 from fno.claims.core import acquire_claim
 from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.staleness import now_ms
@@ -40,8 +44,42 @@ def _age_nofollow(path: Path, seconds: float) -> None:
     os.utime(path, (old, old), follow_symlinks=False)
 
 
+class _FrozenClock:
+    """Stands in for the `time` module so an exact age is decidable."""
+
+    def __init__(self, lock_dir: Path, age_s: float) -> None:
+        self._now = lock_dir.lstat().st_mtime + age_s
+
+    def time(self) -> float:
+        return self._now
+
+    def monotonic_ns(self) -> int:
+        return 0
+
+
 def _event() -> dict:
     return mission_started(mission_id="m-steal")
+
+
+def test_threshold_matches_the_rust_constant():
+    """The `.recovery.d` mutex is wire protocol, so the thresholds must agree.
+
+    Both sides plant corpses using the Python constant, so a drifted Rust
+    constant would leave every other test green while the two implementations
+    disagreed about which locks are corpses.
+    """
+    root = next(
+        (p for p in Path(__file__).resolve().parents if (p / "crates").is_dir()), None
+    )
+    if root is None:
+        pytest.skip("crates/ not present (installed-wheel test run)")
+
+    src = (root / "crates/fno-agents/src/claims.rs").read_text(encoding="utf-8")
+    m = re.search(
+        r"const STALE_MUTEX_STEAL: Duration = Duration::from_secs\((\d+)\)", src
+    )
+    assert m, "STALE_MUTEX_STEAL not found in claims.rs (renamed or reshaped?)"
+    assert int(m.group(1)) == STALE_MUTEX_STEAL_S
 
 
 class TestStealHelper:
@@ -51,13 +89,28 @@ class TestStealHelper:
         assert steal_if_stale(lock) is False
         assert lock.exists()
 
-    def test_AC2_EDGE_at_threshold_not_stolen(self, tmp_path):
-        """Strictly older than the threshold, not at it."""
+    def test_AC2_EDGE_exactly_at_threshold_is_held(self, tmp_path, monkeypatch):
+        """The predicate is `<=`, so equal-to-threshold is held, not stolen.
+
+        Backdating with utime cannot pin this: microseconds elapse before the
+        predicate reads the clock, pushing the age just past the threshold. A
+        frozen clock is what makes `<=` vs `<` actually decidable.
+        """
         lock = tmp_path / "a.lock.d"
         lock.mkdir()
-        _age(lock, STALE_MUTEX_STEAL_S - 1)
+        monkeypatch.setattr(mutex, "time", _FrozenClock(lock, STALE_MUTEX_STEAL_S))
+
         assert steal_if_stale(lock) is False
         assert lock.exists()
+
+    def test_AC2_EDGE_one_second_past_threshold_is_stolen(self, tmp_path, monkeypatch):
+        """The other side of the same boundary, on the same frozen clock."""
+        lock = tmp_path / "a.lock.d"
+        lock.mkdir()
+        monkeypatch.setattr(mutex, "time", _FrozenClock(lock, STALE_MUTEX_STEAL_S + 1))
+
+        assert steal_if_stale(lock) is True
+        assert not lock.exists()
 
     def test_AC1_HP_corpse_stolen(self, tmp_path):
         lock = tmp_path / "a.lock.d"
@@ -156,21 +209,59 @@ class TestEventsMutex:
             append_event(_event(), events_path=events, lock_timeout_seconds=1)
 
     def test_AC3_FR_concurrent_stealers_both_land(self, tmp_path):
-        """Exactly one rename wins; both events land as whole lines."""
+        """Exactly one rename wins; both events land as whole lines.
+
+        The barrier is load-bearing. Without it the first thread steals,
+        appends and releases before the second even contends, so the test
+        passes under full serialization and never exercises the race.
+        """
         events = tmp_path / "events.jsonl"
         lock = tmp_path / "events.jsonl.lock.d"
         lock.mkdir()
         _age(lock, STALE_MUTEX_STEAL_S + 60)
 
+        workers = 4
+        gate = threading.Barrier(workers)
+
         def emit() -> None:
+            gate.wait()
             append_event(_event(), events_path=events, lock_timeout_seconds=10)
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            for fut in [pool.submit(emit), pool.submit(emit)]:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for fut in [pool.submit(emit) for _ in range(workers)]:
                 fut.result()
 
         lines = [ln for ln in events.read_text().splitlines() if ln.strip()]
-        assert len(lines) == 2
+        assert len(lines) == workers
+        assert all(json.loads(ln)["type"] == "mission_started" for ln in lines)
+        assert not lock.exists()
+
+    def test_AC3_FR_only_one_stealer_wins_the_rename(self, tmp_path, caplog):
+        """Contend directly on the predicate so the race is unavoidable."""
+        lock = tmp_path / "a.lock.d"
+        lock.mkdir()
+        _age(lock, STALE_MUTEX_STEAL_S + 60)
+
+        workers = 8
+        gate = threading.Barrier(workers)
+        results: list[bool] = []
+        lk = threading.Lock()
+
+        def race() -> None:
+            gate.wait()
+            got = steal_if_stale(lock)
+            with lk:
+                results.append(got)
+
+        with caplog.at_level("WARNING", logger="fno.mutex"):
+            threads = [threading.Thread(target=race) for _ in range(workers)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        steals = [r for r in caplog.records if "stole stale mutex" in r.message]
+        assert len(steals) == 1, f"expected exactly one winner, got {len(steals)}"
         assert not lock.exists()
 
 

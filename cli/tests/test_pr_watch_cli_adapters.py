@@ -223,3 +223,86 @@ def test_claim_adapter_is_node_live_returns_false_when_free() -> None:
 
     with patch("fno.pr_watch.cli.claim_status", return_value={"state": "free"}):
         assert adapter.is_node_live("x-abc12345") is False
+
+
+# ---------------------------------------------------------------------------
+# AC6: the tick command's printed line (the launchd out.log surface)
+# ---------------------------------------------------------------------------
+#
+# These drive fno.pr_watch.cli.tick() -- the Typer command launchd actually
+# invokes -- not the _dispatch.tick() function. The whole incident was that
+# the PRINTED line could not distinguish a wedged tick from an empty sweep,
+# and that line exists only in the command.
+
+
+def _run_tick_command(monkeypatch, result):
+    """Invoke the Typer tick command with a stubbed dispatch result."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick", lambda **_kw: result, raising=True
+    )
+
+    settings = MagicMock()
+    settings.pr_watch.max_age_days = 30
+    settings.pr_watch.retries = 3
+    settings.recovery.enabled = False
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    return CliRunner().invoke(app, [])
+
+
+def test_AC6_lock_held_tick_prints_holder_and_no_counts(monkeypatch) -> None:
+    """A wedged tick must name the holder and never print open_prs=."""
+    from fno.pr_watch._dispatch import TickResult
+
+    res = _run_tick_command(
+        monkeypatch,
+        TickResult(
+            open_prs=0, acted=0, lock_held=True, lock_holder="lock held by pr-watch:4242"
+        ),
+    )
+
+    assert res.exit_code == 0, res.output
+    assert "lock held by pr-watch:4242" in res.output
+    assert "open_prs=" not in res.output, (
+        f"a lock-held tick must not read as a sweep; got: {res.output!r}"
+    )
+
+
+def test_AC6_healthy_tick_still_prints_counts(monkeypatch) -> None:
+    """The healthy line is unchanged -- lock_held is purely additive."""
+    from fno.pr_watch._dispatch import TickResult
+
+    res = _run_tick_command(
+        monkeypatch, TickResult(open_prs=7, acted=2, skipped=1)
+    )
+
+    assert res.exit_code == 0, res.output
+    assert "open_prs=7 acted=2 skipped=1" in res.output
+    assert "lock held" not in res.output
+
+
+def test_AC6_subsystem_failure_is_not_reported_as_a_held_lock(monkeypatch) -> None:
+    """A claims failure must not masquerade as routine contention."""
+    from fno.pr_watch._dispatch import TickResult
+
+    res = _run_tick_command(
+        monkeypatch,
+        TickResult(
+            open_prs=0,
+            acted=0,
+            lock_held=True,
+            lock_holder="tick lock unavailable: [Errno 28] No space left on device",
+        ),
+    )
+
+    assert res.exit_code == 0, res.output
+    assert "unavailable" in res.output
+    assert "No space left on device" in res.output
+    assert "open_prs=" not in res.output
