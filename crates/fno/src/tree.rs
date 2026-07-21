@@ -466,6 +466,18 @@ pub fn move_leaf(
         return Err(MoveError::PaneGone);
     };
 
+    // A drop that lands the pane exactly where it already sits. `mover ==
+    // target` catches only the literal self-drop; a seam is addressed by its
+    // left/top flank, so dropping a pane on the divider it ALREADY abuts names
+    // its neighbour and slips through. The remove-then-split would then rebuild
+    // the pair at 0.5/0.5 - an operator who sets an 80/20 split, drags the small
+    // pane, thinks better of it and drops it back would silently lose the
+    // ratio they chose. Compared on SHAPE, because ratios are exactly what
+    // differs in this case.
+    if same_shape(&candidate, &tab.root) {
+        return Err(MoveError::Origin);
+    }
+
     // Same per-pane, per-axis check as `split_directional`: a pane fails on
     // either dimension independently.
     if layout(&candidate, viewport)
@@ -481,6 +493,33 @@ pub fn move_leaf(
     tab.root = candidate;
     tab.focus = mover;
     Ok(())
+}
+
+/// Structural equality ignoring ratios: same axes, same nesting, same leaves in
+/// the same order. `PartialEq` on [`Node`] compares ratios too, which is the
+/// wrong question when asking "did this move actually move anything".
+fn same_shape(a: &Node, b: &Node) -> bool {
+    match (a, b) {
+        (Node::Leaf(x), Node::Leaf(y)) => x == y,
+        (
+            Node::Branch {
+                axis: ax,
+                children: ac,
+            },
+            Node::Branch {
+                axis: bx,
+                children: bc,
+            },
+        ) => {
+            ax == bx
+                && ac.len() == bc.len()
+                && ac
+                    .iter()
+                    .zip(bc)
+                    .all(|((_, an), (_, bn))| same_shape(an, bn))
+        }
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -596,6 +635,23 @@ fn normalize(node: Node) -> Node {
                         }
                     }
                     other => merged.push((ratio, other)),
+                }
+            }
+            // Renormalize so the sum is 1.0 again. `remove_leaf` redistributes
+            // proportionally with an f32 multiply (`scale = 1 / (1 - r)`), and
+            // the same-axis merge above multiplies ratios through, so both leave
+            // a little error behind. One close is harmless; a long session of
+            // closes and moves compounds it until the sum drifts past
+            // `check_invariants`' 1e-4 tolerance and every later op reports a
+            // corrupt tree. Correcting here - the one place every structural
+            // mutation funnels through - keeps the error from ever accumulating.
+            //
+            // `split` needs no such pass: halving a ratio is exact in binary
+            // floating point, and the two halves re-sum to the original.
+            let sum: f32 = merged.iter().map(|(r, _)| r).sum();
+            if sum > 0.0 {
+                for (r, _) in merged.iter_mut() {
+                    *r /= sum;
                 }
             }
             if merged.len() == 1 {
@@ -1979,6 +2035,31 @@ mod tests {
     }
 
     #[test]
+    fn tree_move_leaf_refuses_a_drop_back_onto_the_seam_it_already_abuts() {
+        // A seam is addressed by its LEFT/TOP flank, so dropping a pane on the
+        // divider it already sits against names its neighbour and slips past
+        // the `mover == target` guard. The remove-then-split would rebuild the
+        // pair at 0.5/0.5, silently discarding a ratio the operator set.
+        let mut tab = Tab {
+            id: 0,
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(0.8, Node::Leaf(1)), (0.2, Node::Leaf(2))],
+            },
+            focus: 2,
+            name: None,
+        };
+        let before = tab.clone();
+        // Pane 2 dropped just right of pane 1 - exactly where it already is.
+        assert_eq!(
+            move_leaf(&mut tab, MOVE_VIEWPORT, 2, 1, Dir::Right),
+            Err(MoveError::Origin),
+            "a move that changes nothing structural must not be applied"
+        );
+        assert_eq!(tab, before, "and the 80/20 split survives untouched");
+    }
+
+    #[test]
     fn tree_move_leaf_preserves_the_pane_set_and_invariants() {
         // Invariant: relocation is pure surgery - no pane is lost, duplicated,
         // or minted, and the tree stays well-formed.
@@ -2131,34 +2212,55 @@ mod adversarial_move_tests {
     impl R {
         fn next(&mut self) -> u64 {
             let mut x = self.0;
-            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
-            self.0 = x; x
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
         }
-        fn pick(&mut self, n: usize) -> usize { (self.next() % n as u64) as usize }
+        fn pick(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
     }
 
-    const BIG: Rect = Rect { x: 0, y: 0, rows: 24, cols: 60 };
+    const BIG: Rect = Rect {
+        x: 0,
+        y: 0,
+        rows: 24,
+        cols: 60,
+    };
 
-    fn dirs() -> [Dir; 4] { [Dir::Left, Dir::Right, Dir::Up, Dir::Down] }
+    fn dirs() -> [Dir; 4] {
+        [Dir::Left, Dir::Right, Dir::Up, Dir::Down]
+    }
 
     #[test]
     fn adversarial_move_leaf_preserves_invariants() {
         for seed in 1..800u64 {
             let mut r = R(seed);
-            let mut tab = Tab { id: 0, root: Node::Leaf(1), focus: 1, name: None };
+            let mut tab = Tab {
+                id: 0,
+                root: Node::Leaf(1),
+                focus: 1,
+                name: None,
+            };
             let mut next_id = 2;
             // build a random tree
             for _ in 0..r.pick(8) + 2 {
                 let ls = leaves(&tab.root);
                 tab.focus = ls[r.pick(ls.len())];
                 let d = dirs()[r.pick(4)];
-                if split_directional(&mut tab, BIG, d, next_id).is_ok() { next_id += 1; }
+                if split_directional(&mut tab, BIG, d, next_id).is_ok() {
+                    next_id += 1;
+                }
             }
             check_invariants(&tab).unwrap_or_else(|e| panic!("seed {seed}: build broke: {e}"));
 
             for step in 0..300 {
                 let ls = leaves(&tab.root);
-                if ls.len() < 2 { break; }
+                if ls.len() < 2 {
+                    break;
+                }
                 let mover = ls[r.pick(ls.len())];
                 let target = ls[r.pick(ls.len())];
                 let d = dirs()[r.pick(4)];

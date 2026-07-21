@@ -2628,11 +2628,16 @@ impl View {
         let Some(mover) = self.pane_drag.map(|d| d.mover) else {
             return false;
         };
-        // A zone on the pane being dragged is the origin: no highlight, so the
-        // gesture visibly reads as "this drop does nothing" before the release.
+        // A zone the dragged pane already occupies is the origin: no highlight,
+        // so the gesture reads as "this drop does nothing" before the release.
+        // BOTH flanks count - a seam is addressed by its left/top pane, so the
+        // divider a pane already abuts on its far side names the NEIGHBOUR and
+        // would otherwise light up as a real destination.
+        let abuts = |s: Seam| s.a == mover || s.b == mover;
         let zone = self
             .drop_zone_at(row, col)
-            .filter(|z| z.target != mover && self.pane_rect(mover).is_some());
+            .filter(|z| z.target != mover && self.pane_rect(mover).is_some())
+            .filter(|_| !self.seam_at(row, col).is_some_and(abuts));
         let drag = self.pane_drag.as_mut().expect("checked above");
         drag.last_at = now;
         let changed = drag.zone != zone;
@@ -2678,19 +2683,35 @@ impl View {
         // The band sits one cell outside the rect, except on the rim where that
         // cell belongs to the sideline or the tab bar - there it clamps back
         // onto the rect's own edge.
-        let band_col = |outside: Option<u16>, own: u16| {
-            let c = outside.filter(|c| *c >= panel_w).unwrap_or(own);
+        // BOTH sides must be bounded. Guarding only the low side left the right
+        // and bottom rims resolving to a cell one past the terminal, which
+        // compose() then clamped away to an empty range: the zone rendered
+        // nothing while a release there still relocated the pane. In this UI's
+        // own vocabulary an unlit zone means "this drop does nothing" (an origin
+        // drop deliberately blanks the zone to say exactly that), so the
+        // asymmetry taught the wrong thing on half the rim.
+        let (term_rows, term_cols) = self.term;
+        let band_col = |outside: u16, own: u16| {
+            let c = (panel_w..term_cols)
+                .contains(&outside)
+                .then_some(outside)
+                .unwrap_or(own);
             c..c + 1
         };
-        let band_row = |outside: Option<u16>, own: u16| {
-            let r = outside.filter(|r| *r >= TAB_BAR_ROWS).unwrap_or(own);
+        let band_row = |outside: u16, own: u16| {
+            let r = (TAB_BAR_ROWS..term_rows)
+                .contains(&outside)
+                .then_some(outside)
+                .unwrap_or(own);
             r..r + 1
         };
+        // saturating: a zero-column rect from the server would otherwise
+        // underflow `c1 - 1` and panic in debug.
         Some(match zone.dir {
-            Dir::Left => (r0..r1, band_col(c0.checked_sub(1), c0)),
-            Dir::Right => (r0..r1, band_col(Some(c1), c1 - 1)),
-            Dir::Up => (band_row(r0.checked_sub(1), r0), c0..c1),
-            Dir::Down => (band_row(Some(r1), r1 - 1), c0..c1),
+            Dir::Left => (r0..r1, band_col(c0.wrapping_sub(1), c0)),
+            Dir::Right => (r0..r1, band_col(c1, c1.saturating_sub(1))),
+            Dir::Up => (band_row(r0.wrapping_sub(1), r0), c0..c1),
+            Dir::Down => (band_row(r1, r1.saturating_sub(1)), c0..c1),
         })
     }
 
@@ -11448,6 +11469,10 @@ mod tests {
     // A three-pane layout over two_pane_view's geometry (focus on pane 10, so
     // 11 and 12 are both hover targets). Panes tile the 72-col content area:
     // 10 -> outer 28.., 11 -> outer 52.., 12 -> outer 76...
+    //
+    // Also the smallest fixture in which a seam DROP means anything (x-aa95):
+    // a two-pane tab has one seam and it flanks both panes, so every seam drop
+    // there is an origin drop.
     fn three_pane_view() -> View {
         let mut view = two_pane_view();
         let rect = |x| Rect {
@@ -18653,15 +18678,15 @@ mod tests {
 
     // -- pane relocation (x-aa95) -------------------------------------------
 
-    /// The first cell of the seam between the two panes, found the way the
-    /// dispatch does rather than hardcoded, so a layout tweak cannot silently
-    /// point these tests at a cell that is no longer a divider.
-    fn a_seam_cell(view: &View) -> (u16, u16) {
+    /// The first cell of the seam flanked by exactly `a` and `b`, found the way
+    /// the dispatch does rather than hardcoded, so a layout tweak cannot
+    /// silently point these tests at a cell that is no longer that divider.
+    fn seam_cell_between(view: &View, a: u64, b: u64) -> (u16, u16) {
         let (rows, cols) = view.term;
         (TAB_BAR_ROWS..rows)
             .flat_map(|r| (0..cols).map(move |c| (r, c)))
-            .find(|(r, c)| view.seam_at(*r, *c).is_some())
-            .expect("the two-pane view has a seam")
+            .find(|(r, c)| view.seam_at(*r, *c).is_some_and(|s| s.a == a && s.b == b))
+            .unwrap_or_else(|| panic!("no seam between {a} and {b}"))
     }
 
     #[test]
@@ -18703,8 +18728,8 @@ mod tests {
 
     #[test]
     fn a_seam_zone_targets_the_pane_it_sits_after() {
-        let view = two_pane_view();
-        let (r, c) = a_seam_cell(&view);
+        let view = three_pane_view();
+        let (r, c) = seam_cell_between(&view, 11, 12);
         let seam = view.seam_at(r, c).expect("cell chosen for being a seam");
         assert_eq!(
             view.drop_zone_at(r, c),
@@ -18720,11 +18745,11 @@ mod tests {
     fn a_drag_lights_a_candidate_and_keeps_the_origin_marked() {
         // AC3-UI: the zone under the pointer accents, and the pane being moved
         // stays visibly marked even though the pointer has left it.
-        let mut view = two_pane_view();
-        // Pane 11, not 10: the seam's left flank IS 10, so dragging 10 there
-        // would be an origin drop and correctly light nothing.
-        view.begin_pane_drag(11, Instant::now());
-        let (r, c) = a_seam_cell(&view);
+        let mut view = three_pane_view();
+        // Pane 10 dragged to the 11|12 seam: a divider it does not already
+        // abut, so this is a real destination rather than an origin drop.
+        view.begin_pane_drag(10, Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
         assert!(
             view.pane_drag_to(r, c, Instant::now()),
             "entering a zone redraws"
@@ -18743,8 +18768,8 @@ mod tests {
             cell_flags::INVERSE,
             "the candidate zone reads as the drop target"
         );
-        let rect = view.pane_rect(11).expect("the origin still exists");
-        let (grow, gcols) = view.grip_span(rect).expect("pane 11 has room");
+        let rect = view.pane_rect(10).expect("the origin still exists");
+        let (grow, gcols) = view.grip_span(rect).expect("pane 10 has room");
         assert_eq!(
             frame.cells[grow as usize * cols + gcols.start as usize].flags & cell_flags::BOLD,
             cell_flags::BOLD,
@@ -18754,15 +18779,15 @@ mod tests {
 
     #[test]
     fn a_drop_commits_the_candidate_zone() {
-        let mut view = two_pane_view();
-        view.begin_pane_drag(11, Instant::now());
-        let (r, c) = a_seam_cell(&view);
+        let mut view = three_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
         view.pane_drag_to(r, c, Instant::now());
         assert_eq!(
             view.commit_pane_drag(),
             Some(Command::MovePane {
-                mover: Some(11),
-                target: Some(10),
+                mover: Some(10),
+                target: Some(11),
                 dir: Dir::Right
             })
         );
@@ -18881,9 +18906,9 @@ mod tests {
     #[test]
     fn a_drag_ends_when_the_pane_it_moves_disappears() {
         // AC7-FR: the dragged pane's process exits mid-gesture.
-        let mut view = two_pane_view();
+        let mut view = three_pane_view();
         view.begin_pane_drag(10, Instant::now());
-        let (r, c) = a_seam_cell(&view);
+        let (r, c) = seam_cell_between(&view, 11, 12);
         view.pane_drag_to(r, c, Instant::now());
 
         let mut next = view.layout.clone();
@@ -18907,12 +18932,17 @@ mod tests {
         let z = view.edge_zone_at(r, c).expect("rim zone");
         eprintln!("zone={:?}", z);
         let band = view.drop_band(z).expect("band");
-        eprintln!("band rows={:?} cols={:?} termcols={}", band.0, band.1, view.term.1);
+        eprintln!(
+            "band rows={:?} cols={:?} termcols={}",
+            band.0, band.1, view.term.1
+        );
         assert!(view.pane_drag_to(r, c, Instant::now()));
         let frame = view.compose();
         let cols = view.term.1 as usize;
-        let lit = (0..view.term.0 as usize).flat_map(|rr| (0..cols).map(move |cc| (rr,cc)))
-            .filter(|(rr,cc)| frame.cells[rr*cols+cc].flags & cell_flags::INVERSE != 0).count();
+        let lit = (0..view.term.0 as usize)
+            .flat_map(|rr| (0..cols).map(move |cc| (rr, cc)))
+            .filter(|(rr, cc)| frame.cells[rr * cols + cc].flags & cell_flags::INVERSE != 0)
+            .count();
         eprintln!("inverse cells = {}", lit);
         assert!(lit > 0, "right-rim drop zone lit NOTHING");
     }
@@ -18930,10 +18960,11 @@ mod tests {
         assert!(view.pane_drag_to(r, c, Instant::now()));
         let frame = view.compose();
         let cols = view.term.1 as usize;
-        let lit = (0..view.term.0 as usize).flat_map(|rr| (0..cols).map(move |cc| (rr,cc)))
-            .filter(|(rr,cc)| frame.cells[rr*cols+cc].flags & cell_flags::INVERSE != 0).count();
+        let lit = (0..view.term.0 as usize)
+            .flat_map(|rr| (0..cols).map(move |cc| (rr, cc)))
+            .filter(|(rr, cc)| frame.cells[rr * cols + cc].flags & cell_flags::INVERSE != 0)
+            .count();
         eprintln!("inverse cells = {}", lit);
         assert!(lit > 0, "bottom-rim drop zone lit NOTHING");
     }
-
 }
