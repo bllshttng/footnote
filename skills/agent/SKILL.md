@@ -305,13 +305,20 @@ so even a delegated `next`/`all` is never a silent surprise.
 
 #### 2. VALIDATE (refuse bad input before any billed launch)
 
-- **Node must resolve.** If `node` is non-empty, run `fno backlog get "$node"`.
-  If it exits non-zero or returns no `.id`, STOP and tell the user. Do NOT spawn.
-  **Exception - `payload_mode=passthrough`:** the id there is grep'd out of a
-  free-form `/target` line, so a hex-shaped prose word (`re-added`) can match.
-  A miss degrades to `node=""` with a one-line note and the spawn proceeds on
-  the passthrough message as typed; only the receipt loses its node suffix. A
-  `build`-mode miss still refuses loud - the user named that node deliberately.
+- **Node must resolve, and a miss is judged by `node_bare`.** If `node` is
+  non-empty, run `fno backlog get "$node"`. On a miss (non-zero exit or no
+  `.id`):
+  - **`node_bare=1`** - the payload was nothing but the id, so the user named it
+    deliberately. STOP and tell the user. Do NOT spawn.
+  - **`node_bare=0`** - the id was inferred from a payload carrying other text
+    (a `/target` passthrough line, or prose whose first word merely fits the id
+    shape: `a-f` are letters, so `re-added` and `dead-beef` match it). Degrade to
+    `node=""` with a one-line note and spawn on the message as typed; only the
+    receipt loses its node suffix.
+
+  The asymmetry is about what the user *typed*, not which tier matched. Refusing
+  a spawn because ordinary prose happened to look like an id would break the
+  free-text-is-always-a-verbatim-seed rule above.
 - **Collision pre-check (read-only), with a self-handoff exception.** If `node`
   is non-empty, run `fno claim status "node:$node" --json` and inspect `.state`
   and `.holder`. If `live`, decide whether the holder is a FOREIGN worker or

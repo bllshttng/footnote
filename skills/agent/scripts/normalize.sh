@@ -22,7 +22,8 @@
 # read them line by line, never `eval`):
 #   status=ok | status=error
 #   error=<message>            (only when status=error)
-#   node=<ab-XXXXXXXX>         (empty when the payload is a free-form feature)
+#   node=<id>                  (empty when the payload is a free-form feature)
+#   node_bare=0|1              (1 = the payload was nothing but the id)
 #   name=<agent name>
 #   provider=<claude|codex|gemini>
 #   model=<exact model name>   (empty unless `model <name>` / --model given)
@@ -327,6 +328,7 @@ set +f
 # describe-it fuzzy tier (tier 4) is whatever is left - free prose - and lives
 # entirely in the SKILL body behind a confirm.
 NODE=""
+NODE_BARE=0
 NODE_QUERY=""
 SPAWN_NEXT=0
 NEXT_SCOPE=""
@@ -340,6 +342,11 @@ elif [[ "$msg_lc" == "next" || "$msg_lc" == "next all" ]]; then
   [[ "$msg_lc" == "next all" ]] && NEXT_SCOPE="all" || NEXT_SCOPE="project"
 elif printf '%s' "$first_tok" | grep -qE '^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$'; then
   NODE="$first_tok"                                   # tier 1: exact node id
+  # a-f are letters, so this shape also matches hyphen-joined English
+  # ("re-added", "dead-beef"). Whether the payload is NOTHING BUT the id is the
+  # only deliberate-naming signal available without a graph read; VALIDATE uses
+  # it to decide refuse-loud vs degrade-to-seed on a resolution miss.
+  [[ "$msg" == "$first_tok" ]] && NODE_BARE=1
 elif printf '%s' "$msg" | grep -qE '^/target([[:space:]]|$)'; then
   # Unanchored, so a hex-shaped prose word ("re-added") can match; the SKILL's
   # VALIDATE arm degrades a passthrough miss to node="" rather than refusing.
@@ -774,6 +781,9 @@ esac
 # ---- emit --------------------------------------------------------------------
 printf 'status=ok\n'
 printf 'node=%s\n' "$NODE"
+# 1 only when the payload was NOTHING but the id, so VALIDATE can tell a
+# deliberately-named node from one inferred out of prose.
+printf 'node_bare=%s\n' "$NODE_BARE"
 # Resolution-tier classification (ab-f82e8083). The SKILL reads these to resolve
 # the id-free entry modes: node_query is a slug candidate (resolve via `fno
 # backlog get`, fall through to describe-it on miss); spawn_next asks for the
