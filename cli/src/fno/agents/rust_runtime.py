@@ -186,6 +186,11 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # the Rust client, so it must never auto-route to the daemon (it would 404 /
     # be shadowed for installed users). Python owns it.
     "spawn-guard",
+    # x-da8c: the registry-miss healer the Rust lifecycle verbs shell out to.
+    # Pure Python (fno.agents.store_fallback); no Rust port. Staying out of
+    # RUST_CLIENT_VERBS is the recursion guard for that shellout, so listing it
+    # here is documentary — AUTO_ROUTE_VERBS already excludes it.
+    "heal-token",
     # x-301a: "what is MY registered mesh name?" — reads FNO_AGENT_SELF + the
     # registry, read-only. Pure Python (fno.agents.whoami); there is NO
     # `whoami` on the Rust client, so it must never auto-route to the daemon.
