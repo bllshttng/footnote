@@ -1134,6 +1134,36 @@ set -e
 check_contains "AC5-EDGE: reason is reacquire_failed" "reacquire_failed" "$lost_reason"
 
 # ---------------------------------------------------------------------------
+# Scenario 6: x-3ad5 - the plan-status gate accepts the canonical in_review
+#
+# The ship gate stamps `in_review`. If this gate still listed only
+# ready|in_progress|shipped, a high-context target that opened its PR would be
+# parked as "unknown plan status" instead of spawning its successor - a silent
+# branch, since parking is a legal outcome and nothing errors.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 6: x-3ad5 plan-status gate accepts in_review + retired spelling ==="
+
+for st in in_review shipped; do
+  SBX="$(make_sandbox "s6-$st")"
+  sed -i.bak "s/^status: ready$/status: $st/" "$SBX/$PLAN_REL"
+  rm -f "$SBX/$PLAN_REL.bak"
+  CALL_LOG="$SBX/call-log"
+  HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
+
+  check_exit "x-3ad5: status=$st exits 0 (not parked)" "0" "$handoff_rc"
+  check_contains "x-3ad5: status=$st delegates" "delegated" "$output"
+done
+
+# ...and a genuinely unknown status is still refused.
+SBX="$(make_sandbox s6-bogus)"
+sed -i.bak "s/^status: ready$/status: not_a_status/" "$SBX/$PLAN_REL"
+rm -f "$SBX/$PLAN_REL.bak"
+CALL_LOG="$SBX/call-log"
+HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
+check_contains "x-3ad5: an unknown status is still parked" "parked" "$output"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

@@ -1,8 +1,8 @@
 """fno plan CLI - plan management verbs.
 
 Verbs:
-    stamp             - mark a plan's frontmatter with ship metadata (status:shipped)
-    graduate          - flip a stamped plan from status:shipped to status:done
+    stamp             - mark a plan's frontmatter with ship metadata (status:in_review)
+    graduate          - flip a stamped plan from status:in_review to status:done
     brief             - generate a scoped task brief from a single-doc plan
     validate          - validate a plan's frontmatter against fno.plan.schema (read-only)
     reconcile-status  - normalize drifted plan frontmatter status in place
@@ -356,7 +356,7 @@ def folder_audit(
     help=(
         "Normalize drifted plan frontmatter status to the canonical vocabulary "
         "in place. Dry-run by default; pass --apply to write. Prints "
-        "'N normalized, M archived, K skipped'."
+        "'N normalized, M superseded, K skipped'."
     ),
 )
 def reconcile_status(

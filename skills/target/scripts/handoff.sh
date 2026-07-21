@@ -285,15 +285,16 @@ if [ ! -f "$PLAN_PATH" ]; then
   exit "$_EXIT_PARKED"
 fi
 
-# plan frontmatter status: ready|in_progress|shipped (treat unknown as refuse)
+# plan frontmatter status: ready|in_progress|in_review (treat unknown as refuse).
+# `shipped` is the retired spelling of in_review, still accepted on read (x-3ad5).
 set +o pipefail
 PLAN_STATUS="$(grep -E "^status:[[:space:]]" "$PLAN_PATH" 2>/dev/null \
   | head -1 | sed 's/^status:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d ' ' || true)"
 set -o pipefail
 case "$PLAN_STATUS" in
-  ready|in_progress|shipped) ;;
+  ready|in_progress|in_review|shipped) ;;
   *)
-    echo "parked $NODE_ID reason=\"plan status '$PLAN_STATUS' is not ready/in_progress/shipped\""
+    echo "parked $NODE_ID reason=\"plan status '$PLAN_STATUS' is not ready/in_progress/in_review\""
     exit "$_EXIT_PARKED"
     ;;
 esac

@@ -27,12 +27,12 @@ def _plan(status_line: str, *, body: str = "\n# Title\n\nbody text\n") -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_archived_is_a_known_terminal_not_on_the_axis():
+def test_superseded_is_a_known_terminal_not_on_the_axis():
     from fno.plan._status import STATUS_PROGRESSION
 
-    assert "archived" in KNOWN_STATUSES
+    assert "superseded" in KNOWN_STATUSES
     assert "done" in KNOWN_STATUSES
-    assert "archived" not in STATUS_PROGRESSION  # off-axis (AC / Locked #3)
+    assert "superseded" not in STATUS_PROGRESSION  # off-axis (AC / Locked #3)
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -40,9 +40,9 @@ def test_archived_is_a_known_terminal_not_on_the_axis():
     ("draft", "design"),
     ("designed", "design"),        # typo
     ("design-locked", "ready"),
-    ("reviewing", "shipped"),      # pruned axis states (x-f34f) fold into shipped
-    ("shipping", "shipped"),
-    ("superseded", "archived"),
+    ("reviewing", "in_review"),    # pruned axis states (x-f34f) fold into in_review
+    ("shipping", "in_review"),
+    ("superseded-by-implementation", "superseded"),
 ])
 def test_tier1_synonyms(raw, expected):
     assert target_status(raw, lambda: False) == expected
@@ -53,10 +53,10 @@ def test_canonical_status_left_alone():
         assert target_status(s, lambda: True) is None  # never downgrade / re-touch
 
 
-def test_tier2_blank_archived_without_signal():
-    """AC2-EDGE: undeterminable blank -> archived, never a guessed done."""
-    assert target_status("", lambda: False) == "archived"
-    assert target_status(None, lambda: False) == "archived"
+def test_tier2_blank_superseded_without_signal():
+    """AC2-EDGE: undeterminable blank -> superseded, never a guessed done."""
+    assert target_status("", lambda: False) == "superseded"
+    assert target_status(None, lambda: False) == "superseded"
 
 
 def test_tier2_done_with_signal():
@@ -86,8 +86,8 @@ def test_rewrite_replaces_status_line_body_untouched():
 def test_rewrite_inserts_status_when_absent():
     """AC2-EDGE: a (no status) plan gets the key added, not left blank."""
     original = _plan("")  # frontmatter present, no status key
-    out = rewrite_status(original, "archived")
-    assert 'status: "archived"' in out
+    out = rewrite_status(original, "superseded")
+    assert 'status: "superseded"' in out
     assert "node: x-1" in out  # existing keys preserved
 
 
@@ -104,18 +104,18 @@ def test_sweep_dry_run_reports_without_writing(tmp_path: Path):
     p = tmp_path / "a.md"
     p.write_text(_plan("status: PENDING"))
     res = sweep(tmp_path, apply=False, signal_for=lambda fm: False)
-    assert res.normalized == 1 and res.archived == 0
+    assert res.normalized == 1 and res.superseded == 0
     assert "PENDING" in p.read_text()  # dry-run does not write
 
 
 def test_sweep_apply_normalizes_and_summarizes(tmp_path: Path):
     (tmp_path / "a.md").write_text(_plan("status: PENDING"))
-    (tmp_path / "b.md").write_text(_plan(""))  # blank -> archived (no signal)
-    (tmp_path / "c.md").write_text(_plan("status: shipped"))  # canonical -> skip
+    (tmp_path / "b.md").write_text(_plan(""))  # blank -> superseded (no signal)
+    (tmp_path / "c.md").write_text(_plan("status: in_review"))  # canonical -> skip
     res = sweep(tmp_path, apply=True, signal_for=lambda fm: False)
-    assert res.summary() == "1 normalized, 1 archived, 1 skipped"
+    assert res.summary() == "1 normalized, 1 superseded, 1 skipped"
     assert 'status: "design"' in (tmp_path / "a.md").read_text()
-    assert 'status: "archived"' in (tmp_path / "b.md").read_text()
+    assert 'status: "superseded"' in (tmp_path / "b.md").read_text()
 
 
 def test_sweep_skips_malformed_body_intact(tmp_path: Path):
@@ -129,22 +129,22 @@ def test_sweep_skips_malformed_body_intact(tmp_path: Path):
 
 
 def test_sweep_idempotent_and_non_regressing(tmp_path: Path):
-    """AC2-FR: a re-run changes nothing; a human re-activated plan is not re-archived."""
+    """AC2-FR: a re-run changes nothing; a human re-activated plan is not re-superseded."""
     p = tmp_path / "a.md"
     p.write_text(_plan(""))  # blank
-    sweep(tmp_path, apply=True, signal_for=lambda fm: False)  # -> archived
-    assert 'status: "archived"' in p.read_text()
+    sweep(tmp_path, apply=True, signal_for=lambda fm: False)  # -> superseded
+    assert 'status: "superseded"' in p.read_text()
     # Human re-activates it.
-    p.write_text(p.read_text().replace('status: "archived"', 'status: "design"'))
+    p.write_text(p.read_text().replace('status: "superseded"', 'status: "design"'))
     res = sweep(tmp_path, apply=True, signal_for=lambda fm: False)
-    assert res.normalized == 0 and res.archived == 0 and res.skipped == 1
-    assert 'status: "design"' in p.read_text()  # not re-archived
+    assert res.normalized == 0 and res.superseded == 0 and res.skipped == 1
+    assert 'status: "design"' in p.read_text()  # not re-superseded
 
 
 def test_sweep_tier2_uses_signal(tmp_path: Path):
     (tmp_path / "closed.md").write_text(_plan("status: implemented"))
     res = sweep(tmp_path, apply=True, signal_for=lambda fm: True, status_map={})
-    assert res.normalized == 1 and res.archived == 0
+    assert res.normalized == 1 and res.superseded == 0
     assert 'status: "done"' in (tmp_path / "closed.md").read_text()
 
 
@@ -267,3 +267,20 @@ def test_plan_link_id_hashable_so_lookups_never_raise():
     link = _plan_link_id({"claims": ["x-1d91"]})
     assert {"x-1d91": "done"}.get(link) == "done"
     assert link in frozenset({"x-1d91"})
+
+
+def test_AC5_ERR_sweep_leaves_both_vocabularies_untouched(tmp_path: Path):
+    """x-3ad5: mid-migration, one doc on each spelling. Both are in
+    KNOWN_STATUSES, so the sweep rewrites neither - a retired spelling is valid
+    input, not drift, and the aliases are read-path translation only.
+    """
+    old = tmp_path / "old.md"
+    new = tmp_path / "new.md"
+    old.write_text(_plan("status: shipped"))
+    new.write_text(_plan("status: in_review"))
+    before = (old.read_text(), new.read_text())
+
+    res = sweep(tmp_path, apply=True, signal_for=lambda fm: False)
+
+    assert res.skipped == 2 and res.normalized == 0 and res.superseded == 0
+    assert (old.read_text(), new.read_text()) == before  # byte-for-byte

@@ -16,9 +16,9 @@ Enforced by `fno.plan._status.validate_transition(old, new)`. Backward transitio
 |------|----|--------|
 | `design` | `ready` | OK |
 | `ready` | `in_progress` | OK |
-| `in_progress` | `reviewing` | OK |
+| `in_progress` | `in_review` | OK |
 | `ready` | `design` | StatusTransitionError |
-| `shipped` | `in_progress` | StatusTransitionError |
+| `in_review` | `in_progress` | StatusTransitionError |
 
 **Invalid input examples:**
 

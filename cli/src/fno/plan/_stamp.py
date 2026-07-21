@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from fno.plan._status import canonical_status
 from fno.plan.locking import plan_doc_lock
 
 
@@ -424,9 +425,12 @@ def _do_stamp(args: argparse.Namespace, plan_path: Path) -> int:
         existing_sids.append(session_id)
     fields["session_ids"] = existing_sids
 
-    # Status - always set to shipped on stamp (graduate upgrades to done)
-    if fields.get("status") not in ("shipped", "done"):
-        fields["status"] = "shipped"
+    # Status - always set to in_review on stamp (graduate upgrades to done).
+    # Compared canonically so a doc already at the retired `shipped` spelling
+    # reads as in_review and keeps its bytes: the alias translates on read, it
+    # never triggers a migration write.
+    if canonical_status(fields.get("status")) not in ("in_review", "done"):
+        fields["status"] = "in_review"
 
     # Store expected_url_count if provided AND no VALID count is already present.
     # First-writer-wins: for a decomposed epic, `set-expected` writes the
@@ -449,7 +453,7 @@ def _do_stamp(args: argparse.Namespace, plan_path: Path) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_graduate(args: argparse.Namespace) -> int:
-    """Flip status: shipped -> done when enough URLs have accumulated."""
+    """Flip status: in_review -> done when enough URLs have accumulated."""
     plan_path = Path(args.plan_path).expanduser().resolve()
     with plan_doc_lock(plan_path):  # serialize with a concurrent progress append
         return _do_graduate(args, plan_path)
@@ -466,7 +470,7 @@ def _do_graduate(args: argparse.Namespace, plan_path: Path) -> int:
         return 1
 
     status = fields.get("status", "")
-    if status != "shipped":
+    if canonical_status(status) != "in_review":
         # Nothing to do
         return 0
 
@@ -544,7 +548,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # stamp subcommand
-    stamp_p = sub.add_parser("stamp", help="Stamp a plan as shipped.")
+    stamp_p = sub.add_parser("stamp", help="Stamp a plan as in_review.")
     stamp_p.add_argument("--plan-path", required=True, help="Path to plan file.")
     stamp_p.add_argument("--session-id", required=True, help="Claude session ID.")
     stamp_p.add_argument(
@@ -567,7 +571,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # graduate subcommand
     grad_p = sub.add_parser(
-        "graduate", help="Graduate a shipped plan to done when URL count is met."
+        "graduate", help="Graduate an in_review plan to done when URL count is met."
     )
     grad_p.add_argument("--plan-path", required=True, help="Path to plan file.")
     grad_p.add_argument(

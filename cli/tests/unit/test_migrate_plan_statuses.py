@@ -40,7 +40,7 @@ def test_mapping_families():
     assert mps._classify("COMPLETE", None, {}) == "done"
     assert mps._classify("ready-for-implementation", None, {}) == "ready"
     assert mps._classify("inp-progres", None, {}) == "in_progress"
-    assert mps._classify("superseded", None, {}) == "archived"
+    assert mps._classify("abandoned", None, {}) == "superseded"
     # Already canonical -> no change.
     assert mps._classify("ready", None, {}) is None
     # Unmapped -> None (reported by main, left untouched).
@@ -61,7 +61,7 @@ def test_graph_truth_reads_completed_and_superseded(tmp_path):
         {"id": "x-open", "plan_path": "p.md"},
     ]}))
     truth = mps._graph_truth(g, None)
-    assert truth == {"x-done": "done", "x-sup": "archived"}
+    assert truth == {"x-done": "done", "x-sup": "superseded"}
 
 
 def test_apply_writes_and_preserves_other_keys(tmp_path):
@@ -95,3 +95,20 @@ def test_dry_run_writes_nothing(tmp_path):
     rc = mps.main(["--root", str(root), "--graph", str(g)])
     assert rc == 0
     assert p.read_text() == before  # dry-run default: no write
+
+
+def test_graph_truth_does_not_rewrite_a_retired_spelling_at_its_own_rung():
+    """x-3ad5: the truth override runs BEFORE the already-canonical check, so a
+    doc stamped `archived` whose node is superseded would be rewritten purely to
+    change spelling - turning the rename into a migration pass over the vault.
+    """
+    assert mps._classify("archived", "x-1", {"x-1": "superseded"}) is None
+    assert mps._classify("shipped", "x-1", {"x-1": "in_review"}) is None
+
+
+def test_graph_truth_still_fixes_a_genuinely_stale_rung():
+    """The override's real job survives the guard above: a `ready` doc whose
+    node is closed is stale at the RUNG, not merely in spelling.
+    """
+    assert mps._classify("ready", "x-1", {"x-1": "done"}) == "done"
+    assert mps._classify("ready", "x-1", {"x-1": "superseded"}) == "superseded"

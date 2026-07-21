@@ -16,7 +16,7 @@ class TestStatusProgression:
             "design",
             "ready",
             "in_progress",
-            "shipped",
+            "in_review",
         )
 
     def test_progression_is_tuple(self):
@@ -31,32 +31,32 @@ class TestValidateTransition:
     def test_AC1_HP_ready_to_in_progress(self):
         validate_transition("ready", "in_progress")
 
-    def test_AC1_HP_in_progress_to_shipped(self):
-        validate_transition("in_progress", "shipped")
+    def test_AC1_HP_in_progress_to_in_review(self):
+        validate_transition("in_progress", "in_review")
 
     def test_AC1_HP_multi_step_skip_is_allowed(self):
         # design -> in_progress skips "ready" - forward multi-step is allowed
         validate_transition("design", "in_progress")
 
-    def test_AC1_HP_design_to_shipped_extreme_skip(self):
-        validate_transition("design", "shipped")
+    def test_AC1_HP_design_to_in_review_extreme_skip(self):
+        validate_transition("design", "in_review")
 
     # Backward transitions - must all raise
     def test_AC2_ERR_ready_to_design_rejected(self):
         with pytest.raises(StatusTransitionError):
             validate_transition("ready", "design")
 
-    def test_AC2_ERR_shipped_to_ready_rejected(self):
+    def test_AC2_ERR_in_review_to_ready_rejected(self):
         with pytest.raises(StatusTransitionError):
-            validate_transition("shipped", "ready")
+            validate_transition("in_review", "ready")
 
-    def test_AC2_ERR_shipped_to_in_progress_rejected(self):
+    def test_AC2_ERR_in_review_to_in_progress_rejected(self):
         with pytest.raises(StatusTransitionError):
-            validate_transition("shipped", "in_progress")
+            validate_transition("in_review", "in_progress")
 
-    def test_AC2_ERR_shipped_to_design_rejected(self):
+    def test_AC2_ERR_in_review_to_design_rejected(self):
         with pytest.raises(StatusTransitionError):
-            validate_transition("shipped", "design")
+            validate_transition("in_review", "design")
 
     # Identity transitions - must raise
     def test_AC3_ERR_identity_ready_to_ready_rejected(self):
@@ -67,9 +67,9 @@ class TestValidateTransition:
         with pytest.raises(StatusTransitionError):
             validate_transition("design", "design")
 
-    def test_AC3_ERR_identity_shipped_to_shipped_rejected(self):
+    def test_AC3_ERR_identity_in_review_to_in_review_rejected(self):
         with pytest.raises(StatusTransitionError):
-            validate_transition("shipped", "shipped")
+            validate_transition("in_review", "in_review")
 
     # Unknown statuses - must raise
     def test_AC4_ERR_unknown_old_status_rejected(self):
@@ -86,8 +86,8 @@ class TestValidateTransition:
 
     def test_AC4_EDGE_error_message_is_informative(self):
         with pytest.raises(StatusTransitionError) as exc_info:
-            validate_transition("shipped", "ready")
-        assert "shipped" in str(exc_info.value)
+            validate_transition("in_review", "ready")
+        assert "in_review" in str(exc_info.value)
         assert "ready" in str(exc_info.value)
 
 
@@ -126,3 +126,77 @@ class TestCoerceStatusFromYaml:
 
     def test_StatusTransitionError_is_ValueError_subclass(self):
         assert issubclass(StatusTransitionError, ValueError)
+
+
+class TestRetiredSpellings:
+    """x-3ad5: `shipped`/`archived` are retired as status VALUES and accepted on
+    read, so a vault doc stamped under the old vocabulary keeps working.
+    """
+
+    def test_AC2_FR_alias_resolves_to_the_surviving_spelling(self):
+        from fno.plan._status import canonical_status
+
+        assert canonical_status("shipped") == "in_review"
+        assert canonical_status("archived") == "superseded"
+        # Quoting and casing are normalized the same way as any other status.
+        assert canonical_status('  "Shipped" ') == "in_review"
+
+    def test_AC2_FR_canonical_values_pass_through_untouched(self):
+        from fno.plan._status import canonical_status
+
+        for s in (*STATUS_PROGRESSION, "done", "superseded"):
+            assert canonical_status(s) == s
+
+    def test_AC5_ERR_both_spellings_are_known_so_the_sweep_leaves_them(self):
+        from fno.plan._status import KNOWN_STATUSES
+
+        for s in ("shipped", "archived", "in_review", "superseded"):
+            assert s in KNOWN_STATUSES
+
+    def test_AC2_FR_a_doc_on_the_old_spelling_still_coerces(self):
+        assert coerce_status_from_yaml("shipped") == "in_review"
+
+    def test_AC2_FR_transition_off_the_old_spelling_reads_as_its_survivor(self):
+        # `shipped` ranks where `in_review` ranks, so a backward move still raises.
+        with pytest.raises(StatusTransitionError):
+            validate_transition("shipped", "ready")
+        # ...and an identity move through the alias is still an identity move.
+        with pytest.raises(StatusTransitionError):
+            validate_transition("shipped", "in_review")
+
+
+class TestProjectionRankSurvivesTheRename:
+    """AC4-EDGE: the forward-only guard is keyed by the PLAN vocabulary, so it
+    must have moved with the rename - a mis-keyed rank fails silently.
+    """
+
+    def test_AC4_EDGE_backward_projection_is_refused(self):
+        from fno.plan._status import project_plan_status
+
+        assert project_plan_status("in_review", "ready") is None
+
+    def test_AC4_EDGE_backward_projection_refused_from_the_old_spelling(self):
+        from fno.plan._status import project_plan_status
+
+        # The doc says `shipped`; a `ready` projection must not walk it back.
+        assert project_plan_status("shipped", "ready") is None
+
+    def test_AC4_EDGE_forward_projection_still_lands(self):
+        from fno.plan._status import project_plan_status
+
+        assert project_plan_status("in_progress", "in_review") == "in_review"
+
+    def test_AC1_HP_an_old_doc_at_the_target_rung_is_not_rewritten(self):
+        from fno.plan._status import project_plan_status
+
+        # `shipped` already IS in_review, so the projection writes nothing:
+        # the alias translates on read, it never triggers a migration write.
+        assert project_plan_status("shipped", "in_review") is None
+        assert project_plan_status("archived", "superseded") is None
+
+    def test_AC3_UI_the_two_none_gates_survive(self):
+        from fno.plan._status import project_plan_status
+
+        for gate in ("blocked", "deferred"):
+            assert project_plan_status("in_progress", gate) is None
+            assert project_plan_status("shipped", gate) is None

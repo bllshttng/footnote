@@ -109,7 +109,7 @@ EXIT=$?
 [[ $EXIT -eq 0 ]] && pass "AC1-HP: exit 0" || fail "AC1-HP: expected exit 0, got $EXIT"
 
 STATUS=$(frontmatter_value "$PLAN_FILE" "status" 2>/dev/null)
-[[ "$STATUS" == "shipped" ]] && pass "AC1-HP: status=shipped" || fail "AC1-HP: status expected 'shipped', got '$STATUS'"
+[[ "$STATUS" == "in_review" ]] && pass "AC1-HP: status=in_review" || fail "AC1-HP: status expected 'in_review', got '$STATUS'"
 
 SHIPPED_AT=$(frontmatter_value "$PLAN_FILE" "shipped_at" 2>/dev/null)
 [[ -n "$SHIPPED_AT" ]] && pass "AC1-HP: shipped_at present" || fail "AC1-HP: shipped_at missing"
@@ -164,7 +164,7 @@ EXIT=$?
 [[ $EXIT -eq 0 ]] && pass "AC4-EDGE: quick plan exit 0" || fail "AC4-EDGE: quick plan expected exit 0, got $EXIT"
 
 STATUS_Q=$(frontmatter_value "$QUICK" "status" 2>/dev/null)
-[[ "$STATUS_Q" == "shipped" ]] && pass "AC4-EDGE: quick plan status=shipped" || fail "AC4-EDGE: quick plan status expected 'shipped', got '$STATUS_Q'"
+[[ "$STATUS_Q" == "in_review" ]] && pass "AC4-EDGE: quick plan status=in_review" || fail "AC4-EDGE: quick plan status expected 'in_review', got '$STATUS_Q'"
 
 # ---------------------------------------------------------------------------
 # Task 1.2: Idempotent re-stamp (AC1-HP)
@@ -232,7 +232,7 @@ SIDS_ACCUM=$(frontmatter_list "$PLAN_ACCUM" "session_ids" 2>/dev/null)
 [[ "$SIDS_ACCUM" == *"SID2"* ]] && pass "1.2-AC2-HP: SID2 added" || fail "1.2-AC2-HP: SID2 added"
 
 STATUS_ACCUM=$(frontmatter_value "$PLAN_ACCUM" "status" 2>/dev/null)
-[[ "$STATUS_ACCUM" == "shipped" ]] && pass "1.2-AC2-HP: status still shipped (not done)" || fail "1.2-AC2-HP: status expected 'shipped', got '$STATUS_ACCUM'"
+[[ "$STATUS_ACCUM" == "in_review" ]] && pass "1.2-AC2-HP: status still in_review (not done)" || fail "1.2-AC2-HP: status expected 'in_review', got '$STATUS_ACCUM'"
 
 SECOND_AT=$(frontmatter_value "$PLAN_ACCUM" "shipped_at" 2>/dev/null)
 [[ "$FIRST_AT" == "$SECOND_AT" ]] && pass "1.2-AC2-HP: shipped_at unchanged on second stamp" || fail "1.2-AC2-HP: shipped_at changed on second stamp"
@@ -284,7 +284,7 @@ EXIT=$?
 [[ $EXIT -eq 0 ]] && pass "1.2-AC4-EDGE: graduate exits 0 when insufficient" || fail "1.2-AC4-EDGE: expected exit 0, got $EXIT"
 
 STATUS_INSUF=$(frontmatter_value "$PLAN_INSUF" "status" 2>/dev/null)
-[[ "$STATUS_INSUF" == "shipped" ]] && pass "1.2-AC4-EDGE: status stays shipped" || fail "1.2-AC4-EDGE: status expected 'shipped', got '$STATUS_INSUF'"
+[[ "$STATUS_INSUF" == "in_review" ]] && pass "1.2-AC4-EDGE: status stays in_review" || fail "1.2-AC4-EDGE: status expected 'in_review', got '$STATUS_INSUF'"
 
 # ---------------------------------------------------------------------------
 # Task 1.2: Malformed frontmatter (AC5-ERR)
@@ -337,7 +337,7 @@ EOF
 EXIT=$?
 [[ $EXIT -eq 0 ]] && pass "REGRESSION: comment-line frontmatter stamps cleanly" \
     || fail "REGRESSION: parser still crashes on comments (exit=$EXIT)"
-grep -q "^status: shipped" "$COMMENT_PLAN" \
+grep -q "^status: in_review" "$COMMENT_PLAN" \
     && pass "REGRESSION: status written despite comment lines" \
     || fail "REGRESSION: status missing after stamp on commented plan"
 

@@ -276,7 +276,7 @@ fn finalize_postmortem_on_interrupted_or_aborted() {
 }
 
 /// A ship reason runs ledger + stamp + handoff and emits session_finalized.
-/// Ship stamps `shipped` only; it does NOT graduate (done = merged, x-f34f). (AC5-HP.)
+/// Ship stamps `in_review` only; it does NOT graduate (done = merged, x-f34f). (AC5-HP.)
 #[test]
 fn finalize_ship_gated() {
     let env = setup("S-ship", false);
@@ -324,7 +324,7 @@ fn finalize_ship_gated() {
 
 /// An advisory ship (DoneAdvisory) has no merge event, so ship IS its
 /// completion: it stamps AND graduates the plan to done, unlike a code ship
-/// (DonePRGreen) which stamps `shipped` only and flips at merge (codex P2, x-f34f).
+/// (DonePRGreen) which stamps `in_review` only and flips at merge (codex P2, x-f34f).
 #[test]
 fn finalize_advisory_ship_graduates() {
     let env = setup("S-adv", false);
