@@ -2707,29 +2707,29 @@ impl View {
         // drop deliberately blanks the zone to say exactly that), so the
         // asymmetry taught the wrong thing on half the rim.
         let (term_rows, term_cols) = self.term;
-        let band_col = |outside: u16, own: u16| {
-            let c = if (panel_w..term_cols).contains(&outside) {
-                outside
-            } else {
-                own
-            };
+        // `outside` is None when there is no cell on that side at all (the
+        // rect already starts at the edge). Checked rather than wrapping: the
+        // old version leaned on wrapping to u16::MAX to fail the range test,
+        // which worked but read as an accident.
+        let band_col = |outside: Option<u16>, own: u16| {
+            let c = outside
+                .filter(|c| (panel_w..term_cols).contains(c))
+                .unwrap_or(own);
             c..c.saturating_add(1)
         };
-        let band_row = |outside: u16, own: u16| {
-            let r = if (TAB_BAR_ROWS..term_rows).contains(&outside) {
-                outside
-            } else {
-                own
-            };
+        let band_row = |outside: Option<u16>, own: u16| {
+            let r = outside
+                .filter(|r| (TAB_BAR_ROWS..term_rows).contains(r))
+                .unwrap_or(own);
             r..r.saturating_add(1)
         };
         // saturating: a zero-column rect from the server would otherwise
         // underflow `c1 - 1` and panic in debug.
         Some(match zone.dir {
-            Dir::Left => (r0..r1, band_col(c0.wrapping_sub(1), c0)),
-            Dir::Right => (r0..r1, band_col(c1, c1.saturating_sub(1))),
-            Dir::Up => (band_row(r0.wrapping_sub(1), r0), c0..c1),
-            Dir::Down => (band_row(r1, r1.saturating_sub(1)), c0..c1),
+            Dir::Left => (r0..r1, band_col(c0.checked_sub(1), c0)),
+            Dir::Right => (r0..r1, band_col(Some(c1), c1.saturating_sub(1))),
+            Dir::Up => (band_row(r0.checked_sub(1), r0), c0..c1),
+            Dir::Down => (band_row(Some(r1), r1.saturating_sub(1)), c0..c1),
         })
     }
 
@@ -18900,6 +18900,71 @@ mod tests {
                 dir: z.dir,
             }),
             "the release follows the layout it landed on"
+        );
+    }
+
+    #[test]
+    fn a_t_junction_seam_previews_exactly_what_it_does() {
+        // Pane 10 spans the left; 11 and 12 stack on the right. The 10|11 and
+        // 10|12 segments are ONE divider - x-d807 addresses a seam by branch
+        // child pair, so both resolve to the same zone. That is only acceptable
+        // if the highlight says so: the whole divider must light, and the drop
+        // must then land full-height, matching what lit.
+        let mut view = two_pane_view();
+        view.set_layout(LayoutView {
+            panes: vec![
+                (
+                    10,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        rows: 29,
+                        cols: 35,
+                    },
+                ),
+                (
+                    11,
+                    Rect {
+                        x: 36,
+                        y: 0,
+                        rows: 14,
+                        cols: 36,
+                    },
+                ),
+                (
+                    12,
+                    Rect {
+                        x: 36,
+                        y: 15,
+                        rows: 14,
+                        cols: 36,
+                    },
+                ),
+            ],
+            focus: 10,
+            ..view.layout.clone()
+        });
+        view.frames.insert(12, text_frame(14, 36, 'c'));
+
+        let upper = seam_cell_between(&view, 10, 11);
+        let lower = seam_cell_between(&view, 10, 12);
+        assert_ne!(upper.0, lower.0, "the two segments are different rows");
+        assert_eq!(
+            view.drop_zone_at(upper.0, upper.1),
+            view.drop_zone_at(lower.0, lower.1),
+            "one divider, one zone - both segments mean the same drop"
+        );
+
+        // The band spans pane 10's FULL height, so the preview shows the
+        // full-height insert the drop actually performs. No mismatch between
+        // what lights and what happens.
+        let zone = view.drop_zone_at(lower.0, lower.1).expect("a seam zone");
+        let (band_rows, _) = view.drop_band(zone).expect("10 has a rect");
+        let r10 = view.pane_rect(10).expect("10 exists");
+        assert_eq!(
+            (band_rows.end - band_rows.start),
+            r10.rows,
+            "the highlight must cover the whole divider it will insert along"
         );
     }
 
