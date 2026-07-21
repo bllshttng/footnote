@@ -3793,7 +3793,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // P2 (ab-098967b4): the dominant loop-yield boundary. Enrich the continue
     // message with a one-line inbox nudge so an autonomous loop surfaces mail.
     let continue_msg = crate::nudge::append_inbox_nudge(
-        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `timeout 1800 gh pr checks <N> --watch`) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
+        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `gh pr checks <N> --watch & w=$!; (sleep 1800; kill $w 2>/dev/null) & wait $w`) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
         &cwd,
         &session_id,
     );
@@ -3899,9 +3899,15 @@ fn async_wait_class(
 /// into a single idle turn. Supersedes the old "wait silently" prose: waiting
 /// silently still costs a full model invocation every ~90s tick, whereas arming
 /// a harness-tracked watcher and emitting `<watching>` idles the session to ZERO
-/// invocations until the watcher fires. The `timeout N gh pr checks` shape is a
-/// template (gh's `--watch` exit varies by version); the design depends only on
-/// the task EXITING, never on its exit code.
+/// invocations until the watcher fires. The `gh pr checks` shape is a template
+/// (gh's `--watch` exit varies by version); the design depends only on the task
+/// EXITING, never on its exit code.
+///
+/// The bound uses shell builtins, never `timeout(1)`: stock macOS has neither
+/// it nor `gtimeout`, so naming it makes the watcher no-op and the session idle
+/// forever on a wait that never started. The watchdog is reaped once the wait
+/// returns - left alive, it wakes 30m later and kills whatever now holds that
+/// recycled pid (codex P1).
 fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // The watcher must WAIT on the actual blocker. `gh pr checks --watch` exits
     // the instant CI has no pending checks, so on a review wait (CI already
@@ -3909,10 +3915,12 @@ fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // path needs a watcher that polls REVIEW state, not checks (codex P2).
     let watcher = if blocker == "review" {
         format!(
-            "background Bash `timeout 1800 bash -c 'n=$(gh pr view {pr_number} --json reviews --jq \".reviews|length\"); while [ \"$(gh pr view {pr_number} --json reviews --jq \".reviews|length\")\" -le \"$n\" ]; do sleep 60; done'` (wakes when a new review posts, or at the timeout)"
+            "background Bash `n=$(gh pr view {pr_number} --json reviews --jq '.reviews|length'); i=0; while [ $i -lt 30 ]; do sleep 60; [ \"$(gh pr view {pr_number} --json reviews --jq '.reviews|length')\" -gt \"$n\" ] && break; i=$((i+1)); done` (wakes when a new review posts, or after ~30m)"
         )
     } else {
-        format!("background Bash `timeout 1800 gh pr checks {pr_number} --watch`")
+        format!(
+            "background Bash `gh pr checks {pr_number} --watch & w=$!; (sleep 1800; kill $w 2>/dev/null) & k=$!; wait $w; kill $k 2>/dev/null`"
+        )
     };
     format!(
         " Arm a harness-tracked watcher with a hard timeout (e.g. {watcher}), then end your turn with `<watching reason=\"{blocker}\" pr=\"{pr_number}\" timeout=\"30m\">` and nothing else - the session then idles until the watcher exits."
@@ -4550,6 +4558,21 @@ mod tests {
         assert!(reason.contains("timeout"), "got: {reason}");
         assert!(reason.contains("gh pr checks"), "got: {reason}");
         assert!(!reason.contains("wait silently"), "got: {reason}");
+    }
+
+    #[test]
+    fn no_hint_prescribes_the_timeout_binary() {
+        // File-wide, so a future hint cannot reintroduce `timeout(1)` at a site
+        // this test does not name. The needle is built at runtime so the test
+        // does not match its own source.
+        let needle = ["timeout", " "].concat();
+        for tail in include_str!("loopcheck.rs").split(&needle).skip(1) {
+            assert!(
+                !tail.trim_start().starts_with(|c: char| c.is_ascii_digit()),
+                "bare timeout invocation: ...{}",
+                tail.chars().take(60).collect::<String>()
+            );
+        }
     }
 
     #[test]

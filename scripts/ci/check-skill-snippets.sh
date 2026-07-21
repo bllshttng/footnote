@@ -19,7 +19,11 @@
 #                                   reads as "no data".
 #   bare-timeout                    `timeout N` with no gtimeout fallback.
 #                                   macOS ships no timeout binary, so the
-#                                   watcher silently never runs.
+#                                   watcher silently never runs. gtimeout is
+#                                   only a partial escape (it needs Homebrew
+#                                   coreutils, and the fallback must branch on
+#                                   the empty case); a builtin watchdog needs
+#                                   neither binary.
 #   single-spelling-stat            stat -c (GNU) or stat -f (BSD) alone.
 #   guarded-empty-array-arg         "${a[@]+"${a[@]}"}" on an empty array: bash
 #                                   expands to no arguments, zsh to one EMPTY
@@ -152,7 +156,7 @@ FNR == 1 { inblk = 0; prev = "" }
   # 3. bare timeout with no gtimeout fallback
   if (line ~ /(^|[ \t;|&(])timeout[ \t]+[0-9]/ && line !~ /gtimeout/)
     report("bare-timeout", \
-      "macOS has no timeout binary: TO=$(command -v timeout || command -v gtimeout)")
+      "macOS has neither timeout nor gtimeout: bound with builtins - cmd & w=$!; (sleep N; kill $w 2>/dev/null) & k=$!; wait $w; kill $k 2>/dev/null")
 
   # 4. single-spelling stat
   if (line ~ /(^|[ \t;|&(=$])stat[ \t]+-c/ && line !~ /stat[ \t]+-f/)
