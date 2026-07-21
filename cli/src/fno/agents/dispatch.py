@@ -44,6 +44,7 @@ from fno.agents.providers import KNOWN_PROVIDERS
 from fno.agents.providers.base import ProviderResult, ReachabilityProbeError
 from fno.agents.registry import (
     AgentEntry,
+    AgentStatus,
     RegistryVersionError,
     load_registry,
     update_registry,
@@ -689,7 +690,7 @@ def _followup_path(
 def _stamp_status(
     name: str,
     *,
-    status: str,
+    status: AgentStatus,
     last_message_at: Optional[str | Callable[[], str]] = None,
     last_message_at_preserve: bool = False,
 ):
@@ -2194,7 +2195,7 @@ def dispatch_spawn(
                             short_id="",
                             reply=result.stdout,
                         )
-                    result = _claude_create_path(
+                    created = _claude_create_path(
                         name=name,
                         message=message,
                         cwd=cwd,
@@ -2219,7 +2220,7 @@ def dispatch_spawn(
                         kind="created",
                         name=name,
                         provider="claude",
-                        short_id=result.short_id,
+                        short_id=created.short_id,
                     )
 
                 # 4c. codex/gemini --once: create + exchange + teardown.

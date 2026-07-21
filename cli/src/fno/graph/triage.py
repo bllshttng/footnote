@@ -311,7 +311,8 @@ def fold_routing_health(events: list[dict]) -> Optional[dict]:
         key = (d.get("plan_path") or "", task)
         resolved = d.get("resolved")
         if tier == "surface-inference":
-            inferred.setdefault(key, resolved)
+            if isinstance(resolved, str):
+                inferred.setdefault(key, resolved)
         elif tier in ("task-block", "plan-frontmatter"):
             if key in inferred and resolved != inferred[key]:
                 overridden.add(key)
@@ -633,8 +634,9 @@ def _candidate_record(entry: dict, deep: bool) -> dict:
             "merge_status": entry.get("merge_status"),
         },
     }
-    if deep and record["plan_path"]:
-        record["plan_excerpt"] = _read_plan_excerpt(record["plan_path"])
+    plan_path = record["plan_path"]
+    if deep and isinstance(plan_path, str) and plan_path:
+        record["plan_excerpt"] = _read_plan_excerpt(plan_path)
     return record
 
 
@@ -879,7 +881,8 @@ def _validate_proposal(
             continue
         frm = edge.get("from")
         to = edge.get("to")
-        if frm not in valid_ids or to not in valid_ids:
+        if (not isinstance(frm, str) or not isinstance(to, str)
+                or frm not in valid_ids or to not in valid_ids):
             errors.append(f"dependency references unknown id(s): {frm} -> {to}")
             continue
         if frm == to:
@@ -1936,10 +1939,10 @@ def cmd_health(
     if collisions:
         typer.echo("")
         typer.echo("Plans stepping on each other:")
-        for c in collisions:
+        for col in collisions:
             typer.echo(
-                f"  [{c['severity']}] {' <-> '.join(c['between'])}: "
-                f"{len(c['shared_files'])} shared files; recommend {c['recommended_action']}"
+                f"  [{col['severity']}] {' <-> '.join(col['between'])}: "
+                f"{len(col['shared_files'])} shared files; recommend {col['recommended_action']}"
             )
     if resolved_payload:
         typer.echo("")
