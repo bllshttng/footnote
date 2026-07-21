@@ -28,8 +28,10 @@ import shutil
 import sys
 import tempfile
 import time
+from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
+from fno.mutex import steal_if_stale
 from fno.pr._proc import ToolMissing, run
 
 # Required-check states that count as "not failing" (jq parity).
@@ -87,7 +89,7 @@ def _alt(*vals: Any) -> Any:
 
 
 class _Lock:
-    """mkdir-based mutex, matching set-gate.sh's ``${path}.lock.d`` convention."""
+    """mkdir-based mutex on the shared ``${path}.lock.d`` convention."""
 
     def __init__(self, target: str, timeout: int = 30) -> None:
         self.dir = target + ".lock.d"
@@ -103,6 +105,8 @@ class _Lock:
                 self.held = True
                 return True
             except FileExistsError:
+                if steal_if_stale(Path(self.dir)):
+                    continue
                 if waited >= self.timeout:
                     return False
                 time.sleep(1)

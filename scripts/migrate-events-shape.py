@@ -17,10 +17,10 @@ Properties:
   - Stream processing: line-at-a-time iteration; safe for million-row files.
   - Corrupt rows: preserved verbatim, logged to ``<file>.corrupt``,
     migration continues processing subsequent rows.
-  - Lock-shared: acquires the same mkdir-based mutex
-    (``<file>.lock.d``) that scripts/lib/set-gate.sh uses, so a live target
-    session and a migration run cross-serialize. ``MIGRATE_LOCK_TIMEOUT_SECONDS``
-    overrides the 30s default (used by tests).
+  - Lock-shared: acquires the same mkdir-based mutex (``<file>.lock.d``) that
+    ``fno.events.append_event`` and ``crates/fno-agents/src/claims.rs`` use, so
+    a live target session and a migration run cross-serialize.
+    ``MIGRATE_LOCK_TIMEOUT_SECONDS`` overrides the 30s default (used by tests).
 
 Exit codes:
   0  success
@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -54,6 +55,37 @@ def _migrate_row(row: dict) -> dict:
     }
 
 
+# Mirrors fno.mutex.STALE_MUTEX_STEAL_S. Inlined rather than imported: this
+# script runs under whatever ambient python3 the operator has, which need not
+# have the fno wheel installed.
+STALE_MUTEX_STEAL_S = 120
+
+
+def _steal_if_stale(lock_dir: Path) -> bool:
+    """Rename-steal a lock dir older than the threshold (see fno/mutex.py).
+
+    True means retry the mkdir now; False means the lock is honestly held.
+    """
+    try:
+        age = time.time() - lock_dir.stat().st_mtime
+    except OSError:
+        return True
+    if age <= STALE_MUTEX_STEAL_S:
+        return False
+
+    reaped = lock_dir.with_name(f"{lock_dir.name}.reap.{os.getpid()}")
+    shutil.rmtree(reaped, ignore_errors=True)
+    try:
+        os.rename(lock_dir, reaped)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    print(f"stole stale mutex {lock_dir} (age {int(age)}s)", file=sys.stderr)
+    shutil.rmtree(reaped, ignore_errors=True)
+    return True
+
+
 def _acquire_lock(lock_dir: Path, timeout: int) -> bool:
     """mkdir-based mutex; returns True on acquire, False on timeout."""
     lock_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +95,8 @@ def _acquire_lock(lock_dir: Path, timeout: int) -> bool:
             lock_dir.mkdir()
             return True
         except FileExistsError:
+            if _steal_if_stale(lock_dir):
+                continue
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.1)

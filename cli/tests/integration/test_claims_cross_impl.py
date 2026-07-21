@@ -346,7 +346,11 @@ def test_race_python_vs_rust_single_winner(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
-# 8: recovery-mutex interop - a held mutex is waited on, never stolen
+# 8: recovery-mutex interop - a fresh mutex is waited on; a corpse is stolen
+#
+# Both halves are wire protocol: the two implementations must agree on when a
+# mutex is honestly held and when it is a corpse, or one side bricks a claim
+# key the other could have recovered.
 # --------------------------------------------------------------------------
 
 
@@ -387,6 +391,41 @@ def test_recovery_mutex_held_python_waits_does_not_steal(tmp_path: Path, monkeyp
     releaser.join()
     assert claim.holder == "pty:waiter"
     assert elapsed >= 0.9, "python must WAIT for the held recovery mutex, not steal it"
+
+
+def _plant_recovery_corpse(root: Path, key: str) -> Path:
+    """A recovery mutex left by a killed recoverer, backdated past the threshold."""
+    from fno.mutex import STALE_MUTEX_STEAL_S
+
+    mutex = claim_path(key, root=root).with_name(
+        claim_path(key, root=root).name + ".recovery.d"
+    )
+    mutex.mkdir(parents=True)
+    old = time.time() - (STALE_MUTEX_STEAL_S + 60)
+    os.utime(mutex, (old, old))
+    return mutex
+
+
+def test_recovery_mutex_corpse_stolen_by_rust(tmp_path: Path) -> None:
+    write_raw_claim(tmp_path, _stale_claim("session:rec-c"))
+    mutex = _plant_recovery_corpse(tmp_path, "session:rec-c")
+
+    r = rust("acquire", "session:rec-c", tmp_path, tmp_path,
+             "--holder", "pty:heir", "--pid", str(os.getpid()))
+
+    assert r.returncode == 0, f"rust never recovered past the corpse: {r.stderr}"
+    assert not mutex.exists()
+
+
+def test_recovery_mutex_corpse_stolen_by_python(tmp_path: Path, monkeypatch) -> None:
+    write_raw_claim(tmp_path, _stale_claim("session:rec-d"))
+    monkeypatch.chdir(tmp_path)
+    mutex = _plant_recovery_corpse(tmp_path, "session:rec-d")
+
+    claim = acquire_claim("session:rec-d", "pty:heir", pid=os.getpid(), root=tmp_path)
+
+    assert claim.holder == "pty:heir"
+    assert not mutex.exists()
 
 
 # --------------------------------------------------------------------------

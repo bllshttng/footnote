@@ -32,6 +32,7 @@ from typing import Any
 
 import yaml as _yaml
 
+from ..mutex import steal_if_stale
 from .verify_child_promise import verify_child_promise
 
 
@@ -624,8 +625,9 @@ def append_event(
 
     Validates the event before acquiring the lock so a malformed payload
     cannot block other writers. The mutex directory matches the convention
-    used by ``scripts/lib/set-gate.sh`` and ``scripts/migrate-events-shape.py``,
-    so cross-language callers serialize correctly on the same path.
+    used by ``scripts/migrate-events-shape.py`` and
+    ``crates/fno-agents/src/claims.rs``, so cross-language callers serialize
+    correctly on the same path.
     """
     validate(event)
 
@@ -640,6 +642,8 @@ def append_event(
             lock_dir.mkdir()
             break
         except FileExistsError:
+            if steal_if_stale(lock_dir):
+                continue
             if _time.monotonic() >= deadline:
                 raise TimeoutError(f"events.jsonl lock timeout: {lock_dir}")
             _time.sleep(0.1)

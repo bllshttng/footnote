@@ -7,7 +7,7 @@ Covers:
   - mixed-shape files (only legacy rows rewritten)
   - corrupt JSONL rows preserved verbatim with sidecar log
   - lock contention aborts cleanly with rc=2 (mkdir-based mutex shared
-    with scripts/lib/set-gate.sh so cross-language callers serialize)
+    with fno.events.append_event so cross-language callers serialize)
 """
 from __future__ import annotations
 
