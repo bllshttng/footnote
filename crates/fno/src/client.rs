@@ -11495,7 +11495,10 @@ mod tests {
         view.hover_seam = Some(seam); // the drag left the accent lit
         view.end_seam_drag(5, 40); // ended inside pane 10 - off the seam
         assert!(view.seam_drag.is_none(), "the seam drag ended");
-        assert!(view.hover_seam.is_none(), "stale seam accent cleared on cancel");
+        assert!(
+            view.hover_seam.is_none(),
+            "stale seam accent cleared on cancel"
+        );
 
         view.sideline_drag = Some(view.density);
         view.hover_sideline_border = true;
