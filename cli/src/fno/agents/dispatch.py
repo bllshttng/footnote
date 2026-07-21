@@ -2536,6 +2536,99 @@ def stop_agent(
         ) from exc
 
 
+def _teardown_harness_session(
+    existing: AgentEntry,
+    *,
+    name: str,
+    force: bool,
+) -> Optional[str]:
+    """Delete a non-claude agent's record from its own harness store.
+
+    Returns the teardown error message when ``force`` swallowed a failure,
+    else None. The caller folds it into the ONE terminal ``agent_removed``
+    event: emitting from in here would both duplicate that event and
+    report a registry mutation that has not happened yet.
+
+    Record-only: the harness's index record goes, the conversation stays.
+    Upholds the ordering invariant by raising before the caller touches
+    the registry -- unless ``force``, which downgrades every failure to a
+    stderr WARN naming the orphan so the operator can clean it later.
+
+    An already-absent harness record is success, not an error: a manually
+    cleaned store must not wedge ``fno agents rm``.
+
+    opencode is registry-only because it has no record-only teardown at
+    all; see :mod:`fno.agents.providers.opencode`.
+    """
+    harness = existing.harness
+    sid = existing.harness_session_id
+
+    def _fail(message: str, *, exit_code: int) -> str:
+        if not force:
+            # Terminal here, so this IS the only event for this rm.
+            events.emit(
+                "agent_removed",
+                name=name,
+                provider=harness,
+                force=False,
+                registry_changed=False,
+                teardown_error=message,
+            )
+            raise DispatchAskError(message, exit_code=exit_code)
+        sys.stderr.write(
+            f"WARN: {message}; --force given, removing registry only. "
+            f"Orphan {harness} session record: {sid}\n"
+        )
+        return message
+
+    if harness == "opencode":
+        # No record-only teardown exists for opencode: removing the session
+        # would take its child sessions and full message history with it.
+        # Registry-only, and say so rather than implying nothing was left.
+        from fno.agents.providers import opencode as opencode_mod
+
+        if sid:
+            print(opencode_mod.REGISTRY_ONLY_NOTE.format(sid=sid), flush=True)
+        return None
+
+    if not sid:
+        # Refuse rather than assume there is nothing to clean: the harness
+        # record may well exist, and this row simply lost the id that
+        # addresses it. Silently dropping the row would orphan it for good.
+        return _fail(
+            f"registry entry has no {harness} session id on file; cannot "
+            "tear down the harness record. Re-run with --force to drop the "
+            "registry row anyway.",
+            exit_code=12,
+        )
+
+    if harness == "codex":
+        from fno.agents.providers import codex as codex_mod
+
+        try:
+            removed = codex_mod.remove_session_index_entry(sid)
+        except ValueError as exc:
+            return _fail(str(exc), exit_code=12)
+        except OSError as exc:
+            return _fail(f"codex session index rewrite failed: {exc}", exit_code=1)
+        print(
+            f"torn down: codex session index entry {sid}"
+            if removed
+            else f"already gone: codex session index entry {sid}",
+            flush=True,
+        )
+        return None
+
+    # Fail loud rather than fall off the end: the caller's harness tuple and
+    # the arms above are two lists nothing ties together, and a silent return
+    # would drop the registry row while leaving the session record behind --
+    # the exact orphan this function exists to prevent.
+    raise DispatchAskError(
+        f"no teardown arm for harness {harness!r}",
+        exit_code=2,
+    )
+
+
 def rm_agent(
     name: str,
     *,
@@ -2552,11 +2645,17 @@ def rm_agent(
     registry entry is removed even when ``claude rm`` fails, with a
     stderr WARN about the orphan supervisor session.
 
-    codex / gemini: registry-only. The on-disk session files stay
-    (Locked Decision 1). Operator cleans manually if desired.
+    codex / opencode: the harness's own session RECORD is torn down
+    first (codex's ``session_index.jsonl`` entry, opencode's session via
+    ``opencode session delete``), registry row after -- same ordering
+    invariant, same ``--force`` override. Transcript files always stay
+    (Locked Decision 1).
+
+    gemini: registry-only; no teardown arm for a deprecated provider.
 
     Emits ``agent_removed`` with ``provider``, ``force``, ``claude_exit``
     fields.
+
     """
     _validate_lifecycle_name(name)
     # Accept any of the three address forms (x-1b1e); lock on the canonical name.
@@ -2577,6 +2676,9 @@ def rm_agent(
             existing,
         ):
             claude_exit: Optional[int] = None
+            # Non-None only when --force swallowed a teardown failure; rides
+            # the terminal event so the forensic stream stays single and true.
+            teardown_error: Optional[str] = None
 
             if existing.harness == "claude":
                 short_id = existing.short_id
@@ -2672,13 +2774,19 @@ def rm_agent(
                             f"{short_id} to clean later.\n"
                         )
 
-            elif existing.harness not in ("codex", "gemini"):
+            elif existing.harness in ("codex", "opencode"):
+                teardown_error = _teardown_harness_session(
+                    existing,
+                    name=name,
+                    force=force,
+                )
+            elif existing.harness != "gemini":
                 raise DispatchAskError(
                     f"rm for provider {existing.harness!r} is not implemented",
                     exit_code=2,
                 )
-            # codex / gemini: registry-only removal per Locked Decision 1;
-            # the on-disk session files stay.
+            # gemini: registry-only. No teardown arm -- the provider is
+            # deprecated, so a speculative one would be untestable guesswork.
 
             try:
                 update_registry(lambda entries: [e for e in entries if e.name != name])
@@ -2690,6 +2798,7 @@ def rm_agent(
                     claude_exit=claude_exit,
                     force=force,
                     registry_changed=False,
+                    teardown_error=teardown_error,
                     error=str(exc),
                     error_type=type(exc).__name__,
                 )
@@ -2703,9 +2812,7 @@ def rm_agent(
             # confirmation. (Sigma-review C3 finding.)
             if existing.harness == "codex" and existing.harness_session_id:
                 print(
-                    f"removed: {name} (codex session files left on "
-                    f"disk; clean via 'rm -rf ~/.codex/sessions/...' if "
-                    "desired)",
+                    f"removed: {name} (codex transcript files left on disk)",
                     flush=True,
                 )
             else:
@@ -2718,6 +2825,7 @@ def rm_agent(
                 claude_exit=claude_exit,
                 force=force,
                 registry_changed=True,
+                teardown_error=teardown_error,
             )
             return RmResult(
                 name=name,

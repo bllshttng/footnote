@@ -816,3 +816,71 @@ def session_index_exists(*, session_index_path: Optional[Path] = None) -> bool:
     """
     path = session_index_path or default_session_index_path()
     return path.exists()
+
+
+def remove_session_index_entry(
+    session_id: str, *, session_index_path: Optional[Path] = None
+) -> bool:
+    """Drop ``session_id``'s line(s) from codex's session index.
+
+    Record-only teardown: the rollout/transcript files under
+    ``~/.codex/sessions/`` are never touched. Returns True if the index
+    changed, False if the id was already absent (idempotent success --
+    a manually-cleaned index must not fail ``fno agents rm``).
+
+    Matching is on the parsed ``id`` FIELD, not substring containment.
+    The index also carries a free-text ``thread_name``, so a substring
+    match would delete an unrelated session whose name merely quotes
+    this uuid. :func:`load_known_session_ids` can afford its schema-
+    agnostic regex because a false positive there only over-reports
+    liveness; here it would destroy the wrong record.
+
+    A line that does not parse, or that carries no matching ``id``, is
+    always kept: this never removes what it does not understand.
+
+    The rewrite is atomic (temp file in the same directory + ``os.replace``,
+    preserving the original mode), so a concurrent codex append can never
+    observe a half-written index. It is NOT locked: an append landing
+    between the read and the rename is lost, which would leave that
+    session unknown to reconcile until codex rewrites the index. The
+    window is milliseconds on a manual admin command, so the ceiling is
+    accepted rather than paid for with a lock.
+
+    Raises:
+        ValueError: id is not UUID-shaped.
+        OSError: index present but unreadable/unwritable (caller surfaces).
+    """
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
+        raise ValueError(
+            f"refusing to rewrite codex session index: {session_id!r} is not "
+            "a UUID-shaped session id"
+        )
+    path = session_index_path or default_session_index_path()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except FileNotFoundError:
+        # Fresh codex install / index never written: nothing to tear down.
+        return False
+
+    def _is_target(line: str) -> bool:
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            return False
+        return isinstance(row, dict) and row.get("id") == session_id
+
+    kept = [ln for ln in lines if not _is_target(ln)]
+    if len(kept) == len(lines):
+        return False
+    tmp = path.with_name(f"{path.name}.fno-rm.{os.getpid()}.tmp")
+    try:
+        tmp.write_text("".join(kept), encoding="utf-8")
+        os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+    except BaseException:
+        # BaseException, not OSError: a KeyboardInterrupt landing between the
+        # write and the rename would otherwise strand the temp file next to
+        # the index, and nothing sweeps it.
+        tmp.unlink(missing_ok=True)
+        raise
+    return True

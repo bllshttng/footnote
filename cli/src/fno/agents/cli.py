@@ -1703,19 +1703,36 @@ def cmd_rm(
         "--force",
         "-F",
         help=(
-            "Override claude's refusal (e.g. uncommitted worktree changes) "
-            "and drop the registry entry regardless. WARNING: leaves an "
-            "orphan supervisor session that you must clean via 'claude rm "
-            "<short_id>' manually."
+            "Drop the registry entry even when the harness teardown fails "
+            "or refuses (e.g. uncommitted worktree changes). WARNING: "
+            "leaves an orphan session record in that harness's own store, "
+            "named on stderr, for you to clean manually."
         ),
     ),
 ) -> None:
-    """Remove an agent.
+    """Remove an agent: harness session record first, registry row after.
 
-    Claude agents: ``claude rm <short_id>`` first, then drop the registry
-    row on success. ``--force`` keeps removing the registry row even when
-    claude rm fails. Codex / gemini agents: registry-only removal (the
-    on-disk session files stay; clean manually if desired).
+    Per-harness teardown:
+
+    \b
+      claude    `claude rm <short_id>` (session record + worktree, via
+                claude's own delegation contract)
+      codex     drops the session's entry from ~/.codex/session_index.jsonl
+      opencode  registry-only; `rm` will not delete an opencode session,
+                because that also deletes its child sessions and its whole
+                message history. Run `opencode session delete <id>` if you
+                want the conversation gone.
+      gemini    registry-only (no teardown arm for a deprecated provider)
+
+    Your history is never removed here -- teardown drops the harness's
+    index record, not the conversation. On teardown failure the registry
+    row is kept so you can retry; ``--force`` drops it anyway and names
+    the orphan. Removing an agent does not stop a running session; use
+    ``fno agents stop`` for that.
+
+    Worktrees are NOT removed here for non-claude harnesses (nothing on
+    the registry row marks a cwd as an isolated worktree). Reap them with
+    ``fno worktree cleanup --merged --apply``.
     """
     from fno.agents.dispatch import DispatchAskError, rm_agent
 
