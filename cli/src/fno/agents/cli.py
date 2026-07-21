@@ -286,6 +286,13 @@ def cmd_watch(
     raise typer.Exit(rc)
 
 
+# A crown ladder is a handful of altitudes (VP -> Director -> IC). Cap the level
+# well inside the Rust registry row's u32 crown_level so a fat-fingered level
+# (Python int is arbitrary-precision) cannot overflow the u32 on the daemon's
+# read and poison the whole shared store (US9 review).
+_MAX_CROWN_LEVEL = 255
+
+
 def _parse_crown(spec: str) -> tuple[int, str]:
     """Parse a ``--crown 'level=N,scope=X'`` spec into (level, scope); exit 2 on
     any malformed part. ``level`` must be a non-negative int, ``scope`` nonblank.
@@ -317,6 +324,12 @@ def _parse_crown(spec: str) -> tuple[int, str]:
         raise typer.Exit(code=2)
     if level < 0:
         print(f"--crown level must be >= 0; got {level}", file=sys.stderr)
+        raise typer.Exit(code=2)
+    if level > _MAX_CROWN_LEVEL:
+        print(
+            f"--crown level must be <= {_MAX_CROWN_LEVEL}; got {level}",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=2)
     if not parts["scope"]:
         print("--crown scope must be nonblank", file=sys.stderr)

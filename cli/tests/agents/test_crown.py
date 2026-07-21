@@ -36,6 +36,8 @@ def test_parse_crown_valid_orderfree() -> None:
         "level=-1,scope=x",    # negative
         "level=1,scope=",      # blank scope
         "garbage",             # no k=v
+        "level=99999999999,scope=x",  # > u32::MAX would poison the Rust registry
+        "level=256,scope=x",   # just over the sane ceiling
     ],
 )
 def test_parse_crown_rejects_malformed(spec: str) -> None:
