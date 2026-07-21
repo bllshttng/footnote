@@ -372,54 +372,21 @@ esac
 if [ -z "$ORIGIN_SLUG" ]; then
   ORIGIN_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
 fi
-# Canonical repo root, NOT `--show-toplevel`: the ritual usually runs from a
-# worktree, while graph `cwd` values point at the canonical checkout. Taken from
-# `git worktree list` (the first record that is a real working tree) rather than
-# "<git-common-dir>/..", which is only the root by convention - under
-# `git init --separate-git-dir` the common dir is EXTERNAL, and if it happens to
-# sit inside ANOTHER checkout that checkout would pass a bare .git probe and
-# become the root. Mirrors resolve_canonical_worktree, including its fallback.
-# read-loop, not `for x in $VAR`: zsh does not word-split a scalar expansion, so
-# the for-loop form silently collapses every id into one.
-REPO_ROOT=""
-WORKTREE_LIST="$(git worktree list --porcelain 2>/dev/null || true)"
-while IFS= read -r WT_LINE; do
-  case "$WT_LINE" in
-    "worktree "*)
-      WT_CAND="${WT_LINE#worktree }"
-      # A bare repo and a separate-git-dir metadata dir both appear here and
-      # neither has a .git child, so the probe skips exactly those.
-      if [ -e "$WT_CAND/.git" ]; then REPO_ROOT="$WT_CAND"; break; fi ;;
-  esac
-done <<EOF
-$WORKTREE_LIST
-EOF
-if [ -z "$REPO_ROOT" ]; then
-  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-fi
-if [ -n "$REPO_ROOT" ]; then
-  # Resolved via cd/pwd because --path-format=absolute is git >= 2.31 only
-  # (same reason as Step 1).
-  REPO_ROOT="$(cd "$REPO_ROOT" 2>/dev/null && pwd -P || true)"
-fi
-if [ -z "$REPO_ROOT" ]; then
-  echo "post-merge: repo root unresolved; url-less nodes cannot be scoped and are SKIPPED (pr_url matches still union)" >&2
-fi
 if [ -n "$ORIGIN_SLUG" ]; then
   # `contains` not `test`: a slug may carry regex metacharacters (org/repo.js).
   # The surrounding /.../pull/ anchors keep a superstring slug from matching.
   # `strings` not `//`: a hand-edited graph can hold a non-string pr_url, and
   # ascii_downcase on one aborts the WHOLE program, silently dropping every
-  # legitimate node after it. A node with neither url nor cwd is dropped too -
-  # fail closed, never a guess.
+  # legitimate node after it. A url-less node is dropped too - a bare pr_number
+  # names no repo and PR numbers collide across repos, so matching one by cwd
+  # was a guess. Writers now pair pr_url with every pr_number and
+  # `fno backlog maintain` backfills the rest, so a url-less node here is an
+  # anomaly to report, not a population to serve.
   SCAN_ERR="$(mktemp)"
-  if ! PR_NODES="$(jq -r --argjson pr "$PR" --arg slug "$ORIGIN_SLUG" --arg root "$REPO_ROOT" '
+  if ! PR_NODES="$(jq -r --argjson pr "$PR" --arg slug "$ORIGIN_SLUG" '
       .entries[]?
       | select(.pr_number == $pr)
-      | select(
-          (((.pr_url | strings) // "") | ascii_downcase | contains("/" + ($slug | ascii_downcase) + "/pull/"))
-          or ((((.pr_url | strings) // "") == "") and ($root != "") and ((.cwd | strings) == $root))
-        )
+      | select(((.pr_url | strings) // "") | ascii_downcase | contains("/" + ($slug | ascii_downcase) + "/pull/"))
       | .id' "$GJ" 2>"$SCAN_ERR")"; then
     echo "post-merge: graph pr_number scan FAILED - no graph-derived id reaped" >&2
     cat "$SCAN_ERR" >&2
