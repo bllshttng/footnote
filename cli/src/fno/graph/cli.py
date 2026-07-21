@@ -3085,6 +3085,11 @@ def cmd_groom(
     hour: Optional[int] = typer.Option(
         None, "--hour", help="Local hour for --install-agent (default: 2)."
     ),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Report grooming freshness and exit 0 only if a pass is due. Runs nothing.",
+    ),
 ) -> None:
     """Run today's grooming pass over the backlog (at most once a day).
 
@@ -3099,10 +3104,20 @@ def cmd_groom(
         GROOM_AGE_DEFAULT,
         GROOM_HOUR_DEFAULT,
         GROOM_MODEL_DEFAULT,
+        groom_is_due,
+        groom_staleness,
         install_groom_agent,
         refresh_groom_agent,
         run_groom,
     )
+
+    if check:
+        # The shell bridge to the freshness predicate, so the SessionStart
+        # fallback can gate on it without re-implementing the marker scan.
+        # Exit code is the answer; stdout is for a human reading the receipt.
+        state, hours = groom_staleness()
+        typer.echo(json.dumps({"state": state, "hours": hours}))
+        raise typer.Exit(code=0 if groom_is_due((state, hours)) else 1)
 
     if refresh_agent:
         # The tail of `fno update`, so it must never fail the update: a skipped

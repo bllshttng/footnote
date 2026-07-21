@@ -298,6 +298,13 @@ if command -v fno >/dev/null 2>&1; then
         mkdir -p .fno 2>/dev/null; printf '%s\n' "$rs_today" >"$rs_watermark" 2>/dev/null || true
         ( fno plan reconcile-status --apply >/dev/null 2>&1 & ) 2>/dev/null || true
     fi
+    # Grooming fallback (x-1c7b): fires only when the daily pass is >48h stale,
+    # so a healthy LaunchAgent never trips it. Self-gates and self-watermarks.
+    # Backgrounded whole: its freshness probe is a CLI shellout, and a healthy
+    # machine never writes a watermark to skip it, so it would otherwise land on
+    # every single session's critical path.
+    gsh_helper="${SCRIPT_DIR}/helpers/groom-self-heal.sh"
+    [[ -f "$gsh_helper" ]] && ( bash "$gsh_helper" >/dev/null 2>&1 & ) 2>/dev/null || true
     # Graph->doc mirror sweep: bare `plan sync` self-gates on graph.json mtime
     # (one stat, cheap on no change), so no shell watermark; backgrounded + output
     # discarded so it can never corrupt this hook's JSON.
