@@ -1078,6 +1078,7 @@ def _next_cursor(
             providers_hash=providers_hash,
             last_rotated_at=now,
         )
+    assert prev is not None  # `fresh` above is True when prev is None, and returned
     if prev.consecutive_use_count < sticky_limit:
         return ComboCursor(
             combo_name=combo_name,

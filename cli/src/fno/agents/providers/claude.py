@@ -38,7 +38,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Literal, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional
 
 from fno.agents.providers._claude_session_registry import (
     TERMINAL_STATES,
@@ -252,7 +252,7 @@ def headless_create(
             capture_output=True,
             text=True,
             timeout=timeout,
-            **({"env": spawn_env} if spawn_env is not None else {}),
+            env=spawn_env,
         )
     except subprocess.TimeoutExpired as exc:
         raise ProviderSubprocessError(124, f"claude -p timed out after {exc.timeout}s") from exc
@@ -349,6 +349,7 @@ def bg_create(
     # An explicit --route (route_env, already resolved + fail-closed at the CLI
     # boundary) WINS over the role lane: named intent beats auto-routing. Only
     # when absent do we resolve the role's fail-safe route.
+    route: Optional[dict[str, str]]
     if route_env:
         route = dict(route_env)
     else:
@@ -989,6 +990,7 @@ def claude_agents_json(
     # legacy ``{"agents": ...}`` wrapper is unwrapped and a bare list
     # is used directly. Anything else degrades to the warned-fallback
     # path instead of crashing with ``AttributeError`` on ``.get()``.
+    rows: Any
     if isinstance(parsed, list):
         rows = parsed
     elif isinstance(parsed, dict):
@@ -1100,6 +1102,7 @@ def logs(
             return 1
 
         try:
+            assert proc.stdout is not None  # spawned with stdout=PIPE
             for line in iter(proc.stdout.readline, ""):
                 out.write(line)
                 if hasattr(out, "flush"):
