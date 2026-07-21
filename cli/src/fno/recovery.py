@@ -624,7 +624,8 @@ def _auto_switch_enabled(repo_root: Optional[str] = None) -> bool:
     try:
         from fno.adapters.providers.loader import load_providers
 
-        return bool(getattr(load_providers(repo_root=repo_root), "auto_switch", False))
+        rr = Path(repo_root) if repo_root else None
+        return bool(getattr(load_providers(repo_root=rr), "auto_switch", False))
     except Exception:  # noqa: BLE001 - config read must never crash the sweep
         return False
 
@@ -650,7 +651,7 @@ def _materialize_managed_switch(record_id: str, repo_root: Optional[str] = None)
         from fno.adapters.providers import managed
         from fno.agents.events import emit as _emit
 
-        config = load_providers(repo_root=repo_root)
+        config = load_providers(repo_root=Path(repo_root) if repo_root else None)
         if not getattr(config, "auto_switch", False):
             return False
         record = config.by_id.get(record_id)
