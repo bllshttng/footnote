@@ -100,6 +100,9 @@ def test_opencode_spawn_stamps_the_captured_session_id(
     )
     rows = load_registry()
     assert [r.harness_session_id for r in rows] == [ses]
+    # US8: opencode resumes off harness_session_id, so short_id stays empty -
+    # the jobId population is claude-only.
+    assert rows[0].short_id == ""
 
 
 def test_opencode_spawn_never_claims_another_rows_session_id(
@@ -182,7 +185,19 @@ def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     assert row.harness_session_id == result.session_uuid
     assert row.pid == 4242
     assert row.status == "live"
-    assert row.short_id == ""  # one live ref: mux only
+    # The row keeps short_id empty: it is the worker/bg transport slot, and a mux
+    # row holds exactly one live ref (validate_single_live_ref).
+    assert row.short_id == ""
+    # US8: the receipt-facing result carries claude's 8-hex jobId so the king can
+    # mail the pane straight from the spawn receipt...
+    assert result.short_id == result.session_uuid[:8]
+    # ...and that handle resolves back to this exact row via the derived_short
+    # rule (harness_session_id[:8]), proving the receipt handle is addressable.
+    from fno.agents.registry import resolve_agent_in
+
+    resolved = resolve_agent_in(rows, result.short_id)
+    assert resolved.entry.name == "peer"
+    assert resolved.matched_by == "derived_short"
 
 
 def test_ac1_hp_session_resolution_env_beats_default(

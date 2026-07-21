@@ -79,6 +79,9 @@ class MuxSpawnResult:
     pane_id: int
     child_pid: Optional[int]
     session_uuid: Optional[str]
+    # Claude's 8-hex jobId (``session_uuid[:8]``), the addressable mail handle;
+    # "" for providers whose transport key is not short_id (US8).
+    short_id: str = ""
 
 
 def _fno_bin() -> str:
@@ -880,6 +883,17 @@ def dispatch_spawn_pane(
                     reason="no unique opencode session for this cwd after spawn",
                 )
 
+        # Claude addresses a pane by its 8-hex jobId (the first block of the
+        # session UUID). The row does NOT store it in short_id - that field is
+        # the worker/bg transport slot, and a mux row must hold exactly one live
+        # ref (validate_single_live_ref). The jobId resolves back to this row via
+        # resolve_agent's derived_short rule (harness_session_id[:8]), so the
+        # receipt can hand the king a usable mail handle without touching the row
+        # (US8). Empty for providers that resume off harness_session_id.
+        short_id_val = (
+            session_uuid[:8] if provider == "claude" and session_uuid else ""
+        )
+
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
             # Claim check, inside the registry write lock so it is atomic with
             # the stamp. Two panes racing in one cwd can each see the SAME lone
@@ -916,4 +930,5 @@ def dispatch_spawn_pane(
         pane_id=pane_id,
         child_pid=child_pid,
         session_uuid=session_uuid,
+        short_id=short_id_val,
     )

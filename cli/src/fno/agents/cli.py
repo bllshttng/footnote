@@ -818,10 +818,12 @@ def cmd_spawn(
                 raise typer.Exit(code=exc.exit_code) from exc
             # Compact one-line receipt, superset of the daemon-spawn receipt shape
             # ({"name","short_id","provider","status"}) so line-parsing consumers
-            # keep working; short_id is empty (a mux row has no worker socket).
+            # keep working. short_id carries claude's 8-hex jobId so the caller can
+            # mail the pane straight from the receipt (US8); "" for providers that
+            # resume off harness_session_id instead.
             receipt_obj = {
                 "name": pane_result.name,
-                "short_id": "",
+                "short_id": pane_result.short_id,
                 "provider": pane_result.provider,
                 "provider_source": provider_source,
                 "status": "live",
