@@ -311,10 +311,14 @@ so even a delegated `next`/`all` is never a silent surprise.
   - **`node_bare=1`** - the payload was nothing but the id, so the user named it
     deliberately. STOP and tell the user. Do NOT spawn.
   - **`node_bare=0`** - the id was inferred from a payload carrying other text
-    (a `/target` passthrough line, or prose whose first word merely fits the id
-    shape: `a-f` are letters, so `re-added` and `dead-beef` match it). Degrade to
-    `node=""` with a one-line note and spawn on the message as typed; only the
-    receipt loses its node suffix.
+    (prose whose first word merely fits the id shape - `a-f` are letters, so
+    `re-added` and `dead-beef` match it - or a `/target <prose>` line the
+    extraction grep'd a word out of). Degrade to `node=""` with a one-line note
+    and spawn on the message as typed; only the receipt loses its node suffix.
+
+  `/target <id>` with nothing else reports `node_bare=1`, so an explicit command
+  naming a node that does not exist still refuses rather than burning a worker
+  on it.
 
   The asymmetry is about what the user *typed*, not which tier matched. Refusing
   a spawn because ordinary prose happened to look like an id would break the

@@ -625,6 +625,13 @@ out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'ab-12345678' -P etl)"
 check_eq       'node+proj conflict status' "$(field "$out" status)" 'error'
 check_contains 'node+proj conflict hints force' "$(field "$out" error)" '--force'
 
+# ...but an id INFERRED from prose must not trigger it, or a cross-project seed
+# whose first word merely fits the id shape refuses before VALIDATE can fall
+# back to a verbatim seed.
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 're-added the auth check' -P etl)"
+check_eq       'inferred node + proj does not conflict' "$(field "$out" status)" 'ok'
+check_not_contains 'inferred node + proj skips the conflict text' "$(field "$out" error)" 'carries its own project'
+
 # --- node + -P + -f forces the override (flag wins) ---------------------------
 out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'ab-12345678' -P etl -f)"
 check_eq   'forced override status'  "$(field "$out" status)"       'ok'
@@ -704,7 +711,13 @@ check_eq 're-added is inferred, not deliberate'   "$(field "$out" node_bare)" '0
 out="$(run_nofno 'ab-4040eee8 fix the login')"
 check_eq 'id plus trailing prose is inferred'     "$(field "$out" node_bare)" '0'
 out="$(run_nofno '/target internal/fno/plans/20260711-dark-mode-x-8af8.md')"
-check_eq 'passthrough id is never bare'           "$(field "$out" node_bare)" '0'
+check_eq 'id grepped out of a path is inferred'   "$(field "$out" node_bare)" '0'
+out="$(run_nofno '/target re-added the deleted cache layer')"
+check_eq 'id grepped out of prose is inferred'    "$(field "$out" node_bare)" '0'
+# An explicit `/target <id>` and nothing else is as deliberate as a bare id:
+# spawning a worker onto a nonexistent id just burns it.
+out="$(run_nofno '/target x-2aad')"
+check_eq 'explicit /target <id> is deliberate'    "$(field "$out" node_bare)" '1'
 # A payload with no id-shaped first token is untouched by any of this.
 out="$(run_nofno 'dead code cleanup')"
 check_eq 'unhyphenated prose stays a seed'        "$(field "$out" payload_mode)" 'seed'

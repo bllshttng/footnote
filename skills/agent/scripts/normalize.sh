@@ -348,9 +348,11 @@ elif printf '%s' "$first_tok" | grep -qE '^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$'; t
   # it to decide refuse-loud vs degrade-to-seed on a resolution miss.
   [[ "$msg" == "$first_tok" ]] && NODE_BARE=1
 elif printf '%s' "$msg" | grep -qE '^/target([[:space:]]|$)'; then
-  # Unanchored, so a hex-shaped prose word ("re-added") can match; the SKILL's
-  # VALIDATE arm degrades a passthrough miss to node="" rather than refusing.
+  # Unanchored, so a hex-shaped prose word can match a `/target <prose>` line.
   NODE="$(printf '%s' "$msg" | grep -oE '[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}' | head -1)"
+  # `/target <id>` and nothing else is as deliberate as a bare id: spawning a
+  # worker onto an id that does not exist just burns it.
+  [[ -n "$NODE" && "$msg" == "/target $NODE" ]] && NODE_BARE=1
 elif printf '%s' "$msg" | grep -iqE '^[a-z0-9][a-z0-9-]*$'; then
   # tier 2: slug candidate. Case-insensitive (`-i`) so a mobile-auto-capitalized
   # slug (`Dashless-spawn`) is still classified as a candidate; the resolver
@@ -434,9 +436,12 @@ if [[ "$EFFORT_SET" -eq 1 && -z "$EFFORT" ]]; then
   emit_error "--effort requires a value (got an empty value)"
 fi
 if [[ -n "$PROJECT" ]]; then
-  # A node reference (resolved ab-id, slug candidate, or `next` pointer) carries
-  # its own project; --project conflicts unless forced.
-  if [[ "$FORCE" -eq 0 ]] && { [[ -n "$NODE" ]] || [[ -n "$NODE_QUERY" ]] || [[ "$SPAWN_NEXT" -eq 1 ]]; }; then
+  # A node reference (resolved id, slug candidate, or `next` pointer) carries
+  # its own project; --project conflicts unless forced. Only a DELIBERATE node
+  # counts: an id inferred from prose ("re-added the auth check") would
+  # otherwise refuse the spawn here, before VALIDATE ever gets to recognize the
+  # lookup miss and fall back to a verbatim seed.
+  if [[ "$FORCE" -eq 0 ]] && { [[ -n "$NODE" && "$NODE_BARE" -eq 1 ]] || [[ -n "$NODE_QUERY" ]] || [[ "$SPAWN_NEXT" -eq 1 ]]; }; then
     emit_error "a backlog node carries its own project, so --project '$PROJECT' conflicts with it. Drop --project (the node's cwd is used), or pass -f/--force to override the node's cwd with project '$PROJECT'."
   fi
   _pres="$(resolve_project "$PROJECT")"

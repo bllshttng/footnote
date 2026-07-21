@@ -520,6 +520,10 @@ OUT="$(norm_gen 'ab-4040eee8 fix the login')"
 OUT="$(norm_gen 'dead code cleanup')"
 [[ -z "$(field "$OUT" node)" && "$(field "$OUT" message)" == "dead code cleanup" ]] \
   && pass "unhyphenated prose stays a verbatim seed" || fail "unhyphenated prose: $OUT"
+OUT="$(norm_gen '/target x-2aad')"
+[[ "$(field "$OUT" node_bare)" == "1" ]] && pass "explicit /target <id> is deliberate" || fail "/target id: $OUT"
+OUT="$(norm_gen '/target re-added the deleted cache layer')"
+[[ "$(field "$OUT" node_bare)" == "0" ]] && pass "id grepped out of prose is inferred" || fail "/target prose: $OUT"
 
 OUT="$(LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" \
        bash "$NORM" --input "$(printf 'task \x80 text')" 2>/dev/null)"
