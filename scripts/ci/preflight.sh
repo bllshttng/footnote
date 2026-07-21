@@ -67,24 +67,35 @@ CANDIDATE_SHORT="$(git -C "$INVOKING_ROOT" rev-parse --short HEAD)"
 
 # --- lock (atomic mkdir; steal a dead holder) -------------------------------
 LOCKDIR="$COMMON_DIR/.preflight.lock.d"
+stamp_holder() {
+    printf 'pid=%s started=%s host=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(hostname 2>/dev/null || echo unknown)" "$CANDIDATE_SHORT" > "$LOCKDIR/holder"
+}
 acquire_lock() {
-    if mkdir "$LOCKDIR" 2>/dev/null; then return 0; fi
+    if mkdir "$LOCKDIR" 2>/dev/null; then stamp_holder; return 0; fi
     local holder_pid holder_line
     holder_line="$(cat "$LOCKDIR/holder" 2>/dev/null || echo '')"
     holder_pid="$(printf '%s' "$holder_line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
     if [[ -n "$holder_pid" ]] && ! kill -0 "$holder_pid" 2>/dev/null; then
-        # dead holder: steal once
-        rm -rf "$LOCKDIR"
-        mkdir "$LOCKDIR" 2>/dev/null && return 0
+        # Steal a dead holder by rename, never `rm -rf` + `mkdir`: rename is one
+        # atomic operation, so exactly one of N concurrent stealers wins the
+        # corpse. With rm -rf, a loser deletes the lockdir the winner just
+        # recreated and both proceed into the one shared worktree - each then
+        # reset --hard's it mid-run of the other, so a suite reports pass/fail
+        # legs earned by somebody else's checkout.
+        if mv "$LOCKDIR" "$LOCKDIR.reap.$$" 2>/dev/null; then
+            rm -rf "$LOCKDIR.reap.$$"
+            mkdir "$LOCKDIR" 2>/dev/null && { stamp_holder; return 0; }
+        fi
     fi
     echo "preflight: lock held - $holder_line" >&2
     exit 3
 }
 acquire_lock
-printf 'pid=%s started=%s host=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(hostname 2>/dev/null || echo unknown)" "$CANDIDATE_SHORT" > "$LOCKDIR/holder"
 
 TMPHOME=""
-cleanup() { rm -rf "$LOCKDIR"; [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"; }
+# Release only a lock we still hold. If ours was stolen we are the hijacked run,
+# and the lockdir at this path now belongs to the stealer.
+cleanup() { grep -q "pid=$$ " "$LOCKDIR/holder" 2>/dev/null && rm -rf "$LOCKDIR"; [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"; }
 trap cleanup EXIT INT TERM
 
 # --- ensure / reset the preflight worktree ----------------------------------
@@ -223,6 +234,19 @@ if run_hermetic bash -c "command -v cargo-audit >/dev/null 2>&1"; then
     fi
 else
     record_leg "cargo audit (ADVISORY)" "skipped (not installed)" 0
+fi
+
+# --- verdict tripwire --------------------------------------------------------
+# Belt-and-braces over the lock: re-verify we still own both the worktree and
+# the lock before attributing a verdict to our candidate. Any residual clobber -
+# a future lock bug, a hand-run `git reset` in the shared worktree - becomes a
+# loud VOID instead of a GREEN or RED silently earned by another checkout.
+# Compare shas only; the preflight worktree is always detached HEAD.
+WT_HEAD_NOW="$(git -C "$PREFLIGHT_WT" rev-parse HEAD 2>/dev/null || echo unknown)"
+if [[ "$WT_HEAD_NOW" != "$CANDIDATE_SHA" ]] || ! grep -q "pid=$$ " "$LOCKDIR/holder" 2>/dev/null; then
+    echo "preflight: VOID - lost the preflight worktree mid-run (now at ${WT_HEAD_NOW:0:12}, expected $CANDIDATE_SHORT)." >&2
+    echo "preflight: verdict discarded - another preflight took the shared worktree. Re-run." >&2
+    exit 1
 fi
 
 # --- summary -----------------------------------------------------------------
