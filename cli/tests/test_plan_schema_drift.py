@@ -64,3 +64,17 @@ def test_stamp_written_fields_are_modeled() -> None:
     assert not missing, (
         f"_stamp.py writes frontmatter keys with no PlanFrontmatter field: {sorted(missing)}"
     )
+
+
+def test_retired_status_spellings_still_validate() -> None:
+    """AC2-FR (x-3ad5): the vault carries docs stamped under the retired
+    vocabulary. They must validate at their surviving rung, or the rename
+    invalidates every one of them - the gap that hid in this file, since the
+    enum is derived from the axis the rename moved.
+    """
+    assert PlanFrontmatter(
+        node="x-1", status="shipped", created="2026-07-20"
+    ).status.value == "in_review"
+    assert PlanFrontmatter(
+        node="x-1", status="archived", created="2026-07-20"
+    ).status.value == "superseded"
