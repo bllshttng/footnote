@@ -179,3 +179,126 @@ def receipt_lines(
             f'fno backlog update {node_id} --orphan-ok "<reason>"',
         ]
     return []
+
+
+# ---------------------------------------------------------------------------
+# Scope growth (x-d157): how much did an epic grow after it was decomposed?
+# ---------------------------------------------------------------------------
+
+# Below this fraction of the epic's window carrying an origin, the growth figure
+# is suppressed rather than printed. At the capture rate this feature shipped
+# against (27%), a low number is indistinguishable from poor capture, and that
+# ambiguity flatters the process in the direction nobody would question. A
+# constant, not config: the right level is a judgment about the data, and a
+# per-project knob would let a low-capture project tune the check away.
+SCOPE_GROWTH_COVERAGE_FLOOR = 0.50
+
+
+class ScopeGrowth(NamedTuple):
+    """Follow-up work an epic accumulated after decomposition, with its evidence.
+
+    ``reportable`` is false when capture coverage sits below the floor. Callers
+    must suppress ``follow_up_ids`` counting in that case and say why: a growth
+    number without its coverage is not a measurement.
+
+    ``realized_nodes`` / ``realized_prs`` are the ground-truth join - what the
+    epic actually cost - against ``declared_size``, so the growth figure can be
+    falsified. An epic reporting near-zero growth that shipped far past its size
+    is evidence against the capture, not evidence about the epic.
+    """
+
+    epic_id: str
+    follow_up_ids: tuple[str, ...]
+    window_total: int
+    window_with_origin: int
+    coverage: float
+    reportable: bool
+    realized_nodes: int
+    realized_prs: int
+    declared_size: Optional[str]
+
+
+def origin_index(entries: list[Entry]) -> dict[str, list[Entry]]:
+    """``source_node_id`` inverted: origin id -> the nodes that name it."""
+    out: dict[str, list[Entry]] = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        src = e.get("source_node_id")
+        if src:
+            out.setdefault(src, []).append(e)
+    return out
+
+
+def _parent_descendants(entries: list[Entry], root_id: str) -> set:
+    """Every node under ``root_id`` by ``parent``, transitively."""
+    by_parent: dict[str, list[str]] = {}
+    for e in entries:
+        if isinstance(e, dict) and e.get("parent"):
+            by_parent.setdefault(e["parent"], []).append(e["id"])
+    out: set = set()
+    frontier = [root_id]
+    while frontier:
+        current = frontier.pop()
+        for child_id in by_parent.get(current, []):
+            if child_id not in out:
+                out.add(child_id)
+                frontier.append(child_id)
+    return out
+
+
+def scope_growth(
+    entries: list[Entry],
+    epic_id: str,
+    *,
+    floor: float = SCOPE_GROWTH_COVERAGE_FLOOR,
+) -> ScopeGrowth:
+    """Work the epic grew after decomposition, plus the coverage that qualifies it.
+
+    The follow-up set is every node reachable from the epic's descendants by
+    ``source_node_id``, minus the descendants themselves: work that came out of
+    the epic without being planned into it. A node already under the epic by
+    ``parent`` was decomposed in, not grown.
+
+    Coverage is measured over the epic's window - nodes created at or after it -
+    because that is the population in which a follow-up could have been
+    captured. Nodes older than the epic could not have named it.
+    """
+    descendants = _parent_descendants(entries, epic_id)
+    by_origin = origin_index(entries)
+
+    follow_ups: set = set()
+    frontier = list(descendants)
+    seen = set(descendants) | {epic_id}
+    while frontier:
+        for child in by_origin.get(frontier.pop(), []):
+            child_id = child.get("id")
+            if child_id in seen:
+                continue
+            seen.add(child_id)
+            follow_ups.add(child_id)
+            frontier.append(child_id)
+
+    epic = _id_index(entries).get(epic_id, {})
+    epic_born = epic.get("created_at") or ""
+    window = [
+        e for e in entries
+        if isinstance(e, dict)
+        and e.get("id") != epic_id
+        and (e.get("created_at") or "") >= epic_born
+    ]
+    with_origin = sum(1 for e in window if e.get("source_node_id"))
+    coverage = (with_origin / len(window)) if window else 0.0
+
+    realized = [e for e in entries if isinstance(e, dict) and e.get("id") in descendants]
+    return ScopeGrowth(
+        epic_id=epic_id,
+        follow_up_ids=tuple(sorted(follow_ups)),
+        window_total=len(window),
+        window_with_origin=with_origin,
+        coverage=coverage,
+        reportable=coverage >= floor,
+        realized_nodes=len(realized),
+        realized_prs=len({e["pr_number"] for e in realized if e.get("pr_number")}),
+        declared_size=epic.get("size"),
+    )

@@ -356,6 +356,31 @@ def _child_note(child: dict, events: list[dict], worker: Optional[str]) -> str:
     return "-"
 
 
+def _scope_growth_line(growth) -> str:
+    """One line: the growth figure with its coverage, or why it is withheld.
+
+    The coverage clause is never dropped. A bare count reads as measured even
+    when it rests on a quarter of the population, and it errs low - which
+    flatters the process, so it is the direction least likely to be questioned.
+    """
+    from fno.graph.rollup import SCOPE_GROWTH_COVERAGE_FLOOR
+
+    pct = f"{growth.coverage:.0%} of {growth.window_total} window nodes"
+    cost = (
+        f"realized {growth.realized_nodes} nodes / {growth.realized_prs} PRs"
+        f"{f' vs size {growth.declared_size}' if growth.declared_size else ''}"
+    )
+    if not growth.reportable:
+        return (
+            f"scope growth: withheld (origin capture {pct}, below the "
+            f"{SCOPE_GROWTH_COVERAGE_FLOOR:.0%} floor)  |  {cost}"
+        )
+    return (
+        f"scope growth: {len(growth.follow_up_ids)} follow-ups "
+        f"(origin capture {pct})  |  {cost}"
+    )
+
+
 @_epic_cli.command("status")
 def cmd_epic_status(
     ctx: typer.Context,
@@ -417,6 +442,13 @@ def cmd_epic_status(
             "receipt": _child_note(c, events, worker),
         })
 
+    # Scope growth (x-d157): follow-ups the epic accumulated after decomposition.
+    # Folded into the existing epic verb rather than a new one - this is the
+    # surface where someone already asks how big the epic got.
+    from fno.graph.rollup import scope_growth
+
+    growth = scope_growth(entries, epic_id)
+
     if json_mode(ctx):
         typer.echo(json.dumps({
             "epic": epic_id,
@@ -424,10 +456,25 @@ def cmd_epic_status(
             "children_total": total,
             "children_done": done,
             "children": rows,
+            # follow_ups is reported only when coverage clears the floor; the
+            # coverage block ships regardless so a suppressed figure explains
+            # itself instead of just being absent.
+            "scope_growth": {
+                "follow_ups": len(growth.follow_up_ids) if growth.reportable else None,
+                "follow_up_ids": list(growth.follow_up_ids) if growth.reportable else [],
+                "reportable": growth.reportable,
+                "coverage": round(growth.coverage, 4),
+                "window_total": growth.window_total,
+                "window_with_origin": growth.window_with_origin,
+                "realized_nodes": growth.realized_nodes,
+                "realized_prs": growth.realized_prs,
+                "declared_size": growth.declared_size,
+            },
         }, indent=2))
         return
 
     typer.echo(f"epic: {epic_id} ({epic_node.get('slug') or ''})  {done}/{total} done")
+    typer.echo("  " + _scope_growth_line(growth))
     if not rows:
         typer.echo("  (no children)")
         return
@@ -3609,12 +3656,9 @@ def _spawned_walk(
     already found - returning an empty set with a cycle flag would satisfy a
     naive reading of "terminates" while silently discarding the answer.
     """
-    by_source: dict = {}
-    for e in entries:
-        src = e.get("source_node_id")
-        if src:
-            by_source.setdefault(src, []).append(e)
+    from fno.graph.rollup import origin_index
 
+    by_source = origin_index(entries)
     rows: list = []
     seen = {root_id}
     frontier = [root_id]
