@@ -772,9 +772,14 @@ def select_validity_candidates(
             continue
         scored.append((retro, created, nid, e))
     # Retro-exempt nodes first (the reason the gate is lifted), then oldest-first
-    # within each tier.
-    scored.sort(key=lambda t: (not t[0], t[1], t[2]))
-    return [e for _, _, _, e in scored[:batch_size]]
+    # within each tier. Unpack by name rather than by index so the key does not
+    # couple to the tuple's shape (gemini review, PR #530).
+    def _order(item: tuple[bool, datetime, str, dict]):
+        retro, created, nid, _ = item
+        return (not retro, created, nid)
+
+    scored.sort(key=_order)
+    return [e for *_, e in scored[:batch_size]]
 
 
 def contained_path_exists(root: str, rel: str) -> bool:
