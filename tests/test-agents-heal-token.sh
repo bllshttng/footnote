@@ -32,6 +32,13 @@ exec "$VENV_PY" -c 'from fno.cli import app; app()' "\$@"
 EOF
 chmod +x "$tmp/bin/fno"
 
+# `resume` checks its provider CLI is on PATH and exits 14 BEFORE rendering, even
+# under --print-command. A CI runner has no claude, so without this stub the
+# harness dies at the first assertion having tested nothing. Only ever reached by
+# a --print-command call, which returns before any exec, so the stub never runs.
+printf '%s\n%s\n' '#!/bin/sh' 'exit 0' > "$tmp/bin/claude"
+chmod +x "$tmp/bin/claude"
+
 CLAUDE_UUID=c655c326-1111-2222-3333-444455556666
 TWIN_UUID=c655c326-9999-8888-7777-666655554444
 printf '{"type":"summary"}\n{"type":"user","cwd":"/repo/one"}\n' \

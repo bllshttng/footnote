@@ -1084,11 +1084,13 @@ pub(crate) fn find_agent_entry<'a>(
 /// `store_fallback.is_session_shaped`. A plain unknown NAME never probes, so a
 /// typo keeps today's refusal instead of paying for three store reads.
 fn is_session_shaped(token: &str) -> bool {
-    let t = token.trim();
-    if let Some(rest) = t.strip_prefix("ses_") {
+    // Lowercase FIRST, so `SES_...` is probeable here exactly as it is in Python:
+    // `_normalize` only preserves case for a token already matching the
+    // lowercase-literal `ses_` prefix, and lowercases everything else.
+    let low = token.trim().to_ascii_lowercase();
+    if let Some(rest) = low.strip_prefix("ses_") {
         return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric());
     }
-    let low = t.to_ascii_lowercase();
     let hex = |s: &str| s.bytes().all(|b| b.is_ascii_hexdigit());
     (low.len() == 8 && hex(&low)) || is_uuid_shaped(&low)
 }
@@ -2642,6 +2644,9 @@ mod tests {
             "a1b2c3d4",
             "A1B2C3D4",
             "ses_7f3a9b2c1d0e",
+            // Python's _normalize lowercases this into a `ses_` id and probes
+            // it; the Rust gate mirrors that rather than declining.
+            "SES_7f3a9b2c1d0e",
             CLAUDE_UUID_FIXTURE,
         ] {
             assert!(is_session_shaped(t), "{t} should be probeable");
