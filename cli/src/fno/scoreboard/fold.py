@@ -1202,7 +1202,9 @@ def _probe_evidence(loop_check_events: list[dict], session_id: str | None) -> di
         return {}
     latest: dict = {}
     for e in loop_check_events:
-        data = e.get("data") or {}
+        data = e.get("data")
+        if not isinstance(data, dict):
+            continue  # a corrupt event must skip, never crash the whole verb
         if data.get("session_id") != session_id:
             continue
         probes = data.get("done_probes")

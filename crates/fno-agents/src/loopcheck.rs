@@ -4038,11 +4038,18 @@ fn split_inline_list(body: &str) -> Vec<String> {
     while let Some(c) = chars.next() {
         if c == '"' || c == '\'' {
             let mut item = String::new();
+            let mut escaped = false;
             for c2 in chars.by_ref() {
-                if c2 == c {
+                if escaped {
+                    item.push(c2);
+                    escaped = false;
+                } else if c2 == '\\' {
+                    escaped = true;
+                } else if c2 == c {
                     break;
+                } else {
+                    item.push(c2);
                 }
-                item.push(c2);
             }
             out.push(item);
         }
@@ -4098,7 +4105,13 @@ fn parse_done_probes(content: &str) -> ProbeDecl {
                 return ProbeDecl::None;
             }
             if let Some(inner) = rest.strip_prefix('[') {
-                let items = split_inline_list(inner.trim_end_matches(']'));
+                // strip_suffix, not trim_end_matches: the latter eats EVERY
+                // trailing ']' (mangling a command that ends in one) and would
+                // silently accept an unterminated list.
+                let Some(inner) = inner.strip_suffix(']') else {
+                    return ProbeDecl::Unparseable;
+                };
+                let items = split_inline_list(inner);
                 // An empty result means a multi-line inline list (items live on
                 // following lines) - unrecoverable here, so refuse rather than
                 // report the declaration as absent.
@@ -7282,6 +7295,31 @@ mod done_probe_tests {
             parse_done_probes(&fm("done_probes:\nstatus: ready")),
             ProbeDecl::Unparseable,
             "a declared-but-empty block must refuse, not pass"
+        );
+    }
+
+    #[test]
+    fn inline_list_keeps_escaped_quotes_inside_a_command() {
+        // A mis-parsed probe is worse than a refused one: it would run a
+        // DIFFERENT command than the plan declared and gate on its result.
+        let doc = fm(r#"done_probes: ["sh -c \"echo hi\"", "echo ok"]"#);
+        assert_eq!(
+            probes_of(&doc),
+            vec![r#"sh -c "echo hi""#.to_string(), "echo ok".to_string()]
+        );
+    }
+
+    #[test]
+    fn inline_list_preserves_a_trailing_bracket_and_refuses_an_unterminated_one() {
+        assert_eq!(
+            probes_of(&fm(r#"done_probes: ["echo [hi]"]"#)),
+            vec!["echo [hi]".to_string()],
+            "only the list's own closing bracket may be stripped"
+        );
+        assert_eq!(
+            parse_done_probes(&fm(r#"done_probes: ["echo a""#)),
+            ProbeDecl::Unparseable,
+            "an unterminated inline list must refuse, not silently parse"
         );
     }
 

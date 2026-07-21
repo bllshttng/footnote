@@ -357,3 +357,26 @@ def test_undeterminable_marker_counts_as_zero_passed_not_null():
     )
     joined = [r for r in pf["results"] if r["status"] == "joined"][0]
     assert joined["probes"] == {"declared": 2, "passed": 0}
+
+
+def test_probe_evidence_skips_a_corrupt_event_without_crashing():
+    """A malformed `data` (string/list/None) must skip, not raise - one bad
+    line in events.jsonl would otherwise take down the whole scoreboard verb."""
+    events = [
+        {"type": "loop_check", "data": "not-a-dict"},
+        {"type": "loop_check", "data": None},
+        {"type": "loop_check", "data": ["also", "not", "a", "dict"]},
+        _probe_event("build-sess", {
+            "fno mail list --since 24h | grep -q groom": "pass",
+            'test -n "$(fno backlog groom --status)"': "pass",
+        }),
+    ]
+    pf = build_plan_fidelity(
+        _PROBE_ROWS, [], since_days=28, now=NOW,
+        read_plan_doc=lambda p: _PROBE_PLAN,
+        read_summary=lambda row: "",
+        read_diff=lambda pr: [],
+        loop_check_events=events,
+    )
+    joined = [r for r in pf["results"] if r["status"] == "joined"][0]
+    assert joined["probes"] == {"declared": 2, "passed": 2}
