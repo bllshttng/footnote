@@ -47,6 +47,203 @@ def _graph_path() -> Path:
     return GRAPH_JSON
 
 
+# Window for the done-not-merged invariant. A bad close is worth catching in the
+# days after it lands; older ones are settled, and the bound is what keeps this
+# affordable on a cadenced check (984 closed-with-PR nodes in a mature graph).
+DONE_NOT_MERGED_WINDOW_DAYS = 7
+
+
+def _pr_states_by_repo(pr_refs: list[tuple], *, limit: int = 200) -> tuple[dict, list[str]]:
+    """Map (repo, pr_number) -> gh state for a batch of refs.
+
+    ONE `gh pr list` per repo rather than one `gh pr view` per node: a per-node
+    query would be hundreds of round-trips every time the check runs, which is
+    how a cadenced check ends up disabled.
+
+    Returns (states, outage_repos). A repo that could not be read contributes no
+    states and its slug lands in outage_repos, so its nodes read as unknown
+    rather than as violations - one network blip must never manufacture a dozen
+    false alarms.
+    """
+    from fno.graph._reconcile import ReconcileError, _gh_executable
+    import subprocess
+
+    states: dict = {}
+    outages: list[str] = []
+    if _gh_executable() is None:
+        return states, sorted({repo for repo, _ in pr_refs if repo})
+
+    for repo in sorted({repo for repo, _ in pr_refs if repo}):
+        cmd = [
+            "gh", "pr", "list", "--state", "all", "--limit", str(limit),
+            "--repo", repo, "--json", "number,state",
+        ]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, check=False, timeout=30
+            )
+            if result.returncode != 0:
+                raise ReconcileError((result.stderr or "").strip() or "non-zero exit")
+            rows = json.loads(result.stdout or "[]")
+        except (subprocess.TimeoutExpired, OSError, ReconcileError, json.JSONDecodeError):
+            outages.append(repo)
+            continue
+        for row in rows if isinstance(rows, list) else []:
+            number = row.get("number")
+            if isinstance(number, int):
+                states[(repo, number)] = row.get("state")
+    return states, outages
+
+
+def _forced_close_receipts(roots=None) -> set:
+    """`(node_id, pr_number)` pairs carrying a backlog_done_forced receipt.
+
+    A deliberate force-close over an unmerged PR is the documented bypass, not a
+    violation - it is the one close that leaves a reason on the record. The pair
+    scopes the exemption to the PR the force actually authorized: a node reopened
+    (`defer` clears completed_at) and later closed over a DIFFERENT open PR is
+    not shielded by the old receipt. ``pr_number`` is None for a ref-less force.
+
+    ``roots`` names extra project roots to read receipts from: under ``--all``
+    or a foreign ``--project`` a node's receipt lives in ITS repo's events log,
+    not the invocation repo's, so reading only the invocation repo would report
+    a legitimately force-closed foreign node as a violation. None reads the
+    invocation repo alone (the same-project default).
+    """
+    pairs: set = set()
+    paths: list[Path] = []
+    seen: set = set()
+
+    def _add(p: Path) -> None:
+        if str(p) not in seen:
+            seen.add(str(p))
+            paths.append(p)
+
+    for r in roots or []:
+        _add(Path(r) / ".fno" / "events.jsonl")
+    _add(_events_path())  # always include the invocation repo
+
+    for path in paths:
+        try:
+            if not path.exists():
+                continue
+            with path.open() as fh:
+                for line in fh:
+                    if "backlog_done_forced" not in line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    # `data` is where the canonical envelope puts it; the other
+                    # two are tolerated for older lines.
+                    body = ev.get("data") or ev.get("payload") or ev
+                    nid = body.get("node_id") or ev.get("node_id")
+                    if not nid:
+                        continue
+                    pr = body.get("pr_number")
+                    pairs.add((nid, pr if isinstance(pr, int) else None))
+        except OSError:
+            continue
+    return pairs
+
+
+def done_not_merged_report(entries: list[dict], *, window_days: int = DONE_NOT_MERGED_WINDOW_DAYS) -> dict:
+    """Nodes closed over a PR that is not merged.
+
+    The invariant this asserts: for every node with `pr_number` and
+    `completed_at` set, the referenced PR must be MERGED, or the node must carry
+    a forced-close receipt.
+
+    It is stated about the graph rather than enforced inside a close function on
+    purpose - a guard in `cmd_done` cannot see a writer that never calls
+    `cmd_done`, which is exactly how nodes came to be stamped done over open PRs
+    while the guarded door was working correctly.
+
+    Scoped to `pr_number is not None`, so advisory and doc nodes (legitimately
+    PR-less) are exempt rather than permanently red.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=window_days)
+
+    # (node, [(repo, pr_number, pr_url), ...]) - EVERY ref, not just the primary.
+    # cmd_done closes on any MERGED ref (a node whose primary is OPEN but whose
+    # additional_prs carries a merged PR is a legitimate close), so checking the
+    # primary alone reports a valid close as a violation.
+    candidates: list[tuple] = []
+    for e in entries:
+        completed_at, pr_number = e.get("completed_at"), e.get("pr_number")
+        if not completed_at or not isinstance(pr_number, int):
+            continue
+        try:
+            closed_dt = datetime.fromisoformat(str(completed_at).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if closed_dt < cutoff:
+            continue
+        refs = [(repo_slug_from_url(url or ""), num, url) for num, url in node_pr_refs(e)]
+        candidates.append((e, refs))
+
+    if not candidates:
+        return {"violations": [], "unknown": [], "checked": 0, "window_days": window_days}
+
+    all_pairs = [(repo, num) for _, refs in candidates for repo, num, _ in refs]
+    states, outage_repos = _pr_states_by_repo(all_pairs)
+    roots = {r for e, _ in candidates if (r := (e.get("_resolved_cwd") or e.get("cwd")))}
+    forced = _forced_close_receipts(roots)
+
+    violations: list[dict] = []
+    unknown: list[dict] = []
+    for node, refs in candidates:
+        nid = node.get("id")
+        record = {
+            "id": nid,
+            "title": node.get("title", ""),
+            "pr_number": refs[0][1],  # primary is the node's identity
+            "completed_at": node.get("completed_at"),
+        }
+        # Exempt only the closure the force actually authorized: a receipt for
+        # one of THIS node's current refs (or a ref-less force). A node reopened
+        # and re-closed over a new PR is not shielded by an old receipt.
+        if (nid, None) in forced or any((nid, num) in forced for _, num, _ in refs):
+            continue
+
+        ref_states = [states.get((repo, num)) for repo, num, _ in refs]
+        if "MERGED" in ref_states:
+            continue  # any merged ref is a valid close
+
+        # No merged ref. If ANY ref is unreadable, a merged ref could be hiding
+        # behind it, so this stays unknown - the same never-a-false-breach rule
+        # the gh-outage case follows.
+        if None in ref_states:
+            reason = "unknown"
+            for (repo, _num, _url), st in zip(refs, ref_states):
+                if st is None:
+                    if not repo:
+                        reason = "no pr_url to resolve the repo"
+                    elif repo in outage_repos:
+                        reason = "gh outage"
+                    else:
+                        reason = "not in gh window"
+                    break
+            unknown.append({**record, "reason": reason})
+            continue
+
+        # Every ref read, none merged: a genuine close over unmerged evidence.
+        violations.append({**record, "pr_state": ref_states[0]})
+
+    return {
+        "violations": violations,
+        "unknown": unknown,
+        "checked": len(candidates),
+        "window_days": window_days,
+    }
+
+
 def _events_path() -> Path:
     """Repo-root ``.fno/events.jsonl`` - the same file ``fno event emit`` writes
     to (events/cli.py) and the routing/triage fold reads. Anchoring to the repo
@@ -1550,6 +1747,13 @@ def cmd_health(
     except Exception:  # noqa: BLE001 - advisory only; health must not break
         pass
 
+    # done=merged invariant. Advisory on any failure: a check that crashes the
+    # whole health report is a check that gets removed.
+    try:
+        dnm = done_not_merged_report(entries)
+    except Exception:  # noqa: BLE001
+        dnm = {"violations": [], "unknown": [], "checked": 0, "window_days": 0}
+
     report = {
         "scope": _resolve_scope(project, all_projects, entries),
         **({"routing": routing_metrics} if routing_metrics else {}),
@@ -1563,6 +1767,8 @@ def cmd_health(
         "project_cwd_mismatch_nodes": mismatch_ids,
         **({"orphan_feature_rate": orphan_rate} if orphan_rate is not None else {}),
         **({"orphan_feature_nodes": orphan_nodes} if orphan_rate is not None else {}),
+        "done_not_merged": dnm["violations"],
+        "done_not_merged_unknown": dnm["unknown"],
         "stranded_by_failed_blocker": stranded_payload,
         **({"batch_verdict": batch_verdict} if batch_verdict else {}),
         **({"evals": evals_summary} if evals_summary else {}),
@@ -1755,6 +1961,20 @@ def cmd_health(
             typer.echo(f"  {s['blocker']} deferred ({s['deferred_reason']}) strands:")
             for d in s["dependents"]:
                 typer.echo(f"    - {d['id']} [{d['status']}] {d['title']}")
+    if dnm["violations"]:
+        typer.echo("")
+        typer.echo(
+            f"Closed over an unmerged PR (last {dnm['window_days']}d) - "
+            f"the map claims work that has not landed:"
+        )
+        for v in dnm["violations"]:
+            typer.echo(
+                f"  {v['id']} PR #{v['pr_number']} is {v['pr_state']}, "
+                f"closed {v['completed_at']}  {v['title']}"
+            )
+    if dnm["unknown"]:
+        typer.echo("")
+        typer.echo(f"done=merged unknown (not a violation): {len(dnm['unknown'])} node(s)")
 
 
 # ---------------------------------------------------------------------------

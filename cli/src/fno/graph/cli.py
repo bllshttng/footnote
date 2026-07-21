@@ -6299,6 +6299,24 @@ def cmd_reconcile(
         # after the lock - else an epic-level dependent stalls.
         cascade_closed_acc: list = []
 
+        # Ledger rollup, precomputed outside the lock (ledger I/O must not block
+        # other graph mutations). Reconcile is the MAINSTREAM close: a session
+        # lands its PR open, `done` exits 5 awaiting merge, and reconcile closes
+        # it at the merge - so without the rollup here, session_id / cost /
+        # points are never recorded on the normal path at all.
+        reconcile_rollups: dict = {}
+        try:
+            from fno.done.cli import _rollup_from_ledger
+
+            for record in closeable:
+                node_obj = _find_node(entries, record.node_id)
+                if node_obj:
+                    reconcile_rollups[record.node_id] = _rollup_from_ledger(
+                        node_obj.get("plan_path")
+                    )
+        except Exception:
+            reconcile_rollups = {}
+
         def mutator(entries):
             actually_closed.clear()
             cascade_closed_acc.clear()
@@ -6306,6 +6324,34 @@ def cmd_reconcile(
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
                     _apply_completion_fields(node_obj, merge_status="merged")
+                    if record.node_id in reconcile_rollups:
+                        try:
+                            from fno.done.cli import _apply_rollup
+
+                            # Cost is fill-only, matching cmd_done. _apply_rollup
+                            # merges cost_sessions and recomputes the total, but
+                            # a prior stamp (fno backlog cost / a loop writer)
+                            # timestamps its rows at recording time while the
+                            # ledger row carries the completion time, so the same
+                            # run reads as distinct and gets double-counted.
+                            # Preserve any existing cost; the rollup's job here is
+                            # session_id / points.
+                            prior_cost = node_obj.get("cost_usd")
+                            prior_sessions = list(node_obj.get("cost_sessions") or [])
+                            # No env_session: reconcile is the detached
+                            # SessionStart sweep, so CLAUDECODE_SESSION_ID names
+                            # whoever started it, NOT the closed node's work.
+                            # Trust the ledger's attribution.
+                            _apply_rollup(
+                                node_obj,
+                                reconcile_rollups[record.node_id],
+                                env_session=None,
+                            )
+                            if prior_cost is not None:
+                                node_obj["cost_usd"] = prior_cost
+                                node_obj["cost_sessions"] = prior_sessions
+                        except Exception:
+                            pass
                     # Backfill the PR ref for a reverse-mapped node (dead before
                     # the node<->PR stamp): the recovered number/url live only on
                     # the record, so without this the closed node stays
