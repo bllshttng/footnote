@@ -76,7 +76,22 @@ err=$(PATH=/usr/bin:/bin "$BIN" logs deadbeef 2>&1); rc=$?
 [[ "$err" == "no agent matching 'deadbeef'; accepted forms:"* ]] \
   || fail "degraded heal did not reproduce today's error: $err"
 
-# 4. Ambiguity refuses loudly with EVERY candidate and adopts nothing.
+# 4. A registry write failure does not block the verb, and does not hide either:
+#    reaching the session wins, but the operator must see that the roster did not
+#    get the row. Skipped when the chmod does not actually deny us (e.g. root).
+rm -f "$REGISTRY"
+chmod 500 "$(dirname "$REGISTRY")"
+if ! { : > "$REGISTRY"; } 2>/dev/null; then
+  out=$("$BIN" resume c655c326 --print-command 2>&1); rc=$?
+  chmod 700 "$(dirname "$REGISTRY")"
+  [[ $rc -eq 0 ]] || fail "unwritable registry blocked the verb (exit $rc): $out"
+  grep -q -- "--resume $CLAUDE_UUID" <<<"$out" || fail "verb did not reach the session: $out"
+  grep -qi "WARN" <<<"$out" || fail "failed registration was silent: $out"
+else
+  chmod 700 "$(dirname "$REGISTRY")"
+fi
+
+# 5. Ambiguity refuses loudly with EVERY candidate and adopts nothing.
 printf '{"type":"session_meta","payload":{"id":"%s","cwd":"/repo/two"}}\n' "$TWIN_UUID" \
   > "$tmp/codex/2026/07/20/rollout-2026-07-20T10-00-00-$TWIN_UUID.jsonl"
 rm -f "$REGISTRY"

@@ -1120,6 +1120,13 @@ fn heal_token(token: &str) -> Result<Option<Value>, String> {
     if !out.status.success() {
         return Ok(None);
     }
+    // The healer adopts best-effort: a failed registry write still returns the
+    // row, with the reason on stderr. Swallowing that would make the degradation
+    // invisible -- the verb works, the roster silently does not.
+    let warn = String::from_utf8_lossy(&out.stderr);
+    if !warn.trim().is_empty() {
+        eprint!("{warn}");
+    }
     // The LAST non-empty line, not the whole buffer: a first-run `fno` may print
     // a setup-migration banner ahead of the payload.
     let text = String::from_utf8_lossy(&out.stdout);
