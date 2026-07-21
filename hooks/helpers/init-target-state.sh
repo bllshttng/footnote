@@ -745,9 +745,9 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # split from also glob-expanding a token like "5*" against the cwd.
   set -f
   for _tok in $INITIAL_INPUT; do
-    if [[ "$_tok" =~ ^ab-[0-9a-f]{8}$ ]] \
-       || { [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] \
-            && grep -q "\"${_tok}\"" "$_GRAPH_FILE" 2>/dev/null; }; then
+    # One grep-gated arm for every id form, ab-ids included (parity with _resolve_plan_for_blast; no ungrep'd bypass).
+    if [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] \
+       && grep -q "\"${_tok}\"" "$_GRAPH_FILE" 2>/dev/null; then
       case " $_GUARD_MATCHES " in
         *" $_tok "*) ;;  # already counted this distinct id
         *) _GUARD_MATCHES="${_GUARD_MATCHES:+$_GUARD_MATCHES }$_tok" ;;
