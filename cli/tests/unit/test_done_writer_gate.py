@@ -228,3 +228,68 @@ def test_ac5_edge_non_pr_close_is_ungated(done_graph, monkeypatch):
     entry = _node(done_graph, "ab-doc001")
     assert entry.get("completed_at") is not None
     assert entry.get("completion_note") == "shipped brief"
+
+
+# ---------------------------------------------------------------------------
+# US5 / AC1-HP + AC4-FR: sweep every inventoried writer against one fixture
+# ---------------------------------------------------------------------------
+
+
+def test_us5_no_writer_closes_a_node_whose_pr_is_open(done_graph, monkeypatch):
+    """Every close path refuses an OPEN PR, so none can regress alone.
+
+    The inventory that produced this fix listed six writers; W1/W2 were already
+    merge-gated, W5 is deleted, and W3/W4 are fixed here. Sweeping them against
+    one fixture is what keeps a future seventh writer from quietly rejoining the
+    list - the node must read in_review afterward no matter who tried.
+    """
+    from typer.testing import CliRunner
+    from fno.cli import app
+    from fno.graph._reconcile import PrMergeState
+    import fno.graph.cli as graph_cli
+
+    _seed(done_graph, {
+        "id": "ab-sweep01",
+        "title": "Open PR sweep node",
+        "domain": "code",
+        "_status": "in_review",
+        "pr_number": 42,
+        "pr_url": "https://github.com/o/r/pull/42",
+    })
+    _stub_gh(monkeypatch, "OPEN")
+    monkeypatch.setattr(
+        graph_cli,
+        "_done_gh_query",
+        lambda n, **kw: PrMergeState(number=n, state="OPEN", url=None, merged_at=None),
+    )
+
+    runner = CliRunner()
+    # W4 `fno done`, W1 `backlog done`: both must report awaiting merge.
+    assert runner.invoke(app, ["done", "ab-sweep01", "--pr", "42"]).exit_code == 5
+    assert runner.invoke(app, ["backlog", "done", "ab-sweep01"]).exit_code == 5
+    # W3 `backlog update --completed`: the flag is gone, so it cannot be reached.
+    assert runner.invoke(
+        app, ["backlog", "update", "ab-sweep01", "--completed"]
+    ).exit_code != 0
+
+    entry = _node(done_graph, "ab-sweep01")
+    assert entry.get("completed_at") is None
+    assert entry.get("_status") == "in_review"
+    assert entry.get("merge_status") is None
+
+
+def test_ac4_fr_completed_at_never_precedes_merged_at(done_graph, monkeypatch):
+    """AC4-FR: the invariant the incident violated by 2h05m."""
+    from datetime import datetime
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    merged_at = "2026-01-01T00:00:00+00:00"
+    _seed(done_graph, {"id": "ab-mrg002", "title": "Merged node", "domain": "code"})
+    _stub_gh(monkeypatch, "MERGED")
+
+    r = CliRunner().invoke(app, ["done", "ab-mrg002", "--pr", "42"])
+    assert r.exit_code == 0
+
+    entry = _node(done_graph, "ab-mrg002")
+    assert datetime.fromisoformat(entry["completed_at"]) >= datetime.fromisoformat(merged_at)
