@@ -31,7 +31,7 @@ from pathlib import Path
 def _graph_lock_path(path: Path) -> Path:
     try:
         base = path.resolve()
-    except OSError:
+    except (OSError, RuntimeError):  # symlink loop: ELOOP or RuntimeError by version
         base = path
     return Path(str(base) + ".lock")
 

@@ -11,6 +11,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from fno.graph.store import _graph_lock_path, locked_mutate_graph
 
 
@@ -32,10 +34,14 @@ def test_aliased_paths_share_one_lock(tmp_path):
 
 
 # --- AC5: a resolve failure degrades to the raw path, never crashes ---
+# A symlink loop raises OSError (ELOOP) or RuntimeError depending on the Python
+# version (3.13 raises neither, so a real loop can't exercise this branch there);
+# mock both so the degrade path is proven portably.
 
-def test_resolve_failure_degrades_to_raw(monkeypatch):
+@pytest.mark.parametrize("exc", [OSError("ELOOP"), RuntimeError("symlink loop")])
+def test_resolve_failure_degrades_to_raw(monkeypatch, exc):
     def boom(self):
-        raise OSError("symlink loop")
+        raise exc
 
     monkeypatch.setattr(Path, "resolve", boom)
     raw = Path("some/graph.json")

@@ -602,13 +602,14 @@ def _graph_lock_path(path: Path) -> Path:
     Resolved so two spellings of the same graph (relative vs absolute, or a
     symlinked .fno) share ONE inode and stay mutually exclusive; mirrors the
     is_canonical resolve below. Falls back to the raw path on a resolve error
-    (symlink loop) rather than crashing the mutation.
+    rather than crashing the mutation. A symlink loop raises OSError (ELOOP) or
+    RuntimeError depending on the Python version, so catch both.
     """
     # ponytail: resolve() before .lock so aliased paths to one graph share a
     # lock; drop it only if profiling ever flags the stat.
     try:
         base = path.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         base = path
     return Path(str(base) + ".lock")
 
