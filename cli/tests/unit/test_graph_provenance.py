@@ -1268,3 +1268,178 @@ def test_cli_session_add_unknown_node_exits_nonzero(tmp_path, monkeypatch):
 
     r = CliRunner().invoke(C.cli, ["session", "add", "ab-nope", "--phase", "do"])
     assert r.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# x-0469 - guarded do-provenance stamp: claimed_at + the identity/plan guards
+# ---------------------------------------------------------------------------
+
+def _guard_graph(tmp_path, monkeypatch, node_id="ab-guard001"):
+    """A one-node graph wired into both the store and the CLI module."""
+    import fno.graph.cli as C
+
+    g = _make_graph(tmp_path, [{"id": node_id, "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "SESSION-A")
+    return g
+
+
+def _sessions(g):
+    from fno.graph.store import read_graph
+
+    return read_graph(g)[0].get("sessions", [])
+
+
+def test_claimed_at_lands_on_row_and_bounds_the_window(tmp_path, monkeypatch):
+    """AC1-HP: claimed_at (start) and at (terminal) both ride one row."""
+    from fno.graph.store import append_session_record
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    append_session_record(
+        g, "ab-guard001", phase="do", harness="claude", session_id="S",
+        at="2026-07-20T12:00:00Z", claimed_at="2026-07-20T10:00:00Z",
+    )
+    row = _sessions(g)[0]
+    assert row["claimed_at"] == "2026-07-20T10:00:00Z"
+    assert row["claimed_at"] <= row["at"]
+
+
+def test_claimed_at_absent_leaves_the_key_off(tmp_path, monkeypatch):
+    """Legacy rows and Step 1.5 stamps stay valid: no key, not a null."""
+    from fno.graph.store import append_session_record
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    append_session_record(g, "ab-guard001", phase="do", harness="claude", session_id="S")
+    assert "claimed_at" not in _sessions(g)[0]
+
+
+@pytest.mark.parametrize("bad", ["2026-07-20", "2026-07-20T10:00:00-07:00", "nope"])
+def test_claimed_at_rejects_non_utc_like_at(tmp_path, monkeypatch, bad):
+    from fno.graph.store import append_session_record
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="claimed_at"):
+        append_session_record(
+            g, "ab-guard001", phase="do", harness="claude", session_id="S", claimed_at=bad,
+        )
+    assert _sessions(g) == []
+
+
+def test_claimed_at_is_not_part_of_the_idempotency_key(tmp_path, monkeypatch):
+    """AC1-HP: a double fire stays one row, and the first observation owns both
+    timestamps even when the second passes a different claimed_at."""
+    from fno.graph.store import append_session_record
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    for claimed in ("2026-07-20T10:00:00Z", "2026-07-20T11:00:00Z"):
+        append_session_record(
+            g, "ab-guard001", phase="do", harness="claude", session_id="S",
+            claimed_at=claimed,
+        )
+    rows = _sessions(g)
+    assert len(rows) == 1
+    assert rows[0]["claimed_at"] == "2026-07-20T10:00:00Z"
+
+
+def test_require_session_mismatch_skips_with_exit_zero(tmp_path, monkeypatch):
+    """AC5-ERR: the stale-manifest squatter never stamps, and the skip is exit 0
+    so the finalize caller does not log a designed outcome as a failure."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "ab-guard001", "--phase", "do",
+        "--require-session", "SESSION-DEAD",
+    ])
+    assert r.exit_code == 0
+    assert _sessions(g) == []
+    assert "SESSION-DEAD" in r.output
+
+
+def test_require_session_match_stamps(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "ab-guard001", "--phase", "do",
+        "--require-session", "SESSION-A", "--claimed-at", "2026-07-20T10:00:00Z",
+    ])
+    assert r.exit_code == 0
+    rows = _sessions(g)
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "do" and rows[0]["claimed_at"] == "2026-07-20T10:00:00Z"
+
+
+def _plan(tmp_path, claims: str) -> str:
+    p = tmp_path / "plan.md"
+    p.write_text(f"---\nstatus: ready\nclaims: {claims}\n---\n\n# plan\n")
+    return str(p)
+
+
+def test_guard_plan_disagreement_skips_naming_both_ids(tmp_path, monkeypatch):
+    """AC8-EDGE: a plan claiming another node skips, exit 0, both ids named."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "ab-guard001", "--phase", "do",
+        "--guard-plan", _plan(tmp_path, "ab-other99"),
+    ])
+    assert r.exit_code == 0
+    assert _sessions(g) == []
+    assert "ab-other99" in r.output and "ab-guard001" in r.output
+
+
+def test_guard_plan_agreement_stamps(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "ab-guard001", "--phase", "do",
+        "--guard-plan", _plan(tmp_path, "ab-guard001"),
+    ])
+    assert r.exit_code == 0
+    assert len(_sessions(g)) == 1
+
+
+@pytest.mark.parametrize("plan_arg", ["missing.md", "no-claims"])
+def test_guard_plan_absent_evidence_is_agreement(tmp_path, monkeypatch, plan_arg):
+    """Mirror of /do Step 1.5: an unreadable plan or an absent `claims:` is
+    agreement-unknown, and absent evidence of conflict is not conflict."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    if plan_arg == "no-claims":
+        p = tmp_path / "noclaims.md"
+        p.write_text("---\nstatus: ready\n---\n\n# plan\n")
+        plan_arg = str(p)
+    else:
+        plan_arg = str(tmp_path / plan_arg)
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "ab-guard001", "--phase", "do", "--guard-plan", plan_arg,
+    ])
+    assert r.exit_code == 0
+    assert len(_sessions(g)) == 1
+
+
+def test_guard_plan_with_pr_number_is_refused_not_ignored(tmp_path, monkeypatch):
+    """A silently-ignored guard on an append-only record is the failure mode this
+    whole feature exists to prevent, so the combination is rejected."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "--pr-number", "42", "--phase", "do",
+        "--guard-plan", _plan(tmp_path, "ab-guard001"),
+    ])
+    assert r.exit_code == 2
+    assert _sessions(g) == []
