@@ -22,8 +22,8 @@ from fno.graph.relatedness import _RETIRED_EPIC_STATUSES, epic_candidates
 
 Entry = dict[str, Any]
 
-# Only these types roll up. Bugs, epics, and roadmap containers are exempt by
-# type: a bug serves a defect, not a mission (AC6).
+# Only these types roll up. Bugs, epics, and roadmap containers are exempt
+# by their kind -- a bug serves a defect, not a mission (AC6).
 ROLLUP_TYPES = frozenset({"feature", "task"})
 
 # Work that is over. A shipped feature with no mission edge is history, not a
