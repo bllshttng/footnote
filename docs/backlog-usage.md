@@ -173,10 +173,9 @@ human merge); only the graph close waits for the merge, so the "done" state mean
 "landed on main" uniformly, whoever closes it. Exit codes: 0 closed, 3 refusal
 (CLOSED-unmerged / no evidence), 4 gh outage (retryable), 5 awaiting merge.
 
-`fno backlog update <id> --completed` is the un-cross-checked operator bypass
-(same authority class as `done --force`, without the reason ceremony): it applies
-completion with no gh evidence check. Use it only by hand for a node whose real
-state the cross-check cannot see; automation must never call it.
+`fno backlog update` cannot close a node.
+It once carried a `--completed` flag that applied completion with no gh evidence check and emitted no event; that silence is what let a ledger append close nodes hours before their PRs merged, so the flag is removed.
+The only closers are `done` (merge-gated, `--force` for the un-cross-checked case) and `reconcile`.
 
 ## Priority tiers
 

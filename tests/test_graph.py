@@ -116,16 +116,16 @@ def _():
     assert data["title"] == "GetSmoke"
 
 
-@test("shim: update --completed marks node done")
+@test("shim: update --completed is rejected, not a silent close")
 def _():
     add_out, _ = run(["add", "ToComplete", "--project", "smoke"])
     node_id = json.loads(add_out)["id"]
     _, rc = run(["update", node_id, "--completed"])
-    assert rc == 0
+    assert rc != 0
     get_out, _ = run(["get", node_id])
     data = json.loads(get_out)
-    assert data["status"] == "done"
-    assert data["completed_at"] is not None
+    assert data["status"] != "done"
+    assert data["completed_at"] is None
 
 
 @test("shim: validate passes on clean graph")

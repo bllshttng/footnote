@@ -2059,7 +2059,6 @@ def cmd_note(
 @cli.command("update")
 def cmd_update(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
-    completed: bool = typer.Option(False, "--completed", help="Mark as completed"),
     locked_by: Optional[str] = typer.Option(None, "--locked-by", help="Lock owner id ('null' to release)"),
     locked_by_harness: Optional[str] = typer.Option(None, "--locked-by-harness", help="Holder's harness/provider (claude|codex|gemini). 'null' clears."),
     locked_by_harness_session: Optional[str] = typer.Option(None, "--locked-by-harness-session", help="Holder's harness session UUID. 'null' clears."),
@@ -2401,7 +2400,6 @@ def cmd_update(
         derived_add_pr_url = _resolve_or_refuse(int(add_pr), "--add-pr-url")
 
     projected_node: list = [None]
-    cascade_closed_update: list = []
     reparent_old_parent: list = [None]
 
     # Size flows doc->graph when a plan is (re)linked and the node has no size
@@ -2685,16 +2683,9 @@ def cmd_update(
                 )
                 raise typer.Exit(code=1)
 
-        # Completion runs LAST so it sees the FINAL parent edge (codex P2): a
-        # combined `--completed --parent <epic>` must cascade against the new
-        # parent. Use the shared _apply_completion_fields so the close clears
-        # session/claim/defer/queue state in lockstep with done/reconcile, then
-        # cascade-close now-all-done ancestor epics (x-33b2).
-        if completed and not node.get("completed_at"):
-            _apply_completion_fields(node)
-            cascade_closed_update.extend(
-                _cascade_close_parents(entries, node["id"])
-            )
+        # `update` deliberately cannot close a node. Closing is merge-gated and
+        # belongs to done/reconcile; an ungated, event-silent close flag here is
+        # the shape every bypass has taken (x-47a3).
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -2705,11 +2696,9 @@ def cmd_update(
     # through the fresh-re-read helper (not the pre-recompute `projected_node`)
     # so the node carries its recomputed status: a `--locked-by` claim reads
     # `claimed` -> plan `in_progress` (AC1-HP; the claim goes through this update
-    # path, not the `claim` verb), and a `--completed` close reads `done` ->
-    # `done` + `done_at`, including cascade-closed epic parents. Best-effort.
+    # path, not the `claim` verb). Best-effort.
     if projected_node[0] and (
-        completed
-        or locked_by is not None
+        locked_by is not None
         or priority is not None
         or project is not None
         or type_ is not None
@@ -2725,7 +2714,6 @@ def cmd_update(
         _project_plans_from_graph(
             [
                 projected_node[0]["id"],
-                *cascade_closed_update,
                 *([reparent_old_parent[0]] if reparent_old_parent[0] else []),
             ]
         )
@@ -5473,7 +5461,7 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
     This is the closure path that lets epics be excluded from build-SELECTION
     everywhere (`next`/`ready`/advance_dependents never dispatch the box): the
     box closes itself off the merge event that finishes its last child. It fires
-    on every close path (done + reconcile + update --completed) since each calls
+    on every close path (done + reconcile) since each calls
     this after ``_apply_completion_fields``, and it is uniform across projects
     because it follows the parent EDGE, not a project filter - so a cross-project
     parent closes on the same merge that completes its last child.
