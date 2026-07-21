@@ -422,6 +422,32 @@ worktree cwd is not re-isolated; any creation error fails safe to repo root. Thi
 is in `spawn.sh` (deterministic), so you do nothing here except relay the receipt
 - its `cwd="<worktree>"` field on the launched line surfaces the real launch dir.
 
+**Delegation for a self-isolating payload (x-6c22).** One case skips the
+pre-creation above: a **claude** `/target` carrying a **resolved node**. That
+worker isolates itself at cold-start - `fno target start <node>` runs `fno
+worktree ensure` and then the harness `EnterWorktree` tool - so `spawn.sh`
+launches it at the repo ROOT and lets it own the worktree. Doing both would be
+worse: `EnterWorktree` moves the session's cwd but leaves its PROJECT at the
+launch dir, and claude keys `~/.claude/projects/` off that launch dir with no
+rename hook, so pre-creating binds the project to the worktree and mints a
+throwaway project dir per spawn that is orphaned when the worktree is reaped.
+Isolation itself is unchanged - still a worktree off `origin/main`, and both
+paths run the same `fno worktree ensure`, so the per-project `worktree` policy
+is honored either way. Only the timing, the owner, and the branch name move.
+
+Three conditions, all load-bearing. **claude**, because `EnterWorktree` is a
+Claude Code harness tool and a codex/opencode `/fno:target` worker cannot move
+its session into a worktree it creates. **A node**, because `fno target start`
+has nothing to resolve without one - a free-text `/target ship it` never
+isolates, it hits the location-refusal backstop. **A literal `/target`
+message**, because `payload_mode` defaults to `build`, so a caller passing a
+prose task without `--payload-mode` would otherwise be assumed to run `/target`
+when it never will. Anything short of all three keeps pre-creation.
+
+A delegated launch prints `auto-worktree: delegated to the worker cold-start
+(launching at <root>)` on stderr and carries NO `cwd=` receipt field, since no
+worktree was made here.
+
 #### 5. REPORT (echo ONLY what actually happened)
 
 **Receipt-echo invariant (every skip path).** When the confirm was auto-skipped
