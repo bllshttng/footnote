@@ -35,6 +35,12 @@
 
 set -uo pipefail
 
+# Every regex and tr range here is ASCII, and the smart-quote/em-dash handling
+# uses literal octal bytes - byte-wise matching is what those want. Without this,
+# BSD sed/tr abort with "RE error: illegal byte sequence" on a payload carrying
+# bytes invalid in UTF-8.
+export LC_ALL=C
+
 # Mirrors the Rust KNOWN_PROVIDERS source of truth (crates/fno-agents provider.rs):
 # the set `fno agents spawn --provider` accepts. Widen both together. (hermes /
 # openclaw are megawalk drivers, a different axis, not spawn providers.)
