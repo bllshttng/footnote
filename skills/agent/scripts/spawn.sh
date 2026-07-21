@@ -18,7 +18,7 @@
 #   spawn.sh --name <n> --provider <p> --message "<msg>" [--node <ab-XXXX>] [--cwd <dir>]
 #
 # Outcome (one line on stdout; NEVER silent, NEVER a fabricated uuid):
-#   result=launched short_id=<hex> name=<n> hint="fno agents logs <n>" trace="fno agents trace <n>"
+#   result=launched short_id=<hex> name=<n> hint="fno agents logs <hex>" trace="fno agents trace <n>"
 #   result=launched short_id=<name> name=<n> pane="<session>:<pane_id>" hint="fno mux attach <session>"
 #   result=already-running name=<n> reason="<why>"
 #   result=failed reason="<real captured error>"
@@ -523,8 +523,17 @@ else
     printf 'result=launched short_id=%s name=%s mode=%s%s pane="%s:%s" hint="fno mux attach %s"\n' \
       "$short_id" "$NAME" "$report_mode" "$wt_field" "$PANE_SESSION" "$PANE_ID" "$(printf '%q' "$PANE_SESSION")"
   else
+    # Address the hint by short_id on bg/headless, where it is the session-id
+    # prefix: registration can silently fail (the receipt only validates the
+    # short_id's shape, never that a row landed), and a session-shaped token
+    # heals from the harness store on a registry miss while a bare name never
+    # can. `trace` stays name-based - it has no heal, so a short there would
+    # trade one refusal for another. Other substrates keep the name: their
+    # short_id is a name-slug, not session-shaped, so it gains nothing.
+    hint_token="$NAME"
+    case "$SUBSTRATE" in bg|headless) hint_token="$short_id" ;; esac
     printf 'result=launched short_id=%s name=%s mode=%s%s hint="fno agents logs %s" trace="fno agents trace %s"\n' \
-      "$short_id" "$NAME" "$report_mode" "$wt_field" "$NAME" "$NAME"
+      "$short_id" "$NAME" "$report_mode" "$wt_field" "$hint_token" "$NAME"
   fi
 fi
 exit 0
