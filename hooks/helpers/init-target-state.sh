@@ -741,7 +741,9 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # token keeps the same anchored id shape + graph presence, so free text still
   # matches nothing. Exactly one distinct match wins; zero or ambiguous (>=2)
   # stays fail-safe to no node. Unquoted split is bash-3.2 set -u safe (empty
-  # input => zero iterations, unlike an empty "${arr[@]}").
+  # input => zero iterations, unlike an empty "${arr[@]}"); set -f keeps the
+  # split from also glob-expanding a token like "5*" against the cwd.
+  set -f
   for _tok in $INITIAL_INPUT; do
     if [[ "$_tok" =~ ^ab-[0-9a-f]{8}$ ]] \
        || { [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] \
@@ -752,6 +754,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
       esac
     fi
   done
+  set +f
   if [[ -n "$_GUARD_MATCHES" && "$_GUARD_MATCHES" != *" "* ]]; then
     _GUARD_NODE="$_GUARD_MATCHES"
   elif [[ "$_GUARD_MATCHES" == *" "* ]]; then

@@ -86,6 +86,21 @@ CK1b="$(claim_key_of "$STATE")"
   || fail "AC1-HP: bare-id claim '${CK1b}' != modifier-prefixed claim '${CK1}'"
 pass "AC1-HP: bare id produces an identical claim key"
 
+# ── Robustness: a '*' token must not glob against the cwd (set -f) ────────
+log "no-glob: 'tst-aa00aa00 *' claims only tst-aa00aa00, even with a cwd file named like the other node"
+
+make_repo TMP1c; _ALL_TMPS+=("$TMP1c")
+# Plant a cwd file whose name IS the second graph node id. Without noglob, the
+# '*' token would expand to include it (regex + graph-present => a second match
+# => ambiguous => no claim). With set -f the '*' stays literal and matches
+# nothing, so only the real id resolves.
+: > "${TMP1c}/tst-bb00bb00"
+run_init "$TMP1c" "tst-aa00aa00 *"
+CK1c="$(claim_key_of "$STATE")"
+[[ "$CK1c" == "node:tst-aa00aa00" ]] \
+  || fail "no-glob: '*' globbed against cwd and broke resolution (got '${CK1c}')"
+pass "no-glob: '*' stays literal; only the real id resolves"
+
 # ── AC3-ERR: two distinct ids => ambiguous, no claim, one ambiguity line ──
 log "AC3-ERR: 'tst-aa00aa00 tst-bb00bb00' is ambiguous => no claim, one line"
 
