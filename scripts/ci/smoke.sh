@@ -114,6 +114,9 @@ bash scripts/tests/test_prune_fno_dir.sh'
     step "Scoped @requires_rust parity suites (binary present; stubbed providers)" "cli" 'FAKE_BIN="$(mktemp -d)"
 for p in codex gemini; do printf "%s\n%s\n" "#!/bin/sh" "exit 0" > "$FAKE_BIN/$p"; chmod +x "$FAKE_BIN/$p"; done
 PATH="$FAKE_BIN:$PATH" uv run pytest --tb=short -q tests/agents/test_rust_verb_parity.py tests/agents/test_ask_e2e_dispatch.py'
+    # The heal is a Rust->Python shellout, so neither test tree can cover it
+    # alone; this needs the debug binary (built above) and the cli venv.
+    step "registry-miss heal across the Rust/Python seam (x-da8c)" "." 'bash tests/test-agents-heal-token.sh'
     step "Cross-impl claims compat matrix (merge gate; fails loudly, never skips here)" "cli" 'FNO_CLAIMS_COMPAT_REQUIRED=1 uv run pytest --tb=short -q tests/integration/test_claims_cross_impl.py'
     step "loop-check journey tests (e2e + emission-schema + backstop-subprocess)" "." 'bash tests/hooks/test_loop_check_e2e.sh
 bash tests/events/test-loop-check-emission-schema.sh
