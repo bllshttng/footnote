@@ -734,10 +734,28 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # unchanged. _GRAPH_FILE is hoisted here (was defined in the claim block).
   _GRAPH_FILE="${HOME}/.fno/graph.json"
   _GUARD_NODE=""
-  if [[ "$INITIAL_INPUT" =~ ^ab-[0-9a-f]{8}$ ]] \
-     || { [[ "$INITIAL_INPUT" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] \
-          && grep -q "\"${INITIAL_INPUT}\"" "$_GRAPH_FILE" 2>/dev/null; }; then
-    _GUARD_NODE="$INITIAL_INPUT"
+  _GUARD_MATCHES=""   # space-joined distinct id-shaped tokens found in the graph
+  _GUARD_AMBIGUOUS=0
+  # Tokenize INITIAL_INPUT so a modifier-prefixed input ("beast mode <id>")
+  # still resolves its node, the way _resolve_plan_for_blast tokenizes. Each
+  # token keeps the same anchored id shape + graph presence, so free text still
+  # matches nothing. Exactly one distinct match wins; zero or ambiguous (>=2)
+  # stays fail-safe to no node. Unquoted split is bash-3.2 set -u safe (empty
+  # input => zero iterations, unlike an empty "${arr[@]}").
+  for _tok in $INITIAL_INPUT; do
+    if [[ "$_tok" =~ ^ab-[0-9a-f]{8}$ ]] \
+       || { [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] \
+            && grep -q "\"${_tok}\"" "$_GRAPH_FILE" 2>/dev/null; }; then
+      case " $_GUARD_MATCHES " in
+        *" $_tok "*) ;;  # already counted this distinct id
+        *) _GUARD_MATCHES="${_GUARD_MATCHES:+$_GUARD_MATCHES }$_tok" ;;
+      esac
+    fi
+  done
+  if [[ -n "$_GUARD_MATCHES" && "$_GUARD_MATCHES" != *" "* ]]; then
+    _GUARD_NODE="$_GUARD_MATCHES"
+  elif [[ "$_GUARD_MATCHES" == *" "* ]]; then
+    _GUARD_AMBIGUOUS=1
   fi
   if [[ -n "$_GUARD_NODE" && "${TARGET_ALLOW_IN_REVIEW:-}" != "1" ]]; then
     _GUARD_STATUS="$(fno backlog get --strict "$_GUARD_NODE" --field status 2>/dev/null | tr -d '[:space:]' || true)"
