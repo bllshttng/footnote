@@ -1131,6 +1131,9 @@ PYEOF
          || fno backlog update "$_NODE_ID" --locked-by "$claim_owner_id" $_HARNESS_FLAGS 2>"$_STAMP_LOG" >/dev/null; then
         rm -f "$_STAMP_LOG"
         echo "target: graph node $_NODE_ID lock stamped for $claim_owner_id" >&2
+      elif fno backlog update "$_NODE_ID" --locked-by "$claim_owner_id" 2>>"$_STAMP_LOG" >/dev/null; then
+        # Degraded but loud: a partial stamp must never pass for a clean one.
+        echo "target: WARNING: graph node $_NODE_ID stamped WITHOUT harness metadata (installed fno may predate the harness flags; try 'fno doctor --fix'; see $_STAMP_LOG)" >&2
       else
         echo "target: WARNING: graph locked_by stamp failed (non-fatal; TTL claim authoritative; see $_STAMP_LOG)" >&2
       fi
