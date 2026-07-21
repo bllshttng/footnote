@@ -718,6 +718,8 @@ def dispatch_spawn_pane(
     session: Optional[str] = None,
     squad: Optional[str] = None,
     split: Optional[str] = None,
+    crown_level: Optional[int] = None,
+    crown_scope: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
     account_env: Optional[dict[str, str]] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
@@ -894,6 +896,14 @@ def dispatch_spawn_pane(
             session_uuid[:8] if provider == "claude" and session_uuid else ""
         )
 
+        # Crown stamp (US9): the grantor is the spawning session (the parent edge
+        # captured above), or "human" for a direct human spawn with no session
+        # env - never a caller-supplied value. Only stamped when a crown was
+        # actually requested (crown_level is not None).
+        crown_grantor_val = (
+            (spawned_by_session or "human") if crown_level is not None else None
+        )
+
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
             # Claim check, inside the registry write lock so it is atomic with
             # the stamp. Two panes racing in one cwd can each see the SAME lone
@@ -917,6 +927,9 @@ def dispatch_spawn_pane(
                     spawned_by_session=spawned_by_session,
                     spawned_by_harness=spawned_by_harness,
                     spawned_by_cwd=spawned_by_cwd,
+                    crown_level=crown_level,
+                    crown_scope=crown_scope,
+                    crown_grantor=crown_grantor_val,
                 )
             )
             return rows

@@ -286,6 +286,44 @@ def cmd_watch(
     raise typer.Exit(rc)
 
 
+def _parse_crown(spec: str) -> tuple[int, str]:
+    """Parse a ``--crown 'level=N,scope=X'`` spec into (level, scope); exit 2 on
+    any malformed part. ``level`` must be a non-negative int, ``scope`` nonblank.
+    Order-free, both keys required. The grantor is deliberately NOT here: it is
+    stamped ambiently at spawn from the spawning session, never caller-supplied
+    (US9, the never-self-declared rule).
+
+    ponytail: splits scope on ``,`` - a scope with a literal comma is not a real
+    node/epic/project id, so the simple split holds.
+    """
+    parts: dict[str, str] = {}
+    for chunk in spec.split(","):
+        key, sep, val = chunk.partition("=")
+        if not sep:
+            print(f"--crown expects 'level=N,scope=X'; got {chunk!r}", file=sys.stderr)
+            raise typer.Exit(code=2)
+        parts[key.strip()] = val.strip()
+    missing = {"level", "scope"} - parts.keys()
+    if missing:
+        print(
+            f"--crown missing {', '.join(sorted(missing))}; need 'level=N,scope=X'",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    try:
+        level = int(parts["level"])
+    except ValueError:
+        print(f"--crown level must be an int >= 0; got {parts['level']!r}", file=sys.stderr)
+        raise typer.Exit(code=2)
+    if level < 0:
+        print(f"--crown level must be >= 0; got {level}", file=sys.stderr)
+        raise typer.Exit(code=2)
+    if not parts["scope"]:
+        print("--crown scope must be nonblank", file=sys.stderr)
+        raise typer.Exit(code=2)
+    return level, parts["scope"]
+
+
 @agents_app.command("spawn")
 def cmd_spawn(
     name: str = typer.Argument(
@@ -511,6 +549,16 @@ def cmd_spawn(
             "squad's focused pane instead of a new tab. --substrate pane only."
         ),
     ),
+    crown: str | None = typer.Option(
+        None,
+        "--crown",
+        help=(
+            "Bestow an orchestrator crown on the spawned worker (US9): "
+            "'level=N,scope=X' (level int >= 0, nonblank scope). Stamped on the "
+            "child's registry row with the grantor derived from THIS session - a "
+            "crown is granted, never self-declared."
+        ),
+    ),
     node: str | None = typer.Option(
         None,
         "--node",
@@ -702,6 +750,23 @@ def cmd_spawn(
         )
         raise typer.Exit(code=2)
 
+    # --crown level=N,scope=X (US9): parse + validate now; the grantor is stamped
+    # ambiently at spawn from this session, so the child's row records who
+    # actually bestowed the crown, never a value it could forge. Scoped to the
+    # pane substrate for now (the court's own substrate); a bg/headless crown is
+    # refused fail-closed rather than silently dropped.
+    crown_level: int | None = None
+    crown_scope: str | None = None
+    if crown is not None:
+        if substrate != "pane" or once:
+            print(
+                "--crown applies only to --substrate pane (the court's substrate); "
+                "bg/headless crowns are not yet supported",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        crown_level, crown_scope = _parse_crown(crown)
+
     # --account contradictions (x-d012), refused BEFORE route resolution so a
     # keyless route never masks this receipt. --account bills a specific claude
     # account; a non-claude provider, a --route, or an auto-routing --role sends
@@ -810,6 +875,8 @@ def cmd_spawn(
                     deny_tools=deny_tools,
                     squad=squad,
                     split=split,
+                    crown_level=crown_level,
+                    crown_scope=crown_scope,
                     provenance=resolve_provenance(node, slug, plan),
                     account_env=account_env,
                 )
