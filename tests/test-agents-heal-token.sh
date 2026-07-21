@@ -8,13 +8,16 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/crates/fno-agents/target/debug/fno-agents"
 VENV_PY="$ROOT/cli/.venv/bin/python"
 
+# Exit 77, not 0: a skip must not read as a green run. `smoke.sh --only '*heal*'`
+# selects this step without the build/sync steps that produce its prerequisites,
+# and exit 0 there would report "passed" having asserted nothing.
 if [[ ! -x "$BIN" ]]; then
   echo "SKIP: no debug fno-agents binary (cargo build --manifest-path crates/fno-agents/Cargo.toml)"
-  exit 0
+  exit 77
 fi
 if [[ ! -x "$VENV_PY" ]]; then
   echo "SKIP: no cli venv (uv sync --project cli)"
-  exit 0
+  exit 77
 fi
 
 tmp=$(mktemp -d)
@@ -96,9 +99,62 @@ printf '{"type":"session_meta","payload":{"id":"%s","cwd":"/repo/two"}}\n' "$TWI
   > "$tmp/codex/2026/07/20/rollout-2026-07-20T10-00-00-$TWIN_UUID.jsonl"
 rm -f "$REGISTRY"
 err=$("$BIN" logs c655c326 2>&1); rc=$?
-[[ $rc -ne 0 ]] || fail "ambiguous token was resolved instead of refused"
+# The contract code, not merely non-zero: `-ne 0` would also pass on a panic.
+[[ $rc -eq 13 ]] || fail "ambiguous token exited $rc, want 13 (logs' refusal code)"
 grep -q "$CLAUDE_UUID" <<<"$err" || fail "ambiguity message omits the claude candidate: $err"
 grep -q "$TWIN_UUID" <<<"$err" || fail "ambiguity message omits the codex candidate: $err"
 [[ ! -s "$REGISTRY" ]] || fail "an ambiguous token adopted a row"
+
+# 6. attach resolves through the same wrapper. A healed row's liveness comes from
+#    probing reality (locate_session + socket), never the row's `status`, so this
+#    fixture - a stored session with no live supervisor - must reach the
+#    dead-revivable pointer rather than the pre-heal "no agent matching".
+rm -f "$REGISTRY" "$tmp/codex/2026/07/20/rollout-2026-07-20T10-00-00-$TWIN_UUID.jsonl"
+err=$("$BIN" attach c655c326 2>&1); rc=$?
+[[ $rc -ne 0 ]] || fail "attach of a dead stored session unexpectedly succeeded: $err"
+grep -q "no agent matching" <<<"$err" && fail "attach did not heal: $err"
+grep -q "has exited" <<<"$err" || fail "attach did not reach the revival pointer: $err"
+
+# 7. The two heal_token guards that no other case reaches. Both swap in a stub
+#    `fno`, so they pin the Rust side's parsing rather than the healer's.
+stub_fno() { printf '%s\n' '#!/bin/sh' "$1" > "$tmp/bin/fno"; chmod +x "$tmp/bin/fno"; }
+restore_fno() {
+  cat > "$tmp/bin/fno" <<EOF
+#!/bin/sh
+exec "$VENV_PY" -c 'from fno.cli import app; app()' "\$@"
+EOF
+  chmod +x "$tmp/bin/fno"
+}
+ROW='{"name":"x","harness":"claude","cwd":"/w","log_path":"","short_id":"c655c326","harness_session_id":"'$CLAUDE_UUID'","status":"orphaned"}'
+
+# 7a. Exit code is read BEFORE stdout: a failed heal that prints parseable JSON
+#     must still degrade, never yield a half-resolved row.
+rm -f "$REGISTRY"   # step 6 adopted the row; the token must be a MISS again
+stub_fno "echo '$ROW'; exit 1"
+err=$("$BIN" logs c655c326 2>&1); rc=$?
+[[ $rc -eq 13 ]] || fail "nonzero heal with parseable JSON exited $rc, want 13"
+grep -q "no agent matching" <<<"$err" || fail "nonzero heal did not degrade: $err"
+
+# 7b. A banner ahead of the payload (a first-run `fno` prints setup lines) must
+#     not defeat the parse.
+rm -f "$REGISTRY"
+stub_fno "echo '[setup] path migration complete'; echo '$ROW'; exit 0"
+out=$("$BIN" resume c655c326 --print-command 2>&1); rc=$?
+[[ $rc -eq 0 ]] || fail "banner ahead of the row broke the parse (exit $rc): $out"
+grep -q -- "--resume $CLAUDE_UUID" <<<"$out" || fail "banner case lost the row: $out"
+restore_fno
+
+# 8. The heal adopts into the registry the CALLER read, not whichever one the
+#    Python side would resolve on its own. Rust honors FNO_AGENTS_HOME and the
+#    Python path resolver does not, so without the forwarded --registry the row
+#    lands in the default file: the verb still works, so nothing warns, but the
+#    roster never gains the row and every later call re-heals.
+rm -f "$REGISTRY"
+ALT_HOME="$tmp/alt-agents"
+mkdir -p "$ALT_HOME"
+out=$(FNO_AGENTS_HOME="$ALT_HOME" "$BIN" resume c655c326 --print-command 2>&1) || \
+  fail "heal under FNO_AGENTS_HOME failed: $out"
+[[ -s "$ALT_HOME/registry.json" ]] || fail "adopted row did not land in FNO_AGENTS_HOME"
+[[ ! -s "$REGISTRY" ]] || fail "adopted row leaked into the default registry"
 
 echo "PASS"

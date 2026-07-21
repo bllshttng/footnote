@@ -504,14 +504,17 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
 /// read `provider`, which v10 no longer stores, and `claude_resume_argv` reads
 /// `claude_session_uuid`, which v10 replaced with `harness_session_id`. One
 /// shared backfill is why a healed row resumes exactly like a native one.
+///
+/// Caller obligation: at least one of `provider` / `harness` is a valid identity
+/// token. `load_registry_entries` checks that before calling; `heal_token` gets
+/// it from the healer, which only ever writes a known harness.
 fn backfill_row_aliases(obj: &mut serde_json::Map<String, Value>) {
     // Lockstep alias heal (x-8dfc), mirroring Python `load_registry`:
     // the two identity fields are the same token in the skew window, so
     // heal whichever is missing OR corrupt (shape-checked, not truthy)
     // from the valid sibling. Both directions, because resume reads
     // through this same healed value -- a truthy-corrupt harness would
-    // otherwise resolve session_id to None. The gate above guarantees at
-    // least one field is a valid token.
+    // otherwise resolve session_id to None.
     let provider_valid = is_identity_token(obj.get("provider").and_then(Value::as_str));
     let harness_valid = is_identity_token(obj.get("harness").and_then(Value::as_str));
     if !provider_valid && harness_valid {
@@ -1097,20 +1100,36 @@ fn is_session_shaped(token: &str) -> bool {
 /// (the healer's candidate list, relayed verbatim -- refusing to guess is a
 /// designed outcome, not a miss). `FNO_AGENTS_RUNTIME=python` pins the child to
 /// the Python dispatch so the shellout cannot recurse back into this binary.
-fn heal_token(token: &str) -> Result<Option<Value>, String> {
+fn heal_token(token: &str, registry_path: &Path) -> Result<Option<Value>, String> {
     use std::process::Command;
 
     // Exit-code contract of `fno agents heal-token`: 0 adopted, 13 miss, 3
     // ambiguous. Anything else (missing binary, internal error) is a miss.
+    const ADOPTED: i32 = 0;
     const AMBIGUOUS: i32 = 3;
+    const MISS: i32 = 13;
 
     let out = match Command::new("fno")
         .args(["agents", "heal-token", token])
+        // The two runtimes resolve the registry differently (this side honors
+        // FNO_AGENTS_HOME, the Python side does not), so name the file we
+        // actually read. Without it a non-default agents home heals into the
+        // DEFAULT registry: the verb works, the roster never gains the row, and
+        // every later call re-heals -- all of it invisible, because the write
+        // succeeded and nothing warned.
+        .args(["--registry", &registry_path.to_string_lossy()])
         .env("FNO_AGENTS_RUNTIME", "python")
         .output()
     {
         Ok(o) => o,
-        Err(_) => return Ok(None),
+        Err(exc) => {
+            // A missing `fno` is the expected degrade; anything else (a
+            // permission-denied shim, say) is worth naming before we do.
+            if exc.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("fno agents: heal probe could not run: {exc}");
+            }
+            return Ok(None);
+        }
     };
     if out.status.code() == Some(AMBIGUOUS) {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
@@ -1118,6 +1137,13 @@ fn heal_token(token: &str) -> Result<Option<Value>, String> {
     // Exit code BEFORE stdout: a failed heal that happened to print parseable
     // JSON must still degrade to the original error, never a half-resolved row.
     if !out.status.success() {
+        // An off-contract code means the healer itself broke (a traceback out of
+        // a probe, a stale install). The outcome still degrades to today's
+        // error, but discarding the only explanation would tell the operator the
+        // session does not exist when the truth is that the probe crashed.
+        if !matches!(out.status.code(), Some(ADOPTED) | Some(MISS)) {
+            eprint!("{}", String::from_utf8_lossy(&out.stderr));
+        }
         return Ok(None);
     }
     // The healer adopts best-effort: a failed registry write still returns the
@@ -1156,7 +1182,11 @@ fn heal_token(token: &str) -> Result<Option<Value>, String> {
 /// `rows`; a registry hit clones (a one-shot verb, a handful of small fields).
 /// `trace` deliberately does NOT use this: an adopted row has no events, so its
 /// not-found is honest.
-pub(crate) fn resolve_entry_with_heal(rows: &[Value], token: &str) -> Result<Value, ResolveError> {
+pub(crate) fn resolve_entry_with_heal(
+    rows: &[Value],
+    token: &str,
+    registry_path: &Path,
+) -> Result<Value, ResolveError> {
     match find_agent_entry(rows, token) {
         Ok(e) => Ok(e.clone()),
         // An ambiguous REGISTRY is not a miss: healing would pick the winner the
@@ -1166,7 +1196,7 @@ pub(crate) fn resolve_entry_with_heal(rows: &[Value], token: &str) -> Result<Val
             if !is_session_shaped(token) {
                 return Err(err);
             }
-            match heal_token(token) {
+            match heal_token(token, registry_path) {
                 Ok(Some(row)) => Ok(row),
                 Ok(None) => Err(err),
                 Err(candidates) => Err(ResolveError::Ambiguous(candidates)),
@@ -1499,7 +1529,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             return 13;
         }
     };
-    let entry = match resolve_entry_with_heal(&entries, &name) {
+    let entry = match resolve_entry_with_heal(&entries, &name, &home.registry_json()) {
         Ok(e) => e,
         Err(err) => {
             eprintln!(
@@ -1697,7 +1727,7 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
             return 12;
         }
     };
-    let entry = match resolve_entry_with_heal(&entries, &name) {
+    let entry = match resolve_entry_with_heal(&entries, &name, &home.registry_json()) {
         Ok(e) => e,
         Err(err) => {
             eprintln!("{}", err.message());
@@ -1955,7 +1985,7 @@ pub async fn run_logs(rest: &[String], home: &AgentsHome) -> i32 {
             return 1;
         }
     };
-    let entry = match resolve_entry_with_heal(&entries, &args.name) {
+    let entry = match resolve_entry_with_heal(&entries, &args.name, &home.registry_json()) {
         Ok(e) => e,
         Err(err) => {
             eprintln!("{}", err.message());
@@ -2630,10 +2660,13 @@ mod tests {
         // miss returns the ORIGINAL error, byte-identical to today's.
         let rows = vec![claude_row("billing", "a1b2c3d4", CLAUDE_UUID_FIXTURE)];
         assert_eq!(
-            resolve_entry_with_heal(&rows, "billing").unwrap()["name"],
+            resolve_entry_with_heal(&rows, "billing", Path::new("/nonexistent/registry.json"))
+                .unwrap()["name"],
             "billing"
         );
-        let err = resolve_entry_with_heal(&rows, "reviewer").unwrap_err();
+        let err =
+            resolve_entry_with_heal(&rows, "reviewer", Path::new("/nonexistent/registry.json"))
+                .unwrap_err();
         assert_eq!(
             err.message(),
             "no agent matching 'reviewer'; accepted forms: name, 8-hex short id, or full session id"
@@ -2649,7 +2682,7 @@ mod tests {
             claude_row("two", "abcd1234", "abcd1234-9999-8888-7777-666655554444"),
         ];
         assert!(matches!(
-            resolve_entry_with_heal(&rows, "abcd1234"),
+            resolve_entry_with_heal(&rows, "abcd1234", Path::new("/nonexistent/registry.json")),
             Err(ResolveError::Ambiguous(_))
         ));
     }
@@ -2668,6 +2701,20 @@ mod tests {
         backfill_row_aliases(row.as_object_mut().unwrap());
         assert_eq!(row["provider"], "claude");
         assert_eq!(row["claude_session_uuid"], CLAUDE_UUID_FIXTURE);
+    }
+
+    #[test]
+    fn backfill_covers_the_non_claude_healed_row_too() {
+        // The healer adopts codex rows as readily as claude ones, and their
+        // resume path reads the legacy per-provider key just the same.
+        let mut row = json!({
+            "name": "fno-a1b2c3d4", "harness": "codex", "cwd": "/w", "log_path": "",
+            "harness_session_id": CLAUDE_UUID_FIXTURE, "status": "orphaned",
+        });
+        backfill_row_aliases(row.as_object_mut().unwrap());
+        assert_eq!(row["provider"], "codex");
+        assert_eq!(row["codex_session_id"], CLAUDE_UUID_FIXTURE);
+        assert!(row.get("claude_session_uuid").is_none());
     }
 
     #[test]

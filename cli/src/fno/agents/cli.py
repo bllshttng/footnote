@@ -1371,6 +1371,11 @@ HEAL_TOKEN_AMBIGUOUS_EXIT = 3
 @agents_app.command("heal-token", hidden=True)
 def cmd_heal_token(
     token: str = typer.Argument(..., help="Session-shaped token (8-hex, UUID, ses_...)."),
+    registry: str = typer.Option(
+        None,
+        "--registry",
+        help="Adopt into THIS registry file (default: the configured one).",
+    ),
 ) -> None:
     """Internal: adopt the session TOKEN names from its harness store, as JSON.
 
@@ -1379,6 +1384,12 @@ def cmd_heal_token(
     probe rather than growing a second one. Exit 0 with the adopted row on
     stdout; 13 on a miss or a non-session-shaped token; 3 with the candidate
     list on stderr when the token is ambiguous.
+
+    ``--registry`` exists because the two runtimes resolve the registry
+    differently -- Rust honors ``FNO_AGENTS_HOME``, this side does not -- so a
+    caller that read one file would otherwise heal into another and re-heal on
+    every later call. The caller names the file it read from; agreement is then
+    by construction rather than by two resolvers happening to match.
 
     Python-only by construction: keeping it out of ``RUST_CLIENT_VERBS`` is what
     stops the Rust shellout from re-entering the Rust client.
@@ -1389,7 +1400,9 @@ def cmd_heal_token(
     from fno.agents.registry import AgentResolutionError, resolve_from_harness_store
 
     try:
-        entry = resolve_from_harness_store(token)
+        entry = resolve_from_harness_store(
+            token, registry_path=Path(registry) if registry else None
+        )
     except AgentResolutionError as exc:
         sys.stderr.write(f"{exc}\n")
         raise typer.Exit(code=HEAL_TOKEN_AMBIGUOUS_EXIT)
