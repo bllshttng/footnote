@@ -142,8 +142,26 @@ err=$("$BIN" logs c655c326 2>&1); rc=$?
 [[ $rc -eq 13 ]] || fail "nonzero heal with parseable JSON exited $rc, want 13"
 grep -q "no agent matching" <<<"$err" || fail "nonzero heal did not degrade: $err"
 
+# 7a-bis. An off-contract exit relays ONE labelled line, never the child's raw
+#         stderr: a traceback ahead of the refusal is a new error class.
+stub_fno "echo 'Traceback (most recent call last):' >&2; echo '  File \"x.py\", line 1' >&2; exit 70"
+err=$("$BIN" logs c655c326 2>&1); rc=$?
+[[ $rc -eq 13 ]] || fail "off-contract heal exit gave $rc, want 13"
+grep -q "no agent matching" <<<"$err" || fail "off-contract heal lost the refusal: $err"
+grep -q "heal probe failed (exit 70)" <<<"$err" || fail "off-contract heal hid the cause: $err"
+[[ "$(grep -c 'File "x.py"' <<<"$err")" -eq 0 ]] || fail "off-contract heal dumped a raw traceback: $err"
+
 # 7b. A banner ahead of the payload (a first-run `fno` prints setup lines) must
 #     not defeat the parse.
+# 7c. An exit-0 helper returning a JSON object that is not a usable row must
+#     degrade, not resolve: a bare {} would otherwise surface as a confusing
+#     missing-cwd failure instead of the clean not-found.
+rm -f "$REGISTRY"
+stub_fno "echo '{}'; exit 0"
+err=$("$BIN" logs c655c326 2>&1); rc=$?
+[[ $rc -eq 13 ]] || fail "empty JSON object from an exit-0 heal exited $rc, want 13"
+grep -q "no agent matching" <<<"$err" || fail "empty-object heal did not degrade: $err"
+
 rm -f "$REGISTRY"
 stub_fno "echo '[setup] path migration complete'; echo '$ROW'; exit 0"
 out=$("$BIN" resume c655c326 --print-command 2>&1); rc=$?

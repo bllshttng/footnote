@@ -1119,7 +1119,8 @@ fn heal_token(token: &str, registry_path: &Path) -> Result<Option<Value>, String
         // DEFAULT registry: the verb works, the roster never gains the row, and
         // every later call re-heals -- all of it invisible, because the write
         // succeeded and nothing warned.
-        .args(["--registry", &registry_path.to_string_lossy()])
+        .arg("--registry")
+        .arg(registry_path)
         .env("FNO_AGENTS_RUNTIME", "python")
         .output()
     {
@@ -1139,12 +1140,25 @@ fn heal_token(token: &str, registry_path: &Path) -> Result<Option<Value>, String
     // Exit code BEFORE stdout: a failed heal that happened to print parseable
     // JSON must still degrade to the original error, never a half-resolved row.
     if !out.status.success() {
-        // An off-contract code means the healer itself broke (a traceback out of
-        // a probe, a stale install). The outcome still degrades to today's
-        // error, but discarding the only explanation would tell the operator the
-        // session does not exist when the truth is that the probe crashed.
+        // An off-contract code means the healer itself broke (a stale install, a
+        // probe that raised). The verb's own refusal is still what prints, so
+        // relay only ONE labelled line of the cause: dumping the child's stderr
+        // whole would put a python traceback in front of the refusal, which is
+        // exactly the "never a new error class or a stack trace" this degrade
+        // path exists to avoid. Silence is not the alternative -- it would tell
+        // the operator the session does not exist when the probe crashed.
         if !matches!(out.status.code(), Some(ADOPTED) | Some(MISS)) {
-            eprint!("{}", String::from_utf8_lossy(&out.stderr));
+            let why = String::from_utf8_lossy(&out.stderr);
+            let first = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            eprintln!(
+                "fno agents: heal probe failed (exit {}){}",
+                out.status.code().unwrap_or(-1),
+                if first.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", first.trim())
+                }
+            );
         }
         return Ok(None);
     }
@@ -1164,12 +1178,24 @@ fn heal_token(token: &str, registry_path: &Path) -> Result<Option<Value>, String
     };
     match serde_json::from_str::<Value>(line) {
         Ok(mut row) if row.is_object() => {
-            // The healed row skipped `load_registry_entries`, so it has none of
-            // that loader's alias reconciliation; without this it has no
-            // `provider` (logs would take the codex branch) and no
-            // `claude_session_uuid` (resume's dead arm would refuse).
-            if let Some(obj) = row.as_object_mut() {
-                backfill_row_aliases(obj);
+            // The healed row skipped `load_registry_entries`, so it gets neither
+            // that loader's alias reconciliation nor its validation. Apply both:
+            // without the backfill the row has no `provider` (logs would take the
+            // codex branch) and no `claude_session_uuid` (resume's dead arm would
+            // refuse); without the field bar, an exit-0 helper returning `{}` or a
+            // partial object would resolve as a SUCCESS and surface as a confusing
+            // missing-cwd error three frames later instead of a clean not-found.
+            let obj = match row.as_object_mut() {
+                Some(o) => o,
+                None => return Ok(None),
+            };
+            backfill_row_aliases(obj);
+            let has_identity = is_identity_token(obj.get("harness").and_then(Value::as_str));
+            let has_fields = ["name", "cwd", "log_path"]
+                .iter()
+                .all(|k| obj.contains_key(*k));
+            if !has_identity || !has_fields {
+                return Ok(None);
             }
             Ok(Some(row))
         }
