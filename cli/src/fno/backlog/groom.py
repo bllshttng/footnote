@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -40,10 +41,80 @@ _WORKER_TIMEOUT_S = 1800
 _SPAWN_TIMEOUT_S = _WORKER_TIMEOUT_S + 120
 
 
+# Shared by the key writer and the marker scanner, so the freshness read cannot
+# drift from the key it is looking for.
+_GROOM_KEY_PREFIX = "groom"
+
+
 def groom_day_key(today: Optional[date] = None) -> str:
     """The daily dedup claim key, UTC-bucketed like the repo's other day keys."""
     day = today or datetime.now(timezone.utc).date()
-    return f"groom:{day.isoformat()}"
+    return f"{_GROOM_KEY_PREFIX}:{day.isoformat()}"
+
+
+# Past this, the daily cadence is presumed dead: `fno doctor` reddens and the
+# SessionStart fallback fires. Deliberately > 24h so a healthy LaunchAgent that
+# merely slipped a night is not treated as broken.
+GROOM_STALE_HOURS = 48.0
+
+# ("ran", hours) | ("never", None) | ("unknown", None). The third state is
+# load-bearing: folding an unreadable claims root into "never" would make every
+# session look like a machine that has never groomed, and fire the fallback on
+# every one of them.
+GroomFreshness = tuple[Literal["ran", "never", "unknown"], Optional[float]]
+
+
+def groom_staleness(*, now: Optional[float] = None) -> GroomFreshness:
+    """Hours since the last grooming pass, read from its own claim marker.
+
+    The daily claim IS the run receipt, so there is no second source of truth to
+    drift from - and none to add. Live markers sit in the claims dir; recovered
+    ones are archived under ``.expired/`` with the same encoded key, so both are
+    scanned. Age comes from the file's mtime (an archive is a rename, which
+    preserves it), never from a shelled ``stat`` whose flags differ BSD vs GNU.
+    """
+    from fno.claims.io import EXPIRED_SUBDIR, claims_dir, claims_root_for, encode_key
+
+    prefix = encode_key(f"{_GROOM_KEY_PREFIX}:")
+    base = claims_dir(claims_root_for(f"{_GROOM_KEY_PREFIX}:probe"))
+
+    newest: Optional[float] = None
+    for directory in (base, base / EXPIRED_SUBDIR):
+        try:
+            names = os.listdir(directory)
+        except FileNotFoundError:
+            # A machine that never groomed has no claims dir at all; that is
+            # "never", not "unreadable".
+            continue
+        except OSError:
+            return ("unknown", None)
+        for name in names:
+            if not name.startswith(prefix):
+                continue
+            try:
+                mtime = (directory / name).stat().st_mtime
+            except OSError:
+                continue
+            if newest is None or mtime > newest:
+                newest = mtime
+
+    if newest is None:
+        return ("never", None)
+    hours = ((now if now is not None else time.time()) - newest) / 3600.0
+
+    return ("ran", max(0.0, hours))  # clock skew reads as fresh, never negative
+
+
+def groom_is_due(freshness: Optional[GroomFreshness] = None) -> bool:
+    """Whether an unattended trigger should run a pass now.
+
+    ``unknown`` stays dormant on purpose: the fallback's failure mode is firing
+    on every session, so an unreadable root must not be an invitation to run.
+    """
+    state, hours = freshness if freshness is not None else groom_staleness()
+    if state == "never":
+        return True
+    return state == "ran" and hours is not None and hours > GROOM_STALE_HOURS
 
 
 def groom_brief(day: str, mechanical: Optional[dict[str, str]] = None) -> str:
