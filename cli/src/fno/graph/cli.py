@@ -2108,11 +2108,16 @@ def cmd_update(
     # Shape-check any url the caller supplies, on every path: an unparseable
     # url carries no repo slug, so it is url-less in every way that matters.
     if pr_url is not None and not clearing_url:
-        expect = (
-            int(pr_number)
-            if pr_number is not None and pr_number.strip().isdigit()
-            else None
-        )
+        # With no --pr-number the node keeps the one it already has, so that is
+        # what the url must name - otherwise a url-only update re-creates the
+        # two-different-PRs row the paired path refuses.
+        if pr_number is not None and pr_number.strip().isdigit():
+            expect = int(pr_number)
+        elif pr_number is None:
+            current = _node_before_update().get("pr_number")
+            expect = current if isinstance(current, int) else None
+        else:
+            expect = None
         _check_url_shape(pr_url, "--pr-url", expect)
     if add_pr_url is not None:
         _check_url_shape(add_pr_url, "--add-pr-url", add_pr)

@@ -44,22 +44,64 @@ def _first(g: Path) -> dict:
     return json.loads(g.read_text())["entries"][0]
 
 
-def test_writer_degrades_a_stale_node_cwd_to_the_invocation_cwd():
-    """A writer stands in the repo it is stamping, so a recorded cwd that no
-    longer exists must not cost it the url. The bulk backfill deliberately does
-    NOT share this fallback - see test_maintain."""
+def _runner(remote: str):
+    def runner(argv, cwd):
+        return (0, remote + "\n") if argv[0] == "git" else (1, "")
+
+    return runner
+
+
+def test_absent_cwd_resolves_against_the_invocation_checkout():
+    """No recorded cwd means no evidence the node lives elsewhere, and the
+    caller is standing in the repo it is stamping."""
     from fno.graph._reconcile import pr_url_for_repo
 
-    seen: list = []
+    assert pr_url_for_repo(5, None, runner=_runner("git@github.com:o/r.git")) == (
+        "https://github.com/o/r/pull/5"
+    )
 
-    def runner(argv, cwd):
-        seen.append(cwd)
-        return (0, "git@github.com:o/r.git\n") if argv[0] == "git" else (1, "")
 
-    url = pr_url_for_repo(5, "/definitely/not/a/dir", runner=runner)
+def test_a_recorded_but_missing_cwd_refuses_rather_than_guessing():
+    """A recorded cwd IS evidence the node belongs to another repo, and these
+    verbs can name any node in the cross-project graph."""
+    from fno.graph._reconcile import pr_url_for_repo
 
-    assert url == "https://github.com/o/r/pull/5"
-    assert seen == [None]  # the dead path was dropped, not passed to git
+    assert pr_url_for_repo(
+        5, "/definitely/not/a/dir", runner=_runner("git@github.com:o/r.git")
+    ) is None
+
+
+@pytest.mark.parametrize("remote,expected", [
+    ("git@github.com:o/r.git", "o/r"),
+    ("https://github.com/o/r", "o/r"),
+    ("https://github.com/o/r.git/", "o/r"),
+    ("ssh://git@github.com/o/r.git", "o/r"),
+    ("ssh://git@github.com:22/o/r.git", "o/r"),          # port is not the owner
+    ("https://user:tok@github.com/o/r.git", "o/r"),
+    ("https://gitlab.com/mirrors/github.com/o/r.git", None),  # foreign host
+    ("https://notgithub.com/o/r.git", None),
+    ("git@github.com:o/r/extra.git", None),              # not owner/repo depth
+])
+def test_remote_slug_parsing_anchors_the_host(remote, expected):
+    """An unanchored match mints a confident slug for a repo the remote does
+    not name - and the writer persists it."""
+    from fno.graph._reconcile import resolve_current_repo_slug
+
+    assert resolve_current_repo_slug(None, runner=_runner(remote)) == expected
+
+
+@pytest.mark.parametrize("url,slug,number", [
+    ("https://github.com/o/r/pull/12", "o/r", 12),
+    ("https://github.com/o/r/pull/12?x=1", "o/r", 12),
+    ("https://notgithub.com/o/r/pull/12", None, None),
+    ("https://gitlab.com/mirrors/github.com/o/r/pull/12", None, None),
+    ("https://github.com/o/r/pull/12suffix", None, None),
+])
+def test_pr_url_parsing_anchors_the_host_and_the_number(url, slug, number):
+    from fno.graph._reconcile import pr_number_from_url, repo_slug_from_url
+
+    assert repo_slug_from_url(url) == slug
+    assert pr_number_from_url(url) == number
 
 
 def test_resolved_url_is_written_to_the_node(tmp_graph, monkeypatch):

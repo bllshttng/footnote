@@ -250,3 +250,33 @@ def test_add_pr_url_naming_a_different_pr_is_refused(tmp_graph):
 
     assert result.exit_code != 0
     assert _first(tmp_graph).get("additional_prs") in (None, [])
+
+
+def test_url_only_update_must_name_the_number_the_node_already_carries(tmp_graph):
+    """Without --pr-number the node keeps its number, so a url naming a
+    different PR re-creates the two-different-PRs row the paired path refuses."""
+    _seed(tmp_graph, [{
+        "id": "ab-00000001", "title": "t", "domain": "code", "project": "p",
+        "pr_number": 123, "pr_url": "https://github.com/o/r/pull/123",
+    }])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--pr-url", "https://github.com/o/r/pull/999",
+    ])
+
+    assert result.exit_code != 0
+    assert _first(tmp_graph)["pr_url"] == "https://github.com/o/r/pull/123"
+
+
+def test_url_only_update_is_allowed_when_it_names_the_same_pr(tmp_graph):
+    _seed(tmp_graph, [{
+        "id": "ab-00000001", "title": "t", "domain": "code", "project": "p",
+        "pr_number": 123, "pr_url": "https://github.com/old/repo/pull/123",
+    }])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--pr-url", "https://github.com/o/r/pull/123",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert _first(tmp_graph)["pr_url"] == "https://github.com/o/r/pull/123"
