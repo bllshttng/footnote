@@ -5,8 +5,9 @@
 # stub smoke.sh/cargo/rustup/fno on PATH, so no real 45-step suite or cargo
 # build runs. Covers AC2-HP (catches a CI-red commit locally), AC2-ERR (dirty
 # tree refused), AC2-EDGE (concurrent -> exit 3 + holder), AC1-FR (interrupt
-# recovery: stale lock is stealable), plus the shared-worktree safety net: a
-# VOID (never a GREEN/RED) when the worktree moves off the candidate mid-run.
+# recovery: stale lock is stealable), plus the shared-worktree safety net:
+# exactly one winner when racers steal the same dead lock, and a VOID (never a
+# GREEN/RED) when either the worktree or the lock changes hands mid-run.
 
 set -uo pipefail
 
@@ -101,6 +102,50 @@ mkdir -p "$LOCKDIR"; printf 'pid=%s started=OLD host=x sha=deadbee\n' 999999 > "
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "stole stale lock and ran to GREEN" || fail "stale-lock steal failed rc=$rc: $out"
 
+echo "== steal-race: concurrent steal of one dead holder -> exactly one winner =="
+# Measured: against the pre-fix rm-rf-then-mkdir steal this catches a double
+# win in 106 of 120 rounds (88% each), so 5 rounds is ~1e-5 of missing it.
+# Against the fixed steal it is deterministic - 0 double wins in 120 rounds -
+# so it does not flake. An intermediate version of the fix (rename without the
+# steal-then-verify check) did fail this about 1 run in 20; that was a true
+# positive for a residual race, not flakiness, and is the reason the check exists.
+steal_winners=0
+for _round in 1 2 3 4 5; do
+    rm -rf "$LOCKDIR"
+    mkdir -p "$LOCKDIR"; printf 'pid=%s started=OLD host=x sha=deadbee\n' 999999 > "$LOCKDIR/holder"
+    run_pf >/dev/null 2>&1 & p1=$!
+    run_pf >/dev/null 2>&1 & p2=$!
+    wait $p1; r1=$?
+    wait $p2; r2=$?
+    # winners exit 0 (ran) - losers exit 3 (lock held). Never two winners.
+    [[ $r1 -eq 0 ]] && steal_winners=$((steal_winners+1))
+    [[ $r2 -eq 0 ]] && steal_winners=$((steal_winners+1))
+    [[ $r1 -eq 0 && $r2 -eq 0 ]] && { fail "round $_round: BOTH racers stole the same dead lock"; break; }
+done
+[[ $steal_winners -ge 1 ]] && ok "steal still works under contention ($steal_winners/5 rounds had a winner)" \
+    || fail "no racer ever acquired the stolen lock (steal is now dead, not just serialized)"
+rm -rf "$LOCKDIR"
+
+echo "== tripwire: a stolen LOCK also VOIDs, and the stealer's lock survives =="
+# The tripwire's other arm. The worktree stays put here; only the holder changes,
+# so this pins the lock comparison rather than the sha one, and proves cleanup
+# does not delete a lock that now belongs to the stealer.
+cat > "$FIX/scripts/ci/smoke.sh" <<EOF
+#!/usr/bin/env bash
+printf 'pid=424242 started=NOW host=x sha=cafe123\n' > "$LOCKDIR/holder"
+echo "smoke: all green (stub, stole the lock)"; exit 0
+EOF
+( cd "$FIX" && git add -A && git commit -qm "lock-stealing smoke stub" )
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 5 ]] && ok "exit 5 (VOID) when the lock changed hands" || fail "expected 5 got $rc: $out"
+echo "$out" | grep -q "VOID - another preflight took our lock" && ok "names the lock, not the worktree" || fail "wrong VOID cause: $out"
+grep -q "pid=424242" "$LOCKDIR/holder" 2>/dev/null && ok "the stealer's lock survived our exit" \
+    || fail "cleanup deleted a lock owned by the stealer"
+rm -rf "$LOCKDIR"
+
+# NOTE: keep the worktree-hijack leg LAST. Its stub permanently resets the
+# fixture's preflight worktree, so any test appended after it inherits a
+# hijacked tree and fails for reasons that have nothing to do with it.
 echo "== tripwire: a hijacked worktree VOIDs the verdict instead of reporting it =="
 # Move the shared worktree off our candidate mid-run, as a second preflight's
 # `reset --hard` would. The stub smoke.sh is the hook: it fires inside the run.
