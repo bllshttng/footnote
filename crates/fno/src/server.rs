@@ -4518,6 +4518,25 @@ impl Core {
                 }
                 Flow::Continue
             }
+            Command::MovePane { mover, target, dir } => {
+                let Some(tab) = self.viewed_tab_mut(view) else {
+                    return Flow::Continue;
+                };
+                // Loud on refusal, unlike ResizeSeam: a relocation is ONE
+                // deliberate gesture, not a stream, so a rejected drop that said
+                // nothing would read as the feature being broken. The tree is
+                // untouched on every error, so co-viewers need no correction
+                // push - only the sender learns anything.
+                match tree::move_leaf(tab, vp, mover, target, dir) {
+                    Ok(()) => self.push_layout(true),
+                    // An origin drop is a cancel the client should not have sent;
+                    // silently accept it rather than scold the operator for a
+                    // gesture that, from their side, did nothing on purpose.
+                    Err(tree::MoveError::Origin) => {}
+                    Err(e) => self.notice(client_id, e.to_string()),
+                }
+                Flow::Continue
+            }
             Command::NewTab => {
                 // The new tab's first (and so far only) viewer is the
                 // sender: spawn at the sender's own content area (Locked 5's
