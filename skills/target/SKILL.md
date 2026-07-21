@@ -27,7 +27,7 @@ resolve node  →  fno target start <node>   worktree off origin/main + claim + 
               →  /review                     internal sigma panel (cheap insurance)
               →  validate                    fno test  (real exit code; not bare pytest)
               →  /pr create                  Haiku worker opens the PR
-              →  <promise>MISSION COMPLETE...  PR green + reviewed = done; you're bg, so hand the merge to a human
+              →  <promise>MISSION COMPLETE...  PR green + reviewed = done; merge if config.auto_merge.enabled
 ```
 
 That is the whole job when a backlog node or plan is already bound. `fno target start` prints an orientation report (node, worktree, tests, done-when) - read it and go. Everything below is detail on a spine step or an **"only if"** branch you skip unless its trigger fires:
@@ -75,7 +75,17 @@ The wrapper re-invokes the CLI until the session terminates (DonePRGreen, Budget
 
 ## Completion: what you do
 
-Emit `<promise>MISSION COMPLETE: ...</promise>` when the PR is up and CI is green - **promise early**, the external reads hold it. An unsatisfied read just blocks-and-retries naming what is missing; a premature promise never short-circuits the gate. **While waiting on an async check with nothing to do, arm ONE watcher and idle on a `<watching>` tag** (the exact protocol is [How to end every turn](#how-to-end-every-turn) below) - never re-read the poller and re-post the same status on a nudge; that is pure noise. You are a bg/unattended agent, so your terminal state is a **green, reviewed, mergeable PR**, not a merged one: hand the merge to a human (any out-of-band merge also satisfies `done()`). The gate reads `config.review.required_bots`; the loop-check code default is empty `[]` (no review gate, so a fresh install never hangs on an unconfigured bot), and a maintainer sets it explicitly (e.g. `["chatgpt-codex-connector"]`) to require an external pass. Internal `/review` is advisory.
+Emit `<promise>MISSION COMPLETE: ...</promise>` when the PR is up and CI is green - **promise early** (one exception: an approved auto-merge merges FIRST, see below), the external reads hold it. An unsatisfied read just blocks-and-retries naming what is missing; a premature promise never short-circuits the gate. **While waiting on an async check with nothing to do, arm ONE watcher and idle on a `<watching>` tag** (the exact protocol is [How to end every turn](#how-to-end-every-turn) below) - never re-read the poller and re-post the same status on a nudge; that is pure noise. **Read the manifest's resolved `auto_merge_approved` before you promise** - merge authority is config-driven, NOT bg-vs-attended, and nothing in the merge path checks attendance:
+
+```bash
+sed -n 's/^auto_merge_approved:[[:space:]]*//p' .fno/target-state.md
+```
+
+Read that RESOLVED field, never `fno config get auto_merge` directly. Init folds the config together with this run's modifiers, and a per-run `no-merge` - which `/target bg` injects **by default** - sets it false even when `auto_merge.enabled` is true, so the raw config would tell you to merge against an explicit per-run prohibition. `fno pr merge` reads the same field and refuses too, but that is a backstop: decide from the manifest rather than firing the verb and hoping it catches you.
+
+When it is `true` and `auto_merge.require_checks_pass` is satisfied, **MERGE FIRST, THEN promise**: `fno pr merge <n>`, then `fno backlog reconcile` to close the node (a merge from inside a worktree skips the local post-merge step). Order matters - a promise emitted first terminates the loop as `DonePRGreen` the moment CI goes green, so the session is never re-invoked and the merge silently never happens. Config set once IS the standing authorization; re-asking each time re-imposes the step it was configured to delete.
+
+When it is `false` (the default), stop at a **green, reviewed, mergeable PR** and hand the merge to a human (any out-of-band merge also satisfies `done()`). Never write "handing the merge to a human" without having read that field in the same turn. The gate reads `config.review.required_bots`; the loop-check code default is empty `[]` (no review gate, so a fresh install never hangs on an unconfigured bot), and a maintainer sets it explicitly (e.g. `["chatgpt-codex-connector"]`) to require an external pass. Internal `/review` is advisory.
 
 ### How to end every turn
 
