@@ -7,7 +7,7 @@ Covers:
   - mixed-shape files (only legacy rows rewritten)
   - corrupt JSONL rows preserved verbatim with sidecar log
   - lock contention aborts cleanly with rc=2 (mkdir-based mutex shared
-    with scripts/lib/set-gate.sh so cross-language callers serialize)
+    with fno.events.append_event so cross-language callers serialize)
 """
 from __future__ import annotations
 
@@ -207,3 +207,53 @@ def test_dry_run_makes_no_changes(workdir):
     after = target.read_bytes()
     assert before == after, "dry-run modified the file"
     assert not (workdir / ".fno/events.jsonl.bak").exists()
+
+
+def test_long_migration_renews_its_lock_lease(tmp_path, monkeypatch):
+    """A migration legitimately holds the events lock far longer than the
+    steal threshold, so it must keep the lease fresh.
+
+    Without renewal an ordinary emitter age-steals the live lock, appends to
+    the inode the migration is about to replace, and those events are lost.
+    """
+    import importlib.util
+
+    from fno.mutex import STALE_MUTEX_STEAL_S
+
+    script = next(
+        (
+            c
+            for p in Path(__file__).resolve().parents
+            for c in [p / "scripts" / "migrate-events-shape.py"]
+            if c.is_file()
+        ),
+        None,
+    )
+    assert script is not None, "migrate-events-shape.py not found"
+    spec = importlib.util.spec_from_file_location("migrate_events_shape", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        "".join(
+            json.dumps({"timestamp": "2026-01-01T00:00:00Z", "type": "t", "source": "s"})
+            + "\n"
+            for _ in range(50)
+        ),
+        encoding="utf-8",
+    )
+    lock_dir = tmp_path / "events.jsonl.lock.d"
+    lock_dir.mkdir()
+    # Backdate the lease so the very first renewal must fire.
+    old = time.time() - (STALE_MUTEX_STEAL_S + 60)
+    os.utime(lock_dir, (old, old))
+
+    monkeypatch.setattr(mod, "_LEASE_RENEW_EVERY_S", 0)
+    mod._do_migrate(events, dry_run=True, lock_dir=lock_dir)
+
+    age = time.time() - lock_dir.lstat().st_mtime
+    assert age < STALE_MUTEX_STEAL_S, (
+        f"lease not renewed: lock still looks {int(age)}s old and is stealable "
+        "mid-migration"
+    )

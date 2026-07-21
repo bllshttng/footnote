@@ -1113,7 +1113,7 @@ def _persist_plugin_root(root: Path) -> None:
 def resolve_plugin_script(relpath: str) -> Path:
     """Resolve a script that ships with the fno PLUGIN (not the active
     project), e.g. ``hooks/helpers/init-target-state.sh`` or
-    ``scripts/lib/set-gate.sh``.
+    ``scripts/setup/setup-worktree.sh``.
 
     Order: env hint (CLAUDE_PLUGIN_ROOT / FNO_REPO_ROOT, authoritative) ->
     package-relative -> persisted ~/.fno/plugin-root pointer -> repo.

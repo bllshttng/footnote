@@ -17,10 +17,10 @@ Properties:
   - Stream processing: line-at-a-time iteration; safe for million-row files.
   - Corrupt rows: preserved verbatim, logged to ``<file>.corrupt``,
     migration continues processing subsequent rows.
-  - Lock-shared: acquires the same mkdir-based mutex
-    (``<file>.lock.d``) that scripts/lib/set-gate.sh uses, so a live target
-    session and a migration run cross-serialize. ``MIGRATE_LOCK_TIMEOUT_SECONDS``
-    overrides the 30s default (used by tests).
+  - Lock-shared: acquires the same mkdir-based mutex (``<file>.lock.d``) that
+    ``fno.events.append_event`` and ``crates/fno-agents/src/claims.rs`` use, so
+    a live target session and a migration run cross-serialize.
+    ``MIGRATE_LOCK_TIMEOUT_SECONDS`` overrides the 30s default (used by tests).
 
 Exit codes:
   0  success
@@ -54,6 +54,19 @@ def _migrate_row(row: dict) -> dict:
     }
 
 
+try:
+    from fno.mutex import steal_if_stale as _steal_if_stale
+except ImportError:
+    # This script runs under whatever ambient python3 the operator has, which
+    # need not have the fno wheel. Degrade to the pre-steal behavior (time out
+    # and exit 2, leaving the corpse for the operator) rather than keeping a
+    # second copy of the steal: an inlined duplicate already drifted from the
+    # real one inside a single change set, which is the whole failure class
+    # this module exists to close.
+    def _steal_if_stale(lock_dir: Path) -> bool:
+        return False
+
+
 def _acquire_lock(lock_dir: Path, timeout: int) -> bool:
     """mkdir-based mutex; returns True on acquire, False on timeout."""
     lock_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +76,8 @@ def _acquire_lock(lock_dir: Path, timeout: int) -> bool:
             lock_dir.mkdir()
             return True
         except FileExistsError:
+            if _steal_if_stale(lock_dir):
+                continue
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.1)
@@ -90,19 +105,41 @@ def _migrate_file(path: Path, dry_run: bool) -> tuple[int, int, int]:
         raise SystemExit(2)
 
     try:
-        return _do_migrate(path, dry_run)
+        return _do_migrate(path, dry_run, lock_dir)
     finally:
         _release_lock(lock_dir)
 
 
-def _do_migrate(path: Path, dry_run: bool) -> tuple[int, int, int]:
+# The lock dir's mtime is its lease (see fno/mutex.py). Every other holder of
+# this mutex finishes in well under a second, but a migration legitimately runs
+# for minutes on a million-row file while holding it across the scan AND the
+# final tmp.replace(). Without renewal an ordinary emitter would age-steal this
+# live lock, append to the doomed inode, and lose those events at the replace.
+_LEASE_RENEW_EVERY_S = 30
+
+
+def _renew_lease(lock_dir: Path, last: float) -> float:
+    """Touch the lock so a legitimately slow hold never looks like a corpse."""
+    now = time.monotonic()
+    if now - last < _LEASE_RENEW_EVERY_S:
+        return last
+    try:
+        os.utime(lock_dir, None)
+    except OSError:
+        pass  # a vanished lock is surfaced by the release path, not here
+    return now
+
+
+def _do_migrate(path: Path, dry_run: bool, lock_dir: Path) -> tuple[int, int, int]:
     migrated = skipped = corrupt = 0
     bak = path.with_suffix(path.suffix + ".bak")
     corrupt_log = path.with_suffix(path.suffix + ".corrupt")
     tmp = path.with_suffix(path.suffix + ".tmp")
+    leased = time.monotonic()
 
     with path.open("r", encoding="utf-8") as fin, tmp.open("w", encoding="utf-8") as fout:
         for lineno, line in enumerate(fin, 1):
+            leased = _renew_lease(lock_dir, leased)
             stripped = line.strip()
             if not stripped:
                 fout.write(line)

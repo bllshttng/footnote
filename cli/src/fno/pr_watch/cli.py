@@ -201,9 +201,12 @@ def tick() -> None:
         max_retries=cfg.retries,
     )
 
-    typer.echo(
-        f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
-    )
+    if result.lock_held:
+        typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
+    else:
+        typer.echo(
+            f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
+        )
 
     # Session auto-recovery (x-f47c) rides this same launchd cadence: a sweep
     # that resumes footnote-launched bg sessions which went idle-but-incomplete

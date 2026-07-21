@@ -60,6 +60,11 @@ class TickResult:
     open_prs: int
     acted: int
     skipped: int = 0
+    # A tick that could not take its lock did no work at all. Reporting that as
+    # open_prs=0 made 172 consecutive wedged ticks look like empty sweeps for
+    # five days, so it gets its own state instead of a zero count.
+    lock_held: bool = False
+    lock_holder: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -400,10 +405,21 @@ def tick(
     # Step 1: tick-level mutex
     try:
         _claim.acquire_tick_lock(_TICK_CLAIM_KEY, holder)
-    except Exception:
-        # Lock held by another tick: return silently with NO events.
-        log.debug("pr-watch: tick lock held, skipping this interval")
-        return TickResult(open_prs=0, acted=0)
+    except Exception as exc:  # noqa: BLE001 - any acquire failure means no work ran
+        # No work ran either way, so never report counts. Still NO events (a
+        # wedged predecessor must not emit one every 600s); the caller prints
+        # this reason so the wedge shows up in launchd's out.log within a tick.
+        held_by = getattr(exc, "holder", "")
+        if held_by:
+            pid = getattr(exc, "pid", None)
+            reason = f"lock held by {held_by}" + (f" (pid {pid})" if pid else "")
+        else:
+            # Not contention: the claim subsystem itself failed. Calling that a
+            # held lock would disguise a hard failure as routine skipping, which
+            # is the exact confusion this result state exists to remove.
+            log.warning("pr-watch: tick lock unavailable: %s", exc)
+            reason = f"tick lock unavailable: {exc}"
+        return TickResult(open_prs=0, acted=0, lock_held=True, lock_holder=reason)
 
     try:
         return _run_tick(

@@ -20,8 +20,10 @@
 //! - atomic create = temp file + `link(2)` publish (EEXIST = held), replace =
 //!   temp file + `rename(2)`, both in the claims directory itself;
 //! - stale recovery serialized under the `<lockfile-name>.recovery.d` mkdir
-//!   mutex; a waiter that times out retries acquire — it NEVER rmdirs a held
-//!   mutex (stealing would reintroduce the double-winner TOCTOU);
+//!   mutex; a waiter that times out retries acquire, and NEVER rmdirs a mutex
+//!   in place. A mutex older than `STALE_MUTEX_STEAL` is a corpse and is taken
+//!   by atomic rename (exactly one stealer wins) so a killed recoverer cannot
+//!   brick a claim key forever;
 //! - stale claims are archived by rename to `.expired/<enc>.<now_ms>.lock`,
 //!   never unlinked;
 //! - hybrid liveness: an expired-TTL claim whose recorded pid is a live
@@ -603,6 +605,125 @@ fn emit_claim_event(events_dir: Option<&Path>, type_name: &str, data: Map<String
     }
 }
 
+/// Age past which a mkdir mutex dir is a corpse left by a killed holder.
+///
+/// Mirrors `fno.mutex.STALE_MUTEX_STEAL_S`. The `.recovery.d` mutex is wire
+/// protocol with the Python implementation, so the threshold and the steal rule
+/// must move together. Every critical section under these mutexes is
+/// sub-second; never do slow work (network, subprocess) inside one or the age
+/// predicate stops distinguishing a corpse from an honest holder.
+const STALE_MUTEX_STEAL: Duration = Duration::from_secs(120);
+
+/// Rename-steal `lock_dir` when it is older than [`STALE_MUTEX_STEAL`].
+///
+/// True means retry `create_dir` immediately (the corpse is gone, or the lock
+/// was already released); false means the lock is honestly held and the caller
+/// should wait exactly as before. Removal happens only via an atomic rename the
+/// remover won, so two stealers can never both clear the same corpse.
+fn steal_if_stale(lock_dir: &Path) -> bool {
+    // symlink_metadata, not metadata: a dangling symlink at the lock path is
+    // stattable only without following it, and `create_dir` reports it as
+    // AlreadyExists. Following would yield NotFound here, and a caller that
+    // retries on true would spin against a lock it can never acquire.
+    let before = match std::fs::symlink_metadata(lock_dir) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false, // unstattable for any other reason: wait, never spin
+    };
+    // A clock that runs backwards yields Err here -> zero age -> no steal.
+    let age = before
+        .modified()
+        .map(|t| t.elapsed().unwrap_or_default())
+        .unwrap_or_default();
+    if age <= STALE_MUTEX_STEAL {
+        return false;
+    }
+
+    // Unique per attempt (see the Python twin): one name per pid means a reap
+    // dir left by a failed cleanup collides forever, silently disabling every
+    // future steal by this process.
+    static REAP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let reaped = lock_dir.with_file_name(format!(
+        "{}.reap.{}.{}",
+        lock_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        std::process::id(),
+        REAP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    match std::fs::rename(lock_dir, &reaped) {
+        Ok(()) => {
+            // The rename is atomic for a path, not for an inode: between the
+            // stat and here another stealer can have won and a fresh holder
+            // acquired at the same path, so what we moved may be a LIVE lock
+            // rather than the corpse we aged. Put it back and lose properly.
+            if !is_same_lock(&reaped, &before) {
+                if std::fs::rename(&reaped, lock_dir).is_err() {
+                    eprintln!(
+                        "claims: stole a live mutex at {} and could not restore it",
+                        lock_dir.display()
+                    );
+                }
+                return false;
+            }
+            eprintln!(
+                "claims: stole stale mutex {} (age {}s)",
+                lock_dir.display(),
+                age.as_secs()
+            );
+            remove_reaped(&reaped);
+            true
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            eprintln!(
+                "claims: could not steal stale mutex {}: {e}",
+                lock_dir.display()
+            );
+            false
+        }
+    }
+}
+
+/// Identity for a lock dir: inode AND mtime.
+///
+/// The inode alone is not enough. Linux hands a freshly created directory the
+/// inode number just freed by the one it replaced, so a corpse swapped for a
+/// live lock compares equal on (ino, dev). The mtime separates them: the corpse
+/// is at least the threshold old, a fresh holder's is now.
+fn is_same_lock(path: &Path, expected: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(got) => {
+            (got.ino(), got.dev(), got.mtime(), got.mtime_nsec())
+                == (
+                    expected.ino(),
+                    expected.dev(),
+                    expected.mtime(),
+                    expected.mtime_nsec(),
+                )
+        }
+        Err(_) => false,
+    }
+}
+
+/// Delete a reaped mutex, usually a directory but possibly a symlink
+/// (`remove_dir_all` fails on one).
+fn remove_reaped(path: &Path) {
+    if std::fs::remove_file(path).is_ok() {
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir_all(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!(
+                "claims: could not remove reaped mutex {}: {e}",
+                path.display()
+            );
+        }
+    }
+}
+
 fn append_event_line(events_path: &Path, event: &Value) -> Result<(), String> {
     if let Some(parent) = events_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -619,6 +740,9 @@ fn append_event_line(events_path: &Path, event: &Value) -> Result<(), String> {
         match std::fs::create_dir(&lock_dir) {
             Ok(()) => break,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if steal_if_stale(&lock_dir) {
+                    continue;
+                }
                 if Instant::now() >= deadline {
                     return Err(format!("events.jsonl lock timeout: {}", lock_dir.display()));
                 }
@@ -863,10 +987,16 @@ enum RecoverResult {
 }
 
 /// Stale-claim recovery under the shared mkdir mutex. The mutex NAME
-/// (`<lockfile-name>.recovery.d`) and the no-steal rule are wire protocol:
-/// they are how a Python worker and this implementation serialize recovery of
-/// the same claim. A waiter whose deadline expires retries acquire — it never
-/// rmdirs a mutex it does not hold (the holder may still be mid-archive).
+/// (`<lockfile-name>.recovery.d`) and the steal rule are wire protocol: they
+/// are how a Python worker and this implementation serialize recovery of the
+/// same claim, so both sides steal only past [`STALE_MUTEX_STEAL`] and only by
+/// atomic rename. A mutex younger than that is never touched (the holder may
+/// still be mid-archive); a waiter whose deadline expires just retries acquire.
+///
+/// Age-based steal is what keeps a killed recoverer from bricking a claim key
+/// permanently: archive-by-rename and exclusive-create both arbitrate a winner
+/// on their own, so the mutex is a spurious-retry guard, not the correctness
+/// boundary.
 fn recover_stale(
     path: &Path,
     key: &str,
@@ -883,10 +1013,14 @@ fn recover_stale(
     match std::fs::create_dir(&recovery_lock) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Another worker is doing recovery. Wait briefly, then retry from
-            // the top: the recovering worker either succeeded (we then see
-            // live-other) or failed (we get another shot).
-            wait_for_recovery_release(&recovery_lock, RECOVERY_LOCK_MAX_WAIT);
+            // Another worker is doing recovery -- or died holding the mutex.
+            // Steal a corpse so a killed recoverer cannot brick this key
+            // forever; otherwise wait briefly. Either way retry from the top:
+            // the recovering worker either succeeded (we then see live-other)
+            // or failed (we get another shot).
+            if !steal_if_stale(&recovery_lock) {
+                wait_for_recovery_release(&recovery_lock, RECOVERY_LOCK_MAX_WAIT);
+            }
             return RecoverResult::Retry;
         }
         // The claims dir itself vanished (or another io failure): retry from
@@ -984,10 +1118,14 @@ fn recover_stale_locked(
 
 /// Poll for another worker's recovery mutex to clear (mirrors
 /// `core._wait_for_recovery_release`): bounded wait, then the caller retries
-/// acquire regardless — never steal.
+/// acquire regardless. Only reached for a mutex young enough to be honestly
+/// held; corpses are handled by [`steal_if_stale`] before this is called.
 fn wait_for_recovery_release(recovery_lock: &Path, max_wait: Duration) {
+    // symlink_metadata, not exists(): a dangling symlink at the mutex path is
+    // AlreadyExists to create_dir but absent to a following stat, so exists()
+    // would report the lock free and burn every contention attempt instantly.
     let deadline = Instant::now() + max_wait;
-    while recovery_lock.exists() && Instant::now() < deadline {
+    while std::fs::symlink_metadata(recovery_lock).is_ok() && Instant::now() < deadline {
         std::thread::sleep(RECOVERY_LOCK_POLL_INTERVAL);
     }
 }
@@ -1112,9 +1250,14 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
             .unwrap_or_default()
     ));
     // A peer holding the mutex is mid-reclaim; back off (best-effort) rather
-    // than race it. A missed renewal only shortens the lease.
+    // than race it. A missed renewal only shortens the lease. But a CORPSE here
+    // would block every renewal until some other path cleared it, which is the
+    // permanent-wedge shape this mutex's stealing exists to prevent, so retry
+    // once past a stale one.
     if std::fs::create_dir(&recovery_lock).is_err() {
-        return Ok(false);
+        if !steal_if_stale(&recovery_lock) || std::fs::create_dir(&recovery_lock).is_err() {
+            return Ok(false);
+        }
     }
     let result = renew_locked(&path, holder, ttl_ms);
     let _ = std::fs::remove_dir(&recovery_lock);
@@ -1765,7 +1908,7 @@ mod tests {
     }
 
     #[test]
-    fn deadline_expired_waiter_never_steals_the_recovery_mutex() {
+    fn deadline_expired_waiter_never_steals_a_fresh_recovery_mutex() {
         let td = TempDir::new().unwrap();
         let path = lockfile(&td, "session:x");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1776,15 +1919,143 @@ mod tests {
             path.file_name().unwrap().to_string_lossy()
         ));
         std::fs::create_dir(&mutex).unwrap();
-        // Held for the whole call: acquire retries, exhausts attempts, errors.
-        // The mutex must survive (stealing would reintroduce the TOCTOU
-        // double-winner) and the stale claim must be untouched.
+        // Held for the whole call and young enough to be an honest holder:
+        // acquire retries rather than stealing (an in-place steal would
+        // reintroduce the TOCTOU double-winner), and the stale claim is
+        // untouched. Only a mutex past STALE_MUTEX_STEAL is taken, by rename.
         wait_for_recovery_release(&mutex, Duration::from_millis(50)); // exercise the wait path cheaply
         let out = recover_stale(&path, "session:x", "pty:thief", &opts_in(&td), None);
         assert!(matches!(out, RecoverResult::Retry));
         assert!(mutex.exists(), "recovery mutex was stolen");
         let kept = read_claim_file(&path).ok().unwrap();
         assert_eq!(kept.holder, "h");
+    }
+
+    /// Backdate a lock dir's mtime, which is what the steal predicate reads.
+    /// Via libc (already a direct dependency) rather than pulling in filetime.
+    fn age_dir(path: &Path, secs: u64) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let t = libc::timeval {
+            tv_sec: now - secs as i64,
+            tv_usec: 0,
+        };
+        let times = [t, t];
+        // lutimes, not utimes: identical for a real dir, and the only one that
+        // works on the dangling-symlink case below.
+        assert_eq!(unsafe { libc::lutimes(c.as_ptr(), times.as_ptr()) }, 0);
+    }
+
+    #[test]
+    fn recovery_mutex_corpse_is_stolen_so_a_claim_cannot_brick() {
+        // The permanence mechanism of the Jul 13 outage: a recoverer died
+        // holding the mutex, so the stale claim could never be reclaimed.
+        let td = TempDir::new().unwrap();
+        let path = lockfile(&td, "session:x");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let stale = record(999_999, 1, None, &hostname());
+        std::fs::write(&path, serialize_claim(&stale).unwrap()).unwrap();
+        let mutex = path.with_file_name(format!(
+            "{}.recovery.d",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir(&mutex).unwrap();
+        age_dir(&mutex, STALE_MUTEX_STEAL.as_secs() + 60);
+
+        let out = acquire("session:x", "pty:heir", opts_in(&td));
+
+        assert!(matches!(out, AcquireOutcome::Acquired(_)), "{out:?}");
+        assert!(!mutex.exists(), "corpse survived the steal");
+    }
+
+    #[test]
+    fn events_lock_corpse_is_stolen_within_the_daemon_budget() {
+        // AC5-ERR: the 2s hot-path budget still holds -- a corpse is stolen on
+        // the first spin rather than burning the whole deadline.
+        let td = TempDir::new().unwrap();
+        let events = td.path().join(".fno/events.jsonl");
+        std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+        let lock = events.with_file_name("events.jsonl.lock.d");
+        std::fs::create_dir(&lock).unwrap();
+        age_dir(&lock, STALE_MUTEX_STEAL.as_secs() + 60);
+
+        let started = Instant::now();
+        let res = append_event_line(&events, &json!({"ts": "t", "type": "x"}));
+
+        assert!(res.is_ok(), "{res:?}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!lock.exists());
+        assert_eq!(std::fs::read_to_string(&events).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn dangling_symlink_lock_never_spins() {
+        // EEXIST to create_dir but NotFound to a following metadata(): a
+        // "retry now" there spins the caller forever with its deadline
+        // unreachable. Stale -> stolen; fresh -> waited on.
+        let td = TempDir::new().unwrap();
+        let lock = td.path().join("events.jsonl.lock.d");
+        std::os::unix::fs::symlink(td.path().join("nonexistent"), &lock).unwrap();
+
+        assert!(!steal_if_stale(&lock), "fresh dangling link was stolen");
+
+        age_dir(&lock, STALE_MUTEX_STEAL.as_secs() + 60);
+        assert!(steal_if_stale(&lock), "stale dangling link was not stolen");
+        assert!(std::fs::symlink_metadata(&lock).is_err());
+    }
+
+    #[test]
+    fn repeated_steals_never_collide_on_the_reap_name() {
+        let td = TempDir::new().unwrap();
+        let lock = td.path().join("events.jsonl.lock.d");
+        for _ in 0..3 {
+            std::fs::create_dir(&lock).unwrap();
+            age_dir(&lock, STALE_MUTEX_STEAL.as_secs() + 60);
+            assert!(steal_if_stale(&lock));
+            assert!(!lock.exists());
+        }
+    }
+
+    #[test]
+    fn events_lock_fresh_contention_still_times_out() {
+        // AC2-EDGE: honest contention keeps today's log-and-skip behavior.
+        let td = TempDir::new().unwrap();
+        let events = td.path().join(".fno/events.jsonl");
+        std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+        std::fs::create_dir(events.with_file_name("events.jsonl.lock.d")).unwrap();
+
+        let res = append_event_line(&events, &json!({"ts": "t", "type": "x"}));
+
+        assert!(res.is_err(), "fresh lock was stolen");
+    }
+
+    #[test]
+    fn concurrent_stealers_have_exactly_one_rename_winner() {
+        // AC3-FR: both writers land whole lines; neither deadlocks.
+        let td = TempDir::new().unwrap();
+        let events = td.path().join(".fno/events.jsonl");
+        std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+        let lock = events.with_file_name("events.jsonl.lock.d");
+        std::fs::create_dir(&lock).unwrap();
+        age_dir(&lock, STALE_MUTEX_STEAL.as_secs() + 60);
+
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let events = events.clone();
+                std::thread::spawn(move || {
+                    append_event_line(&events, &json!({"ts": "t", "type": "x", "i": i}))
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+
+        assert_eq!(std::fs::read_to_string(&events).unwrap().lines().count(), 4);
     }
 
     #[test]

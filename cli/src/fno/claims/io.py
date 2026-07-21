@@ -39,8 +39,8 @@ EXPIRED_SUBDIR = ".expired"
 # Env var naming the base dir under which GLOBAL (node-level) claims live.
 # Node ids are global (like ~/.fno/graph.json), so a node:<id> lock must
 # coordinate across worktrees rather than land in a worktree-local cwd. Shell
-# call sites that manage node claims (init-target-state.sh / set-gate.sh /
-# the deleted claim-release.sh, ab-d0337fbc) set this to "$HOME" so the claim lands at
+# call sites that manage node claims (init-target-state.sh; the deleted
+# set-gate.sh / claim-release.sh) set this to "$HOME" so the claim lands at
 # ~/.fno/claims. An older `fno` that predates this var silently ignores
 # it (writes cwd-local, degraded but never erroring), which is why this is an
 # env var and not a CLI flag. Per-root claims (the megawalk walker singleton)

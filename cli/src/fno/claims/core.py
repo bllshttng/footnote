@@ -46,6 +46,7 @@ from .io import (
 )
 from .staleness import classify, now_ms
 from ..harness_identity import resolve_harness_identity
+from ..mutex import steal_if_stale
 from .types import (
     MAX_ENCODED_FILENAME_BYTES,
     MAX_KEY_LENGTH,
@@ -237,10 +238,14 @@ def acquire_claim(
                 recovery_lock.mkdir(parents=True)
                 acquired_lock = True
             except FileExistsError:
-                # Another worker is doing recovery. Wait briefly, then recurse
-                # from the top. The recovering worker will either succeed
-                # (we then see live-other) or fail (we get another shot).
-                _wait_for_recovery_release(recovery_lock)
+                # Another worker is doing recovery -- or died holding the mutex.
+                # Steal a corpse (age-based, rename-atomic) so a killed
+                # recoverer cannot brick this key forever; otherwise wait
+                # briefly. Either way recurse from the top: the recovering
+                # worker will either succeed (we then see live-other) or fail
+                # (we get another shot).
+                if not steal_if_stale(recovery_lock):
+                    _wait_for_recovery_release(recovery_lock)
                 return acquire_claim(
                     key,
                     holder,
@@ -325,22 +330,23 @@ def _wait_for_recovery_release(recovery_lock: Path) -> None:
     """Poll briefly for a recovery lock to be released by another worker.
 
     The lock is just a directory; once the holder finishes, it rmdir()s and
-    we can recurse. Bounded wait protects against a recovering worker that
-    crashed and left a stale recovery lock (the next iteration through
-    acquire_claim will then re-evaluate and possibly try recovery itself).
+    we can recurse. Only reached for a mutex young enough to be honestly held
+    - a corpse is stolen by ``steal_if_stale`` before this is called.
     """
+    # lexists, not exists: a dangling symlink at the mutex path is EEXIST to
+    # mkdir but absent to a following stat, so exists() would report the lock
+    # free and send the caller straight back into acquire_claim, recursing
+    # without pause until RecursionError.
     deadline = time.monotonic() + _RECOVERY_LOCK_MAX_WAIT_S
-    while recovery_lock.exists() and time.monotonic() < deadline:
+    while os.path.lexists(recovery_lock) and time.monotonic() < deadline:
         time.sleep(_RECOVERY_LOCK_POLL_INTERVAL_S)
-    # Deadline expired with the lock still held. Do NOT rmdir - the holder
-    # may still be inside the critical section (a slow archive + create on
-    # a heavily-loaded filesystem). Stealing the lockdir would cause two
-    # workers to both run the archive+create sequence simultaneously,
-    # reintroducing the TOCTOU double-winner bug the mutex is meant to
-    # prevent. The waiter recurses into acquire_claim regardless; the
-    # next attempt re-evaluates the claim and either sees the recovered
-    # state or tries its own recovery. A truly stuck recovery is
-    # recoverable via `fno claim force-release` from an operator.
+    # Deadline expired with the lock still held, and it is too young to be a
+    # corpse. Do NOT rmdir - the holder may still be inside the critical
+    # section (a slow archive + create on a heavily-loaded filesystem), and
+    # removing it in place would let two workers run archive+create at once.
+    # The waiter recurses into acquire_claim regardless; the next attempt
+    # re-evaluates the claim and either sees the recovered state or tries its
+    # own recovery, stealing the mutex once it ages past the threshold.
 
 
 def _existing_is_live(existing: Claim) -> bool:
