@@ -199,7 +199,7 @@ run_change2_relative_vs_absolute() {
     {
       "id": "ab-relpath",
       "plan_path": "internal/fno/plans/test-fixture.md",
-      "_status": "ready"
+      "status": "ready"
     }
   ]
 }
@@ -243,12 +243,12 @@ run_change2_prefer_node_id() {
     {
       "id": "ab-nomatch-path",
       "plan_path": "some/other/plan.md",
-      "_status": "ready"
+      "status": "ready"
     },
     {
       "id": "ab-id-match",
       "plan_path": "different/path.md",
-      "_status": "ready"
+      "status": "ready"
     }
   ]
 }

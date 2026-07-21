@@ -52,7 +52,7 @@ cat > "$TEST_HOME/.fno/graph.json" <<'EOF'
             "priority": "medium",
             "blocked_by": [],
             "completed_at": null,
-            "_status": "ready"
+            "status": "ready"
         },
         {
             "id": "ab-aaaaaaaa",
@@ -62,7 +62,7 @@ cat > "$TEST_HOME/.fno/graph.json" <<'EOF'
             "priority": "high",
             "blocked_by": [],
             "completed_at": null,
-            "_status": "ready"
+            "status": "ready"
         },
         {
             "id": "ab-aaaaaaab",
@@ -72,7 +72,7 @@ cat > "$TEST_HOME/.fno/graph.json" <<'EOF'
             "priority": "medium",
             "blocked_by": ["ab-aaaaaaaa"],
             "completed_at": null,
-            "_status": "blocked"
+            "status": "blocked"
         },
         {
             "id": "ab-cccccccc",
@@ -82,7 +82,7 @@ cat > "$TEST_HOME/.fno/graph.json" <<'EOF'
             "priority": "medium",
             "blocked_by": [],
             "completed_at": "2026-01-01T00:00:00Z",
-            "_status": "ready"
+            "status": "ready"
         },
         {
             "id": "ab-ddddddd1",
@@ -91,7 +91,7 @@ cat > "$TEST_HOME/.fno/graph.json" <<'EOF'
             "priority": "medium",
             "blocked_by": [],
             "completed_at": null,
-            "_status": "ready"
+            "status": "ready"
         },
         {
             "id": "ab-eeeeeeee",
@@ -101,7 +101,7 @@ cat > "$TEST_HOME/.fno/graph.json" <<'EOF'
             "priority": "low",
             "blocked_by": [],
             "completed_at": null,
-            "_status": "ready"
+            "status": "ready"
         }
     ]
 }

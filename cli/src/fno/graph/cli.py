@@ -348,7 +348,7 @@ def _child_note(child: dict, events: list[dict], worker: Optional[str]) -> str:
     from fno.graph import failure
 
     node_id = child["id"]
-    status = child.get("status") or child.get("status")
+    status = child.get("status")
     if status == "deferred":
         return f"streak {failure.consecutive_failures(node_id, events)}"
     if status == "ready" and not worker:
@@ -397,7 +397,7 @@ def cmd_epic_status(
     events = _epic_events(children)
 
     def _status_of(c: dict) -> Optional[str]:
-        return c.get("status") or c.get("status")
+        return c.get("status")
 
     total = len(children)
     done = sum(1 for c in children if _status_of(c) == "done")

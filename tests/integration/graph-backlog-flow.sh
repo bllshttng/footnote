@@ -94,7 +94,7 @@ import json
 g = json.load(open('$TEST_HOME/.fno/graph.json'))
 billing = next(e for e in g['entries'] if e['title'] == 'Billing')
 assert '$AUTH_ID' in billing['blocked_by'], 'billing not blocked by auth'
-assert billing['_status'] == 'blocked', f'billing status wrong: {billing[\"_status\"]}'
+assert billing['status'] == 'blocked', f'billing status wrong: {billing[\"status\"]}'
 " || fail "apply did not update graph.json"
 
 grep -q "blocked by:" "$GRAPH_MD" || fail "graph.md did not re-render with blocked-by hint"

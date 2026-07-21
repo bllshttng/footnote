@@ -150,7 +150,7 @@ def _evaluate(
     if entry is None:
         return BlockerVerdict("(unknown)", "unknown", reason="not in graph") if explicit else None
     bid = str(entry.get("id") or "(unknown)")
-    status = str(entry.get("status") or entry.get("status") or "").strip()
+    status = str(entry.get("status") or "").strip()
     if status != "done":
         # Open blocker means the node should not have dispatched; a done-but-not
         # -this blocker is simply not landed. Silent skip for graph blockers.

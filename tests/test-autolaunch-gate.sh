@@ -147,7 +147,7 @@ subcmd1="${1:-}"
 subcmd2="${2:-}"
 case "$subcmd1 $subcmd2" in
   "backlog get")
-    printf '{"_status":"ready","id":"%s"}\n' "${3:-unknown}"
+    printf '{"status":"ready","id":"%s"}\n' "${3:-unknown}"
     exit 0
     ;;
   *)
@@ -160,9 +160,9 @@ ABIEOF
   # Stub jq
   cat > "$sbx/stub-bin/jq" <<'JQEOF'
 #!/usr/bin/env bash
-# Minimal jq stub: handle -r '._status // "unknown"'
+# Minimal jq stub: handle -r '.status // "unknown"'
 input="$(cat)"
-if printf '%s' "$input" | grep -q '"_status":"ready"'; then
+if printf '%s' "$input" | grep -q '"status":"ready"'; then
   echo "ready"
 else
   echo "unknown"
@@ -315,7 +315,7 @@ SBX8="$(make_autolaunch_sandbox t8 none)"
 LOG8="$SBX8/call-log"
 # Graph fixture: a ready node whose plan_path is exactly this plan.
 cat > "$SBX8/graph.json" <<EOF
-{"entries":[{"id":"${NODE_ID}","_status":"ready","plan_path":"$SBX8/plan.md"}]}
+{"entries":[{"id":"${NODE_ID}","status":"ready","plan_path":"$SBX8/plan.md"}]}
 EOF
 OUT8="$(GRAPH_JSON_FIXTURE="$SBX8/graph.json" run_autolaunch "$SBX8" "$SBX8/plan.md")"
 check_contains "T8: auto-launched via plan_path" "auto-launched" "$OUT8"
@@ -327,7 +327,7 @@ echo ""
 echo "--- Test 8b: no link, no graph match -> nothing to launch ---"
 SBX8B="$(make_autolaunch_sandbox t8b none)"
 cat > "$SBX8B/graph.json" <<EOF
-{"entries":[{"id":"ab-99999999","_status":"ready","plan_path":"/some/other/plan.md"}]}
+{"entries":[{"id":"ab-99999999","status":"ready","plan_path":"/some/other/plan.md"}]}
 EOF
 OUT8B="$(GRAPH_JSON_FIXTURE="$SBX8B/graph.json" run_autolaunch "$SBX8B" "$SBX8B/plan.md")"
 check_contains "T8b: nothing to launch message" "nothing to launch" "$OUT8B"
@@ -346,7 +346,7 @@ LOG9="$SBX9/call-log"
 # would have matched this and dispatched ab-bodyfake.
 printf '\ngraph_node_id: ab-bodyfake\n' >> "$SBX9/plan.md"
 cat > "$SBX9/graph.json" <<EOF
-{"entries":[{"id":"${NODE_ID}","_status":"ready","plan_path":"$SBX9/plan.md"}]}
+{"entries":[{"id":"${NODE_ID}","status":"ready","plan_path":"$SBX9/plan.md"}]}
 EOF
 OUT9="$(GRAPH_JSON_FIXTURE="$SBX9/graph.json" run_autolaunch "$SBX9" "$SBX9/plan.md")"
 check_contains "T9: resolved the plan_path node, not the body's" "$NODE_ID" "$OUT9"
@@ -365,9 +365,9 @@ LOG10="$SBX10/call-log"
 EPIC10="ab-epic0001"
 cat > "$SBX10/graph.json" <<EOF
 {"entries":[
-  {"id":"${EPIC10}","_status":"ready","plan_path":"$SBX10/plan.md"},
-  {"id":"ab-child001","_status":"blocked","parent":"${EPIC10}"},
-  {"id":"ab-child002","_status":"ready","parent":"${EPIC10}"}
+  {"id":"${EPIC10}","status":"ready","plan_path":"$SBX10/plan.md"},
+  {"id":"ab-child001","status":"blocked","parent":"${EPIC10}"},
+  {"id":"ab-child002","status":"ready","parent":"${EPIC10}"}
 ]}
 EOF
 OUT10="$(GRAPH_JSON_FIXTURE="$SBX10/graph.json" run_autolaunch "$SBX10" "$SBX10/plan.md")"
@@ -388,9 +388,9 @@ LOG11="$SBX11/call-log"
 EPIC11="ab-epic0002"
 cat > "$SBX11/graph.json" <<EOF
 {"entries":[
-  {"id":"${EPIC11}","_status":"ready","plan_path":"$SBX11/plan.md"},
-  {"id":"ab-c1","_status":"claimed","parent":"${EPIC11}"},
-  {"id":"ab-c2","_status":"blocked","parent":"${EPIC11}"}
+  {"id":"${EPIC11}","status":"ready","plan_path":"$SBX11/plan.md"},
+  {"id":"ab-c1","status":"claimed","parent":"${EPIC11}"},
+  {"id":"ab-c2","status":"blocked","parent":"${EPIC11}"}
 ]}
 EOF
 OUT11="$(GRAPH_JSON_FIXTURE="$SBX11/graph.json" run_autolaunch "$SBX11" "$SBX11/plan.md")"
@@ -457,7 +457,7 @@ case "$subcmd1 $subcmd2" in
     exit 0
     ;;
   "backlog get")
-    printf '{"_status":"ready","id":"%s"}\n' "${3:-unknown}"
+    printf '{"status":"ready","id":"%s"}\n' "${3:-unknown}"
     exit 0
     ;;
   *)

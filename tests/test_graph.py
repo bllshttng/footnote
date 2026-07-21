@@ -124,7 +124,7 @@ def _():
     assert rc == 0
     get_out, _ = run(["get", node_id])
     data = json.loads(get_out)
-    assert data["_status"] == "done"
+    assert data["status"] == "done"
     assert data["completed_at"] is not None
 
 

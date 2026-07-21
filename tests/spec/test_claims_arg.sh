@@ -119,7 +119,7 @@ cat > "$FIXTURE_HOME/.fno/graph.json" <<'JSON'
       "merge_status": null,
       "artifact_url": null,
       "completion_note": null,
-      "_status": "idea",
+      "status": "idea",
       "created_at": "2026-01-01T00:00:00+00:00"
     }
   ]

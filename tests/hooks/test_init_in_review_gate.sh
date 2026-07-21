@@ -3,13 +3,13 @@
 #
 # A fresh named-node /target dispatch (/target <id>, fno target start <id>,
 # fno target init --input <id>) must REFUSE when the node already carries an
-# open, unmerged PR (derives _status == in_review) -- unless TARGET_ALLOW_IN_REVIEW=1.
+# open, unmerged PR (derives status == in_review) -- unless TARGET_ALLOW_IN_REVIEW=1.
 # Resume of an existing session, free-text/plan inputs, and any non-in_review
 # or unreadable status must proceed unchanged (fail-open).
 #
 # in_review is a DERIVED status (open PR), so we cannot fabricate it in a temp
 # graph. Instead we stub `fno` on PATH to answer the `backlog get --field
-# _status|pr_number` probe from STUB_STATUS/STUB_PR. The stub is SELF-CONTAINED:
+# status|pr_number` probe from STUB_STATUS/STUB_PR. The stub is SELF-CONTAINED:
 # every other verb is a benign success, so the proceed path needs no real fno
 # (CI smoke has none on PATH). A marker file proves the guard never probed
 # (free-text, resume).
@@ -46,7 +46,7 @@ if [[ "${1:-}" == "backlog" && "${2:-}" == "get" ]]; then
     field=""; prev=""
     for a in "$@"; do [[ "$prev" == "--field" ]] && field="$a"; prev="$a"; done
     case "$field" in
-        _status)
+        status)
             [[ -n "${STUB_MARKER:-}" ]] && : > "$STUB_MARKER"
             [[ "${STUB_STATUS:-}" == "__fail__" ]] && exit 1
             printf '%s\n' "${STUB_STATUS:-}"; exit 0;;

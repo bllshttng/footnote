@@ -141,7 +141,7 @@ for e in entries:
         continue
     if pp == plan or norm(pp) == want:
         nid = e.get("id") or ""
-        if e.get("status") == "ready":
+        if (e.get("status") or e.get("_status")) == "ready":
             ready = nid
             break
         other = other or nid
@@ -190,7 +190,7 @@ children = [e for e in entries if isinstance(e, dict) and e.get("parent") == nod
 if not children:
     sys.exit(0)  # not an epic (no children) -> empty output, no redirect
 for e in children:
-    if e.get("status") == "ready":
+    if (e.get("status") or e.get("_status")) == "ready":
         print(e.get("id") or "")
         sys.exit(0)
 print("__NONE__")  # decomposed but no ready child yet
