@@ -82,7 +82,7 @@ def steal_if_stale(lock_dir: Path) -> bool:
     # here another stealer can have won and a fresh holder acquired at the same
     # path, in which case what we just moved is a LIVE lock, not the corpse we
     # aged. Put it back and lose the race properly.
-    if not _same_inode(reaped, before):
+    if not _is_same_lock(reaped, before):
         try:
             os.rename(reaped, lock_dir)
         except OSError:
@@ -94,12 +94,23 @@ def steal_if_stale(lock_dir: Path) -> bool:
     return True
 
 
-def _same_inode(path: Path, expected: os.stat_result) -> bool:
+def _is_same_lock(path: Path, expected: os.stat_result) -> bool:
+    """Identity for a lock dir: inode AND mtime.
+
+    The inode alone is not enough. Linux hands a freshly created directory the
+    inode number just freed by the one it replaced, so a corpse swapped for a
+    live lock compares equal on (st_ino, st_dev). The mtime separates them: the
+    corpse is at least the threshold old, a fresh holder's is now.
+    """
     try:
         got = path.lstat()
     except OSError:
         return False
-    return (got.st_ino, got.st_dev) == (expected.st_ino, expected.st_dev)
+    return (got.st_ino, got.st_dev, got.st_mtime_ns) == (
+        expected.st_ino,
+        expected.st_dev,
+        expected.st_mtime_ns,
+    )
 
 
 def _remove(path: Path) -> None:

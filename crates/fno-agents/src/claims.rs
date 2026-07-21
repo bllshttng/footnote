@@ -658,7 +658,7 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
             // stat and here another stealer can have won and a fresh holder
             // acquired at the same path, so what we moved may be a LIVE lock
             // rather than the corpse we aged. Put it back and lose properly.
-            if !same_inode(&reaped, &before) {
+            if !is_same_lock(&reaped, &before) {
                 if std::fs::rename(&reaped, lock_dir).is_err() {
                     eprintln!(
                         "claims: stole a live mutex at {} and could not restore it",
@@ -686,10 +686,24 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
     }
 }
 
-fn same_inode(path: &Path, expected: &std::fs::Metadata) -> bool {
+/// Identity for a lock dir: inode AND mtime.
+///
+/// The inode alone is not enough. Linux hands a freshly created directory the
+/// inode number just freed by the one it replaced, so a corpse swapped for a
+/// live lock compares equal on (ino, dev). The mtime separates them: the corpse
+/// is at least the threshold old, a fresh holder's is now.
+fn is_same_lock(path: &Path, expected: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     match std::fs::symlink_metadata(path) {
-        Ok(got) => (got.ino(), got.dev()) == (expected.ino(), expected.dev()),
+        Ok(got) => {
+            (got.ino(), got.dev(), got.mtime(), got.mtime_nsec())
+                == (
+                    expected.ino(),
+                    expected.dev(),
+                    expected.mtime(),
+                    expected.mtime_nsec(),
+                )
+        }
         Err(_) => false,
     }
 }

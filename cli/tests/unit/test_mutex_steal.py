@@ -217,6 +217,29 @@ class TestStealHelper:
         assert steal_if_stale(lock) is False, "stole a freshly acquired lock"
         assert lock.is_dir(), "the live lock was not restored"
 
+    def test_AC3_EDGE_identity_survives_inode_reuse(self, tmp_path):
+        """Linux hands a new directory the inode just freed by the old one.
+
+        So (st_ino, st_dev) compares EQUAL across a corpse-for-live swap and
+        cannot carry identity on its own. This pins the mtime half, which is
+        what actually separates them, on every platform rather than only where
+        the allocator happens to reuse.
+        """
+        lock = tmp_path / "a.lock.d"
+        lock.mkdir()
+        corpse = lock.lstat()
+
+        os.rmdir(lock)
+        lock.mkdir()  # a fresh holder at the same path
+        fresh = lock.lstat()
+
+        if (fresh.st_ino, fresh.st_dev) == (corpse.st_ino, corpse.st_dev):
+            assert not mutex._is_same_lock(lock, corpse), (
+                "inode was reused and identity did not notice: a live lock "
+                "would be stolen using the corpse's age"
+            )
+        assert mutex._is_same_lock(lock, fresh)
+
     def test_AC2_ERR_fresh_dangling_symlink_is_waited_on(self, tmp_path):
         """The same path, still fresh, must fall through to the wait loop."""
         lock = tmp_path / "a.lock.d"
