@@ -11379,20 +11379,21 @@ mod tests {
         // drag with this render missing, so the border was a draggable-but-
         // invisible 1-cell target; this is the regression guard.
         let mut view = two_pane_view();
-        let border = view.panel_w() - 1; // last sideline column
-        let cell_at = |view: &View, row: usize, col: usize| {
-            let f = view.compose();
-            f.cells[row * f.cols as usize + col]
-        };
+        let border = view.panel_w() as usize - 1; // last sideline column
+                                                  // Compose once per state and assert on that snapshot, rather than
+                                                  // re-rendering per cell read.
+        let cell = |f: &Frame, row: usize, col: usize| f.cells[row * f.cols as usize + col];
 
-        let idle = cell_at(&view, 5, border as usize);
+        let idle_f = view.compose();
+        let idle = cell(&idle_f, 5, border);
         assert_eq!(idle.c, '│', "the divider glyph itself is unchanged");
         assert_eq!(idle.flags, cell_flags::DIM, "idle border is dim chrome");
 
         // Hover the border column.
-        view.on_hover(5, border, Instant::now());
+        view.on_hover(5, border as u16, Instant::now());
         assert!(view.hover_sideline_border, "hover state set");
-        let lit = cell_at(&view, 5, border as usize);
+        let lit_f = view.compose();
+        let lit = cell(&lit_f, 5, border);
         assert_eq!(
             lit.c, '│',
             "hover accents the border, it does not redraw it"
@@ -11405,17 +11406,19 @@ mod tests {
         );
 
         // Leaving the column clears it.
-        view.on_hover(5, border - 1, Instant::now());
+        view.on_hover(5, border as u16 - 1, Instant::now());
+        let off_f = view.compose();
         assert_eq!(
-            cell_at(&view, 5, border as usize).flags,
+            cell(&off_f, 5, border).flags,
             cell_flags::DIM,
             "border returns to idle chrome off the column"
         );
 
         // A drag in flight keeps it accented even while the pointer runs ahead.
         view.sideline_drag = Some(view.density);
+        let drag_f = view.compose();
         assert_eq!(
-            cell_at(&view, 5, border as usize).flags,
+            cell(&drag_f, 5, border).flags,
             cell_flags::BOLD,
             "the border stays lit for the whole drag"
         );
