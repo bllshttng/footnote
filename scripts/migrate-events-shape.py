@@ -105,19 +105,41 @@ def _migrate_file(path: Path, dry_run: bool) -> tuple[int, int, int]:
         raise SystemExit(2)
 
     try:
-        return _do_migrate(path, dry_run)
+        return _do_migrate(path, dry_run, lock_dir)
     finally:
         _release_lock(lock_dir)
 
 
-def _do_migrate(path: Path, dry_run: bool) -> tuple[int, int, int]:
+# The lock dir's mtime is its lease (see fno/mutex.py). Every other holder of
+# this mutex finishes in well under a second, but a migration legitimately runs
+# for minutes on a million-row file while holding it across the scan AND the
+# final tmp.replace(). Without renewal an ordinary emitter would age-steal this
+# live lock, append to the doomed inode, and lose those events at the replace.
+_LEASE_RENEW_EVERY_S = 30
+
+
+def _renew_lease(lock_dir: Path, last: float) -> float:
+    """Touch the lock so a legitimately slow hold never looks like a corpse."""
+    now = time.monotonic()
+    if now - last < _LEASE_RENEW_EVERY_S:
+        return last
+    try:
+        os.utime(lock_dir, None)
+    except OSError:
+        pass  # a vanished lock is surfaced by the release path, not here
+    return now
+
+
+def _do_migrate(path: Path, dry_run: bool, lock_dir: Path) -> tuple[int, int, int]:
     migrated = skipped = corrupt = 0
     bak = path.with_suffix(path.suffix + ".bak")
     corrupt_log = path.with_suffix(path.suffix + ".corrupt")
     tmp = path.with_suffix(path.suffix + ".tmp")
+    leased = time.monotonic()
 
     with path.open("r", encoding="utf-8") as fin, tmp.open("w", encoding="utf-8") as fout:
         for lineno, line in enumerate(fin, 1):
+            leased = _renew_lease(lock_dir, leased)
             stripped = line.strip()
             if not stripped:
                 fout.write(line)

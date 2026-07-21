@@ -625,12 +625,16 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
     // stattable only without following it, and `create_dir` reports it as
     // AlreadyExists. Following would yield NotFound here, and a caller that
     // retries on true would spin against a lock it can never acquire.
-    let age = match std::fs::symlink_metadata(lock_dir).and_then(|m| m.modified()) {
-        // A clock that runs backwards yields Err here -> zero age -> no steal.
-        Ok(t) => t.elapsed().unwrap_or_default(),
+    let before = match std::fs::symlink_metadata(lock_dir) {
+        Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
         Err(_) => return false, // unstattable for any other reason: wait, never spin
     };
+    // A clock that runs backwards yields Err here -> zero age -> no steal.
+    let age = before
+        .modified()
+        .map(|t| t.elapsed().unwrap_or_default())
+        .unwrap_or_default();
     if age <= STALE_MUTEX_STEAL {
         return false;
     }
@@ -650,12 +654,25 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
     ));
     match std::fs::rename(lock_dir, &reaped) {
         Ok(()) => {
+            // The rename is atomic for a path, not for an inode: between the
+            // stat and here another stealer can have won and a fresh holder
+            // acquired at the same path, so what we moved may be a LIVE lock
+            // rather than the corpse we aged. Put it back and lose properly.
+            if !same_inode(&reaped, &before) {
+                if std::fs::rename(&reaped, lock_dir).is_err() {
+                    eprintln!(
+                        "claims: stole a live mutex at {} and could not restore it",
+                        lock_dir.display()
+                    );
+                }
+                return false;
+            }
             eprintln!(
                 "claims: stole stale mutex {} (age {}s)",
                 lock_dir.display(),
                 age.as_secs()
             );
-            let _ = std::fs::remove_dir_all(&reaped);
+            remove_reaped(&reaped);
             true
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
@@ -665,6 +682,30 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
                 lock_dir.display()
             );
             false
+        }
+    }
+}
+
+fn same_inode(path: &Path, expected: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(got) => (got.ino(), got.dev()) == (expected.ino(), expected.dev()),
+        Err(_) => false,
+    }
+}
+
+/// Delete a reaped mutex, usually a directory but possibly a symlink
+/// (`remove_dir_all` fails on one).
+fn remove_reaped(path: &Path) {
+    if std::fs::remove_file(path).is_ok() {
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir_all(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!(
+                "claims: could not remove reaped mutex {}: {e}",
+                path.display()
+            );
         }
     }
 }

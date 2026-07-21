@@ -179,6 +179,44 @@ class TestStealHelper:
         assert steal_if_stale(lock) is True
         assert not lock.is_symlink()
 
+    def test_AC1_EDGE_stolen_symlink_leaves_no_garbage(self, tmp_path):
+        """rmtree raises NotADirectoryError on a symlink, so the reaped link
+        would survive as litter under ignore_errors."""
+        lock = tmp_path / "a.lock.d"
+        lock.symlink_to(tmp_path / "nonexistent-target")
+        _age_nofollow(lock, STALE_MUTEX_STEAL_S + 60)
+
+        assert steal_if_stale(lock) is True
+
+        leftovers = [p for p in tmp_path.iterdir() if ".reap." in p.name]
+        assert leftovers == [], f"reaped symlink left behind: {leftovers}"
+
+    def test_AC3_EDGE_a_live_lock_swapped_in_is_not_stolen(self, tmp_path, monkeypatch):
+        """The rename is atomic per path, not per inode.
+
+        A waiter can be descheduled after reading the age, another stealer win,
+        and a fresh holder acquire at the same path. Renaming then moves a LIVE
+        lock using the corpse's age, letting both callers in. The inode read
+        before the rename is what makes that detectable.
+        """
+        lock = tmp_path / "a.lock.d"
+        lock.mkdir()
+        _age(lock, STALE_MUTEX_STEAL_S + 60)
+
+        real_rename = os.rename
+
+        def swap_then_rename(src, dst):
+            # Stand in for the race: the corpse is replaced by a fresh holder
+            # between our age read and our rename.
+            os.rmdir(src)
+            os.mkdir(src)
+            return real_rename(src, dst)
+
+        monkeypatch.setattr(mutex.os, "rename", swap_then_rename)
+
+        assert steal_if_stale(lock) is False, "stole a freshly acquired lock"
+        assert lock.is_dir(), "the live lock was not restored"
+
     def test_AC2_ERR_fresh_dangling_symlink_is_waited_on(self, tmp_path):
         """The same path, still fresh, must fall through to the wait loop."""
         lock = tmp_path / "a.lock.d"

@@ -54,12 +54,13 @@ def steal_if_stale(lock_dir: Path) -> bool:
     # raise ENOENT here, and a caller that retries on True would then spin
     # against a lock it can never acquire.
     try:
-        age = time.time() - lock_dir.lstat().st_mtime
+        before = lock_dir.lstat()
     except FileNotFoundError:
         return True  # released between contention and stat: retry the mkdir
     except OSError:
         return False  # unstattable for any other reason: wait, never spin
 
+    age = time.time() - before.st_mtime
     if age <= STALE_MUTEX_STEAL_S:
         return False
 
@@ -77,6 +78,33 @@ def steal_if_stale(lock_dir: Path) -> bool:
         log.warning("could not steal stale mutex %s: %s", lock_dir, exc)
         return False
 
+    # The rename is atomic for a path, not for an inode: between the lstat and
+    # here another stealer can have won and a fresh holder acquired at the same
+    # path, in which case what we just moved is a LIVE lock, not the corpse we
+    # aged. Put it back and lose the race properly.
+    if not _same_inode(reaped, before):
+        try:
+            os.rename(reaped, lock_dir)
+        except OSError:
+            log.warning("stole a live mutex at %s and could not restore it", lock_dir)
+        return False
+
     log.warning("stole stale mutex %s (age %ds) -> %s", lock_dir, int(age), reaped)
-    shutil.rmtree(reaped, ignore_errors=True)
+    _remove(reaped)
     return True
+
+
+def _same_inode(path: Path, expected: os.stat_result) -> bool:
+    try:
+        got = path.lstat()
+    except OSError:
+        return False
+    return (got.st_ino, got.st_dev) == (expected.st_ino, expected.st_dev)
+
+
+def _remove(path: Path) -> None:
+    """Delete a reaped mutex, which is usually a directory but can be a symlink."""
+    try:
+        os.unlink(path)  # rmtree raises NotADirectoryError on a symlink
+    except OSError:
+        shutil.rmtree(path, ignore_errors=True)
