@@ -1404,6 +1404,9 @@ fn build_claude_stream_entry(
         exited_at: None,
         mux: None,
         screen_state: None,
+        crown_level: None,
+        crown_scope: None,
+        crown_grantor: None,
     }
 }
 
