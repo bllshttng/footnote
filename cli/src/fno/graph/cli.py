@@ -3425,6 +3425,23 @@ session_app = typer.Typer(
 )
 
 
+def _plan_claims(plan_path: str) -> "set[str]":
+    """The node ids a plan's frontmatter ``claims:``, as a set.
+
+    Empty means "no claim declared" -- including every unreadable-plan case, since
+    ``_read_plan_frontmatter`` returns ``{}`` on all of them. The caller treats
+    empty as agreement, so only a positive disagreement can skip a stamp.
+    """
+    from fno.graph._intake import _read_plan_frontmatter
+
+    claims = _read_plan_frontmatter(plan_path).get("claims")
+    if isinstance(claims, str):
+        claims = [claims]
+    if not isinstance(claims, list):
+        return set()
+    return {c.strip() for c in claims if isinstance(c, str) and c.strip() not in ("", "null")}
+
+
 @session_app.callback()
 def _session_callback() -> None:
     """Keep ``add`` a real subcommand (a single-command Typer app auto-collapses,
@@ -3455,6 +3472,18 @@ def cmd_session_add(
     at: Optional[str] = typer.Option(
         None, "--at", help="ISO-8601 UTC timestamp (default: now); explicit for backfill."
     ),
+    claimed_at: Optional[str] = typer.Option(
+        None, "--claimed-at", help="ISO-8601 UTC instant work was claimed; lands on the "
+                                   "row so it bounds the implementation window with --at."
+    ),
+    require_session: Optional[str] = typer.Option(
+        None, "--require-session", help="Skip (exit 0) unless the ambient session id equals "
+                                        "this. Identity-continuity guard for stale manifests."
+    ),
+    guard_plan: Optional[str] = typer.Option(
+        None, "--guard-plan", help="Skip (exit 0) if this plan's frontmatter `claims:` names "
+                                   "a DIFFERENT node. Requires NODE (not --pr-number)."
+    ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the result as JSON."),
 ) -> None:
     """Stamp a node with a lifecycle phase record (idempotent, append-only).
@@ -3470,6 +3499,13 @@ def cmd_session_add(
     that maps to zero or several nodes is a best-effort SKIP, not an error: it
     warns (naming the candidates) and exits 0, because refusing to guess is the
     designed outcome and a caller must not log it as a failure (x-f47f AC3-ERR).
+
+    ``--require-session`` and ``--guard-plan`` are the honesty guards an
+    unattended caller (finalize's do-provenance backstop, x-0469) needs: a stale
+    manifest in a reused worktree or a plan claiming another node must not
+    mis-attribute work on an append-only record. Both skip with exit 0 and one
+    named reason, because a guard skip is a designed outcome the caller must not
+    log as a failure.
     """
     from fno.graph.fuzzy import resolve_node
     from fno.graph.store import (
@@ -3482,8 +3518,23 @@ def cmd_session_add(
     if (node is None) == (pr is None):
         typer.echo("session add: pass exactly one of NODE or --pr-number.", err=True)
         raise typer.Exit(code=2)
+    # Refused, never ignored: the guard compares against the node the row lands
+    # on, and the --pr-number path resolves that only after it has stamped.
+    if guard_plan is not None and pr is not None:
+        typer.echo("session add: --guard-plan requires NODE, not --pr-number.", err=True)
+        raise typer.Exit(code=2)
 
     who = node if node is not None else f"pr#{pr}"
+
+    def _skip(reason: str, node_id: "str | None" = None) -> None:
+        typer.echo(f"session add: {reason} (target={who} phase={phase}). Skipped.", err=True)
+        if json_out:
+            typer.echo(json.dumps({
+                "node_id": node_id, "status": "skipped", "reason": reason,
+                "phase": phase, "harness": eff_harness, "session_id": eff_session,
+                "added": False,
+            }))
+
     ident = resolve_harness_identity()
     eff_harness = (harness or ident.harness or "").strip()
     eff_session = (session_id or ident.session_id or "").strip()
@@ -3494,6 +3545,31 @@ def cmd_session_add(
             err=True,
         )
         raise typer.Exit(code=2)
+
+    # Identity continuity: the caller vouches for whose session this manifest
+    # belongs to; a mismatch means it belongs to a different conversation (the
+    # stale-manifest squatter), so the record is not this session's to write.
+    # Compared against the AMBIENT id, never the --session-id override: a guard a
+    # caller can satisfy by asserting its own answer is not a guard. No ambient
+    # identity at all therefore also skips - continuity is unprovable.
+    if require_session is not None:
+        # The row must record the identity the guard actually checked. Allowing an
+        # override would verify one identity and permanently write another, which
+        # is the same self-certification hole in a different shape. Refused rather
+        # than ignored, like --guard-plan with --pr-number.
+        if session_id is not None or harness is not None:
+            typer.echo(
+                "session add: --require-session cannot be combined with "
+                "--session-id/--harness (it would verify one identity and "
+                "record another).",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        ambient = (ident.session_id or "").strip()
+        if ambient != require_session.strip():
+            return _skip(
+                f"ambient session {ambient!r} != required {require_session.strip()!r}"
+            )
 
     # After the identity guard: resolution shells out to git and possibly gh, and
     # a run with no identity is about to skip anyway.
@@ -3519,7 +3595,8 @@ def cmd_session_add(
         if pr is not None:
             node_id, status = stamp_session_for_pr(
                 _graph_path(), pr, phase=phase,
-                harness=eff_harness, session_id=eff_session, at=at, repo=repo,
+                harness=eff_harness, session_id=eff_session, at=at,
+                claimed_at=claimed_at, repo=repo,
             )
             if status in ("no-node", "ambiguous"):
                 cands = find_nodes_for_pr(_graph_path(), pr, repo=repo)
@@ -3543,9 +3620,31 @@ def cmd_session_add(
                 typer.echo(f"session add: no node matches {node!r} (phase={phase}).", err=True)
                 raise typer.Exit(code=2)
             node_id = match.candidates[0]["id"]
+            # Plan agreement (mirrors /do Step 1.5): only a POSITIVE disagreement
+            # skips. An unreadable plan or an absent `claims:` is agreement-
+            # unknown, and absent evidence of conflict is not conflict.
+            #
+            # This is the one guard that does NOT fail closed, so it says so out
+            # loud when it could not evaluate. Otherwise an install whose
+            # plan_path is systematically stale (plan moved, vault unmounted)
+            # runs with G3 disabled and no operator signal anywhere.
+            if guard_plan is not None:
+                claims = _plan_claims(guard_plan)
+                if not claims:
+                    typer.echo(
+                        f"session add: plan {guard_plan} is unreadable or declares no "
+                        f"claims; agreement not evaluated for {node_id}.",
+                        err=True,
+                    )
+                elif node_id not in claims:
+                    return _skip(
+                        f"plan {guard_plan} claims {sorted(claims)} != node {node_id}",
+                        node_id=node_id,
+                    )
             found, added = append_session_record(
                 _graph_path(), node_id, phase=phase,
                 harness=eff_harness, session_id=eff_session, at=at,
+                claimed_at=claimed_at,
             )
             if not found:
                 typer.echo(f"session add: node {node_id} not found (phase={phase}).", err=True)

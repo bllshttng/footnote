@@ -577,6 +577,7 @@ def append_session_record(
     harness: str,
     session_id: str,
     at: "str | None" = None,
+    claimed_at: "str | None" = None,
 ) -> "tuple[bool, bool]":
     """Append a ``{phase, harness, session_id, at}`` lifecycle record to a node's
     append-only ``sessions`` list, returning ``(found, added)`` (x-b6e4).
@@ -587,10 +588,15 @@ def append_session_record(
     to one row and the first observation owns ``at``. Never edits or removes an
     entry.
 
+    ``claimed_at`` is optional and records when the work was claimed, so one row
+    bounds the implementation window (``claimed_at`` start, ``at`` terminal). It
+    is omitted from the row when absent, keeping legacy rows valid, and is never
+    part of the idempotency key.
+
     Raises ``ValueError`` on an unknown phase, an empty/over-long harness or
-    session id, or an unparseable ``at`` -- validation lives here so every caller
-    (CLI, tests, future backfill) is bound by the same contract. ``found=False``
-    when the node is absent (no mutation).
+    session id, or an unparseable ``at``/``claimed_at`` -- validation lives here
+    so every caller (CLI, tests, future backfill) is bound by the same contract.
+    ``found=False`` when the node is absent (no mutation).
     """
     from fno.graph._intake import _find_node  # function-local: avoid import cycle
     from fno.graph.types import SESSION_PHASES
@@ -607,22 +613,29 @@ def append_session_record(
         if len(value) > _SESSION_STR_MAX:
             raise ValueError(f"{label} exceeds {_SESSION_STR_MAX} chars")
 
-    if at is None:
-        at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    else:
-        # The `at` contract is ISO-8601 *UTC*. fromisoformat alone would accept a
-        # date-only value, a naive datetime, or a non-UTC offset -- all of which
-        # break append-order comparison and a future evidence-based backfill. So
-        # require a tz-aware instant whose offset is exactly UTC, then normalize
-        # to the canonical `...Z` form the default path emits.
-        raw = at.strip()
+    # The timestamp contract is ISO-8601 *UTC*. fromisoformat alone would accept a
+    # date-only value, a naive datetime, or a non-UTC offset -- all of which break
+    # append-order comparison and a future evidence-based backfill. So require a
+    # tz-aware instant whose offset is exactly UTC, then normalize to the
+    # canonical `...Z` form the default path emits.
+    def _utc(label: str, value: str) -> str:
         try:
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
         except ValueError as exc:
-            raise ValueError(f"at must be an ISO-8601 timestamp, got {at!r}") from exc
+            raise ValueError(
+                f"{label} must be an ISO-8601 timestamp, got {value!r}"
+            ) from exc
         if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
-            raise ValueError(f"at must be a UTC timestamp (offset +00:00 / Z), got {at!r}")
-        at = parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            raise ValueError(
+                f"{label} must be a UTC timestamp (offset +00:00 / Z), got {value!r}"
+            )
+        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    at = _utc("at", at) if at is not None else datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    if claimed_at is not None:
+        claimed_at = _utc("claimed_at", claimed_at)
 
     result = {"found": False, "added": False}
 
@@ -635,8 +648,10 @@ def append_session_record(
         key = (phase, harness, session_id)
         if any((r.get("phase"), r.get("harness"), r.get("session_id")) == key for r in rows):
             return entries  # duplicate: first observation owns `at`
-        rows.append({"phase": phase, "harness": harness,
-                     "session_id": session_id, "at": at})
+        row = {"phase": phase, "harness": harness, "session_id": session_id, "at": at}
+        if claimed_at is not None:
+            row["claimed_at"] = claimed_at
+        rows.append(row)
         result["added"] = True
         return entries
 
@@ -718,6 +733,7 @@ def stamp_session_for_pr(
     harness: str,
     session_id: str,
     at: "str | None" = None,
+    claimed_at: "str | None" = None,
     repo: "str | None" = None,
 ) -> "tuple[str | None, str]":
     """Resolve the UNIQUE node carrying ``pr_number`` and append a lifecycle
@@ -743,6 +759,7 @@ def stamp_session_for_pr(
         return None, "ambiguous"
     node_id = matches[0]
     _found, added = append_session_record(
-        path, node_id, phase=phase, harness=harness, session_id=session_id, at=at
+        path, node_id, phase=phase, harness=harness, session_id=session_id, at=at,
+        claimed_at=claimed_at,
     )
     return node_id, ("added" if added else "duplicate")

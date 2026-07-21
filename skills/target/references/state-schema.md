@@ -28,6 +28,12 @@ session_id: 20260420T091434Z-56177-a1b2c3
   # Used by fno-agents loop-check as the primary session discriminator.
 
 created_at: "2026-06-05T03:00:00Z"   # ISO 8601 UTC, set at fresh init
+initial_head: "eb7505a7..."          # HEAD at init; `null` in a repo with no commits.
+                                      # finalize diffs initial_head..HEAD for commits
+                                      # AUTHORED at/after created_at before stamping
+                                      # do-provenance, so a rebase-only successor
+                                      # (committer date rewritten, author date kept)
+                                      # is not mistaken for an implementer.
 
 input: "Add AI chat feature"          # original user argument (idea or plan path)
 plan_path: null                       # resolved plan path; may be first-filled post-init
