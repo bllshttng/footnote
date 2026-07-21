@@ -3548,10 +3548,15 @@ def cmd_session_add(
     # Identity continuity: the caller vouches for whose session this manifest
     # belongs to; a mismatch means it belongs to a different conversation (the
     # stale-manifest squatter), so the record is not this session's to write.
-    if require_session is not None and eff_session != require_session.strip():
-        return _skip(
-            f"ambient session {eff_session!r} != required {require_session.strip()!r}"
-        )
+    # Compared against the AMBIENT id, never the --session-id override: a guard a
+    # caller can satisfy by asserting its own answer is not a guard. No ambient
+    # identity at all therefore also skips - continuity is unprovable.
+    if require_session is not None:
+        ambient = (ident.session_id or "").strip()
+        if ambient != require_session.strip():
+            return _skip(
+                f"ambient session {ambient!r} != required {require_session.strip()!r}"
+            )
 
     # After the identity guard: resolution shells out to git and possibly gh, and
     # a run with no identity is about to skip anyway.

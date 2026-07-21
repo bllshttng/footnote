@@ -1443,3 +1443,18 @@ def test_guard_plan_with_pr_number_is_refused_not_ignored(tmp_path, monkeypatch)
     ])
     assert r.exit_code == 2
     assert _sessions(g) == []
+
+
+def test_require_session_is_not_satisfiable_by_the_session_id_override(tmp_path, monkeypatch):
+    """A guard a caller can satisfy by asserting its own answer is not a guard:
+    the comparison is against ambient identity, never the explicit override."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _guard_graph(tmp_path, monkeypatch)  # ambient is SESSION-A
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "ab-guard001", "--phase", "do",
+        "--session-id", "SESSION-B", "--require-session", "SESSION-B",
+    ])
+    assert r.exit_code == 0
+    assert _sessions(g) == []
