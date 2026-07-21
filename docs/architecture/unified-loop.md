@@ -178,6 +178,37 @@ After `next()` returns the unit and `close()` is called, subsequent `next()` cal
 
 **Cancel:** the cancel closure checks `SIGINT_RECEIVED` (atomic bool set by a signal handler) OR the existence of `.fno/.target-cancelled`. Either trips `Interrupted`.
 
+### `done_probes`: the operational-evidence conjunct
+
+`DonePRGreen` normally conjuncts PR-exists + CI-green + review-clean + HEAD-shipped.
+Every one of those measures an artifact, so operational silence cannot falsify the gate: a recurring deliverable can ship, pass CI, get reviewed, and never once run.
+Grooming died this death three times.
+
+A plan may therefore declare `done_probes` in its frontmatter - up to 3 shell commands that assert the thing actually ran:
+
+```yaml
+done_probes:
+  - "fno mail list --kind report --since 24h | grep -q groom"
+```
+
+`loop-check` runs them as the **final** conjunct, only once every other conjunct already holds, and refuses `DonePRGreen` until each exits 0.
+Ordering is what keeps the feature free: a plan with no declaration spawns no subprocess, and a red or unreviewed PR never pays for one either.
+
+| Aspect | Behavior |
+|---|---|
+| Field absent, or `[]` | Zero probe subprocesses; gate behavior unchanged |
+| More than 3 declared | Refuse, naming the cap; nothing executes |
+| Non-zero exit (127 included) | Refuse, naming the verbatim command, the exit code, and up to 500 chars of stderr |
+| Runs past 60s | Child killed, treated as failed. The timeout is native Rust (spawn + `try_wait` + kill) because the host has no `timeout` binary |
+| Plan unreadable, probes seen on a prior fire | Refuse as "probes undeterminable" |
+| Plan unreadable, no probe history | Today's behavior - a probe-less session with a stale `plan_path` must not start refusing |
+
+Every fire records its results in the `loop_check` event as `data.done_probes` (`{"<cmd>": "pass" \| "fail:<code>" \| "timeout"}`), which is what `fno scoreboard --plan-fidelity` joins against the declaration to report probes declared vs passed.
+
+There is no environment override.
+A probe that cannot pass here is fixed by editing the plan, which is visible in git; a wedged one falls to the existing `NoProgress` and `Budget` backstops.
+Authoring guidance (freshness over bare existence) lives in `skills/blueprint/SKILL.md`.
+
 ---
 
 ## The exec shim (`scripts/run-target-loop.sh`)
