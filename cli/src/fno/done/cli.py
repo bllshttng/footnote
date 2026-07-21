@@ -42,7 +42,11 @@ from fno.events import (
     SchemaUnavailableError as _SchemaUnavailableError,
     ValidationError as _ValidationError,
 )
-from fno.graph._reconcile import pr_url_for_repo, repo_slug_from_url
+from fno.graph._reconcile import (
+    pr_number_from_url,
+    pr_url_for_repo,
+    repo_slug_from_url,
+)
 from fno.graph.fuzzy import resolve_id
 from fno.graph.store import locked_mutate_graph, read_graph
 
@@ -478,6 +482,14 @@ def done_command(
                 typer.echo(
                     f"fno done: --pr-url {pr_url!r} is not a GitHub PR url "
                     "(expected https://github.com/<owner>/<repo>/pull/<n>)",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            named = pr_number_from_url(pr_url)
+            if named != pr:
+                typer.echo(
+                    f"fno done: --pr-url names PR #{named}, not #{pr} - a row "
+                    "pointing at two different PRs matches neither.",
                     err=True,
                 )
                 raise typer.Exit(code=2)

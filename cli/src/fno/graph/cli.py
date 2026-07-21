@@ -2056,7 +2056,11 @@ def cmd_update(
     # and PR numbers collide across repos, so any consumer matching on the bare
     # number can attribute a foreign PR. Resolve here (subprocess I/O stays out
     # of the graph lock) and fail closed when the repo will not resolve.
-    from fno.graph._reconcile import pr_url_for_repo, repo_slug_from_url
+    from fno.graph._reconcile import (
+        pr_number_from_url,
+        pr_url_for_repo,
+        repo_slug_from_url,
+    )
 
     _pre_lock_node: list = []
 
@@ -2085,11 +2089,17 @@ def cmd_update(
         typer.echo(f"note: derived {label} {url}", err=True)
         return url  # type: ignore[return-value]
 
-    def _check_url_shape(value: str, label: str) -> None:
+    def _check_url_shape(value: str, label: str, expect_pr: Optional[int] = None) -> None:
         if repo_slug_from_url(value) is None:
             _refuse(
                 f"{label} {value!r} is not a GitHub PR url "
                 "(expected https://github.com/<owner>/<repo>/pull/<n>)"
+            )
+        named = pr_number_from_url(value)
+        if expect_pr is not None and named != expect_pr:
+            _refuse(
+                f"{label} names PR #{named}, not #{expect_pr} - a row pointing at "
+                "two different PRs matches neither."
             )
 
     clearing_number = pr_number is not None and pr_number.lower() == "null"
@@ -2098,9 +2108,14 @@ def cmd_update(
     # Shape-check any url the caller supplies, on every path: an unparseable
     # url carries no repo slug, so it is url-less in every way that matters.
     if pr_url is not None and not clearing_url:
-        _check_url_shape(pr_url, "--pr-url")
+        expect = (
+            int(pr_number)
+            if pr_number is not None and pr_number.strip().isdigit()
+            else None
+        )
+        _check_url_shape(pr_url, "--pr-url", expect)
     if add_pr_url is not None:
-        _check_url_shape(add_pr_url, "--add-pr-url")
+        _check_url_shape(add_pr_url, "--add-pr-url", add_pr)
 
     derived_pr_url: Optional[str] = None
     if pr_number is not None and not clearing_number:

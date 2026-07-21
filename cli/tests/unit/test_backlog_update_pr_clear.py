@@ -222,3 +222,31 @@ def test_add_pr_refused_when_repo_unresolvable(tmp_graph, monkeypatch):
 
     assert result.exit_code != 0
     assert _first(tmp_graph).get("additional_prs") in (None, [])
+
+
+def test_pr_url_naming_a_different_pr_is_refused(tmp_graph):
+    _seed(tmp_graph, [
+        {"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"},
+    ])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001",
+        "--pr-number", "123", "--pr-url", "https://github.com/o/r/pull/999",
+    ])
+
+    assert result.exit_code != 0
+    assert _first(tmp_graph).get("pr_number") is None
+
+
+def test_add_pr_url_naming_a_different_pr_is_refused(tmp_graph):
+    _seed(tmp_graph, [
+        {"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"},
+    ])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001",
+        "--add-pr", "88", "--add-pr-url", "https://github.com/o/r/pull/99",
+    ])
+
+    assert result.exit_code != 0
+    assert _first(tmp_graph).get("additional_prs") in (None, [])

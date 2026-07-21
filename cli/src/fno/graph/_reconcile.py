@@ -96,6 +96,22 @@ def resolve_current_repo_slug(
     return (out.strip() or None) if rc == 0 else None
 
 
+_PR_NUM_RE = re.compile(r"github\.com/[^/\s]+/[^/\s]+?(?:\.git)?/pull/(\d+)")
+
+
+def pr_number_from_url(url: Optional[str]) -> Optional[int]:
+    """The PR number a GitHub PR url names, or None.
+
+    A url that carries the wrong number is worse than none: the row then points
+    reconciliation at one PR and renders a link to another, and repo-scoped
+    matching - which compares BOTH slug and number - finds neither.
+    """
+    if not url:
+        return None
+    m = _PR_NUM_RE.search(url)
+    return int(m.group(1)) if m else None
+
+
 def pr_url_from_slug(slug: str, pr: int) -> str:
     """The one place a PR url is built, so ``repo_slug_from_url`` round-trips it."""
     return f"https://github.com/{slug}/pull/{pr}"
