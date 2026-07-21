@@ -245,15 +245,18 @@ def headless_create(
             spawn_env.pop(_k, None)
         spawn_env.update(account_env)
     started = time.monotonic()
+    # Pass env ONLY when set: no --account must inherit the parent env by
+    # omitting the kwarg entirely (byte-identical to a bare subprocess.run).
+    run_kwargs: dict[str, Any] = {
+        "cwd": str(cwd),
+        "capture_output": True,
+        "text": True,
+        "timeout": timeout,
+    }
+    if spawn_env is not None:
+        run_kwargs["env"] = spawn_env
     try:
-        result = _subprocess_run(
-            argv,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=spawn_env,
-        )
+        result = _subprocess_run(argv, **run_kwargs)
     except subprocess.TimeoutExpired as exc:
         raise ProviderSubprocessError(124, f"claude -p timed out after {exc.timeout}s") from exc
     except FileNotFoundError as exc:
