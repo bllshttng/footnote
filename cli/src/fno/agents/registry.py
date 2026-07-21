@@ -833,7 +833,15 @@ def register_existing_session(
             # the 8-hex transport key rather than the session id we match on.
             if entry.harness == provider and entry.harness_session_id == session_id:
                 # Same session re-registering: refresh, do not duplicate.
-                entry.status = _REGISTERED_STATUS
+                #
+                # An EXPLICIT status never demotes a live row. The harness-store
+                # healer resolves against a miss, then upserts under the lock; a
+                # registration landing in that window (a `/fno-me`, a spawn) would
+                # otherwise be overwritten with the healer's weaker "orphaned" and
+                # dropped from live routing. A caller passing no status keeps the
+                # old unconditional refresh, so `/fno-me` behaves exactly as before.
+                if status is None or entry.status != "live":
+                    entry.status = _REGISTERED_STATUS
                 entry.cwd = cwd
                 if log_path:
                     entry.log_path = log_path

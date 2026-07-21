@@ -347,3 +347,41 @@ def test_invalid_utf8_transcript_does_not_crash(_registry_home):
 
     assert [h.session_id for h in hits] == [CLAUDE_UUID]
     assert hits[0].cwd == ""
+
+
+def test_adoption_never_demotes_a_live_row(_registry_home):
+    """A registration landing between the resolver's miss and the healer's
+    locked upsert must survive: overwriting it with the healer's weaker
+    'orphaned' would drop a running agent out of live routing."""
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    _write_claude_session(_registry_home, CLAUDE_UUID)
+    write_registry([
+        AgentEntry(name="racer", cwd="/live", log_path="", harness="claude",
+                   harness_session_id=CLAUDE_UUID, status="live"),
+    ])
+
+    store_fallback.heal_from_harness_store("c655c326")
+
+    assert load_registry()[0].status == "live"
+
+
+def test_explicitless_registration_still_refreshes_status(_registry_home):
+    """`/fno-me`'s re-register (no explicit status) keeps its old behavior."""
+    from fno.agents.registry import (
+        AgentEntry,
+        load_registry,
+        register_existing_session,
+        write_registry,
+    )
+
+    write_registry([
+        AgentEntry(name="racer", cwd="/live", log_path="", harness="claude",
+                   harness_session_id=CLAUDE_UUID, status="live"),
+    ])
+
+    register_existing_session(
+        provider="claude", session_id=CLAUDE_UUID, cwd="/live"
+    )
+
+    assert load_registry()[0].status == "idle"
