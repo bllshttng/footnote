@@ -152,13 +152,15 @@ def resume_logic(
     try:
         entry = resolve_agent_in(entries, name).entry
     except AgentResolutionError as exc:
-        # Registry miss: the harness's own store may still know this session
-        # (x-9cc5). An ambiguous token raises from here and is reported as-is --
-        # refusing to guess is the answer, not a miss.
-        try:
-            entry = resolve_from_harness_store(name)
-        except AgentResolutionError as ambiguous:
-            exc, entry = ambiguous, None
+        # Registry MISS only: the harness's own store may still know this
+        # session (x-9cc5). A registry the caller must disambiguate keeps
+        # refusing -- refusing to guess is the answer, not a miss.
+        entry = None
+        if not exc.ambiguous:
+            try:
+                entry = resolve_from_harness_store(name)
+            except AgentResolutionError as ambiguous:
+                exc = ambiguous
         if entry is None:
             return ResumeResult(
                 exit_code=13,

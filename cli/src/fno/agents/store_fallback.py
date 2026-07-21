@@ -78,17 +78,20 @@ def _codex_sessions_dir() -> Path:
 
 def _transcript_cwd(path: Path) -> str:
     """The session's own recorded cwd, or "" when it never recorded one."""
+    # errors="replace" so an invalid UTF-8 byte mid-transcript cannot raise
+    # UnicodeDecodeError from the ITERATION itself, outside the per-line guard.
+    # A mangled line simply fails to parse as JSON and is skipped.
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8", errors="replace") as fh:
             for _, line in zip(range(_CWD_SCAN_LINES), fh):
                 try:
                     rec = json.loads(line)
-                except (ValueError, UnicodeDecodeError):
+                except ValueError:
                     continue
                 cwd = rec.get("cwd") if isinstance(rec, dict) else None
                 if isinstance(cwd, str) and cwd:
                     return cwd
-    except OSError:
+    except (OSError, ValueError):
         return ""
     return ""
 
@@ -204,7 +207,8 @@ def heal_from_harness_store(
         ))
         raise AgentResolutionError(
             f"token {token!r} matches {len(hits)} sessions across harness stores: "
-            f"{cands}. Disambiguate with the full session id."
+            f"{cands}. Disambiguate with the full session id.",
+            ambiguous=True,
         )
 
     hit = hits[0]

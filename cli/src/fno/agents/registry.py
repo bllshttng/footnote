@@ -323,11 +323,20 @@ class AgentResolutionError(RuntimeError):
     e.g. ``watch``). Verbs with their own convention still override it — resume
     reports 13, trace/stop/rm map through their existing not-found path — so this
     default is the fallback, not a universal choke point.
+
+    ``ambiguous`` distinguishes "this token names several agents" from "no agent
+    matches". Both are resolution failures, but only a MISS may fall through to
+    the harness-store fallback (x-9cc5): a token the registry already refuses to
+    disambiguate must keep refusing, or a store hit on one of the candidates
+    would silently pick the winner the registry deliberately would not.
     """
 
-    def __init__(self, message: str, *, exit_code: int = 2) -> None:
+    def __init__(
+        self, message: str, *, exit_code: int = 2, ambiguous: bool = False
+    ) -> None:
         super().__init__(message)
         self.exit_code = exit_code
+        self.ambiguous = ambiguous
 
 
 @dataclass
@@ -385,7 +394,8 @@ def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
         )
         raise AgentResolutionError(
             f"token {token!r} is ambiguous across {len(distinct)} agents: "
-            f"{cands}. Disambiguate with the name or full session id."
+            f"{cands}. Disambiguate with the name or full session id.",
+            ambiguous=True,
         )
     return ResolvedAgent(entry=next(iter(distinct.values())), matched_by=matched_by)
 
@@ -444,7 +454,12 @@ def resolve_agent(token: str, *, path: Optional[Path] = None) -> ResolvedAgent:
         ) from exc
     try:
         return resolve_agent_in(entries, token)
-    except AgentResolutionError:
+    except AgentResolutionError as exc:
+        # A MISS may fall through; a registry the caller must disambiguate must
+        # not. Otherwise a store hit on one of several matching rows would pick
+        # the winner the registry deliberately refused to pick.
+        if exc.ambiguous:
+            raise
         entry = resolve_from_harness_store(token, registry_path=path)
         if entry is None:
             raise
