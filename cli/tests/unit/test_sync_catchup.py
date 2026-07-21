@@ -340,6 +340,81 @@ def test_tick_prints_nothing_when_disabled(monkeypatch):  # AC6-EDGE
     assert notes == []
 
 
+@pytest.fixture
+def tmp_graph(tmp_path, monkeypatch):
+    g = tmp_path / "graph.json"
+    g.write_text('{"entries": []}\n')
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    for mod, attr, val in (
+        (gc, "GRAPH_JSON", g),
+        (gc, "GRAPH_MD", tmp_path / "graph.md"),
+        (gc, "GRAPH_HTML", tmp_path / "graph.html"),
+        (gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json"),
+        (gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock"),
+        (gs, "GRAPH_JSON", g),
+        (gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock"),
+    ):
+        monkeypatch.setattr(mod, attr, val)
+    return g
+
+
+def _reconcile_json(monkeypatch, catchup_result):
+    """`fno backlog reconcile --json` with only the catch-up leg live."""
+    import json
+
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as gcli
+    from fno.pr import _sync_canonical as sc_mod
+
+    if catchup_result is None:
+        monkeypatch.setattr(
+            sc_mod, "run_sync_catchup",
+            lambda **_kw: (_ for _ in ()).throw(RuntimeError("gh exploded")),
+        )
+    else:
+        monkeypatch.setattr(sc_mod, "run_sync_catchup", lambda **_kw: catchup_result)
+    res = CliRunner().invoke(gcli.cli, ["reconcile", "--json"])
+    assert res.exit_code == 0, res.output
+    return json.loads(res.stdout)
+
+
+def test_reconcile_reports_catchup_in_json(tmp_graph, monkeypatch):  # US3
+    """The SessionStart hook runs reconcile --json and discards stderr, so the
+    outcome has to ride the payload or it is unobservable."""
+    payload = _reconcile_json(
+        monkeypatch, sc.CatchupResult("synced", 52, swept=3)
+    )
+    assert payload["sync_catchup"] == {
+        "outcome": "synced", "pr_number": 52, "swept": 3, "detail": ""
+    }
+
+
+def test_reconcile_survives_a_catchup_exception(tmp_graph, monkeypatch):
+    payload = _reconcile_json(monkeypatch, None)
+    assert payload["sync_catchup"]["outcome"] == "error"
+    assert "gh exploded" in payload["sync_catchup"]["detail"]
+
+
+def test_reconcile_dry_run_never_syncs(tmp_graph, monkeypatch):  # AC6-EDGE
+    import json
+
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as gcli
+    from fno.pr import _sync_canonical as sc_mod
+
+    monkeypatch.setattr(
+        sc_mod, "run_sync_catchup",
+        lambda **_kw: pytest.fail("a preview must mutate nothing"),
+    )
+    res = CliRunner().invoke(gcli.cli, ["reconcile", "--json", "--dry-run"])
+    assert res.exit_code == 0
+    assert json.loads(res.stdout)["sync_catchup"]["outcome"] == "not-run"
+
+
 def test_doctor_reports_staleness(monkeypatch):  # AC2-HP
     from fno import doctor
     from fno.pr import _sync_canonical as sc_mod
