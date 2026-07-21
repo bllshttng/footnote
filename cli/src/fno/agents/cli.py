@@ -783,6 +783,10 @@ def cmd_spawn(
         no_wait=no_wait,
     )
 
+    # Prior values of the provenance keys the bg/headless arm exports below, so
+    # the finally can put the process env back.
+    prov_prev: dict[str, "str | None"] = {}
+
     # `--once` is the pre-substrate spelling of headless (the Rust client maps
     # it to --substrate headless): it always means a one-shot, never a pane.
     try:
@@ -842,6 +846,25 @@ def cmd_spawn(
         if substrate == "headless":
             once = True
 
+        # Carry the bound node to bg/headless workers. The pane path gets this
+        # through dispatch_spawn_pane's explicit provenance wrapper; bg and
+        # headless build their child env from os.environ, so exporting here is
+        # what reaches them.
+        #
+        # All three keys are set or cleared together, never merged with what
+        # this process inherited: a worker dispatching a child for a plan-less
+        # node would otherwise pass down its OWN FNO_PLAN alongside the child's
+        # FNO_NODE. Restored in the finally, so the child inherits during the
+        # dispatch call and an in-process caller spawning twice cannot leak the
+        # first spawn's node into the second.
+        from fno.agents.mux_spawn import PROVENANCE_KEYS, resolve_provenance
+
+        prov_env = resolve_provenance(node, slug, plan)
+        prov_prev.update({k: os.environ.get(k) for k in PROVENANCE_KEYS})
+        for _k in PROVENANCE_KEYS:
+            os.environ.pop(_k, None)
+        os.environ.update(prov_env)
+
         try:
             result: SpawnResult = dispatch_spawn(
                 name=name,
@@ -872,6 +895,11 @@ def cmd_spawn(
         # Release the gate's claims once the dispatch result exists (or the
         # spawn failed): registry/roster rows carry the count from here.
         gate.release()
+        for _k, _v in prov_prev.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
 
     if result.kind == "created":
         # claude plain spawn: compact hand-rolled JSON receipt on stdout.

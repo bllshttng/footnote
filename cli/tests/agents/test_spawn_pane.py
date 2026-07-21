@@ -548,10 +548,17 @@ def test_provenance_vars_ride_wrapper_for_node_driven(
 
 def test_ad_hoc_spawn_exports_no_provenance(tmp_path: Path, monkeypatch) -> None:
     """x-84a8 AC(edge): an ad-hoc spawn (no node) exports no FNO_NODE/SLUG/PLAN,
-    and no empty-string variants."""
+    and no empty-string variants.
+
+    Asserted against ASSIGNMENTS (`KEY=`), not bare tokens: the wrapper now also
+    emits `-u KEY` to clear an inherited value, whose operand is the bare key.
+    Unsetting satisfies this AC more strongly than omitting would.
+    """
     _, runner = _spawn(monkeypatch, tmp_path)  # default: no provenance
     tail = runner.calls[0][runner.calls[0].index("--") + 1 :]
-    assert not any(t.startswith(("FNO_NODE", "FNO_SLUG", "FNO_PLAN")) for t in tail)
+    assert not any(
+        t.startswith(("FNO_NODE=", "FNO_SLUG=", "FNO_PLAN=")) for t in tail
+    )
 
 
 def test_resolve_provenance_branches(tmp_path: Path, monkeypatch) -> None:
@@ -806,19 +813,53 @@ def test_mesh_env_wrapper_routed_pane_scrubs_anthropic_creds(monkeypatch):
 
 
 def test_mesh_env_wrapper_unrouted_pane_adds_no_unset(monkeypatch):
-    """No role -> no route -> no `-u` scrub (byte-identical to today)."""
+    """No role -> no route -> no AUTH scrub.
+
+    Narrowed from "no `-u` at all": the wrapper now always clears the
+    provenance triple, so a pane cannot inherit its spawner's node. The claim
+    this test exists to make is about credentials, which are still untouched.
+    """
     from fno.agents import mux_spawn
 
     wrapped = mux_spawn._mesh_env_wrapper("w", "claude", None, ["claude"])
-    assert "-u" not in wrapped
+    assert "ANTHROPIC_API_KEY" not in wrapped
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in wrapped
     assert wrapped[0] == "env"
 
 
 def test_mesh_env_wrapper_role_without_key_adds_no_unset(monkeypatch):
-    """A routed role that resolves to None (no key) must not scrub either."""
+    """A routed role that resolves to None (no key) must not scrub creds either.
+
+    Narrowed alongside the unrouted case: the provenance clear is unconditional,
+    the credential scrub is not.
+    """
     from fno.agents import mux_spawn
     from fno.agents import model_routing
 
     monkeypatch.setattr(model_routing, "resolve_route", lambda role, **kw: None)
     wrapped = mux_spawn._mesh_env_wrapper("w", "claude", "coordinate", ["claude"])
-    assert "-u" not in wrapped
+    assert "ANTHROPIC_API_KEY" not in wrapped
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in wrapped
+
+
+def test_mesh_env_wrapper_clears_inherited_provenance(monkeypatch):
+    """A pane must not inherit its spawner's node.
+
+    dispatch_spawn_pane hands the ambient environment to the self-spawning mux
+    process, so without an explicit clear an ad-hoc pane carries the server's
+    FNO_NODE and a plan-less child carries its FNO_PLAN - which ambient origin
+    capture then persists into every node that pane files.
+    """
+    from fno.agents import mux_spawn
+
+    adhoc = mux_spawn._mesh_env_wrapper("w", "claude", None, ["claude"])
+    for key in mux_spawn.PROVENANCE_KEYS:
+        assert ["-u", key] == adhoc[adhoc.index(key) - 1 : adhoc.index(key) + 1]
+
+    # A resolved key is set, not cleared; the unresolved rest are still cleared.
+    bound = mux_spawn._mesh_env_wrapper(
+        "w", "claude", None, ["claude"], provenance={"FNO_NODE": "x-aaaa"}
+    )
+    assert "FNO_NODE=x-aaaa" in bound
+    assert "-u" in bound and "FNO_PLAN" in bound
+    assert "FNO_NODE" not in bound[: bound.index("FNO_NODE=x-aaaa")]

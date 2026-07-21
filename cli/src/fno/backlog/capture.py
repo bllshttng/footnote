@@ -634,6 +634,7 @@ def _create_graph_node(*, title: str, priority: str, domain: str = "code", graph
             domain=domain,
             project=project,
             cwd=resolved_cwd,
+            known_ids={e.get("id") for e in entries},
         )
         node["id"] = new_id
         entries.append(node)

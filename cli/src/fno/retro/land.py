@@ -87,6 +87,7 @@ def _default_create(
             priority=priority,
             domain=domain,
             details=details,
+            known_ids={e.get("id") for e in entries},
         )
         node["id"] = new_id
         if queued:

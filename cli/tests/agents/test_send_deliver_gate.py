@@ -95,11 +95,18 @@ def _write_frame(conn: socket.socket, obj: dict) -> None:
     conn.sendall(header + payload)
 
 
-def _fake_daemon(sock_path: Path, responses: list[dict], received: list[dict]) -> None:
+def _fake_daemon(
+    sock_path: Path,
+    responses: list[dict],
+    received: list[dict],
+    ready: "threading.Event | None" = None,
+) -> None:
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(str(sock_path))
     srv.listen(1)
+    if ready is not None:
+        ready.set()
     conn, _ = srv.accept()
     try:
         for resp in responses:
@@ -119,17 +126,20 @@ def _start_fake_daemon(
 ) -> tuple[threading.Thread, list[dict]]:
     """Start the fake daemon in a background thread. Returns (thread, received_list)."""
     received: list[dict] = []
+    # Readiness is signalled by the daemon thread after listen(), not inferred
+    # from the socket file appearing: the file exists from bind(), one syscall
+    # earlier, so an exists() poll can hand the client a socket that is not
+    # accepting yet. Connect-probing instead would steal the single accept()
+    # this fake serves. The old poll also capped at 500ms, which a loaded
+    # full-suite run overran -- the flake this replaces.
+    ready = threading.Event()
     t = threading.Thread(
         target=_fake_daemon,
-        args=(sock_path, responses, received),
+        args=(sock_path, responses, received, ready),
         daemon=True,
     )
     t.start()
-    import time
-    for _ in range(50):
-        if sock_path.exists():
-            break
-        time.sleep(0.01)
+    ready.wait(timeout=10)
     return t, received
 
 
@@ -687,11 +697,14 @@ def test_daemon_rpc_request_frame_shape(monkeypatch) -> None:
     # Capture raw bytes + parsed request
     raw_bytes_received: list[bytes] = []
 
+    ready = threading.Event()
+
     def _raw_fake_daemon(path: Path, resp_list: list, recv_list: list) -> None:
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(str(path))
         srv.listen(1)
+        ready.set()
         conn, _ = srv.accept()
         try:
             # Read the raw 4-byte header
@@ -732,11 +745,7 @@ def test_daemon_rpc_request_frame_shape(monkeypatch) -> None:
         daemon=True,
     )
     t.start()
-    import time
-    for _ in range(50):
-        if sock_path.exists():
-            break
-        time.sleep(0.01)
+    ready.wait(timeout=10)
 
     monkeypatch.setenv("FNO_AGENTS_HOME", str(home_dir))
 
@@ -903,6 +912,7 @@ def test_daemon_rpc_malformed_json_response_returns_none(monkeypatch) -> None:
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(str(sock_path))
         srv.listen(1)
+        ready.set()
         conn, _ = srv.accept()
         try:
             _read_frame(conn)
@@ -914,14 +924,10 @@ def test_daemon_rpc_malformed_json_response_returns_none(monkeypatch) -> None:
             conn.close()
             srv.close()
 
-    import time as _time
-
+    ready = _threading.Event()
     t = _threading.Thread(target=_raw_server, daemon=True)
     t.start()
-    for _ in range(100):
-        if sock_path.exists():
-            break
-        _time.sleep(0.01)
+    ready.wait(timeout=10)
     monkeypatch.setenv("FNO_AGENTS_HOME", str(home_dir))
 
     from fno.agents import dispatch as dispatch_mod

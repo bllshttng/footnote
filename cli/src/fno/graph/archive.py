@@ -11,6 +11,9 @@ Never archived (an open node still points at them):
   - a blocker in any open node's ``blocked_by``
   - the parent of any open child
   - a ``supersedes`` / ``superseded_by`` target of an open node
+  - a ``related`` peer of an open node (the edge is symmetric; archiving one
+    side would strand the other)
+  - the ``source_node_id`` origin of an open node
 """
 from __future__ import annotations
 
@@ -71,6 +74,21 @@ def _guard_ids(entries: list[Entry]) -> set[str]:
             for s in supersedes:
                 if isinstance(s, str):
                     guard.add(s)
+        # related is symmetric and stored on both endpoints, so archiving one
+        # side of a live pair strands the other: the open node names an id the
+        # working graph no longer has, and the inverse is beyond set_related's
+        # reach. Broken by routine grooming rather than by any explicit edit.
+        # An open node's origin, for the same reason: this PR made
+        # source_node_id readable (rendered, walked, and counted as capture
+        # coverage), so archiving the target turns a live edge into a dangler.
+        origin = e.get("source_node_id")
+        if isinstance(origin, str):
+            guard.add(origin)
+        related = e.get("related")
+        if isinstance(related, list):
+            for r in related:
+                if isinstance(r, str):
+                    guard.add(r)
         sup = e.get("superseded_by")
         if isinstance(sup, str):
             guard.add(sup)
@@ -112,6 +130,30 @@ def partition_for_archive(
             skipped.append({**e, "_skip": "too-recent"})
             continue
         to_archive.append(e)
+
+    # A related pair must move together. `_guard_ids` only protects references
+    # held by OPEN nodes, so two terminal peers of different ages would split:
+    # the older sweeps while the newer stays behind naming an id the working
+    # graph no longer has, and set_related resolves peers against the working
+    # graph only, so nothing could repair it. Hold back any candidate whose
+    # related peer is staying. Iterated to a fixed point because holding one
+    # back can strand the next along a chain; each pass moves at least one
+    # entry out, so it terminates.
+    while True:
+        staying = {
+            e.get("id") for e in remaining if isinstance(e.get("id"), str)
+        }
+        held = [
+            e for e in to_archive
+            if any(r in staying for r in (e.get("related") or []) if isinstance(r, str))
+        ]
+        if not held:
+            break
+        held_ids = {e.get("id") for e in held}
+        to_archive = [e for e in to_archive if e.get("id") not in held_ids]
+        for e in held:
+            remaining.append(e)
+            skipped.append({**e, "_skip": "related-peer-not-archived"})
 
     return to_archive, remaining, skipped
 

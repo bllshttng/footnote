@@ -287,6 +287,9 @@ def _clear_session_env(monkeypatch):
         "CLAUDE_CODE_SESSION_ID",
         "CODEX_SESSION_ID",
         "GEMINI_SESSION_ID",
+        # x-d157: the ambient origin-node fallback. Cleared here so a spawned
+        # test runner's own FNO_NODE cannot leak into a null-origin assertion.
+        "FNO_NODE",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -345,6 +348,7 @@ def test_ambient_edge_no_env_all_none(tmp_path, monkeypatch):
         "source_cwd": None,
         "source_node_id": None,
         "source_plan_path": None,
+        "source_node_dropped": None,
     }
 
 
@@ -409,11 +413,143 @@ def test_ambient_codex_thread_precedes_claude_and_skips_manifest(tmp_path, monke
     assert prov["source_plan_path"] is None
 
 
+# ---------------------------------------------------------------------------
+# x-d157 Task 1.1 - three-branch capture precedence
+#   explicit --source-node  >  owned manifest  >  FNO_NODE env
+# ---------------------------------------------------------------------------
+
+
+def test_ac2_hp_fno_node_fallback_fires_without_manifest(tmp_path, monkeypatch):
+    """AC2-HP: no manifest + FNO_NODE set -> the env names the origin."""
+    from fno.graph.cli import _session_provenance
+
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-nomanifest")
+    monkeypatch.setenv("FNO_NODE", "x-aaaa")
+
+    prov = _session_provenance(str(tmp_path))
+    assert prov["source_node_id"] == "x-aaaa"
+
+
+@pytest.mark.parametrize(
+    "env_var,expected_harness",
+    [("CODEX_SESSION_ID", "codex"), ("GEMINI_SESSION_ID", "gemini")],
+)
+def test_ac2_hp_fno_node_fallback_is_not_harness_gated(
+    tmp_path, monkeypatch, env_var, expected_harness
+):
+    """AC2-HP: the fallback serves the non-claude lanes the manifest branch cannot.
+
+    The manifest branch is claude-only because only claude's transcript resolver
+    is proven. FNO_NODE carries no such dependency, so gating it on harness would
+    leave codex/opencode workers permanently originless -- which is where the
+    capture miss actually concentrates.
+    """
+    from fno.graph.cli import _session_provenance
+
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv(env_var, "sess-other-harness")
+    monkeypatch.setenv("FNO_NODE", "x-aaaa")
+
+    prov = _session_provenance(str(tmp_path))
+    assert prov["source_harness"] == expected_harness
+    assert prov["source_node_id"] == "x-aaaa"
+
+
+def test_ac3_hp_precedence_flag_over_manifest_over_env(tmp_path, monkeypatch):
+    """AC3-HP: explicit beats the manifest, the manifest beats the env."""
+    from fno.graph.cli import _session_provenance
+
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-prec")
+    monkeypatch.setenv("FNO_NODE", "x-cccc")
+    _write_manifest(tmp_path, transcript_id="sess-prec",
+                    node_id="x-bbbb", plan_path="p.md")
+
+    # all three signals present -> explicit wins
+    assert _session_provenance(
+        str(tmp_path), source_node="x-aaaa"
+    )["source_node_id"] == "x-aaaa"
+
+    # flag omitted -> owned manifest wins over the env
+    assert _session_provenance(str(tmp_path))["source_node_id"] == "x-bbbb"
+
+    # flag omitted and manifest gone -> the env fallback fires
+    (tmp_path / ".fno" / "target-state.md").unlink()
+    assert _session_provenance(str(tmp_path))["source_node_id"] == "x-cccc"
+
+
+def test_ac3_edge_stale_fno_node_degrades_to_null(tmp_path, monkeypatch):
+    """AC3-EDGE: an ambient id absent from the live graph stamps null, not a dangling edge.
+
+    FNO_NODE is written at spawn and never revised, so it outlives deletions. The
+    id set is the caller's live snapshot; validation is skipped when no caller
+    supplies one (a unit call with no graph in hand).
+    """
+    from fno.graph.cli import _session_provenance
+
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-stale")
+    monkeypatch.setenv("FNO_NODE", "x-deleted")
+
+    prov = _session_provenance(str(tmp_path), known_ids={"x-alive"})
+    assert prov["source_node_id"] is None
+    # Reported back rather than swallowed: the caller warns, so capture
+    # regressing to nothing leaves a trace. The AC's "appears nowhere" is about
+    # the created NODE, asserted end-to-end in test_graph_source_node.py.
+    assert prov["source_node_dropped"] == "x-deleted"
+
+    # present in the snapshot -> stamped, nothing dropped
+    live = _session_provenance(str(tmp_path), known_ids={"x-deleted"})
+    assert live["source_node_id"] == "x-deleted"
+    assert live["source_node_dropped"] is None
+
+
+def test_ac3_edge_empty_fno_node_is_no_signal(tmp_path, monkeypatch):
+    """AC3-ERR: an empty FNO_NODE means "no signal", never an empty-string origin."""
+    from fno.graph.cli import _session_provenance
+
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-empty")
+    monkeypatch.setenv("FNO_NODE", "   ")
+
+    assert _session_provenance(str(tmp_path))["source_node_id"] is None
+
+
+def test_ac3_err_malformed_manifest_never_raises(tmp_path, monkeypatch):
+    """AC3-ERR: a malformed manifest degrades to null and never raises."""
+    from fno.graph.cli import _session_provenance
+
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-bad")
+    (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".fno" / "target-state.md").write_bytes(b"\xff\xfe not utf8 at all")
+
+    prov = _session_provenance(str(tmp_path))
+    assert prov["source_node_id"] is None
+    assert prov["source_session_id"] == "sess-bad"
+
+
+def test_explicit_source_node_outranks_a_stale_snapshot(tmp_path, monkeypatch):
+    """The explicit branch is validated by its caller (fail-closed), not here.
+
+    _session_provenance keeps its never-raises contract, so it must not re-judge
+    an id the CLI already resolved and accepted.
+    """
+    from fno.graph.cli import _session_provenance
+
+    _clear_session_env(monkeypatch)
+    prov = _session_provenance(
+        str(tmp_path), source_node="x-aaaa", known_ids={"x-other"}
+    )
+    assert prov["source_node_id"] == "x-aaaa"
+
+
 def test_build_backlog_node_stamps_ambient(monkeypatch):
     """AC-HP (2.1): _build_backlog_node merges ambient provenance with no caller arg."""
     import fno.graph.cli as gcli
 
-    monkeypatch.setattr(gcli, "_session_provenance", lambda cwd=None: {
+    monkeypatch.setattr(gcli, "_session_provenance", lambda cwd=None, **_kw: {
         "source_session_id": "S",
         "source_harness": "claude",
         "source_cwd": "/wt/sess",
@@ -1561,3 +1697,22 @@ def test_claimed_at_is_validated_on_the_pr_number_path(tmp_path, monkeypatch):
     ])
     assert r.exit_code == 2
     assert _sessions(g) == []
+
+
+def test_an_explicit_source_node_reports_nothing_as_dropped(tmp_path, monkeypatch):
+    """An ambient candidate that LOSES to the flag is not a capture failure.
+
+    Reporting it as dropped would tell the operator the node was filed with no
+    origin at the exact moment one was successfully stamped.
+    """
+    from fno.graph.cli import _session_provenance
+
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-x")
+    monkeypatch.setenv("FNO_NODE", "x-stale")
+
+    prov = _session_provenance(
+        str(tmp_path), source_node="x-aaaa", known_ids={"x-aaaa"}
+    )
+    assert prov["source_node_id"] == "x-aaaa"
+    assert prov["source_node_dropped"] is None

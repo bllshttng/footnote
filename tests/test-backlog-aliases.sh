@@ -63,6 +63,10 @@ echo
 # end-of-cell.
 verb_in_help() {
     local verb="$1" help="$2"
+    # Strip ANSI first: rich colorizes the top-level menu on a TTY, and an
+    # escape like \033[1;36m contains letters, so the [^A-Za-z]* prefix cannot
+    # span it. Without this the test passes only where colour happens to be off.
+    help=$(sed -E $'s/\033\\[[0-9;]*m//g' <<<"$help")
     grep -E "^[^A-Za-z]*${verb}([[:space:]]|$)" <<<"$help" >/dev/null
 }
 

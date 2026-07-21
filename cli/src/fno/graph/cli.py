@@ -356,6 +356,57 @@ def _child_note(child: dict, events: list[dict], worker: Optional[str]) -> str:
     return "-"
 
 
+def _entries_with_archive(entries: list) -> list:
+    """``entries`` plus archived nodes, working graph winning on id.
+
+    Best-effort and read-only: an unreadable archive degrades to the working
+    graph rather than failing a read verb.
+    """
+    from fno.paths import graph_archive_json
+
+    try:
+        archive_path = graph_archive_json()
+        if not archive_path.exists():
+            return entries
+        from fno.graph.store import read_graph
+
+        live = {e.get("id") for e in entries if isinstance(e, dict)}
+        return [
+            *entries,
+            *(
+                a for a in read_graph(archive_path)
+                if isinstance(a, dict) and a.get("id") not in live
+            ),
+        ]
+    except (OSError, ValueError):
+        return entries
+
+
+def _scope_growth_line(growth) -> str:
+    """One line: the growth figure with its coverage, or why it is withheld.
+
+    The coverage clause is never dropped - a bare count reads as measured.
+    """
+    from fno.graph.rollup import SCOPE_GROWTH_COVERAGE_FLOOR
+
+    pct = f"{growth.coverage:.0%} of {growth.window_total} window nodes"
+    if growth.window_dangling:
+        pct += f", {growth.window_dangling} dangling"
+    cost = (
+        f"realized {growth.realized_nodes} nodes / {growth.realized_prs} PRs"
+        f"{f' vs size {growth.declared_size}' if growth.declared_size else ''}"
+    )
+    if not growth.reportable or growth.follow_up_ids is None:
+        return (
+            f"scope growth: withheld (origin capture {pct}, below the "
+            f"{SCOPE_GROWTH_COVERAGE_FLOOR:.0%} floor)  |  {cost}"
+        )
+    return (
+        f"scope growth: {len(growth.follow_up_ids)} follow-ups "
+        f"(origin capture {pct})  |  {cost}"
+    )
+
+
 @_epic_cli.command("status")
 def cmd_epic_status(
     ctx: typer.Context,
@@ -417,6 +468,16 @@ def cmd_epic_status(
             "receipt": _child_note(c, events, worker),
         })
 
+    from fno.graph.rollup import scope_growth
+
+    # Read through the archive for the METRIC only (the same read-only fallback
+    # `get` uses). Without it a swept child stops counting and the epic's
+    # realized cost and follow-up set shrink as grooming runs - a number that
+    # quietly changes with unrelated maintenance is the failure this metric is
+    # supposed to be immune to. The children table above stays working-graph
+    # only, as it was before.
+    growth = scope_growth(_entries_with_archive(entries), epic_id)
+
     if json_mode(ctx):
         typer.echo(json.dumps({
             "epic": epic_id,
@@ -424,10 +485,29 @@ def cmd_epic_status(
             "children_total": total,
             "children_done": done,
             "children": rows,
+            # follow_ups is reported only when coverage clears the floor; the
+            # coverage block ships regardless so a suppressed figure explains
+            # itself instead of just being absent.
+            "scope_growth": {
+                "follow_ups": len(growth.follow_up_ids) if growth.reportable else None,
+                "follow_up_ids": list(growth.follow_up_ids or ()),
+                "reportable": growth.reportable,
+                "coverage": round(growth.coverage, 4),
+                "window_total": growth.window_total,
+                "window_with_origin": growth.window_with_origin,
+                # Origins naming a node the graph no longer has. Excluded from
+                # coverage (they can join nothing) and reported so the gap
+                # between "stamped" and "joinable" stays visible.
+                "window_dangling": growth.window_dangling,
+                "realized_nodes": growth.realized_nodes,
+                "realized_prs": growth.realized_prs,
+                "declared_size": growth.declared_size,
+            },
         }, indent=2))
         return
 
     typer.echo(f"epic: {epic_id} ({epic_node.get('slug') or ''})  {done}/{total} done")
+    typer.echo("  " + _scope_growth_line(growth))
     if not rows:
         typer.echo("  (no children)")
         return
@@ -479,14 +559,65 @@ def _scan_md_field(text: str, key: str) -> Optional[str]:
     return None
 
 
-def _session_provenance(running_cwd: Optional[str] = None) -> dict:
-    """Ambient parent-edge provenance for a node born inside a live session.
+def _resolve_asserted_id(
+    token: str,
+    entries: list,
+    *,
+    flag: str,
+    self_id: Optional[str] = None,
+) -> str:
+    """Resolve a caller-asserted node reference to a canonical id, or refuse.
+
+    The counterpart to ambient capture's degrade-to-null: a caller who names an
+    origin or a peer has asserted something, and silently dropping an assertion
+    that does not resolve would leave a node looking organically filed. So this
+    FAILS CLOSED - non-zero exit, the unresolved
+    token named, no write.
+
+    Accepts anything the graph resolver accepts (id, slug, bare hex) rather than
+    refusing on shape; passing a slug where an id is expected is the likely
+    mistake and the resolver already handles it.
+    """
+    from fno.graph.fuzzy import resolve_node
+
+    match = resolve_node(token, entries)
+    if match.kind != "exact":
+        typer.echo(f"Error: {flag} '{token}' does not resolve to a node", err=True)
+        raise typer.Exit(code=1)
+    resolved = match.candidates[0]["id"]
+    if self_id is not None and resolved == self_id:
+        typer.echo(f"Error: {flag} cannot reference the node itself ({self_id})", err=True)
+        raise typer.Exit(code=1)
+    return resolved
+
+
+def _session_provenance(
+    running_cwd: Optional[str] = None,
+    *,
+    source_node: Optional[str] = None,
+    known_ids: Optional[set] = None,
+) -> dict:
+    """Parent-edge provenance for a node born inside a live session.
 
     Reads the running session's env + ``.fno/target-state.md`` and returns
     ``source_session_id`` / ``source_harness`` / ``source_cwd`` /
-    ``source_node_id`` / ``source_plan_path``. Capture is AMBIENT, never
-    volunteered (x-30f6): no caller passes anything. Every key degrades to
-    ``None`` and the function NEVER raises (AC-EDGE).
+    ``source_node_id`` / ``source_plan_path``. Every key degrades to ``None``
+    and the function NEVER raises (AC-EDGE).
+
+    The origin resolves through three branches in strict precedence:
+
+    1. ``source_node`` - an explicit ``--source-node``, already resolved and
+       validated by the CLI verb. Taken as given: re-judging it would need a
+       raise this function has promised not to make.
+    2. The owned manifest (below, claude-only and ownership-proven).
+    3. ``FNO_NODE`` - written at spawn time by the spawner. NOT gated on
+       harness: it is the only origin signal a codex/opencode worker has.
+
+    ``known_ids`` is the caller's live snapshot. When supplied, an ambiently
+    resolved id absent from it degrades to ``None`` rather than stamping an edge
+    that dangles, and the dropped token comes back in ``source_node_dropped``.
+    Every filing path resolves it inside its locked mutator, so the check costs
+    no extra read; omitting it skips the check.
 
     ``source_cwd`` is the originating SESSION's cwd, which is the key claude
     transcript dirs are slugged by -- distinct from the node's durable ``cwd``
@@ -522,8 +653,20 @@ def _session_provenance(running_cwd: Optional[str] = None) -> dict:
                 plan = _scan_md_field(text, "plan_path")
                 if plan and plan.lower() != "null":
                     source_plan_path = plan
-        except OSError:
+        except (OSError, ValueError):
             pass
+
+    if source_node_id is None:
+        source_node_id = (os.environ.get("FNO_NODE") or "").strip() or None
+
+    dropped: Optional[str] = None
+    if source_node_id is not None and known_ids is not None and source_node_id not in known_ids:
+        dropped, source_node_id = source_node_id, None
+
+    if source_node:
+        # The explicit flag wins, so nothing was dropped: an ambient candidate
+        # that lost a precedence contest is not a capture failure to report.
+        source_node_id, dropped = source_node, None
 
     return {
         "source_session_id": session,
@@ -532,6 +675,10 @@ def _session_provenance(running_cwd: Optional[str] = None) -> dict:
         "source_cwd": cwd if session else None,
         "source_node_id": source_node_id,
         "source_plan_path": source_plan_path,
+        # Not a node field. An ambient signal naming a node the graph no longer
+        # has is the one case worth telling the operator about: capture silently
+        # regressing to nothing is what this feature exists to catch.
+        "source_node_dropped": dropped,
     }
 
 
@@ -552,8 +699,16 @@ def _build_backlog_node(
     batch: Optional[str] = None,
     plan_path: Optional[str] = None,
     tags: Optional[list[str]] = None,
+    source_node: Optional[str] = None,
+    known_ids: Optional[set] = None,
+    out: Optional[dict] = None,
 ) -> _NodeFields:
     """Build a backlog node dict shared by ``cmd_add`` and ``cmd_idea``.
+
+    ``out``, when given, receives metadata ABOUT the capture that is not itself
+    a node field (currently ``source_node_dropped``). A separate channel rather
+    than a transient key on the returned dict, so a caller that does not know to
+    strip it cannot persist it into the graph.
 
     Centralizes the field set so a schema addition (e.g. a new graph
     field) shows up in every entry-creating verb at once. The returned
@@ -561,10 +716,12 @@ def _build_backlog_node(
     so duplicate-ID checks happen against the live snapshot.
     """
     from fno.graph._constants import ID_PREFIX  # noqa: F401 (kept for symmetry)
-    # Parent-edge provenance (x-30f6): stamped ambiently from the running
-    # session's env + manifest. Centralized here so every creator verb
-    # (add/idea/decompose) self-describes its origin with no caller arg.
-    prov = _session_provenance()
+    # Parent-edge provenance (x-30f6): stamped from the running session's env +
+    # manifest, or from an explicit --source-node. Centralized here so
+    # every creator verb (add/idea/decompose) self-describes its origin.
+    prov = _session_provenance(source_node=source_node, known_ids=known_ids)
+    if out is not None:
+        out["source_node_dropped"] = prov["source_node_dropped"]
     return {
         "id": None,  # caller fills inside locked mutator
         "parent": parent,
@@ -617,6 +774,8 @@ def _create_node_impl(
     size: Optional[str] = None,
     batch: Optional[str] = None,
     tags: Optional[list[str]] = None,
+    source_node: Optional[str] = None,
+    related: Optional[list[str]] = None,
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
 
@@ -673,11 +832,20 @@ def _create_node_impl(
 
     new_id_holder: list[Optional[str]] = [None]
     node_holder: list[Optional[dict]] = [None]
+    capture_meta: dict = {}
     rollup_lines: list[str] = []
     rollup_error: list[Optional[str]] = [None]
 
     def mutator(entries):
-        new_id = mint_node_id({e.get("id") for e in entries})
+        live_ids = {e.get("id") for e in entries}
+        # Fail closed BEFORE minting: an unresolvable assertion must leave the
+        # graph untouched, and raising here aborts the locked write.
+        resolved_source_node = (
+            _resolve_asserted_id(source_node, entries, flag="--source-node")
+            if source_node
+            else None
+        )
+        new_id = mint_node_id(live_ids)
         new_id_holder[0] = new_id
         node = _build_backlog_node(
             title=title,
@@ -694,6 +862,9 @@ def _create_node_impl(
             size=size,
             batch=batch,
             tags=resolved_tags,
+            source_node=resolved_source_node,
+            known_ids=live_ids,
+            out=capture_meta,
         )
         node["id"] = new_id
         # Enforce the epic-nesting cap on the create path too, or `add --type
@@ -716,6 +887,21 @@ def _create_node_impl(
                 raise typer.Exit(code=1)
         entries.append(node)
         node_holder[0] = node
+        # After the append so the new node is in the snapshot the mirror writes
+        # against; before the rollup block, whose broad except would swallow a
+        # refusal.
+        if related:
+            from fno.graph._intake import _parse_blocker_list
+            from fno.graph.store import set_related
+
+            set_related(
+                entries,
+                new_id,
+                [
+                    _resolve_asserted_id(t, entries, flag="--related", self_id=new_id)
+                    for t in _parse_blocker_list(related)
+                ],
+            )
         # Rollup resolution runs INSIDE the mutator: it reads the same locked
         # snapshot the node was born into and applies an auto-link in the same
         # write, so no second lock and no window where the node exists unlinked.
@@ -764,6 +950,19 @@ def _create_node_impl(
     # human output and must not corrupt that contract.
     for line in rollup_lines:
         typer.echo(line, err=True)
+
+    # Name a captured origin on stderr, for the same reason as the rollup lines:
+    # stdout is the machine-readable payload. Silent when no signal existed at
+    # all, but never silent when one was found and rejected - that is the case
+    # where capture regresses to nothing with no other trace.
+    dropped = capture_meta.get("source_node_dropped")
+    if dropped:
+        typer.echo(
+            f"origin: dropped '{dropped}' (not in graph); filed with no origin",
+            err=True,
+        )
+    elif node_holder[0] is not None and node_holder[0].get("source_node_id"):
+        typer.echo(f"origin: {node_holder[0]['source_node_id']}", err=True)
 
     # Born-with-why: route births through the shared birth hook. Gate-first and
     # strictly non-fatal, so a gate-OFF install is a no-op and a dispatch
@@ -824,6 +1023,22 @@ def cmd_add(
     tag: Optional[List[str]] = typer.Option(
         None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
     ),
+    source_node: Optional[str] = typer.Option(
+        None,
+        "--source-node",
+        help=(
+            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
+            "ambient capture. Refuses if it does not resolve."
+        ),
+    ),
+    related: Optional[List[str]] = typer.Option(
+        None,
+        "--related",
+        help=(
+            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
+            "comma-separate. Refuses an id that does not resolve."
+        ),
+    ),
 ) -> None:
     _create_node_impl(
         title=title,
@@ -841,6 +1056,8 @@ def cmd_add(
         size=size,
         batch=batch,
         tags=tag,
+        source_node=source_node,
+        related=related,
     )
 
 
@@ -883,6 +1100,22 @@ def cmd_idea(
     tag: Optional[List[str]] = typer.Option(
         None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
     ),
+    source_node: Optional[str] = typer.Option(
+        None,
+        "--source-node",
+        help=(
+            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
+            "ambient capture. Refuses if it does not resolve."
+        ),
+    ),
+    related: Optional[List[str]] = typer.Option(
+        None,
+        "--related",
+        help=(
+            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
+            "comma-separate. Refuses an id that does not resolve."
+        ),
+    ),
 ) -> None:
     """Capture an idea (a plan-less backlog node) with minimal ceremony.
 
@@ -909,6 +1142,8 @@ def cmd_idea(
         size=size,
         batch=batch,
         tags=tag,
+        source_node=source_node,
+        related=related,
     )
 
 
@@ -1175,6 +1410,7 @@ def cmd_decompose(
                     priority=live_epic.get("priority", "p2"),
                     domain=live_epic.get("domain", "code"),
                     plan_path=None,
+                    known_ids={e.get("id") for e in graph_entries},
                 )
                 node["group_slug"] = grp["slug"]
                 node["id"] = mint_node_id({e.get("id") for e in graph_entries})
@@ -1881,6 +2117,23 @@ def cmd_update(
     public: Optional[bool] = typer.Option(None, "--public/--no-public", help="Mark node for the public roadmap (fno backlog roadmap)"),
     project: Optional[str] = typer.Option(None, "--project", help="Reproject this node (use for migrating wrong-scope nodes)"),
     cwd: Optional[str] = typer.Option(None, "--cwd", "-c", help="Update cwd (pair with --project for migration)"),
+    source_node: Optional[str] = typer.Option(
+        None,
+        "--source-node",
+        help=(
+            "Set the origin node this node came out of (id, slug, or bare hex). "
+            "Pass 'null' to clear. Refuses a self-reference or an id that does not resolve."
+        ),
+    ),
+    related: Optional[List[str]] = typer.Option(
+        None,
+        "--related",
+        help=(
+            "Replace the related list (asserted, symmetric, non-blocking). Repeat or "
+            "comma-separate. Pass 'null' to clear. Refuses a self-reference or an id "
+            "that does not resolve."
+        ),
+    ),
     blocked_by: Optional[List[str]] = typer.Option(None, "--blocked-by", help="Replace blocked_by list"),
     add_blocker: Optional[List[str]] = typer.Option(None, "--add-blocker", help="Append blocker IDs"),
     remove_blocker: Optional[List[str]] = typer.Option(None, "--remove-blocker", help="Remove blocker IDs"),
@@ -2174,6 +2427,31 @@ def cmd_update(
             typer.echo(f"Error: graph node {task_id} not found", err=True)
             raise typer.Exit(code=1)
         projected_node[0] = node
+
+        if related is not None:
+            from fno.graph.store import set_related
+
+            tokens = _parse_blocker_list(related)
+            desired = (
+                []
+                if tokens == ["null"]
+                else [
+                    _resolve_asserted_id(
+                        t, entries, flag="--related", self_id=node["id"]
+                    )
+                    for t in tokens
+                ]
+            )
+            set_related(entries, node["id"], desired)
+
+        if source_node is not None:
+            node["source_node_id"] = (
+                None
+                if source_node == "null"
+                else _resolve_asserted_id(
+                    source_node, entries, flag="--source-node", self_id=node["id"]
+                )
+            )
 
         if has_blocker_edit:
             if blocked_by is not None:
@@ -3412,11 +3690,66 @@ def cmd_project_root(
 
 # -- provenance --
 
+# A cycle in source_node_id needs a visited set to terminate; the cap is the
+# second belt, and bounds output on a legitimately deep chain. Not configurable:
+# a follow-up chain this long is a graph problem, not a display preference.
+_SPAWNED_MAX_DEPTH = 10
+
+
+def _spawned_walk(
+    entries: list, root_id: str, *, max_depth: int = _SPAWNED_MAX_DEPTH
+) -> "tuple[list, bool, bool]":
+    """Walk source_node_id in reverse: what did ``root_id`` produce?
+
+    Breadth-first so depth falls out of the traversal rather than being assigned,
+    and so the shortest path to a node is the depth reported for it.
+
+    Returns ``(rows, cycle_detected, truncated)`` where rows are
+    ``(depth, entry)``. A cycle TRUNCATES the walk and keeps the descendants
+    already found - returning an empty set with a cycle flag would satisfy a
+    naive reading of "terminates" while silently discarding the answer.
+    """
+    from fno.graph.rollup import origin_index
+
+    by_source = origin_index(entries)
+    rows: list = []
+    seen = {root_id}
+    frontier = [root_id]
+    cycle = False
+    depth = 0
+    while frontier and depth < max_depth:
+        depth += 1
+        nxt: list = []
+        for parent_id in frontier:
+            for child in sorted(by_source.get(parent_id, []), key=lambda e: e.get("id") or ""):
+                child_id = child.get("id")
+                if child_id in seen:
+                    cycle = True
+                    continue
+                seen.add(child_id)
+                rows.append((depth, child))
+                nxt.append(child_id)
+        frontier = nxt
+    # Truncated only if something was actually cut: a chain ending exactly at
+    # the cap leaves a non-empty frontier with nothing below it.
+    truncated = any(
+        child.get("id") not in seen
+        for parent_id in frontier
+        for child in by_source.get(parent_id, [])
+    )
+    return rows, cycle, truncated
+
+
 @cli.command("provenance", hidden=True)
 def cmd_provenance(
     id: str = typer.Argument(
         ...,
         help="Node ab-id, slug, or bare 8-hex",
+    ),
+    spawned: bool = typer.Option(
+        False,
+        "--spawned",
+        help="Also walk the origin edge in reverse: every node this one produced, transitively.",
     ),
     json_out: bool = typer.Option(
         False, "--json", "-J", help="Emit machine-readable JSON instead of human summary"
@@ -3470,6 +3803,21 @@ def cmd_provenance(
             projects_root=_DEFAULT_PROJECTS_ROOT,
         )
 
+    index = {e.get("id"): e for e in entries if isinstance(e, dict)}
+
+    def _titled(other_id: str) -> str:
+        """`<id> (<title>)`, so the line reads without a second lookup."""
+        other = index.get(other_id)
+        if other is None:
+            return f"{other_id} (not in graph)"
+        return f"{other_id} ({other.get('title', '')})"
+
+    origin_id = e.get("source_node_id")
+    related_ids = e.get("related") or []
+    walk_rows, walk_cycle, walk_truncated = (
+        _spawned_walk(entries, node_id) if spawned else ([], False, False)
+    )
+
     if json_out:
         import dataclasses
 
@@ -3490,7 +3838,20 @@ def cmd_provenance(
             # Append-only lifecycle provenance in raw append order (x-b6e4).
             # read_graph's defaults guarantee the key, so no fallback guard.
             "sessions": e["sessions"],
+            "source_node_id": origin_id,
+            "source_node_title": (index.get(origin_id) or {}).get("title"),
+            "source_plan_path": e.get("source_plan_path"),
+            "related": related_ids,
         }
+        if spawned:
+            output["spawned"] = {
+                "nodes": [
+                    {"depth": d, "id": n.get("id"), "title": n.get("title")}
+                    for d, n in walk_rows
+                ],
+                "cycle_detected": walk_cycle,
+                "truncated_at_depth": _SPAWNED_MAX_DEPTH if walk_truncated else None,
+            }
         typer.echo(json.dumps(output, indent=2))
         return
 
@@ -3514,7 +3875,25 @@ def cmd_provenance(
             lines.append(f"    transcript: (unresolved - {reason})")
 
     _fmt_edge("node-birth", birth_result, birth_session, birth_harness)
+    # Rendered even when null: an omitted line reads as "this verb does not
+    # report origins", which is how the field stayed invisible for a month.
+    lines.append(f"  origin: {_titled(origin_id) if origin_id else '(none)'}")
+    if e.get("source_plan_path"):
+        lines.append(f"    plan: {e['source_plan_path']}")
     _fmt_edge("spawn", spawn_result, spawn_session, spawn_harness)
+
+    lines.append(f"  related: {'(none)' if not related_ids else ''}".rstrip())
+    for rid in related_ids:
+        lines.append(f"    {_titled(rid)}")
+
+    if spawned:
+        lines.append(f"  spawned: {'(none)' if not walk_rows else ''}".rstrip())
+        for depth, n in walk_rows:
+            lines.append(f"    {'  ' * (depth - 1)}d{depth} {_titled(n.get('id'))}")
+        if walk_cycle:
+            lines.append("    note: cycle detected; walk truncated at the repeat")
+        if walk_truncated:
+            lines.append(f"    note: depth cap {_SPAWNED_MAX_DEPTH} reached; walk truncated")
 
     # Lifecycle rows (x-b6e4): raw append order, phase-forward. Distinct from the
     # birth/spawn edges above -- those are single parent pointers; this is the
@@ -4309,6 +4688,17 @@ def cmd_remove(
         for e in entries:
             if task_id in e.get("blocked_by", []):
                 e["blocked_by"].remove(task_id)
+            # related is symmetric, and no other verb can repair a peer that
+            # names a node the graph no longer has: set_related only touches
+            # peers in the declaring node's own delta.
+            if task_id in (e.get("related") or []):
+                e["related"].remove(task_id)
+            # remove is a HARD delete, unlike archive (which keeps the node
+            # readable and therefore guards it instead). A dependent's origin
+            # would be left pointing at nothing, and the stated invariant is
+            # that source_node_id is null or resolves - never a dangling string.
+            if e.get("source_node_id") == task_id:
+                e["source_node_id"] = None
         return [e for e in entries if e.get("id") != task_id]
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -7610,8 +8000,13 @@ def cmd_new(
     new_id_holder: list[Optional[str]] = [None]
 
     def mutator(es: list[dict]) -> list[dict]:
-        new_id = mint_node_id({e.get("id") for e in es})
+        live_ids = {e.get("id") for e in es}
+        new_id = mint_node_id(live_ids)
         new_id_holder[0] = new_id
+        # This verb builds its node inline rather than through
+        # _build_backlog_node, so ambient origin capture has to be wired
+        # explicitly or `new` stays the one creation path outside the contract.
+        prov = _session_provenance(known_ids=live_ids)
         node = {
             "id": new_id,
             "parent": None,
@@ -7643,7 +8038,11 @@ def cmd_new(
             "created_at": datetime.now(timezone.utc).isoformat(),
             "source_kind": source_kind,
             "source_project": source_project,
-            "source_session_id": source_session_id,
+            "source_session_id": source_session_id or prov["source_session_id"],
+            "source_harness": prov["source_harness"],
+            "source_cwd": prov["source_cwd"],
+            "source_node_id": prov["source_node_id"],
+            "source_plan_path": prov["source_plan_path"],
             "source_inbox_msg": source_inbox_msg,
         }
         es.append(node)

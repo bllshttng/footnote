@@ -106,6 +106,9 @@ class Entry(BaseModel):
     rank: Optional[float] = None
     domain: str = "code"
     blocked_by: list[str] = Field(default_factory=list)
+    # Asserted affinity. Never reaches _derive_status or selection, unlike
+    # blocked_by. Stored on both endpoints, not derived: see store.set_related.
+    related: list[str] = Field(default_factory=list)
     # Lock owner. locked_by is canonical; session_id is the one-release mirror
     # (_normalize_lock_fields keeps them equal). locked_by_harness* record the
     # holder's provider + harness-session UUID (US6).

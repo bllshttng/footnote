@@ -89,6 +89,12 @@ SESSION_URL_RE='claude\.ai/code/[A-Za-z0-9]'
 NODE_ID_ALLOWLIST=(
     "ab-1a2b3c4d"   # slug-derivation example (ab-1a2b3c4d -> dashless-spawn)
     "ab-1234abcd"   # generic command / argument placeholder
+    # Repeated-letter placeholders for examples needing several distinct nodes
+    # (a symmetric edge takes two, a precedence chain three). Non-real by
+    # construction: a minted id is random hex, never one letter repeated.
+    "x-aaaa"
+    "x-bbbb"
+    "x-cccc"
 )
 
 # Echo the line with every allowlisted token removed. A line carrying ONLY
