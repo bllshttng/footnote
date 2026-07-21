@@ -1736,3 +1736,38 @@ def test_agent_scan_parses_last_exit_not_current_state(
     assert report["dead"] == [{"label": "sh.fno.pr-watcher", "exit": 78}], (
         "only nonzero-exit sh.fno.* labels count; foreign labels and `-` do not"
     )
+
+
+def test_never_run_remedy_is_platform_appropriate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--install-agent is launchd-only; off darwin it would report `unsupported`."""
+    _fresh(monkeypatch)
+    monkeypatch.setattr(
+        doctor,
+        "_groom_health",
+        lambda: {"state": "never", "hours": None, "stale": True, "agent_installed": False},
+    )
+    monkeypatch.setattr(doctor.sys, "platform", "linux")
+    result = runner.invoke(app, ["doctor"])
+    assert "NEVER run" in result.stdout
+    assert "--install-agent" not in result.stdout, "that flag does nothing off launchd"
+    assert "docs/backlog-usage.md" in result.stdout
+
+
+def test_fix_does_not_attempt_a_launchd_install_off_darwin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unguarded call would warn `unsupported` on every --fix, unactionably."""
+    _fresh(monkeypatch)
+    monkeypatch.setattr(
+        doctor,
+        "_groom_health",
+        lambda: {"state": "never", "hours": None, "stale": True, "agent_installed": False},
+    )
+    monkeypatch.setattr(doctor.sys, "platform", "linux")
+
+    def _boom(**kw):
+        raise AssertionError("must not attempt a launchd install off darwin")
+
+    monkeypatch.setattr("fno.backlog.groom.install_groom_agent", _boom)
+    result = runner.invoke(app, ["doctor", "--fix"])
+    assert "groom agent" not in result.stderr

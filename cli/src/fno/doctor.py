@@ -1114,14 +1114,14 @@ def _emit_human(
     # below, because "installed" has repeatedly not meant "running".
     gr = result.get("groom") or {}
     if gr.get("state") == "never":
-        out(
-            "fno doctor: backlog grooming has NEVER run"
-            + (
-                "; run `fno backlog groom --install-agent` to schedule it daily."
-                if not gr.get("agent_installed")
-                else " despite an installed agent; check ~/.fno/groom.err.log."
-            )
-        )
+        if gr.get("agent_installed"):
+            remedy = " despite an installed agent; check ~/.fno/groom.err.log."
+        elif sys.platform == "darwin":
+            remedy = "; run `fno backlog groom --install-agent` to schedule it daily."
+        else:
+            # --install-agent is launchd-only and would report `unsupported`.
+            remedy = "; schedule `fno backlog groom` daily (see docs/backlog-usage.md)."
+        out("fno doctor: backlog grooming has NEVER run" + remedy)
     elif gr.get("stale"):
         out(
             f"fno doctor: backlog grooming last ran {gr['hours']:.0f}h ago "
@@ -1657,8 +1657,15 @@ def doctor_command(
         # scheduled to run it. The receipt already reports the BOOTSTRAP result
         # rather than the plist write, so a plist that lands but fails to load
         # reads `failed` here too. Advisory, like the pr-watch heal above.
+        # darwin-gated: off launchd this only ever returns `unsupported`, so an
+        # unguarded call is a warning on every --fix that nothing can act on.
         gr = result.get("groom") or {}
-        if gr.get("stale") and not gr.get("agent_installed") and not json_out:
+        if (
+            sys.platform == "darwin"
+            and gr.get("stale")
+            and not gr.get("agent_installed")
+            and not json_out
+        ):
             from fno.backlog.groom import install_groom_agent
 
             receipt = install_groom_agent()

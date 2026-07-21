@@ -298,10 +298,10 @@ if command -v fno >/dev/null 2>&1; then
         mkdir -p .fno 2>/dev/null; printf '%s\n' "$rs_today" >"$rs_watermark" 2>/dev/null || true
         ( fno plan reconcile-status --apply >/dev/null 2>&1 & ) 2>/dev/null || true
     fi
-    # Grooming fallback: self-gates on staleness, so a healthy LaunchAgent never
-    # trips it. Backgrounded whole - its probe is a CLI shellout, and a healthy
-    # machine writes no watermark to skip it, so it would land on every session.
-    gsh_helper="${SCRIPT_DIR}/helpers/groom-self-heal.sh"
+    # Grooming fallback, for the codex/gemini path only: claude registers the
+    # same script directly in hooks.json (this wrapper is not in that list), and
+    # its own watermark makes a double invocation a no-op regardless.
+    gsh_helper="${SCRIPT_DIR}/groom-self-heal-session-start.sh"
     [[ -f "$gsh_helper" ]] && ( bash "$gsh_helper" >/dev/null 2>&1 & ) 2>/dev/null || true
     # Graph->doc mirror sweep: bare `plan sync` self-gates on graph.json mtime
     # (one stat, cheap on no change), so no shell watermark; backgrounded + output

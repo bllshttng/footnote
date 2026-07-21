@@ -20,7 +20,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT_REAL="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-HELPER="${REPO_ROOT_REAL}/hooks/helpers/groom-self-heal.sh"
+HELPER="${REPO_ROOT_REAL}/hooks/groom-self-heal-session-start.sh"
 
 log()  { printf '[groom-heal] %s\n' "$*"; }
 fail() { printf '[groom-heal] FAIL: %s\n' "$*" >&2; exit 1; }
@@ -149,4 +149,16 @@ if compgen -G "$proj/.fno/.groom-heal-*" >/dev/null; then
     fail "a non-repo cwd must not claim the day"
 fi
 pass "a non-repo cwd is skipped, leaving the day retryable"
+
+# --- the fallback must actually be REGISTERED for claude ----------------------
+# hooks/session-start.sh is the codex/gemini wrapper and is NOT in hooks.json;
+# claude runs its SessionStart scripts individually. A fallback reachable only
+# from the wrapper would ship and never run on the primary platform - which is
+# the exact failure this whole node exists to end.
+HOOKS_JSON="${REPO_ROOT_REAL}/hooks/hooks.json"
+grep -q 'hooks/groom-self-heal-session-start\.sh' "$HOOKS_JSON" \
+    || fail "the fallback is not registered in hooks.json; it would never run under claude"
+python3 -c "import json,sys; json.load(open('$HOOKS_JSON'))" 2>/dev/null \
+    || fail "hooks.json is not valid JSON"
+pass "the fallback is registered in hooks.json and the file still parses"
 log "all groom self-heal tests passed"
