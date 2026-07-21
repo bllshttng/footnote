@@ -859,6 +859,15 @@ def _create_node_impl(
     for line in rollup_lines:
         typer.echo(line, err=True)
 
+    # Name the captured origin (x-d157 AC1-UI). stderr for the same reason as the
+    # rollup lines: stdout is the machine-readable payload. Printed even when
+    # nothing resolved, so an ambient capture that quietly found no origin is
+    # visible at the moment it happens rather than weeks later as a flat metric.
+    if node_holder[0] is not None:
+        typer.echo(
+            f"origin: {node_holder[0].get('source_node_id') or '(none)'}", err=True
+        )
+
     # Born-with-why: route births through the shared birth hook. Gate-first and
     # strictly non-fatal, so a gate-OFF install is a no-op and a dispatch
     # failure never wedges the filing of the node above.
@@ -3581,11 +3590,62 @@ def cmd_project_root(
 
 # -- provenance --
 
+# A cycle in source_node_id needs a visited set to terminate; the cap is the
+# second belt, and bounds output on a legitimately deep chain. Not configurable:
+# a follow-up chain this long is a graph problem, not a display preference.
+_SPAWNED_MAX_DEPTH = 10
+
+
+def _spawned_walk(
+    entries: list, root_id: str, *, max_depth: int = _SPAWNED_MAX_DEPTH
+) -> "tuple[list, bool, bool]":
+    """Walk source_node_id in reverse: what did ``root_id`` produce?
+
+    Breadth-first so depth falls out of the traversal rather than being assigned,
+    and so the shortest path to a node is the depth reported for it.
+
+    Returns ``(rows, cycle_detected, truncated)`` where rows are
+    ``(depth, entry)``. A cycle TRUNCATES the walk and keeps the descendants
+    already found - returning an empty set with a cycle flag would satisfy a
+    naive reading of "terminates" while silently discarding the answer.
+    """
+    by_source: dict = {}
+    for e in entries:
+        src = e.get("source_node_id")
+        if src:
+            by_source.setdefault(src, []).append(e)
+
+    rows: list = []
+    seen = {root_id}
+    frontier = [root_id]
+    cycle = False
+    depth = 0
+    while frontier and depth < max_depth:
+        depth += 1
+        nxt: list = []
+        for parent_id in frontier:
+            for child in sorted(by_source.get(parent_id, []), key=lambda e: e.get("id") or ""):
+                child_id = child.get("id")
+                if child_id in seen:
+                    cycle = True
+                    continue
+                seen.add(child_id)
+                rows.append((depth, child))
+                nxt.append(child_id)
+        frontier = nxt
+    return rows, cycle, bool(frontier)
+
+
 @cli.command("provenance", hidden=True)
 def cmd_provenance(
     id: str = typer.Argument(
         ...,
         help="Node ab-id, slug, or bare 8-hex",
+    ),
+    spawned: bool = typer.Option(
+        False,
+        "--spawned",
+        help="Also walk the origin edge in reverse: every node this one produced, transitively.",
     ),
     json_out: bool = typer.Option(
         False, "--json", "-J", help="Emit machine-readable JSON instead of human summary"
@@ -3639,6 +3699,24 @@ def cmd_provenance(
             projects_root=_DEFAULT_PROJECTS_ROOT,
         )
 
+    # Origin + affinity edges (x-d157). source_node_id shipped a month before
+    # anything read it back, so it looked broken while working: a write-only
+    # field is indistinguishable from a field that is not being written.
+    index = {e.get("id"): e for e in entries if isinstance(e, dict)}
+
+    def _titled(other_id: str) -> str:
+        """`<id> (<title>)`, so the line reads without a second lookup."""
+        other = index.get(other_id)
+        if other is None:
+            return f"{other_id} (not in graph)"
+        return f"{other_id} ({other.get('title', '')})"
+
+    origin_id = e.get("source_node_id")
+    related_ids = e.get("related") or []
+    walk_rows, walk_cycle, walk_truncated = (
+        _spawned_walk(entries, node_id) if spawned else ([], False, False)
+    )
+
     if json_out:
         import dataclasses
 
@@ -3659,7 +3737,20 @@ def cmd_provenance(
             # Append-only lifecycle provenance in raw append order (x-b6e4).
             # read_graph's defaults guarantee the key, so no fallback guard.
             "sessions": e["sessions"],
+            "source_node_id": origin_id,
+            "source_node_title": (index.get(origin_id) or {}).get("title"),
+            "source_plan_path": e.get("source_plan_path"),
+            "related": related_ids,
         }
+        if spawned:
+            output["spawned"] = {
+                "nodes": [
+                    {"depth": d, "id": n.get("id"), "title": n.get("title")}
+                    for d, n in walk_rows
+                ],
+                "cycle_detected": walk_cycle,
+                "truncated_at_depth": _SPAWNED_MAX_DEPTH if walk_truncated else None,
+            }
         typer.echo(json.dumps(output, indent=2))
         return
 
@@ -3683,7 +3774,26 @@ def cmd_provenance(
             lines.append(f"    transcript: (unresolved - {reason})")
 
     _fmt_edge("node-birth", birth_result, birth_session, birth_harness)
+    # Rendered unconditionally, including the null case: an omitted line reads as
+    # "this verb does not report origins", which is exactly how the field stayed
+    # invisible for a month.
+    lines.append(f"  origin: {_titled(origin_id) if origin_id else '(none)'}")
+    if e.get("source_plan_path"):
+        lines.append(f"    plan: {e['source_plan_path']}")
     _fmt_edge("spawn", spawn_result, spawn_session, spawn_harness)
+
+    lines.append(f"  related: {'(none)' if not related_ids else ''}".rstrip())
+    for rid in related_ids:
+        lines.append(f"    {_titled(rid)}")
+
+    if spawned:
+        lines.append(f"  spawned: {'(none)' if not walk_rows else ''}".rstrip())
+        for depth, n in walk_rows:
+            lines.append(f"    {'  ' * (depth - 1)}d{depth} {_titled(n.get('id'))}")
+        if walk_cycle:
+            lines.append("    note: cycle detected; walk truncated at the repeat")
+        if walk_truncated:
+            lines.append(f"    note: depth cap {_SPAWNED_MAX_DEPTH} reached; walk truncated")
 
     # Lifecycle rows (x-b6e4): raw append order, phase-forward. Distinct from the
     # birth/spawn edges above -- those are single parent pointers; this is the
