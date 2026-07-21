@@ -125,6 +125,17 @@ FIELD_META: dict[str, Meta] = {
         "Let merge-detection auto-dispatch the /fno:pr merged ritual for a "
         "newly-merged PR (opt-in; default off).",
     ),
+    "post_merge.catchup_window_days": Meta(
+        "advanced",
+        "How far back the canonical-sync catch-up sweep looks for merges with no "
+        "sync marker (default 3 days). Bounds the sweep so a fresh clone never "
+        "re-syncs all history.",
+    ),
+    "post_merge.sync_stale_hours": Meta(
+        "advanced",
+        "How long the newest merge may sit unsynced before `fno doctor` reports "
+        "the canonical checkout stale (default 24h).",
+    ),
     "post_merge.model": Meta(
         "advanced",
         "Model for post-merge ritual workers (default claude-sonnet-5). Routing "

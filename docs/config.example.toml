@@ -125,6 +125,10 @@ self_reap = false
 sync_paths = []
 # Let merge-detection auto-dispatch the /fno:pr merged ritual for a newly-merged PR (opt-in; default off).
 auto_run = false
+# How far back the canonical-sync catch-up sweep looks for merges with no sync marker (default 3 days). Bounds the sweep so a fresh clone never re-syncs all history.
+catchup_window_days = 3
+# How long the newest merge may sit unsynced before `fno doctor` reports the canonical checkout stale (default 24h).
+sync_stale_hours = 24
 # Model for post-merge ritual workers (default claude-sonnet-5). Routing wins when a secondary provider is keyed.
 model = "claude-sonnet-5"
 
