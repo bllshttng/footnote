@@ -883,9 +883,7 @@ EOF
   # Authority grant (`/target yolo`): omitted unless granted, so absence is the default.
   _authority_line=""
   [[ "${TARGET_BEASTMODE:-}" == "1" ]] && _authority_line="authority: full"$'\n' || true
-  # Work-evidence baseline: the do-provenance backstop proves this session's
-  # lineage authored commits by diffing initial_head..HEAD. `null` on a repo with
-  # no commits, which fails the guard closed.
+  # Work-evidence baseline for the do-provenance stamp; `null` fails it closed.
   _initial_head=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo null)
 
   cat > "$local_temp" << EOF
