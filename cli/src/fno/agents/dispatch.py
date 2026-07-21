@@ -3211,7 +3211,20 @@ def attach_agent(name: str) -> AttachResult:
     concurrent attach safety natively.
     """
     _validate_lifecycle_name(name)
-    existing = _resolve_registry_entry(name)
+    # Resolve to the ENTRY, not just the canonical name: when the harness-store
+    # heal (x-9cc5) synthesizes a row it could not persist, re-reading the
+    # registry by name would miss it and report not-found - defeating the
+    # best-effort recovery in exactly the registry-unwritable case it exists for.
+    # Falls back to today's name lookup on any resolution failure, so the
+    # familiar not-found/exit-2 contract is unchanged.
+    from fno.agents.registry import AgentResolutionError, resolve_agent
+
+    try:
+        resolved = resolve_agent(name)
+    except (AgentResolutionError, OSError, RegistryVersionError):
+        existing = _resolve_registry_entry(name)
+    else:
+        existing, name = resolved.entry, resolved.entry.name
 
     if existing.harness in ("codex", "gemini"):
         sys.stderr.write(
