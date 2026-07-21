@@ -4,9 +4,21 @@ Public API:
     _acquire_flock, _release_flock  - raw flock operations
     _read_json, _write_json         - raw JSON I/O (callers hold lock for writes)
     _apply_graph_defaults           - lazy migration defaults for ab- entries
-    read_graph                      - unlocked read with defaults applied
+    read_graph                      - unlocked read with defaults applied (soft:
+                                      swallows corruption to [] for display cmds)
+    read_graph_strict               - unlocked read that RAISES on an unreadable
+                                      graph, for resolution callers that must tell
+                                      "node absent" from "graph unreadable"
     locked_mutate_graph             - locked read-modify-write with status recompute
-    GraphCorruptError               - raised on unparseable graph.json
+    GraphCorruptError               - raised on unparseable graph.json (this module)
+    GraphUnreadableError            - strict-read failure (bad JSON / bad shape)
+    GraphMalformedRootError         - subclass: root object with no 'entries' key
+
+Graph read-failure taxonomy (four types across two modules, distinct call paths,
+NOT severities): GraphCorruptError (here, JSON parse on the raw read) and
+GraphUnreadableError (here, the strict read) both mean "bytes/shape unusable";
+load.py's GraphCorruptionError is a different axis entirely - a SHA256 sidecar
+mismatch, checked only by load_graph, never by read_graph/read_graph_strict.
 
 Sidecar / backup protocol (Layer 2 hygiene):
     After every successful atomic write locked_mutate_graph:
@@ -551,6 +563,12 @@ def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     Never writes a ``.bak``: diagnosis is read-only, and a file that parsed did
     not fail to parse (AC1-EDGE). ``read_graph``'s soft contract is untouched;
     display commands (``status``/``ready``) keep swallowing to [].
+
+    Deliberately does NO sha256-sidecar check: this is the read-path integrity
+    layer (bytes/shape), separate from ``load.load_graph``'s hash layer. A graph
+    that is byte-corrupt yet still valid JSON is a hash-mismatch, which only
+    ``load_graph`` detects; routing every ``get`` through the hash check is out
+    of scope here (it would tax every resolution read).
     """
     if not path.exists():
         return []
