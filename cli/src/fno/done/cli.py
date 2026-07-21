@@ -567,6 +567,7 @@ def done_command(
     tag_bits: list[str] = [f"domain={domain}"]
     if pr is not None:
         tag_bits.append(f"PR #{pr}")
+        tag_bits.append(f"pr_url={pr_url_to_write}")
     if link is not None:
         tag_bits.append(f"link={link}")
     if note is not None:

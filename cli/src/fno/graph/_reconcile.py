@@ -118,6 +118,13 @@ def pr_url_for_repo(
     if cwd:
         cwd = os.path.expanduser(cwd)
         if not os.path.isdir(cwd):
+            # Announced, never silent: the url is about to name whatever repo
+            # the caller happens to stand in, not the one the node recorded.
+            print(
+                f"note: recorded cwd {cwd} is gone; resolving PR #{pr} against "
+                "the current checkout",
+                file=sys.stderr,
+            )
             cwd = None
     slug = resolve_current_repo_slug(cwd or None, runner=runner)
     return pr_url_from_slug(slug, pr) if slug else None

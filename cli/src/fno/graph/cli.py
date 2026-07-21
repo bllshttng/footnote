@@ -6793,8 +6793,11 @@ def cmd_maintain(
     # AC1-UI: every category prints its count, zero included - a silent
     # category reads as "nothing to do" when it may be "nothing resolved".
     if apply:
+        # "written N of M", never a bare N: the in-lock loop skips a row that
+        # raced to a url or a different pr_number, so 120-of-159 would read
+        # exactly like a complete run.
         typer.echo(
-            f"pr-url written {len(applied_pr_urls)} | "
+            f"pr-url written {len(applied_pr_urls)} of {len(pr_url_writable)} | "
             f"pr-url unresolvable {len(pr_url_unresolvable)}"
         )
     else:

@@ -380,8 +380,9 @@ if [ -n "$ORIGIN_SLUG" ]; then
   # legitimate node after it. A url-less node is dropped too - a bare pr_number
   # names no repo and PR numbers collide across repos, so matching one by cwd
   # was a guess. Writers now pair pr_url with every pr_number and
-  # `fno backlog maintain` backfills the rest, so a url-less node here is an
-  # anomaly to report, not a population to serve.
+  # `fno backlog maintain` reports whatever it could not backfill, so the drop
+  # here is silent on purpose: it costs one unreaped build-worker row, and the
+  # maintain leg is where an operator sees the anomaly.
   SCAN_ERR="$(mktemp)"
   if ! PR_NODES="$(jq -r --argjson pr "$PR" --arg slug "$ORIGIN_SLUG" '
       .entries[]?
