@@ -283,10 +283,11 @@ fi
 # /target-family command that runs. A free-text SEED (x-cbb0) is sent VERBATIM as
 # the session's opening turn, so a flag-shaped token in it ("what does grep -i
 # do") is conversational content, not a mangled dispatch flag - exempt, exactly as
-# the retired `ask` verb and `handoff` are. The node-id check mirrors the tier-1/
-# tier-3 detection below (inline here because node detection runs after this).
+# the retired `ask` verb and `handoff` are. The node-id check mirrors the tier-1
+# detection below (inline here because node detection runs after this); a tier-2
+# candidate is scanned on the SKILL's re-normalize pass, once it matches tier 1.
 _scan_ft="${msg%%[[:space:]]*}"
-if [[ "$HANDOFF_MODE" -eq 0 ]] && { [[ "$msg" == /* ]] || printf '%s' "$_scan_ft" | grep -qE '^(ab-[0-9a-f]{8}|[0-9a-f]{8})$'; }; then
+if [[ "$HANDOFF_MODE" -eq 0 ]] && { [[ "$msg" == /* ]] || printf '%s' "$_scan_ft" | grep -qE '^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$'; }; then
   set -f
   for scan_tok in $msg; do
     scan_cano="$scan_tok"
@@ -309,20 +310,22 @@ set +f
 # caller's (codex P2). See the resolution block just after RESOLVED_CWD.
 
 # ---- 2. node detection + resolution-tier classification ----------------------
-# A backlog node id is exactly `ab-` + 8 lowercase hex (tier 1, exact). Three
-# id-free entry modes layer on top (ab-f82e8083):
-#   tier 3 - a bare 8-hex first token (no `ab-`, no hyphen: autocorrect-neutral)
-#            re-prefixes to `ab-`. EXACTLY 8 hex, so a 10-char hex string is NOT
-#            a node id (AC4-ERR) and falls through to the describe-it tier.
+# A backlog node id matches `^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$` (tier 1, exact) -
+# the shape parse-claims-arg.sh and graph-resolve.sh already use, so any
+# configured id_prefix/id_hex_width classifies, not just `ab-`. Two id-free entry
+# modes layer on top (ab-f82e8083):
 #   tier 2 - a single slug-shaped token is a slug CANDIDATE the SKILL resolves
-#            via `fno backlog get` (exact slug -> ab-id), falling through to
-#            describe-it on a miss.
+#            via `fno backlog get`, falling through to describe-it on a miss.
+#            Bare hex rides this lane too: the resolver is format-agnostic and
+#            accepts it, which beats guessing a prefix here.
 #   tier 5 - `next` / `next all` asks for the top ready node; the SKILL resolves
 #            it via `fno backlog next` (this-project default; `all` widens).
 # Slug + next resolution need the graph, so normalize only CLASSIFIES them here
 # (deterministic + unit-testable); the SKILL does the lookup and re-normalizes
-# with the resolved ab-id. The describe-it fuzzy tier (tier 4) is whatever is
-# left - free prose - and lives entirely in the SKILL body behind a confirm.
+# with the resolved id. Termination invariant: a canonical id from the resolver
+# MUST match tier 1, or the re-normalize would reclassify as tier 2 forever. The
+# describe-it fuzzy tier (tier 4) is whatever is left - free prose - and lives
+# entirely in the SKILL body behind a confirm.
 NODE=""
 NODE_QUERY=""
 SPAWN_NEXT=0
@@ -335,15 +338,12 @@ if [[ "$HANDOFF_MODE" -eq 1 ]]; then
 elif [[ "$msg_lc" == "next" || "$msg_lc" == "next all" ]]; then
   SPAWN_NEXT=1
   [[ "$msg_lc" == "next all" ]] && NEXT_SCOPE="all" || NEXT_SCOPE="project"
-elif printf '%s' "$first_tok" | grep -qE '^ab-[0-9a-f]{8}$'; then
-  NODE="$first_tok"                                   # tier 1: exact ab-id
-elif printf '%s' "$first_tok" | grep -qE '^[0-9a-f]{8}$'; then
-  NODE="ab-$first_tok"                                # tier 3: bare 8-hex
-  # Rewrite the leading bare-hex token so the /target message the worker runs
-  # carries the canonical id, not the bare hex.
-  msg="ab-${first_tok}${msg#"$first_tok"}"
+elif printf '%s' "$first_tok" | grep -qE '^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$'; then
+  NODE="$first_tok"                                   # tier 1: exact node id
 elif printf '%s' "$msg" | grep -qE '^/target([[:space:]]|$)'; then
-  NODE="$(printf '%s' "$msg" | grep -oE 'ab-[0-9a-f]{8}' | head -1)"
+  # Unanchored, so a hex-shaped prose word ("re-added") can match; the SKILL's
+  # VALIDATE arm degrades a passthrough miss to node="" rather than refusing.
+  NODE="$(printf '%s' "$msg" | grep -oE '[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}' | head -1)"
 elif printf '%s' "$msg" | grep -iqE '^[a-z0-9][a-z0-9-]*$'; then
   # tier 2: slug candidate. Case-insensitive (`-i`) so a mobile-auto-capitalized
   # slug (`Dashless-spawn`) is still classified as a candidate; the resolver
