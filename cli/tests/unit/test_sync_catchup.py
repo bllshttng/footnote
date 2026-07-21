@@ -66,15 +66,53 @@ def _stamp(root: Path, sha: str) -> None:
 # --- sync_staleness ---------------------------------------------------------
 
 
-def test_staleness_fresh_when_newest_merge_is_marked(tmp_path):
+def test_staleness_fresh_when_every_merge_is_marked(tmp_path):
     rows = [_merged(50, "aaa", 48), _merged(49, "bbb", 72)]
     _stamp(tmp_path, "aaa")
+    _stamp(tmp_path, "bbb")
     st = sc.sync_staleness(
         settings=_pm(), canonical_root=tmp_path, runner=_git(0), gh_list=_gh(rows)
     )
-    # bbb is markerless but sits BEHIND a synced head: cosmetic, not an outage.
     assert st.state == "fresh"
+    assert st.markerless == ()
+
+
+def test_staleness_stale_on_an_older_markerless_merge(tmp_path):
+    """A marked newest merge does NOT vouch for the merges behind it.
+
+    run_sync_canonical marks a merge that misses the sync_paths globs without
+    pulling, so treating an older markerless merge as cosmetic-because-the-head-
+    is-marked would hide a code merge that was never pulled.
+    """
+    rows = [_merged(50, "aaa", 1), _merged(49, "bbb", 72)]
+    _stamp(tmp_path, "aaa")  # newest marked - possibly by a path-gate skip
+    st = sc.sync_staleness(
+        settings=_pm(), canonical_root=tmp_path, runner=_git(0), gh_list=_gh(rows)
+    )
+    assert st.state == "stale"
+    assert "#49" in st.detail
     assert [r["sha"] for r in st.markerless] == ["bbb"]
+
+
+def test_staleness_fetches_only_when_asked(tmp_path):
+    """The 5-minute tick must not fetch; the human-facing doctor must."""
+    seen: list[list[str]] = []
+
+    def runner(cmd, **_kw):
+        seen.append(list(cmd))
+        return sc.Result(returncode=0, stdout="origin/main\n0\n", stderr="")
+
+    sc.sync_staleness(
+        settings=_pm(), canonical_root=tmp_path, runner=runner, gh_list=_gh([])
+    )
+    assert not any("fetch" in c for cmd in seen for c in cmd)
+
+    seen.clear()
+    sc.sync_staleness(
+        settings=_pm(), canonical_root=tmp_path, runner=runner,
+        gh_list=_gh([]), fetch=True,
+    )
+    assert any("fetch" in c for cmd in seen for c in cmd)
 
 
 def test_staleness_stale_when_newest_merge_is_old_and_unmarked(tmp_path):
@@ -334,6 +372,9 @@ def _run_tick(monkeypatch, catchup_result):
     from fno.pr import _sync_canonical as sc_mod
 
     monkeypatch.setattr(pw, "load_settings", _tick_settings)
+    monkeypatch.setattr(pw, "load_settings_for_repo", lambda _root: _tick_settings())
+    # The daemon is global, so the leg sweeps roots from the graph, not cwd.
+    monkeypatch.setattr(pw, "_catchup_roots", lambda: [Path("/tmp/proj-alpha")])
     monkeypatch.setattr(
         "fno.pr_watch._dispatch.tick",
         lambda **_kw: SimpleNamespace(
@@ -347,19 +388,142 @@ def _run_tick(monkeypatch, catchup_result):
     return result, calls
 
 
-def test_tick_alarms_only_when_catchup_fails(monkeypatch):  # AC8-HP
+def test_catchup_roots_come_from_the_graph_deduped(tmp_path, monkeypatch):
+    """launchd starts the daemon in `/`, so there is no ambient project.
+
+    A bare load_settings() there reads global config, where post_merge is
+    unset - which silently disabled this whole leg.
+    """
+    from fno.pr_watch import cli as pw
+
+    alpha = tmp_path / "alpha"
+    alpha.mkdir()
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph",
+        lambda _p: [
+            {"cwd": str(alpha)},
+            {"cwd": str(alpha)},              # duplicate project
+            {"cwd": str(tmp_path / "gone")},  # deleted checkout
+            {},                                # node with no cwd
+        ],
+    )
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    assert pw._catchup_roots() == [alpha]
+
+
+def test_catchup_roots_survive_an_unreadable_graph(monkeypatch):
+    from fno.pr_watch import cli as pw
+
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph",
+        lambda _p: (_ for _ in ()).throw(RuntimeError("corrupt")),
+    )
+    assert pw._catchup_roots() == []
+
+
+def test_tick_sweeps_each_project_independently(monkeypatch, tmp_path):
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as pw
+    from fno.pr import _sync_canonical as sc_mod
+
+    roots = []
+    for name in ("alpha", "beta"):
+        d = tmp_path / name
+        d.mkdir()
+        roots.append(d)
+
+    seen: list[Path] = []
+    monkeypatch.setattr(pw, "load_settings", _tick_settings)
+    monkeypatch.setattr(pw, "load_settings_for_repo", lambda _r: _tick_settings())
+    monkeypatch.setattr(pw, "_catchup_roots", lambda: roots)
+    monkeypatch.setattr(pw, "_notify_parked", lambda _m: None)
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: SimpleNamespace(
+            lock_held=False, lock_holder=None, open_prs=0, acted=0, skipped=0
+        ),
+    )
+
+    def catchup(*, canonical_root=None, **_kw):
+        seen.append(canonical_root)
+        return sc.CatchupResult("synced", 1)
+
+    monkeypatch.setattr(sc_mod, "run_sync_catchup", catchup)
+    res = CliRunner().invoke(pw.cli, ["tick"])
+    assert res.exit_code == 0
+    assert seen == roots  # scoped per project, not once against the daemon's cwd
+    assert "sync catch-up [alpha]" in res.output
+    assert "sync catch-up [beta]" in res.output
+
+
+def test_tick_continues_after_one_project_raises(monkeypatch, tmp_path):
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as pw
+    from fno.pr import _sync_canonical as sc_mod
+
+    bad, good = tmp_path / "bad", tmp_path / "good"
+    bad.mkdir()
+    good.mkdir()
+    monkeypatch.setattr(pw, "load_settings", _tick_settings)
+    monkeypatch.setattr(pw, "load_settings_for_repo", lambda _r: _tick_settings())
+    monkeypatch.setattr(pw, "_catchup_roots", lambda: [bad, good])
+    monkeypatch.setattr(pw, "_notify_parked", lambda _m: None)
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: SimpleNamespace(
+            lock_held=False, lock_holder=None, open_prs=0, acted=0, skipped=0
+        ),
+    )
+
+    def catchup(*, canonical_root=None, **_kw):
+        if canonical_root == bad:
+            raise RuntimeError("boom")
+        return sc.CatchupResult("synced", 1)
+
+    monkeypatch.setattr(sc_mod, "run_sync_catchup", catchup)
+    res = CliRunner().invoke(pw.cli, ["tick"])
+    assert res.exit_code == 0
+    assert "sync catch-up [good]: synced" in res.output
+
+
+def test_tick_alarms_on_detected_and_unresolved(monkeypatch):  # AC8-HP
     res, notes = _run_tick(
-        monkeypatch, sc.CatchupResult("failed", 52, detail="exit 1")
+        monkeypatch,
+        sc.CatchupResult("failed", 52, detail="exit 1", stale=True),
     )
     assert res.exit_code == 0
-    assert "ALARM" in res.output and "#52" in res.output
+    assert "ALARM" in res.output and "proj-alpha" in res.output
+    assert len(notes) == 1
+
+
+def test_tick_does_not_alarm_on_a_failure_that_is_not_yet_stale(monkeypatch):
+    """A merge from two minutes ago whose retry is seconds away is not an outage."""
+    res, notes = _run_tick(
+        monkeypatch, sc.CatchupResult("failed", 52, detail="exit 1", stale=False)
+    )
+    assert "sync catch-up [proj-alpha]: failed" in res.output  # still reported
+    assert "ALARM" not in res.output
+    assert notes == []
+
+
+def test_tick_alarms_when_markers_lie(monkeypatch):
+    """Nothing to sweep, yet the canonical is proven behind. Detected, unresolved."""
+    res, notes = _run_tick(
+        monkeypatch,
+        sc.CatchupResult("fresh", detail="local default branch 5 behind origin", stale=True),
+    )
+    assert "ALARM" in res.output
     assert len(notes) == 1
 
 
 def test_tick_is_silent_when_catchup_succeeds(monkeypatch):  # AC8-HP, no cry-wolf
-    res, notes = _run_tick(monkeypatch, sc.CatchupResult("synced", 52, swept=2))
+    res, notes = _run_tick(
+        monkeypatch, sc.CatchupResult("synced", 52, swept=2, stale=True)
+    )
     assert res.exit_code == 0
-    assert "sync catch-up: synced" in res.output  # the leg ran (not vacuous)
+    assert "sync catch-up [proj-alpha]: synced" in res.output  # the leg ran
     assert "ALARM" not in res.output
     assert notes == []
 

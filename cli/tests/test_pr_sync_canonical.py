@@ -226,3 +226,31 @@ def test_e2e_merge_syncs_canonical_not_worktree_and_dedups(tmp_path, capsys):
     assert rc2 == 0
     assert len(shell.calls) == 1  # unchanged: dedup by marker
     assert "already synced" in capsys.readouterr().out
+
+
+def test_claim_key_is_canonical_wide_not_per_sha(tmp_path, monkeypatch):
+    """Two different merges must contend for ONE lock.
+
+    The claim's job is that two `fno restart`s never overlap in a checkout. A
+    per-SHA key does not deliver that: a catch-up for one merge and a merge-time
+    sync for another would take different locks and pull, update, and restart
+    concurrently. Exactly-once-per-SHA is the marker's job, not the claim's.
+    """
+    from fno import claims
+
+    keys: list[str] = []
+    monkeypatch.setattr(
+        claims, "acquire_claim", lambda key, holder, **_kw: keys.append(key)
+    )
+    monkeypatch.setattr(claims, "release_claim", lambda *a, **k: None)
+
+    _run(tmp_path, shell_runner=_Shell())
+    _run(
+        tmp_path,
+        gh_json=_gh_row(mergeCommit={"oid": "b" * 40}),
+        shell_runner=_Shell(),
+    )
+
+    assert len(keys) == 2
+    assert keys[0] == keys[1], "different SHAs must contend for the same lock"
+    assert "a" * 40 not in keys[0] and "b" * 40 not in keys[1]

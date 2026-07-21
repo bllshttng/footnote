@@ -117,6 +117,29 @@ def _reviewers_for(repo_dir: Path) -> list[str]:
         return []
 
 
+def _catchup_roots() -> list[Path]:
+    """Distinct project roots the canonical-sync catch-up should sweep.
+
+    launchd starts this daemon in ``/`` with no WorkingDirectory, so there is no
+    ambient project to read config from. The roots come from the backlog graph,
+    the same source the dispatch pass scopes its own per-repo config reads to.
+    """
+    try:
+        from fno.graph.store import read_graph
+        from fno.paths import graph_json
+
+        entries = read_graph(graph_json())
+    except Exception as exc:  # noqa: BLE001 - no graph means nothing to sweep
+        log.warning("pr-watch: could not read graph for catch-up roots: %s", exc)
+        return []
+    roots: dict[str, Path] = {}
+    for node in entries:
+        cwd = node.get("cwd")
+        if cwd and str(cwd) not in roots:
+            roots[str(cwd)] = Path(cwd)
+    return [p for p in roots.values() if p.is_dir()]
+
+
 class ClaimAdapter:
     """Thin adapter that maps the tick() claim protocol to fno.claims."""
 
@@ -230,26 +253,32 @@ def tick() -> None:
     try:
         from fno.pr._sync_canonical import run_sync_catchup
 
-        res = run_sync_catchup(settings=settings)
-        if res.outcome != "disabled":
+        for root in _catchup_roots():
+            try:
+                res = run_sync_catchup(
+                    settings=load_settings_for_repo(root), canonical_root=root
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad repo never stops the rest
+                log.warning("pr-watch: sync catch-up failed for %s: %s", root, exc)
+                continue
+            if res.outcome == "disabled":
+                continue
             typer.echo(
-                f"sync catch-up: {res.outcome}"
+                f"sync catch-up [{root.name}]: {res.outcome}"
                 + (f" ({res.detail})" if res.detail else "")
             )
-        # Detected AND failed is the alarm case: a successful catch-up is the
-        # system working, and alarming on it is how a check trains people to
-        # ignore it. The notify is best-effort and never load-bearing.
-        if res.outcome == "failed":
-            typer.echo(
-                f"ALARM: canonical sync is behind and catch-up failed for PR "
-                f"#{res.pr_number} ({res.detail}). The canonical checkout and its "
-                f"installed tooling are stale; run `fno pr sync-canonical "
-                f"--pr-number {res.pr_number}` by hand.",
-                err=True,
-            )
-            _notify_parked(
-                f"canonical sync stuck: PR #{res.pr_number} catch-up failed"
-            )
+            # Detected AND unresolved. Keying on a failed sync alone would alarm
+            # on a merge from two minutes ago whose retry is seconds away, and
+            # stay silent on a canonical proven behind with every marker present
+            # - the state where there is nothing to sweep and the markers lie.
+            if res.stale and res.outcome != "synced":
+                typer.echo(
+                    f"ALARM: {root.name} canonical sync is stale and the catch-up "
+                    f"did not resolve it ({res.detail}). That checkout and its "
+                    f"installed tooling are behind; sync it by hand.",
+                    err=True,
+                )
+                _notify_parked(f"canonical sync stale: {root.name} ({res.outcome})")
     except Exception as exc:  # noqa: BLE001 - never let catch-up break pr-watch
         log.warning("pr-watch: sync catch-up failed: %s", exc)
 

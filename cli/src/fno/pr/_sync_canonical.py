@@ -160,7 +160,13 @@ def run_sync_canonical(
     # 5. Single-flight lock (canonical-scoped, TTL-live).
     from fno import claims
 
-    lock_key = f"post-merge-sync:{sha}"
+    # Canonical-wide, NOT per-SHA. The claim's job is that two `fno restart`s
+    # never overlap in one checkout, and a per-SHA key does not deliver that: a
+    # catch-up for one merge and a merge-time sync for another take different
+    # locks and pull, update, and restart concurrently. Exactly-once-per-SHA is
+    # the marker's job, and it still is - separating the two is what lets this
+    # key be the coarse one the non-overlap invariant actually needs.
+    lock_key = "post-merge-sync"
     holder = f"sync-canonical:{pr_number}"
     try:
         claims.acquire_claim(
@@ -238,10 +244,16 @@ class SyncStaleness:
 class CatchupResult:
     """One catch-up sweep. ``outcome`` drives the tick's alarm decision."""
 
-    outcome: str  # disabled | unknown | fresh | synced | skipped | failed
+    outcome: str  # disabled | unknown | fresh | synced | marked | skipped | failed
     pr_number: Optional[int] = None
     swept: int = 0
     detail: str = ""
+    # Whether the predicate found the canonical stale. The alarm is "detected AND
+    # unresolved", so the tick needs the detection separately from the outcome: a
+    # failed sync of a merge from two minutes ago is not yet an outage, and a
+    # canonical proven behind with every marker present is one even though there
+    # was nothing for the sweep to do.
+    stale: bool = False
 
 
 def _default_gh_list(canonical: Path, window_days: int) -> Optional[list[dict]]:
@@ -297,14 +309,27 @@ def _parse_iso(raw: object) -> Optional[datetime]:
         return None
 
 
-def _behind_count(canonical: Path, runner: Callable[..., Result]) -> Optional[int]:
+def _behind_count(
+    canonical: Path, runner: Callable[..., Result], *, fetch: bool = False
+) -> Optional[int]:
     """Commits the default branch is behind its origin counterpart, or None.
 
-    Deliberately does NOT fetch: a predicate that mutates the repo is not a
-    predicate, and the tick's own sync_command is what advances the remote-
-    tracking ref. The number is therefore as fresh as the last fetch - stale in
-    the safe direction (it under-reports, never invents an alarm).
+    Without ``fetch`` the answer is only as fresh as the last fetch, which
+    under-reports rather than inventing an alarm. That is wrong for the one case
+    this number exists to catch: a merge that has aged out of the gh window
+    leaves no markerless row, so a stale remote-tracking ref would read as zero
+    behind and the outage would be invisible forever. Callers that report to a
+    human (doctor) therefore fetch; the 5-minute tick does not.
     """
+    if fetch:
+        try:
+            runner(
+                ["git", "fetch", "--quiet", "origin"],
+                cwd=str(canonical),
+                timeout=_CATCHUP_PROBE_TIMEOUT_S,
+            )
+        except Exception:  # noqa: BLE001 - a failed fetch just means a staler answer
+            pass
     try:
         head = runner(
             ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -337,11 +362,14 @@ def sync_staleness(
     canonical_root: Optional[Path] = None,
     runner: Callable[..., Result] = _run,
     gh_list: Optional[Callable[[Path, int], Optional[list[dict]]]] = None,
+    fetch: bool = False,
 ) -> SyncStaleness:
     """Is the canonical checkout current with recently-merged PRs?
 
     Read-only, so it is safe for ``fno doctor`` to call regardless of
-    ``post_merge.auto_run`` - reporting is not acting.
+    ``post_merge.auto_run`` - reporting is not acting. ``fetch`` refreshes the
+    remote-tracking ref first; see :func:`_behind_count` for why a human-facing
+    caller wants it and the tick does not.
     """
     from fno.config import load_settings
 
@@ -362,20 +390,26 @@ def sync_staleness(
     markerless = tuple(
         r for r in rows if not _synced_marker(canonical, r["sha"]).exists()
     )
-    behind = _behind_count(canonical, runner)
+    behind = _behind_count(canonical, runner, fetch=fetch)
 
-    # The NEWEST merge is the load-bearing one: one pull brings HEAD current for
-    # every older merge, so an unsynced tail behind a synced head is cosmetic
-    # (the sweep stamps it) while an unsynced HEAD is the real outage.
+    # ANY markerless merge past the threshold is stale, not just the newest one.
+    # Keying on the newest alone would call the older ones cosmetic on the theory
+    # that a newer sync pulled past them - but a marker does not imply a pull (a
+    # merge missing the sync_paths globs is marked without one), so the newest
+    # being marked proves nothing about the merges behind it.
+    now = datetime.now(timezone.utc)
+    overdue = [
+        r for r in markerless
+        if (now - r["merged_at"]).total_seconds() / 3600 > pm.sync_stale_hours
+    ]
     detail = ""
-    stale = False
-    if rows and rows[0] in markerless:
-        age_h = (
-            datetime.now(timezone.utc) - rows[0]["merged_at"]
-        ).total_seconds() / 3600
-        if age_h > pm.sync_stale_hours:
-            stale = True
-            detail = f"PR #{rows[0]['number']} merged {age_h:.0f}h ago, never synced"
+    stale = bool(overdue)
+    if overdue:
+        oldest = overdue[-1]  # markerless is newest-first
+        age_h = (now - oldest["merged_at"]).total_seconds() / 3600
+        detail = f"PR #{oldest['number']} merged {age_h:.0f}h ago, never synced"
+        if len(overdue) > 1:
+            detail += f" (+{len(overdue) - 1} more)"
     if behind:
         stale = True
         detail = (detail + "; " if detail else "") + f"local default branch {behind} behind origin"
@@ -425,7 +459,7 @@ def run_sync_catchup(
         # the canonical is still behind origin - that is what "the markers lie"
         # looks like, and it is the one state the sweep cannot act on, so the
         # least it can do is say so rather than report a flat "fresh".
-        return CatchupResult("fresh", detail=st.detail)
+        return CatchupResult("fresh", detail=st.detail, stale=st.state == "stale")
 
     newest = st.markerless[0]
     # Stamping the older merges is only sound if the newest one actually PULLED,
@@ -452,11 +486,15 @@ def run_sync_catchup(
             f"(exit {rc}); markers withheld, will retry",
             err=True,
         )
-        return CatchupResult("failed", newest["number"], detail=f"exit {rc}")
+        return CatchupResult(
+            "failed", newest["number"], detail=f"exit {rc}", stale=st.state == "stale"
+        )
 
     if not _synced_marker(canonical, newest["sha"]).exists():
         return CatchupResult(
-            "skipped", newest["number"], detail="sync declined (claim held or out of scope)"
+            "skipped", newest["number"],
+            detail="sync declined (claim held or out of scope)",
+            stale=st.state == "stale",
         )
 
     if not pulled:
@@ -464,7 +502,9 @@ def run_sync_catchup(
         # pulled. The older merges keep their claim on the next sweep, which
         # will pick the newest REMAINING one and pull for real.
         return CatchupResult(
-            "marked", newest["number"], detail="no buildable change; older merges still pending"
+            "marked", newest["number"],
+            detail="no buildable change; older merges still pending",
+            stale=st.state == "stale",
         )
 
     swept = 0

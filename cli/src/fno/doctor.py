@@ -745,7 +745,12 @@ def _post_merge_sync_health() -> dict[str, Any]:
     try:
         from fno.pr._sync_canonical import sync_staleness
 
-        st = sync_staleness()
+        # fetch=True: doctor is the human-facing report and runs interactively,
+        # so it can afford the fetch that makes the behind-count trustworthy.
+        # Without it a merge aged out of the gh window leaves no markerless row
+        # and a stale remote-tracking ref reads as zero behind - the outage goes
+        # invisible exactly when it has lasted longest.
+        st = sync_staleness(fetch=True)
         return {
             "state": st.state,
             "stale": st.state == "stale",
@@ -1157,9 +1162,18 @@ def _emit_human(
     pms = result.get("post_merge_sync") or {}
     if pms.get("stale"):
         out(
-            f"fno doctor: the canonical checkout is not synced with recent merges "
-            f"({pms.get('detail')}); run `fno pr sync-canonical --pr-number <n>` "
-            "and check ~/.fno/pr-watcher.err.log."
+            f"fno doctor: post-merge sync STALE - the canonical checkout is not "
+            f"synced with recent merges ({pms.get('detail')}); run "
+            "`fno pr sync-canonical --pr-number <n>` and check "
+            "~/.fno/pr-watcher.err.log."
+        )
+    elif pms.get("state") == "unknown":
+        # "Could not tell" must not read as "fine". An unauthenticated gh was
+        # part of the outage this check exists to catch.
+        out(
+            "fno doctor: post-merge sync UNKNOWN - could not read merge state "
+            f"({pms.get('detail') or 'gh unavailable or unauthenticated'}); "
+            "run `gh auth status`."
         )
 
     agents = result.get("launch_agents") or {}
