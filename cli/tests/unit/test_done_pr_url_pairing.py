@@ -40,6 +40,24 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     return g
 
 
+@pytest.fixture(autouse=True)
+def merged_pr(monkeypatch):
+    """Answer the merge gate with MERGED so these tests stay about pr_url.
+
+    `fno done --pr` requires gh-resolved merge evidence, so without this every
+    case here would refuse on the gh outage before reaching the url pairing.
+    """
+    import fno.done.cli as done_cli
+    from fno.graph._reconcile import PrMergeState
+
+    monkeypatch.setattr(
+        done_cli, "_gh_query",
+        lambda n, **kw: PrMergeState(
+            number=n, state="MERGED", url=None, merged_at="2026-01-01T00:00:00Z"
+        ),
+    )
+
+
 def _first(g: Path) -> dict:
     return json.loads(g.read_text())["entries"][0]
 
