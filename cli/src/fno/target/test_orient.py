@@ -1,7 +1,6 @@
 """Tests for the target orientation report (x-a7be, change A)."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from fno.target import orient
@@ -345,8 +344,7 @@ def test_read_manifest_merges_body_keys(tmp_path, monkeypatch) -> None:
     assert raw is not None
     assert raw["graph_node_id"] == "x-7"
     assert raw["target_claim_key"] == "node:x-7"
-    # and the node line then reports in-progress from that claim
-    line = orient._node_line("x-7", tmp_path, manifest_raw=raw)
+    # once the node exists in the graph, the node line reports in-progress from that claim
     monkeypatch.setattr(orient, "_graph_entry", lambda *_: {"status": "ready"})
     assert "in-progress" in orient._node_line("x-7", tmp_path, manifest_raw=raw)
 

@@ -500,7 +500,7 @@ class TestDispatchSubprocess:
                 self._stdout = stdout
                 self._stderr = stderr
 
-            def communicate(self, timeout=None):  # noqa: ANN
+            def communicate(self, timeout=None):
                 return (self._stdout, self._stderr)
 
         return _FakePopen()  # type: ignore[return-value]

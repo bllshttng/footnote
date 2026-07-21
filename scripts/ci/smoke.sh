@@ -142,7 +142,7 @@ bash skills/agent/tests/test_spawn_guard.sh'
     step "events-discipline lint" "." 'bash scripts/lint/events-discipline.sh'
     step "events-discipline lint self-test" "." 'bash tests/lint/test-events-discipline.sh'
     step "No quarantined events.invalid.jsonl rows" "." 'bash scripts/lint/no-invalid-events.sh'
-    step "ruff (repo-wide) + mypy (path-config modules)" "cli" 'uv run ruff check src/
+    step "ruff (repo-wide) + mypy (path-config modules)" "cli" 'uv run ruff check --no-respect-gitignore src/
 uv run mypy src/fno/paths.py src/fno/config/ src/fno/config_io.py'
     step "Smoke tests" "." 'bash cli/tests/smoke/run-all.sh'
     step "no hardcoded paths" "." 'bash scripts/ci/check-no-hardcoded-paths.sh'
