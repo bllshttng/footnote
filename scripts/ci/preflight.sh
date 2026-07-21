@@ -134,13 +134,7 @@ holder_pid_now() { sed -n 's/.*pid=\([0-9]*\).*/\1/p' "$LOCKDIR/holder" 2>/dev/n
 # our own stamp having failed, and leaving it would wedge every later run.
 # Parse the pid rather than matching the stamp's layout, so reordering the
 # fields in stamp_holder cannot silently stop every run from releasing.
-# Once-only: the INT/TERM handler exits, which fires the EXIT trap and would run
-# this a second time. By then our own lockdir is gone, so the unreadable-holder
-# release below would delete whatever lock a successor had just taken.
-CLEANED=0
 cleanup() {
-    [[ $CLEANED -eq 1 ]] && return 0
-    CLEANED=1
     local pid_now; pid_now="$(holder_pid_now)"
     [[ -z "$pid_now" || "$pid_now" == "$$" ]] && rm -rf "$LOCKDIR"
     [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"
@@ -149,8 +143,10 @@ trap cleanup EXIT
 # Signals must EXIT, not just clean up. A bare `trap cleanup INT TERM` released
 # the lock and deleted the hermetic HOME, then let the script carry on through
 # the remaining suites unlocked - so a second preflight could enter the shared
-# worktree while this one was still reporting on it.
-trap 'cleanup; exit 130' INT TERM
+# worktree while this one was still reporting on it. Exit only, and let the EXIT
+# trap do the single cleanup: calling cleanup here too would run it twice, and
+# the second pass (our lockdir already gone) could delete a successor's lock.
+trap 'exit 130' INT TERM
 
 # --- ensure / reset the preflight worktree ----------------------------------
 echo "preflight: repo=$REPO_NAME candidate=$CANDIDATE_SHORT worktree=$PREFLIGHT_WT"

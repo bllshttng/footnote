@@ -45,7 +45,14 @@ if [[ "${FNO_SKIP_PREFLIGHT:-0}" != "1" && -x scripts/ci/preflight.sh && -n "$no
   # shared worktree and earned no verdict at all, and 3 means it never started.
   case "$pf_rc" in
     0) : ;;
-    5) scripts/ci/preflight.sh || { echo "preflight VOID twice - shared worktree contention, retry later"; exit 1; } ;;
+    5) scripts/ci/preflight.sh; retry_rc=$?
+       # Classify the RETRY too. Reporting contention for a retry that came back
+       # RED would repeat the very mislabelling this branching exists to fix.
+       case "$retry_rc" in
+         0) : ;;
+         5) echo "preflight VOID twice - shared worktree contention, retry later"; exit 1 ;;
+         *) echo "preflight RED - fix before pushing"; exit 1 ;;
+       esac ;;
     3) echo "another preflight holds the lock - retry when it finishes"; exit 1 ;;
     *) echo "preflight RED - fix before pushing"; exit 1 ;;
   esac
