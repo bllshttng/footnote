@@ -3902,12 +3902,9 @@ fn async_wait_class(
 /// invocations until the watcher fires. The `gh pr checks` shape is a template
 /// (gh's `--watch` exit varies by version); the design depends only on the task
 /// EXITING, never on its exit code.
-///
-/// The bound is spelled with shell builtins, never `timeout(1)`: that is GNU
-/// coreutils and a stock macOS ships neither it nor `gtimeout`, so a hint naming
-/// it dies with `command not found` before `gh` runs - the watcher no-ops, the
-/// harness never wakes anyone, and the session idles forever on a wait that
-/// never started (x-0a65, observed live).
+/// The bound uses shell builtins, never `timeout(1)`: stock macOS has neither
+/// it nor `gtimeout`, so naming it makes the watcher no-op and the session idle
+/// forever on a wait that never started.
 fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // The watcher must WAIT on the actual blocker. `gh pr checks --watch` exits
     // the instant CI has no pending checks, so on a review wait (CI already
@@ -4562,12 +4559,9 @@ mod tests {
 
     #[test]
     fn no_hint_prescribes_the_timeout_binary() {
-        // x-0a65: `timeout(1)` is GNU coreutils; a stock macOS has neither it
-        // nor `gtimeout`, so a hint naming it dies with `command not found`
-        // before `gh` ever runs - the watcher no-ops and the session idles
-        // forever on a wait that never started. File-wide so a future hint
-        // cannot reintroduce it at a site this test does not name. The needle
-        // is assembled at runtime so it does not match its own source.
+        // File-wide, so a future hint cannot reintroduce `timeout(1)` at a site
+        // this test does not name. The needle is built at runtime so the test
+        // does not match its own source.
         let needle = ["timeout", " "].concat();
         for tail in include_str!("loopcheck.rs").split(&needle).skip(1) {
             assert!(
