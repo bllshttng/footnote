@@ -709,6 +709,15 @@ def node_fingerprint(node: dict) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+def is_retro_triage_node(node: dict) -> bool:
+    """True for a node retro-triage filed: land writes the machine trailer
+    ``<!-- retro-triage source_pr=N finding_hash=H -->`` into its details. Detect
+    the class by that stable trailer substring - a boolean needs no regex, and a
+    substring check avoids coupling ``graph`` to ``fno.retro.dedup`` (the
+    dependency runs retro -> graph, not the reverse)."""
+    return "retro-triage source_pr=" in str(node.get("details") or "")
+
+
 def select_validity_candidates(
     entries: list[dict],
     validity_days: object,
@@ -718,17 +727,25 @@ def select_validity_candidates(
     seen_fingerprints: frozenset[str] = frozenset(),
     now: Optional[datetime] = None,
 ) -> list[dict]:
-    """Oldest-first idea nodes STRICTLY older than ``validity_days``, minus the
-    live-claimed and already-watermarked ones, capped at the clamped batch size.
+    """Idea nodes to validity-sweep, minus the live-claimed and
+    already-watermarked ones, capped at the clamped batch size.
 
-    Deterministic pagination: sort by ``(created_at, id)`` so repeated sweeps
-    advance through the pile in a stable order (AC5-FR). An idea exactly
-    ``validity_days`` old is excluded (strictly older-than, Boundaries).
+    A non-retro idea qualifies only when STRICTLY older than ``validity_days``.
+    A retro-triage node (``is_retro_triage_node``) is the known phantom-prone
+    class - a review comment on already-correct code carries no time-forward
+    addressed-signal, so it is filed even when moot - and is swept regardless of
+    age, floated ahead of the older non-retro pile so it is actually reached
+    under the batch cap.
+
+    Deterministic pagination: within each tier sort by ``(created_at, id)`` so
+    repeated sweeps advance through the pile in a stable order (AC5-FR). An
+    exactly-``validity_days``-old non-retro idea is excluded (strictly
+    older-than, Boundaries).
     """
     if now is None:
         now = datetime.now(timezone.utc)
     validity_days, batch_size, _ = clamp_validity_bounds(validity_days, batch_size)
-    scored: list[tuple[datetime, str, dict]] = []
+    scored: list[tuple[bool, datetime, str, dict]] = []
     for e in entries:
         if e.get("status") != "idea":
             continue
@@ -738,13 +755,16 @@ def select_validity_candidates(
         created = _parse_ts(e.get("created_at"))
         if created is None:
             continue
-        if (now - created).days <= validity_days:
+        retro = is_retro_triage_node(e)
+        if not retro and (now - created).days <= validity_days:
             continue
         if node_fingerprint(e) in seen_fingerprints:
             continue
-        scored.append((created, nid, e))
-    scored.sort(key=lambda t: (t[0], t[1]))
-    return [e for _, _, e in scored[:batch_size]]
+        scored.append((retro, created, nid, e))
+    # Retro-exempt nodes first (the reason the gate is lifted), then oldest-first
+    # within each tier.
+    scored.sort(key=lambda t: (not t[0], t[1], t[2]))
+    return [e for _, _, _, e in scored[:batch_size]]
 
 
 def contained_path_exists(root: str, rel: str) -> bool:
