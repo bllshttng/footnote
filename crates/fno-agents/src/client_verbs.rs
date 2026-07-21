@@ -1067,6 +1067,107 @@ pub(crate) fn find_agent_entry<'a>(
     Err(ResolveError::NotFound(token.to_string()))
 }
 
+// ---------------------------------------------------------------------------
+// Registry-miss heal (x-da8c). The registry is a cache of reality, not a gate in
+// front of it: a live session the harness store knows but the roster does not was
+// addressable by `fno mail` (whose Python resolver already falls through to the
+// x-9cc5 healer) yet refused by every Rust lifecycle verb, which reads the
+// registry file and nothing else. These verbs now reach the SAME healer through a
+// shellout rather than growing a second prober (x-5011 stays a two-prober
+// problem), following the `fetch_discovered_sessions` precedent in client.rs.
+// ---------------------------------------------------------------------------
+
+/// True for a token worth probing a harness store with -- the Rust mirror of
+/// `store_fallback.is_session_shaped`. A plain unknown NAME never probes, so a
+/// typo keeps today's refusal instead of paying for three store reads.
+fn is_session_shaped(token: &str) -> bool {
+    let t = token.trim();
+    if let Some(rest) = t.strip_prefix("ses_") {
+        return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric());
+    }
+    let low = t.to_ascii_lowercase();
+    let hex = |s: &str| s.bytes().all(|b| b.is_ascii_hexdigit());
+    (low.len() == 8 && hex(&low)) || is_uuid_shaped(&low)
+}
+
+/// Ask the Python healer to adopt `token` from its harness store.
+///
+/// `Ok(Some(row))` on adoption, `Ok(None)` on anything that should reproduce the
+/// caller's original not-found error, and `Err(msg)` ONLY for an ambiguous token
+/// (the healer's candidate list, relayed verbatim -- refusing to guess is a
+/// designed outcome, not a miss). `FNO_AGENTS_RUNTIME=python` pins the child to
+/// the Python dispatch so the shellout cannot recurse back into this binary.
+fn heal_token(token: &str) -> Result<Option<Value>, String> {
+    use std::process::Command;
+
+    // Exit-code contract of `fno agents heal-token`: 0 adopted, 13 miss, 3
+    // ambiguous. Anything else (missing binary, internal error) is a miss.
+    const AMBIGUOUS: i32 = 3;
+
+    let out = match Command::new("fno")
+        .args(["agents", "heal-token", token])
+        .env("FNO_AGENTS_RUNTIME", "python")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Ok(None),
+    };
+    if out.status.code() == Some(AMBIGUOUS) {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    // Exit code BEFORE stdout: a failed heal that happened to print parseable
+    // JSON must still degrade to the original error, never a half-resolved row.
+    if !out.status.success() {
+        return Ok(None);
+    }
+    // The LAST non-empty line, not the whole buffer: a first-run `fno` may print
+    // a setup-migration banner ahead of the payload.
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = match text.lines().rev().find(|l| !l.trim().is_empty()) {
+        Some(l) => l,
+        None => return Ok(None),
+    };
+    match serde_json::from_str::<Value>(line) {
+        Ok(mut row) if row.is_object() => {
+            // The healed row skipped `load_registry_entries`, so it has none of
+            // that loader's alias reconciliation; without this it has no
+            // `provider` (logs would take the codex branch) and no
+            // `claude_session_uuid` (resume's dead arm would refuse).
+            if let Some(obj) = row.as_object_mut() {
+                backfill_row_aliases(obj);
+            }
+            Ok(Some(row))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// [`find_agent_entry`], plus a harness-store heal on a session-shaped miss.
+///
+/// The one choke point the session-connecting verbs resolve through. Returns an
+/// OWNED row because a healed one is synthesized rather than borrowed from
+/// `rows`; a registry hit clones (a one-shot verb, a handful of small fields).
+/// `trace` deliberately does NOT use this: an adopted row has no events, so its
+/// not-found is honest.
+pub(crate) fn resolve_entry_with_heal(rows: &[Value], token: &str) -> Result<Value, ResolveError> {
+    match find_agent_entry(rows, token) {
+        Ok(e) => Ok(e.clone()),
+        // An ambiguous REGISTRY is not a miss: healing would pick the winner the
+        // registry deliberately refused to pick.
+        Err(err @ ResolveError::Ambiguous(_)) => Err(err),
+        Err(err) => {
+            if !is_session_shaped(token) {
+                return Err(err);
+            }
+            match heal_token(token) {
+                Ok(Some(row)) => Ok(row),
+                Ok(None) => Err(err),
+                Err(candidates) => Err(ResolveError::Ambiguous(candidates)),
+            }
+        }
+    }
+}
+
 /// Provider-specific resume argv, mirroring Python `_build_resume_argv`.
 /// Returns `None` for unsupported providers.
 fn build_resume_argv(provider: &str, session_id: &str) -> Option<Vec<String>> {
@@ -1391,7 +1492,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             return 13;
         }
     };
-    let entry = match find_agent_entry(&entries, &name) {
+    let entry = match resolve_entry_with_heal(&entries, &name) {
         Ok(e) => e,
         Err(err) => {
             eprintln!(
@@ -1401,6 +1502,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             return 13;
         }
     };
+    let entry = &entry;
 
     // Identity is one axis (x-8dfc): resume keys on harness (provider fallback
     // for a not-yet-backfilled row), and the exit-13 errors name the harness,
@@ -1588,13 +1690,14 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
             return 12;
         }
     };
-    let entry = match find_agent_entry(&entries, &name) {
+    let entry = match resolve_entry_with_heal(&entries, &name) {
         Ok(e) => e,
         Err(err) => {
             eprintln!("{}", err.message());
             return 2;
         }
     };
+    let entry = &entry;
 
     let provider = entry.get("provider").and_then(Value::as_str).unwrap_or("");
     let events_path = trace_events_path(home);
@@ -1845,13 +1948,14 @@ pub async fn run_logs(rest: &[String], home: &AgentsHome) -> i32 {
             return 1;
         }
     };
-    let entry = match find_agent_entry(&entries, &args.name) {
+    let entry = match resolve_entry_with_heal(&entries, &args.name) {
         Ok(e) => e,
         Err(err) => {
             eprintln!("{}", err.message());
             return 13;
         }
     };
+    let entry = &entry;
     let provider = entry.get("provider").and_then(Value::as_str).unwrap_or("");
 
     if provider == "claude" {
@@ -2388,6 +2492,8 @@ mod tests {
 
     // --- find_agent_entry (x-1b1e): parity with Python resolve_agent ----------
 
+    const CLAUDE_UUID_FIXTURE: &str = "a1b2c3d4-1111-2222-3333-444455556666";
+
     fn claude_row(name: &str, short: &str, uuid: &str) -> Value {
         json!({
             "name": name, "provider": "claude", "cwd": "/w", "log_path": "/l",
@@ -2489,6 +2595,72 @@ mod tests {
             find_agent_entry(&rows, "7f3a9b2c"),
             Err(ResolveError::NotFound(_))
         ));
+    }
+
+    // --- registry-miss heal (x-da8c) -----------------------------------------
+
+    #[test]
+    fn session_shape_gate_admits_only_probeable_tokens() {
+        for t in [
+            "a1b2c3d4",
+            "A1B2C3D4",
+            "ses_7f3a9b2c1d0e",
+            CLAUDE_UUID_FIXTURE,
+        ] {
+            assert!(is_session_shaped(t), "{t} should be probeable");
+        }
+        // A plain name, a short SHA of the wrong width, and a non-hex 8-char
+        // token must never cost three store reads.
+        for t in ["reviewer", "a1b2c3", "a1b2c3d45", "deadbeeg", "", "ses_"] {
+            assert!(!is_session_shaped(t), "{t} should not be probeable");
+        }
+    }
+
+    #[test]
+    fn heal_wrapper_never_probes_on_a_registry_hit_or_a_name_miss() {
+        // No `fno` is stubbed here, so any shellout would degrade to NotFound
+        // anyway; what this pins is that a hit returns the ROW and a name-shaped
+        // miss returns the ORIGINAL error, byte-identical to today's.
+        let rows = vec![claude_row("billing", "a1b2c3d4", CLAUDE_UUID_FIXTURE)];
+        assert_eq!(
+            resolve_entry_with_heal(&rows, "billing").unwrap()["name"],
+            "billing"
+        );
+        let err = resolve_entry_with_heal(&rows, "reviewer").unwrap_err();
+        assert_eq!(
+            err.message(),
+            "no agent matching 'reviewer'; accepted forms: name, 8-hex short id, or full session id"
+        );
+    }
+
+    #[test]
+    fn heal_wrapper_keeps_an_ambiguous_registry_ambiguous() {
+        // Healing an ambiguous registry would pick the winner the registry
+        // deliberately refused to pick.
+        let rows = vec![
+            claude_row("one", "abcd1234", CLAUDE_UUID_FIXTURE),
+            claude_row("two", "abcd1234", "abcd1234-9999-8888-7777-666655554444"),
+        ];
+        assert!(matches!(
+            resolve_entry_with_heal(&rows, "abcd1234"),
+            Err(ResolveError::Ambiguous(_))
+        ));
+    }
+
+    #[test]
+    fn backfill_gives_a_healed_v10_row_the_fields_the_verbs_read() {
+        // The shape `fno agents heal-token` emits: harness-only, no `provider`
+        // and no `claude_session_uuid` (v10 removed both from disk). Without the
+        // backfill, `logs` would take the codex branch and resume's dead arm
+        // would refuse "no claude session recorded".
+        let mut row = json!({
+            "name": "fno-a1b2c3d4", "harness": "claude", "cwd": "/w", "log_path": "",
+            "short_id": "a1b2c3d4", "harness_session_id": CLAUDE_UUID_FIXTURE,
+            "status": "orphaned",
+        });
+        backfill_row_aliases(row.as_object_mut().unwrap());
+        assert_eq!(row["provider"], "claude");
+        assert_eq!(row["claude_session_uuid"], CLAUDE_UUID_FIXTURE);
     }
 
     #[test]
