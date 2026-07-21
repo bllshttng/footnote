@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Tests for auto_merge fields in init-target-state.sh
-# Verifies: auto_merge_enabled, auto_merge_approved, merged_prs,
-#           merge_auto_queued, merge_failed, conflicts_resolved fields
-#           are written to target-state.md at init time.
+# Verifies: auto_merge_enabled + auto_merge_approved are written to
+#           target-state.md at init time. The merged_prs / merge_auto_queued /
+#           merge_failed / conflicts_resolved arrays are NOT: the manifest became
+#           write-once, and mutable per-run state left it with them.
 # Also verifies TARGET_NO_MERGE=1 forces auto_merge_approved: false.
 
 set -uo pipefail
@@ -44,13 +45,17 @@ setup_repo() {
 run_init_in() {
     local tmpdir="$1"
     shift
+    # An empty HOME: without it the developer's own ~/.fno/config.toml leaks in
+    # and the "false when not set" defaults read whatever they have configured.
+    local fake_home="$tmpdir/.home"
+    mkdir -p "$fake_home"
     # Run with explicit env vars only - no array expansion to avoid set -u issues
     (
       cd "$tmpdir"
       if [[ $# -gt 0 ]]; then
-        env "$@" TARGET_START=1 TARGET_INPUT="test feature" bash "$INIT_SCRIPT"
+        env "$@" HOME="$fake_home" TARGET_START=1 TARGET_INPUT="test feature" bash "$INIT_SCRIPT"
       else
-        TARGET_START=1 TARGET_INPUT="test feature" bash "$INIT_SCRIPT"
+        HOME="$fake_home" TARGET_START=1 TARGET_INPUT="test feature" bash "$INIT_SCRIPT"
       fi
     ) 2>/dev/null
 }
@@ -67,10 +72,6 @@ STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
 
 assert_contains "AC1-HP: auto_merge_enabled field present" "auto_merge_enabled:" "$STATE"
 assert_contains "AC1-HP: auto_merge_approved field present" "auto_merge_approved:" "$STATE"
-assert_contains "AC1-HP: merged_prs array present" "merged_prs: []" "$STATE"
-assert_contains "AC1-HP: merge_auto_queued array present" "merge_auto_queued: []" "$STATE"
-assert_contains "AC1-HP: merge_failed array present" "merge_failed: []" "$STATE"
-assert_contains "AC1-HP: conflicts_resolved array present" "conflicts_resolved: []" "$STATE"
 assert_contains "AC1-HP: auto_merge_approved false when disabled" "auto_merge_approved: false" "$STATE"
 assert_contains "AC1-HP: auto_merge_enabled false when not set" "auto_merge_enabled: false" "$STATE"
 
@@ -89,7 +90,6 @@ STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
 
 assert_contains "AC2-HP: auto_merge_enabled true when set" "auto_merge_enabled: true" "$STATE"
 assert_contains "AC2-HP: auto_merge_approved true when enabled" "auto_merge_approved: true" "$STATE"
-assert_contains "AC2-HP: arrays still empty at init" "merged_prs: []" "$STATE"
 
 rm -rf "$T"
 
@@ -108,7 +108,7 @@ assert_contains "AC3-ERR: auto_merge_approved false with TARGET_NO_MERGE=1" "aut
 
 rm -rf "$T"
 
-# ---- Test 4: AC4-VERIFY all 6 fields are in the YAML frontmatter ----
+# ---- Test 4: AC4-VERIFY the auto_merge fields are in the YAML frontmatter ----
 
 echo ""
 echo "test_fields_are_in_yaml_frontmatter"
@@ -122,10 +122,6 @@ FRONTMATTER=$(awk '/^---/{n++; if(n==2) exit} n==1{print}' "$T/.fno/target-state
 
 assert_contains "AC4-VERIFY: auto_merge_enabled in frontmatter" "auto_merge_enabled:" "$FRONTMATTER"
 assert_contains "AC4-VERIFY: auto_merge_approved in frontmatter" "auto_merge_approved:" "$FRONTMATTER"
-assert_contains "AC4-VERIFY: merged_prs in frontmatter" "merged_prs:" "$FRONTMATTER"
-assert_contains "AC4-VERIFY: merge_auto_queued in frontmatter" "merge_auto_queued:" "$FRONTMATTER"
-assert_contains "AC4-VERIFY: merge_failed in frontmatter" "merge_failed:" "$FRONTMATTER"
-assert_contains "AC4-VERIFY: conflicts_resolved in frontmatter" "conflicts_resolved:" "$FRONTMATTER"
 
 rm -rf "$T"
 
