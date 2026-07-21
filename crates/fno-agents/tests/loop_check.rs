@@ -3838,3 +3838,197 @@ fn ac2_low_budget_cost_cap_non_hash_junk_fails_closed() {
         d.termination_reason
     );
 }
+
+// ── done_probes: operational evidence at the ship gate (x-e54c) ───────────────
+
+/// Build a plan doc with an optional `done_probes` frontmatter block.
+fn plan_doc(probes: &[&str]) -> String {
+    let mut s = String::from("---\ntitle: p\nstatus: ready\n");
+    if !probes.is_empty() {
+        s.push_str("done_probes:\n");
+        for p in probes {
+            s.push_str(&format!("  - \"{p}\"\n"));
+        }
+    }
+    s.push_str("---\n\n# plan\n");
+    s
+}
+
+fn manifest_with_plan(session_id: &str, created_at: &str, plan_path: &Path) -> String {
+    format!(
+        "---\nsession_id: {session_id}\ncreated_at: {created_at}\nattended: true\nplan_path: {}\n---\n",
+        plan_path.display()
+    )
+}
+
+/// Stage a probe-gated session: returns (cwd tempdir, manifest, transcript, plan).
+fn probe_fixture(session_id: &str, probes: &[&str]) -> (TempDir, PathBuf, PathBuf) {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let plan = cwd.join("plan.md");
+    fs::write(&plan, plan_doc(probes)).unwrap();
+
+    let manifest = cwd.join("target-state.md");
+    fs::write(
+        &manifest,
+        manifest_with_plan(session_id, "2026-06-05T00:00:00Z", &plan),
+    )
+    .unwrap();
+
+    let transcript = cwd.join("transcript.jsonl");
+    fs::write(&transcript, transcript_with_promise()).unwrap();
+
+    (tmp, manifest, transcript)
+}
+
+fn fire_probe_gate(cwd: &Path, manifest: &Path, transcript: &Path, mock: &MockBins) -> Decision {
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest.to_str().unwrap(),
+        "--transcript",
+        transcript.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+    d
+}
+
+/// AC1-HP: every other conjunct holds and the declared probe exits 0 ->
+/// DonePRGreen, with this fire's probe result recorded in the loop_check event.
+#[test]
+fn done_probes_ac1_hp_passing_probe_grants_done() {
+    let (tmp, manifest, transcript) = probe_fixture("sess-probe-hp", &["exit 0"]);
+    let cwd = tmp.path();
+    let mock = MockBins::green();
+
+    let d = fire_probe_gate(cwd, &manifest, &transcript, &mock);
+
+    assert_eq!(d.decision, "allow");
+    assert_eq!(
+        d.termination_reason.as_deref(),
+        Some("DonePRGreen"),
+        "a passing probe must not change the verdict: {}",
+        d.message
+    );
+
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    assert!(
+        events.contains("\"done_probes\""),
+        "probe evidence must be recorded in the loop_check event"
+    );
+    assert!(
+        events.contains("\"exit 0\":\"pass\""),
+        "the probe result for THIS fire must be recorded: {events}"
+    );
+}
+
+/// AC2-HP: a plan with no `done_probes` field takes the byte-identical path -
+/// no probe machinery, verdict unchanged, and no probe evidence in the event.
+#[test]
+fn done_probes_ac2_hp_absent_field_leaves_gate_unchanged() {
+    let (tmp, manifest, transcript) = probe_fixture("sess-probe-none", &[]);
+    let cwd = tmp.path();
+    let mock = MockBins::green();
+
+    let d = fire_probe_gate(cwd, &manifest, &transcript, &mock);
+
+    assert_eq!(d.decision, "allow");
+    assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
+
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    assert!(
+        events.contains("\"done_probes\":null"),
+        "no declaration must record a null, never a fabricated 0/0: {events}"
+    );
+}
+
+/// AC1-ERR: a failing probe refuses done, and the reason carries BOTH the
+/// verbatim command and the literal exit code.
+#[test]
+fn done_probes_ac1_err_failing_probe_refuses_done() {
+    let (tmp, manifest, transcript) =
+        probe_fixture("sess-probe-fail", &["test -f /nonexistent-groom-report"]);
+    let cwd = tmp.path();
+    let mock = MockBins::green();
+
+    let d = fire_probe_gate(cwd, &manifest, &transcript, &mock);
+
+    assert_eq!(
+        d.decision, "block",
+        "a green PR with a failing probe must NOT be done: {}",
+        d.message
+    );
+    assert_eq!(d.termination_reason, None);
+    assert!(
+        d.message.contains("test -f /nonexistent-groom-report"),
+        "reason must name the verbatim probe: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("exited 1"),
+        "reason must carry the literal exit code: {}",
+        d.message
+    );
+}
+
+/// AC2-ERR: a probe whose binary does not exist fails closed as 127, stated
+/// explicitly - a generic "probe failed" would leave the agent guessing.
+#[test]
+fn done_probes_ac2_err_missing_binary_states_127() {
+    let (tmp, manifest, transcript) =
+        probe_fixture("sess-probe-127", &["fno-no-such-binary-xyz --check"]);
+    let cwd = tmp.path();
+    let mock = MockBins::green();
+
+    let d = fire_probe_gate(cwd, &manifest, &transcript, &mock);
+
+    assert_eq!(d.decision, "block");
+    assert!(
+        d.message.contains("127"),
+        "reason must state exit code 127 explicitly: {}",
+        d.message
+    );
+}
+
+/// AC2-EDGE: probes are the FINAL conjunct - a red-CI PR must never spawn one.
+#[test]
+fn done_probes_ac2_edge_no_probe_runs_while_ci_is_red() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let sentinel = cwd.join("probe-ran");
+    let plan = cwd.join("plan.md");
+    fs::write(
+        &plan,
+        plan_doc(&[&format!("touch {}", sentinel.display())]),
+    )
+    .unwrap();
+
+    let manifest = cwd.join("target-state.md");
+    fs::write(
+        &manifest,
+        manifest_with_plan("sess-probe-ordering", "2026-06-05T00:00:00Z", &plan),
+    )
+    .unwrap();
+    let transcript = cwd.join("transcript.jsonl");
+    fs::write(&transcript, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::ci_red();
+    let d = fire_probe_gate(cwd, &manifest, &transcript, &mock);
+
+    assert_eq!(d.decision, "block");
+    assert!(
+        !sentinel.exists(),
+        "no probe subprocess may run while an earlier conjunct is already false"
+    );
+}
