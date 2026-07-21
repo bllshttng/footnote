@@ -4010,7 +4010,10 @@ enum ProbeGate {
     /// No declaration: zero subprocesses, gate behavior byte-identical to before.
     Absent,
     Pass(Value),
-    Fail { reason: String, results: Value },
+    Fail {
+        reason: String,
+        results: Value,
+    },
 }
 
 /// Strip one layer of matching surrounding quotes.
@@ -7217,7 +7220,10 @@ mod done_probe_tests {
         let events = tmp.path().join("events.jsonl");
         match evaluate_done_probes(plan.to_str(), tmp.path(), &events, "s1") {
             ProbeGate::Fail { reason, .. } => {
-                assert!(reason.contains("cap is 3"), "reason names the cap: {reason}")
+                assert!(
+                    reason.contains("cap is 3"),
+                    "reason names the cap: {reason}"
+                )
             }
             _ => panic!("over-cap declaration must refuse"),
         }

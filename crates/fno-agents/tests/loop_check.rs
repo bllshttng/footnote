@@ -4008,11 +4008,7 @@ fn done_probes_ac2_edge_no_probe_runs_while_ci_is_red() {
 
     let sentinel = cwd.join("probe-ran");
     let plan = cwd.join("plan.md");
-    fs::write(
-        &plan,
-        plan_doc(&[&format!("touch {}", sentinel.display())]),
-    )
-    .unwrap();
+    fs::write(&plan, plan_doc(&[&format!("touch {}", sentinel.display())])).unwrap();
 
     let manifest = cwd.join("target-state.md");
     fs::write(
