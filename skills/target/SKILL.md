@@ -83,10 +83,11 @@ The stop hook reads your final message and makes ONE decision from it. There are
 
 1. **Done** -> `<promise>MISSION COMPLETE: <what shipped></promise>`. Emit it as soon as the PR is up and CI is green (promise early). Once a promise is accepted the loop has terminated: do NOT reflexively re-emit it or re-post the same status on later conversational turns - answer what is asked and stop.
 2. **Waiting on an async check with nothing to do** (CI pending, or a bot review not yet posted) -> arm ONE **harness-tracked** watcher whose command carries a hard timeout, then end with the tag and NOTHING else:
-   - CI: background Bash `timeout 1800 gh pr checks <N> --watch`
-   - review: a review-state poll (a `gh pr view <N> --json reviews` loop with a `timeout`), NOT `gh pr checks --watch` (it exits the instant CI is green, so on a review wait it wakes immediately and re-blocks)
+   - CI: background Bash `command -v timeout >/dev/null && timeout 1800 gh pr checks <N> --watch || gh pr checks <N> --watch --interval 30`
+   - review: a review-state poll (a `gh pr view <N> --json reviews` loop, bounded the same way), NOT `gh pr checks --watch` (it exits the instant CI is green, so on a review wait it wakes immediately and re-blocks)
    - then: `<watching reason="ci|review" pr="<N>" timeout="30m">`
    loop-check verifies the wait against external truth and idles the session to ZERO re-invocations until the watcher fires. The watcher MUST be harness-tracked (background Bash / Monitor) - a detached process (`nohup`, bare `&`, `disown`) exits without waking anyone and the session idles forever. On wake: if it settled, proceed; if the timeout fired and it is still pending, re-arm and re-emit.
+   **Guard `timeout`, never assume it.** It is GNU coreutils and is ABSENT on a stock macOS, where the bare form dies with `command not found` before `gh` ever runs - the watcher no-ops, nothing ever wakes you, and the session idles forever on a wait that never started. That is the exact failure this section exists to prevent, so the guard is not optional decoration. `gh pr checks --watch` exits on its own once checks settle, which is why the unguarded fallback is safe.
 3. **Still working** -> just take the next action (a tool call). The stop hook only fires when you STOP, so mid-work turns never reach it.
 
 **Never** end a turn with tag-less prose while the mission is incomplete. That is the ONLY thing that blocks - the hook re-invokes you with "continue working" for zero progress. If you have nothing to add and are not done, do not post: arm-and-tag (2) or take the next action (3).
