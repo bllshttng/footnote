@@ -7,7 +7,7 @@ from fno.plan._rollup import compute_rollup, compute_waves
 
 def _n(nid, parent=None, status="ready", type_="feature", blocked_by=None):
     return {
-        "id": nid, "parent": parent, "_status": status, "type": type_,
+        "id": nid, "parent": parent, "status": status, "type": type_,
         "blocked_by": blocked_by or [],
     }
 
@@ -77,7 +77,7 @@ def test_idless_epic_child_skipped_not_miscounted():
     in every top-level node)."""
     entries = [
         _n("M", type_="epic"),
-        {"id": None, "parent": "M", "type": "epic", "_status": "ready"},
+        {"id": None, "parent": "M", "type": "epic", "status": "ready"},
         _n("top", status="done"),  # a top-level node (parent None) - must NOT count
     ]
     r = compute_rollup("M", entries)

@@ -174,7 +174,7 @@ def test_existing_fields_still_present():
         "roadmap_id": "rm-1",
         "created_at": "2026-04-27T10:00:00Z",
         "source": "intake",
-        "_status": "ready",
+        "status": "ready",
     }
     record = _candidate_record(entry, deep=False)
     for key in (
@@ -262,7 +262,7 @@ def test_cli_context_candidate_round_trips_enriched_fields(tmp_graph, tmp_path):
                 "claimed_at": "2026-04-27T10:00:00Z",
                 "pr_number": 42,
                 "merge_status": "open",
-                "_status": "ready",
+                "status": "ready",
             }
         ],
     )
@@ -301,7 +301,7 @@ def test_cli_context_idea_branch_also_enriched(tmp_graph):
                 "plan_path": None,
                 "size": "S",
                 "details": "thought captured at intake time",
-                "_status": "idea",
+                "status": "idea",
             }
         ],
     )
@@ -332,7 +332,7 @@ def test_cli_context_tolerates_legacy_dict_cost_sessions(tmp_graph):
                 "priority": "p2",
                 "plan_path": "fake.md",
                 "cost_sessions": {"sess-1": {"cost_usd": 5.0}},  # legacy dict
-                "_status": "ready",
+                "status": "ready",
             }
         ],
     )

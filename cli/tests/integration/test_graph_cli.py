@@ -203,7 +203,7 @@ def test_legacy_id_resolves_under_configured_install(tmp_graph, monkeypatch):
     data = json.loads(g.read_text())
     data["entries"].append({
         "id": "ab-55ba9adb", "title": "Legacy node", "priority": "p2",
-        "_status": "ready", "blocked_by": [], "type": "feature",
+        "status": "ready", "blocked_by": [], "type": "feature",
     })
     g.write_text(json.dumps(data))
 
@@ -292,13 +292,13 @@ def test_ac1_hp_graph_update_completed(tmp_graph):
     r = _invoke("graph", "get", node_id)
     data = json.loads(r.output)
     assert data["completed_at"] is not None
-    assert data["_status"] == "done"
+    assert data["status"] == "done"
 
 
 # --- queue / unqueue / queued ---
 
 def test_queue_sets_queued_at_and_keeps_ready_status(tmp_graph):
-    """Queuing a ready node sets queued_at but does NOT change _status (still ready)."""
+    """Queuing a ready node sets queued_at but does NOT change status (still ready)."""
     r = _invoke("graph", "add", "QueueTarget")
     nid = json.loads(r.output)["id"]
     r = _invoke("graph", "queue", nid, "--reason", "today's focus")
@@ -309,7 +309,7 @@ def test_queue_sets_queued_at_and_keeps_ready_status(tmp_graph):
     assert data["queued_reason"] == "today's focus"
     # Status stays ready - queued is orthogonal.
     # (an idea-status node would still be idea; this one has no plan so it's idea)
-    assert data["_status"] in ("ready", "idea")
+    assert data["status"] in ("ready", "idea")
 
 
 def test_unqueue_clears_fields_and_warns_if_not_queued(tmp_graph):
@@ -393,7 +393,7 @@ def test_pick_format_blocked_marker_and_inline_blockers():
         "title": "Depends on the blocker",
         "priority": "p2",
         "project": "fno",
-        "_status": "blocked",
+        "status": "blocked",
         "blocked_by": ["ab-block1234"],
         "queued_at": None,
     }
@@ -412,7 +412,7 @@ def test_pick_format_queued_blocked_combined_marker():
         "title": "Queued and waiting",
         "priority": "p1",
         "project": "fno",
-        "_status": "blocked",
+        "status": "blocked",
         "blocked_by": ["ab-block2222"],
         "queued_at": "2026-05-12T12:00:00Z",
     }
@@ -650,7 +650,7 @@ def test_ac1_hp_graph_remove(tmp_graph):
 # --- defer ---
 
 def test_ac1_hp_graph_defer(tmp_graph):
-    """AC1-HP: fno graph defer sets deferred_at + deferred_reason and derives _status: deferred."""
+    """AC1-HP: fno graph defer sets deferred_at + deferred_reason and derives status: deferred."""
     r = _invoke("graph", "add", "ToDefer")
     node_id = json.loads(r.output)["id"]
 
@@ -661,7 +661,7 @@ def test_ac1_hp_graph_defer(tmp_graph):
     data = json.loads(r.output)
     assert data.get("deferred_at"), "deferred_at should be set to an ISO timestamp"
     assert data.get("deferred_reason") == "stale spec"
-    assert data.get("_status") == "deferred"
+    assert data.get("status") == "deferred"
     assert not data.get("completed_at"), "completed_at must remain clear when deferring"
 
 
@@ -903,13 +903,13 @@ def test_priority_migration_on_mutation(tmp_graph):
     tmp_graph.write_text(json.dumps({
         "entries": [
             {"id": "ab-old00001", "title": "Was high", "priority": "high",
-             "plan_path": "x.md", "_status": "ready",
+             "plan_path": "x.md", "status": "ready",
              "created_at": "2026-01-01T00:00:00Z"},
             {"id": "ab-old00002", "title": "Was medium", "priority": "medium",
-             "plan_path": "x.md", "_status": "ready",
+             "plan_path": "x.md", "status": "ready",
              "created_at": "2026-01-01T00:00:00Z"},
             {"id": "ab-old00003", "title": "Was low", "priority": "low",
-             "plan_path": "x.md", "_status": "ready",
+             "plan_path": "x.md", "status": "ready",
              "created_at": "2026-01-01T00:00:00Z"},
         ]
     }))
@@ -958,7 +958,7 @@ def test_priority_migration_idempotent(tmp_graph):
     tmp_graph.write_text(json.dumps({
         "entries": [
             {"id": "ab-old00001", "title": "Was high", "priority": "high",
-             "plan_path": "x.md", "_status": "ready",
+             "plan_path": "x.md", "status": "ready",
              "created_at": "2026-01-01T00:00:00Z"},
         ]
     }))
@@ -983,7 +983,7 @@ def test_priority_missing_key_backfill(tmp_graph):
     tmp_graph.write_text(json.dumps({
         "entries": [
             {"id": "ab-nokey0001", "title": "No priority key",
-             "plan_path": "x.md", "_status": "ready",
+             "plan_path": "x.md", "status": "ready",
              "created_at": "2026-01-01T00:00:00Z"},
         ]
     }))
@@ -1059,7 +1059,7 @@ def test_model_pin_rides_in_ready_and_next_json(tmp_graph):
     tmp_graph.write_text(json.dumps({
         "entries": [
             {"id": "ab-pinned00", "title": "Pinned", "priority": "p1",
-             "plan_path": "x.md", "_status": "ready", "model": "fable",
+             "plan_path": "x.md", "status": "ready", "model": "fable",
              "created_at": _recent_iso(1)},
         ]
     }))
@@ -1079,10 +1079,10 @@ def test_priority_read_path_backfill(tmp_graph):
     tmp_graph.write_text(json.dumps({
         "entries": [
             {"id": "ab-mem00low", "title": "Was low", "priority": "low",
-             "plan_path": "x.md", "_status": "ready",
+             "plan_path": "x.md", "status": "ready",
              "created_at": _recent_iso(2)},
             {"id": "ab-mem00hi0", "title": "Was high", "priority": "high",
-             "plan_path": "x.md", "_status": "ready",
+             "plan_path": "x.md", "status": "ready",
              "created_at": _recent_iso(1)},
         ]
     }))
@@ -1234,7 +1234,7 @@ def test_render_html_renders_non_http_additional_pr_url_as_plain_text(tmp_path):
             {"number": 542, "url": "github.com/x/y/pull/542", "note": "no-scheme"},
         ],
         "created_at": "2026-01-01T00:00:00Z",
-        "_status": "done",
+        "status": "done",
     }
     html_out = _card_html(entry, {entry["id"]: entry})
     # The URL must be visible somewhere even though it has no scheme.
@@ -1480,13 +1480,13 @@ def _epics_first_entries():
     Epics-first must rank the p3 epic child ahead of the p0 loose node.
     """
     return [
-        {"id": "ab-epic", "title": "Epic", "_status": "ready", "priority": "p2",
+        {"id": "ab-epic", "title": "Epic", "status": "ready", "priority": "p2",
          "created_at": _recent_iso(3), "project": "p", "blocked_by": [],
          "plan_path": "x.md"},
-        {"id": "ab-child", "title": "Child", "_status": "ready", "priority": "p3",
+        {"id": "ab-child", "title": "Child", "status": "ready", "priority": "p3",
          "created_at": _recent_iso(2), "project": "p", "parent": "ab-epic",
          "blocked_by": [], "plan_path": "x.md"},
-        {"id": "ab-loose", "title": "Loose", "_status": "ready", "priority": "p0",
+        {"id": "ab-loose", "title": "Loose", "status": "ready", "priority": "p0",
          "created_at": _recent_iso(1), "project": "p", "blocked_by": [],
          "plan_path": "x.md"},
     ]
@@ -1529,13 +1529,13 @@ def test_graph_next_skips_in_progress_epic_for_leaf(tmp_graph):
     assuming this one is next')."""
     entries = [
         # Epic: ready, p0 -> would rank ahead of everything if selectable.
-        {"id": "ab-epic", "title": "Epic", "_status": "ready", "priority": "p0",
+        {"id": "ab-epic", "title": "Epic", "status": "ready", "priority": "p0",
          "created_at": "2026-01-01", "project": "p", "blocked_by": [], "plan_path": "x.md"},
         # One child done, one still pending -> the epic is IN PROGRESS.
-        {"id": "ab-cdone", "title": "Done child", "_status": "done", "priority": "p2",
+        {"id": "ab-cdone", "title": "Done child", "status": "done", "priority": "p2",
          "created_at": "2026-01-02", "project": "p", "parent": "ab-epic",
          "completed_at": "2026-01-03", "blocked_by": [], "plan_path": "x.md"},
-        {"id": "ab-cpend", "title": "Pending child", "_status": "ready", "priority": "p3",
+        {"id": "ab-cpend", "title": "Pending child", "status": "ready", "priority": "p3",
          "created_at": _recent_iso(1), "project": "p", "parent": "ab-epic",
          "blocked_by": [], "plan_path": "x.md"},
     ]
@@ -1556,12 +1556,12 @@ def test_done_cascade_closes_all_done_parent_epic(tmp_graph):
     a container with no PR of its own; it is done when its children are). Replaces
     the old 'walker closes the epic via next' path."""
     entries = [
-        {"id": "ab-epic0000", "title": "Epic", "_status": "ready", "project": "p",
+        {"id": "ab-epic0000", "title": "Epic", "status": "ready", "project": "p",
          "blocked_by": [], "plan_path": "x.md"},
-        {"id": "ab-cdone001", "title": "Done child", "_status": "done", "project": "p",
+        {"id": "ab-cdone001", "title": "Done child", "status": "done", "project": "p",
          "parent": "ab-epic0000", "completed_at": "2026-01-01T00:00:00Z", "blocked_by": []},
         # Last open child, no PR refs -> `done` closes it with no gh cross-check.
-        {"id": "ab-clast002", "title": "Last child", "_status": "ready", "project": "p",
+        {"id": "ab-clast002", "title": "Last child", "status": "ready", "project": "p",
          "parent": "ab-epic0000", "blocked_by": []},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
@@ -1577,11 +1577,11 @@ def test_done_does_not_close_epic_with_a_pending_child(tmp_graph):
     """The cascade only fires when ALL children are done: an epic with another
     still-open child stays open."""
     entries = [
-        {"id": "ab-epic0000", "title": "Epic", "_status": "ready", "project": "p",
+        {"id": "ab-epic0000", "title": "Epic", "status": "ready", "project": "p",
          "blocked_by": [], "plan_path": "x.md"},
-        {"id": "ab-cdone001", "title": "Child A", "_status": "ready", "project": "p",
+        {"id": "ab-cdone001", "title": "Child A", "status": "ready", "project": "p",
          "parent": "ab-epic0000", "blocked_by": []},
-        {"id": "ab-cstill02", "title": "Child B (stays open)", "_status": "ready",
+        {"id": "ab-cstill02", "title": "Child B (stays open)", "status": "ready",
          "project": "p", "parent": "ab-epic0000", "blocked_by": []},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
@@ -1596,11 +1596,11 @@ def test_done_cascade_closes_grandparent_chain(tmp_graph):
     """Cascade walks up multi-level chains: leaf -> sub-epic -> epic all close
     when the leaf (the only open node in the chain) lands."""
     entries = [
-        {"id": "ab-epic0000", "title": "Epic", "_status": "ready", "project": "p",
+        {"id": "ab-epic0000", "title": "Epic", "status": "ready", "project": "p",
          "blocked_by": [], "plan_path": "x.md"},
-        {"id": "ab-sub00001", "title": "Sub-epic", "_status": "ready", "project": "p",
+        {"id": "ab-sub00001", "title": "Sub-epic", "status": "ready", "project": "p",
          "parent": "ab-epic0000", "blocked_by": []},
-        {"id": "ab-leaf0002", "title": "Leaf", "_status": "ready", "project": "p",
+        {"id": "ab-leaf0002", "title": "Leaf", "status": "ready", "project": "p",
          "parent": "ab-sub00001", "blocked_by": []},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
@@ -1617,9 +1617,9 @@ def test_done_cascade_closes_cross_project_parent(tmp_graph):
     DIFFERENT project from its child closes on the same close - the cross-project
     closure gap codex flagged (advance() is project-scoped and cannot)."""
     entries = [
-        {"id": "ab-epic0000", "title": "Epic", "_status": "ready", "project": "web",
+        {"id": "ab-epic0000", "title": "Epic", "status": "ready", "project": "web",
          "blocked_by": [], "plan_path": "x.md"},
-        {"id": "ab-leaf0001", "title": "Leaf", "_status": "ready", "project": "etl",
+        {"id": "ab-leaf0001", "title": "Leaf", "status": "ready", "project": "etl",
          "parent": "ab-epic0000", "blocked_by": []},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
@@ -1637,7 +1637,7 @@ def _make_node_with_project_cwd(project: str, cwd: str) -> dict:
     return {
         "id": "ab-resolvetest",
         "title": "Resolve Test",
-        "_status": "ready",
+        "status": "ready",
         "project": project,
         "cwd": cwd,
     }
@@ -1709,7 +1709,7 @@ def test_resolved_cwd_falls_back_to_recorded_cwd_when_project_null(tmp_graph):
     node = {
         "id": "ab-resolvetest",
         "title": "Null Project",
-        "_status": "ready",
+        "status": "ready",
         "project": None,
         "cwd": "/recorded/cwd",
     }
@@ -1908,7 +1908,7 @@ def test_ac2_ui_update_unmapped_project_warns_cwd_unchanged(tmp_graph, tmp_path,
         "title": "UpdateTarget",
         "project": "old-project",
         "cwd": original_cwd,
-        "_status": "idea",
+        "status": "idea",
     }
     tmp_graph.write_text(json.dumps({"entries": [node]}) + "\n")
 
@@ -1944,7 +1944,7 @@ def test_ac2_fr_update_mapped_project_derives_cwd(tmp_graph, tmp_path):
         "title": "UpdateMapped",
         "project": "old-project",
         "cwd": "/old/cwd",
-        "_status": "idea",
+        "status": "idea",
     }
     tmp_graph.write_text(json.dumps({"entries": [node]}) + "\n")
 
@@ -1974,7 +1974,7 @@ def test_ac2_update_explicit_cwd_wins_over_workmap(tmp_graph, tmp_path):
         "title": "UpdateExplicitCwd",
         "project": "old-project",
         "cwd": "/old/cwd",
-        "_status": "idea",
+        "status": "idea",
     }
     tmp_graph.write_text(json.dumps({"entries": [node]}) + "\n")
 
@@ -2198,14 +2198,14 @@ def test_ready_excludes_stale_and_dead_ancestor(tmp_graph):
 
     recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     _seed(tmp_graph, [
-        {"id": "ab-live0", "title": "live", "project": "fno", "_status": "ready",
+        {"id": "ab-live0", "title": "live", "project": "fno", "status": "ready",
          "plan_path": "/no/p.md", "created_at": recent, "priority": "p2"},
-        {"id": "ab-stale0", "title": "stale", "project": "fno", "_status": "ready",
+        {"id": "ab-stale0", "title": "stale", "project": "fno", "status": "ready",
          "plan_path": "/no/p.md", "created_at": "2026-01-01T00:00:00+00:00",
          "priority": "p2"},
         {"id": "ab-deadep", "title": "epic", "project": "fno",
          "superseded_by": "ab-new"},
-        {"id": "ab-deadch", "title": "child", "project": "fno", "_status": "ready",
+        {"id": "ab-deadch", "title": "child", "project": "fno", "status": "ready",
          "parent": "ab-deadep", "plan_path": "/no/p.md", "created_at": recent,
          "priority": "p2"},
     ])

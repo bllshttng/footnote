@@ -472,7 +472,7 @@ def done_race_collision(
     """Build a ``done_race_collision`` event.
 
     Forensic notice that two ``fno done`` calls landed on the same node; the
-    second saw ``_status`` already done. Emitted AFTER ``locked_mutate_graph``
+    second saw ``status`` already done. Emitted AFTER ``locked_mutate_graph``
     returns so the event reflects the actual outcome of the metadata writes.
     """
     return _build(

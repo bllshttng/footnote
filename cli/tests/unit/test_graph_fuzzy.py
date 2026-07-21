@@ -23,7 +23,7 @@ def _entry(id: str, title: str, *, status: str = "ready", domain: str = "code") 
     return {
         "id": id,
         "title": title,
-        "_status": status,
+        "status": status,
         "domain": domain,
     }
 

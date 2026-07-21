@@ -25,7 +25,7 @@ fail() { echo "  FAIL: $1 :: $2"; FAIL=$((FAIL + 1)); }
 # Seed a tiny sandbox graph.json that maps ab-12345678 -> plans/test.md.
 cat > "$HOME/.fno/graph.json" <<'JSON'
 {"entries": [
-  {"id": "ab-12345678", "title": "Test", "plan_path": "plans/test.md", "_status": "ready"}
+  {"id": "ab-12345678", "title": "Test", "plan_path": "plans/test.md", "status": "ready"}
 ]}
 JSON
 

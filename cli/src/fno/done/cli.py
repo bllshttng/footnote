@@ -3,7 +3,7 @@
 For `domain: code` with no explicit flags, auto-detects the node from the
 current git branch and fills pr_number/pr_url/merge_status from `gh pr view`.
 For any domain, populates user-supplied fields (--pr, --link, --note) and
-always sets `_status: done` + `completed_at`.
+always sets `status: done` + `completed_at`.
 
 Beyond the direct flags, `fno done` ALSO rolls up ledger-sourced lifecycle
 fields so a "done" graph entry reflects everything we know about the
@@ -14,12 +14,12 @@ completed feature, not just the PR trio:
     cost_sessions   - one row per (ledger entry, session UUID) combination
     points          - from ledger.points if currently null in graph
 
-A --backfill flag runs ONLY the rollup (skipping _status / completed_at
+A --backfill flag runs ONLY the rollup (skipping status / completed_at
 changes), for sweeping already-done nodes that were marked done before
 this logic existed. Pair with --force-overwrite for explicit re-reconciliation
 of stale rollups (e.g. session_id or points changed since the node was marked done).
 
-When a second `fno done` call races a node that is already done, the _status
+When a second `fno done` call races a node that is already done, the status
 and completed_at are preserved. User-supplied --pr/--link/--note are still applied.
 A done_race_collision event is emitted to events.jsonl for forensic audit.
 
@@ -328,8 +328,8 @@ def done_command(
         False, "--backfill",
         help=(
             "Run ONLY the ledger-rollup (session_id, cost_usd, cost_sessions, "
-            "points). Does not flip _status or completed_at. With no QUERY, "
-            "sweeps every node with _status=done."
+            "points). Does not flip status or completed_at. With no QUERY, "
+            "sweeps every node with status=done."
         ),
     ),
     force_overwrite: bool = typer.Option(
@@ -368,7 +368,7 @@ def done_command(
                 )
                 for c in match.candidates:
                     typer.echo(
-                        f"  {c.get('id'):<14} {c.get('_status', '?'):<9} "
+                        f"  {c.get('id'):<14} {c.get('status', '?'):<9} "
                         f"{c.get('title', '')}",
                         err=True,
                     )
@@ -377,7 +377,7 @@ def done_command(
         else:
             target_ids = {
                 e.get("id") for e in entries
-                if e.get("_status") == "done" and e.get("id")
+                if e.get("status") == "done" and e.get("id")
             }
 
         if not target_ids:
@@ -437,7 +437,7 @@ def done_command(
         )
         for c in match.candidates:
             line = (
-                f"  {c.get('id'):<14} {c.get('_status', '?'):<9} "
+                f"  {c.get('id'):<14} {c.get('status', '?'):<9} "
                 f"{c.get('title', '')}"
             )
             typer.echo(line, err=True)
@@ -499,9 +499,9 @@ def done_command(
             if note is not None:
                 e["completion_note"] = note
 
-            if e.get("_status") == "done":
+            if e.get("status") == "done":
                 # Second writer sees node already done - collision path.
-                # Skip _status / completed_at overwrites. Apply rollup only when
+                # Skip status / completed_at overwrites. Apply rollup only when
                 # force_overwrite is explicit: a bare `fno done <id>` on a done
                 # node must not silently re-reconcile rollup, but
                 # `fno done <id> --force-overwrite` honors the flag's promise of
@@ -511,7 +511,7 @@ def done_command(
                 if force_overwrite:
                     rollup_tags.extend(_apply_rollup(e, rollup, env_session=env_session, force_overwrite=True))
             else:
-                e["_status"] = "done"
+                e["status"] = "done"
                 e["completed_at"] = now
                 rollup_tags.extend(_apply_rollup(e, rollup, env_session=env_session, force_overwrite=force_overwrite))
             break

@@ -43,7 +43,7 @@ def test_in_progress_epic_preferred_over_unstarted_same_priority():
     epic_x = {"id": "epicX", "priority": "p2", "created_at": "2026-01-01"}
     epic_y = {"id": "epicY", "priority": "p2", "created_at": "2026-01-01"}
     done_child = {"id": "xdone", "parent": "epicX", "priority": "p2",
-                  "_status": "done", "created_at": "2026-02-01"}
+                  "status": "done", "created_at": "2026-02-01"}
     ready_x = {"id": "xr", "parent": "epicX", "priority": "p2",
                "created_at": "2026-02-02"}
     ready_y = {"id": "yr", "parent": "epicY", "priority": "p2",
@@ -103,7 +103,7 @@ def test_ranked_loose_node_overrides_in_progress_epic_and_clear_restores():
     # rank restores epics-first selection.
     epic = {"id": "epic1", "priority": "p1", "created_at": "2026-01-01"}
     done_child = {"id": "dc", "parent": "epic1", "priority": "p1",
-                  "_status": "done", "created_at": "2026-02-01"}
+                  "status": "done", "created_at": "2026-02-01"}
     ready_child = {"id": "rc", "parent": "epic1", "priority": "p1",
                    "created_at": "2026-02-02"}
     ranked_loose = {"id": "rl", "priority": "p3", "created_at": "2026-03-01",

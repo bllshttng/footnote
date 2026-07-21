@@ -362,7 +362,7 @@ def _is_pending(entry: dict) -> bool:
     completed = entry.get("completed_at") or ""
     if completed:
         return False
-    status = entry.get("_status", "ready")
+    status = entry.get("status", "ready")
     if status == "deferred":
         return False
     return status in ("ready", "blocked")
@@ -374,7 +374,7 @@ def _is_idea(entry: dict) -> bool:
         return False
     if entry.get("completed_at"):
         return False
-    return entry.get("_status") == "idea"
+    return entry.get("status") == "idea"
 
 
 def _read_plan_excerpt(plan_path: Optional[str], max_lines: int = 150) -> str:
@@ -422,7 +422,7 @@ def _candidate_record(entry: dict, deep: bool) -> dict:
         "roadmap_id": entry.get("roadmap_id"),
         "created_at": entry.get("created_at"),
         "source": entry.get("source"),
-        "status": entry.get("_status"),
+        "status": entry.get("status"),
         "size": entry.get("size"),
         "domain": entry.get("domain"),
         "details": entry.get("details"),
@@ -1102,7 +1102,7 @@ def cmd_apply(
             node["priority"] = pc["to"]
             applied["priority_changes"] += 1
         # Defer entries land deferred_at + deferred_reason on each target.
-        # The cascade in recompute_statuses derives _status: deferred from
+        # The cascade in recompute_statuses derives status: deferred from
         # deferred_at after the locked mutation completes.
         from datetime import datetime, timezone
         for d in cleaned_locked.get("defer", []):
@@ -1111,7 +1111,7 @@ def cmd_apply(
                 continue
             # Clear completed_at so the deferred cascade can take effect.
             # Without this, deferring an already-done node would keep the
-            # row pinned to _status: done because of the `done > deferred`
+            # row pinned to status: done because of the `done > deferred`
             # precedence in recompute_statuses. Symmetric with the direct
             # cmd_defer verb (cli.py).
             node["completed_at"] = None
@@ -1210,7 +1210,7 @@ def cmd_pile(
     No new lifecycle state (epic LD5) - the pile IS ``deferred`` +
     ``deferred_reason``. Surfaces what selection quarantined or a human paused so
     nothing rots invisibly. Hidden verb (menu-caps); the sole authority is the
-    derived ``_status``, so a node undeferred out of band drops off immediately.
+    derived ``status``, so a node undeferred out of band drops off immediately.
     """
     from datetime import datetime, timezone
 
@@ -1222,7 +1222,7 @@ def cmd_pile(
     now = datetime.now(timezone.utc)
     rows: list[dict] = []
     for e in entries:
-        if e.get("_status") != "deferred":
+        if e.get("status") != "deferred":
             continue
         if project and e.get("project") != project:
             continue
@@ -1313,7 +1313,7 @@ def cmd_health(
     now = datetime.now(timezone.utc)
     stale: list[dict] = []
     for e in pending_active:
-        if e.get("_status") != "ready":
+        if e.get("status") != "ready":
             continue
         created = e.get("created_at")
         if not created:
@@ -1445,7 +1445,7 @@ def cmd_health(
                     {
                         "id": d,
                         "title": by_id.get(d, {}).get("title", ""),
-                        "status": by_id.get(d, {}).get("_status"),
+                        "status": by_id.get(d, {}).get("status"),
                     }
                     for d in dep_ids
                 ],
@@ -1529,7 +1529,7 @@ def cmd_health(
             if isinstance(e, dict)
             and e.get("type") in ROLLUP_TYPES
             and not e.get("orphan_ok")
-            and e.get("_status") not in CLOSED_STATUSES
+            and e.get("status") not in CLOSED_STATUSES
         ]
         orphan_nodes = [
             nid for e in non_exempt

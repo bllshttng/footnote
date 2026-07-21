@@ -49,7 +49,7 @@ def _node(node_id: str, **overrides) -> dict:
         "merge_status": None,
         "artifact_url": None,
         "completion_note": None,
-        "_status": "idea",
+        "status": "idea",
         "created_at": "2026-01-01T00:00:00+00:00",
     }
     base.update(overrides)
@@ -78,7 +78,7 @@ def graph_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         priority="p1",
         project="fno",
         cwd=str(tmp_path),
-        _status="ready",
+        status="ready",
     )
     g.write_text(json.dumps({"entries": [epic]}) + "\n")
 
@@ -140,8 +140,8 @@ def test_ac1_hp_creates_group_children(graph_env):
     for c in children:
         assert c["parent"] == "ab-epic0001"
         assert c["plan_path"] is None
-        assert c["_status"] != "ready"
-    assert _child(children, "1")["_status"] == "idea"  # no blockers -> idea
+        assert c["status"] != "ready"
+    assert _child(children, "1")["status"] == "idea"  # no blockers -> idea
 
 
 def test_ac1_hp_inter_group_blocked_by_resolves_to_ids(graph_env):
@@ -381,7 +381,7 @@ def test_ac2_edge_redecompose_preserves_filled_child_plan_path(graph_env):
 
     after = read_entries()
     assert _child(after, "1")["plan_path"] == filled_path   # designed plan untouched
-    assert _child(after, "1")["_status"] == "ready"          # stays ready
+    assert _child(after, "1")["status"] == "ready"          # stays ready
     # An unfilled sibling stays unlinked - re-decompose never spuriously links it.
     assert _child(after, "2")["plan_path"] is None
 
@@ -624,7 +624,7 @@ def graph_env_real_doc(
         title="Epic: big thing",
         plan_path=f"{doc}#c1-anchor",
         priority="p1",
-        _status="ready",
+        status="ready",
     )
     g.write_text(json.dumps({"entries": [epic]}) + "\n")
 
@@ -1016,7 +1016,7 @@ def test_fanout_non_spawn_prints_offer_fallback(graph_env, monkeypatch):
     # AC2-ERR / AC1-EDGE: a child that did not spawn is left idea + an OFFER line.
     assert "did not spawn" in result.output and "/think" in result.output
     child = _child(read_entries(), "1")
-    assert child["plan_path"] is None and child["_status"] == "idea"
+    assert child["plan_path"] is None and child["status"] == "idea"
 
 
 def test_json_mode_reports_fanout_outcome(graph_env, monkeypatch):
@@ -1259,7 +1259,7 @@ def _separate_env(tmp_path, monkeypatch):
         title="Epic",
         plan_path=f"{doc}#anchor",
         cwd=str(tmp_path),
-        _status="ready",
+        status="ready",
     )
     _, read_entries = _wire_graph(tmp_path, monkeypatch, epic)
     return read_entries, doc

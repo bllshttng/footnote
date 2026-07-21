@@ -251,7 +251,7 @@ def _card_flags(
     and ideas that lack a plan.
     """
     flags: list[tuple[str, str]] = []
-    status = entry.get("_status") or "ready"
+    status = entry.get("status") or "ready"
     if status == "in_progress":
         flags.append(("flag-claimed", "in session"))
     if entry.get("queued_at") and status not in ("done", "in_progress"):
@@ -461,7 +461,7 @@ def _stats(entries: list[dict]) -> tuple[Counter, Counter]:
     for e in entries:
         if _column_for(e) is None:
             continue
-        statuses[e.get("_status") or "ready"] += 1
+        statuses[e.get("status") or "ready"] += 1
         projects[_project_key(e)] += 1
     return statuses, projects
 

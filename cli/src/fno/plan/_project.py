@@ -110,10 +110,10 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
             fields[key] = value
             changed = True
 
-    # Status projection (x-f34f): map the graph derived `_status` onto the plan,
+    # Status projection (x-f34f): map the graph derived `status` onto the plan,
     # forward-only. Kept out of MIRROR_KEYS because it is a mapped, monotonic
     # write (not a straight mirror) and stamps done_at on the terminal write.
-    graph_status = node.get("_status")
+    graph_status = node.get("status")
     if graph_status:
         current_status = fields.get("status")
         projected = project_plan_status(current_status, graph_status)

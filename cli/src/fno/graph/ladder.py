@@ -7,9 +7,9 @@ vocabulary (``design -> ready -> in_progress -> shipped``). The only rung the
 graph side could not see is ``design`` - a node whose plan doc exists but is
 still a design doc, not a blueprint.
 
-Derived per read rather than persisted into ``_status``. A plan doc is external
+Derived per read rather than persisted into ``status``. A plan doc is external
 mutable state that ``/blueprint`` rewrites WITHOUT touching the graph, and
-``read_graph`` does not recompute ``_status`` (only ``locked_mutate_graph``
+``read_graph`` does not recompute ``status`` (only ``locked_mutate_graph``
 does), so a persisted ``design`` would never re-arm once the blueprint landed -
 the node would starve invisibly forever. Same shape as
 ``statuses.live_claimed_node_ids``, which overlays the claim lockfile for the

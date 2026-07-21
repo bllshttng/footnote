@@ -220,13 +220,13 @@ def selection_guards(
             anc = entries_by_id.get(cur)
             if anc is None:
                 break  # missing parent - no verdict, select normally
-            # Field-based, not just derived `_status`: read_graph returns the
+            # Field-based, not just derived `status`: read_graph returns the
             # persisted status and does NOT recompute, so a superseded/deferred
-            # ancestor whose `_status` was not re-persisted still reads its own
+            # ancestor whose `status` was not re-persisted still reads its own
             # bucket here via the underlying fields. Checking both is robust to
             # either read path.
             if (
-                anc.get("_status") in ("superseded", "deferred")
+                anc.get("status") in ("superseded", "deferred")
                 or anc.get("superseded_by")
                 or anc.get("deferred_at")
             ):
@@ -245,10 +245,10 @@ def selection_guards(
         # that dispatch used to supply, and would age into `stale-quarantine` -
         # reporting the wrong reason and letting `maintain --apply` auto-defer
         # a perfectly healthy design doc off the board.
-        if entry.get("_status") == "ready" and is_design_stage(entry):
+        if entry.get("status") == "ready" and is_design_stage(entry):
             return "design-stage"
 
-        if entry.get("_status") == "ready" and _maintain.is_stale_ready(
+        if entry.get("status") == "ready" and _maintain.is_stale_ready(
             entry, now, staleness_days
         ):
             return "stale-quarantine"
@@ -1426,7 +1426,7 @@ def advance(
 def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> list[dict]:
     """Ready, direct ``blocked_by`` dependents of the closed node.
 
-    Reads the graph (``read_graph`` recomputes ``_status`` at read), so a
+    Reads the graph (``read_graph`` recomputes ``status`` at read), so a
     dependent whose only open blocker was the just-closed node already reads
     ``ready`` here. Returns minimal dicts
     ``{id, project, slug, cwd, model, model_tier, cross_project}``.
@@ -1468,7 +1468,7 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
         # "now-unblocked" == ready: blocker done + no other open blocker + has a
         # plan. A still-blocked dependent reads `blocked`; a plan-less one reads
         # `idea`; a claimed/done/deferred one reads its own bucket - all excluded.
-        if e.get("_status") != "ready":
+        if e.get("status") != "ready":
             continue
         if selection_guards(e, by_id, staleness_days=staleness_days):
             continue  # dead-ancestor or stale-quarantine - do not revive

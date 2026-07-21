@@ -86,7 +86,7 @@ def test_missing_plan_path_warns_no_raise(tmp_path):
 
 def test_unowned_keys_untouched(tmp_path):
     plan = _write_plan(tmp_path)
-    node = {"priority": "p3"}  # no _status -> status projection skipped
+    node = {"priority": "p3"}  # no status -> status projection skipped
 
     project_node_to_plan(node, plan)
     _, fields, _ = read_plan_file(plan)
@@ -106,7 +106,7 @@ def test_unowned_keys_untouched(tmp_path):
 def test_status_projects_claim_to_in_progress(tmp_path):
     """AC1-HP: a claimed node moves a ready plan to in_progress, body intact."""
     plan = _write_plan(tmp_path)
-    assert project_node_to_plan({"_status": "claimed"}, plan) is True
+    assert project_node_to_plan({"status": "claimed"}, plan) is True
     _, fields, _ = read_plan_file(plan)
     assert fields["status"] == "in_progress"
     assert "iteration_ceiling" in plan.read_text(encoding="utf-8")  # body untouched
@@ -115,13 +115,13 @@ def test_status_projects_claim_to_in_progress(tmp_path):
 def test_status_projects_done_stamps_done_at(tmp_path):
     """AC2-HP: a done node flips a shipped plan to done and stamps done_at once."""
     plan = _write_plan(tmp_path, _PLAN.replace("status: ready", "status: shipped"))
-    assert project_node_to_plan({"_status": "done"}, plan) is True
+    assert project_node_to_plan({"status": "done"}, plan) is True
     _, fields, _ = read_plan_file(plan)
     assert fields["status"] == "done"
     assert fields.get("done_at")
     first = fields["done_at"]
     # First-write-only: a second done projection never overwrites done_at.
-    assert project_node_to_plan({"_status": "done"}, plan) is False
+    assert project_node_to_plan({"status": "done"}, plan) is False
     _, fields2, _ = read_plan_file(plan)
     assert fields2["done_at"] == first
 
@@ -129,7 +129,7 @@ def test_status_projects_done_stamps_done_at(tmp_path):
 def test_status_backward_projection_refused(tmp_path):
     """AC1-EDGE: a node that regressed to claimed never rewrites a shipped plan."""
     plan = _write_plan(tmp_path, _PLAN.replace("status: ready", "status: shipped"))
-    assert project_node_to_plan({"_status": "claimed"}, plan) is False
+    assert project_node_to_plan({"status": "claimed"}, plan) is False
     _, fields, _ = read_plan_file(plan)
     assert fields["status"] == "shipped"
 
@@ -138,7 +138,7 @@ def test_status_no_write_for_gated_states(tmp_path):
     """blocked/deferred are graph-side gates: the plan status is left as-is."""
     plan = _write_plan(tmp_path)
     for gated in ("blocked", "deferred"):
-        assert project_node_to_plan({"_status": gated}, plan) is False
+        assert project_node_to_plan({"status": gated}, plan) is False
     _, fields, _ = read_plan_file(plan)
     assert fields["status"] == "ready"
 

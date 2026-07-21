@@ -67,7 +67,7 @@ def _seed_with_plan(tmp_path, title: str = "Plan") -> str:
 
 
 def test_status_deferred_derived_from_field(tmp_graph, tmp_path):
-    """A node with ``deferred_at`` set derives to ``_status: deferred``."""
+    """A node with ``deferred_at`` set derives to ``status: deferred``."""
     node_id = _seed_with_plan(tmp_path, "Plan A")
 
     r = _invoke("backlog", "defer", node_id, "--reason", "stale")
@@ -77,8 +77,8 @@ def test_status_deferred_derived_from_field(tmp_graph, tmp_path):
     node = next(e for e in entries if e["id"] == node_id)
     assert node.get("deferred_at"), "deferred_at should be set to an ISO timestamp"
     assert node.get("deferred_reason") == "stale"
-    assert node.get("_status") == "deferred", (
-        f"expected derived deferred status; got {node.get('_status')!r}"
+    assert node.get("status") == "deferred", (
+        f"expected derived deferred status; got {node.get('status')!r}"
     )
 
 
@@ -98,8 +98,8 @@ def test_deferred_overrides_blocked(tmp_graph, tmp_path):
 
     entries = _read_entries(tmp_graph)
     target = next(e for e in entries if e["id"] == target_id)
-    assert target.get("_status") == "deferred", (
-        f"deferred should beat blocked; got {target.get('_status')!r}"
+    assert target.get("status") == "deferred", (
+        f"deferred should beat blocked; got {target.get('status')!r}"
     )
 
 
@@ -110,7 +110,7 @@ def test_deferred_does_not_override_done(tmp_graph, tmp_path):
 
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
-    assert node.get("_status") == "done"
+    assert node.get("status") == "done"
 
     # Force-set deferred_at via direct mutation; recompute should still pick done.
     import fno.graph._constants as gc
@@ -125,8 +125,8 @@ def test_deferred_does_not_override_done(tmp_graph, tmp_path):
     _invoke("backlog", "add", "trigger")
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
-    assert node.get("_status") == "done", (
-        f"done must beat deferred; got {node.get('_status')!r}"
+    assert node.get("status") == "done", (
+        f"done must beat deferred; got {node.get('status')!r}"
     )
 
 
@@ -162,7 +162,7 @@ def test_legacy_deferred_completed_at_migrates(tmp_graph):
     assert legacy.get("deferred_at") == legacy_ts, (
         f"deferred_at should be migrated from the prefix; got {legacy.get('deferred_at')!r}"
     )
-    assert legacy.get("_status") == "deferred"
+    assert legacy.get("status") == "deferred"
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +208,8 @@ def test_undefer_command_clears_state(tmp_graph, tmp_path):
         f"deferred_at should be cleared; got {node.get('deferred_at')!r}"
     )
     assert not node.get("deferred_reason")
-    assert node.get("_status") == "ready", (
-        f"undefer should restore ready; got {node.get('_status')!r}"
+    assert node.get("status") == "ready", (
+        f"undefer should restore ready; got {node.get('status')!r}"
     )
 
 
@@ -237,7 +237,7 @@ def test_defer_after_done_transitions_to_deferred(tmp_graph, tmp_path):
 
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
-    assert node.get("_status") == "done"
+    assert node.get("status") == "done"
     assert node.get("completed_at")
 
     r = _invoke("backlog", "defer", node_id, "--reason", "reopened, parking it")
@@ -249,8 +249,8 @@ def test_defer_after_done_transitions_to_deferred(tmp_graph, tmp_path):
         f"completed_at must be cleared when deferring; got {node.get('completed_at')!r}"
     )
     assert node.get("deferred_at"), "deferred_at must be set"
-    assert node.get("_status") == "deferred", (
-        f"cascade must flip to deferred after defer; got {node.get('_status')!r}"
+    assert node.get("status") == "deferred", (
+        f"cascade must flip to deferred after defer; got {node.get('status')!r}"
     )
 
 
@@ -269,7 +269,7 @@ def test_triage_defer_after_done_transitions_to_deferred(tmp_graph, tmp_path):
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
     assert node.get("completed_at") in (None, "")
-    assert node.get("_status") == "deferred"
+    assert node.get("status") == "deferred"
 
 
 def test_defer_rejects_blank_reason(tmp_graph, tmp_path):
@@ -391,7 +391,7 @@ def test_triage_defer_proposal_validates_and_applies(tmp_graph, tmp_path):
 
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
-    assert node.get("_status") == "deferred"
+    assert node.get("status") == "deferred"
     assert node.get("deferred_reason") == "out of season"
 
 
@@ -454,4 +454,4 @@ def test_triage_apply_exits_nonzero_on_drops(tmp_graph, tmp_path):
     # The good entry still lands - apply is best-effort partial.
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
-    assert node.get("_status") == "deferred"
+    assert node.get("status") == "deferred"

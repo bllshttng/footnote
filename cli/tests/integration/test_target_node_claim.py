@@ -42,7 +42,7 @@ def _sandbox(tmp_path: Path):
     home = tmp_path / "home"
     (home / ".fno").mkdir(parents=True)
     (home / ".fno" / "graph.json").write_text(
-        '{"entries":[{"id":"%s","title":"t","_status":"idea","priority":"p2",'
+        '{"entries":[{"id":"%s","title":"t","status":"idea","priority":"p2",'
         '"project":"fno","plan_path":null}]}' % NODE_ID
     )
     repo = tmp_path / "repo"

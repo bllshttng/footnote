@@ -14,7 +14,7 @@ The tier ladder, cheapest to most ceremony:
 
 ```
 inbox item (fu-, markdown, NOT in graph)
-  -> idea node     (ab-, graph node, no plan_path, _status: idea)
+  -> idea node     (ab-, graph node, no plan_path, status: idea)
     -> full node   (ab-, graph node, plan_path set, ready/next)
 ```
 

@@ -163,7 +163,7 @@ def test_adopt_alias_is_gone(tmp_graph, tmp_path):
 
 
 def test_ac1_hp_done_marks_node_completed(tmp_graph):
-    """`fno backlog done <id>` sets completed_at and _status derives to done."""
+    """`fno backlog done <id>` sets completed_at and status derives to done."""
     add = _invoke("--json", "backlog", "add", "DoneTest")
     assert add.exit_code == 0
     node_id = json.loads(add.stdout)["id"]
@@ -176,7 +176,7 @@ def test_ac1_hp_done_marks_node_completed(tmp_graph):
     assert get.exit_code == 0
     node = json.loads(get.stdout)
     assert node.get("completed_at"), "completed_at must be set"
-    # _status is derived by recompute_statuses; it may not be in the JSON
+    # status is derived by recompute_statuses; it may not be in the JSON
     # serialization but the completed_at presence is the canonical signal.
 
 

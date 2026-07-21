@@ -154,7 +154,7 @@ class MergeDriftRecord:
 def node_is_open(node: dict) -> bool:
     """A node is open when it is neither done nor superseded.
 
-    Keyed off the underlying fields rather than the derived ``_status`` so the
+    Keyed off the underlying fields rather than the derived ``status`` so the
     predicate holds even on an entries list that has not been through
     ``recompute_statuses`` (e.g. a raw test fixture).
     """

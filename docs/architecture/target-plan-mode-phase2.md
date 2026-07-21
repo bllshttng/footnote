@@ -21,11 +21,11 @@ Result: **Phase 2 stands alone on `fno agents ask`** (Locked Decision 6), no Bet
 ### Layer 1: the dispatch primitive (US5)
 
 ```
-You (planning session): /think + /blueprint  ->  node reaches _status: ready
+You (planning session): /think + /blueprint  ->  node reaches status: ready
         |
         v  /target bg ab-A ab-B          (or --all-ready)
    skills/target/scripts/dispatch-node.sh
-     per node:  resolve _status -> claim-guard -> fno agents ask --provider claude
+     per node:  resolve status -> claim-guard -> fno agents ask --provider claude
         |              (-> claude --bg --name target-<id>-<slug> "/target no-merge <node>")
         v
    fresh bg worker per node = clean context; runs do->review->ship.
@@ -53,18 +53,18 @@ Locked behaviors:
 ### Layer 2: ready-gated auto-launch (US6, opt-in, default OFF)
 
 ```
-/blueprint finishes -> claimed node has a _status
+/blueprint finishes -> claimed node has a status
         |
         v  config.target.auto_launch_on_blueprint == true ?  --no--> nothing (manual dispatch as today)
         |                                                  yes
-        v  node _status == ready (unblocked, not deferred) ?
+        v  node status == ready (unblocked, not deferred) ?
         |                  |
        yes                no  ->  PARK (pre-planned future work); never launch
         v
    dispatch via Layer 1 (no-merge default)
 ```
 
-`skills/blueprint/scripts/autolaunch-on-ready.sh <plan-path>` runs as the last step of `/blueprint` in every mode. It is a no-op unless `config.target.auto_launch_on_blueprint: true` (default OFF; an absent key reads as off, so existing behavior is unchanged). When enabled, it resolves the plan's `claims: ab-XXX` node, and if that node is `_status: ready` it dispatches via Layer 1, printing `auto-launched <node> ...`. A `blocked`/`deferred`/`idea` node prints `parked <node> ...` and is never launched. A dispatch failure prints `autolaunch-failed <node> ...` and leaves the node `ready` and the plan intact.
+`skills/blueprint/scripts/autolaunch-on-ready.sh <plan-path>` runs as the last step of `/blueprint` in every mode. It is a no-op unless `config.target.auto_launch_on_blueprint: true` (default OFF; an absent key reads as off, so existing behavior is unchanged). When enabled, it resolves the plan's `claims: ab-XXX` node, and if that node is `status: ready` it dispatches via Layer 1, printing `auto-launched <node> ...`. A `blocked`/`deferred`/`idea` node prints `parked <node> ...` and is never launched. A dispatch failure prints `autolaunch-failed <node> ...` and leaves the node `ready` and the plan intact.
 
 The gate reuses the **existing backlog state model** (Locked Decision 3): a `ready` node is unblocked and up-next; pre-planned future work the developer marked `blocked_by`/`deferred` is parked. No new concept. The developer's own discipline IS the "only launch what's up-next" gate.
 

@@ -141,7 +141,7 @@ for e in entries:
         continue
     if pp == plan or norm(pp) == want:
         nid = e.get("id") or ""
-        if e.get("_status") == "ready":
+        if e.get("status") == "ready":
             ready = nid
             break
         other = other or nid
@@ -163,7 +163,7 @@ fi
 #     next` excludes epics). Launch the first ready child instead; if children
 #     exist but none is ready yet (all claimed/blocked), park - the ready one
 #     autolaunches when its deps clear.
-#     ponytail: "first ready child" = graph order; _status==ready already encodes
+#     ponytail: "first ready child" = graph order; status==ready already encodes
 #     deps-satisfied, so no separate blocked_by walk. Graph-path resolution mirrors
 #     the tier-c block above; unreadable/absent graph -> no redirect (dispatch as-is).
 if command -v python3 >/dev/null 2>&1; then
@@ -190,7 +190,7 @@ children = [e for e in entries if isinstance(e, dict) and e.get("parent") == nod
 if not children:
     sys.exit(0)  # not an epic (no children) -> empty output, no redirect
 for e in children:
-    if e.get("_status") == "ready":
+    if e.get("status") == "ready":
         print(e.get("id") or "")
         sys.exit(0)
 print("__NONE__")  # decomposed but no ready child yet
@@ -223,7 +223,7 @@ if [[ "$get_rc" -ne 0 || -z "$node_json" ]]; then
   echo "parked $node reason=\"backlog status read failed (rc=$get_rc) - not launched\""
   exit 0
 fi
-status="$(printf '%s' "$node_json" | jq -r '._status // "unknown"' 2>/dev/null || echo "unknown")"
+status="$(printf '%s' "$node_json" | jq -r '.status // "unknown"' 2>/dev/null || echo "unknown")"
 if [[ "$status" != "ready" ]]; then
   echo "parked $node reason=\"$status (not up-next) - blueprinted, awaiting deps/undefer\""
   exit 0

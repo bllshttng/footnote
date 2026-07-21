@@ -62,7 +62,7 @@ _add("superseded", "abandoned", "cancelled", "canceled", "moved",
 def _graph_truth(graph_path: Path, archive_path: Path | None) -> dict[str, str]:
     """node id -> terminal status implied by the graph (done|superseded).
 
-    A node with completed_at is done; superseded_by (or _status superseded) is
+    A node with completed_at is done; superseded_by (or status superseded) is
     superseded. Reads the working graph and, if present, the archive. Best-effort:
     a missing/corrupt file yields no overrides.
     """
@@ -82,7 +82,7 @@ def _graph_truth(graph_path: Path, archive_path: Path | None) -> dict[str, str]:
                 continue
             if e.get("completed_at"):
                 truth[nid] = "done"
-            elif e.get("superseded_by") or e.get("_status") == "superseded":
+            elif e.get("superseded_by") or e.get("status") == "superseded":
                 truth[nid] = "superseded"
     return truth
 

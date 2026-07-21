@@ -9,7 +9,7 @@ Covers:
 - ``cmd_update --acknowledge-collisions`` audit-trail field
 - ``find_acknowledged_collisions`` resolved-collision reconciliation
 - ``fno backlog triage health`` aggregate report
-- ``superseded`` ``_status`` derivation
+- ``superseded`` ``status`` derivation
 """
 from __future__ import annotations
 
@@ -135,7 +135,7 @@ def _seed_node(graph: list[dict], *, id_: str, plan_path: str, created_at: str =
         "session_id": None,
         "claimed_at": None,
         "completed_at": None,
-        "_status": "ready",
+        "status": "ready",
         "has_brief": False,
         "compacted": False,
         "plan_path": plan_path,
@@ -253,7 +253,7 @@ def test_done_nodes_excluded(tmp_path):
     graph: list[dict] = []
     _seed_node(graph, id_="ab-done", plan_path=str(other))
     graph[0]["completed_at"] = "2026-04-27T00:00:00+00:00"
-    graph[0]["_status"] = "done"
+    graph[0]["status"] = "done"
 
     cols = find_collisions(cand, graph)
     assert cols == []
@@ -425,8 +425,8 @@ def test_supersede_defers_old_and_status_becomes_superseded(tmp_graph, tmp_path)
     by_id = {e["id"]: e for e in entries}
     assert by_id["ab-old"]["deferred_at"] is not None
     assert "superseded by ab-new" in by_id["ab-old"]["deferred_reason"]
-    # _status derivation: superseded_by wins over deferred_at
-    assert by_id["ab-old"]["_status"] == "superseded"
+    # status derivation: superseded_by wins over deferred_at
+    assert by_id["ab-old"]["status"] == "superseded"
 
 
 def test_supersede_done_node_rejected(tmp_graph, tmp_path):
@@ -436,12 +436,12 @@ def test_supersede_done_node_rejected(tmp_graph, tmp_path):
     _seed_node(entries, id_="ab-shipped", plan_path=str(_write_quick_plan(tmp_path / "old.md", ["x.py"])))
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
     entries[0]["completed_at"] = "2026-04-30T12:00:00+00:00"
-    entries[0]["_status"] = "done"
+    entries[0]["status"] = "done"
     tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
 
     res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-shipped", "--reason", "test")
     assert res.exit_code != 0
-    assert "already shipped" in res.output.lower() or "_status=done" in res.output
+    assert "already shipped" in res.output.lower() or "status=done" in res.output
 
     # Confirm no mutation happened: completed_at preserved, no superseded_by written
     entries = _read_entries(tmp_graph)
@@ -534,7 +534,7 @@ def test_acknowledged_resolved_when_other_ships(tmp_path):
     _seed_node(graph, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["x.py"])))
     # ab-new acknowledged a collision with ab-old; ab-old then shipped.
     graph[0]["completed_at"] = "2026-04-28T00:00:00+00:00"
-    graph[0]["_status"] = "done"
+    graph[0]["status"] = "done"
     graph[1]["collisions_acknowledged"] = ["ab-old"]
 
     out = find_acknowledged_collisions(graph)
@@ -586,7 +586,7 @@ def test_triage_health_idea_count(tmp_graph, tmp_path):
     for e in entries:
         if e["id"] in ("ab-idea1", "ab-idea2"):
             e["plan_path"] = None
-            e["_status"] = "idea"
+            e["status"] = "idea"
     tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
 
     res = _invoke("backlog", "triage", "health", "--all", "--json")

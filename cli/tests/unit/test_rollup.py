@@ -109,7 +109,7 @@ def test_epic_candidates_ignores_non_epics_and_self():
 
 @pytest.mark.parametrize("status", ["done", "superseded", "deferred"])
 def test_retired_epics_are_not_candidates(status):
-    entries = [epic("x-e", "mux pane layout polish", _status=status)]
+    entries = [epic("x-e", "mux pane layout polish", status=status)]
     subject = node("x-1", title="mux pane layout polish")
     assert epic_candidates(subject, entries) == []
 
@@ -185,7 +185,7 @@ def test_ladder_reports_orphan_once_a_live_epic_exists():
 
 
 def test_retired_epics_do_not_re_enable_the_orphan_line():
-    entries = [epic("x-e", "unrelated", _status="done"), node("x-1", title="quantum teapot")]
+    entries = [epic("x-e", "unrelated", status="done"), node("x-1", title="quantum teapot")]
     assert resolve(entries[1], entries).kind == "exempt"
 
 
@@ -270,10 +270,10 @@ def test_an_explicit_non_epic_parent_is_never_overwritten():
 @pytest.mark.parametrize("status", ["done", "superseded", "deferred"])
 def test_closed_work_is_never_an_orphan(status):
     """A shipped feature is history, not a rollup anyone can still make."""
-    entries = [node("x-1", _status=status)]
+    entries = [node("x-1", status=status)]
     assert orphan_ids(entries) == frozenset()
 
 
 def test_open_statuses_still_count():
     for status in ("ready", "idea", "blocked", "claimed", None):
-        assert orphan_ids([node("x-1", _status=status)]) == {"x-1"}, status
+        assert orphan_ids([node("x-1", status=status)]) == {"x-1"}, status

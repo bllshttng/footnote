@@ -35,7 +35,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 def test_ready_accepts_json_flag(tmp_graph):
     tmp_graph.write_text(json.dumps({"entries": [
-        {"id": "ab-R", "title": "R", "_status": "ready",
+        {"id": "ab-R", "title": "R", "status": "ready",
          "plan_path": "p.md", "project": "x"}
     ]}))
     r = runner.invoke(app, ["backlog", "ready", "--project", "x", "--json"],

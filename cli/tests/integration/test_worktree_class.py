@@ -174,12 +174,12 @@ def test_list_orphaned_finds_unregistered(wm: WorktreeManager, tmp_git_repo: Pat
 
 
 def test_list_orphaned_finds_done(wm: WorktreeManager, tmp_git_repo: Path):
-    """A worktree whose graph node is _status:done is listed as orphaned."""
+    """A worktree whose graph node is status:done is listed as orphaned."""
     wt = wm.create("ab-done5678", base_ref="main")
     assert wt.path.exists()
 
     graph = {
-        "ab-done5678": {"_status": "done", "title": "finished node"},
+        "ab-done5678": {"status": "done", "title": "finished node"},
     }
     orphans = wm.list_orphaned(graph)
     node_ids = [o.node_id for o in orphans]

@@ -33,14 +33,14 @@ GRAPH_BACKUP_KEEP = 10
 
 # Canonical key order for serialized graph entries. Status-forward: a human
 # scanning graph.json (or `fno backlog get`) sees the node's id and derived
-# _status before anything else, then the human-scan fields (title/priority),
+# status before anything else, then the human-scan fields (title/priority),
 # then the parent/children relationship, then the long lifecycle/provenance
 # tail. Keys NOT in this list are appended in their original order after the
 # canonical block, so forward-compat schema additions and legacy extras (e.g.
 # the old `points` field) are reordered-around, never dropped.
 CANONICAL_FIELD_ORDER: list[str] = [
     "id",
-    "_status",
+    "status",
     # Title-derived human handle (ab-f82e8083). Additive: it LEADS display but
     # `id` stays the canonical key. Listed here so canonicalize keeps it and
     # places it right after the status, ahead of the title it derives from.
@@ -126,7 +126,7 @@ CANONICAL_FIELD_ORDER: list[str] = [
 # Fields copied into each parent's ``children`` summary. Compact on purpose:
 # enough to scan what a child is and where it stands without a second lookup,
 # light enough that the flat ``entries`` store is not denormalized into a tree.
-CHILD_SUMMARY_FIELDS: tuple[str, ...] = ("id", "title", "project", "_status")
+CHILD_SUMMARY_FIELDS: tuple[str, ...] = ("id", "title", "project", "status")
 
 
 def _compute_children(entries: list[dict]) -> list[dict]:
@@ -217,8 +217,8 @@ def canonicalize_entries(entries: list[dict]) -> list[dict]:
     Returns a new list of new dicts (does not preserve the input dict objects'
     key order). Unknown keys are appended after the canonical block in their
     original relative order so nothing is dropped. Called inside
-    ``locked_mutate_graph`` after ``recompute_statuses`` so ``_status`` and the
-    child summaries' ``_status`` are already current.
+    ``locked_mutate_graph`` after ``recompute_statuses`` so ``status`` and the
+    child summaries' ``status`` are already current.
     """
     _compute_children(entries)
     # Keep the locked_by/session_id mirror consistent after the mutator +
@@ -318,15 +318,20 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
     from fno.graph._constants import PRIORITY_MIGRATION
     from fno.graph.statuses import STATUS_MIGRATION
     for e in entries:
+        # Key rename `_status` -> `status`: a pre-rename row still carries the
+        # underscore key, so fold it in before anything reads `status`.
+        if "_status" in e:
+            e.setdefault("status", e["_status"])
+            del e["_status"]
         old_priority = e.get("priority")
         if old_priority in PRIORITY_MIGRATION:
             e["priority"] = PRIORITY_MIGRATION[old_priority]
         # Same idea for the renamed `claimed` -> `in_progress` status: the read
         # path must speak the current vocabulary even for a row whose on-disk
-        # `_status` predates the rename and has not been re-mutated yet.
-        old_status = e.get("_status")
+        # `status` predates the rename and has not been re-mutated yet.
+        old_status = e.get("status")
         if old_status in STATUS_MIGRATION:
-            e["_status"] = STATUS_MIGRATION[old_status]
+            e["status"] = STATUS_MIGRATION[old_status]
     for e in entries:
         e.setdefault("parent", None)
         e.setdefault("tags", [])
@@ -345,7 +350,7 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         e.setdefault("locked_by_harness_session", None)
         e.setdefault("claimed_at", None)
         e.setdefault("completed_at", None)
-        e.setdefault("_status", "ready")
+        e.setdefault("status", "ready")
         # Title-derived handle (ab-f82e8083). Default null on the read path;
         # the actual value is assigned by ensure_slugs() inside the locked
         # mutate cycle, so a pre-backfill node reads null and display falls
@@ -388,7 +393,7 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         e.setdefault("spawned_by_cwd", None)
         # Append-only lifecycle provenance (x-b6e4): empty on legacy nodes.
         e.setdefault("sessions", [])
-        # Queued: orthogonal to _status. A queued node is still ready (has a
+        # Queued: orthogonal to status. A queued node is still ready (has a
         # plan, unblocked); the queued_at field marks the user's intent to
         # pick it up next/today. Cleared on completion.
         e.setdefault("queued_at", None)
@@ -481,7 +486,7 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
         ensure_slugs(entries)
         entries = recompute_statuses(entries)
         # Status-forward key order + fresh children index. Runs after
-        # recompute_statuses so _status (top-level and inside child summaries)
+        # recompute_statuses so status (top-level and inside child summaries)
         # is already current.
         entries = canonicalize_entries(entries)
         # Backup previous content BEFORE overwriting (so --revert has something

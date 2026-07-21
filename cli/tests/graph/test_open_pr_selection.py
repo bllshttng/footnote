@@ -2,7 +2,7 @@
 
 The bug: `fno backlog next` / `ready` (and therefore `advance` auto-continue and
 megawalk, which both shell `fno backlog next`) re-select a node that already has
-an open, unmerged PR. A `no-merge` node keeps `_status: ready` for the entire
+an open, unmerged PR. A `no-merge` node keeps `status: ready` for the entire
 review window (it only becomes `done` at merge), and its PID-based `node:<id>`
 claim dies when the builder session exits - so the node looks like fresh ready
 work and a redundant worker is dispatched.
@@ -53,7 +53,7 @@ def _node(node_id: str, **overrides) -> dict:
         "completed_at": None,
         "pr_number": None,
         "merge_status": None,
-        "_status": "ready",
+        "status": "ready",
         "created_at": _RECENT_CREATED,
     }
     base.update(overrides)
@@ -199,7 +199,7 @@ def test_ready_include_deferred_keeps_pr_bearing_deferred_node(graph_file):
         _node(
             "ab-eeee5555",
             pr_number=515,
-            _status="deferred",
+            status="deferred",
             deferred_at="2026-06-13T02:00:00+00:00",
             deferred_reason="paused by operator",
         ),
@@ -216,7 +216,7 @@ def test_next_include_deferred_keeps_pr_bearing_deferred_node(graph_file):
         _node(
             "ab-eeee5555",
             pr_number=515,
-            _status="deferred",
+            status="deferred",
             deferred_at="2026-06-13T02:00:00+00:00",
             deferred_reason="paused by operator",
         ),
@@ -232,7 +232,7 @@ def test_ready_default_still_omits_deferred_pr_node(graph_file):
     """Without --include-deferred, the deferred node is absent anyway (status
     filter), so the scoping change does not leak it into the normal listing."""
     graph_file([
-        _node("ab-eeee5555", pr_number=515, _status="deferred"),
+        _node("ab-eeee5555", pr_number=515, status="deferred"),
         _node("ab-ffff6666", pr_number=515),  # ready + open PR -> excluded
         _node("ab-aaaa7777"),                  # ready, no PR -> listed
     ])

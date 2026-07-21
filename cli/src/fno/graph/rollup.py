@@ -98,7 +98,7 @@ def is_orphan(entry: Entry, id_to_entry: dict[str, Entry]) -> bool:
         return False
     if entry.get("orphan_ok"):
         return False
-    if entry.get("_status") in CLOSED_STATUSES:
+    if entry.get("status") in CLOSED_STATUSES:
         return False
     return not has_epic_ancestor(entry, id_to_entry)
 
@@ -136,7 +136,7 @@ def resolve(node: Entry, entries: list[Entry]) -> Resolution:
         if not any(
             isinstance(e, dict)
             and e.get("type") == "epic"
-            and e.get("_status") not in _RETIRED_EPIC_STATUSES
+            and e.get("status") not in _RETIRED_EPIC_STATUSES
             for e in entries
         ):
             return Resolution("exempt", reason="no epics in graph")

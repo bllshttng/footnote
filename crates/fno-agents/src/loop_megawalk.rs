@@ -72,7 +72,7 @@ use std::process::Command;
 // closes on the same merge that finishes its last child), cascades to the
 // grandparent, and tags the PR-less close with a completion_note. So the walker
 // no longer needs to discover or close epics: it dispatches leaves only, and the
-// box closes itself. recompute_statuses still derives _status:done from the
+// box closes itself. recompute_statuses still derives status:done from the
 // individual node's completed_at; the cascade is what SETS the parent's
 // completed_at (deliberately, in the close path - not a recompute derivation).
 
@@ -882,7 +882,7 @@ impl Queue for MegawalkQueue {
     /// ## Park-exclusion (AC2-EDGE): hold claim on Parked/Refused
     ///
     /// Releases the node claim on Closed AND AwaitingMerge (both success-shaped:
-    /// an exit-5 node carries a PR, so its durable `_status: in_review` already
+    /// an exit-5 node carries a PR, so its durable `status: in_review` already
     /// excludes it from next/ready/named dispatch - holding the claim would only
     /// starve the walker of a slot). For Parked and Refused outcomes, the claim
     /// is HELD so the live-claims

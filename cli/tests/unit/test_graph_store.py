@@ -87,7 +87,7 @@ def test_ac7_edge_mixed_version_round_trip(tmp_path):
     saved = json.loads(p.read_text())["entries"][0]
     assert saved["locked_by"] == "worker-7"
     assert saved["session_id"] == "worker-7"  # mirror written
-    assert saved["_status"] == "in_progress"
+    assert saved["status"] == "in_progress"
 
 
 def test_ac1_hp_lock_path_is_tmp_abilities_graph_lock():
@@ -162,7 +162,7 @@ def test_ac1_hp_apply_graph_defaults():
     assert e["priority"] == "p2"
     assert e["domain"] == "code"
     assert e["blocked_by"] == []
-    assert e["_status"] == "ready"
+    assert e["status"] == "ready"
     assert e["cost_sessions"] == []
 
 
@@ -320,3 +320,14 @@ def test_ac2_err_read_graph_corrupt_returns_empty(tmp_path):
     path.write_text("{ INVALID JSON }")
     entries = read_graph(path)
     assert entries == []
+
+
+def test_legacy_underscore_status_key_migrates_on_read(tmp_path):
+    """A pre-rename row carries `_status`; read_graph folds it into `status`."""
+    path = _make_graph(
+        tmp_path, [{"id": "ab-12341234", "title": "T", "_status": "claimed"}]
+    )
+    entry = read_graph(path)[0]
+    assert "_status" not in entry
+    # STATUS_MIGRATION still applies after the key fold.
+    assert entry["status"] == "in_progress"

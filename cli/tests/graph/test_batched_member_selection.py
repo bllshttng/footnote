@@ -49,7 +49,7 @@ def _node(node_id: str, **overrides) -> dict:
         "pr_number": None,
         "merge_status": None,
         "batch": None,
-        "_status": "ready",
+        "status": "ready",
         "created_at": _RECENT_CREATED,
     }
     base.update(overrides)

@@ -25,7 +25,7 @@ root = project_root_from_settings(e["project"]) if e.get("project") else None
 e["_resolved_cwd"] = root or e.get("cwd")
 ```
 
-Underscore prefix = derived, matching `_status`. Unlike `_status` it is **never persisted** to graph.json - a persisted copy would go stale when the work-map changes; read-time derivation stays current forever.
+Underscore prefix = derived, matching `status`. Unlike `status` it is **never persisted** to graph.json - a persisted copy would go stale when the work-map changes; read-time derivation stays current forever.
 
 ### 2. Launch consumers
 

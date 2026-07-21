@@ -150,7 +150,7 @@ def test_design_node_is_never_stale_ready(tmp_path):
     os.utime(plan, (0, 0))  # ancient mtime: no movement signal
     node = {
         "id": "x-old",
-        "_status": "ready",
+        "status": "ready",
         "plan_path": str(plan),
         "created_at": (now - timedelta(days=400)).isoformat(),
     }
@@ -172,7 +172,7 @@ def test_recompute_persists_the_design_rung(tmp_path):
         {"id": "x-r", "plan_path": str(blueprint)},
         {"id": "x-p", "plan_path": str(design), "locked_by": "w", "claimed_at": _now()},
     ]
-    got = {e["id"]: e["_status"] for e in recompute_statuses(entries)}
+    got = {e["id"]: e["status"] for e in recompute_statuses(entries)}
     assert got == {"x-i": "idea", "x-d": "design", "x-r": "ready", "x-p": "in_progress"}
 
 
@@ -180,8 +180,8 @@ def test_legacy_claimed_status_migrates_on_read(tmp_path):
     """A row persisted before the rename still reads as the current vocabulary."""
     from fno.graph.store import _apply_graph_defaults
 
-    entries = _apply_graph_defaults([{"id": "x-a", "_status": "claimed"}])
-    assert entries[0]["_status"] == "in_progress"
+    entries = _apply_graph_defaults([{"id": "x-a", "status": "claimed"}])
+    assert entries[0]["status"] == "in_progress"
 
 
 def _fm(path) -> str:
@@ -207,13 +207,13 @@ def test_graph_and_frontmatter_are_a_fixed_point(tmp_path, stamped):
     node = {"id": "x-a", "plan_path": str(plan)}
 
     recompute_statuses([node])
-    assert node["_status"] == stamped  # graph reads the doc
+    assert node["status"] == stamped  # graph reads the doc
 
     assert project_node_to_plan(node, plan) is False  # doc already agrees
     assert _fm(plan) == stamped
 
     recompute_statuses([node])
-    assert node["_status"] == stamped  # and it stays put
+    assert node["status"] == stamped  # and it stays put
 
 
 def test_claiming_a_design_node_advances_the_doc_off_design(tmp_path):
@@ -226,7 +226,7 @@ def test_claiming_a_design_node_advances_the_doc_off_design(tmp_path):
     node = {"id": "x-a", "plan_path": str(plan), "locked_by": "w", "claimed_at": _now()}
 
     recompute_statuses([node])
-    assert node["_status"] == "in_progress"
+    assert node["status"] == "in_progress"
 
     assert project_node_to_plan(node, plan) is True
     assert _fm(plan) == "in_progress"
@@ -239,7 +239,7 @@ def test_stale_graph_design_never_regresses_a_blueprinted_doc(tmp_path):
     """`plan sync` must not undo a fresh `/blueprint`.
 
     `/blueprint` rewrites the doc design -> ready without touching the graph,
-    and `read_graph` does not recompute, so the persisted `_status` can still
+    and `read_graph` does not recompute, so the persisted `status` can still
     say `design` when the sweep runs. Repainting from that stale value would
     stamp `design` back onto the doc and un-blueprint it. The forward-only rule
     in project_plan_status is what prevents it.
@@ -248,7 +248,7 @@ def test_stale_graph_design_never_regresses_a_blueprinted_doc(tmp_path):
 
     plan = tmp_path / "p.md"
     plan.write_text("---\nstatus: ready\ntitle: T\n---\n\n# T\n\nbody\n")
-    stale = {"id": "x-a", "plan_path": str(plan), "_status": "design"}
+    stale = {"id": "x-a", "plan_path": str(plan), "status": "design"}
 
     assert project_node_to_plan(stale, plan) is False
     assert _fm(plan) == "ready"  # blueprint survives
@@ -269,7 +269,7 @@ def test_idea_can_skip_design_and_go_straight_to_ready(tmp_path):
     node = {"id": "x-a", "plan_path": str(plan)}
 
     recompute_statuses([node])
-    assert node["_status"] == "ready"
+    assert node["status"] == "ready"
     assert not is_design_stage(node)
 
 
@@ -284,14 +284,14 @@ def test_stale_idea_graph_never_stamps_design_on_a_fresh_blueprint(tmp_path):
 
     plan = tmp_path / "quick.md"
     plan.write_text("---\nstatus: ready\ntitle: T\n---\n\n# T\n\nbody\n")
-    stale = {"id": "x-a", "plan_path": str(plan), "_status": "idea"}
+    stale = {"id": "x-a", "plan_path": str(plan), "status": "idea"}
 
     assert project_node_to_plan(stale, plan) is False
     assert _fm(plan) == "ready"
 
 
 def test_design_node_is_never_autonomously_selected(tmp_path):
-    """Every autonomous path filters `_status == "ready"` before selecting.
+    """Every autonomous path filters `status == "ready"` before selecting.
 
     Once the rung is persisted the node is excluded upstream, so the guard is
     no longer what saves us here - this pins the property itself rather than
@@ -303,8 +303,8 @@ def test_design_node_is_never_autonomously_selected(tmp_path):
     plan.write_text(DESIGN_FM)
     node = {"id": "x-d", "plan_path": str(plan)}
     recompute_statuses([node])
-    assert node["_status"] == "design"
-    assert node["_status"] != "ready"  # the filter every selector applies
+    assert node["status"] == "design"
+    assert node["status"] != "ready"  # the filter every selector applies
 
 
 def test_receipt_reports_a_node_already_on_the_design_rung(tmp_path):
@@ -346,8 +346,8 @@ def test_think_attaches_plan_then_blueprint_arms_it(tmp_path):
 
     # /think links it: parked, but visible and explained rather than silent.
     recompute_statuses([node])
-    assert node["_status"] == "design"
-    assert node["_status"] != "ready"  # the filter every autonomous selector applies
+    assert node["status"] == "design"
+    assert node["status"] != "ready"  # the filter every autonomous selector applies
     assert _starvation_receipts([node], None, True, None, set(), now, 21) == [
         ("x-8af8", "design")
     ]
@@ -355,7 +355,7 @@ def test_think_attaches_plan_then_blueprint_arms_it(tmp_path):
     # /blueprint flips the doc; the very same node is now dispatchable.
     doc.write_text("---\nstatus: ready\nnode: x-8af8\n---\n\n## Execution Strategy\n")
     recompute_statuses([node])
-    assert node["_status"] == "ready"
+    assert node["status"] == "ready"
     assert selection_guards(node, {"x-8af8": node}, now) is None
 
 
@@ -373,7 +373,7 @@ def test_starvation_receipt_names_design_not_quarantined(tmp_path):
     plan.write_text("---\nstatus: design\n---\n")
     node = {
         "id": "x-aaaa",
-        "_status": "ready",
+        "status": "ready",
         "plan_path": str(plan),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

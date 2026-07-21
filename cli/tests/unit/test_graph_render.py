@@ -26,7 +26,7 @@ def _entry(eid: str, **kwargs) -> dict:
         "priority": "p2",
         "completed_at": None,
         "session_id": None,
-        "_status": "ready",
+        "status": "ready",
         "blocked_by": [],
         "plan_path": None,
         "pr_url": None,
@@ -40,41 +40,41 @@ def _entry(eid: str, **kwargs) -> dict:
 
 def test_column_ready_p2_goes_next():
     """Intent mapping: ready+p2 (this-week-ish) lands in Next."""
-    e = _entry("ab-11111111", _status="ready", priority="p2")
+    e = _entry("ab-11111111", status="ready", priority="p2")
     assert _kanban_column(e) == "Next"
 
 
 def test_column_ready_p0_goes_now():
     """p0 (drop-everything) is today-ish - Now column regardless of session."""
-    e = _entry("ab-11111112", _status="ready", priority="p0")
+    e = _entry("ab-11111112", status="ready", priority="p0")
     assert _kanban_column(e) == "Now"
 
 
 def test_column_ready_p1_goes_now():
     """p1 (next-up) is today-or-tomorrow-ish - Now column."""
-    e = _entry("ab-11111113", _status="ready", priority="p1")
+    e = _entry("ab-11111113", status="ready", priority="p1")
     assert _kanban_column(e) == "Now"
 
 
 def test_column_ready_p3_goes_later():
     """p3 (long-tail) lands in Later regardless of session state."""
-    e = _entry("ab-11111114", _status="ready", priority="p3")
+    e = _entry("ab-11111114", status="ready", priority="p3")
     assert _kanban_column(e) == "Later"
 
 
 def test_column_claimed_overrides_priority():
     """A claimed (in-session) node lands in Now even if it'd otherwise be Later."""
-    e = _entry("ab-22222222", _status="in_progress", priority="p3")
+    e = _entry("ab-22222222", status="in_progress", priority="p3")
     assert _kanban_column(e) == "Now"
 
 
 def test_column_queued_goes_triage():
     """A queued node (awaiting human ack) lands in Triage, not Now, regardless
     of priority - it must not inflate the Now lane (ab-95a4a479)."""
-    e = _entry("ab-22222223", _status="ready", priority="p3", queued_at="2026-05-12T12:00:00Z")
+    e = _entry("ab-22222223", status="ready", priority="p3", queued_at="2026-05-12T12:00:00Z")
     assert _kanban_column(e) == "Triage"
     # priority is irrelevant once queued: a queued p1 still goes to Triage.
-    e_p1 = _entry("ab-2222222a", _status="ready", priority="p1", queued_at="2026-05-12T12:00:00Z")
+    e_p1 = _entry("ab-2222222a", status="ready", priority="p1", queued_at="2026-05-12T12:00:00Z")
     assert _kanban_column(e_p1) == "Triage"
 
 
@@ -83,7 +83,7 @@ def test_column_claimed_beats_queued():
     it also carries queued_at."""
     e = _entry(
         "ab-2222222b",
-        _status="in_progress",
+        status="in_progress",
         priority="p3",
         queued_at="2026-05-12T12:00:00Z",
     )
@@ -94,7 +94,7 @@ def test_column_queued_does_not_override_deferred():
     """A queued+deferred node is excluded - the explicit pause wins over queue intent."""
     e = _entry(
         "ab-22222224",
-        _status="deferred",
+        status="deferred",
         deferred_at="2026-05-12T12:00:00Z",
         queued_at="2026-05-11T12:00:00Z",
     )
@@ -103,16 +103,16 @@ def test_column_queued_does_not_override_deferred():
 
 def test_column_blocked_rides_priority():
     """Blocked is no longer a Later override - it rides its priority. Surface as visual flag."""
-    e = _entry("ab-33333331", _status="blocked", priority="p1")
+    e = _entry("ab-33333331", status="blocked", priority="p1")
     assert _kanban_column(e) == "Now"
-    e2 = _entry("ab-33333332", _status="blocked", priority="p2")
+    e2 = _entry("ab-33333332", status="blocked", priority="p2")
     assert _kanban_column(e2) == "Next"
-    e3 = _entry("ab-33333333", _status="blocked", priority="p3")
+    e3 = _entry("ab-33333333", status="blocked", priority="p3")
     assert _kanban_column(e3) == "Later"
 
 
 def test_column_done_goes_done():
-    e = _entry("ab-44444444", _status="done", completed_at="2026-01-01T00:00:00Z")
+    e = _entry("ab-44444444", status="done", completed_at="2026-01-01T00:00:00Z")
     assert _kanban_column(e) == "Done"
 
 
@@ -122,20 +122,20 @@ def test_column_deferred_is_excluded():
         "ab-55555555",
         deferred_at="2026-01-01T00:00:00Z",
         deferred_reason="stale",
-        _status="deferred",
+        status="deferred",
     )
     assert _kanban_column(e) is None
 
 
 def test_column_superseded_is_excluded():
     """Superseded rows drop off the board (the successor carries the work)."""
-    e = _entry("ab-55555556", _status="superseded", superseded_by="ab-aaaaaaaa")
+    e = _entry("ab-55555556", status="superseded", superseded_by="ab-aaaaaaaa")
     assert _kanban_column(e) is None
 
 
 def test_column_idea_rides_priority():
     """Idea status (no plan yet) still rides priority. Surface 'needs plan' as visual flag."""
-    e = _entry("ab-55555557", _status="idea", priority="p1")
+    e = _entry("ab-55555557", status="idea", priority="p1")
     assert _kanban_column(e) == "Now"
 
 
@@ -150,7 +150,7 @@ def test_ac1_hp_column_roadmap_excluded():
 def test_in_progress_epic_ids_detects_done_or_claimed_child():
     entries = [
         _entry("ab-epic0001"),                                   # in-progress (claimed child)
-        _entry("ab-kid00001", _status="in_progress", parent="ab-epic0001"),
+        _entry("ab-kid00001", status="in_progress", parent="ab-epic0001"),
         _entry("ab-epic0002"),                                   # in-progress (done child)
         _entry("ab-kid00002", completed_at="2026-01-01T00:00:00Z", parent="ab-epic0002"),
         _entry("ab-epic0003"),                                   # NOT in progress (ready child)
@@ -163,11 +163,11 @@ def test_in_progress_epic_ids_detects_done_or_claimed_child():
 
 def test_column_in_progress_epic_goes_now():
     """An in-progress epic (passed in the set) lands in Now even at p3, derived
-    from its children - its own _status is left untouched (still `ready`)."""
+    from its children - its own status is left untouched (still `ready`)."""
     epic = _entry("ab-epic0001", priority="p3")  # would be Later by priority
     assert _kanban_column(epic, frozenset({"ab-epic0001"})) == "Now"
-    # _status was never mutated to a session-less "in_progress".
-    assert epic["_status"] == "ready"
+    # status was never mutated to a session-less "in_progress".
+    assert epic["status"] == "ready"
 
 
 def test_column_epic_not_in_progress_rides_priority():
@@ -234,8 +234,8 @@ def test_sort_key_tolerates_null_created_at(tmp_path):
 
     # Done column path: two completed nodes with null completed_at must not crash.
     done = [
-        _entry("ab-done0001", _status="done", completed_at=None),
-        _entry("ab-done0002", _status="done", completed_at=None),
+        _entry("ab-done0001", status="done", completed_at=None),
+        _entry("ab-done0002", status="done", completed_at=None),
     ]
     output = tmp_path / "graph.md"
     render_graph_md(done + nodes, output)  # must not raise TypeError
@@ -430,7 +430,7 @@ def test_ac1_hp_render_done_cap_at_10(tmp_path):
     """AC1-HP: Done column shows at most 10 entries."""
     entries = [
         _entry(f"ab-{i:08x}", title=f"DoneEntry{i:02d}",
-               _status="done", completed_at=f"2026-01-{i:02d}T00:00:00Z")
+               status="done", completed_at=f"2026-01-{i:02d}T00:00:00Z")
         for i in range(1, 16)
     ]
     output = tmp_path / "graph.md"
@@ -444,7 +444,7 @@ def test_ac1_hp_render_done_cap_at_10(tmp_path):
 # -- x-4845: live node-claim overlay --
 
 def test_overlay_live_claim_routes_to_now():
-    """AC: a node with a LIVE node:<id> claim and no session_id (so _status is
+    """AC: a node with a LIVE node:<id> claim and no session_id (so status is
     not 'claimed') routes to Now off the lockfile, not by bare priority."""
     e = _entry("x-aaaa", priority="p3")  # p3 would be Later without the overlay
     assert _kanban_column(e) == "Later"
@@ -460,9 +460,9 @@ def test_overlay_absent_for_unclaimed_node():
 
 
 def test_overlay_never_demotes_claimed():
-    """AC: a node whose _status is already 'claimed' stays in Now regardless of
+    """AC: a node whose status is already 'claimed' stays in Now regardless of
     the overlay (additive, never demotes)."""
-    e = _entry("x-cccc", session_id="s1", _status="in_progress")
+    e = _entry("x-cccc", session_id="s1", status="in_progress")
     assert _kanban_column(e, frozenset(), frozenset()) == "Now"
     assert _kanban_column(e, frozenset(), frozenset({"x-cccc"})) == "Now"
 
@@ -471,13 +471,13 @@ def test_overlay_does_not_resurrect_offboard():
     """Invariant: the overlay is additive to on-board lanes and never resurrects
     a deferred/superseded (off-board) node even if a claim leaks onto it."""
     for st in ("deferred", "superseded"):
-        e = _entry("x-dddd", _status=st, deferred_at="2026-01-01T00:00:00Z")
+        e = _entry("x-dddd", status=st, deferred_at="2026-01-01T00:00:00Z")
         assert _kanban_column(e, frozenset(), frozenset({"x-dddd"})) is None
 
 
 def test_overlay_degrades_when_claims_unreadable(tmp_path, monkeypatch):
     """AC: claims subsystem unreadable -> the helper returns an empty overlay
-    (it swallows faults), so render still succeeds with _status-only placement."""
+    (it swallows faults), so render still succeeds with status-only placement."""
     monkeypatch.setattr("fno.graph.render.live_claimed_node_ids", lambda: set())
     entries = [_entry("x-eeee", priority="p2")]
     output = tmp_path / "graph.md"

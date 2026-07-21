@@ -268,7 +268,7 @@ def test_direct_dependents_carry_model_tier(monkeypatch):
     graph = [
         {"id": "ab-closed11", "project": "fno"},
         {"id": "ab-dep00001", "project": "fno", "blocked_by": ["ab-closed11"],
-         "_status": "ready", "model_tier": "high", "cwd": "/w"},
+         "status": "ready", "model_tier": "high", "cwd": "/w"},
     ]
     monkeypatch.setattr("fno.graph.store.read_graph", lambda p: graph)
     deps = adv._direct_dependents("ab-closed11", "fno")
@@ -1007,12 +1007,12 @@ def test_direct_dependents_tags_same_and_cross_project(monkeypatch):
     import fno.paths as paths
 
     entries = [
-        {"id": "ab-same", "project": "fno", "blocked_by": ["ab-A"], "_status": "ready",
+        {"id": "ab-same", "project": "fno", "blocked_by": ["ab-A"], "status": "ready",
          "slug": "same", "cwd": "/repo/fno"},
-        {"id": "ab-cross", "project": "web", "blocked_by": ["ab-A"], "_status": "ready",
+        {"id": "ab-cross", "project": "web", "blocked_by": ["ab-A"], "status": "ready",
          "slug": "cross", "cwd": "/repo/web"},
-        {"id": "ab-blocked", "project": "fno", "blocked_by": ["ab-A"], "_status": "blocked"},
-        {"id": "ab-other", "project": "fno", "blocked_by": ["ab-Z"], "_status": "ready"},
+        {"id": "ab-blocked", "project": "fno", "blocked_by": ["ab-A"], "status": "blocked"},
+        {"id": "ab-other", "project": "fno", "blocked_by": ["ab-Z"], "status": "ready"},
     ]
     monkeypatch.setattr(store, "read_graph", lambda p: entries)
     monkeypatch.setattr(paths, "graph_json", lambda: Path("/unused/graph.json"))
@@ -1085,18 +1085,18 @@ def test_dependents_zero_dependents_is_clean_noop(iso, monkeypatch):
 
 def test_direct_dependents_filters_to_ready(monkeypatch):
     entries = [
-        {"id": "A", "project": "etl", "_status": "done", "blocked_by": []},
+        {"id": "A", "project": "etl", "status": "done", "blocked_by": []},
         # ready cross-project direct dependent -> INCLUDED (cross_project True)
-        {"id": "B", "project": "web", "_status": "ready", "blocked_by": ["A"],
+        {"id": "B", "project": "web", "status": "ready", "blocked_by": ["A"],
          "slug": "bee", "cwd": "/w"},
         # ready same-project dependent -> NOW INCLUDED (RC1; cross_project False)
-        {"id": "C", "project": "etl", "_status": "ready", "blocked_by": ["A"]},
+        {"id": "C", "project": "etl", "status": "ready", "blocked_by": ["A"]},
         # cross-project but still blocked by another open node -> EXCLUDED
-        {"id": "D", "project": "web", "_status": "blocked", "blocked_by": ["A", "X"]},
+        {"id": "D", "project": "web", "status": "blocked", "blocked_by": ["A", "X"]},
         # cross-project dependent with no plan (idea) -> EXCLUDED
-        {"id": "E", "project": "web", "_status": "idea", "blocked_by": ["A"]},
+        {"id": "E", "project": "web", "status": "idea", "blocked_by": ["A"]},
         # not a dependent of A -> EXCLUDED
-        {"id": "F", "project": "web", "_status": "ready", "blocked_by": []},
+        {"id": "F", "project": "web", "status": "ready", "blocked_by": []},
     ]
     monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
     deps = adv._direct_dependents("A", "etl")
@@ -1110,7 +1110,7 @@ def test_direct_dependents_filters_to_ready(monkeypatch):
 def test_direct_dependents_treats_missing_closed_project_as_cross(monkeypatch):
     """A closed node with no project still surfaces foreign dependents."""
     entries = [
-        {"id": "B", "project": "web", "_status": "ready", "blocked_by": ["A"]},
+        {"id": "B", "project": "web", "status": "ready", "blocked_by": ["A"]},
     ]
     monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
     deps = adv._direct_dependents("A", None)
@@ -1122,10 +1122,10 @@ def test_direct_dependents_skips_pr_in_flight(monkeypatch):
     reads `ready`, but must NOT be re-dispatched - mirror _has_unmerged_open_pr."""
     entries = [
         # ready cross-project dep WITH an open PR -> EXCLUDED (in review)
-        {"id": "B", "project": "web", "_status": "ready", "blocked_by": ["A"],
+        {"id": "B", "project": "web", "status": "ready", "blocked_by": ["A"],
          "pr_number": 99, "completed_at": None},
         # ready cross-project dep with NO pr -> INCLUDED
-        {"id": "C", "project": "web", "_status": "ready", "blocked_by": ["A"]},
+        {"id": "C", "project": "web", "status": "ready", "blocked_by": ["A"]},
     ]
     monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
     deps = adv._direct_dependents("A", "etl")
@@ -1136,8 +1136,8 @@ def test_direct_dependents_skips_non_dict_and_idless(monkeypatch):
     """gemini medium: a malformed (non-dict / id-less) entry is skipped, not crashed."""
     entries = [
         "not-a-dict",
-        {"project": "web", "_status": "ready", "blocked_by": ["A"]},  # no id
-        {"id": "B", "project": "web", "_status": "ready", "blocked_by": ["A"]},
+        {"project": "web", "status": "ready", "blocked_by": ["A"]},  # no id
+        {"id": "B", "project": "web", "status": "ready", "blocked_by": ["A"]},
     ]
     monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
     deps = adv._direct_dependents("A", "etl")
@@ -1150,10 +1150,10 @@ def test_direct_dependents_skips_epic_dependent(monkeypatch):
     cmd_next's epic exclusion on the edge-following dependent path."""
     entries = [
         # E is a ready dependent of A, but it is also B's parent -> an epic.
-        {"id": "E", "project": "web", "_status": "ready", "blocked_by": ["A"]},
-        {"id": "B", "project": "web", "_status": "ready", "parent": "E"},
+        {"id": "E", "project": "web", "status": "ready", "blocked_by": ["A"]},
+        {"id": "B", "project": "web", "status": "ready", "parent": "E"},
         # L is a ready leaf dependent of A (no children) -> dispatched.
-        {"id": "L", "project": "web", "_status": "ready", "blocked_by": ["A"]},
+        {"id": "L", "project": "web", "status": "ready", "blocked_by": ["A"]},
     ]
     monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
     deps = adv._direct_dependents("A", "etl")
@@ -1663,25 +1663,25 @@ def _gnow():
 
 def test_selection_guards_dead_ancestor_superseded():
     now = _gnow()
-    child = {"id": "c", "parent": "p", "_status": "ready",
+    child = {"id": "c", "parent": "p", "status": "ready",
              "plan_path": "x", "created_at": now.isoformat()}
-    by_id = {"c": child, "p": {"id": "p", "_status": "superseded"}}
+    by_id = {"c": child, "p": {"id": "p", "status": "superseded"}}
     assert adv.selection_guards(child, by_id, now) == "dead-ancestor:p"
 
 
 def test_selection_guards_dead_ancestor_transitive_deferred():
     now = _gnow()
     by_id = {
-        "c": {"id": "c", "parent": "m", "_status": "ready", "created_at": now.isoformat()},
-        "m": {"id": "m", "parent": "g", "_status": "ready"},
-        "g": {"id": "g", "_status": "deferred"},
+        "c": {"id": "c", "parent": "m", "status": "ready", "created_at": now.isoformat()},
+        "m": {"id": "m", "parent": "g", "status": "ready"},
+        "g": {"id": "g", "status": "deferred"},
     }
     assert adv.selection_guards(by_id["c"], by_id, now) == "dead-ancestor:g"
 
 
 def test_selection_guards_missing_parent_no_verdict():
     now = _gnow()
-    child = {"id": "c", "parent": "gone", "_status": "ready",
+    child = {"id": "c", "parent": "gone", "status": "ready",
              "plan_path": "x", "created_at": now.isoformat()}
     assert adv.selection_guards(child, {"c": child}, now) is None
 
@@ -1689,9 +1689,9 @@ def test_selection_guards_missing_parent_no_verdict():
 def test_selection_guards_parent_cycle_terminates():
     now = _gnow()
     by_id = {
-        "a": {"id": "a", "parent": "b", "_status": "ready",
+        "a": {"id": "a", "parent": "b", "status": "ready",
               "plan_path": "x", "created_at": now.isoformat()},
-        "b": {"id": "b", "parent": "a", "_status": "ready"},
+        "b": {"id": "b", "parent": "a", "status": "ready"},
     }
     # No dead ancestor in the cycle; must terminate and (recent) not quarantine.
     assert adv.selection_guards(by_id["a"], by_id, now) is None
@@ -1700,14 +1700,14 @@ def test_selection_guards_parent_cycle_terminates():
 def test_selection_guards_stale_quarantine():
     now = _gnow()
     old = (now - timedelta(days=80)).isoformat()
-    node = {"id": "c", "_status": "ready", "created_at": old}
+    node = {"id": "c", "status": "ready", "created_at": old}
     assert adv.selection_guards(node, {"c": node}, now) == "stale-quarantine"
 
 
 def test_selection_guards_healthy_ready_selected():
     now = _gnow()
     recent = (now - timedelta(days=2)).isoformat()
-    node = {"id": "c", "_status": "ready", "plan_path": "x", "created_at": recent}
+    node = {"id": "c", "status": "ready", "plan_path": "x", "created_at": recent}
     assert adv.selection_guards(node, {"c": node}, now) is None
 
 
@@ -1716,7 +1716,7 @@ def test_selection_guards_stale_check_skipped_for_non_ready():
     # staleness is detect_stale_ideas' job.
     now = _gnow()
     old = (now - timedelta(days=80)).isoformat()
-    node = {"id": "c", "_status": "idea", "created_at": old}
+    node = {"id": "c", "status": "idea", "created_at": old}
     assert adv.selection_guards(node, {"c": node}, now) is None
 
 
@@ -1728,7 +1728,7 @@ def test_selection_guards_fail_open_on_error(monkeypatch, capsys):
 
     monkeypatch.setattr(mm, "is_stale_ready", boom)
     now = _gnow()
-    node = {"id": "c", "_status": "ready", "created_at": now.isoformat()}
+    node = {"id": "c", "status": "ready", "created_at": now.isoformat()}
     assert adv.selection_guards(node, {"c": node}, now) is None
     assert "selecting anyway" in capsys.readouterr().err
 
@@ -1744,7 +1744,7 @@ def test_selection_guards_design_stage_not_autonomously_selected(tmp_path):
     now = _gnow()
     node = {
         "id": "c",
-        "_status": "ready",
+        "status": "ready",
         "plan_path": _design_plan(tmp_path),
         "created_at": now.isoformat(),
     }
@@ -1755,7 +1755,7 @@ def test_selection_guards_blueprinted_plan_is_armed(tmp_path):
     now = _gnow()
     node = {
         "id": "c",
-        "_status": "ready",
+        "status": "ready",
         "plan_path": _design_plan(tmp_path, status="ready"),
         "created_at": now.isoformat(),
     }
@@ -1768,7 +1768,7 @@ def test_selection_guards_missing_plan_file_stays_armed(tmp_path):
     now = _gnow()
     node = {
         "id": "c",
-        "_status": "ready",
+        "status": "ready",
         "plan_path": str(tmp_path / "gone.md"),
         "created_at": now.isoformat(),
     }
@@ -1776,10 +1776,10 @@ def test_selection_guards_missing_plan_file_stays_armed(tmp_path):
 
 
 def test_selection_guards_dead_ancestor_via_field_not_status():
-    # Robust to read_graph NOT recomputing _status: an ancestor carrying only
+    # Robust to read_graph NOT recomputing status: an ancestor carrying only
     # the underlying superseded_by / deferred_at field is still a dead ancestor.
     now = _gnow()
-    child = {"id": "c", "parent": "p", "_status": "ready", "created_at": now.isoformat()}
+    child = {"id": "c", "parent": "p", "status": "ready", "created_at": now.isoformat()}
     by_sup = {"c": child, "p": {"id": "p", "superseded_by": "new"}}
     assert adv.selection_guards(child, by_sup, now) == "dead-ancestor:p"
     by_def = {"c": child, "p": {"id": "p", "deferred_at": "2026-01-01T00:00:00+00:00"}}

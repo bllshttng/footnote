@@ -1,6 +1,6 @@
 """/blueprint refreshes the node's graph status so doc and graph agree.
 
-The graph derives `_status` FROM the plan doc, but `read_graph` never
+The graph derives `status` FROM the plan doc, but `read_graph` never
 recomputes - only a graph mutation does. So a doc that /blueprint just moved
 design -> ready would keep reading `design` on every board until something
 unrelated touched the graph. The blueprint write triggers the recompute itself.

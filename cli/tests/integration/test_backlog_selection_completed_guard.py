@@ -1,8 +1,8 @@
 """Backlog selection must never surface a completed node.
 
-read_graph does not recompute _status, so a node closed out of band (PR merged
+read_graph does not recompute status, so a node closed out of band (PR merged
 via reconcile/done in another process) can carry completed_at while its
-persisted _status is still a stale "ready". Without a completed_at guard,
+persisted status is still a stale "ready". Without a completed_at guard,
 `fno backlog next` returns it and `advance` dispatches a /target worker for an
 already-done node.
 """
@@ -37,10 +37,10 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 def test_completed_node_excluded_from_next_and_ready(tmp_graph):
     tmp_graph.write_text(json.dumps({"entries": [
-        {"id": "ab-DONE", "title": "done", "_status": "ready",
+        {"id": "ab-DONE", "title": "done", "status": "ready",
          "plan_path": "p.md", "project": "x",
          "completed_at": "2026-06-20T00:00:00Z"},
-        {"id": "ab-LIVE", "title": "live", "_status": "ready",
+        {"id": "ab-LIVE", "title": "live", "status": "ready",
          "plan_path": "q.md", "project": "x"},
     ]}))
 

@@ -62,7 +62,7 @@ def _has_unmerged_open_pr(e: dict) -> bool:
     dispatch (ab-372130f6).
 
     A node only leaves the ready pool at merge-and-close (completed_at set ->
-    recompute_statuses derives _status "done"). During the whole PR window
+    recompute_statuses derives status "done"). During the whole PR window
     pr_number is set but completed_at is None, so the status derivation still
     yields "ready"; this predicate is the missing selection-time guard,
     mirroring _live_claimed_node_ids() - the PID-based node claim dies when the
@@ -348,7 +348,7 @@ def _child_note(child: dict, events: list[dict], worker: Optional[str]) -> str:
     from fno.graph import failure
 
     node_id = child["id"]
-    status = child.get("_status") or child.get("status")
+    status = child.get("status") or child.get("status")
     if status == "deferred":
         return f"streak {failure.consecutive_failures(node_id, events)}"
     if status == "ready" and not worker:
@@ -397,7 +397,7 @@ def cmd_epic_status(
     events = _epic_events(children)
 
     def _status_of(c: dict) -> Optional[str]:
-        return c.get("_status") or c.get("status")
+        return c.get("status") or c.get("status")
 
     total = len(children)
     done = sum(1 for c in children if _status_of(c) == "done")
@@ -620,7 +620,7 @@ def _create_node_impl(
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
 
-    Both verbs create a plan-less node (which derives to ``_status: idea``);
+    Both verbs create a plan-less node (which derives to ``status: idea``);
     ``idea`` is just sugar for ``add``. Centralizing the body keeps their flag
     sets and behavior from drifting - the divergence that used to force a second
     ``fno backlog update`` just to set parent/size/domain on a fresh idea.
@@ -888,7 +888,7 @@ def cmd_idea(
 
     Equivalent to `fno backlog add <title>` but signals intent to skip the
     spec/plan ceremony for now. The new node has no ``plan_path`` and so
-    derives to ``_status: idea`` until a plan is associated (via
+    derives to ``status: idea`` until a plan is associated (via
     ``fno backlog intake`` or by setting ``--plan-path`` on
     ``fno backlog update``). Shares ``add``'s full option set so a fresh idea
     can carry parent/size/domain without a follow-up ``fno backlog update``.
@@ -1666,7 +1666,7 @@ def _intake_impl(
                     if entry.get("cwd") is None and resolved_cwd:
                         entry["cwd"] = resolved_cwd
                 # Promote idea -> ready by clearing any stale claimed_at.
-                # _status is recomputed by recompute_statuses on the next read.
+                # status is recomputed by recompute_statuses on the next read.
                 entry["claimed_at"] = None
                 break
             return es
@@ -2329,7 +2329,7 @@ def cmd_update(
     # Project the graph-authoritative fields (nav mirror + forward-only status)
     # onto the plan when a mirrored OR status-affecting field changed. Routed
     # through the fresh-re-read helper (not the pre-recompute `projected_node`)
-    # so the node carries its recomputed _status: a `--locked-by` claim reads
+    # so the node carries its recomputed status: a `--locked-by` claim reads
     # `claimed` -> plan `in_progress` (AC1-HP; the claim goes through this update
     # path, not the `claim` verb), and a `--completed` close reads `done` ->
     # `done` + `done_at`, including cascade-closed epic parents. Best-effort.
@@ -2489,7 +2489,7 @@ def _unclaim_node(task_id: str) -> None:
             raise typer.Exit(code=1)
         resolved_id = node["id"]
         # Same field clear as `update --locked-by null`; recompute_statuses
-        # derives _status back to ready from the now-empty locked_by.
+        # derives status back to ready from the now-empty locked_by.
         node["locked_by"] = None
         node["claimed_at"] = None
         return entries
@@ -2565,7 +2565,7 @@ def _starvation_receipts(
         # rather than drop it silently - the exact starvation this receipt
         # exists to prevent (a backlog that is ALL design-stage would otherwise
         # return null with nothing to say).
-        if e.get("_status") not in ("ready", "design", "idea") or e.get("completed_at"):
+        if e.get("status") not in ("ready", "design", "idea") or e.get("completed_at"):
             continue
         if roadmap_id and e.get("roadmap_id") != roadmap_id:
             continue
@@ -2586,13 +2586,13 @@ def _starvation_receipts(
             reason = "container"
         elif nid in claimed:
             reason = "claimed"
-        elif e.get("_status") == "design":
+        elif e.get("status") == "design":
             # Read off the persisted rung, not the guard: the guard only fires
             # for the stale window (graph still says `ready`, doc since edited
             # to design), so a node already ON the rung would fall through and
             # report nothing at all.
             reason = "design"
-        elif e.get("_status") == "ready" and (
+        elif e.get("status") == "ready" and (
             _has_unmerged_open_pr(e) or _is_batched_member(e)
         ):
             continue  # in review / batched - handled, not starved
@@ -2685,14 +2685,14 @@ def cmd_next(
         allowed.add("deferred")
 
     def _pick_ready(entries):
-        # read_graph does not recompute _status, so a node closed out of band
+        # read_graph does not recompute status, so a node closed out of band
         # (e.g. PR merged via reconcile/done in another process) can carry
-        # completed_at while its persisted _status is still "ready". Guard on
+        # completed_at while its persisted status is still "ready". Guard on
         # completed_at so advance / megawalk never dispatch a /target worker for
         # an already-done node.
         candidates = [
             e for e in entries
-            if e.get("_status") in allowed and not e.get("completed_at")
+            if e.get("status") in allowed and not e.get("completed_at")
         ]
         if roadmap_id:
             candidates = [e for e in candidates if e.get("roadmap_id") == roadmap_id]
@@ -2713,7 +2713,7 @@ def cmd_next(
         # is gone once the builder session exits, so this PR-state guard is the
         # only in-flight signal left during the review window.
         #
-        # Scoped to _status "ready": a deferred/idea row only appears here when
+        # Scoped to status "ready": a deferred/idea row only appears here when
         # an operator explicitly asked for it via --include-deferred /
         # --include-ideas, and the defer contract says those resurface on
         # request. The guard is about AUTO re-selection of fresh ready work, not
@@ -2724,7 +2724,7 @@ def cmd_next(
         # still caught.
         candidates = [
             e for e in candidates
-            if e.get("_status") != "ready" or not _has_unmerged_open_pr(e)
+            if e.get("status") != "ready" or not _has_unmerged_open_pr(e)
         ]
         # Containers are never directly buildable (x-33b2): an epic's work lives
         # in its decomposed children, so `next` must never return it - it
@@ -2878,13 +2878,13 @@ def cmd_ready(
         allowed.add("idea")
     if include_deferred:
         allowed.add("deferred")
-    # read_graph does not recompute _status, so a node closed out of band can
-    # carry completed_at while its persisted _status is still "ready". Guard on
+    # read_graph does not recompute status, so a node closed out of band can
+    # carry completed_at while its persisted status is still "ready". Guard on
     # completed_at so a done node never lists as actionable work (the same guard
     # is in `next`'s _pick_ready, the dispatch path).
     ready = [
         e for e in entries
-        if e.get("_status") in allowed and not e.get("completed_at")
+        if e.get("status") in allowed and not e.get("completed_at")
     ]
     ready = filter_by_project(ready, project, all_)
     if roadmap_id:
@@ -2913,12 +2913,12 @@ def cmd_ready(
     # listing must not present an already-PR'd node as actionable work.
     # cmd_ready keeps its own inline status/claim filter (it does not route
     # through _pick_ready), so the guard is applied here too for parity.
-    # Scoped to _status "ready" so an explicitly --include-deferred / -ideas
+    # Scoped to status "ready" so an explicitly --include-deferred / -ideas
     # paused PR-bearing node still lists (the defer contract resurfaces those
     # on request; codex PR #516 P2).
     ready = [
         e for e in ready
-        if e.get("_status") != "ready" or not _has_unmerged_open_pr(e)
+        if e.get("status") != "ready" or not _has_unmerged_open_pr(e)
     ]
     # Containers are never actionable work (x-33b2 / codex P2 on PR #69): drop
     # epics so `fno backlog ready` - and the `dispatch-node.sh --all-ready` bulk
@@ -3177,7 +3177,7 @@ def cmd_lanes(
                 "lane_id": lane_id,
                 "domain": meta.get("domain"),
                 "slug": node.get("slug"),
-                "status": node.get("_status"),
+                "status": node.get("status"),
                 "pr_number": node.get("pr_number"),
                 "holder": s.get("holder"),
             }
@@ -3215,6 +3215,10 @@ def cmd_get(
 ) -> None:
     from fno.graph.store import read_graph
     from fno.graph.fuzzy import resolve_node
+
+    # Pre-rename spelling; shell consumers outside this repo still pass it.
+    if field == "_status":
+        field = "status"
 
     entries = read_graph(_graph_path())
     # Deterministic resolution tiers 1-3 (ab-f82e8083): exact ab-id, exact slug,
@@ -3860,7 +3864,7 @@ def cmd_tree(
         children = children_map.get(parent_id, [])
         children.sort(key=_graph_sort_key_fn)
         for child in children:
-            icon = STATUS_ICONS.get(child.get("_status", "ready"), "[ ]")
+            icon = STATUS_ICONS.get(child.get("status", "ready"), "[ ]")
             title = child.get("title", "?")
             eid = child["id"]
             prefix = "  " * indent
@@ -3874,7 +3878,7 @@ def cmd_tree(
 
     roots = [e for e in entries if e.get("parent") is None or e.get("parent") not in id_to_entry]
     for root in sorted(roots, key=_graph_sort_key_fn):
-        icon = STATUS_ICONS.get(root.get("_status", "ready"), "[ ]")
+        icon = STATUS_ICONS.get(root.get("status", "ready"), "[ ]")
         title = root.get("title", "?")
         eid = root["id"]
         suffix = ""
@@ -3926,12 +3930,12 @@ def cmd_status(
 
     for proj_name, proj_entries in sorted(projects.items()):
         features = [e for e in proj_entries if e.get("type") == "feature"]
-        done = sum(1 for e in features if e.get("_status") == "done")
-        claimed = sum(1 for e in features if e.get("_status") == "in_progress")
-        ready = sum(1 for e in features if e.get("_status") == "ready")
-        ideas = sum(1 for e in features if e.get("_status") == "idea")
-        blocked = sum(1 for e in features if e.get("_status") == "blocked")
-        deferred = sum(1 for e in features if e.get("_status") == "deferred")
+        done = sum(1 for e in features if e.get("status") == "done")
+        claimed = sum(1 for e in features if e.get("status") == "in_progress")
+        ready = sum(1 for e in features if e.get("status") == "ready")
+        ideas = sum(1 for e in features if e.get("status") == "idea")
+        blocked = sum(1 for e in features if e.get("status") == "blocked")
+        deferred = sum(1 for e in features if e.get("status") == "deferred")
         total = len(features)
         cost = sum(e.get("cost_usd", 0) or 0 for e in features)
 
@@ -3974,7 +3978,7 @@ def cmd_status(
         for e in features:
             eid = e.get("id", "?")
             title = (e.get("title", "?"))[:28]
-            st = e.get("_status", "?")
+            st = e.get("status", "?")
             pri = e.get("priority", "?")
             c = f"${e.get('cost_usd', 0) or 0:.2f}"
             pr = f"#{e.get('pr_number')}" if e.get("pr_number") else "-"
@@ -3995,7 +3999,7 @@ def cmd_briefs(
     entries = read_graph(_graph_path())
     done_with_briefs = [
         e for e in entries
-        if e.get("_status") == "done" and e.get("has_brief")
+        if e.get("status") == "done" and e.get("has_brief")
     ]
     done_with_briefs.sort(key=lambda e: e.get("completed_at", ""), reverse=True)
 
@@ -4201,7 +4205,7 @@ def cmd_remove(
 #
 # ``defer`` records a first-class pause on a backlog node via dedicated
 # ``deferred_at`` + ``deferred_reason`` fields. The cascade derives
-# ``_status: deferred`` from those fields so the node disappears from the
+# ``status: deferred`` from those fields so the node disappears from the
 # default ``ready`` / ``next`` candidate sets and from triage proposals,
 # but resurfaces with ``--include-deferred``. Reversal is via ``undefer``
 # (idempotent: clearing already-clear state warns but exits 0).
@@ -4256,7 +4260,7 @@ def cmd_defer(
         # Clear completed_at so the cascade can flip to deferred. Without
         # this, deferring an already-done node is a silent no-op because
         # the precedence ladder is `done > deferred` - completed_at would
-        # keep _status pinned to done. Symmetric with cmd_done, which
+        # keep status pinned to done. Symmetric with cmd_done, which
         # clears deferred_at on the reverse transition.
         node["completed_at"] = None
         node["deferred_at"] = datetime.now(timezone.utc).isoformat()
@@ -4272,8 +4276,8 @@ def cmd_defer(
 #
 # ``queue`` is the user-facing triage marker for "I'm pulling this off
 # the backlog and intend to work on it next" (e.g. "tomorrow I'm going
-# to queue x, y, z"). Orthogonal to ``_status``: a queued node still has
-# ``_status: ready`` so ``fno backlog ready`` keeps surfacing it. The
+# to queue x, y, z"). Orthogonal to ``status``: a queued node still has
+# ``status: ready`` so ``fno backlog ready`` keeps surfacing it. The
 # kanban renderer reads ``queued_at`` separately and promotes the card
 # into the Now column (between ``claimed`` and the priority-driven
 # promotion rule).
@@ -4428,7 +4432,7 @@ def _pick_format_line(entry: dict, id_to_entry: dict[str, dict] | None = None) -
     want to queue A and the nodes it blocks together.
     """
     is_queued = bool(entry.get("queued_at"))
-    is_blocked = entry.get("_status") == "blocked"
+    is_blocked = entry.get("status") == "blocked"
     if is_queued and is_blocked:
         marker = "[Q!]"
     elif is_queued:
@@ -4616,7 +4620,7 @@ def cmd_pick(
         allowed.add("idea")
     if include_blocked:
         allowed.add("blocked")
-    candidates = [e for e in entries if e.get("_status") in allowed]
+    candidates = [e for e in entries if e.get("status") in allowed]
     candidates = filter_by_project(candidates, project, all_)
 
     if not candidates:
@@ -4666,7 +4670,7 @@ def cmd_pick(
                     _tsv_safe(e.get("title") or ""),
                     e.get("priority") or "p2",
                     _tsv_safe(e.get("project") or "-"),
-                    e.get("_status") or "ready",
+                    e.get("status") or "ready",
                     "1" if e.get("queued_at") else "0",
                     _tsv_safe(e.get("plan_path") or ""),
                     blockers,
@@ -4852,7 +4856,7 @@ def cmd_queued(
     output = [{
         "id": e["id"], "title": e.get("title"), "priority": e.get("priority"),
         "project": e.get("project"), "queued_at": e.get("queued_at"),
-        "queued_reason": e.get("queued_reason"), "_status": e.get("_status"),
+        "queued_reason": e.get("queued_reason"), "status": e.get("status"),
     } for e in queued]
     typer.echo(json.dumps(output, indent=2))
 
@@ -4913,7 +4917,7 @@ def cmd_undefer(
 def _project_plans_from_graph(node_ids: list[str]) -> None:
     """Project each named node's mirror fields + forward status onto its plan.
 
-    Re-reads the graph so every node carries its recomputed ``_status`` (a claim
+    Re-reads the graph so every node carries its recomputed ``status`` (a claim
     reads ``claimed`` -> ``in_progress``; a close reads ``done`` -> ``done`` +
     ``done_at``), then delegates to the shared converger. Covers cascade-closed
     epic parents that ``_stamp_and_graduate_plan`` never stamps. Best-effort per
@@ -4939,7 +4943,7 @@ def _apply_completion_fields(node: dict) -> None:
     Shared by ``done`` and ``reconcile`` so both close paths stay in
     lockstep. The caller owns the idempotency check (skip when
     ``completed_at`` is already set). ``recompute_statuses`` derives
-    ``_status: done`` from ``completed_at`` and unblocks dependents.
+    ``status: done`` from ``completed_at`` and unblocks dependents.
     """
     node["locked_by"] = None
     node["claimed_at"] = None
@@ -5250,7 +5254,7 @@ def cmd_done(
     """Mark a node complete.
 
     Sets ``completed_at`` to an ISO timestamp; ``recompute_statuses`` derives
-    ``_status: done`` from that field and unblocks any dependents.
+    ``status: done`` from that field and unblocks any dependents.
 
     Before mutation, a gh cross-check verifies that at least one referenced PR
     is MERGED (x-aba7: graph done = merged, uniformly). An OPEN PR is NOT
@@ -6363,7 +6367,7 @@ def cmd_maintain(
     from fno.graph.render_html import _load_wip_caps
     from fno.graph import maintain as _maintain
 
-    # Read once and derive _status so the judgment legs see accurate states
+    # Read once and derive status so the judgment legs see accurate states
     # (read_graph applies defaults but does not run the cascade).
     entries = recompute_statuses(read_graph(_graph_path()))
 
@@ -6502,7 +6506,7 @@ def cmd_maintain(
                         f"consecutive failed attempts"
                     )
                     # Mirror cmd_defer: clear claim/completion so the cascade
-                    # derives _status: deferred, then set the deferred fields.
+                    # derives status: deferred, then set the deferred fields.
                     n["locked_by"] = None
                     n["claimed_at"] = None
                     n["completed_at"] = None
@@ -7238,7 +7242,7 @@ def cmd_find(
     query: str = typer.Argument(..., help="ab-id / id-prefix / slug / bare-hex / free-text description"),
     domain: Optional[str] = typer.Option(None, "--domain", "-d", help="Filter by domain"),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project"),
-    status: Optional[str] = typer.Option(None, "--status", "-s", help="Filter by _status"),
+    status: Optional[str] = typer.Option(None, "--status", "-s", help="Filter by status"),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON array"),
 ) -> None:
     """Search graph entries: exact id/slug/bare-hex, else high-recall over title+slug+details.
@@ -7280,7 +7284,7 @@ def cmd_find(
             return False
         if project is not None and e.get("project") != project:
             return False
-        if status is not None and e.get("_status") != status:
+        if status is not None and e.get("status") != status:
             return False
         return True
 
@@ -7325,7 +7329,7 @@ def cmd_find(
         typer.echo(
             "\t".join([
                 format_handle(e),
-                e.get("_status", "?"),
+                e.get("status", "?"),
                 e.get("domain", "?"),
                 e.get("project", "-") or "-",
                 e.get("title", ""),
@@ -7641,10 +7645,10 @@ def cmd_supersede(
         # completed_at to let the precedence cascade flip to superseded -
         # erasing the ship timestamp on a shipped plan and destroying
         # forensic history. Use a follow-up node instead.
-        if old_node.get("completed_at") or old_node.get("_status") == "done":
+        if old_node.get("completed_at") or old_node.get("status") == "done":
             typer.echo(
                 f"Error: cannot supersede {replaces}: it is already shipped "
-                f"(_status=done). Open a follow-up node instead.",
+                f"(status=done). Open a follow-up node instead.",
                 err=True,
             )
             raise typer.Exit(code=1)

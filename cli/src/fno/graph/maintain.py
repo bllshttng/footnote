@@ -280,7 +280,7 @@ def detect_dup_groups(entries: list[dict]) -> list[list[str]]:
     """
     groups: dict[str, list[str]] = {}
     for e in entries:
-        if e.get("_status") != "idea":
+        if e.get("status") != "idea":
             continue
         nid = e.get("id")
         if not isinstance(nid, str):
@@ -322,7 +322,7 @@ def detect_rollup_candidates(
     }
     proposals: list[tuple[str, str, float]] = []
     for nid, entry in index.items():
-        if entry.get("_status") in ("done", "superseded", "deferred"):
+        if entry.get("status") in ("done", "superseded", "deferred"):
             continue
         if not is_orphan(entry, index):
             continue
@@ -427,7 +427,7 @@ def is_stale_ready(entry: dict, now: datetime, staleness_days: int) -> bool:
     selection guard, and the under-lock recheck in ``maintain --apply``.
 
     Caller guarantees the entry is ready-status; this does not re-check
-    ``_status`` so it stays reusable by the selection guard AND the maintain leg.
+    ``status`` so it stays reusable by the selection guard AND the maintain leg.
     """
     from fno.graph.ladder import is_design_stage
 
@@ -452,14 +452,14 @@ def detect_stale_ready(
     the SAME movement signals as ``advance.selection_guards`` so the maintain
     leg and live selection can never disagree about what is stale. Returns
     candidates for a reversible ``defer``; never mutates. A live-claimed node
-    reads ``_status: claimed`` (not ready) so it is already excluded here - the
+    reads ``status: claimed`` (not ready) so it is already excluded here - the
     "quarantine racing a live claim must lose" race rule holds without a probe.
     """
     if now is None:
         now = datetime.now(timezone.utc)
     out: list[StaleIdea] = []
     for e in entries:
-        if e.get("_status") != "ready":
+        if e.get("status") != "ready":
             continue
         nid = e.get("id")
         if not isinstance(nid, str):
@@ -485,7 +485,7 @@ def detect_stale_ideas(
         now = datetime.now(timezone.utc)
     out: list[StaleIdea] = []
     for e in entries:
-        if e.get("_status") != "idea":
+        if e.get("status") != "idea":
             continue
         nid = e.get("id")
         if not isinstance(nid, str):
@@ -538,7 +538,7 @@ def detect_failure_defers(
 
     Mirrors ``detect_temp_leaks`` / ``detect_rescope_fixes``: a pure detector
     that returns candidates (the CLI applies them under one lock). Candidates
-    are nodes ``fno backlog next`` would still pick (``_status`` ready, not
+    are nodes ``fno backlog next`` would still pick (``status`` ready, not
     already deferred) - the ones that burn an iteration on every walk. A node
     below threshold, or at exactly ``N-1``, is excluded (Boundaries). The streak
     is derived from the walker's events via ``failure.consecutive_failures``
@@ -552,7 +552,7 @@ def detect_failure_defers(
     for e in entries:
         if not isinstance(e, dict):
             continue
-        if e.get("_status") != "ready":
+        if e.get("status") != "ready":
             continue
         if e.get("deferred_at"):
             continue
@@ -669,7 +669,7 @@ def select_validity_candidates(
     validity_days, batch_size, _ = clamp_validity_bounds(validity_days, batch_size)
     scored: list[tuple[datetime, str, dict]] = []
     for e in entries:
-        if e.get("_status") != "idea":
+        if e.get("status") != "idea":
             continue
         nid = e.get("id")
         if not isinstance(nid, str) or nid in claimed_ids:
@@ -816,7 +816,7 @@ def collect_evidence(
         for other_id in sorted(m for m in matches if m):
             other = next((e for e in entries if e.get("id") == other_id), {})
             packet.items[f"graph:title-match:{other_id}"] = str(
-                other.get("_status") or "unknown"
+                other.get("status") or "unknown"
             )
 
     # pr: plan/PR pointers.
@@ -1379,7 +1379,7 @@ def run_validity_sweep(
             }
             for r in rows:
                 cur = current.get(r.node_id)
-                if cur is None or cur.get("_status") != "idea" or node_fingerprint(cur) != r.fingerprint:
+                if cur is None or cur.get("status") != "idea" or node_fingerprint(cur) != r.fingerprint:
                     r.mark_stale()
 
     if deck_id is None:

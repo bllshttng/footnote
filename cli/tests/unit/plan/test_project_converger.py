@@ -42,7 +42,7 @@ def test_projects_and_injects_parent_slug(tmp_path):
             "priority": "p0",
             "parent": "x-epic",
             "size": "M",
-            "_status": "ready",
+            "status": "ready",
         },
     ]
 
@@ -110,7 +110,7 @@ def test_empty_ids_no_op(tmp_path):
 def test_idempotent_second_run_zero(tmp_path):
     """AC2-EDGE: a converged doc rewrites zero files on a second pass."""
     plan = _plan(tmp_path, "child.md")
-    entries = [{"id": "x-c", "slug": "c", "plan_path": str(plan), "priority": "p0", "_status": "ready"}]
+    entries = [{"id": "x-c", "slug": "c", "plan_path": str(plan), "priority": "p0", "status": "ready"}]
 
     assert project_graph_nodes(entries, ["x-c"], root=str(tmp_path)) == 1
     assert project_graph_nodes(entries, ["x-c"], root=str(tmp_path)) == 0
@@ -135,9 +135,9 @@ def test_epic_doc_gets_rollup_counters(tmp_path):
     """An epic node's own doc carries the computed rollup counters."""
     epic_plan = _plan(tmp_path, "epic.md", _EPIC_PLAN)
     entries = [
-        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_plan), "_status": "ready"},
-        {"id": "c1", "parent": "x-epic", "_status": "done"},
-        {"id": "c2", "parent": "x-epic", "_status": "ready"},
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_plan), "status": "ready"},
+        {"id": "c1", "parent": "x-epic", "status": "done"},
+        {"id": "c2", "parent": "x-epic", "status": "ready"},
     ]
     assert project_graph_nodes(entries, ["x-epic"], root=str(tmp_path)) == 1
     _, fields, _ = read_plan_file(epic_plan)
@@ -154,8 +154,8 @@ def test_child_transition_repaints_parent_epic(tmp_path):
     epic_plan = _plan(tmp_path, "epic.md", _EPIC_PLAN)
     child_plan = _plan(tmp_path, "child.md")
     entries = [
-        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_plan), "_status": "ready"},
-        {"id": "x-child", "slug": "child", "parent": "x-epic", "plan_path": str(child_plan), "_status": "done"},
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_plan), "status": "ready"},
+        {"id": "x-child", "slug": "child", "parent": "x-epic", "plan_path": str(child_plan), "status": "done"},
     ]
     # Only the child id is passed; the epic doc must still be repainted.
     assert project_graph_nodes(entries, ["x-child"], root=str(tmp_path)) == 2
@@ -168,7 +168,7 @@ def test_leaf_doc_has_no_rollup_keys(tmp_path):
     """A non-epic leaf doc never gains rollup keys (they stay clean)."""
     plan = _plan(tmp_path, "child.md")
     # priority p0 differs from the doc's p2, so the projection rewrites the doc.
-    entries = [{"id": "x-c", "slug": "c", "type": "feature", "plan_path": str(plan), "priority": "p0", "_status": "ready"}]
+    entries = [{"id": "x-c", "slug": "c", "type": "feature", "plan_path": str(plan), "priority": "p0", "status": "ready"}]
     assert project_graph_nodes(entries, ["x-c"], root=str(tmp_path)) == 1
     _, fields, _ = read_plan_file(plan)
     assert fields["priority"] == "p0"
@@ -198,7 +198,7 @@ def test_wave_painted_on_children_and_epic(tmp_path):
     for nid in ("a", "b", "d"):
         docs[nid] = _plan(tmp_path, f"{nid}.md", _CHILD.format(nid=nid))
     entries = [
-        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "_status": "ready"},
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "status": "ready"},
         {"id": "x-a", "slug": "a", "type": "feature", "parent": "x-epic", "plan_path": str(docs["a"]), "blocked_by": []},
         {"id": "x-b", "slug": "b", "type": "feature", "parent": "x-epic", "plan_path": str(docs["b"]), "blocked_by": ["x-a"]},
         {"id": "x-d", "slug": "d", "type": "feature", "parent": "x-epic", "plan_path": str(docs["d"]), "blocked_by": ["x-b"]},
@@ -219,7 +219,7 @@ def test_edge_edit_restratifies_siblings(tmp_path):
     a_doc = _plan(tmp_path, "a.md", _CHILD.format(nid="a"))
     d_doc = _plan(tmp_path, "d.md", _CHILD.format(nid="d"))
     entries = [
-        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "_status": "ready"},
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "status": "ready"},
         {"id": "x-a", "slug": "a", "type": "feature", "parent": "x-epic", "plan_path": str(a_doc), "blocked_by": []},
         {"id": "x-d", "slug": "d", "type": "feature", "parent": "x-epic", "plan_path": str(d_doc), "blocked_by": ["x-a"]},
     ]
@@ -239,7 +239,7 @@ def test_orphaning_child_clears_stale_wave(tmp_path):
     # Seed a child under an epic; project so it carries a wave.
     epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN)
     entries = [
-        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "_status": "ready"},
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "status": "ready"},
         {"id": "x-c", "slug": "c", "type": "feature", "parent": "x-epic", "plan_path": str(child_doc), "blocked_by": []},
     ]
     project_graph_nodes(entries, ["x-c"], root=str(tmp_path))
@@ -254,7 +254,7 @@ def test_epic_demotion_clears_stale_waves_and_rollup(tmp_path):
     """codex: demoting an epic to a feature clears its stale waves/rollup keys."""
     epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN)
     entries = [
-        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "_status": "ready"},
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "status": "ready"},
         {"id": "x-c", "slug": "c", "type": "feature", "parent": "x-epic", "plan_path": None, "blocked_by": []},
     ]
     project_graph_nodes(entries, ["x-epic"], root=str(tmp_path))

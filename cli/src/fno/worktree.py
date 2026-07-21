@@ -480,7 +480,7 @@ class WorktreeManager:
 
         A worktree is orphaned if:
         - Its node_id is not present in graph, OR
-        - Its graph node has ``_status: done``
+        - Its graph node has ``status: done``
 
         Scans the base_dir for directories (excluding .archived/).
 
@@ -506,7 +506,7 @@ class WorktreeManager:
 
             node_id = child.name
             node = graph.get(node_id)
-            if node is None or node.get("_status") == "done":
+            if node is None or node.get("status") == "done":
                 orphans.append(
                     Worktree(
                         node_id=node_id,

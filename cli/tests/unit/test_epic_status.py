@@ -30,7 +30,7 @@ def _node(node_id: str, **overrides) -> dict:
         "blocked_by": [],
         "pr_number": None,
         "pr_url": None,
-        "_status": "ready",
+        "status": "ready",
         "created_at": "2026-01-01T00:00:00+00:00",
     }
     base.update(overrides)
@@ -73,8 +73,8 @@ def test_lists_children_with_status_project_pr(graph_env):
     tmp_path, write = graph_env
     write([
         _node("x-epic", type="epic", slug="the-epic"),
-        _node("x-c1", parent="x-epic", _status="done", pr_number=460, cwd=str(tmp_path)),
-        _node("x-c2", parent="x-epic", _status="ready", cwd=str(tmp_path)),
+        _node("x-c1", parent="x-epic", status="done", pr_number=460, cwd=str(tmp_path)),
+        _node("x-c2", parent="x-epic", status="ready", cwd=str(tmp_path)),
     ])
     r = _invoke(["backlog", "epic", "status", "x-epic"])
     assert r.exit_code == 0, r.output
@@ -91,7 +91,7 @@ def test_ready_child_shows_latest_receipt(graph_env):
     tmp_path, write = graph_env
     write([
         _node("x-epic", type="epic"),
-        _node("x-c2", parent="x-epic", _status="ready", cwd=str(tmp_path)),
+        _node("x-c2", parent="x-epic", status="ready", cwd=str(tmp_path)),
     ])
     _write_events(tmp_path, [
         {"ts": "2026-07-18T10:00:00Z", "type": "advance_skipped",
@@ -106,7 +106,7 @@ def test_ready_child_receipt_picks_newest(graph_env):
     tmp_path, write = graph_env
     write([
         _node("x-epic", type="epic"),
-        _node("x-c2", parent="x-epic", _status="ready", cwd=str(tmp_path)),
+        _node("x-c2", parent="x-epic", status="ready", cwd=str(tmp_path)),
     ])
     _write_events(tmp_path, [
         {"ts": "2026-07-18T10:00:00Z", "type": "advance_skipped",
@@ -126,7 +126,7 @@ def test_ready_child_no_events_shows_no_receipt_found(graph_env):
     tmp_path, write = graph_env
     write([
         _node("x-epic", type="epic"),
-        _node("x-c2", parent="x-epic", _status="ready", cwd=str(tmp_path)),
+        _node("x-c2", parent="x-epic", status="ready", cwd=str(tmp_path)),
     ])
     r = _invoke(["backlog", "epic", "status", "x-epic"])
     assert r.exit_code == 0, r.output
@@ -140,7 +140,7 @@ def test_deferred_child_shows_streak(graph_env):
     tmp_path, write = graph_env
     write([
         _node("x-epic", type="epic"),
-        _node("x-c3", parent="x-epic", _status="deferred", cwd=str(tmp_path)),
+        _node("x-c3", parent="x-epic", status="deferred", cwd=str(tmp_path)),
     ])
     _write_events(tmp_path, [
         {"ts": "2026-07-18T09:00:00Z", "type": "node_failed", "source": "hook",
@@ -161,7 +161,7 @@ def test_streak_dedups_mirrored_events(graph_env, monkeypatch):
     tmp_path, write = graph_env
     write([
         _node("x-epic", type="epic"),
-        _node("x-c3", parent="x-epic", _status="deferred", cwd=str(tmp_path)),
+        _node("x-c3", parent="x-epic", status="deferred", cwd=str(tmp_path)),
     ])
     fails = [
         {"ts": "2026-07-18T09:00:00Z", "type": "node_failed", "source": "hook",
@@ -185,7 +185,7 @@ def test_inherited_json_flag_before_leaf(graph_env):
     tmp_path, write = graph_env
     write([
         _node("x-epic", type="epic", slug="the-epic"),
-        _node("x-c2", parent="x-epic", _status="ready", cwd=str(tmp_path)),
+        _node("x-c2", parent="x-epic", status="ready", cwd=str(tmp_path)),
     ])
     r = _invoke(["backlog", "--json", "epic", "status", "x-epic"])
     assert r.exit_code == 0, r.output
@@ -198,7 +198,7 @@ def test_null_ts_event_does_not_crash(graph_env):
     tmp_path, write = graph_env
     write([
         _node("x-epic", type="epic"),
-        _node("x-c2", parent="x-epic", _status="ready", cwd=str(tmp_path)),
+        _node("x-c2", parent="x-epic", status="ready", cwd=str(tmp_path)),
     ])
     _write_events(tmp_path, [
         {"ts": None, "type": "advance_skipped", "source": "backlog",
@@ -218,7 +218,7 @@ def test_refuses_non_container(graph_env):
     tmp_path, write = graph_env
     write([
         _node("x-epic", type="epic"),
-        _node("x-c2", parent="x-epic", _status="ready", cwd=str(tmp_path)),
+        _node("x-c2", parent="x-epic", status="ready", cwd=str(tmp_path)),
     ])
     r = _invoke(["backlog", "epic", "status", "x-c2"])  # a leaf, not a container
     assert r.exit_code != 0
@@ -248,7 +248,7 @@ def test_resolves_by_slug(graph_env):
     tmp_path, write = graph_env
     write([
         _node("x-epic", type="epic", slug="the-epic"),
-        _node("x-c2", parent="x-epic", _status="ready", cwd=str(tmp_path)),
+        _node("x-c2", parent="x-epic", status="ready", cwd=str(tmp_path)),
     ])
     r = _invoke(["backlog", "epic", "status", "the-epic"])
     assert r.exit_code == 0, r.output
@@ -262,7 +262,7 @@ def test_live_worker_shown(graph_env):
     tmp_path, write = graph_env
     write([
         _node("x-epic", type="epic"),
-        _node("x-c2", parent="x-epic", _status="ready", cwd=str(tmp_path)),
+        _node("x-c2", parent="x-epic", status="ready", cwd=str(tmp_path)),
     ])
     from fno.claims.core import acquire_claim, release_claim
     from fno.claims.io import claims_root_for
@@ -290,8 +290,8 @@ def test_json_output(graph_env):
     tmp_path, write = graph_env
     write([
         _node("x-epic", type="epic", slug="the-epic"),
-        _node("x-c1", parent="x-epic", _status="done", pr_number=460, cwd=str(tmp_path)),
-        _node("x-c2", parent="x-epic", _status="ready", cwd=str(tmp_path)),
+        _node("x-c1", parent="x-epic", status="done", pr_number=460, cwd=str(tmp_path)),
+        _node("x-c2", parent="x-epic", status="ready", cwd=str(tmp_path)),
     ])
     r = _invoke(["backlog", "epic", "status", "x-epic", "--json"])
     assert r.exit_code == 0, r.output

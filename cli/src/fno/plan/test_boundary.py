@@ -18,7 +18,7 @@ def _plan(p: Path, body: str, *, epoch: bool = False) -> Path:
 
 _DONE = {
     "id": "x-blk",
-    "_status": "done",
+    "status": "done",
     "pr_number": 141,
     "completed_at": "2026-07-02T09:12:12+00:00",
 }
@@ -56,7 +56,7 @@ def test_marker_matches_on_pr_number(tmp_path: Path) -> None:
 
 def test_independent_blockers_marker_does_not_mask_later(tmp_path: Path) -> None:
     # Marker for x-blk present, but x-late merged after and has no marker -> STALE.
-    late = {"id": "x-late", "_status": "done", "pr_number": 200, "completed_at": "2026-07-02T09:12:12+00:00"}
+    late = {"id": "x-late", "status": "done", "pr_number": 200, "completed_at": "2026-07-02T09:12:12+00:00"}
     plan = _plan(tmp_path / "p.md", "# plan\n### x-blk landed (PR #141)\n", epoch=True)
     node = {"id": "x-dep", "blocked_by": ["x-blk", "x-late"]}
     verdicts = {v.blocker_id: v.verdict for v in boundary_reconcile(node, str(plan), [_DONE, late])}
@@ -84,7 +84,7 @@ def test_marker_id_no_substring_false_match() -> None:
 def test_mtime_poisoned_after_any_marker_reads_stale(tmp_path: Path) -> None:
     # Reconciling x-blk (marker + mtime bumped to now) must NOT false-fresh a
     # different, un-markered blocker (x-late) that merged before the plan edit.
-    late = {"id": "x-late", "_status": "done", "pr_number": 200, "completed_at": "2026-06-01T00:00:00+00:00"}
+    late = {"id": "x-late", "status": "done", "pr_number": 200, "completed_at": "2026-06-01T00:00:00+00:00"}
     # mtime = now (NOT epoch): x-late would read fresh on mtime alone.
     plan = _plan(tmp_path / "p.md", "# plan\n### x-blk landed (PR #141)\n")
     node = {"id": "x-dep", "blocked_by": ["x-blk", "x-late"]}
@@ -95,7 +95,7 @@ def test_mtime_poisoned_after_any_marker_reads_stale(tmp_path: Path) -> None:
 def test_open_blocker_skipped(tmp_path: Path) -> None:
     plan = _plan(tmp_path / "p.md", "# plan\n", epoch=True)
     node = {"id": "x-dep", "blocked_by": ["x-open"]}
-    graph = [{"id": "x-open", "_status": "ready", "pr_number": None}]
+    graph = [{"id": "x-open", "status": "ready", "pr_number": None}]
     assert boundary_reconcile(node, str(plan), graph) == []
 
 
@@ -103,7 +103,7 @@ def test_done_blocker_without_pr_skipped(tmp_path: Path) -> None:
     # A done doc/advisory node in blocked_by (no PR) is silently skipped.
     plan = _plan(tmp_path / "p.md", "# plan\n", epoch=True)
     node = {"id": "x-dep", "blocked_by": ["x-doc"]}
-    graph = [{"id": "x-doc", "_status": "done", "pr_number": None}]
+    graph = [{"id": "x-doc", "status": "done", "pr_number": None}]
     assert boundary_reconcile(node, str(plan), graph) == []
 
 
@@ -133,21 +133,21 @@ def test_reconcile_against_escape_hatch(tmp_path: Path) -> None:  # AC9-EDGE
         epoch=True,
     )
     node = {"id": "x-dep"}  # x-extra is NOT a blocker
-    graph = [{"id": "x-extra", "_status": "done", "pr_number": 99, "completed_at": "2026-07-02T00:00:00+00:00"}]
+    graph = [{"id": "x-extra", "status": "done", "pr_number": 99, "completed_at": "2026-07-02T00:00:00+00:00"}]
     [v] = boundary_reconcile(node, str(plan), graph)
     assert v.verdict == "stale" and v.blocker_id == "x-extra"
 
 
 def test_reconcile_against_no_pr_is_unknown(tmp_path: Path) -> None:  # AC9 unknown clause
     plan = _plan(tmp_path / "p.md", "---\nreconcile_against: [x-doc]\n---\n# plan\n", epoch=True)
-    graph = [{"id": "x-doc", "_status": "done", "pr_number": None}]
+    graph = [{"id": "x-doc", "status": "done", "pr_number": None}]
     [v] = boundary_reconcile({"id": "x-dep"}, str(plan), graph)
     assert v.verdict == "unknown"
 
 
 def test_reconcile_against_matches_slug(tmp_path: Path) -> None:  # Discretion #4
     plan = _plan(tmp_path / "p.md", "---\nreconcile_against: [my-slug]\n---\n# plan\n", epoch=True)
-    graph = [{"id": "x-s", "slug": "my-slug", "_status": "done", "pr_number": 5, "completed_at": "2026-07-02T00:00:00+00:00"}]
+    graph = [{"id": "x-s", "slug": "my-slug", "status": "done", "pr_number": 5, "completed_at": "2026-07-02T00:00:00+00:00"}]
     [v] = boundary_reconcile({"id": "x-dep"}, str(plan), graph)
     assert v.verdict == "stale" and v.blocker_id == "x-s"
 
@@ -155,7 +155,7 @@ def test_reconcile_against_matches_slug(tmp_path: Path) -> None:  # Discretion #
 def test_unparseable_completed_at_is_unknown(tmp_path: Path) -> None:  # AC8-FR
     plan = _plan(tmp_path / "p.md", "# plan\n", epoch=True)
     node = {"id": "x-dep", "blocked_by": ["x-blk"]}
-    graph = [{"id": "x-blk", "_status": "done", "pr_number": 1, "completed_at": "not-a-date"}]
+    graph = [{"id": "x-blk", "status": "done", "pr_number": 1, "completed_at": "not-a-date"}]
     [v] = boundary_reconcile(node, str(plan), graph)
     assert v.verdict == "unknown"
 

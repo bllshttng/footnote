@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-# Derived `_status` buckets. Everything not named here (ready/idea/deferred/
+# Derived `status` buckets. Everything not named here (ready/idea/deferred/
 # superseded) counts toward the total only.
 _DONE = "done"
 _IN_FLIGHT = frozenset({"in_progress", "claimed", "in_review"})  # claimed = pre-x-5d91
@@ -118,7 +118,7 @@ def compute_rollup(
 ) -> dict[str, Any]:
     """Return the LEAF rollup counters for ``epic_id`` (x-6c2b wave 3).
 
-    A direct leaf child counts once by its derived ``_status``; a direct child
+    A direct leaf child counts once by its derived ``status``; a direct child
     that is itself an epic recurses ONE level and folds its leaves in (so a
     mission aggregates its epics' leaves, never counting an epic as a unit).
     Depth caps at mission -> epic -> leaf; the ``_seen`` guard bounds recursion
@@ -148,7 +148,7 @@ def compute_rollup(
             blocked += sub["children_blocked"]
             continue
         total += 1
-        st = child.get("_status")
+        st = child.get("status")
         if st == _DONE:
             done += 1
         elif st in _IN_FLIGHT:

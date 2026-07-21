@@ -803,9 +803,9 @@ def mutate(
 
 
 def _sync_graph_status(node_id: object, plan_path: Path) -> None:
-    """Re-derive the node's graph ``_status`` now that the doc is blueprinted.
+    """Re-derive the node's graph ``status`` now that the doc is blueprinted.
 
-    The graph derives `_status` FROM this doc, but ``read_graph`` does not
+    The graph derives `status` FROM this doc, but ``read_graph`` does not
     recompute - only a graph mutation does. Without this, a node the doc just
     moved design -> ready keeps reading `design` on every board until something
     unrelated happens to touch the graph. Re-asserting ``plan_path`` is the

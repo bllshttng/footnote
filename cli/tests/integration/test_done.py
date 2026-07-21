@@ -1,8 +1,8 @@
 """Integration tests for `fno done` race collision and force-overwrite.
 
 Covers:
-- #28: done_race_collision event emitted when second fno done call sees _status already done.
-       User-supplied --link/--note/--pr still applied. _status/completed_at NOT overwritten.
+- #28: done_race_collision event emitted when second fno done call sees status already done.
+       User-supplied --link/--note/--pr still applied. status/completed_at NOT overwritten.
 - #30: --force-overwrite flag causes _apply_rollup to overwrite even non-null rollup fields.
        Default (fill-if-null) behavior is the control case.
 """
@@ -105,13 +105,13 @@ def test_done_race_collision_emits_event_and_preserves_metadata(
     """#28: second fno done on an already-done node:
     - emits done_race_collision event
     - applies user-supplied --link
-    - does NOT overwrite _status or completed_at
+    - does NOT overwrite status or completed_at
     """
     first_completed_at = "2026-05-15T10:00:00+00:00"
     _seed(tmp_graph, [{
         "id": "ab-race001",
         "title": "Race test node",
-        "_status": "done",
+        "status": "done",
         "completed_at": first_completed_at,
         "domain": "research",
         "artifact_url": None,
@@ -122,9 +122,9 @@ def test_done_race_collision_emits_event_and_preserves_metadata(
     # Should succeed (exit 0) with a diagnostic to stderr
     assert result.exit_code == 0, f"Exit {result.exit_code}: {result.output}"
 
-    # _status and completed_at must NOT change
+    # status and completed_at must NOT change
     entry = next(e for e in _read(tmp_graph) if e["id"] == "ab-race001")
-    assert entry["_status"] == "done"
+    assert entry["status"] == "done"
     assert entry["completed_at"] == first_completed_at
 
     # --link should still be applied
@@ -157,7 +157,7 @@ def test_done_race_collision_stderr_diagnostic(
     _seed(tmp_graph, [{
         "id": "ab-race002",
         "title": "Another race node",
-        "_status": "done",
+        "status": "done",
         "completed_at": first_completed_at,
         "domain": "research",
     }])
@@ -179,12 +179,12 @@ def test_done_race_collision_stderr_diagnostic(
 def test_done_race_collision_applies_pr_and_note(
     tmp_graph, tmp_ledger, tmp_events, monkeypatch
 ):
-    """#28: second fno done on done node applies --pr and --note while preserving _status/completed_at."""
+    """#28: second fno done on done node applies --pr and --note while preserving status/completed_at."""
     first_completed_at = "2026-05-15T10:00:00+00:00"
     _seed(tmp_graph, [{
         "id": "ab-race003",
         "title": "PR/note race node",
-        "_status": "done",
+        "status": "done",
         "completed_at": first_completed_at,
         "domain": "code",
     }])
@@ -200,8 +200,8 @@ def test_done_race_collision_applies_pr_and_note(
     assert entry.get("pr_number") == 42
     assert entry.get("merge_status") == "merged"
     assert entry.get("completion_note") == "second pass"
-    # _status / completed_at preserved despite the metadata writes.
-    assert entry.get("_status") == "done"
+    # status / completed_at preserved despite the metadata writes.
+    assert entry.get("status") == "done"
     assert entry.get("completed_at") == first_completed_at
 
 
@@ -212,7 +212,7 @@ def test_done_no_collision_when_not_done(
     _seed(tmp_graph, [{
         "id": "ab-norace001",
         "title": "Normal node",
-        "_status": "ready",
+        "status": "ready",
         "domain": "research",
     }])
     _stub_subprocess_no_git(monkeypatch)
@@ -228,7 +228,7 @@ def test_done_no_collision_when_not_done(
 
     # Node should now be done
     entry = next(e for e in _read(tmp_graph) if e["id"] == "ab-norace001")
-    assert entry["_status"] == "done"
+    assert entry["status"] == "done"
 
 
 # ---- #30: --force-overwrite ----
@@ -243,7 +243,7 @@ def test_done_force_overwrite(tmp_graph, tmp_ledger, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-fo001",
         "title": "Force overwrite node",
-        "_status": "done",
+        "status": "done",
         "completed_at": "2026-05-15T10:00:00+00:00",
         "domain": "research",
         "plan_path": plan_path,
@@ -277,7 +277,7 @@ def test_done_force_overwrite_default_is_fill_if_null(tmp_graph, tmp_ledger, mon
     _seed(tmp_graph, [{
         "id": "ab-fo002",
         "title": "Fill if null control node",
-        "_status": "done",
+        "status": "done",
         "completed_at": "2026-05-15T10:00:00+00:00",
         "domain": "research",
         "plan_path": plan_path,
@@ -341,7 +341,7 @@ def test_done_collision_with_force_overwrite_applies_rollup(
     _seed(tmp_graph, [{
         "id": "ab-force-collide-001",
         "title": "Collision + force_overwrite",
-        "_status": "done",
+        "status": "done",
         "completed_at": first_completed_at,
         "domain": "research",
         "plan_path": plan_path,
@@ -370,8 +370,8 @@ def test_done_collision_with_force_overwrite_applies_rollup(
     )
     # --link still applied (metadata writes survive force-overwrite on collision).
     assert entry.get("artifact_url") == "https://example.com/y"
-    # _status / completed_at still preserved (collision invariant).
-    assert entry.get("_status") == "done"
+    # status / completed_at still preserved (collision invariant).
+    assert entry.get("status") == "done"
     assert entry.get("completed_at") == first_completed_at
     # Collision event still emitted.
     if tmp_events.exists():
@@ -391,7 +391,7 @@ def test_done_collision_without_force_overwrite_skips_rollup(
     _seed(tmp_graph, [{
         "id": "ab-bare-collide-001",
         "title": "Bare collision",
-        "_status": "done",
+        "status": "done",
         "completed_at": "2026-05-15T10:00:00+00:00",
         "domain": "research",
         "plan_path": plan_path,
@@ -434,7 +434,7 @@ def test_done_force_overwrite_backfill_preserves_historical_session(
     _seed(tmp_graph, [{
         "id": "ab-codex-p1-001",
         "title": "Codex P1 regression",
-        "_status": "done",
+        "status": "done",
         "completed_at": "2026-05-15T10:00:00+00:00",
         "domain": "research",
         "plan_path": plan_path,
@@ -472,7 +472,7 @@ def test_done_normal_mode_still_prefers_env_session(tmp_graph, tmp_ledger, monke
     _seed(tmp_graph, [{
         "id": "ab-env-control-001",
         "title": "Env priority control",
-        "_status": "ready",
+        "status": "ready",
         "domain": "research",
         "plan_path": plan_path,
     }])
@@ -511,7 +511,7 @@ def test_done_force_overwrite_cost_dedup(tmp_graph, tmp_ledger, monkeypatch):
     _seed(tmp_graph, [{
         "id": "ab-dedup001",
         "title": "Cost-dedup node",
-        "_status": "done",
+        "status": "done",
         "completed_at": "2026-05-15T10:00:00+00:00",
         "domain": "research",
         "plan_path": plan_path,
@@ -559,7 +559,7 @@ def test_done_force_overwrite_empty_ledger_noop(tmp_graph, tmp_ledger, monkeypat
     _seed(tmp_graph, [{
         "id": "ab-empty001",
         "title": "Empty ledger node",
-        "_status": "done",
+        "status": "done",
         "completed_at": "2026-05-15T10:00:00+00:00",
         "domain": "research",
         "plan_path": plan_path,

@@ -117,7 +117,7 @@ def test_contract_dependents_copies_provider(monkeypatch, tmp_path):
     from fno.backlog import reconcile_dispatch as rdmod
 
     graph = [
-        {"id": "x-blk", "_status": "done"},
+        {"id": "x-blk", "status": "done"},
         {"id": "x-dep", "blocked_by": ["x-blk"], "dep": "contract",
          "provider": "claude", "model_tier": "medium"},
     ]

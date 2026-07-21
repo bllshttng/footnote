@@ -46,7 +46,7 @@ Differences:
   agent/automated creation.
 
 All three accept `--details`/`--description`. A node with no `plan_path`
-derives to `_status: idea` until a plan is associated.
+derives to `status: idea` until a plan is associated.
 
 ## Editing a node
 
@@ -110,14 +110,14 @@ fno backlog rank <id> --clear          # rejoin the priority fallback
 
 | Action | Command | Effect |
 |--------|---------|--------|
-| Pause a node | `fno backlog defer <id> --reason "..."` | leaves the board; `_status: deferred` |
+| Pause a node | `fno backlog defer <id> --reason "..."` | leaves the board; `status: deferred` |
 | Resume it | `fno backlog undefer <id>` | returns to `ready`/`idea` |
-| Replace with a newer node | `fno backlog supersede <new> --replaces <old> --reason "..."` | auto-defers old; `_status: superseded` |
+| Replace with a newer node | `fno backlog supersede <new> --replaces <old> --reason "..."` | auto-defers old; `status: superseded` |
 | Mark complete | `fno backlog done <id>` | closes only on a MERGED PR; sets `completed_at`, unblocks dependents |
 | Remove permanently | `fno backlog remove <id>` | hard delete (use for dupes / dead nodes) |
 
 Blockers: `--blocked-by`, `--add-blocker`, `--remove-blocker` on `update`.
-A node with an open blocker derives to `_status: blocked` automatically.
+A node with an open blocker derives to `status: blocked` automatically.
 
 **done = merged.** `fno backlog done` closes a node only when a referenced PR is
 MERGED. An OPEN PR (even with green CI) exits 5 (awaiting merge): the node stays

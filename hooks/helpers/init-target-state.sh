@@ -723,7 +723,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # ── in_review dispatch guard (x-2dc5) ─────────────────────────────
   # A FRESH named-node dispatch (/target <id>, fno target start <id>, direct
   # init) must not re-launch a node that already carries an open, unmerged PR
-  # (derives _status == in_review) - it would redo shipped work and race a
+  # (derives status == in_review) - it would redo shipped work and race a
   # second PR. Lives inside this fresh-init branch ONLY: a resume (valid state
   # file present) never reaches here, so same-worktree resume and handoff-into-
   # existing-state are exempt. Runs BEFORE the manifest write so a refusal
@@ -740,7 +740,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
     _GUARD_NODE="$INITIAL_INPUT"
   fi
   if [[ -n "$_GUARD_NODE" && "${TARGET_ALLOW_IN_REVIEW:-}" != "1" ]]; then
-    _GUARD_STATUS="$(fno backlog get --strict "$_GUARD_NODE" --field _status 2>/dev/null | tr -d '[:space:]' || true)"
+    _GUARD_STATUS="$(fno backlog get --strict "$_GUARD_NODE" --field status 2>/dev/null | tr -d '[:space:]' || true)"
     if [[ "$_GUARD_STATUS" == "in_review" ]]; then
       _GUARD_PR="$(fno backlog get --strict "$_GUARD_NODE" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)"
       cat >&2 <<EOF

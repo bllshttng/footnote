@@ -11,7 +11,7 @@ Three tiers. Tier 1 is a pure synonym rewrite (no history needed). Tier 2 (blank
 / ``implemented`` / any unknown token) needs a true-state signal: a linked node
 that is closed -> ``done``, else ``superseded`` (an honest "off the board", never
 a false ``done``). Tier 3 recomputes a CANONICAL-but-stale status from the
-linked node's derived ``_status`` (the x-76ea class: plan ``design`` while its
+linked node's derived ``status`` (the x-76ea class: plan ``design`` while its
 node is ``done``), forward-only and graph-required. Dry-run by default;
 ``--apply`` writes.
 
@@ -127,7 +127,7 @@ class SweepResult:
 
 @lru_cache(maxsize=1)
 def _done_node_ids() -> frozenset:
-    """Ids of every closed (`_status == done`) node. Read once per process.
+    """Ids of every closed (`status == done`) node. Read once per process.
 
     ponytail: cached for the life of a one-shot sweep so the graph is parsed
     once, not once per plan file (gemini PR#149). A merged-PR probe would add gh
@@ -138,7 +138,7 @@ def _done_node_ids() -> frozenset:
         from fno.paths import graph_json
 
         return frozenset(
-            e.get("id") for e in read_graph(graph_json()) if e.get("_status") == "done"
+            e.get("id") for e in read_graph(graph_json()) if e.get("status") == "done"
         )
     except Exception:  # noqa: BLE001 - no graph => no signal => superseded (honest)
         return frozenset()
@@ -176,7 +176,7 @@ def _default_signal(frontmatter: dict) -> bool:
 
 @lru_cache(maxsize=1)
 def _node_status_map() -> dict:
-    """Map node id -> derived ``_status``. Empty when the graph is unreadable,
+    """Map node id -> derived ``status``. Empty when the graph is unreadable,
     which disables Tier 3 (it must never rewrite on absent evidence).
     """
     try:
@@ -184,7 +184,7 @@ def _node_status_map() -> dict:
         from fno.paths import graph_json
 
         return {
-            e.get("id"): e.get("_status")
+            e.get("id"): e.get("status")
             for e in read_graph(graph_json())
             if e.get("id")
         }
@@ -225,7 +225,7 @@ def sweep(
 
     Tier 1 (synonym) and Tier 2 (unknown token -> node signal) correct DRIFT
     tokens; Tier 3 recomputes a CANONICAL-but-stale status from the linked
-    node's derived ``_status`` (forward-only, graph-required).
+    node's derived ``status`` (forward-only, graph-required).
     """
     res = SweepResult()
     if not plans_dir.is_dir():

@@ -135,7 +135,7 @@ Run `fno --help` for the full list. The main trees are `state`, `graph`
   `cost_usd`, `cost_sessions`, and `points` from `~/.fno/ledger.json`
   entries matching the node's `plan_path`. `--backfill` runs only the
   rollup (no status change); without a query it sweeps every node with
-  `_status=done`, useful for reconciling nodes marked done before the
+  `status=done`, useful for reconciling nodes marked done before the
   rollup existed.
 - `fno find <query> [--domain X] [--project Y] [--status S] [--json]` --
   fuzzy search across graph entries. Output is tab-separated by default

@@ -20,7 +20,7 @@ def _entry(eid: str, **kwargs) -> dict:
         # claimed/done branches; tests for the idea derivation explicitly omit
         # plan_path or set it to None.
         "plan_path": f"plans/{eid}.md",
-        "_status": "ready",
+        "status": "ready",
     }
     base.update(kwargs)
     return base
@@ -60,14 +60,14 @@ def test_ac1_hp_recompute_ready():
     """AC1-HP: entry with no blockers and no session is ready."""
     entries = [_entry("ab-aaaaaaaa")]
     result = recompute_statuses(entries)
-    assert result[0]["_status"] == "ready"
+    assert result[0]["status"] == "ready"
 
 
 def test_ac1_hp_recompute_done():
     """AC1-HP: entry with completed_at is done."""
     entries = [_entry("ab-bbbbbbbb", completed_at="2026-01-01T00:00:00Z")]
     result = recompute_statuses(entries)
-    assert result[0]["_status"] == "done"
+    assert result[0]["status"] == "done"
 
 
 def test_ac1_hp_recompute_blocked():
@@ -77,7 +77,7 @@ def test_ac1_hp_recompute_blocked():
         _entry("ab-dddddddd", blocked_by=["ab-cccccccc"]),
     ]
     result = recompute_statuses(entries)
-    statuses = {e["id"]: e["_status"] for e in result}
+    statuses = {e["id"]: e["status"] for e in result}
     assert statuses["ab-cccccccc"] == "ready"
     assert statuses["ab-dddddddd"] == "blocked"
 
@@ -89,7 +89,7 @@ def test_ac1_hp_recompute_unblock_on_completion():
         _entry("ab-ffffffff", blocked_by=["ab-eeeeeeee"]),
     ]
     result = recompute_statuses(entries)
-    statuses = {e["id"]: e["_status"] for e in result}
+    statuses = {e["id"]: e["status"] for e in result}
     assert statuses["ab-eeeeeeee"] == "done"
     assert statuses["ab-ffffffff"] == "ready"
 
@@ -99,7 +99,7 @@ def test_ac1_hp_recompute_claimed():
     now = datetime.now(timezone.utc).isoformat()
     entries = [_entry("ab-gggggggg", session_id="sess-active", claimed_at=now)]
     result = recompute_statuses(entries)
-    assert result[0]["_status"] == "in_progress"
+    assert result[0]["status"] == "in_progress"
 
 
 def test_ac1_hp_recompute_stale_lock_cleared():
@@ -108,7 +108,7 @@ def test_ac1_hp_recompute_stale_lock_cleared():
     entries = [_entry("ab-hhhhhhhh", session_id="old-sess", claimed_at=old)]
     result = recompute_statuses(entries)
     e = result[0]
-    assert e["_status"] == "ready"
+    assert e["status"] == "ready"
     assert e["session_id"] is None
     assert e["claimed_at"] is None
 
@@ -121,7 +121,7 @@ def test_ac1_hp_recompute_cascade_unblock():
         _entry("ab-ccccdddd", blocked_by=["ab-bbbbcccc"]),
     ]
     result = recompute_statuses(entries)
-    statuses = {e["id"]: e["_status"] for e in result}
+    statuses = {e["id"]: e["status"] for e in result}
     assert statuses["ab-aaaabbbb"] == "done"
     assert statuses["ab-bbbbcccc"] == "ready"
     assert statuses["ab-ccccdddd"] == "blocked"
@@ -134,7 +134,7 @@ def test_ac1_hp_recompute_idea_when_plan_path_none():
     """AC1-HP: a plan-less node derives to idea when otherwise-ready."""
     e = _entry("ab-ideaa001", plan_path=None)
     result = recompute_statuses([e])
-    assert result[0]["_status"] == "idea"
+    assert result[0]["status"] == "idea"
 
 
 def test_ac1_hp_recompute_idea_when_plan_path_missing():
@@ -146,7 +146,7 @@ def test_ac1_hp_recompute_idea_when_plan_path_missing():
     e = _entry("ab-ideaa002")
     e.pop("plan_path", None)
     result = recompute_statuses([e])
-    assert result[0]["_status"] == "idea"
+    assert result[0]["status"] == "idea"
 
 
 def test_ac4_edge_idea_overridden_by_claimed():
@@ -159,7 +159,7 @@ def test_ac4_edge_idea_overridden_by_claimed():
         claimed_at=now,
     )
     result = recompute_statuses([e])
-    assert result[0]["_status"] == "in_progress"
+    assert result[0]["status"] == "in_progress"
 
 
 def test_ac4_edge_idea_overridden_by_blocked():
@@ -169,7 +169,7 @@ def test_ac4_edge_idea_overridden_by_blocked():
         _entry("ab-ideaa004", plan_path=None, blocked_by=["ab-blockero"]),
     ]
     result = recompute_statuses(entries)
-    statuses = {e["id"]: e["_status"] for e in result}
+    statuses = {e["id"]: e["status"] for e in result}
     assert statuses["ab-blockero"] == "idea"  # the blocker itself is also plan-less
     assert statuses["ab-ideaa004"] == "blocked"
 
@@ -178,7 +178,7 @@ def test_ac4_edge_node_with_plan_path_remains_ready():
     """AC4-EDGE: a node with a plan_path resolves to ready, never idea."""
     e = _entry("ab-readyy01", plan_path="plans/some-plan.md")
     result = recompute_statuses([e])
-    assert result[0]["_status"] == "ready"
+    assert result[0]["status"] == "ready"
 
 
 def test_ac4_edge_idea_when_plan_path_is_empty_string():
@@ -190,7 +190,7 @@ def test_ac4_edge_idea_when_plan_path_is_empty_string():
     """
     e = _entry("ab-emptyplan", plan_path="")
     result = recompute_statuses([e])
-    assert result[0]["_status"] == "idea"
+    assert result[0]["status"] == "idea"
 
 
 # -- in_review: node with an open, unmerged PR is held out of dispatch --
@@ -200,7 +200,7 @@ def test_in_review_when_pr_number_set():
     """A node carrying a pr_number (not yet merged) derives in_review."""
     e = _entry("ab-prreview1", pr_number=358)
     result = recompute_statuses([e])
-    assert result[0]["_status"] == "in_review"
+    assert result[0]["status"] == "in_review"
 
 
 def test_in_review_survives_stale_claim():
@@ -210,7 +210,7 @@ def test_in_review_survives_stale_claim():
     old = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
     e = _entry("ab-prreview2", pr_number=358, session_id="dead-sess", claimed_at=old)
     result = recompute_statuses([e])
-    assert result[0]["_status"] == "in_review"
+    assert result[0]["status"] == "in_review"
     # The stale lock must still be reaped (not leaked): otherwise
     # _normalize_lock_fields re-mirrors it into session_id at done time and
     # clobbers merge-time provenance.
@@ -220,19 +220,19 @@ def test_in_review_survives_stale_claim():
 
 
 def test_in_review_reachable_through_typed_entry():
-    """The Entry._status computed field must also derive in_review, so a typed
+    """The Entry.status computed field must also derive in_review, so a typed
     round-trip (model_dump) does not silently emit ready/idea/blocked."""
     from fno.graph.types import Entry
 
     entry = Entry(id="ab-prreview5", title="t", pr_number=358)
-    assert entry._status == "in_review"
+    assert entry.status == "in_review"
 
 
 def test_done_wins_over_pr_number_on_merge():
     """Once the PR merges, completed_at is set and `done` wins over in_review."""
     e = _entry("ab-prreview3", pr_number=358, completed_at="2026-07-12T00:00:00Z")
     result = recompute_statuses([e])
-    assert result[0]["_status"] == "done"
+    assert result[0]["status"] == "done"
 
 
 def test_deferred_wins_over_pr_number():
@@ -245,4 +245,4 @@ def test_deferred_wins_over_pr_number():
         deferred_reason="awaiting human merge",
     )
     result = recompute_statuses([e])
-    assert result[0]["_status"] == "deferred"
+    assert result[0]["status"] == "deferred"

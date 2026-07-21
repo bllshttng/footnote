@@ -19,7 +19,7 @@ def _entry(eid: str, **kwargs) -> dict:
         "completed_at": None,
         "deferred_at": None,
         "session_id": None,
-        "_status": "ready",
+        "status": "ready",
         "blocked_by": [],
         "plan_path": None,
         "pr_url": None,
@@ -36,7 +36,7 @@ def test_card_flags_queued(tmp_path: Path):
         _entry(
             "ab-flagged0",
             project="fno",
-            _status="ready",
+            status="ready",
             priority="p3",
             queued_at="2026-05-12T12:00:00Z",
         ),
@@ -54,7 +54,7 @@ def test_card_flags_claimed(tmp_path: Path):
         _entry(
             "ab-flagged1",
             project="fno",
-            _status="in_progress",
+            status="in_progress",
             session_id="some-session",
         ),
     ]
@@ -71,7 +71,7 @@ def test_card_flags_blocked_shows_count(tmp_path: Path):
         _entry(
             "ab-flagged2",
             project="fno",
-            _status="blocked",
+            status="blocked",
             blocked_by=["ab-aaaa0001", "ab-aaaa0002"],
             priority="p1",
         ),
@@ -86,7 +86,7 @@ def test_card_flags_blocked_shows_count(tmp_path: Path):
 def test_card_flags_idea_needs_plan(tmp_path: Path):
     """Idea (no plan) cards get a 'needs plan' chip; status doesn't pin them to a column."""
     entries = [
-        _entry("ab-flagged3", project="fno", _status="idea", priority="p2"),
+        _entry("ab-flagged3", project="fno", status="idea", priority="p2"),
     ]
     out = tmp_path / "graph.html"
     render_graph_html(entries, out)
@@ -98,7 +98,7 @@ def test_card_flags_idea_needs_plan(tmp_path: Path):
 def test_render_html_columns_are_collapsible_details(tmp_path: Path):
     """Each column is a <details data-col=...> so users can tap to collapse."""
     entries = [
-        _entry("ab-c0011111", project="fno", _status="ready", priority="p1"),
+        _entry("ab-c0011111", project="fno", status="ready", priority="p1"),
         _entry(
             "ab-c0022222",
             project="fno",
@@ -123,10 +123,10 @@ def test_render_html_columns_are_collapsible_details(tmp_path: Path):
 
 def test_render_html_basic(tmp_path: Path):
     entries = [
-        _entry("ab-aaaa1111", _status="ready", project="alpha"),
+        _entry("ab-aaaa1111", status="ready", project="alpha"),
         _entry(
             "ab-bbbb2222",
-            _status="ready",
+            status="ready",
             project="beta",
             completed_at="2026-05-01T00:00:00Z",
         ),

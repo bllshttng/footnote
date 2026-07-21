@@ -55,7 +55,7 @@ def _node(node_id: str, **overrides) -> dict:
         "merge_status": None,
         "artifact_url": None,
         "completion_note": None,
-        "_status": "idea",
+        "status": "idea",
         "created_at": "2026-01-01T00:00:00+00:00",
     }
     base.update(overrides)
@@ -69,20 +69,20 @@ def fixture_graph(tmp_path: Path):
         _node(
             "ab-1dea1234",
             title="Backlog intake honors plan claims",
-            _status="idea",
+            status="idea",
             details="three-layer claim resolution",
         ),
         _node(
             "ab-d0ne5678",
             title="Already shipped feature",
-            _status="done",
+            status="done",
             completed_at="2026-04-01T00:00:00+00:00",
             plan_path="plans/already.md",
         ),
         _node(
             "ab-0fff9999",
             title="Provider rotation substrate",
-            _status="idea",
+            status="idea",
         ),
     ]
     graph_file = tmp_path / "graph.json"
@@ -204,7 +204,7 @@ def test_similar_titles_warning_excludes_self(fixture_graph, capsys):
         _node(
             "ab-5e1f0001",
             title="Backlog intake honors plan claims",
-            _status="idea",
+            status="idea",
         )
     )
     _warn_similar_idea_titles(
@@ -226,7 +226,7 @@ def test_similar_titles_warning_skips_non_idea_states(fixture_graph, capsys):
         entries=entries,
     )
     err = capsys.readouterr().err
-    # ab-d0ne5678 is `_status: done`, not idea — skipped.
+    # ab-d0ne5678 is `status: done`, not idea — skipped.
     assert "ab-d0ne5678" not in err
 
 
@@ -349,7 +349,7 @@ def test_cli_runner_intake_with_claims_flag(tmp_path, monkeypatch):
     import fno.graph.store as gs
 
     g = tmp_path / "graph.json"
-    entries = [_node("ab-1dea1234", title="Idea title", _status="idea")]
+    entries = [_node("ab-1dea1234", title="Idea title", status="idea")]
     g.write_text(json.dumps({"entries": entries}) + "\n")
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries": []}\n')
@@ -424,7 +424,7 @@ def unscoped_node_graph(tmp_path: Path):
         _node(
             "ab-aaa00001",
             title="An unscoped idea created via fno backlog new",
-            _status="idea",
+            status="idea",
             project=None,
             cwd=None,
         ),
@@ -488,7 +488,7 @@ def test_intake_claim_backfills_only_null_fields(tmp_path, capsys):
         _node(
             "ab-aaa00002",
             title="An idea node with project but no cwd",
-            _status="idea",
+            status="idea",
             project="some-other-project",  # set
             cwd=None,                       # null
         ),

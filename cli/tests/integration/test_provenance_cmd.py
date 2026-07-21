@@ -52,7 +52,7 @@ def _base_node(node_id: str, **overrides) -> dict:
     base = {
         "id": node_id,
         "title": "Test node",
-        "_status": "ready",
+        "status": "ready",
         "domain": "code",
         "project": "fno",
         "cwd": "/Users/bb16/code/footnote",

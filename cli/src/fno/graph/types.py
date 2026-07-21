@@ -86,7 +86,7 @@ class Entry(BaseModel):
     id: str
     parent: Optional[str] = None
     # Derived inverse-of-parent index: compact summaries of direct children,
-    # each {id, title, project, _status}. Recomputed on every write by
+    # each {id, title, project, status}. Recomputed on every write by
     # store.canonicalize_entries, so it is read-mostly here -- declared so
     # model_dump round-trips it and old graph.json entries (no children key)
     # parse without migration.
@@ -225,7 +225,7 @@ class Entry(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _check_status_drift(cls, data: object) -> object:
-        """Drop persisted _status; emit graph_status_drift event if it differs
+        """Drop persisted status; emit graph_status_drift event if it differs
         from the computed value so forensic audit can track legacy graph.json.
 
         Best-effort: event emit failures are swallowed so deserialization
@@ -233,7 +233,12 @@ class Entry(BaseModel):
         """
         if not isinstance(data, dict):
             return data
-        persisted = data.pop("_status", None)
+        # `_status` is the pre-rename key; a row read outside _apply_graph_defaults
+        # still carries it.
+        persisted = data.pop("status", None)
+        legacy = data.pop("_status", None)
+        if persisted is None:
+            persisted = legacy
         if persisted is None:
             return data
 
@@ -273,7 +278,7 @@ class Entry(BaseModel):
 
     @computed_field
     @property
-    def _status(self) -> str:
+    def status(self) -> str:
         """Derive entry status from single-entry fields.
 
         Precedence (mirrors recompute_statuses single-entry portion):

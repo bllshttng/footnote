@@ -801,7 +801,7 @@ def archive_struck(path: Path, archive_path: Optional[Path] = None) -> dict:
 #
 # `tidy` does four things in a single locked read-modify-write:
 #   1. EJECT filed nodes whose graph node completed (completed_at /
-#      superseded_by read directly, NOT _status which read_graph does not
+#      superseded_by read directly, NOT status which read_graph does not
 #      recompute) - both raw `ab-*` lines and promoted `[x] fu- -> ab-` lines.
 #   2. DEDUP open items by (where + title), report-only (no line mutated).
 #   3. NORMALIZE the item separator em-dash -> hyphen on every managed line it
@@ -833,7 +833,7 @@ def _completed_node_ids(
     """Return ``(complete_ids, warning)`` from graph.json.
 
     A node is 'complete' when ``completed_at`` OR ``superseded_by`` is set
-    (read directly, since ``read_graph`` does not recompute ``_status``).
+    (read directly, since ``read_graph`` does not recompute ``status``).
     ``deferred_at`` counts only with ``include_deferred``. Fail-safe: a missing
     or unreadable graph returns an EMPTY id set plus a warning, so ``tidy``
     ejects nothing rather than archiving a live item on a read miss.

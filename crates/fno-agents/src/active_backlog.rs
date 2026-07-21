@@ -1228,7 +1228,7 @@ mod tests {
         let fno = stub_fno_get(
             &tmp.path().join("bin"),
             &record,
-            r#"{"id":"x-dead0001","_status":"in_review"}"#,
+            r#"{"id":"x-dead0001","status":"in_review"}"#,
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, project_journal) = test_journal(tmp.path());
@@ -1348,7 +1348,7 @@ mod tests {
         let fno = stub_fno_get(
             &tmp.path().join("bin"),
             &record,
-            r#"{"id":"x-doc00001","_status":"in_review"}"#,
+            r#"{"id":"x-doc00001","status":"in_review"}"#,
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, _pj) = test_journal(tmp.path());

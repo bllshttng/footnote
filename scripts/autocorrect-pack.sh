@@ -168,10 +168,10 @@ sort -u "$IMPLICATED_LIST" > "$UNIQ_IMPLICATED"
 GRAPH_BLOCKED="$TMPDIR_PACK/graph-blocked.yaml"
 : > "$GRAPH_BLOCKED"
 if [[ -f "$GRAPH_PATH" ]] && command -v jq >/dev/null 2>&1; then
-  # Select nodes where _status == "blocked" OR blocked_count > 0.
+  # Select nodes where status == "blocked" OR blocked_count > 0.
   jq -r '
     .nodes // [] | .[] |
-    select(._status == "blocked" or (.blocked_count // 0) > 0) |
+    select(.status == "blocked" or (.blocked_count // 0) > 0) |
     {
       node_id: .id,
       title: .title,

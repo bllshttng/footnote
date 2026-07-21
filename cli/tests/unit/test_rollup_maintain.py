@@ -5,7 +5,7 @@ from fno.graph.maintain import ROLLUP_PROPOSAL_CAP, detect_rollup_candidates
 
 
 def node(nid, **kw):
-    base = {"id": nid, "type": "feature", "title": nid, "_status": "ready"}
+    base = {"id": nid, "type": "feature", "title": nid, "status": "ready"}
     base.update(kw)
     return base
 
@@ -55,7 +55,7 @@ def test_closed_nodes_are_not_proposed():
     for status in ("done", "superseded", "deferred"):
         entries = [
             epic("x-mux", "mux pane layout polish"),
-            node("x-1", title="mux pane layout resize", _status=status),
+            node("x-1", title="mux pane layout resize", status=status),
         ]
         assert detect_rollup_candidates(entries) == [], status
 

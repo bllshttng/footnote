@@ -16,7 +16,7 @@ cat > "$TMP/.fno/graph.json" <<'JSON'
     {
       "id": "ab-smoke0001",
       "title": "Smoke test entry",
-      "_status": "ready",
+      "status": "ready",
       "domain": "trading",
       "created_at": "2026-04-22T00:00:00+00:00"
     }
@@ -57,7 +57,7 @@ status=$(python3 -c "
 import json
 d = json.load(open('$TMP/.fno/graph.json'))
 e = next(x for x in d['entries'] if x['id'] == 'ab-smoke0001')
-print(e.get('_status'), e.get('completion_note'))
+print(e.get('status'), e.get('completion_note'))
 ")
 if [[ "$status" != "done smoke test marker" ]]; then
   echo "FAIL: expected 'done smoke test marker', got: $status"
@@ -72,7 +72,7 @@ cat > "$TMP/.fno/graph.json" <<'JSON'
     {
       "id": "ab-smoke0002",
       "title": "Rollup smoke target",
-      "_status": "ready",
+      "status": "ready",
       "domain": "code",
       "plan_path": "/smoke/plans/feature-x",
       "created_at": "2026-04-22T00:00:00+00:00"
@@ -121,7 +121,7 @@ backfilled=$(python3 -c "
 import json
 d = json.load(open('$TMP/.fno/graph.json'))
 e = next(x for x in d['entries'] if x['id'] == 'ab-smoke0002')
-print(e.get('_status'), e.get('session_id'), e.get('cost_usd'))
+print(e.get('status'), e.get('session_id'), e.get('cost_usd'))
 ")
 if [[ "$backfilled" != "done smoke-sess-1 4.25" ]]; then
   echo "FAIL: --backfill did not refill. got: $backfilled"

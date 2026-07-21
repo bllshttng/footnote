@@ -48,7 +48,7 @@ def test_ac1_hp_existing_entry_gains_provenance_defaults():
         {
             "id": "ab-legacy01",
             "title": "Old entry",
-            "_status": "ready",
+            "status": "ready",
             "domain": "code",
             "project": "fno",
         }
@@ -72,7 +72,7 @@ def test_ac2_err_existing_source_kind_preserved():
         {
             "id": "ab-inbox001",
             "title": "From inbox",
-            "_status": "ready",
+            "status": "ready",
             "domain": "code",
             "project": "fno",
             "source_kind": "from_inbox",
@@ -91,7 +91,7 @@ def test_ac4_edge_kanban_render_does_not_crash_with_provenance_fields(tmp_path, 
         {
             "id": "ab-kan00001",
             "title": "Kanban entry",
-            "_status": "ready",
+            "status": "ready",
             "domain": "code",
             "project": "fno",
             "source_kind": "from_inbox",
@@ -123,7 +123,7 @@ def test_ac4_edge_provenance_survives_save_reload(tmp_path, monkeypatch):
         {
             "id": "ab-triage01",
             "title": "Triage entry",
-            "_status": "ready",
+            "status": "ready",
             "domain": "code",
             "project": "fno",
             "source_inbox_msg": "msg-a4f1",
@@ -175,7 +175,7 @@ def test_us6_harness_stamp_written_and_cleared(tmp_path, monkeypatch):
     assert node["session_id"] == "new-owner"          # mirror synced
     assert node["locked_by_harness"] == "claude"
     assert node["locked_by_harness_session"] == "uuid-9"
-    assert node["_status"] == "in_progress"
+    assert node["status"] == "in_progress"
 
     r2 = CliRunner().invoke(C.cli, ["update", "ab-harnes01", "--locked-by", "null"])
     assert r2.exit_code == 0, r2.output
@@ -183,7 +183,7 @@ def test_us6_harness_stamp_written_and_cleared(tmp_path, monkeypatch):
     assert cleared["locked_by"] is None
     assert cleared["locked_by_harness"] is None
     assert cleared["locked_by_harness_session"] is None
-    assert cleared["_status"] == "ready"
+    assert cleared["status"] == "ready"
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +199,7 @@ def test_ac_hp_new_provenance_fields_default_null():
         {
             "id": "ab-legacy02",
             "title": "Old entry",
-            "_status": "ready",
+            "status": "ready",
             "domain": "code",
             "project": "fno",
         }
@@ -219,7 +219,7 @@ def test_ac_err_existing_parent_edge_preserved():
         {
             "id": "ab-edge0001",
             "title": "Spawned entry",
-            "_status": "ready",
+            "status": "ready",
             "domain": "code",
             "project": "fno",
             "source_node_id": "ab-origin01",
@@ -241,7 +241,7 @@ def test_ac_edge_parent_edge_survives_save_reload(tmp_path, monkeypatch):
         {
             "id": "ab-rt000001",
             "title": "Round-trip entry",
-            "_status": "ready",
+            "status": "ready",
             "domain": "code",
             "project": "fno",
             "source_node_id": "ab-origin02",
@@ -439,7 +439,7 @@ def test_ac1_hp_query_by_source_inbox_msg_single_match(tmp_path, monkeypatch):
         {
             "id": "ab-qry00001",
             "title": "Entry with msg",
-            "_status": "ready",
+            "status": "ready",
             "domain": "code",
             "project": "fno",
             "source_inbox_msg": "msg-a4f1",
@@ -447,7 +447,7 @@ def test_ac1_hp_query_by_source_inbox_msg_single_match(tmp_path, monkeypatch):
         {
             "id": "ab-qry00002",
             "title": "Entry without msg",
-            "_status": "ready",
+            "status": "ready",
             "domain": "code",
             "project": "fno",
         },
@@ -466,7 +466,7 @@ def test_ac2_err_query_by_source_inbox_msg_no_match(tmp_path, monkeypatch):
         {
             "id": "ab-qry00003",
             "title": "No msg here",
-            "_status": "ready",
+            "status": "ready",
             "domain": "code",
             "project": "fno",
         },
@@ -484,7 +484,7 @@ def test_ac4_edge_query_returns_both_on_duplicate(tmp_path, monkeypatch):
         {
             "id": "ab-dup00001",
             "title": "Dupe entry A",
-            "_status": "ready",
+            "status": "ready",
             "domain": "code",
             "project": "fno",
             "source_inbox_msg": "msg-dupe",
@@ -492,7 +492,7 @@ def test_ac4_edge_query_returns_both_on_duplicate(tmp_path, monkeypatch):
         {
             "id": "ab-dup00002",
             "title": "Dupe entry B",
-            "_status": "ready",
+            "status": "ready",
             "domain": "code",
             "project": "fno",
             "source_inbox_msg": "msg-dupe",
