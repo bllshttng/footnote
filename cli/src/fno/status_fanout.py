@@ -504,9 +504,9 @@ def _deliver(url: str, body: dict[str, Any], fanout: StatusFanoutConfig) -> "tup
 
 
 def _secrets_env_path() -> Path:
-    # ponytail: global ~/.fno/.env; add config.status_fanout.secrets_file only if
-    # a real deployment needs it elsewhere.
-    return Path.home() / ".fno" / ".env"
+    # ponytail: the state dir's .env (default ~/.fno/.env); add
+    # config.status_fanout.secrets_file only if a deployment needs it elsewhere.
+    return paths.state_dir() / ".env"
 
 
 def _resolve_url(sink: StatusSinkConfig) -> "tuple[Optional[str], Optional[str]]":
