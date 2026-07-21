@@ -7007,6 +7007,9 @@ async fn handle_stdin(
                             .await
                             .map_err(|e| format!("pane move send failed: {e}"))?;
                     }
+                    // Same release-recompute as the seam/sideline drags: clear a
+                    // grip accent the drag left on if the pointer ended off it.
+                    view.refresh_hover_affordances(rep.row, rep.col);
                     continue;
                 }
                 _ => {
