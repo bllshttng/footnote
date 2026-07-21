@@ -122,10 +122,10 @@ When your only outstanding work is an async external check - CI still running, o
 1. **Arm a harness-tracked watcher with a hard timeout.** Use a background task the harness re-invokes the model on when it exits - background `Bash` (`run_in_background`) or a `Monitor` - whose command embeds a hard timeout, e.g.:
 
    ```bash
-   gh pr checks <PR> --watch & w=$!; (sleep 1800; kill $w 2>/dev/null) & wait $w
+   gh pr checks <PR> --watch & w=$!; (sleep 1800; kill $w 2>/dev/null) & k=$!; wait $w; kill $k 2>/dev/null
    ```
 
-   The bound doubles as the heartbeat: a hung `gh` is capped, and a killed watcher still wakes the session. Spell it with shell builtins, never `timeout(1)` - that is GNU coreutils, and a stock macOS ships neither it nor `gtimeout`, so a command naming it dies with `command not found` before `gh` runs and the watcher no-ops. Detaching the task itself (`nohup`, `disown`, a trailing `&`) is FORBIDDEN - it exits without re-invoking anyone, so the session would idle forever; the `&` above is internal to the task, which still ends on `wait`. The exact `gh` incantation is a template, not load-bearing (its `--watch` exit varies by version); the design depends only on the task exiting.
+   The bound doubles as the heartbeat: a hung `gh` is capped, and a killed watcher still wakes the session. Spell it with shell builtins, never `timeout(1)` - that is GNU coreutils, and a stock macOS ships neither it nor `gtimeout`, so a command naming it dies with `command not found` before `gh` runs and the watcher no-ops. Reap the watchdog (`kill $k`) once the wait returns: left alive it wakes half an hour later and kills whatever process now holds that recycled pid. Detaching the task itself (`nohup`, `disown`, a trailing `&`) is FORBIDDEN - it exits without re-invoking anyone, so the session would idle forever; the `&` above is internal to the task, which still ends on `wait`. The exact `gh` incantation is a template, not load-bearing (its `--watch` exit varies by version); the design depends only on the task exiting.
 
 2. **End your turn with the tag, and nothing else.** After arming the watcher, close the turn with:
 

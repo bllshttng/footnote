@@ -156,7 +156,7 @@ FNR == 1 { inblk = 0; prev = "" }
   # 3. bare timeout with no gtimeout fallback
   if (line ~ /(^|[ \t;|&(])timeout[ \t]+[0-9]/ && line !~ /gtimeout/)
     report("bare-timeout", \
-      "macOS has neither timeout nor gtimeout: bound with builtins - cmd & w=$!; (sleep N; kill $w 2>/dev/null) & wait $w")
+      "macOS has neither timeout nor gtimeout: bound with builtins - cmd & w=$!; (sleep N; kill $w 2>/dev/null) & k=$!; wait $w; kill $k 2>/dev/null")
 
   # 4. single-spelling stat
   if (line ~ /(^|[ \t;|&(=$])stat[ \t]+-c/ && line !~ /stat[ \t]+-f/)

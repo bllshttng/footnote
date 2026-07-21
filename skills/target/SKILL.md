@@ -93,7 +93,7 @@ The stop hook reads your final message and makes ONE decision from it. There are
 
 1. **Done** -> `<promise>MISSION COMPLETE: <what shipped></promise>`. Emit it as soon as the PR is up and CI is green (promise early). Once a promise is accepted the loop has terminated: do NOT reflexively re-emit it or re-post the same status on later conversational turns - answer what is asked and stop.
 2. **Waiting on an async check with nothing to do** (CI pending, or a bot review not yet posted) -> arm ONE **harness-tracked** watcher whose command carries a hard timeout, then end with the tag and NOTHING else:
-   - CI: background Bash `gh pr checks <N> --watch & w=$!; (sleep 1800; kill $w 2>/dev/null) & wait $w`
+   - CI: background Bash `gh pr checks <N> --watch & w=$!; (sleep 1800; kill $w 2>/dev/null) & k=$!; wait $w; kill $k 2>/dev/null`
    - review: a review-state poll (a `gh pr view <N> --json reviews` loop, bounded the same way), NOT `gh pr checks --watch` (it exits the instant CI is green, so on a review wait it wakes immediately and re-blocks)
    - then: `<watching reason="ci|review" pr="<N>" timeout="30m">`
    loop-check verifies the wait against external truth and idles the session to ZERO re-invocations until the watcher fires. The watcher MUST be harness-tracked (background Bash / Monitor) - a detached process (`nohup`, `disown`, or a trailing `&` on the task itself) exits without waking anyone and the session idles forever. The `&` inside the command above is a different thing: the task still ends on `wait`, so the harness sees it exit. On wake: if it settled, proceed; if the bound fired and it is still pending, re-arm and re-emit.

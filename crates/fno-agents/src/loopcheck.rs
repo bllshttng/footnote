@@ -3905,7 +3905,9 @@ fn async_wait_class(
 ///
 /// The bound uses shell builtins, never `timeout(1)`: stock macOS has neither
 /// it nor `gtimeout`, so naming it makes the watcher no-op and the session idle
-/// forever on a wait that never started.
+/// forever on a wait that never started. The watchdog is reaped once the wait
+/// returns - left alive, it wakes 30m later and kills whatever now holds that
+/// recycled pid (codex P1).
 fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // The watcher must WAIT on the actual blocker. `gh pr checks --watch` exits
     // the instant CI has no pending checks, so on a review wait (CI already
@@ -3913,11 +3915,11 @@ fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // path needs a watcher that polls REVIEW state, not checks (codex P2).
     let watcher = if blocker == "review" {
         format!(
-            "background Bash `n=$(gh pr view {pr_number} --json reviews --jq '.reviews|length'); for _ in $(seq 30); do sleep 60; [ \"$(gh pr view {pr_number} --json reviews --jq '.reviews|length')\" -gt \"$n\" ] && break; done` (wakes when a new review posts, or after ~30m)"
+            "background Bash `n=$(gh pr view {pr_number} --json reviews --jq '.reviews|length'); i=0; while [ $i -lt 30 ]; do sleep 60; [ \"$(gh pr view {pr_number} --json reviews --jq '.reviews|length')\" -gt \"$n\" ] && break; i=$((i+1)); done` (wakes when a new review posts, or after ~30m)"
         )
     } else {
         format!(
-            "background Bash `gh pr checks {pr_number} --watch & w=$!; (sleep 1800; kill $w 2>/dev/null) & wait $w`"
+            "background Bash `gh pr checks {pr_number} --watch & w=$!; (sleep 1800; kill $w 2>/dev/null) & k=$!; wait $w; kill $k 2>/dev/null`"
         )
     };
     format!(
@@ -4566,7 +4568,7 @@ mod tests {
         let needle = ["timeout", " "].concat();
         for tail in include_str!("loopcheck.rs").split(&needle).skip(1) {
             assert!(
-                !tail.starts_with(|c: char| c.is_ascii_digit()),
+                !tail.trim_start().starts_with(|c: char| c.is_ascii_digit()),
                 "bare timeout invocation: ...{}",
                 tail.chars().take(60).collect::<String>()
             );
