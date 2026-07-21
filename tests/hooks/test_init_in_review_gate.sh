@@ -72,6 +72,12 @@ make_repo() {
         git add README.md
         git commit -q -m "init"
     )
+    # Seed the node's PRESENCE in the graph the guard greps ($HOME/.fno/graph.json,
+    # HOME=$dir here). The guard requires an id-shaped token to be a real graph
+    # entry before it resolves + probes (x-8e98: the ungrep'd ab- arm is gone).
+    # Only presence is seeded; the derived in_review STATUS is still stubbed via fno.
+    mkdir -p "$dir/.fno"
+    printf '{"entries":[{"id":"%s"}]}\n' "$NODE" > "$dir/.fno/graph.json"
 }
 
 # Run init isolated. cwd is a per-scenario worktree-like repo on a feature
