@@ -232,6 +232,31 @@ def sum_plan_points(plan_path: str | None) -> int | None:
     return total if found_any else None
 
 
+def _pr_url_for(
+    pr_number: int | None, remote_url: str | None, cwd: str | None
+) -> str | None:
+    """The PR's GitHub url, or None when no repo slug can be resolved.
+
+    A row that lands with a ``pr_number`` but no ``pr_url`` attributes no
+    ownership at read time (see :mod:`fno.ledger_join`), and no later writer
+    repairs it - ``upsert_ledger_pr`` returns early once a row carries the
+    number. So the slug must be resolved as hard here as the read side resolves
+    it: ``origin`` first, then the same ``gh repo view`` fallback
+    :func:`resolve_current_repo_slug` uses, which covers a checkout whose GitHub
+    remote simply is not named ``origin``.
+    """
+    if not pr_number:
+        return None
+    if remote_url:
+        match = re.search(r"github\.com[:/](.+?)(?:\.git)?$", remote_url)
+        if match:
+            return f"https://github.com/{match.group(1)}/pull/{pr_number}"
+    from fno.graph._reconcile import resolve_current_repo_slug
+
+    slug = resolve_current_repo_slug(cwd)
+    return f"https://github.com/{slug}/pull/{pr_number}" if slug else None
+
+
 def build_entry(
     state: dict,
     session_id: str,
@@ -277,12 +302,7 @@ def build_entry(
         pr_number = _pr_number_from_gh(cwd)
     pr_number = int(pr_number) if pr_number and str(pr_number).isdigit() else None
 
-    pr_url = None
-    if pr_number and remote_url:
-        # Convert git remote to GitHub URL
-        gh_match = re.search(r"github\.com[:/](.+?)(?:\.git)?$", remote_url)
-        if gh_match:
-            pr_url = f"https://github.com/{gh_match.group(1)}/pull/{pr_number}"
+    pr_url = _pr_url_for(pr_number, remote_url, cwd)
 
     # Phases
     phases_completed, phases_skipped = derive_phases(state)
