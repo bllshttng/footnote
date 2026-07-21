@@ -2687,8 +2687,15 @@ impl View {
     fn drop_band(&self, zone: DropZone) -> Option<(std::ops::Range<u16>, std::ops::Range<u16>)> {
         let rect = self.pane_rect(zone.target)?;
         let panel_w = self.panel_w();
-        let (r0, c0) = (TAB_BAR_ROWS + rect.y, panel_w + rect.x);
-        let (r1, c1) = (r0 + rect.rows, c0 + rect.cols);
+        // Saturating throughout: `rect` comes from the last Layout, which can
+        // lag a sideline toggle or a resize, so these sums are not guaranteed to
+        // stay inside the terminal. Overflow here would panic a debug build for
+        // a highlight; clamping just draws the band at the edge instead.
+        let (r0, c0) = (
+            TAB_BAR_ROWS.saturating_add(rect.y),
+            panel_w.saturating_add(rect.x),
+        );
+        let (r1, c1) = (r0.saturating_add(rect.rows), c0.saturating_add(rect.cols));
         // The band sits one cell outside the rect, except on the rim where that
         // cell belongs to the sideline or the tab bar - there it clamps back
         // onto the rect's own edge.
@@ -2701,18 +2708,20 @@ impl View {
         // asymmetry taught the wrong thing on half the rim.
         let (term_rows, term_cols) = self.term;
         let band_col = |outside: u16, own: u16| {
-            let c = (panel_w..term_cols)
-                .contains(&outside)
-                .then_some(outside)
-                .unwrap_or(own);
-            c..c + 1
+            let c = if (panel_w..term_cols).contains(&outside) {
+                outside
+            } else {
+                own
+            };
+            c..c.saturating_add(1)
         };
         let band_row = |outside: u16, own: u16| {
-            let r = (TAB_BAR_ROWS..term_rows)
-                .contains(&outside)
-                .then_some(outside)
-                .unwrap_or(own);
-            r..r + 1
+            let r = if (TAB_BAR_ROWS..term_rows).contains(&outside) {
+                outside
+            } else {
+                own
+            };
+            r..r.saturating_add(1)
         };
         // saturating: a zero-column rect from the server would otherwise
         // underflow `c1 - 1` and panic in debug.
@@ -6884,7 +6893,15 @@ async fn handle_stdin(
     // AC3-UI); a Shift-modified event is dropped (native-selection, AC3-EDGE).
     let (reports, passthrough) = crate::mouse::extract_mouse(mouse_carry, bytes);
     for rep in reports {
-        if rep.shift {
+        // Shift-modified reports are dropped so the terminal's own native
+        // selection keeps working. A RELEASE while a drag is in flight is the
+        // exception: some terminals report Shift on the release, and dropping it
+        // would leave the drag latched - visibly stuck, eating input until its
+        // timeout - for a gesture the operator has already finished. Nobody is
+        // shift-selecting text mid-drag, so nothing is taken away here.
+        let ends_a_drag = matches!(rep.kind, MouseKind::Release(MouseButton::Left))
+            && (view.pane_drag.is_some() || view.seam_drag.is_some());
+        if rep.shift && !ends_a_drag {
             continue;
         }
         // A pointer action - click/press/wheel/drag, anything but passive hover
@@ -6949,10 +6966,17 @@ async fn handle_stdin(
         if view.pane_drag.is_some() {
             match rep.kind {
                 MouseKind::Drag(MouseButton::Left) => {
-                    if view.pane_drag_to(rep.row, rep.col, Instant::now()) {}
+                    view.pane_drag_to(rep.row, rep.col, Instant::now());
                     continue;
                 }
                 MouseKind::Release(MouseButton::Left) => {
+                    // Re-hit-test at the RELEASE coordinates rather than trusting
+                    // the zone the last motion cached. A co-viewer can move the
+                    // targeted seam between that motion and this release, which
+                    // leaves the cached zone naming a slot the pointer no longer
+                    // sits in - and `set_layout` only clears the cache when the
+                    // target disappears, not when it merely moves.
+                    view.pane_drag_to(rep.row, rep.col, Instant::now());
                     // Nothing goes on the wire until here: the whole drag is a
                     // client-local preview, so the server only ever learns the
                     // outcome (AC5-EDGE - a cancel sends nothing at all).
@@ -18802,6 +18826,81 @@ mod tests {
             })
         );
         assert!(view.pane_drag.is_none(), "committing ends the drag");
+    }
+
+    #[test]
+    fn a_release_resolves_against_the_layout_it_lands_on() {
+        // The cached zone can go stale: a co-viewer moves the targeted seam
+        // between the last motion and the release, and set_layout only clears
+        // the cache when the target DISAPPEARS, not when it merely moves. So
+        // the release re-hit-tests its own coordinates.
+        let mut view = three_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.pane_drag_to(r, c, Instant::now());
+        assert_eq!(
+            view.pane_drag.and_then(|d| d.zone),
+            Some(DropZone {
+                target: 11,
+                dir: Dir::Right
+            })
+        );
+
+        // A co-viewer widens 11, sliding the 11|12 seam right so this cell now
+        // sits INSIDE pane 11 rather than on any seam.
+        let mut next = view.layout.clone();
+        next.panes = vec![
+            (
+                10,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 23,
+                },
+            ),
+            (
+                11,
+                Rect {
+                    x: 24,
+                    y: 0,
+                    rows: 29,
+                    cols: 40,
+                },
+            ),
+            (
+                12,
+                Rect {
+                    x: 65,
+                    y: 0,
+                    rows: 29,
+                    cols: 7,
+                },
+            ),
+        ];
+        view.set_layout(next);
+
+        // Whatever that cell means NOW is what the release must commit - never
+        // the stale 11|12 seam, which has slid out from under the pointer.
+        let fresh = view.drop_zone_at(r, c);
+        assert_ne!(
+            fresh,
+            Some(DropZone {
+                target: 11,
+                dir: Dir::Right
+            }),
+            "precondition: the cell must no longer mean what it did"
+        );
+        view.pane_drag_to(r, c, Instant::now());
+        assert_eq!(
+            view.commit_pane_drag(),
+            fresh.map(|z| Command::MovePane {
+                mover: Some(10),
+                target: Some(z.target),
+                dir: z.dir,
+            }),
+            "the release follows the layout it landed on"
+        );
     }
 
     #[test]
