@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fno.graph import maintain as m
 
@@ -622,6 +623,204 @@ def test_collect_evidence_caps_packet_size():
     pkt = m.collect_evidence(node, [node], now=now)
     size = len(json.dumps(pkt.to_json()).encode("utf-8"))
     assert size <= m.PACKET_MAX_BYTES
+
+
+# --- leg 8: validity sweep - retro-triage enrichment (x-8a7e) ---------------
+
+_PR525_FIXTURE = (
+    Path(__file__).resolve().parent.parent / "fixtures" / "pr525-comment-3620363998.json"
+)
+
+
+def test_parse_retro_trailer():
+    pr, h = m.parse_retro_trailer(f"finding body\n{_RETRO_TRAILER}")
+    assert pr == 525 and h == "deff167a7b09df6d"
+    # A postmortem-sourced node carries source_pr=None; it round-trips as None
+    # (no fetchable PR comment) with the hash still parsed.
+    pr2, h2 = m.parse_retro_trailer(
+        "x <!-- retro-triage source_pr=None finding_hash=abc123 -->"
+    )
+    assert pr2 is None and h2 == "abc123"
+    # No trailer -> None; never raises on missing / non-str details.
+    assert m.parse_retro_trailer("an ordinary idea") is None
+    assert m.parse_retro_trailer(None) is None
+
+
+def _boom(node):
+    raise RuntimeError("gh down")
+
+
+def test_collect_evidence_retro_enrichment_merged():
+    """AC1-HP: a retro node's stubbed retro_source items land in the packet, all
+    allowlisted, within budget; a non-retro node gets a byte-identical packet."""
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    retro = _retro_idea("ab-retro", 2, now, title="heal token stub")
+
+    def _src(node):
+        return {
+            "pr:review-comment": "reviewer asked at tests/x.sh:60; diff_hunk: ...",
+            "git:merged-region:tests/x.sh": "line 60 context here",
+        }
+
+    pkt = m.collect_evidence(retro, [retro], now=now, retro_source=_src)
+    assert "pr:review-comment" in pkt.items
+    assert "git:merged-region:tests/x.sh" in pkt.items
+    assert "retro" not in pkt.unavailable
+    assert all(
+        any(i.startswith(p) for p in m.ALLOWED_EVIDENCE_PREFIXES) for i in pkt.items
+    )
+    assert len(json.dumps(pkt.to_json()).encode("utf-8")) <= m.PACKET_MAX_BYTES
+    # A non-retro node ignores the seam entirely: byte-identical to the no-seam build.
+    plain = _idea("ab-plain", 90, now, title="t", details="ordinary")
+    assert (
+        m.collect_evidence(plain, [plain], now=now, retro_source=_src).to_json()
+        == m.collect_evidence(plain, [plain], now=now).to_json()
+    )
+
+
+def test_collect_evidence_retro_rejects_non_allowlisted_key():
+    """AC1-HP: a seam item with a non pr:/git: prefix is rejected, not merged."""
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    retro = _retro_idea("ab-retro", 2, now)
+
+    def _src(node):
+        return {"pr:review-comment": "ok", "graph:evil": "x", "shell:rm": "y"}
+
+    pkt = m.collect_evidence(retro, [retro], now=now, retro_source=_src)
+    assert pkt.items.get("pr:review-comment") == "ok"
+    assert "graph:evil" not in pkt.items and "shell:rm" not in pkt.items
+    assert "retro" not in pkt.unavailable  # at least one valid item merged
+
+
+def test_collect_evidence_retro_fails_open():
+    """AC3-ERR: an absent / empty / raising seam records `retro` unavailable, adds
+    no enrichment item, and the base packet still stands (node kept)."""
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    retro = _retro_idea(
+        "ab-retro", 2, now, title="t", details=f"touches a/b.py\n{_RETRO_TRAILER}"
+    )
+    for src in (None, lambda n: {}, _boom):
+        pkt = m.collect_evidence(
+            retro, [retro], now=now, retro_source=src, exists=lambda p: True
+        )
+        assert "retro" in pkt.unavailable
+        assert not any(
+            i.startswith(("pr:review-comment", "git:merged-region")) for i in pkt.items
+        )
+        # base packet intact: node identity survives, path evidence still collected.
+        assert pkt.node_id == "ab-retro"
+        assert pkt.items.get("path:a/b.py") == "exists"
+
+
+def test_collect_evidence_retro_cap_drops_enrichment_first():
+    """AC4-EDGE: an oversized enrichment is dropped before any base item; the
+    higher-value comment item and the node identity survive, within budget."""
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    retro = _retro_idea(
+        "ab-retro", 2, now, title="t",
+        details=f"touches cli/src/fno/ui.py\n{_RETRO_TRAILER}",
+        plan_path="internal/plans/p.md",
+    )
+
+    def _src(node):
+        return {
+            "pr:review-comment": "the ask",
+            "git:merged-region:cli/src/fno/ui.py": "X" * 60_000,  # alone over budget
+        }
+
+    pkt = m.collect_evidence(
+        retro, [retro], now=now, retro_source=_src,
+        exists=lambda p: True, search=lambda s: 3,
+    )
+    assert len(json.dumps(pkt.to_json()).encode("utf-8")) <= m.PACKET_MAX_BYTES
+    # The oversized region drops first; the comment item and a base pr: item survive.
+    assert "git:merged-region:cli/src/fno/ui.py" not in pkt.items
+    assert pkt.items.get("pr:review-comment") == "the ask"
+    assert pkt.items.get("pr:plan") == "internal/plans/p.md"
+    assert pkt.node_id == "ab-retro" and pkt.fingerprint and pkt.title == "t"
+
+
+def test_retro_fixture_hash_join_reproduces():
+    """AC2-HP: the canonical content_hash of the recorded PR #525 comment body
+    reproduces the finding_hash the retro node carries, and a hash-join selects
+    THAT comment (not a decoy) from a comment list. A seam substituting its own
+    hash function would not reproduce this."""
+    from fno.retro.dedup import content_hash
+
+    comment = json.loads(_PR525_FIXTURE.read_text())
+    trailer_hash = m.parse_retro_trailer(_RETRO_TRAILER)[1]
+    assert content_hash(comment["body"]) == trailer_hash
+    decoy = {"id": 1, "body": "a totally different review comment", "path": "x"}
+    picked = next(
+        c for c in (decoy, comment) if content_hash(str(c.get("body", ""))) == trailer_hash
+    )
+    assert picked["id"] == comment["id"]
+    assert content_hash(decoy["body"]) != trailer_hash  # the decoy really differs
+
+
+def test_deck_renders_retro_unavailable_marker():
+    """AC5-FR: a retro node kept with enrichment unavailable is flagged in the
+    rendered deck row itself, so a thin-evidence keep reads as such."""
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    retro = _retro_idea("ab-retro", 2, now, title="heal stub")
+    pkt = m.collect_evidence(retro, [retro], now=now, retro_source=lambda n: {})
+    assert "retro" in pkt.unavailable
+    row = m.ValidityRow("ab-retro", pkt.fingerprint, "keep", 0.7, "premise holds", [])
+    md = m._render_deck_md(
+        [row], {"ab-retro": pkt}, deck_id="d", created_iso=now.isoformat(), degraded=False
+    )
+    assert "enrichment unavailable (retro)" in md
+
+
+def test_cli_retro_seam_selects_comment_and_reads_region(monkeypatch, tmp_path):
+    """AC2-HP at the seam: _validity_retro_source flattens the slurped gh pages,
+    hash-joins the real fixture comment out of a list with a decoy, and reads a
+    bounded merged region - all hermetic (no live gh/git)."""
+    import subprocess
+
+    from fno.graph import cli
+
+    comment = json.loads(_PR525_FIXTURE.read_text())
+    node = {"id": "ab-retro", "details": f"finding\n{_RETRO_TRAILER}", "cwd": str(tmp_path)}
+
+    def _fake_run(args, **kw):
+        if args[:2] == ["gh", "api"]:
+            decoy = {"id": 1, "body": "unrelated", "path": "x", "line": 1, "diff_hunk": "h"}
+            return subprocess.CompletedProcess(args, 0, json.dumps([[decoy], [comment]]), "")
+        if args[:2] == ["git", "-C"] and "show" in args:
+            return subprocess.CompletedProcess(args, 0, "line\n" * 120, "")
+        return subprocess.CompletedProcess(args, 1, "", "boom")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    items = cli._validity_retro_source(node)
+    # Picked the fixture comment (its path), not the decoy.
+    assert "tests/test-agents-heal-token.sh" in items["pr:review-comment"]
+    assert any(k.startswith("git:merged-region:") for k in items)
+    # Every returned key is allowlisted, so collect_evidence will merge them.
+    assert all(k.startswith(("pr:", "git:")) for k in items)
+
+
+def test_cli_retro_seam_fails_open(monkeypatch, tmp_path):
+    """AC3-ERR at the seam: gh failure, a postmortem (source_pr=None) node, and an
+    invalid cwd each return {} so collect_evidence records `retro` unavailable."""
+    import subprocess
+
+    from fno.graph import cli
+
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "gh down"),
+    )
+    assert cli._validity_retro_source(
+        {"id": "ab", "details": f"x\n{_RETRO_TRAILER}", "cwd": str(tmp_path)}
+    ) == {}
+    assert cli._validity_retro_source(
+        {"id": "ab", "details": "y <!-- retro-triage source_pr=None finding_hash=abc -->",
+         "cwd": str(tmp_path)}
+    ) == {}
+    assert cli._validity_retro_source(
+        {"id": "ab", "details": f"z\n{_RETRO_TRAILER}", "cwd": "/no/such/dir"}
+    ) == {}
 
 
 # --- leg 8: validity sweep - validation + command rendering --------
