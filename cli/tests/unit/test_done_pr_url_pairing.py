@@ -111,3 +111,16 @@ def test_unparseable_pr_url_is_rejected(tmp_graph):
 
     assert result.exit_code != 0
     assert _first(tmp_graph).get("pr_number") is None
+
+
+def test_pr_url_without_pr_is_refused(tmp_graph):
+    """--note suppresses branch auto-detect, so the url would be dropped silently."""
+    result = runner.invoke(app, [
+        "done", "ab-00000001", "--pr-url", "https://github.com/o/r/pull/9",
+        "--note", "shipped",
+    ])
+
+    assert result.exit_code != 0
+    node = _first(tmp_graph)
+    assert node.get("pr_url") is None
+    assert node.get("completion_note") is None

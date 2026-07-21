@@ -2056,50 +2056,76 @@ def cmd_update(
     # and PR numbers collide across repos, so any consumer matching on the bare
     # number can attribute a foreign PR. Resolve here (subprocess I/O stays out
     # of the graph lock) and fail closed when the repo will not resolve.
-    derived_pr_url: Optional[str] = None
-    if pr_number is not None and pr_number.lower() != "null":
-        from fno.graph._reconcile import pr_url_for_repo, repo_slug_from_url
+    from fno.graph._reconcile import pr_url_for_repo, repo_slug_from_url
 
-        if not pr_number.strip().isdigit():
-            typer.echo(
-                f"Error: --pr-number {pr_number!r} is not a number (or 'null')",
-                err=True,
-            )
-            raise typer.Exit(code=2)
+    _pre_lock_node: list = []
 
-        if pr_url is not None and pr_url.lower() == "null":
-            typer.echo(
-                "Error: --pr-url null cannot accompany --pr-number: that writes a "
-                "url-less pr_number. Clear both, or supply a url.",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-
-        if pr_url is not None:
-            if repo_slug_from_url(pr_url) is None:
-                typer.echo(
-                    f"Error: --pr-url {pr_url!r} is not a GitHub PR url "
-                    "(expected https://github.com/<owner>/<repo>/pull/<n>)",
-                    err=True,
-                )
-                raise typer.Exit(code=2)
-        else:
+    def _node_before_update() -> dict:
+        """The node as it stands now, for cwd + current-PR reads. Cached."""
+        if not _pre_lock_node:
             from fno.graph._intake import _find_node as _find
             from fno.graph.load import load_graph
 
-            node_now = _find(load_graph(_graph_path()), task_id)
-            slug_cwd = derived_cwd_for_update or cwd or (node_now or {}).get("cwd")
-            derived_pr_url = pr_url_for_repo(int(pr_number), slug_cwd)
-            if derived_pr_url is None:
-                typer.echo(
-                    f"Error: cannot resolve the repo for PR #{pr_number} - refusing "
-                    "to stamp an unattributable pr_number. Fix with either "
-                    "`gh auth login` or `--pr-url https://github.com/<owner>/<repo>"
-                    f"/pull/{pr_number}`.",
-                    err=True,
-                )
-                raise typer.Exit(code=2)
-            typer.echo(f"note: derived --pr-url {derived_pr_url}", err=True)
+            _pre_lock_node.append(_find(load_graph(_graph_path()), task_id) or {})
+        return _pre_lock_node[0]
+
+    def _refuse(msg: str) -> None:
+        typer.echo(f"Error: {msg}", err=True)
+        raise typer.Exit(code=2)
+
+    def _resolve_or_refuse(number: int, label: str) -> str:
+        slug_cwd = derived_cwd_for_update or cwd or _node_before_update().get("cwd")
+        url = pr_url_for_repo(number, slug_cwd)
+        if url is None:
+            _refuse(
+                f"cannot resolve the repo for PR #{number} - refusing to stamp an "
+                "unattributable pr_number. Fix with either `gh auth login` or "
+                f"`{label} https://github.com/<owner>/<repo>/pull/{number}`."
+            )
+        typer.echo(f"note: derived {label} {url}", err=True)
+        return url  # type: ignore[return-value]
+
+    def _check_url_shape(value: str, label: str) -> None:
+        if repo_slug_from_url(value) is None:
+            _refuse(
+                f"{label} {value!r} is not a GitHub PR url "
+                "(expected https://github.com/<owner>/<repo>/pull/<n>)"
+            )
+
+    clearing_number = pr_number is not None and pr_number.lower() == "null"
+    clearing_url = pr_url is not None and pr_url.lower() == "null"
+
+    # Shape-check any url the caller supplies, on every path: an unparseable
+    # url carries no repo slug, so it is url-less in every way that matters.
+    if pr_url is not None and not clearing_url:
+        _check_url_shape(pr_url, "--pr-url")
+    if add_pr_url is not None:
+        _check_url_shape(add_pr_url, "--add-pr-url")
+
+    derived_pr_url: Optional[str] = None
+    if pr_number is not None and not clearing_number:
+        if not pr_number.strip().isdigit():
+            _refuse(f"--pr-number {pr_number!r} is not a number (or 'null')")
+        if clearing_url:
+            _refuse(
+                "--pr-url null cannot accompany --pr-number: that writes a "
+                "url-less pr_number. Clear both, or supply a url."
+            )
+        if pr_url is None:
+            derived_pr_url = _resolve_or_refuse(int(pr_number), "--pr-url")
+    elif clearing_url and not clearing_number and _node_before_update().get("pr_number"):
+        # Clearing the url alone strands the pr_number the node already carries.
+        _refuse(
+            "--pr-url null would leave this node's pr_number "
+            f"({_node_before_update().get('pr_number')}) unattributable. "
+            "Pass --pr-number null too, or supply a replacement url."
+        )
+
+    # additional_prs entries are read by the same repo-scoped matcher as the
+    # primary field, so a bare --add-pr is unattributable for the same reason.
+    derived_add_pr_url: Optional[str] = None
+    if add_pr is not None and add_pr_url is None:
+        derived_add_pr_url = _resolve_or_refuse(int(add_pr), "--add-pr-url")
 
     projected_node: list = [None]
     cascade_closed_update: list = []
@@ -2265,8 +2291,7 @@ def cmd_update(
         if add_pr is not None:
             existing_list = list(node.get("additional_prs") or [])
             entry = {"number": int(add_pr)}
-            if add_pr_url is not None:
-                entry["url"] = add_pr_url
+            entry["url"] = add_pr_url if add_pr_url is not None else derived_add_pr_url
             if add_pr_note is not None:
                 entry["note"] = add_pr_note
             replaced = False

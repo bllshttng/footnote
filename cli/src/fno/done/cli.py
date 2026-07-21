@@ -437,6 +437,12 @@ def done_command(
             typer.echo(line, err=True)
         raise typer.Exit(code=2)
 
+    # A url with no number is not a PR link, and silently dropping it would
+    # mark the node done while discarding the operator's only evidence.
+    if pr_url is not None and pr is None:
+        typer.echo("fno done: --pr-url requires --pr", err=True)
+        raise typer.Exit(code=2)
+
     node_id = match.id
     node = next(e for e in entries if e.get("id") == node_id)
     domain = node.get("domain") or "code"
