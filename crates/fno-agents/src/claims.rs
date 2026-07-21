@@ -1121,8 +1121,11 @@ fn recover_stale_locked(
 /// acquire regardless. Only reached for a mutex young enough to be honestly
 /// held; corpses are handled by [`steal_if_stale`] before this is called.
 fn wait_for_recovery_release(recovery_lock: &Path, max_wait: Duration) {
+    // symlink_metadata, not exists(): a dangling symlink at the mutex path is
+    // AlreadyExists to create_dir but absent to a following stat, so exists()
+    // would report the lock free and burn every contention attempt instantly.
     let deadline = Instant::now() + max_wait;
-    while recovery_lock.exists() && Instant::now() < deadline {
+    while std::fs::symlink_metadata(recovery_lock).is_ok() && Instant::now() < deadline {
         std::thread::sleep(RECOVERY_LOCK_POLL_INTERVAL);
     }
 }
@@ -1247,9 +1250,14 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
             .unwrap_or_default()
     ));
     // A peer holding the mutex is mid-reclaim; back off (best-effort) rather
-    // than race it. A missed renewal only shortens the lease.
+    // than race it. A missed renewal only shortens the lease. But a CORPSE here
+    // would block every renewal until some other path cleared it, which is the
+    // permanent-wedge shape this mutex's stealing exists to prevent, so retry
+    // once past a stale one.
     if std::fs::create_dir(&recovery_lock).is_err() {
-        return Ok(false);
+        if !steal_if_stale(&recovery_lock) || std::fs::create_dir(&recovery_lock).is_err() {
+            return Ok(false);
+        }
     }
     let result = renew_locked(&path, holder, ttl_ms);
     let _ = std::fs::remove_dir(&recovery_lock);

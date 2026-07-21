@@ -89,11 +89,19 @@ def _alt(*vals: Any) -> Any:
 
 
 class _Lock:
-    """mkdir-based mutex on the shared ``${path}.lock.d`` convention."""
+    """mkdir-based mutex on the shared ``${path}.lock.d`` convention.
 
-    def __init__(self, target: str, timeout: int = 30) -> None:
+    ``steal`` opts into age-based corpse stealing (see ``fno.mutex``). It is
+    safe only where the critical section is a whole-line append, which another
+    writer can interleave harmlessly. A read-modify-write section must NOT set
+    it: a holder suspended past the threshold resumes and writes back a
+    snapshot taken before the stealer's update, silently losing it.
+    """
+
+    def __init__(self, target: str, timeout: int = 30, *, steal: bool = False) -> None:
         self.dir = target + ".lock.d"
         self.timeout = timeout
+        self.steal = steal
         self.held = False
 
     def acquire(self) -> bool:
@@ -105,7 +113,7 @@ class _Lock:
                 self.held = True
                 return True
             except FileExistsError:
-                if steal_if_stale(Path(self.dir)):
+                if self.steal and steal_if_stale(Path(self.dir)):
                     continue
                 if waited >= self.timeout:
                     return False
@@ -157,7 +165,7 @@ def _append_event_lenient(events_file: str, event: dict, reason: str) -> None:
             f"pr-verify: schema validation failed for transcript_audit_failed "
             f"(reason={reason}); appending anyway\n"
         )
-    lock = _Lock(events_file, 30)
+    lock = _Lock(events_file, 30, steal=True)  # whole-line append
     if not lock.acquire():
         sys.stderr.write(f"pr-verify: events.jsonl lock timeout (reason={reason})\n")
         return

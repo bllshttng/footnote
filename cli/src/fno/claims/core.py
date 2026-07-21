@@ -333,8 +333,12 @@ def _wait_for_recovery_release(recovery_lock: Path) -> None:
     we can recurse. Only reached for a mutex young enough to be honestly held
     - a corpse is stolen by ``steal_if_stale`` before this is called.
     """
+    # lexists, not exists: a dangling symlink at the mutex path is EEXIST to
+    # mkdir but absent to a following stat, so exists() would report the lock
+    # free and send the caller straight back into acquire_claim, recursing
+    # without pause until RecursionError.
     deadline = time.monotonic() + _RECOVERY_LOCK_MAX_WAIT_S
-    while recovery_lock.exists() and time.monotonic() < deadline:
+    while os.path.lexists(recovery_lock) and time.monotonic() < deadline:
         time.sleep(_RECOVERY_LOCK_POLL_INTERVAL_S)
     # Deadline expired with the lock still held, and it is too young to be a
     # corpse. Do NOT rmdir - the holder may still be inside the critical

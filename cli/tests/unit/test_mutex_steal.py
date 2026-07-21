@@ -357,6 +357,26 @@ class TestRecoveryMutex:
         assert not recovery_lock.exists()
         assert any((claims_dir(tmp_path) / ".expired").iterdir())
 
+    def test_AC4_ERR_dangling_recovery_lock_does_not_recurse(self, tmp_path):
+        """The waiter must not follow symlinks either.
+
+        `exists()` reports a dangling `.recovery.d` absent while `mkdir` still
+        raises EEXIST, so the waiter returns instantly and acquire_claim
+        recurses with no pause until RecursionError.
+        """
+        from fno.claims.core import _wait_for_recovery_release
+
+        recovery_lock = tmp_path / "k.lock.recovery.d"
+        recovery_lock.symlink_to(tmp_path / "nonexistent-target")
+
+        started = time.monotonic()
+        _wait_for_recovery_release(recovery_lock)
+
+        assert time.monotonic() - started >= 1.0, (
+            "waiter returned instantly on a dangling mutex; the caller would "
+            "recurse without pause"
+        )
+
     def test_AC4_EDGE_fresh_recovery_lock_is_respected(self, tmp_path):
         """A live recoverer's mutex is never stolen; the waiter backs off.
 

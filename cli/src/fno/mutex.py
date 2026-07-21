@@ -15,13 +15,23 @@ so the threshold and the steal rule must change in lockstep.
 
 Accepted race: a steal is unilateral, so a holder suspended past the threshold
 (laptop sleep, SIGSTOP) can resume inside its critical section while the stealer
-is also in one, and its release then rmdirs whatever now sits at the path. That
-is deliberate. Every operation these mutexes guard already arbitrates a single
-winner on its own - archive is a rename, claim creation is an exclusive create,
-and an event is one whole-line O_APPEND write - so the worst case degrades to
-the benign pre-mutex race. These locks suppress spurious retries; they are not
-the correctness boundary, which is why an unrecoverable corpse was the far
-worse failure.
+is also in one, and its release then rmdirs whatever now sits at the path.
+
+Only steal a mutex whose critical section tolerates that. A whole-line O_APPEND
+write does (two appends interleave harmlessly), which is why the events mutex is
+stealable. A read-modify-write does NOT: the resumed holder writes back a
+snapshot predating the stealer's update and silently loses it.
+
+Claim recovery is the sharp case and is NOT independently safe: `archive_claim`
+renames whatever claim file is present without re-checking liveness, so a
+recoverer suspended between its in-mutex liveness check and its archive can, on
+resuming, archive a successor's LIVE claim and then publish its own - two live
+holders of a key whose entire purpose is single ownership. The window is a few
+instructions wide and needs a >120s suspension inside it, and the alternative
+was a corpse that bricked the key permanently and observably for eight days, so
+the trade is deliberate. Closing it properly needs a compare-and-swap on the
+claim file across both implementations; until then this is a known, narrow hole
+rather than a proof of safety.
 """
 
 from __future__ import annotations
