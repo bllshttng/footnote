@@ -343,17 +343,26 @@ def _live_lane_domains(*, claims_root: Optional[Path] = None) -> set[str]:
     return domains
 
 
-def _live_lane_entries(claims_root: Optional[Path] = None) -> list[dict]:
-    """Collision-comparable graph entries for the nodes live lanes already hold.
+_NODE_CLAIM_PREFIX = "node:"
+
+
+def _live_worked_entries(claims_root: Optional[Path] = None) -> list[dict]:
+    """Collision-comparable graph entries for every node a live worker holds.
+
+    Two claim shapes count as in flight, because both mean somebody is editing
+    those files: a ``lane-slot:`` holder (a peer lane) and a bare ``node:<id>``
+    claim (a manually started or non-lane ``/target``, which holds no slot).
+    Reading only lane slots would leave the gate blind to every hand-run worker.
 
     Entries pass through with their real fields: ``find_collisions`` rejects
-    anything done/deferred/superseded itself, and a lane slot outliving its node
+    anything done/deferred/superseded itself, and a claim outliving its node
     (a corpse claim) is exactly the case that filter exists for - synthesizing a
     ready status here would resurrect a finished node into the comparison set and
     let it block a dispatchable one.
     """
     from fno.claims.core import list_claims
     from fno.claims.lanes import LANE_HOLDER_PREFIX, LANE_SLOT_PREFIX
+    from fno.graph.collision import has_file_surface, resolve_plan_path
     from fno.graph.store import read_graph
     from fno.paths import graph_json
 
@@ -362,22 +371,27 @@ def _live_lane_entries(claims_root: Optional[Path] = None) -> list[dict]:
         holder = claim.get("holder") or ""
         if holder.startswith(LANE_HOLDER_PREFIX):
             held.add(holder[len(LANE_HOLDER_PREFIX):])
+    for claim in list_claims(prefix=_NODE_CLAIM_PREFIX, root=claims_root):
+        key = claim.get("key") or ""
+        if key.startswith(_NODE_CLAIM_PREFIX):
+            held.add(key[len(_NODE_CLAIM_PREFIX):])
     if not held:
         return []
     entries = [
         e for e in read_graph(graph_json())
         if e.get("id") in held and e.get("plan_path")
     ]
-    # read_graph degrades a corrupt graph to [] and list_claims drops a corrupt
-    # lockfile, either of which shrinks the comparison set to nothing while the
-    # gate still reports "no collision". One line makes that visible.
-    if len(entries) < len(held):
+    # A comparator with no readable surface is skipped inside find_collisions,
+    # so the gate would read clean without ever having compared against it.
+    # Same unevaluated-is-not-clean rule the candidate side follows.
+    comparable = [e for e in entries if has_file_surface(resolve_plan_path(e["plan_path"]))]
+    if len(comparable) < len(held):
         _LOG.warning(
-            "collision gate: %d of %d live lanes have no comparable plan; "
-            "those nodes cannot be collided against",
-            len(held) - len(entries), len(held),
+            "collision gate: %d of %d in-flight nodes have no comparable file "
+            "surface; those nodes cannot be collided against",
+            len(held) - len(comparable), len(held),
         )
-    return entries
+    return comparable
 
 
 def _high_collision(node: dict, inflight: list[dict]):
@@ -498,8 +512,14 @@ def select_lane_fill(
     used_domains: set[str] = _live_lane_domains(claims_root=claims_root)
     picked_ids: set[str] = set()
     # Nodes already in flight, for the file-surface collision gate below. Seeded
-    # from live peer lanes; this call's own picks are appended as they land.
-    inflight: list[dict] = _live_lane_entries(claims_root=claims_root)
+    # from live workers; this call's own picks are appended as they land. Seeding
+    # fails open like the gate itself - a claims or graph read error must not
+    # wedge dispatch, it just leaves the gate with nothing to compare against.
+    try:
+        inflight: list[dict] = _live_worked_entries(claims_root=claims_root)
+    except Exception as exc:  # noqa: BLE001 - fail open, never wedge dispatch
+        _LOG.warning("collision gate unavailable (in-flight read failed): %s", exc)
+        inflight = []
 
     try:
         while len(selected) < max_lanes:

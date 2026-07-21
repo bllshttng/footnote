@@ -21,8 +21,8 @@ consume:
 3. **`fno backlog collisions check`** is the direct CLI surface for
    checking a plan against the graph from a script or one-off prompt.
 4. **Dispatch** (`select_lane_fill`, shared by `lane-fill` / `dispatch-lanes`
-   and the active-backlog daemon) compares each candidate against the nodes
-   live lanes already hold before filling a lane. See
+   and the active-backlog daemon) compares each candidate against every node a
+   live worker already holds before filling a lane. See
    [Dispatch-time gate](#dispatch-time-gate) below.
 
 The primitive deliberately scopes to *file overlap* in v1. Concept overlap
@@ -62,7 +62,7 @@ dependencies. It exposes:
 
 | Function | Purpose |
 |----------|---------|
-| `parse_files_to_modify(plan_path)` | Extract file paths from a plan's file table. Recognized headings: `Files to Modify`, `Files to Change`, `Files Touched`, `File Ownership Map`, `Files`. Handles single-file quick plans and folder plans (00-INDEX.md plus every NN-* phase file). |
+| `parse_files_to_modify(plan_path)` | Extract file paths from a plan's file table. Recognized headings: `Files to Modify`, `Files to Change`, `Files Touched`, `File Ownership Map`, `Files`. Handles single-file quick plans and folder plans (every `*.md` under the folder, so 00-INDEX.md plus each NN-* phase file). |
 | `has_file_surface(plan_path)` | Whether the plan states a surface at all. `find_collisions` returns `[]` both when it compared and found nothing and when it had nothing to compare; this separates the two. |
 | `resolve_plan_path(plan_path)` | Public resolver for a graph-stored `plan_path` (absolute, `~`, or repo-relative). |
 | `find_collisions(candidate, graph, *, self_id, thresholds)` | Compare a candidate plan's file set against every pending plan on the graph. Returns sorted `Collision` records (high severity first). |
@@ -120,7 +120,13 @@ three phrasings, all landing in the same file, all fired in parallel.
 `select_lane_fill` (`cli/src/fno/backlog/advance.py`) now consults the primitive
 before it fills a lane.
 For each candidate it compares the plan's file surface against the surfaces of
-nodes live lanes already hold, plus this round's own picks.
+every node a live worker holds, plus this round's own picks.
+Both claim shapes count, because both mean somebody is editing those files: a
+`lane-slot:` holder (a peer lane) and a bare `node:<id>` claim (a hand-run
+`/target`, which holds no slot).
+A comparator whose own plan states no surface is reported rather than counted -
+`find_collisions` would skip it silently and the gate would read clean without
+having compared against it at all.
 A `high`-severity overlap skips the candidate and logs the node it collides with
 and the shared files.
 
@@ -128,8 +134,8 @@ Two properties are load-bearing:
 
 - **The node stays `ready`, never parked.** Skipping is the reversible option:
   the node is retried next round once the colliding lane finishes.
-- **The gate fails OPEN.** Any error reading or parsing a plan surface lets the
-  dispatch proceed with a warning.
+- **The gate fails OPEN end to end**, seeding included.
+  An error reading a plan surface, the claims directory, or the graph lets the dispatch proceed with a warning.
   A dedup check that can wedge the dispatcher is worse than the duplicate work it
   prevents.
 

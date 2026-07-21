@@ -182,6 +182,15 @@ def parse_files_to_modify(plan_path: Path) -> set[str]:
     """
     if not plan_path.exists():
         return set()
+    if plan_path.is_dir():
+        # A folder plan spreads its file tables across 00-INDEX.md and the
+        # NN-* phase files. Reading the directory itself raises IsADirectoryError,
+        # which _scan_one degrades to an empty set - indistinguishable from a
+        # plan that states no surface, so every folder plan bypassed the gate.
+        found: set[str] = set()
+        for child in sorted(plan_path.glob("*.md")):
+            found |= _scan_one(child)
+        return found
 
     return _scan_one(plan_path)
 

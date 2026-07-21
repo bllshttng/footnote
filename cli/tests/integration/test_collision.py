@@ -764,3 +764,18 @@ def test_collisions_check_human_output_says_unevaluated(tmp_graph, tmp_path):
     assert res.exit_code == 0
     assert "UNEVALUATED" in res.output
     assert "No collisions found" not in res.output
+
+
+def test_parse_folder_plan_scans_index_and_phase_files(tmp_path):
+    """Reading a directory raises IsADirectoryError, which degrades to an empty
+    set - indistinguishable from a plan stating no surface, so every folder plan
+    bypassed the gate."""
+    from fno.graph.collision import has_file_surface, parse_files_to_modify
+
+    folder = tmp_path / "plan"
+    folder.mkdir()
+    _write_quick_plan(folder / "00-INDEX.md", ["src/index.py"])
+    _write_quick_plan(folder / "01-phase.md", ["src/phase.py"])
+
+    assert parse_files_to_modify(folder) == {"src/index.py", "src/phase.py"}
+    assert has_file_surface(folder) is True
