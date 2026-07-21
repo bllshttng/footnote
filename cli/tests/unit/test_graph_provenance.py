@@ -1458,3 +1458,54 @@ def test_require_session_is_not_satisfiable_by_the_session_id_override(tmp_path,
     ])
     assert r.exit_code == 0
     assert _sessions(g) == []
+
+
+def test_guard_plan_that_cannot_be_read_says_so(tmp_path, monkeypatch):
+    """G3 is the one guard that does not fail closed, so a plan it could not
+    evaluate must be visible. Otherwise an install whose plan_path is
+    systematically stale runs with the guard off and no signal anywhere."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    stale = str(tmp_path / "moved-away.md")
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "ab-guard001", "--phase", "do", "--guard-plan", stale,
+    ])
+    assert r.exit_code == 0
+    assert len(_sessions(g)) == 1  # still stamps: absent conflict is not conflict
+    assert "not evaluated" in r.output and stale in r.output
+
+
+def test_guard_plan_on_binary_file_skips_rather_than_erroring(tmp_path, monkeypatch):
+    """UnicodeDecodeError is a ValueError, so letting it escape would turn a
+    designed guard outcome into exit 2 and log a skip as a stamp failure."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    binary = tmp_path / "binary.md"
+    binary.write_bytes(b"\xff\xfe\x00\x01 not utf-8")
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "ab-guard001", "--phase", "do", "--guard-plan", str(binary),
+    ])
+    assert r.exit_code == 0
+    assert len(_sessions(g)) == 1
+
+
+def test_skip_json_carries_the_resolved_node_and_identity(tmp_path, monkeypatch):
+    """A --json consumer must not read node_id=null for a skip that had already
+    resolved the node."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    _guard_graph(tmp_path, monkeypatch)
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "ab-guard001", "--phase", "do", "--json",
+        "--guard-plan", _plan(tmp_path, "ab-other99"),
+    ])
+    assert r.exit_code == 0
+    payload = json.loads([l for l in r.output.splitlines() if l.startswith("{")][-1])
+    assert payload["status"] == "skipped"
+    assert payload["node_id"] == "ab-guard001"
+    assert payload["session_id"] == "SESSION-A"

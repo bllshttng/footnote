@@ -3526,12 +3526,13 @@ def cmd_session_add(
 
     who = node if node is not None else f"pr#{pr}"
 
-    def _skip(reason: str) -> None:
+    def _skip(reason: str, node_id: "str | None" = None) -> None:
         typer.echo(f"session add: {reason} (target={who} phase={phase}). Skipped.", err=True)
         if json_out:
             typer.echo(json.dumps({
-                "node_id": None, "status": "skipped", "reason": reason,
-                "phase": phase, "added": False,
+                "node_id": node_id, "status": "skipped", "reason": reason,
+                "phase": phase, "harness": eff_harness, "session_id": eff_session,
+                "added": False,
             }))
 
     ident = resolve_harness_identity()
@@ -3609,11 +3610,23 @@ def cmd_session_add(
             # Plan agreement (mirrors /do Step 1.5): only a POSITIVE disagreement
             # skips. An unreadable plan or an absent `claims:` is agreement-
             # unknown, and absent evidence of conflict is not conflict.
+            #
+            # This is the one guard that does NOT fail closed, so it says so out
+            # loud when it could not evaluate. Otherwise an install whose
+            # plan_path is systematically stale (plan moved, vault unmounted)
+            # runs with G3 disabled and no operator signal anywhere.
             if guard_plan is not None:
                 claims = _plan_claims(guard_plan)
-                if claims and node_id not in claims:
+                if not claims:
+                    typer.echo(
+                        f"session add: plan {guard_plan} is unreadable or declares no "
+                        f"claims; agreement not evaluated for {node_id}.",
+                        err=True,
+                    )
+                elif node_id not in claims:
                     return _skip(
-                        f"plan {guard_plan} claims {sorted(claims)} != node {node_id}"
+                        f"plan {guard_plan} claims {sorted(claims)} != node {node_id}",
+                        node_id=node_id,
                     )
             found, added = append_session_record(
                 _graph_path(), node_id, phase=phase,

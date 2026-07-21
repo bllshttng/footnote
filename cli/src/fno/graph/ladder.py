@@ -76,9 +76,9 @@ def is_design_stage(entry: object) -> bool:
     try:
         raw = _read_plan_frontmatter(probe).get("status")
     except Exception:  # noqa: BLE001 - fail OPEN; see the fail-open note above
-        # `_read_plan_frontmatter` absorbs OSError and YAML errors but not, say,
-        # a UnicodeDecodeError from a binary file at the plan path. Callers must
-        # not have to know that: `detect_stale_ready` has no outer catch, so an
-        # escaping read error there would abort an entire `maintain` run.
+        # `_read_plan_frontmatter` now absorbs the read errors this was written
+        # for (including UnicodeDecodeError from a binary file at the plan path).
+        # Kept as a belt-and-braces net because `detect_stale_ready` has no outer
+        # catch, so any future escaping read error would abort a `maintain` run.
         return False
     return str(raw if raw is not None else "").strip().strip("'\"").lower() == "design"

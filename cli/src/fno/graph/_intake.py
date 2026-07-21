@@ -593,7 +593,9 @@ def _read_plan_frontmatter(plan_path: str) -> dict:
 
     try:
         text = target.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, so letting it escape turns a
+        # caller's designed "no frontmatter" branch into an error exit.
         return {}
 
     lines = text.splitlines()
