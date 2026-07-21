@@ -8,7 +8,7 @@
 #   2. Single-project quick plan: stamp, confirm no .completed/, graduate,
 #      confirm done
 #   3. Cross-project plan (expected_url_count: 2): stamp twice across two
-#      sessions, graduate after each, confirm shipped then done
+#      sessions, graduate after each, confirm in_review then done
 #   4. Idempotent re-stamp: identical (session, url) produces no duplicates
 #   5. Backfill path: simulate stop-hook backfill via direct stamp-plan.py call
 #      and assert hook contains the backfill logic (lite variant - see comment)
@@ -162,8 +162,8 @@ S1_FILE=$(make_plan "s1-plan.md")
     2>/dev/null
 
 STATUS=$(frontmatter_value "$S1_FILE" "status")
-[[ "$STATUS" == "shipped" ]] && pass "s1: status is 'shipped' after stamp" \
-    || fail "s1: expected status=shipped, got '$STATUS'"
+[[ "$STATUS" == "in_review" ]] && pass "s1: status is 'in_review' after stamp" \
+    || fail "s1: expected status=in_review, got '$STATUS'"
 
 URL_COUNT=$(frontmatter_list_count "$S1_FILE" "urls")
 [[ "$URL_COUNT" -eq 1 ]] && pass "s1: urls has 1 entry" \
@@ -206,8 +206,8 @@ S2_FILE=$(make_quick_plan "s2-quick.md")
     2>/dev/null
 
 STATUS=$(frontmatter_value "$S2_FILE" "status")
-[[ "$STATUS" == "shipped" ]] && pass "s2: quick plan frontmatter stamped (status=shipped)" \
-    || fail "s2: expected status=shipped in quick plan, got '$STATUS'"
+[[ "$STATUS" == "in_review" ]] && pass "s2: quick plan frontmatter stamped (status=in_review)" \
+    || fail "s2: expected status=in_review in quick plan, got '$STATUS'"
 
 # No .completed/ anywhere in the temp dir
 COMPLETED_DIRS=$(find "$TMP" -name ".completed" -type d 2>/dev/null | wc -l | tr -d ' ')
@@ -239,19 +239,19 @@ S3_FILE=$(make_plan "s3-cross.md")
     2>/dev/null
 
 STATUS=$(frontmatter_value "$S3_FILE" "status")
-[[ "$STATUS" == "shipped" ]] && pass "s3: status=shipped after first stamp" \
-    || fail "s3: expected status=shipped after first stamp, got '$STATUS'"
+[[ "$STATUS" == "in_review" ]] && pass "s3: status=in_review after first stamp" \
+    || fail "s3: expected status=in_review after first stamp, got '$STATUS'"
 
 URL_COUNT=$(frontmatter_list_count "$S3_FILE" "urls")
 [[ "$URL_COUNT" -eq 1 ]] && pass "s3: urls has 1 entry after first stamp" \
     || fail "s3: expected 1 url after first stamp, got $URL_COUNT"
 
-# Graduate after first stamp - should stay shipped (not enough URLs)
+# Graduate after first stamp - should stay in_review (not enough URLs)
 "${STAMP_PY[@]}" graduate --plan-path "$S3_FILE" 2>/dev/null
 
 STATUS=$(frontmatter_value "$S3_FILE" "status")
-[[ "$STATUS" == "shipped" ]] && pass "s3: status remains 'shipped' after graduate with 1/2 URLs" \
-    || fail "s3: expected status=shipped (not done) after first graduate, got '$STATUS'"
+[[ "$STATUS" == "in_review" ]] && pass "s3: status remains 'in_review' after graduate with 1/2 URLs" \
+    || fail "s3: expected status=in_review (not done) after first graduate, got '$STATUS'"
 
 # Second stamp: second URL
 "${STAMP_PY[@]}" stamp \
@@ -398,8 +398,8 @@ ABS_PLAN="$S5_REPO/plans/my-plan.md"
 S5_FILE="$ABS_PLAN"
 
 STATUS=$(frontmatter_value "$S5_FILE" "status")
-[[ "$STATUS" == "shipped" ]] && pass "s5: backfill stamps plan with status=shipped" \
-    || fail "s5: expected status=shipped after backfill, got '$STATUS'"
+[[ "$STATUS" == "in_review" ]] && pass "s5: backfill stamps plan with status=in_review" \
+    || fail "s5: expected status=in_review after backfill, got '$STATUS'"
 
 frontmatter_contains "$S5_FILE" "$S5_SESSION" && pass "s5: backfill includes session_id" \
     || fail "s5: backfill missing session_id"

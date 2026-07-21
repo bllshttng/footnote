@@ -168,7 +168,7 @@ def test_stamp_subcommand_against_plan_with_kill_criteria():
         assert "shipped_at:" in text
         assert "test-session-id-12345" in text
         assert "https://example.com/pull/777" in text
-        assert "status: shipped" in text
+        assert "status: in_review" in text
 
 
 def test_block_mapping_of_mappings_projects_shape():

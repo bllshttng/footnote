@@ -31,7 +31,7 @@ _SRC = _REPO / "cli" / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from fno.plan._status import KNOWN_STATUSES  # noqa: E402
+from fno.plan._status import KNOWN_STATUSES, canonical_status  # noqa: E402
 from fno.plan._stamp import read_plan_file, write_plan_file  # noqa: E402
 
 # Legacy status -> canonical ladder value. Keys are matched case-insensitively
@@ -55,7 +55,7 @@ _add("in_progress", "active", "in-progress", "inprogress", "in-flight",
      "inp-progres", "handoff", "handoff-pending", "wip", "started")
 _add("in_review", "reviewing", "in-review", "ready-for-review", "reviewed",
      "waves_complete_awaiting_review", "awaiting-review")
-_add("superseded", "archived", "abandoned", "cancelled", "canceled", "moved",
+_add("superseded", "abandoned", "cancelled", "canceled", "moved",
      "deferred", "future", "future-work", "obsolete", "wontfix")
 
 
@@ -117,7 +117,12 @@ def _classify(old: str, node_id: str | None, truth: dict[str, str]) -> str | Non
     """Return the new status, or None to leave untouched (already canonical or
     unmapped)."""
     if node_id and node_id in truth:
-        return truth[node_id]
+        new = truth[node_id]
+        # A doc already AT the target rung under a retired spelling is not
+        # stale, and rewriting it would turn the x-3ad5 rename into a migration
+        # pass over the vault. The override still fixes a genuinely stale rung
+        # (the `ready` doc whose node is done), which is what it exists for.
+        return None if canonical_status(old) == new else new
     if old.strip().lower() in KNOWN_STATUSES:
         return None  # already canonical
     return _MAPPING.get(_norm_key(old))  # None => unmapped
