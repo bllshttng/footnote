@@ -11,7 +11,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, cast
 
 import typer
 
@@ -1057,7 +1057,7 @@ def combos_list(
         )
         typer.echo(
             f"{row['name']}  [{row['strategy']}, sticky={row['sticky_limit']}]  "
-            f"members={','.join(row['members'])}  {cursor_str}"
+            f"members={','.join(cast('list[str]', row['members']))}  {cursor_str}"
         )
 
 

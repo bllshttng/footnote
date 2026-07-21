@@ -130,7 +130,7 @@ def score_findings(
             )
             scores = [0] * len(findings_list)
     else:
-        scores = [resolved(f) for f in findings_list]  # type: ignore[arg-type]
+        scores = [resolved(f) for f in findings_list]  # type: ignore[arg-type, misc]  # dynamic scorer return
 
     kept: list[Finding] = []
     for f, score in zip(findings_list, scores):

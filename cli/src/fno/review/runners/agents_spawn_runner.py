@@ -113,6 +113,7 @@ def run_via_agents_spawn(
     exc_holder: dict[str, BaseException] = {}
 
     def _call() -> None:
+        assert dispatch is not None  # resolved above (passed in or imported)
         try:
             result_holder["value"] = dispatch(
                 name=name,

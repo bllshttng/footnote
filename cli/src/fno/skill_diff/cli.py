@@ -419,7 +419,7 @@ def reconcile(
             return
         open_gaps = [pr_number]
     else:
-        open_gaps = [pr for pr in proposed if pr not in closed]
+        open_gaps = [pr for pr in proposed if pr is not None and pr not in closed]
         if not open_gaps:
             print("reconcile: no un-closed proposer PRs")
             return

@@ -3199,7 +3199,7 @@ def reconcile_agents(
                     }
                 )
                 continue
-            new_status = "live" if reachable else "orphaned"
+            new_status: AgentStatus = "live" if reachable else "orphaned"
 
         elif entry.harness == "codex":
             if codex_index_state != "ready":
