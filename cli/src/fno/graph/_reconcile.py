@@ -308,7 +308,8 @@ def resolve_merge_evidence(
     refusal_reason: Optional[str] = None
     outage_error: Optional[str] = None
     open_pr_number: Optional[int] = None
-    repo = repo_slug_from_url(refs[0][1])
+    first_pr_number, first_pr_url = refs[0]
+    repo = repo_slug_from_url(first_pr_url)
 
     for pr_number, pr_url in refs:
         pr_repo = repo_slug_from_url(pr_url) or repo
@@ -341,7 +342,7 @@ def resolve_merge_evidence(
         return MergeEvidence(outcome="outage", error=outage_error)
     return MergeEvidence(
         outcome="refused",
-        reason=refusal_reason or f"PR #{refs[0][0]}: no merged evidence",
+        reason=refusal_reason or f"PR #{first_pr_number}: no merged evidence",
     )
 
 

@@ -214,7 +214,9 @@ def test_done_race_collision_applies_pr_and_note(
 
     entry = next(e for e in _read(tmp_graph) if e["id"] == "ab-race003")
     assert entry.get("pr_number") == 42
-    assert entry.get("merge_status") == "merged"
+    # Attaching a PR number to an already-done node is metadata, not evidence
+    # of a merge, so merge_status is left alone rather than asserted.
+    assert entry.get("merge_status") is None
     assert entry.get("completion_note") == "second pass"
     # status / completed_at preserved despite the metadata writes.
     assert entry.get("status") == "done"

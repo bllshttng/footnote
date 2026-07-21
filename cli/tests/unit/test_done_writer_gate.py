@@ -30,7 +30,7 @@ def _seed_graph(home: Path, *, plan_path: str) -> Path:
                         "id": "x-fixture",
                         "plan_path": plan_path,
                         "pr_number": 505,
-                        "_status": "in_review",
+                        "status": "in_review",
                     }
                 ]
             },
@@ -176,7 +176,7 @@ def test_ac2_hp_done_on_open_pr_exits_5_after_querying_gh(done_graph, monkeypatc
 
     entry = _node(done_graph, "ab-open001")
     assert entry.get("completed_at") is None
-    assert entry.get("_status") != "done"
+    assert entry.get("status") != "done"
     assert entry.get("merge_status") is None
 
 
@@ -252,7 +252,7 @@ def test_us5_no_writer_closes_a_node_whose_pr_is_open(done_graph, monkeypatch):
         "id": "ab-sweep01",
         "title": "Open PR sweep node",
         "domain": "code",
-        "_status": "in_review",
+        "status": "in_review",
         "pr_number": 42,
         "pr_url": "https://github.com/o/r/pull/42",
     })
@@ -274,7 +274,7 @@ def test_us5_no_writer_closes_a_node_whose_pr_is_open(done_graph, monkeypatch):
 
     entry = _node(done_graph, "ab-sweep01")
     assert entry.get("completed_at") is None
-    assert entry.get("_status") == "in_review"
+    assert entry.get("status") == "in_review"
     assert entry.get("merge_status") is None
 
 
@@ -403,20 +403,26 @@ def test_note_close_cannot_bypass_the_gate_on_a_node_with_an_open_pr(
     assert _node(done_graph, "ab-note001").get("completed_at") is None
 
 
-def test_each_ref_is_evidenced_against_its_own_repo(done_graph, monkeypatch):
-    """A --pr number must not be evidenced against another PR's repo url."""
+def test_explicit_pr_is_scoped_to_the_nodes_repo_not_the_callers(
+    done_graph, monkeypatch
+):
+    """An explicit --pr is evidenced in the NODE's repo, wherever it is run.
+
+    Multi-repo graphs are supported, so closing a node from a different
+    checkout must not let a same-numbered PR in the caller's repo authorize it.
+    """
     from typer.testing import CliRunner
     from fno.cli import app
     import fno.done.cli as done_cli
     from fno.graph._reconcile import PrMergeState
 
     _seed(done_graph, {
-        "id": "ab-repo001", "title": "Two repos", "domain": "code",
+        "id": "ab-repo001", "title": "Node in repo-a", "domain": "code",
         "pr_number": 7, "pr_url": "https://github.com/o/repo-a/pull/7",
     })
-    # gh resolves the CURRENT repo, so the explicit --pr carries repo-b.
-    monkeypatch.setattr(done_cli, "_pr_url_from_gh",
-                        lambda n: f"https://github.com/o/repo-b/pull/{n}")
+    # The caller is standing in repo-b; gh would resolve that slug.
+    monkeypatch.setattr(done_cli, "pr_url_for_repo",
+                        lambda n, cwd=None: f"https://github.com/o/repo-b/pull/{n}")
     seen: list = []
 
     def _q(pr_number, **kwargs):
@@ -427,8 +433,102 @@ def test_each_ref_is_evidenced_against_its_own_repo(done_graph, monkeypatch):
 
     CliRunner().invoke(app, ["done", "ab-repo001", "--pr", "99"])
 
-    # PR 7 is evidenced against repo-a; PR 99 against the repo gh resolved for
-    # it, never inheriting repo-a and silently reading a stranger's PR #99.
-    assert (7, "o/repo-a") in seen
-    assert (99, "o/repo-b") in seen
-    assert (99, "o/repo-a") not in seen
+    assert seen == [(99, "o/repo-a")], "explicit --pr must resolve in the node's repo"
+
+
+def test_explicit_pr_replaces_a_stale_merged_ref_as_the_evidence(
+    done_graph, monkeypatch
+):
+    """A merged old PR must not authorize a close whose replacement is open.
+
+    Closing with --pr names the PR being closed on; treating the node's older
+    merged ref as evidence would stamp merge_status: merged while writing the
+    new, still-open PR number.
+    """
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.done.cli as done_cli
+    from fno.graph._reconcile import PrMergeState
+
+    _seed(done_graph, {
+        "id": "ab-repl001", "title": "Replacement PR", "domain": "code",
+        "pr_number": 100, "pr_url": "https://github.com/o/r/pull/100",
+        "merge_status": "merged",
+    })
+    monkeypatch.setattr(
+        done_cli, "_gh_query",
+        lambda n, **kw: PrMergeState(
+            number=n,
+            state="MERGED" if n == 100 else "OPEN",
+            url=None,
+            merged_at="2026-01-01T00:00:00Z" if n == 100 else None,
+        ),
+    )
+
+    r = CliRunner().invoke(app, ["done", "ab-repl001", "--pr", "101"])
+
+    assert r.exit_code == 5
+    assert _node(done_graph, "ab-repl001").get("completed_at") is None
+
+
+def test_metadata_update_on_a_done_node_skips_the_gate(done_graph, monkeypatch):
+    """A --note on an already-done node must land even when gh is down.
+
+    The close was gated when it happened; re-gating a metadata update would
+    let an outage block a note from reaching a node that closed long ago.
+    """
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(done_graph, {
+        "id": "ab-meta001", "title": "Already done", "domain": "code",
+        "status": "done", "completed_at": "2026-05-15T10:00:00+00:00",
+        "pr_number": 42, "merge_status": "merged",
+    })
+    _stub_no_git(monkeypatch)
+    calls: list = []
+    _stub_gh(monkeypatch, None, calls=calls)  # would raise an outage if consulted
+
+    r = CliRunner().invoke(app, ["done", "ab-meta001", "--note", "late note"])
+
+    assert r.exit_code == 0
+    assert calls == [], "a metadata update must not re-gate a closed node"
+    entry = _node(done_graph, "ab-meta001")
+    assert entry.get("completion_note") == "late note"
+    assert entry.get("completed_at") == "2026-05-15T10:00:00+00:00"
+    assert entry.get("merge_status") == "merged", "existing evidence preserved"
+
+
+def test_reconcile_style_close_stamps_merge_evidence(done_graph, monkeypatch):
+    """An evidenced close records merge_status, so orientation can require it.
+
+    Making `fno target status` demand merge_status is only correct if the
+    normal post-merge closers write it; otherwise every genuinely merged node
+    would render "awaiting merge" right after GitHub confirmed the merge.
+    """
+    from fno.graph.cli import _apply_completion_fields
+
+    node: dict = {"id": "ab-ev001", "pr_number": 42}
+    _apply_completion_fields(node, merge_status="merged")
+    assert node["completed_at"] is not None
+    assert node["merge_status"] == "merged"
+
+    # A --force close resolved no evidence, so it must not claim a merge.
+    forced: dict = {"id": "ab-ev002", "pr_number": 43}
+    _apply_completion_fields(forced)
+    assert forced["completed_at"] is not None
+    assert "merge_status" not in forced
+
+
+def test_orient_renders_merged_for_an_evidenced_close(monkeypatch):
+    """End of the chain: an evidenced close reads "merged" in orientation."""
+    from fno.graph.cli import _apply_completion_fields
+    from fno.target import orient
+
+    node: dict = {"id": "ab-ev003", "status": "done", "pr_number": 42}
+    _apply_completion_fields(node, merge_status="merged")
+    monkeypatch.setattr(orient, "_graph_entry", lambda *_: node)
+
+    assert orient._node_line("ab-ev003", Path("/"), manifest_raw={}) == (
+        "shipped (PR #42 merged)"
+    )

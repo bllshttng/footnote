@@ -481,22 +481,23 @@ def done_command(
 
     now = datetime.now(timezone.utc).isoformat()
 
-    # Resolved before the gate so an explicit --pr enters it carrying its OWN
-    # url. Without that the number would inherit the node's stored repo slug and
-    # could be evidenced against a same-numbered PR in a different repo.
-    pr_url_to_write: Optional[str] = None
-    if pr is not None:
-        pr_url_to_write = auto_url or _pr_url_from_gh(pr)
-
     # -- merge gate --
-    # Keyed on the NODE's refs (plus an explicit --pr), not on the --pr argument
-    # alone, exactly as cmd_done keys on node_pr_refs. Reading only the argument
-    # would let `fno done <id>` reopen the original bypass whenever gh
-    # auto-detect fails, and let `--note` close a node whose PR is still open.
+    # An explicit --pr REPLACES the node's refs as the evidence: it is the PR
+    # the operator is closing on, so a stale merged ref must not authorize a
+    # close whose new PR is still open. It is scoped to the NODE's repo (its
+    # stored url, else its cwd), never the caller's checkout, so running from
+    # another checkout cannot close the node on a same-numbered stranger.
+    # With no --pr the node's own refs are the evidence, exactly as cmd_done
+    # reads them - keying on the argument alone would reopen the original
+    # bypass whenever gh auto-detect fails, and let --note close an open PR.
     # A node with no ref anywhere has nothing to gate (--link/--note).
-    gate_refs = node_pr_refs(node)
-    if pr is not None and pr not in [n for n, _ in gate_refs]:
-        gate_refs.append((pr, node.get("pr_url")))
+    gate_refs = [(pr, node.get("pr_url"))] if pr is not None else node_pr_refs(node)
+
+    # An already-done node is a metadata update, not a close. The close was
+    # gated when it happened; re-gating here would let a gh outage block a
+    # --note from landing on a node that closed months ago.
+    if node.get("status") == "done" or node.get("completed_at"):
+        gate_refs = []
 
     merge_status_to_write: Optional[str] = None
     if gate_refs:
@@ -576,8 +577,11 @@ def done_command(
             # same six assignments.
             if pr is not None:
                 e["pr_number"] = pr
-                # From the gh-resolved state above, never a literal.
-                e["merge_status"] = merge_status_to_write
+                # Only when the gate above resolved MERGED from gh. Left alone
+                # otherwise so a metadata-only update to an already-done node
+                # cannot erase the evidence its own close recorded.
+                if merge_status_to_write is not None:
+                    e["merge_status"] = merge_status_to_write
                 e["pr_url"] = pr_url_to_write
             if link is not None:
                 e["artifact_url"] = link

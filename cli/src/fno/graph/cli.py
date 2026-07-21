@@ -5426,13 +5426,17 @@ def _project_plans_from_graph(node_ids: list[str]) -> None:
     project_graph_nodes(entries, ids)
 
 
-def _apply_completion_fields(node: dict) -> None:
+def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) -> None:
     """Set the fields that mark a node done.
 
     Shared by ``done`` and ``reconcile`` so both close paths stay in
     lockstep. The caller owns the idempotency check (skip when
     ``completed_at`` is already set). ``recompute_statuses`` derives
     ``status: done`` from ``completed_at`` and unblocks dependents.
+
+    ``merge_status`` is passed ONLY by a caller that resolved MERGED from gh,
+    so the field keeps meaning "GitHub confirmed this". A ``--force`` close and
+    a PR-less epic cascade leave it unset rather than assert a merge.
     """
     node["locked_by"] = None
     node["claimed_at"] = None
@@ -5443,6 +5447,8 @@ def _apply_completion_fields(node: dict) -> None:
     node["queued_at"] = None
     node["queued_reason"] = None
     node["completed_at"] = datetime.now(timezone.utc).isoformat()
+    if merge_status is not None:
+        node["merge_status"] = merge_status
 
 
 def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
@@ -5808,7 +5814,7 @@ def cmd_done(
 
     if refs and not force:
         # There are PR references; require evidence before closing.
-        first_pr_number = refs[0][0]
+        first_pr_number, _ = refs[0]
 
         # Shared with `fno done` so the two verbs cannot drift apart on what
         # counts as evidence.
@@ -5921,7 +5927,7 @@ def cmd_done(
         if existing:
             already_holder[0] = True
             return entries
-        _apply_completion_fields(n)
+        _apply_completion_fields(n, merge_status="merged" if evidence_pr_url else None)
         # Fill-only: never overwrite a cost a richer path (e.g. `fno done`)
         # already stamped, and don't drop rows appended during the run.
         if cost_rollup.get("cost_usd") is not None and not n.get("cost_usd"):
@@ -6299,7 +6305,7 @@ def cmd_reconcile(
             for record in closeable:
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
-                    _apply_completion_fields(node_obj)
+                    _apply_completion_fields(node_obj, merge_status="merged")
                     # Backfill the PR ref for a reverse-mapped node (dead before
                     # the node<->PR stamp): the recovered number/url live only on
                     # the record, so without this the closed node stays
