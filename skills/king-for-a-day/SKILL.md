@@ -42,6 +42,11 @@ Two rules keep the court from growing:
 
 State your level, altitude, and scope in your own opening line, so the transcript records what you believed you were authorized to do.
 
+**The crown is stamped at spawn, never self-declared.**
+A grantor bestows it with `fno agents spawn ... --crown level=N,scope=<scope>`; the child's registry row records `level`, `scope`, and the grantor (the spawning session, or `human`), the same provenance discipline as harness-stamped mail identity.
+So a crown is externally verifiable, not a claim a session makes about itself: `fno agents list`/`top` mark crowned rows (a minion resolves who to escalate to, and a second live crown over one scope is detectable), and `fno whoami` prints your own crown line so you recover your authority after a compaction.
+Crown liveness is just row liveness - the crown dies with the session, no separate lifecycle.
+
 **Abdicate.**
 This is orthogonal to the crown and equally load-bearing.
 A king who crowns a subordinate and then stays alive to watch it has made itself a permanent monarch, which is the shape this design exists to prevent.
@@ -53,7 +58,7 @@ A pass makes judgment calls (which wave, what to park, what to supersede) and th
 Grooming stays on a small model because it is daily and levers-only; a reign is rare and bounded, so the cost argument does not apply to it.
 
 ```bash
-fno agents spawn king-<epic> "<brief>" --effort high --model <your frontier model>
+fno agents spawn king-<epic> "<brief>" --effort high --model <your frontier model> --crown level=<N>,scope=<epic>
 ```
 
 What a reign actually requires is a frontier-class model at high reasoning effort, in a session that can run many steps.
