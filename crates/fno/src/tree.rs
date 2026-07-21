@@ -1562,6 +1562,81 @@ mod tests {
     }
 
     #[test]
+    fn tree_set_seam_pos_is_exact_at_arbitrary_nesting_depth() {
+        // The fix must generalise, not just handle the one shape that exposed
+        // it. Four levels of alternating axes, with the seam addressed by the
+        // DEEPEST pane on each side - the worst case for confusing a pane's
+        // extent with its branch child's.
+        //
+        //   Root(H): [ A , B ]
+        //     A(V): [ P1 , D ]          D(H): [ P2 , E ]      E(V): [ P3, P4 ]
+        //     B(V): [ P5 , F ]          F(H): [ P6 , G ]      G(V): [ P7, P8 ]
+        let deep = |l: PaneId, m: PaneId, r1: PaneId, r2: PaneId| Node::Branch {
+            axis: Axis::Vertical,
+            children: vec![
+                (0.5, Node::Leaf(l)),
+                (
+                    0.5,
+                    Node::Branch {
+                        axis: Axis::Horizontal,
+                        children: vec![
+                            (0.5, Node::Leaf(m)),
+                            (
+                                0.5,
+                                Node::Branch {
+                                    axis: Axis::Vertical,
+                                    children: vec![(0.5, Node::Leaf(r1)), (0.5, Node::Leaf(r2))],
+                                },
+                            ),
+                        ],
+                    },
+                ),
+            ],
+        };
+        let mk = || Tab {
+            name: None,
+            id: 0,
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(0.5, deep(1, 2, 3, 4)), (0.5, deep(5, 6, 7, 8))],
+            },
+            focus: 1,
+        };
+        let mut tab = mk();
+        check_invariants(&tab).unwrap();
+
+        // Panes 4 and 7 are three levels deep on either side of the OUTER seam.
+        let panes = layout(&tab.root, WIDE);
+        let (p4, p7) = (leaf_rect(&panes, 4), leaf_rect(&panes, 7));
+        assert!(
+            p4.cols < leaf_rect(&panes, 1).cols,
+            "pane 4 spans a strict subset of its branch child"
+        );
+        assert!(p4.x + p4.cols < p7.x, "and does not even abut the seam");
+
+        // Every legal target cell must land exactly, addressed by deep panes.
+        for target in [60u16, 140, 75] {
+            let mut t = mk();
+            assert!(
+                set_seam_pos(&mut t, WIDE, 4, 7, target),
+                "deep pair addresses the outer seam"
+            );
+            let r = leaf_rect(&layout(&t.root, WIDE), 1);
+            assert_eq!(
+                r.x + r.cols,
+                target,
+                "outer divider lands on {target} regardless of how deep the \
+                 addressing panes sit"
+            );
+            check_invariants(&t).unwrap();
+        }
+
+        // And an INNER seam addressed by its own deep pair stays independent.
+        assert!(set_seam_pos(&mut tab, WIDE, 3, 4, 0));
+        check_invariants(&tab).unwrap();
+    }
+
+    #[test]
     fn tree_set_seam_pos_refuses_a_nan_ratio_instead_of_panicking() {
         // f32::clamp panics on a NaN bound, and `lo > hi` cannot catch one -
         // every comparison against NaN is false, so it would sail through.
