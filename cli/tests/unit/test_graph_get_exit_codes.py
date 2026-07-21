@@ -82,6 +82,9 @@ def test_cmd_get_malformed_root_is_distinct_exit_code(scratch_graph):
     result = runner.invoke(app, ["backlog", "get", "--strict", "x-d157"])
     assert result.exit_code == GRAPH_UNREADABLE_EXIT
     assert "No node matching" not in result.output
+    # AC1-UI: names the graph path so the failure is diagnosable, like the
+    # invalid-JSON case -- not only the exit code.
+    assert str(scratch_graph) in result.output
 
 
 def test_cmd_get_empty_graph_is_a_clean_miss(scratch_graph):

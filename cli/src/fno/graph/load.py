@@ -107,11 +107,21 @@ def load_graph(path: Path | None = None) -> list[dict]:
         raw_bytes = path.read_bytes()
         actual_hash = hashlib.sha256(raw_bytes).hexdigest()
 
-        expected_hash = sidecar.read_text().strip() if sidecar.exists() else ""
+        sidecar_present = sidecar.exists()
+        expected_hash = sidecar.read_text().strip() if sidecar_present else ""
         if not _is_sha256(expected_hash):
             # Absent, empty, or truncated sidecar: no baseline to validate
             # against, so trust the file and (re)write the sidecar -- the same
-            # first-contact stance as before, NOT graph corruption.
+            # first-contact stance as before, NOT graph corruption. But a sidecar
+            # that EXISTS yet is not a valid digest is anomalous (a damaged or
+            # partially-written sidecar disables corruption detection), so warn
+            # before re-blessing it -- unlike a legitimately-absent first run.
+            if sidecar_present:
+                print(
+                    f"Warning: {sidecar} is present but not a valid sha256; "
+                    f"rewriting from current graph bytes (corruption detection was disabled)",
+                    file=sys.stderr,
+                )
             sidecar.write_text(actual_hash + "\n")
             return _entries(json.loads(raw_bytes))
 

@@ -626,14 +626,22 @@ def resolve_provenance(
                     if plan is None:
                         plan = rec.get("plan_path") or ""
                     break
-        except Exception:
+        except Exception as e:
             # A graph read failure must not block the spawn -- but it must not
             # degrade a SLUG into FNO_NODE=<slug> either. The origin-capture
             # consumer matches ids exactly and would drop a slug as an unknown
             # node, blaming a bad id for what was a read failure. If `node` was
             # never an id, drop it so FNO_NODE is absent (not wrong); an id
             # input survives untouched. Never re-raise: the pane path degrades.
+            # Log under FNO_DEBUG so a missing-origin node is traceable to the
+            # read failure rather than being silently invisible.
             if not has_node_id_prefix(node):
+                if os.environ.get("FNO_DEBUG"):
+                    print(
+                        f"resolve_provenance: graph read failed ({type(e).__name__}); "
+                        f"dropping unresolved node '{node}' from provenance",
+                        file=sys.stderr,
+                    )
                 node = None
     prov = {"FNO_NODE": node, "FNO_SLUG": slug or "", "FNO_PLAN": plan or ""}
     return {k: v for k, v in prov.items() if v}

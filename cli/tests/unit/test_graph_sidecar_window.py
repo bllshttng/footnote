@@ -109,6 +109,41 @@ def test_truncated_sidecar_is_not_corruption(tmp_path):
     assert [e["id"] for e in entries] == ["x-a"]
 
 
+def test_present_but_invalid_sidecar_warns_before_reblessing(tmp_path, capsys):
+    # A present-but-garbage sidecar silently disables corruption detection; warn
+    # before re-blessing it (distinct from a legitimately-absent first run).
+    g = tmp_path / "graph.json"
+    g.write_text(json.dumps({"entries": [{"id": "x-a"}]}) + "\n")
+    _sidecar_path(g).write_text("deadbeef")
+    load_graph(g)
+    assert "not a valid sha256" in capsys.readouterr().err
+
+
+def test_absent_sidecar_first_run_does_not_warn(tmp_path, capsys):
+    g = tmp_path / "graph.json"
+    g.write_text(json.dumps({"entries": [{"id": "x-a"}]}) + "\n")
+    load_graph(g)  # no sidecar present: normal first contact, no warning
+    assert capsys.readouterr().err == ""
+
+
+def test_ac1fr_transient_recovery_is_observable_under_fno_debug(tmp_path, monkeypatch, capsys):
+    # AC1-FR: the recovery must not be entirely invisible. Under FNO_DEBUG the
+    # retry emits a line so the transient window is observable.
+    g = tmp_path / "graph.json"
+    _write_consistent(g, [{"id": "x-a"}])
+    g.write_text(json.dumps({"entries": [{"id": "x-a"}, {"id": "x-b"}]}) + "\n")
+    correct = hashlib.sha256(g.read_bytes()).hexdigest()
+    monkeypatch.setenv("FNO_DEBUG", "1")
+
+    def fake_sleep(_s):
+        _sidecar_path(g).write_text(correct + "\n")
+
+    monkeypatch.setattr(load_mod.time, "sleep", fake_sleep)
+    load_graph(g)
+    err = capsys.readouterr().err
+    assert "hash mismatch" in err and "retry" in err.lower()
+
+
 # --- AC3-HP: concurrent writers + readers, zero false corruption ---
 
 def test_ac3hp_concurrent_writes_never_surface_corruption(tmp_path, monkeypatch):
