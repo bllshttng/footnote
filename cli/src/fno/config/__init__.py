@@ -362,7 +362,7 @@ class PostMergeBlock(BaseModel):
     sync_command: Optional[str] = None
     sync_paths: list[str] = Field(default_factory=list)
     auto_run: bool = False
-    # Catch-up sweep (x-8a26): both triggers for the sync are event-time-only, so
+    # Catch-up sweep: both triggers for the sync are event-time-only, so
     # a merge the watcher never saw was never synced. The sweep bounds its gh
     # lookback to this window (a fresh clone must not re-sweep all history) and
     # the doctor alarm fires only after the newest merge has sat markerless this

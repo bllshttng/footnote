@@ -6709,7 +6709,7 @@ def cmd_reconcile(
         except Exception as exc:  # noqa: BLE001 - never abort the sweep
             typer.echo(f"warning: revert detection skipped: {exc}", err=True)
 
-    # Canonical-sync catch-up (x-8a26). reconcile auto-fires on SessionStart, so
+    # Canonical-sync catch-up. reconcile auto-fires on SessionStart, so
     # this is the leg that breaks the circularity: when the pr-watch daemon is
     # dead AGAIN, the next interactive session catches the canonical up instead
     # of the outage waiting for a human to notice. Same self-heal posture as

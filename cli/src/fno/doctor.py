@@ -734,7 +734,7 @@ def _groom_health() -> dict[str, Any]:
 
 
 def _post_merge_sync_health() -> dict[str, Any]:
-    """Is the canonical checkout current with recently-merged PRs? (x-8a26)
+    """Is the canonical checkout current with recently-merged PRs?
 
     The failure class here is "the daemon runs but does nothing" - five merges
     went unsynced while process-liveness checks all read green. Only outcome
@@ -1152,7 +1152,7 @@ def _emit_human(
             "and ~/.fno/groom.err.log."
         )
 
-    # Canonical-sync freshness (x-8a26). Advisory like grooming: the alarm
+    # Canonical-sync freshness. Advisory like grooming: the alarm
     # exists because process-liveness reads green through this exact failure.
     pms = result.get("post_merge_sync") or {}
     if pms.get("stale"):

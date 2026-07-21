@@ -1,4 +1,4 @@
-"""Catch-up sweep + staleness alarm for the post-merge canonical sync (x-8a26).
+"""Catch-up sweep + staleness alarm for the post-merge canonical sync.
 
 The outage this covers was "the daemon runs but does nothing" for five straight
 merges, so every assertion here is on ground truth (marker files on disk, call
@@ -168,8 +168,9 @@ def test_catchup_syncs_newest_and_stamps_the_rest(tmp_path):  # AC1-HP
     rows = [_merged(52, "ccc", 30), _merged(51, "bbb", 40), _merged(50, "aaa", 50)]
     calls: list[int] = []
 
-    def sync(pr, **_kw):
+    def sync(pr, shell_runner=None, **_kw):
         calls.append(pr)
+        shell_runner("git pull", str(tmp_path))  # a real sync enters the shell
         _stamp(tmp_path, "ccc")
         return 0
 
@@ -212,6 +213,55 @@ def test_catchup_declined_sync_stamps_nothing(tmp_path):  # AC7-EDGE
     )
     assert res.outcome == "skipped"
     assert not _marker(tmp_path, "bbb").exists()
+
+
+def test_catchup_does_not_stamp_when_newest_merge_needed_no_pull(tmp_path):
+    """The regression this feature would otherwise have re-introduced.
+
+    run_sync_canonical writes a marker and returns 0 for a merge that misses the
+    sync_paths globs, having pulled nothing. Stamping the older merges off that
+    marker would mark real code merges synced without ever pulling them - the
+    exact silent skip the catch-up exists to end. Proof-of-pull is whether
+    sync_command's shell was entered, so a path-gated newest leaves the rest
+    markerless for the next sweep.
+    """
+    rows = [_merged(52, "docs", 30), _merged(51, "code", 40)]
+
+    def path_gated_sync(pr, shell_runner=None, **_kw):
+        _stamp(tmp_path, "docs")  # marker written, shell never entered
+        return 0
+
+    res = sc.run_sync_catchup(
+        settings=_pm(sync_paths=["cli/**"]), canonical_root=tmp_path,
+        runner=_git(0), gh_list=_gh(rows), sync=path_gated_sync,
+    )
+    assert res.outcome == "marked"
+    assert not _marker(tmp_path, "code").exists()
+
+    # The next sweep picks the newest REMAINING merge and pulls for real.
+    def real_sync(pr, shell_runner=None, **_kw):
+        shell_runner("git pull", str(tmp_path))
+        _stamp(tmp_path, "code")
+        return 0
+
+    res2 = sc.run_sync_catchup(
+        settings=_pm(sync_paths=["cli/**"]), canonical_root=tmp_path,
+        runner=_git(0), gh_list=_gh(rows), sync=real_sync,
+    )
+    assert res2.outcome == "synced" and res2.pr_number == 51
+
+
+def test_catchup_reports_a_lying_marker_set(tmp_path):
+    """Every marker present but the canonical still behind: nothing to sweep, so
+    the outcome has to carry the reason rather than read as a flat 'fresh'."""
+    _stamp(tmp_path, "aaa")
+    res = sc.run_sync_catchup(
+        settings=_pm(), canonical_root=tmp_path, runner=_git(4),
+        gh_list=_gh([_merged(50, "aaa", 30)]),
+        sync=lambda pr, **_kw: pytest.fail("nothing markerless to sync"),
+    )
+    assert res.outcome == "fresh"
+    assert "4 behind" in res.detail
 
 
 def test_catchup_inert_when_auto_run_off(tmp_path):  # AC6-EDGE
@@ -258,7 +308,9 @@ def test_catchup_survives_a_wedged_events_bus(tmp_path, monkeypatch):  # AC5-FR
     res = sc.run_sync_catchup(
         settings=_pm(), canonical_root=tmp_path, runner=_git(0),
         gh_list=_gh([_merged(52, "ccc", 30), _merged(51, "bbb", 40)]),
-        sync=lambda pr, **_kw: (_stamp(tmp_path, "ccc"), 0)[1],
+        sync=lambda pr, shell_runner=None, **_kw: (
+            shell_runner("git pull", str(tmp_path)), _stamp(tmp_path, "ccc"), 0
+        )[2],
     )
     assert res.outcome == "synced"
     assert _marker(tmp_path, "bbb").exists()

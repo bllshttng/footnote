@@ -221,7 +221,7 @@ def tick() -> None:
         except Exception as exc:  # noqa: BLE001 - never let recovery break pr-watch
             log.warning("pr-watch: recovery sweep failed: %s", exc)
 
-    # Canonical-sync catch-up (x-8a26). The dispatch above is event-time-only:
+    # Canonical-sync catch-up. The dispatch above is event-time-only:
     # it acts on merges it DETECTS, so a merge that landed while the daemon was
     # wedged is never synced by it. This leg is keyed on outcome instead - it
     # asks whether recent merges have markers, not whether we saw them happen.
@@ -232,7 +232,10 @@ def tick() -> None:
 
         res = run_sync_catchup(settings=settings)
         if res.outcome != "disabled":
-            typer.echo(f"sync catch-up: {res.outcome}")
+            typer.echo(
+                f"sync catch-up: {res.outcome}"
+                + (f" ({res.detail})" if res.detail else "")
+            )
         # Detected AND failed is the alarm case: a successful catch-up is the
         # system working, and alarming on it is how a check trains people to
         # ignore it. The notify is best-effort and never load-bearing.

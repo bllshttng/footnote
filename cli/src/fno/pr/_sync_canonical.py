@@ -211,19 +211,12 @@ def run_sync_canonical(
 
 
 # ---------------------------------------------------------------------------
-# Catch-up sweep + staleness alarm (x-8a26)
+# Catch-up sweep + staleness alarm
 #
-# Both triggers for the sync above are event-time-only: the pr-watch tick
-# dispatches at merge-DETECTION time and reconcile's dispatch is once-only
-# best-effort. A merge nobody was alive to see is therefore never synced - which
-# is exactly what happened for five consecutive merges while the watcher sat
-# wedged, and it could not self-heal because the watcher's own fix ships through
-# `fno update`, which lives inside the sync_command the dead watcher owed us.
-#
-# The cure must survive the disease, so everything below reads only ground truth
-# (gh, the marker dir, git's behind-count). It never consults the watcher state
-# file and never blocks on the events bus - both were dead or lying during the
-# outage that motivated it.
+# The sync above fires only at merge-DETECTION time, so a merge nobody was alive
+# to see is never synced. Everything below therefore reads only ground truth (gh,
+# the marker dir, git's behind-count): the watcher state file and the events bus
+# were both dead or lying during the outage this exists to survive.
 # ---------------------------------------------------------------------------
 
 
@@ -231,9 +224,8 @@ def run_sync_canonical(
 class SyncStaleness:
     """Outcome-keyed health of the canonical sync.
 
-    ``state`` is ``fresh`` / ``stale`` / ``unknown`` - never a bare bool,
-    because "gh is unauthenticated" must not read as "everything is fine" (the
-    401s in the outage's err.log) nor as an alarm.
+    ``state`` is ``fresh`` / ``stale`` / ``unknown`` rather than a bool: an
+    unauthenticated gh must read as neither "fine" nor "alarm".
     """
 
     state: str
@@ -429,11 +421,30 @@ def run_sync_catchup(
         typer.echo(f"post-merge sync catch-up: {st.detail}; skipping", err=True)
         return CatchupResult("unknown", detail=st.detail)
     if not st.markerless:
-        return CatchupResult("fresh")
+        # Carry the staleness detail even here. Every marker can be present while
+        # the canonical is still behind origin - that is what "the markers lie"
+        # looks like, and it is the one state the sweep cannot act on, so the
+        # least it can do is say so rather than report a flat "fresh".
+        return CatchupResult("fresh", detail=st.detail)
 
     newest = st.markerless[0]
+    # Stamping the older merges is only sound if the newest one actually PULLED,
+    # and neither the exit code nor the marker proves that: run_sync_canonical
+    # returns 0 and writes a marker for a merge that misses the sync_paths globs
+    # (a docs-only merge needs no build), having run nothing. Stamping older
+    # merges off that would permanently mark real code merges as synced without
+    # ever pulling them - the exact silent-skip this feature exists to end. So
+    # the proof is whether sync_command's shell was entered, observed through
+    # the shell_runner seam the function already exposes.
+    pulled: list[int] = []
+
+    def _tracking_shell(command: str, cwd: str) -> int:
+        pulled.append(1)
+        return _default_shell_runner(command, cwd)
+
     rc = (sync or run_sync_canonical)(
-        newest["number"], settings=settings, canonical_root=canonical
+        newest["number"], settings=settings, canonical_root=canonical,
+        shell_runner=_tracking_shell,
     )
     if rc != 0:
         typer.echo(
@@ -443,12 +454,17 @@ def run_sync_catchup(
         )
         return CatchupResult("failed", newest["number"], detail=f"exit {rc}")
 
-    # A zero exit is not proof of a sync: run_sync_canonical also returns 0 when
-    # another leg holds the single-flight claim or the PR is not ours. The marker
-    # is the only proof, so the stamp-the-rest step gates on it.
     if not _synced_marker(canonical, newest["sha"]).exists():
         return CatchupResult(
             "skipped", newest["number"], detail="sync declined (claim held or out of scope)"
+        )
+
+    if not pulled:
+        # The newest merge needed no sync, so it is marked but nothing was
+        # pulled. The older merges keep their claim on the next sweep, which
+        # will pick the newest REMAINING one and pull for real.
+        return CatchupResult(
+            "marked", newest["number"], detail="no buildable change; older merges still pending"
         )
 
     swept = 0
