@@ -51,7 +51,7 @@ def test_emit_subagent_spawn_appends_valid_jsonl_line(tmp_path: Path) -> None:
     events_file = tmp_path / ".fno" / "events.jsonl"
     assert events_file.exists(), "events.jsonl was not created"
 
-    lines = [l for l in events_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    lines = [ln for ln in events_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert lines, "events.jsonl is empty"
 
     event = json.loads(lines[-1])
@@ -92,7 +92,7 @@ def test_emit_subagent_complete_appends_valid_jsonl_line(tmp_path: Path) -> None
     events_file = tmp_path / ".fno" / "events.jsonl"
     assert events_file.exists(), "events.jsonl was not created"
 
-    lines = [l for l in events_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    lines = [ln for ln in events_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert lines, "events.jsonl is empty"
 
     event = json.loads(lines[-1])
@@ -164,7 +164,7 @@ def test_record_dispatch_appends_valid_jsonl_line(tmp_path: Path) -> None:
     )
 
     assert sidecar_path.exists(), "sidecar file was not created"
-    lines = [l for l in sidecar_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    lines = [ln for ln in sidecar_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert len(lines) == 1, f"expected 1 line, got {len(lines)}"
 
     record = json.loads(lines[0])
@@ -195,7 +195,7 @@ def test_record_dispatch_creates_missing_parent_dir(tmp_path: Path) -> None:
     )
 
     assert sidecar_path.exists(), "sidecar file was not created"
-    lines = [l for l in sidecar_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    lines = [ln for ln in sidecar_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert len(lines) == 1
     record = json.loads(lines[0])
     assert record["turn_index"] == 5
@@ -226,7 +226,7 @@ def test_record_dispatch_concurrent_appends_survive_race(tmp_path: Path) -> None
         futures = [pool.submit(write_batch, t) for t in range(10)]
         concurrent.futures.wait(futures)
 
-    lines = [l for l in sidecar_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    lines = [ln for ln in sidecar_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert len(lines) == 1000, f"expected 1000 lines, got {len(lines)}"
 
     seen_indices = set()
@@ -320,7 +320,7 @@ class TestDispatchClaudeTask:
             # On __enter__, spawn event must already be on disk.
             assert events_file.exists(), "events.jsonl missing after __enter__"
             lines_on_enter = [
-                l for l in events_file.read_text(encoding="utf-8").splitlines() if l.strip()
+                ln for ln in events_file.read_text(encoding="utf-8").splitlines() if ln.strip()
             ]
             assert lines_on_enter, "no events after __enter__"
             spawn_event = json.loads(lines_on_enter[-1])
@@ -331,7 +331,7 @@ class TestDispatchClaudeTask:
 
         # After __exit__, paired complete event must be present.
         lines_after = [
-            l for l in events_file.read_text(encoding="utf-8").splitlines() if l.strip()
+            ln for ln in events_file.read_text(encoding="utf-8").splitlines() if ln.strip()
         ]
         assert len(lines_after) >= 2, "expected at least 2 events (spawn + complete)"
 
@@ -364,7 +364,7 @@ class TestDispatchClaudeTask:
         ):
             pass  # deliberately do NOT call record_complete
 
-        lines = [l for l in events_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+        lines = [ln for ln in events_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
         assert len(lines) >= 2, f"expected at least 2 events, got {len(lines)}"
 
         complete_event = json.loads(lines[-1])
@@ -412,9 +412,9 @@ class TestDispatchClaudeTask:
         # file at that path would itself be a bug; a dir contains no events.
         if events_file.is_file():
             complete_lines = [
-                l
-                for l in events_file.read_text(encoding="utf-8").splitlines()
-                if l.strip() and "subagent_complete" in l
+                ln
+                for ln in events_file.read_text(encoding="utf-8").splitlines()
+                if ln.strip() and "subagent_complete" in ln
             ]
             assert not complete_lines, (
                 f"subagent_complete should not be written when spawn failed, "
@@ -439,7 +439,7 @@ class TestDispatchClaudeTask:
         ) as d:
             d.record_complete(stdout="ok", exit_code=0)
 
-        lines = [l for l in events_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+        lines = [ln for ln in events_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
         assert len(lines) >= 2, f"expected spawn + complete, got {len(lines)} lines"
 
         spawn_nonce = json.loads(lines[-2])["data"]["nonce"]
@@ -539,7 +539,7 @@ class TestDispatchSubprocess:
 
         events_file = tmp_path / ".fno" / "events.jsonl"
         assert events_file.exists(), "events.jsonl not created"
-        lines = [l for l in events_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+        lines = [ln for ln in events_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
         assert len(lines) >= 2, f"expected spawn + complete, got {len(lines)} events"
 
         spawn_event = json.loads(lines[-2])
@@ -664,7 +664,7 @@ class TestDispatchSubprocess:
             pass
 
         events_file = tmp_path / ".fno" / "events.jsonl"
-        lines = [l for l in events_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+        lines = [ln for ln in events_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
         complete_event = json.loads(lines[-1])
         assert complete_event["type"] == "subagent_complete"
         assert complete_event["data"]["exit_code"] == 139, (
@@ -735,7 +735,7 @@ class TestDispatchSubprocess:
         )
 
         events_file = tmp_path / ".fno" / "events.jsonl"
-        lines = [l for l in events_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+        lines = [ln for ln in events_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
         spawn_event = json.loads(lines[-2])
         assert spawn_event["type"] == "subagent_spawn"
         assert spawn_event["data"]["provider_id"] == original_provider_id, (
@@ -1071,7 +1071,7 @@ def test_subprocess_communicate_timeout_emits_complete_with_124(
 
     events_file = tmp_path / ".fno" / "events.jsonl"
     assert events_file.exists(), "events.jsonl not created"
-    lines = [l for l in events_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    lines = [ln for ln in events_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
     complete_event = json.loads(lines[-1])
 
     assert complete_event["type"] == "subagent_complete"
@@ -1113,7 +1113,7 @@ def test_record_complete_handles_non_str_stdout(tmp_path: Path) -> None:
     ) as d:
         d.record_complete(stdout=None, exit_code=0)  # type: ignore[arg-type]
 
-    lines = [l for l in events_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    lines = [ln for ln in events_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
     complete_event = json.loads(lines[-1])
     assert complete_event["type"] == "subagent_complete"
     assert complete_event["data"].get("outcome") == "ok", (
@@ -1149,7 +1149,7 @@ def test_emit_subagent_spawn_no_override_fields_in_event(tmp_path: Path) -> None
     )
 
     events_file = tmp_path / ".fno" / "events.jsonl"
-    lines = [l for l in events_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    lines = [ln for ln in events_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert lines, "events.jsonl is empty"
 
     event = json.loads(lines[-1])

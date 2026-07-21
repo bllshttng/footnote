@@ -308,8 +308,8 @@ def _write_blocked_reason(target_state_path: Path, reason: str) -> bool:
     fm_head = text[:end_idx]
     fm_lines = fm_head.split("\n")
     replaced = False
-    for i, l in enumerate(fm_lines):
-        if l.startswith("blocked_reason:"):
+    for i, ln in enumerate(fm_lines):
+        if ln.startswith("blocked_reason:"):
             fm_lines[i] = line
             replaced = True
             break

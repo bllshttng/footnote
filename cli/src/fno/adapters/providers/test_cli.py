@@ -135,7 +135,7 @@ class TestListWithRecords:
         assert result.exit_code == 0
         # The active record should have a * marker
         output_lines = result.output.splitlines()
-        active_lines = [l for l in output_lines if "claude-primary" in l]
+        active_lines = [ln for ln in output_lines if "claude-primary" in ln]
         assert any("*" in line for line in active_lines), (
             f"Expected '*' next to active provider in: {active_lines}"
         )
@@ -146,7 +146,7 @@ class TestListWithRecords:
         _write_settings(settings_path, _two_record_config(active="claude-primary"))
         result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
         output_lines = result.output.splitlines()
-        backup_lines = [l for l in output_lines if "gemini-backup" in l]
+        backup_lines = [ln for ln in output_lines if "gemini-backup" in ln]
         assert backup_lines, "gemini-backup should appear in output"
         assert not any("*" in line for line in backup_lines), (
             f"Expected no '*' next to inactive provider in: {backup_lines}"

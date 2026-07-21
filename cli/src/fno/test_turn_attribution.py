@@ -70,7 +70,7 @@ class TestRecordTurn:
 
         lines = sidecar.read_text().splitlines()
         assert len(lines) == 3
-        ids = [json.loads(l)["provider_id"] for l in lines]
+        ids = [json.loads(ln)["provider_id"] for ln in lines]
         assert ids == ["a", "a", "b"]
 
     def test_err1_sidecar_write_failure_is_non_blocking(

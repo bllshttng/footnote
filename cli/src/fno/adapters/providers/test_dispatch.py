@@ -401,8 +401,8 @@ class TestSpawnSnapshot:
         out, _ = proc.communicate(timeout=5)
         text = out.decode()
 
-        line = next((l for l in text.splitlines()
-                     if l.startswith("FNO_PROVIDER_PRICING=")), "")
+        line = next((ln for ln in text.splitlines()
+                     if ln.startswith("FNO_PROVIDER_PRICING=")), "")
         assert line, f"FNO_PROVIDER_PRICING missing in env\n{text}"
         json_part = line.split("=", 1)[1]
         pricing = _json.loads(json_part)
