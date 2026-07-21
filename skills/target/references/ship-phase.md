@@ -39,7 +39,16 @@ push-wait-red-fix loop where each ~10-minute CI round surfaces one new failure.
 # condition - grep -q in a pipeline can SIGPIPE git diff under pipefail.
 non_docs="$(git diff --name-only origin/main...HEAD | grep -vE '^(docs/|internal/|.*\.md$)' || true)"
 if [[ "${FNO_SKIP_PREFLIGHT:-0}" != "1" && -x scripts/ci/preflight.sh && -n "$non_docs" ]]; then
-  if ! scripts/ci/preflight.sh; then echo "preflight RED - fix before pushing"; exit 1; fi
+  scripts/ci/preflight.sh; pf_rc=$?
+  # Branch on the code. Collapsing every non-zero into "RED" is what sends a
+  # loop hunting a test failure that does not exist: 5 means the run lost the
+  # shared worktree and earned no verdict at all, and 3 means it never started.
+  case "$pf_rc" in
+    0) : ;;
+    5) scripts/ci/preflight.sh || { echo "preflight VOID twice - shared worktree contention, retry later"; exit 1; } ;;
+    3) echo "another preflight holds the lock - retry when it finishes"; exit 1 ;;
+    *) echo "preflight RED - fix before pushing"; exit 1 ;;
+  esac
 fi
 ```
 

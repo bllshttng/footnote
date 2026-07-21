@@ -18,7 +18,9 @@
 #                      (a SUBSET; run a full preflight before the settle push).
 #
 # Exit codes: 0 all non-advisory suites passed; 1 a suite failed; 2 bad usage /
-#   missing prerequisite; 3 lock held; 4 dirty invoking tree.
+#   missing prerequisite; 3 lock held; 4 dirty invoking tree; 5 VOID (the run
+#   lost the shared worktree or its lock, so it earned no verdict - re-run;
+#   this is NOT a suite failure and must not be reported as one).
 #
 # Bash 3.2 compatible (macOS default). No flock dependency (atomic mkdir lock).
 
@@ -82,20 +84,58 @@ acquire_lock() {
         # recreated and both proceed into the one shared worktree - each then
         # reset --hard's it mid-run of the other, so a suite reports pass/fail
         # legs earned by somebody else's checkout.
-        if mv "$LOCKDIR" "$LOCKDIR.reap.$$" 2>/dev/null; then
-            rm -rf "$LOCKDIR.reap.$$"
-            mkdir "$LOCKDIR" 2>/dev/null && { stamp_holder; return 0; }
+        local mv_err reaped
+        if mv_err="$(mv "$LOCKDIR" "$LOCKDIR.reap.$$" 2>&1)"; then
+            # Steal-then-verify. Rename is atomic, but the dead-holder CHECK
+            # above and this rename are not one operation: a racer that read the
+            # same corpse can be descheduled while the winner reaps it and
+            # installs its own lock, then rename away that LIVE lock believing
+            # it is the corpse it validated. Both then run against the one
+            # shared worktree, which is the whole bug. So confirm we moved the
+            # exact holder we condemned; if not, put it back and lose the race.
+            reaped="$(cat "$LOCKDIR.reap.$$/holder" 2>/dev/null || echo '')"
+            if [[ "$reaped" == "$holder_line" ]]; then
+                rm -rf "$LOCKDIR.reap.$$"
+                mkdir "$LOCKDIR" 2>/dev/null && { stamp_holder; return 0; }
+            else
+                mv "$LOCKDIR.reap.$$" "$LOCKDIR" 2>/dev/null || rm -rf "$LOCKDIR.reap.$$"
+            fi
+            # Lost the race: re-read so we name the live winner rather than the
+            # corpse we just reaped.
+            holder_line="$(cat "$LOCKDIR/holder" 2>/dev/null || echo '')"
+        else
+            # The holder is provably dead, so a failed reap is an environment
+            # problem (permissions, read-only .git). Saying "lock held" here
+            # would send the user chasing a pid they can see is not running.
+            echo "preflight: cannot reap a dead holder at $LOCKDIR: $mv_err" >&2
+            exit 3
         fi
     fi
-    echo "preflight: lock held - $holder_line" >&2
+    if [[ -z "$holder_line" ]]; then
+        # No parsable holder: nothing proves this lock is live, but we still
+        # refuse rather than steal (a holder killed between mkdir and its stamp
+        # looks identical to this). Name the path so the recovery is obvious.
+        echo "preflight: lock held by an unidentified holder (no readable $LOCKDIR/holder)." >&2
+        echo "preflight: if no preflight is running, remove it: rm -rf '$LOCKDIR'" >&2
+    else
+        echo "preflight: lock held - $holder_line" >&2
+    fi
     exit 3
 }
 acquire_lock
 
 TMPHOME=""
-# Release only a lock we still hold. If ours was stolen we are the hijacked run,
-# and the lockdir at this path now belongs to the stealer.
-cleanup() { grep -q "pid=$$ " "$LOCKDIR/holder" 2>/dev/null && rm -rf "$LOCKDIR"; [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"; }
+holder_pid_now() { sed -n 's/.*pid=\([0-9]*\).*/\1/p' "$LOCKDIR/holder" 2>/dev/null; }
+# Release only a lock we still hold: if ours was stolen, the lockdir at this
+# path now belongs to the stealer. An unreadable holder still releases - that is
+# our own stamp having failed, and leaving it would wedge every later run.
+# Parse the pid rather than matching the stamp's layout, so reordering the
+# fields in stamp_holder cannot silently stop every run from releasing.
+cleanup() {
+    local pid_now; pid_now="$(holder_pid_now)"
+    [[ -z "$pid_now" || "$pid_now" == "$$" ]] && rm -rf "$LOCKDIR"
+    [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"
+}
 trap cleanup EXIT INT TERM
 
 # --- ensure / reset the preflight worktree ----------------------------------
@@ -242,11 +282,18 @@ fi
 # a future lock bug, a hand-run `git reset` in the shared worktree - becomes a
 # loud VOID instead of a GREEN or RED silently earned by another checkout.
 # Compare shas only; the preflight worktree is always detached HEAD.
-WT_HEAD_NOW="$(git -C "$PREFLIGHT_WT" rev-parse HEAD 2>/dev/null || echo unknown)"
-if [[ "$WT_HEAD_NOW" != "$CANDIDATE_SHA" ]] || ! grep -q "pid=$$ " "$LOCKDIR/holder" 2>/dev/null; then
-    echo "preflight: VOID - lost the preflight worktree mid-run (now at ${WT_HEAD_NOW:0:12}, expected $CANDIDATE_SHORT)." >&2
-    echo "preflight: verdict discarded - another preflight took the shared worktree. Re-run." >&2
-    exit 1
+VOID_REASON=""
+if ! WT_HEAD_NOW="$(git -C "$PREFLIGHT_WT" rev-parse HEAD 2>&1)"; then
+    VOID_REASON="cannot read the preflight worktree at $PREFLIGHT_WT: $WT_HEAD_NOW"
+elif [[ "$WT_HEAD_NOW" != "$CANDIDATE_SHA" ]]; then
+    VOID_REASON="worktree moved off our candidate mid-run (now ${WT_HEAD_NOW:0:12}, expected $CANDIDATE_SHORT)"
+elif [[ "$(holder_pid_now)" != "$$" ]]; then
+    VOID_REASON="another preflight took our lock mid-run"
+fi
+if [[ -n "$VOID_REASON" ]]; then
+    echo "preflight: VOID - $VOID_REASON." >&2
+    echo "preflight: verdict discarded - nothing here was earned by $CANDIDATE_SHORT. Re-run; this is not a code failure." >&2
+    exit 5
 fi
 
 # --- summary -----------------------------------------------------------------

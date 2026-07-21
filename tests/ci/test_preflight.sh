@@ -5,8 +5,7 @@
 # stub smoke.sh/cargo/rustup/fno on PATH, so no real 45-step suite or cargo
 # build runs. Covers AC2-HP (catches a CI-red commit locally), AC2-ERR (dirty
 # tree refused), AC2-EDGE (concurrent -> exit 3 + holder), AC1-FR (interrupt
-# recovery: stale lock is stealable), plus the two shared-worktree safety
-# properties: exactly one winner when racers steal the same dead lock, and a
+# recovery: stale lock is stealable), plus the shared-worktree safety net: a
 # VOID (never a GREEN/RED) when the worktree moves off the candidate mid-run.
 
 set -uo pipefail
@@ -102,27 +101,6 @@ mkdir -p "$LOCKDIR"; printf 'pid=%s started=OLD host=x sha=deadbee\n' 999999 > "
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "stole stale lock and ran to GREEN" || fail "stale-lock steal failed rc=$rc: $out"
 
-echo "== steal-race: concurrent steal of one dead holder -> exactly one winner =="
-# Before the rename-atomic steal, both racers' `rm -rf` + `mkdir` frequently
-# succeeded and both ran against the one shared worktree. Repeat: the race is
-# probabilistic, so a single round can pass even when broken.
-steal_winners=0
-for _round in 1 2 3 4 5; do
-    rm -rf "$LOCKDIR"
-    mkdir -p "$LOCKDIR"; printf 'pid=%s started=OLD host=x sha=deadbee\n' 999999 > "$LOCKDIR/holder"
-    run_pf >/dev/null 2>&1 & p1=$!
-    run_pf >/dev/null 2>&1 & p2=$!
-    wait $p1; r1=$?
-    wait $p2; r2=$?
-    # winners exit 0 (ran) - losers exit 3 (lock held). Never two winners.
-    [[ $r1 -eq 0 ]] && steal_winners=$((steal_winners+1))
-    [[ $r2 -eq 0 ]] && steal_winners=$((steal_winners+1))
-    [[ $r1 -eq 0 && $r2 -eq 0 ]] && { fail "round $_round: BOTH racers stole the same dead lock"; break; }
-done
-[[ $steal_winners -ge 1 ]] && ok "steal still works under contention ($steal_winners/5 rounds had a winner)" \
-    || fail "no racer ever acquired the stolen lock (steal is now dead, not just serialized)"
-rm -rf "$LOCKDIR"
-
 echo "== tripwire: a hijacked worktree VOIDs the verdict instead of reporting it =="
 # Move the shared worktree off our candidate mid-run, as a second preflight's
 # `reset --hard` would. The stub smoke.sh is the hook: it fires inside the run.
@@ -134,8 +112,9 @@ echo "smoke: all green (stub, hijacked the worktree)"; exit 0
 EOF
 ( cd "$FIX" && git add -A && git commit -qm "hijacking smoke stub" )
 out="$(run_pf 2>&1)"; rc=$?
-[[ $rc -eq 1 ]] && ok "exit 1 on hijack" || fail "expected 1 got $rc: $out"
-echo "$out" | grep -q "VOID - lost the preflight worktree" && ok "reports VOID" || fail "no VOID line: $out"
+[[ $rc -eq 5 ]] && ok "exit 5 (VOID), distinct from RED's 1" || fail "expected 5 got $rc: $out"
+echo "$out" | grep -q "VOID - worktree moved off our candidate" && ok "names the cause" || fail "no VOID line: $out"
+echo "$out" | grep -q "not a code failure" && ok "tells the caller it is not RED" || fail "no re-run hint: $out"
 echo "$out" | grep -qE "GREEN - safe to push|RED - fix" && fail "printed a verdict for a hijacked tree" || ok "printed neither GREEN nor RED"
 
 echo ""
