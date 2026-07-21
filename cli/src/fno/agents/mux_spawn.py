@@ -627,9 +627,14 @@ def resolve_provenance(
                         plan = rec.get("plan_path") or ""
                     break
         except Exception:
-            # A missing/corrupt graph must not block the spawn; degrade to the
-            # node id alone rather than raising in the pane path.
-            pass
+            # A graph read failure must not block the spawn -- but it must not
+            # degrade a SLUG into FNO_NODE=<slug> either. The origin-capture
+            # consumer matches ids exactly and would drop a slug as an unknown
+            # node, blaming a bad id for what was a read failure. If `node` was
+            # never an id, drop it so FNO_NODE is absent (not wrong); an id
+            # input survives untouched. Never re-raise: the pane path degrades.
+            if not has_node_id_prefix(node):
+                node = None
     prov = {"FNO_NODE": node, "FNO_SLUG": slug or "", "FNO_PLAN": plan or ""}
     return {k: v for k, v in prov.items() if v}
 
