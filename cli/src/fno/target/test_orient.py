@@ -27,9 +27,25 @@ def test_node_line_not_in_graph(monkeypatch) -> None:
 
 def test_node_line_shipped(monkeypatch) -> None:
     monkeypatch.setattr(
-        orient, "_graph_entry", lambda *_: {"status": "done", "pr_number": 42}
+        orient,
+        "_graph_entry",
+        lambda *_: {"status": "done", "pr_number": 42, "merge_status": "merged"},
     )
     assert orient._node_line("x-1", Path("/"), manifest_raw={}) == "shipped (PR #42 merged)"
+
+
+def test_node_line_shipped_without_merge_evidence(monkeypatch) -> None:
+    """done + pr_number is not a merge.
+
+    The old render asserted "merged" from those two fields alone, so a node
+    closed before its PR landed reported a merge that had not happened.
+    """
+    monkeypatch.setattr(
+        orient, "_graph_entry", lambda *_: {"status": "done", "pr_number": 42}
+    )
+    line = orient._node_line("x-1", Path("/"), manifest_raw={})
+    assert line == "shipped (PR #42, awaiting merge)"
+    assert "merged" not in line
 
 
 def test_node_line_done_without_pr(monkeypatch) -> None:

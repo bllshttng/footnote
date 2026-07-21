@@ -95,6 +95,19 @@ def _stub_subprocess_no_git(monkeypatch):
 
     monkeypatch.setattr(done_cli.subprocess, "run", lambda *a, **kw: _Res())
 
+    # `--pr` now demands gh-resolved merge evidence; without a stub
+    # these collision tests would exit 4 on the gh outage instead of reaching
+    # the collision path they are about.
+    from fno.graph._reconcile import PrMergeState
+
+    monkeypatch.setattr(
+        done_cli,
+        "_gh_query",
+        lambda n, **kw: PrMergeState(
+            number=n, state="MERGED", url=None, merged_at="2026-01-01T00:00:00Z"
+        ),
+    )
+
 
 # ---- #28: done_race_collision ----
 
@@ -201,7 +214,9 @@ def test_done_race_collision_applies_pr_and_note(
 
     entry = next(e for e in _read(tmp_graph) if e["id"] == "ab-race003")
     assert entry.get("pr_number") == 42
-    assert entry.get("merge_status") == "merged"
+    # Attaching a PR number to an already-done node is metadata, not evidence
+    # of a merge, so merge_status is left alone rather than asserted.
+    assert entry.get("merge_status") is None
     assert entry.get("completion_note") == "second pass"
     # status / completed_at preserved despite the metadata writes.
     assert entry.get("status") == "done"

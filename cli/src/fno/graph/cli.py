@@ -2059,7 +2059,6 @@ def cmd_note(
 @cli.command("update")
 def cmd_update(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
-    completed: bool = typer.Option(False, "--completed", help="Mark as completed"),
     locked_by: Optional[str] = typer.Option(None, "--locked-by", help="Lock owner id ('null' to release)"),
     locked_by_harness: Optional[str] = typer.Option(None, "--locked-by-harness", help="Holder's harness/provider (claude|codex|gemini). 'null' clears."),
     locked_by_harness_session: Optional[str] = typer.Option(None, "--locked-by-harness-session", help="Holder's harness session UUID. 'null' clears."),
@@ -2071,7 +2070,6 @@ def cmd_update(
         None, "--pr-number", help="PR number. 'null' clears."
     ),
     pr_url: Optional[str] = typer.Option(None, "--pr-url", help="PR URL. 'null' clears."),
-    merge_status: Optional[str] = typer.Option(None, "--merge-status", help="Merge status"),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority"),
     title: Optional[str] = typer.Option(None, "--title", "-t", help="Update display title"),
     details: Optional[str] = typer.Option(
@@ -2401,7 +2399,6 @@ def cmd_update(
         derived_add_pr_url = _resolve_or_refuse(int(add_pr), "--add-pr-url")
 
     projected_node: list = [None]
-    cascade_closed_update: list = []
     reparent_old_parent: list = [None]
 
     # Size flows doc->graph when a plan is (re)linked and the node has no size
@@ -2509,8 +2506,6 @@ def cmd_update(
             node["pr_url"] = None if pr_url.lower() == "null" else pr_url
         elif derived_pr_url is not None:
             node["pr_url"] = derived_pr_url
-        if merge_status is not None:
-            node["merge_status"] = merge_status
         if batch is not None:
             # 'null' clears the mark (requeue as individual ship on abandon); any
             # other value records the batch id this node is a member of.
@@ -2685,16 +2680,9 @@ def cmd_update(
                 )
                 raise typer.Exit(code=1)
 
-        # Completion runs LAST so it sees the FINAL parent edge (codex P2): a
-        # combined `--completed --parent <epic>` must cascade against the new
-        # parent. Use the shared _apply_completion_fields so the close clears
-        # session/claim/defer/queue state in lockstep with done/reconcile, then
-        # cascade-close now-all-done ancestor epics (x-33b2).
-        if completed and not node.get("completed_at"):
-            _apply_completion_fields(node)
-            cascade_closed_update.extend(
-                _cascade_close_parents(entries, node["id"])
-            )
+        # `update` deliberately cannot close a node. Closing is merge-gated and
+        # belongs to done/reconcile; an ungated, event-silent close flag here is
+        # the shape every bypass has taken.
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -2705,11 +2693,9 @@ def cmd_update(
     # through the fresh-re-read helper (not the pre-recompute `projected_node`)
     # so the node carries its recomputed status: a `--locked-by` claim reads
     # `claimed` -> plan `in_progress` (AC1-HP; the claim goes through this update
-    # path, not the `claim` verb), and a `--completed` close reads `done` ->
-    # `done` + `done_at`, including cascade-closed epic parents. Best-effort.
+    # path, not the `claim` verb). Best-effort.
     if projected_node[0] and (
-        completed
-        or locked_by is not None
+        locked_by is not None
         or priority is not None
         or project is not None
         or type_ is not None
@@ -2725,7 +2711,6 @@ def cmd_update(
         _project_plans_from_graph(
             [
                 projected_node[0]["id"],
-                *cascade_closed_update,
                 *([reparent_old_parent[0]] if reparent_old_parent[0] else []),
             ]
         )
@@ -5441,13 +5426,17 @@ def _project_plans_from_graph(node_ids: list[str]) -> None:
     project_graph_nodes(entries, ids)
 
 
-def _apply_completion_fields(node: dict) -> None:
+def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) -> None:
     """Set the fields that mark a node done.
 
     Shared by ``done`` and ``reconcile`` so both close paths stay in
     lockstep. The caller owns the idempotency check (skip when
     ``completed_at`` is already set). ``recompute_statuses`` derives
     ``status: done`` from ``completed_at`` and unblocks dependents.
+
+    ``merge_status`` is passed ONLY by a caller that resolved MERGED from gh,
+    so the field keeps meaning "GitHub confirmed this". A ``--force`` close and
+    a PR-less epic cascade leave it unset rather than assert a merge.
     """
     node["locked_by"] = None
     node["claimed_at"] = None
@@ -5458,6 +5447,8 @@ def _apply_completion_fields(node: dict) -> None:
     node["queued_at"] = None
     node["queued_reason"] = None
     node["completed_at"] = datetime.now(timezone.utc).isoformat()
+    if merge_status is not None:
+        node["merge_status"] = merge_status
 
 
 def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
@@ -5473,7 +5464,7 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
     This is the closure path that lets epics be excluded from build-SELECTION
     everywhere (`next`/`ready`/advance_dependents never dispatch the box): the
     box closes itself off the merge event that finishes its last child. It fires
-    on every close path (done + reconcile + update --completed) since each calls
+    on every close path (done + reconcile) since each calls
     this after ``_apply_completion_fields``, and it is uniform across projects
     because it follows the parent EDGE, not a project filter - so a cross-project
     parent closes on the same merge that completes its last child.
@@ -5782,7 +5773,7 @@ def cmd_done(
     from fno.graph._reconcile import (
         node_pr_refs,
         repo_slug_from_url,
-        ReconcileError,
+        resolve_merge_evidence,
     )
 
     if not has_node_id_prefix(task_id):
@@ -5823,71 +5814,38 @@ def cmd_done(
 
     if refs and not force:
         # There are PR references; require evidence before closing.
-        first_pr_number, first_pr_url = refs[0]
-        repo = repo_slug_from_url(first_pr_url)
-        cwd = node.get("cwd")
+        first_pr_number, _ = refs[0]
 
-        # Try each ref in order; the first MERGED ref is closing evidence
-        # (x-aba7: graph done = merged). An OPEN ref means the node is awaiting
-        # merge - success-shaped (exit 5), never closing evidence. CI state is
-        # NOT consulted: whether CI is green is the session's finish-line concern
-        # (loop-check), not the graph-close decision.
-        evidence_found = False
-        refusal_reason: Optional[str] = None
-        outage_error: Optional[str] = None
-        open_pr_number: Optional[int] = None  # first OPEN ref -> awaiting merge
-
-        for pr_number, pr_url in refs:
-            pr_repo = repo_slug_from_url(pr_url) or repo
-            pr_cwd = cwd if pr_repo is None else None
-
-            try:
-                pr_state = _done_gh_query(pr_number, repo=pr_repo, cwd=pr_cwd)
-            except ReconcileError as exc:
-                outage_error = str(exc)
-                continue
-
-            if pr_state.state == "MERGED":
-                evidence_found = True
-                evidence_pr_url = pr_url
-                break
-
-            if pr_state.state == "OPEN":
-                if open_pr_number is None:
-                    open_pr_number = pr_number
-            else:
-                # CLOSED (not merged) or UNKNOWN
-                refusal_reason = (
-                    f"PR #{pr_number} state={pr_state.state} (not merged)"
-                )
-
-        if not evidence_found:
-            # A definitive OPEN ref wins over an outage: we KNOW the node has a
-            # live PR awaiting merge, so exit 5 (success-shaped, retryable on
-            # merge) rather than the conservative outage retry.
-            if open_pr_number is not None:
+        # Shared with `fno done` so the two verbs cannot drift apart on what
+        # counts as evidence.
+        evidence = resolve_merge_evidence(
+            refs, cwd=node.get("cwd"), query=_done_gh_query
+        )
+        evidence_found = evidence.outcome == "merged"
+        if evidence_found:
+            evidence_pr_url = evidence.pr_url
+        else:
+            if evidence.outcome == "awaiting_merge":
                 typer.echo(
-                    f"awaiting merge: PR #{open_pr_number} is OPEN, not merged. "
+                    f"awaiting merge: PR #{evidence.open_pr_number} is OPEN, not merged. "
                     f"{task_id} stays in_review and closes on merge "
                     f"(reconcile / merge-triggered advance). "
-                    f"Use --force --reason TEXT for an early close.",
+                    f"Use --force --reason TEXT for an early close."
+                    + (f" (note: {evidence.error})" if evidence.error else ""),
                     err=True,
                 )
-                raise typer.Exit(code=5)
+                raise typer.Exit(code=evidence.exit_code)
 
-            # No MERGED, no OPEN. An outage on any ref is a retryable outage
-            # (covers pure outage AND the partial CLOSED+outage conservatism:
-            # never refuse when a ref we could not query might be evidence).
-            if outage_error:
+            if evidence.outcome == "outage":
                 typer.echo(
-                    f"Error: gh cross-check failed for {task_id}: {outage_error}\n"
+                    f"Error: gh cross-check failed for {task_id}: {evidence.error}\n"
                     f"The check is retryable once gh is available again. Node stays open.",
                     err=True,
                 )
-                raise typer.Exit(code=4)
+                raise typer.Exit(code=evidence.exit_code)
 
             # Pure policy refusal - CLOSED-unmerged / UNKNOWN only.
-            msg = refusal_reason or f"PR #{first_pr_number}: no merged evidence"
+            msg = evidence.reason or f"PR #{first_pr_number}: no merged evidence"
             typer.echo(
                 f"Refused: {task_id} cross-check failed: {msg}\n"
                 f"Use --force --reason TEXT to bypass.",
@@ -5904,7 +5862,7 @@ def cmd_done(
                 _evts.append_event(event)
             except Exception:
                 pass
-            raise typer.Exit(code=3)
+            raise typer.Exit(code=evidence.exit_code)
 
     # -- Step 3: Force path - proceed and journal loudly --
     if force and refs:
@@ -5969,7 +5927,7 @@ def cmd_done(
         if existing:
             already_holder[0] = True
             return entries
-        _apply_completion_fields(n)
+        _apply_completion_fields(n, merge_status="merged" if evidence_pr_url else None)
         # Fill-only: never overwrite a cost a richer path (e.g. `fno done`)
         # already stamped, and don't drop rows appended during the run.
         if cost_rollup.get("cost_usd") is not None and not n.get("cost_usd"):
@@ -6347,7 +6305,7 @@ def cmd_reconcile(
             for record in closeable:
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
-                    _apply_completion_fields(node_obj)
+                    _apply_completion_fields(node_obj, merge_status="merged")
                     # Backfill the PR ref for a reverse-mapped node (dead before
                     # the node<->PR stamp): the recovered number/url live only on
                     # the record, so without this the closed node stays

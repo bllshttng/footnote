@@ -43,9 +43,11 @@ from fno.events import (
     ValidationError as _ValidationError,
 )
 from fno.graph._reconcile import (
+    node_pr_refs,
     pr_number_from_url,
     pr_url_for_repo,
     repo_slug_from_url,
+    resolve_merge_evidence,
 )
 from fno.graph.fuzzy import resolve_id
 from fno.graph.store import locked_mutate_graph, read_graph
@@ -303,6 +305,12 @@ def _apply_rollup(
     return tags
 
 
+def _gh_query(pr_number, **kwargs):
+    """Query gh for PR merge state. Injectable test seam, mirroring graph.cli."""
+    from fno.graph._reconcile import query_pr_merge_state
+    return query_pr_merge_state(pr_number, **kwargs)
+
+
 def done_command(
     query: Optional[str] = typer.Argument(
         None,
@@ -473,6 +481,53 @@ def done_command(
 
     now = datetime.now(timezone.utc).isoformat()
 
+    # -- merge gate --
+    # An explicit --pr REPLACES the node's refs as the evidence: it is the PR
+    # the operator is closing on, so a stale merged ref must not authorize a
+    # close whose new PR is still open. It is scoped to the NODE's repo (its
+    # stored url, else its cwd), never the caller's checkout, so running from
+    # another checkout cannot close the node on a same-numbered stranger.
+    # With no --pr the node's own refs are the evidence, exactly as cmd_done
+    # reads them - keying on the argument alone would reopen the original
+    # bypass whenever gh auto-detect fails, and let --note close an open PR.
+    # A node with no ref anywhere has nothing to gate (--link/--note).
+    gate_refs = [(pr, node.get("pr_url"))] if pr is not None else node_pr_refs(node)
+
+    # An already-done node is a metadata update, not a close. The close was
+    # gated when it happened; re-gating here would let a gh outage block a
+    # --note from landing on a node that closed months ago.
+    if node.get("status") == "done" or node.get("completed_at"):
+        gate_refs = []
+
+    merge_status_to_write: Optional[str] = None
+    if gate_refs:
+        evidence = resolve_merge_evidence(
+            gate_refs, cwd=node.get("cwd"), query=_gh_query
+        )
+        if evidence.outcome == "awaiting_merge":
+            typer.echo(
+                f"awaiting merge: PR #{evidence.open_pr_number} is OPEN, not merged. "
+                f"{node_id} stays in_review and closes on merge "
+                f"(reconcile / merge-triggered advance)."
+                + (f" (note: {evidence.error})" if evidence.error else ""),
+                err=True,
+            )
+            raise typer.Exit(code=evidence.exit_code)
+        if evidence.outcome == "outage":
+            typer.echo(
+                f"Error: gh cross-check failed for {node_id}: {evidence.error}\n"
+                f"The check is retryable once gh is available again. Node stays open.",
+                err=True,
+            )
+            raise typer.Exit(code=evidence.exit_code)
+        if evidence.outcome == "refused":
+            typer.echo(
+                f"Refused: {node_id} cross-check failed: {evidence.reason}",
+                err=True,
+            )
+            raise typer.Exit(code=evidence.exit_code)
+        merge_status_to_write = "merged"
+
     # Resolve pr_url + ledger rollup outside the mutator so subprocess / disk
     # I/O stays out of the graph lock.
     pr_url_to_write: Optional[str] = None
@@ -522,7 +577,11 @@ def done_command(
             # same six assignments.
             if pr is not None:
                 e["pr_number"] = pr
-                e["merge_status"] = "merged"
+                # Only when the gate above resolved MERGED from gh. Left alone
+                # otherwise so a metadata-only update to an already-done node
+                # cannot erase the evidence its own close recorded.
+                if merge_status_to_write is not None:
+                    e["merge_status"] = merge_status_to_write
                 e["pr_url"] = pr_url_to_write
             if link is not None:
                 e["artifact_url"] = link

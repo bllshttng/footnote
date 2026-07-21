@@ -67,7 +67,7 @@ use std::process::Command;
 //
 // Resolution: `cli/src/fno/graph/cli.py:_cascade_close_parents` closes an
 // ancestor epic the moment its last child's `completed_at` is set. It runs
-// inside every close mutator (done + reconcile + update --completed), follows
+// inside every close mutator (done + reconcile), follows
 // the `parent` EDGE (so it is uniform across projects - a cross-project parent
 // closes on the same merge that finishes its last child), cascades to the
 // grandparent, and tags the PR-less close with a completion_note. So the walker

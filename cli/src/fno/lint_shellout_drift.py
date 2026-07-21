@@ -21,7 +21,7 @@ Scope boundaries (deliberate, documented so they are not silent gaps):
 * SIGNAL = a module that (a) bash/sh-execs via ``subprocess`` AND (b) calls the
   shared ``resolve_repo_root()`` / ``resolve_plugin_script()`` (exact names). This
   excludes ``cost/_register.py`` (roots ``events.sh`` at ``PLUGIN_ROOT`` /
-  package-relative via its own ``_resolve_repo_root`` helper, best-effort and
+  package-relative via its own repo-root helper, best-effort and
   non-fatal - not the shared resolver), ``paths_cli.py`` (constructs
   ``scripts/lib/paths.sh`` but writes/reads it - never bash-execs it), and
   ``worktree.py``'s ``_run_setup_worktree_hook`` (roots ``setup-worktree.sh`` at an

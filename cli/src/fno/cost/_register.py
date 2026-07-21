@@ -280,10 +280,7 @@ def build_entry(
         if match:
             project = match.group(1)
     # root_path is the worktree top: project-local ledger writes, event
-    # emission, and target-state.md reads all anchor here. Graph-node lookup
-    # via _resolve_repo_root() stays on --git-common-dir (canonical repo)
-    # so worktree branches still match graph entries written against the
-    # canonical checkout. The two paths are equal in a non-worktree.
+    # emission, and target-state.md reads all anchor here.
     worktree_top = git_cmd("rev-parse", "--show-toplevel")
     root_path = worktree_top or ""
     cwd = os.getcwd()
@@ -413,10 +410,8 @@ def build_entry(
     # present - the stop hook's ensure_session_registered dedup uses this
     # so it can match an LLM-issued register-task call (which only knows
     # the target ID) against a later transcript-UUID lookup.
-    # `graph_node_id` (scalar) lets _sync_to_graph skip the plan_path
-    # path normalization entirely on the happy path (graph node was
-    # registered via roadmap-tasks.py intake and the node ID was captured at
-    # target init).
+    # `graph_node_id` (scalar) joins the ledger row to its backlog node for
+    # downstream reads (cost rollups, reconcile); it is never a close signal.
     scalar_session_id = state.get("fno_id") or state.get("session_id") or None
     scalar_graph_node_id = state.get("graph_node_id") or None
 
@@ -712,7 +707,7 @@ def render_tasks_md(tasks_json_path: Path, tasks_md_path: Path) -> None:
             "# Task Registry",
             "",
             f"> {len(entries)} tasks completed in this project.",
-            f"> Source of truth: `ledger.json` - this file is a derived view.",
+            "> Source of truth: `ledger.json` - this file is a derived view.",
             "",
         ]
         for i, e in enumerate(entries):
@@ -757,9 +752,7 @@ def build_quick_entry(
         match = re.search(r"/([^/]+?)(?:\.git)?$", remote_url)
         if match:
             project = match.group(1)
-    # See build_entry: root_path tracks the worktree top, not the canonical
-    # repo. Graph-node lookup is the only consumer that still needs the
-    # canonical path; it calls _resolve_repo_root() directly.
+    # See build_entry: root_path tracks the worktree top, not the canonical repo.
     worktree_top = git_cmd("rev-parse", "--show-toplevel")
     root_path = worktree_top or ""
 
@@ -800,171 +793,6 @@ def build_quick_entry(
         "points": None,
         "notes": None,
     }
-
-
-def _resolve_repo_root() -> str:
-    """Resolve the canonical repo root for plan_path normalization.
-
-    Graph nodes store plan_path relative to the repo root. Ledger entries
-    written by /target store plan_path absolute. To compare them we anchor
-    the relative side at the repo root and absolutize. Use the main
-    git common dir (not the worktree top) so worktree branches resolve
-    against the same root as the canonical checkout - a worktree at
-    .claude/worktrees/foo/internal/x shares its root with main repo's
-    internal/x once both are absolutized.
-    """
-    common = git_cmd("rev-parse", "--path-format=absolute", "--git-common-dir")
-    if common:
-        return re.sub(r"/\.git/?$", "", common)
-    top = git_cmd("rev-parse", "--show-toplevel")
-    if top:
-        return top
-    return os.getcwd()
-
-
-def _normalize_plan_path(plan_path: str | None, repo_root: str) -> str | None:
-    """Anchor a plan_path at repo_root and normalize it for comparison.
-
-    Returns an absolute, os.path.normpath'd path, or None if plan_path is
-    falsy. Both ledger-side (absolute) and graph-side (relative) paths
-    pass through here so the comparison is symmetric.
-    """
-    if not plan_path:
-        return None
-    s = str(plan_path)
-    if not os.path.isabs(s):
-        s = os.path.join(repo_root, s)
-    return os.path.normpath(s)
-
-
-def _match_graph_node(
-    entries: list[dict],
-    entry: dict,
-    repo_root: str | None = None,
-) -> dict | None:
-    """Find the graph node that corresponds to a ledger entry.
-
-    Two-tier lookup. The graph_node_id tier covers the happy path - when
-    the plan was registered via `roadmap-tasks.py intake` and target captured
-    the node ID at init, the entry carries it forward and the lookup is
-    O(N) on a single field with no path massaging. The plan_path tier is
-    the fallback for entries that didn't carry an ID (manual register-task
-    calls, pre-graph_node_id ledger backfills) and resolves the well-known
-    failure mode of relative-vs-absolute path mismatch by anchoring both
-    sides at the repo root before comparing.
-
-    Returns None when nothing matches; that's a benign no-op in
-    _sync_to_graph (e.g., a plan that was never adopted to the graph).
-    """
-    if not entries:
-        return None
-
-    node_id = entry.get("graph_node_id")
-    if node_id:
-        for n in entries:
-            if n.get("id") == node_id:
-                return n
-
-    plan_path = entry.get("plan_path")
-    if not plan_path:
-        return None
-
-    root = repo_root or _resolve_repo_root()
-    target = _normalize_plan_path(plan_path, root)
-    if not target:
-        return None
-
-    for n in entries:
-        node_plan = n.get("plan_path")
-        if not node_plan:
-            continue
-        if _normalize_plan_path(node_plan, root) == target:
-            return n
-    return None
-
-
-def _sync_to_graph(entry: dict) -> None:
-    """Propagate a completed execution entry to graph.json via roadmap-tasks.py.
-
-    When a target session completes, the ledger captures the execution record
-    but the feature graph (adoption/roadmap) stays stale unless the caller
-    remembers to run `roadmap-tasks.py update`. That manual step was the
-    same class of failure as the ledger gap we just fixed - soft guidance
-    to the LLM, silently skipped under pressure. This automates the happy
-    path so a plan registered via `roadmap-tasks.py intake` flips to completed
-    as soon as its execution lands in the ledger.
-
-    Only fires when the entry has plan_path AND pr_number - those are the
-    two fields the graph node needs to transition to "merged" or "pr-open"
-    status. If roadmap-tasks.py isn't installed, or no graph node matches
-    the plan_path, this is a silent no-op (stderr gets a one-liner; stdout
-    stays clean so the ledger entry print still parses).
-    """
-    plan_path = entry.get("plan_path")
-    pr_number = entry.get("pr_number")
-    if not plan_path or not pr_number:
-        return
-
-    # This module lives at cli/src/fno/cost/_register.py, so the repo root is
-    # parents[4]; scripts/roadmap-tasks.py is the (in-clone) graph writer. In
-    # the installed wheel there is no scripts/ tree, so the exists() guard
-    # below skips the best-effort graph sync (the ledger append still landed).
-    repo_root = Path(__file__).resolve().parents[4]
-    roadmap_script = repo_root / "scripts" / "roadmap-tasks.py"
-    graph_path = Path.home() / ".fno" / "graph.json"
-    if not roadmap_script.exists() or not graph_path.exists():
-        return
-
-    # Find the matching graph node. Read graph.json directly (roadmap-tasks.py
-    # has no JSON-dump subcommand); the write path still goes through
-    # roadmap-tasks.py so mutations use its flock + kanban rendering.
-    try:
-        raw = json.loads(graph_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return
-    # graph.json wraps entries in {"entries": [...]}. Be lenient in case
-    # an older version on disk is a bare list.
-    entries = raw.get("entries", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
-
-    node = _match_graph_node(entries, entry)
-    if not node:
-        return
-
-    node_id = node.get("id")
-    if not node_id:
-        return
-
-    # sys.executable, not bare "python3": the graph sync must run under the same
-    # interpreter as this process (which has fno + its deps), matching the
-    # render + finalize interpreter fix. A bare PATH python3 could lack pydantic
-    # and fail the graph sync with ModuleNotFoundError.
-    update_args = [
-        sys.executable, str(roadmap_script), "update", node_id,
-        "--completed",
-        "--pr-number", str(pr_number),
-    ]
-    pr_url = entry.get("pr_url")
-    if pr_url:
-        update_args += ["--pr-url", pr_url]
-
-    try:
-        result = subprocess.run(
-            update_args, capture_output=True, text=True, timeout=10, check=False,
-            cwd=str(repo_root),
-        )
-        if result.returncode == 0:
-            print(
-                f"Synced graph node {node_id} (completed, PR #{pr_number})",
-                file=sys.stderr,
-            )
-        else:
-            err = (result.stderr or result.stdout or "").strip()
-            print(
-                f"Warning: graph sync rc={result.returncode} for {node_id}: {err}",
-                file=sys.stderr,
-            )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        print(f"Warning: graph sync failed for {node_id}: {exc}", file=sys.stderr)
 
 
 def _emit_ledger_transition(entry: dict) -> None:
@@ -1061,13 +889,13 @@ def register_entry(entry: dict) -> None:
     ``paths.ledger_json()``. The former project-local dual-write (a stray
     ``<root_path>/.fno/ledger.json``) was the split-brain that corrupted
     node-level joins; it is removed.
+
+    An append records that a session shipped; it never closes the backlog
+    node. Closing is merge-gated and belongs to done/reconcile.
     """
     ledger_path = _paths.ledger_json()
     append_to_tasks_json(ledger_path, entry)
     render_tasks_md(ledger_path, ledger_path.with_suffix(".md"))
-
-    # Graph sync (best-effort - never blocks the ledger write)
-    _sync_to_graph(entry)
 
     # 4. Phase-transition event (gate-provenance phase 02, ledger_updated gate)
     _emit_ledger_transition(entry)
@@ -1103,7 +931,7 @@ def main():
             try:
                 cost_json = json.loads(args.cost_json)
             except json.JSONDecodeError:
-                print(f"Warning: invalid --cost-json, ignoring", file=sys.stderr)
+                print("Warning: invalid --cost-json, ignoring", file=sys.stderr)
 
         entry = build_quick_entry(
             session_id=session_id,

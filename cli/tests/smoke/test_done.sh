@@ -27,6 +27,20 @@ JSON
 export HOME="$TMP"
 export FNO_GRAPH_JSON_LOCK=/tmp/abilities-smoke-done.lock
 
+# Closing with --pr now demands gh-resolved MERGED evidence, and CI has no
+# authenticated gh. Stub one that reports merged so the cases below keep
+# testing what they are about (the ledger rollup), not the merge gate.
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/gh" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [[ "$arg" == "nameWithOwner" ]]; then echo "smoke/repo"; exit 0; fi
+done
+printf '{"number":99,"state":"MERGED","url":"https://github.com/smoke/repo/pull/99","mergedAt":"2026-04-22T18:00:00Z","mergeCommit":{"oid":"deadbeef"}}\n'
+SH
+chmod +x "$TMP/bin/gh"
+export PATH="$TMP/bin:$PATH"
+
 # AC: `fno done --help` succeeds and mentions 'done'
 help_out=$(uv run fno-py done --help 2>&1)
 if ! echo "$help_out" | grep -qi "done"; then

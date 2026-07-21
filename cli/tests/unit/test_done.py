@@ -46,6 +46,28 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     return g
 
 
+@pytest.fixture(autouse=True)
+def merged_pr(monkeypatch):
+    """Default every `--pr` close to a MERGED PR.
+
+    `fno done --pr N` now demands gh-resolved merge evidence, so without a stub
+    every close in this module would exit 4 (gh outage). Tests that exercise the
+    gate itself override this with their own stub.
+    """
+    import fno.done.cli as done_cli
+    from fno.graph._reconcile import PrMergeState
+
+    def _merged(pr_number, **kwargs):
+        return PrMergeState(
+            number=pr_number,
+            state="MERGED",
+            url=f"https://github.com/o/r/pull/{pr_number}",
+            merged_at="2026-01-01T00:00:00Z",
+        )
+
+    monkeypatch.setattr(done_cli, "_gh_query", _merged)
+
+
 @pytest.fixture
 def tmp_ledger(tmp_path) -> Path:
     """The ledger path tmp_graph routes to. Tests that want rollup data write

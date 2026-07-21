@@ -281,18 +281,23 @@ def test_ac2_err_graph_get_unknown_exits_nonzero(tmp_graph):
 
 # --- update ---
 
-def test_ac1_hp_graph_update_completed(tmp_graph):
-    """AC1-HP: fno graph update --completed marks done."""
+def test_ac6_edge_graph_update_completed_removed(tmp_graph):
+    """AC6-EDGE: `update --completed` is gone and fails loudly.
+
+    It was an ungated, event-silent close. Closing is merge-gated and belongs
+    to done/reconcile, so the flag must not merely be ignored - a silently
+    accepted no-op would let a caller believe it closed the node.
+    """
     r = _invoke("graph", "add", "ToDone")
     node_id = json.loads(r.output)["id"]
 
     r = _invoke("graph", "update", node_id, "--completed")
-    assert r.exit_code == 0
+    assert r.exit_code != 0
 
     r = _invoke("graph", "get", node_id)
     data = json.loads(r.output)
-    assert data["completed_at"] is not None
-    assert data["status"] == "done"
+    assert data["completed_at"] is None
+    assert data["status"] != "done"
 
 
 # --- queue / unqueue / queued ---
@@ -852,7 +857,13 @@ def test_ac1_hp_graph_archive(tmp_graph):
     """
     r = _invoke("graph", "add", "ToArchive")
     node_id = json.loads(r.output)["id"]
-    _invoke("graph", "update", node_id, "--completed")
+    # Seed completed_at in the fixture rather than via a CLI verb: closing is
+    # merge-gated now, and archive only cares that the node reads done.
+    graph = json.loads(tmp_graph.read_text())
+    for entry in graph["entries"]:
+        if entry["id"] == node_id:
+            entry["completed_at"] = "2026-01-01T00:00:00+00:00"
+    tmp_graph.write_text(json.dumps(graph))
 
     # Dry-run default: nothing moves.
     r = _invoke("graph", "archive")
