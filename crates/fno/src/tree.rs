@@ -109,6 +109,27 @@ pub enum SplitError {
     FocusNotFound(PaneId),
 }
 
+/// [`move_leaf`] failure. The tree is left completely unchanged on `Err`.
+///
+/// Each variant maps to a distinct operator-facing notice: the sizes are a
+/// "make room first" problem, a gone pane is a "your view is stale" one, and
+/// the two must not collapse into one message.
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum MoveError {
+    #[error(
+        "move refused: a resulting pane would be smaller than the {min_rows}x{min_cols} minimum"
+    )]
+    TooSmall { min_rows: u16, min_cols: u16 },
+    /// The mover or the target is no longer in the tree - a drop validated
+    /// against a layout another client has since changed.
+    #[error("move refused: that pane is no longer in the layout")]
+    PaneGone,
+    /// A drop on the pane's own origin. Not a failure the operator caused, so
+    /// callers treat it as a silent cancel rather than something to announce.
+    #[error("move refused: the pane is already there")]
+    Origin,
+}
+
 // ---------------------------------------------------------------------------
 // layout: tree -> tiled rects
 // ---------------------------------------------------------------------------
@@ -387,6 +408,121 @@ fn replace_leaf_node(node: &mut Node, old: PaneId, new: PaneId) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// move_leaf (drag-to-relocate + keyboard move-pane, x-aa95)
+// ---------------------------------------------------------------------------
+
+/// Relocate the `mover` leaf to sit adjacent to `target` on its `dir` side.
+/// Every `Err` leaves the tab COMPLETELY unchanged, so a rejected drop needs no
+/// re-sync - the client flashes and keeps drawing what it already has.
+///
+/// The error is typed rather than a bool because a refused drop has to explain
+/// itself: "a pane would be too small" and "that pane is gone" send the operator
+/// to different fixes, and a drag that dies silently reads as a broken feature.
+///
+/// Deliberately a remove-then-insert composed from [`remove_leaf`] (which owns
+/// ratio redistribution and single-child collapse) and [`split_node`] (which
+/// owns adjacent insertion and cross-axis wrapping), rather than rect swapping
+/// or bespoke ratio arithmetic. Relocation is exactly a close plus a split at a
+/// different slot, and reusing both halves is why the ratio sum, the
+/// no-single-child-branch rule, and the same-axis merge all keep holding here
+/// for free.
+///
+pub fn move_leaf(
+    tab: &mut Tab,
+    viewport: Rect,
+    mover: PaneId,
+    target: PaneId,
+    dir: Dir,
+) -> Result<(), MoveError> {
+    if mover == target {
+        return Err(MoveError::Origin);
+    }
+    // Both ends are validated BEFORE any surgery: the target must survive the
+    // removal to be insertable next to, and checking after would mean undoing.
+    let present = leaves(&tab.root);
+    if !present.contains(&mover) || !present.contains(&target) {
+        return Err(MoveError::PaneGone);
+    }
+    // Defensive: `None` (absent) and `Some(None)` (the root WAS the mover, so
+    // the tab held one pane) are both already excluded by the guards above - a
+    // lone pane cannot coexist with a present, different target. Folded into
+    // `PaneGone` rather than given a variant of its own, which would advertise
+    // a refusal reason no caller can ever actually receive.
+    let Some(Some(without)) = remove_leaf(&tab.root, mover) else {
+        return Err(MoveError::PaneGone);
+    };
+    // Normalizing HERE is load-bearing: the removal can leave a nested
+    // same-axis branch, and inserting into one would place `mover` in the
+    // wrong branch relative to the seam the operator pointed at.
+    let without = normalize(without);
+
+    let (axis, before) = match dir {
+        Dir::Left => (Axis::Horizontal, true),
+        Dir::Right => (Axis::Horizontal, false),
+        Dir::Up => (Axis::Vertical, true),
+        Dir::Down => (Axis::Vertical, false),
+    };
+    let Some(candidate) = split_node(&without, target, axis, before, mover) else {
+        return Err(MoveError::PaneGone);
+    };
+
+    // A drop that lands the pane exactly where it already sits. `mover ==
+    // target` catches only the literal self-drop; a seam is addressed by its
+    // left/top flank, so dropping a pane on the divider it ALREADY abuts names
+    // its neighbour and slips through. The remove-then-split would then rebuild
+    // the pair at 0.5/0.5 - an operator who sets an 80/20 split, drags the small
+    // pane, thinks better of it and drops it back would silently lose the
+    // ratio they chose. Compared on SHAPE, because ratios are exactly what
+    // differs in this case.
+    if same_shape(&candidate, &tab.root) {
+        return Err(MoveError::Origin);
+    }
+
+    // Same per-pane, per-axis check as `split_directional`: a pane fails on
+    // either dimension independently.
+    if layout(&candidate, viewport)
+        .iter()
+        .any(|(_, r)| r.rows < MIN_ROWS || r.cols < MIN_COLS)
+    {
+        return Err(MoveError::TooSmall {
+            min_rows: MIN_ROWS,
+            min_cols: MIN_COLS,
+        });
+    }
+
+    tab.root = candidate;
+    tab.focus = mover;
+    Ok(())
+}
+
+/// Structural equality ignoring ratios: same axes, same nesting, same leaves in
+/// the same order. `PartialEq` on [`Node`] compares ratios too, which is the
+/// wrong question when asking "did this move actually move anything".
+fn same_shape(a: &Node, b: &Node) -> bool {
+    match (a, b) {
+        (Node::Leaf(x), Node::Leaf(y)) => x == y,
+        (
+            Node::Branch {
+                axis: ax,
+                children: ac,
+            },
+            Node::Branch {
+                axis: bx,
+                children: bc,
+            },
+        ) => {
+            ax == bx
+                && ac.len() == bc.len()
+                && ac
+                    .iter()
+                    .zip(bc)
+                    .all(|((_, an), (_, bn))| same_shape(an, bn))
+        }
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // close
 // ---------------------------------------------------------------------------
 
@@ -499,6 +635,23 @@ fn normalize(node: Node) -> Node {
                         }
                     }
                     other => merged.push((ratio, other)),
+                }
+            }
+            // Renormalize so the sum is 1.0 again. `remove_leaf` redistributes
+            // proportionally with an f32 multiply (`scale = 1 / (1 - r)`), and
+            // the same-axis merge above multiplies ratios through, so both leave
+            // a little error behind. One close is harmless; a long session of
+            // closes and moves compounds it until the sum drifts past
+            // `check_invariants`' 1e-4 tolerance and every later op reports a
+            // corrupt tree. Correcting here - the one place every structural
+            // mutation funnels through - keeps the error from ever accumulating.
+            //
+            // `split` needs no such pass: halving a ratio is exact in binary
+            // floating point, and the two halves re-sum to the original.
+            let sum: f32 = merged.iter().map(|(r, _)| r).sum();
+            if sum > 0.0 {
+                for (r, _) in merged.iter_mut() {
+                    *r /= sum;
                 }
             }
             if merged.len() == 1 {
@@ -1830,5 +1983,304 @@ mod tests {
         };
         assert!(replace_leaf(&mut tab, 2, 9));
         assert_eq!(tab.focus, 1);
+    }
+
+    // -- move_leaf (x-aa95) -------------------------------------------------
+
+    /// Wider than [`VIEWPORT`] because a move concentrates panes into one row:
+    /// three panes side by side need `3 * MIN_COLS` plus two divider cells, so
+    /// the shared 21-column viewport would refuse every relocation on size
+    /// alone and prove nothing about the surgery.
+    const MOVE_VIEWPORT: Rect = Rect {
+        x: 0,
+        y: 0,
+        rows: 21,
+        cols: 40,
+    };
+
+    fn grid_2x2_tab() -> Tab {
+        Tab {
+            id: 0,
+            root: grid_2x2(),
+            focus: 2,
+            name: None,
+        }
+    }
+
+    #[test]
+    fn tree_move_leaf_relocates_a_pane_into_a_sibling_row() {
+        // AC1-HP: grid 1 2 / 3 4; move 2 to the seam between 3 and 4 =>
+        // 1 spans the top, 3 2 4 share the bottom.
+        let mut tab = grid_2x2_tab();
+        move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right).expect("the move is legal here");
+        let Node::Branch { axis, children } = &tab.root else {
+            panic!("root collapsed to a leaf: {:?}", tab.root);
+        };
+        assert_eq!(*axis, Axis::Vertical);
+        assert_eq!(children.len(), 2, "still a top row and a bottom row");
+        assert_eq!(children[0].1, Node::Leaf(1), "1 absorbed the whole top row");
+        let Node::Branch {
+            axis: bottom_axis,
+            children: bottom,
+        } = &children[1].1
+        else {
+            panic!("bottom row is not a branch: {:?}", children[1].1);
+        };
+        assert_eq!(*bottom_axis, Axis::Horizontal);
+        assert_eq!(
+            bottom.iter().map(|(_, n)| n.clone()).collect::<Vec<_>>(),
+            vec![Node::Leaf(3), Node::Leaf(2), Node::Leaf(4)],
+            "2 landed between 3 and 4, in that order"
+        );
+    }
+
+    #[test]
+    fn tree_move_leaf_refuses_a_drop_back_onto_the_seam_it_already_abuts() {
+        // A seam is addressed by its LEFT/TOP flank, so dropping a pane on the
+        // divider it already sits against names its neighbour and slips past
+        // the `mover == target` guard. The remove-then-split would rebuild the
+        // pair at 0.5/0.5, silently discarding a ratio the operator set.
+        let mut tab = Tab {
+            id: 0,
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(0.8, Node::Leaf(1)), (0.2, Node::Leaf(2))],
+            },
+            focus: 2,
+            name: None,
+        };
+        let before = tab.clone();
+        // Pane 2 dropped just right of pane 1 - exactly where it already is.
+        assert_eq!(
+            move_leaf(&mut tab, MOVE_VIEWPORT, 2, 1, Dir::Right),
+            Err(MoveError::Origin),
+            "a move that changes nothing structural must not be applied"
+        );
+        assert_eq!(tab, before, "and the 80/20 split survives untouched");
+    }
+
+    #[test]
+    fn tree_move_leaf_preserves_the_pane_set_and_invariants() {
+        // Invariant: relocation is pure surgery - no pane is lost, duplicated,
+        // or minted, and the tree stays well-formed.
+        let mut tab = grid_2x2_tab();
+        let before: Vec<PaneId> = {
+            let mut v = leaves(&tab.root);
+            v.sort_unstable();
+            v
+        };
+        move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right).expect("the move is legal here");
+        let after: Vec<PaneId> = {
+            let mut v = leaves(&tab.root);
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(before, after, "the pane set must be identical");
+        check_invariants(&tab).expect("tree must stay well-formed after a move");
+    }
+
+    #[test]
+    fn tree_move_leaf_focus_follows_the_moved_pane() {
+        let mut tab = grid_2x2_tab();
+        tab.focus = 1;
+        move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right).expect("the move is legal here");
+        assert_eq!(tab.focus, 2, "the relocated pane takes focus");
+    }
+
+    #[test]
+    fn tree_move_leaf_refuses_a_move_that_would_undersize_a_pane() {
+        // AC4-ERR: the refusal leaves the tree byte-identical, so the client
+        // can flash a rejection without re-syncing.
+        let mut tab = grid_2x2_tab();
+        let before = tab.clone();
+        // Wide enough for the 2x2 it starts as, too narrow for the three-pane
+        // row the move would produce - so the refusal is the move's doing, not
+        // a viewport that was already illegal.
+        let cramped = Rect {
+            x: 0,
+            y: 0,
+            rows: 8,
+            cols: 20,
+        };
+        assert!(
+            layout(&tab.root, cramped)
+                .iter()
+                .all(|(_, r)| r.rows >= MIN_ROWS && r.cols >= MIN_COLS),
+            "precondition: the starting grid must itself be legal here"
+        );
+        assert_eq!(
+            move_leaf(&mut tab, cramped, 2, 3, Dir::Right),
+            Err(MoveError::TooSmall {
+                min_rows: MIN_ROWS,
+                min_cols: MIN_COLS
+            }),
+            "three panes cannot share a row this narrow"
+        );
+        assert_eq!(tab, before, "tree must be unchanged on refusal");
+    }
+
+    #[test]
+    fn tree_move_leaf_is_a_no_op_for_ids_not_in_the_tree() {
+        // AC6-FR: a stale drop names a pane another client already closed.
+        let mut tab = grid_2x2_tab();
+        let before = tab.clone();
+        assert_eq!(
+            move_leaf(&mut tab, MOVE_VIEWPORT, 99, 3, Dir::Right),
+            Err(MoveError::PaneGone)
+        );
+        assert_eq!(tab, before);
+        assert_eq!(
+            move_leaf(&mut tab, MOVE_VIEWPORT, 2, 99, Dir::Right),
+            Err(MoveError::PaneGone)
+        );
+        assert_eq!(tab, before);
+    }
+
+    #[test]
+    fn tree_move_leaf_onto_itself_is_a_no_op() {
+        // AC5-EDGE: dropping a pane on its own origin cancels rather than
+        // running a remove+reinsert that would churn ratios for no reason.
+        let mut tab = grid_2x2_tab();
+        let before = tab.clone();
+        assert_eq!(
+            move_leaf(&mut tab, MOVE_VIEWPORT, 2, 2, Dir::Right),
+            Err(MoveError::Origin)
+        );
+        assert_eq!(tab, before);
+    }
+
+    #[test]
+    fn tree_move_leaf_refuses_every_move_a_single_pane_tab_can_express() {
+        // A lone pane has nowhere to go. Both addressable forms refuse, and
+        // neither reaches the `Some(None)` removal branch - which is why that
+        // branch folds into PaneGone instead of carrying its own variant.
+        let mut tab = Tab {
+            id: 0,
+            root: Node::Leaf(1),
+            focus: 1,
+            name: None,
+        };
+        let before = tab.clone();
+        assert_eq!(
+            move_leaf(&mut tab, MOVE_VIEWPORT, 1, 1, Dir::Right),
+            Err(MoveError::Origin),
+            "naming itself as the target is an origin drop"
+        );
+        assert_eq!(
+            move_leaf(&mut tab, MOVE_VIEWPORT, 1, 2, Dir::Right),
+            Err(MoveError::PaneGone),
+            "there is no second pane to target"
+        );
+        assert_eq!(tab, before);
+    }
+
+    #[test]
+    fn tree_move_leaf_collapses_the_branch_it_emptied() {
+        // Moving 2 out of the top row leaves that row single-child; the
+        // collapse+normalize pass must fold it away rather than leave a
+        // one-child branch standing (which check_invariants rejects).
+        let mut tab = grid_2x2_tab();
+        move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Right).expect("the move is legal here");
+        check_invariants(&tab).expect("no single-child branch may survive");
+        // And the fold is real: the top row is the bare leaf, not a wrapper.
+        let Node::Branch { children, .. } = &tab.root else {
+            panic!("root collapsed unexpectedly");
+        };
+        assert!(matches!(children[0].1, Node::Leaf(1)));
+    }
+
+    #[test]
+    fn tree_move_leaf_across_axes_wraps_the_target() {
+        // Moving below a target whose parent runs Horizontal must wrap that
+        // target in a Vertical branch, the same way split_directional does.
+        let mut tab = grid_2x2_tab();
+        move_leaf(&mut tab, MOVE_VIEWPORT, 2, 3, Dir::Down).expect("the move is legal here");
+        check_invariants(&tab).expect("cross-axis relocation stays well-formed");
+        let panes = layout(&tab.root, MOVE_VIEWPORT);
+        let r2 = leaf_rect(&panes, 2);
+        let r3 = leaf_rect(&panes, 3);
+        assert!(r2.y > r3.y, "2 sits below 3 after a Down move");
+    }
+}
+
+#[cfg(test)]
+mod adversarial_move_tests {
+    use super::*;
+
+    // xorshift, no dev-deps
+    struct R(u64);
+    impl R {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn pick(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    const BIG: Rect = Rect {
+        x: 0,
+        y: 0,
+        rows: 24,
+        cols: 60,
+    };
+
+    fn dirs() -> [Dir; 4] {
+        [Dir::Left, Dir::Right, Dir::Up, Dir::Down]
+    }
+
+    #[test]
+    fn adversarial_move_leaf_preserves_invariants() {
+        for seed in 1..800u64 {
+            let mut r = R(seed);
+            let mut tab = Tab {
+                id: 0,
+                root: Node::Leaf(1),
+                focus: 1,
+                name: None,
+            };
+            let mut next_id = 2;
+            // build a random tree
+            for _ in 0..r.pick(8) + 2 {
+                let ls = leaves(&tab.root);
+                tab.focus = ls[r.pick(ls.len())];
+                let d = dirs()[r.pick(4)];
+                if split_directional(&mut tab, BIG, d, next_id).is_ok() {
+                    next_id += 1;
+                }
+            }
+            check_invariants(&tab).unwrap_or_else(|e| panic!("seed {seed}: build broke: {e}"));
+
+            for step in 0..300 {
+                let ls = leaves(&tab.root);
+                if ls.len() < 2 {
+                    break;
+                }
+                let mover = ls[r.pick(ls.len())];
+                let target = ls[r.pick(ls.len())];
+                let d = dirs()[r.pick(4)];
+                let before = tab.clone();
+                let mut sorted_before = ls.clone();
+                sorted_before.sort_unstable();
+                match move_leaf(&mut tab, BIG, mover, target, d) {
+                    Ok(()) => {
+                        let mut after = leaves(&tab.root);
+                        after.sort_unstable();
+                        assert_eq!(sorted_before, after,
+                            "seed {seed} step {step}: pane set changed moving {mover}->{target:?} {d:?}\nbefore={:?}\nafter={:?}", before.root, tab.root);
+                        check_invariants(&tab).unwrap_or_else(|e| panic!(
+                            "seed {seed} step {step}: INVARIANT {e}\nmove {mover} -> {target} {d:?}\nbefore={:?}\nafter={:?}", before.root, tab.root));
+                    }
+                    Err(_) => {
+                        assert_eq!(before, tab, "seed {seed} step {step}: tree mutated on Err");
+                    }
+                }
+            }
+        }
     }
 }

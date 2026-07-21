@@ -175,6 +175,18 @@ const HOVER_DEBOUNCE: Duration = Duration::from_millis(50);
 /// a stuck-state backstop, not a gesture timer.
 const SEAM_DRAG_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// (x-aa95) The pane grip: a small mark at top-center saying "this pane can be
+/// moved". Middle dots rather than ASCII periods so it reads as a handle and
+/// not as truncated text, and three cells so it is findable without eating a
+/// meaningful slice of a narrow pane's title row.
+const GRIP: &str = "···";
+
+/// (x-aa95) How long a relocation drag survives with no motion before it
+/// expires. Same backstop role - and so the same duration - as
+/// [`SEAM_DRAG_TIMEOUT`]: a swallowed mouse-up must not leave the client
+/// latched, silently eating every later click.
+const PANE_DRAG_TIMEOUT: Duration = SEAM_DRAG_TIMEOUT;
+
 /// Run the client for `session`. Returns the process exit code.
 pub fn run(session: &str) -> i32 {
     match run_inner(session) {
@@ -475,6 +487,33 @@ struct SeamDrag {
     last_at: Instant,
 }
 
+/// (x-aa95) Where a drop would put the dragged pane: adjacent to `target` on
+/// its `dir` side.
+///
+/// A seam and the outer edge beside it collapse to the same shape on purpose -
+/// "between C and D" is "after C", and "along the left edge" is "left of the
+/// leftmost pane there" - so the drop path has one vocabulary and `move_leaf`
+/// has one entry point, which is what keeps drag and keyboard genuinely
+/// identical rather than merely similar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct DropZone {
+    target: u64,
+    dir: Dir,
+}
+
+/// (x-aa95) A pane relocation drag in flight.
+///
+/// `zone` is the candidate under the pointer, recomputed per motion report and
+/// kept here so the renderer can light it without re-hit-testing. Purely
+/// client-local: nothing is sent until the release, so a drag that dies mid-air
+/// leaves the server's tree untouched.
+#[derive(Clone, Copy, Debug)]
+struct PaneDrag {
+    mover: u64,
+    zone: Option<DropZone>,
+    last_at: Instant,
+}
+
 /// The last `Layout` as the client holds it.
 #[derive(Clone)]
 struct LayoutView {
@@ -651,6 +690,13 @@ struct View {
     /// wire) and snaps between density states rather than taking a free width.
     hover_sideline_border: bool,
     sideline_drag: Option<Density>,
+    /// (x-aa95) The pane whose grip the pointer is over, accented so the grip
+    /// reads as grabbable before the press - the same "no portable cursor
+    /// shape" constraint that makes [`View::hover_seam`] the whole affordance.
+    hover_grip: Option<u64>,
+    /// (x-aa95) The relocation drag in flight, if any. While `Some`, motion and
+    /// release are intercepted before they reach a pane's PTY.
+    pane_drag: Option<PaneDrag>,
     /// (x-a496) A pending click-a-card confirm: the node to dispatch and its
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
@@ -1394,6 +1440,8 @@ impl View {
             seam_drag: None,
             hover_sideline_border: false,
             sideline_drag: None,
+            hover_grip: None,
+            pane_drag: None,
             confirm: None,
             create: None,
             create_esc: Vec::new(),
@@ -2474,6 +2522,217 @@ impl View {
         })
     }
 
+    // -- pane relocation (x-aa95) -------------------------------------------
+
+    /// The grip's row and column span for a pane rect, in OUTER terminal
+    /// coordinates. Shared by the renderer and the hit test so a press always
+    /// lands exactly where the glyphs drew.
+    ///
+    /// `None` when the pane cannot spare the cells. The grip is an affordance,
+    /// never the only way in - the keyboard move-pane bind reaches the same
+    /// operation - so a cramped pane loses the handle and keeps the gesture.
+    ///
+    /// Deliberately PERSISTENT rather than hover-only: a terminal cannot change
+    /// the cursor shape, so a handle that appears only once the pointer is
+    /// already on it is a handle nobody discovers. The cost is real and accepted
+    /// - these three cells of each pane's top row always show `···` and always
+    /// start a drag rather than reaching the inner app, so a program drawing
+    /// there is overdrawn and unclickable at those columns. Bounded to
+    /// multi-pane tabs, to three cells, and to panes wide enough to spare them,
+    /// with the keyboard path as the escape hatch.
+    fn grip_span(&self, rect: Rect) -> Option<(u16, std::ops::Range<u16>)> {
+        let w = GRIP.chars().count() as u16;
+        // Two spare cells so the grip never abuts the pane's own borders, where
+        // it would read as part of the divider lattice rather than as a handle.
+        if rect.cols < w + 2 {
+            return None;
+        }
+        let row = TAB_BAR_ROWS + rect.y;
+        let c0 = self.panel_w() + rect.x + (rect.cols - w) / 2;
+        Some((row, c0..c0 + w))
+    }
+
+    /// The pane whose grip covers an outer cell.
+    ///
+    /// `None` on a single-pane tab: with nowhere to relocate to, a grip there
+    /// would be an affordance for an operation that cannot succeed.
+    fn grip_at(&self, row: u16, col: u16) -> Option<u64> {
+        if self.layout.panes.len() < 2 {
+            return None;
+        }
+        self.layout.panes.iter().find_map(|(pid, rect)| {
+            let (grow, gcols) = self.grip_span(*rect)?;
+            (row == grow && gcols.contains(&col)).then_some(*pid)
+        })
+    }
+
+    /// The drop zone under an outer cell during a relocation drag.
+    ///
+    /// Seams come straight from x-d807's [`View::seam_at`], so the resize and
+    /// relocate gestures cannot disagree about where a divider is - including
+    /// its refusal on a `┼`, which stays "no zone here" rather than becoming a
+    /// rejected drop. Outer edges are this node's own surface precisely because
+    /// `seam_at` yields nothing off a live divider.
+    fn drop_zone_at(&self, row: u16, col: u16) -> Option<DropZone> {
+        if let Some(seam) = self.seam_at(row, col) {
+            // Landing "between the pair" is landing after the left/top flank.
+            return Some(DropZone {
+                target: seam.a,
+                dir: match seam.axis {
+                    Axis::Horizontal => Dir::Right,
+                    Axis::Vertical => Dir::Down,
+                },
+            });
+        }
+        self.edge_zone_at(row, col)
+    }
+
+    /// The zone for a cell on the content area's outer rim.
+    ///
+    /// An edge drop lands beside the pane the operator actually pointed at,
+    /// not spanning the full side of the layout. Predictability wins over
+    /// power here: "it goes next to this one" is what the pointer already
+    /// says, and a full-side insert would need a root-level tree op whose
+    /// result the operator cannot see themselves asking for.
+    fn edge_zone_at(&self, row: u16, col: u16) -> Option<DropZone> {
+        let panel_w = self.panel_w();
+        if row < TAB_BAR_ROWS || col < panel_w {
+            return None;
+        }
+        let (cr, cc) = (row - TAB_BAR_ROWS, col - panel_w);
+        let (a_rows, a_cols) = self.layout.area;
+        if a_rows == 0 || a_cols == 0 || cr >= a_rows || cc >= a_cols {
+            return None;
+        }
+        let target = self.pane_covering(cr, cc)?;
+        // Corners resolve left/right before up/down rather than being refused:
+        // unlike a `┼` (where two seams genuinely compete), both answers at a
+        // corner are the same drop from the operator's view - the pane ends up
+        // in that corner either way - so a fixed order beats a dead cell.
+        let dir = if cc == 0 {
+            Dir::Left
+        } else if cc + 1 == a_cols {
+            Dir::Right
+        } else if cr == 0 {
+            Dir::Up
+        } else if cr + 1 == a_rows {
+            Dir::Down
+        } else {
+            return None;
+        };
+        Some(DropZone { target, dir })
+    }
+
+    fn begin_pane_drag(&mut self, mover: u64, now: Instant) {
+        self.pane_drag = Some(PaneDrag {
+            mover,
+            zone: None,
+            last_at: now,
+        });
+    }
+
+    /// Track the pointer to a new candidate zone. Returns whether the highlight
+    /// changed, so a drag across a pane's interior costs no redraws.
+    fn pane_drag_to(&mut self, row: u16, col: u16, now: Instant) -> bool {
+        let Some(mover) = self.pane_drag.map(|d| d.mover) else {
+            return false;
+        };
+        // A zone the dragged pane already occupies is the origin: no highlight,
+        // so the gesture reads as "this drop does nothing" before the release.
+        // BOTH flanks count - a seam is addressed by its left/top pane, so the
+        // divider a pane already abuts on its far side names the NEIGHBOUR and
+        // would otherwise light up as a real destination.
+        let abuts = |s: Seam| s.a == mover || s.b == mover;
+        let zone = self
+            .drop_zone_at(row, col)
+            .filter(|z| z.target != mover && self.pane_rect(mover).is_some())
+            .filter(|_| !self.seam_at(row, col).is_some_and(abuts));
+        let drag = self.pane_drag.as_mut().expect("checked above");
+        drag.last_at = now;
+        let changed = drag.zone != zone;
+        drag.zone = zone;
+        changed
+    }
+
+    /// End the drag and return the command that applies it.
+    ///
+    /// `None` on every cancel path - released off any zone, on the origin, or
+    /// after the dragged pane went away - so a cancelled drag provably puts
+    /// nothing on the wire rather than sending a command the server will refuse.
+    fn commit_pane_drag(&mut self) -> Option<Command> {
+        let drag = self.pane_drag.take()?;
+        let zone = drag.zone?;
+        Some(Command::MovePane {
+            mover: Some(drag.mover),
+            target: Some(zone.target),
+            dir: zone.dir,
+        })
+    }
+
+    /// Abandon a drag with no command. Esc, the timeout, and the dragged pane
+    /// exiting mid-gesture all land here. Returns whether one was in flight.
+    fn cancel_pane_drag(&mut self) -> bool {
+        self.pane_drag.take().is_some()
+    }
+
+    /// The outer cells to light for a candidate zone: the one-cell band along
+    /// the `dir` side of the target's rect.
+    ///
+    /// One formula serves both zone kinds because a zone always names the gap
+    /// the pane will land in - beside a seam that band IS the divider between
+    /// the pair. On the layout's outer rim there is no gap yet, so the band
+    /// clamps onto the target's own edge column/row: still honest ("it lands on
+    /// this side of this pane") without reaching into the sideline or the tab
+    /// bar, which own those cells.
+    fn drop_band(&self, zone: DropZone) -> Option<(std::ops::Range<u16>, std::ops::Range<u16>)> {
+        let rect = self.pane_rect(zone.target)?;
+        let panel_w = self.panel_w();
+        // Saturating throughout: `rect` comes from the last Layout, which can
+        // lag a sideline toggle or a resize, so these sums are not guaranteed to
+        // stay inside the terminal. Overflow here would panic a debug build for
+        // a highlight; clamping just draws the band at the edge instead.
+        let (r0, c0) = (
+            TAB_BAR_ROWS.saturating_add(rect.y),
+            panel_w.saturating_add(rect.x),
+        );
+        let (r1, c1) = (r0.saturating_add(rect.rows), c0.saturating_add(rect.cols));
+        // The band sits one cell outside the rect, except on the rim where that
+        // cell belongs to the sideline or the tab bar - there it clamps back
+        // onto the rect's own edge.
+        // BOTH sides must be bounded. Guarding only the low side left the right
+        // and bottom rims resolving to a cell one past the terminal, which
+        // compose() then clamped away to an empty range: the zone rendered
+        // nothing while a release there still relocated the pane. In this UI's
+        // own vocabulary an unlit zone means "this drop does nothing" (an origin
+        // drop deliberately blanks the zone to say exactly that), so the
+        // asymmetry taught the wrong thing on half the rim.
+        let (term_rows, term_cols) = self.term;
+        // `outside` is None when there is no cell on that side at all (the
+        // rect already starts at the edge). Checked rather than wrapping: the
+        // old version leaned on wrapping to u16::MAX to fail the range test,
+        // which worked but read as an accident.
+        let band_col = |outside: Option<u16>, own: u16| {
+            let c = outside
+                .filter(|c| (panel_w..term_cols).contains(c))
+                .unwrap_or(own);
+            c..c.saturating_add(1)
+        };
+        let band_row = |outside: Option<u16>, own: u16| {
+            let r = outside
+                .filter(|r| (TAB_BAR_ROWS..term_rows).contains(r))
+                .unwrap_or(own);
+            r..r.saturating_add(1)
+        };
+        // saturating: a zero-column rect from the server would otherwise
+        // underflow `c1 - 1` and panic in debug.
+        Some(match zone.dir {
+            Dir::Left => (r0..r1, band_col(c0.checked_sub(1), c0)),
+            Dir::Right => (r0..r1, band_col(Some(c1), c1.saturating_sub(1))),
+            Dir::Up => (band_row(r0.checked_sub(1), r0), c0..c1),
+            Dir::Down => (band_row(Some(r1), r1.saturating_sub(1)), c0..c1),
+        })
+    }
+
     /// The column range of the footer's `☰ menu` button (x-8ccf US4), shared by
     /// the renderer and the hit-test so a click lands where it draws. `None` when
     /// the panel is too narrow to add the button beside the `+ new workspace`
@@ -2878,6 +3137,9 @@ impl View {
         // the focus-follow off-switch below.
         self.hover_seam = self.seam_at(row, col);
         self.hover_sideline_border = self.on_sideline_border(row, col);
+        // x-aa95: same reasoning for the pane grip - the accent is the only
+        // signal the handle is grabbable, since the cursor shape cannot say so.
+        self.hover_grip = self.grip_at(row, col);
 
         // Focus-follows-mouse rides the off-switch. hit_test resolves a PANE
         // (chrome/divider/sideline => None), so hovering the sideline never
@@ -3042,6 +3304,30 @@ impl View {
         if self.seam_drag.is_some_and(|d| !self.seam_is_live(d.seam)) {
             self.seam_drag = None;
             self.set_notice("divider gone: layout changed".into());
+        }
+        // (x-aa95) Same for a relocation. AC7-FR: the dragged pane's process can
+        // exit mid-gesture, and continuing to drag a pane that no longer exists
+        // would end in a drop the server refuses for reasons the operator never
+        // saw. The grip accent is cleared unannounced (it is only a hover hint);
+        // an in-flight drag says why it stopped.
+        if self.hover_grip.is_some_and(|p| self.pane_rect(p).is_none()) {
+            self.hover_grip = None;
+        }
+        if self
+            .pane_drag
+            .is_some_and(|d| self.pane_rect(d.mover).is_none())
+        {
+            self.pane_drag = None;
+            self.set_notice("pane gone: move cancelled".into());
+        }
+        // A drag whose TARGET retired keeps going - only the candidate is
+        // stale, and the next motion recomputes it against the new layout.
+        if let Some(zone) = self.pane_drag.and_then(|d| d.zone) {
+            if self.pane_rect(zone.target).is_none() {
+                if let Some(d) = self.pane_drag.as_mut() {
+                    d.zone = None;
+                }
+            }
         }
         // (x-0f9d US1) Last, after every re-anchor: if a bare NewTab is
         // pending, the layout that just added the tab opens rename on it. Last
@@ -3457,6 +3743,69 @@ impl View {
                 }
             }
         }
+        // x-aa95: pane grips, drawn on cells the pane owns, hence after the blit
+        // - but BEFORE the scroll indicator, which is state rather than an
+        // affordance and so wins the cells they contend for on a narrow pane. The dragged pane's own grip stays lit for the
+        // whole gesture, which is what keeps the origin marked (AC3-UI) once
+        // the pointer has run off to a zone somewhere else.
+        let dragged = self.pane_drag.map(|d| d.mover);
+        // Hidden on a single-pane tab, matching `grip_at`: no grip is drawn
+        // where none can be pressed.
+        for (pid, rect) in self
+            .layout
+            .panes
+            .iter()
+            .filter(|_| self.layout.panes.len() >= 2)
+        {
+            let Some((grow, gcols)) = self.grip_span(*rect) else {
+                continue;
+            };
+            let lit = dragged == Some(*pid) || (dragged.is_none() && self.hover_grip == Some(*pid));
+            let (fg, flags) = if lit {
+                (LATTICE_ACCENT, cell_flags::BOLD)
+            } else {
+                (Color::Default, cell_flags::DIM)
+            };
+            let (r, start, end) = (grow as usize, gcols.start as usize, gcols.end as usize);
+            if r >= rows {
+                continue;
+            }
+            // A grip cell is one column wide, but the pane content underneath is
+            // arbitrary program output that may hold a DOUBLE-width glyph. The
+            // compositor skips any WIDE_SPACER cell, so stamping over half of
+            // such a pair leaves either a lead with no spacer or a spacer with
+            // no lead - and the row then emits the wrong number of columns,
+            // shifting every cell after it. Blank whichever half survives at the
+            // stamp's edges before writing (the interior is fully overwritten,
+            // so no orphan can survive in there).
+            let blank = Cell {
+                c: ' ',
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: 0,
+            };
+            if start > 0
+                && start < cols
+                && cells[r * cols + start].flags & cell_flags::WIDE_SPACER != 0
+            {
+                cells[r * cols + start - 1] = blank;
+            }
+            if end < cols && cells[r * cols + end].flags & cell_flags::WIDE_SPACER != 0 {
+                cells[r * cols + end] = blank;
+            }
+            for (i, ch) in GRIP.chars().enumerate() {
+                let c = start + i;
+                if c < cols {
+                    cells[r * cols + c] = Cell {
+                        c: ch,
+                        fg,
+                        bg: Color::Default,
+                        flags,
+                    };
+                }
+            }
+        }
+
         // Scroll indicator (US1, AC1-UI): a minimal `[+N]` at a scrolled pane's
         // top-right, inverse-video so it reads over content. Present iff the
         // pane's frame reports a non-zero offset (group 2's status row becomes
@@ -3497,6 +3846,8 @@ impl View {
         // A drag keeps the accent on the seam it grabbed even as the pointer
         // runs ahead of it, so the thing being moved stays the thing lit.
         let active_seam = self.seam_drag.map(|d| d.seam).or(self.hover_seam);
+        // x-aa95: the candidate drop zone, lit while a relocation drag is live.
+        let drop_zone = self.pane_drag.and_then(|d| d.zone);
         // Divider glyphs for in-area content cells no pane covers: pick by
         // which neighbors are panes so vertical strips read '│', horizontal
         // '─', crossings '┼'. Dim so chrome never shouts over content.
@@ -3539,7 +3890,13 @@ impl View {
                 // draggable before the press.
                 let grabbable =
                     active_seam.is_some_and(|s| self.seam_at(r as u16, c as u16) == Some(s));
-                let (fg, flags) = if grabbable {
+                // x-aa95: the candidate zone outranks the hover accent - during
+                // a drag the only question on screen is where the pane lands.
+                let dropping =
+                    drop_zone.is_some_and(|z| self.drop_zone_at(r as u16, c as u16) == Some(z));
+                let (fg, flags) = if dropping {
+                    (LATTICE_ACCENT, cell_flags::INVERSE)
+                } else if grabbable {
                     (LATTICE_ACCENT, cell_flags::BOLD)
                 } else if outline {
                     (LATTICE_ACCENT, 0)
@@ -3557,6 +3914,21 @@ impl View {
                     bg: Color::Default,
                     flags,
                 };
+            }
+        }
+
+        // x-aa95: an edge drop zone lands on cells a PANE owns, which the
+        // divider pass above skips by construction. Lit here, after the blit,
+        // so the rim reads as a candidate the same way a seam does.
+        if let Some((band_rows, band_cols)) = drop_zone.and_then(|z| self.drop_band(z)) {
+            for r in band_rows.start as usize..(band_rows.end as usize).min(rows) {
+                for c in band_cols.start as usize..(band_cols.end as usize).min(cols) {
+                    if covered[r * cols + c] {
+                        let cell = &mut cells[r * cols + c];
+                        cell.fg = LATTICE_ACCENT;
+                        cell.flags |= cell_flags::INVERSE;
+                    }
+                }
             }
         }
 
@@ -6117,6 +6489,7 @@ async fn attach_and_run(
         // lost focus mid-gesture, or the release was eaten - would otherwise
         // leave the drag latched, swallowing every later mouse event. Expire it.
         let seam_drag_deadline = view.seam_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
+        let pane_drag_deadline = view.pane_drag.map(|d| d.last_at + PANE_DRAG_TIMEOUT);
         tokio::select! {
             msg = srv_rx.recv() => match msg.unwrap_or(Err(ProtoError::Closed)) {
                 Ok(ServerMsg::Frame { pane_id, frame }) => {
@@ -6456,6 +6829,21 @@ async fn attach_and_run(
                 }
             }
             _ = async {
+                match pane_drag_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if pane_drag_deadline.is_some() => {
+                // Unlike a seam drag, an expired relocation applies NOTHING: a
+                // move is one discrete jump rather than an accumulation the
+                // operator watched happen, so committing a drop they never
+                // released would relocate a pane on its own (AC5-EDGE).
+                view.cancel_pane_drag();
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            _ = async {
                 match hover_deadline {
                     Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
                     None => std::future::pending().await,
@@ -6505,7 +6893,15 @@ async fn handle_stdin(
     // AC3-UI); a Shift-modified event is dropped (native-selection, AC3-EDGE).
     let (reports, passthrough) = crate::mouse::extract_mouse(mouse_carry, bytes);
     for rep in reports {
-        if rep.shift {
+        // Shift-modified reports are dropped so the terminal's own native
+        // selection keeps working. A RELEASE while a drag is in flight is the
+        // exception: some terminals report Shift on the release, and dropping it
+        // would leave the drag latched - visibly stuck, eating input until its
+        // timeout - for a gesture the operator has already finished. Nobody is
+        // shift-selecting text mid-drag, so nothing is taken away here.
+        let ends_a_drag = matches!(rep.kind, MouseKind::Release(MouseButton::Left))
+            && (view.pane_drag.is_some() || view.seam_drag.is_some());
+        if rep.shift && !ends_a_drag {
             continue;
         }
         // A pointer action - click/press/wheel/drag, anything but passive hover
@@ -6563,6 +6959,39 @@ async fn handle_stdin(
                 _ => view.seam_drag = None,
             }
         }
+        // x-aa95: a relocation drag owns the mouse, for the same reason a seam
+        // drag does - the pointer's whole job is to leave the pane it grabbed,
+        // so this must precede the pane forward that would otherwise feed the
+        // gesture to a PTY as a text selection.
+        if view.pane_drag.is_some() {
+            match rep.kind {
+                MouseKind::Drag(MouseButton::Left) => {
+                    view.pane_drag_to(rep.row, rep.col, Instant::now());
+                    continue;
+                }
+                MouseKind::Release(MouseButton::Left) => {
+                    // Re-hit-test at the RELEASE coordinates rather than trusting
+                    // the zone the last motion cached. A co-viewer can move the
+                    // targeted seam between that motion and this release, which
+                    // leaves the cached zone naming a slot the pointer no longer
+                    // sits in - and `set_layout` only clears the cache when the
+                    // target disappears, not when it merely moves.
+                    view.pane_drag_to(rep.row, rep.col, Instant::now());
+                    // Nothing goes on the wire until here: the whole drag is a
+                    // client-local preview, so the server only ever learns the
+                    // outcome (AC5-EDGE - a cancel sends nothing at all).
+                    if let Some(cmd) = view.commit_pane_drag() {
+                        write_msg(sock_w, &ClientMsg::Command(cmd))
+                            .await
+                            .map_err(|e| format!("pane move send failed: {e}"))?;
+                    }
+                    continue;
+                }
+                _ => {
+                    view.cancel_pane_drag();
+                }
+            }
+        }
         // x-d807: the sideline border drag, same ownership rule as a seam drag.
         // Client-local: the sideline is never on the wire, so a snap only tells
         // the server its content area changed.
@@ -6607,6 +7036,14 @@ async fn handle_stdin(
         if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
             if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
                 apply_hit(view, hit, sock_w).await?;
+                continue;
+            }
+            // x-aa95: a press on a pane's grip starts a relocation. Before the
+            // seam check only for readability - grips sit on cells a pane
+            // covers and seams only on cells no pane covers, so the two can
+            // never contend for the same press.
+            if let Some(mover) = view.grip_at(rep.row, rep.col) {
+                view.begin_pane_drag(mover, Instant::now());
                 continue;
             }
             // x-d807: a press on a divider grabs the seam. After chrome_hit so
@@ -6678,6 +7115,14 @@ async fn handle_stdin(
                 .await
                 .map_err(|e| format!("seam revert send failed: {e}"))?;
         }
+        return Ok(StdinFlow::Continue);
+    }
+    // x-aa95 (AC5-EDGE): a bare Esc during a relocation drag cancels it. No
+    // command travels, unlike the seam revert above - nothing was ever applied,
+    // so there is nothing to put back. Same lone-0x1b match so an arrow key's
+    // escape sequence cannot read as a cancel.
+    if view.pane_drag.is_some() && passthrough == [0x1b] {
+        view.cancel_pane_drag();
         return Ok(StdinFlow::Continue);
     }
     if view.digest.is_some() {
@@ -11058,6 +11503,10 @@ mod tests {
     // A three-pane layout over two_pane_view's geometry (focus on pane 10, so
     // 11 and 12 are both hover targets). Panes tile the 72-col content area:
     // 10 -> outer 28.., 11 -> outer 52.., 12 -> outer 76...
+    //
+    // Also the smallest fixture in which a seam DROP means anything (x-aa95):
+    // a two-pane tab has one seam and it flanks both panes, so every seam drop
+    // there is an origin drop.
     fn three_pane_view() -> View {
         let mut view = two_pane_view();
         let rect = |x| Rect {
@@ -18259,5 +18708,543 @@ mod tests {
         v.sel_follow = Some(1);
         selector_keys(&mut v, b"j", &mut Vec::new()).await.unwrap();
         assert_eq!(v.sel_follow, None);
+    }
+
+    // -- pane relocation (x-aa95) -------------------------------------------
+
+    /// The first cell of the seam flanked by exactly `a` and `b`, found the way
+    /// the dispatch does rather than hardcoded, so a layout tweak cannot
+    /// silently point these tests at a cell that is no longer that divider.
+    fn seam_cell_between(view: &View, a: u64, b: u64) -> (u16, u16) {
+        let (rows, cols) = view.term;
+        (TAB_BAR_ROWS..rows)
+            .flat_map(|r| (0..cols).map(move |c| (r, c)))
+            .find(|(r, c)| view.seam_at(*r, *c).is_some_and(|s| s.a == a && s.b == b))
+            .unwrap_or_else(|| panic!("no seam between {a} and {b}"))
+    }
+
+    #[test]
+    fn grip_is_hidden_on_a_single_pane_tab() {
+        // Locked Decision 5: nowhere to relocate to, so no handle is offered.
+        let mut view = two_pane_view();
+        view.layout.panes.truncate(1);
+        let rect = view.layout.panes[0].1;
+        let (row, cols) = view.grip_span(rect).expect("a wide pane has room");
+        assert_eq!(
+            view.grip_at(row, cols.start),
+            None,
+            "a lone pane must not offer a grip"
+        );
+    }
+
+    #[test]
+    fn grip_hit_test_matches_where_the_grip_draws() {
+        // The renderer and the hit test share grip_span precisely so a press
+        // cannot miss a handle the operator can see.
+        let view = two_pane_view();
+        let rect = view.pane_rect(10).expect("pane 10 exists");
+        let (row, gcols) = view.grip_span(rect).expect("pane 10 has room");
+        let frame = view.compose();
+        let cols = view.term.1 as usize;
+        for (i, ch) in GRIP.chars().enumerate() {
+            let cell = frame.cells[row as usize * cols + gcols.start as usize + i];
+            assert_eq!(cell.c, ch, "the grip draws at its own span");
+        }
+        for c in gcols.clone() {
+            assert_eq!(
+                view.grip_at(row, c),
+                Some(10),
+                "every grip cell is pressable"
+            );
+        }
+        assert_eq!(view.grip_at(row, gcols.end), None, "and only those cells");
+    }
+
+    #[test]
+    fn a_seam_zone_targets_the_pane_it_sits_after() {
+        let view = three_pane_view();
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        let seam = view.seam_at(r, c).expect("cell chosen for being a seam");
+        assert_eq!(
+            view.drop_zone_at(r, c),
+            Some(DropZone {
+                target: seam.a,
+                dir: Dir::Right
+            }),
+            "landing between a side-by-side pair is landing right of the left one"
+        );
+    }
+
+    #[test]
+    fn a_drag_lights_a_candidate_and_keeps_the_origin_marked() {
+        // AC3-UI: the zone under the pointer accents, and the pane being moved
+        // stays visibly marked even though the pointer has left it.
+        let mut view = three_pane_view();
+        // Pane 10 dragged to the 11|12 seam: a divider it does not already
+        // abut, so this is a real destination rather than an origin drop.
+        view.begin_pane_drag(10, Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        assert!(
+            view.pane_drag_to(r, c, Instant::now()),
+            "entering a zone redraws"
+        );
+        assert!(view.pane_drag.and_then(|d| d.zone).is_some());
+        assert!(
+            !view.pane_drag_to(r, c, Instant::now()),
+            "staying inside the same zone costs no redraw"
+        );
+
+        let frame = view.compose();
+        let cols = view.term.1 as usize;
+        let lit = frame.cells[r as usize * cols + c as usize];
+        assert_eq!(
+            lit.flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "the candidate zone reads as the drop target"
+        );
+        let rect = view.pane_rect(10).expect("the origin still exists");
+        let (grow, gcols) = view.grip_span(rect).expect("pane 10 has room");
+        assert_eq!(
+            frame.cells[grow as usize * cols + gcols.start as usize].flags & cell_flags::BOLD,
+            cell_flags::BOLD,
+            "the origin grip stays marked while the pointer is elsewhere"
+        );
+    }
+
+    #[test]
+    fn a_drop_commits_the_candidate_zone() {
+        let mut view = three_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.pane_drag_to(r, c, Instant::now());
+        assert_eq!(
+            view.commit_pane_drag(),
+            Some(Command::MovePane {
+                mover: Some(10),
+                target: Some(11),
+                dir: Dir::Right
+            })
+        );
+        assert!(view.pane_drag.is_none(), "committing ends the drag");
+    }
+
+    #[test]
+    fn a_release_resolves_against_the_layout_it_lands_on() {
+        // The cached zone can go stale: a co-viewer moves the targeted seam
+        // between the last motion and the release, and set_layout only clears
+        // the cache when the target DISAPPEARS, not when it merely moves. So
+        // the release re-hit-tests its own coordinates.
+        let mut view = three_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.pane_drag_to(r, c, Instant::now());
+        assert_eq!(
+            view.pane_drag.and_then(|d| d.zone),
+            Some(DropZone {
+                target: 11,
+                dir: Dir::Right
+            })
+        );
+
+        // A co-viewer widens 11, sliding the 11|12 seam right so this cell now
+        // sits INSIDE pane 11 rather than on any seam.
+        let mut next = view.layout.clone();
+        next.panes = vec![
+            (
+                10,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 23,
+                },
+            ),
+            (
+                11,
+                Rect {
+                    x: 24,
+                    y: 0,
+                    rows: 29,
+                    cols: 40,
+                },
+            ),
+            (
+                12,
+                Rect {
+                    x: 65,
+                    y: 0,
+                    rows: 29,
+                    cols: 7,
+                },
+            ),
+        ];
+        view.set_layout(next);
+
+        // Whatever that cell means NOW is what the release must commit - never
+        // the stale 11|12 seam, which has slid out from under the pointer.
+        let fresh = view.drop_zone_at(r, c);
+        assert_ne!(
+            fresh,
+            Some(DropZone {
+                target: 11,
+                dir: Dir::Right
+            }),
+            "precondition: the cell must no longer mean what it did"
+        );
+        view.pane_drag_to(r, c, Instant::now());
+        assert_eq!(
+            view.commit_pane_drag(),
+            fresh.map(|z| Command::MovePane {
+                mover: Some(10),
+                target: Some(z.target),
+                dir: z.dir,
+            }),
+            "the release follows the layout it landed on"
+        );
+    }
+
+    #[test]
+    fn a_t_junction_seam_previews_exactly_what_it_does() {
+        // Pane 10 spans the left; 11 and 12 stack on the right. The 10|11 and
+        // 10|12 segments are ONE divider - x-d807 addresses a seam by branch
+        // child pair, so both resolve to the same zone. That is only acceptable
+        // if the highlight says so: the whole divider must light, and the drop
+        // must then land full-height, matching what lit.
+        let mut view = two_pane_view();
+        view.set_layout(LayoutView {
+            panes: vec![
+                (
+                    10,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        rows: 29,
+                        cols: 35,
+                    },
+                ),
+                (
+                    11,
+                    Rect {
+                        x: 36,
+                        y: 0,
+                        rows: 14,
+                        cols: 36,
+                    },
+                ),
+                (
+                    12,
+                    Rect {
+                        x: 36,
+                        y: 15,
+                        rows: 14,
+                        cols: 36,
+                    },
+                ),
+            ],
+            focus: 10,
+            ..view.layout.clone()
+        });
+        view.frames.insert(12, text_frame(14, 36, 'c'));
+
+        let upper = seam_cell_between(&view, 10, 11);
+        let lower = seam_cell_between(&view, 10, 12);
+        assert_ne!(upper.0, lower.0, "the two segments are different rows");
+        assert_eq!(
+            view.drop_zone_at(upper.0, upper.1),
+            view.drop_zone_at(lower.0, lower.1),
+            "one divider, one zone - both segments mean the same drop"
+        );
+
+        // The band spans pane 10's FULL height, so the preview shows the
+        // full-height insert the drop actually performs. No mismatch between
+        // what lights and what happens.
+        let zone = view.drop_zone_at(lower.0, lower.1).expect("a seam zone");
+        let (band_rows, _) = view.drop_band(zone).expect("10 has a rect");
+        let r10 = view.pane_rect(10).expect("10 exists");
+        assert_eq!(
+            (band_rows.end - band_rows.start),
+            r10.rows,
+            "the highlight must cover the whole divider it will insert along"
+        );
+    }
+
+    #[test]
+    fn every_cancel_path_sends_nothing() {
+        // AC5-EDGE: Esc, a drop off any zone, and a drop on the pane's own
+        // origin all end the gesture without putting a command on the wire.
+        let mut view = two_pane_view();
+
+        view.begin_pane_drag(10, Instant::now());
+        assert!(view.cancel_pane_drag(), "Esc ends a live drag");
+        assert!(
+            view.commit_pane_drag().is_none(),
+            "and leaves nothing to send"
+        );
+
+        // Released over the pane's own middle: no zone was ever a candidate.
+        view.begin_pane_drag(10, Instant::now());
+        let rect = view.pane_rect(10).expect("pane 10 exists");
+        let mid_r = TAB_BAR_ROWS + rect.y + rect.rows / 2;
+        let mid_c = view.panel_w() + rect.x + rect.cols / 2;
+        view.pane_drag_to(mid_r, mid_c, Instant::now());
+        assert_eq!(view.commit_pane_drag(), None);
+    }
+
+    #[test]
+    fn a_zone_on_the_dragged_pane_never_becomes_a_candidate() {
+        // An origin drop is a cancel, so it must not even light up - the
+        // gesture should read as "this does nothing" before the release.
+        let mut view = two_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        let rect = view.pane_rect(10).expect("pane 10 exists");
+        // Pane 10 sits at the layout's left rim, so its own left edge is a zone
+        // that would target it.
+        let edge = view.edge_zone_at(TAB_BAR_ROWS + rect.y, view.panel_w() + rect.x);
+        assert_eq!(
+            edge.map(|z| z.target),
+            Some(10),
+            "precondition: that rim targets 10"
+        );
+        view.pane_drag_to(
+            TAB_BAR_ROWS + rect.y,
+            view.panel_w() + rect.x,
+            Instant::now(),
+        );
+        assert_eq!(view.pane_drag.and_then(|d| d.zone), None);
+        assert_eq!(view.commit_pane_drag(), None);
+    }
+
+    #[test]
+    fn every_rim_drop_zone_actually_lights_something() {
+        // The right and bottom rims resolve to a cell one PAST the terminal.
+        // Clamping only the low side left those bands empty once compose()
+        // trimmed them to the buffer, so the zone rendered nothing while a
+        // release there still relocated the pane - and an unlit zone means
+        // "this does nothing" everywhere else in this UI.
+        //
+        // two_pane_view tiles the content area exactly (35 + divider + 36 =
+        // 72); three_pane_view leaves its last column uncovered, so its right
+        // rim is filler rather than a pane and resolves to no zone at all.
+        let mut view = two_pane_view();
+        let panel_w = view.panel_w();
+        let (term_rows, term_cols) = (view.term.0, view.term.1);
+        let (a_rows, a_cols) = view.layout.area;
+        let mid_col = panel_w + a_cols / 2;
+        let mid_row = TAB_BAR_ROWS + a_rows / 2;
+
+        for (row, col, want) in [
+            (mid_row, panel_w, Dir::Left),
+            (mid_row, panel_w + a_cols - 1, Dir::Right),
+            (TAB_BAR_ROWS, mid_col, Dir::Up),
+            (TAB_BAR_ROWS + a_rows - 1, mid_col, Dir::Down),
+        ] {
+            // A cell the hit-test really resolves to a rim zone; a fabricated
+            // zone would prove nothing, since an interior pane's outward band
+            // belongs to a seam zone instead.
+            let zone = view
+                .edge_zone_at(row, col)
+                .unwrap_or_else(|| panic!("{want:?} rim cell ({row},{col}) is not a zone"));
+            assert_eq!(zone.dir, want, "rim cell ({row},{col}) resolved oddly");
+
+            // The regression itself: after compose()'s clamp to the cell
+            // buffer, the band must still cover at least one real cell.
+            let (br, bc) = view.drop_band(zone).expect("the target has a rect");
+            assert!(
+                br.start < term_rows && br.end.min(term_rows) > br.start,
+                "{want:?} band rows {br:?} clamp to nothing against {term_rows}"
+            );
+            assert!(
+                bc.start < term_cols && bc.end.min(term_cols) > bc.start,
+                "{want:?} band cols {bc:?} clamp to nothing against {term_cols}"
+            );
+        }
+
+        // And end to end for the right rim, the half that regressed: dragging
+        // there really does light more than the resting frame does.
+        let baseline = view
+            .compose()
+            .cells
+            .iter()
+            .filter(|c| c.flags & cell_flags::INVERSE != 0)
+            .count();
+        let (row, col) = (mid_row, panel_w + a_cols - 1);
+        let target = view.edge_zone_at(row, col).expect("right rim zone").target;
+        let mover = view
+            .layout
+            .panes
+            .iter()
+            .map(|(p, _)| *p)
+            .find(|p| *p != target)
+            .expect("a second pane to drag");
+        view.begin_pane_drag(mover, Instant::now());
+        assert!(view.pane_drag_to(row, col, Instant::now()));
+        let lit = view
+            .compose()
+            .cells
+            .iter()
+            .filter(|c| c.flags & cell_flags::INVERSE != 0)
+            .count();
+        assert!(
+            lit > baseline,
+            "right rim lit nothing (lit={lit} baseline={baseline})"
+        );
+    }
+
+    #[test]
+    fn the_scroll_indicator_outranks_the_grip() {
+        // They contend for the same top row on a narrow pane. The indicator is
+        // state, the grip is an affordance that has a keyboard equivalent, so
+        // the indicator wins.
+        let mut view = three_pane_view();
+        let rect = view.pane_rect(10).expect("pane 10 exists");
+        let narrow = Rect { cols: 9, ..rect };
+        view.layout.panes[0].1 = narrow;
+        let f = view.frames.get_mut(&10).expect("pane 10 has a frame");
+        f.scroll_offset = 7;
+
+        let (grow, gcols) = view.grip_span(narrow).expect("9 cols still fits a grip");
+        let cols = view.term.1 as usize;
+        let out = view.compose();
+        let row: String = (0..cols)
+            .map(|c| out.cells[grow as usize * cols + c].c)
+            .collect();
+        assert!(
+            row.contains("[+7]"),
+            "the scroll indicator must survive the grip: {row:?}"
+        );
+        // Precondition: they really did overlap, or this proves nothing.
+        let ind_start = view.panel_w() + narrow.x + narrow.cols - 4;
+        assert!(
+            gcols.contains(&ind_start) || (ind_start..ind_start + 4).contains(&gcols.start),
+            "fixture no longer overlaps: grip={gcols:?} indicator at {ind_start}"
+        );
+    }
+
+    #[test]
+    fn the_grip_never_bisects_a_double_width_glyph() {
+        // The compositor SKIPS a WIDE_SPACER cell, so a lead left without its
+        // spacer (or vice versa) makes the row emit the wrong column count and
+        // shifts everything after it. Pane content is arbitrary program output,
+        // so a CJK glyph can sit anywhere - including straddling the grip.
+        let mut view = two_pane_view();
+        let rect = view.pane_rect(10).expect("pane 10 exists");
+        let (grow, gcols) = view.grip_span(rect).expect("pane 10 has room");
+
+        // Straddle BOTH edges: a wide pair whose spacer is the grip's first
+        // cell, and another whose lead is the grip's last cell.
+        let panel_w = view.panel_w();
+        let frow = (grow - TAB_BAR_ROWS - rect.y) as usize;
+        let local = |outer: u16| (outer - panel_w - rect.x) as usize;
+        let (lead_before, last_cell) = (local(gcols.start) - 1, local(gcols.end) - 1);
+        let frame = view.frames.get_mut(&10).expect("pane 10 has a frame");
+        let fcols = frame.cols as usize;
+        for (at, ch, spacer) in [
+            (lead_before, '\u{4f60}', true),
+            (last_cell, '\u{597d}', true),
+        ] {
+            frame.cells[frow * fcols + at] = Cell {
+                c: ch,
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: 0,
+            };
+            if spacer {
+                frame.cells[frow * fcols + at + 1] = Cell {
+                    c: ' ',
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    flags: cell_flags::WIDE_SPACER,
+                };
+            }
+        }
+
+        let out = view.compose();
+        let cols = view.term.1 as usize;
+        let row = &out.cells[grow as usize * cols..(grow as usize + 1) * cols];
+        // Every surviving WIDE_SPACER must still be preceded by a real
+        // double-width lead; every wide lead must still own its spacer.
+        for (i, cell) in row.iter().enumerate() {
+            if cell.flags & cell_flags::WIDE_SPACER != 0 {
+                assert!(
+                    i > 0 && glyph_cols(row[i - 1].c) == 2,
+                    "orphaned spacer at column {i}: the row would shift left"
+                );
+            }
+            if glyph_cols(cell.c) == 2 {
+                assert!(
+                    i + 1 < cols && row[i + 1].flags & cell_flags::WIDE_SPACER != 0,
+                    "wide glyph at column {i} lost its spacer: the row would shift right"
+                );
+            }
+        }
+        // And the grip still drew.
+        for (i, ch) in GRIP.chars().enumerate() {
+            assert_eq!(row[gcols.start as usize + i].c, ch);
+        }
+    }
+
+    #[test]
+    fn a_drag_ends_when_the_pane_it_moves_disappears() {
+        // AC7-FR: the dragged pane's process exits mid-gesture.
+        let mut view = three_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.pane_drag_to(r, c, Instant::now());
+
+        let mut next = view.layout.clone();
+        next.panes.retain(|(id, _)| *id != 10);
+        next.focus = 11;
+        view.set_layout(next);
+
+        assert!(view.pane_drag.is_none(), "the drag cannot outlive its pane");
+        assert!(
+            view.notice.is_some(),
+            "and it says why rather than dying silently"
+        );
+    }
+    #[test]
+    fn probe_right_rim_band() {
+        let mut view = two_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        let rect = view.pane_rect(11).unwrap();
+        let r = TAB_BAR_ROWS + rect.y + 5;
+        let c = view.panel_w() + rect.x + rect.cols - 1; // rightmost content col
+        let z = view.edge_zone_at(r, c).expect("rim zone");
+        eprintln!("zone={:?}", z);
+        let band = view.drop_band(z).expect("band");
+        eprintln!(
+            "band rows={:?} cols={:?} termcols={}",
+            band.0, band.1, view.term.1
+        );
+        assert!(view.pane_drag_to(r, c, Instant::now()));
+        let frame = view.compose();
+        let cols = view.term.1 as usize;
+        let lit = (0..view.term.0 as usize)
+            .flat_map(|rr| (0..cols).map(move |cc| (rr, cc)))
+            .filter(|(rr, cc)| frame.cells[rr * cols + cc].flags & cell_flags::INVERSE != 0)
+            .count();
+        eprintln!("inverse cells = {}", lit);
+        assert!(lit > 0, "right-rim drop zone lit NOTHING");
+    }
+
+    #[test]
+    fn probe_bottom_rim_band() {
+        let mut view = two_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        let rect = view.pane_rect(11).unwrap();
+        let r = TAB_BAR_ROWS + rect.y + rect.rows - 1;
+        let c = view.panel_w() + rect.x + 5;
+        let z = view.edge_zone_at(r, c).expect("rim zone");
+        eprintln!("zone={:?}", z);
+        eprintln!("band={:?}", view.drop_band(z));
+        assert!(view.pane_drag_to(r, c, Instant::now()));
+        let frame = view.compose();
+        let cols = view.term.1 as usize;
+        let lit = (0..view.term.0 as usize)
+            .flat_map(|rr| (0..cols).map(move |cc| (rr, cc)))
+            .filter(|(rr, cc)| frame.cells[rr * cols + cc].flags & cell_flags::INVERSE != 0)
+            .count();
+        eprintln!("inverse cells = {}", lit);
+        assert!(lit > 0, "bottom-rim drop zone lit NOTHING");
     }
 }

@@ -209,7 +209,12 @@ use crate::tree::{Dir, Rect, TabId};
 /// the bump an upgraded client would attach cleanly to a v38 server and then
 /// have the connection dropped on its first divider drag, instead of being told
 /// at handshake to restart the server.
-pub const PROTO_VERSION: u32 = 39;
+///
+/// v40 (x-aa95): `Command::MovePane` (drag-to-relocate and keyboard move-pane).
+/// Same case again - a new verb, not an additive field, so a v39 server cannot
+/// deserialize it and an unbumped upgraded client would lose its connection on
+/// the first relocation rather than at handshake.
+pub const PROTO_VERSION: u32 = 40;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -766,6 +771,28 @@ pub enum Command {
         a: u64,
         b: u64,
         pos: u16,
+    },
+    /// (v40, x-aa95) Relocate `mover` to sit adjacent to `target` on its `dir`
+    /// side - the drop of a grip drag, and the keyboard move-pane bind.
+    ///
+    /// Addressed by pane pair for the same reason [`Command::ResizeSeam`] is:
+    /// the client holds a flat `Vec<(PaneId, Rect)>`, never the tree, so it
+    /// cannot name a branch path. Sent once on drop rather than streamed like a
+    /// resize, so the server validates against the tree the drop actually lands
+    /// on and refuses a stale address out loud.
+    /// Both ids are `None` for the keyboard bind and `Some` for a drop, because
+    /// a pointer has a position and a keypress does not: a drag can pick up any
+    /// pane and name the exact slot it lands in, while the bind always moves
+    /// whatever is focused to whatever lies that way. `None` therefore means
+    /// "resolve it server-side" - `mover` from the tab's focus, `target` from
+    /// the same `navigate` geometry [`Command::FocusDir`] uses.
+    ///
+    /// One verb rather than two: both forms end in the same relocation, and
+    /// only the addressing differs.
+    MovePane {
+        mover: Option<u64>,
+        target: Option<u64>,
+        dir: Dir,
     },
     NewTab,
     SelectTab(TabId),
