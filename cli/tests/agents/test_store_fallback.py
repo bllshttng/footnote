@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from fno.agents import store_fallback
+from fno.agents import discover, store_fallback
 from fno.agents.registry import AgentResolutionError, load_registry, resolve_agent
 
 CLAUDE_UUID = "c655c326-1111-2222-3333-444455556666"
@@ -31,8 +31,10 @@ def _registry_home(tmp_path, monkeypatch):
     codex = tmp_path / "codex"
     projects.mkdir()
     codex.mkdir()
-    monkeypatch.setattr(store_fallback, "_claude_projects_dir", lambda: projects)
-    monkeypatch.setattr(store_fallback, "_codex_sessions_dir", lambda: codex)
+    # Through the real env seams discover owns, so the test exercises the same
+    # resolution path production does.
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(projects))
+    monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(codex))
     return tmp_path
 
 

@@ -69,11 +69,18 @@ def is_session_shaped(token: str) -> bool:
 
 
 def _claude_projects_dir() -> Path:
-    return Path.home() / ".claude" / "projects"
+    """Delegated, not re-derived: ``discover`` already owns the store roots and
+    their ``FNO_*_DIR`` test overrides, so a probe here cannot drift from what
+    discovery reads (and needs no placement-rule allowlist entry of its own)."""
+    from fno.agents.discover import default_projects_dir
+
+    return default_projects_dir()
 
 
 def _codex_sessions_dir() -> Path:
-    return Path.home() / ".codex" / "sessions"
+    from fno.agents.discover import default_codex_sessions_dir
+
+    return default_codex_sessions_dir()
 
 
 def _transcript_cwd(path: Path) -> str:
