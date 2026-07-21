@@ -62,10 +62,10 @@ _DEFAULT_SESSION = "main"
 #: _EFFORT_ALLOWED). A harness appears ONLY when fno must supply a model the
 #: harness will not self-default: opencode's providerID/modelID pair needs one,
 #: so fno injects the z.ai GLM secondary. claude and codex are omitted ON
-#: PURPOSE - each reads its own config (~/.claude/settings.json,
-#: ~/.codex/config.toml) and self-defaults better than fno can guess, so
-#: injecting nothing is correct. An explicit --model always overrides.
-#: ponytail: a code table, not a config knob, until the set outgrows a literal.
+#: PURPOSE - each reads its own harness config and self-defaults better than fno
+#: can guess, so injecting nothing is correct. An explicit --model always
+#: overrides. ponytail: a code table, not a config knob, until the set outgrows
+#: a literal.
 _PER_HARNESS_DEFAULT_MODEL = {
     "opencode": "z-ai/glm-5.2",
 }
