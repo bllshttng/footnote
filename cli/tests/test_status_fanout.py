@@ -1212,3 +1212,33 @@ def test_backlog_progress_delivered_even_when_plan_lock_times_out(tmp_path, monk
     status, _ = sf._dispatch_backlog_progress(
         StatusSinkConfig(name="b", type="backlog-progress"), ev, tmp_path)
     assert status == sf.DELIVERED  # plan-doc append is best-effort; delivery unaffected
+
+
+def test_post_json_sends_explicit_user_agent(monkeypatch):
+    """Discord 403s the stdlib default `Python-urllib` UA, so `_post_json` must
+    send an explicit User-Agent on every webhook POST (regression: a sink to a
+    real Discord webhook short-circuited forever without it)."""
+    from fno import status_fanout as sf
+
+    captured = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def getcode(self):
+            return 204
+
+    def _fake_urlopen(req, timeout=None):
+        captured["ua"] = req.get_header("User-agent")
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    result = sf._post_json("https://example.test/hook", {"content": "hi"}, 5.0)
+
+    assert result.ok
+    assert captured["ua"] == sf._USER_AGENT
+    assert not captured["ua"].lower().startswith("python-urllib")

@@ -417,6 +417,10 @@ class _TickLock:
 _BACKOFF = (1.0, 3.0)
 _MAX_RETRY_AFTER = 30.0  # cap a server's Retry-After so one sink can't wedge a tick
 
+# Sent on every webhook POST: Discord blocks the stdlib default `Python-urllib`
+# UA, so we always send an explicit one (see _post_json).
+_USER_AGENT = "fno-status-fanout/1.0"
+
 
 def _sleep(seconds: float) -> None:
     import time
@@ -441,7 +445,10 @@ def _post_json(url: str, body: dict[str, Any], timeout: float) -> _HttpResult:
     try:
         req = urllib.request.Request(
             url, data=data, method="POST",
-            headers={"Content-Type": "application/json"},
+            # Discord's webhook API 403s the stdlib default `Python-urllib/x.y`
+            # User-Agent (anti-abuse); an explicit UA is required or every send
+            # short-circuits forever. Any descriptive string passes.
+            headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             code = resp.getcode()
