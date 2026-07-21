@@ -191,3 +191,116 @@ def test_read_diff_pins_repo_from_pr_url(monkeypatch):
 def test_read_diff_no_pr_number_returns_none():
     from fno.scoreboard import fold
     assert fold._default_read_diff({"pr_number": None}) is None
+
+
+# --- AC3-HP: done_probes join declaration to evidence (x-e54c) ----------------
+_PROBE_PLAN = (
+    "---\ntitle: p\ndone_probes:\n"
+    '  - "fno mail list --since 24h | grep -q groom"\n'
+    '  - "test -n \\"$(fno backlog groom --status)\\""\n'
+    "---\n\n# plan\n\n## Acceptance Criteria\n"
+)
+
+_PROBE_ROWS = [
+    {"completed": "2026-07-03T10:00:00", "termination_reason": "NoWork",
+     "phases_completed": ["think", "plan"], "plan_path": "/wt-a/feat/00-INDEX.md",
+     "project": "fno", "session_id": "plan-sess", "cost_usd": 2.0},
+    {"completed": "2026-07-03T12:00:00", "termination_reason": "DonePRGreen",
+     "phases_completed": ["do", "ship"], "plan_path": "/wt-b/feat/00-INDEX.md",
+     "project": "fno", "graph_node_id": "x-1", "pr_number": 7,
+     "session_id": "build-sess", "cost_usd": 6.0},
+]
+
+
+def _probe_event(session_id, probes):
+    return {"type": "loop_check", "data": {"session_id": session_id, "done_probes": probes}}
+
+
+def test_probes_join_declaration_to_delivery_evidence():
+    events = [_probe_event("build-sess", {
+        "fno mail list --since 24h | grep -q groom": "pass",
+        'test -n "$(fno backlog groom --status)"': "pass",
+    })]
+    pf = build_plan_fidelity(
+        _PROBE_ROWS, [], since_days=28, now=NOW,
+        read_plan_doc=lambda p: _PROBE_PLAN,
+        read_summary=lambda row: "",
+        read_diff=lambda pr: [],
+        loop_check_events=events,
+    )
+    joined = [r for r in pf["results"] if r["status"] == "joined"][0]
+    assert joined["probes"] == {"declared": 2, "passed": 2}
+
+
+def test_probes_count_only_passes_not_declarations():
+    events = [_probe_event("build-sess", {
+        "fno mail list --since 24h | grep -q groom": "fail:1",
+        'test -n "$(fno backlog groom --status)"': "pass",
+    })]
+    pf = build_plan_fidelity(
+        _PROBE_ROWS, [], since_days=28, now=NOW,
+        read_plan_doc=lambda p: _PROBE_PLAN,
+        read_summary=lambda row: "",
+        read_diff=lambda pr: [],
+        loop_check_events=events,
+    )
+    joined = [r for r in pf["results"] if r["status"] == "joined"][0]
+    assert joined["probes"] == {"declared": 2, "passed": 1}
+
+
+def test_probes_declared_but_no_evidence_reports_zero_passed():
+    """A declared probe with no recorded fire is 0 passed, not null: the
+    declaration is real, the evidence is simply missing."""
+    pf = build_plan_fidelity(
+        _PROBE_ROWS, [], since_days=28, now=NOW,
+        read_plan_doc=lambda p: _PROBE_PLAN,
+        read_summary=lambda row: "",
+        read_diff=lambda pr: [],
+        loop_check_events=[],
+    )
+    joined = [r for r in pf["results"] if r["status"] == "joined"][0]
+    assert joined["probes"] == {"declared": 2, "passed": 0}
+
+
+def test_probes_null_when_plan_declares_none():
+    """Coverage honesty: no declaration is unmeasurable, never 0/0 or {}."""
+    pf = _fidelity(_PROBE_ROWS, summary="", diff=[])
+    joined = [r for r in pf["results"] if r["status"] == "joined"][0]
+    assert joined["probes"] is None
+    assert "probes" in joined, "the key must be present, never omitted"
+
+
+def test_probe_evidence_takes_the_last_fire():
+    """A session that blocked on a failing probe then passed on a later fire is
+    graded on the fire that granted done."""
+    events = [
+        _probe_event("build-sess", {"fno mail list --since 24h | grep -q groom": "fail:1",
+                                    'test -n "$(fno backlog groom --status)"': "fail:1"}),
+        _probe_event("build-sess", {"fno mail list --since 24h | grep -q groom": "pass",
+                                    'test -n "$(fno backlog groom --status)"': "pass"}),
+    ]
+    pf = build_plan_fidelity(
+        _PROBE_ROWS, [], since_days=28, now=NOW,
+        read_plan_doc=lambda p: _PROBE_PLAN,
+        read_summary=lambda row: "",
+        read_diff=lambda pr: [],
+        loop_check_events=events,
+    )
+    joined = [r for r in pf["results"] if r["status"] == "joined"][0]
+    assert joined["probes"] == {"declared": 2, "passed": 2}
+
+
+def test_probe_evidence_ignores_another_sessions_events():
+    events = [_probe_event("some-other-sess", {
+        "fno mail list --since 24h | grep -q groom": "pass",
+        'test -n "$(fno backlog groom --status)"': "pass",
+    })]
+    pf = build_plan_fidelity(
+        _PROBE_ROWS, [], since_days=28, now=NOW,
+        read_plan_doc=lambda p: _PROBE_PLAN,
+        read_summary=lambda row: "",
+        read_diff=lambda pr: [],
+        loop_check_events=events,
+    )
+    joined = [r for r in pf["results"] if r["status"] == "joined"][0]
+    assert joined["probes"] == {"declared": 2, "passed": 0}
