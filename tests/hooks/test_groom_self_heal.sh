@@ -65,7 +65,17 @@ count_lines() {
 dispatch_count() { count_lines '^backlog groom$'; }
 settle() { sleep 0.5; }
 
+# A real git repo: the helper refuses a non-repo cwd, because grooming's
+# validity sweep reads its evidence from there.
 fresh_project() {
+    local dir="$WORK/$1"
+    rm -rf "$dir"; mkdir -p "$dir/.fno"
+    git init -q "$dir" 2>/dev/null
+    : > "$FNO_CALL_LOG"
+    echo "$dir"
+}
+
+fresh_non_repo() {
     local dir="$WORK/$1"
     rm -rf "$dir"; mkdir -p "$dir/.fno"
     : > "$FNO_CALL_LOG"
@@ -128,4 +138,15 @@ if compgen -G "$proj/.fno/.groom-heal-*" >/dev/null; then
 fi
 pass "no fno on PATH degrades silently"
 
+
+
+# --- a non-repo cwd must not burn the day on a degraded pass ------------------
+proj="$(fresh_non_repo non-repo)"
+( cd "$proj" && bash "$HELPER" ) || fail "a non-repo cwd must exit 0"
+settle
+[[ "$(dispatch_count)" == "0" ]] || fail "grooming must not run from outside a git repo"
+if compgen -G "$proj/.fno/.groom-heal-*" >/dev/null; then
+    fail "a non-repo cwd must not claim the day"
+fi
+pass "a non-repo cwd is skipped, leaving the day retryable"
 log "all groom self-heal tests passed"

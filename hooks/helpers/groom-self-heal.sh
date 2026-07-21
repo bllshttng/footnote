@@ -12,6 +12,11 @@
 set -uo pipefail
 
 command -v fno >/dev/null 2>&1 || exit 0
+# The agent pins a repo root as its cwd for a reason: maintain's validity sweep
+# reads git evidence from there, and from a non-repo it marks every symbol
+# unavailable while still reporting ok. A session started outside one must not
+# burn the day on a pass that would degrade exactly that quietly.
+git rev-parse --show-toplevel >/dev/null 2>&1 || exit 0
 today="$(date -u +%Y-%m-%d 2>/dev/null || echo "")"
 [[ -n "$today" ]] || exit 0
 
