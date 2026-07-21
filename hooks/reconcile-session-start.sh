@@ -27,17 +27,12 @@ if [[ -f "$RESULT" ]] && command -v jq >/dev/null 2>&1; then
         nodes=$(jq -r '.closed[].node_id' "$RESULT" 2>/dev/null | paste -sd, - 2>/dev/null)
         echo "reconcile: last sweep closed ${closed_n} drifted node(s) whose PR merged outside the ship gate (${nodes}). Retro sentinels were written; the background harvest files follow-ups from them (or run \`fno retro run\` now)."
     fi
-    # Canonical-sync catch-up outcome. Surfaced independently of closed nodes:
-    # the sweep that matters most here is the one that found no drift but could
-    # not bring the canonical current, and reading only `.closed` discarded it.
-    # Quiet on the states that need no action (disabled / fresh / synced).
-    cu=$(jq -r '.sync_catchup.outcome // "not-run"' "$RESULT" 2>/dev/null || echo "not-run")
-    case "$cu" in
-        failed|unknown|error|marked|skipped)
-            cu_detail=$(jq -r '.sync_catchup.detail // ""' "$RESULT" 2>/dev/null)
-            echo "reconcile: canonical-sync catch-up ${cu}${cu_detail:+ (${cu_detail})}. The canonical checkout may be behind; run \`fno doctor\` for the outcome-keyed report."
-            ;;
-    esac
+    # Canonical-sync catch-up outcome, surfaced independently of closed nodes:
+    # the sweep that matters most is the one that found no drift yet could not
+    # bring the canonical current, and reading only `.closed` discarded it. The
+    # jq select keeps this quiet for the states needing no action.
+    cu=$(jq -r '.sync_catchup | select(.outcome | test("failed|unknown|error|marked|skipped")) | "\(.outcome)\(if .detail != "" then " (" + .detail + ")" else "" end)"' "$RESULT" 2>/dev/null)
+    [[ -n "$cu" ]] && echo "reconcile: canonical-sync catch-up ${cu}. The canonical checkout may be behind; run \`fno doctor\` for the outcome-keyed report."
     mv -f "$RESULT" "$RESULT.shown" 2>/dev/null || true
 fi
 
