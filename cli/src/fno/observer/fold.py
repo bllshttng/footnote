@@ -129,7 +129,7 @@ def build_corpus(
         judgeable = bool(shipped and nid and w4_available and nid in by_id)
         outcome = (
             _node_outcome(nid, _parse_ts(r.get("completed")), by_id, fixes)
-            if judgeable
+            if judgeable and isinstance(nid, str)
             else None
         )
         version = resolve_skill_version(skill_id, r.get("completed"))
@@ -497,6 +497,8 @@ def build_target_corpus(
             continue
 
         nid = node.get("id")
+        if not isinstance(nid, str):
+            continue
         node_rows = rows_by_node.get(nid, [])
         session_ids: set[str] = set()
         for s in node.get("sessions") or []:  # x-b6e4 phase stamps: dicts, or legacy bare strings
@@ -768,7 +770,7 @@ if __name__ == "__main__":
 
     # -- target: PR-anchored corpus (x-6ff0) --------------------------------- #
     t_now = datetime(2026, 7, 18, 12, 0, 0)
-    t_nodes = [
+    t_nodes: list[dict] = [
         {"id": "x-a", "pr_number": 10, "pr_url": "https://github.com/o/r/pull/10", "reverted": False,
          "sessions": [{"session_id": "sa", "phase": "ship"}]},
         {"id": "x-b", "pr_number": 11, "pr_url": "https://github.com/o/r/pull/11", "reverted": False,

@@ -14,6 +14,7 @@ import json
 import re
 import time
 from collections import Counter
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -277,10 +278,10 @@ def _survival(shipped_nodes: set, ship_rows: list[dict], graph_nodes: list[dict]
     ship_ts = {r["graph_node_id"]: _parse_ts(r.get("completed")) for r in ship_rows if r.get("graph_node_id")}
     # Fix-nodes grouped by the node they blame.
     fixes: dict[str, list[dict]] = {}
-    for n in graph_nodes:
-        origin = n.get("caused_by")
+    for gn in graph_nodes:
+        origin = gn.get("caused_by")
         if origin:
-            fixes.setdefault(origin, []).append(n)
+            fixes.setdefault(origin, []).append(gn)
 
     survived = 0
     for nid in shipped_nodes:
@@ -350,7 +351,8 @@ def build_calibration(verdict_events: list[dict], rows: list[dict], graph_nodes:
     final: dict[str, str] = {}
     unattributed = 0
     for e in verdict_events:
-        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        raw_data = e.get("data")
+        data = raw_data if isinstance(raw_data, dict) else {}
         v = data.get("verdict")
         if v not in _COUNTABLE_VERDICTS and v not in ("error", "not_applicable"):
             continue
@@ -596,10 +598,10 @@ def build_skill_scoreboard(
 
     by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
     fixes: dict[str, list[dict]] = {}
-    for n in graph_nodes:
-        origin = n.get("caused_by")
+    for gn in graph_nodes:
+        origin = gn.get("caused_by")
         if origin:
-            fixes.setdefault(origin, []).append(n)
+            fixes.setdefault(origin, []).append(gn)
 
     # W4 causal telemetry availability - mirrors _survival's own gate. Without
     # it, _node_outcome's "no fix found" branch is indistinguishable from
@@ -644,7 +646,10 @@ def build_skill_scoreboard(
         # node must not silently default to "merged_clean" (same gap class as
         # _survival's w4 check, applied here per codex peer review).
         judgeable = bool(shipped and nid and w4_available and nid in by_id)
-        outcome = _node_outcome(nid, _parse_ts(r.get("completed")), by_id, fixes) if judgeable else None
+        outcome = (
+            _node_outcome(nid, _parse_ts(r.get("completed")), by_id, fixes)
+            if judgeable and isinstance(nid, str) else None
+        )
 
         for skill in skills:
             version = resolve_skill_version(skill, r.get("completed"))
@@ -725,10 +730,10 @@ def build_provider_scoreboard(
 
     by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
     fixes: dict[str, list[dict]] = {}
-    for n in graph_nodes:
-        origin = n.get("caused_by")
+    for gn in graph_nodes:
+        origin = gn.get("caused_by")
         if origin:
-            fixes.setdefault(origin, []).append(n)
+            fixes.setdefault(origin, []).append(gn)
     # Same W4 gate as _survival/build_skill_scoreboard: without causal
     # telemetry, "no fix found" is indistinguishable from "no revert data
     # yet", so bounce degrades to n/a instead of a fake 0%.
@@ -901,7 +906,7 @@ def _transcript_counts(session_ids: set[str], read_transcript) -> tuple[int | No
     return turns, toolcalls
 
 
-def _dist(rows_metric: list[float | int | None]) -> dict:
+def _dist(rows_metric: Sequence[float | int | None]) -> dict:
     """median/p90/n over the non-None values only (the denominator rides along)."""
     vals = [v for v in rows_metric if v is not None]
     return {"median": _percentile(vals, 50), "p90": _percentile(vals, 90), "n": len(vals)}
@@ -938,7 +943,8 @@ def build_efficiency(
     for e in loop_events:
         if not isinstance(e, dict):
             continue
-        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        raw_data = e.get("data")
+        data = raw_data if isinstance(raw_data, dict) else {}
         sid = data.get("session_id")
         if not isinstance(sid, str) or not sid:
             continue
@@ -947,10 +953,10 @@ def build_efficiency(
 
     by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
     fixes: dict[str, list[dict]] = {}
-    for n in graph_nodes:
-        origin = n.get("caused_by")
+    for gn in graph_nodes:
+        origin = gn.get("caused_by")
         if origin:
-            fixes.setdefault(origin, []).append(n)
+            fixes.setdefault(origin, []).append(gn)
     # Same w4 gate as _survival: without any causal telemetry, _node_outcome's
     # "no fix found" branch is indistinguishable from "revert data doesn't exist
     # yet", so a shipped row lands in `shipped_untracked`, never a fake merged_clean.
@@ -1283,10 +1289,10 @@ def build_plan_fidelity(
 
     by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
     fixes: dict[str, list[dict]] = {}
-    for n in graph_nodes:
-        origin = n.get("caused_by")
+    for gn in graph_nodes:
+        origin = gn.get("caused_by")
         if origin:
-            fixes.setdefault(origin, []).append(n)
+            fixes.setdefault(origin, []).append(gn)
 
     shipped_by_plan: dict[str, list[dict]] = {}
     for r in windowed:
@@ -1363,7 +1369,7 @@ if __name__ == "__main__":
     assert build_scoreboard([], [], [], since_days=28, now=now)["state"] == "no_data"
 
     # survival compute activates when a node carries a W4 causal field
-    g = [
+    g: list[dict] = [
         {"id": "x-1", "reverted": False},
         {"id": "x-9", "caused_by": "x-2", "created_at": "2026-07-03T00:00:00"},
     ]
