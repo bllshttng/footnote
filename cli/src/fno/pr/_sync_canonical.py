@@ -301,12 +301,18 @@ def _default_gh_list(canonical: Path, window_days: int) -> Optional[list[dict]]:
 
 
 def _parse_iso(raw: object) -> Optional[datetime]:
+    """Parse a gh timestamp, always tz-aware.
+
+    A naive datetime here would raise TypeError on every comparison against the
+    aware `now`, taking the whole leg down from one odd offset-less timestamp.
+    """
     if not isinstance(raw, str) or not raw:
         return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _behind_count(
@@ -338,7 +344,9 @@ def _behind_count(
         )
     except Exception:  # noqa: BLE001 - a missing git is "unknown", not "behind 0"
         return None
-    remote = head.stdout.strip() if head.ok else "origin/main"
+    # A zero exit with empty stdout is not an answer: it would make `remote` an
+    # empty string and the rev-list range malformed.
+    remote = head.stdout.strip() if (head.ok and head.stdout.strip()) else "origin/main"
     local = remote.split("/", 1)[1] if "/" in remote else "main"
     try:
         res = runner(

@@ -193,6 +193,30 @@ def test_gh_list_filters_by_window(tmp_path, monkeypatch):
     assert [r["sha"] for r in rows] == ["new"]
 
 
+def test_parse_iso_is_always_tz_aware():
+    """A naive datetime would TypeError against the aware `now` on every compare."""
+    for raw in ("2026-07-21T10:00:00Z", "  2026-07-21T10:00:00Z  ", "2026-07-21T10:00:00"):
+        dt = sc._parse_iso(raw)
+        assert dt is not None and dt.tzinfo is not None, raw
+        assert (datetime.now(timezone.utc) - dt).total_seconds() > 0  # comparable
+    assert sc._parse_iso("not-a-date") is None
+    assert sc._parse_iso(None) is None
+
+
+def test_behind_count_ignores_empty_symbolic_ref(tmp_path):
+    """A zero exit with empty stdout is not an answer; it would malform the range."""
+    ranges: list[str] = []
+
+    def runner(cmd, **_kw):
+        if cmd[:2] == ["git", "symbolic-ref"]:
+            return sc.Result(returncode=0, stdout="   \n", stderr="")
+        ranges.append(cmd[-1])
+        return sc.Result(returncode=0, stdout="3\n", stderr="")
+
+    assert sc._behind_count(tmp_path, runner) == 3
+    assert ranges == ["main..origin/main"]
+
+
 def _iso(hours_ago: float) -> str:
     return (
         datetime.now(timezone.utc) - timedelta(hours=hours_ago)
