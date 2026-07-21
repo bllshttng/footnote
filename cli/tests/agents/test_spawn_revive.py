@@ -198,6 +198,11 @@ def test_spawn_resume_refused_when_session_claim_held(
 # ---------------------------------------------------------------------------
 
 CLAIM_KEY = f"session:{DEAD_UUID}"
+_PIN_ATTEMPTS = dispatch._PIN_LOOKUP_ATTEMPTS
+
+
+def _raise_registry(_fn):
+    raise OSError("registry unwritable")
 
 
 @pytest.fixture
@@ -292,10 +297,7 @@ def test_writer_claim_held_when_registry_write_fails(revive_ready, monkeypatch):
     supervisor_pid = revive_ready
     _pin_supervisor(monkeypatch, supervisor_pid)
 
-    def _boom(_fn):
-        raise OSError("registry unwritable")
-
-    monkeypatch.setattr(dispatch, "update_registry", _boom)
+    monkeypatch.setattr(dispatch, "update_registry", _raise_registry)
 
     result = _spawn_resume()
     assert result.exit_code == 12, result.output
@@ -308,15 +310,52 @@ def test_writer_claim_held_when_registry_write_fails(revive_ready, monkeypatch):
         acquire_claim(CLAIM_KEY, "someone-else", root=global_claims_root())
 
 
-def test_writer_claim_released_when_spawn_fails(revive_ready, monkeypatch):
-    """AC5-ERR: no child spawned means nothing is writing, so the claim must be
-    freed - otherwise a failed wake locks the session out of every later wake."""
+def test_registry_failure_retries_the_pin_when_first_lookup_misses(
+    revive_ready, monkeypatch
+):
+    """The sidecar race and a registry failure can coincide. The exit-12 path is
+    the last chance to pin, so it retries - otherwise the orphan is 'guarded' by
+    a claim pinned to this exiting process, which is no guard at all."""
+    from fno.agents.providers import claude as claude_mod
+    from fno.agents.providers._claude_session_registry import SessionLocator
+
+    supervisor_pid = revive_ready
+    calls = {"n": 0}
+
+    def _late_locate(short_id: str):
+        # Every lookup before the registry write misses; the retry then wins.
+        calls["n"] += 1
+        if calls["n"] <= _PIN_ATTEMPTS:
+            return None
+        return SessionLocator(
+            pid=supervisor_pid,
+            short_id=short_id,
+            messaging_socket_path="/tmp/fake.sock",
+            jobs_dir=Path("/tmp"),
+        )
+
+    monkeypatch.setattr(claude_mod, "locate_session", _late_locate)
+    monkeypatch.setattr(dispatch, "_PIN_LOOKUP_BACKOFF_S", 0)
+    monkeypatch.setattr(dispatch, "update_registry", _raise_registry)
+
+    result = _spawn_resume()
+    assert result.exit_code == 12, result.output
+
+    st = _status()
+    assert st["state"] == "live"
+    assert st["pid"] == supervisor_pid  # pinned by the retry, not left on us
+
+
+def test_writer_claim_released_when_claude_never_ran(revive_ready, monkeypatch):
+    """AC5-ERR: exit 127 means claude never executed, so no supervisor can exist
+    and the claim must be freed - otherwise a missing binary would lock the
+    session out of every later wake."""
     from fno.agents.providers import claude as claude_mod
 
     _pin_supervisor(monkeypatch, revive_ready)
 
     def _fail(**_kw):
-        raise claude_mod.ProviderSubprocessError(1, "spawn exploded")
+        raise claude_mod.ProviderSubprocessError(127, "claude CLI not found")
 
     monkeypatch.setattr(claude_mod, "bg_create", _fail)
 
@@ -329,6 +368,70 @@ def test_writer_claim_released_when_spawn_fails(revive_ready, monkeypatch):
     from fno.claims.io import global_claims_root
 
     assert acquire_claim(CLAIM_KEY, "next-writer", root=global_claims_root())
+
+
+@pytest.mark.parametrize(
+    "failure, label",
+    [
+        (lambda m: m.ProviderSubprocessError(124, "claude --bg timed out"), "timeout"),
+        (lambda m: m.ProviderParseError("garbled receipt"), "unparseable receipt"),
+    ],
+)
+def test_writer_claim_kept_when_a_child_may_exist(
+    revive_ready, monkeypatch, failure, label
+):
+    """A spawn failure that MAY have left a supervisor keeps the claim.
+
+    bg_create's own timeout path documents that a half-created supervisor is the
+    caller's to reconcile, and an unparseable receipt follows a clean exit 0 - so
+    in both cases something may be writing the transcript. Releasing here is the
+    fail-open double-writer window; keeping costs only a dead-pid claim that
+    stale recovery reclaims.
+    """
+    from fno.agents.providers import claude as claude_mod
+
+    _pin_supervisor(monkeypatch, revive_ready)
+
+    def _fail(**_kw):
+        raise failure(claude_mod)
+
+    monkeypatch.setattr(claude_mod, "bg_create", _fail)
+
+    result = _spawn_resume()
+    assert result.exit_code == 1, result.output
+    assert _status()["state"] != "free", f"claim was freed after {label}"
+
+
+def test_claim_substrate_fault_fails_closed(revive_ready, monkeypatch):
+    """A corrupt claim file raises ClaimCorrupted, which is neither
+    SessionWriterClaimError nor the OSError/RuntimeError wake_and_deliver
+    catches. It must surface as exit 11 (writer-possibly-live) rather than
+    propagate and abort `fno mail send` before its durable fallback runs."""
+    from fno.agents.providers import claude as claude_mod
+    from fno.claims.io import ClaimCorrupted
+
+    def _corrupt(**_kw):
+        raise ClaimCorrupted("claim file is not valid YAML")
+
+    monkeypatch.setattr(claude_mod, "acquire_session_writer_claim", _corrupt)
+
+    result = _spawn_resume()
+    assert result.exit_code == 11, result.output
+
+
+def test_wake_and_deliver_degrades_on_claim_substrate_fault(revive_ready, monkeypatch):
+    """The same fault, seen end to end: the wake reports a lane failure so the
+    sender writes the durable fallback, instead of raising out of the command."""
+    from fno.agents.providers import claude as claude_mod
+    from fno.claims.io import ClaimCorrupted
+
+    def _corrupt(**_kw):
+        raise ClaimCorrupted("claim file is not valid YAML")
+
+    monkeypatch.setattr(claude_mod, "acquire_session_writer_claim", _corrupt)
+
+    ok, reason = dispatch.wake_and_deliver(DEAD_UUID, "wake up")
+    assert (ok, reason) == (False, "writer-possibly-live")
 
 
 def test_writer_claim_degrades_when_supervisor_pid_unresolvable(

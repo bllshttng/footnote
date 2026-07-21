@@ -1313,6 +1313,19 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     return identity.session_id, identity.harness, parent_cwd
 
 
+# Bounded lookup of the spawned supervisor's pid. Short by design: the sidecar is
+# normally written by receipt time, so this only covers a race, and a wake must
+# not stall behind it.
+_PIN_LOOKUP_ATTEMPTS = 4
+_PIN_LOOKUP_BACKOFF_S = 0.05
+
+# `claude --bg` never ran, so no supervisor can exist and the claim is safe to
+# free. Every other failure is ambiguous - a timeout (124) or an unparseable
+# receipt may leave a half-created supervisor, which bg_create's own timeout
+# comment calls out as the caller's to reconcile.
+_NO_CHILD_POSSIBLE_EXIT = 127
+
+
 def _claude_create_path(
     *,
     name: str,
@@ -1386,10 +1399,22 @@ def _claude_create_path(
                 f"to open a second writer on one transcript ({exc})",
                 exit_code=11,
             ) from exc
+        except Exception as exc:
+            # Fail closed on a claim-substrate fault (a corrupt claim file raises
+            # ClaimCorrupted, which is neither SessionWriterClaimError nor the
+            # OSError/RuntimeError wake_and_deliver catches). Left to propagate it
+            # would abort `fno mail send` before the durable fallback queues the
+            # message; exit 11 demotes to "writer possibly live" instead, which is
+            # the safe answer when we cannot establish single-writer safety.
+            raise DispatchAskError(
+                f"cannot establish single-writer safety for session "
+                f"{resume_session_id}: {exc}",
+                exit_code=11,
+            ) from exc
 
     def _release_writer_claim() -> None:
-        """Free the claim. Only correct when NO child was spawned - once a
-        supervisor exists it IS the writer, and the claim must say so."""
+        """Free the claim. ONLY correct when no child can exist - once a
+        supervisor is running it IS the writer, and the claim must say so."""
         if writer_claim_holder is None or not resume_session_id:
             return
         try:
@@ -1398,6 +1423,36 @@ def _claude_create_path(
             )
         except Exception:
             pass
+
+    def _pin_claim_to_supervisor(spawned_short_id: str) -> bool:
+        """Re-pin the claim from this process onto the spawned supervisor.
+
+        A same-holder re-acquire rewrites the claim file with the given pid
+        (claims/core.py resolution step 1), so no new primitive is needed. The
+        sidecar `~/.claude/sessions/<pid>.json` is normally written by receipt
+        time; the short retry covers the race where it is not yet visible, since
+        every miss costs an unguarded orphan window.
+        """
+        if writer_claim_holder is None or not resume_session_id:
+            return False
+        for attempt in range(_PIN_LOOKUP_ATTEMPTS):
+            try:
+                locator = claude_mod.locate_session(spawned_short_id)
+            except Exception:
+                locator = None
+            if locator is not None:
+                try:
+                    claude_mod.acquire_session_writer_claim(
+                        session_uuid=resume_session_id,
+                        holder=writer_claim_holder,
+                        pid=locator.pid,
+                    )
+                    return True
+                except Exception:
+                    return False
+            if attempt + 1 < _PIN_LOOKUP_ATTEMPTS:
+                time.sleep(_PIN_LOOKUP_BACKOFF_S)
+        return False
 
     try:
         result: ProviderResult = claude_mod.bg_create(
@@ -1418,7 +1473,13 @@ def _claude_create_path(
             account_env=account_env,
         )
     except claude_mod.ProviderSubprocessError as exc:
-        _release_writer_claim()
+        # Only a never-executed claude proves no supervisor exists. A timeout or a
+        # non-zero exit may have left one running, and freeing the claim there is
+        # the fail-open double-writer this change exists to close. Keeping it
+        # costs nothing: pinned to this exiting process it goes dead-pid, and the
+        # next acquire reclaims it through stale recovery.
+        if exc.exit_code == _NO_CHILD_POSSIBLE_EXIT:
+            _release_writer_claim()
         events.emit(
             "agent_ask_failed",
             stage="subprocess",
@@ -1428,7 +1489,8 @@ def _claude_create_path(
         )
         raise DispatchAskError(exc.stderr, exit_code=1) from exc
     except claude_mod.ProviderParseError as exc:
-        _release_writer_claim()
+        # claude exited 0 and only its receipt was unreadable, so a supervisor is
+        # very likely running. Keep the claim.
         events.emit(
             "agent_ask_failed",
             stage="parse",
@@ -1440,33 +1502,13 @@ def _claude_create_path(
             f"unable to parse short-id from claude --bg output: {exc.stdout_head}",
             exit_code=1,
         ) from exc
-    except BaseException:
-        # Anything else out of bg_create means no child; do not strand the claim.
-        _release_writer_claim()
-        raise
 
     short_id = result.session_id_out
     assert short_id is not None  # parse_short_id raises otherwise
 
     # x-7fef: re-pin the claim off this transient process and onto the spawned
-    # supervisor. A same-holder re-acquire rewrites the claim file with the given
-    # pid (claims/core.py resolution step 1), so no new primitive is needed.
-    pinned_to_supervisor = False
-    if writer_claim_holder is not None and resume_session_id:
-        try:
-            locator = claude_mod.locate_session(short_id)
-        except Exception:
-            locator = None
-        if locator is not None:
-            try:
-                claude_mod.acquire_session_writer_claim(
-                    session_uuid=resume_session_id,
-                    holder=writer_claim_holder,
-                    pid=locator.pid,
-                )
-                pinned_to_supervisor = True
-            except Exception:
-                pinned_to_supervisor = False
+    # supervisor, so the claim lives and dies with the writer it guards.
+    pinned_to_supervisor = _pin_claim_to_supervisor(short_id)
 
     # Best-effort full session-UUID capture (ab-f1b0ccd1, AC1-HP): persist the
     # stream-json `--resume` target alongside the 8-hex short-id so the worker
@@ -1529,13 +1571,26 @@ def _claude_create_path(
         # x-7fef: do NOT release the writer claim here. The orphaned supervisor
         # is the transcript's writer even though no registry row names it, so a
         # supervisor-pinned claim is the only thing that stops a later wake from
-        # opening a second one. Name it so an operator can read the refusal.
+        # opening a second one.
+        #
+        # This is also the last chance to pin it. If the first lookup lost the
+        # sidecar race, retry now - the registry attempt bought time, and an
+        # orphan guarded by a claim pinned to THIS exiting process is no guard at
+        # all. Still unpinned, we keep the claim anyway rather than release: a
+        # dead-pid claim is reclaimed by stale recovery, whereas releasing hands
+        # the transcript to the next wake while the orphan is still writing.
+        if not pinned_to_supervisor:
+            pinned_to_supervisor = _pin_claim_to_supervisor(short_id)
         held_note = (
             f" session writer claim session:{resume_session_id} is held for the "
             f"orphan (pid-pinned); later wakes of this session will refuse until "
             f"that supervisor exits."
             if pinned_to_supervisor
-            else ""
+            else (
+                f" session writer claim session:{resume_session_id} is held but "
+                f"its supervisor pid is unresolved; it will be reclaimed as stale "
+                f"once this process exits."
+            )
         )
         raise DispatchAskError(
             f"registry write failed: {exc}. "
