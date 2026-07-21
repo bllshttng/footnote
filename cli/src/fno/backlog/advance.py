@@ -343,6 +343,56 @@ def _live_lane_domains(*, claims_root: Optional[Path] = None) -> set[str]:
     return domains
 
 
+def _live_lane_entries(claims_root: Optional[Path] = None) -> list[dict]:
+    """Collision-comparable graph entries for the nodes live lanes already hold.
+
+    Shaped for :func:`fno.graph.collision.find_collisions`, which needs an ``id``
+    and a ``plan_path`` and skips anything done/deferred/superseded. A node whose
+    lane is live is by definition in flight, so ``status`` is asserted ready.
+    """
+    from fno.claims.core import list_claims
+    from fno.claims.lanes import LANE_HOLDER_PREFIX, LANE_SLOT_PREFIX
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json
+
+    held: set[str] = set()
+    for claim in list_claims(prefix=LANE_SLOT_PREFIX, root=claims_root):
+        holder = claim.get("holder") or ""
+        if holder.startswith(LANE_HOLDER_PREFIX):
+            held.add(holder[len(LANE_HOLDER_PREFIX):])
+    if not held:
+        return []
+    return [
+        {"id": e["id"], "title": e.get("title", ""), "plan_path": e.get("plan_path"),
+         "created_at": e.get("created_at", ""), "status": "ready"}
+        for e in read_graph(graph_json())
+        if e.get("id") in held and e.get("plan_path")
+    ]
+
+
+def _high_collision(node: dict, inflight: list[dict]):
+    """The first high-severity file overlap between ``node`` and in-flight work.
+
+    Fails OPEN: any error resolving or parsing a plan returns None so dispatch
+    proceeds. A dedup check that can wedge the dispatcher is worse than the
+    duplicate work it prevents.
+    """
+    plan = node.get("plan_path")
+    if not plan or not inflight:
+        return None
+    try:
+        from fno.graph.collision import find_collisions, resolve_plan_path
+
+        for c in find_collisions(
+            resolve_plan_path(plan), inflight, self_id=node.get("id")
+        ):
+            if c.severity == "high":
+                return c
+    except Exception as exc:  # noqa: BLE001 - fail open, never wedge dispatch
+        _LOG.warning("collision check unavailable for %s: %s", node.get("id"), exc)
+    return None
+
+
 def _ready_nodes(project: Optional[str], mission: Optional[str] = None) -> list[dict]:
     """Ordered ready-node summaries via ``fno backlog ready`` (JSON list).
 
@@ -430,6 +480,9 @@ def select_lane_fill(
     # call's own picks are added below as they are acquired.
     used_domains: set[str] = _live_lane_domains(claims_root=claims_root)
     picked_ids: set[str] = set()
+    # Nodes already in flight, for the file-surface collision gate below. Seeded
+    # from live peer lanes; this call's own picks are appended as they land.
+    inflight: list[dict] = _live_lane_entries(claims_root=claims_root)
 
     try:
         while len(selected) < max_lanes:
@@ -448,6 +501,14 @@ def select_lane_fill(
                     continue
                 if find_lane_slot(nid, root=claims_root) is not None:
                     continue  # a live peer lane already owns this node
+                hit = _high_collision(node, inflight)
+                if hit is not None:
+                    _LOG.warning(
+                        "lane-fill: skipping %s - high file collision with %s "
+                        "(shared: %s)",
+                        nid, hit.with_node_id, ", ".join(hit.shared_files[:5]),
+                    )
+                    continue  # leave it ready; reversible, retried next round
                 candidate = (node, domain)
                 break
             if candidate is None:
@@ -466,6 +527,11 @@ def select_lane_fill(
             selected.append(node)
             used_domains.add(domain)
             picked_ids.add(node["id"])
+            if node.get("plan_path"):
+                inflight.append({
+                    "id": node["id"], "title": node.get("title", ""),
+                    "plan_path": node["plan_path"], "created_at": "", "status": "ready",
+                })
     except BaseException:
         # A mid-loop raise (a garbled `fno backlog ready` on a LATER pick, or a
         # filesystem error during a claim probe) must not orphan the slots

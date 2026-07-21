@@ -262,3 +262,65 @@ def test_cli_ready_mission_filter(tmp_path, monkeypatch):
     assert res.exit_code == 0, res.output
     ids = [e["id"] for e in json.loads(res.output)]
     assert ids == ["x-in"]
+
+
+# --- dispatch-time collision gate (x-2ada) -------------------------------
+
+
+def _plan(tmp_path, name: str, files: list[str]) -> str:
+    """Write a plan with a populated File Ownership Map; return its path."""
+    rows = "\n".join(f"| `{f}` | modify | /blueprint |" for f in files)
+    p = tmp_path / f"{name}.md"
+    p.write_text(
+        f"# {name}\n\n## File Ownership Map\n\n"
+        f"| File | Action | Owner |\n|---|---|---|\n{rows}\n"
+    )
+    return str(p)
+
+
+def test_skips_node_colliding_with_a_pick_from_this_round(tmp_path, monkeypatch):
+    """Two ready nodes on the same file surface: only the first dispatches.
+
+    The x-2ada incident: three nodes on one root cause, all landing in the same
+    file, fired in parallel because nothing consulted the collision check.
+    """
+    shared = ["cli/src/fno/graph/cli.py", "cli/src/fno/graph/store.py"]
+    ready = [
+        {"id": "n-a", "domain": "code", "title": "a", "plan_path": _plan(tmp_path, "a", shared)},
+        {"id": "n-b", "domain": "docs", "title": "b", "plan_path": _plan(tmp_path, "b", shared)},
+        {"id": "n-c", "domain": "infra", "title": "c",
+         "plan_path": _plan(tmp_path, "c", ["docs/unrelated.md"])},
+    ]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    sel = advance.select_lane_fill(3, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-a", "n-c"]
+    assert find_lane_slot("n-b", root=tmp_path) is None  # left ready, not parked
+
+
+def test_collision_gate_fails_open_on_error(tmp_path, monkeypatch):
+    """An unreadable collision surface must let dispatch proceed, not wedge it."""
+    shared = ["cli/src/fno/graph/cli.py", "cli/src/fno/graph/store.py"]
+    ready = [
+        {"id": "n-a", "domain": "code", "title": "a", "plan_path": _plan(tmp_path, "a", shared)},
+        {"id": "n-b", "domain": "docs", "title": "b", "plan_path": _plan(tmp_path, "b", shared)},
+    ]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    def boom(*a, **k):
+        raise OSError("collision surface unreadable")
+
+    monkeypatch.setattr("fno.graph.collision.find_collisions", boom)
+
+    sel = advance.select_lane_fill(2, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-a", "n-b"]
+
+
+def test_node_without_plan_path_dispatches(tmp_path, monkeypatch):
+    """No plan means no surface to compare; the gate must not block it."""
+    ready = [{"id": "n-a", "domain": "code", "title": "a"}]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    assert [n["id"] for n in advance.select_lane_fill(1, claims_root=tmp_path)] == ["n-a"]
