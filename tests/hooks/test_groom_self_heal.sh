@@ -63,7 +63,20 @@ count_lines() {
     printf '%s' "${n:-0}"
 }
 dispatch_count() { count_lines '^backlog groom$'; }
-settle() { sleep 0.5; }
+
+# The dispatch is fully detached, so a fixed sleep is a load-dependent flake:
+# under a busy machine (a parallel CI job, a concurrent lint sweep) the fake fno
+# has not appended its line yet. Poll for the expected count instead, and only
+# then settle briefly to catch a SECOND dispatch that should never come.
+wait_for_dispatches() {
+    local want="$1" i=0
+    while [ "$i" -lt 60 ]; do
+        [ "$(dispatch_count)" = "$want" ] && break
+        sleep 0.25; i=$((i + 1))
+    done
+    sleep 0.5
+}
+settle() { wait_for_dispatches 0; }
 
 # A real git repo: the helper refuses a non-repo cwd, because grooming's
 # validity sweep reads its evidence from there.
@@ -95,7 +108,7 @@ pass "AC1-EDGE: healthy grooming spawns nothing and writes no watermark"
 # --- happy path: a stale pass dispatches once and watermarks ------------------
 proj="$(fresh_project stale)"
 ( cd "$proj" && bash "$HELPER" )
-settle
+wait_for_dispatches 1
 [[ "$(dispatch_count)" == "1" ]] || fail "a stale pass must dispatch exactly once"
 [[ -e "$proj/.fno/.groom-heal-${TODAY}" ]] || fail "the winner must write today's watermark"
 pass "stale grooming dispatches once and claims the day"
@@ -115,7 +128,7 @@ for _ in 1 2 3 4 5; do
     ( cd "$proj" && bash "$HELPER" ) &
 done
 wait
-settle
+wait_for_dispatches 1
 n="$(dispatch_count)"
 [[ "$n" == "1" ]] || fail "AC2-EDGE: 5 concurrent sessions dispatched $n times, want 1"
 pass "AC2-EDGE: five concurrent sessions dispatch exactly once"
