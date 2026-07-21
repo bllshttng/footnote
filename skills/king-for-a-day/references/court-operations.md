@@ -65,8 +65,8 @@ Capture the teammate's mail handle from the spawn receipt's `short_id` (a claude
 ```bash
 fno mail send <teammate-handle> \
   "Ruling: approved, the design covers the three failure modes. \
-Cross-squad: node x-7a53 owns cli/src/fno/agents/format.py - do not touch it. \
-Next: /fno:blueprint x-b3a8." --from-self
+Cross-squad: node <sibling> owns <shared-file> - do not touch it. \
+Next: /fno:blueprint <node>." --from-self
 ```
 
 **Hand off on context pressure (report said `context: 62% used`, trigger is 50):**
