@@ -34,6 +34,18 @@ echo "ARGS:$* ROOT:${FNO_CLAIMS_ROOT:-UNSET}" >> "$MOCK_ABI_LOG"
 if [[ "$1" == "claim" && "$2" == "acquire" ]]; then
   exit "${MOCK_ABI_ACQUIRE_RC:-0}"
 fi
+# The graph lock stamp is the one call whose EFFECT a test asserts, so swallowing
+# it as a bare success would hollow out the identity assertion. Delegate to the
+# real writer under the pinned python3; the shim exposes graph.cli directly, so
+# the leading `backlog` token is dropped.
+if [[ "$1" == "backlog" && "$2" == "update" ]]; then
+  # MOCK_ABI_STALE simulates an installed fno predating the harness flags.
+  if [[ -n "${MOCK_ABI_STALE:-}" && "$*" == *--locked-by-harness* ]]; then
+    echo "Error: No such option: --locked-by-harness" >&2
+    exit 2
+  fi
+  exec python3 "$MOCK_ABI_SHIM" "${@:2}"
+fi
 exit 0
 """
 
@@ -57,12 +69,11 @@ def _sandbox(tmp_path: Path):
     mock.chmod(0o755)
     log = tmp_path / "fno.log"
 
-    # Pin the init script's `python3` to the interpreter running these tests.
-    # The graph locked_by stamp shells out to scripts/roadmap-tasks.py, which
-    # needs fno's dependencies importable; an ambient python3 (homebrew's, say)
-    # has no typer, so the stamp degrades to its non-fatal warning and the
-    # stamped-node assertion fails for a reason unrelated to the shell wiring
-    # under test. Which python3 sits first on PATH must not decide that.
+    # Pin `python3` to the interpreter running these tests. Production no longer
+    # shells an interpreter for the stamp, but the mock's delegation to the
+    # real writer below does, and it needs fno's dependencies importable; an
+    # ambient python3 (homebrew's, say) has no typer. Which python3 sits first on
+    # PATH must not decide whether the stamped-node assertion holds.
     py = bindir / "python3"
     py.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n')
     py.chmod(0o755)
@@ -75,6 +86,7 @@ def _sandbox(tmp_path: Path):
         "HOME": str(home),
         "PATH": f"{bindir}:{env['PATH']}",
         "MOCK_ABI_LOG": str(log),
+        "MOCK_ABI_SHIM": str(REPO_ROOT / "scripts" / "roadmap-tasks.py"),
     })
     return repo, home, log, env
 
@@ -144,6 +156,23 @@ def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path):
     assert graph["session_id"] == thread_id
     assert f'--holder target-session:{thread_id}' in acquire
     assert f'target_claim_holder: "target-session:{thread_id}"' in state
+
+
+def test_stale_installed_fno_stamps_owner_only_and_says_so(tmp_path):
+    """An fno predating the harness flags must still stamp the owner - but must
+    NOT pass for a clean stamp, or the missing harness metadata goes silent."""
+    repo, home, log, env = _sandbox(tmp_path)
+    env["MOCK_ABI_ACQUIRE_RC"] = "0"
+    env["MOCK_ABI_STALE"] = "1"
+
+    r = _run_init(repo, env)
+    graph = json.loads((home / ".fno" / "graph.json").read_text())["entries"][0]
+
+    assert graph.get("locked_by"), f"owner must survive a stale fno: {graph}"
+    assert not graph.get("locked_by_harness"), \
+        "the stale fno rejected the harness flag; it must not appear stamped"
+    assert "WITHOUT harness metadata" in r.stderr, \
+        "degraded stamp must be announced, not silent: " + r.stderr[-600:]
 
 
 def test_held_by_other_refuses(tmp_path):

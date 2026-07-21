@@ -996,7 +996,6 @@ PYEOF
     # only on its success, so a legitimate STALE steal never leaves a dead prior
     # owner on the node (the stale-locked-by-leak this reorder fixes).
     _NODE_OWNED=0
-    _ROADMAP_TASKS="${REPO_ROOT}/scripts/roadmap-tasks.py"
 
     # fno claim acquire (global TTL lock; authoritative mutex)
     if command -v fno >/dev/null 2>&1; then
@@ -1127,10 +1126,14 @@ PYEOF
       _HARNESS_FLAGS=""
       [[ -n "${PROVIDER:-}" ]] && _HARNESS_FLAGS="--locked-by-harness $PROVIDER"
       [[ -n "$_HARNESS_SESSION" ]] && _HARNESS_FLAGS="$_HARNESS_FLAGS --locked-by-harness-session $_HARNESS_SESSION"
-      if python3 "$_ROADMAP_TASKS" update "$_NODE_ID" --locked-by "$claim_owner_id" $_HARNESS_FLAGS 2>"$_STAMP_LOG" >/dev/null \
-         || python3 "$_ROADMAP_TASKS" update "$_NODE_ID" --locked-by "$claim_owner_id" $_HARNESS_FLAGS 2>"$_STAMP_LOG" >/dev/null; then
+      # Unconditional `fno` is safe: every _NODE_OWNED=1 path ran inside command -v fno.
+      if fno backlog update "$_NODE_ID" --locked-by "$claim_owner_id" $_HARNESS_FLAGS 2>"$_STAMP_LOG" >/dev/null \
+         || fno backlog update "$_NODE_ID" --locked-by "$claim_owner_id" $_HARNESS_FLAGS 2>"$_STAMP_LOG" >/dev/null; then
         rm -f "$_STAMP_LOG"
         echo "target: graph node $_NODE_ID lock stamped for $claim_owner_id" >&2
+      elif fno backlog update "$_NODE_ID" --locked-by "$claim_owner_id" 2>>"$_STAMP_LOG" >/dev/null; then
+        # Degraded but loud: a partial stamp must never pass for a clean one.
+        echo "target: WARNING: graph node $_NODE_ID stamped WITHOUT harness metadata (installed fno may predate the harness flags; try 'fno doctor --fix'; see $_STAMP_LOG)" >&2
       else
         echo "target: WARNING: graph locked_by stamp failed (non-fatal; TTL claim authoritative; see $_STAMP_LOG)" >&2
       fi
