@@ -115,8 +115,8 @@ _ev_load_schema_cache() {
         rm -f "$EVENTS_SCHEMA_CACHE"
     fi
 
-    if command -v python3 >/dev/null 2>&1; then
-        if python3 -c '
+    for _ev_py in "python3" "uv run --no-project --with pyyaml python3"; do
+        if $_ev_py -c '
 import json, sys
 try:
     import yaml
@@ -130,7 +130,7 @@ with open(sys.argv[1], "r", encoding="utf-8") as fh:
             fi
         fi
         rm -f "$EVENTS_SCHEMA_CACHE"
-    fi
+    done
 
     _ev_warn "schema unavailable: parse failed"
     return 2

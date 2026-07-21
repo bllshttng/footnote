@@ -63,11 +63,12 @@ fi
 
 # PyYAML: prefer the host interpreter, else an ephemeral uv env. Homebrew's
 # python3 is PEP 668 externally-managed, so pyyaml is routinely absent there and
-# `pip install` refuses; uv is already this repo's standard everywhere else and
-# needs no host provisioning at all.
+# `pip install` refuses. Probe uv rather than just detecting it: a uv that
+# cannot materialize pyyaml (offline, cold cache) would otherwise fail later
+# under the misleading "parse-bundle-manifest.py failed".
 if python3 -c 'import yaml' 2>/dev/null; then
   PY=(python3)
-elif command -v uv >/dev/null 2>&1; then
+elif command -v uv >/dev/null 2>&1 && uv run --no-project --with pyyaml python3 -c 'import yaml' 2>/dev/null; then
   PY=(uv run --no-project --with pyyaml python3)
 else
   echo "ERROR: need PyYAML - install it for python3, or install uv" >&2
@@ -80,7 +81,7 @@ fi
 # output and report success.
 ROWS_FILE="$(mktemp)"
 META_FILE="$(mktemp)"
-trap 'rm -f "$ROWS_FILE" "$META_FILE"' EXIT
+trap 'rm -f "$ROWS_FILE" "$META_FILE" "${TMP_DST:-}"' EXIT
 if ! "${PY[@]}" "$PARSER" "$MANIFEST" > "$ROWS_FILE"; then
   echo "ERROR: parse-bundle-manifest.py failed" >&2
   exit 1

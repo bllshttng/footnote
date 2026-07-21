@@ -79,6 +79,11 @@ if python3 -c 'import yaml' 2>/dev/null || ! command -v uv >/dev/null 2>&1; then
   PY=(python3)
 else
   PY=(uv run --no-project --with pyyaml python3)
+  # A uv that cannot actually materialize pyyaml (offline, cold cache) would
+  # otherwise surface once per skill as "does not declare fno in frontmatter",
+  # blaming the author for an environment fault. Fall back so the checker's own
+  # rc=2 reports the real cause.
+  "${PY[@]}" -c 'import yaml' 2>/dev/null || PY=(python3)
 fi
 
 # ---------------------------------------------------------------------------

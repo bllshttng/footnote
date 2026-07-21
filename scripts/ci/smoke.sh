@@ -21,7 +21,8 @@
 #                     exit without running anything.
 #
 # Prerequisites (asserted up front, exit 2 naming the missing one): `uv`,
-# `python3` with `yaml` importable, and `cargo` when a selected step needs it.
+# `python3` with `yaml` importable OR `uv` to supply it, and `cargo` when a
+# selected step needs it.
 # Never auto-installs at system level.
 #
 # Exit codes: 0 all selected steps passed (>=1 ran); 1 a step failed or zero
@@ -268,9 +269,10 @@ miss() { echo "smoke: missing prerequisite: $1 ($2)" >&2; exit 2; }
 if need_prereq 'uv '; then command -v uv >/dev/null 2>&1 || miss uv "install from https://docs.astral.sh/uv"; fi
 if need_prereq 'python3'; then
     command -v python3 >/dev/null 2>&1 || miss python3 "install Python 3"
-    # PyYAML from the host interpreter OR from uv - the bundler and marketplace
-    # lint resolve it the same way, falling back to `uv run --with pyyaml`. A
-    # host without pyyaml is the norm, not an error: homebrew python3 is PEP 668
+    # PyYAML from the host interpreter OR from uv. Every yaml-consuming step
+    # resolves it the same way (bundler, marketplace lint, events-validate) or
+    # uses cli/.venv, which `uv sync` provisions in the first step. A host
+    # without pyyaml is the norm, not an error: homebrew python3 is PEP 668
     # externally-managed, so `pip install` refuses there.
     python3 -c 'import yaml' 2>/dev/null || command -v uv >/dev/null 2>&1 \
         || miss "python3-yaml" "install pyyaml for python3, or install uv (https://docs.astral.sh/uv)"
