@@ -17,6 +17,8 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import yaml
+
 # termination_reason -> outcome class. The delivered-ship set is the explicit
 # _SHIPPED_TERMINALS allowlist below; the wedge set is the stuck-terminal set.
 # Everything else (Interrupted, delegated, NoWork, DoneAwaitingMerge, or no
@@ -1173,17 +1175,18 @@ def _default_read_plan_doc(plan_path: str) -> str | None:
 
 
 def _declared_probes(plan_doc: str | None) -> list[str]:
-    """`done_probes` declared in a plan doc's frontmatter (x-e54c)."""
+    """`done_probes` declared in a plan doc's frontmatter."""
     if not plan_doc or not plan_doc.lstrip().startswith("---"):
         return []
     body = plan_doc.lstrip()[3:].split("\n---", 1)
     if len(body) < 2:
         return []
     try:
-        import yaml
-
         fm = yaml.safe_load(body[0])
-    except Exception:
+    except yaml.YAMLError:
+        # Malformed frontmatter: no declaration is readable. Narrow on purpose -
+        # a broader catch would swallow an import or IO error and report a plan
+        # that DID declare probes as one that declared none.
         return []
     probes = fm.get("done_probes") if isinstance(fm, dict) else None
     return [str(p) for p in probes] if isinstance(probes, list) else []
@@ -1307,7 +1310,7 @@ def build_plan_fidelity(
         nid = d.get("graph_node_id")
         plan_doc = read_plan_doc(plan_path) if plan_path else None
         score = _score_fidelity(plan_doc, read_summary(d), read_diff(d))
-        # x-e54c: join "the plan said this would prove it" to "evidence it ran".
+        # join "the plan said this would prove it" to "evidence it ran".
         # A plan declaring no probes reports null, never a fabricated 0/0.
         declared = _declared_probes(plan_doc)
         probes = None

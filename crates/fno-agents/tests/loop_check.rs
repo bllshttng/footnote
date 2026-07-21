@@ -3992,7 +3992,7 @@ fn done_probes_ac2_err_missing_binary_states_127() {
 
     assert_eq!(d.decision, "block");
     assert!(
-        d.message.contains("127"),
+        d.message.contains("exited 127"),
         "reason must state exit code 127 explicitly: {}",
         d.message
     );
@@ -4026,5 +4026,97 @@ fn done_probes_ac2_edge_no_probe_runs_while_ci_is_red() {
     assert!(
         !sentinel.exists(),
         "no probe subprocess may run while an earlier conjunct is already false"
+    );
+}
+
+/// AC1-HP (the clause the substring assertion above cannot pin): the gate must
+/// run probes on THIS fire. A prior fire's recorded pass must never satisfy it.
+#[test]
+fn done_probes_a_prior_fires_pass_never_satisfies_this_fire() {
+    let (tmp, manifest, transcript) =
+        probe_fixture("sess-probe-cache", &["test -f /nonexistent-groom-report"]);
+    let cwd = tmp.path();
+
+    // Seed a prior fire in which the very same probe passed.
+    fs::write(
+        cwd.join(".fno/events.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "loop_check",
+                "data": {
+                    "session_id": "sess-probe-cache",
+                    "done_probes": {"test -f /nonexistent-groom-report": "pass"}
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    let mock = MockBins::green();
+    let d = fire_probe_gate(cwd, &manifest, &transcript, &mock);
+
+    assert_eq!(
+        d.decision, "block",
+        "a cached pass from an earlier fire must not grant done: {}",
+        d.message
+    );
+    assert!(d.message.contains("test -f /nonexistent-groom-report"));
+}
+
+/// The block path must record probe evidence too - it is the fire most likely
+/// to have run probes, and both the grader and the fail-closed history read it.
+#[test]
+fn done_probes_block_path_records_evidence_in_the_event() {
+    let (tmp, manifest, transcript) = probe_fixture("sess-probe-evt", &["exit 3"]);
+    let cwd = tmp.path();
+    let mock = MockBins::green();
+
+    let d = fire_probe_gate(cwd, &manifest, &transcript, &mock);
+    assert_eq!(d.decision, "block");
+
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    assert!(
+        events.contains("\"exit 3\":\"fail:3\""),
+        "a failing probe's result must be recorded, not just its reason: {events}"
+    );
+}
+
+/// A declared field this parser cannot read must refuse, never silently pass.
+#[test]
+fn done_probes_unparseable_declaration_refuses_done() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let plan = cwd.join("plan.md");
+    // A multi-line inline list: declared, but not a shape the gate can read.
+    fs::write(
+        &plan,
+        "---\ntitle: p\ndone_probes: [\n  \"echo a\"\n]\n---\n\n# plan\n",
+    )
+    .unwrap();
+    let manifest = cwd.join("target-state.md");
+    fs::write(
+        &manifest,
+        manifest_with_plan("sess-probe-unparseable", "2026-06-05T00:00:00Z", &plan),
+    )
+    .unwrap();
+    let transcript = cwd.join("transcript.jsonl");
+    fs::write(&transcript, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::green();
+    let d = fire_probe_gate(cwd, &manifest, &transcript, &mock);
+
+    assert_eq!(
+        d.decision, "block",
+        "an unreadable declaration must not pass as 'no probes': {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("undeterminable"),
+        "reason must say undeterminable: {}",
+        d.message
     );
 }

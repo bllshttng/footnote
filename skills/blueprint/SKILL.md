@@ -508,10 +508,15 @@ lookup) so it can only pass if the thing ran recently.
 `... | grep -q x` exits on the grep; `... | tail -5` exits on the tail and
 masks the real status, so a broken command reads as a pass.
 
+**Use the block form above, or a single-line inline list** (`done_probes: ["cmd"]`).
+A declaration in any other shape (a multi-line inline list, say) refuses done as
+"probes undeterminable" rather than passing as if you had declared nothing -
+declaring a gate the loop cannot read must never read as no gate.
+
 **Constraints.** At most 3 probes (a gate, not a test suite); each gets a 60s
-native timeout and is killed past it; a missing binary (127), a non-zero exit,
-and a timeout all fail closed with the command and code named in the block
-reason.
+native timeout and its whole process group is killed past it; a missing binary
+(127), a non-zero exit, and a timeout all fail closed with the command and code
+named in the block reason.
 Probes must be read-only and idempotent - two near-simultaneous fires may run
 them twice.
 There is no env override: a probe that cannot pass in this environment is

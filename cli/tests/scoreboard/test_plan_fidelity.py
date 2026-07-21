@@ -12,6 +12,7 @@ AC3  a planned row with no joinable delivery is `unjoined`, never scored 0%.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from fno.scoreboard.fold import build_plan_fidelity
@@ -295,6 +296,58 @@ def test_probe_evidence_ignores_another_sessions_events():
         "fno mail list --since 24h | grep -q groom": "pass",
         'test -n "$(fno backlog groom --status)"': "pass",
     })]
+    pf = build_plan_fidelity(
+        _PROBE_ROWS, [], since_days=28, now=NOW,
+        read_plan_doc=lambda p: _PROBE_PLAN,
+        read_summary=lambda row: "",
+        read_diff=lambda pr: [],
+        loop_check_events=events,
+    )
+    joined = [r for r in pf["results"] if r["status"] == "joined"][0]
+    assert joined["probes"] == {"declared": 2, "passed": 0}
+
+
+def test_probe_evidence_reads_the_real_events_file_shape(tmp_path):
+    """The production wiring: build_plan_fidelity is fed by read_jsonl_events.
+
+    Every other probe test injects events directly, so a shape mismatch here
+    (unwrapped `data`, wrong kind key) would leave them all green while the
+    scoreboard silently reported 0 passed for every plan - indistinguishable
+    from the real signal this feature exists to produce.
+    """
+    from fno.scoreboard.fold import read_jsonl_events
+
+    events_file = tmp_path / "events.jsonl"
+    events_file.write_text(
+        json.dumps({
+            "type": "loop_check",
+            "data": {
+                "session_id": "build-sess",
+                "done_probes": {
+                    "fno mail list --since 24h | grep -q groom": "pass",
+                    'test -n "$(fno backlog groom --status)"': "pass",
+                },
+            },
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+
+    pf = build_plan_fidelity(
+        _PROBE_ROWS, [], since_days=28, now=NOW,
+        read_plan_doc=lambda p: _PROBE_PLAN,
+        read_summary=lambda row: "",
+        read_diff=lambda pr: [],
+        loop_check_events=read_jsonl_events([events_file], {"loop_check"}),
+    )
+    joined = [r for r in pf["results"] if r["status"] == "joined"][0]
+    assert joined["probes"] == {"declared": 2, "passed": 2}
+
+
+def test_undeterminable_marker_counts_as_zero_passed_not_null():
+    """A refusal where nothing ran records a marker, not command results. The
+    plan still declared probes, so the grader must report 0 passed."""
+    events = [_probe_event("build-sess", {"_undeterminable": "over-cap"})]
     pf = build_plan_fidelity(
         _PROBE_ROWS, [], since_days=28, now=NOW,
         read_plan_doc=lambda p: _PROBE_PLAN,
