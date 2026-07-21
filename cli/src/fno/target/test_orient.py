@@ -25,11 +25,13 @@ def test_node_line_not_in_graph(monkeypatch) -> None:
     assert "unknown" in line and "fno backlog get x-zzzz" in line
 
 
-def test_node_line_shipped(monkeypatch) -> None:
+def test_node_line_done_with_pr(monkeypatch) -> None:
     monkeypatch.setattr(
         orient, "_graph_entry", lambda *_: {"_status": "done", "pr_number": 42}
     )
-    assert orient._node_line("x-1", Path("/"), manifest_raw={}) == "shipped (PR #42 merged)"
+    line = orient._node_line("x-1", Path("/"), manifest_raw={})
+    assert line == "done (PR #42)"
+    assert "merged" not in line
 
 
 def test_node_line_done_without_pr(monkeypatch) -> None:
