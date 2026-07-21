@@ -2409,6 +2409,37 @@ impl View {
         })
     }
 
+    /// Recompute which grabbable chrome (seam, sideline border, pane grip) is
+    /// accented, from the pointer position `(row, col)`.
+    ///
+    /// Terminals cannot change the cursor shape, so this accent is the entire
+    /// draggability affordance. It must be refreshed on hover AND at the end of
+    /// a drag: `Drag` events never touch hover state, so a drag that ends off
+    /// the thing it grabbed would otherwise leave it lit until the next bare
+    /// `Move` (the stale-highlight the pane relocation drag already avoids by
+    /// re-hit-testing at its release coords).
+    fn refresh_hover_affordances(&mut self, row: u16, col: u16) {
+        self.hover_seam = self.seam_at(row, col);
+        self.hover_sideline_border = self.on_sideline_border(row, col);
+        self.hover_grip = self.grip_at(row, col);
+    }
+
+    /// End a seam drag and recompute hover from `(row, col)`. Both the release
+    /// arm and the non-left cancellation arm (a wheel, another button) route
+    /// through here: a Drag event never refreshes hover, so however the gesture
+    /// ends, the accent must be recomputed or it lingers until the next bare
+    /// Move (codex peer review of the sideline-border affordance).
+    fn end_seam_drag(&mut self, row: u16, col: u16) {
+        self.seam_drag = None;
+        self.refresh_hover_affordances(row, col);
+    }
+
+    /// End a sideline-border drag and recompute hover; see [`View::end_seam_drag`].
+    fn end_sideline_drag(&mut self, row: u16, col: u16) {
+        self.sideline_drag = None;
+        self.refresh_hover_affordances(row, col);
+    }
+
     /// True on the sideline's right border column - the grab band for the
     /// density drag. False when the sideline is hidden: there is no border to
     /// grab, so revealing it stays on the existing toggle.
@@ -3130,16 +3161,9 @@ impl View {
         // a cell off the sideline text column clears it.
         self.hover_row = self.sideline_row_at(row, col);
 
-        // x-d807: accent the divider under the pointer. Terminals cannot
-        // portably change the cursor shape, so this accent is the entire
-        // draggability affordance - without it a seam gives no sign it can be
-        // grabbed. Always on, like the sideline highlight, and independent of
-        // the focus-follow off-switch below.
-        self.hover_seam = self.seam_at(row, col);
-        self.hover_sideline_border = self.on_sideline_border(row, col);
-        // x-aa95: same reasoning for the pane grip - the accent is the only
-        // signal the handle is grabbable, since the cursor shape cannot say so.
-        self.hover_grip = self.grip_at(row, col);
+        // Accent whatever grabbable chrome sits under the pointer (independent
+        // of the focus-follow off-switch below).
+        self.refresh_hover_affordances(row, col);
 
         // Focus-follows-mouse rides the off-switch. hit_test resolves a PANE
         // (chrome/divider/sideline => None), so hovering the sideline never
@@ -5047,12 +5071,23 @@ impl View {
         }
         // The divider column, now full terminal height (the sideline owns row
         // 0 too; the strip sits right of the divider) - x-cd67 US1.
+        //
+        // x-9e33: accent it while hovered or dragged, the same signal a pane
+        // seam wears (x-d807 shipped the drag but never rendered this, leaving
+        // the border a draggable-but-invisible 1-cell target). A terminal
+        // cannot change the cursor shape, so this accent IS the affordance.
+        let border_active = self.hover_sideline_border || self.sideline_drag.is_some();
+        let (border_fg, border_flags) = if border_active {
+            (LATTICE_ACCENT, cell_flags::BOLD)
+        } else {
+            (Color::Default, cell_flags::DIM)
+        };
         for r in 0..rows {
             cells[r * cols + (panel_w - 1)] = Cell {
                 c: '│',
-                fg: Color::Default,
+                fg: border_fg,
                 bg: Color::Default,
-                flags: cell_flags::DIM,
+                flags: border_flags,
             };
         }
     }
@@ -6950,13 +6985,13 @@ async fn handle_stdin(
                     continue;
                 }
                 MouseKind::Release(MouseButton::Left) => {
-                    // The last applied ratio stands.
-                    view.seam_drag = None;
+                    // The last applied ratio stands (no command travels).
+                    view.end_seam_drag(rep.row, rep.col);
                     continue;
                 }
                 // Anything else (a wheel, another button) means the gesture is
                 // over; drop the drag and let the event route normally.
-                _ => view.seam_drag = None,
+                _ => view.end_seam_drag(rep.row, rep.col),
             }
         }
         // x-aa95: a relocation drag owns the mouse, for the same reason a seam
@@ -6985,10 +7020,17 @@ async fn handle_stdin(
                             .await
                             .map_err(|e| format!("pane move send failed: {e}"))?;
                     }
+                    // Same release-recompute as the seam/sideline drags: clear a
+                    // grip accent the drag left on if the pointer ended off it.
+                    view.refresh_hover_affordances(rep.row, rep.col);
                     continue;
                 }
                 _ => {
                     view.cancel_pane_drag();
+                    // A non-left termination ends the drag with no Release;
+                    // recompute hover so a grip accent the drag left on does not
+                    // linger (codex peer review).
+                    view.refresh_hover_affordances(rep.row, rep.col);
                 }
             }
         }
@@ -7007,10 +7049,11 @@ async fn handle_stdin(
                     continue;
                 }
                 MouseKind::Release(MouseButton::Left) => {
-                    view.sideline_drag = None;
+                    view.end_sideline_drag(rep.row, rep.col);
                     continue;
                 }
-                _ => view.sideline_drag = None,
+                // A non-left termination (a wheel, another button) ends the drag.
+                _ => view.end_sideline_drag(rep.row, rep.col),
             }
         }
         // A card-dispatch confirm is modal (x-a496): while it is open, any mouse
@@ -11359,6 +11402,112 @@ mod tests {
         view.begin_seam_drag(seam, Instant::now());
         assert_eq!(view.revert_seam_drag(), None);
         assert!(view.seam_drag.is_none());
+    }
+
+    #[test]
+    fn sideline_border_accents_on_hover_and_during_drag() {
+        // AC3-UI (the border half): the divider column reads BOLD accent when
+        // hovered or dragged, distinct from idle DIM chrome. x-d807 shipped the
+        // drag with this render missing, so the border was a draggable-but-
+        // invisible 1-cell target; this is the regression guard.
+        // One frame per state; assert against that snapshot.
+        let mut view = two_pane_view();
+        let border = view.panel_w() as usize - 1;
+        let cell = |f: &Frame, row: usize, col: usize| f.cells[row * f.cols as usize + col];
+
+        let idle_f = view.compose();
+        let idle = cell(&idle_f, 5, border);
+        assert_eq!(idle.c, '│', "the divider glyph itself is unchanged");
+        assert_eq!(idle.flags, cell_flags::DIM, "idle border is dim chrome");
+
+        view.on_hover(5, border as u16, Instant::now());
+        assert!(view.hover_sideline_border, "hover state set");
+        let lit_f = view.compose();
+        let lit = cell(&lit_f, 5, border);
+        assert_eq!(
+            lit.c, '│',
+            "hover accents the border, it does not redraw it"
+        );
+        assert_eq!(lit.flags, cell_flags::BOLD);
+        assert_eq!(lit.fg, LATTICE_ACCENT);
+        assert!(
+            (lit.flags, lit.fg) != (idle.flags, idle.fg),
+            "hovered border is visibly distinct from idle"
+        );
+
+        view.on_hover(5, border as u16 - 1, Instant::now());
+        let off_f = view.compose();
+        assert_eq!(
+            cell(&off_f, 5, border).flags,
+            cell_flags::DIM,
+            "border returns to idle chrome off the column"
+        );
+
+        // A drag in flight keeps it accented even while the pointer runs ahead.
+        view.sideline_drag = Some(view.density);
+        let drag_f = view.compose();
+        assert_eq!(
+            cell(&drag_f, 5, border).flags,
+            cell_flags::BOLD,
+            "the border stays lit for the whole drag"
+        );
+    }
+
+    #[test]
+    fn drag_release_off_a_target_clears_its_stale_accent() {
+        // A drag ends off the thing it grabbed. Drag events never refresh hover
+        // state, so without the release recompute the accent would linger until
+        // the next bare Move. The release arms call this recompute; here it is
+        // directly, proving stale-true fields clear at the release position.
+        let mut view = three_pane_view();
+        // Pretend a seam drag and a sideline hover both left stale accents on.
+        view.hover_seam = view.seam_at(5, 51);
+        view.hover_sideline_border = true;
+        assert!(view.hover_seam.is_some());
+
+        // Release lands inside a pane (10) - on no seam, no border, no grip.
+        view.refresh_hover_affordances(5, 40);
+        assert!(view.hover_seam.is_none(), "stale seam accent cleared");
+        assert!(!view.hover_sideline_border, "stale border accent cleared");
+        assert!(view.hover_grip.is_none());
+
+        // And a release that lands back on a seam re-lights exactly that one.
+        view.refresh_hover_affordances(5, 75);
+        assert_eq!(
+            view.hover_seam.map(|s| (s.a, s.b)),
+            Some((11, 12)),
+            "release on a seam accents that seam"
+        );
+    }
+
+    #[test]
+    fn ending_a_drag_off_its_target_clears_the_stale_accent() {
+        // The non-left cancellation arm (a wheel, another button) ends a drag
+        // the same way a release does - both route through end_{seam,sideline}
+        // _drag. A Drag event never refreshes hover, so a gesture that ends off
+        // its target must recompute or the accent lingers until the next Move.
+        // The release arms already had this; the cancel arms did not (codex peer
+        // review), so both paths now share one method that recomputes.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+
+        view.begin_seam_drag(seam, Instant::now());
+        view.hover_seam = Some(seam); // the drag left the accent lit
+        view.end_seam_drag(5, 40); // ended inside pane 10 - off the seam
+        assert!(view.seam_drag.is_none(), "the seam drag ended");
+        assert!(
+            view.hover_seam.is_none(),
+            "stale seam accent cleared on cancel"
+        );
+
+        view.sideline_drag = Some(view.density);
+        view.hover_sideline_border = true;
+        view.end_sideline_drag(5, 40); // off the border column
+        assert!(view.sideline_drag.is_none(), "the sideline drag ended");
+        assert!(
+            !view.hover_sideline_border,
+            "stale border accent cleared on cancel"
+        );
     }
 
     #[test]
