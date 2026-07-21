@@ -108,7 +108,7 @@ def _node_line(
             return "done (no PR)"
         # Only `merge_status` evidences a merge. Deriving "merged" from
         # done + pr_number asserted a merge nothing had checked, so a node
-        # closed early read as shipped while the PR was still open (x-47a3).
+        # closed early read as shipped while the PR was still open.
         if entry.get("merge_status") == "merged":
             return f"shipped (PR #{pr} merged)"
         return f"shipped (PR #{pr}, awaiting merge)"

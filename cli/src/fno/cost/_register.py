@@ -707,7 +707,7 @@ def render_tasks_md(tasks_json_path: Path, tasks_md_path: Path) -> None:
             "# Task Registry",
             "",
             f"> {len(entries)} tasks completed in this project.",
-            f"> Source of truth: `ledger.json` - this file is a derived view.",
+            "> Source of truth: `ledger.json` - this file is a derived view.",
             "",
         ]
         for i, e in enumerate(entries):
@@ -889,13 +889,14 @@ def register_entry(entry: dict) -> None:
     ``paths.ledger_json()``. The former project-local dual-write (a stray
     ``<root_path>/.fno/ledger.json``) was the split-brain that corrupted
     node-level joins; it is removed.
+
+    An append records that a session shipped; it never closes the backlog
+    node. Closing is merge-gated and belongs to done/reconcile.
     """
     ledger_path = _paths.ledger_json()
     append_to_tasks_json(ledger_path, entry)
     render_tasks_md(ledger_path, ledger_path.with_suffix(".md"))
 
-    # A ledger append records that a session shipped; it never closes the
-    # backlog node. Closing is merge-gated and belongs to done/reconcile.
     # 4. Phase-transition event (gate-provenance phase 02, ledger_updated gate)
     _emit_ledger_transition(entry)
 
@@ -930,7 +931,7 @@ def main():
             try:
                 cost_json = json.loads(args.cost_json)
             except json.JSONDecodeError:
-                print(f"Warning: invalid --cost-json, ignoring", file=sys.stderr)
+                print("Warning: invalid --cost-json, ignoring", file=sys.stderr)
 
         entry = build_quick_entry(
             session_id=session_id,

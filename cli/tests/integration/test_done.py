@@ -95,7 +95,7 @@ def _stub_subprocess_no_git(monkeypatch):
 
     monkeypatch.setattr(done_cli.subprocess, "run", lambda *a, **kw: _Res())
 
-    # `--pr` now demands gh-resolved merge evidence (x-47a3); without a stub
+    # `--pr` now demands gh-resolved merge evidence; without a stub
     # these collision tests would exit 4 on the gh outage instead of reaching
     # the collision path they are about.
     from fno.graph._reconcile import PrMergeState

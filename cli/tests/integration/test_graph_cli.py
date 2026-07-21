@@ -282,7 +282,7 @@ def test_ac2_err_graph_get_unknown_exits_nonzero(tmp_graph):
 # --- update ---
 
 def test_ac6_edge_graph_update_completed_removed(tmp_graph):
-    """AC6-EDGE: `update --completed` is gone and fails loudly (x-47a3).
+    """AC6-EDGE: `update --completed` is gone and fails loudly.
 
     It was an ungated, event-silent close. Closing is merge-gated and belongs
     to done/reconcile, so the flag must not merely be ignored - a silently

@@ -361,7 +361,7 @@ run_commit_b_root_path_in_worktree() {
 
     # Run from the worktree so git resolves toplevel to the worktree path.
     HOME="$sandbox" \
-        bash -c "cd '$WORKTREE_FIXTURE' && "$PY" '$REGISTER_PY' '$WORKTREE_FIXTURE/.fno/target-state.md' 'transcript-cB-1'" \
+        bash -c "cd '$WORKTREE_FIXTURE' && '$PY' '$REGISTER_PY' '$WORKTREE_FIXTURE/.fno/target-state.md' 'transcript-cB-1'" \
         > "$sandbox/out.log" 2> "$sandbox/err.log"
 
     # AC1-HP: root_path equals the worktree top, not the canonical repo top.
@@ -426,7 +426,7 @@ ledger_updated: false
 EOF
 
     HOME="$sandbox" \
-        bash -c "cd '$WORKTREE_FIXTURE' && "$PY" '$REGISTER_PY' '$WORKTREE_FIXTURE/.fno/target-state.md' 'transcript-cB-emit'" \
+        bash -c "cd '$WORKTREE_FIXTURE' && '$PY' '$REGISTER_PY' '$WORKTREE_FIXTURE/.fno/target-state.md' 'transcript-cB-emit'" \
         > "$sandbox/out.log" 2> "$sandbox/err.log"
 
     # Event MUST land in the worktree's events.jsonl, not the canonical repo's.
