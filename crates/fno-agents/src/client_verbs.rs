@@ -486,96 +486,109 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
             }
         }
     }
+    let mut out = rows.clone();
+    for row in &mut out {
+        if let Some(obj) = row.as_object_mut() {
+            backfill_row_aliases(obj);
+        }
+    }
+    Ok(out)
+}
+
+/// Reconcile one row's identity aliases so every verb body reads the same
+/// fields regardless of the schema version that wrote the row.
+///
+/// Extracted from [`load_registry_entries`] because a row healed from a harness
+/// store (x-da8c) never passes through that loader, and a row that skips this
+/// is subtly broken in ways the verb reports as something else: `logs`/`attach`
+/// read `provider`, which v10 no longer stores, and `claude_resume_argv` reads
+/// `claude_session_uuid`, which v10 replaced with `harness_session_id`. One
+/// shared backfill is why a healed row resumes exactly like a native one.
+fn backfill_row_aliases(obj: &mut serde_json::Map<String, Value>) {
+    // Lockstep alias heal (x-8dfc), mirroring Python `load_registry`:
+    // the two identity fields are the same token in the skew window, so
+    // heal whichever is missing OR corrupt (shape-checked, not truthy)
+    // from the valid sibling. Both directions, because resume reads
+    // through this same healed value -- a truthy-corrupt harness would
+    // otherwise resolve session_id to None. The gate above guarantees at
+    // least one field is a valid token.
+    let provider_valid = is_identity_token(obj.get("provider").and_then(Value::as_str));
+    let harness_valid = is_identity_token(obj.get("harness").and_then(Value::as_str));
+    if !provider_valid && harness_valid {
+        if let Some(h) = obj
+            .get("harness")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            obj.insert("provider".into(), Value::String(h));
+        }
+    } else if !harness_valid && provider_valid {
+        if let Some(p) = obj
+            .get("provider")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            obj.insert("harness".into(), Value::String(p));
+        }
+    }
+    // v10 (x-880e) accept-on-read, the raw-Value mirror of the typed
+    // backfill_harness_aliases: TWO-WAY sync harness_session_id <-> the
+    // harness-matching legacy per-provider key (canonical wins). A v1..=v9
+    // row's legacy id back-fills the canonical field; a v10 row's canonical
+    // id mirrors BACK into the legacy field so the raw resume/attach helpers
+    // (which still read e.g. claude_session_uuid) resolve a harness-only row.
+    let legacy_key = match obj.get("harness").and_then(Value::as_str) {
+        Some("claude") => Some("claude_session_uuid"),
+        Some("codex") => Some("codex_session_id"),
+        Some("gemini") => Some("gemini_session_id"),
+        _ => None,
+    };
+    if let Some(k) = legacy_key {
+        let nonempty = |v: Option<&str>| {
+            v.filter(|s| !s.is_empty() && *s != "null")
+                .map(str::to_string)
+        };
+        let hsid = nonempty(obj.get("harness_session_id").and_then(Value::as_str));
+        let legacy_val = nonempty(obj.get(k).and_then(Value::as_str));
+        match (hsid, legacy_val) {
+            // canonical wins: mirror it into the legacy key the helpers read
+            (Some(h), _) => {
+                obj.insert(k.into(), Value::String(h));
+            }
+            // no canonical yet: adopt the legacy id
+            (None, Some(l)) => {
+                obj.insert("harness_session_id".into(), Value::String(l));
+            }
+            (None, None) => {}
+        }
+    }
     // v9 transport-key backfill (x-1b1e), the raw-Value mirror of Python
     // `load_registry` popping `claude_short_id` into `short_id`: a legacy row's
     // jobId moves into an empty `short_id` and the old key is dropped so no verb
     // body reads it. A conflicting pair keeps `short_id` and warns once.
-    let mut out = rows.clone();
-    for row in &mut out {
-        if let Some(obj) = row.as_object_mut() {
-            // Lockstep alias heal (x-8dfc), mirroring Python `load_registry`:
-            // the two identity fields are the same token in the skew window, so
-            // heal whichever is missing OR corrupt (shape-checked, not truthy)
-            // from the valid sibling. Both directions, because resume reads
-            // through this same healed value -- a truthy-corrupt harness would
-            // otherwise resolve session_id to None. The gate above guarantees at
-            // least one field is a valid token.
-            let provider_valid = is_identity_token(obj.get("provider").and_then(Value::as_str));
-            let harness_valid = is_identity_token(obj.get("harness").and_then(Value::as_str));
-            if !provider_valid && harness_valid {
-                if let Some(h) = obj
-                    .get("harness")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                {
-                    obj.insert("provider".into(), Value::String(h));
-                }
-            } else if !harness_valid && provider_valid {
-                if let Some(p) = obj
-                    .get("provider")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                {
-                    obj.insert("harness".into(), Value::String(p));
-                }
+    let legacy = obj
+        .remove("claude_short_id")
+        .and_then(|v| v.as_str().map(str::to_string))
+        .filter(|s| !s.is_empty());
+    if let Some(legacy) = legacy {
+        let existing = obj
+            .get("short_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        match existing {
+            None => {
+                obj.insert("short_id".into(), Value::String(legacy));
             }
-            // v10 (x-880e) accept-on-read, the raw-Value mirror of the typed
-            // backfill_harness_aliases: TWO-WAY sync harness_session_id <-> the
-            // harness-matching legacy per-provider key (canonical wins). A v1..=v9
-            // row's legacy id back-fills the canonical field; a v10 row's canonical
-            // id mirrors BACK into the legacy field so the raw resume/attach helpers
-            // (which still read e.g. claude_session_uuid) resolve a harness-only row.
-            let legacy_key = match obj.get("harness").and_then(Value::as_str) {
-                Some("claude") => Some("claude_session_uuid"),
-                Some("codex") => Some("codex_session_id"),
-                Some("gemini") => Some("gemini_session_id"),
-                _ => None,
-            };
-            if let Some(k) = legacy_key {
-                let nonempty = |v: Option<&str>| {
-                    v.filter(|s| !s.is_empty() && *s != "null")
-                        .map(str::to_string)
-                };
-                let hsid = nonempty(obj.get("harness_session_id").and_then(Value::as_str));
-                let legacy_val = nonempty(obj.get(k).and_then(Value::as_str));
-                match (hsid, legacy_val) {
-                    // canonical wins: mirror it into the legacy key the helpers read
-                    (Some(h), _) => {
-                        obj.insert(k.into(), Value::String(h));
-                    }
-                    // no canonical yet: adopt the legacy id
-                    (None, Some(l)) => {
-                        obj.insert("harness_session_id".into(), Value::String(l));
-                    }
-                    (None, None) => {}
-                }
+            Some(short) if short != legacy => {
+                let name = obj.get("name").and_then(Value::as_str).unwrap_or("?");
+                eprintln!(
+                    "fno agents: warning: registry row {name:?} carries short_id={short:?} and legacy claude_short_id={legacy:?}; keeping short_id"
+                );
             }
-            let legacy = obj
-                .remove("claude_short_id")
-                .and_then(|v| v.as_str().map(str::to_string))
-                .filter(|s| !s.is_empty());
-            if let Some(legacy) = legacy {
-                let existing = obj
-                    .get("short_id")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string);
-                match existing {
-                    None => {
-                        obj.insert("short_id".into(), Value::String(legacy));
-                    }
-                    Some(short) if short != legacy => {
-                        let name = obj.get("name").and_then(Value::as_str).unwrap_or("?");
-                        eprintln!(
-                            "fno agents: warning: registry row {name:?} carries short_id={short:?} and legacy claude_short_id={legacy:?}; keeping short_id"
-                        );
-                    }
-                    Some(_) => {}
-                }
-            }
+            Some(_) => {}
         }
     }
-    Ok(out)
 }
 
 /// String field accessor with a default (Python `ev.get(key, "")`).
