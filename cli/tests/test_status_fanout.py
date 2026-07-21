@@ -1242,3 +1242,49 @@ def test_post_json_sends_explicit_user_agent(monkeypatch):
     assert result.ok
     assert captured["ua"] == sf._USER_AGENT
     assert not captured["ua"].lower().startswith("python-urllib")
+
+
+def test_resolve_url_falls_back_to_env_file(tmp_path, monkeypatch):
+    """US1: a url_env sink with no process-env var resolves the secret from
+    ~/.fno/.env (the daemon-invisible-secret fix, x-0128)."""
+    from fno import status_fanout as sf
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("FNO_STATUS_DISCORD=https://discord.example/hook\n")
+    monkeypatch.delenv("FNO_STATUS_DISCORD", raising=False)
+    monkeypatch.setattr(sf, "_secrets_env_path", lambda: env_file)
+
+    sink = StatusSinkConfig(name="d", type="text-webhook", url_env="FNO_STATUS_DISCORD")
+    url, err = sf._resolve_url(sink)
+    assert url == "https://discord.example/hook"
+    assert err is None
+
+
+def test_resolve_url_process_env_wins_over_file(tmp_path, monkeypatch):
+    """US2: an exported var beats the file value (no regression on the exported
+    path)."""
+    from fno import status_fanout as sf
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("FNO_STATUS_DISCORD=https://from-file/hook\n")
+    monkeypatch.setenv("FNO_STATUS_DISCORD", "https://from-env/hook")
+    monkeypatch.setattr(sf, "_secrets_env_path", lambda: env_file)
+
+    sink = StatusSinkConfig(name="d", type="text-webhook", url_env="FNO_STATUS_DISCORD")
+    url, _ = sf._resolve_url(sink)
+    assert url == "https://from-env/hook"
+
+
+def test_resolve_url_missing_everywhere_short_circuits_secret_safe(tmp_path, monkeypatch):
+    """US3: absent in both env and file -> short-circuit-worthy, the error names
+    the var but never a value, and no crash on a missing file."""
+    from fno import status_fanout as sf
+
+    monkeypatch.delenv("FNO_STATUS_DISCORD", raising=False)
+    monkeypatch.setattr(sf, "_secrets_env_path", lambda: tmp_path / "absent.env")
+
+    sink = StatusSinkConfig(name="d", type="text-webhook", url_env="FNO_STATUS_DISCORD")
+    url, err = sf._resolve_url(sink)
+    assert url is None
+    assert "FNO_STATUS_DISCORD" in err
+    assert "discord.example" not in err  # never leaks a value

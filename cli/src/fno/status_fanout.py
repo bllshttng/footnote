@@ -33,6 +33,7 @@ import typer
 
 from fno import paths
 from fno.config import StatusFanoutConfig, StatusSinkConfig
+from fno.env_file import read_var_from_env_file
 from fno.plan._stamp import _atomic_write as _atomic_write_plan
 from fno.plan.locking import plan_doc_lock
 
@@ -502,16 +503,28 @@ def _deliver(url: str, body: dict[str, Any], fanout: StatusFanoutConfig) -> "tup
     return SHORT_CIRCUIT, f"exhausted retries ({reason})"
 
 
+def _secrets_env_path() -> Path:
+    # ponytail: global ~/.fno/.env; add config.status_fanout.secrets_file only if
+    # a real deployment needs it elsewhere.
+    return Path.home() / ".fno" / ".env"
+
+
 def _resolve_url(sink: StatusSinkConfig) -> "tuple[Optional[str], Optional[str]]":
     """Resolve a webhook URL from ``url`` or ``url_env``. Returns (url, error);
-    a missing env secret is short-circuit-worthy (fixable), not a hard drop."""
+    a missing env secret is short-circuit-worthy (fixable), not a hard drop.
+
+    ``url_env`` resolves from the process env first, then ``~/.fno/.env`` - the
+    daemon shells the tick with its own env, which never saw the operator's
+    ``export``, so a file fallback is what makes an unattended ``url_env`` sink
+    deliver (x-0128). Process env wins so an exported value is unchanged."""
     if sink.url:
         return sink.url, None
     if sink.url_env:
-        val = os.environ.get(sink.url_env)
+        val = os.environ.get(sink.url_env) or read_var_from_env_file(
+            str(_secrets_env_path()), sink.url_env)
         if val:
             return val, None
-        return None, f"url_env {sink.url_env} unset"
+        return None, f"url_env {sink.url_env} unset (checked process env and ~/.fno/.env)"
     return None, "no url configured"
 
 

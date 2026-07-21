@@ -49,8 +49,9 @@ Two non-negotiable invariants:
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Mapping, NamedTuple, Optional
+
+from fno.env_file import read_var_from_env_file
 
 if TYPE_CHECKING:
     from fno.config import ModelRoutingBlock, SettingsModel
@@ -160,29 +161,6 @@ def _parse_target(raw: str) -> Optional[tuple[str, str]]:
     return provider.lower(), model
 
 
-def _key_from_env_file(path_str: str, key_name: str) -> Optional[str]:
-    """Read ``key_name`` from a ``.env``-style file. Missing file / key is not
-    fatal: returns None so the caller falls back to the primary model.
-
-    Tolerates an optional ``export`` prefix and whitespace around ``=``.
-    RuntimeError is caught alongside OSError/ValueError because
-    ``Path.expanduser()`` raises it when the home dir cannot be resolved."""
-    try:
-        text = Path(path_str).expanduser().read_text(encoding="utf-8")
-    except (OSError, ValueError, RuntimeError):
-        return None
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("#") or "=" not in line:
-            continue
-        if line.startswith("export "):
-            line = line[len("export "):].strip()
-        name, _, value = line.partition("=")
-        if name.strip() == key_name:
-            return value.strip().strip('"').strip("'") or None
-    return None
-
-
 def _resolve_key(
     provider: Mapping[str, Optional[str]], env: Mapping[str, str]
 ) -> Optional[str]:
@@ -195,7 +173,7 @@ def _resolve_key(
             return from_env
     key_file = provider.get("api_key_file")
     if key_file and key_name:
-        return _key_from_env_file(key_file, key_name)
+        return read_var_from_env_file(key_file, key_name)
     return None
 
 
@@ -223,7 +201,7 @@ def key_source(
     key_file = provider.get("api_key_file")
     if key_file and key_name:
         checked.append(str(key_file))
-        if _key_from_env_file(str(key_file), key_name):
+        if read_var_from_env_file(str(key_file), key_name):
             return str(key_file), checked
     return None, checked
 
