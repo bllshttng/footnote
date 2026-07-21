@@ -884,7 +884,7 @@ EOF
   _authority_line=""
   [[ "${TARGET_BEASTMODE:-}" == "1" ]] && _authority_line="authority: full"$'\n' || true
   # Work-evidence baseline for the do-provenance stamp; `null` fails it closed.
-  _initial_head=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo null)
+  _initial_head=$(git -C "$REPO_ROOT" rev-parse --verify -q HEAD 2>/dev/null || echo null)
 
   cat > "$local_temp" << EOF
 ---

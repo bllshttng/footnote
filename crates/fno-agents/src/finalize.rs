@@ -453,7 +453,12 @@ pub fn run_finalize(args: &[String]) -> i32 {
             eprintln!("finalize: session {session_id} already finalized (ship); early-return");
             return 0;
         }
-        Some(false) if !ship => {
+        // `DoneAwaitingMerge` is not in SHIP_REASONS, so without this it would
+        // early-return here and never reach the always-run tail. A session that
+        // hits Budget and then resumes to DoneAwaitingMerge would silently lose
+        // its do stamp - the same "correct wiring, missing coverage" failure this
+        // backstop exists to fix. Everything downstream is idempotent.
+        Some(false) if !ship && !is_do_stamp_terminal(&reason) => {
             eprintln!(
                 "finalize: session {session_id} ledger already recorded (non-ship); early-return"
             );
@@ -1520,6 +1525,16 @@ fn stamp_node_pr(cwd: &Path, node: Option<&str>) {
     }
 }
 
+/// The terminals a `do` stamp is allowed on. Planner-only sessions exit via
+/// Budget/NoProgress/Interrupted, so those never stamp.
+///
+/// Deliberately NOT `SHIP_REASONS`, which also contains `DoneAdvisory`: a doc
+/// ship authors no branch commits, so reusing that constant here would stamp
+/// every doc ship. The two sets disagree on purpose.
+fn is_do_stamp_terminal(reason: &str) -> bool {
+    matches!(reason, "DonePRGreen" | "DoneAwaitingMerge")
+}
+
 /// Guarded `do` lifecycle stamp (x-0469). `/do` Step 1.5 is the earlier truthful
 /// stamp, but most `/target` runs implement inline and never invoke `/do`, so the
 /// phase was recorded twice across ~2800 nodes. This is the backstop: one record
@@ -1527,19 +1542,27 @@ fn stamp_node_pr(cwd: &Path, node: Option<&str>) {
 ///
 /// `sessions[]` is append-only and every worker-session resolver trusts it, so a
 /// WRONG stamp is strictly worse than none - stamping at init recorded the
-/// PLANNER (PR #504, reverted). All four guards therefore fail closed. G1 (ship
-/// reason) and G4 (authored-commit evidence) evaluate here; G2 (identity
-/// continuity) and G3 (plan agreement) ride flags into `fno backlog session add`,
-/// which already owns ambient-identity precedence. Log-only and never retried:
-/// a guard skip is a designed outcome, and retrying one would spin.
+/// PLANNER (PR #504, reverted). G1 (ship reason) and G4 (authored-commit
+/// evidence) evaluate here; G2 (identity continuity) and G3 (plan agreement)
+/// ride flags into `fno backlog session add`, which already owns ambient-identity
+/// precedence.
+///
+/// G1, G2 and G4 fail closed. G3 is the deliberate exception: an unreadable plan
+/// or an absent `claims:` counts as agreement (mirroring `/do` Step 1.5, since
+/// absent evidence of conflict is not conflict), and only a positive
+/// disagreement skips. The primitive says so on stderr when it could not
+/// evaluate, so that leniency is never silent.
+///
+/// Log-only and never retried: a guard skip is a designed outcome, and retrying
+/// one would spin.
 fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
-    let Some(node) = m.graph_node_id.as_deref() else { return };
+    let Some(node) = m.graph_node_id.as_deref() else {
+        return;
+    };
     let skip = |guard: &str, why: String| {
         eprintln!("finalize: do stamp skipped for node {node} ({guard}: {why})");
     };
-    // G1: planner-only sessions exit via Budget/NoProgress/Interrupted, and a doc
-    // ship (DoneAdvisory) authors no branch commits, so G4 would skip it anyway.
-    if !matches!(reason, "DonePRGreen" | "DoneAwaitingMerge") {
+    if !is_do_stamp_terminal(reason) {
         return skip("G1", format!("{reason} is not a ship terminal"));
     }
     // G2 input: an absent id cannot prove continuity, so it is not stamped.
@@ -1577,18 +1600,33 @@ fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
     }
 }
 
-/// True when `initial_head..HEAD` holds a non-merge commit authored at or after
-/// `floor` (epoch seconds).
+/// True when `initial_head..HEAD` holds a non-merge commit on HEAD's own
+/// first-parent chain authored at or after `floor` (epoch seconds).
 ///
 /// Author dates, never committer dates: `git rebase` rewrites the committer date
 /// to now while preserving the author date, so a successor that merely rebased a
 /// predecessor's branch onto main moves HEAD maximally while authoring nothing.
-/// `--since` filters on committer date and would re-open exactly that hole. The
-/// range is set subtraction, so it survives a rebased-away `initial_head`; any
-/// git failure (GC'd baseline, deleted worktree) reads as no evidence.
+/// `--since` filters on committer date and would re-open exactly that hole.
+///
+/// `--first-parent` closes the sibling hole. The range is set subtraction over
+/// the whole DAG, and `--no-merges` drops a merge commit but KEEPS its payload,
+/// so a session that authored nothing and only ran `git merge origin/main` would
+/// otherwise pass on other contributors' commits - genuinely recent, so the
+/// author-date floor cannot catch them. The session's own commits sit on HEAD's
+/// first-parent chain, so they still count.
+///
+/// The range survives a rebased-away `initial_head`; any git failure (GC'd
+/// baseline, deleted worktree) reads as no evidence.
 fn authored_work_since(cwd: &Path, initial_head: &str, floor: i64) -> bool {
     let range = format!("{initial_head}..HEAD");
-    let Some(out) = git_capture(cwd, &["log", "--no-merges", "--format=%at", &range]) else {
+    let args = [
+        "log",
+        "--no-merges",
+        "--first-parent",
+        "--format=%at",
+        &range,
+    ];
+    let Some(out) = git_capture(cwd, &args) else {
         return false;
     };
     out.lines()
@@ -1985,15 +2023,67 @@ mod tests {
     }
 
     #[test]
+    fn work_evidence_rejects_commits_merged_in_from_upstream() {
+        // A session that authored nothing and only ran `git merge origin/main`.
+        // `--no-merges` drops the merge commit but keeps its payload, so without
+        // --first-parent this passes on other contributors' commits - and their
+        // author dates are genuinely recent, so the floor cannot catch them.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        git_fixture(d);
+        commit_at(d, "base", 1000, 1000);
+        let base = head_of(d);
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(d)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .status()
+                .unwrap();
+        };
+        git(&["checkout", "-q", "-b", "upstream"]);
+        commit_at(d, "someone else's work", 5000, 5000);
+        git(&["checkout", "-q", "-"]);
+        git(&["merge", "-q", "--no-ff", "upstream", "-m", "merge upstream"]);
+        assert!(!authored_work_since(d, &base, 2000));
+
+        // ...and the session's own commit still counts: it lands on HEAD's
+        // first-parent chain.
+        commit_at(d, "my own work", 6000, 6000);
+        assert!(authored_work_since(d, &base, 2000));
+    }
+
+    #[test]
+    fn do_stamp_terminals_exclude_doc_ships_and_planner_exits() {
+        assert!(is_do_stamp_terminal("DonePRGreen"));
+        assert!(is_do_stamp_terminal("DoneAwaitingMerge"));
+        // DoneAdvisory is in SHIP_REASONS but must NOT stamp: a doc ship authors
+        // no branch commits. Swapping this predicate for SHIP_REASONS would
+        // stamp every doc ship, and this assertion is what catches that.
+        assert!(!is_do_stamp_terminal("DoneAdvisory"));
+        for planner in ["Budget", "NoProgress", "Interrupted", "NoWork"] {
+            assert!(!is_do_stamp_terminal(planner), "{planner} must not stamp");
+        }
+    }
+
+    #[test]
     fn work_evidence_rejects_a_merge_only_range_and_a_bad_baseline() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         git_fixture(d);
         commit_at(d, "base", 1000, 1000);
         // A GC'd / unknown baseline makes git fail: no evidence, never a stamp.
-        assert!(!authored_work_since(d, "0000000000000000000000000000000000000000", 0));
+        assert!(!authored_work_since(
+            d,
+            "0000000000000000000000000000000000000000",
+            0
+        ));
         // So does a directory that is not a repo at all.
-        assert!(!authored_work_since(Path::new("/nonexistent-xyz"), &head_of(d), 0));
+        assert!(!authored_work_since(
+            Path::new("/nonexistent-xyz"),
+            &head_of(d),
+            0
+        ));
     }
 
     #[test]

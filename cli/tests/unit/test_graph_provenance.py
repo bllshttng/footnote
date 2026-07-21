@@ -1509,3 +1509,50 @@ def test_skip_json_carries_the_resolved_node_and_identity(tmp_path, monkeypatch)
     assert payload["status"] == "skipped"
     assert payload["node_id"] == "ab-guard001"
     assert payload["session_id"] == "SESSION-A"
+
+
+def test_claimed_at_is_forwarded_on_the_pr_number_path(tmp_path, monkeypatch):
+    """A flag accepted, reported as success, and silently dropped is the failure
+    this feature refuses elsewhere; the --pr-number path must honor it too."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _make_graph(tmp_path, [{
+        "id": "ab-guardpr1", "title": "t", "pr_number": 4242,
+        "pr_url": "https://github.com/o/r/pull/4242",
+    }])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "SESSION-A")
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "--pr-number", "4242", "--repo", "o/r", "--phase", "do",
+        "--claimed-at", "2026-07-20T10:00:00Z",
+    ])
+    assert r.exit_code == 0
+    rows = _sessions(g)
+    assert len(rows) == 1
+    assert rows[0]["claimed_at"] == "2026-07-20T10:00:00Z"
+
+
+def test_claimed_at_is_validated_on_the_pr_number_path(tmp_path, monkeypatch):
+    """It was accepted unvalidated there while the NODE path raised."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _make_graph(tmp_path, [{
+        "id": "ab-guardpr2", "title": "t", "pr_number": 4243,
+        "pr_url": "https://github.com/o/r/pull/4243",
+    }])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "SESSION-A")
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "--pr-number", "4243", "--repo", "o/r", "--phase", "do",
+        "--claimed-at", "not-a-timestamp",
+    ])
+    assert r.exit_code == 2
+    assert _sessions(g) == []

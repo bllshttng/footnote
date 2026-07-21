@@ -3583,7 +3583,8 @@ def cmd_session_add(
         if pr is not None:
             node_id, status = stamp_session_for_pr(
                 _graph_path(), pr, phase=phase,
-                harness=eff_harness, session_id=eff_session, at=at, repo=repo,
+                harness=eff_harness, session_id=eff_session, at=at,
+                claimed_at=claimed_at, repo=repo,
             )
             if status in ("no-node", "ambiguous"):
                 cands = find_nodes_for_pr(_graph_path(), pr, repo=repo)
