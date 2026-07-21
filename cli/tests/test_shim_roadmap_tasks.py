@@ -117,7 +117,7 @@ def test_ac3_fr_cli_src_exists_but_no_abilities_package():
     """AC3-FR: cli/src exists but fno package absent; ImportError branch fires.
 
     The assert passes (cli/src dir is present), but the import fails.
-    The shim must produce the 'uv tool install' hint and exit 3.
+    The shim must produce the ImportError diagnostic and exit 3.
     It must NOT produce the 'shim broken' message -- that is the assert branch,
     which only fires when cli/src is completely absent.
     """
@@ -138,8 +138,8 @@ def test_ac3_fr_cli_src_exists_but_no_abilities_package():
         f"Expected exit code 3, got {result.returncode}.\nstderr: {result.stderr}"
     )
     # ImportError branch message must appear
-    assert "uv tool install" in result.stderr, (
-        f"Expected 'uv tool install' install hint in stderr.\nstderr: {result.stderr}"
+    assert "cannot import fno.graph.cli" in result.stderr, (
+        f"Expected the ImportError diagnostic in stderr.\nstderr: {result.stderr}"
     )
     # The shim-broken assert must NOT fire (cli/src was present)
     assert "fno CLI shim broken" not in result.stderr, (

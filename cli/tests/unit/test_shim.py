@@ -1,8 +1,8 @@
 """Tests for the scripts/roadmap-tasks.py compatibility shim (#24).
 
 The shim has two distinct error paths:
-- Lines 15-21: cli/src directory missing (covered by FOLLOW-UPS #11).
-- Lines 25-32: cli/src present but fno.graph package unimportable.
+- cli/src directory missing (covered by FOLLOW-UPS #11).
+- cli/src present but fno.graph package unimportable.
 
 #24 covers the second branch. Both must surface rc=3 with their own
 diagnostic, and a fix to one path must not regress the other.
