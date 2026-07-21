@@ -8,11 +8,23 @@ Run: python3 tests/test_graph.py   OR   pytest tests/test_graph.py
 """
 import atexit
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 SCRIPT = Path(__file__).parent.parent / "scripts" / "roadmap-tasks.py"
+CLI_DIR = Path(__file__).parent.parent / "cli"
+
+# The shim is invoked via sys.executable, so a bare `python3 tests/test_graph.py`
+# runs it under an interpreter with no typer/pydantic and every case dies in an
+# import error. Re-exec under the project interpreter so the documented
+# invocation works instead of silently testing nothing.
+try:
+    import typer  # noqa: F401
+except ModuleNotFoundError:
+    import os
+    os.execvp("uv", ["uv", "run", "--project", str(CLI_DIR), "python", __file__])
 GRAPH_PATH = Path.home() / ".fno" / "graph.json"
 BACKUP_PATH = Path.home() / ".fno" / "graph.json.test-backup"
 
@@ -88,13 +100,16 @@ def _():
     assert isinstance(data, list), f"expected list, got {type(data)}"
 
 
-@test("shim: add creates a node with ab- ID")
+@test("shim: add creates a node with a <prefix>-<hex> ID")
 def _():
     out, rc = run(["add", "Smoke Test Feature", "--project", "smoke"])
     assert rc == 0, f"exit {rc}: {out}"
     data = json.loads(out)
-    assert data["id"].startswith("ab-"), f"ID should start with ab-: {data['id']}"
-    assert len(data["id"]) == 11, f"ID should be 11 chars: {data['id']}"
+    # The prefix and hex width are config-driven (config.backlog.id_prefix /
+    # id_hex_width), so assert the shape rather than a hardcoded "ab-".
+    assert re.fullmatch(r"[a-z]+-[0-9a-f]{4,8}", data["id"]), (
+        f"ID should be <prefix>-<4..8 hex>: {data['id']}"
+    )
     assert data["title"] == "Smoke Test Feature"
 
 
