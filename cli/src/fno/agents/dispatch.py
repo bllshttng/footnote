@@ -1325,6 +1325,12 @@ _PIN_LOOKUP_BACKOFF_S = 0.05
 # comment calls out as the caller's to reconcile.
 _NO_CHILD_POSSIBLE_EXIT = 127
 
+# How long to guard a transcript whose possible writer we could not identify (a
+# timeout or unparseable receipt leaves no short_id to resolve a pid from). Long
+# enough to cover the orphan's startup, short enough that a false positive costs
+# one delayed wake rather than a wedged session.
+_UNKNOWN_ORPHAN_TTL_MS = 5 * 60 * 1000
+
 
 def _claude_create_path(
     *,
@@ -1424,6 +1430,27 @@ def _claude_create_path(
         except Exception:
             pass
 
+    def _anchor_claim_for_unknown_orphan() -> None:
+        """Keep guarding a possible supervisor whose pid we never learned.
+
+        The TTL is what makes this guard real. The claim is currently pinned to
+        this short-lived process, so it would read STALE the instant we exit and
+        the next wake would reclaim it while the orphan is still writing. With a
+        TTL, a dead pid reads SUSPECT instead, which acquire refuses until the
+        window lapses. The project's own preference settles the trade-off: a
+        missed wake demotes to durable, a second writer corrupts a transcript.
+        """
+        if writer_claim_holder is None or not resume_session_id:
+            return
+        try:
+            claude_mod.acquire_session_writer_claim(
+                session_uuid=resume_session_id,
+                holder=writer_claim_holder,
+                ttl_ms=_UNKNOWN_ORPHAN_TTL_MS,
+            )
+        except Exception:
+            pass
+
     def _pin_claim_to_supervisor(spawned_short_id: str) -> bool:
         """Re-pin the claim from this process onto the spawned supervisor.
 
@@ -1473,13 +1500,14 @@ def _claude_create_path(
             account_env=account_env,
         )
     except claude_mod.ProviderSubprocessError as exc:
-        # Only a never-executed claude proves no supervisor exists. A timeout or a
-        # non-zero exit may have left one running, and freeing the claim there is
-        # the fail-open double-writer this change exists to close. Keeping it
-        # costs nothing: pinned to this exiting process it goes dead-pid, and the
-        # next acquire reclaims it through stale recovery.
+        # Only a never-executed claude proves no supervisor exists. A timeout or
+        # a non-zero exit may have left one running, and there is no short_id to
+        # resolve its pid from - so the claim gets a TTL, which is the only thing
+        # that keeps guarding it once this process exits.
         if exc.exit_code == _NO_CHILD_POSSIBLE_EXIT:
             _release_writer_claim()
+        else:
+            _anchor_claim_for_unknown_orphan()
         events.emit(
             "agent_ask_failed",
             stage="subprocess",
@@ -1490,7 +1518,9 @@ def _claude_create_path(
         raise DispatchAskError(exc.stderr, exit_code=1) from exc
     except claude_mod.ProviderParseError as exc:
         # claude exited 0 and only its receipt was unreadable, so a supervisor is
-        # very likely running. Keep the claim.
+        # very likely running - and without a parsed short_id we cannot find its
+        # pid. Same TTL anchor as the timeout case.
+        _anchor_claim_for_unknown_orphan()
         events.emit(
             "agent_ask_failed",
             stage="parse",
@@ -1581,15 +1611,17 @@ def _claude_create_path(
         # the transcript to the next wake while the orphan is still writing.
         if not pinned_to_supervisor:
             pinned_to_supervisor = _pin_claim_to_supervisor(short_id)
+            if not pinned_to_supervisor:
+                _anchor_claim_for_unknown_orphan()
         held_note = (
             f" session writer claim session:{resume_session_id} is held for the "
             f"orphan (pid-pinned); later wakes of this session will refuse until "
             f"that supervisor exits."
             if pinned_to_supervisor
             else (
-                f" session writer claim session:{resume_session_id} is held but "
-                f"its supervisor pid is unresolved; it will be reclaimed as stale "
-                f"once this process exits."
+                f" session writer claim session:{resume_session_id} is held on a "
+                f"{_UNKNOWN_ORPHAN_TTL_MS // 60000}m TTL (supervisor pid "
+                f"unresolved); later wakes refuse until it lapses."
             )
         )
         raise DispatchAskError(

@@ -399,7 +399,57 @@ def test_writer_claim_kept_when_a_child_may_exist(
 
     result = _spawn_resume()
     assert result.exit_code == 1, result.output
-    assert _status()["state"] != "free", f"claim was freed after {label}"
+
+    st = _status()
+    assert st["state"] != "free", f"claim was freed after {label}"
+    # The TTL is what makes the guard real. Without it the claim is pure
+    # PID-liveness and reads STALE - therefore reclaimable - the instant this
+    # process exits, so the orphan it is meant to guard would be unguarded.
+    assert st["expires_at"], f"claim after {label} is not TTL-anchored"
+
+
+def test_unknown_orphan_guard_survives_the_caller_dying(revive_ready, monkeypatch):
+    """The point of the TTL, proven the only way that counts: with the holder's
+    pid dead, the claim must still refuse a competing writer. A pure PID-liveness
+    claim would be STALE here and the next wake would reclaim it."""
+    from fno.agents.providers import claude as claude_mod
+    from fno.claims import acquire_claim, claim_status
+    from fno.claims.core import ClaimHeldByOther
+    from fno.claims.io import global_claims_root
+
+    _pin_supervisor(monkeypatch, revive_ready)
+
+    def _timeout(**_kw):
+        raise claude_mod.ProviderSubprocessError(124, "claude --bg timed out")
+
+    monkeypatch.setattr(claude_mod, "bg_create", _timeout)
+    assert _spawn_resume().exit_code == 1
+
+    # Rewrite the holder's pid to a dead one: the acquiring `fno mail send` has
+    # exited, which is exactly when the old lifetime stopped guarding anything.
+    root = global_claims_root()
+    path = root / "claims" / f"{CLAIM_KEY.replace(':', '_')}.yaml"
+    if not path.exists():  # layout is an implementation detail; find it
+        path = next(p for p in root.rglob("*") if p.is_file() and "session" in p.name)
+    dead_pid = _reap_a_dead_pid()
+    path.write_text(
+        path.read_text().replace(f"pid: {os.getpid()}", f"pid: {dead_pid}"),
+        encoding="utf-8",
+    )
+
+    assert claim_status(CLAIM_KEY, root=root)["state"] == "suspect"
+    with pytest.raises(ClaimHeldByOther):
+        acquire_claim(CLAIM_KEY, "a-later-wake", root=root)
+
+
+def _reap_a_dead_pid() -> int:
+    """A pid that is certainly not running: spawn and reap a trivial child."""
+    import subprocess
+    import sys
+
+    p = subprocess.Popen([sys.executable, "-c", ""])
+    p.wait()
+    return p.pid
 
 
 def test_claim_substrate_fault_fails_closed(revive_ready, monkeypatch):
