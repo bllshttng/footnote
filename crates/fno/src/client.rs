@@ -2531,6 +2531,15 @@ impl View {
     /// `None` when the pane cannot spare the cells. The grip is an affordance,
     /// never the only way in - the keyboard move-pane bind reaches the same
     /// operation - so a cramped pane loses the handle and keeps the gesture.
+    ///
+    /// Deliberately PERSISTENT rather than hover-only: a terminal cannot change
+    /// the cursor shape, so a handle that appears only once the pointer is
+    /// already on it is a handle nobody discovers. The cost is real and accepted
+    /// - these three cells of each pane's top row always show `···` and always
+    /// start a drag rather than reaching the inner app, so a program drawing
+    /// there is overdrawn and unclickable at those columns. Bounded to
+    /// multi-pane tabs, to three cells, and to panes wide enough to spare them,
+    /// with the keyboard path as the escape hatch.
     fn grip_span(&self, rect: Rect) -> Option<(u16, std::ops::Range<u16>)> {
         let w = GRIP.chars().count() as u16;
         // Two spare cells so the grip never abuts the pane's own borders, where
