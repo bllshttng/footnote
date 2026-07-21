@@ -2337,6 +2337,31 @@ impl View {
         })
     }
 
+    /// Whether a seam still separates the exact pair that addressed it.
+    ///
+    /// Membership is deliberately not the test. A concurrent same-axis split
+    /// can insert a pane between the two while keeping both ids alive, and a
+    /// membership check would call that seam live: the drag stays latched,
+    /// `set_seam_ratio` refuses every command for the now non-adjacent pair,
+    /// and the divider looks dead until release with no notice ever shown.
+    /// Geometry is what the address actually means, so geometry is what is
+    /// checked - one divider cell between them, overlapping across it.
+    fn seam_is_live(&self, seam: Seam) -> bool {
+        let (Some(ra), Some(rb)) = (self.pane_rect(seam.a), self.pane_rect(seam.b)) else {
+            return false;
+        };
+        let abuts = |start: u16, len: u16, next: u16| start.saturating_add(len) + 1 == next;
+        let overlaps = |a0: u16, a_len: u16, b0: u16, b_len: u16| {
+            a0 < b0.saturating_add(b_len) && b0 < a0.saturating_add(a_len)
+        };
+        match seam.axis {
+            Axis::Horizontal => {
+                abuts(ra.x, ra.cols, rb.x) && overlaps(ra.y, ra.rows, rb.y, rb.rows)
+            }
+            Axis::Vertical => abuts(ra.y, ra.rows, rb.y) && overlaps(ra.x, ra.cols, rb.x, rb.cols),
+        }
+    }
+
     /// The share of the seam's pair currently held by pane `a`, in permille.
     /// Pair-relative, not branch-relative: the client cannot see the branch's
     /// other children, so the server rescales this against the pair's own total.
@@ -3040,14 +3065,10 @@ impl View {
         // pair that addressed it, and a seam whose panes are gone must not stay
         // lit as draggable. The drag itself re-anchors here too - it survives a
         // layout push that leaves its pair intact, and ends when one does not.
-        let live_seam = |s: &Seam| {
-            let live = |id: u64| self.layout.panes.iter().any(|(p, _)| *p == id);
-            live(s.a) && live(s.b)
-        };
-        if self.hover_seam.is_some_and(|s| !live_seam(&s)) {
+        if self.hover_seam.is_some_and(|s| !self.seam_is_live(s)) {
             self.hover_seam = None;
         }
-        if self.seam_drag.is_some_and(|d| !live_seam(&d.seam)) {
+        if self.seam_drag.is_some_and(|d| !self.seam_is_live(d.seam)) {
             self.seam_drag = None;
             self.set_notice("divider gone: layout changed".into());
         }
@@ -10810,6 +10831,52 @@ mod tests {
         assert!(
             view.notice.is_some(),
             "the drag ending is reported, never silent"
+        );
+    }
+
+    #[test]
+    fn drag_ends_when_a_split_lands_between_its_panes() {
+        // Both ids survive a same-axis split between them, so a membership
+        // check would call this seam live. It is not: the panes no longer
+        // flank one divider, the server would refuse every command, and the
+        // divider would look dead until release with no notice ever shown.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        view.begin_seam_drag(seam, Instant::now());
+        view.on_hover(5, 51, Instant::now());
+
+        let rect = |x, cols| Rect {
+            x,
+            y: 0,
+            rows: 29,
+            cols,
+        };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            // New pane 13 lands between 10 and 11; every original id lives on.
+            panes: vec![
+                (10, rect(0, 16)),
+                (13, rect(17, 16)),
+                (11, rect(34, 16)),
+                (12, rect(51, 21)),
+            ],
+            focus: 13,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        });
+        assert!(
+            view.seam_drag.is_none(),
+            "the pair is no longer adjacent, so the drag ends"
+        );
+        assert!(view.hover_seam.is_none());
+        assert!(
+            view.notice.is_some(),
+            "and says so, rather than going quiet"
         );
     }
 

@@ -202,7 +202,14 @@ use crate::tree::{Dir, Rect, TabId};
 /// and without a version difference the handshake would accept an upgraded
 /// client and then drop it on the first decode error instead of telling the
 /// operator to restart the server.
-pub const PROTO_VERSION: u32 = 38;
+///
+/// v39 (x-d807): `Command::ResizeSeam` (dragging a pane divider). Same case as
+/// v38 - a new verb rather than an additive field, so a v38 server cannot
+/// deserialize it. Mux servers deliberately outlive client upgrades, so without
+/// the bump an upgraded client would attach cleanly to a v38 server and then
+/// have the connection dropped on its first divider drag, instead of being told
+/// at handshake to restart the server.
+pub const PROTO_VERSION: u32 = 39;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
