@@ -1718,14 +1718,17 @@ def cmd_rm(
       claude    `claude rm <short_id>` (session record + worktree, via
                 claude's own delegation contract)
       codex     drops the session's entry from ~/.codex/session_index.jsonl
-      opencode  `opencode session delete <ses_...>`
+      opencode  registry-only; `rm` will not delete an opencode session,
+                because that also deletes its child sessions and its whole
+                message history. Run `opencode session delete <id>` if you
+                want the conversation gone.
       gemini    registry-only (no teardown arm for a deprecated provider)
 
-    Transcript files are always preserved -- teardown removes the
-    harness's index/db record, never your history. On teardown failure
-    the registry row is kept so you can retry; ``--force`` drops it
-    anyway and names the orphan. Removing an agent does not stop a
-    running session; use ``fno agents stop`` for that.
+    Your history is never removed here -- teardown drops the harness's
+    index record, not the conversation. On teardown failure the registry
+    row is kept so you can retry; ``--force`` drops it anyway and names
+    the orphan. Removing an agent does not stop a running session; use
+    ``fno agents stop`` for that.
 
     Worktrees are NOT removed here for non-claude harnesses (nothing on
     the registry row marks a cwd as an isolated worktree). Reap them with

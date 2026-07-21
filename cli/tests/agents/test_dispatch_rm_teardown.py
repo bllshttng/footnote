@@ -122,6 +122,70 @@ def test_codex_teardown_refuses_non_uuid_id(isolated_state):
     assert index.read_text(encoding="utf-8") == before
 
 
+def test_codex_spares_a_row_that_merely_mentions_the_id(isolated_state):
+    """The index carries a free-text thread_name, so substring matching bites.
+
+    A session named after another session's uuid must survive its removal.
+    """
+    home = Path.home()
+    index = home / ".codex" / "session_index.jsonl"
+    index.parent.mkdir(parents=True, exist_ok=True)
+    bystander = f'{{"id":"{KEEP_ID}","thread_name":"investigate {GONE_ID}"}}\n'
+    index.write_text(
+        bystander + f'{{"id":"{GONE_ID}","thread_name":"the target"}}\n',
+        encoding="utf-8",
+    )
+    _seed("worker", harness="codex", session_id=GONE_ID, cwd=isolated_state)
+
+    rm_agent("worker")
+
+    assert index.read_text(encoding="utf-8") == bystander
+
+
+def test_codex_keeps_lines_it_cannot_parse(isolated_state):
+    """Never remove what you do not understand."""
+    home = Path.home()
+    index = home / ".codex" / "session_index.jsonl"
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.write_text(
+        f"not json at all {GONE_ID}\n" + f'{{"id":"{GONE_ID}"}}\n', encoding="utf-8"
+    )
+    _seed("worker", harness="codex", session_id=GONE_ID, cwd=isolated_state)
+
+    rm_agent("worker")
+
+    assert index.read_text(encoding="utf-8") == f"not json at all {GONE_ID}\n"
+
+
+def test_codex_rewrite_preserves_file_mode(isolated_state):
+    index = _write_index(Path.home(), [KEEP_ID, GONE_ID])
+    index.chmod(0o600)
+
+    codex_mod.remove_session_index_entry(GONE_ID)
+
+    assert index.stat().st_mode & 0o777 == 0o600
+
+
+def test_codex_non_string_stored_id_refuses_cleanly(isolated_state):
+    """A corrupt row must not surface as a TypeError traceback."""
+    with pytest.raises(ValueError):
+        codex_mod.remove_session_index_entry(123)
+
+
+def test_rm_without_session_id_refuses_then_forces(isolated_state, capsys):
+    """The harness record may exist; dropping the row silently orphans it."""
+    _seed("worker", harness="codex", session_id="", cwd=isolated_state)
+
+    with pytest.raises(DispatchAskError) as exc:
+        rm_agent("worker")
+    assert exc.value.exit_code == 12
+    assert _names() == ["worker"]
+
+    rm_agent("worker", force=True)
+    assert _names() == []
+    assert "WARN" in capsys.readouterr().err
+
+
 def test_codex_rm_preserves_row_when_index_unwritable(isolated_state, monkeypatch):
     """AC1-ERR: ordering invariant holds for the codex arm."""
     _write_index(Path.home(), [GONE_ID])
@@ -193,42 +257,33 @@ def test_codex_rewrite_is_atomic_and_leaves_no_temp_file(isolated_state, monkeyp
 
 
 # ------------------------------------------------------------------ opencode
+#
+# opencode is registry-only ON PURPOSE. `opencode session delete` is the
+# store's only deletion verb and it takes the session's child sessions and
+# every message row with it (`message.session_id` is ON DELETE CASCADE), so
+# there is no record-only teardown to perform. `rm` must not destroy a
+# conversation as a side effect of cleaning up a registry row.
 
 SES = "ses_7f3a9b2c1d"
 
 
-class _Run:
-    """Stand-in for subprocess.run capturing argv."""
-
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
-        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
-        self.argv: list[str] | None = None
-
-    def __call__(self, argv, **kwargs):
-        self.argv = argv
-        return self
-
-
-def _with_opencode(monkeypatch, run: _Run) -> None:
-    monkeypatch.setattr(opencode_mod, "_subprocess_run", run)
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/opencode")
-
-
-def test_opencode_rm_deletes_session_and_row(isolated_state, monkeypatch):
-    """AC2-HP."""
-    run = _Run(stdout=f"Session {SES} deleted")
-    _with_opencode(monkeypatch, run)
+def test_opencode_rm_is_registry_only_and_says_so(isolated_state, capsys):
     _seed("ocw", harness="opencode", session_id=SES, cwd=isolated_state)
 
     rm_agent("ocw")
 
-    assert run.argv == ["opencode", "--pure", "session", "delete", SES]
+    out = capsys.readouterr().out
     assert _names() == []
+    assert SES in out, "the surviving session must be named"
+    assert "opencode session delete" in out, "the escape hatch must be offered"
 
 
-def test_opencode_rm_missing_session_is_idempotent(isolated_state, monkeypatch):
-    """AC1-EDGE: opencode reports an absent session as exit 1, not success."""
-    _with_opencode(monkeypatch, _Run(returncode=1, stderr=f"Error: Session not found: {SES}"))
+def test_opencode_rm_never_shells_out(isolated_state, monkeypatch):
+    """The whole point: no deletion command may run for an opencode row."""
+    def _explode(*a, **k):
+        raise AssertionError("rm must not shell out for an opencode agent")
+
+    monkeypatch.setattr(subprocess, "run", _explode)
     _seed("ocw", harness="opencode", session_id=SES, cwd=isolated_state)
 
     rm_agent("ocw")
@@ -236,68 +291,11 @@ def test_opencode_rm_missing_session_is_idempotent(isolated_state, monkeypatch):
     assert _names() == []
 
 
-def test_opencode_rm_preserves_row_on_failure(isolated_state, monkeypatch):
-    """AC1-ERR."""
-    _with_opencode(monkeypatch, _Run(returncode=1, stderr="Error: database is locked"))
-    _seed("ocw", harness="opencode", session_id=SES, cwd=isolated_state)
-
-    with pytest.raises(DispatchAskError):
-        rm_agent("ocw")
-
-    assert _names() == ["ocw"]
-
-
-def test_opencode_rm_missing_binary_preserves_row(isolated_state, monkeypatch):
-    """AC1-ERR: not-on-PATH mirrors claude's exit 14 family."""
-    monkeypatch.setattr("shutil.which", lambda name: None)
-    _seed("ocw", harness="opencode", session_id=SES, cwd=isolated_state)
-
-    with pytest.raises(DispatchAskError) as exc:
-        rm_agent("ocw")
-
-    assert exc.value.exit_code == 14
-    assert _names() == ["ocw"]
-
-
-def test_opencode_rm_timeout_preserves_row(isolated_state, monkeypatch):
-    """A hung `opencode` must not hang rm, and must not drop the row."""
-    def _boom(argv, **kwargs):
-        raise subprocess.TimeoutExpired(argv, 30)
-
-    monkeypatch.setattr(opencode_mod, "_subprocess_run", _boom)
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/opencode")
-    _seed("ocw", harness="opencode", session_id=SES, cwd=isolated_state)
-
-    with pytest.raises(DispatchAskError) as exc:
-        rm_agent("ocw")
-
-    assert exc.value.exit_code == 15
-    assert _names() == ["ocw"]
-
-
-def test_opencode_rm_force_drops_row_and_warns(isolated_state, monkeypatch, capsys):
-    """AC2-ERR."""
-    _with_opencode(monkeypatch, _Run(returncode=1, stderr="Error: database is locked"))
-    _seed("ocw", harness="opencode", session_id=SES, cwd=isolated_state)
-
-    rm_agent("ocw", force=True)
-
-    err = capsys.readouterr().err
-    assert "WARN" in err and SES in err
-    assert "opencode" in err, "the orphan's harness must be named too"
-    assert _names() == []
-
-
-def test_opencode_session_delete_refuses_malformed_id(monkeypatch):
-    """No shell metacharacter can reach the subprocess."""
-    run = _Run()
-    monkeypatch.setattr(opencode_mod, "_subprocess_run", run)
-
-    for bad in ("", "abc", "ses_", "ses_x'; drop table session;--"):
-        with pytest.raises(ValueError):
-            opencode_mod.session_delete(bad)
-
-    assert run.argv is None, "a malformed id must never reach the subprocess"
+def test_opencode_session_id_shape_guard():
+    for good in (SES, "ses_abc123"):
+        assert opencode_mod.is_session_id(good)
+    for bad in ("", "abc", "ses_", "ses_x'; drop table session;--", None, 123):
+        assert not opencode_mod.is_session_id(bad)
 
 
 def test_unknown_harness_still_refuses(isolated_state):

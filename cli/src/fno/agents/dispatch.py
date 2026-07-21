@@ -2541,18 +2541,19 @@ def _teardown_harness_session(
     *,
     name: str,
     force: bool,
-    shellout_timeout: float,
 ) -> None:
     """Delete a non-claude agent's record from its own harness store.
 
-    Record-only (Locked Decision 1): the harness's index/db row goes, the
-    transcript files stay. Upholds the ordering invariant by raising
-    before the caller touches the registry -- unless ``force``, which
-    downgrades every failure to a stderr WARN naming the orphan so the
-    operator can clean it later.
+    Record-only: the harness's index record goes, the conversation stays.
+    Upholds the ordering invariant by raising before the caller touches
+    the registry -- unless ``force``, which downgrades every failure to a
+    stderr WARN naming the orphan so the operator can clean it later.
 
     An already-absent harness record is success, not an error: a manually
     cleaned store must not wedge ``fno agents rm``.
+
+    opencode is registry-only because it has no record-only teardown at
+    all; see :mod:`fno.agents.providers.opencode`.
     """
     harness = existing.harness
     sid = existing.harness_session_id
@@ -2576,12 +2577,25 @@ def _teardown_harness_session(
             f"Orphan {harness} session record: {sid}\n"
         )
 
+    if harness == "opencode":
+        # No record-only teardown exists for opencode: removing the session
+        # would take its child sessions and full message history with it.
+        # Registry-only, and say so rather than implying nothing was left.
+        from fno.agents.providers import opencode as opencode_mod
+
+        if sid:
+            print(opencode_mod.REGISTRY_ONLY_NOTE.format(sid=sid), flush=True)
+        return
+
     if not sid:
-        # Nothing addresses a harness record here, so there is no action to
-        # refuse -- unlike claude, whose shellout also removes the worktree.
-        sys.stderr.write(
-            f"WARN: registry entry has no {harness} session id on file; "
-            "removing registry row only.\n"
+        # Refuse rather than assume there is nothing to clean: the harness
+        # record may well exist, and this row simply lost the id that
+        # addresses it. Silently dropping the row would orphan it for good.
+        _fail(
+            f"registry entry has no {harness} session id on file; cannot "
+            "tear down the harness record. Re-run with --force to drop the "
+            "registry row anyway.",
+            exit_code=12,
         )
         return
 
@@ -2602,40 +2616,6 @@ def _teardown_harness_session(
             else f"already gone: codex session index entry {sid}",
             flush=True,
         )
-        return
-
-    if harness == "opencode":
-        from fno.agents.providers import opencode as opencode_mod
-
-        if shutil.which("opencode") is None:
-            _fail("opencode CLI not on PATH", exit_code=14)
-            return
-        try:
-            rc, output = opencode_mod.session_delete(sid, timeout=shellout_timeout)
-        except ValueError as exc:
-            _fail(str(exc), exit_code=12)
-            return
-        except FileNotFoundError:
-            _fail("opencode CLI not on PATH", exit_code=14)
-            return
-        except subprocess.TimeoutExpired:
-            _fail(
-                f"opencode session delete timed out after {int(shellout_timeout)}s",
-                exit_code=15,
-            )
-            return
-        except OSError as exc:
-            _fail(f"opencode session delete failed: {exc}", exit_code=1)
-            return
-        if rc == 0:
-            print(f"torn down: opencode session {sid}", flush=True)
-        elif opencode_mod.looks_already_gone(output, sid):
-            print(f"already gone: opencode session {sid}", flush=True)
-        else:
-            _fail(
-                f"opencode session delete {sid} exited {rc}: {output.strip()}",
-                exit_code=1,
-            )
         return
 
     # Fail loud rather than fall off the end: the caller's harness tuple and
@@ -2795,7 +2775,6 @@ def rm_agent(
                     existing,
                     name=name,
                     force=force,
-                    shellout_timeout=shellout_timeout,
                 )
             elif existing.harness != "gemini":
                 raise DispatchAskError(
@@ -2826,10 +2805,9 @@ def rm_agent(
             # Stdout "removed:" prints come AFTER update_registry succeeds so
             # a write failure cannot leave the operator with a misleading
             # confirmation. (Sigma-review C3 finding.)
-            if existing.harness in ("codex", "opencode") and existing.harness_session_id:
+            if existing.harness == "codex" and existing.harness_session_id:
                 print(
-                    f"removed: {name} ({existing.harness} transcript files "
-                    "left on disk)",
+                    f"removed: {name} (codex transcript files left on disk)",
                     flush=True,
                 )
             else:

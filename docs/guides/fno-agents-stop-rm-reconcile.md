@@ -51,18 +51,27 @@ fno agents rm worker-claude --force
 
 `--force` drops the registry row regardless of claude's exit code, leaving the supervisor session orphaned. You are responsible for the manual `claude rm 7c5dcf5d` (the stderr WARN spells it out).
 
-The same ordering holds for **codex** and **opencode**, which tear down their own session record before the registry row is dropped:
+The same ordering holds for **codex**, which tears down its own session record before the registry row is dropped:
 
 | Harness | What teardown removes |
 |---------|-----------------------|
 | claude | `claude rm <short_id>` (session record + worktree, via claude's own delegation contract) |
 | codex | the session's entry in `~/.codex/session_index.jsonl` |
-| opencode | the session, via `opencode session delete <ses_...>` |
+| opencode | nothing; registry-only (see below) |
 | gemini | nothing; registry-only (no teardown arm for a deprecated provider) |
 
 Teardown is record-only.
-Transcripts always stay on disk: codex rollout files under `~/.codex/sessions/<date>/<id>` and opencode session JSON are never touched, so `rm` cleans up discovery without destroying history.
+Codex rollout files under `~/.codex/sessions/<date>/<id>` are never touched, so `rm` cleans up discovery without destroying history.
 Removing an agent also does not stop a running session; use `fno agents stop` for that.
+
+**Why opencode is registry-only.**
+`opencode session delete` is the store's only deletion verb, and it is not record-only: it also deletes the session's child sessions and every message row (`message.session_id` is `ON DELETE CASCADE`, so no direct-sqlite variant avoids this either).
+The conversation is keyed to the record, so there is no way to drop one and keep the other.
+`rm` will not destroy a conversation as a side effect of cleaning up a registry row, so it drops the row, names the surviving session, and leaves the deletion to you:
+
+```bash
+opencode session delete ses_7f3a9b2c1d
+```
 
 A harness record that is already gone counts as success, so re-running `rm` after a manual cleanup will not wedge.
 

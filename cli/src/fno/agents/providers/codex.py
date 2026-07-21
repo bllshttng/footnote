@@ -828,21 +828,29 @@ def remove_session_index_entry(
     changed, False if the id was already absent (idempotent success --
     a manually-cleaned index must not fail ``fno agents rm``).
 
-    The id must be UUID-shaped. That guard is load-bearing, not
-    defensive noise: matching is substring containment (mirroring
-    :func:`load_known_session_ids`, which deliberately does not pin a
-    JSON field name), so an empty or truncated id would match every
-    line and silently wipe the index.
+    Matching is on the parsed ``id`` FIELD, not substring containment.
+    The index also carries a free-text ``thread_name``, so a substring
+    match would delete an unrelated session whose name merely quotes
+    this uuid. :func:`load_known_session_ids` can afford its schema-
+    agnostic regex because a false positive there only over-reports
+    liveness; here it would destroy the wrong record.
 
-    The rewrite is surgical (drops only lines containing the id) and
-    atomic (temp file in the same directory + ``os.replace``), so a
-    concurrent codex append can never observe a half-written index.
+    A line that does not parse, or that carries no matching ``id``, is
+    always kept: this never removes what it does not understand.
+
+    The rewrite is atomic (temp file in the same directory + ``os.replace``,
+    preserving the original mode), so a concurrent codex append can never
+    observe a half-written index. It is NOT locked: an append landing
+    between the read and the rename is lost, which would leave that
+    session unknown to reconcile until codex rewrites the index. The
+    window is milliseconds on a manual admin command, so the ceiling is
+    accepted rather than paid for with a lock.
 
     Raises:
         ValueError: id is not UUID-shaped.
         OSError: index present but unreadable/unwritable (caller surfaces).
     """
-    if not _SESSION_ID_RE.fullmatch(session_id or ""):
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
         raise ValueError(
             f"refusing to rewrite codex session index: {session_id!r} is not "
             "a UUID-shaped session id"
@@ -853,12 +861,21 @@ def remove_session_index_entry(
     except FileNotFoundError:
         # Fresh codex install / index never written: nothing to tear down.
         return False
-    kept = [ln for ln in lines if session_id not in ln]
+
+    def _is_target(line: str) -> bool:
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            return False
+        return isinstance(row, dict) and row.get("id") == session_id
+
+    kept = [ln for ln in lines if not _is_target(ln)]
     if len(kept) == len(lines):
         return False
     tmp = path.with_name(f"{path.name}.fno-rm.{os.getpid()}.tmp")
     try:
         tmp.write_text("".join(kept), encoding="utf-8")
+        os.chmod(tmp, path.stat().st_mode & 0o7777)
         os.replace(tmp, path)
     except BaseException:
         # BaseException, not OSError: a KeyboardInterrupt landing between the
