@@ -30,9 +30,7 @@ def _patch_graph(monkeypatch, graph_path: Path) -> None:
     lock = graph_path.parent / "graph.lock"
     monkeypatch.setattr(gc, "GRAPH_JSON", graph_path)
     monkeypatch.setattr(gc, "GRAPH_MD", graph_path.parent / "graph.md")
-    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", lock)
     monkeypatch.setattr(gs, "GRAPH_JSON", graph_path)
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", lock)
 
 
 # ---------------------------------------------------------------------------

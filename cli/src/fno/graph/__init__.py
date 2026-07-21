@@ -14,7 +14,6 @@ from fno.graph._constants import (  # noqa: F401
     LEDGER_JSON,
     BRIEFS_DIR,
     ID_PREFIX,
-    GRAPH_LOCK_FILE,
     LOCK_TTL_HOURS,
     PRIORITY_ORDER,
 )

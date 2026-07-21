@@ -36,10 +36,8 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
-    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     # Remove any ambient CLAUDECODE_SESSION_ID so tests that don't set it
     # don't accidentally inherit a real session id from the host.
     monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)

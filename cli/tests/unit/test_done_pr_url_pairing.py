@@ -29,9 +29,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
         (gc, "GRAPH_JSON", g),
         (gc, "GRAPH_MD", tmp_path / "graph.md"),
         (gc, "GRAPH_HTML", tmp_path / "graph.html"),
-        (gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock"),
         (gs, "GRAPH_JSON", g),
-        (gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock"),
     ):
         monkeypatch.setattr(mod, attr, val)
     g.write_text(json.dumps({"entries": [

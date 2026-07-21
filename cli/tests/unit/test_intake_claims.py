@@ -355,10 +355,8 @@ def test_cli_runner_intake_with_claims_flag(tmp_path, monkeypatch):
     ledger.write_text('{"entries": []}\n')
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
-    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
 
     plan = _write_quick_plan(tmp_path, title="Real Typer plan")
     runner = CliRunner()
@@ -385,10 +383,8 @@ def test_cli_runner_intake_unknown_claim_exits_nonzero(tmp_path, monkeypatch):
     ledger.write_text('{"entries": []}\n')
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
-    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
 
     plan = _write_quick_plan(tmp_path)
     runner = CliRunner()

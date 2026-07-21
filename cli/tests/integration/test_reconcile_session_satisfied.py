@@ -223,11 +223,9 @@ def _patch_graph_path(monkeypatch, graph_path: Path) -> None:
     import fno.graph._constants as gc
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", graph_path)
-    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", graph_path.parent / "graph.lock")
     monkeypatch.setattr(gc, "GRAPH_MD", graph_path.parent / "graph.md")
     monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", graph_path.parent / "graph-archive.json")
     monkeypatch.setattr(gs, "GRAPH_JSON", graph_path)
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", graph_path.parent / "graph.lock")
 
 
 def test_cli_reconcile_emits_session_satisfied_for_owner(tmp_path, monkeypatch):

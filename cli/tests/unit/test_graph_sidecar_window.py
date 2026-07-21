@@ -150,7 +150,6 @@ def test_ac3hp_concurrent_writes_never_surface_corruption(tmp_path, monkeypatch)
     import fno.graph.store as gs
 
     g = tmp_path / "graph.json"
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     # Seed a present node the readers resolve throughout.
     from fno.graph.store import locked_mutate_graph
 

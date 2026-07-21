@@ -38,7 +38,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fno.graph._constants import GRAPH_JSON, GRAPH_LOCK_FILE, GRAPH_MD
+from fno.graph._constants import GRAPH_JSON, GRAPH_MD
 
 # Keep at most this many timestamped backups on disk.
 GRAPH_BACKUP_KEEP = 10
@@ -596,6 +596,23 @@ def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     return _apply_graph_defaults(entries)
 
 
+def _graph_lock_path(path: Path) -> Path:
+    """Sibling lockfile for a graph.json (``<graph>.lock``).
+
+    Resolved so two spellings of the same graph (relative vs absolute, or a
+    symlinked .fno) share ONE inode and stay mutually exclusive; mirrors the
+    is_canonical resolve below. Falls back to the raw path on a resolve error
+    (symlink loop) rather than crashing the mutation.
+    """
+    # ponytail: resolve() before .lock so aliased paths to one graph share a
+    # lock; drop it only if profiling ever flags the stat.
+    try:
+        base = path.resolve()
+    except OSError:
+        base = path
+    return Path(str(base) + ".lock")
+
+
 def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     """Locked read-modify-write for graph entries. Recomputes statuses after mutation."""
     # Import here to avoid circular imports
@@ -604,7 +621,7 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     from fno.paths import vault_root
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = _acquire_flock(GRAPH_LOCK_FILE)
+    fd = _acquire_flock(_graph_lock_path(path))
     try:
         try:
             raw = _read_json(path)

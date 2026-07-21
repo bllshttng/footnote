@@ -117,8 +117,7 @@ def test_maintain_cli_surfaces_rollup_candidates(tmp_path, monkeypatch):
     for mod, attr, val in (
         (gc, "GRAPH_JSON", g), (gc, "GRAPH_MD", tmp_path / "g.md"),
         (gc, "GRAPH_HTML", tmp_path / "g.html"),
-        (gc, "GRAPH_LOCK_FILE", tmp_path / "g.lock"),
-        (gs, "GRAPH_JSON", g), (gs, "GRAPH_LOCK_FILE", tmp_path / "g.lock"),
+        (gs, "GRAPH_JSON", g),
     ):
         monkeypatch.setattr(mod, attr, val)
 
