@@ -356,7 +356,7 @@ def folder_audit(
     help=(
         "Normalize drifted plan frontmatter status to the canonical vocabulary "
         "in place. Dry-run by default; pass --apply to write. Prints "
-        "'N normalized, M archived, K skipped'."
+        "'N normalized, M superseded, K skipped'."
     ),
 )
 def reconcile_status(

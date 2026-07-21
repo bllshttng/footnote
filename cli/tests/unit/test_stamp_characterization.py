@@ -2,7 +2,7 @@
 
 Runs `python3 -m fno.plan._stamp <verb>` on temp fixtures and asserts the
 resulting frontmatter + exit codes match the documented contract (stamp ->
-status: shipped + urls/session_ids; graduate -> status: done once the URL
+status: in_review + urls/session_ids; graduate -> status: done once the URL
 count is met; set-expected -> writes expected_url_count; bad count exits 2).
 """
 from __future__ import annotations
@@ -70,7 +70,7 @@ def test_module_stamp_then_graduate_contract(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     text = doc.read_text()
-    assert "status: shipped" in text
+    assert "status: in_review" in text
     assert "shipped_at:" in text
     assert "https://example.com/pull/7" in text
     assert "SID-X" in text

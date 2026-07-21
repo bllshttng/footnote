@@ -21,7 +21,7 @@ from fno.plan.schema import PlanFrontmatter, PlanStatus
 
 
 def test_plan_status_axis_matches_status_module() -> None:
-    """PlanStatus members == STATUS_PROGRESSION plus exactly {done, archived} (AC2-HP).
+    """PlanStatus members == STATUS_PROGRESSION plus exactly {done, superseded} (AC2-HP).
 
     Fails the build the moment someone edits the axis in ``_status.py`` (or the
     enum here) without the other - the exact drift-killer the config schema
@@ -31,14 +31,14 @@ def test_plan_status_axis_matches_status_module() -> None:
     axis = set(STATUS_PROGRESSION)
     terminals = set(TERMINAL_STATUSES)
 
-    assert terminals == {"done", "archived"}, (
-        f"off-axis terminals drifted: {sorted(terminals)} != ['archived', 'done']"
+    assert terminals == {"done", "superseded"}, (
+        f"off-axis terminals drifted: {sorted(terminals)} != ['done', 'superseded']"
     )
     assert members == axis | terminals, (
         "PlanStatus drifted from _status.py; the enum must be derived from "
         "STATUS_PROGRESSION + TERMINAL_STATUSES (never hand-listed)"
     )
-    # done/archived are off the monotonic axis, never inserted into it.
+    # done/superseded are off the monotonic axis, never inserted into it.
     assert members - axis == terminals
 
 

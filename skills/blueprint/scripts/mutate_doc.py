@@ -80,7 +80,7 @@ from fno.plan._status import (  # noqa: E402
 _BLUEPRINT_INPUT_STATUSES = frozenset({"design", "ready"})
 
 # Statuses where the plan is past blueprint phase (cannot mutate even with --rewrite)
-_PAST_BLUEPRINT_STATUSES = frozenset({"in_progress", "reviewing", "shipping", "shipped"})
+_PAST_BLUEPRINT_STATUSES = frozenset({"in_progress", "in_review", "reviewing", "shipping", "shipped"})
 
 # Default kill_criteria entries. Canonical {name, predicate, reason} shape - the
 # predicate engine and validate-plan.sh both read these fields; the old flat

@@ -745,7 +745,7 @@ fi
 if [[ -n "$target_file" ]]; then
     # Scope to frontmatter only: extract lines between the first two --- delimiters.
     FRONTMATTER=$(awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$target_file")
-    STATUS_FM=$(echo "$FRONTMATTER" | grep -oE "^status:[[:space:]]*(done|shipped)" 2>/dev/null | head -1 | sed 's/status:[[:space:]]*//' || true)
+    STATUS_FM=$(echo "$FRONTMATTER" | grep -oE "^status:[[:space:]]*(done|in_review|shipped)" 2>/dev/null | head -1 | sed 's/status:[[:space:]]*//' || true)
     if [[ -n "$STATUS_FM" ]]; then
         ok "INFO: plan is already shipped (status: $STATUS_FM) - stamp fields present and accepted"
     else

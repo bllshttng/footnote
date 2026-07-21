@@ -1,16 +1,21 @@
 """Frontmatter status state machine for lean single-doc plan architecture.
 
 Enforces the monotonic progression:
-    design -> ready -> in_progress -> shipped
+    design -> ready -> in_progress -> in_review
 
-Tracks the same lifecycle ladder the graph `_status` speaks, with `shipped` as
-the plan-side name for the graph's `in_review` rung (GRAPH_TO_PLAN_STATUS is
-the alignment layer). `idea` has no plan doc so it never appears here, and
-`done`/`archived` are off-axis terminals.
+Speaks the same words as the graph `_status` ladder, one per rung. `idea` has
+no plan doc so it never appears here, and `done`/`superseded` are off-axis
+terminals. GRAPH_TO_PLAN_STATUS survives the unification because two of its
+rows are not renames at all: `blocked` and `deferred` map to None, the gate
+that keeps a graph-side pause from writing plan state.
+
+`shipped` and `archived` were the plan-side spellings of `in_review` and
+`superseded`. They are retired as status VALUES and accepted on read via
+STATUS_ALIASES; `shipped_at` is a timestamp field and is untouched.
 
 `reviewing`/`shipping` were pruned (x-f34f): they had zero consumers and the
 graph has no derived state that distinguishes them, so they never got written.
-The reconcile sweep now folds them into `shipped` as Tier-1 synonyms.
+The reconcile sweep folds them into `in_review` as Tier-1 synonyms.
 
 Backward transitions, identity transitions, and unknown statuses all raise
 StatusTransitionError. No silent fallbacks.
@@ -24,18 +29,21 @@ STATUS_PROGRESSION: tuple[str, ...] = (
     "design",
     "ready",
     "in_progress",
-    "shipped",
+    "in_review",
 )
 
 # Off-axis terminals: written directly (graduate stamps `done`; the status
-# sweep stamps `archived`), NOT part of the monotonic axis. Inserting either
+# sweep stamps `superseded`), NOT part of the monotonic axis. Inserting either
 # into STATUS_PROGRESSION would break the forward-transition index math.
-TERMINAL_STATUSES: tuple[str, ...] = ("done", "archived")
+TERMINAL_STATUSES: tuple[str, ...] = ("done", "superseded")
 
 # Retired spellings, accepted on read and never written. Mirrors the read-and-
 # write shape of STATUS_MIGRATION in fno.graph.statuses: a doc stamped under the
 # old vocabulary keeps parsing at its correct rung, and nothing rewrites it.
-STATUS_ALIASES: dict[str, str] = {}
+STATUS_ALIASES: dict[str, str] = {
+    "shipped": "in_review",
+    "archived": "superseded",
+}
 
 # The full plan-status vocabulary the reconcile sweep leaves untouched: canonical
 # axis + terminals + every retired spelling. A retired spelling is valid input,
@@ -46,9 +54,9 @@ KNOWN_STATUSES: frozenset[str] = (
 
 # Graph derived `_status` -> plan `status` projection (x-f34f). Total over the
 # graph vocabulary; None means "no plan write" (a graph-side gate that must not
-# touch plan state). Since x-5d91 the two vocabularies are the same ladder, so
-# this is near-identity - it survives to carry the genuinely non-identity rows
-# (idea -> design, superseded -> archived, and the two None gates).
+# touch plan state). Identity on every rung since x-3ad5 unified the spellings -
+# it survives for `idea` (which has no plan doc) and the two None gates, which
+# are real behavior with no naming component.
 GRAPH_TO_PLAN_STATUS: dict[str, str | None] = {
     "idea": "design",  # node exists, no plan doc yet
     "design": "design",  # doc exists but is still a design doc
@@ -56,20 +64,21 @@ GRAPH_TO_PLAN_STATUS: dict[str, str | None] = {
     "in_progress": "in_progress",
     "claimed": "in_progress",  # legacy graph vocabulary, pre-x-5d91 rows
     "blocked": None,  # graph-side gate; plan keeps its current state
-    "in_review": "shipped",  # PR open = implementation complete
+    "in_review": "in_review",  # PR open = implementation complete
     "done": "done",  # merged
-    "superseded": "archived",
+    "superseded": "superseded",
     "deferred": None,  # pause is reversible; plan state stands
 }
 
-# Forward-only ordering for the projection. `done` caps the axis; `archived`
-# (from `superseded`) is a terminal reachable from any non-terminal state and is
+# Forward-only ordering for the projection. Keyed by the plan vocabulary, so it
+# moves with any rename or the guard silently stops matching. `done` caps the
+# axis; `superseded` is a terminal reachable from any non-terminal state and is
 # never rank-compared.
 _PROJECTION_RANK: dict[str, int] = {
     "design": 0,
     "ready": 1,
     "in_progress": 2,
-    "shipped": 3,
+    "in_review": 3,
     "done": 4,
 }
 
@@ -92,11 +101,11 @@ def canonical_status(raw: object) -> str:
 def project_plan_status(current: object, graph_status: str) -> Optional[str]:
     """Plan status to WRITE for a node in ``graph_status``, or None to leave it.
 
-    Forward-only along design < ready < in_progress < shipped < done. Returns
+    Forward-only along design < ready < in_progress < in_review < done. Returns
     None when the graph status maps to no write, the target equals the current
     status, or the target would be a backward move (graph wins forward, a human
-    hand-edit wins backward). ``archived`` is written over any non-terminal
-    plan state (superseded) but never over ``done`` or ``archived``.
+    hand-edit wins backward). ``superseded`` is written over any non-terminal
+    plan state but never over ``done`` or ``superseded``.
     """
     target = GRAPH_TO_PLAN_STATUS.get(graph_status)
     if not target:
@@ -104,10 +113,10 @@ def project_plan_status(current: object, graph_status: str) -> Optional[str]:
     cur = canonical_status(current)
     if target == cur:
         return None
-    if target == "archived":
-        return None if cur in ("done", "archived") else "archived"
+    if target == "superseded":
+        return None if cur in ("done", "superseded") else "superseded"
     # target is a forward-axis status (design..done)
-    if cur in ("done", "archived"):
+    if cur in ("done", "superseded"):
         return None  # terminal: never auto-rewritten forward off a terminal
     if _PROJECTION_RANK[target] <= _PROJECTION_RANK.get(cur, -1):
         return None

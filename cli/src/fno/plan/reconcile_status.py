@@ -4,12 +4,12 @@ Plans stay FLAT in the plans dir; an Obsidian Base filters by frontmatter
 ``status``. Drifted or blank statuses lie to that Base, so this one-shot-then-
 idempotent sweep rewrites them to the canonical vocabulary (x-ff83 W2):
 
-    axis:      design ready in_progress shipped
-    terminals: done archived   (off-axis, written directly)
+    axis:      design ready in_progress in_review
+    terminals: done superseded   (off-axis, written directly)
 
 Three tiers. Tier 1 is a pure synonym rewrite (no history needed). Tier 2 (blank
 / ``implemented`` / any unknown token) needs a true-state signal: a linked node
-that is closed -> ``done``, else ``archived`` (an honest "off the board", never
+that is closed -> ``done``, else ``superseded`` (an honest "off the board", never
 a false ``done``). Tier 3 recomputes a CANONICAL-but-stale status from the
 linked node's derived ``_status`` (the x-76ea class: plan ``design`` while its
 node is ``done``), forward-only and graph-required. Dry-run by default;
@@ -17,7 +17,7 @@ node is ``done``), forward-only and graph-required. Dry-run by default;
 
 Only DRIFT tokens are in scope, so a canonical status is never touched: the
 sweep corrects, never downgrades, and is safe to re-run - after a human
-re-activates an ``archived`` plan to (say) ``design``, the next run skips it.
+re-activates a ``superseded`` plan to (say) ``design``, the next run skips it.
 The status scalar is rewritten as a single-line double-quoted value and the
 body is left byte-for-byte intact (the graduate/_stamp wrapped-scalar parser
 chokes on multi-line status; keep it single-line).
@@ -46,10 +46,9 @@ _TIER1: dict[str, str] = {
     "idea": "design",
     "ready-for-blueprint": "design",
     "design-locked": "ready",
-    "reviewing": "shipped",  # pruned axis states (x-f34f) fold into shipped
-    "shipping": "shipped",
-    "superseded": "archived",
-    "superseded-by-implementation": "archived",
+    "reviewing": "in_review",  # pruned axis states (x-f34f) fold into in_review
+    "shipping": "in_review",
+    "superseded-by-implementation": "superseded",
 }
 
 # Frontmatter block: leading ---\n ... \n--- . Non-greedy so the FIRST block
@@ -91,7 +90,7 @@ def target_status(raw: object, signal: Callable[[], bool]) -> Optional[str]:
     if s in _TIER1:
         return _TIER1[s]
     # Tier 2: blank, implemented/REVISED, or any unrecognized token.
-    return "done" if signal() else "archived"
+    return "done" if signal() else "superseded"
 
 
 def rewrite_status(text: str, new_status: str) -> Optional[str]:
@@ -116,14 +115,14 @@ def rewrite_status(text: str, new_status: str) -> Optional[str]:
 
 @dataclass
 class SweepResult:
-    normalized: int = 0  # rewritten to a non-archived canonical status
-    archived: int = 0  # rewritten to `archived`
+    normalized: int = 0  # rewritten to a non-terminal canonical status
+    superseded: int = 0  # rewritten to `superseded`
     skipped: int = 0  # already canonical, no frontmatter, or unparseable
     changes: list[tuple[str, str, str]] = field(default_factory=list)  # (path, old, new)
     warnings: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
-        return f"{self.normalized} normalized, {self.archived} archived, {self.skipped} skipped"
+        return f"{self.normalized} normalized, {self.superseded} superseded, {self.skipped} skipped"
 
 
 @lru_cache(maxsize=1)
@@ -141,7 +140,7 @@ def _done_node_ids() -> frozenset:
         return frozenset(
             e.get("id") for e in read_graph(graph_json()) if e.get("_status") == "done"
         )
-    except Exception:  # noqa: BLE001 - no graph => no signal => archived (honest)
+    except Exception:  # noqa: BLE001 - no graph => no signal => superseded (honest)
         return frozenset()
 
 
@@ -270,8 +269,8 @@ def sweep(
             rewritten = ensure_done_at(rewritten, ts)
 
         res.changes.append((str(path), _norm(raw) or "(none)", new))
-        if new == "archived":
-            res.archived += 1
+        if new == "superseded":
+            res.superseded += 1
         else:
             res.normalized += 1
         if apply:
