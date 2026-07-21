@@ -136,7 +136,12 @@ cleanup() {
     [[ -z "$pid_now" || "$pid_now" == "$$" ]] && rm -rf "$LOCKDIR"
     [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# Signals must EXIT, not just clean up. A bare `trap cleanup INT TERM` released
+# the lock and deleted the hermetic HOME, then let the script carry on through
+# the remaining suites unlocked - so a second preflight could enter the shared
+# worktree while this one was still reporting on it.
+trap 'cleanup; exit 130' INT TERM
 
 # --- ensure / reset the preflight worktree ----------------------------------
 echo "preflight: repo=$REPO_NAME candidate=$CANDIDATE_SHORT worktree=$PREFLIGHT_WT"
