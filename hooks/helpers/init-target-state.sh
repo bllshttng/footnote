@@ -734,10 +734,31 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # unchanged. _GRAPH_FILE is hoisted here (was defined in the claim block).
   _GRAPH_FILE="${HOME}/.fno/graph.json"
   _GUARD_NODE=""
-  if [[ "$INITIAL_INPUT" =~ ^ab-[0-9a-f]{8}$ ]] \
-     || { [[ "$INITIAL_INPUT" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] \
-          && grep -q "\"${INITIAL_INPUT}\"" "$_GRAPH_FILE" 2>/dev/null; }; then
-    _GUARD_NODE="$INITIAL_INPUT"
+  _GUARD_MATCHES=""   # space-joined distinct id-shaped tokens found in the graph
+  _GUARD_AMBIGUOUS=0
+  # Tokenize INITIAL_INPUT so a modifier-prefixed input ("beast mode <id>")
+  # still resolves its node, the way _resolve_plan_for_blast tokenizes. Each
+  # token keeps the same anchored id shape + graph presence, so free text still
+  # matches nothing. Exactly one distinct match wins; zero or ambiguous (>=2)
+  # stays fail-safe to no node. Unquoted split is bash-3.2 set -u safe (empty
+  # input => zero iterations, unlike an empty "${arr[@]}"); set -f keeps the
+  # split from also glob-expanding a token like "5*" against the cwd.
+  set -f
+  for _tok in $INITIAL_INPUT; do
+    if [[ "$_tok" =~ ^ab-[0-9a-f]{8}$ ]] \
+       || { [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] \
+            && grep -q "\"${_tok}\"" "$_GRAPH_FILE" 2>/dev/null; }; then
+      case " $_GUARD_MATCHES " in
+        *" $_tok "*) ;;  # already counted this distinct id
+        *) _GUARD_MATCHES="${_GUARD_MATCHES:+$_GUARD_MATCHES }$_tok" ;;
+      esac
+    fi
+  done
+  set +f
+  if [[ -n "$_GUARD_MATCHES" && "$_GUARD_MATCHES" != *" "* ]]; then
+    _GUARD_NODE="$_GUARD_MATCHES"
+  elif [[ "$_GUARD_MATCHES" == *" "* ]]; then
+    _GUARD_AMBIGUOUS=1
   fi
   if [[ -n "$_GUARD_NODE" && "${TARGET_ALLOW_IN_REVIEW:-}" != "1" ]]; then
     _GUARD_STATUS="$(fno backlog get --strict "$_GUARD_NODE" --field status 2>/dev/null | tr -d '[:space:]' || true)"
@@ -988,6 +1009,22 @@ for entry in entries:
         pass
 PYEOF
 )
+  fi
+
+  # Never lose a claim silently: when input was supplied but resolved to no
+  # node, the claim block below is skipped with no trace, so a modifier that hid
+  # a node id (or a plain free-text run) looks identical to a nodeless one. Emit
+  # exactly one line naming what happened, on the resolution path itself and
+  # before the claim block, so the absence of a target_claim_key is discoverable
+  # from stderr alone. The manifest is already written, so the session proceeds
+  # unclaimed rather than aborting. Empty input prints nothing (nothing to fail
+  # to resolve).
+  if [[ -z "$_NODE_ID" && -n "${INITIAL_INPUT// /}" ]]; then
+    if [[ "$_GUARD_AMBIGUOUS" -eq 1 ]]; then
+      echo "target: input names multiple node ids ($_GUARD_MATCHES); ambiguous, no node claimed" >&2
+    else
+      echo "target: no backlog node resolved from input '$INITIAL_INPUT'; running unclaimed" >&2
+    fi
   fi
 
   if [[ -n "$_NODE_ID" && -n "$claim_owner_id" ]]; then

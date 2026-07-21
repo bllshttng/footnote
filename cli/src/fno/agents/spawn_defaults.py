@@ -6,9 +6,14 @@ Every `fno agents spawn` / `/agent spawn` passes the Python dispatch seam
 and the Rust route with zero Rust changes (Locked Decision 9).
 
 Precedence per field: explicit CLI flag > `agents.defaults` > built-in. Fields
-resolve independently, so `-p claude` still inherits a config `model`. Scope is
-the operator-initiated spawn surface only; autonomous dispatch computes its own
-routing and reaches the seam as explicit flags, never displaced by these.
+resolve independently, with ONE exception: the `model` default is provider-
+scoped. A bare scalar `model` with no `provider` belongs to the harness it was
+written for (the config `provider`, else the inferred one), so a spawn that
+resolves to a DIFFERENT harness (e.g. `-p codex` over a claude-shaped `model`)
+leaves the model to that harness rather than forcing an incompatible one. An
+explicit `-m/--model` always wins. Scope is the operator-initiated spawn surface
+only; autonomous dispatch computes its own routing and reaches the seam as
+explicit flags, never displaced by these.
 """
 from __future__ import annotations
 
@@ -386,8 +391,38 @@ def inject_spawn_defaults(
         from_config.append("provider")
 
     if cfg_model and not has_model:
-        inject += ["--model", cfg_model]
-        from_config.append("model")
+        # The ambient config model applies only to the harness it was written
+        # for. Mirror the effort branch's resolution: the IMPLIED provider is the
+        # config provider, else harness inference; the RESOLVED provider is an
+        # explicit -p, else the implied. Inject only when they agree - a codex
+        # spawn must not inherit a claude model (it 400s after the round-trip),
+        # and an explicit --model stays the supported cross-harness override.
+        from fno.agents.provider_resolve import resolve_dispatch_provider
+
+        try:
+            implied = cfg_provider or resolve_dispatch_provider(None, env=env)[0]
+        except Exception:
+            # Degrade open (AC5-FR): resolve_dispatch_provider is newly reached
+            # here, and a raise must never brick a spawn that would otherwise
+            # work. No implied provider => no basis to inject => inject nothing.
+            print(
+                "fno agents spawn: provider resolution failed; "
+                "leaving model to the harness",
+                file=err,
+            )
+            implied = None
+        if implied:
+            resolved = (explicit_provider or "").strip() or implied
+            if resolved == implied:
+                inject += ["--model", cfg_model]
+                from_config.append("model")
+            else:
+                print(
+                    f"fno agents spawn: config model {cfg_model!r} targets "
+                    f"{implied}; spawn resolves {resolved}, leaving model to "
+                    "the harness",
+                    file=err,
+                )
 
     if cfg_effort and not has_effort:
         # Effort surface depends on the RESOLVED provider: an explicit -p flag,

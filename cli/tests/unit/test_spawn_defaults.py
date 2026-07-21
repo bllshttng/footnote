@@ -49,14 +49,23 @@ def test_ac3_bare_spawn_inherits_provider_and_model():
     assert out[-2:] == ["w", "hi"]
 
 
-def test_ac3_explicit_provider_wins_model_still_inherited():
-    # AC3-HP tail: -p claude wins field-by-field, model still inherited.
+def test_config_model_skipped_when_resolved_provider_differs():
+    # The ambient config model applies only to the harness it was written for.
+    # config provider=codex, model=gpt-5.6-sol, but -p claude retargets the
+    # spawn: the codex model must NOT be forced onto a claude spawn (it would
+    # 400 after the round-trip). explicit --model stays the supported override.
+    err = io.StringIO()
     out = _inject(
-        ["spawn", "-p", "claude", "w", "hi"], provider="codex", model="gpt-5.6-sol"
+        ["spawn", "-p", "claude", "w", "hi"],
+        err=err,
+        provider="codex",
+        model="gpt-5.6-sol",
     )
     assert out.count("--provider") == 0  # no config provider injected
     assert "-p" in out  # the explicit flag survives
-    assert "--model" in out and out[out.index("--model") + 1] == "gpt-5.6-sol"
+    assert out.count("--model") == 0  # codex model not forced onto claude
+    msg = err.getvalue()
+    assert "gpt-5.6-sol" in msg and "codex" in msg and "claude" in msg
 
 
 def test_explicit_equals_form_wins():
@@ -161,3 +170,44 @@ def test_help_after_argv_still_injects():
     # A --help inside the --argv payload is not a help request for spawn itself.
     out = _inject(["spawn", "w", "--argv", "tool", "--help"], provider="codex")
     assert "--provider" in out and out.index("--provider") < out.index("--argv")
+
+
+def test_ac2_hp_codex_spawn_does_not_inherit_claude_model():
+    # config model=opus (a claude alias), provider unset; an explicit -p codex
+    # retargets the spawn. The claude model must NOT ride onto codex, and a
+    # stderr line names the config model, its implied provider, and the resolved
+    # one. env={} => resolve_dispatch_provider infers claude as the implied.
+    err = io.StringIO()
+    out = _inject(["spawn", "-p", "codex", "w"], err=err, env={}, model="opus")
+    assert out.count("--model") == 0  # no --model opus injected
+    assert "opus" not in out
+    msg = err.getvalue()
+    assert "opus" in msg and "codex" in msg  # names the model and resolved provider
+
+
+def test_ac5_fr_provider_resolution_failure_degrades_open(monkeypatch):
+    # If resolve_dispatch_provider raises, the model default must degrade to
+    # injecting nothing rather than aborting the spawn.
+    import fno.agents.provider_resolve as pr
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("resolution exploded")
+
+    monkeypatch.setattr(pr, "resolve_dispatch_provider", _boom)
+    err = io.StringIO()
+    # provider unset so the model branch must call resolve_dispatch_provider.
+    out = _inject(["spawn", "-p", "codex", "w"], err=err, env={}, model="opus")
+    assert out.count("--model") == 0  # nothing injected
+    assert out[-1] == "w"  # spawn not aborted; positional preserved
+    assert "resolution" in err.getvalue().lower() or "leaving" in err.getvalue().lower()
+
+
+def test_ac6_edge_no_explicit_provider_injects_model_unchanged():
+    # No explicit -p, config model=opus, provider unset: --model opus is injected
+    # exactly as before, with no NEW skip/leave reason line. env={} => implied
+    # provider (claude) == resolved provider (claude) => inject.
+    err = io.StringIO()
+    out = _inject(["spawn", "w"], err=err, env={}, model="opus")
+    assert out == ["spawn", "--model", "opus", "w"]  # byte-identical to pre-fix
+    # the "leaving model to the harness" skip line must NOT fire here
+    assert "leaving model to the harness" not in err.getvalue()

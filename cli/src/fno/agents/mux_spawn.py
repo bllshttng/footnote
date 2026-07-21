@@ -58,11 +58,17 @@ _MUX_SUBPROCESS_TIMEOUT_S = 30
 #: (mirrors crates/fno proto::DEFAULT_SESSION).
 _DEFAULT_SESSION = "main"
 
-#: opencode is spawned with a model by default (its provider/model form). The
-#: chosen default is the z.ai GLM (the secondary provider); an explicit --model
-#: overrides it. ponytail: a plain constant, not a config knob, until a second
-#: opencode default is actually wanted.
-_OPENCODE_DEFAULT_MODEL = "z-ai/glm-5.2"
+#: Per-harness default model, keyed by provider (mux_spawn owns this alongside
+#: _EFFORT_ALLOWED). A harness appears ONLY when fno must supply a model the
+#: harness will not self-default: opencode's providerID/modelID pair needs one,
+#: so fno injects the z.ai GLM secondary. claude and codex are omitted ON
+#: PURPOSE - each reads its own harness config and self-defaults better than fno
+#: can guess, so injecting nothing is correct. An explicit --model always
+#: overrides. ponytail: a code table, not a config knob, until the set outgrows
+#: a literal.
+_PER_HARNESS_DEFAULT_MODEL = {
+    "opencode": "z-ai/glm-5.2",
+}
 
 
 @dataclass
@@ -504,9 +510,12 @@ def build_pane_argv(
         argv = ["opencode"]
         if message:
             argv += ["--prompt", message]
-        # opencode expects the provider/model form and is always launched with a
-        # model: an explicit --model wins, else the z-ai/glm-5.2 default.
-        argv += ["--model", model or _OPENCODE_DEFAULT_MODEL]
+        # opencode expects the provider/model form. An explicit --model wins,
+        # else the per-harness default table (opencode is the only entry);
+        # inject nothing if the table has no entry for this provider.
+        _default_model = model or _PER_HARNESS_DEFAULT_MODEL.get(provider)
+        if _default_model:
+            argv += ["--model", _default_model]
         argv += tier3
         if permission_mode:
             argv += permission_pane_tokens("opencode", permission_mode)
@@ -772,7 +781,9 @@ def dispatch_spawn_pane(
                 exit_code=2,
             )
         if provider == "opencode" and effort:
-            apply_opencode_variant(model or _OPENCODE_DEFAULT_MODEL, effort)
+            _variant_model = model or _PER_HARNESS_DEFAULT_MODEL.get(provider)
+            if _variant_model:
+                apply_opencode_variant(_variant_model, effort)
 
         # --claim marks the pane writer-claim eligible (agent panes only);
         # mail's live inject holds it around each burst.
