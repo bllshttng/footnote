@@ -44,6 +44,7 @@ MetricKey = Literal[
     "collisions",
     "project_cwd_mismatch",
     "orphan_feature_rate",
+    "done_not_merged",
 ]
 
 
@@ -329,6 +330,21 @@ def evaluate_thresholds(
                 kind="rate",
                 hint="open features that resolve no mission edge",
             ))
+
+    # 7. done=merged invariant (presence). A node closed over a PR that gh says
+    # is not merged, with no forced-close receipt. Presence-based: one is a bug.
+    # Unknowns (gh outage, PR outside the listed window) are deliberately NOT
+    # counted - a network blip that reports a dozen false violations trains the
+    # operator to mute the check, which is worse than not having it.
+    dnm_count = len(report.get("done_not_merged", []))
+    if dnm_count > 0:
+        breaches.append(_make_breach(
+            "done_not_merged",
+            actual=dnm_count,
+            threshold=0,
+            kind="presence",
+            hint="closed over an unmerged PR",
+        ))
 
     return breaches
 
