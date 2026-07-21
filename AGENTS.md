@@ -103,7 +103,7 @@ Paths are resolved via `fno.paths`; override under `config.paths.*`. Check with 
 
 ### Plan completion stamp
 
-At the ship gate `/target` stamps the plan frontmatter (`status: shipped|done`, `shipped_at`, `urls`, `session_ids`) — inline-list syntax only. `shipped` = first PR created (single-project → immediately `done`); `done` = all expected ships (cross-project: `len(urls) >= len(projects)`). [plan-completion-stamp](docs/architecture/plan-completion-stamp.md).
+At the ship gate `/target` stamps the plan frontmatter (`status: in_review|done`, `shipped_at`, `urls`, `session_ids`) — inline-list syntax only. `in_review` = first PR created (single-project → immediately `done`); `done` = all expected ships (cross-project: `len(urls) >= len(projects)`). [plan-completion-stamp](docs/architecture/plan-completion-stamp.md).
 
 ### Multi-repo features
 

@@ -115,3 +115,28 @@ def test_module_stamp_rejects_expected_url_count_below_one(tmp_path):
     )
     assert r.returncode == 2, r.stderr
     assert doc.read_text() == original  # no partial stamp
+
+
+def test_module_stamp_leaves_a_retired_spelling_in_place(tmp_path):
+    """x-3ad5: a doc already stamped `shipped` reads AS in_review, so a restamp
+    accumulates urls/session_ids without touching the status. The alias is
+    read-path translation; the rename must never become a migration write.
+    """
+    doc = tmp_path / "plan.md"
+    doc.write_text(PLAN_FIXTURE.replace("scope: single-project",
+                                        "scope: single-project\nstatus: shipped"))
+
+    r = _run_module(
+        "stamp", "--plan-path", str(doc),
+        "--session-id", "SID-Y", "--url", "https://example.com/pull/8",
+    )
+    assert r.returncode == 0, r.stderr
+    text = doc.read_text()
+    assert "status: shipped" in text  # spelling untouched
+    assert "status: in_review" not in text
+    assert "SID-Y" in text  # ...but the stamp still did its job
+
+    # And it still graduates, because graduate reads the alias too.
+    r = _run_module("graduate", "--plan-path", str(doc))
+    assert r.returncode == 0, r.stderr
+    assert "status: done" in doc.read_text()

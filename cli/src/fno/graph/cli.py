@@ -4981,7 +4981,7 @@ def _stamp_and_graduate_plan(
     target's ship gate: ``cmd_graduate`` returns early unless ``status`` is
     already ``shipped``, so a never-stamped plan's frontmatter would never record
     the ship (ab-bd9f476c). When a concrete PR ``url`` is available we first
-    ``stamp`` the plan (sets ``shipped_at`` + ``status: shipped`` + records the
+    ``stamp`` the plan (sets ``shipped_at`` + ``status: in_review`` + records the
     URL and session id) and THEN ``graduate`` (flips ``shipped -> done`` once the
     URL count is met). Without a URL we fall back to graduate-only - the prior
     behavior - rather than assert a ship we cannot evidence (e.g. a forced close

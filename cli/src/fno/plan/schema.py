@@ -11,7 +11,7 @@ stays byte-preserving (Locked Decision 1) - a YAML round-trip would reorder
 keys and reformat opaque blocks like `kill_criteria`.
 
 `PlanStatus` is derived FROM `_status.STATUS_PROGRESSION` (never re-listed) so
-the two definitions cannot drift; `done`/`archived` join as off-axis sibling
+the two definitions cannot drift; `done`/`superseded` join as off-axis sibling
 terminals, matching `_status`'s own split (Locked Decision 2).
 """
 from __future__ import annotations
