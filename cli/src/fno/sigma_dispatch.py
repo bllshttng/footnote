@@ -62,6 +62,7 @@ FILE AUTHORITY DISTINCTION
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import datetime
 import fcntl
 import hashlib
@@ -782,9 +783,6 @@ def dispatch_sigma_subagent(
 # (Spec 3 lock; combos compose with per-agent routing as additional
 # fallback, not replacement).
 # ---------------------------------------------------------------------------
-
-
-import dataclasses
 
 
 @dataclasses.dataclass(frozen=True)

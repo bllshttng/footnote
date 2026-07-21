@@ -36,8 +36,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Mapping, Optional
 
-DispatchKind = Literal["create", "followup"]
-
 from fno import paths
 from fno.agents import events
 from fno.agents.context import EventContext, build_context
@@ -51,6 +49,8 @@ from fno.agents.registry import (
     update_registry,
 )
 from fno.harness_identity import resolve_harness_identity
+
+DispatchKind = Literal["create", "followup"]
 
 
 # ---------------------------------------------------------------------------

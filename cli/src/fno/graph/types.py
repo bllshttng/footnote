@@ -4,6 +4,7 @@ Contains Status/Priority enums and the Entry pydantic model.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import math
 from enum import Enum
 from typing import Optional
@@ -40,8 +41,6 @@ SESSION_PHASES: frozenset[str] = frozenset({"think", "blueprint", "do", "ship"})
 # Re-export the canonical PRIORITY_ORDER from _constants so this module
 # stays in sync without a parallel literal.
 from fno.graph._constants import PRIORITY_ORDER  # noqa: E402,F401
-
-import datetime as _dt
 
 
 def _ts_now() -> str:

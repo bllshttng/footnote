@@ -40,13 +40,6 @@ import time
 from pathlib import Path
 from typing import Literal, Mapping, Optional
 
-OrphanReason = Literal[
-    "not-found",
-    "socket-null",
-    "liveness-failed",
-    "roster-live-inject-failed",
-]
-
 from fno.agents.providers._claude_session_registry import (
     TERMINAL_STATES,
     SessionLocator,
@@ -60,6 +53,13 @@ from fno.agents.providers._claude_session_registry import (
 from fno.agents.providers.base import ProviderResult, ReachabilityProbeError
 from fno.claims import ClaimHeldByOther, acquire_claim, release_claim
 from fno.claims.io import global_claims_root
+
+OrphanReason = Literal[
+    "not-found",
+    "socket-null",
+    "liveness-failed",
+    "roster-live-inject-failed",
+]
 
 # Locked Decision 6: 8 lowercase hex chars after "backgrounded · ".
 _SHORT_ID_PATTERN = re.compile(r"^backgrounded · ([0-9a-f]{8}) · ")
