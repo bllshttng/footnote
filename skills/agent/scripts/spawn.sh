@@ -299,8 +299,15 @@ is_code_payload() {
 # into the result (a `cd` dies with the shell), so it still needs pre-creation --
 # and its transcripts never land in ~/.claude/projects/ anyway. `/do` and `/fix`
 # refuse on a protected branch rather than isolating, so they keep it everywhere.
+#
+# A NODE is required, not incidental: the cold-start that does the isolating is
+# `fno target start <node>`, which has nothing to start from without one. A
+# free-text `/target ship the thing` never reaches it -- unattended, that path
+# hits the location-refusal backstop on canonical main and aborts -- so
+# delegating there would strand the worker instead of isolating it.
 self_isolating_payload() {
   [[ "$PROVIDER" == "claude" ]] || return 1
+  [[ -n "$NODE" ]] || return 1
   case "$PAYLOAD_MODE" in
     build) return 0 ;;   # node dispatch: renders `/target <id>` on claude
     passthrough)

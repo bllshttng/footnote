@@ -314,5 +314,17 @@ has  "opencode build still pre-created" "$err18" "auto-worktree: $TMP/conductor/
 no   "opencode build not delegated" "$err18" "delegated to the worker cold-start"
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-oc-target" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: opencode build lost its worktree"; }
 
+# 17. a FREE-TEXT claude /target (passthrough, no node) keeps pre-creation. The
+#     cold-start that would isolate it is `fno target start <node>`, and there is
+#     no node; unattended, that path hits the location-refusal backstop on
+#     canonical main and aborts, so delegating would strand the worker.
+out19="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-freetext-target" \
+  --provider claude --payload-mode passthrough \
+  --message "/target ship it bg" --cwd "$REPO" 2>"$TMP/err19")"
+err19="$(cat "$TMP/err19")"
+has  "free-text /target pre-created" "$err19" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-freetext-target"
+no   "free-text /target not delegated" "$err19" "delegated to the worker cold-start"
+[[ -d "$TMP/conductor/workspaces/myrepo/spawn-freetext-target" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: free-text /target lost its worktree"; }
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
