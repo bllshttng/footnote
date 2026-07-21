@@ -38,7 +38,10 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fno.graph._constants import GRAPH_JSON
+from fno.graph._constants import (  # noqa: F401  GRAPH_MD re-exported: patched via store.GRAPH_MD
+    GRAPH_JSON,
+    GRAPH_MD,
+)
 
 # Keep at most this many timestamped backups on disk.
 GRAPH_BACKUP_KEEP = 10
