@@ -42,21 +42,21 @@ footnote/
 
 ## Commands
 
-**Front door.** Six advertised verbs: `/target`, `/megawalk`, `/think`, `/review`, `/pr`, `/fix`. Each fans out to modes (`/review sigma|peer`, `/fix` + `investigate`, `/think` + `what-if|panel`, `/pr create|check|merged`, `/do flat|waves`). Everything else is invocable by full name. The advertised set lives in `skills/using-fno/SKILL.md`, injected at SessionStart.
+**Front door.** Six advertised verbs: `/fno:target`, `/fno:megawalk`, `/fno:think`, `/fno:review`, `/fno:pr`, `/fno:fix`. Each fans out to modes (`/fno:review sigma|peer`, `/fno:fix` + `investigate`, `/fno:think` + `what-if|panel`, `/fno:pr create|check|merged`, `/fno:do flat|waves`). Everything else is invocable by full name. The advertised set lives in `skills/using-fno/SKILL.md`, injected at SessionStart. Verbs are written plugin-qualified (`/fno:...`): a bare `/do` resolves to another plugin's `do` in a mixed-plugin session, so qualification is the contract, not a style choice.
 
 | Command | Purpose |
 |---------|---------|
-| `/target "feature"` | End-to-end: think → blueprint → do → review → ship |
-| `/target path/to/plan` \| `/target <node-id>` | Execute an existing plan, or a backlog node by id (resolves via `~/.fno/graph.json`) |
-| `/target L "feature"` | Large size: full ceremony including adversarial |
-| `/target auto-merge "..."` | Auto-merge once external review passes (opt-in). [skills/target/references/auto-merge.md](skills/target/references/auto-merge.md) |
-| `/megawalk` | Loop the ready backlog until done. `/megawalk roadmap <vision.md>` generates a backlog first |
-| `/blueprint <doc-path>` | Mutate a design doc in place (Execution Strategy + File Ownership + kill_criteria). `quick "..."` for a flat single-file plan |
-| `/do` | Execute a plan: `flat` (default) or `waves` |
-| `/think` \| `/review` \| `/fix` \| `/tdd` \| `/triage` \| `/setup` | Design / review / fix-loop / TDD / spec-ordering / config wizard |
-| `/pr create` \| `check` \| `merged` | Open a PR (Haiku worker) / poll+implement external review / post-merge ritual |
+| `/fno:target "feature"` | End-to-end: think → blueprint → do → review → ship |
+| `/fno:target path/to/plan` \| `/fno:target <node-id>` | Execute an existing plan, or a backlog node by id (resolves via `~/.fno/graph.json`) |
+| `/fno:target L "feature"` | Large size: full ceremony including adversarial |
+| `/fno:target auto-merge "..."` | Auto-merge once external review passes (opt-in). [skills/target/references/auto-merge.md](skills/target/references/auto-merge.md) |
+| `/fno:megawalk` | Loop the ready backlog until done. `/fno:megawalk roadmap <vision.md>` generates a backlog first |
+| `/fno:blueprint <doc-path>` | Mutate a design doc in place (Execution Strategy + File Ownership + kill_criteria). `quick "..."` for a flat single-file plan |
+| `/fno:do` | Execute a plan: `flat` (default) or `waves` |
+| `/fno:think` \| `/fno:review` \| `/fno:fix` \| `/fno:tdd` \| `/fno:triage` \| `/fno:setup` | Design / review / fix-loop / TDD / spec-ordering / config wizard |
+| `/fno:pr create` \| `check` \| `merged` | Open a PR (Haiku worker) / poll+implement external review / post-merge ritual |
 
-Surface evolution (one-liners; see linked docs): bare `/megawalk` replaced `continue`/`next`/`adopt --batch` ([megawalk-migration](docs/architecture/megawalk-migration.md)); `/blueprint` mutates the design doc in place rather than making a folder plan ([lean-blueprint](docs/architecture/lean-blueprint.md)); an approved native Plan-Mode plan is picked up by the next bare `/target`, which backfills the gates' required structure ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
+Surface evolution (one-liners; see linked docs): bare `/fno:megawalk` replaced `continue`/`next`/`adopt --batch` ([megawalk-migration](docs/architecture/megawalk-migration.md)); `/fno:blueprint` mutates the design doc in place rather than making a folder plan ([lean-blueprint](docs/architecture/lean-blueprint.md)); an approved native Plan-Mode plan is picked up by the next bare `/fno:target`, which backfills the gates' required structure ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
 
 ## Backlog (`fno backlog`)
 
