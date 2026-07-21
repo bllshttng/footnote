@@ -26,8 +26,8 @@ def test_shim_import_error_exits_3(tmp_path: Path) -> None:
     raises ImportError; because the shim does sys.path.insert(0, cli/src)
     this stub wins precedence over any fno installed in the test
     runner's venv. The shim's `from fno.graph.cli import cli as
-    app` then trips the ImportError branch and exits 3 with the
-    "fno CLI required" message.
+    app` then trips the ImportError branch and exits 3, reporting the
+    underlying import failure.
 
     Without this stub the test runner's venv (which has fno
     installed) would satisfy the import and the ImportError branch would
@@ -61,8 +61,15 @@ def test_shim_import_error_exits_3(tmp_path: Path) -> None:
         f"expected rc=3 on ImportError branch, got rc={result.returncode}; "
         f"stderr={result.stderr!r}"
     )
-    assert "fno CLI required" in result.stderr, (
+    assert "cannot import fno.graph.cli" in result.stderr, (
         f"stderr should carry the ImportError-specific message, got: {result.stderr!r}"
+    )
+    # The underlying error must survive into the message. Reporting only
+    # "install the CLI" sends the operator to reinstall something that is
+    # already installed when the real cause is a missing dependency under
+    # whichever interpreter ran the shim.
+    assert "forced for #24 ImportError-branch test" in result.stderr, (
+        f"stderr must name the underlying import failure; got: {result.stderr!r}"
     )
     # The other branch's message must NOT appear; otherwise #11's coverage
     # has regressed and the two error paths have collapsed.
@@ -97,7 +104,7 @@ def test_shim_import_error_distinct_from_missing_clisrc(tmp_path: Path) -> None:
         f"got: {result.stderr!r}"
     )
     # The ImportError-branch message must NOT appear.
-    assert "fno CLI required" not in result.stderr, (
+    assert "cannot import fno.graph.cli" not in result.stderr, (
         f"missing-cli/src branch must not emit the ImportError message; "
         f"stderr={result.stderr!r}"
     )
