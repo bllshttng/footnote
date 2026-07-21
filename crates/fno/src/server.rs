@@ -4504,11 +4504,7 @@ impl Core {
                 }
                 Flow::Continue
             }
-            Command::ResizeSeam {
-                a,
-                b,
-                ratio_permille,
-            } => {
+            Command::ResizeSeam { a, b, pos } => {
                 let Some(tab) = self.viewed_tab_mut(view) else {
                     return Flow::Continue;
                 };
@@ -4517,7 +4513,7 @@ impl Core {
                 // rejected cell would be a wall of noise. The client reports a
                 // drag that dies on a stale address; a clamp is self-evident
                 // from the divider not moving.
-                if tree::set_seam_ratio(tab, vp, a, b, ratio_permille) {
+                if tree::set_seam_pos(tab, vp, a, b, pos) {
                     self.push_layout(true);
                 }
                 Flow::Continue

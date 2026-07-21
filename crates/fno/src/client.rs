@@ -143,19 +143,6 @@ fn density_glyph(d: Density) -> char {
         Density::Extended => '▦',
     }
 }
-/// `held` as a share of `available`, in permille, clamped to `0..=1000`.
-///
-/// (x-d807) Seam ratios ride the wire as permille rather than `f32` because
-/// `Command` derives `Eq`, which no float type implements. One cell on a
-/// 200-column terminal is ~5 permille, so the integer resolution is far finer
-/// than a drag can express.
-fn permille(held: u16, available: u16) -> u16 {
-    if available == 0 {
-        return 0;
-    }
-    ((held as u32 * 1000) / available as u32).min(1000) as u16
-}
-
 /// The tab bar row.
 const TAB_BAR_ROWS: u16 = 1;
 /// The status row (US4): one always-on bottom line of client-local chrome.
@@ -477,14 +464,14 @@ struct Seam {
     axis: Axis,
 }
 
-/// A seam drag in flight. `start_permille` is the ratio the seam held when the
-/// drag began, kept for the Esc revert; `last_permille` suppresses duplicate
-/// commands between cell-boundary crossings.
+/// A seam drag in flight. `start_pos` is where the divider sat when the drag
+/// began, kept for the Esc revert; `last_pos` suppresses duplicate commands
+/// between cell-boundary crossings.
 #[derive(Clone, Copy, Debug)]
 struct SeamDrag {
     seam: Seam,
-    start_permille: u16,
-    last_permille: u16,
+    start_pos: u16,
+    last_pos: u16,
     last_at: Instant,
 }
 
@@ -2321,22 +2308,6 @@ impl View {
             .map(|(_, r)| *r)
     }
 
-    /// A seam's extent along its branch axis: `(start, available)` in content
-    /// cells, where `available` excludes the 1-cell divider. `None` if either
-    /// pane has gone.
-    ///
-    /// Reading one pane's rect as its whole branch child's extent is exact, not
-    /// an approximation: `tree::check_invariants` rejects a branch nesting a
-    /// same-axis child, so every descendant of a child shares that child's
-    /// extent along the branch axis.
-    fn seam_span(&self, seam: Seam) -> Option<(u16, u16)> {
-        let (ra, rb) = (self.pane_rect(seam.a)?, self.pane_rect(seam.b)?);
-        Some(match seam.axis {
-            Axis::Horizontal => (ra.x, ra.cols.saturating_add(rb.cols)),
-            Axis::Vertical => (ra.y, ra.rows.saturating_add(rb.rows)),
-        })
-    }
-
     /// Whether a seam still separates the exact pair that addressed it.
     ///
     /// Membership is deliberately not the test. A concurrent same-axis split
@@ -2362,32 +2333,32 @@ impl View {
         }
     }
 
-    /// The share of the seam's pair currently held by pane `a`, in permille.
+    /// Where the seam sits now, as a content-area coordinate along its axis.
     /// Pair-relative, not branch-relative: the client cannot see the branch's
     /// other children, so the server rescales this against the pair's own total.
-    fn seam_permille(&self, seam: Seam) -> Option<u16> {
-        let (_, available) = self.seam_span(seam)?;
-        let held = match seam.axis {
-            Axis::Horizontal => self.pane_rect(seam.a)?.cols,
-            Axis::Vertical => self.pane_rect(seam.a)?.rows,
-        };
-        Some(permille(held, available))
+    /// Where the seam sits now, as a content-area coordinate along its axis.
+    /// The divider is the cell immediately past pane `a`.
+    fn seam_pos(&self, seam: Seam) -> Option<u16> {
+        let ra = self.pane_rect(seam.a)?;
+        Some(match seam.axis {
+            Axis::Horizontal => ra.x.saturating_add(ra.cols),
+            Axis::Vertical => ra.y.saturating_add(ra.rows),
+        })
     }
 
-    /// The share pane `a` would hold with the seam dragged under an
-    /// outer-terminal cell. Clamped to the pair; the server applies the
-    /// minimum-size clamp, which is the one that must hold.
-    fn seam_permille_at(&self, seam: Seam, row: u16, col: u16) -> Option<u16> {
-        let (start, available) = self.seam_span(seam)?;
+    /// Where an outer-terminal cell puts the divider, in the same content-area
+    /// coordinates. Converting a position to a ratio is deliberately the
+    /// server's job: it needs the branch child's extent, and a pane's rect is
+    /// not that extent once axes alternate more than one level deep.
+    fn seam_pos_at(&self, seam: Seam, row: u16, col: u16) -> Option<u16> {
         let (cr, cc) = (
             row.checked_sub(TAB_BAR_ROWS)?,
             col.checked_sub(self.panel_w())?,
         );
-        let at = match seam.axis {
+        Some(match seam.axis {
             Axis::Horizontal => cc,
             Axis::Vertical => cr,
-        };
-        Some(permille(at.saturating_sub(start), available))
+        })
     }
 
     /// True on the sideline's right border column - the grab band for the
@@ -2401,13 +2372,13 @@ impl View {
     /// Grab a seam, remembering the share it currently holds so Esc can put it
     /// back. A seam whose panes have already gone is not grabbable.
     fn begin_seam_drag(&mut self, seam: Seam, now: Instant) {
-        let Some(start) = self.seam_permille(seam) else {
+        let Some(start) = self.seam_pos(seam) else {
             return;
         };
         self.seam_drag = Some(SeamDrag {
             seam,
-            start_permille: start,
-            last_permille: start,
+            start_pos: start,
+            last_pos: start,
             last_at: now,
         });
     }
@@ -2422,17 +2393,17 @@ impl View {
     /// on the way self-heals at the next cell.
     fn seam_drag_to(&mut self, row: u16, col: u16, now: Instant) -> Option<Command> {
         let drag = self.seam_drag?;
-        let target = self.seam_permille_at(drag.seam, row, col)?;
-        if target == drag.last_permille {
+        let target = self.seam_pos_at(drag.seam, row, col)?;
+        if target == drag.last_pos {
             return None;
         }
         let live = self.seam_drag.as_mut()?;
-        live.last_permille = target;
+        live.last_pos = target;
         live.last_at = now;
         Some(Command::ResizeSeam {
             a: drag.seam.a,
             b: drag.seam.b,
-            ratio_permille: target,
+            pos: target,
         })
     }
 
@@ -2496,10 +2467,10 @@ impl View {
     /// released without a crossing sent nothing, so there is nothing to undo.
     fn revert_seam_drag(&mut self) -> Option<Command> {
         let drag = self.seam_drag.take()?;
-        (drag.last_permille != drag.start_permille).then_some(Command::ResizeSeam {
+        (drag.last_pos != drag.start_pos).then_some(Command::ResizeSeam {
             a: drag.seam.a,
             b: drag.seam.b,
-            ratio_permille: drag.start_permille,
+            pos: drag.start_pos,
         })
     }
 
@@ -10678,16 +10649,18 @@ mod tests {
     }
 
     #[test]
-    fn seam_permille_reads_the_current_split_from_rects() {
+    fn seam_pos_reads_the_divider_cell_not_a_ratio() {
+        // The client reports WHERE the divider goes and leaves the ratio to the
+        // server, which is the only side that can see the branch child's true
+        // extent. Content origin is outer (1, 28).
         let view = three_pane_view();
         let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
-        // Panes 10 and 11 are both 23 cols: an even split of the 46-cell pair.
-        assert_eq!(view.seam_permille(seam), Some(500));
-        // Dragging to content col 30 (outer 58) gives pane 10 thirty of 46.
-        assert_eq!(view.seam_permille_at(seam, 5, 58), Some(652));
-        // Past either end clamps into the pair rather than wrapping.
-        assert_eq!(view.seam_permille_at(seam, 5, 28), Some(0));
-        assert_eq!(view.seam_permille_at(seam, 5, 200), Some(1000));
+        // Pane 10 spans content cols 0..22, so its divider sits at 23.
+        assert_eq!(view.seam_pos(seam), Some(23));
+        // Dragging to outer col 58 asks for the divider at content col 30.
+        assert_eq!(view.seam_pos_at(seam, 5, 58), Some(30));
+        // Off the content area on the sideline side resolves to nothing.
+        assert_eq!(view.seam_pos_at(seam, 5, 10), None);
     }
 
     #[test]
@@ -10703,9 +10676,9 @@ mod tests {
             Some(Command::ResizeSeam {
                 a: 10,
                 b: 11,
-                ratio_permille: 652
+                pos: 30
             }),
-            "crossing to content col 30 of 46 moves the seam"
+            "crossing to content col 30 moves the seam"
         );
         assert_eq!(
             view.seam_drag_to(6, 58, t0),
@@ -10717,7 +10690,7 @@ mod tests {
             Some(Command::ResizeSeam {
                 a: 10,
                 b: 11,
-                ratio_permille: 673
+                pos: 31
             }),
             "the next column is a new position"
         );
@@ -10925,9 +10898,9 @@ mod tests {
             Some(Command::ResizeSeam {
                 a: 10,
                 b: 11,
-                ratio_permille: 500
+                pos: 23
             }),
-            "reverts to the share held when the drag began, not the last one"
+            "reverts to where the divider sat when the drag began"
         );
         assert!(view.seam_drag.is_none(), "the revert also ends the drag");
     }
