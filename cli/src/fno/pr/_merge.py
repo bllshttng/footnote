@@ -391,7 +391,7 @@ def _merge_lock() -> Iterator[_MergeLockState]:
     proceeds unserialized: the lock is coordination, GitHub stays the merge
     authority, and our own tooling failing must never block a merge.
     """
-    state = "acquired"
+    state: Literal["acquired", "held", "unavailable"] = "acquired"
     key = holder = release = None
     # Acquisition happens fully BEFORE the yield: an exception the consumer
     # body throws into the generator must reach the finally-release, never an
@@ -420,6 +420,7 @@ def _merge_lock() -> Iterator[_MergeLockState]:
         yield state
     finally:
         if release is not None and state == "acquired":
+            assert key is not None and holder is not None  # set together before release
             try:
                 release(key, holder)
             except Exception:  # noqa: BLE001 - pid-liveness frees it anyway

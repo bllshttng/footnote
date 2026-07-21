@@ -332,7 +332,8 @@ def resolve_dispatch(
         chosen_verb = verb.strip()
         if not chosen_verb:
             raise DispatchResolveError("explicit dispatch verb must not be empty")
-        allowed = list(cfg.get("allowed_verbs") or _DEFAULT_ALLOWED_VERBS)
+        _av = cfg.get("allowed_verbs")
+        allowed = list(_av) if isinstance(_av, list) else list(_DEFAULT_ALLOWED_VERBS)
         if chosen_verb not in allowed:
             raise DispatchResolveError(
                 f"dispatch verb {chosen_verb!r} is not in the allowlist "
@@ -345,7 +346,8 @@ def resolve_dispatch(
         # Per-harness builtin (x-a5e4): the normalize of `/target no-merge {id}` -
         # codex `$fno:target`, claude/agy `/target`, opencode `/fno:target`, gemini
         # refused. config.dispatch.command overrides.
-        template = (cfg.get("command") or dispatch_command(chosen_harness)).strip()
+        _cmd = cfg.get("command")
+        template = (_cmd if isinstance(_cmd, str) and _cmd else dispatch_command(chosen_harness)).strip()
         decision.append("command=config" if cfg.get("command") else "command=builtin")
 
     if not template:
