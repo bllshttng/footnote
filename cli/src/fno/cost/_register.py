@@ -323,7 +323,8 @@ def build_entry(
     cj = cost_json if isinstance(cost_json, dict) else {}
     # Contract guard: a provider that breaches the tokens shape (list/str) must
     # not reach the `"total" in cj_tokens` / subscript logic below (gemini review).
-    cj_tokens = cj.get("tokens") if isinstance(cj.get("tokens"), dict) else {}
+    _tok = cj.get("tokens")
+    cj_tokens = _tok if isinstance(_tok, dict) else {}
     cost_usd = safe_number(cj["cost_usd"] if "cost_usd" in cj else state.get("total_cost"))
     tokens_total = safe_number(
         cj_tokens["total"] if "total" in cj_tokens else state.get("total_tokens"),

@@ -438,7 +438,8 @@ def _status_event_line(rec: dict) -> Optional[tuple[str, str]]:
     kind = rec.get("kind") or rec.get("type")
     if kind not in _STATUS_KINDS:
         return None
-    data = rec.get("data") if isinstance(rec.get("data"), dict) else rec
+    _data = rec.get("data")
+    data = _data if isinstance(_data, dict) else rec
     ident = ""
     for field in ("short_id", "session_id", "source", "worker"):
         val = data.get(field) or rec.get(field)

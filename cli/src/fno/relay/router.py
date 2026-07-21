@@ -83,6 +83,7 @@ def resolve(
     addr = parse_address(raw)
     idx = index if index is not None else _registry.index()
 
+    sid: Optional[str]
     if addr.kind == "session":
         sid = addr.value
     elif addr.kind == "node":
