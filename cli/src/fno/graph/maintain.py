@@ -655,6 +655,11 @@ VALIDITY_RUN_TIMEOUT_S = 120.0
 # citation (injection boundary, Locked Decision #6). Anything else is dropped.
 ALLOWED_EVIDENCE_PREFIXES = ("graph:", "path:", "git:", "pr:")
 
+# The subset of the above that a retro_source seam may contribute (US1). Narrower
+# than the general allowlist on purpose: retro enrichment carries only the review
+# comment and the merged file region, never graph:/path: items.
+RETRO_ALLOWED_PREFIXES = ("pr:", "git:")
+
 # Fields whose content defines a node's "premise". A change to any of them
 # re-qualifies a watermarked node for review (Locked Decision #5 / AC5-FR).
 _FINGERPRINT_FIELDS = (
@@ -981,7 +986,7 @@ def collect_evidence(
                 extra = {}
         merged = False
         for pid, summary in extra.items():
-            if isinstance(pid, str) and pid.startswith(("pr:", "git:")):
+            if isinstance(pid, str) and pid.startswith(RETRO_ALLOWED_PREFIXES):
                 packet.items[pid] = str(summary)
                 merged = True
         if not merged:
