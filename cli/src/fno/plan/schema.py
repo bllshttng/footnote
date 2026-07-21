@@ -100,10 +100,11 @@ class PlanFrontmatter(BaseModel):
         rather than reused because that helper rejects `done`/`superseded`, which
         are valid for this model's superset enum. Then a retired spelling
         resolves to its survivor, so a doc stamped under the old vocabulary
-        validates without the enum having to carry dead members.
+        validates without the enum having to carry dead members. The alias is
+        matched exactly, never case-folded: canonical values are case-sensitive
+        here, so normalizing only the alias would let `Shipped` through where
+        `Design` is rejected.
         """
         if isinstance(v, bool):
             return str(v).lower()
-        if isinstance(v, str):
-            return STATUS_ALIASES.get(v.strip().strip("'\"").lower(), v)
-        return v
+        return STATUS_ALIASES.get(v, v) if isinstance(v, str) else v

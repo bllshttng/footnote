@@ -82,7 +82,7 @@ predates the plan completion stamp. You can ignore it or remove it - nothing rea
 Find all shipped plans (replace `<plans-dir>` with wherever your plan folders live - commonly a `plans/` dir in the repo or a vault path reachable via `internal/`):
 
 ```bash
-grep -rl 'status: in_review\|status: done' <plans-dir>
+grep -rlE 'status: (in_review|shipped|done)' <plans-dir>
 ```
 
 Find plans that shipped to a specific repo:
@@ -94,7 +94,7 @@ grep -rl 'github.com/org/repo' <plans-dir>
 Find plans with `status: in_review` but not yet `done` (cross-project in flight):
 
 ```bash
-grep -rl 'status: in_review' internal/fno/plans/**/00-INDEX.md 2>/dev/null \
+grep -rlE 'status: (in_review|shipped)' internal/fno/plans/**/00-INDEX.md 2>/dev/null \
   | xargs grep -L 'status: done'
 ```
 
