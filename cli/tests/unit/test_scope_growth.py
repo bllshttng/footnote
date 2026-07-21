@@ -253,3 +253,36 @@ def test_epic_status_renders_the_reportable_line(graph):
     assert "scope growth: 1 follow-ups" in out
     assert "origin capture" in out
     assert "realized" in out
+
+
+def test_realized_prs_counts_follow_up_prs_and_scopes_by_project():
+    """A wrap-up PR is real cost; a PR number only identifies a PR within a repo."""
+    entries = [
+        _epic(),
+        _node("x-c1", parent="x-epic", project="a", pr_number=11,
+              additional_prs=[{"number": 12}]),
+        _node("x-c2", parent="x-epic", project="b", pr_number=11),  # other repo
+    ]
+    # a#11, a#12, b#11 -> three distinct PRs, not one.
+    assert scope_growth(entries, "x-epic", floor=0.0).realized_prs == 3
+
+
+def test_scope_growth_reads_through_the_archive(graph, tmp_path, monkeypatch):
+    """A swept child must not shrink the epic's realized cost.
+
+    A metric that quietly changes when unrelated grooming runs is exactly the
+    kind of number this feature refuses to print.
+    """
+    archive = tmp_path / "graph-archive.json"
+    archive.write_text(
+        json.dumps({"entries": [_node("x-swept", parent="x-epic", pr_number=99)]})
+        + "\n"
+    )
+    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: archive)
+    graph([_epic(), _node("x-c1", parent="x-epic", pr_number=1)])
+
+    payload = json.loads(
+        runner.invoke(app, ["backlog", "epic", "status", "x-epic", "--json"]).stdout
+    )
+    assert payload["scope_growth"]["realized_nodes"] == 2
+    assert payload["scope_growth"]["realized_prs"] == 2

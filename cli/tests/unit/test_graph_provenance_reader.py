@@ -199,3 +199,21 @@ def test_spawned_is_opt_in(graph):
         runner.invoke(app, ["backlog", "provenance", "x-aaaa", "--json"]).stdout
     )
     assert "spawned" not in payload
+
+
+def test_a_chain_ending_exactly_at_the_cap_is_not_reported_truncated(graph):
+    """Truncation means something was cut, not that the walk used its whole budget."""
+    from fno.graph.cli import _SPAWNED_MAX_DEPTH
+
+    chain = [_node("x-0000")]
+    for i in range(1, _SPAWNED_MAX_DEPTH + 1):
+        chain.append(_node(f"x-{i:04d}", source_node_id=f"x-{i - 1:04d}"))
+    graph(chain)
+
+    payload = json.loads(
+        runner.invoke(
+            app, ["backlog", "provenance", "x-0000", "--spawned", "--json"]
+        ).stdout
+    )
+    assert len(payload["spawned"]["nodes"]) == _SPAWNED_MAX_DEPTH
+    assert payload["spawned"]["truncated_at_depth"] is None

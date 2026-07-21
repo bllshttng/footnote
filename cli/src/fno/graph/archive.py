@@ -13,6 +13,7 @@ Never archived (an open node still points at them):
   - a ``supersedes`` / ``superseded_by`` target of an open node
   - a ``related`` peer of an open node (the edge is symmetric; archiving one
     side would strand the other)
+  - the ``source_node_id`` origin of an open node
 """
 from __future__ import annotations
 
@@ -77,6 +78,12 @@ def _guard_ids(entries: list[Entry]) -> set[str]:
         # side of a live pair strands the other: the open node names an id the
         # working graph no longer has, and the inverse is beyond set_related's
         # reach. Broken by routine grooming rather than by any explicit edit.
+        # An open node's origin, for the same reason: this PR made
+        # source_node_id readable (rendered, walked, and counted as capture
+        # coverage), so archiving the target turns a live edge into a dangler.
+        origin = e.get("source_node_id")
+        if isinstance(origin, str):
+            guard.add(origin)
         related = e.get("related")
         if isinstance(related, list):
             for r in related:

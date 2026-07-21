@@ -843,7 +843,7 @@ def test_mesh_env_wrapper_role_without_key_adds_no_unset(monkeypatch):
 
 
 def test_mesh_env_wrapper_clears_inherited_provenance(monkeypatch):
-    """A pane must not inherit its spawner's node (codex review, PR 524).
+    """A pane must not inherit its spawner's node.
 
     dispatch_spawn_pane hands the ambient environment to the self-spawning mux
     process, so without an explicit clear an ad-hoc pane carries the server's

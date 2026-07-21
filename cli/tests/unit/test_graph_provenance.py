@@ -1697,3 +1697,22 @@ def test_claimed_at_is_validated_on_the_pr_number_path(tmp_path, monkeypatch):
     ])
     assert r.exit_code == 2
     assert _sessions(g) == []
+
+
+def test_an_explicit_source_node_reports_nothing_as_dropped(tmp_path, monkeypatch):
+    """An ambient candidate that LOSES to the flag is not a capture failure.
+
+    Reporting it as dropped would tell the operator the node was filed with no
+    origin at the exact moment one was successfully stamped.
+    """
+    from fno.graph.cli import _session_provenance
+
+    _clear_session_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-x")
+    monkeypatch.setenv("FNO_NODE", "x-stale")
+
+    prov = _session_provenance(
+        str(tmp_path), source_node="x-aaaa", known_ids={"x-aaaa"}
+    )
+    assert prov["source_node_id"] == "x-aaaa"
+    assert prov["source_node_dropped"] is None

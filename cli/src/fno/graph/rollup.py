@@ -250,6 +250,24 @@ def _parent_descendants(entries: list[Entry], root_id: str) -> set:
     return out
 
 
+def _pr_refs(entries: list[Entry]) -> set:
+    """Distinct PR references across ``entries``, scoped by project.
+
+    Counts ``additional_prs`` alongside the primary: a node that shipped a
+    wrap-up or review-fix PR really did cost those. Scoped by project because
+    an epic spans repos and PR numbers only identify a PR within one.
+    """
+    refs: set = set()
+    for e in entries:
+        project = e.get("project")
+        if e.get("pr_number"):
+            refs.add((project, e["pr_number"]))
+        for extra in e.get("additional_prs") or []:
+            if isinstance(extra, dict) and extra.get("number"):
+                refs.add((project, extra["number"]))
+    return refs
+
+
 def scope_growth(
     entries: list[Entry],
     epic_id: str,
@@ -321,6 +339,6 @@ def scope_growth(
         coverage=coverage,
         reportable=reportable,
         realized_nodes=len(realized),
-        realized_prs=len({e["pr_number"] for e in realized if e.get("pr_number")}),
+        realized_prs=len(_pr_refs(realized)),
         declared_size=epic.get("size"),
     )

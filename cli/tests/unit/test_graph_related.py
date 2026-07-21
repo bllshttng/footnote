@@ -284,3 +284,43 @@ def test_archive_holds_back_a_node_an_open_peer_is_related_to():
     assert "x-done" not in archived_ids, "an open peer's related target is held back"
     assert "x-lonely" in archived_ids, "an unreferenced terminal node still sweeps"
     assert "x-done" in {e["id"] for e in skipped}
+
+
+def test_archive_holds_back_an_open_node_s_origin():
+    """An open node's source_node_id target must survive the sweep.
+
+    This PR made the field readable, so archiving its target turns a live edge
+    into a dangler the reader renders as "(not in graph)".
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from fno.graph.archive import partition_for_archive
+
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=400)).isoformat()
+    entries = [
+        _node("x-open", status="ready", source_node_id="x-origin"),
+        _node("x-origin", status="done", completed_at=old),
+    ]
+    to_archive, _remaining, _skipped = partition_for_archive(entries, 30, now)
+    assert "x-origin" not in {e["id"] for e in to_archive}
+
+
+def test_removing_an_origin_clears_its_dependents_reference(tmp_graph):
+    """remove is a HARD delete, so a dependent's origin must not dangle.
+
+    archive keeps the node readable and guards it instead; remove cannot, so
+    the stated invariant (null or resolves, never a dangling string) is held by
+    clearing.
+    """
+    created = runner.invoke(
+        app, ["backlog", "idea", "follow-up", "--source-node", "x-aaaa"]
+    )
+    new_id = json.loads(created.stdout)["id"]
+
+    assert runner.invoke(
+        app, ["backlog", "remove", "x-aaaa", "--force"]
+    ).exit_code == 0
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    node = next(e for e in entries if e["id"] == new_id)
+    assert node["source_node_id"] is None

@@ -356,6 +356,32 @@ def _child_note(child: dict, events: list[dict], worker: Optional[str]) -> str:
     return "-"
 
 
+def _entries_with_archive(entries: list) -> list:
+    """``entries`` plus archived nodes, working graph winning on id.
+
+    Best-effort and read-only: an unreadable archive degrades to the working
+    graph rather than failing a read verb.
+    """
+    from fno.paths import graph_archive_json
+
+    try:
+        archive_path = graph_archive_json()
+        if not archive_path.exists():
+            return entries
+        from fno.graph.store import read_graph
+
+        live = {e.get("id") for e in entries if isinstance(e, dict)}
+        return [
+            *entries,
+            *(
+                a for a in read_graph(archive_path)
+                if isinstance(a, dict) and a.get("id") not in live
+            ),
+        ]
+    except (OSError, ValueError):
+        return entries
+
+
 def _scope_growth_line(growth) -> str:
     """One line: the growth figure with its coverage, or why it is withheld.
 
@@ -444,7 +470,13 @@ def cmd_epic_status(
 
     from fno.graph.rollup import scope_growth
 
-    growth = scope_growth(entries, epic_id)
+    # Read through the archive for the METRIC only (the same read-only fallback
+    # `get` uses). Without it a swept child stops counting and the epic's
+    # realized cost and follow-up set shrink as grooming runs - a number that
+    # quietly changes with unrelated maintenance is the failure this metric is
+    # supposed to be immune to. The children table above stays working-graph
+    # only, as it was before.
+    growth = scope_growth(_entries_with_archive(entries), epic_id)
 
     if json_mode(ctx):
         typer.echo(json.dumps({
@@ -632,7 +664,9 @@ def _session_provenance(
         dropped, source_node_id = source_node_id, None
 
     if source_node:
-        source_node_id = source_node
+        # The explicit flag wins, so nothing was dropped: an ambient candidate
+        # that lost a precedence contest is not a capture failure to report.
+        source_node_id, dropped = source_node, None
 
     return {
         "source_session_id": session,
@@ -3693,7 +3727,14 @@ def _spawned_walk(
                 rows.append((depth, child))
                 nxt.append(child_id)
         frontier = nxt
-    return rows, cycle, bool(frontier)
+    # Truncated only if something was actually cut: a chain ending exactly at
+    # the cap leaves a non-empty frontier with nothing below it.
+    truncated = any(
+        child.get("id") not in seen
+        for parent_id in frontier
+        for child in by_source.get(parent_id, [])
+    )
+    return rows, cycle, truncated
 
 
 @cli.command("provenance", hidden=True)
@@ -4649,6 +4690,12 @@ def cmd_remove(
             # peers in the declaring node's own delta.
             if task_id in (e.get("related") or []):
                 e["related"].remove(task_id)
+            # remove is a HARD delete, unlike archive (which keeps the node
+            # readable and therefore guards it instead). A dependent's origin
+            # would be left pointing at nothing, and the stated invariant is
+            # that source_node_id is null or resolves - never a dangling string.
+            if e.get("source_node_id") == task_id:
+                e["source_node_id"] = None
         return [e for e in entries if e.get("id") != task_id]
 
     locked_mutate_graph(_graph_path(), mutator)
