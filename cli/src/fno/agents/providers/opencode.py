@@ -18,12 +18,15 @@ attempt one.** Verified against opencode v1.14.50:
   conversation either -- the history is keyed to the record being
   removed.
 
-The JSON tree under ``storage/`` does NOT soften this. It is the legacy
-pre-sqlite store, frozen at the one-time migration (``storage/migration``
-holds its version); a session created after that migration exists in
-sqlite alone, with no file under ``storage/message`` or
-``storage/session``. So there is no on-disk copy for a deleted session to
-fall back to.
+The JSON tree under ``storage/`` does NOT soften this, which is the
+obvious objection and worth answering: it is the legacy pre-sqlite store,
+left in place by the one-time migration (``storage/migration`` holds its
+version) and no longer written. Driving a real session against a fresh
+data dir persists the message and part rows to sqlite and creates no
+``storage/`` tree at all; on a migrated store, a pre-migration session's
+file count matches its message-row count exactly, because the migration
+copied rather than moved. So a session created since the migration has no
+on-disk copy to fall back to.
 
 That makes opencode teardown irreversible destruction of conversation
 history, which is a different act from the index-record cleanup ``rm``
