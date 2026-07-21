@@ -135,6 +135,15 @@ struct ManifestFields {
     input: Option<String>,
     /// Backlog node id (lives in the manifest BODY, below the frontmatter).
     graph_node_id: Option<String>,
+    /// Harness (conversation) session id captured at init: the do-stamp's
+    /// identity-continuity input, passed through to the Python primitive.
+    harness_session_id: Option<String>,
+    /// HEAD at init: baseline for the `initial_head..HEAD` work-evidence range.
+    /// Absent on manifests minted before x-0469 -> the do stamp skips.
+    initial_head: Option<String>,
+    /// Init instant: the author-date floor for work evidence, and the value the
+    /// do row carries as `claimed_at` (the start of the implementation window).
+    created_at: Option<String>,
     /// Cross-project plan: graduation must wait for ALL project PRs, so the
     /// expected URL count is derived from the plan's `projects:` map, never 1.
     cross_project: bool,
@@ -176,6 +185,9 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
             "plan_path" => set(&mut m.plan_path, v),
             "input" => set(&mut m.input, v),
             "graph_node_id" => set(&mut m.graph_node_id, v),
+            "harness_session_id" => set(&mut m.harness_session_id, v),
+            "initial_head" => set(&mut m.initial_head, v),
+            "created_at" => set(&mut m.created_at, v),
             "cross_project" => m.cross_project = v == "true",
             _ => {}
         }
@@ -648,6 +660,11 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // even a non-ship/awaiting-merge terminal that left an open PR. Non-fatal;
     // deliberately not returned into `failed`.
     stamp_node_pr(&cwd, m.graph_node_id.as_deref());
+
+    // ── guarded do-provenance backstop (x-0469) ────────────────────────────
+    // Same shape and same fatality as the stamp above: log-only, deliberately
+    // not returned into `failed` (a guard skip must never wedge the loop).
+    stamp_node_do(&cwd, &m, &reason);
 
     // ── emit terminal event ────────────────────────────────────────────────
     let mut data = json!({
@@ -1503,6 +1520,89 @@ fn stamp_node_pr(cwd: &Path, node: Option<&str>) {
     }
 }
 
+/// Guarded `do` lifecycle stamp (x-0469). `/do` Step 1.5 is the earlier truthful
+/// stamp, but most `/target` runs implement inline and never invoke `/do`, so the
+/// phase was recorded twice across ~2800 nodes. This is the backstop: one record
+/// per implementing session, at its own finish line.
+///
+/// `sessions[]` is append-only and every worker-session resolver trusts it, so a
+/// WRONG stamp is strictly worse than none - stamping at init recorded the
+/// PLANNER (PR #504, reverted). All four guards therefore fail closed. G1 (ship
+/// reason) and G4 (authored-commit evidence) evaluate here; G2 (identity
+/// continuity) and G3 (plan agreement) ride flags into `fno backlog session add`,
+/// which already owns ambient-identity precedence. Log-only and never retried:
+/// a guard skip is a designed outcome, and retrying one would spin.
+fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
+    let Some(node) = m.graph_node_id.as_deref() else { return };
+    let skip = |guard: &str, why: String| {
+        eprintln!("finalize: do stamp skipped for node {node} ({guard}: {why})");
+    };
+    // G1: planner-only sessions exit via Budget/NoProgress/Interrupted, and a doc
+    // ship (DoneAdvisory) authors no branch commits, so G4 would skip it anyway.
+    if !matches!(reason, "DonePRGreen" | "DoneAwaitingMerge") {
+        return;
+    }
+    // G2 input: an absent id cannot prove continuity, so it is not stamped.
+    let Some(session) = m.harness_session_id.as_deref() else {
+        return skip("G2", "manifest carries no harness_session_id".into());
+    };
+    let (Some(created_at), Some(head)) = (m.created_at.as_deref(), m.initial_head.as_deref())
+    else {
+        return skip("G4", "manifest predates initial_head/created_at".into());
+    };
+    let Some(floor) = parse_utc_epoch(created_at) else {
+        return skip("G4", format!("unparseable created_at {created_at}"));
+    };
+    if !authored_work_since(cwd, head, floor) {
+        return skip(
+            "G4",
+            format!("no non-merge commit in {head}..HEAD authored at/after {created_at}"),
+        );
+    }
+
+    let mut cmd = Command::new("fno");
+    cmd.args(["backlog", "session", "add", node, "--phase", "do"]);
+    cmd.args(["--require-session", session]);
+    if let Some(plan) = m.plan_path.as_deref() {
+        cmd.args(["--guard-plan", plan]);
+    }
+    cmd.args(["--claimed-at", created_at]);
+    let ok = cmd
+        .current_dir(cwd)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("finalize: do stamp failed for node {node} (non-fatal)");
+    }
+}
+
+/// True when `initial_head..HEAD` holds a non-merge commit authored at or after
+/// `floor` (epoch seconds).
+///
+/// Author dates, never committer dates: `git rebase` rewrites the committer date
+/// to now while preserving the author date, so a successor that merely rebased a
+/// predecessor's branch onto main moves HEAD maximally while authoring nothing.
+/// `--since` filters on committer date and would re-open exactly that hole. The
+/// range is set subtraction, so it survives a rebased-away `initial_head`; any
+/// git failure (GC'd baseline, deleted worktree) reads as no evidence.
+fn authored_work_since(cwd: &Path, initial_head: &str, floor: i64) -> bool {
+    let range = format!("{initial_head}..HEAD");
+    let Some(out) = git_capture(cwd, &["log", "--no-merges", "--format=%at", &range]) else {
+        return false;
+    };
+    out.lines()
+        .filter_map(|l| l.trim().parse::<i64>().ok())
+        .any(|at| at >= floor)
+}
+
+/// Parse a manifest ISO-8601 UTC instant to epoch seconds.
+fn parse_utc_epoch(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|d| d.timestamp())
+}
+
 /// Run `git <args>` in cwd, returning trimmed stdout on success.
 fn git_capture(cwd: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
@@ -1781,6 +1881,126 @@ mod tests {
         assert_eq!(m.claude_transcript_id.as_deref(), Some("de977b03-aaaa"));
         assert_eq!(m.graph_node_id.as_deref(), Some("ab-f8e5f214"));
         assert_eq!(m.input.as_deref(), Some("ab-f8e5f214 no-merge"));
+    }
+
+    #[test]
+    fn manifest_reads_do_stamp_guard_inputs() {
+        // created_at carries colons, so the split_once(':') parse must keep the
+        // whole remainder, not the first segment.
+        let content = "---\n\
+            created_at: 2026-07-20T21:48:25Z\n\
+            initial_head: eb7505a737c53a102c0f03e04ca7b92995175bb4\n\
+            harness_session_id: 3c6aaaa0-db8b-48ff\n\
+            ---\n";
+        let m = parse_manifest_fields(content);
+        assert_eq!(m.created_at.as_deref(), Some("2026-07-20T21:48:25Z"));
+        assert_eq!(
+            m.initial_head.as_deref(),
+            Some("eb7505a737c53a102c0f03e04ca7b92995175bb4")
+        );
+        assert_eq!(m.harness_session_id.as_deref(), Some("3c6aaaa0-db8b-48ff"));
+    }
+
+    #[test]
+    fn manifest_without_do_stamp_guard_inputs_reads_none() {
+        // Legacy manifests (and a repo with no commits, which writes `null`) leave
+        // the guards without inputs, so the stamp fails closed.
+        let m = parse_manifest_fields("---\ninitial_head: null\nsession_id: x\n---\n");
+        assert_eq!(m.initial_head, None);
+        assert_eq!(m.created_at, None);
+        assert_eq!(m.harness_session_id, None);
+    }
+
+    /// A git repo with deterministic author dates, so work evidence is testable
+    /// without sleeping. `git` env vars set both dates; the rebase case overrides
+    /// only the committer date, exactly as `git rebase` does.
+    fn git_fixture(dir: &Path) {
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .status()
+                .unwrap()
+        };
+        run(&["init", "-q", "."]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+    }
+
+    fn commit_at(dir: &Path, msg: &str, author_epoch: i64, committer_epoch: i64) {
+        Command::new("git")
+            .args(["commit", "-q", "--allow-empty", "-m", msg])
+            .current_dir(dir)
+            .env("GIT_AUTHOR_DATE", format!("@{author_epoch} +0000"))
+            .env("GIT_COMMITTER_DATE", format!("@{committer_epoch} +0000"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+    }
+
+    fn head_of(dir: &Path) -> String {
+        git_capture(dir, &["rev-parse", "HEAD"]).unwrap()
+    }
+
+    #[test]
+    fn work_evidence_accepts_a_commit_authored_after_init() {
+        // AC1-HP: the inline implementer. Its own commit is authored after its
+        // own init, so the range carries evidence.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        git_fixture(d);
+        commit_at(d, "base", 1000, 1000);
+        let base = head_of(d);
+        commit_at(d, "work", 3000, 3000);
+        assert!(authored_work_since(d, &base, 2000));
+    }
+
+    #[test]
+    fn work_evidence_rejects_an_empty_range() {
+        // AC4-ERR: the session respawned onto an already-green PR. HEAD never
+        // moved, so there is nothing to attribute.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        git_fixture(d);
+        commit_at(d, "base", 1000, 1000);
+        let base = head_of(d);
+        assert!(!authored_work_since(d, &base, 2000));
+    }
+
+    #[test]
+    fn work_evidence_rejects_a_rebase_only_successor() {
+        // AC4b-ERR, the reason this guard reads AUTHOR dates. A successor that
+        // only rebased a predecessor's branch moves HEAD maximally while
+        // authoring nothing: the committer date is rewritten to now (5000, after
+        // its init at 2000) but the author date is preserved (1500, before it).
+        // A committer-date test (or `git log --since`) would wrongly pass here.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        git_fixture(d);
+        commit_at(d, "base", 1000, 1000);
+        let base = head_of(d);
+        commit_at(d, "predecessor work, replayed by a rebase", 1500, 5000);
+        assert!(!authored_work_since(d, &base, 2000));
+    }
+
+    #[test]
+    fn work_evidence_rejects_a_merge_only_range_and_a_bad_baseline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        git_fixture(d);
+        commit_at(d, "base", 1000, 1000);
+        // A GC'd / unknown baseline makes git fail: no evidence, never a stamp.
+        assert!(!authored_work_since(d, "0000000000000000000000000000000000000000", 0));
+        // So does a directory that is not a repo at all.
+        assert!(!authored_work_since(Path::new("/nonexistent-xyz"), &head_of(d), 0));
+    }
+
+    #[test]
+    fn utc_epoch_parses_manifest_timestamps_and_rejects_junk() {
+        assert_eq!(parse_utc_epoch("1970-01-01T00:00:42Z"), Some(42));
+        assert_eq!(parse_utc_epoch("2026-07-20"), None);
+        assert_eq!(parse_utc_epoch(""), None);
     }
 
     #[test]
