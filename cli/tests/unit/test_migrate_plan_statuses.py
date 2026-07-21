@@ -40,7 +40,7 @@ def test_mapping_families():
     assert mps._classify("COMPLETE", None, {}) == "done"
     assert mps._classify("ready-for-implementation", None, {}) == "ready"
     assert mps._classify("inp-progres", None, {}) == "in_progress"
-    assert mps._classify("superseded", None, {}) == "archived"
+    assert mps._classify("abandoned", None, {}) == "superseded"
     # Already canonical -> no change.
     assert mps._classify("ready", None, {}) is None
     # Unmapped -> None (reported by main, left untouched).
@@ -61,7 +61,7 @@ def test_graph_truth_reads_completed_and_superseded(tmp_path):
         {"id": "x-open", "plan_path": "p.md"},
     ]}))
     truth = mps._graph_truth(g, None)
-    assert truth == {"x-done": "done", "x-sup": "archived"}
+    assert truth == {"x-done": "done", "x-sup": "superseded"}
 
 
 def test_apply_writes_and_preserves_other_keys(tmp_path):

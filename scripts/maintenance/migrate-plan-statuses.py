@@ -4,13 +4,13 @@
 The vault carries ~85 distinct historical `status:` values (COMPLETE, draft,
 ready-for-implementation, inp-progres, ...). The canonical vocabulary is the
 Pydantic ladder in `fno.plan._status`: design -> ready -> in_progress ->
-reviewing -> shipping -> shipped, plus the off-axis terminals done/archived.
+in_review, plus the off-axis terminals done/superseded.
 This script maps the legacy variants onto that ladder so the Obsidian Bases
 views stop showing a smear of dead statuses.
 
 Two signals, graph wins:
   1. Graph-truth override: if a doc's `node` resolves in graph.json (or the
-     archive) as done/superseded, the doc's status becomes done/archived
+     archive) as done/superseded, the doc's status becomes done/superseded
      regardless of the mapping. This alone fixes most stale `ready` docs.
   2. Mapping table: otherwise the legacy string maps by family.
   Unmapped values are reported and left untouched.
@@ -53,17 +53,17 @@ _add("ready", "ready-for-implementation", "ready-for-impl", "ready-to-build",
      "ready-to-implement", "approved", "confirmed", "accepted")
 _add("in_progress", "active", "in-progress", "inprogress", "in-flight",
      "inp-progres", "handoff", "handoff-pending", "wip", "started")
-_add("reviewing", "in-review", "ready-for-review", "reviewed",
+_add("in_review", "reviewing", "in-review", "ready-for-review", "reviewed",
      "waves_complete_awaiting_review", "awaiting-review")
-_add("archived", "superseded", "abandoned", "cancelled", "canceled", "moved",
+_add("superseded", "archived", "abandoned", "cancelled", "canceled", "moved",
      "deferred", "future", "future-work", "obsolete", "wontfix")
 
 
 def _graph_truth(graph_path: Path, archive_path: Path | None) -> dict[str, str]:
-    """node id -> terminal status implied by the graph (done|archived).
+    """node id -> terminal status implied by the graph (done|superseded).
 
     A node with completed_at is done; superseded_by (or _status superseded) is
-    archived. Reads the working graph and, if present, the archive. Best-effort:
+    superseded. Reads the working graph and, if present, the archive. Best-effort:
     a missing/corrupt file yields no overrides.
     """
     import json
@@ -83,7 +83,7 @@ def _graph_truth(graph_path: Path, archive_path: Path | None) -> dict[str, str]:
             if e.get("completed_at"):
                 truth[nid] = "done"
             elif e.get("superseded_by") or e.get("_status") == "superseded":
-                truth[nid] = "archived"
+                truth[nid] = "superseded"
     return truth
 
 
