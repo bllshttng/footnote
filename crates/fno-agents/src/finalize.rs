@@ -10,7 +10,7 @@
 //!   `termination_reason`, so a node's true cost and full session list roll up
 //!   by grouping ledger entries on `graph_node_id` (US7).
 //! - **Ship only** (`DonePRGreen` / `DoneAdvisory`): plan stamp + a mechanical
-//!   git-derived handoff artifact. A code ship (DonePRGreen) stamps `shipped`
+//!   git-derived handoff artifact. A code ship (DonePRGreen) stamps `in_review`
 //!   only (done = merged, x-f34f; the flip happens at merge). An advisory ship
 //!   (DoneAdvisory) has no merge event, so it also graduates to `done` here.
 //!
@@ -487,11 +487,11 @@ pub fn run_finalize(args: &[String]) -> i32 {
     };
 
     // ── SHIP ONLY: stamp (+ graduate for advisory) + handoff ───────────────
-    // For a CODE ship (DonePRGreen) the plan is stamped `shipped` only: done now
-    // means MERGED (x-f34f), and the `shipped -> done` flip happens at merge via
+    // For a CODE ship (DonePRGreen) the plan is stamped `in_review` only: done now
+    // means MERGED (x-f34f), and the `in_review -> done` flip happens at merge via
     // the write-time status projection. An ADVISORY/doc ship (DoneAdvisory) has
     // NO merge event - ship IS its completion - so it must still graduate to
-    // `done` here, else the plan is stranded at `shipped` on the active board
+    // `done` here, else the plan is stranded at `in_review` on the active board
     // (codex P2). expected_url_count is still recorded either way for the manual
     // `graduate` verb and the cross-project safety net.
     let mut stamped = false;
@@ -885,10 +885,10 @@ fn validate_stamped_frontmatter(cwd: &Path, plan_path: &str) {
     }
 }
 
-/// Stamp the plan `shipped` and, when `do_graduate`, flip it to `done`.
+/// Stamp the plan `in_review` and, when `do_graduate`, flip it to `done`.
 ///
 /// For a CODE ship (`DonePRGreen`) the caller passes `do_graduate = false`: done
-/// means merged (x-f34f), so the `shipped -> done` flip happens later via the
+/// means merged (x-f34f), so the `in_review -> done` flip happens later via the
 /// write-time projection at merge, not here. For an ADVISORY ship
 /// (`DoneAdvisory`) there is no merge event, so the caller passes `true` and
 /// this graduates the plan now. `expected_url_count` is recorded either way for
@@ -932,7 +932,7 @@ fn stamp_and_graduate(
     // finalize (finalize is idempotent/non-fatal by design).
     validate_stamped_frontmatter(cwd, plan_path);
 
-    // A code ship stamps `shipped` only; done flips at merge via the projection.
+    // A code ship stamps `in_review` only; done flips at merge via the projection.
     if !do_graduate {
         return Ok(());
     }

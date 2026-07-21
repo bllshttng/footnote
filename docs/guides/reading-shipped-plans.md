@@ -18,7 +18,7 @@ Look at the YAML frontmatter at the top:
 
 ```yaml
 ---
-status: shipped
+status: in_review
 shipped_at: 2026-04-15T09:22:10Z
 urls: [https://github.com/org/repo/pull/42]
 session_ids: [abc123def456]
@@ -27,7 +27,7 @@ session_ids: [abc123def456]
 
 | Field | What it tells you |
 |-------|------------------|
-| `status: shipped` | PR created; for cross-project plans, some repos may still be in flight |
+| `status: in_review` | PR created; for cross-project plans, some repos may still be in flight |
 | `status: done` | All PRs created and all expected URLs stamped |
 | `shipped_at` | First ship timestamp (UTC ISO 8601). Not updated on re-stamps. |
 | `urls: [...]` | Direct links to the PR(s). Multiple URLs for cross-project plans. |
@@ -82,7 +82,7 @@ predates the plan completion stamp. You can ignore it or remove it - nothing rea
 Find all shipped plans (replace `<plans-dir>` with wherever your plan folders live - commonly a `plans/` dir in the repo or a vault path reachable via `internal/`):
 
 ```bash
-grep -rl 'status: shipped\|status: done' <plans-dir>
+grep -rl 'status: in_review\|status: done' <plans-dir>
 ```
 
 Find plans that shipped to a specific repo:
@@ -91,10 +91,10 @@ Find plans that shipped to a specific repo:
 grep -rl 'github.com/org/repo' <plans-dir>
 ```
 
-Find plans with `status: shipped` but not yet `done` (cross-project in flight):
+Find plans with `status: in_review` but not yet `done` (cross-project in flight):
 
 ```bash
-grep -rl 'status: shipped' internal/fno/plans/**/00-INDEX.md 2>/dev/null \
+grep -rl 'status: in_review' internal/fno/plans/**/00-INDEX.md 2>/dev/null \
   | xargs grep -L 'status: done'
 ```
 
@@ -128,7 +128,7 @@ python3 scripts/lib/stamp-plan.py stamp \
 Add `--completion-note "text"` to include prose in `COMPLETION.md`. Use
 `--dry-run` first to verify the output without writing.
 
-To promote a plan from `shipped` to `done` manually (if graduate did not
+To promote a plan from `in_review` to `done` manually (if graduate did not
 fire after the final cross-project ship):
 
 ```bash

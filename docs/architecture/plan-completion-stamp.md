@@ -27,7 +27,7 @@ file is `00-INDEX.md`; for single-file quick plans it is the plan file itself.
 
 ```yaml
 ---
-status: shipped         # or "done" after graduation
+status: in_review       # or "done" after graduation
 shipped_at: 2026-04-22T14:31:05Z
 urls: [https://github.com/org/repo/pull/42]
 session_ids: [abc123]
@@ -44,25 +44,25 @@ preserved when showing examples or writing tests.
 See `CLAUDE.md` under "Plan Completion Stamp" for the canonical field
 definitions. This document goes deeper on the runtime behavior.
 
-## `shipped` vs `done`
+## `in_review` vs `done`
 
 Two distinct terminal states exist because cross-project plans can ship their
 PRs incrementally.
 
 | Status | Meaning |
 |--------|---------|
-| `shipped` | At least one PR URL is stamped; may still await more URLs |
+| `in_review` | At least one PR URL is stamped; may still await more URLs |
 | `done` | All expected URLs are present (`len(urls) >= expected_url_count`) |
 
 For single-project plans, `expected_url_count` is 1. The first stamp sets
-`status: shipped` and the immediate `graduate` call flips it to `done` in the
+`status: in_review` and the immediate `graduate` call flips it to `done` in the
 same session, so single-project plans reach `done` without a gap.
 
 For cross-project plans, each sub-repo's target session stamps its own URL.
-The plan stays `shipped` until every repo has contributed a URL. The final
+The plan stays `in_review` until every repo has contributed a URL. The final
 session's `graduate` call sees `len(urls) >= expected_url_count` and flips
 to `done`. Between the first and last sub-repo ships, the plan is genuinely
-`shipped` - real code is in review, just not everywhere yet.
+`in_review` - real code is in review, just not everywhere yet.
 
 ## Invocation Points
 
@@ -75,7 +75,7 @@ flowchart TD
     SP --> CM[COMPLETION.md appended]
 
     MEGA[megawalk graduation step] -->|after target sub-session| GRAD[stamp-plan.py graduate]
-    GRAD -->|"len(urls) >= expected"| DONE[status: shipped → done]
+    GRAD -->|"len(urls) >= expected"| DONE[status: in_review -> done]
     GRAD -->|"len(urls) < expected"| NOOP[no-op, wait for more ships]
 
     HOOK[target-stop-hook.sh backfill] -->|ship artifact present, stamp missing| SP
@@ -109,7 +109,7 @@ python3 "${REPO_ROOT}/scripts/lib/stamp-plan.py" graduate \
 ```
 
 `graduate` is conditional: it reads `expected_url_count` from the frontmatter,
-counts the current `urls` list, and only flips `shipped` to `done` when the
+counts the current `urls` list, and only flips `in_review` to `done` when the
 count is met. On intermediate ships of a cross-project plan it exits 0 without
 touching the file. See `skills/megawalk/references/bare-loop-execution.md`
 step 7b (graduation step) for the surrounding protocol, including the
@@ -137,7 +137,7 @@ The stamp operation is designed to be re-runnable without side effects:
   re-runs.
 - `urls` and `session_ids` are deduplicated before writing; appending the same
   URL twice produces one entry.
-- `graduate` exits 0 without writing if `status` is not already `shipped`.
+- `graduate` exits 0 without writing if `status` is not already `in_review` (the retired `shipped` spelling still reads as `in_review`).
 
 These guarantees make all three call sites safe to overlap - if the ship gate
 stamps, then the stop-hook backfill fires, and then a manual re-run happens,

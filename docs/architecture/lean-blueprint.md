@@ -21,9 +21,8 @@ Each transition corresponds to a pipeline phase:
 | `design` | `/think` at doc creation time |
 | `ready` | `/blueprint` after appending execution sections |
 | `in_progress` | `/do` or `/target` when execution starts |
-| `reviewing` | `/review sigma` on completion |
-| `shipping` | `/pr create` on PR creation |
-| `shipped` | `/ship` on merge confirmation |
+| `in_review` | `/pr create` on PR creation |
+| `done` | the merge, via the write-time projection |
 
 ## Section ownership
 
