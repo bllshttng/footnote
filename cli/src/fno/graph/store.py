@@ -59,6 +59,12 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "cwd",
     "domain",
     "blocked_by",
+    # Asserted symmetric affinity (x-d157): "two sides of the same coin", "these
+    # work well together". Distinct from the computed relatedness sidecar, which
+    # is regenerable and would destroy an assertion on the next build, and from
+    # blocked_by, which gates. related is navigational only: it never touches
+    # _status, dispatch eligibility, or selection order.
+    "related",
     # Contract-tier dependency classification (G2). Present ONLY on a
     # `dep=contract` dependent (it stubs against a pinned ## Interface Contract);
     # absent on the default `hard` path, so canonicalize keeps the hard-path
@@ -127,6 +133,50 @@ CANONICAL_FIELD_ORDER: list[str] = [
 # enough to scan what a child is and where it stands without a second lookup,
 # light enough that the flat ``entries`` store is not denormalized into a tree.
 CHILD_SUMMARY_FIELDS: tuple[str, ...] = ("id", "title", "project", "status")
+
+
+def _mirror_related(
+    by_id: dict, node_id: str, *, added: set, removed: set
+) -> None:
+    """Write the inverse edge onto each peer ``node_id`` gained or dropped.
+
+    Split out from :func:`set_related` so a test can fault exactly this step and
+    prove the half-edge state is unreachable rather than merely unlikely.
+
+    A peer in ``added`` that is missing raises: refusing the whole mutation is
+    correct when a node is deleted between resolution and write, since the
+    alternative is persisting an edge that dangles. A peer in ``removed`` that
+    is missing is ignored - the edge is already gone.
+    """
+    for peer_id in added:
+        peer = by_id[peer_id]
+        peer["related"] = sorted({*(peer.get("related") or []), node_id})
+    for peer_id in removed:
+        peer = by_id.get(peer_id)
+        if peer is not None:
+            peer["related"] = sorted(set(peer.get("related") or []) - {node_id})
+
+
+def set_related(entries: list[dict], node_id: str, desired: list[str]) -> None:
+    """Declare ``node_id``'s related set and mirror it onto every peer.
+
+    Symmetry is stored on both endpoints, not derived. ``children`` can be
+    rebuilt from scratch on every write because it inverts a single ``parent``
+    pointer, so the rebuild is lossless. ``related`` has two independently
+    declaring sides, so the same idiom would discard whichever side did not
+    write last.
+
+    Mutates ``entries`` in place. Both halves land in the caller's
+    ``locked_mutate_graph`` call, so ``B in A.related`` iff ``A in B.related``
+    cannot be left half-written: an exception aborts the mutation before
+    anything is persisted.
+    """
+    by_id = {e.get("id"): e for e in entries}
+    node = by_id[node_id]
+    before = set(node.get("related") or [])
+    after = set(desired)
+    node["related"] = sorted(after)
+    _mirror_related(by_id, node_id, added=after - before, removed=before - after)
 
 
 def _compute_children(entries: list[dict]) -> list[dict]:
@@ -376,6 +426,7 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         e.setdefault("completion_note", None)
         e.setdefault("progress_notes", [])
         e.setdefault("collisions_acknowledged", [])
+        e.setdefault("related", [])
         e.setdefault("supersedes", [])
         e.setdefault("superseded_by", None)
         e.setdefault("source_kind", "organic")

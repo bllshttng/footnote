@@ -1,0 +1,233 @@
+"""The asserted symmetric ``related`` edge (x-d157, Part B).
+
+``related`` is affinity ("two sides of the same coin", "these work well
+together"), distinct from ``source_node_id`` (origin) and from the computed
+relatedness sidecar (regenerable, so an assertion stored there would not
+survive the next build). It is navigational only: it must never reach
+``_status``, dispatch eligibility, or selection order.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from fno.cli import app
+
+runner = CliRunner()
+
+
+def _node(node_id: str, **over) -> dict:
+    base = {
+        "id": node_id,
+        "title": f"Node {node_id}",
+        "_status": "ready",
+        "domain": "code",
+        "project": "fno",
+        "slug": f"node-{node_id}",
+    }
+    base.update(over)
+    return base
+
+
+@pytest.fixture
+def tmp_graph(tmp_path, monkeypatch) -> Path:
+    g = tmp_path / "graph.json"
+    g.write_text(
+        json.dumps(
+            {"entries": [_node("x-aaaa"), _node("x-bbbb"), _node("x-cccc")]}, indent=2
+        )
+        + "\n"
+    )
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    monkeypatch.setattr(gc, "GRAPH_JSON", g)
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
+    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
+    for var in ("FNO_NODE", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID",
+                "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(var, raising=False)
+    return g
+
+
+def _related(g: Path, node_id: str) -> list[str]:
+    entries = json.loads(g.read_text())["entries"]
+    return next(e for e in entries if e["id"] == node_id).get("related", [])
+
+
+# ---------------------------------------------------------------------------
+# Schema: the three edits a graph.json field needs
+# ---------------------------------------------------------------------------
+
+
+def test_related_defaults_to_empty_on_a_legacy_node():
+    """A node written before the field existed reads back as [], never missing."""
+    from fno.graph.store import _apply_graph_defaults
+
+    (e,) = _apply_graph_defaults([_node("x-legacy")])
+    assert e["related"] == []
+
+
+def test_related_survives_canonicalization():
+    """The field is in CANONICAL_FIELD_ORDER, so a write round-trips it."""
+    from fno.graph.store import canonicalize_entries
+
+    (e,) = canonicalize_entries([_node("x-aaaa", related=["x-bbbb"])])
+    assert e["related"] == ["x-bbbb"]
+
+
+# ---------------------------------------------------------------------------
+# AC4-HP: symmetry on write
+# ---------------------------------------------------------------------------
+
+
+def test_ac4_hp_related_is_symmetric_on_write_and_on_clear(tmp_graph):
+    """AC4-HP: declaring on one endpoint writes the inverse; 'null' clears both."""
+    assert runner.invoke(
+        app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb"]
+    ).exit_code == 0
+    assert _related(tmp_graph, "x-aaaa") == ["x-bbbb"]
+    assert _related(tmp_graph, "x-bbbb") == ["x-aaaa"]
+
+    assert runner.invoke(
+        app, ["backlog", "update", "x-aaaa", "--related", "null"]
+    ).exit_code == 0
+    assert _related(tmp_graph, "x-aaaa") == []
+    assert _related(tmp_graph, "x-bbbb") == []
+
+
+def test_replace_semantics_unlink_the_dropped_peer(tmp_graph):
+    """--related replaces the list, so a dropped peer loses its inverse edge too."""
+    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb,x-cccc"])
+    assert _related(tmp_graph, "x-bbbb") == ["x-aaaa"]
+
+    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-cccc"])
+    assert _related(tmp_graph, "x-aaaa") == ["x-cccc"]
+    assert _related(tmp_graph, "x-bbbb") == []
+    assert _related(tmp_graph, "x-cccc") == ["x-aaaa"]
+
+
+def test_related_accepts_slugs_and_repeated_flags(tmp_graph):
+    result = runner.invoke(
+        app,
+        ["backlog", "update", "x-aaaa",
+         "--related", "node-x-bbbb", "--related", "x-cccc"],
+    )
+    assert result.exit_code == 0, result.output
+    assert _related(tmp_graph, "x-aaaa") == ["x-bbbb", "x-cccc"]
+
+
+# ---------------------------------------------------------------------------
+# AC2-ERR / boundaries
+# ---------------------------------------------------------------------------
+
+
+def test_ac2_err_self_reference_is_rejected(tmp_graph):
+    """AC2-ERR: a node cannot be related to itself; the list is left unchanged."""
+    result = runner.invoke(
+        app, ["backlog", "update", "x-aaaa", "--related", "x-aaaa"]
+    )
+    assert result.exit_code != 0
+    assert _related(tmp_graph, "x-aaaa") == []
+
+
+def test_dangling_related_id_is_rejected_and_writes_nothing(tmp_graph):
+    """An unresolvable peer refuses the whole update, mirroring --source-node."""
+    result = runner.invoke(
+        app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb,x-zzzz"]
+    )
+    assert result.exit_code != 0
+    assert "x-zzzz" in result.output
+    # The valid half of the list must not have landed either.
+    assert _related(tmp_graph, "x-aaaa") == []
+    assert _related(tmp_graph, "x-bbbb") == []
+
+
+def test_related_is_non_blocking(tmp_graph):
+    """related never gates: declaring one leaves every _status and blocked_by alone.
+
+    Asserted as before-vs-after rather than against a literal status, so the
+    test pins the invariant that matters (related does not participate in
+    status derivation) instead of whatever the fixture happens to derive to.
+    """
+    def _statuses() -> dict[str, tuple]:
+        entries = json.loads(tmp_graph.read_text())["entries"]
+        return {e["id"]: (e["_status"], tuple(e["blocked_by"])) for e in entries}
+
+    # A no-op write first, so the baseline reflects derivation, not the seed.
+    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "null"])
+    before = _statuses()
+
+    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb"])
+    assert _statuses() == before
+
+
+# ---------------------------------------------------------------------------
+# AC7-HP: filing-time related
+# ---------------------------------------------------------------------------
+
+
+def test_ac7_hp_related_at_filing_time(tmp_graph):
+    """AC7-HP: --related on idea holds symmetry with no follow-up update."""
+    result = runner.invoke(
+        app, ["backlog", "idea", "co-delivered work", "--related", "x-bbbb"]
+    )
+    assert result.exit_code == 0, result.output
+    new_id = json.loads(result.stdout)["id"]
+    assert _related(tmp_graph, new_id) == ["x-bbbb"]
+    assert _related(tmp_graph, "x-bbbb") == [new_id]
+
+
+def test_filing_time_dangling_peer_refuses_the_whole_filing(tmp_graph):
+    before = len(json.loads(tmp_graph.read_text())["entries"])
+    result = runner.invoke(
+        app, ["backlog", "add", "co-delivered work", "--related", "x-zzzz"]
+    )
+    assert result.exit_code != 0
+    assert len(json.loads(tmp_graph.read_text())["entries"]) == before
+
+
+# ---------------------------------------------------------------------------
+# AC1-FR: the half-edge state is unreachable
+# ---------------------------------------------------------------------------
+
+
+def test_ac1_fr_peer_write_failure_leaves_neither_side(tmp_graph, monkeypatch):
+    """AC1-FR: fault the mirror step; the declaring write must not survive alone.
+
+    Faulted at the peer-normalization function rather than by killing the
+    process, so the assertion runs against a deterministic point. Both halves
+    are in one locked_mutate_graph call, so the abort is structural.
+    """
+    import fno.graph.store as gs
+
+    def boom(*a, **k):
+        raise RuntimeError("peer write failed")
+
+    monkeypatch.setattr(gs, "_mirror_related", boom)
+
+    result = runner.invoke(
+        app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb"]
+    )
+    assert result.exit_code != 0
+    assert _related(tmp_graph, "x-aaaa") == []
+    assert _related(tmp_graph, "x-bbbb") == []
+
+
+def test_ac2_fr_opposite_endpoint_declarations_both_survive(tmp_graph):
+    """AC2-FR: B keeps both A's and C's edges; neither is lost to a rewrite.
+
+    Sequential rather than threaded: each update re-reads under the graph lock,
+    so serialized writes are exactly what two concurrent sessions produce.
+    """
+    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb"])
+    runner.invoke(app, ["backlog", "update", "x-cccc", "--related", "x-bbbb"])
+
+    assert sorted(_related(tmp_graph, "x-bbbb")) == ["x-aaaa", "x-cccc"]
+    assert _related(tmp_graph, "x-aaaa") == ["x-bbbb"]
+    assert _related(tmp_graph, "x-cccc") == ["x-bbbb"]

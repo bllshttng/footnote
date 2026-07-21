@@ -685,6 +685,7 @@ def _create_node_impl(
     batch: Optional[str] = None,
     tags: Optional[list[str]] = None,
     source_node: Optional[str] = None,
+    related: Optional[list[str]] = None,
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
 
@@ -794,6 +795,21 @@ def _create_node_impl(
                 raise typer.Exit(code=1)
         entries.append(node)
         node_holder[0] = node
+        # Filing-time related edges (x-d157). After the append so the new node
+        # is in the snapshot the mirror writes against; before the rollup block,
+        # whose broad except must not swallow a refusal.
+        if related:
+            from fno.graph._intake import _parse_blocker_list
+            from fno.graph.store import set_related
+
+            set_related(
+                entries,
+                new_id,
+                [
+                    _resolve_asserted_id(t, entries, flag="--related", self_id=new_id)
+                    for t in _parse_blocker_list(related)
+                ],
+            )
         # Rollup resolution runs INSIDE the mutator: it reads the same locked
         # snapshot the node was born into and applies an auto-link in the same
         # write, so no second lock and no window where the node exists unlinked.
@@ -910,6 +926,14 @@ def cmd_add(
             "ambient capture. Refuses if it does not resolve."
         ),
     ),
+    related: Optional[List[str]] = typer.Option(
+        None,
+        "--related",
+        help=(
+            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
+            "comma-separate. Refuses an id that does not resolve."
+        ),
+    ),
 ) -> None:
     _create_node_impl(
         title=title,
@@ -928,6 +952,7 @@ def cmd_add(
         batch=batch,
         tags=tag,
         source_node=source_node,
+        related=related,
     )
 
 
@@ -978,6 +1003,14 @@ def cmd_idea(
             "ambient capture. Refuses if it does not resolve."
         ),
     ),
+    related: Optional[List[str]] = typer.Option(
+        None,
+        "--related",
+        help=(
+            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
+            "comma-separate. Refuses an id that does not resolve."
+        ),
+    ),
 ) -> None:
     """Capture an idea (a plan-less backlog node) with minimal ceremony.
 
@@ -1005,6 +1038,7 @@ def cmd_idea(
         batch=batch,
         tags=tag,
         source_node=source_node,
+        related=related,
     )
 
 
@@ -1985,6 +2019,15 @@ def cmd_update(
             "Pass 'null' to clear. Refuses a self-reference or an id that does not resolve."
         ),
     ),
+    related: Optional[List[str]] = typer.Option(
+        None,
+        "--related",
+        help=(
+            "Replace the related list (asserted, symmetric, non-blocking). Repeat or "
+            "comma-separate. Pass 'null' to clear. Refuses a self-reference or an id "
+            "that does not resolve."
+        ),
+    ),
     blocked_by: Optional[List[str]] = typer.Option(None, "--blocked-by", help="Replace blocked_by list"),
     add_blocker: Optional[List[str]] = typer.Option(None, "--add-blocker", help="Append blocker IDs"),
     remove_blocker: Optional[List[str]] = typer.Option(None, "--remove-blocker", help="Remove blocker IDs"),
@@ -2278,6 +2321,22 @@ def cmd_update(
             typer.echo(f"Error: graph node {task_id} not found", err=True)
             raise typer.Exit(code=1)
         projected_node[0] = node
+
+        if related is not None:
+            from fno.graph.store import set_related
+
+            tokens = _parse_blocker_list(related)
+            desired = (
+                []
+                if tokens == ["null"]
+                else [
+                    _resolve_asserted_id(
+                        t, entries, flag="--related", self_id=node["id"]
+                    )
+                    for t in tokens
+                ]
+            )
+            set_related(entries, node["id"], desired)
 
         if source_node is not None:
             node["source_node_id"] = (
