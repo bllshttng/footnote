@@ -17,6 +17,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Literal, Optional
 
 import typer
@@ -113,8 +114,8 @@ def _container_ids(entries: list[dict]) -> set[str]:
     container.
     """
     return {
-        e.get("parent") for e in entries
-        if isinstance(e, dict) and isinstance(e.get("parent"), str)
+        p for e in entries
+        if isinstance(e, dict) and isinstance((p := e.get("parent")), str)
     }
 
 
@@ -516,7 +517,7 @@ def cmd_epic_status(
             # coverage block ships regardless so a suppressed figure explains
             # itself instead of just being absent.
             "scope_growth": {
-                "follow_ups": len(growth.follow_up_ids) if growth.reportable else None,
+                "follow_ups": len(growth.follow_up_ids or ()) if growth.reportable else None,
                 "follow_up_ids": list(growth.follow_up_ids or ()),
                 "reportable": growth.reportable,
                 "coverage": round(growth.coverage, 4),
@@ -1005,8 +1006,9 @@ def _create_node_impl(
     # Repaint the new child's ancestors so a parent epic/mission rollup reflects
     # the birth immediately (a plan-less idea still counts toward children_total).
     # The converger walks up from the child id to the epic + mission (codex P2).
-    if node_holder[0] is not None and node_holder[0].get("parent"):
-        _project_plans_from_graph([new_id_holder[0]])
+    new_child_id = new_id_holder[0]
+    if new_child_id is not None and node_holder[0] is not None and node_holder[0].get("parent"):
+        _project_plans_from_graph([new_child_id])
 
     typer.echo(json.dumps({"id": new_id_holder[0], "title": title}, indent=2))
 
@@ -1790,20 +1792,18 @@ def _intake_impl(
         raise typer.Exit(code=1)
 
     # Build args-like namespace for reuse of shared intake logic
-    class _Args:
-        pass
-
-    args = _Args()
-    args.roadmap_id = roadmap_id
-    args.title = title
-    args.priority = priority
-    args.deps = deps
-    args.points = points
-    args.force_new_roadmap = force_new_roadmap
-    args.dry_run = dry_run
-    args.from_list = from_list
-    args.plan_paths = plan_paths or []
-    args.project = project
+    args = SimpleNamespace(
+        roadmap_id=roadmap_id,
+        title=title,
+        priority=priority,
+        deps=deps,
+        points=points,
+        force_new_roadmap=force_new_roadmap,
+        dry_run=dry_run,
+        from_list=from_list,
+        plan_paths=plan_paths or [],
+        project=project,
+    )
 
     if project is not None and (not isinstance(project, str) or not project.strip()):
         typer.echo("Error: --project must be a non-empty string", err=True)
@@ -2389,6 +2389,7 @@ def cmd_update(
         # With no --pr-number the node keeps the one it already has, so that is
         # what the url must name - otherwise a url-only update re-creates the
         # two-different-PRs row the paired path refuses.
+        expect: Optional[int]
         if pr_number is not None and pr_number.strip().isdigit():
             expect = int(pr_number)
         elif pr_number is None:
@@ -3044,6 +3045,7 @@ def cmd_next(
     if (not project_filter and not all_) or parent:
         pre_entries = read_graph(_graph_path())
     if not project_filter and not all_:
+        assert pre_entries is not None  # set under the same condition above
         project_filter = detect_project(pre_entries)
 
     # Epic-scope filter (C2, ab-facfaade): restrict candidates to the
@@ -3056,6 +3058,7 @@ def cmd_next(
     # concurrent reparent could claim a node no longer in the subtree).
     parent_target_id: Optional[str] = None
     if parent:
+        assert pre_entries is not None  # set when `parent` is truthy above
         target = _find_node(pre_entries, parent)
         if target is None:
             typer.echo(f"Error: no such node '{parent}'", err=True)
@@ -3739,6 +3742,8 @@ def _spawned_walk(
         for parent_id in frontier:
             for child in sorted(by_source.get(parent_id, []), key=lambda e: e.get("id") or ""):
                 child_id = child.get("id")
+                if not isinstance(child_id, str):
+                    continue
                 if child_id in seen:
                     cycle = True
                     continue
@@ -4420,10 +4425,11 @@ def cmd_status(
     if roadmap_id:
         entries = [e for e in entries if e.get("roadmap_id") == roadmap_id]
 
+    projects: dict[str, list]
     if project:
         projects = {project: [e for e in entries if e.get("project") == project]}
     elif all_:
-        projects: dict = {}
+        projects = {}
         for e in entries:
             proj = e.get("project") or "(no project)"
             projects.setdefault(proj, []).append(e)
@@ -5898,6 +5904,7 @@ def cmd_done(
 
     # -- Step 3: Force path - proceed and journal loudly --
     if force and refs:
+        assert reason is not None  # the `--force requires --reason` guard above ensures this
         first_pr_number, first_pr_url = refs[0]
         # A forced close still names a PR; stamp the plan against it so the ship
         # is recorded even when the cross-check was bypassed (ab-bd9f476c).
@@ -6840,8 +6847,8 @@ def cmd_reconcile(
     if reverted_stamped:
         verb = "Would stamp" if dry_run else "Stamped"
         typer.echo(f"{verb} {len(reverted_stamped)} node(s) reverted:")
-        for r in reverted_stamped:
-            typer.echo(f"  {r['node_id']}  revert PR #{r['revert_pr']}")
+        for rev in reverted_stamped:
+            typer.echo(f"  {rev['node_id']}  revert PR #{rev['revert_pr']}")
 
     if failures:
         typer.echo(f"{len(failures)} node(s) could not be resolved:", err=True)
@@ -7501,9 +7508,9 @@ def cmd_maintain(
             f"(run with --apply to apply the deterministic legs)"
         )
 
-    for f in rescope_fixes:
-        verb = "re-scoped" if (apply and f.node_id in applied_rescope) else "would re-scope"
-        typer.echo(f"  {verb} {f.node_id} -> project={f.new_project} cwd={f.new_cwd}")
+    for rf in rescope_fixes:
+        verb = "re-scoped" if (apply and rf.node_id in applied_rescope) else "would re-scope"
+        typer.echo(f"  {verb} {rf.node_id} -> project={rf.new_project} cwd={rf.new_cwd}")
     for nid in prune_ids:
         verb = "pruned" if (apply and nid in applied_prune) else "would prune (temp-cwd leak)"
         typer.echo(f"  {verb} {nid}")
@@ -7532,11 +7539,11 @@ def cmd_maintain(
                 f"unmoved): {d['reason']}"
             )
     else:
-        for c in stale_ready_cands:
+        for sc in stale_ready_cands:
             typer.echo(
-                f"  would quarantine stale-ready {c.node_id} ({c.age_days}d "
+                f"  would quarantine stale-ready {sc.node_id} ({sc.age_days}d "
                 f"unmoved, >{ready_staleness_days}d): fno backlog undefer "
-                f"{c.node_id} to recover"
+                f"{sc.node_id} to recover"
             )
     if stale_ready_truncated:
         typer.echo(
@@ -7574,14 +7581,14 @@ def cmd_maintain(
         if validity_result.eligible == 0:
             typer.echo("validity: 0 eligible ideas")
         else:
-            c = validity_result.counts
+            counts = validity_result.counts
             tag = " (DEGRADED: analyzer unavailable)" if validity_result.degraded else ""
-            stale = f", {validity_result.stale} stale" if validity_result.stale else ""
+            stale_note = f", {validity_result.stale} stale" if validity_result.stale else ""
             typer.echo(
                 f"validity: reviewed {validity_result.eligible} ideas{tag} -> "
-                f"promote {c.get('promote', 0)} | keep {c.get('keep', 0)} | "
-                f"supersede {c.get('supersede', 0)} | needs-human "
-                f"{c.get('needs-human', 0)}{stale}"
+                f"promote {counts.get('promote', 0)} | keep {counts.get('keep', 0)} | "
+                f"supersede {counts.get('supersede', 0)} | needs-human "
+                f"{counts.get('needs-human', 0)}{stale_note}"
             )
             typer.echo(f"  deck: {validity_result.deck_md}")
 
@@ -7843,7 +7850,7 @@ def cmd_archive(
             f"[dry-run] would archive {len(to_archive)} terminal node(s) "
             f"older than {older_than_days}d to {_archive_path()}"
         )
-        held = {}
+        held: dict[str, int] = {}
         for s in skipped:
             held[s["_skip"]] = held.get(s["_skip"], 0) + 1
         for reason, n in sorted(held.items()):
