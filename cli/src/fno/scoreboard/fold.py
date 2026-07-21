@@ -1381,7 +1381,8 @@ if __name__ == "__main__":
     import tempfile as _tf
     import os as _os
     _fd, _p = _tf.mkstemp()
-    _os.write(_fd, b'{"entries": null}'); _os.close(_fd)
+    _os.write(_fd, b'{"entries": null}')
+    _os.close(_fd)
     assert load_ledger_rows(Path(_p)) == []
     _os.unlink(_p)
 

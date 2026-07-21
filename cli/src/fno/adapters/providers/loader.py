@@ -12,7 +12,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 import tomli_w
 import pydantic
@@ -27,6 +27,9 @@ from fno.adapters.providers.model import (
     QuotaConfig,
 )
 from fno.state.io import atomic_write
+
+if TYPE_CHECKING:
+    from fno.adapters.providers.rotation import Combo
 
 logger = logging.getLogger(__name__)
 
