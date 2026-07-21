@@ -70,3 +70,32 @@ def test_pr_number_still_sets_an_int(tmp_graph):
     node = _first(tmp_graph)
     assert node["pr_number"] == 77
     assert node["pr_url"] == "https://example.com/pull/77"
+
+
+def test_plan_path_can_be_cleared(tmp_graph):
+    """A literal 'null' would bind the node to a plan file named "null", which
+    reads as bound to every gate that only checks presence."""
+    _seed(tmp_graph, [{
+        "id": "ab-00000001", "title": "t", "domain": "code", "project": "p",
+        "plan_path": "/plans/old.md",
+    }])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--plan-path", "null",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert _first(tmp_graph)["plan_path"] is None
+
+
+def test_plan_path_still_binds_a_real_path(tmp_graph):
+    _seed(tmp_graph, [
+        {"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"},
+    ])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--plan-path", "/plans/new.md",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert _first(tmp_graph)["plan_path"] == "/plans/new.md"

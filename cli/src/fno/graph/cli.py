@@ -1828,7 +1828,9 @@ def cmd_update(
     locked_by_harness: Optional[str] = typer.Option(None, "--locked-by-harness", help="Holder's harness/provider (claude|codex|gemini). 'null' clears."),
     locked_by_harness_session: Optional[str] = typer.Option(None, "--locked-by-harness-session", help="Holder's harness session UUID. 'null' clears."),
     has_brief: Optional[str] = typer.Option(None, "--has-brief", help="Set has_brief flag"),
-    plan_path: Optional[str] = typer.Option(None, "--plan-path", help="Plan directory path"),
+    plan_path: Optional[str] = typer.Option(
+        None, "--plan-path", help="Plan directory path. 'null' clears."
+    ),
     pr_number: Optional[str] = typer.Option(
         None, "--pr-number", help="PR number. 'null' clears."
     ),
@@ -2114,9 +2116,16 @@ def cmd_update(
         if has_brief is not None:
             node["has_brief"] = has_brief.lower() == "true"
         if plan_path is not None:
-            node["plan_path"] = plan_path
-            if linked_size and not node.get("size"):
-                node["size"] = linked_size
+            # 'null' clears. Storing the literal string binds the node to a plan
+            # file named "null", which reads as bound to every gate that only
+            # checks presence - worse than unbound, and unfixable on a
+            # hand-edit-forbidden graph.
+            if plan_path.lower() == "null":
+                node["plan_path"] = None
+            else:
+                node["plan_path"] = plan_path
+                if linked_size and not node.get("size"):
+                    node["size"] = linked_size
         if pr_number is not None:
             # 'null' clears, like every other nullable scalar here. Without it a
             # node linked to the wrong PR could not be unlinked at all, and the
