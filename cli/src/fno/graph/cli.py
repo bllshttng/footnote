@@ -3653,9 +3653,12 @@ def cmd_get(
     # Read-through fallback: a node the sweep archived still resolves here
     # (read-only). Mutating verbs stay working-graph-only and error instead.
     from fno.paths import graph_archive_json
+    from fno.graph.store import read_graph
 
     archive_path = graph_archive_json()
     if archive_path.exists():
+        # Best-effort, read-only: an unreadable archive degrades to the final
+        # miss below rather than erroring, so keep the soft reader here.
         archived = read_graph(archive_path)
         amatch = resolve_node(id, archived)
         if amatch.kind == "exact":
