@@ -13,9 +13,20 @@ The pane layer owns placement, lifecycle, and I/O; fno stays the authority for i
 | Duty | Verb | Notes |
 |---|---|---|
 | **Place** a teammate near the king | `fno agents spawn <name> "<payload>" --substrate pane --squad <s> --split <dir>` | Splits the target squad's active tab; min-size refusal falls back to a same-squad tab. Read the receipt for which one landed. |
-| **Inject** the next phase into a live session | `fno mail send <handle> "<ruling + /fno:verb>" --from-self` | A direct send to a live pane injects as a notification it acts on this turn. Receipt-gated - see delivery truth below. |
+| **Inject** the next phase into a live session | `fno mail send <handle> "<ruling + /fno:verb>" --from-self` | A direct send to a live pane injects as a notification it acts on this turn. Receipt-gated - see delivery truth below. Auto-wrapped in the `<fno_mail>` envelope; a raw pane-layer prompt is not - see the envelope rule below. |
 | **Wait** on lifecycle | `fno-agents needs --json` + `fno agents top` per heartbeat | Push-first (the teammate's report mail); this is the backstop sweep. |
 | **Read / triage** | `fno agents peek <handle>` | Read-only. Full-screen agents render in the alternate screen, so scrolled-off rows are unrecoverable - reads are triage, results live in artifacts and the graph. |
+
+## The `<fno_mail>` envelope, on every lane
+
+Every agent-to-agent payload carries the `<fno_mail>` envelope - king to teammate, teammate to teammate, on every lane. The reason is a transcript-safety one: an injected message lands in the recipient's transcript as *user-role* text, indistinguishable from the human at the keyboard, and the envelope is the only marker that says "an agent said this." An unwrapped ruling impersonates the maintainer.
+
+- **`fno mail send` wraps automatically.** Nothing to do; the ruling is already marked.
+- **A pane-layer prompt verb does not.** If the crowning brief routes you through the pane layer's own prompt/send verb instead of `fno mail`, include the wrapper in the text yourself:
+
+  ```
+  <fno_mail from="<your-handle>" to="<teammate-handle>">Ruling: approved. Next: /fno:blueprint <node>.</fno_mail>
+  ```
 
 ## Control surfaces
 
