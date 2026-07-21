@@ -1188,6 +1188,9 @@ mod tests {
             exited_at: None,
             mux: None,
             screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
             legacy_claude_short_id: None,
         }
     }
