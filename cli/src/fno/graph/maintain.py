@@ -655,6 +655,11 @@ VALIDITY_RUN_TIMEOUT_S = 120.0
 # citation (injection boundary, Locked Decision #6). Anything else is dropped.
 ALLOWED_EVIDENCE_PREFIXES = ("graph:", "path:", "git:", "pr:")
 
+# The subset of the above that a retro_source seam may contribute (US1). Narrower
+# than the general allowlist on purpose: retro enrichment carries only the review
+# comment and the merged file region, never graph:/path: items.
+RETRO_ALLOWED_PREFIXES = ("pr:", "git:")
+
 # Fields whose content defines a node's "premise". A change to any of them
 # re-qualifies a watermarked node for review (Locked Decision #5 / AC5-FR).
 _FINGERPRINT_FIELDS = (
@@ -716,7 +721,7 @@ def node_fingerprint(node: dict) -> str:
 # source_pr=`` substring, so ordinary prose that merely mentions the trailer
 # cannot masquerade as a filed node (codex review, PR #530).
 _RETRO_TRAILER_RE = re.compile(
-    r"<!--\s*retro-triage\s+source_pr=(?:\d+|None)\s+finding_hash=[0-9a-f]+\s*-->"
+    r"<!--\s*retro-triage\s+source_pr=(?P<pr>\d+|None)\s+finding_hash=(?P<hash>[0-9a-f]+)\s*-->"
 )
 
 
@@ -726,6 +731,19 @@ def is_retro_triage_node(node: dict) -> bool:
     the class by that full trailer, so a node whose prose merely discusses
     retro-triage is not falsely age-exempted."""
     return _RETRO_TRAILER_RE.search(str(node.get("details") or "")) is not None
+
+
+def parse_retro_trailer(details: object) -> Optional[tuple[Optional[int], str]]:
+    """Pull ``(source_pr, finding_hash)`` from a retro node's trailer, or ``None``
+    when no trailer is present. ``source_pr`` is an ``int``, or ``None`` for a
+    postmortem-sourced node (no fetchable PR comment). Mirrors the named groups on
+    ``fno.retro.dedup._TRAILER_RE`` so the enrichment seam can hash-join the
+    originating comment."""
+    m = _RETRO_TRAILER_RE.search(str(details or ""))
+    if m is None:
+        return None
+    pr_raw = m.group("pr")
+    return (None if pr_raw == "None" else int(pr_raw)), m.group("hash")
 
 
 def select_validity_candidates(
@@ -866,6 +884,7 @@ def collect_evidence(
     now: Optional[datetime] = None,
     exists: Optional[Callable[[str], bool]] = None,
     search: Optional[Callable[[str], Optional[int]]] = None,
+    retro_source: Optional[Callable[[dict], dict[str, str]]] = None,
 ) -> EvidencePacket:
     """Build one node's deterministic, read-only, allowlisted evidence packet.
 
@@ -875,6 +894,10 @@ def collect_evidence(
         evidence is recorded as unavailable rather than fabricated.
       * ``search(symbol) -> int | None`` returns a bounded git/rg match count, or
         ``None`` for an unavailable source (recorded, never guessed).
+      * ``retro_source(node) -> {id: summary}`` enriches ONLY a retro-triage node
+        with the originating review comment + merged file region so the classifier
+        can judge "already satisfied". Fail open: an absent/empty/raising seam
+        records ``retro`` unavailable and the node is kept (never dropped).
 
     The packet is capped at ``PACKET_MAX_BYTES`` by truncating ``details`` and
     dropping trailing evidence items (Boundaries / Locked Decision #7).
@@ -947,6 +970,27 @@ def collect_evidence(
                 packet.unavailable.append(f"git:{sym}")
             else:
                 packet.items[f"git:{sym}"] = f"{count} matches"
+
+    # retro-only enrichment: fetch the originating review comment + merged file
+    # region so the classifier can judge "already satisfied" (the x-fdff shape a
+    # base packet cannot catch). Merged LAST so ``_cap_packet`` drops these before
+    # any base item (AC4-EDGE). Only ``pr:``/``git:`` keys are accepted; anything
+    # else is rejected, not merged (AC1-HP injection boundary). Absent/empty/raising
+    # -> record ``retro`` unavailable, node kept (fail open, Locked Decision #4).
+    if is_retro_triage_node(node):
+        extra: dict[str, str] = {}
+        if retro_source is not None:
+            try:
+                extra = retro_source(node) or {}
+            except Exception:  # noqa: BLE001 - a failed source is unavailable, not a verdict
+                extra = {}
+        merged = False
+        for pid, summary in extra.items():
+            if isinstance(pid, str) and pid.startswith(RETRO_ALLOWED_PREFIXES):
+                packet.items[pid] = str(summary)
+                merged = True
+        if not merged:
+            packet.unavailable.append("retro")
 
     _cap_packet(packet)
     return packet
@@ -1025,7 +1069,16 @@ _VALIDITY_PROMPT = (
     "useful long-tail idea whose premise still holds), `promote` (a keep worth "
     "surfacing as a real p3 card), `supersede` (its premise is invalidated or a "
     "concrete other node/PR already implemented it - you MUST name that node id "
-    "in `target`), or `needs-human` (unclear, or evidence too weak). Cite the "
+    "in `target`), or `needs-human` (unclear, or evidence too weak). For a "
+    "retro-triage node, a `pr:review-comment` item (the originating reviewer ask) "
+    "paired with a `git:merged-region` item (the cited file as it stands in the "
+    "merged tree) may show the ask is already satisfied (the reviewed code is "
+    "already correct, or the requested change is already present). There is no "
+    "superseding node in that case, so classify it `needs-human` and cite both "
+    "ids, naming the source PR in the rationale so an operator can confirm and "
+    "close it. Do NOT emit `supersede` with a PR number as `target`: a supersede "
+    "target must be an existing backlog node id drawn from a `graph:title-match` "
+    "item, and a bare PR number is rejected. Cite the "
     "evidence ids you relied on in `evidence_ids`; a destructive supersede/promote "
     "MUST cite at least one. Output JSON {results:[{node_id, classification, "
     "confidence (0-1), rationale, evidence_ids, target?}]}. One result per packet."
@@ -1280,6 +1333,11 @@ def _render_deck_md(
             if r.stale_note():
                 lines.append(f"- **{r.stale_note()}**")
             lines.append(f"- rationale: {r.rationale}")
+            # AC5-FR: a retro node kept because enrichment could not be read is a
+            # thin-evidence keep, not a verified one - surface it in the row so an
+            # operator reads "kept, evidence thin", not "premise verified".
+            if pkt and "retro" in pkt.unavailable:
+                lines.append("- **enrichment unavailable (retro): kept on base evidence only**")
             if r.evidence_ids:
                 lines.append(f"- evidence: {', '.join(r.evidence_ids)}")
             if r.note:
@@ -1406,6 +1464,7 @@ def run_validity_sweep(
     now: Optional[datetime] = None,
     exists_factory: Optional[Callable[[dict], Optional[Callable[[str], bool]]]] = None,
     search: Optional[Callable[[str], Optional[int]]] = None,
+    retro_source: Optional[Callable[[dict], dict[str, str]]] = None,
     analyze: Optional[Callable[[list["EvidencePacket"]], dict[str, dict]]] = None,
     reread: Optional[Callable[[], list[dict]]] = None,
     deck_id: Optional[str] = None,
@@ -1437,6 +1496,7 @@ def run_validity_sweep(
             c, entries, now=now,
             exists=(exists_factory(c) if exists_factory else None),
             search=search,
+            retro_source=retro_source,
         )
         for c in candidates
     ]

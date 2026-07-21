@@ -6810,6 +6810,152 @@ def _maintain_source_timeout() -> float:
     return _m.EVIDENCE_SOURCE_TIMEOUT_S
 
 
+# Bounds for the retro enrichment items (Discretion #1/#2): a few lines of the
+# merged file around the comment, and a truncated diff_hunk. Kept small so both
+# sit comfortably inside PACKET_MAX_BYTES alongside the base packet.
+_RETRO_REGION_WINDOW = 8
+_RETRO_REGION_MAX_BYTES = 1200
+_RETRO_HUNK_MAX_BYTES = 400
+
+
+def _fetch_retro_comment(source_pr: int, finding_hash: str, root: str) -> Optional[dict]:
+    """Fetch PR ``source_pr``'s inline comments (resolved from ``root``) and return
+    the one whose body hash-joins ``finding_hash``, or ``None`` on any failure.
+
+    The hash is the canonical ``content_hash`` ``land`` wrote (function-local import
+    so ``graph`` keeps no module-level ``fno.retro`` dependency - that edge runs
+    retro -> graph). The gh path is templated with a numeric PR slot, so an injected
+    trailer value cannot escape the current repo or the ``<int>`` slot (Pessimist B).
+    """
+    import subprocess
+
+    from fno.retro.dedup import content_hash  # function-local: no graph->retro cycle
+
+    path = f"repos/:owner/:repo/pulls/{source_pr}/comments"
+    try:
+        proc = subprocess.run(
+            ["gh", "api", path, "--paginate", "--slurp"],
+            capture_output=True, text=True, cwd=root,
+            timeout=_maintain_source_timeout(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        raw = json.loads(proc.stdout) if proc.stdout.strip() else []
+    except (json.JSONDecodeError, ValueError):
+        return None
+    # --slurp wraps paginated pages as [[page1...],[page2...]]; flatten, tolerating
+    # a non-slurped flat list too (defensive, mirrors fetch_review_comments).
+    flat: list[dict] = []
+    if isinstance(raw, list):
+        for elem in raw:
+            if isinstance(elem, list):
+                flat.extend(x for x in elem if isinstance(x, dict))
+            elif isinstance(elem, dict):
+                flat.append(elem)
+    for c in flat:
+        if content_hash(str(c.get("body", ""))) == finding_hash:
+            return c
+    return None
+
+
+def _summarize_review_comment(path: object, line: object, diff_hunk: object) -> str:
+    """One-line, bounded summary of the originating ask: cited path/line plus a
+    truncated diff_hunk (the shape of the ask, not the whole hunk - Discretion #2)."""
+    loc = f"{path}:{line}" if line else str(path)
+    hunk = str(diff_hunk or "").strip()
+    if len(hunk) > _RETRO_HUNK_MAX_BYTES:
+        hunk = hunk[:_RETRO_HUNK_MAX_BYTES] + "…[truncated]"
+    return f"reviewer asked at {loc}; diff_hunk: {hunk}" if hunk else f"reviewer asked at {loc}"
+
+
+def _read_merged_region(root: str, path: str, line: object) -> str:
+    """A bounded excerpt of ``path`` in the live merged tree around ``line``.
+
+    Reads ``git show HEAD:<path>`` (Locked Decision #3: live HEAD, not the merge
+    SHA); on git failure falls back to a path-safe filesystem read gated by
+    ``contained_path_exists`` (CWE-22). Returns "" when neither resolves. The line
+    is clamped to the file's bounds (Boundaries: a comment at/past EOF)."""
+    import subprocess
+
+    from fno.graph import maintain as _m
+
+    # Defense in depth (CWE-22): `path` originates from a GitHub comment, so reject
+    # a non-str or a parent-escaping / absolute path BEFORE any read. `git show
+    # HEAD:<path>` already cannot escape the tree object and the fs fallback is
+    # gated by contained_path_exists, but guarding up front keeps every reader safe
+    # and avoids a TypeError on a non-str root/path.
+    if not isinstance(root, str) or not isinstance(path, str):
+        return ""
+    norm = os.path.normpath(path)
+    if os.path.isabs(norm) or norm == ".." or norm.startswith(".." + os.sep):
+        return ""
+
+    content: Optional[str] = None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", root, "show", f"HEAD:{path}"],
+            capture_output=True, text=True, timeout=_maintain_source_timeout(),
+        )
+        if proc.returncode == 0:
+            content = proc.stdout
+    except (OSError, subprocess.SubprocessError):
+        content = None
+    if content is None:
+        if not _m.contained_path_exists(root, path):
+            return ""
+        try:
+            with open(os.path.join(root, path), encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except OSError:
+            return ""
+    file_lines = content.splitlines()
+    if not file_lines:
+        return ""
+    anchor = line if isinstance(line, int) and line >= 1 else 1
+    anchor = min(anchor, len(file_lines))  # clamp EOF
+    lo = max(0, anchor - 1 - _RETRO_REGION_WINDOW)
+    hi = min(len(file_lines), anchor + _RETRO_REGION_WINDOW)
+    excerpt = "\n".join(file_lines[lo:hi])
+    return excerpt[:_RETRO_REGION_MAX_BYTES]
+
+
+def _validity_retro_source(node: dict) -> dict[str, str]:
+    """Per-retro-node enrichment seam (Locked Decision #1): the originating review
+    comment (`pr:review-comment`) + the cited file's merged region
+    (`git:merged-region:<path>`), for the validity classifier. Returns allowlisted
+    `pr:`/`git:` items, or ``{}`` on any failure at any step (fail open, node kept).
+    Wired only here in the CLI edge; the hermetic core injects a stub under test."""
+    from fno.graph import maintain as _m
+
+    parsed = _m.parse_retro_trailer(node.get("details"))
+    if parsed is None:
+        return {}
+    source_pr, finding_hash = parsed
+    if source_pr is None:  # postmortem-sourced: no fetchable PR comment
+        return {}
+    root = node.get("cwd")
+    if not isinstance(root, str) or not os.path.isdir(root):
+        return {}
+    root_p = os.path.abspath(os.path.expanduser(root))
+    comment = _fetch_retro_comment(source_pr, finding_hash, root_p)
+    if comment is None:
+        return {}
+    items: dict[str, str] = {}
+    path = comment.get("path")
+    line = comment.get("line") or comment.get("original_line")  # outdated diff -> original_line
+    items["pr:review-comment"] = _summarize_review_comment(path, line, comment.get("diff_hunk"))
+    # Ordered after the comment item so a cap drops the precision add (merged
+    # region) before the higher-value ask (Discretion #4 / AC4-EDGE).
+    if isinstance(path, str) and path:
+        region = _read_merged_region(root_p, path, line)
+        if region:
+            items[f"git:merged-region:{path}"] = region
+    return items
+
+
 @cli.command("maintain", hidden=True)
 def cmd_maintain(
     apply: bool = typer.Option(
@@ -7129,6 +7275,7 @@ def cmd_maintain(
                 recheck=recheck,
                 exists_factory=_exists_factory,
                 search=_validity_rg_search,
+                retro_source=_validity_retro_source,
                 reread=_reread,
             )
             if validity_result.error and not json_out:
