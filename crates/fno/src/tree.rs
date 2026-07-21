@@ -746,8 +746,17 @@ pub fn set_seam_ratio(tab: &mut Tab, viewport: Rect, a: PaneId, b: PaneId, permi
     let pair_total = held + children[j].0;
     // Both sides need room; a pair too small to seat two minimums has no
     // legal seam position at all, so leave it where it is.
+    //
+    // Written `!(lo <= hi)` rather than `lo > hi` so a NaN refuses instead of
+    // falling through: every comparison against NaN is false, and `f32::clamp`
+    // panics outright on a NaN bound. A NaN ratio is not merely hypothetical -
+    // `check_invariants` shares the blind spot (`(sum - 1.0).abs() > 1e-4` is
+    // also false for NaN), so one could reach here unflagged from a persisted
+    // or deserialized tree.
     let (lo, hi) = (min_ratio, pair_total - min_ratio);
-    if lo > hi {
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    let no_room = !(lo <= hi);
+    if no_room {
         return false;
     }
     let target = (pair_total * (permille as f32 / 1000.0)).clamp(lo, hi);
@@ -1460,6 +1469,33 @@ mod tests {
         check_invariants(&tab).unwrap();
         // Already clamped: pushing further in the same direction does nothing.
         assert!(!set_seam_ratio(&mut tab, WIDE, 1, 2, 1000));
+    }
+
+    #[test]
+    fn tree_set_seam_ratio_refuses_a_nan_ratio_instead_of_panicking() {
+        // f32::clamp panics on a NaN bound, and `lo > hi` cannot catch one -
+        // every comparison against NaN is false, so it would sail through.
+        // check_invariants has the same blind spot, so a NaN can reach here
+        // unflagged; refusing is the only safe answer.
+        let mut tab = Tab {
+            name: None,
+            id: 0,
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(f32::NAN, Node::Leaf(1)), (0.5, Node::Leaf(2))],
+            },
+            focus: 1,
+        };
+        assert!(
+            !set_seam_ratio(&mut tab, WIDE, 1, 2, 600),
+            "refuses rather than panicking in clamp"
+        );
+        // Note the tree cannot be compared with assert_eq! here: NaN != NaN, so
+        // a tree holding one never equals itself. That the derived PartialEq is
+        // useless on such a tree is the same blind spot the guard exists for.
+        let r = ratios(&tab, &[]);
+        assert!(r[0].is_nan(), "the NaN child is untouched");
+        assert_eq!(r[1], 0.5, "and so is its neighbour");
     }
 
     #[test]

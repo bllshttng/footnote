@@ -2290,7 +2290,7 @@ impl View {
         let across = cc
             .checked_sub(1)
             .and_then(|l| self.pane_covering(cr, l))
-            .zip(self.pane_covering(cr, cc + 1))
+            .zip(cc.checked_add(1).and_then(|r| self.pane_covering(cr, r)))
             .map(|(a, b)| Seam {
                 a,
                 b,
@@ -2299,7 +2299,7 @@ impl View {
         let down = cr
             .checked_sub(1)
             .and_then(|u| self.pane_covering(u, cc))
-            .zip(self.pane_covering(cr + 1, cc))
+            .zip(cr.checked_add(1).and_then(|d| self.pane_covering(d, cc)))
             .map(|(a, b)| Seam {
                 a,
                 b,
@@ -2332,8 +2332,8 @@ impl View {
     fn seam_span(&self, seam: Seam) -> Option<(u16, u16)> {
         let (ra, rb) = (self.pane_rect(seam.a)?, self.pane_rect(seam.b)?);
         Some(match seam.axis {
-            Axis::Horizontal => (ra.x, ra.cols + rb.cols),
-            Axis::Vertical => (ra.y, ra.rows + rb.rows),
+            Axis::Horizontal => (ra.x, ra.cols.saturating_add(rb.cols)),
+            Axis::Vertical => (ra.y, ra.rows.saturating_add(rb.rows)),
         })
     }
 
