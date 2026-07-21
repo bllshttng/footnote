@@ -18,9 +18,7 @@ def _patch(monkeypatch, g: Path) -> None:
     lock = g.parent / "graph.lock"
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", g.parent / "graph.md")
-    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", lock)
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", lock)
     monkeypatch.setattr(paths, "graph_json", lambda: g)
 
 

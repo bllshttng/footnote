@@ -23,7 +23,6 @@ from fno.graph.store import (
     read_graph,
 )
 from fno.graph.statuses import recompute_statuses, is_stale_lock
-from fno.graph import GRAPH_LOCK_FILE
 
 
 # -- helpers --
@@ -88,11 +87,6 @@ def test_ac7_edge_mixed_version_round_trip(tmp_path):
     assert saved["locked_by"] == "worker-7"
     assert saved["session_id"] == "worker-7"  # mirror written
     assert saved["status"] == "in_progress"
-
-
-def test_ac1_hp_lock_path_is_tmp_abilities_graph_lock():
-    """AC3-EDGE: Lock file path is /tmp/abilities-graph.lock."""
-    assert str(GRAPH_LOCK_FILE) == "/tmp/abilities-graph.lock"
 
 
 def test_ac1_hp_acquire_release_flock(tmp_path):

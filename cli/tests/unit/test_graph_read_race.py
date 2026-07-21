@@ -27,11 +27,8 @@ from fno.graph.store import (
 
 @pytest.fixture
 def scratch(tmp_path, monkeypatch):
-    import fno.graph.store as gs
-
-    # A scratch lock so the harness never takes the real /tmp graph lock and
-    # blocks live writers (GRAPH_LOCK_FILE is a hardcoded global path).
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
+    # The graph lock is derived from the graph path, so a scratch graph in
+    # tmp_path automatically locks a scratch sibling -- no real /tmp lock taken.
     g = tmp_path / "graph.json"
 
     def _seed(entries):

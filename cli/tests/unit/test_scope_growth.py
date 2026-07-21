@@ -195,9 +195,7 @@ def graph(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
-    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     return seed
 
 

@@ -244,7 +244,6 @@ def mint_node_id(existing_ids) -> str:
     )
 
 
-GRAPH_LOCK_FILE = Path("/tmp/abilities-graph.lock")
 LOCK_TTL_HOURS = float(os.environ.get("TASK_LOCK_TTL_HOURS", "2"))
 
 PRIORITY_ORDER: dict[str, int] = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}

@@ -40,9 +40,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gc, "GRAPH_HTML", tmp_path / "graph.html")
     monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json")
-    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     # Pin the global claims root to tmp: clear any inherited override so
     # global_claims_root() falls through to $HOME (which we pin here), and the
     # acquire root (tmp_path) and the selection filter resolve to the same dir.

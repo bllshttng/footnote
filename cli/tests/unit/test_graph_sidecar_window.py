@@ -150,7 +150,6 @@ def test_ac3hp_concurrent_writes_never_surface_corruption(tmp_path, monkeypatch)
     import fno.graph.store as gs
 
     g = tmp_path / "graph.json"
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     # Seed a present node the readers resolve throughout.
     from fno.graph.store import locked_mutate_graph
 
@@ -181,6 +180,12 @@ def test_ac3hp_concurrent_writes_never_surface_corruption(tmp_path, monkeypatch)
                 assert any(e.get("id") == "x-keep" for e in entries)
             except GraphCorruptionError as e:
                 errors.append(e)
+            # Yield the GIL so the 3 readers can't starve the single writer
+            # between its graph and sidecar writes (a threads-only artifact:
+            # production readers are separate processes). Without this, a
+            # loaded runner holds the two-write window open past load_graph's
+            # retry ceiling and surfaces false corruption.
+            time.sleep(0.0002)
 
     threads = [threading.Thread(target=writer)] + [
         threading.Thread(target=reader) for _ in range(3)

@@ -592,9 +592,7 @@ def tmp_graph(tmp_path, monkeypatch):
         (gc, "GRAPH_MD", tmp_path / "graph.md"),
         (gc, "GRAPH_HTML", tmp_path / "graph.html"),
         (gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json"),
-        (gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock"),
         (gs, "GRAPH_JSON", g),
-        (gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock"),
     ):
         monkeypatch.setattr(mod, attr, val)
     return g

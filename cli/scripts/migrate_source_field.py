@@ -6,9 +6,9 @@ changes and exits 0. `--dry-run` previews the diff without writing.
 The script is invoked manually, once per machine. New intakes always
 write `"intake"` directly via cli/src/fno/graph/_intake.py.
 
-Concurrency: acquires the same `/tmp/abilities-graph.lock` flock that
-`fno backlog intake` uses, so a concurrent intake against the same
-graph cannot race the read-modify-write window.
+Concurrency: acquires the same sibling `<graph>.lock` flock that
+`fno backlog intake` uses (derived from the graph path), so a concurrent
+intake against the same graph cannot race the read-modify-write window.
 
 Usage:
     uv run python cli/scripts/migrate_source_field.py /path/to/graph.json
@@ -24,12 +24,16 @@ import sys
 from pathlib import Path
 
 
-# Same lock path as cli/src/fno/graph/_constants.py::GRAPH_LOCK_FILE.
-# Hard-coded here rather than imported because the script runs standalone via
-# `uv run python cli/scripts/...` outside the fno package, and pulling
-# the import in would couple this one-shot script to the larger module graph
-# that imports e.g. yaml + filelock at module-load time.
-_GRAPH_LOCK_FILE = Path("/tmp/abilities-graph.lock")
+# Sibling-lock derivation copied from fno.graph.store._graph_lock_path (kept in
+# sync by hand rather than imported: this one-shot script runs standalone via
+# `uv run python cli/scripts/...` and importing the package would pull in
+# yaml + filelock at module-load time).
+def _graph_lock_path(path: Path) -> Path:
+    try:
+        base = path.resolve()
+    except (OSError, RuntimeError):  # symlink loop: ELOOP or RuntimeError by version
+        base = path
+    return Path(str(base) + ".lock")
 
 
 def _print_diff(entries: list[dict]) -> int:
@@ -78,10 +82,11 @@ def main() -> int:
         sys.stderr.write(f"Error: graph.json not found at {path}\n")
         return 1
 
-    # Acquire the canonical graph flock so a concurrent `fno backlog intake`
+    # Acquire the graph's sibling flock so a concurrent `fno backlog intake`
     # cannot land a write between our read and our rename.
-    _GRAPH_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    lock_fd = os.open(str(_GRAPH_LOCK_FILE), os.O_CREAT | os.O_RDWR)
+    lock_path = _graph_lock_path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
     try:
         try:
