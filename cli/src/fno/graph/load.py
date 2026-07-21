@@ -11,9 +11,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sys
+import time
 from pathlib import Path
 
 from fno.graph._constants import GRAPH_JSON
+
+# The graph and its sidecar are two sequential atomic replaces under the write
+# lock; a lock-free reader can land between them and see new graph bytes against
+# the old sidecar. Re-read BOTH files a bounded number of times before raising:
+# the window is milliseconds, so a retry lands consistent, while a genuine
+# corruption still raises once the attempts are spent. Bounded, never a
+# wait-until-consistent loop: worst case is (_ATTEMPTS - 1) * _SLEEP_S.
+_RETRY_ATTEMPTS = 5
+_RETRY_SLEEP_S = 0.01
 
 
 class GraphCorruptionError(Exception):
@@ -50,6 +62,21 @@ def _sidecar_path(path: Path) -> Path:
     return Path(str(path) + ".sha256")
 
 
+def _is_sha256(s: str) -> bool:
+    """True for a well-formed 64-char lowercase-hex digest.
+
+    A sidecar that is not one (empty, truncated, garbage) carries no usable
+    baseline, so it is treated as absent rather than as evidence of corruption.
+    """
+    if len(s) != 64:
+        return False
+    try:
+        int(s, 16)
+    except ValueError:
+        return False
+    return True
+
+
 def load_graph(path: Path | None = None) -> list[dict]:
     """Read and validate graph.json against its SHA256 sidecar.
 
@@ -72,22 +99,45 @@ def load_graph(path: Path | None = None) -> list[dict]:
     if not path.exists():
         return []
 
-    raw_bytes = path.read_bytes()
-    actual_hash = hashlib.sha256(raw_bytes).hexdigest()
     sidecar = _sidecar_path(path)
+    actual_hash = expected_hash = ""
+    for attempt in range(_RETRY_ATTEMPTS):
+        # Re-read BOTH files every attempt: caching either would freeze the
+        # mismatch and convert a transient window into a guaranteed raise.
+        raw_bytes = path.read_bytes()
+        actual_hash = hashlib.sha256(raw_bytes).hexdigest()
 
-    if not sidecar.exists():
-        # First run: write sidecar lazily, trust the file
-        sidecar.write_text(actual_hash + "\n")
-        data = json.loads(raw_bytes)
-        return _entries(data)
+        sidecar_present = sidecar.exists()
+        expected_hash = sidecar.read_text().strip() if sidecar_present else ""
+        if not _is_sha256(expected_hash):
+            # Absent, empty, or truncated sidecar: no baseline to validate
+            # against, so trust the file and (re)write the sidecar -- the same
+            # first-contact stance as before, NOT graph corruption. But a sidecar
+            # that EXISTS yet is not a valid digest is anomalous (a damaged or
+            # partially-written sidecar disables corruption detection), so warn
+            # before re-blessing it -- unlike a legitimately-absent first run.
+            if sidecar_present:
+                print(
+                    f"Warning: {sidecar} is present but not a valid sha256; "
+                    f"rewriting from current graph bytes (corruption detection was disabled)",
+                    file=sys.stderr,
+                )
+            sidecar.write_text(actual_hash + "\n")
+            return _entries(json.loads(raw_bytes))
 
-    expected_hash = sidecar.read_text().strip()
-    if actual_hash != expected_hash:
-        raise GraphCorruptionError(path, actual_hash, expected_hash)
+        if actual_hash == expected_hash:
+            return _entries(json.loads(raw_bytes))
 
-    data = json.loads(raw_bytes)
-    return _entries(data)
+        # Mismatch: likely the two-write window. Retry after a short sleep.
+        if attempt < _RETRY_ATTEMPTS - 1:
+            if os.environ.get("FNO_DEBUG"):
+                print(
+                    f"load_graph: hash mismatch on {path} (attempt {attempt + 1}), retrying",
+                    file=sys.stderr,
+                )
+            time.sleep(_RETRY_SLEEP_S)
+
+    raise GraphCorruptionError(path, actual_hash, expected_hash)
 
 
 def _entries(data: object) -> list[dict]:

@@ -612,7 +612,7 @@ def resolve_provenance(
     # caller supplied slug+plan would export FNO_NODE=<slug>, and the ambient
     # origin-capture consumer matches ids exactly - so a slug-driven spawn would
     # silently file its nodes with no origin at all.
-    from fno.graph._constants import has_node_id_prefix
+    from fno.graph._constants import has_node_id_prefix, is_wellformed_node_id
 
     if slug is None or plan is None or not has_node_id_prefix(node):
         try:
@@ -626,10 +626,26 @@ def resolve_provenance(
                     if plan is None:
                         plan = rec.get("plan_path") or ""
                     break
-        except Exception:
-            # A missing/corrupt graph must not block the spawn; degrade to the
-            # node id alone rather than raising in the pane path.
-            pass
+        except Exception as e:
+            # A graph read failure must not block the spawn -- but it must not
+            # degrade a SLUG into FNO_NODE=<slug> either. The origin-capture
+            # consumer matches ids exactly and would drop a slug as an unknown
+            # node, blaming a bad id for what was a read failure. Keep `node`
+            # only when it is a STRICTLY well-formed id (hex suffix); the liberal
+            # has_node_id_prefix admits a title-derived slug like `x-marks-the-
+            # spot`, which would leak right back into FNO_NODE. An absent-but-
+            # well-formed id is still dropped downstream by the capture side's
+            # known-ids check, so strict-here is safe. Never re-raise: the pane
+            # path degrades. Log under FNO_DEBUG so a missing-origin node is
+            # traceable to the read failure rather than being silently invisible.
+            if not is_wellformed_node_id(node):
+                if os.environ.get("FNO_DEBUG"):
+                    print(
+                        f"resolve_provenance: graph read failed ({type(e).__name__}); "
+                        f"dropping unresolved node '{node}' from provenance",
+                        file=sys.stderr,
+                    )
+                node = None
     prov = {"FNO_NODE": node, "FNO_SLUG": slug or "", "FNO_PLAN": plan or ""}
     return {k: v for k, v in prov.items() if v}
 

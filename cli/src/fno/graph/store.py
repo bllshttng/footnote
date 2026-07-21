@@ -4,9 +4,21 @@ Public API:
     _acquire_flock, _release_flock  - raw flock operations
     _read_json, _write_json         - raw JSON I/O (callers hold lock for writes)
     _apply_graph_defaults           - lazy migration defaults for ab- entries
-    read_graph                      - unlocked read with defaults applied
+    read_graph                      - unlocked read with defaults applied (soft:
+                                      swallows corruption to [] for display cmds)
+    read_graph_strict               - unlocked read that RAISES on an unreadable
+                                      graph, for resolution callers that must tell
+                                      "node absent" from "graph unreadable"
     locked_mutate_graph             - locked read-modify-write with status recompute
-    GraphCorruptError               - raised on unparseable graph.json
+    GraphCorruptError               - raised on unparseable graph.json (this module)
+    GraphUnreadableError            - strict-read failure (bad JSON / bad shape)
+    GraphMalformedRootError         - subclass: root object with no 'entries' key
+
+Graph read-failure taxonomy (four types across two modules, distinct call paths,
+NOT severities): GraphCorruptError (here, JSON parse on the raw read) and
+GraphUnreadableError (here, the strict read) both mean "bytes/shape unusable";
+load.py's GraphCorruptionError is a different axis entirely - a SHA256 sidecar
+mismatch, checked only by load_graph, never by read_graph/read_graph_strict.
 
 Sidecar / backup protocol (Layer 2 hygiene):
     After every successful atomic write locked_mutate_graph:
@@ -293,6 +305,26 @@ class GraphCorruptError(Exception):
     """
 
 
+class GraphUnreadableError(Exception):
+    """Strict-read failure: the graph exists but could not be read as a graph.
+
+    Covers bad JSON bytes, a zero-byte file, and a non-object root (a bare list,
+    null, or string). The point is diagnosability: a resolution caller that
+    catches this KNOWS the graph could not be read, instead of concluding the
+    node is absent (the duplicate-filing class). ``read_graph`` -- the soft
+    display path -- never raises this; it swallows to [].
+    """
+
+
+class GraphMalformedRootError(GraphUnreadableError):
+    """Root JSON is an object but has no 'entries' key.
+
+    Distinct from a legitimately empty ``{"entries": []}``. A subclass so a
+    caller needing only "unreadable vs absent" catches the base, while one
+    wanting the finer distinction catches this.
+    """
+
+
 def _acquire_flock(lock_path: Path) -> int:
     """Acquire exclusive flock on the given path. Returns the lock fd."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -467,6 +499,17 @@ def _read_json(path: Path) -> list[dict]:
         data = json.loads(path.read_text())
         if not isinstance(data, dict):
             raise json.JSONDecodeError("graph root must be a JSON object", "", 0)
+        entries = data.get("entries", [])
+        # A present-but-non-list 'entries' (e.g. {"entries": "x"}) would otherwise
+        # reach _apply_graph_defaults and raise a bare AttributeError, breaking
+        # read_graph's "swallow corruption to [], never crash the terminal"
+        # contract. Route it through the same corrupt-handling as bad JSON so
+        # read_graph swallows it and locked_mutate exits cleanly -- and so it
+        # gets the same .bak that locked_mutate's "restore from backup" message
+        # promises (a raise without the .bak would advertise a file that does
+        # not exist, leaving the operator only the data-losing delete option).
+        if not isinstance(entries, list):
+            raise json.JSONDecodeError("graph 'entries' must be a list", "", 0)
     except json.JSONDecodeError:
         backup = path.with_suffix(".json.bak")
         try:
@@ -475,7 +518,7 @@ def _read_json(path: Path) -> list[dict]:
         except OSError as e:
             print(f"Warning: {path} is corrupt, backup also failed: {e}", file=sys.stderr)
         raise GraphCorruptError(str(path))
-    return data.get("entries", [])
+    return entries
 
 
 def _write_json(entries: list[dict], path: Path) -> None:
@@ -505,6 +548,52 @@ def read_graph(path: Path = GRAPH_JSON) -> list[dict]:
         return _apply_graph_defaults(_read_json(path))
     except GraphCorruptError:
         return []
+
+
+def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
+    """Failure-surfacing counterpart to :func:`read_graph`.
+
+    Returns entries (defaults applied) for a populated OR legitimately empty
+    graph, and for an absent file (an absent graph is empty, not unreadable --
+    matching ``read_graph``). RAISES instead of returning [] when the graph
+    cannot be read cleanly, so a resolution caller can tell "node absent" apart
+    from "graph unreadable":
+
+      - :class:`GraphMalformedRootError` -- root object lacks an ``entries`` key
+      - :class:`GraphUnreadableError`    -- bad JSON, zero bytes, or a non-object
+        root (bare list/null/string), or an ``entries`` value that is not a list
+
+    Never writes a ``.bak``: diagnosis is read-only, and a file that parsed did
+    not fail to parse (AC1-EDGE). ``read_graph``'s soft contract is untouched;
+    display commands (``status``/``ready``) keep swallowing to [].
+
+    Deliberately does NO sha256-sidecar check: this is the read-path integrity
+    layer (bytes/shape), separate from ``load.load_graph``'s hash layer. A graph
+    that is byte-corrupt yet still valid JSON is a hash-mismatch, which only
+    ``load_graph`` detects; routing every ``get`` through the hash check is out
+    of scope here (it would tax every resolution read).
+    """
+    if not path.exists():
+        return []
+    raw = path.read_text()
+    if raw.strip() == "":
+        raise GraphUnreadableError(f"{path} is empty (zero bytes)")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise GraphUnreadableError(f"{path} is not valid JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise GraphUnreadableError(
+            f"{path} root is not a JSON object (got {type(data).__name__})"
+        )
+    if "entries" not in data:
+        raise GraphMalformedRootError(f"{path} root object has no 'entries' key")
+    entries = data["entries"]
+    if not isinstance(entries, list):
+        raise GraphUnreadableError(
+            f"{path} 'entries' is not a list (got {type(entries).__name__})"
+        )
+    return _apply_graph_defaults(entries)
 
 
 def locked_mutate_graph(path: Path, mutator) -> list[dict]:
