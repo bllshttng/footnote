@@ -45,6 +45,16 @@ def test_read_failure_keeps_a_resolved_id(monkeypatch):
     assert prov.get("FNO_NODE") == "x-aaaa"
 
 
+def test_read_failure_drops_an_id_shaped_slug(monkeypatch):
+    _make_load_graph_fail(monkeypatch)
+    # A title-derived slug can pass the LIBERAL has_node_id_prefix (starts with
+    # the id prefix) yet is not a strict well-formed id (non-hex suffix). It must
+    # still be dropped on a read failure, not leaked into FNO_NODE.
+    prov = resolve_provenance("x-marks-the-spot")
+    assert "FNO_NODE" not in prov
+    assert "x-marks-the-spot" not in prov.values()
+
+
 def test_read_failure_swallow_never_raises_to_caller(monkeypatch):
     _make_load_graph_fail(monkeypatch)
     # resolve_provenance must return normally -- a read failure never fails the spawn.

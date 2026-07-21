@@ -135,6 +135,15 @@ def test_soft_read_swallows_non_list_entries_instead_of_crashing(tmp_path):
     assert read_graph(g) == []
 
 
+def test_non_list_entries_writes_the_bak_locked_mutate_advertises(tmp_path):
+    # locked_mutate_graph tells the operator to "restore from backup at
+    # <path>.json.bak" on a GraphCorruptError, so the non-list case must create
+    # that .bak (an accurate recovery path, not a data-losing delete).
+    g = _write(tmp_path / "graph.json", json.dumps({"entries": "oops"}))
+    read_graph(g)  # triggers the corrupt handling that writes the .bak
+    assert g.with_suffix(".json.bak").exists()
+
+
 def test_strict_read_raises_on_non_list_entries_value(tmp_path):
     g = _write(tmp_path / "graph.json", json.dumps({"entries": {"not": "a list"}}))
     with pytest.raises(GraphUnreadableError):

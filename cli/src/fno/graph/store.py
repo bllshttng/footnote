@@ -499,6 +499,17 @@ def _read_json(path: Path) -> list[dict]:
         data = json.loads(path.read_text())
         if not isinstance(data, dict):
             raise json.JSONDecodeError("graph root must be a JSON object", "", 0)
+        entries = data.get("entries", [])
+        # A present-but-non-list 'entries' (e.g. {"entries": "x"}) would otherwise
+        # reach _apply_graph_defaults and raise a bare AttributeError, breaking
+        # read_graph's "swallow corruption to [], never crash the terminal"
+        # contract. Route it through the same corrupt-handling as bad JSON so
+        # read_graph swallows it and locked_mutate exits cleanly -- and so it
+        # gets the same .bak that locked_mutate's "restore from backup" message
+        # promises (a raise without the .bak would advertise a file that does
+        # not exist, leaving the operator only the data-losing delete option).
+        if not isinstance(entries, list):
+            raise json.JSONDecodeError("graph 'entries' must be a list", "", 0)
     except json.JSONDecodeError:
         backup = path.with_suffix(".json.bak")
         try:
@@ -506,14 +517,6 @@ def _read_json(path: Path) -> list[dict]:
             print(f"Warning: {path} is corrupt, backup saved to {backup}", file=sys.stderr)
         except OSError as e:
             print(f"Warning: {path} is corrupt, backup also failed: {e}", file=sys.stderr)
-        raise GraphCorruptError(str(path))
-    entries = data.get("entries", [])
-    # A present-but-non-list 'entries' (e.g. {"entries": "x"}) would otherwise
-    # reach _apply_graph_defaults and raise a bare AttributeError, breaking
-    # read_graph's "swallow corruption to [], never crash the terminal" contract.
-    # Raise the corruption type so read_graph swallows it and locked_mutate exits
-    # cleanly. No .bak: the file parsed, it is just the wrong shape.
-    if not isinstance(entries, list):
         raise GraphCorruptError(str(path))
     return entries
 
