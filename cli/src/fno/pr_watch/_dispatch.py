@@ -60,6 +60,11 @@ class TickResult:
     open_prs: int
     acted: int
     skipped: int = 0
+    # A tick that could not take its lock did no work at all. Reporting that as
+    # open_prs=0 made 172 consecutive wedged ticks look like empty sweeps for
+    # five days, so it gets its own state instead of a zero count.
+    lock_held: bool = False
+    lock_holder: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -400,10 +405,18 @@ def tick(
     # Step 1: tick-level mutex
     try:
         _claim.acquire_tick_lock(_TICK_CLAIM_KEY, holder)
-    except Exception:
-        # Lock held by another tick: return silently with NO events.
-        log.debug("pr-watch: tick lock held, skipping this interval")
-        return TickResult(open_prs=0, acted=0)
+    except Exception as exc:  # noqa: BLE001 - any acquire failure means no work ran
+        # Lock held by another tick. Still NO events (a wedged predecessor must
+        # not emit one every 600s), but the caller prints a holder-naming line
+        # so the wedge is visible in launchd's out.log within one tick.
+        held_by = getattr(exc, "holder", "") or str(exc) or "unknown"
+        pid = getattr(exc, "pid", None)
+        return TickResult(
+            open_prs=0,
+            acted=0,
+            lock_held=True,
+            lock_holder=f"{held_by} (pid {pid})" if pid else held_by,
+        )
 
     try:
         return _run_tick(

@@ -425,7 +425,10 @@ def _make_tick_deps(
 
 
 class _ClaimHeldByOtherStub(Exception):
-    pass
+    def __init__(self, holder: str = "pr-watch:4242", pid: int = 4242):
+        super().__init__(f"held by {holder}")
+        self.holder = holder
+        self.pid = pid
 
 
 class TestTickOrchestrator:
@@ -478,6 +481,74 @@ class TestTickOrchestrator:
         # No events at all when lock held (tick exits immediately)
         assert deps["events"] == []
         assert deps["fired"] == []
+
+    def test_AC6_HP_lock_held_tick_names_the_holder(self, tmp_path):
+        """A wedged predecessor must not read as an empty sweep."""
+        from fno.pr_watch._dispatch import tick
+
+        deps = _make_tick_deps(tmp_path, candidates=[], claim_held=True)
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=tmp_path / "state.json",
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+        )
+
+        assert result.lock_held is True
+        assert "pr-watch:4242" in result.lock_holder
+        assert "4242" in result.lock_holder
+        assert deps["events"] == []
+
+    def test_AC7_EDGE_lock_held_tick_leaves_state_untouched(self, tmp_path):
+        """The stale `Last tick:` stays the corroborating staleness signal."""
+        from fno.pr_watch._dispatch import tick
+
+        store_path = tmp_path / "state.json"
+        deps = _make_tick_deps(tmp_path, candidates=[], claim_held=True)
+        tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+        )
+
+        assert not store_path.exists()
+
+    def test_AC6_FR_healthy_tick_keeps_open_prs_reporting(self, tmp_path):
+        """The lock_held state is additive: a real sweep is unchanged."""
+        from fno.pr_watch._dispatch import tick
+
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=tmp_path / "state.json",
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+        )
+
+        assert result.lock_held is False
+        assert result.lock_holder == ""
 
     def test_no_checkout_emits_skipped(self, tmp_path):
         """AC-no-checkout: candidate with repo_dir=None -> pr_watch_skipped{reason:no-checkout}."""
