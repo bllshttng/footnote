@@ -346,9 +346,11 @@ def _live_lane_domains(*, claims_root: Optional[Path] = None) -> set[str]:
 def _live_lane_entries(claims_root: Optional[Path] = None) -> list[dict]:
     """Collision-comparable graph entries for the nodes live lanes already hold.
 
-    Shaped for :func:`fno.graph.collision.find_collisions`, which needs an ``id``
-    and a ``plan_path`` and skips anything done/deferred/superseded. A node whose
-    lane is live is by definition in flight, so ``status`` is asserted ready.
+    Entries pass through with their real fields: ``find_collisions`` rejects
+    anything done/deferred/superseded itself, and a lane slot outliving its node
+    (a corpse claim) is exactly the case that filter exists for - synthesizing a
+    ready status here would resurrect a finished node into the comparison set and
+    let it block a dispatchable one.
     """
     from fno.claims.core import list_claims
     from fno.claims.lanes import LANE_HOLDER_PREFIX, LANE_SLOT_PREFIX
@@ -363,9 +365,7 @@ def _live_lane_entries(claims_root: Optional[Path] = None) -> list[dict]:
     if not held:
         return []
     entries = [
-        {"id": e["id"], "title": e.get("title", ""), "plan_path": e.get("plan_path"),
-         "created_at": e.get("created_at", ""), "status": "ready"}
-        for e in read_graph(graph_json())
+        e for e in read_graph(graph_json())
         if e.get("id") in held and e.get("plan_path")
     ]
     # read_graph degrades a corrupt graph to [] and list_claims drops a corrupt

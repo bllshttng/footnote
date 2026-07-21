@@ -697,7 +697,7 @@ def test_triage_health_emits_well_formed_json(tmp_graph):
 
 
 # ---------------------------------------------------------------------------
-# Unevaluated surface (x-2ada): "nothing to compare" != "compared, clean"
+# Unevaluated surface: "nothing to compare" != "compared, clean"
 # ---------------------------------------------------------------------------
 
 
@@ -752,3 +752,15 @@ def test_collisions_check_json_reports_ok_when_clean(tmp_graph, tmp_path):
     payload = json.loads(res.stdout)
     assert payload["status"] == "ok"
     assert payload["collisions"] == []
+
+
+def test_collisions_check_human_output_says_unevaluated(tmp_graph, tmp_path):
+    """The non-JSON path must not read as 'no collisions found'."""
+    plan = tmp_path / "surfaceless.md"
+    plan.write_text("# Plan\n\n## Context\n\nNothing to compare.\n")
+
+    res = _invoke("backlog", "collisions", "check", str(plan))
+
+    assert res.exit_code == 0
+    assert "UNEVALUATED" in res.output
+    assert "No collisions found" not in res.output

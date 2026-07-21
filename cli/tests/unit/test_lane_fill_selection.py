@@ -264,7 +264,31 @@ def test_cli_ready_mission_filter(tmp_path, monkeypatch):
     assert ids == ["x-in"]
 
 
-# --- dispatch-time collision gate (x-2ada) -------------------------------
+# --- dispatch-time collision gate ----------------------------------------
+
+
+import json
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolated_graph(tmp_path, monkeypatch):
+    """Point the graph read at an empty tmp graph for EVERY test in this file.
+
+    `_live_lane_entries` calls `read_graph(graph_json())` whenever a lane slot is
+    held, so a test with an isolated claims_root would otherwise read the
+    developer's real ~/.fno/graph.json. Tests that need entries overwrite this
+    file via `_seed_graph`.
+    """
+    g = tmp_path / "graph.json"
+    g.write_text('{"entries": []}\n')
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    return g
+
+
+def _seed_graph(graph_path, entries):
+    graph_path.write_text(json.dumps({"entries": entries}))
 
 
 def _plan(tmp_path, name: str, files: list[str]) -> str:
@@ -281,8 +305,8 @@ def _plan(tmp_path, name: str, files: list[str]) -> str:
 def test_skips_node_colliding_with_a_pick_from_this_round(tmp_path, monkeypatch):
     """Two ready nodes on the same file surface: only the first dispatches.
 
-    The x-2ada incident: three nodes on one root cause, all landing in the same
-    file, fired in parallel because nothing consulted the collision check.
+    The incident this closes: three nodes on one root cause, all landing in
+    the same file, fired in parallel because nothing consulted the check.
     """
     shared = ["cli/src/fno/graph/cli.py", "cli/src/fno/graph/store.py"]
     ready = [
@@ -319,11 +343,19 @@ def test_collision_gate_fails_open_on_error(tmp_path, monkeypatch):
 
 
 def test_node_without_plan_path_dispatches(tmp_path, monkeypatch):
-    """No plan means no surface to compare; the gate must not block it."""
-    ready = [{"id": "n-a", "domain": "code", "title": "a"}]
+    """No plan means no surface to compare; the gate must not block it.
+
+    The plan-less node is evaluated SECOND, so `inflight` is non-empty and the
+    guard's `not plan` clause is what carries the case.
+    """
+    ready = [
+        {"id": "n-a", "domain": "code", "title": "a",
+         "plan_path": _plan(tmp_path, "a", ["cli/src/fno/graph/cli.py"])},
+        {"id": "n-b", "domain": "docs", "title": "b"},  # no plan_path
+    ]
     monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
 
-    assert [n["id"] for n in advance.select_lane_fill(1, claims_root=tmp_path)] == ["n-a"]
+    assert [n["id"] for n in advance.select_lane_fill(2, claims_root=tmp_path)] == ["n-a", "n-b"]
 
 
 def test_unevaluated_surface_is_logged_not_silently_clean(tmp_path, monkeypatch, caplog):
@@ -343,3 +375,51 @@ def test_unevaluated_surface_is_logged_not_silently_clean(tmp_path, monkeypatch,
     assert [n["id"] for n in sel] == ["n-a", "n-b"]  # unevaluated never blocks
     assert "UNEVALUATED" in caplog.text
     assert "n-b" in caplog.text
+
+
+def test_skips_node_colliding_with_a_live_peer_lane(tmp_path, monkeypatch, _isolated_graph):
+    """The cross-tick case: a peer lane from an EARLIER round holds the collider.
+
+    Within-round dedup only catches nodes picked together. The incident had
+    workers dispatched across ticks, so the comparison set must include what
+    live lanes already hold.
+    """
+    shared = ["cli/src/fno/graph/cli.py", "cli/src/fno/graph/store.py"]
+    peer_plan = _plan(tmp_path, "peer", shared)
+    _seed_graph(_isolated_graph, [
+        {"id": "n-peer", "title": "peer", "plan_path": peer_plan,
+         "status": "ready", "created_at": "2026-07-01T00:00:00+00:00"},
+    ])
+    acquire_lane_slot(max_lanes=3, lane_id="n-peer", extra_metadata={"domain": "code"}, root=tmp_path)
+
+    ready = [
+        {"id": "n-b", "domain": "docs", "title": "b", "plan_path": _plan(tmp_path, "b", shared)},
+        {"id": "n-c", "domain": "infra", "title": "c",
+         "plan_path": _plan(tmp_path, "c", ["docs/unrelated.md"])},
+    ]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    sel = advance.select_lane_fill(3, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-c"]
+    assert find_lane_slot("n-b", root=tmp_path) is None  # left ready
+
+
+def test_finished_node_holding_a_stale_lane_never_blocks(tmp_path, monkeypatch, _isolated_graph):
+    """A lane slot outliving its node must not resurrect it into the comparison.
+
+    Synthesizing a ready status for every held node would let a done node's
+    corpse claim block a genuinely dispatchable one indefinitely.
+    """
+    shared = ["cli/src/fno/graph/cli.py", "cli/src/fno/graph/store.py"]
+    _seed_graph(_isolated_graph, [
+        {"id": "n-done", "title": "done", "plan_path": _plan(tmp_path, "done", shared),
+         "status": "done", "completed_at": "2026-07-02T00:00:00+00:00"},
+    ])
+    acquire_lane_slot(max_lanes=3, lane_id="n-done", extra_metadata={"domain": "code"}, root=tmp_path)
+
+    ready = [{"id": "n-b", "domain": "docs", "title": "b",
+              "plan_path": _plan(tmp_path, "b", shared)}]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    assert [n["id"] for n in advance.select_lane_fill(3, claims_root=tmp_path)] == ["n-b"]
