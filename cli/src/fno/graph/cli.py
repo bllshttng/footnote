@@ -6882,6 +6882,17 @@ def _read_merged_region(root: str, path: str, line: object) -> str:
 
     from fno.graph import maintain as _m
 
+    # Defense in depth (CWE-22): `path` originates from a GitHub comment, so reject
+    # a non-str or a parent-escaping / absolute path BEFORE any read. `git show
+    # HEAD:<path>` already cannot escape the tree object and the fs fallback is
+    # gated by contained_path_exists, but guarding up front keeps every reader safe
+    # and avoids a TypeError on a non-str root/path.
+    if not isinstance(root, str) or not isinstance(path, str):
+        return ""
+    norm = os.path.normpath(path)
+    if os.path.isabs(norm) or norm == ".." or norm.startswith(".." + os.sep):
+        return ""
+
     content: Optional[str] = None
     try:
         proc = subprocess.run(

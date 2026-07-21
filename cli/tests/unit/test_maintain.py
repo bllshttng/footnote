@@ -823,6 +823,55 @@ def test_cli_retro_seam_fails_open(monkeypatch, tmp_path):
     ) == {}
 
 
+def test_read_merged_region_rejects_traversal(monkeypatch, tmp_path):
+    """CWE-22: a parent-escaping / absolute / non-str path is rejected before any
+    read (gemini review). git show never runs for such a path."""
+    from fno.graph import cli
+
+    called = {"git": False}
+
+    def _fake_run(args, **kw):
+        called["git"] = True
+        import subprocess
+        return subprocess.CompletedProcess(args, 0, "x\n", "")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    for bad in ("../../etc/passwd", "/etc/passwd", "..", "a/../../b"):
+        assert cli._read_merged_region(str(tmp_path), bad, 1) == ""
+    assert cli._read_merged_region(str(tmp_path), 123, 1) == ""  # non-str path
+    assert called["git"] is False  # never reached the subprocess
+
+
+def test_validate_row_retro_pr_target_downgrades_to_needs_human():
+    """codex review: a supersede whose target is a bare PR number (not a graph
+    node) is NOT executable - it downgrades to needs-human and is watermarked, so
+    the prompt now routes already-satisfied retro nodes to needs-human directly
+    rather than emitting an un-actionable supersede."""
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    retro = _retro_idea("ab-retro", 2, now)
+    pkt = m.collect_evidence(
+        retro, [retro], now=now,
+        retro_source=lambda n: {
+            "pr:review-comment": "asked at x.sh:1",
+            "git:merged-region:x.sh": "already there",
+        },
+    )
+    row = m.validate_row(
+        {"classification": "supersede", "confidence": 0.9,
+         "rationale": "already satisfied by PR 525",
+         "evidence_ids": ["pr:review-comment", "git:merged-region:x.sh"],
+         "target": "525"},
+        pkt,
+    )
+    assert row.classification == "needs-human" and row.command is None
+    # A needs-human IS surfaced in the deck with its cited evidence, so the
+    # operator still sees the enrichment.
+    md = m._render_deck_md(
+        [row], {"ab-retro": pkt}, deck_id="d", created_iso=now.isoformat(), degraded=False
+    )
+    assert "ab-retro" in md
+
+
 # --- leg 8: validity sweep - validation + command rendering --------
 
 
