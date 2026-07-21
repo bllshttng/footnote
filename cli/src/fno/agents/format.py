@@ -60,6 +60,11 @@ def serialize_entry(entry: AgentEntry, live_status: Optional[str]) -> dict:
         "crown_level": entry.crown_level,
         "crown_scope": entry.crown_scope,
         "crown_grantor": entry.crown_grantor,
+        # The mux hosting ref ({session, pane_id}) for a pane-hosted row, else
+        # null. Exposed so a caller can address the pane - e.g. close a handed-off
+        # teammate with `fno mux pane kill <session>:<pane_id>` (a mux row's
+        # short_id is empty, so `fno agents stop` refuses it).
+        "mux": entry.mux,
     }
 
 

@@ -14,7 +14,7 @@ The pane layer owns placement, lifecycle, and I/O; fno stays the authority for i
 |---|---|---|
 | **Place** a teammate near the king | `fno agents spawn <name> "<payload>" --substrate pane --squad <s> --split <dir>` | Splits the target squad's active tab; min-size refusal falls back to a same-squad tab. Read the receipt for which one landed. |
 | **Inject** the next phase into a live session | `fno mail send <handle> "<ruling + /fno:verb>" --from-self` | A direct send to a live pane injects as a notification it acts on this turn. Receipt-gated - see delivery truth below. Auto-wrapped in the `<fno_mail>` envelope; a raw pane-layer prompt is not - see the envelope rule below. |
-| **Wait** on lifecycle | `fno-agents needs --json` + `fno agents top` per heartbeat | Push-first (the teammate's report mail); this is the backstop sweep. |
+| **Wait** on lifecycle | `fno agents top` + `fno agents peek <handle>` per heartbeat | Push-first (the teammate's report mail); this is the backstop sweep. `top` = who is alive; `peek` = is a quiet pane done/blocked/dead. `fno-agents needs --json` is a separate loop-wedge signal, not pane completion. |
 | **Read / triage** | `fno agents peek <handle>` | Read-only. Full-screen agents render in the alternate screen, so scrolled-off rows are unrecoverable - reads are triage, results live in artifacts and the graph. |
 
 ## The `<fno_mail>` envelope, on every lane
@@ -39,9 +39,10 @@ Every agent-to-agent payload carries the `<fno_mail>` envelope - king to teammat
 | Resolve a handle you lost | `fno agents discovered-json` · `fno agents top` |
 | Is it alive? | `fno agents peek <handle>` |
 | Who is actually running | `fno agents top` |
-| The needs-me fold | `fno-agents needs --json` |
+| The loop-wedge fold | `fno-agents needs --json` (review_wedged / budget_stop; NOT pane completion) |
 | Wake an idle teammate | `fno agents resume <handle>` (then re-send) |
-| End a teammate | `fno agents stop <name>` |
+| Close a teammate pane | `fno mux pane kill` (a mux row's short_id is empty, so `fno agents stop` refuses it) |
+| End a bg/daemon worker | `fno agents stop <name>` |
 | Encode a ruling | `fno backlog update <id> --dispatch-verb /fno:... --dispatch-brief "..." --add-blocker <up>` |
 | Land a green child | `fno pr merge <n>` (only when config permits) |
 
@@ -50,8 +51,8 @@ Every agent-to-agent payload carries the `<fno_mail>` envelope - king to teammat
 The runtime serializes three teammate states. Read them precisely - the failure that built a duplicate PR was reading *invisibility* as *death*.
 
 - **working** - the pane has an active session doing its unit of work. No action.
-- **blocked** - the teammate hit something it cannot resolve from its own scope (an open dependency, a question). Surfaces as `BlockedAnswerable` in the needs fold. Your job: read the block, rule, mail the answer back into the same session.
-- **done** - finished and you have not looked at it yet (`DoneUnseen` in the needs fold). Your job: reconcile (read the artifact, rule, route, encode).
+- **blocked** - the teammate hit something it cannot resolve from its own scope (an open dependency, a question). Surfaces as a `BlockedAnswerable` badge in the mux sideline; confirm with `fno agents peek <handle>`. Your job: read the block, rule, mail the answer back into the same session.
+- **done** - finished and you have not looked at it yet, a `DoneUnseen` badge in the mux sideline (confirm with `peek`; `fno-agents needs` does NOT report it). Your job: reconcile (read the artifact, rule, route, encode).
 
 Two states that are **not** death and must never be treated as such:
 
@@ -89,8 +90,11 @@ Next: /fno:blueprint <node>." --from-self
 fno agents spawn node-x-b3a8-g2 "Continue node x-b3a8 at /fno:blueprint. \
 Prior /think artifact: <path>. <minion clause>" \
   --substrate pane --squad epic-squad --split down --effort high
-# ...only after the successor's session header prints:
-fno agents stop node-x-b3a8
+# ...only after the successor's session header prints, close the predecessor
+# PANE (a mux row -> fno mux pane kill, not fno agents stop). Its <session>:<pane_id>
+# ref is in the mux field of `fno agents list --json`:
+ref=$(fno agents list --json | jq -r '.agents[] | select(.name=="node-x-b3a8") | "\(.mux.session):\(.mux.pane_id)"')
+fno mux pane kill "$ref"
 ```
 
 **Corpse check before respawn (no report, pane looks gone):**
