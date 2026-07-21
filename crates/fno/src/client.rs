@@ -5047,12 +5047,23 @@ impl View {
         }
         // The divider column, now full terminal height (the sideline owns row
         // 0 too; the strip sits right of the divider) - x-cd67 US1.
+        //
+        // x-9e33: accent it while hovered or dragged, the same signal a pane
+        // seam wears (x-d807 shipped the drag but never rendered this, leaving
+        // the border a draggable-but-invisible 1-cell target). A terminal
+        // cannot change the cursor shape, so this accent IS the affordance.
+        let border_active = self.hover_sideline_border || self.sideline_drag.is_some();
+        let (border_fg, border_flags) = if border_active {
+            (LATTICE_ACCENT, cell_flags::BOLD)
+        } else {
+            (Color::Default, cell_flags::DIM)
+        };
         for r in 0..rows {
             cells[r * cols + (panel_w - 1)] = Cell {
                 c: '│',
-                fg: Color::Default,
+                fg: border_fg,
                 bg: Color::Default,
-                flags: cell_flags::DIM,
+                flags: border_flags,
             };
         }
     }
@@ -11359,6 +11370,55 @@ mod tests {
         view.begin_seam_drag(seam, Instant::now());
         assert_eq!(view.revert_seam_drag(), None);
         assert!(view.seam_drag.is_none());
+    }
+
+    #[test]
+    fn sideline_border_accents_on_hover_and_during_drag() {
+        // AC3-UI (the border half): the divider column reads BOLD accent when
+        // hovered or dragged, distinct from idle DIM chrome. x-d807 shipped the
+        // drag with this render missing, so the border was a draggable-but-
+        // invisible 1-cell target; this is the regression guard.
+        let mut view = two_pane_view();
+        let border = view.panel_w() - 1; // last sideline column
+        let cell_at = |view: &View, row: usize, col: usize| {
+            let f = view.compose();
+            f.cells[row * f.cols as usize + col]
+        };
+
+        let idle = cell_at(&view, 5, border as usize);
+        assert_eq!(idle.c, '│', "the divider glyph itself is unchanged");
+        assert_eq!(idle.flags, cell_flags::DIM, "idle border is dim chrome");
+
+        // Hover the border column.
+        view.on_hover(5, border, Instant::now());
+        assert!(view.hover_sideline_border, "hover state set");
+        let lit = cell_at(&view, 5, border as usize);
+        assert_eq!(
+            lit.c, '│',
+            "hover accents the border, it does not redraw it"
+        );
+        assert_eq!(lit.flags, cell_flags::BOLD);
+        assert_eq!(lit.fg, LATTICE_ACCENT);
+        assert!(
+            (lit.flags, lit.fg) != (idle.flags, idle.fg),
+            "hovered border is visibly distinct from idle"
+        );
+
+        // Leaving the column clears it.
+        view.on_hover(5, border - 1, Instant::now());
+        assert_eq!(
+            cell_at(&view, 5, border as usize).flags,
+            cell_flags::DIM,
+            "border returns to idle chrome off the column"
+        );
+
+        // A drag in flight keeps it accented even while the pointer runs ahead.
+        view.sideline_drag = Some(view.density);
+        assert_eq!(
+            cell_at(&view, 5, border as usize).flags,
+            cell_flags::BOLD,
+            "the border stays lit for the whole drag"
+        );
     }
 
     #[test]
