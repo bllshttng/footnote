@@ -610,10 +610,13 @@ def test_pr_url_backfill_reports_unresolvable(tmp_graph, stub_slugs):
 
 def test_pr_url_backfill_counts_print_when_zero(tmp_graph, stub_slugs):
     """A silent category reads as "nothing to do" when it may be "nothing resolved"."""
-    result = _invoke(["--apply"])
+    applied = _invoke(["--apply"])
+    assert "pr-url written 0" in applied.output
+    assert "pr-url unresolvable 0" in applied.output
 
-    assert "pr-url written 0" in result.output
-    assert "pr-url unresolvable 0" in result.output
+    dry = _invoke([])
+    assert "pr-url proposed 0" in dry.output
+    assert "pr-url unresolvable 0" in dry.output
 
 
 def test_pr_url_backfill_is_idempotent(tmp_graph, stub_slugs):

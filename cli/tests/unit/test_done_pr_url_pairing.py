@@ -44,7 +44,25 @@ def _first(g: Path) -> dict:
     return json.loads(g.read_text())["entries"][0]
 
 
-def test_pr_url_derived_from_the_origin_remote(tmp_graph, monkeypatch):
+def test_writer_degrades_a_stale_node_cwd_to_the_invocation_cwd():
+    """A writer stands in the repo it is stamping, so a recorded cwd that no
+    longer exists must not cost it the url. The bulk backfill deliberately does
+    NOT share this fallback - see test_maintain."""
+    from fno.graph._reconcile import pr_url_for_repo
+
+    seen: list = []
+
+    def runner(argv, cwd):
+        seen.append(cwd)
+        return (0, "git@github.com:o/r.git\n") if argv[0] == "git" else (1, "")
+
+    url = pr_url_for_repo(5, "/definitely/not/a/dir", runner=runner)
+
+    assert url == "https://github.com/o/r/pull/5"
+    assert seen == [None]  # the dead path was dropped, not passed to git
+
+
+def test_resolved_url_is_written_to_the_node(tmp_graph, monkeypatch):
     import fno.done.cli as done_cli
 
     monkeypatch.setattr(done_cli, "pr_url_for_repo", lambda pr, cwd=None: f"https://github.com/o/r/pull/{pr}")

@@ -146,15 +146,6 @@ case "$*" in
   "remote get-url origin")
     [ -n "${FAKE_ORIGIN_URL:-}" ] || exit 1
     printf '%s\n' "$FAKE_ORIGIN_URL" ;;
-  *--git-common-dir*)
-    [ -n "${FAKE_GIT_COMMON_DIR:-}" ] || exit 1
-    printf '%s\n' "$FAKE_GIT_COMMON_DIR" ;;
-  *--show-toplevel*)
-    [ -n "${FAKE_GIT_TOPLEVEL:-}" ] || exit 1
-    printf '%s\n' "$FAKE_GIT_TOPLEVEL" ;;
-  "worktree list --porcelain")
-    [ -n "${FAKE_WORKTREE_LIST:-}" ] || exit 1
-    printf '%s\n' "$FAKE_WORKTREE_LIST" ;;
   *) exit 1 ;;
 esac
 SHIM
@@ -186,9 +177,6 @@ run_step2() {
   printf '\nprintf "%%s" "$NODE_IDS"\n' >> "$runner"
   FAKE_RECONCILE_JSON="$1" PR="$3" HOME="$UHOME" PATH="$UBIN:$PATH" \
     FAKE_ORIGIN_URL="${FAKE_ORIGIN_URL-$ORIGIN_FIXTURE}" \
-    FAKE_GIT_COMMON_DIR="${FAKE_GIT_COMMON_DIR-$TMP/repo/.git}" \
-    FAKE_GIT_TOPLEVEL="${FAKE_GIT_TOPLEVEL-$TMP/repo}" \
-    FAKE_WORKTREE_LIST="${FAKE_WORKTREE_LIST-worktree $TMP/repo}" \
     FAKE_GH_SLUG="${FAKE_GH_SLUG-}" \
     TMPDIR="$TMP" "${STEP2_SHELL:-bash}" "$runner"
 }

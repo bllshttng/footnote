@@ -187,6 +187,16 @@ def test_empty_graph_is_a_clean_no_op():
     assert m.detect_url_less_prs([], resolver=_slugs({})) == []
 
 
+def test_default_resolver_never_falls_back_to_the_invocation_cwd(tmp_path):
+    """The leg's whole safety argument: a stale cwd resolves to nothing.
+
+    A bulk pass that degraded to the invocation cwd the way a writer does would
+    stamp every stale-cwd row with the sweeping repo's slug.
+    """
+    assert m._slug_from_node_cwd(str(tmp_path / "gone")) is None
+    assert m._slug_from_node_cwd(None) is None
+
+
 # --- leg 3: dedup ----------------------------------------------------------
 
 
