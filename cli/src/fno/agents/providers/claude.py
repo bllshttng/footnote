@@ -1332,6 +1332,7 @@ def acquire_session_writer_claim(
     holder: str,
     claude_short_id: Optional[str] = None,
     pid: Optional[int] = None,
+    ttl_ms: Optional[int] = None,
     root: Optional[Path] = None,
 ):
     """Acquire the atomic single-writer claim before respawning a session.
@@ -1342,6 +1343,11 @@ def acquire_session_writer_claim(
     acquiring process. Returns the held :class:`~fno.claims.types.Claim`;
     the caller releases it via :func:`release_session_writer_claim` when the
     child orphans/exits.
+
+    ``ttl_ms`` is for the case where a writer may exist but its pid is unknown.
+    A pure PID-liveness claim is STALE the moment the acquiring process exits,
+    so it cannot guard anything past that; a TTL claim with a dead pid reads
+    SUSPECT instead, which acquire refuses like LIVE until the TTL expires.
 
     Raises :class:`SessionWriterClaimError` when the session is held live by
     another process (guard 1) or the claim is already held (guard 2).
@@ -1359,6 +1365,7 @@ def acquire_session_writer_claim(
             holder,
             reason="stream-json host lane single-writer",
             pid=pid,
+            ttl_ms=ttl_ms,
             root=claims_root,
         )
     except ClaimHeldByOther as exc:
