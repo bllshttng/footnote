@@ -34,7 +34,7 @@ use crate::proto::{
     ServerMsg, SquadMeta, BUILD_VERSION, MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME,
     PROTO_VERSION,
 };
-use crate::tree::{Dir, Rect, TabId};
+use crate::tree::{Axis, Dir, Rect, TabId};
 use crate::view_store::{self, next_view, AgentSort, Density, SectionKey, SectionView};
 
 /// How long to wait for a just-spawned server to accept.
@@ -121,6 +121,21 @@ const DENSITY_BTN_W: usize = 2;
 /// (x-b186) The density button's glyph. Each state paints a DIFFERENT one, so a
 /// press changes the button as well as the geometry - a press with no visible
 /// change would read as a dead control.
+/// A density's `(want, floor)` widths. Free-standing rather than a method so
+/// the border drag can price a state the sideline is not currently in.
+fn density_bounds_of(d: Density) -> (u16, u16) {
+    match d {
+        // Slim CLAMPS rather than hides: it is explicitly the non-hidden
+        // state, so cycling into it must never make the sideline vanish
+        // (that is what `b` is for). Its floor is the narrowest rail that
+        // still shows a caret plus a rollup pair; `header_band_text` drops
+        // the counts and then truncates the label below that.
+        Density::Slim => (SLIM_PANEL_W, MIN_SLIM_PANEL_W),
+        Density::Regular => (PANEL_W, PANEL_W),
+        Density::Extended => (EXTENDED_PANEL_W, MIN_EXTENDED_PANEL_W),
+    }
+}
+
 fn density_glyph(d: Density) -> char {
     match d {
         Density::Slim => '▏',
@@ -151,6 +166,14 @@ const NOTICE_TTL: Duration = Duration::from_secs(3);
 /// only a pane that stays under the pointer this long steals focus, coalescing
 /// the burst to one `FocusPane` for the pane the pointer lands on.
 const HOVER_DEBOUNCE: Duration = Duration::from_millis(50);
+
+/// How long a seam drag survives with no motion before it expires (x-d807,
+/// AC7-FR). A drag whose mouse-up never arrives - the terminal lost focus
+/// mid-gesture, or the release was eaten - would otherwise stay latched and
+/// swallow every later mouse event. Generous compared to [`HOVER_DEBOUNCE`]
+/// because a human pausing mid-drag to look at the layout is ordinary; this is
+/// a stuck-state backstop, not a gesture timer.
+const SEAM_DRAG_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Run the client for `session`. Returns the process exit code.
 pub fn run(session: &str) -> i32 {
@@ -426,6 +449,32 @@ enum TabContext {
     Ordinal(usize),
 }
 
+/// A draggable seam between two panes, addressed by the panes flanking it:
+/// `a` is the left/top pane, `b` the right/bottom one. `axis` is the branch's
+/// axis, so `Horizontal` (children side by side) means a vertical divider line.
+///
+/// The pair addresses one branch child pair, not one pane pair: a seam can run
+/// past several panes on either side, and naming any pane from each side picks
+/// out the same two branch children (a same-axis branch never nests, so every
+/// descendant of a child shares that child's extent along the branch axis).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Seam {
+    a: u64,
+    b: u64,
+    axis: Axis,
+}
+
+/// A seam drag in flight. `start_pos` is where the divider sat when the drag
+/// began, kept for the Esc revert; `last_pos` suppresses duplicate commands
+/// between cell-boundary crossings.
+#[derive(Clone, Copy, Debug)]
+struct SeamDrag {
+    seam: Seam,
+    start_pos: u16,
+    last_pos: u16,
+    last_at: Instant,
+}
+
 /// The last `Layout` as the client holds it.
 #[derive(Clone)]
 struct LayoutView {
@@ -590,6 +639,18 @@ struct View {
     /// sideline, painted with the selector's INVERSE bar. Highlight-only - never
     /// switches the viewed squad/tab. `None` off the panel.
     hover_row: Option<usize>,
+    /// (x-d807) The seam under the pointer, accented so a divider reads as
+    /// draggable before the press. Terminals cannot portably change the cursor
+    /// shape, so the accent is the whole affordance.
+    hover_seam: Option<Seam>,
+    /// (x-d807) The seam drag in flight, if any. While `Some`, drag and release
+    /// reports are intercepted before they reach a pane's PTY.
+    seam_drag: Option<SeamDrag>,
+    /// (x-d807) True while the pointer is over the sideline's right border, and
+    /// the border-drag in flight. The sideline stays client-local (never on the
+    /// wire) and snaps between density states rather than taking a free width.
+    hover_sideline_border: bool,
+    sideline_drag: Option<Density>,
     /// (x-a496) A pending click-a-card confirm: the node to dispatch and its
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
@@ -1329,6 +1390,10 @@ impl View {
             hover_focus: true,
             hover_pending: None,
             hover_row: None,
+            hover_seam: None,
+            seam_drag: None,
+            hover_sideline_border: false,
+            sideline_drag: None,
             confirm: None,
             create: None,
             create_esc: Vec::new(),
@@ -2090,16 +2155,7 @@ impl View {
     /// (auto-hide, AC6-EDGE) - the clamp path below is reachable only from
     /// Extended, which is the state that asks for more than it may get.
     fn density_bounds(&self) -> (u16, u16) {
-        match self.density {
-            // Slim CLAMPS rather than hides: it is explicitly the non-hidden
-            // state, so cycling into it must never make the sideline vanish
-            // (that is what `b` is for). Its floor is the narrowest rail that
-            // still shows a caret plus a rollup pair; `header_band_text` drops
-            // the counts and then truncates the label below that.
-            Density::Slim => (SLIM_PANEL_W, MIN_SLIM_PANEL_W),
-            Density::Regular => (PANEL_W, PANEL_W),
-            Density::Extended => (EXTENDED_PANEL_W, MIN_EXTENDED_PANEL_W),
-        }
+        density_bounds_of(self.density)
     }
 
     /// The sideline's width in columns, or 0 when it is not rendering.
@@ -2112,9 +2168,10 @@ impl View {
     ///
     /// Note there is no stored "previous Regular width" to restore on leaving
     /// Extended: width is a pure function of the density, so exiting recomputes
-    /// Regular's exactly. When x-d807 makes Regular's width drag-adjustable,
-    /// that adjusted value becomes the thing this returns for Regular, and
-    /// save/restore still falls out of the same derivation.
+    /// Regular's exactly. The border drag does not change that - it snaps
+    /// between whole density states rather than taking a free width, so this
+    /// stays a pure function of the density (x-b186: a rail that resizes freely
+    /// shifts the content area on unrelated events).
     fn panel_w(&self) -> u16 {
         if !self.panel_on {
             return 0;
@@ -2183,6 +2240,238 @@ impl View {
             }
         }
         None
+    }
+
+    /// The pane covering a content-relative cell, if any. The shared primitive
+    /// behind [`View::hit_test`] and [`View::seam_at`].
+    fn pane_covering(&self, cr: u16, cc: u16) -> Option<u64> {
+        self.layout
+            .panes
+            .iter()
+            .find(|(_, r)| cr >= r.y && cr < r.y + r.rows && cc >= r.x && cc < r.x + r.cols)
+            .map(|(pid, _)| *pid)
+    }
+
+    /// The seam under an outer-terminal cell, addressed by the panes flanking it.
+    ///
+    /// The client never receives the pane tree - `Layout` carries a flat
+    /// `Vec<(PaneId, Rect)>` - so a seam cannot be addressed by branch path here.
+    /// A flanking pane pair is derivable from the rects and resolves to exactly
+    /// one branch child pair server-side, which is why it is the wire address
+    /// (`Command::ResizeSeam`) rather than the topological one the design
+    /// originally assumed.
+    ///
+    /// `None` on a covered cell, on chrome, and on a `┼` crossing, where the two
+    /// candidate seams are genuinely ambiguous and picking one would resize a
+    /// divider the operator was not pointing at.
+    fn seam_at(&self, row: u16, col: u16) -> Option<Seam> {
+        let panel_w = self.panel_w();
+        if row < TAB_BAR_ROWS || col < panel_w {
+            return None;
+        }
+        let (cr, cc) = (row - TAB_BAR_ROWS, col - panel_w);
+        if self.pane_covering(cr, cc).is_some() {
+            return None;
+        }
+        // Horizontal axis == children side by side == a vertical divider line.
+        let across = cc
+            .checked_sub(1)
+            .and_then(|l| self.pane_covering(cr, l))
+            .zip(cc.checked_add(1).and_then(|r| self.pane_covering(cr, r)))
+            .map(|(a, b)| Seam {
+                a,
+                b,
+                axis: Axis::Horizontal,
+            });
+        let down = cr
+            .checked_sub(1)
+            .and_then(|u| self.pane_covering(u, cc))
+            .zip(cr.checked_add(1).and_then(|d| self.pane_covering(d, cc)))
+            .map(|(a, b)| Seam {
+                a,
+                b,
+                axis: Axis::Vertical,
+            });
+        match (across, down) {
+            (Some(s), None) => Some(s),
+            (None, Some(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The rect of a pane by id, from the last layout.
+    fn pane_rect(&self, pid: u64) -> Option<Rect> {
+        self.layout
+            .panes
+            .iter()
+            .find(|(p, _)| *p == pid)
+            .map(|(_, r)| *r)
+    }
+
+    /// Whether a seam still separates the exact pair that addressed it.
+    ///
+    /// Membership is deliberately not the test. A concurrent same-axis split
+    /// can insert a pane between the two while keeping both ids alive, and a
+    /// membership check would call that seam live: the drag stays latched,
+    /// `set_seam_ratio` refuses every command for the now non-adjacent pair,
+    /// and the divider looks dead until release with no notice ever shown.
+    /// Geometry is what the address actually means, so geometry is what is
+    /// checked - one divider cell between them, overlapping across it.
+    fn seam_is_live(&self, seam: Seam) -> bool {
+        let (Some(ra), Some(rb)) = (self.pane_rect(seam.a), self.pane_rect(seam.b)) else {
+            return false;
+        };
+        let abuts = |start: u16, len: u16, next: u16| start.saturating_add(len) + 1 == next;
+        let overlaps = |a0: u16, a_len: u16, b0: u16, b_len: u16| {
+            a0 < b0.saturating_add(b_len) && b0 < a0.saturating_add(a_len)
+        };
+        match seam.axis {
+            Axis::Horizontal => {
+                abuts(ra.x, ra.cols, rb.x) && overlaps(ra.y, ra.rows, rb.y, rb.rows)
+            }
+            Axis::Vertical => abuts(ra.y, ra.rows, rb.y) && overlaps(ra.x, ra.cols, rb.x, rb.cols),
+        }
+    }
+
+    /// Where the seam sits now, as a content-area coordinate along its axis.
+    /// Pair-relative, not branch-relative: the client cannot see the branch's
+    /// other children, so the server rescales this against the pair's own total.
+    /// Where the seam sits now, as a content-area coordinate along its axis.
+    /// The divider is the cell immediately past pane `a`.
+    fn seam_pos(&self, seam: Seam) -> Option<u16> {
+        let ra = self.pane_rect(seam.a)?;
+        Some(match seam.axis {
+            Axis::Horizontal => ra.x.saturating_add(ra.cols),
+            Axis::Vertical => ra.y.saturating_add(ra.rows),
+        })
+    }
+
+    /// Where an outer-terminal cell puts the divider, in the same content-area
+    /// coordinates. Converting a position to a ratio is deliberately the
+    /// server's job: it needs the branch child's extent, and a pane's rect is
+    /// not that extent once axes alternate more than one level deep.
+    fn seam_pos_at(&self, seam: Seam, row: u16, col: u16) -> Option<u16> {
+        let (cr, cc) = (
+            row.checked_sub(TAB_BAR_ROWS)?,
+            col.checked_sub(self.panel_w())?,
+        );
+        Some(match seam.axis {
+            Axis::Horizontal => cc,
+            Axis::Vertical => cr,
+        })
+    }
+
+    /// True on the sideline's right border column - the grab band for the
+    /// density drag. False when the sideline is hidden: there is no border to
+    /// grab, so revealing it stays on the existing toggle.
+    fn on_sideline_border(&self, row: u16, col: u16) -> bool {
+        let panel_w = self.panel_w();
+        panel_w > 0 && row >= TAB_BAR_ROWS && col == panel_w - 1
+    }
+
+    /// Grab a seam, remembering the share it currently holds so Esc can put it
+    /// back. A seam whose panes have already gone is not grabbable.
+    fn begin_seam_drag(&mut self, seam: Seam, now: Instant) {
+        let Some(start) = self.seam_pos(seam) else {
+            return;
+        };
+        self.seam_drag = Some(SeamDrag {
+            seam,
+            start_pos: start,
+            last_pos: start,
+            last_at: now,
+        });
+    }
+
+    /// The command for a drag that has reached an outer cell, or `None` when
+    /// the seam has not moved. A drag reports far more cells than the seam has
+    /// positions, so this is what keeps the wire quiet between crossings.
+    ///
+    /// The seam's span is invariant under its own resize - the pair's total
+    /// extent does not change, only the split point inside it - so the target
+    /// stays stable as the server's layout updates mid-drag, and a command lost
+    /// on the way self-heals at the next cell.
+    fn seam_drag_to(&mut self, row: u16, col: u16, now: Instant) -> Option<Command> {
+        let drag = self.seam_drag?;
+        let target = self.seam_pos_at(drag.seam, row, col)?;
+        if target == drag.last_pos {
+            return None;
+        }
+        let live = self.seam_drag.as_mut()?;
+        live.last_pos = target;
+        live.last_at = now;
+        Some(Command::ResizeSeam {
+            a: drag.seam.a,
+            b: drag.seam.b,
+            pos: target,
+        })
+    }
+
+    /// The sideline states this terminal is wide enough to render, paired with
+    /// the width each would take. `None` is the hidden state, always offered.
+    ///
+    /// Filtering by what fits is what keeps a drag on a narrow terminal from
+    /// snapping to a state `panel_w` would then refuse to draw, which would
+    /// read as the sideline vanishing at random.
+    fn density_snap_targets(&self) -> Vec<(Option<Density>, u16)> {
+        let room = self.term.1.saturating_sub(MIN_CONTENT_COLS);
+        let mut out = vec![(None, 0u16)];
+        out.extend(
+            [Density::Slim, Density::Regular, Density::Extended]
+                .into_iter()
+                .filter_map(|d| {
+                    let (want, floor) = density_bounds_of(d);
+                    (room >= floor).then_some((Some(d), want.min(room)))
+                }),
+        );
+        out
+    }
+
+    /// Snap the sideline to whichever state's width sits nearest the dragged
+    /// border column. Returns whether anything changed.
+    ///
+    /// Deliberately snap-only: x-b186 fixed these widths because a rail that
+    /// takes a free width shifts the content area on unrelated events. The drag
+    /// is a faster way to reach the states the density button already cycles,
+    /// not a new degree of freedom.
+    fn snap_sideline_to(&mut self, col: u16) -> bool {
+        // The border sits on the sideline's last column, so the width the
+        // operator is asking for is one past it.
+        let want = col.saturating_add(1);
+        let targets = self.density_snap_targets();
+        let Some(&(pick, _)) = targets.iter().min_by_key(|(_, w)| w.abs_diff(want)) else {
+            return false;
+        };
+        let before = (self.panel_on, self.density);
+        let held = self.selected_agent_name();
+        match pick {
+            None => self.panel_on = false,
+            Some(d) => {
+                self.panel_on = true;
+                self.density = d;
+            }
+        }
+        if before == (self.panel_on, self.density) {
+            return false;
+        }
+        view_store::save_prefs(self.density, self.agent_sort);
+        // Same ordering as cycle_density: the row set changes with the density,
+        // so re-anchor the selector before clamping the scroll to it.
+        self.reanchor_selector(held);
+        self.clamp_sideline_offset();
+        true
+    }
+
+    /// End the drag and put the seam back where it started, returning the
+    /// command that does it. `None` when the seam never moved: a press that
+    /// released without a crossing sent nothing, so there is nothing to undo.
+    fn revert_seam_drag(&mut self) -> Option<Command> {
+        let drag = self.seam_drag.take()?;
+        (drag.last_pos != drag.start_pos).then_some(Command::ResizeSeam {
+            a: drag.seam.a,
+            b: drag.seam.b,
+            pos: drag.start_pos,
+        })
     }
 
     /// The column range of the footer's `☰ menu` button (x-8ccf US4), shared by
@@ -2582,6 +2871,14 @@ impl View {
         // a cell off the sideline text column clears it.
         self.hover_row = self.sideline_row_at(row, col);
 
+        // x-d807: accent the divider under the pointer. Terminals cannot
+        // portably change the cursor shape, so this accent is the entire
+        // draggability affordance - without it a seam gives no sign it can be
+        // grabbed. Always on, like the sideline highlight, and independent of
+        // the focus-follow off-switch below.
+        self.hover_seam = self.seam_at(row, col);
+        self.hover_sideline_border = self.on_sideline_border(row, col);
+
         // Focus-follows-mouse rides the off-switch. hit_test resolves a PANE
         // (chrome/divider/sideline => None), so hovering the sideline never
         // steals focus - only moving over pane content does.
@@ -2734,6 +3031,17 @@ impl View {
             if !self.layout.panes.iter().any(|(id, _)| *id == pane) {
                 self.hover_pending = None;
             }
+        }
+        // (x-d807) Same for a seam: a split or close elsewhere can retire the
+        // pair that addressed it, and a seam whose panes are gone must not stay
+        // lit as draggable. The drag itself re-anchors here too - it survives a
+        // layout push that leaves its pair intact, and ends when one does not.
+        if self.hover_seam.is_some_and(|s| !self.seam_is_live(s)) {
+            self.hover_seam = None;
+        }
+        if self.seam_drag.is_some_and(|d| !self.seam_is_live(d.seam)) {
+            self.seam_drag = None;
+            self.set_notice("divider gone: layout changed".into());
         }
         // (x-0f9d US1) Last, after every re-anchor: if a bare NewTab is
         // pending, the layout that just added the tab opens rename on it. Last
@@ -3186,6 +3494,9 @@ impl View {
         // placeholder: no filler until the first real Layout names a bound.
         let (a_rows, a_cols) = self.layout.area;
         let boxed = self.layout.area != (0, 0);
+        // A drag keeps the accent on the seam it grabbed even as the pointer
+        // runs ahead of it, so the thing being moved stays the thing lit.
+        let active_seam = self.seam_drag.map(|d| d.seam).or(self.hover_seam);
         // Divider glyphs for in-area content cells no pane covers: pick by
         // which neighbors are panes so vertical strips read '│', horizontal
         // '─', crossings '┼'. Dim so chrome never shouts over content.
@@ -3221,7 +3532,16 @@ impl View {
                     || c + 1 < cols && focused[r * cols + c + 1]
                     || r > origin_r && focused[(r - 1) * cols + c]
                     || r + 1 < rows && focused[(r + 1) * cols + c];
-                let (fg, flags) = if outline {
+                // x-d807: the seam under the pointer (or held in a drag) reads
+                // BOLD, distinct from both idle DIM chrome and the focus
+                // outline's plain accent. A terminal cannot portably change the
+                // cursor shape, so this is the only signal a divider is
+                // draggable before the press.
+                let grabbable =
+                    active_seam.is_some_and(|s| self.seam_at(r as u16, c as u16) == Some(s));
+                let (fg, flags) = if grabbable {
+                    (LATTICE_ACCENT, cell_flags::BOLD)
+                } else if outline {
                     (LATTICE_ACCENT, 0)
                 } else {
                     (Color::Default, cell_flags::DIM)
@@ -5793,6 +6113,10 @@ async fn attach_and_run(
         // (x-1d91) A dispatched reorder verb the feed never confirmed: the `…`
         // marker must clear with a notice rather than spin forever.
         let backlog_deadline = view.backlog_pending_deadline();
+        // (x-d807, AC7-FR) A drag whose mouse-up never arrives - the terminal
+        // lost focus mid-gesture, or the release was eaten - would otherwise
+        // leave the drag latched, swallowing every later mouse event. Expire it.
+        let seam_drag_deadline = view.seam_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
         tokio::select! {
             msg = srv_rx.recv() => match msg.unwrap_or(Err(ProtoError::Closed)) {
                 Ok(ServerMsg::Frame { pane_id, frame }) => {
@@ -6118,6 +6442,20 @@ async fn attach_and_run(
                 }
             }
             _ = async {
+                match seam_drag_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if seam_drag_deadline.is_some() => {
+                // The last applied ratio stands - the operator's drag was real
+                // up to the point the release went missing, so keeping it is
+                // less surprising than reverting work they watched happen.
+                view.seam_drag = None;
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            _ = async {
                 match hover_deadline {
                     Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
                     None => std::future::pending().await,
@@ -6201,6 +6539,51 @@ async fn handle_stdin(
             }
             continue;
         }
+        // x-d807: a seam drag in flight owns the mouse. The pointer routinely
+        // leaves the divider it grabbed - that is what dragging is - so this
+        // precedes every position-based route below, including the pane forward
+        // that would otherwise hand the drag to a PTY as text selection.
+        if view.seam_drag.is_some() {
+            match rep.kind {
+                MouseKind::Drag(MouseButton::Left) => {
+                    if let Some(cmd) = view.seam_drag_to(rep.row, rep.col, Instant::now()) {
+                        write_msg(sock_w, &ClientMsg::Command(cmd))
+                            .await
+                            .map_err(|e| format!("seam resize send failed: {e}"))?;
+                    }
+                    continue;
+                }
+                MouseKind::Release(MouseButton::Left) => {
+                    // The last applied ratio stands.
+                    view.seam_drag = None;
+                    continue;
+                }
+                // Anything else (a wheel, another button) means the gesture is
+                // over; drop the drag and let the event route normally.
+                _ => view.seam_drag = None,
+            }
+        }
+        // x-d807: the sideline border drag, same ownership rule as a seam drag.
+        // Client-local: the sideline is never on the wire, so a snap only tells
+        // the server its content area changed.
+        if view.sideline_drag.is_some() {
+            match rep.kind {
+                MouseKind::Drag(MouseButton::Left) => {
+                    if view.snap_sideline_to(rep.col) {
+                        let (r, c) = view.content_dims();
+                        write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                            .await
+                            .map_err(|e| format!("sideline resize send failed: {e}"))?;
+                    }
+                    continue;
+                }
+                MouseKind::Release(MouseButton::Left) => {
+                    view.sideline_drag = None;
+                    continue;
+                }
+                _ => view.sideline_drag = None,
+            }
+        }
         // A card-dispatch confirm is modal (x-a496): while it is open, any mouse
         // click / scroll cancels it and is SWALLOWED - it must never leak to a
         // pane underneath (the confirm prompt spans the full-width bottom row) nor
@@ -6224,6 +6607,18 @@ async fn handle_stdin(
         if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
             if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
                 apply_hit(view, hit, sock_w).await?;
+                continue;
+            }
+            // x-d807: a press on a divider grabs the seam. After chrome_hit so
+            // sideline and tab-bar affordances still win their own cells.
+            if let Some(seam) = view.seam_at(rep.row, rep.col) {
+                view.begin_seam_drag(seam, Instant::now());
+                continue;
+            }
+            // Likewise the sideline's own border. Also after chrome_hit, so the
+            // density button keeps the cells it draws on.
+            if view.on_sideline_border(rep.row, rep.col) {
+                view.sideline_drag = Some(view.density);
                 continue;
             }
         }
@@ -6270,6 +6665,19 @@ async fn handle_stdin(
         }
     }
     if passthrough.is_empty() {
+        return Ok(StdinFlow::Continue);
+    }
+    // x-d807 (AC6-FR): a bare Esc during a seam drag reverts it. The revert is
+    // an explicit final command to the drag-start ratio, not a client-side
+    // rollback - the server owns the layout, so putting the seam back has to
+    // travel the same path that moved it. Matched on a lone 0x1b so an arrow
+    // key's escape sequence never reads as a cancel.
+    if view.seam_drag.is_some() && passthrough == [0x1b] {
+        if let Some(cmd) = view.revert_seam_drag() {
+            write_msg(sock_w, &ClientMsg::Command(cmd))
+                .await
+                .map_err(|e| format!("seam revert send failed: {e}"))?;
+        }
         return Ok(StdinFlow::Continue);
     }
     if view.digest.is_some() {
@@ -10166,6 +10574,485 @@ mod tests {
         assert_eq!(view.hit_test(5, 10), None);
         // The divider column between the panes covers no pane.
         assert_eq!(view.hit_test(5, 28 + 35), None);
+    }
+
+    // A two-pane VERTICAL stack over two_pane_view's geometry: 20 above 21,
+    // divider on content row 14 (outer row 15).
+    fn stacked_view() -> View {
+        let mut view = two_pane_view();
+        let rect = |y, rows| Rect {
+            x: 0,
+            y,
+            rows,
+            cols: 72,
+        };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![(20, rect(0, 14)), (21, rect(15, 14))],
+            focus: 20,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        });
+        view
+    }
+
+    #[test]
+    fn seam_at_addresses_a_divider_by_its_flanking_panes() {
+        // US5: the client never sees the tree, so a seam is addressed by the
+        // panes flanking it. Content origin is outer (1, 28); three_pane_view
+        // tiles panes 10/11/12 at content x 0/24/48, each 23 wide, so the
+        // dividers sit on content col 23 and 47 (outer 51 and 75).
+        let view = three_pane_view();
+        assert_eq!(
+            view.seam_at(5, 51),
+            Some(Seam {
+                a: 10,
+                b: 11,
+                axis: Axis::Horizontal
+            }),
+            "vertical divider line addresses the panes left and right of it"
+        );
+        assert_eq!(
+            view.seam_at(5, 75),
+            Some(Seam {
+                a: 11,
+                b: 12,
+                axis: Axis::Horizontal
+            }),
+            "the second divider addresses its own pair, not the first's"
+        );
+        // A covered cell is a pane hit, never a seam - hit_test still owns it.
+        assert_eq!(view.seam_at(5, 30), None);
+        // Chrome: tab bar row and sideline columns.
+        assert_eq!(view.seam_at(0, 51), None);
+        assert_eq!(view.seam_at(5, 10), None);
+    }
+
+    #[test]
+    fn seam_at_addresses_a_stacked_divider_on_the_vertical_axis() {
+        let view = stacked_view();
+        assert_eq!(
+            view.seam_at(15, 40),
+            Some(Seam {
+                a: 20,
+                b: 21,
+                axis: Axis::Vertical
+            }),
+            "horizontal divider line addresses the panes above and below it"
+        );
+        assert_eq!(view.seam_at(5, 40), None, "inside the top pane");
+    }
+
+    #[test]
+    fn seam_pos_reads_the_divider_cell_not_a_ratio() {
+        // The client reports WHERE the divider goes and leaves the ratio to the
+        // server, which is the only side that can see the branch child's true
+        // extent. Content origin is outer (1, 28).
+        let view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        // Pane 10 spans content cols 0..22, so its divider sits at 23.
+        assert_eq!(view.seam_pos(seam), Some(23));
+        // Dragging to outer col 58 asks for the divider at content col 30.
+        assert_eq!(view.seam_pos_at(seam, 5, 58), Some(30));
+        // Off the content area on the sideline side resolves to nothing.
+        assert_eq!(view.seam_pos_at(seam, 5, 10), None);
+    }
+
+    #[test]
+    fn seam_drag_emits_one_command_per_crossing_not_per_report() {
+        // US1: a drag reports far more cells than the seam has positions. Only
+        // a real move goes on the wire; the rest are silent.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        let t0 = Instant::now();
+        view.begin_seam_drag(seam, t0);
+        assert_eq!(
+            view.seam_drag_to(5, 58, t0),
+            Some(Command::ResizeSeam {
+                a: 10,
+                b: 11,
+                pos: 30
+            }),
+            "crossing to content col 30 moves the seam"
+        );
+        assert_eq!(
+            view.seam_drag_to(6, 58, t0),
+            None,
+            "same column, different row: the seam did not move"
+        );
+        assert_eq!(
+            view.seam_drag_to(5, 59, t0),
+            Some(Command::ResizeSeam {
+                a: 10,
+                b: 11,
+                pos: 31
+            }),
+            "the next column is a new position"
+        );
+    }
+
+    #[test]
+    fn hovered_seam_renders_a_distinct_accent_in_compose() {
+        // AC3-UI: the accent is the whole draggability affordance (a terminal
+        // cursor cannot portably change shape), so it must be visibly distinct
+        // from idle chrome and assertable in the compose output.
+        let mut view = three_pane_view();
+        let cell_at = |view: &View, row: usize, col: usize| {
+            let f = view.compose();
+            f.cells[row * f.cols as usize + col]
+        };
+        // Two different idle states exist. The seam at col 75 (between the
+        // unfocused 11 and 12) is plain dim chrome; the one at col 51 borders
+        // the focused pane 10, so it already wears x-5a52's standing outline.
+        // The hover accent has to be distinct from BOTH.
+        let idle_chrome = cell_at(&view, 5, 75);
+        let focus_outline = cell_at(&view, 5, 51);
+        assert_eq!(idle_chrome.c, '│', "the divider glyph itself is unchanged");
+        assert_eq!(idle_chrome.flags, cell_flags::DIM);
+        assert_eq!(
+            focus_outline.flags, 0,
+            "the focus outline is undimmed accent"
+        );
+
+        view.on_hover(5, 75, Instant::now());
+        let lit = cell_at(&view, 5, 75);
+        assert_eq!(
+            lit.c, '│',
+            "hover accents the divider, it does not redraw it"
+        );
+        assert_eq!(lit.flags, cell_flags::BOLD);
+        assert_eq!(lit.fg, LATTICE_ACCENT);
+        assert!(
+            (lit.flags, lit.fg) != (idle_chrome.flags, idle_chrome.fg),
+            "distinct from idle chrome"
+        );
+        assert!(
+            (lit.flags, lit.fg) != (focus_outline.flags, focus_outline.fg),
+            "distinct from the focused pane's standing outline, so a hovered \
+             seam beside the focused pane still reads as grabbable"
+        );
+        // Hovering one seam does not light another.
+        assert_eq!(
+            cell_at(&view, 5, 51).flags,
+            0,
+            "still just the focus outline"
+        );
+
+        // Leaving the band clears it.
+        view.on_hover(5, 40, Instant::now());
+        assert_eq!(cell_at(&view, 5, 75).flags, cell_flags::DIM);
+    }
+
+    #[test]
+    fn drag_keeps_the_accent_on_the_seam_it_grabbed() {
+        // The pointer routinely runs ahead of the divider during a drag; the
+        // thing being moved must stay the thing lit.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        view.begin_seam_drag(seam, Instant::now());
+        view.on_hover(5, 60, Instant::now()); // pointer now over a pane
+        let f = view.compose();
+        assert_eq!(
+            f.cells[5 * f.cols as usize + 51].flags,
+            cell_flags::BOLD,
+            "the grabbed seam stays accented while the pointer is off it"
+        );
+    }
+
+    #[test]
+    fn layout_change_ends_a_drag_whose_seam_is_gone() {
+        // AC4-ERR (client half): a concurrent close retires the pair, so the
+        // drag ends visibly rather than resizing something else.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        view.begin_seam_drag(seam, Instant::now());
+        view.on_hover(5, 51, Instant::now());
+        assert!(view.seam_drag.is_some() && view.hover_seam.is_some());
+
+        // Pane 11 closes elsewhere; 10 and 12 now tile the area.
+        let rect = |x, cols| Rect {
+            x,
+            y: 0,
+            rows: 29,
+            cols,
+        };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![(10, rect(0, 35)), (12, rect(36, 36))],
+            focus: 10,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        });
+        assert!(
+            view.seam_drag.is_none(),
+            "the drag ended, it did not re-target"
+        );
+        assert!(
+            view.hover_seam.is_none(),
+            "a dead seam is not lit as draggable"
+        );
+        assert!(
+            view.notice.is_some(),
+            "the drag ending is reported, never silent"
+        );
+    }
+
+    #[test]
+    fn drag_ends_when_a_split_lands_between_its_panes() {
+        // Both ids survive a same-axis split between them, so a membership
+        // check would call this seam live. It is not: the panes no longer
+        // flank one divider, the server would refuse every command, and the
+        // divider would look dead until release with no notice ever shown.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        view.begin_seam_drag(seam, Instant::now());
+        view.on_hover(5, 51, Instant::now());
+
+        let rect = |x, cols| Rect {
+            x,
+            y: 0,
+            rows: 29,
+            cols,
+        };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            // New pane 13 lands between 10 and 11; every original id lives on.
+            panes: vec![
+                (10, rect(0, 16)),
+                (13, rect(17, 16)),
+                (11, rect(34, 16)),
+                (12, rect(51, 21)),
+            ],
+            focus: 13,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        });
+        assert!(
+            view.seam_drag.is_none(),
+            "the pair is no longer adjacent, so the drag ends"
+        );
+        assert!(view.hover_seam.is_none());
+        assert!(
+            view.notice.is_some(),
+            "and says so, rather than going quiet"
+        );
+    }
+
+    #[test]
+    fn drag_survives_a_layout_push_that_keeps_its_pair() {
+        // The common case: every applied resize broadcasts a layout, and the
+        // drag must ride through its own updates.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        view.begin_seam_drag(seam, Instant::now());
+        let rect = |x, cols| Rect {
+            x,
+            y: 0,
+            rows: 29,
+            cols,
+        };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            // 10 grew, 11 shrank: the same pair, a moved seam.
+            panes: vec![(10, rect(0, 30)), (11, rect(31, 16)), (12, rect(48, 23))],
+            focus: 10,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        });
+        assert!(view.seam_drag.is_some(), "the drag survives its own resize");
+        assert!(view.notice.is_none(), "a normal resize is not an error");
+    }
+
+    #[test]
+    fn esc_reverts_a_seam_drag_to_where_it_started() {
+        // AC6-FR: the revert is an explicit final command, not a local
+        // rollback - the server owns the layout.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        let t0 = Instant::now();
+        view.begin_seam_drag(seam, t0);
+        view.seam_drag_to(5, 58, t0);
+        view.seam_drag_to(5, 62, t0);
+        assert_eq!(
+            view.revert_seam_drag(),
+            Some(Command::ResizeSeam {
+                a: 10,
+                b: 11,
+                pos: 23
+            }),
+            "reverts to where the divider sat when the drag began"
+        );
+        assert!(view.seam_drag.is_none(), "the revert also ends the drag");
+    }
+
+    #[test]
+    fn a_drag_that_never_moved_reverts_to_nothing() {
+        // A press-and-release on a divider is a click, not a resize: it sent no
+        // command, so cancelling it must not send one either.
+        let mut view = three_pane_view();
+        let seam = view.seam_at(5, 51).expect("seam between 10 and 11");
+        view.begin_seam_drag(seam, Instant::now());
+        assert_eq!(view.revert_seam_drag(), None);
+        assert!(view.seam_drag.is_none());
+    }
+
+    #[test]
+    fn sideline_border_drag_snaps_between_density_states() {
+        // AC2-HP: the drag reaches exactly the states the density button
+        // cycles, at exactly their fixed widths. No intermediate free-form
+        // width is ever rendered (Locked Decision 4 / x-b186).
+        let mut view = two_pane_view();
+        view.term = (30, 120); // wide enough for every state
+        view.density = Density::Regular;
+        assert_eq!(view.panel_w(), PANEL_W);
+
+        // Drag inward past the Slim midpoint.
+        assert!(view.snap_sideline_to(SLIM_PANEL_W - 1));
+        assert_eq!(view.density, Density::Slim);
+        assert_eq!(
+            view.panel_w(),
+            SLIM_PANEL_W,
+            "lands on the fixed Slim width, not where the pointer was"
+        );
+
+        // Outward to Extended.
+        assert!(view.snap_sideline_to(EXTENDED_PANEL_W - 1));
+        assert_eq!(view.density, Density::Extended);
+        assert_eq!(view.panel_w(), EXTENDED_PANEL_W);
+
+        // All the way in hides it - the same state `b` toggles.
+        assert!(view.snap_sideline_to(0));
+        assert!(!view.panel_on);
+        assert_eq!(view.panel_w(), 0);
+    }
+
+    #[test]
+    fn sideline_border_snaps_to_the_nearest_state_by_midpoint() {
+        let mut view = two_pane_view();
+        view.term = (30, 120);
+        view.density = Density::Slim;
+        // Just past halfway between Slim (16) and Regular (28) takes Regular.
+        let midpoint = (SLIM_PANEL_W + PANEL_W) / 2;
+        assert!(view.snap_sideline_to(midpoint));
+        assert_eq!(view.density, Density::Regular);
+        // Just short of it stays Slim, and reports no change.
+        view.density = Density::Slim;
+        assert!(
+            !view.snap_sideline_to(midpoint - 2),
+            "short of the midpoint is a no-op, not a churned save"
+        );
+        assert_eq!(view.density, Density::Slim);
+    }
+
+    #[test]
+    fn sideline_border_never_snaps_to_a_state_the_terminal_cannot_show() {
+        // A snap to a state panel_w would then refuse to draw would read as the
+        // sideline vanishing at random.
+        let mut view = two_pane_view();
+        view.term = (30, MIN_CONTENT_COLS + PANEL_W); // room for Regular, not Extended
+        view.density = Density::Regular;
+        assert!(
+            !view
+                .density_snap_targets()
+                .iter()
+                .any(|(d, _)| *d == Some(Density::Extended)),
+            "Extended is not offered when it does not fit"
+        );
+        // Dragging far outward takes the widest state that DOES fit.
+        view.snap_sideline_to(200);
+        assert_eq!(view.density, Density::Regular);
+        assert!(view.panel_w() > 0, "the sideline still renders");
+    }
+
+    #[test]
+    fn sideline_border_is_grabbable_only_while_the_sideline_shows() {
+        let mut view = two_pane_view();
+        view.term = (30, 120);
+        view.density = Density::Regular;
+        let border = view.panel_w() - 1;
+        assert!(view.on_sideline_border(5, border));
+        assert!(!view.on_sideline_border(5, border - 1), "inside the rail");
+        assert!(!view.on_sideline_border(5, border + 1), "content side");
+        assert!(!view.on_sideline_border(0, border), "tab bar row is chrome");
+        // Hidden: no border to grab, so revealing stays on the toggle.
+        view.panel_on = false;
+        assert!(!view.on_sideline_border(5, border));
+    }
+
+    #[test]
+    fn seam_drag_is_not_grabbable_once_its_panes_are_gone() {
+        let mut view = three_pane_view();
+        view.begin_seam_drag(
+            Seam {
+                a: 998,
+                b: 999,
+                axis: Axis::Horizontal,
+            },
+            Instant::now(),
+        );
+        assert!(
+            view.seam_drag.is_none(),
+            "a seam with no live panes has no share to remember, so no grab"
+        );
+    }
+
+    #[test]
+    fn seam_at_refuses_an_ambiguous_crossing() {
+        // A '┼' is the intersection of two seams; picking one would resize a
+        // divider the operator was not pointing at, so the cell is not a target.
+        let mut view = two_pane_view();
+        let r = |x, y, rows, cols| Rect { x, y, rows, cols };
+        view.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            // A 2x2 grid: the crossing sits at content (14, 35).
+            panes: vec![
+                (30, r(0, 0, 14, 35)),
+                (31, r(36, 0, 14, 36)),
+                (32, r(0, 15, 14, 35)),
+                (33, r(36, 15, 14, 36)),
+            ],
+            focus: 30,
+            area: (29, 72),
+            agents: vec![],
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        });
+        // Outer (1+14, 28+35) = (15, 63) is the crossing: both axes resolve.
+        assert_eq!(view.seam_at(15, 63), None);
+        // One cell off the crossing, each seam still resolves cleanly.
+        assert_eq!(
+            view.seam_at(5, 63).map(|s| (s.a, s.b)),
+            Some((30, 31)),
+            "above the crossing the vertical divider is unambiguous"
+        );
+        assert_eq!(
+            view.seam_at(15, 40).map(|s| (s.a, s.b)),
+            Some((30, 32)),
+            "left of the crossing the horizontal divider is unambiguous"
+        );
     }
 
     // A three-pane layout over two_pane_view's geometry (focus on pane 10, so

@@ -202,7 +202,14 @@ use crate::tree::{Dir, Rect, TabId};
 /// and without a version difference the handshake would accept an upgraded
 /// client and then drop it on the first decode error instead of telling the
 /// operator to restart the server.
-pub const PROTO_VERSION: u32 = 38;
+///
+/// v39 (x-d807): `Command::ResizeSeam` (dragging a pane divider). Same case as
+/// v38 - a new verb rather than an additive field, so a v38 server cannot
+/// deserialize it. Mux servers deliberately outlive client upgrades, so without
+/// the bump an upgraded client would attach cleanly to a v38 server and then
+/// have the connection dropped on its first divider drag, instead of being told
+/// at handshake to restart the server.
+pub const PROTO_VERSION: u32 = 39;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -737,6 +744,29 @@ pub enum Command {
     ClosePane,
     FocusDir(Dir),
     ResizeDir(Dir),
+    /// (x-d807) Move one seam under a mouse drag on a divider. The seam is
+    /// named by the panes flanking it (`a` left/top, `b` right/bottom) because
+    /// that is what the client can see - `Layout` carries rects, never the
+    /// tree - and the server resolves the pair to a branch child pair, refusing
+    /// a pane that has gone or a pair that no longer flanks one seam.
+    ///
+    /// `pos` is where the divider should land: a content-area coordinate along
+    /// the branch axis (a column for a vertical divider, a row for a horizontal
+    /// one). Deliberately NOT a ratio, because only the server can compute one.
+    /// The client sees the flanking PANES, and a pane is not its branch child:
+    /// alternating axes nest legally, so a pane two levels down spans only a
+    /// fraction of its child's extent, and a client-derived ratio would move
+    /// the divider somewhere the operator never pointed.
+    ///
+    /// Absolute rather than a delta: repeated sends are idempotent, a dropped
+    /// command self-heals at the next cell crossing, and a long drag
+    /// accumulates no rounding drift. A cell coordinate rather than a float
+    /// also preserves this enum's `Eq`, which no float type implements.
+    ResizeSeam {
+        a: u64,
+        b: u64,
+        pos: u16,
+    },
     NewTab,
     SelectTab(TabId),
     NextTab,

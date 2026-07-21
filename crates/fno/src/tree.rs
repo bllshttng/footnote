@@ -694,6 +694,103 @@ pub fn resize(tab: &mut Tab, viewport: Rect, dir: Dir, step: f32) -> bool {
     true
 }
 
+/// Move the seam between the branch children holding `a` and `b` so the
+/// divider lands on `pos` (a content-area coordinate along the branch's axis:
+/// a column for `Horizontal`, a row for `Vertical`). Returns `true` if
+/// anything changed.
+///
+/// The seam is addressed by the panes flanking it because that is what the
+/// client can see - `ServerMsg::Layout` carries rects, never the tree. Any
+/// pane from each side names the same two branch children, and resolving the
+/// pair here is also what validates it: panes that have gone, or that are no
+/// longer adjacent children of a common branch, refuse with the tree
+/// untouched. A concurrent split or close therefore cannot land a resize on
+/// the wrong seam.
+///
+/// The target is a POSITION rather than a ratio because only this side can
+/// convert one into the other. A caller holding just the rects cannot: it sees
+/// the flanking PANES, and a pane is not its branch child. Alternating axes
+/// nest legally (`Horizontal` -> `Vertical` -> `Horizontal`), so a pane two
+/// levels down spans a fraction of its child's extent, and a ratio derived
+/// from the pane's rect would move the divider somewhere the operator did not
+/// point. `child_areas` below gives the child's true extent, so the conversion
+/// is exact at any nesting depth.
+///
+/// The position is ABSOLUTE: repeated sets are idempotent, a dropped one
+/// self-heals on the next, and no drift accumulates the way a stream of deltas
+/// would. What one child gains the other loses exactly, so the branch's ratio
+/// sum is conserved without a renormalize pass.
+pub fn set_seam_pos(tab: &mut Tab, viewport: Rect, a: PaneId, b: PaneId, pos: u16) -> bool {
+    let (mut pa, mut pb) = (Vec::new(), Vec::new());
+    if !find_path(&tab.root, a, &mut pa) || !find_path(&tab.root, b, &mut pb) {
+        return false;
+    }
+    // The deepest branch they share; the children they descend from must be
+    // adjacent there, in order, or the two panes do not flank one seam.
+    let Some(depth) = (0..pa.len().min(pb.len())).find(|&k| pa[k] != pb[k]) else {
+        return false;
+    };
+    let (i, j) = (pa[depth], pb[depth]);
+    if i + 1 != j {
+        return false;
+    }
+    let branch_path = &pa[..depth];
+    let Node::Branch { axis, children } = node_at_path(&tab.root, branch_path) else {
+        return false;
+    };
+    let (axis, n) = (*axis, children.len());
+
+    let branch_area = area_at_path(&tab.root, viewport, branch_path);
+    let axis_len = match axis {
+        Axis::Horizontal => branch_area.cols,
+        Axis::Vertical => branch_area.rows,
+    };
+    let available = axis_len.saturating_sub((n as u16).saturating_sub(1)).max(1) as f32;
+    let min_len = match axis {
+        Axis::Horizontal => MIN_COLS,
+        Axis::Vertical => MIN_ROWS,
+    };
+    let min_ratio = (min_len as f32 / available).min(1.0);
+
+    // The child's OWN extent, not the flanking pane's: this is the step that
+    // makes the conversion exact when a pane sits deeper than its branch child.
+    let child_start = {
+        let areas = child_areas(axis, branch_area, children);
+        match axis {
+            Axis::Horizontal => areas[i].x,
+            Axis::Vertical => areas[i].y,
+        }
+    };
+    // The length child `i` must take for the divider to land on `pos`.
+    let want_len = pos.saturating_sub(child_start) as f32;
+
+    let held = children[i].0;
+    let pair_total = held + children[j].0;
+    // Both sides need room; a pair too small to seat two minimums has no
+    // legal seam position at all, so leave it where it is.
+    //
+    // Written `!(lo <= hi)` rather than `lo > hi` so a NaN refuses instead of
+    // falling through: every comparison against NaN is false, and `f32::clamp`
+    // panics outright on a NaN bound. A NaN ratio is not merely hypothetical -
+    // `check_invariants` shares the blind spot (`(sum - 1.0).abs() > 1e-4` is
+    // also false for NaN), so one could reach here unflagged from a persisted
+    // or deserialized tree.
+    let (lo, hi) = (min_ratio, pair_total - min_ratio);
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    let no_room = !(lo <= hi);
+    if no_room {
+        return false;
+    }
+    let target = (want_len / available).clamp(lo, hi);
+    // A drag reports many cells per branch cell; only a real move is a write.
+    if (target - held).abs() < 1e-4 {
+        return false;
+    }
+    let updates = [(i, target), (j, pair_total - target)];
+    tab.root = set_children_ratios(&tab.root, branch_path, &updates);
+    true
+}
+
 /// Populate `path` with the child-index chain from `node` down to `target`.
 /// Returns `false` (and leaves `path` unchanged in length) if not found.
 fn find_path(node: &Node, target: PaneId, path: &mut Vec<usize>) -> bool {
@@ -1317,6 +1414,327 @@ mod tests {
             other => panic!("expected a Branch, got {other:?}"),
         }
         check_invariants(&tab).unwrap();
+    }
+
+    // -- set_seam_pos (x-d807) ------------------------------------------
+
+    /// A wide viewport so MIN_COLS is a small fraction and the clamp does not
+    /// dominate the assertions. 2 children => 1 divider => 200 available.
+    const WIDE: Rect = Rect {
+        x: 0,
+        y: 0,
+        rows: 41,
+        cols: 201,
+    };
+
+    fn ratios(tab: &Tab, path: &[usize]) -> Vec<f32> {
+        match node_at_path(&tab.root, path) {
+            Node::Branch { children, .. } => children.iter().map(|(r, _)| *r).collect(),
+            other => panic!("expected a Branch, got {other:?}"),
+        }
+    }
+
+    /// Where the divider between the first two children actually lands.
+    fn divider_x(tab: &Tab, a: PaneId) -> u16 {
+        let r = leaf_rect(&layout(&tab.root, WIDE), a);
+        r.x + r.cols
+    }
+
+    fn pair_tab() -> Tab {
+        Tab {
+            name: None,
+            id: 0,
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
+            },
+            focus: 1,
+        }
+    }
+
+    #[test]
+    fn tree_set_seam_pos_puts_the_divider_on_the_asked_for_cell() {
+        let mut tab = pair_tab();
+        assert!(set_seam_pos(&mut tab, WIDE, 1, 2, 150));
+        assert_eq!(divider_x(&tab, 1), 150, "the divider lands where asked");
+        let r = ratios(&tab, &[]);
+        assert!((r[0] - 0.75).abs() < 1e-4, "150 of 200 available");
+        assert!((r[0] + r[1] - 1.0).abs() < 1e-4, "sum conserved");
+        check_invariants(&tab).unwrap();
+    }
+
+    #[test]
+    fn tree_set_seam_pos_is_idempotent_and_drift_free() {
+        // Absolute positions, so re-sending one changes nothing and a long drag
+        // accumulates no error - the reason the wire carries a target rather
+        // than a delta.
+        let mut tab = pair_tab();
+        assert!(set_seam_pos(&mut tab, WIDE, 1, 2, 140));
+        assert!(
+            !set_seam_pos(&mut tab, WIDE, 1, 2, 140),
+            "re-sending the same target is not a change"
+        );
+        for p in [60, 160, 90, 124] {
+            set_seam_pos(&mut tab, WIDE, 1, 2, p);
+        }
+        assert!(set_seam_pos(&mut tab, WIDE, 1, 2, 100));
+        assert_eq!(
+            divider_x(&tab, 1),
+            100,
+            "returning to a cell lands exactly, whatever the path there"
+        );
+        check_invariants(&tab).unwrap();
+    }
+
+    #[test]
+    fn tree_set_seam_pos_clamps_at_minimum_size() {
+        // AC5-EDGE: the divider stops at the clamp; it never crushes a pane to
+        // zero or drives a ratio negative.
+        let mut tab = pair_tab();
+        assert!(set_seam_pos(&mut tab, WIDE, 1, 2, 5_000));
+        let r = ratios(&tab, &[]);
+        assert!(r[1] > 0.0, "the far pane keeps a minimum: {r:?}");
+        assert!((r[0] + r[1] - 1.0).abs() < 1e-4, "sum conserved: {r:?}");
+        assert!(
+            divider_x(&tab, 1) <= WIDE.cols - MIN_COLS,
+            "the far pane keeps at least MIN_COLS of room"
+        );
+        check_invariants(&tab).unwrap();
+        // Already clamped: pushing further the same way does nothing.
+        assert!(!set_seam_pos(&mut tab, WIDE, 1, 2, 5_000));
+    }
+
+    #[test]
+    fn tree_set_seam_pos_measures_the_branch_child_not_the_flanking_pane() {
+        // The pane that flanks a seam is NOT its branch child once axes
+        // alternate more than one level: Horizontal -> Vertical -> Horizontal
+        // is legal, so P3 below spans only part of A's width. Measuring from
+        // P3's rect instead of A's would land the divider well short of the
+        // cell the operator pointed at, which is why the position-to-ratio
+        // conversion lives here rather than client-side.
+        //
+        //   Root(H): [ A , B ]   A(V): [ P1 , D ]   D(H): [ P2 , P3 ]   B = P4
+        let mut tab = Tab {
+            name: None,
+            id: 0,
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![
+                    (
+                        0.5,
+                        Node::Branch {
+                            axis: Axis::Vertical,
+                            children: vec![
+                                (0.5, Node::Leaf(1)),
+                                (
+                                    0.5,
+                                    Node::Branch {
+                                        axis: Axis::Horizontal,
+                                        children: vec![(0.5, Node::Leaf(2)), (0.5, Node::Leaf(3))],
+                                    },
+                                ),
+                            ],
+                        },
+                    ),
+                    (0.5, Node::Leaf(4)),
+                ],
+            },
+            focus: 1,
+        };
+        check_invariants(&tab).unwrap();
+        let panes = layout(&tab.root, WIDE);
+        let p3 = leaf_rect(&panes, 3);
+        let p1 = leaf_rect(&panes, 1);
+        assert!(
+            p3.x > p1.x && p3.cols < p1.cols,
+            "P3 sits deeper than its branch child, so its extent is a strict \
+             subset of A's: p3={p3:?} p1={p1:?}"
+        );
+
+        // Grab the outer A|B divider at a row inside D, which flanks P3 and P4.
+        assert!(set_seam_pos(&mut tab, WIDE, 3, 4, 120));
+        assert_eq!(
+            divider_x(&tab, 1),
+            120,
+            "the outer divider lands on the asked-for cell, measured from A"
+        );
+        check_invariants(&tab).unwrap();
+    }
+
+    #[test]
+    fn tree_set_seam_pos_is_exact_at_arbitrary_nesting_depth() {
+        // The fix must generalise, not just handle the one shape that exposed
+        // it. Four levels of alternating axes, with the seam addressed by the
+        // DEEPEST pane on each side - the worst case for confusing a pane's
+        // extent with its branch child's.
+        //
+        //   Root(H): [ A , B ]
+        //     A(V): [ P1 , D ]          D(H): [ P2 , E ]      E(V): [ P3, P4 ]
+        //     B(V): [ P5 , F ]          F(H): [ P6 , G ]      G(V): [ P7, P8 ]
+        let deep = |l: PaneId, m: PaneId, r1: PaneId, r2: PaneId| Node::Branch {
+            axis: Axis::Vertical,
+            children: vec![
+                (0.5, Node::Leaf(l)),
+                (
+                    0.5,
+                    Node::Branch {
+                        axis: Axis::Horizontal,
+                        children: vec![
+                            (0.5, Node::Leaf(m)),
+                            (
+                                0.5,
+                                Node::Branch {
+                                    axis: Axis::Vertical,
+                                    children: vec![(0.5, Node::Leaf(r1)), (0.5, Node::Leaf(r2))],
+                                },
+                            ),
+                        ],
+                    },
+                ),
+            ],
+        };
+        let mk = || Tab {
+            name: None,
+            id: 0,
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(0.5, deep(1, 2, 3, 4)), (0.5, deep(5, 6, 7, 8))],
+            },
+            focus: 1,
+        };
+        let mut tab = mk();
+        check_invariants(&tab).unwrap();
+
+        // Panes 4 and 7 are three levels deep on either side of the OUTER seam.
+        let panes = layout(&tab.root, WIDE);
+        let (p4, p7) = (leaf_rect(&panes, 4), leaf_rect(&panes, 7));
+        assert!(
+            p4.cols < leaf_rect(&panes, 1).cols,
+            "pane 4 spans a strict subset of its branch child"
+        );
+        assert!(p4.x + p4.cols < p7.x, "and does not even abut the seam");
+
+        // Every legal target cell must land exactly, addressed by deep panes.
+        for target in [60u16, 140, 75] {
+            let mut t = mk();
+            assert!(
+                set_seam_pos(&mut t, WIDE, 4, 7, target),
+                "deep pair addresses the outer seam"
+            );
+            let r = leaf_rect(&layout(&t.root, WIDE), 1);
+            assert_eq!(
+                r.x + r.cols,
+                target,
+                "outer divider lands on {target} regardless of how deep the \
+                 addressing panes sit"
+            );
+            check_invariants(&t).unwrap();
+        }
+
+        // And an INNER seam addressed by its own deep pair stays independent.
+        assert!(set_seam_pos(&mut tab, WIDE, 3, 4, 0));
+        check_invariants(&tab).unwrap();
+    }
+
+    #[test]
+    fn tree_set_seam_pos_refuses_a_nan_ratio_instead_of_panicking() {
+        // f32::clamp panics on a NaN bound, and `lo > hi` cannot catch one -
+        // every comparison against NaN is false, so it would sail through.
+        // check_invariants has the same blind spot, so a NaN can reach here
+        // unflagged; refusing is the only safe answer.
+        let mut tab = Tab {
+            name: None,
+            id: 0,
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(f32::NAN, Node::Leaf(1)), (0.5, Node::Leaf(2))],
+            },
+            focus: 1,
+        };
+        assert!(
+            !set_seam_pos(&mut tab, WIDE, 1, 2, 120),
+            "refuses rather than panicking in clamp"
+        );
+        // Note the tree cannot be compared with assert_eq! here: NaN != NaN, so
+        // a tree holding one never equals itself. That the derived PartialEq is
+        // useless on such a tree is the same blind spot the guard exists for.
+        let r = ratios(&tab, &[]);
+        assert!(r[0].is_nan(), "the NaN child is untouched");
+        assert_eq!(r[1], 0.5, "and so is its neighbour");
+    }
+
+    #[test]
+    fn tree_set_seam_pos_refuses_a_stale_or_non_adjacent_pair() {
+        // AC4-ERR: the address IS the validation. A pane that has gone, or a
+        // pair that does not flank one seam, leaves the tree untouched.
+        let mut tab = Tab {
+            name: None,
+            id: 0,
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![
+                    (0.34, Node::Leaf(1)),
+                    (0.33, Node::Leaf(2)),
+                    (0.33, Node::Leaf(3)),
+                ],
+            },
+            focus: 1,
+        };
+        let before = tab.root.clone();
+        assert!(!set_seam_pos(&mut tab, WIDE, 1, 99, 120), "pane 99 is gone");
+        assert!(
+            !set_seam_pos(&mut tab, WIDE, 1, 3, 120),
+            "1 and 3 are not adjacent"
+        );
+        assert!(
+            !set_seam_pos(&mut tab, WIDE, 2, 1, 120),
+            "reversed order is not a seam"
+        );
+        assert!(
+            !set_seam_pos(&mut tab, WIDE, 1, 1, 120),
+            "a pane does not flank itself"
+        );
+        assert_eq!(tab.root, before, "every refusal left the tree untouched");
+        // The genuinely adjacent pairs still work, and only touch their pair.
+        assert!(set_seam_pos(&mut tab, WIDE, 2, 3, 150));
+        let r = ratios(&tab, &[]);
+        assert!(
+            (r[0] - 0.34).abs() < 1e-4,
+            "the uninvolved child is untouched"
+        );
+        assert!((r.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+        check_invariants(&tab).unwrap();
+    }
+
+    #[test]
+    fn tree_set_seam_pos_resolves_a_seam_flanked_by_nested_panes() {
+        // A seam runs past every pane in the children it separates, so naming
+        // any pane from each side must pick the same seam. Here the left child
+        // is a vertical stack of 2 and 3; both name the same boundary with 4.
+        let stacked = Node::Branch {
+            axis: Axis::Vertical,
+            children: vec![(0.5, Node::Leaf(2)), (0.5, Node::Leaf(3))],
+        };
+        let mk = || Tab {
+            name: None,
+            id: 0,
+            root: Node::Branch {
+                axis: Axis::Horizontal,
+                children: vec![(0.5, stacked.clone()), (0.5, Node::Leaf(4))],
+            },
+            focus: 4,
+        };
+        let (mut via_top, mut via_bottom) = (mk(), mk());
+        assert!(set_seam_pos(&mut via_top, WIDE, 2, 4, 140));
+        assert!(set_seam_pos(&mut via_bottom, WIDE, 3, 4, 140));
+        assert_eq!(
+            via_top.root, via_bottom.root,
+            "either flanking pane addresses the same seam"
+        );
+        assert!((ratios(&via_top, &[])[0] - 0.7).abs() < 1e-4);
+        // The stack's own inner ratios are untouched by the outer resize.
+        assert_eq!(ratios(&via_top, &[0]), vec![0.5, 0.5]);
+        check_invariants(&via_top).unwrap();
     }
 
     #[test]
