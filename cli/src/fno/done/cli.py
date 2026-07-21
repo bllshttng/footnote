@@ -42,6 +42,11 @@ from fno.events import (
     SchemaUnavailableError as _SchemaUnavailableError,
     ValidationError as _ValidationError,
 )
+from fno.graph._reconcile import (
+    pr_number_from_url,
+    pr_url_for_repo,
+    repo_slug_from_url,
+)
 from fno.graph.fuzzy import resolve_id
 from fno.graph.store import locked_mutate_graph, read_graph
 
@@ -122,17 +127,6 @@ def _current_pr(announce_failure: bool = False) -> tuple[Optional[int], Optional
         return None, None
 
 
-def _pr_url_from_gh(pr: int) -> Optional[str]:
-    try:
-        r = subprocess.run(
-            ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
-            capture_output=True, text=True, check=False,
-        )
-    except OSError:
-        return None
-    if r.returncode != 0 or not (r.stdout or "").strip():
-        return None
-    return f"https://github.com/{r.stdout.strip()}/pull/{pr}"
 
 
 # -- ledger rollup --
@@ -317,6 +311,10 @@ def done_command(
     pr: Optional[int] = typer.Option(
         None, "--pr-number", "--pr", "-p", help="PR number (for code-domain completions)."
     ),
+    pr_url: Optional[str] = typer.Option(
+        None, "--pr-url",
+        help="PR URL. Derived from the repo when omitted; supply it when the repo slug cannot be resolved.",
+    ),
     link: Optional[str] = typer.Option(
         None, "--link", "--url", "-l",
         help="Artifact URL (Figma/Canva/Obsidian/any) - sets artifact_url.",
@@ -443,6 +441,12 @@ def done_command(
             typer.echo(line, err=True)
         raise typer.Exit(code=2)
 
+    # A url with no number is not a PR link, and silently dropping it would
+    # mark the node done while discarding the operator's only evidence.
+    if pr_url is not None and pr is None:
+        typer.echo("fno done: --pr-url requires --pr", err=True)
+        raise typer.Exit(code=2)
+
     node_id = match.id
     node = next(e for e in entries if e.get("id") == node_id)
     domain = node.get("domain") or "code"
@@ -473,7 +477,36 @@ def done_command(
     # I/O stays out of the graph lock.
     pr_url_to_write: Optional[str] = None
     if pr is not None:
-        pr_url_to_write = auto_url or _pr_url_from_gh(pr)
+        if pr_url is not None:
+            if repo_slug_from_url(pr_url) is None:
+                typer.echo(
+                    f"fno done: --pr-url {pr_url!r} is not a GitHub PR url "
+                    "(expected https://github.com/<owner>/<repo>/pull/<n>)",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            named = pr_number_from_url(pr_url)
+            if named != pr:
+                typer.echo(
+                    f"fno done: --pr-url names PR #{named}, not #{pr} - a row "
+                    "pointing at two different PRs matches neither.",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            pr_url_to_write = pr_url
+        else:
+            pr_url_to_write = auto_url or pr_url_for_repo(pr, node.get("cwd"))
+        # Fail closed: a url-less pr_number names no repo, and PR numbers
+        # collide across repos, so a bare number can attribute a foreign PR.
+        if pr_url_to_write is None:
+            typer.echo(
+                f"fno done: cannot resolve the repo for PR #{pr} - refusing to "
+                "stamp an unattributable pr_number. Fix with either "
+                "`gh auth login` or `--pr-url https://github.com/<owner>/<repo>/pull/"
+                f"{pr}`.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
     rollup = _rollup_from_ledger(node.get("plan_path"))
     rollup_tags: list[str] = []
 
@@ -490,10 +523,7 @@ def done_command(
             if pr is not None:
                 e["pr_number"] = pr
                 e["merge_status"] = "merged"
-                # Only overwrite pr_url if we resolved one; otherwise leave prior
-                # value intact. None is acceptable when gh auth is missing.
-                if pr_url_to_write is not None:
-                    e["pr_url"] = pr_url_to_write
+                e["pr_url"] = pr_url_to_write
             if link is not None:
                 e["artifact_url"] = link
             if note is not None:
@@ -555,6 +585,7 @@ def done_command(
     tag_bits: list[str] = [f"domain={domain}"]
     if pr is not None:
         tag_bits.append(f"PR #{pr}")
+        tag_bits.append(f"pr_url={pr_url_to_write}")
     if link is not None:
         tag_bits.append(f"link={link}")
     if note is not None:
@@ -603,6 +634,7 @@ def _cli_callback(
     ctx: typer.Context,
     query: Optional[str] = typer.Argument(None),
     pr: Optional[int] = typer.Option(None, "--pr-number", "--pr", "-p"),
+    pr_url: Optional[str] = typer.Option(None, "--pr-url"),
     link: Optional[str] = typer.Option(None, "--link", "--url", "-l"),
     note: Optional[str] = typer.Option(None, "--note", "-m"),
     backfill: bool = typer.Option(False, "--backfill"),
@@ -614,4 +646,4 @@ def _cli_callback(
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
-    done_command(query=query, pr=pr, link=link, note=note, backfill=backfill, force_overwrite=force_overwrite)
+    done_command(query=query, pr=pr, pr_url=pr_url, link=link, note=note, backfill=backfill, force_overwrite=force_overwrite)

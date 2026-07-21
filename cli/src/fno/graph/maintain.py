@@ -1,16 +1,18 @@
 """Backlog + kanban hygiene sweep for ``fno backlog maintain`` (ab-9c144a4c).
 
-Six legs that keep ``graph.json`` and the kanban board clean by composing
+Legs that keep ``graph.json`` and the kanban board clean by composing
 detection logic over the entries list. The CLI command in ``cli.py`` orchestrates
 them; this module holds the pure, IO-light detectors so each leg is unit-testable
 without a live graph.
 
-Two legs are DETERMINISTIC and apply under ``--apply``:
+Three legs are DETERMINISTIC and apply under ``--apply``:
 
   1. re-scope  - correct ``project``/``cwd`` drift (project-null, wrong project,
                  or a worktree-path cwd) against the settings workspace map.
                  Only ``project``/``cwd`` are ever changed, never priority/status.
   2. leak-prune - remove nodes whose ``cwd`` is under a temp dir (pytest leaks).
+  2b. pr-url    - backfill a derived ``pr_url`` onto rows carrying a
+                 ``pr_number`` with none, keyed off each node's own ``cwd``.
 
 Three legs are JUDGMENT calls and ALWAYS propose-only (never mutate, regardless
 of ``--apply``):
@@ -19,7 +21,7 @@ of ``--apply``):
   4. drain  - propose a reversible ``defer`` for stale ideas (older than N days).
   5. cap    - report a Now column over its WIP cap; propose triage demotions.
 
-A sixth leg (report) appends a summary to health-history; that lives in the CLI
+A final report leg appends a summary to health-history; that lives in the CLI
 command since it owns the write target.
 """
 from __future__ import annotations
@@ -260,6 +262,65 @@ def detect_temp_leaks(entries: list[dict]) -> list[str]:
         for e in entries
         if isinstance(e.get("id"), str) and is_temp_cwd(e.get("cwd"))
     ]
+
+
+# ---------------------------------------------------------------------------
+# Leg 2b: pr_url backfill (url-less pr_number rows)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PrUrlFix:
+    """One url-less ``pr_number`` row. ``pr_url`` is None when unresolvable."""
+
+    node_id: str
+    pr_number: int
+    cwd: Optional[str]
+    pr_url: Optional[str]
+
+
+def _slug_from_node_cwd(cwd: Optional[str]) -> Optional[str]:
+    """Repo slug for a node's recorded cwd, or None when it is gone.
+
+    Deliberately does NOT degrade to the invocation cwd the way a writer does:
+    a bulk pass that did would stamp every stale-cwd row with the sweeping
+    repo's slug, which is the mis-attribution this leg exists to remove.
+    """
+    from fno.graph._reconcile import resolve_current_repo_slug
+
+    if not cwd:
+        return None
+    path = os.path.expanduser(cwd)
+    return resolve_current_repo_slug(path) if os.path.isdir(path) else None
+
+
+def detect_url_less_prs(
+    entries: list[dict],
+    resolver: Optional[Callable[[Optional[str]], Optional[str]]] = None,
+) -> list[PrUrlFix]:
+    """Rows carrying a ``pr_number`` with no ``pr_url``, with a derived url.
+
+    Keys off the node's durable ``cwd`` - never ``source_cwd`` (a session cwd,
+    not repo identity). A row whose cwd is gone or whose repo will not resolve
+    comes back with ``pr_url=None`` so the caller reports it instead of
+    guessing.
+    """
+    from fno.graph._reconcile import pr_url_from_slug
+
+    resolver = resolver or _slug_from_node_cwd
+    # One resolution per distinct cwd: the gh leg carries a 30s timeout and a
+    # whole repo's worth of rows share one checkout.
+    slugs: dict[Optional[str], Optional[str]] = {}
+    fixes: list[PrUrlFix] = []
+    for e in entries:
+        nid, pr = e.get("id"), e.get("pr_number")
+        if not isinstance(nid, str) or not isinstance(pr, int) or e.get("pr_url"):
+            continue
+        cwd = e.get("cwd") if isinstance(e.get("cwd"), str) else None
+        if cwd not in slugs:
+            slugs[cwd] = resolver(cwd)
+        slug = slugs[cwd]
+        fixes.append(PrUrlFix(nid, pr, cwd, pr_url_from_slug(slug, pr) if slug else None))
+    return fixes
 
 
 # ---------------------------------------------------------------------------

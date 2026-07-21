@@ -192,7 +192,10 @@ def test_done_race_collision_applies_pr_and_note(
 
     result = runner.invoke(
         app,
-        ["done", "ab-race003", "--pr", "42", "--note", "second pass"],
+        # Explicit --pr-url: this stub has neither git nor gh, and a pr_number
+        # with no resolvable url is refused.
+        ["done", "ab-race003", "--pr", "42",
+         "--pr-url", "https://github.com/org/repo/pull/42", "--note", "second pass"],
     )
     assert result.exit_code == 0
 

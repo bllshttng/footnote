@@ -2052,6 +2052,101 @@ def cmd_update(
         )
         raise typer.Exit(code=2)
 
+    # pr_number and pr_url travel together: a url-less pr_number names no repo,
+    # and PR numbers collide across repos, so any consumer matching on the bare
+    # number can attribute a foreign PR. Resolve here (subprocess I/O stays out
+    # of the graph lock) and fail closed when the repo will not resolve.
+    from fno.graph._reconcile import (
+        pr_number_from_url,
+        pr_url_for_repo,
+        repo_slug_from_url,
+    )
+
+    _pre_lock_node: list = []
+
+    def _node_before_update() -> dict:
+        """The node as it stands now, for cwd + current-PR reads. Cached."""
+        if not _pre_lock_node:
+            from fno.graph._intake import _find_node as _find
+            from fno.graph.load import load_graph
+
+            _pre_lock_node.append(_find(load_graph(_graph_path()), task_id) or {})
+        return _pre_lock_node[0]
+
+    def _refuse(msg: str) -> None:
+        typer.echo(f"Error: {msg}", err=True)
+        raise typer.Exit(code=2)
+
+    def _resolve_or_refuse(number: int, label: str) -> str:
+        slug_cwd = derived_cwd_for_update or cwd or _node_before_update().get("cwd")
+        url = pr_url_for_repo(number, slug_cwd)
+        if url is None:
+            _refuse(
+                f"cannot resolve the repo for PR #{number} - refusing to stamp an "
+                "unattributable pr_number. Fix with either `gh auth login` or "
+                f"`{label} https://github.com/<owner>/<repo>/pull/{number}`."
+            )
+        typer.echo(f"note: derived {label} {url}", err=True)
+        return url  # type: ignore[return-value]
+
+    def _check_url_shape(value: str, label: str, expect_pr: Optional[int] = None) -> None:
+        if repo_slug_from_url(value) is None:
+            _refuse(
+                f"{label} {value!r} is not a GitHub PR url "
+                "(expected https://github.com/<owner>/<repo>/pull/<n>)"
+            )
+        named = pr_number_from_url(value)
+        if expect_pr is not None and named != expect_pr:
+            _refuse(
+                f"{label} names PR #{named}, not #{expect_pr} - a row pointing at "
+                "two different PRs matches neither."
+            )
+
+    clearing_number = pr_number is not None and pr_number.lower() == "null"
+    clearing_url = pr_url is not None and pr_url.lower() == "null"
+
+    # Shape-check any url the caller supplies, on every path: an unparseable
+    # url carries no repo slug, so it is url-less in every way that matters.
+    if pr_url is not None and not clearing_url:
+        # With no --pr-number the node keeps the one it already has, so that is
+        # what the url must name - otherwise a url-only update re-creates the
+        # two-different-PRs row the paired path refuses.
+        if pr_number is not None and pr_number.strip().isdigit():
+            expect = int(pr_number)
+        elif pr_number is None:
+            current = _node_before_update().get("pr_number")
+            expect = current if isinstance(current, int) else None
+        else:
+            expect = None
+        _check_url_shape(pr_url, "--pr-url", expect)
+    if add_pr_url is not None:
+        _check_url_shape(add_pr_url, "--add-pr-url", add_pr)
+
+    derived_pr_url: Optional[str] = None
+    if pr_number is not None and not clearing_number:
+        if not pr_number.strip().isdigit():
+            _refuse(f"--pr-number {pr_number!r} is not a number (or 'null')")
+        if clearing_url:
+            _refuse(
+                "--pr-url null cannot accompany --pr-number: that writes a "
+                "url-less pr_number. Clear both, or supply a url."
+            )
+        if pr_url is None:
+            derived_pr_url = _resolve_or_refuse(int(pr_number), "--pr-url")
+    elif clearing_url and not clearing_number and _node_before_update().get("pr_number"):
+        # Clearing the url alone strands the pr_number the node already carries.
+        _refuse(
+            "--pr-url null would leave this node's pr_number "
+            f"({_node_before_update().get('pr_number')}) unattributable. "
+            "Pass --pr-number null too, or supply a replacement url."
+        )
+
+    # additional_prs entries are read by the same repo-scoped matcher as the
+    # primary field, so a bare --add-pr is unattributable for the same reason.
+    derived_add_pr_url: Optional[str] = None
+    if add_pr is not None and add_pr_url is None:
+        derived_add_pr_url = _resolve_or_refuse(int(add_pr), "--add-pr-url")
+
     projected_node: list = [None]
     cascade_closed_update: list = []
     reparent_old_parent: list = [None]
@@ -2134,6 +2229,8 @@ def cmd_update(
             node["pr_number"] = None if pr_number.lower() == "null" else int(pr_number)
         if pr_url is not None:
             node["pr_url"] = None if pr_url.lower() == "null" else pr_url
+        elif derived_pr_url is not None:
+            node["pr_url"] = derived_pr_url
         if merge_status is not None:
             node["merge_status"] = merge_status
         if batch is not None:
@@ -2214,8 +2311,7 @@ def cmd_update(
         if add_pr is not None:
             existing_list = list(node.get("additional_prs") or [])
             entry = {"number": int(add_pr)}
-            if add_pr_url is not None:
-                entry["url"] = add_pr_url
+            entry["url"] = add_pr_url if add_pr_url is not None else derived_add_pr_url
             if add_pr_note is not None:
                 entry["note"] = add_pr_note
             replaced = False
@@ -6324,7 +6420,8 @@ def cmd_maintain(
         False,
         "--apply",
         help=(
-            "Apply the DETERMINISTIC legs (re-scope drift, prune pytest leaks). "
+            "Apply the DETERMINISTIC legs (re-scope drift, prune pytest leaks, "
+            "backfill url-less pr_url). "
             "The judgment legs (dedup, drain-stale, cap-Now) are ALWAYS "
             "proposal-only regardless of this flag."
         ),
@@ -6347,8 +6444,9 @@ def cmd_maintain(
 ) -> None:
     """Keep graph.json + the kanban board clean by composing existing verbs.
 
-    Six legs (ab-9c144a4c). Two are deterministic and apply under ``--apply``:
-    re-scope project/cwd drift, and prune pytest-temp leak nodes. Three are
+    Deterministic legs apply under ``--apply``: re-scope project/cwd drift,
+    prune pytest-temp leak nodes, and backfill a derived ``pr_url`` onto rows
+    carrying a ``pr_number`` with no url. Three are
     judgment calls and only ever PROPOSE (never mutate, regardless of
     ``--apply``): surface near-duplicate idea titles, propose a reversible
     ``defer`` for stale ideas, and report a Now column over its WIP cap. The
@@ -6378,6 +6476,9 @@ def cmd_maintain(
     workspaces = _maintain.load_workspaces()
     rescope_fixes = _maintain.detect_rescope_fixes(entries, workspaces)
     prune_ids = _maintain.detect_temp_leaks(entries)
+    pr_url_fixes = _maintain.detect_url_less_prs(entries)
+    pr_url_writable = [f for f in pr_url_fixes if f.pr_url]
+    pr_url_unresolvable = [f for f in pr_url_fixes if not f.pr_url]
     dup_groups = _maintain.detect_dup_groups(entries)
     # Propose-only in v1 even under --apply: a bulk reparent has no human
     # reading a receipt the way intake's one-at-a-time auto-link does.
@@ -6440,9 +6541,12 @@ def cmd_maintain(
     applied_prune: list[str] = []
     applied_defers: list[dict] = []
     applied_stale_ready: list[dict] = []
+    applied_pr_urls: list[dict] = []
     skipped_claimed: list[str] = []
 
-    if apply and (rescope_fixes or prune_ids or defer_cands or stale_ready_cands):
+    if apply and (
+        rescope_fixes or prune_ids or defer_cands or stale_ready_cands or pr_url_writable
+    ):
         # Batch every change under ONE locked mutation so the board renders once,
         # not per node (Domain Pitfall). Each item is guarded so one failure
         # never strands the rest (AC1-ERR).
@@ -6451,6 +6555,7 @@ def cmd_maintain(
             applied_prune.clear()
             applied_defers.clear()
             applied_stale_ready.clear()
+            applied_pr_urls.clear()
             skipped_claimed.clear()
             prune_set: set[str] = set()
             for fix in rescope_fixes:
@@ -6482,6 +6587,26 @@ def cmd_maintain(
                     if blocked:
                         e["blocked_by"] = [b for b in blocked if b not in prune_set]
                 ents = [e for e in ents if e.get("id") not in prune_set]
+            # Leg 2b: backfill a derived pr_url onto url-less pr_number rows.
+            # Re-check inside the lock so a url written since the pre-lock scan
+            # is never overwritten (a present url always outranks a derived one).
+            for fix in pr_url_writable:
+                if fix.node_id in claimed:
+                    skipped_claimed.append(fix.node_id)
+                    continue
+                try:
+                    n = _find_node(ents, fix.node_id)
+                    if not n or n.get("pr_url") or n.get("pr_number") != fix.pr_number:
+                        continue
+                    n["pr_url"] = fix.pr_url
+                    applied_pr_urls.append(
+                        {"node_id": fix.node_id, "pr_url": fix.pr_url}
+                    )
+                except Exception as exc:  # noqa: BLE001 - one bad row must not abort
+                    typer.echo(
+                        f"warning: pr_url backfill of {fix.node_id} failed: {exc}",
+                        err=True,
+                    )
             # Leg 7: auto-defer failure-prone nodes (#34). Mirrors cmd_defer's
             # field-set. Re-check live state INSIDE the lock (Concurrency): a
             # node done or deferred between the read and now must not be touched.
@@ -6620,6 +6745,8 @@ def cmd_maintain(
         "applied": apply,
         "rescoped": len(applied_rescope) if apply else len(rescope_fixes),
         "pruned": len(applied_prune) if apply else len(prune_ids),
+        "pr_url_backfilled": len(applied_pr_urls) if apply else len(pr_url_writable),
+        "pr_url_unresolvable": len(pr_url_unresolvable),
         "dedup_groups": len(dup_groups),
         "rollup_candidates": len(rollup_cands),
         "stale_ideas": len(stale),
@@ -6663,6 +6790,17 @@ def cmd_maintain(
                 "applied": applied_prune if apply else [],
                 "candidates": prune_ids,
             },
+            "pr_url_backfill": {
+                "applied": applied_pr_urls if apply else [],
+                "candidates": [
+                    {"node_id": f.node_id, "pr_number": f.pr_number, "pr_url": f.pr_url}
+                    for f in pr_url_writable
+                ],
+                "unresolvable": [
+                    {"node_id": f.node_id, "pr_number": f.pr_number, "cwd": f.cwd}
+                    for f in pr_url_unresolvable
+                ],
+            },
             "dedup_groups": dup_groups,
             "rollup_candidates": [
                 {"node_id": n, "epic_id": e, "score": sc} for n, e, sc in rollup_cands
@@ -6701,6 +6839,26 @@ def cmd_maintain(
         return
 
     # --- human per-leg summary (a no-op run is visibly distinct, AC1-UI) ---
+    # AC1-UI: every category prints its count, zero included - a silent
+    # category reads as "nothing to do" when it may be "nothing resolved".
+    if apply:
+        # "written N of M", never a bare N: the in-lock loop skips a row that
+        # raced to a url or a different pr_number, so 120-of-159 would read
+        # exactly like a complete run.
+        typer.echo(
+            f"pr-url written {len(applied_pr_urls)} of {len(pr_url_writable)} | "
+            f"pr-url unresolvable {len(pr_url_unresolvable)}"
+        )
+    else:
+        typer.echo(
+            f"pr-url proposed {len(pr_url_writable)} | "
+            f"pr-url unresolvable {len(pr_url_unresolvable)}"
+        )
+    for f in pr_url_unresolvable:
+        typer.echo(
+            f"  unresolvable pr_url {f.node_id} (PR #{f.pr_number}, cwd={f.cwd or 'unset'})"
+        )
+
     if apply:
         typer.echo(
             f"re-scoped {len(applied_rescope)} | pruned {len(applied_prune)} | "

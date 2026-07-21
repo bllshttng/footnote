@@ -1134,8 +1134,14 @@ def test_add_pr_dedups_on_same_number(tmp_graph):
     assert node["additional_prs"][0]["note"] == "updated"
 
 
-def test_add_pr_minimal_just_number(tmp_graph):
-    """--add-pr alone (no url, no note) is valid; entry has number only."""
+def test_add_pr_minimal_derives_the_url(tmp_graph, monkeypatch):
+    """--add-pr alone is valid, but never url-less: additional_prs entries are
+    read by the same repo-scoped matcher, so a bare number is unattributable."""
+    import fno.graph._reconcile as rec
+
+    monkeypatch.setattr(
+        rec, "pr_url_for_repo", lambda pr, cwd=None: f"https://github.com/o/r/pull/{pr}"
+    )
     r = _invoke("backlog", "add", "Numbered")
     node_id = json.loads(r.output)["id"]
 
@@ -1143,7 +1149,9 @@ def test_add_pr_minimal_just_number(tmp_graph):
     assert r.exit_code == 0, r.output
 
     node = json.loads(_invoke("backlog", "get", node_id).output)
-    assert node["additional_prs"] == [{"number": 777}]
+    assert node["additional_prs"] == [
+        {"number": 777, "url": "https://github.com/o/r/pull/777"}
+    ]
 
 
 def test_remove_pr_drops_entry_by_number(tmp_graph):

@@ -73,12 +73,18 @@ def _stub_subprocess(
     pr_view_rc: int = 1,
     repo_name: str | None = None,
     repo_rc: int = 1,
+    origin: str | None = "https://github.com/org/repo.git",
 ):
     """Replace subprocess.run for fno.done.cli with scripted responses.
 
     - git branch --show-current -> returns `branch` (or empty if None)
+    - git remote get-url origin -> returns `origin` (rc 1 when None)
     - gh pr view ... -> stdout = pr_view_json, rc = pr_view_rc
     - gh repo view ... -> stdout = repo_name, rc = repo_rc
+
+    `origin` defaults to a parseable GitHub remote: the pr_url derivation now
+    resolves the slug the way the reader does (origin first, gh second), so a
+    checkout with no remote at all is the exception, not the baseline.
     """
     from fno.done import cli as done_cli
 
@@ -92,6 +98,8 @@ def _stub_subprocess(
             return _Result("", 1)
         if cmd[0] == "git" and "branch" in cmd:
             return _Result((branch or "") + "\n", 0 if branch else 0)
+        if cmd[0] == "git" and "remote" in cmd:
+            return _Result((origin or "") + "\n", 0 if origin else 1)
         if cmd[0] == "gh" and "pr" in cmd:
             return _Result((pr_view_json or "") + "\n", pr_view_rc)
         if cmd[0] == "gh" and "repo" in cmd:
@@ -142,6 +150,7 @@ def test_scenario2_hp_abi_done_id_pr_explicit(tmp_graph, monkeypatch):
         pr_view_rc=1,  # no PR on current branch - forces fallback
         repo_name="bllshttng/footnote",
         repo_rc=0,
+        origin=None,  # no remote: the gh leg of the chain carries the slug
     )
     result = runner.invoke(app, ["done", "ab-54e461b6", "--pr", "9"])
     assert result.exit_code == 0, result.stdout
@@ -232,7 +241,11 @@ def test_scenario7_edge_detached_head(tmp_graph, monkeypatch):
 
 
 def test_scenario8_edge_pr_explicit_gh_missing(tmp_graph, monkeypatch):
-    """Scenario 8 (EDGE): --pr explicit but gh unavailable still flips to done."""
+    """Scenario 8 (EDGE): --pr explicit and gh unavailable - origin carries the url.
+
+    The writer resolves the slug with the reader's own chain, so an absent or
+    unauthenticated gh no longer costs the pr_url.
+    """
     _seed(tmp_graph, [{
         "id": "ab-xx000001",
         "title": "T",
@@ -250,7 +263,21 @@ def test_scenario8_edge_pr_explicit_gh_missing(tmp_graph, monkeypatch):
     entry = _read(tmp_graph)[0]
     assert entry["pr_number"] == 42
     assert entry["merge_status"] == "merged"
-    assert entry["pr_url"] is None  # gh failed, url stays None
+    assert entry["pr_url"] == "https://github.com/org/repo/pull/42"
+
+
+def test_pr_stamp_refused_when_neither_origin_nor_gh_resolves(tmp_graph, monkeypatch):
+    """No remote and no gh: refuse rather than write an unattributable number."""
+    _seed(tmp_graph, [{
+        "id": "ab-xx000001",
+        "title": "T",
+        "_status": "ready",
+        "domain": "code",
+    }])
+    _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1, repo_rc=1, origin=None)
+    result = runner.invoke(app, ["done", "ab-xx000001", "--pr", "42"])
+    assert result.exit_code != 0
+    assert _read(tmp_graph)[0].get("pr_number") is None
 
 
 def test_help_lists_done_command(tmp_graph, monkeypatch):
@@ -632,6 +659,7 @@ def _stub_subprocess_with_stderr(
     pr_view_rc: int = 1,
     pr_view_stderr: str = "",
     pr_view_raises: type[Exception] | None = None,
+    origin: str | None = "https://github.com/org/repo.git",
 ):
     """Subprocess stub that exposes stderr on the gh pr view result.
 
@@ -656,6 +684,8 @@ def _stub_subprocess_with_stderr(
             return _Result("", 1)
         if cmd[0] == "git" and "branch" in cmd:
             return _Result((branch or "") + "\n", 0, "")
+        if cmd[0] == "git" and "remote" in cmd:
+            return _Result((origin or "") + "\n", 0 if origin else 1, "")
         if cmd[0] == "gh" and "pr" in cmd:
             if pr_view_raises is not None:
                 raise pr_view_raises("stubbed exception")

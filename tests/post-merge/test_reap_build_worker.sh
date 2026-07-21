@@ -146,15 +146,6 @@ case "$*" in
   "remote get-url origin")
     [ -n "${FAKE_ORIGIN_URL:-}" ] || exit 1
     printf '%s\n' "$FAKE_ORIGIN_URL" ;;
-  *--git-common-dir*)
-    [ -n "${FAKE_GIT_COMMON_DIR:-}" ] || exit 1
-    printf '%s\n' "$FAKE_GIT_COMMON_DIR" ;;
-  *--show-toplevel*)
-    [ -n "${FAKE_GIT_TOPLEVEL:-}" ] || exit 1
-    printf '%s\n' "$FAKE_GIT_TOPLEVEL" ;;
-  "worktree list --porcelain")
-    [ -n "${FAKE_WORKTREE_LIST:-}" ] || exit 1
-    printf '%s\n' "$FAKE_WORKTREE_LIST" ;;
   *) exit 1 ;;
 esac
 SHIM
@@ -186,9 +177,6 @@ run_step2() {
   printf '\nprintf "%%s" "$NODE_IDS"\n' >> "$runner"
   FAKE_RECONCILE_JSON="$1" PR="$3" HOME="$UHOME" PATH="$UBIN:$PATH" \
     FAKE_ORIGIN_URL="${FAKE_ORIGIN_URL-$ORIGIN_FIXTURE}" \
-    FAKE_GIT_COMMON_DIR="${FAKE_GIT_COMMON_DIR-$TMP/repo/.git}" \
-    FAKE_GIT_TOPLEVEL="${FAKE_GIT_TOPLEVEL-$TMP/repo}" \
-    FAKE_WORKTREE_LIST="${FAKE_WORKTREE_LIST-worktree $TMP/repo}" \
     FAKE_GH_SLUG="${FAKE_GH_SLUG-}" \
     TMPDIR="$TMP" "${STEP2_SHELL:-bash}" "$runner"
 }
@@ -197,8 +185,8 @@ count_id() { printf '%s' "$1" | tr ' ' '\n' | grep -c "^$2\$"; }
 # Real schema: nodes are stored flat under `.entries`, NOT `.nodes` (a `.nodes`
 # scan silently yields empty and the reap never fires - the bug codex caught).
 # Nodes carry a pr_url because graph.json is CROSS-PROJECT: a bare pr_number is
-# ambiguous across repos, so the scan admits a node only on a matching origin
-# slug, or on cwd for a url-less one.
+# ambiguous across repos, so the scan admits a node ONLY on a matching origin
+# slug. A url-less node is never matched - see AC6.
 GRAPH_MATCH='{"entries":[{"id":"x-1234","pr_number":292,"pr_url":"https://github.com/o/r/pull/292"}]}'
 
 # AC1 (the bug): reconcile .closed[] empty, pr_number matches -> node unioned in.
@@ -257,16 +245,17 @@ NI="$(run_step2 '{"closed":[]}' '{"entries":[
   && pass "AC5: a superstring slug is excluded; a case-differing slug still matches" \
   || fail "AC5: expected only x-upper, got: $(printf '%q' "$NI")"
 
-# A url-less node is the pr_number backstop: admitted only when its cwd IS this
-# repo. A foreign cwd, or no cwd at all, is dropped - fail closed, never a guess.
+# A url-less node is NEVER matched, not even when its cwd is this very repo:
+# a bare pr_number names no repo, so matching one by cwd was a guess. Writers
+# now pair pr_url with every pr_number and `fno backlog maintain` backfills the
+# rest, so a url-less node reaching here is an anomaly, not a population.
 NI="$(run_step2 '{"closed":[]}' '{"entries":[
   {"id":"x-here","pr_number":292,"cwd":"'"$REPO_FIXTURE"'"},
   {"id":"x-elsewhere","pr_number":292,"cwd":"/some/other/repo"},
   {"id":"x-nothing","pr_number":292}]}' 292)"
-[[ "$(count_id "$NI" x-here)" == "1" && "$(count_id "$NI" x-elsewhere)" == "0" \
-   && "$(count_id "$NI" x-nothing)" == "0" ]] \
-  && pass "AC6: a url-less node unions only when its cwd is this repo" \
-  || fail "AC6: expected only x-here, got: $(printf '%q' "$NI")"
+[[ -z "${NI// }" ]] \
+  && pass "AC6: a url-less node is never unioned, cwd or not" \
+  || fail "AC6: expected empty NODE_IDS, got: $(printf '%q' "$NI")"
 
 # A hand-edited graph can hold a non-string pr_url. jq's ascii_downcase raises
 # on one and aborts the WHOLE program, so a single corrupt node would silently
@@ -321,30 +310,9 @@ done
 [[ "${BAD_HOST:-0}" == "0" ]] \
   && pass "AC9c: a lookalike host or a github.com path segment yields no slug"
 
-# `git init --separate-git-dir` puts the common dir OUTSIDE the checkout, so its
-# parent is not a working tree. Deriving the root as "<common-dir>/.." would
-# silently exclude every url-less node; the .git probe must catch it and fall
-# back to the working tree git reports.
-mkdir -p "$TMP/external-gitdir"
-NI="$(FAKE_GIT_COMMON_DIR="$TMP/external-gitdir" run_step2 '{"closed":[]}' \
-      '{"entries":[{"id":"x-sep","pr_number":292,"cwd":"'"$REPO_FIXTURE"'"}]}' 292)"
-[[ "$(count_id "$NI" x-sep)" == "1" ]] \
-  && pass "AC10: separate-git-dir falls back to the real checkout for the repo root" \
-  || fail "AC10: expected x-sep via the --show-toplevel fallback, got: $(printf '%q' "$NI")"
-
-# The nastier separate-git-dir shape: the external git dir sits INSIDE another
-# checkout. "<common-dir>/.." is then a real working tree that passes a bare
-# .git probe, so deriving the root that way would silently adopt the WRONG
-# repo and admit its same-numbered url-less node. Resolving from
-# `git worktree list` instead never consults the common dir's parent at all.
-mkdir -p "$TMP/other-checkout/.git" "$TMP/other-checkout/gitdata"
-NI="$(FAKE_GIT_COMMON_DIR="$TMP/other-checkout/gitdata" \
-      FAKE_WORKTREE_LIST="worktree $TMP/other-checkout/gitdata" \
-      run_step2 '{"closed":[]}' \
-      '{"entries":[{"id":"x-foreign-root","pr_number":292,"cwd":"'"$(cd "$TMP/other-checkout" && pwd -P)"'"}]}' 292)"
-[[ "$(count_id "$NI" x-foreign-root)" == "0" ]] \
-  && pass "AC10b: a git dir nested in ANOTHER checkout does not make that checkout the root" \
-  || fail "AC10b: adopted a foreign checkout as REPO_ROOT, got: $(printf '%q' "$NI")"
+# AC10 / AC10b covered the Step 2 repo-root resolution (worktree-list walk,
+# separate-git-dir handling, the .git probe) that only the cwd fallback needed.
+# Both went with it.
 
 # AC3 (no node): pr_number matches nothing -> NODE_IDS stays empty.
 NI="$(run_step2 '{"closed":[]}' '{"entries":[{"id":"x-9999","pr_number":999}]}' 292)"

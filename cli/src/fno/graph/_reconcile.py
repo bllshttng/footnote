@@ -38,9 +38,17 @@ def _gh_executable() -> Optional[str]:
     """
     return shutil.which("gh")
 
-# Extract `owner/repo` from a GitHub PR/issue URL. A trailing `.git` is never
-# present on web URLs but stripped defensively. Stops before `/pull/<n>`.
-_PR_URL_RE = re.compile(r"github\.com/([^/\s]+)/([^/\s]+?)(?:\.git)?/(?:pull|issues)/")
+# `owner/repo` + PR number from a GitHub PR/issue URL. The host is anchored,
+# never searched for: a substring match accepts notgithub.com and
+# gitlab.com/mirrors/github.com/o/r, handing back a confident `o/r` that names
+# a repo the url does not belong to. The trailing delimiter on the number
+# rejects `/pull/123suffix`. A trailing `.git` is never present on web URLs but
+# stripped defensively.
+_PR_URL_RE = re.compile(
+    r"^(?:[A-Za-z][A-Za-z0-9+.-]*://)?(?:[^/@]*@)?github\.com(?::\d+)?"
+    r"/([^/\s]+)/([^/\s]+?)(?:\.git)?/(?:pull|issues)/(\d+)(?:[/?#]|$)",
+    re.IGNORECASE,
+)
 
 
 def repo_slug_from_url(url: Optional[str]) -> Optional[str]:
@@ -53,13 +61,32 @@ def repo_slug_from_url(url: Optional[str]) -> Optional[str]:
     """
     if not url:
         return None
-    m = _PR_URL_RE.search(url)
+    m = _PR_URL_RE.match(url.strip())
     return f"{m.group(1)}/{m.group(2)}" if m else None
 
 
-# `owner/repo` from a remote URL: git@github.com:owner/repo.git or
-# https://github.com/owner/repo(.git).
-_REMOTE_SLUG_RE = re.compile(r"(?:github\.com[:/])([^/]+)/(.+?)(?:\.git)?/?$")
+def _slug_from_remote(raw: str) -> Optional[str]:
+    """``owner/repo`` from a git remote URL, or None for a non-GitHub remote.
+
+    Handles every form git accepts - scp (``git@github.com:o/r.git``), https,
+    ``ssh://…:22/o/r.git``, trailing slash - by stripping scheme, credentials
+    and port before anchoring on the host. The host check must be exact and
+    the path exactly two segments deep: an unanchored match reads
+    ``ssh://git@github.com:22/o/r.git`` as the repo ``22/o/r`` and a GitLab
+    mirror path as ``o/r``, and the writer then persists that wrong url.
+    """
+    s = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", raw.strip())
+    s = re.sub(r"^[^/@]*@", "", s)
+    m = re.match(r"github\.com(?::\d+)?[:/](.+)$", s, re.IGNORECASE)
+    if not m:
+        return None
+    path = m.group(1).rstrip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = path.split("/")
+    if len(parts) != 2 or not all(parts):
+        return None
+    return f"{parts[0]}/{parts[1]}"
 
 
 def _run_slug_cmd(argv: list, cwd: Optional[str]) -> "tuple[int, str]":
@@ -87,13 +114,64 @@ def resolve_current_repo_slug(
     """
     rc, out = runner(["git", "remote", "get-url", "origin"], cwd)
     if rc == 0:
-        m = _REMOTE_SLUG_RE.search(out.strip())
-        if m:
-            return f"{m.group(1)}/{m.group(2)}"
+        slug = _slug_from_remote(out.strip())
+        if slug:
+            return slug
     rc, out = runner(
         ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd
     )
     return (out.strip() or None) if rc == 0 else None
+
+
+def pr_number_from_url(url: Optional[str]) -> Optional[int]:
+    """The PR number a GitHub PR url names, or None.
+
+    A url that carries the wrong number is worse than none: the row then points
+    reconciliation at one PR and renders a link to another, and repo-scoped
+    matching - which compares BOTH slug and number - finds neither.
+    """
+    if not url:
+        return None
+    m = _PR_URL_RE.match(url.strip())
+    return int(m.group(3)) if m else None
+
+
+def pr_url_from_slug(slug: str, pr: int) -> str:
+    """The one place a PR url is built, so ``repo_slug_from_url`` round-trips it."""
+    return f"https://github.com/{slug}/pull/{pr}"
+
+
+def pr_url_for_repo(
+    pr: int,
+    cwd: Optional[str] = None,
+    *,
+    runner: Callable[..., "tuple[int, str]"] = _run_slug_cmd,
+) -> Optional[str]:
+    """The canonical PR url for the checkout at ``cwd``, or None.
+
+    A writer must resolve the url at least as capably as the reader resolves
+    the slug, so this shares ``resolve_current_repo_slug``'s origin-then-gh
+    chain: a url-less ``pr_number`` names no repo, and PR numbers collide
+    across repos.
+
+    An absent ``cwd`` resolves against the invocation checkout - the caller is
+    standing in the repo it is stamping. A ``cwd`` that IS recorded but no
+    longer exists returns None instead: that is positive evidence the node
+    belongs to another repo, and `fno done`/`backlog update` can name any node
+    in the cross-project graph, so falling back would stamp the running repo's
+    slug onto a foreign node.
+    """
+    if cwd:
+        cwd = os.path.expanduser(cwd)
+        if not os.path.isdir(cwd):
+            print(
+                f"note: recorded cwd {cwd} is gone - refusing to resolve PR "
+                f"#{pr} against a different checkout",
+                file=sys.stderr,
+            )
+            return None
+    slug = resolve_current_repo_slug(cwd or None, runner=runner)
+    return pr_url_from_slug(slug, pr) if slug else None
 
 # GitHub PR states we resolve from gh, plus the "UNKNOWN" sentinel used on a
 # drift record whose query failed. Kept here as the single home for the
