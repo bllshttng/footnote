@@ -167,6 +167,7 @@ def scoreboard_command(
             read_graph_nodes(graph_path),
             since_days=since,
             now=datetime.now(),
+            loop_check_events=read_jsonl_events(events_paths, {"loop_check"}),
         )
         if json_out:
             typer.echo(_json.dumps(pf, indent=2))
@@ -299,10 +300,13 @@ def _render_plan_fidelity(pf: dict) -> None:
         ac_s = f"{ac['verified']}/{ac['total']} ({ac['pct']}%)" if ac else "n/a"
         dm = _fmt(r["data_model_surprise"])
         drift = len(r["scope_drift"]["unplanned"]) if r["scope_drift"] else "n/a"
+        pr = r.get("probes")
+        probes_s = f"{pr['passed']}/{pr['declared']}" if pr else "n/a"
         out(
             f"  {r.get('session_id') or '?':<24} PR#{r.get('pr_number') or '?'} "
             f"AC {ac_s} | drift {drift} | data-model-surprise {dm} | "
-            f"deviations {_fmt(r['deviation_load'])} | outcome {r.get('outcome') or 'n/a'}\n"
+            f"deviations {_fmt(r['deviation_load'])} | probes {probes_s} | "
+            f"outcome {r.get('outcome') or 'n/a'}\n"
         )
 
 

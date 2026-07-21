@@ -178,6 +178,49 @@ After `next()` returns the unit and `close()` is called, subsequent `next()` cal
 
 **Cancel:** the cancel closure checks `SIGINT_RECEIVED` (atomic bool set by a signal handler) OR the existence of `.fno/.target-cancelled`. Either trips `Interrupted`.
 
+### `done_probes`: the operational-evidence conjunct
+
+`DonePRGreen` normally conjuncts PR-exists + CI-green + review-clean + HEAD-shipped.
+Every one of those measures an artifact, so operational silence cannot falsify the gate: a recurring deliverable can ship, pass CI, get reviewed, and never once run.
+Grooming died this death three times.
+
+A plan may therefore declare `done_probes` in its frontmatter - up to 3 shell commands that assert the thing actually ran:
+
+```yaml
+done_probes:
+  - "fno mail list --kind report --since 24h | grep -q groom"
+```
+
+`loop-check` runs them as the **final** conjunct, only once every other conjunct already holds, and refuses `DonePRGreen` until each exits 0.
+Ordering is what keeps the feature free: a plan with no declaration spawns no subprocess, and a red or unreviewed PR never pays for one either.
+
+| Aspect | Behavior |
+|---|---|
+| Field absent, or `[]` | Zero probe subprocesses; gate behavior unchanged |
+| Field present but unreadable (e.g. a multi-line inline list) | Refuse as "probes undeterminable". A declaration the parser cannot read is never treated as "no probes" - that is the vacuous pass the whole feature exists to prevent |
+| More than 3 declared | Refuse, naming the cap; nothing executes |
+| Non-zero exit (127 included) | Refuse, naming the verbatim command, the exit code, and up to 500 chars of stderr |
+| Runs past 60s | The child's whole process GROUP is killed, and the result is a failure. The timeout is native Rust (spawn + `try_wait` + kill) because the host has no `timeout` binary |
+| Plan unreadable, probes seen on a prior fire | Refuse as "probes undeterminable" |
+| Plan unreadable, no probe history | Today's behavior - a probe-less session with a stale `plan_path` must not start refusing |
+
+Two implementation constraints are load-bearing rather than defensive, and a future edit that "simplifies" either one reintroduces a hang.
+A probe is typically a pipeline (`... | grep -q x`), so `sh` forks and killing `sh` alone would leave grandchildren holding the stderr pipe open - the drain thread would never see EOF and the join would block past the very timeout meant to bound it.
+Hence the process-group kill, and hence stderr being drained by a reader thread at all (reading a piped stderr only after exit deadlocks any probe that writes past the pipe buffer).
+
+A refusal where probes were declared but none actually ran (unparseable, over cap, plan unreadable) records `{"_undeterminable": "<cause>"}` rather than a bare `null`.
+That matters because the fail-closed path keys off "did a prior fire record probes": a `null` would make the refusal invisible to it, so a plan that tripped the cap and then went missing would silently degrade to "no gate".
+
+**Scope: `DonePRGreen` only.**
+`DoneAdvisory`, `DonePlanned`, and `DoneBatched` return earlier and do not consult probes.
+Those units ship no PR of their own, so there is no ship gate to hang evidence on; a recurring deliverable reaches its finish line through `DonePRGreen`.
+
+Every fire records its results in the `loop_check` event as `data.done_probes` (`{"<cmd>": "pass" \| "fail:<code>" \| "timeout"}`), which is what `fno scoreboard --plan-fidelity` joins against the declaration to report probes declared vs passed.
+
+There is no environment override.
+A probe that cannot pass here is fixed by editing the plan, which is visible in git; a wedged one falls to the existing `NoProgress` and `Budget` backstops.
+Authoring guidance (freshness over bare existence) lives in `skills/blueprint/SKILL.md`.
+
 ---
 
 ## The exec shim (`scripts/run-target-loop.sh`)

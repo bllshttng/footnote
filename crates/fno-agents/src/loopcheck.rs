@@ -11,9 +11,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 // ── public types ──────────────────────────────────────────────────────────────
 
@@ -77,6 +77,8 @@ struct Manifest {
     /// plan-only thread: reaches the plan boundary and terminates DonePlanned
     /// (not DoneAdvisory, which would graduate the plan).
     planned: bool,
+    /// Plan doc backing this session; source of the `done_probes` declaration.
+    plan_path: Option<String>,
     legacy_status: Option<String>, // COMPLETE | BLOCKED | ABORTED
     /// None = absent (unlimited). Some(Ok(v)) = valid cap. Some(Err(s)) = malformed raw value.
     budget_wall_clock_cap_minutes: Option<Result<u64, String>>,
@@ -95,6 +97,7 @@ impl Default for Manifest {
             no_external: false,
             batched: false,
             planned: false,
+            plan_path: None,
             legacy_status: None,
             budget_wall_clock_cap_minutes: None, // None = absent = unlimited
             budget_cost_cap_usd: None,           // None = absent = unlimited
@@ -161,6 +164,11 @@ fn parse_manifest(content: &str) -> Option<Manifest> {
                 "no_external" => m.no_external = v == "true",
                 "batched" => m.batched = v == "true",
                 "planned" => m.planned = v == "true",
+                "plan_path" => {
+                    if !v.is_empty() {
+                        m.plan_path = Some(v.to_string());
+                    }
+                }
                 "status" => {
                     let upper = v.to_uppercase();
                     if matches!(upper.as_str(), "COMPLETE" | "BLOCKED" | "ABORTED") {
@@ -3416,7 +3424,29 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // merged PR is still unshipped work.
                 let head_shipped = !pr_info.head_oid.is_empty() && pr_info.head_oid == head_sha;
 
+                // done_probes: the FINAL DonePRGreen conjunct. Gated on
+                // every other conjunct already holding, so a plan with no probes
+                // spawns no subprocess and a red/unreviewed PR never pays for one.
+                let mut probe_block: Option<String> = None;
+                let mut probe_results = Value::Null;
                 if pr_open && ci_ok && pr_info.reviewed && head_shipped {
+                    match evaluate_done_probes(
+                        manifest.plan_path.as_deref(),
+                        &cwd,
+                        &project_events,
+                        &session_id,
+                        PROBE_TIMEOUT,
+                    ) {
+                        ProbeGate::Absent => {}
+                        ProbeGate::Pass(results) => probe_results = results,
+                        ProbeGate::Fail { reason, results } => {
+                            probe_block = Some(reason);
+                            probe_results = results;
+                        }
+                    }
+                }
+
+                if pr_open && ci_ok && pr_info.reviewed && head_shipped && probe_block.is_none() {
                     // AC1-UI: name any rate-limited bot the gate proceeded
                     // without, so the terminal message and the emitted event
                     // agree on why a required bot is absent from the evidence.
@@ -3452,7 +3482,8 @@ pub fn decide(args: &[String]) -> (i32, String) {
                             "reviewed": pr_info.reviewed,
                             "review_skipped": pr_info.review_skipped,
                             "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                            "fp_read_failed": fp_read_failed
+                            "fp_read_failed": fp_read_failed,
+                            "done_probes": probe_results
                         }),
                     );
                     return (
@@ -3654,7 +3685,13 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     // AC2-ERR head mismatch / finding).
                 }
 
-                if backstop_tripped && (!pr_open || !ci_ok || !pr_info.reviewed) {
+                // `probe_block.is_some()` keeps a probe that can never pass in
+                // this environment on the NoProgress escape rather than looping
+                // to the budget ceiling: PR+CI+review all hold, so without it
+                // none of the other disjuncts can ever fire.
+                if backstop_tripped
+                    && (!pr_open || !ci_ok || !pr_info.reviewed || probe_block.is_some())
+                {
                     // Backstop tripped + done() false -> NoProgress
                     emit(
                         "termination",
@@ -3679,7 +3716,8 @@ pub fn decide(args: &[String]) -> (i32, String) {
                             "reviewed": pr_info.reviewed,
                             "review_skipped": pr_info.review_skipped,
                             "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                            "fp_read_failed": fp_read_failed
+                            "fp_read_failed": fp_read_failed,
+                            "done_probes": probe_results
                         }),
                     );
                     return (0, allow_output(
@@ -3697,8 +3735,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
                 // done() false on promise -> block with named reason. P2
                 // (ab-098967b4): enrich with a loop-boundary inbox nudge.
+                // A failed probe IS the blocker when everything else is green;
+                // build_block_reason would otherwise report a healthy PR.
                 let reason = crate::nudge::append_inbox_nudge(
-                    &build_block_reason(&pr_info, &head_sha),
+                    &probe_block
+                        .clone()
+                        .unwrap_or_else(|| build_block_reason(&pr_info, &head_sha)),
                     &cwd,
                     &session_id,
                 );
@@ -3717,7 +3759,8 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         "reviewed": pr_info.reviewed,
                         "review_skipped": pr_info.review_skipped,
                         "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                        "fp_read_failed": fp_read_failed
+                        "fp_read_failed": fp_read_failed,
+                        "done_probes": probe_results
                     }),
                 );
                 return (
@@ -3925,6 +3968,478 @@ fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     format!(
         " Arm a harness-tracked watcher with a hard timeout (e.g. {watcher}), then end your turn with `<watching reason=\"{blocker}\" pr=\"{pr_number}\" timeout=\"30m\">` and nothing else - the session then idles until the watcher exits."
     )
+}
+
+// ── done_probes ──────────────────────────────────────────────────────
+//
+// A plan may declare `done_probes` in its frontmatter: runnable commands whose
+// success is the operational evidence that the shipped thing actually RUNS.
+// DonePRGreen measures artifacts (PR + CI + review), which operational silence
+// cannot falsify - grooming shipped three times without ever running. Probes are
+// the enforcement arm: the gate refuses done until the declared observation
+// holds, forcing the session to perform the last mile before claiming done.
+
+/// Wall-clock ceiling per probe. The host has no `timeout` binary (and no
+/// gtimeout), so the bound is native: spawn, poll `try_wait`, kill.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A probe list is a gate, not a test suite.
+const PROBE_CAP: usize = 3;
+
+/// Probe stderr is quoted back in the block reason so the agent knows which
+/// last-mile action to perform; cap it so the reason stays readable.
+const PROBE_STDERR_CAP: usize = 500;
+
+enum ProbeOutcome {
+    Pass,
+    Fail { code: Option<i32>, stderr: String },
+    Timeout,
+}
+
+impl ProbeOutcome {
+    /// Event rendering: `pass` | `fail:<code>` | `timeout`.
+    fn render(&self) -> String {
+        match self {
+            ProbeOutcome::Pass => "pass".to_string(),
+            ProbeOutcome::Fail { code: Some(c), .. } => format!("fail:{c}"),
+            ProbeOutcome::Fail { code: None, .. } => "fail:signal".to_string(),
+            ProbeOutcome::Timeout => "timeout".to_string(),
+        }
+    }
+}
+
+enum ProbeGate {
+    /// No declaration: zero subprocesses, gate behavior byte-identical to before.
+    Absent,
+    Pass(Value),
+    Fail {
+        reason: String,
+        results: Value,
+    },
+}
+
+/// Unwrap a YAML scalar to the string a YAML parser would produce.
+///
+/// Decoding escapes is not cosmetic: the recommended block form routinely
+/// carries an inner quote (`- "test -n \"$(cmd)\""`). Leaving the backslashes in
+/// would hand `sh -c` literal `\"` characters - a DIFFERENT command than the
+/// plan declared, whose result the gate would then trust - and would also key
+/// the event by a string the PyYAML-side grader never matches.
+fn unquote_scalar(s: &str) -> String {
+    let s = s.trim();
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        let inner = &s[1..s.len() - 1];
+        let mut out = String::with_capacity(inner.len());
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('0') => out.push('\0'),
+                // `\"`, `\\`, `\/` and anything else: keep the escaped char.
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+        }
+        return out;
+    }
+    if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
+        // YAML single-quoted scalars escape only the quote, by doubling it.
+        return s[1..s.len() - 1].replace("''", "'");
+    }
+    s.to_string()
+}
+
+/// Split a YAML inline list body. Quoted segments win over comma-splitting
+/// because probe commands routinely contain commas (`--jq '.a,.b'`); only an
+/// unquoted body falls back to a naive split.
+fn split_inline_list(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' || c == '\'' {
+            let mut item = String::new();
+            let mut escaped = false;
+            for c2 in chars.by_ref() {
+                if escaped {
+                    item.push(c2);
+                    escaped = false;
+                } else if c2 == '\\' {
+                    escaped = true;
+                } else if c2 == c {
+                    break;
+                } else {
+                    item.push(c2);
+                }
+            }
+            out.push(item);
+        }
+    }
+    if out.is_empty() {
+        out = body
+            .split(',')
+            .map(unquote_scalar)
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    out
+}
+
+/// What a plan doc's frontmatter says about `done_probes`.
+#[derive(Debug, PartialEq)]
+enum ProbeDecl {
+    /// No `done_probes` key, or explicitly `[]` - both mean "no gate".
+    None,
+    Probes(Vec<String>),
+    /// The key is present but no probes could be recovered from it. This is
+    /// NEVER treated as "no probes": a declaration this parser cannot read is
+    /// the vacuous-pass shape the whole feature exists to prevent, so it fails
+    /// closed and asks a human to look.
+    Unparseable,
+}
+
+/// Read `done_probes` from a plan doc's frontmatter. Accepts the block form
+/// (`done_probes:\n  - "cmd"`) and the single-line inline form
+/// (`done_probes: ["cmd"]`); anything else declared is `Unparseable`.
+fn parse_done_probes(content: &str) -> ProbeDecl {
+    let content = content.trim_start();
+    if !content.starts_with("---") {
+        return ProbeDecl::None;
+    }
+    let after_first = &content[3..];
+    let Some(end) = after_first.find("\n---") else {
+        return ProbeDecl::None;
+    };
+
+    let mut out = Vec::new();
+    let mut declared = false;
+    let mut in_block = false;
+    for line in after_first[..end].lines() {
+        let trimmed = line.trim();
+        if !in_block {
+            let Some(rest) = trimmed.strip_prefix("done_probes:") else {
+                continue;
+            };
+            declared = true;
+            let rest = rest.trim();
+            if rest == "[]" {
+                return ProbeDecl::None;
+            }
+            if let Some(inner) = rest.strip_prefix('[') {
+                // strip_suffix, not trim_end_matches: the latter eats EVERY
+                // trailing ']' (mangling a command that ends in one) and would
+                // silently accept an unterminated list.
+                let Some(inner) = inner.strip_suffix(']') else {
+                    return ProbeDecl::Unparseable;
+                };
+                let items = split_inline_list(inner);
+                // An empty result means a multi-line inline list (items live on
+                // following lines) - unrecoverable here, so refuse rather than
+                // report the declaration as absent.
+                return if items.is_empty() {
+                    ProbeDecl::Unparseable
+                } else {
+                    ProbeDecl::Probes(items)
+                };
+            }
+            in_block = true;
+            continue;
+        }
+        // Inside the block: a comment is not the end of it (treating one as a
+        // terminator would silently drop every probe below it).
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(item) = trimmed.strip_prefix("- ") else {
+            break; // the next frontmatter key ends the block
+        };
+        let item = unquote_scalar(item);
+        if !item.is_empty() {
+            out.push(item);
+        }
+    }
+
+    match (declared, out.is_empty()) {
+        (false, _) => ProbeDecl::None,
+        (true, true) => ProbeDecl::Unparseable,
+        (true, false) => ProbeDecl::Probes(out),
+    }
+}
+
+/// Keep at most the LAST `cap` bytes, without splitting a UTF-8 character.
+///
+/// The tail, not the head: a failing command's real error is almost always its
+/// last line, so keeping the prefix would routinely drop the one diagnostic the
+/// block reason exists to surface. Char-boundary aware because `String::drain`
+/// and `truncate` panic mid-character, and probe stderr regularly carries
+/// arrows, box-drawing, and accented words.
+fn keep_last_on_char_boundary(s: &mut String, cap: usize) {
+    if s.len() <= cap {
+        return;
+    }
+    let start = s.len() - cap;
+    let cut = (start..=s.len())
+        .find(|i| s.is_char_boundary(*i))
+        .unwrap_or(s.len());
+    s.drain(..cut);
+}
+
+/// SIGKILL a process group, ignoring "already gone".
+fn killpg(pgid: i32) {
+    if pgid <= 0 {
+        return;
+    }
+    // SAFETY: pgid is our own spawned group leader's pid; ESRCH is expected
+    // once every member has exited and is deliberately ignored.
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
+}
+
+/// Run one probe under a native timeout.
+///
+/// Two things here are load-bearing rather than defensive. stderr is drained by
+/// a reader thread because reading a piped stderr only after exit deadlocks any
+/// probe that writes past the pipe buffer. And the child leads its own process
+/// group, which is killed on EVERY exit path - not just the timeout.
+///
+/// The group kill has to cover normal exit too, because `sh` is not the only
+/// process holding the stderr write end. A pipeline (`... | grep -q x`) forks,
+/// and a probe that backgrounds anything (`sleep 3600 &`, or any command that
+/// daemonizes) lets `sh` exit IMMEDIATELY while the descendant keeps the pipe
+/// open. `try_wait` then reports success and leaves the timeout loop, so the
+/// timer is never consulted again and the drain join blocks for the
+/// descendant's whole lifetime - wedging the stop hook well past the 60s the
+/// gate promises. Killing the group closes the pipe and bounds the join.
+fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcome {
+    use std::os::unix::process::CommandExt;
+
+    let spawned = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn();
+
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => {
+            return ProbeOutcome::Fail {
+                code: Some(127),
+                stderr: format!("probe spawn failed: {e}"),
+            }
+        }
+    };
+
+    // Capture the pgid before any wait() can reap the leader.
+    let pgid = child.id() as i32;
+
+    let mut pipe = child.stderr.take();
+    let drain = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(ref mut p) = pipe {
+            let _ = p.read_to_string(&mut buf);
+        }
+        buf
+    });
+
+    let start = std::time::Instant::now();
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                break if status.success() {
+                    ProbeOutcome::Pass
+                } else {
+                    ProbeOutcome::Fail {
+                        code: status.code(),
+                        stderr: String::new(),
+                    }
+                };
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    kill_process_group(&mut child);
+                    break ProbeOutcome::Timeout;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                kill_process_group(&mut child);
+                break ProbeOutcome::Fail {
+                    code: None,
+                    stderr: format!("probe wait failed: {e}"),
+                };
+            }
+        }
+    };
+
+    // Reap any descendant still holding the stderr write end, so the drain sees
+    // EOF. Without this a backgrounding probe blocks the join indefinitely even
+    // though the shell itself exited cleanly.
+    killpg(pgid);
+
+    // On timeout the stderr tail is worthless (the reason names the timeout) and
+    // joining risks the very hang we just escaped if anything outlived the group
+    // kill. Drop the handle instead: the thread ends when the pipe closes.
+    if matches!(outcome, ProbeOutcome::Timeout) {
+        return outcome;
+    }
+
+    let mut stderr = drain.join().unwrap_or_default();
+    keep_last_on_char_boundary(&mut stderr, PROBE_STDERR_CAP);
+    match outcome {
+        ProbeOutcome::Fail { code, stderr: s } if s.is_empty() => {
+            ProbeOutcome::Fail { code, stderr }
+        }
+        other => other,
+    }
+}
+
+/// SIGKILL the child's whole process group, then reap it. A probe pipeline's
+/// grandchildren hold the stderr pipe open; killing only the direct child would
+/// leave the drain thread blocked on a pipe that never reaches EOF.
+fn kill_process_group(child: &mut std::process::Child) {
+    killpg(child.id() as i32);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Event payload for a refusal where probes were DECLARED but none ran (plan
+/// unreadable, unparseable, over cap). It must be a non-empty object: recording
+/// a bare null would make the refusal invisible to `prior_fires_declared_probes`,
+/// so a plan that tripped the cap and then went missing would silently degrade
+/// to "no gate" - the exact fail-open this records history to prevent. The key
+/// is underscore-prefixed so it cannot collide with a probe command string.
+fn undeterminable_marker(cause: &str) -> Value {
+    serde_json::json!({ "_undeterminable": cause })
+}
+
+/// True when any prior loop_check fire for this session recorded probe results.
+/// Used to fail closed on an unreadable plan only when probes are known to have
+/// existed - a probe-less session with a stale plan_path keeps today's behavior.
+fn prior_fires_declared_probes(events_path: &Path, session_id: &str) -> bool {
+    let Ok(content) = std::fs::read_to_string(events_path) else {
+        return false;
+    };
+    content.lines().any(|line| {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            return false;
+        };
+        val.get("type").and_then(|v| v.as_str()) == Some("loop_check")
+            && val.pointer("/data/session_id").and_then(|v| v.as_str()) == Some(session_id)
+            && val
+                .pointer("/data/done_probes")
+                .and_then(|v| v.as_object())
+                .is_some_and(|m| !m.is_empty())
+    })
+}
+
+/// Evaluate the probe conjunct. Called ONLY once every other DonePRGreen
+/// conjunct already holds, so probes run at most once per would-be-done fire.
+fn evaluate_done_probes(
+    plan_path: Option<&str>,
+    cwd: &Path,
+    events_path: &Path,
+    session_id: &str,
+    timeout: std::time::Duration,
+) -> ProbeGate {
+    // Resolve a relative plan_path against the session's cwd, not the process
+    // cwd: plan_path is repo-relative in practice, and reading nothing here
+    // would degrade to Absent - a silent gate bypass.
+    let plan = plan_path.and_then(|p| {
+        // A plan_path may carry a `#wave-1`-style fragment; the Python plan
+        // readers strip it, and reading the literal name would fail, which on
+        // the first fire (no probe history) degrades to Absent - a silent
+        // bypass of a gate the plan actually declared.
+        let p = Path::new(p.split('#').next().unwrap_or(p));
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd.join(p)
+        };
+        std::fs::read_to_string(abs).ok()
+    });
+    let Some(plan) = plan else {
+        // Fail closed only when probes were observed before; otherwise a stale
+        // plan_path on a probe-less session must not start refusing done.
+        if prior_fires_declared_probes(events_path, session_id) {
+            return ProbeGate::Fail {
+                reason: format!(
+                    "done_probes undeterminable: plan {} is unreadable but a prior fire declared probes; restore the plan doc",
+                    plan_path.unwrap_or("(unset)")
+                ),
+                results: undeterminable_marker("plan-unreadable"),
+            };
+        }
+        return ProbeGate::Absent;
+    };
+
+    let probes = match parse_done_probes(&plan) {
+        ProbeDecl::None => return ProbeGate::Absent,
+        ProbeDecl::Unparseable => {
+            return ProbeGate::Fail {
+                reason: format!(
+                    "done_probes undeterminable: plan {} declares the field but no probe could be read from it (use a block list, or a single-line inline list)",
+                    plan_path.unwrap_or("(unset)")
+                ),
+                results: undeterminable_marker("unparseable-declaration"),
+            }
+        }
+        ProbeDecl::Probes(p) => p,
+    };
+    if probes.len() > PROBE_CAP {
+        return ProbeGate::Fail {
+            reason: format!(
+                "plan declares {} done_probes; the cap is {PROBE_CAP} (a probe list is a gate, not a test suite)",
+                probes.len()
+            ),
+            results: undeterminable_marker("over-cap"),
+        };
+    }
+
+    let mut results = serde_json::Map::new();
+    let mut failures = Vec::new();
+    for cmd in &probes {
+        let outcome = run_probe(cmd, cwd, timeout);
+        results.insert(cmd.clone(), Value::String(outcome.render()));
+        match &outcome {
+            ProbeOutcome::Pass => {}
+            ProbeOutcome::Timeout => failures.push(format!(
+                "probe `{cmd}` timed out after {}s (killed)",
+                timeout.as_secs()
+            )),
+            ProbeOutcome::Fail { code, stderr } => {
+                let code = code.map(|c| c.to_string()).unwrap_or("signal".to_string());
+                let tail = if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stderr.trim())
+                };
+                failures.push(format!("probe `{cmd}` exited {code}{tail}"));
+            }
+        }
+    }
+
+    let results = Value::Object(results);
+    if failures.is_empty() {
+        ProbeGate::Pass(results)
+    } else {
+        ProbeGate::Fail {
+            reason: format!(
+                "done_probes failed - the shipped thing has no evidence of running: {}",
+                failures.join("; ")
+            ),
+            results,
+        }
+    }
 }
 
 fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
@@ -6777,5 +7292,391 @@ mod tests {
         assert!(!is_no_pr_stderr(b"connect: network is unreachable"));
         assert!(!is_no_pr_stderr(b"API rate limit exceeded"));
         assert!(!is_no_pr_stderr(b""));
+    }
+}
+
+#[cfg(test)]
+mod done_probe_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn fm(body: &str) -> String {
+        format!("---\ntitle: t\n{body}\n---\n\n# doc\n")
+    }
+
+    fn probes_of(doc: &str) -> Vec<String> {
+        match parse_done_probes(doc) {
+            ProbeDecl::Probes(p) => p,
+            other => panic!("expected probes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_block_list() {
+        let doc = fm("done_probes:\n  - \"fno mail list --since 24h | grep -q groom\"\n  - 'echo ok'\nstatus: ready");
+        assert_eq!(
+            probes_of(&doc),
+            vec![
+                "fno mail list --since 24h | grep -q groom".to_string(),
+                "echo ok".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_inline_list_keeping_commas_inside_commands() {
+        let doc = fm(r#"done_probes: ["gh api x --jq '.a,.b'", "echo ok"]"#);
+        assert_eq!(
+            probes_of(&doc),
+            vec!["gh api x --jq '.a,.b'".to_string(), "echo ok".to_string()],
+            "a comma inside a quoted command must not split it into two probes"
+        );
+    }
+
+    #[test]
+    fn absent_field_and_explicit_empty_list_are_both_no_gate() {
+        assert_eq!(parse_done_probes(&fm("done_probes: []")), ProbeDecl::None);
+        assert_eq!(parse_done_probes(&fm("status: ready")), ProbeDecl::None);
+        assert_eq!(parse_done_probes("no frontmatter here"), ProbeDecl::None);
+    }
+
+    #[test]
+    fn a_declaration_this_parser_cannot_read_is_never_no_gate() {
+        // The vacuous-pass shape: the field is there, so the plan MEANT to gate.
+        // Reporting None here would silently drop the gate entirely.
+        let multiline_inline = fm("done_probes: [\n  \"echo a\",\n  \"echo b\"\n]");
+        assert_eq!(parse_done_probes(&multiline_inline), ProbeDecl::Unparseable);
+        assert_eq!(
+            parse_done_probes(&fm("done_probes:\nstatus: ready")),
+            ProbeDecl::Unparseable,
+            "a declared-but-empty block must refuse, not pass"
+        );
+    }
+
+    #[test]
+    fn inline_list_keeps_escaped_quotes_inside_a_command() {
+        // A mis-parsed probe is worse than a refused one: it would run a
+        // DIFFERENT command than the plan declared and gate on its result.
+        let doc = fm(r#"done_probes: ["sh -c \"echo hi\"", "echo ok"]"#);
+        assert_eq!(
+            probes_of(&doc),
+            vec![r#"sh -c "echo hi""#.to_string(), "echo ok".to_string()]
+        );
+    }
+
+    #[test]
+    fn inline_list_preserves_a_trailing_bracket_and_refuses_an_unterminated_one() {
+        assert_eq!(
+            probes_of(&fm(r#"done_probes: ["echo [hi]"]"#)),
+            vec!["echo [hi]".to_string()],
+            "only the list's own closing bracket may be stripped"
+        );
+        assert_eq!(
+            parse_done_probes(&fm(r#"done_probes: ["echo a""#)),
+            ProbeDecl::Unparseable,
+            "an unterminated inline list must refuse, not silently parse"
+        );
+    }
+
+    #[test]
+    fn a_comment_inside_the_block_does_not_swallow_the_probes() {
+        let doc = fm("done_probes:\n  # why this probe exists\n  - echo a\n  - echo b\ntags: []");
+        assert_eq!(
+            probes_of(&doc),
+            vec!["echo a".to_string(), "echo b".to_string()]
+        );
+    }
+
+    #[test]
+    fn block_list_stops_at_the_next_key() {
+        let doc = fm("done_probes:\n  - echo a\ntags: []\nother: x");
+        assert_eq!(probes_of(&doc), vec!["echo a".to_string()]);
+    }
+
+    #[test]
+    fn probe_outcomes_render_pass_fail_and_exit_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = Duration::from_secs(10);
+        assert_eq!(run_probe("exit 0", tmp.path(), t).render(), "pass");
+        assert_eq!(run_probe("exit 3", tmp.path(), t).render(), "fail:3");
+        assert_eq!(
+            run_probe("fno-no-such-binary-xyz", tmp.path(), t).render(),
+            "fail:127",
+            "a missing binary must fail closed as 127, never pass"
+        );
+    }
+
+    #[test]
+    fn hanging_probe_is_killed_within_the_timeout_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let start = std::time::Instant::now();
+        let outcome = run_probe("sleep 30", tmp.path(), Duration::from_millis(200));
+        assert_eq!(outcome.render(), "timeout");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "run_probe must return on its own timeout, not wait out the child"
+        );
+    }
+
+    #[test]
+    fn chatty_probe_does_not_deadlock_on_the_stderr_pipe() {
+        // A probe writing past the 64KB pipe buffer would hang forever if
+        // stderr were drained only after exit.
+        let tmp = tempfile::tempdir().unwrap();
+        let outcome = run_probe(
+            "head -c 200000 /dev/zero | tr '\\0' 'x' >&2; exit 1",
+            tmp.path(),
+            Duration::from_secs(20),
+        );
+        assert_eq!(outcome.render(), "fail:1");
+        match outcome {
+            ProbeOutcome::Fail { stderr, .. } => assert!(
+                stderr.len() <= PROBE_STDERR_CAP,
+                "stderr must be truncated to {PROBE_STDERR_CAP}"
+            ),
+            _ => panic!("expected Fail"),
+        }
+    }
+
+    #[test]
+    fn over_cap_declaration_refuses_without_running_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("plan.md");
+        let sentinel = tmp.path().join("ran");
+        std::fs::write(
+            &plan,
+            fm(&format!(
+                "done_probes:\n  - touch {0}\n  - echo b\n  - echo c\n  - echo d",
+                sentinel.display()
+            )),
+        )
+        .unwrap();
+        let events = tmp.path().join("events.jsonl");
+        match evaluate_done_probes(
+            plan.to_str(),
+            tmp.path(),
+            &events,
+            "s1",
+            Duration::from_secs(10),
+        ) {
+            ProbeGate::Fail { reason, .. } => {
+                assert!(
+                    reason.contains("cap is 3"),
+                    "reason names the cap: {reason}"
+                )
+            }
+            _ => panic!("over-cap declaration must refuse"),
+        }
+        assert!(!sentinel.exists(), "an over-cap list must not execute");
+    }
+
+    #[test]
+    fn unreadable_plan_fails_closed_only_when_probes_were_seen_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let missing = tmp.path().join("gone.md");
+
+        // AC2-FR: no probe history -> today's behavior exactly.
+        assert!(matches!(
+            evaluate_done_probes(
+                missing.to_str(),
+                tmp.path(),
+                &events,
+                "s1",
+                Duration::from_secs(10)
+            ),
+            ProbeGate::Absent
+        ));
+
+        // AC1-FR: a prior fire recorded probes -> undeterminable, fail closed.
+        std::fs::write(
+            &events,
+            "{\"type\":\"loop_check\",\"data\":{\"session_id\":\"s1\",\"done_probes\":{\"echo ok\":\"pass\"}}}\n",
+        )
+        .unwrap();
+        match evaluate_done_probes(
+            missing.to_str(),
+            tmp.path(),
+            &events,
+            "s1",
+            Duration::from_secs(10),
+        ) {
+            ProbeGate::Fail { reason, .. } => assert!(
+                reason.contains("undeterminable"),
+                "reason must say undeterminable: {reason}"
+            ),
+            _ => panic!("unreadable plan with probe history must fail closed"),
+        }
+    }
+
+    #[test]
+    fn a_refusal_where_nothing_ran_still_records_probe_history() {
+        // Otherwise prior_fires_declared_probes sees no history, and a plan that
+        // tripped the cap and then went missing degrades to "no gate".
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("plan.md");
+        std::fs::write(
+            &plan,
+            fm("done_probes:\n  - echo a\n  - echo b\n  - echo c\n  - echo d"),
+        )
+        .unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let ProbeGate::Fail { results, .. } = evaluate_done_probes(
+            plan.to_str(),
+            tmp.path(),
+            &events,
+            "s1",
+            Duration::from_secs(10),
+        ) else {
+            panic!("over-cap must refuse");
+        };
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "loop_check",
+                    "data": {"session_id": "s1", "done_probes": results}
+                })
+            ),
+        )
+        .unwrap();
+        assert!(
+            prior_fires_declared_probes(&events, "s1"),
+            "a declared-but-never-ran refusal must be visible as probe history"
+        );
+    }
+
+    #[test]
+    fn relative_plan_path_resolves_against_the_session_cwd() {
+        // plan_path is repo-relative in practice; resolving against the process
+        // cwd would read nothing and silently drop the gate.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("plan.md"), fm("done_probes:\n  - exit 0")).unwrap();
+        let events = tmp.path().join("events.jsonl");
+        assert!(
+            matches!(
+                evaluate_done_probes(
+                    Some("plan.md"),
+                    tmp.path(),
+                    &events,
+                    "s1",
+                    Duration::from_secs(10)
+                ),
+                ProbeGate::Pass(_)
+            ),
+            "a relative plan_path must resolve against cwd, not the process cwd"
+        );
+    }
+
+    #[test]
+    fn timeout_reaches_the_gate_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("plan.md");
+        std::fs::write(&plan, fm("done_probes:\n  - sleep 30")).unwrap();
+        let events = tmp.path().join("events.jsonl");
+        match evaluate_done_probes(
+            plan.to_str(),
+            tmp.path(),
+            &events,
+            "s1",
+            Duration::from_millis(200),
+        ) {
+            ProbeGate::Fail { reason, results } => {
+                assert!(
+                    reason.contains("timed out"),
+                    "reason names the timeout: {reason}"
+                );
+                assert_eq!(results["sleep 30"], "timeout");
+            }
+            _ => panic!("a hanging probe must refuse done"),
+        }
+    }
+
+    #[test]
+    fn a_pipeline_probe_timeout_does_not_hang_the_gate() {
+        // `sh -c "a | b"` forks: killing only sh leaves grandchildren holding
+        // the stderr pipe, so the drain thread never sees EOF. This is the
+        // documented probe shape, so a regression here wedges every session.
+        let tmp = tempfile::tempdir().unwrap();
+        let start = std::time::Instant::now();
+        let outcome = run_probe("sleep 30 | cat", tmp.path(), Duration::from_millis(200));
+        assert_eq!(outcome.render(), "timeout");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "a pipeline probe must not outlive its timeout (took {:?})",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn multibyte_stderr_is_truncated_without_panicking() {
+        // String::drain panics off a char boundary; probe stderr routinely
+        // carries arrows and box-drawing characters.
+        let mut s = "→".repeat(400); // 3 bytes each, straddles the cut
+        keep_last_on_char_boundary(&mut s, PROBE_STDERR_CAP);
+        assert!(s.len() <= PROBE_STDERR_CAP);
+        assert!(s.chars().all(|c| c == '→'), "must not split a character");
+    }
+
+    #[test]
+    fn stderr_cap_keeps_the_tail_where_the_error_is() {
+        let mut s = format!("{}\nthe actual error", "noise ".repeat(200));
+        keep_last_on_char_boundary(&mut s, PROBE_STDERR_CAP);
+        assert!(
+            s.ends_with("the actual error"),
+            "the last line is the diagnostic; keeping the prefix drops it: {s}"
+        );
+    }
+
+    #[test]
+    fn block_scalar_escapes_decode_to_the_command_the_plan_meant() {
+        // Leaving `\"` in would hand sh a DIFFERENT command than declared, and
+        // would key the event by a string the PyYAML-side grader never matches.
+        let doc = fm("done_probes:\n  - \"test -n \\\"$(echo hi)\\\"\"");
+        assert_eq!(probes_of(&doc), vec![r#"test -n "$(echo hi)""#.to_string()]);
+    }
+
+    #[test]
+    fn single_quoted_scalar_undoubles_its_quote() {
+        let doc = fm("done_probes:\n  - 'echo it''s fine'");
+        assert_eq!(probes_of(&doc), vec!["echo it's fine".to_string()]);
+    }
+
+    #[test]
+    fn plan_path_fragment_is_stripped_before_reading() {
+        // `plans/p.md#wave-1` must resolve to plans/p.md, not a literal filename
+        // containing the fragment (which would read nothing -> silent Absent).
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("plan.md"), fm("done_probes:\n  - exit 0")).unwrap();
+        let events = tmp.path().join("events.jsonl");
+        assert!(
+            matches!(
+                evaluate_done_probes(
+                    Some("plan.md#wave-1"),
+                    tmp.path(),
+                    &events,
+                    "s1",
+                    Duration::from_secs(10)
+                ),
+                ProbeGate::Pass(_)
+            ),
+            "a fragment in plan_path must not silently disable the gate"
+        );
+    }
+
+    #[test]
+    fn a_backgrounding_probe_does_not_block_the_drain() {
+        // sh exits immediately while the descendant keeps stderr open, so the
+        // timeout loop is already over and only the group kill bounds the join.
+        let tmp = tempfile::tempdir().unwrap();
+        let start = std::time::Instant::now();
+        let outcome = run_probe("sleep 300 & exit 0", tmp.path(), Duration::from_secs(30));
+        assert_eq!(outcome.render(), "pass");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "a backgrounded descendant must not hold the drain open (took {:?})",
+            start.elapsed()
+        );
     }
 }

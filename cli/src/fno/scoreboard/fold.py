@@ -17,6 +17,8 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import yaml
+
 # termination_reason -> outcome class. The delivered-ship set is the explicit
 # _SHIPPED_TERMINALS allowlist below; the wedge set is the stuck-terminal set.
 # Everything else (Interrupted, delegated, NoWork, DoneAwaitingMerge, or no
@@ -1172,6 +1174,45 @@ def _default_read_plan_doc(plan_path: str) -> str | None:
         return None
 
 
+def _declared_probes(plan_doc: str | None) -> list[str]:
+    """`done_probes` declared in a plan doc's frontmatter."""
+    if not plan_doc or not plan_doc.lstrip().startswith("---"):
+        return []
+    body = plan_doc.lstrip()[3:].split("\n---", 1)
+    if len(body) < 2:
+        return []
+    try:
+        fm = yaml.safe_load(body[0])
+    except yaml.YAMLError:
+        # Malformed frontmatter: no declaration is readable. Narrow on purpose -
+        # a broader catch would swallow an import or IO error and report a plan
+        # that DID declare probes as one that declared none.
+        return []
+    probes = fm.get("done_probes") if isinstance(fm, dict) else None
+    return [str(p) for p in probes] if isinstance(probes, list) else []
+
+
+def _probe_evidence(loop_check_events: list[dict], session_id: str | None) -> dict:
+    """The delivery session's LAST recorded probe results, keyed command->state.
+
+    Last wins: a session may block on a failing probe and pass on a later fire,
+    and only the fire that granted done is evidence.
+    """
+    if not session_id:
+        return {}
+    latest: dict = {}
+    for e in loop_check_events:
+        data = e.get("data")
+        if not isinstance(data, dict):
+            continue  # a corrupt event must skip, never crash the whole verb
+        if data.get("session_id") != session_id:
+            continue
+        probes = data.get("done_probes")
+        if isinstance(probes, dict) and probes:
+            latest = probes
+    return latest
+
+
 def _default_read_summary(row: dict) -> str | None:
     sp = row.get("summary_path")
     if isinstance(sp, str) and sp:
@@ -1218,6 +1259,7 @@ def build_plan_fidelity(
     read_plan_doc=None,
     read_summary=None,
     read_diff=None,
+    loop_check_events: list[dict] | None = None,
 ) -> dict:
     """Join each `planned` row (W1) to its delivery and score plan fidelity.
 
@@ -1227,6 +1269,7 @@ def build_plan_fidelity(
     read_plan_doc = read_plan_doc or _default_read_plan_doc
     read_summary = read_summary or _default_read_summary
     read_diff = read_diff or _default_read_diff
+    loop_check_events = loop_check_events or []
 
     cutoff = now - timedelta(days=since_days)
 
@@ -1267,17 +1310,25 @@ def build_plan_fidelity(
         joined += 1
         d = deliveries[0]
         nid = d.get("graph_node_id")
-        score = _score_fidelity(
-            read_plan_doc(plan_path) if plan_path else None,
-            read_summary(d),
-            read_diff(d),
-        )
+        plan_doc = read_plan_doc(plan_path) if plan_path else None
+        score = _score_fidelity(plan_doc, read_summary(d), read_diff(d))
+        # join "the plan said this would prove it" to "evidence it ran".
+        # A plan declaring no probes reports null, never a fabricated 0/0.
+        declared = _declared_probes(plan_doc)
+        probes = None
+        if declared:
+            evidence = _probe_evidence(loop_check_events, d.get("session_id"))
+            probes = {
+                "declared": len(declared),
+                "passed": sum(1 for c in declared if evidence.get(c) == "pass"),
+            }
         results.append({
             "session_id": sid,
             "plan_path": plan_path,
             "status": "joined",
             "pr_number": d.get("pr_number"),
             "outcome": _node_outcome(nid, _parse_ts(d.get("completed")), by_id, fixes) if nid and nid in by_id else None,
+            "probes": probes,
             **score,
         })
 

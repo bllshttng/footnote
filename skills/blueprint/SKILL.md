@@ -477,6 +477,51 @@ and unknown predicates are warnings.
 identically to today's engine - the evaluator returns exit 0 when the
 block is absent, and only the engine-wide defaults (if any) apply.
 
+## done_probes: operational evidence (MANDATORY for recurring deliverables)
+
+A plan whose deliverable is **recurring or operational** - a scheduler, a
+watcher, a daemon, a cadence, a LaunchAgent, anything whose value is that it
+keeps running - MUST declare 1-2 `done_probes` in its frontmatter.
+Everything else omits the field entirely.
+
+`fno-agents loop-check` runs each probe as the final `DonePRGreen` conjunct and
+refuses done until every one exits 0.
+The gate otherwise measures artifacts (PR + CI + review), which operational
+silence cannot falsify: grooming shipped three times without ever running,
+because the last mile (installing the agent, firing the first run) lives
+outside the repo where the worker's authority ends.
+A probe is what forces that last mile before the session can claim done.
+
+```yaml
+done_probes:
+  - "fno mail list --kind report --since 24h | grep -q groom"
+```
+
+**Assert freshness, never bare existence.**
+A probe like `test -f ~/.fno/groom-report.json` passes vacuously against
+launch-day dry-run residue, which is exactly the failure this field exists to
+catch.
+Bound every probe in time (`--since 24h`, an mtime check, a date-stamped
+lookup) so it can only pass if the thing ran recently.
+
+**End in a predicate, not a pipeline tail.**
+`... | grep -q x` exits on the grep; `... | tail -5` exits on the tail and
+masks the real status, so a broken command reads as a pass.
+
+**Use the block form above, or a single-line inline list** (`done_probes: ["cmd"]`).
+A declaration in any other shape (a multi-line inline list, say) refuses done as
+"probes undeterminable" rather than passing as if you had declared nothing -
+declaring a gate the loop cannot read must never read as no gate.
+
+**Constraints.** At most 3 probes (a gate, not a test suite); each gets a 60s
+native timeout and its whole process group is killed past it; a missing binary
+(127), a non-zero exit, and a timeout all fail closed with the command and code
+named in the block reason.
+Probes must be read-only and idempotent - two near-simultaneous fires may run
+them twice.
+There is no env override: a probe that cannot pass in this environment is
+resolved by editing the plan, which is visible in git.
+
 ---
 
 ## One output shape: a single `.md`
