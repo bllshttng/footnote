@@ -495,7 +495,15 @@ def _read_json(path: Path) -> list[dict]:
         except OSError as e:
             print(f"Warning: {path} is corrupt, backup also failed: {e}", file=sys.stderr)
         raise GraphCorruptError(str(path))
-    return data.get("entries", [])
+    entries = data.get("entries", [])
+    # A present-but-non-list 'entries' (e.g. {"entries": "x"}) would otherwise
+    # reach _apply_graph_defaults and raise a bare AttributeError, breaking
+    # read_graph's "swallow corruption to [], never crash the terminal" contract.
+    # Raise the corruption type so read_graph swallows it and locked_mutate exits
+    # cleanly. No .bak: the file parsed, it is just the wrong shape.
+    if not isinstance(entries, list):
+        raise GraphCorruptError(str(path))
+    return entries
 
 
 def _write_json(entries: list[dict], path: Path) -> None:

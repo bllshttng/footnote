@@ -125,3 +125,17 @@ def test_ac2err_soft_read_returns_empty_for_malformed_root(tmp_path):
 def test_ac2err_soft_read_returns_empty_for_empty_entries(tmp_path):
     g = _write(tmp_path / "graph.json", json.dumps({"entries": []}))
     assert read_graph(g) == []
+
+
+def test_soft_read_swallows_non_list_entries_instead_of_crashing(tmp_path):
+    # read_graph promises it never crashes the terminal; a non-list 'entries'
+    # value must swallow to [] like other corruption, not raise AttributeError
+    # from _apply_graph_defaults.
+    g = _write(tmp_path / "graph.json", json.dumps({"entries": "oops"}))
+    assert read_graph(g) == []
+
+
+def test_strict_read_raises_on_non_list_entries_value(tmp_path):
+    g = _write(tmp_path / "graph.json", json.dumps({"entries": {"not": "a list"}}))
+    with pytest.raises(GraphUnreadableError):
+        read_graph_strict(g)
