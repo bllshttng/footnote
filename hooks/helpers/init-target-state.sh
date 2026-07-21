@@ -732,7 +732,8 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # session, PR-still-open gap the free claim does not. Fail-open: refuse only
   # on an exact in_review read - any error/empty/other-status proceeds
   # unchanged. _GRAPH_FILE is hoisted here (was defined in the claim block).
-  _GRAPH_FILE="${HOME}/.fno/graph.json"
+  # GRAPH_JSON_PATH (config.sh's shell-stub) honors config.paths.graph_json; fall back to the default (as scripts/lib/graph-resolve.sh does).
+  _GRAPH_FILE="${GRAPH_JSON_PATH:-${HOME}/.fno/graph.json}"
   _GUARD_NODE=""
   _GUARD_MATCHES=""   # space-joined distinct id-shaped tokens found in the graph
   _GUARD_AMBIGUOUS=0
@@ -745,9 +746,8 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # split from also glob-expanding a token like "5*" against the cwd.
   set -f
   for _tok in $INITIAL_INPUT; do
-    if [[ "$_tok" =~ ^ab-[0-9a-f]{8}$ ]] \
-       || { [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] \
-            && grep -q "\"${_tok}\"" "$_GRAPH_FILE" 2>/dev/null; }; then
+    if [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] \
+       && grep -q "\"${_tok}\"" "$_GRAPH_FILE" 2>/dev/null; then
       case " $_GUARD_MATCHES " in
         *" $_tok "*) ;;  # already counted this distinct id
         *) _GUARD_MATCHES="${_GUARD_MATCHES:+$_GUARD_MATCHES }$_tok" ;;
