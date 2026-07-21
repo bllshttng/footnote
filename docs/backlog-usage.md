@@ -63,6 +63,8 @@ fno backlog update <id> --type epic            # feature | epic | bug
 fno backlog update <id> --project fno --cwd /path   # reproject (move swimlane)
 fno backlog update <id> --plan-path path/to/plan.md
 fno backlog update <id> --public               # show on the public roadmap
+fno backlog update <id> --source-node x-aaaa   # origin edge (see "Node-to-node edges")
+fno backlog update <id> --related x-bbbb       # affinity edge, symmetric
 ```
 
 `<id>` resolves by canonical id (`ab-1a2b3c4d`), title-derived slug
@@ -118,6 +120,50 @@ fno backlog rank <id> --clear          # rejoin the priority fallback
 
 Blockers: `--blocked-by`, `--add-blocker`, `--remove-blocker` on `update`.
 A node with an open blocker derives to `status: blocked` automatically.
+
+## Node-to-node edges
+
+Four edges connect nodes, and only the first two gate anything.
+
+| Edge | Set with | Meaning | Gates? |
+|------|----------|---------|--------|
+| `blocked_by` | `--blocked-by` / `--add-blocker` / `--remove-blocker` | this cannot start until that lands | yes: derives `_status: blocked` |
+| `parent` | `--parent` | this was decomposed into that epic | yes: rollup, epic depth |
+| `source_node_id` | `--source-node`, or captured ambiently | this came *out of* working on that | no |
+| `related` | `--related` | affinity: two sides of the same coin, or work that co-delivers | no |
+
+`source_node_id` and `related` are deliberately different questions.
+Origin is where the decision to think about this was made; affinity is asserted by whoever notices it, in either direction, and neither implies the other.
+
+**Origin capture is ambient first.** Filing a node from a session that already knows its node stamps the origin with no flag, through three branches in precedence order: an explicit `--source-node`, then an owned `.fno/target-state.md`, then the `FNO_NODE` a spawn exported. Pass `--source-node <id>` only when none of those apply, or to override them.
+
+The two paths fail in opposite directions on purpose. Ambient capture that resolves nothing files the node anyway with a null origin, because provenance must never block a filing. An explicit `--source-node` that does not resolve **refuses the command** and writes nothing, because silently dropping an assertion would leave a node looking organically filed.
+
+```bash
+fno backlog idea "follow-up" --source-node x-aaaa    # or a slug, or bare hex
+fno backlog update <id> --source-node null           # clear it
+```
+
+**`related` is symmetric and stored on both endpoints.** Declaring it on one node writes the inverse on each peer, in the same locked write, so the two sides cannot disagree. It replaces the list rather than appending, and a dropped peer loses its inverse edge too.
+
+```bash
+fno backlog update x-aaaa --related x-bbbb,x-cccc   # sets both directions
+fno backlog idea "co-delivered work" --related x-bbbb
+fno backlog update x-aaaa --related null            # clears both sides
+```
+
+Not to be confused with `fno backlog relatedness`, which builds a *computed* similarity sidecar from token overlap and shared domain/epic. That sidecar is regenerable and rebuilt from scratch on every `relatedness build`; `related` is an assertion and lives on the node so it survives.
+
+### Reading the edges back
+
+```bash
+fno backlog provenance <id>              # origin (with its title), related, birth + spawn sessions
+fno backlog provenance <id> --spawned    # invert the origin edge: what did this node produce?
+```
+
+`--spawned` walks transitively with traversal-derived depth. A cycle truncates the walk and says so, keeping the descendants it already found.
+
+`fno backlog epic status <epic>` reports **scope growth**: follow-ups the epic accumulated after decomposition (reachable by `source_node_id`, not already children by `parent`). The figure is withheld when origin-capture coverage across the epic's window sits below 50%, since at low capture a small number is indistinguishable from poor capture. Coverage and realized node/PR counts print either way, so a withheld figure explains itself.
 
 **done = merged.** `fno backlog done` closes a node only when a referenced PR is
 MERGED. An OPEN PR (even with green CI) exits 5 (awaiting merge): the node stays
