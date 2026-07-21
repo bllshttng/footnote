@@ -332,7 +332,7 @@ def test_build_pane_argv_forwards_model(tmp_path: Path) -> None:
     # x-c772: an explicit --model reaches every pane provider's TUI flag
     # (opencode included, now that it is spawnable). Exact passthrough; opencode
     # uses the provider/model form and always carries a model (z-ai/glm-5.2 default).
-    from fno.agents.mux_spawn import _OPENCODE_DEFAULT_MODEL, build_pane_argv
+    from fno.agents.mux_spawn import _PER_HARNESS_DEFAULT_MODEL, build_pane_argv
 
     cases = [
         ("claude", "u", "opus"),
@@ -353,7 +353,28 @@ def test_build_pane_argv_forwards_model(tmp_path: Path) -> None:
     # opencode ALWAYS carries a model: None/empty falls back to the default.
     for m in (None, ""):
         argv = build_pane_argv("opencode", "t", tmp_path, False, None, m)
-        assert argv[argv.index("--model") + 1] == _OPENCODE_DEFAULT_MODEL
+        assert argv[argv.index("--model") + 1] == _PER_HARNESS_DEFAULT_MODEL["opencode"]
+
+
+def test_opencode_default_is_a_table_lookup(tmp_path: Path, monkeypatch) -> None:
+    # AC7-EDGE: opencode's default reads from the provider-keyed table, not a
+    # hardcoded branch. Retargeting the entry retargets the injected argv;
+    # removing it injects no --model at all; an explicit --model still wins.
+    import fno.agents.mux_spawn as ms
+    from fno.agents.mux_spawn import build_pane_argv
+
+    # retarget: a sentinel entry flows straight through to argv
+    monkeypatch.setattr(ms, "_PER_HARNESS_DEFAULT_MODEL", {"opencode": "sentinel/x"})
+    argv = build_pane_argv("opencode", "t", tmp_path, False, None, None)
+    assert argv[argv.index("--model") + 1] == "sentinel/x"
+
+    # remove the entry: no --model injected (a hardcoded branch would still add one)
+    monkeypatch.setattr(ms, "_PER_HARNESS_DEFAULT_MODEL", {})
+    assert "--model" not in build_pane_argv("opencode", "t", tmp_path, False, None, None)
+
+    # explicit --model overrides the (now empty) table
+    argv = build_pane_argv("opencode", "t", tmp_path, False, None, "mine/y")
+    assert argv[argv.index("--model") + 1] == "mine/y"
 
 
 def test_build_pane_argv_forwards_tier3_flags(tmp_path: Path) -> None:
