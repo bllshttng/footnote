@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from fno import dispatch
 from fno.claims.lanes import active_lane_count
 
@@ -185,3 +183,51 @@ def test_resolve_brief_bytes_reported_in_kv():
     r = _resolve_cli("--node", "x-1", "--verb", "/target", "--brief", "abc")
     assert r.exit_code == 0
     assert "brief_bytes=3" in r.stdout
+
+
+# ---------------------------------------------------------------------------
+# x-d1f4: `fno dispatch resolve` auto-resolves the brief from --node
+# ---------------------------------------------------------------------------
+
+def test_resolve_auto_brief_from_node_details(monkeypatch):
+    """With --node but no --brief, the porcelain resolves the node's brief chain
+    (here details -> synthesis) into env.TARGET_BRIEF, so the /target bg shell
+    dispatcher routing through it carries context, not an empty brief."""
+    import json
+
+    monkeypatch.setattr(
+        dispatch, "_lookup_node",
+        lambda ref: {"id": "x-9", "title": "Retry", "details": "exponential backoff " * 5},
+    )
+    r = _resolve_cli("--node", "x-9", "-J")
+    assert r.exit_code == 0
+    out = json.loads(r.stdout)
+    assert "exponential backoff" in out["env"]["TARGET_BRIEF"]
+    assert out["brief_source"] == "synth-details"
+
+
+def test_resolve_explicit_brief_still_wins_over_auto(monkeypatch):
+    """An explicit --brief is rung 1: it rides verbatim and the node is never
+    consulted for a synthesized brief."""
+    import json
+
+    monkeypatch.setattr(
+        dispatch, "_lookup_node",
+        lambda ref: (_ for _ in ()).throw(AssertionError("must not look up node")),
+    )
+    r = _resolve_cli("--node", "x-9", "--brief", "hand set", "-J")
+    assert r.exit_code == 0
+    out = json.loads(r.stdout)
+    assert out["env"]["TARGET_BRIEF"] == "hand set"
+    assert out["brief_source"] == "explicit"
+
+
+def test_resolve_no_node_no_brief_is_none(monkeypatch):
+    """No node + no brief -> no auto-resolve, brief_source=none, no TARGET_BRIEF."""
+    import json
+
+    r = _resolve_cli("--verb", "/target", "-J")
+    assert r.exit_code == 0
+    out = json.loads(r.stdout)
+    assert out["brief_source"] == "none"
+    assert out["env"].get("TARGET_BRIEF") is None

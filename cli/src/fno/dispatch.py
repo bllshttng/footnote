@@ -120,6 +120,19 @@ def cmd_resolve(
     """
     from fno.agents.harness_map import DispatchResolveError, resolve_dispatch
 
+    # Auto-brief (x-d1f4): with --node but no explicit --brief, resolve the node's
+    # brief chain (explicit dispatch_brief > sidecar > details > transcript tail)
+    # so EVERY dispatcher routing through this porcelain - the /target bg shell
+    # dispatcher (dispatch-node.sh) included - carries the same context, not only
+    # advance.py's daemon paths. An explicit --brief still wins (it IS rung 1).
+    brief_source = "explicit" if brief else "none"
+    if brief is None and node:
+        rec = _lookup_node(node)
+        if rec:
+            from fno.provenance.autobrief import resolve_dispatch_brief
+
+            brief, brief_source = resolve_dispatch_brief(rec)
+
     try:
         out = resolve_dispatch(
             harness=harness,
@@ -134,6 +147,7 @@ def cmd_resolve(
         typer.echo(f"dispatch resolve: {exc}", err=True)
         raise typer.Exit(code=2)
 
+    out["brief_source"] = brief_source
     if json_output:
         typer.echo(json.dumps(out))
     else:
@@ -146,6 +160,7 @@ def cmd_resolve(
         # can be multi-line, so key=value lines only report presence/size here.
         if out["env"].get("TARGET_BRIEF") is not None:
             typer.echo(f"brief_bytes={len(out['env']['TARGET_BRIEF'].encode('utf-8'))}")
+        typer.echo(f"brief_source={brief_source}")
     raise typer.Exit(code=0)
 
 
