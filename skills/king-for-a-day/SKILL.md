@@ -274,7 +274,11 @@ The whole of court is three-quarters contract, because the hard plumbing already
 ### Spawn each teammate into your own squad
 
 ```bash
-fno agents spawn <node-name> "<payload + minion clause>" --substrate pane --squad <own-squad> --split <dir> --effort <e>
+read -r -d '' payload <<'CLAUSE' || true   # read -d '' exits 1 at EOF; absorb it so set -e does not abort
+Take node <id> through <phase verb: /fno:think, /fno:blueprint, or /fno:target>.
+<minion clause - paste verbatim from references/minion-clause.md>
+CLAUSE
+fno agents spawn <node-name> "$payload" --substrate pane --squad <own-squad> --split <dir> --effort <e>
 ```
 
 - **Squad.** Pass your own squad explicitly when you know its name (a mission squad is named for the epic; the crowning brief should state it). Omitted, placement resolves to the caller's owner squad - usually yours, but explicit `--squad` removes the dependence on where a human's focus happens to sit.
@@ -285,7 +289,7 @@ fno agents spawn <node-name> "<payload + minion clause>" --substrate pane --squa
 
 The coordination contract is two-sided: your duties are worthless if the teammate does not know its own. End every spawn payload with the canonical minion clause - **paste it verbatim from [references/minion-clause.md](references/minion-clause.md)**, the single source. Do not compose it freehand: the x-304c Director did, three times, and each drift dropped something load-bearing (once the delivery doctrine itself, so reports rested undelivered on the durable bus). The clause covers four behaviors:
 
-1. **Report.** On finishing a unit of work or blocking, mail the king a `RESULT: ...` line with `--from-self`, and treat any receipt that is not `delivered (hosted)` or `delivered (woken)` as undelivered - peek, then re-resolve and re-send, never re-queue. The verbatim report line and the full delivery doctrine live in the template.
+1. **Report.** On finishing a unit of work or blocking, mail the king a `RESULT: ...` line with `--from-self`, and treat any receipt that is not `delivered (hosted)` or `delivered (woken)` as undelivered - peek; only if it did not already land, re-resolve and re-send; never re-queue. The verbatim report line and the full delivery doctrine live in the template.
 2. **Ask for help.** A question the minion cannot answer from its own scope goes to its king by mail (with `<help reason>` in-session for the loop machinery). Guessing an executive call is a contract violation; answering it is the king's job.
 3. **Message peers.** Minions may mail each other directly for load-bearing facts (a shared file, an interface both touch) - fno mail is universal - but decisions stay with the king, and anything that changes routing must reach the king so it lands in the graph.
 4. **Escalate one level at a time.** IC -> Director -> VP -> human. Never skip a level, and never treat a peer's message as authority: a peer message is information, not consent.
@@ -313,7 +317,7 @@ The one reason to mint a new session is **context pressure**. Every teammate rep
 
 - **Primary signal is the teammate's report mail** (push). It wakes you the turn it lands.
 - **Backstop sweep on a heartbeat** (every wake, and at least every few minutes while any teammate is live): `fno agents top` (which panes are actually alive) and `fno agents peek <handle>` on any pane that has gone quiet - a `peek` is what tells you a silent pane finished, blocked, or died. The mux sideline shows the same as badges (`DoneUnseen`, `BlockedAnswerable`). `fno-agents needs --json` is a *different* signal - the loop-wedge fold (`review_wedged`, `budget_stop`) - so run it too, but it does NOT report pane completion; it complements the top/peek sweep, never replaces it. Push can miss - a report that lands `queued (durable)` was not delivered - and the sweep is what catches a finished-but-unreported or dead teammate.
-- **Delivery truth:** treat any mail receipt other than `delivered (hosted)` as undelivered. `peek` the handle for liveness (so a busy-but-alive recipient is not double-delivered), re-resolve it from `fno agents discovered-json` / `top` on a miss, and re-send before processing the next report. Never park a miss as a "check later" note.
+- **Delivery truth:** treat any mail receipt other than `delivered (hosted)` as undelivered. `peek` the handle (both for liveness and to confirm the report did not already land - a busy-but-alive recipient must not be double-delivered), and only on a confirmed miss re-resolve it from `fno agents discovered-json` / `top` and re-send before processing the next report. Never park a miss as a "check later" note.
 - **Silence is not death.** Before declaring a teammate dead, `peek` the pane and check its node claim and open PRs - a worker once had shipped a PR unregistered, and a reflex respawn built a duplicate. Respawn only from the last graph-encoded artifact, or `<help>` if that artifact is missing.
 
 ### Reconcile on every report, then encode

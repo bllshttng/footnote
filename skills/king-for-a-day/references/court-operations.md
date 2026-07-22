@@ -58,13 +58,13 @@ The runtime serializes three teammate states. Read them precisely - the failure 
 Two states that are **not** death and must never be treated as such:
 
 - **unknown / unregistered but alive.** A teammate can finish work, ship a PR, and never register a row or send a report. Silence proves nothing. Before declaring death, `peek` the pane, check the node claim (`fno claim`), and check open PRs (`gh pr list --head <branch>`). Only a confirmed-dead pane with no claim and no PR is a corpse.
-- **queued (durable), not delivered (hosted).** A mail receipt that is not `delivered (hosted)` means the message is sitting in a queue the recipient may never drain. It is not delivered. Re-resolve the handle and re-send.
+- **queued (durable), not confirmed delivered.** A mail receipt that is not `delivered (hosted)` is sitting in a queue the recipient may never drain - treat it as undelivered. But `peek` the handle first: a `queued (durable)` can be a timed-out live inject that already landed. Re-resolve and re-send only if the peek shows it absent.
 
 ## Recipes
 
 **Spawn a teammate for a node (with the minion clause):**
 
-Assemble the payload with a quoted heredoc so the clause's backticks, `$`, and quotes pass through literally (a plain double-quoted payload runs the clause's backticks as command substitution during spawn):
+Assemble the payload with a quoted heredoc so the clause's single and double quotes pass through literally (the clause carries single quotes in its `RESULT:` line and a double quote in `<help reason="...">`; a plain double-quoted payload terminates at that inner double quote and splits the argument list during spawn):
 
 ```bash
 read -r -d '' payload <<'CLAUSE' || true   # read -d '' exits 1 at EOF; absorb it so set -e does not abort
@@ -89,7 +89,7 @@ Next: /fno:blueprint <node>." --from-self
 
 ```bash
 # spawn the successor FIRST, carrying the phase artifact - same quoted-heredoc
-# assembly as the primary spawn (the clause's backticks/quotes need it here too)
+# assembly as the primary spawn (the clause's single and double quotes need it here too)
 read -r -d '' payload <<'CLAUSE' || true
 Continue node x-b3a8 at /fno:blueprint. Prior /think artifact: <path>.
 <minion clause - paste verbatim from references/minion-clause.md>
