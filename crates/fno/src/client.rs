@@ -31,6 +31,7 @@ use crate::proto::{
     self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentRow,
     AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg, Color,
     Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget, ProtoError,
+    TabSel,
     ServerMsg, SquadMeta, BUILD_VERSION, MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME,
     PROTO_VERSION,
 };
@@ -511,6 +512,43 @@ struct DropZone {
 struct PaneDrag {
     mover: u64,
     zone: Option<DropZone>,
+    /// (v42, x-d6a8 G1) The pointer is over the tab strip: the drop breaks the
+    /// pane into its own new tab (`Command::BreakPane`) instead of relocating it
+    /// within the tab (`Command::MovePane`). Mutually exclusive with `zone` - a
+    /// cell is either the strip or the content area, never both.
+    on_strip: bool,
+    last_at: Instant,
+}
+
+/// (v42, x-d6a8 G2) A tab-cell relocation drag in flight: picking a whole tab up
+/// from the strip to graft it into the current tab's content as a split
+/// (`Command::JoinTab`). Mirrors [`PaneDrag`]'s lifetime (ghost, timeout reaper,
+/// esc-cancel); `zone` is the content-edge candidate under the pointer.
+#[derive(Clone, Copy, Debug)]
+struct TabDrag {
+    src_tab: u64,
+    zone: Option<DropZone>,
+    last_at: Instant,
+}
+
+/// (v42, x-d6a8 G3) The drag source of a sideline agent row.
+#[derive(Clone, Debug)]
+enum RowSource {
+    /// A pane-hosted row: the drop moves its pane into the current tab's content,
+    /// a cross-tab `Command::MovePane` (the pane lives in another tab).
+    Pane(u64),
+    /// A paneless bg row: the drop attaches it at the drop slot
+    /// (`Command::AttachAgent` with a placement).
+    Attach(String),
+}
+
+/// (v42, x-d6a8 G3) A sideline-row placement drag in flight. Reuses the
+/// content-area zone vocabulary; `RowSource` carries whether the drop moves a
+/// live pane or attaches a paneless session. Not `Copy` (the attach id is owned).
+#[derive(Clone, Debug)]
+struct RowDrag {
+    src: RowSource,
+    zone: Option<DropZone>,
     last_at: Instant,
 }
 
@@ -697,6 +735,11 @@ struct View {
     /// (x-aa95) The relocation drag in flight, if any. While `Some`, motion and
     /// release are intercepted before they reach a pane's PTY.
     pane_drag: Option<PaneDrag>,
+    /// (v42, x-d6a8 G2) A tab-cell join drag in flight. Same interception as
+    /// `pane_drag`; at most one of the three drags is ever live at a time.
+    tab_drag: Option<TabDrag>,
+    /// (v42, x-d6a8 G3) A sideline-row placement drag in flight.
+    row_drag: Option<RowDrag>,
     /// (x-a496) A pending click-a-card confirm: the node to dispatch and its
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
@@ -1442,6 +1485,8 @@ impl View {
             sideline_drag: None,
             hover_grip: None,
             pane_drag: None,
+            tab_drag: None,
+            row_drag: None,
             confirm: None,
             create: None,
             create_esc: Vec::new(),
@@ -2654,10 +2699,19 @@ impl View {
         Some(DropZone { target, dir })
     }
 
+    /// (v42, x-d6a8 G1) Whether a cell lies on the tab strip (the top bar right
+    /// of the sideline panel) rather than the content area. The same region
+    /// [`View::chrome_hit`] treats as the strip, so a pane dropped anywhere on it
+    /// breaks into a new tab.
+    fn strip_at(&self, row: u16, col: u16) -> bool {
+        row < TAB_BAR_ROWS && col >= self.panel_w()
+    }
+
     fn begin_pane_drag(&mut self, mover: u64, now: Instant) {
         self.pane_drag = Some(PaneDrag {
             mover,
             zone: None,
+            on_strip: false,
             last_at: now,
         });
     }
@@ -2668,20 +2722,27 @@ impl View {
         let Some(mover) = self.pane_drag.map(|d| d.mover) else {
             return false;
         };
+        // Over the strip (G1): the drop breaks the pane into its own tab, so the
+        // content zone is cleared - a cell is the strip XOR a content zone.
+        let on_strip = self.strip_at(row, col);
         // A zone the dragged pane already occupies is the origin: no highlight,
         // so the gesture reads as "this drop does nothing" before the release.
         // BOTH flanks count - a seam is addressed by its left/top pane, so the
         // divider a pane already abuts on its far side names the NEIGHBOUR and
         // would otherwise light up as a real destination.
         let abuts = |s: Seam| s.a == mover || s.b == mover;
-        let zone = self
-            .drop_zone_at(row, col)
-            .filter(|z| z.target != mover && self.pane_rect(mover).is_some())
-            .filter(|_| !self.seam_at(row, col).is_some_and(abuts));
+        let zone = if on_strip {
+            None
+        } else {
+            self.drop_zone_at(row, col)
+                .filter(|z| z.target != mover && self.pane_rect(mover).is_some())
+                .filter(|_| !self.seam_at(row, col).is_some_and(abuts))
+        };
         let drag = self.pane_drag.as_mut().expect("checked above");
         drag.last_at = now;
-        let changed = drag.zone != zone;
+        let changed = drag.zone != zone || drag.on_strip != on_strip;
         drag.zone = zone;
+        drag.on_strip = on_strip;
         changed
     }
 
@@ -2690,14 +2751,124 @@ impl View {
     /// `None` on every cancel path - released off any zone, on the origin, or
     /// after the dragged pane went away - so a cancelled drag provably puts
     /// nothing on the wire rather than sending a command the server will refuse.
+    /// Over the strip it breaks the pane into its own tab instead (G1).
     fn commit_pane_drag(&mut self) -> Option<Command> {
         let drag = self.pane_drag.take()?;
+        if drag.on_strip {
+            return Some(Command::BreakPane { pane: drag.mover });
+        }
         let zone = drag.zone?;
         Some(Command::MovePane {
             mover: Some(drag.mover),
             target: Some(zone.target),
             dir: zone.dir,
         })
+    }
+
+    // ---- (v42, x-d6a8 G2) tab-cell join drag -------------------------------
+
+    fn begin_tab_drag(&mut self, src_tab: u64, now: Instant) {
+        self.tab_drag = Some(TabDrag {
+            src_tab,
+            zone: None,
+            last_at: now,
+        });
+    }
+
+    /// Track a tab-cell drag to a content-edge zone. Returns whether the
+    /// highlight changed. A drag of the CURRENT tab lights nothing: any zone in
+    /// its own content would be a self-join, suppressed exactly like an origin
+    /// drop (x-aa95 grammar).
+    fn tab_drag_to(&mut self, row: u16, col: u16, now: Instant) -> bool {
+        let Some(src_tab) = self.tab_drag.map(|d| d.src_tab) else {
+            return false;
+        };
+        let self_join = self.active_squad_active_tab_id() == Some(src_tab);
+        let zone = if self_join {
+            None
+        } else {
+            self.drop_zone_at(row, col)
+        };
+        let drag = self.tab_drag.as_mut().expect("checked above");
+        drag.last_at = now;
+        let changed = drag.zone != zone;
+        drag.zone = zone;
+        changed
+    }
+
+    /// End the tab-cell drag and return the join command, or `None` on any cancel
+    /// path (off-zone, or a self-join onto the source tab's own content - the
+    /// server also refuses BAD_REQUEST, belt and braces).
+    fn commit_tab_drag(&mut self) -> Option<Command> {
+        let drag = self.tab_drag.take()?;
+        if self.active_squad_active_tab_id() == Some(drag.src_tab) {
+            return None;
+        }
+        let zone = drag.zone?;
+        Some(Command::JoinTab {
+            src_tab: drag.src_tab,
+            anchor_pane: zone.target,
+            dir: zone.dir,
+        })
+    }
+
+    fn cancel_tab_drag(&mut self) -> bool {
+        self.tab_drag.take().is_some()
+    }
+
+    // ---- (v42, x-d6a8 G3) sideline-row placement drag ----------------------
+
+    fn begin_row_drag(&mut self, src: RowSource, now: Instant) {
+        self.row_drag = Some(RowDrag {
+            src,
+            zone: None,
+            last_at: now,
+        });
+    }
+
+    /// Track a sideline-row drag to a content-edge zone. Unlike a pane drag this
+    /// does NOT gate on `pane_rect(mover)`: a pane-hosted row names a pane living
+    /// in ANOTHER tab, off the current layout by design (the server resolves it).
+    fn row_drag_to(&mut self, row: u16, col: u16, now: Instant) -> bool {
+        if self.row_drag.is_none() {
+            return false;
+        }
+        let zone = self.drop_zone_at(row, col);
+        let drag = self.row_drag.as_mut().expect("checked above");
+        drag.last_at = now;
+        let changed = drag.zone != zone;
+        drag.zone = zone;
+        changed
+    }
+
+    /// End the sideline-row drag and return its placement command, or `None` off
+    /// any zone. A pane-hosted row moves its pane cross-tab (`MovePane`); a
+    /// paneless bg row attaches at the drop slot (`AttachAgent` with a placement
+    /// anchored to the dropped-on pane in the current tab).
+    fn commit_row_drag(&mut self) -> Option<Command> {
+        let drag = self.row_drag.take()?;
+        let zone = drag.zone?;
+        Some(match drag.src {
+            RowSource::Pane(pid) => Command::MovePane {
+                mover: Some(pid),
+                target: Some(zone.target),
+                dir: zone.dir,
+            },
+            RowSource::Attach(id) => Command::AttachAgent {
+                id,
+                placement: PanePlacement {
+                    tab: Some(TabSel::Active),
+                    at: Some(zone.target),
+                    split: Some(zone.dir),
+                    here: false,
+                    ..PanePlacement::default()
+                },
+            },
+        })
+    }
+
+    fn cancel_row_drag(&mut self) -> bool {
+        self.row_drag.take().is_some()
     }
 
     /// Abandon a drag with no command. Esc, the timeout, and the dragged pane
@@ -19549,6 +19720,163 @@ mod tests {
             })
         );
         assert!(view.pane_drag.is_none(), "committing ends the drag");
+    }
+
+    // ---- (v42, x-d6a8) US9 interactive drag commit functions ---------------
+
+    #[test]
+    fn g1_pane_drag_onto_the_strip_commits_a_break() {
+        // AC1-HP (commit half): a pane dragged onto the tab strip breaks into its
+        // own tab (BreakPane), not a within-tab MovePane. The strip cell also
+        // clears the content zone: a cell is strip XOR content.
+        let mut view = three_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        // First over a real content seam: a MovePane candidate.
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.pane_drag_to(r, c, Instant::now());
+        assert!(view.pane_drag.and_then(|d| d.zone).is_some());
+        // Then up onto the strip (row 0, right of the sideline panel).
+        let changed = view.pane_drag_to(0, view.panel_w(), Instant::now());
+        assert!(changed, "moving onto the strip redraws");
+        let d = view.pane_drag.expect("still dragging");
+        assert!(d.on_strip, "the pointer is over the strip");
+        assert!(d.zone.is_none(), "the content zone is cleared on the strip");
+        assert_eq!(
+            view.commit_pane_drag(),
+            Some(Command::BreakPane { pane: 10 }),
+            "a strip drop breaks the pane"
+        );
+        assert!(view.pane_drag.is_none(), "committing ends the drag");
+    }
+
+    #[test]
+    fn g1_pane_drag_off_the_strip_still_moves_within_the_tab() {
+        // The strip branch must not perturb the ordinary drag: leaving the strip
+        // for a content seam commits MovePane exactly as before.
+        let mut view = three_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        view.pane_drag_to(0, view.panel_w(), Instant::now()); // over strip
+        let (r, c) = seam_cell_between(&view, 11, 12); // back to content
+        view.pane_drag_to(r, c, Instant::now());
+        assert!(!view.pane_drag.unwrap().on_strip, "left the strip");
+        assert_eq!(
+            view.commit_pane_drag(),
+            Some(Command::MovePane {
+                mover: Some(10),
+                target: Some(11),
+                dir: Dir::Right
+            })
+        );
+    }
+
+    #[test]
+    fn g2_tab_drag_onto_a_content_edge_commits_a_join() {
+        // AC2-HP: dragging a NON-current tab (id 0; the current tab is 1) onto a
+        // content edge of the current tab joins it there.
+        let mut view = three_pane_view();
+        view.begin_tab_drag(0, Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        assert!(view.tab_drag_to(r, c, Instant::now()), "entering a zone redraws");
+        assert!(view.tab_drag.and_then(|d| d.zone).is_some());
+        assert_eq!(
+            view.commit_tab_drag(),
+            Some(Command::JoinTab {
+                src_tab: 0,
+                anchor_pane: 11,
+                dir: Dir::Right
+            })
+        );
+        assert!(view.tab_drag.is_none(), "committing ends the drag");
+    }
+
+    #[test]
+    fn g2_tab_drag_of_the_current_tab_is_a_suppressed_self_join() {
+        // AC2-EDGE: the current tab (id 1) dropped on its own content lights
+        // nothing and commits nothing - the client suppresses the no-op (the
+        // server would also refuse BAD_REQUEST).
+        let mut view = three_pane_view();
+        view.begin_tab_drag(1, Instant::now()); // 1 IS the current tab
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.tab_drag_to(r, c, Instant::now());
+        assert!(
+            view.tab_drag.and_then(|d| d.zone).is_none(),
+            "a self-join lights no zone"
+        );
+        assert_eq!(view.commit_tab_drag(), None, "and commits nothing");
+    }
+
+    #[test]
+    fn g2_tab_drag_off_zone_or_cancelled_sends_nothing() {
+        // AC1-EDGE / AC1-FR: an off-zone release, and a cancelled drag (the
+        // timeout/esc path clears the struct internally), both send nothing.
+        let mut view = three_pane_view();
+        view.begin_tab_drag(0, Instant::now());
+        // Released with no zone ever set.
+        assert_eq!(view.commit_tab_drag(), None, "off-zone -> nothing");
+        // Cancel clears the struct internally, so a late commit finds nothing.
+        view.begin_tab_drag(0, Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.tab_drag_to(r, c, Instant::now());
+        assert!(view.cancel_tab_drag(), "a live drag cancels");
+        assert!(view.tab_drag.is_none(), "the struct is cleared, not just the zone");
+        assert_eq!(view.commit_tab_drag(), None, "a late release commits nothing");
+    }
+
+    #[test]
+    fn g3_pane_hosted_row_drop_moves_the_off_layout_pane_cross_tab() {
+        // AC3-HP (commit half): a pane-hosted row names a pane (99) that is NOT
+        // in the current layout - off-layout by design (Domain Pitfall: the row
+        // drop must NOT gate on pane_rect(mover)). It still commits a MovePane.
+        let mut view = three_pane_view();
+        assert!(view.pane_rect(99).is_none(), "precondition: 99 is off-layout");
+        view.begin_row_drag(RowSource::Pane(99), Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        assert!(view.row_drag_to(r, c, Instant::now()), "entering a zone redraws");
+        assert_eq!(
+            view.commit_row_drag(),
+            Some(Command::MovePane {
+                mover: Some(99),
+                target: Some(11),
+                dir: Dir::Right
+            })
+        );
+    }
+
+    #[test]
+    fn g3_paneless_row_drop_attaches_at_the_slot() {
+        // AC3 (paneless half): a paneless bg row attaches at the drop slot with a
+        // placement anchored to the dropped-on pane in the current (Active) tab.
+        let mut view = three_pane_view();
+        view.begin_row_drag(RowSource::Attach("c19cd2c3".into()), Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.row_drag_to(r, c, Instant::now());
+        assert_eq!(
+            view.commit_row_drag(),
+            Some(Command::AttachAgent {
+                id: "c19cd2c3".into(),
+                placement: PanePlacement {
+                    tab: Some(TabSel::Active),
+                    at: Some(11),
+                    split: Some(Dir::Right),
+                    here: false,
+                    ..PanePlacement::default()
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn g3_row_drop_off_zone_or_cancelled_sends_nothing() {
+        // AC1-EDGE / AC1-FR for the row drag: off-zone and cancelled both quiet.
+        let mut view = three_pane_view();
+        view.begin_row_drag(RowSource::Pane(99), Instant::now());
+        assert_eq!(view.commit_row_drag(), None, "off-zone -> nothing");
+        view.begin_row_drag(RowSource::Attach("dead".into()), Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.row_drag_to(r, c, Instant::now());
+        assert!(view.cancel_row_drag(), "a live drag cancels");
+        assert!(view.row_drag.is_none(), "the struct is cleared internally");
+        assert_eq!(view.commit_row_drag(), None, "a late release commits nothing");
     }
 
     #[test]
