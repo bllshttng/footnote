@@ -4113,6 +4113,12 @@ def _switchboard_exchange(
 # for ~10s (40 * 250ms) before reporting not-confirmed; give it headroom.
 _MAIL_INJECT_TIMEOUT_S = 20.0
 
+# Rust mux pane exit code for a guarded send the server refused because the
+# recipient pane's turn is not takeable (crates/fno/src/mux_cli.rs
+# EXIT_TARGET_NOT_IDLE). The delivery ladder reads it as turn-not-taken -> a
+# stalled demotion to the durable floor, never a hosted receipt (US4, LD4).
+_MUX_EXIT_TARGET_NOT_IDLE = 15
+
 # Wake spawns key on the target session uuid, not on a fresh agent name: spawn
 # dedup scopes NAME, so two senders waking one session must derive the same name
 # to collide on its flock. Prefixed because a bare 8-hex name is refused.
@@ -4166,11 +4172,23 @@ def _build_mail_ctx(
     )
 
 
-def _mux_pane_send(entry: "AgentEntry", text: str) -> bool:
-    """Live-inject to a mux-hosted agent via ``fno mux pane send``, holding
-    the pane's writer claim around the text-then-CR burst. The claim is
-    best-effort (an unclaimed pane refuses the acquire; send proceeds), but a
-    failed send fails closed -> the caller's durable demotion.
+def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> bool:
+    """Live-inject to a mux-hosted agent via ``fno mux pane send``.
+
+    When ``guarded`` (the mail-delivery default, US4), the paste rides the
+    server-side turn-taken interlock: a pane whose recipient is mid-turn refuses
+    with EXIT_TARGET_NOT_IDLE and this returns False -- a ``stalled`` demotion to
+    the caller's durable floor -- rather than swallowing the bytes and letting the
+    sender report ``hosted`` (Locked Decision 4: hosted-on-bytes-written is
+    banned). A guarded send does NOT hold the pane's writer claim: the server
+    guard refuses any pane whose claim a live pid holds ("busy: relay"), so
+    holding our own claim would self-block every guarded send; the atomic
+    server-side idle check is itself the interleave protection for the paste.
+
+    ``guarded=False`` is the raw channel the writer-claim holder owns (peer
+    follow-up); it holds the claim across the text-then-CR burst so no other
+    writer interleaves. The claim is best-effort (an unclaimed pane refuses the
+    acquire; send proceeds), but a failed send fails closed -> durable.
     """
     mux = entry.mux or {}
     session = mux.get("session")
@@ -4180,7 +4198,9 @@ def _mux_pane_send(entry: "AgentEntry", text: str) -> bool:
     fno_bin = os.environ.get("FNO_BIN") or "fno"
     pane = str(pane_id)
 
-    def _run(args: list[str], stdin_text: Optional[str] = None) -> bool:
+    def _run(args: list[str], stdin_text: Optional[str] = None) -> int:
+        """Run one ``fno mux pane`` verb; return its exit code (-1 on spawn
+        failure). A non-zero code's stderr detail is surfaced, never swallowed."""
         try:
             proc = subprocess.run(
                 [fno_bin, "mux", "pane", *args, "--session", str(session)],
@@ -4191,23 +4211,41 @@ def _mux_pane_send(entry: "AgentEntry", text: str) -> bool:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             print(f"fno mux pane {args[0]} failed: {exc}", file=sys.stderr)
-            return False
+            return -1
         if proc.returncode != 0:
             detail = (proc.stderr or "").strip()
             print(
                 f"fno mux pane {args[0]} exited {proc.returncode}: {detail}",
                 file=sys.stderr,
             )
-            return False
-        return True
+        return proc.returncode
 
-    claimed = _run(["claim", pane, "--pid", str(os.getpid())])
-    try:
-        if not _run(["send", pane, "--stdin"], stdin_text=text):
-            return False
+    def _paste_then_submit() -> bool:
         # PaneSend is bytes; the CR submit waits for the TUI to absorb the paste.
+        send_args = ["send", pane, "--stdin"]
+        if guarded:
+            send_args.append("--guarded")
+        rc = _run(send_args, stdin_text=text)
+        if rc != 0:
+            if rc == _MUX_EXIT_TARGET_NOT_IDLE:
+                # Turn not taken: the recipient is mid-turn, so the paste never
+                # landed. Name the stall; the caller demotes to the durable floor.
+                print(
+                    f"mux pane {pane} stalled: recipient turn not taken; demoting to durable",
+                    file=sys.stderr,
+                )
+            return False
+        # The CR is unguarded: the guarded paste already proved the pane idle, and
+        # guarding the submit could strand a pasted-but-unsent prompt.
         time.sleep(0.3)
-        return _run(["send", pane, "--text", "\r"])
+        return _run(["send", pane, "--text", "\r"]) == 0
+
+    if guarded:
+        return _paste_then_submit()
+
+    claimed = _run(["claim", pane, "--pid", str(os.getpid())]) == 0
+    try:
+        return _paste_then_submit()
     finally:
         if claimed:
             _run(["release", pane])
@@ -4246,7 +4284,10 @@ def _mux_followup_path(
         short_id=ref,
     )
     wrapped = build_cross_session_container(message, from_name)
-    if not _mux_pane_send(existing, wrapped):
+    # Peer follow-up is the writer-claim holder's own raw channel: it has no
+    # durable floor to demote to, so it keeps the unguarded send (the turn-taken
+    # interlock is the mail-delivery lane's guarantee, not this one -- US4 scope).
+    if not _mux_pane_send(existing, wrapped, guarded=False):
         events.emit(
             "agent_followup_failed",
             stage="mux-send",
@@ -4557,9 +4598,6 @@ def _deliver_live(
         )
         return False
 
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.base import ReachabilityProbeError
-
     # Group 2 (Task 3.1): both-endpoints-live switchboard fast lane. When B is a
     # held stream-json thread the daemon drives a turn against it and (the A2A
     # default, Task 4.1 gates it by config) mirrors B's reply back into A. The
@@ -4595,43 +4633,21 @@ def _deliver_live(
     if _switchboard_exchange(entry.name, from_name, wrapped, relay_ctxs):
         return True
 
-    # MCP-channel probe (mirrors _followup_path :334-366).
-    if entry.mcp_channel_id:
-        try:
-            mcp_alive = claude_mod.mcp_channel_reachable(entry.mcp_channel_id, timeout=0.25)
-        except ReachabilityProbeError:
-            mcp_alive = False
-        if mcp_alive:
-            try:
-                # Fire-and-forget via the MCP sidecar: the send-only half of
-                # ask_followup_via_mcp (build notification + push to channel),
-                # WITHOUT its wait_for_reply poll - send never blocks for a
-                # reply (codex #459 P2: the old call used nonexistent kwargs
-                # and would also have blocked polling for a reply).
-                from fno.mcp import build_channel_notification
-                from fno.mcp import client as _mcp_client
-
-                envelope = build_channel_notification(
-                    content=wrapped,
-                    meta={
-                        "source": "fno",
-                        "from_name": from_name,
-                        "session_id": entry.mcp_channel_id,
-                    },
-                )
-                _mcp_client.send_to_channel(entry.mcp_channel_id, envelope)
-                return True
-            except Exception:
-                pass  # fall through to socket path
-
     # Live inject over control.sock (adopted `claude --bg`, the fno-agents
-    # mail-inject verb, G1; node x-1f23). The claude PTY worker.sock lane retired
-    # with daemon PTY hosting (x-f54c), so every live claude row now carries an
-    # empty plain `short_id` -- the worker lane can no longer resolve a mail
-    # recipient, leaving control.sock the sole live path (x-3dac). The mail-inject
-    # verb resolves the handle itself via ClaudeRoster (accepts the full session
-    # uuid or 8-hex short id) and returns False (-> durable) when not reachable.
-    recipient = entry.harness_session_id or entry.short_id
+    # mail-inject verb, G1; node x-1f23). This is the SOLE claude live lane: the
+    # PTY worker.sock lane retired with daemon PTY hosting (x-f54c, x-3dac), and
+    # the redundant MCP-channel fast lane retired here (US5) because it reported
+    # hosted on an unconfirmed bytes-written push (Locked Decision 4) while
+    # reaching no peer the control.sock lane cannot. The mail-inject verb resolves
+    # the handle itself via ClaudeRoster (accepts the full session uuid or 8-hex
+    # short id) and confirms transcript growth before reporting delivered.
+    #
+    # Recipient resolution guarantees no former MCP recipient is stranded:
+    # mcp_channel_id is minted 1:1 from short_id by its sole producer
+    # (register_mcp_channel), so it IS a roster-resolvable id. Live rows can carry
+    # an empty plain `short_id` (x-3dac), so mcp_channel_id is the load-bearing
+    # fallback for an MCP-registered row whose short_id field was since cleared.
+    recipient = entry.harness_session_id or entry.short_id or entry.mcp_channel_id
     if not recipient:
         return False
     return _mail_inject_claude(recipient, wrapped)

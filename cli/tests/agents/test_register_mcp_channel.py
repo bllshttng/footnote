@@ -61,6 +61,32 @@ class TestRegisterMCPChannel:
         target = next(e for e in loaded if e.name == "claude-bot")
         assert target.mcp_channel_id == "abc12345"
 
+    def test_mcp_channel_id_equals_short_id_invariant(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The sole producer mints mcp_channel_id 1:1 from short_id, whatever the
+        short_id is (proof by a distinct value, not the default). This is what
+        lets the control.sock lane reach every MCP recipient: the id it resolves
+        (roster accepts the 8-hex short id) IS the mcp_channel_id."""
+        use_tmpdir(monkeypatch, tmp_path)
+        _seed_claude_agent(short_id="zzzz9999")
+
+        from fno.agents.dispatch import register_mcp_channel
+
+        assert register_mcp_channel("claude-bot") == "zzzz9999"
+
+    def test_rejects_missing_short_id(self, tmp_path: Path, monkeypatch) -> None:
+        """An mcp_channel_id can never be minted without a short_id, so no
+        MCP-registered row can lack a roster-resolvable id -- there is no
+        MCP-only recipient the control.sock lane cannot reach."""
+        use_tmpdir(monkeypatch, tmp_path)
+        _seed_claude_agent(short_id="")
+
+        from fno.agents.dispatch import DispatchAskError, register_mcp_channel
+
+        with pytest.raises(DispatchAskError):
+            register_mcp_channel("claude-bot")
+
     def test_idempotent_returns_existing_id(
         self, tmp_path: Path, monkeypatch
     ) -> None:
@@ -85,7 +111,7 @@ class TestRegisterMCPChannel:
         register_mcp_channel("claude-bot")
 
         events_text = (paths.state_dir() / "events.jsonl").read_text("utf-8")
-        records = [json.loads(l) for l in events_text.splitlines() if l.strip()]
+        records = [json.loads(line) for line in events_text.splitlines() if line.strip()]
         registered = [r for r in records if r["kind"] == "mcp_channel_registered"]
         assert len(registered) == 1
         assert registered[0]["name"] == "claude-bot"
@@ -105,7 +131,7 @@ class TestRegisterMCPChannel:
         register_mcp_channel("claude-bot")
 
         events_text = (paths.state_dir() / "events.jsonl").read_text("utf-8")
-        records = [json.loads(l) for l in events_text.splitlines() if l.strip()]
+        records = [json.loads(line) for line in events_text.splitlines() if line.strip()]
         registered = [r for r in records if r["kind"] == "mcp_channel_registered"]
         assert len(registered) == 2
         assert registered[0]["idempotent"] is False

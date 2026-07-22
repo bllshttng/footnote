@@ -1194,6 +1194,11 @@ enum PaneCmd {
     Send {
         pane: u64,
         source: SendSource,
+        /// `--guarded`: refuse the paste (TARGET_NOT_IDLE) unless the pane is
+        /// provably idle, so a mid-turn recipient demotes to durable instead of
+        /// swallowing bytes an external sender would miscall delivered. Default
+        /// off: the raw channel is the writer-claim holder's own.
+        guarded: bool,
     },
     Wait {
         pane: u64,
@@ -1339,6 +1344,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut lines = None;
     let mut text = None;
     let mut stdin = false;
+    let mut guarded = false;
     let mut quiet_ms = None;
     let mut pattern = None;
     let mut timeout_s = None;
@@ -1362,6 +1368,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             "--command-done" => command_done = true,
             "--text" => text = Some(flag_value(args, &mut i, "--text")?),
             "--stdin" => stdin = true,
+            "--guarded" => guarded = true,
             "--quiet-ms" => {
                 quiet_ms = Some(parse_u64(
                     &flag_value(args, &mut i, "--quiet-ms")?,
@@ -1403,7 +1410,11 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 (None, true) => SendSource::Stdin,
                 (None, false) => return Err("pane send needs --text <s> or --stdin".into()),
             };
-            PaneCmd::Send { pane, source }
+            PaneCmd::Send {
+                pane,
+                source,
+                guarded,
+            }
         }
         "wait" => PaneCmd::Wait {
             pane: pane_arg("wait")?,
@@ -1485,7 +1496,11 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                 CONTROL_TIMEOUT,
             )
         }
-        PaneCmd::Send { pane, source } => {
+        PaneCmd::Send {
+            pane,
+            source,
+            guarded,
+        } => {
             let bytes = match source {
                 SendSource::Text(t) => t.into_bytes(),
                 SendSource::Stdin => {
@@ -1501,7 +1516,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                 ControlVerb::PaneSend {
                     pane,
                     bytes,
-                    guarded: false,
+                    guarded,
                 },
                 CONTROL_TIMEOUT,
             )
@@ -1715,10 +1730,15 @@ fn render_reply(reply: ServerMsg, json: bool, command_done_requested: bool) -> i
         ServerMsg::Err { code, msg } => {
             eprintln!("fno mux pane: {msg}");
             // BLOCK_UNAVAILABLE gets its own exit code (AC2-ERR: a caller can
-            // tell "no such block" apart from a dead pane); every other class
-            // shares the generic error code.
+            // tell "no such block" apart from a dead pane); TARGET_NOT_IDLE
+            // (a guarded send refused because the pane's turn is not takeable)
+            // gets EXIT_TARGET_NOT_IDLE so a mail sender demotes to durable
+            // instead of miscalling a stalled paste delivered; every other
+            // class shares the generic error code.
             if code == err_code::BLOCK_UNAVAILABLE {
                 EXIT_BLOCK_UNAVAILABLE
+            } else if code == err_code::TARGET_NOT_IDLE {
+                EXIT_TARGET_NOT_IDLE
             } else {
                 EXIT_ERROR
             }
@@ -2604,19 +2624,50 @@ mod tests {
                 .cmd,
             PaneCmd::Send {
                 pane: 2,
-                source: SendSource::Text("hi\r".into())
+                source: SendSource::Text("hi\r".into()),
+                guarded: false,
             }
         );
         assert_eq!(
             parse_pane_args(&os(&["send", "2", "--stdin"])).unwrap().cmd,
             PaneCmd::Send {
                 pane: 2,
-                source: SendSource::Stdin
+                source: SendSource::Stdin,
+                guarded: false,
+            }
+        );
+        // --guarded opts the send into the server-side turn-taken interlock.
+        assert_eq!(
+            parse_pane_args(&os(&["send", "2", "--stdin", "--guarded"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Send {
+                pane: 2,
+                source: SendSource::Stdin,
+                guarded: true,
             }
         );
         // Neither / both are usage errors.
         assert!(parse_pane_args(&os(&["send", "2"])).is_err());
         assert!(parse_pane_args(&os(&["send", "2", "--text", "x", "--stdin"])).is_err());
+    }
+
+    #[test]
+    fn mux_pane_guarded_send_not_idle_maps_to_target_not_idle_exit() {
+        // A guarded send the server refuses (pane's turn not takeable) must
+        // carry its own exit code so a mail sender demotes to durable rather
+        // than the generic error, and never miscalls a stalled paste delivered.
+        let refused = ServerMsg::Err {
+            code: err_code::TARGET_NOT_IDLE,
+            msg: "receiving agent not idle".into(),
+        };
+        assert_eq!(render_reply(refused, false, false), EXIT_TARGET_NOT_IDLE);
+        // A different error class still collapses to the generic error code.
+        let other = ServerMsg::Err {
+            code: err_code::DEAD_PANE,
+            msg: "no such pane".into(),
+        };
+        assert_eq!(render_reply(other, false, false), EXIT_ERROR);
     }
 
     #[test]
