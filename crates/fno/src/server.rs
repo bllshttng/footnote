@@ -2106,6 +2106,12 @@ impl Core {
                 self.next_squad_id += 1;
                 self.session
                     .add_squad(sid, vec![squad_key.to_string()], None, tab);
+                // Every squad created remains across a restart, TUI or API: an
+                // unnamed lane minted here (a `pane run`, a fresh attach) persists
+                // immediately, even before any member attaches, keyed by its
+                // durable key.
+                self.squad_members.entry(sid).or_default();
+                self.persist_squad(sid);
                 return Ok((sid, tid, false));
             }
         };
@@ -2679,13 +2685,13 @@ impl Core {
         // workspace, or empty and remove the source squad entirely - each needs a
         // different persistence reconcile below.
         let moved_member = self.member_ctx(mover);
-        // The source squad's store identity (name when named, else origins), so a
-        // move that empties it can depersist the right entry - an unnamed lane
-        // persists too now, not only named workspaces.
+        // The source squad's store identity (name when named, else the durable
+        // key), so a move that empties it can depersist the right entry - an
+        // unnamed lane persists too now, not only named workspaces.
         let src_identity = self
             .session
             .squad(src_sid)
-            .map(|s| (s.name.clone().unwrap_or_default(), s.origins.clone()));
+            .map(|s| (s.name.clone().unwrap_or_default(), s.key.clone()));
 
         // Graft into the destination first, and focus the moved pane there while
         // the dst index is still valid (removing the source tab below can shift
@@ -2717,8 +2723,8 @@ impl Core {
             // resurrect it on restart. Keyed by name when named, else origins;
             // `persist_remove` is a no-op if the squad was never persisted.
             self.squad_members.remove(&src_sid);
-            if let Some((name, origins)) = src_identity {
-                self.persist_remove(&name, &origins);
+            if let Some((name, key)) = src_identity {
+                self.persist_remove(&name, &key);
             }
         } else if let Some(ctx) = moved_member {
             if src_sid != dst_sid {
@@ -3382,21 +3388,25 @@ impl Core {
             .any(|s| s.name == name)
     }
 
-    /// Write-through one persisted squad (upsert by name). Reads name/origins
-    /// from the live session squad and members from `squad_members`; a squad
-    /// that is unnamed or untracked is a silent no-op.
+    /// Write-through one persisted squad. Identity is `name` when named, else a
+    /// durable per-squad `key` minted here on first persist (operator decision:
+    /// every squad persists, not only named workspaces). `origins` is stored for
+    /// restore/owns_path but is NOT identity, so two same-origin unnamed squads
+    /// never collide.
     fn persist_squad(&mut self, sid: u64) {
         let Some(sq) = self.session.squad(sid) else {
             return;
         };
-        // Identity is `name` when named, else `origins` (operator decision: every
-        // squad persists, not only named workspaces). A squad with NEITHER a name
-        // NOR an origin has no stable key across a restart, so it is the one
-        // unpersistable squad - skipped, never an error.
         let name = sq.name.clone().unwrap_or_default();
+        let mut key = sq.key.clone();
         let origins = sq.origins.clone();
-        if name.is_empty() && origins.is_empty() {
-            return;
+        if name.is_empty() && key.is_empty() {
+            // First persist of an unnamed squad: mint its durable identity and
+            // record it on the live squad so every later persist reuses it.
+            key = crate::squad_store::mint_key();
+            if let Some(s) = self.session.squad_mut(sid) {
+                s.key = key.clone();
+            }
         }
         // (x-0f9d US4) Re-derive each member's hosting tab name and write it back
         // into the AUTHORITATIVE in-memory list, not just the store copy. Other
@@ -3426,7 +3436,7 @@ impl Core {
             }
         }
         let members = self.squad_members.get(&sid).cloned().unwrap_or_default();
-        if let Err(e) = crate::squad_store::upsert(&name, &origins, &members) {
+        if let Err(e) = crate::squad_store::upsert(&name, &key, &origins, &members) {
             self.persist_degraded(&e);
         }
     }
@@ -3480,23 +3490,26 @@ impl Core {
     }
 
     /// Write-through a raw upsert from captured fields (used when the in-session
-    /// squad is already gone - a churned member's last pane).
+    /// squad is already gone - a churned member's last pane). Identity is `name`
+    /// when named, else the durable `key`.
     fn persist_stored(
         &mut self,
         name: &str,
+        key: &str,
         origins: &[String],
         members: &[crate::squad_store::StoredMember],
     ) {
-        if let Err(e) = crate::squad_store::upsert(name, origins, members) {
+        if let Err(e) = crate::squad_store::upsert(name, key, origins, members) {
             self.persist_degraded(&e);
         }
     }
 
     /// Write-through a delete of a squad's store entry, keyed by `name` when
-    /// named else by `origins` (an unnamed lane whose last pane closed). A named
-    /// caller may pass `&[]` for origins - the store ignores it when named.
-    fn persist_remove(&mut self, name: &str, origins: &[String]) {
-        if let Err(e) = crate::squad_store::remove(name, origins) {
+    /// named else by its durable `key` (an unnamed lane whose last pane closed).
+    /// A named caller may pass `""` for key; an unpersisted squad (empty key)
+    /// removes nothing.
+    fn persist_remove(&mut self, name: &str, key: &str) {
+        if let Err(e) = crate::squad_store::remove(name, key) {
             self.persist_degraded(&e);
         }
     }
@@ -3518,12 +3531,12 @@ impl Core {
     }
 
     /// The persisted-member context of a pane, captured BEFORE it is reaped
-    /// (the reap clears `attached` and the tree). `(squad id, name, origins,
+    /// (the reap clears `attached` and the tree). `(squad id, name, key, origins,
     /// attach_id)`, or `None` when the pane is not a member of a tracked squad.
-    /// `name` is empty for an unnamed (origin-keyed) squad, whose members
-    /// persist too now - the store identity is `name` when named, else origins.
+    /// `name` is empty for an unnamed squad, whose store identity is the durable
+    /// `key`; members persist too now.
     #[allow(clippy::type_complexity)]
-    fn member_ctx(&self, pid: u64) -> Option<(u64, String, Vec<String>, String)> {
+    fn member_ctx(&self, pid: u64) -> Option<(u64, String, String, Vec<String>, String)> {
         let attach_id = self
             .attached
             .iter()
@@ -3534,11 +3547,11 @@ impl Core {
             return None;
         }
         let sq = self.session.squad(sid)?;
-        // Unnamed squads persist too (keyed by origins); an empty name is the
-        // unnamed sentinel, not a "skip" - so a picker-attached member of the
-        // home squad / a lane still reconciles its close.
+        // Unnamed squads persist too (keyed by the durable `key`); an empty name
+        // is the unnamed sentinel, not a "skip" - so a picker-attached member of
+        // the home squad / a lane still reconciles its close.
         let name = sq.name.clone().unwrap_or_default();
-        Some((sid, name, sq.origins.clone(), attach_id))
+        Some((sid, name, sq.key.clone(), sq.origins.clone(), attach_id))
     }
 
     /// Broadcast a one-line notice to every attached client (restore + degraded
@@ -3642,6 +3655,9 @@ impl Core {
                     .session
                     .squad(home_sid)
                     .is_some_and(|h| h.origins == ps.origins);
+            // The persisted durable identity, adopted onto the rebuilt squad so a
+            // later persist reuses its store entry instead of minting a new one.
+            let restore_key = ps.key.clone();
             for m in &ps.members {
                 if m.tombstone {
                     members.push(m.clone()); // already dead - stays a tombstone
@@ -3741,6 +3757,11 @@ impl Core {
                     .entry(home_sid)
                     .or_default()
                     .extend(members);
+                // Home adopts the lane's durable key so its next persist updates
+                // the SAME store entry instead of minting a second one.
+                if let Some(h) = self.session.squad_mut(home_sid) {
+                    h.key = restore_key;
+                }
                 home_sid
             } else {
                 let sid = self.next_squad_id;
@@ -3749,6 +3770,10 @@ impl Core {
                 let (first_tab, first_map) = it.next().expect("tabs is non-empty above");
                 self.session
                     .add_squad(sid, ps.origins.clone(), restore_name, first_tab);
+                // Adopt the persisted key so the rebuilt squad keeps its identity.
+                if let Some(s) = self.session.squad_mut(sid) {
+                    s.key = restore_key;
+                }
                 if let Some((id, pid)) = first_map {
                     self.attached.insert(id, pid);
                 }
@@ -3801,10 +3826,10 @@ impl Core {
     /// dropped (AC3-EDGE - it must not return at restart).
     fn reconcile_member_close(
         &mut self,
-        ctx: Option<(u64, String, Vec<String>, String)>,
+        ctx: Option<(u64, String, String, Vec<String>, String)>,
         churn: bool,
     ) {
-        let Some((sid, name, origins, attach_id)) = ctx else {
+        let Some((sid, name, key, origins, attach_id)) = ctx else {
             return;
         };
         // member_ctx only returns Some when squad_members holds sid, so get_mut
@@ -3818,7 +3843,7 @@ impl Core {
                 mm.tombstone = true;
             }
             let members = members.clone();
-            self.persist_stored(&name, &origins, &members);
+            self.persist_stored(&name, &key, &origins, &members);
         } else {
             members.retain(|m| m.attach_id != attach_id);
             let survives = self.session.squad(sid).is_some();
@@ -3826,7 +3851,7 @@ impl Core {
                 self.persist_squad(sid);
             } else {
                 self.squad_members.remove(&sid);
-                self.persist_remove(&name, &origins);
+                self.persist_remove(&name, &key);
             }
         }
     }
@@ -6581,11 +6606,11 @@ impl Core {
                                     }
                                 }
                                 (Some(old), None) => {
-                                    self.persist_remove(&old, &[]);
+                                    self.persist_remove(&old, "");
                                     self.persist_squad(squad);
                                 }
                                 // No old name (already unnamed): just persist under
-                                // the origins key.
+                                // the durable key.
                                 (None, _) => self.persist_squad(squad),
                             }
                         }
@@ -6604,13 +6629,13 @@ impl Core {
                 };
                 // De-persist the whole squad up front (user dismissed it - it
                 // must not return at restart). Keyed by name when named, else by
-                // origins (an unnamed lane persists too now). Reaping its member
-                // panes below then no-ops on the store (entry + tracking gone).
+                // the durable key (an unnamed lane persists too now). Reaping its
+                // member panes below then no-ops on the store (entry + tracking gone).
                 if self.squad_members.remove(&id).is_some() {
                     let sq = &self.session.squads[pos];
                     let name = sq.name.clone().unwrap_or_default();
-                    let origins = sq.origins.clone();
-                    self.persist_remove(&name, &origins);
+                    let key = sq.key.clone();
+                    self.persist_remove(&name, &key);
                 }
                 let pids: Vec<u64> = self.session.squads[pos]
                     .tabs
@@ -13570,6 +13595,7 @@ mod tests {
         let _s = StoreScratch::new("restore-dead");
         crate::squad_store::upsert(
             "dead-ws",
+            "",
             &["/tmp".into()],
             &[stored_member("deadbeef", false)],
         )
@@ -13694,6 +13720,7 @@ mod tests {
         let _s = StoreScratch::new("restore-home-merge");
         crate::squad_store::upsert(
             "",
+            "homekey1",
             &["/tmp/home".into()],
             &[stored_member("deadbeef", false)],
         )
@@ -13747,6 +13774,7 @@ mod tests {
         let _s = StoreScratch::new("restore-separate-lane");
         crate::squad_store::upsert(
             "",
+            "lanekey1",
             &["/repo/other".into()],
             &[stored_member("deadbeef", false)],
         )
@@ -13872,6 +13900,7 @@ mod tests {
         let _s = StoreScratch::new("recruit-persisted");
         crate::squad_store::upsert(
             "ghost",
+            "",
             &["/repo".into()],
             &[stored_member("c19cd2c3", false)],
         )
@@ -14910,6 +14939,9 @@ mod tests {
 
     #[test]
     fn pane_placement_split_without_existing_route_creates_first_tab() {
+        // A fresh unnamed lane now persists on creation (every squad remains,
+        // TUI or API), so scratch the store off the real home.
+        let _s = StoreScratch::new("place-split-new-lane");
         let mut core = empty_core();
         let landed = core
             .place_spawned_pane(None, "/repo/new", 1, Some(Dir::Down))
@@ -14919,6 +14951,18 @@ mod tests {
         assert_eq!(squad.tabs.len(), 1);
         assert_eq!(squad.tabs[0].root, Node::Leaf(1));
         assert_eq!(squad.tabs[0].focus, 1);
+        // P2: the lane persisted immediately, even with no member, keyed by its
+        // durable key (name empty).
+        let loaded = crate::squad_store::load();
+        let lane = loaded
+            .squads
+            .iter()
+            .find(|s| s.origins == vec!["/repo/new".to_string()])
+            .expect("the new unnamed lane persisted on creation");
+        assert!(
+            lane.name.is_empty() && !lane.key.is_empty(),
+            "unnamed, durable key"
+        );
     }
 
     #[test]
