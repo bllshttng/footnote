@@ -4750,23 +4750,27 @@ impl View {
             // band still FILLS the full width below - only the text yields.
             let text_w = if r == 0 { btn_reserved } else { text_w };
             let is_inert = row_is_inert(&drow);
-            // x-5a52: standing "you are here" markers, always on (independent of
-            // the selector/hover). The active squad header accents its caret; the
-            // agent row whose pane holds focus gets an accent gutter bar. At most
-            // one of each renders at a time.
-            let (mark_caret, mark_gutter) = match &drow {
+            // x-5a52: the active-squad header accents its caret (always on,
+            // independent of the selector/hover).
+            let mark_caret = matches!(
+                &drow,
                 DisplayRow::Sel(row)
-                    if row.tab.is_none() && row.squad == self.layout.active_squad =>
-                {
-                    (true, false)
-                }
-                DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus) => (false, true),
-                _ => (false, false),
-            };
-            // (x-6851 US1) A header band (squad name row or a section header)
-            // paints its INVERSE flags across the FULL panel width, not just its
-            // text.
-            let is_band = matches!(&drow, DisplayRow::Sel(_) | DisplayRow::Header { .. });
+                    if row.tab.is_none() && row.squad == self.layout.active_squad
+            );
+            // (x-4374) The focused pane's owning row is the sole standing
+            // full-width INVERSE band, replacing the near-invisible one-cell
+            // gutter x-5a52 painted: the band IS the "you are here" signal now. At
+            // most one row matches focus, and a focused shell pane or a focused row
+            // inside a folded section matches no painted row - so zero bands,
+            // never a stale one on a previously-focused row.
+            let is_focus =
+                matches!(&drow, DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus));
+            // A full-width band fills the panel edge-to-edge: the focused row (its
+            // standing band) plus every header (so a SELECTED header inverts
+            // edge-to-edge - headers are otherwise demoted to plain/BOLD by
+            // `header_band_flags` and carry zero standing INVERSE cells).
+            let is_band =
+                is_focus || matches!(&drow, DisplayRow::Sel(_) | DisplayRow::Header { .. });
             // (x-df4c) The row tuple carries `fg` now: most rows are
             // `Color::Default`, but a needs-attention (Blocked) agent row or card
             // paints the accent, so the color must reach the cells below.
@@ -4785,15 +4789,15 @@ impl View {
                             // active-tab marker below.
                             let mark = if is_active_squad { '*' } else { ' ' };
                             let label = format!("{caret}{mark}{}", squad.name);
-                            // (x-6851 US1+US2) The squad name row is a header
-                            // band: a full-width INVERSE band (active BOLD /
-                            // inactive DIM) carrying always-on per-state rollup
-                            // counts folded from THIS squad's live rows every
-                            // paint (never cached - the x-df4c drift posture).
-                            // Subsumes x-d140's collapsed-only worst-state glyph:
-                            // the counts read in every view state, so a blocked
-                            // pane shows as `▲N` whether the squad is folded or
-                            // open.
+                            // (x-6851 US2, demoted x-4374) The squad name row
+                            // carries always-on per-state rollup counts folded
+                            // from THIS squad's live rows every paint (never
+                            // cached - the x-df4c drift posture), right-aligned
+                            // across the full width. The reverse-video band came
+                            // off in x-4374 (active BOLD / inactive plain via
+                            // `header_band_flags`); the counts still read in every
+                            // view state, so a blocked pane shows `▲N` whether the
+                            // squad is folded or open.
                             let rollup = section_rollup(
                                 self.layout
                                     .agents
@@ -4938,8 +4942,8 @@ impl View {
                     // a squad row, so both read as the same cycleable control.
                     header_band_text(&format!("{}{label}", view_caret(view)), &rollup, text_w),
                     // A section header is never the active squad, so it is the
-                    // inactive band (INVERSE+DIM) - one grammar with the squad
-                    // rows above.
+                    // inactive (plain) header - one grammar with the demoted squad
+                    // rows above (x-4374).
                     header_band_flags(false),
                     Color::Default,
                 ),
@@ -4981,6 +4985,14 @@ impl View {
                     ("  no agents".to_string(), cell_flags::DIM, Color::Default)
                 }
             };
+            // (x-4374) The focused row wears the band via INVERSE in its base
+            // flags, set BEFORE the selector/hover XOR below so the two compose:
+            // a parked selector leaves the row as the sole standing band; a
+            // selector ON the focused row XOR-de-inverts it under the cursor, the
+            // same grammar the old header bands used, so the selection still reads.
+            if is_focus {
+                flags |= cell_flags::INVERSE;
+            }
             // The selector cursor OR the mouse hover paints the INVERSE bar
             // (x-a496); both are display indices now (x-260a), so the bar can
             // never drift from the painted row. Hover is highlight-only, and
@@ -5035,18 +5047,13 @@ impl View {
                     cells[r * cols + j].flags |= cell_flags::INVERSE;
                 }
             }
-            // x-5a52 (US4): the active marker rides column 0, preserving the
-            // INVERSE selection band when the selector also sits on this row so
-            // active (accent) and selected (inverse) compose instead of masking.
-            if (mark_caret || mark_gutter) && text_w >= 1 {
-                let idx = r * cols;
-                // Recolor in place so the existing flags (INVERSE band, BOLD)
-                // survive; the caret keeps its glyph, the agent gutter replaces
-                // its leading space with the marker.
-                cells[idx].fg = LATTICE_ACCENT;
-                if mark_gutter {
-                    cells[idx].c = '▎';
-                }
+            // x-5a52 (US4): the active-squad caret rides column 0 in the accent,
+            // recolored in place so the header's flags (BOLD, or INVERSE when
+            // selected) survive and the caret glyph stays. The focused row's
+            // signal is the band above, not a gutter, so nothing is painted here
+            // for it (x-4374).
+            if mark_caret && text_w >= 1 {
+                cells[r * cols].fg = LATTICE_ACCENT;
             }
         }
         // (x-b186) The density button, painted LAST over the sideline's top row.
@@ -5856,19 +5863,18 @@ fn section_rollup(states: impl Iterator<Item = LatticeState>) -> Vec<(LatticeSta
         .collect()
 }
 
-/// (x-6851 US1) The flag set for a section-header band: a full-panel-width
-/// INVERSE band so every section header (squad, `~ elsewhere`, `~ backlog`)
-/// reads visually dominant over the agent rows below it. The active squad adds
-/// BOLD, every inactive section adds DIM - the text is identical, only weight
-/// differs, so a weak-BOLD theme still separates active from inactive by the
-/// band alone.
+/// (x-4374) The flag set for a section header, demoted from the old always-on
+/// INVERSE band: the full-width INVERSE is now the focused-row signal, not the
+/// header's, so a header carries zero standing INVERSE cells. The active squad
+/// header keeps BOLD; an inactive header renders plain (not DIM - a demoted
+/// header should read as present-but-quiet, not disabled). The rollup counts
+/// (`header_band_text`) are unchanged and still fill the full width.
 fn header_band_flags(active: bool) -> u8 {
-    cell_flags::INVERSE
-        | if active {
-            cell_flags::BOLD
-        } else {
-            cell_flags::DIM
-        }
+    if active {
+        cell_flags::BOLD
+    } else {
+        0
+    }
 }
 
 /// (x-6851 US1+US2) Compose one section header band: the label at the left, the
@@ -10961,49 +10967,59 @@ mod tests {
 
     #[test]
     fn sideline_marks_active_squad_and_focused_agent_row() {
-        // x-5a52 US2/US3 / AC2-HP: the active squad header accents its caret and
-        // the agent row whose pane holds focus carries the `▎` gutter, both
-        // standing regardless of the selector (parked elsewhere) or hover.
+        // x-4374 / AC2-HP: the active squad header accents its caret, and the
+        // agent row whose pane holds focus wears the full-width INVERSE band
+        // (replacing the near-invisible one-cell gutter x-5a52 painted). Both
+        // stand regardless of the selector (parked elsewhere) or hover.
         let mut view = two_pane_view(); // active_squad = 1, focus = pane 11
         view.layout.agents.push(focus_agent(11));
         view.selector = Some(3); // squad 2's header, not row 0 or 1
         view.hover_row = None;
         let frame = view.compose();
         let cols = frame.cols as usize;
+        let panel_w = view.panel_w() as usize;
 
         // Display row 0 -> outer row 0: the active squad header caret is amber.
         let caret = frame.cells[0];
         assert_eq!(caret.c, '▾', "active expanded squad shows the caret");
         assert_eq!(caret.fg, LATTICE_ACCENT, "active squad caret is accented");
 
-        // Display row 1 -> outer row 1: the focused agent row gutter marker.
-        let gutter = frame.cells[cols]; // outer row 1
-        assert_eq!(gutter.c, '▎', "focused agent row carries the gutter marker");
-        assert_eq!(gutter.fg, LATTICE_ACCENT, "gutter marker is accented");
+        // Display row 1 -> outer row 1: the focused agent row is a full-width
+        // INVERSE band, and the `▎` gutter glyph is gone.
+        let lead = frame.cells[cols]; // outer row 1, col 0
+        assert_ne!(
+            lead.c, '▎',
+            "the ▎ gutter is retired; the band is the signal"
+        );
         assert_eq!(
-            gutter.flags & cell_flags::INVERSE,
-            0,
-            "standing marker shows without a selection band"
+            lead.flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "the focused row carries the standing INVERSE band"
+        );
+        // The band fills the panel width (a right-edge text cell is still INVERSE).
+        assert_eq!(
+            frame.cells[cols + panel_w - 2].flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "the focus band fills the panel width"
         );
     }
 
     #[test]
     fn active_marker_composes_with_selection_inverse() {
-        // x-5a52 US4 / AC3-UI: when the selector sits on the active agent row, the
-        // gutter keeps its accent AND the INVERSE band, so active and selected
-        // render together instead of one masking the other.
+        // x-4374 / AC3-UI: when the selector sits on the focused row, the XOR
+        // de-inverts its standing band so the selection reads under the cursor -
+        // the same grammar the old header bands used - instead of band and cursor
+        // masking each other.
         let mut view = two_pane_view();
         view.layout.agents.push(focus_agent(11));
         view.selector = Some(1); // the focused agent row
         let frame = view.compose();
         let cols = frame.cols as usize;
-        let gutter = frame.cells[cols]; // outer row 1
-        assert_eq!(gutter.c, '▎', "gutter glyph survives the selection band");
-        assert_eq!(gutter.fg, LATTICE_ACCENT, "accent survives under INVERSE");
+        let lead = frame.cells[cols]; // outer row 1, col 0
         assert_eq!(
-            gutter.flags & cell_flags::INVERSE,
-            cell_flags::INVERSE,
-            "the selection band still covers the marked row"
+            lead.flags & cell_flags::INVERSE,
+            0,
+            "the selector de-inverts the focused row's band so the cursor reads"
         );
     }
 
@@ -14198,13 +14214,13 @@ mod tests {
         sel_view.selector = Some(4);
         let sel_frame = sel_view.compose();
         let sel_cell = sel_frame.cells[notes_row * cols + 2];
-        // (x-6851 US1) The notes squad is an inactive header band (INVERSE+DIM);
-        // the selector TOGGLES INVERSE, so the cursor row must render DIFFERENTLY
-        // from the unselected band rather than simply carrying INVERSE.
+        // (x-4374) The notes squad is a demoted header (no standing INVERSE); the
+        // selector TOGGLES INVERSE, so selecting it ADDS the band and the cursor
+        // row renders DIFFERENTLY from the unselected header.
         assert_ne!(
             sel_cell.flags & cell_flags::INVERSE,
             unsel_cell.flags & cell_flags::INVERSE,
-            "selector highlight must visibly toggle the notes band"
+            "selector highlight must visibly toggle the notes header"
         );
     }
 
@@ -14344,10 +14360,12 @@ mod tests {
     }
 
     #[test]
-    fn header_band_is_inverse_and_agent_rows_are_not() {
-        // x-6851 US1 (AC1-HP): every section header paints an INVERSE band
-        // (active squad +BOLD, inactive +DIM); agent rows never carry INVERSE, so
-        // a flag diff cleanly separates header cells from row cells.
+    fn headers_demoted_and_focused_row_wears_the_band() {
+        // x-4374 (AC1-HP, was header_band_is_inverse_and_agent_rows_are_not):
+        // headers lose the always-on INVERSE band (active squad keeps BOLD,
+        // inactive renders plain), and the full-width band moves to the agent row
+        // that owns the focused pane. Exactly one standing band, and it is the
+        // focus row.
         let mut view = two_pane_view();
         let panes = view.layout.panes.clone();
         view.set_layout(LayoutView {
@@ -14356,7 +14374,7 @@ mod tests {
             panes,
             focus: 11,
             area: (29, 72),
-            agents: vec![blocked_row("lb", 7, None)], // under active squad 1
+            agents: vec![blocked_row("lb", 11, None)], // owns the focused pane 11
             focus_node: None,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
@@ -14365,25 +14383,38 @@ mod tests {
         let (rows, cols, panel_w) = (29usize, 72usize, 28usize);
         let mut cells = vec![Cell::default(); rows * cols];
         view.draw_sideline(&mut cells, rows, cols, panel_w);
-        // Row 0 = active squad band: INVERSE + BOLD.
-        assert_eq!(cells[0].flags & cell_flags::INVERSE, cell_flags::INVERSE);
-        assert_eq!(cells[0].flags & cell_flags::BOLD, cell_flags::BOLD);
-        // The band spans the full width (a right-edge cell is still INVERSE).
+        // Row 0 = active squad header: demoted - BOLD, NO INVERSE.
         assert_eq!(
-            cells[panel_w - 2].flags & cell_flags::INVERSE,
+            cells[0].flags & cell_flags::INVERSE,
+            0,
+            "the active header no longer paints a standing band"
+        );
+        assert_eq!(cells[0].flags & cell_flags::BOLD, cell_flags::BOLD);
+        // Row 1 = the agent row owning the focused pane: the sole standing band.
+        assert_eq!(
+            cells[cols].flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "the focused row wears the full-width band"
+        );
+        // The band spans the full width (a right-edge text cell is still INVERSE).
+        assert_eq!(
+            cells[cols + panel_w - 2].flags & cell_flags::INVERSE,
             cell_flags::INVERSE,
             "band fills the panel width"
         );
-        // Row 1 = the agent row: NOT a band (no INVERSE).
-        assert_eq!(cells[cols].flags & cell_flags::INVERSE, 0);
         // Row 2 = the Blank spacer between squads (inert, no INVERSE). Row 3 =
-        // inactive `notes` band: INVERSE + DIM.
+        // inactive `notes` header: demoted to plain - NO INVERSE, NO DIM.
         assert_eq!(cells[2 * cols].flags & cell_flags::INVERSE, 0);
         assert_eq!(
             cells[3 * cols].flags & cell_flags::INVERSE,
-            cell_flags::INVERSE
+            0,
+            "the inactive header no longer paints a standing band"
         );
-        assert_eq!(cells[3 * cols].flags & cell_flags::DIM, cell_flags::DIM);
+        assert_eq!(
+            cells[3 * cols].flags & cell_flags::DIM,
+            0,
+            "the inactive header is plain, not DIM (present, not disabled)"
+        );
     }
 
     #[test]
