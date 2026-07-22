@@ -1,10 +1,10 @@
 # Background dispatch (`bg`) and batched mode (`batched`)
 
-Read this when the argument leads with `bg <node...>` / `bg --all-ready` (fire-and-forget dispatch) or `batched <node>` (a batch-lane member run dispatched by the active-backlog daemon). Neither is a normal pipeline; each is a constrained flow.
+Read this when the argument leads with `bg <node...>` / `bg --all-ready` (dispatch-and-continue) or `batched <node>` (a batch-lane member run dispatched by the active-backlog daemon). Neither is a normal pipeline; each is a constrained flow.
 
 ## Background Dispatch (`bg`)
 
-If `bg <node...>` or `bg --all-ready` is passed (US5 targeted bg-dispatch): this is a **fire-and-forget** dispatch of one or more `ready` backlog nodes as fresh `claude --bg` `/target` workers. Do NOT init a pipeline, do NOT resume, do NOT write `target-state.md` — the planning session stays usable for more `/think` + `/blueprint` while the dispatched workers run on their own (the fresh bg process IS the context "clear"; the agent cannot `/clear` itself). Run the dispatch primitive, relay its per-node outcome lines verbatim with the `fno agents logs <name>` hints, then STOP:
+If `bg <node...>` or `bg --all-ready` is passed (US5 targeted bg-dispatch): this **dispatches** one or more `ready` backlog nodes as fresh `claude --bg` `/target` workers and continues, without blocking or supervising them from here. A `--bg` worker is NOT headless "fire-and-forget": it registers an agent-view row and keeps an attachable pane, so it is observable and drivable after launch (`fno agents logs <name>`, and attach for a live look) - the dispatch stance is unsupervised, the worker is not invisible. Do NOT init a pipeline, do NOT resume, do NOT write `target-state.md` — the planning session stays usable for more `/think` + `/blueprint` while the dispatched workers run on their own (the fresh bg thread gets its own fresh context; this session cannot `/clear` itself). Run the dispatch primitive, relay its per-node outcome lines verbatim with the `fno agents logs <name>` hints, then STOP:
 
 ```bash
 bash "${SKILL_DIR}/scripts/dispatch-node.sh" <node...|--all-ready> [--flags "<size/modifiers>"] [--allow-merge] [--max N] [--permission-mode <mode>]
@@ -12,7 +12,7 @@ bash "${SKILL_DIR}/scripts/dispatch-node.sh" <node...|--all-ready> [--flags "<si
 
 Each line is one of `launched` / `already-running` / `parked` / `skipped-done` / `failed` / `deferred-cap`, followed by a `summary:` line; never silent. Locked semantics:
 - Under `--all-ready` only `ready` nodes dispatch. An **explicitly-named** node also dispatches when its status is `idea` (the triage pile; naming it is the human's vet, the worker runs think->blueprint->do); `blocked`/`deferred` are always **parked** (pre-planned future work), never launched. A node a live worker already holds (`node:<id>` claim) is **already-running**, never double-dispatched.
-- Each worker launches via `fno agents spawn --provider claude --substrate bg` (the detached `claude --bg` thread; Group 1 ab-8b3e4fe0 moved creation off `ask`), NEVER `--bare`/`-p` (subscription lane only). The `--substrate bg` key is load-bearing: the post-x-3ab8 default substrate is `pane` (owned-PTY), which would stall a fire-and-forget dispatch at a placement prompt (x-2c27).
+- Each worker launches via `fno agents spawn --provider claude --substrate bg` (the detached `claude --bg` thread; Group 1 ab-8b3e4fe0 moved creation off `ask`), NEVER `--bare`/`-p` (subscription lane only). The `--substrate bg` key is load-bearing: the post-x-3ab8 default substrate is `pane` (owned-PTY), which would stall an unsupervised dispatch at a placement prompt (x-2c27).
 - `no-merge` is injected by default (an autonomous worker lands a PR for review, not an auto-merge); pass `--allow-merge` to opt out.
 - A dispatch failure is surfaced and leaves the node `ready`/re-dispatchable; it never reports a launch that did not happen, and never falls back to `-p`/API-credit billing.
 

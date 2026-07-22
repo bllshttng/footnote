@@ -46,7 +46,7 @@ That is the whole job when a backlog node or plan is already bound. `fno target 
 - **only if** `$TARGET_BRIEF` is set in the environment (a dispatcher passed a per-node brief via `dispatch_brief`, US3): read it as extra mission context - the scope/"why" the dispatcher wanted this worker to carry. It is plain text (capped at 8 KB) and travels via env, never the command line; treat it as guidance for this node, not as a command to execute.
 - **only if** the run carries `authority: full` (invoked as `/target beastmode`, surfaced on the `attended` line of `fno target status`): a judgment call that would emit `<help>` and stall is decided and recorded instead - [references/beastmode-authority.md](references/beastmode-authority.md).
 - **only if** `.fno/target-state.md` already exists for this session: you are **mid-loop** - re-verify the world and re-emit `<promise>`; do NOT re-init or rebuild.
-- **only if** dispatching nodes fire-and-forget (`bg`) or running a batch-lane member (`batched`): [references/bg-and-batched-modes.md](references/bg-and-batched-modes.md).
+- **only if** dispatching nodes to run unsupervised (`bg`) or running a batch-lane member (`batched`): [references/bg-and-batched-modes.md](references/bg-and-batched-modes.md).
 - **only if** the orienter printed `boundary-reconcile: STALE`: perform **Step 0** before any code commit - for each stale blocker, read its merged diff (`gh pr diff <n>`) and append a `### <blocker> landed ... - boundary reconcile` landed-facts section to the plan/brief. This is a *different* thing from de-stub reconcile below (hard-serialized dependent vs a stubbed contract). Full procedure + section format: [references/boundary-reconcile.md](references/boundary-reconcile.md).
 - **only if** spawned to de-stub a merged blocker: [§0b Reconcile mode](#0b-reconcile-mode---reconcile-manifest).
 - **only if** a Claude Plan-Mode plan was just approved (attended): [references/plan-mode-frontdoor.md](references/plan-mode-frontdoor.md).
@@ -78,6 +78,7 @@ Environment-specific traps that defy reasonable assumptions. Read these before y
 - **Read the RESOLVED `auto_merge_approved` from the manifest, never `fno config get auto_merge`.** Init folds config with this run's modifiers, and `/target bg` injects `no-merge` by default; the raw config would tell you to merge against an explicit per-run prohibition.
 - **`git checkout -- <file>` destroys uncommitted work** and is NOT stash-recoverable. In a stale-base worktree, `git add -A` can revert an unmerged merge - stage named files, never `-A`.
 - **The manifest is write-once.** After `fno target init`, the only legal write is first-filling an empty `plan_path` via `fno state set`. There are no gate booleans or status fields to set; any other field write exits 5.
+- **A `bg` worker is unsupervised, NOT headless.** `/target bg` dispatches and continues without blocking, but the worker is not invisible: it registers an agent-view row and keeps an attachable pane, so it stays observable and drivable after launch (`fno agents logs <name>`, or attach). "Fire-and-forget" describes only the dispatching session's non-blocking stance, never the worker's nature.
 
 ## Optional: external loop wrapper
 
@@ -151,7 +152,7 @@ For a from-idea or multi-phase run, the whole phase map (think -> blueprint -> d
 # Execution modes (combinable with sizes)
 /target agent "feature"                  # subagent dispatch
 /target fork path/to/plans-folder/       # worktree isolation per plan
-/target bg ab-A ab-B                     # fire-and-forget: dispatch ready node(s) as claude --bg /target workers (US5)
+/target bg ab-A ab-B                     # dispatch-and-continue: ready node(s) as claude --bg /target workers, unsupervised (US5)
 /target bg --all-ready                   # dispatch every ready, non-deferred node; planning session keeps going
 
 # Modifiers
@@ -192,7 +193,7 @@ If `override <reason>` is passed: the operator-override machinery was removed in
 
 ### 0a. Background dispatch (`bg`) and batched mode (`batched`)
 
-**only if** the argument leads with `bg <node...>` / `bg --all-ready` (fire-and-forget dispatch of ready nodes as `claude --bg /target` workers) or `batched <node>` (a batch-lane member run on a shared branch): neither is a normal pipeline. Load [references/bg-and-batched-modes.md](references/bg-and-batched-modes.md) for the constrained flow before doing anything else.
+**only if** the argument leads with `bg <node...>` / `bg --all-ready` (dispatch ready nodes as unsupervised `claude --bg /target` workers - each keeps an agent-view row and an attachable pane, so "unsupervised" not "headless") or `batched <node>` (a batch-lane member run on a shared branch): neither is a normal pipeline. Load [references/bg-and-batched-modes.md](references/bg-and-batched-modes.md) for the constrained flow before doing anything else.
 
 ### 0b. Reconcile mode (`--reconcile <manifest>`)
 
@@ -356,7 +357,7 @@ Configuration lives in `.fno/config.toml` (project-local) with `~/.fno/config.to
 Loaded by state — the "read X when Y" load conditions are inline above; this is the index.
 
 - [references/beastmode-authority.md](references/beastmode-authority.md) - Walk-away authority grant (load when `authority: full`)
-- [references/bg-and-batched-modes.md](references/bg-and-batched-modes.md) - `bg` fire-and-forget dispatch + `batched` member runs
+- [references/bg-and-batched-modes.md](references/bg-and-batched-modes.md) - `bg` dispatch-and-continue (unsupervised, still observable) + `batched` member runs
 - [references/plan-mode-frontdoor.md](references/plan-mode-frontdoor.md) - Attended Claude Plan-Mode backfill front door
 - [references/plan-mode-backfill.md](references/plan-mode-backfill.md) - Backfill adapter mechanics (deeper contract)
 - [references/ship-and-promise.md](references/ship-and-promise.md) - Draining reviews + local review gates before `<promise>`
