@@ -176,6 +176,59 @@ def _handle_question(repo_root: Path, h: ThreadHandle) -> DrainResult:
 
 
 def _handle_heads_up(repo_root: Path, project: str, h: ThreadHandle) -> DrainResult:
+    """Wake the addressee to drain its own heads-up when it is a resumable-but-
+    asleep session (US9); otherwise triage it into a graph node.
+
+    A heads-up's recipient can be a session handle, not just a project. When it
+    resolves to an asleep-but-resumable claude session, that session has no turn
+    boundary of its own to drain the note - so the daemon wakes it (rung 3 of the
+    inbox-daemon ladder) and leaves the thread unread for the woken agent's own
+    drain-self to consume. A wake refusal (the session is actually live, or
+    another wake is in flight) falls through to triage.
+    """
+    woke = _try_wake_addressee(project, h)
+    if woke is not None:
+        return woke
+    return _handle_heads_up_triage(repo_root, project, h)
+
+
+def _try_wake_addressee(project: str, h: ThreadHandle) -> Optional[DrainResult]:
+    """Return a ``woke_drain_agent`` result if the recipient resolves to a
+    resumable-but-asleep claude session that this rung woke; else None (a plain
+    project, a non-claude session, an ambiguous token, or a refused wake - all
+    fall through to triage). Best-effort: a resolver or spawn error never breaks
+    the drain.
+    """
+    from fno.agents.discover import resolve_reachable
+    from fno.agents.dispatch import wake_drain_agent
+
+    try:
+        reachable, _ambiguous = resolve_reachable(project)
+    except Exception:  # noqa: BLE001 - a resolver failure must not break the drain
+        return None
+    if reachable is None or reachable.agent != "claude":
+        return None
+    cwd = None
+    if reachable.cwd:
+        try:
+            cwd = Path(reachable.cwd)
+        except (TypeError, ValueError):
+            cwd = None
+    try:
+        delivered, _detail = wake_drain_agent(reachable.session_id, cwd=cwd)
+    except Exception:  # noqa: BLE001 - a spawn error falls through to triage
+        return None
+    if not delivered:
+        return None
+    return DrainResult(
+        thread_id=h.thread_id,
+        kind="heads-up",
+        action="woke_drain_agent",
+        thread_path=str(h.path),
+    )
+
+
+def _handle_heads_up_triage(repo_root: Path, project: str, h: ThreadHandle) -> DrainResult:
     """LLM triage; create graph node on success."""
     settings = read_triage_settings()
     try:
