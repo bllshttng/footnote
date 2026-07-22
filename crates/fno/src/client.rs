@@ -6498,7 +6498,13 @@ async fn attach_and_run(
                 | ServerMsg::SearchResult { .. }
                 // PeekBody answers a post-attach PeekAgent (x-c376): impossible
                 // in the preamble, ignore rather than desync.
-                | ServerMsg::PeekBody { .. },
+                | ServerMsg::PeekBody { .. }
+                // (v41) Script-layout control-verb replies: only ever sent on a
+                // one-shot control connection, never to an attached client.
+                | ServerMsg::TabList { .. }
+                | ServerMsg::LayoutTree { .. }
+                | ServerMsg::PaneLocation { .. }
+                | ServerMsg::TabSpawned { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
@@ -6747,7 +6753,13 @@ async fn attach_and_run(
                     | ServerMsg::PaneSpawned { .. }
                     | ServerMsg::Ok
                     | ServerMsg::WaitDone { .. }
-                    | ServerMsg::Err { .. }) => {}
+                    | ServerMsg::Err { .. }
+                    // (v41) Script-layout replies: control-connection only,
+                    // never sent to an attached client - ignore, don't desync.
+                    | ServerMsg::TabList { .. }
+                    | ServerMsg::LayoutTree { .. }
+                    | ServerMsg::PaneLocation { .. }
+                    | ServerMsg::TabSpawned { .. }) => {}
                 Ok(ServerMsg::Copy { text }) => {
                     // Land the server-extracted selection on the clipboard: local
                     // exec first, OSC 52 to the outer terminal as fallback
@@ -8138,6 +8150,8 @@ async fn execute_row_menu_action(
                         target: PaneTarget::CurrentRoute,
                         split,
                         here: false,
+                        tab: None,
+                        at: None,
                     },
                 }),
             )
@@ -9415,6 +9429,8 @@ async fn attach_place_keys(
                     target: PaneTarget::SquadId(picker.target),
                     split,
                     here: false,
+                    tab: None,
+                    at: None,
                 },
             }),
         )
@@ -16655,6 +16671,8 @@ mod tests {
             ClientMsg::Command(Command::AttachAgent {
                 id: "c19cd2c3".into(),
                 placement: PanePlacement {
+                    tab: None,
+                    at: None,
                     target: PaneTarget::SquadId(2),
                     split: Some(Dir::Left),
                     here: false,
@@ -16690,6 +16708,8 @@ mod tests {
             ClientMsg::Command(Command::AttachAgent {
                 id: "c19cd2c3".into(),
                 placement: PanePlacement {
+                    tab: None,
+                    at: None,
                     target: PaneTarget::SquadId(1),
                     split: None,
                     here: false,

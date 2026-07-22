@@ -98,6 +98,8 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
         &scratch,
         &cwd,
         PanePlacement {
+            tab: None,
+            at: None,
             target: PaneTarget::CurrentRoute,
             split: Some(Dir::Left),
             here: false,
@@ -133,6 +135,8 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
         &scratch,
         &cwd,
         PanePlacement {
+            tab: None,
+            at: None,
             target: PaneTarget::CurrentRoute,
             split: Some(Dir::Right),
             here: false,

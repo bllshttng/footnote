@@ -34,8 +34,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::proto::{
-    self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, PanePlacement,
-    PaneTarget, ServerMsg, WaitOutcome, BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
+    self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, LayoutScope,
+    PanePlacement, PaneTarget, ServerMsg, TabSel, WaitOutcome, BUILD_VERSION, DEFAULT_SESSION,
+    PROTO_VERSION,
 };
 use crate::tree::Dir;
 
@@ -1127,6 +1128,9 @@ pub const EXIT_WAIT_EXITED: i32 = 12; // wait: the pane's child exited
 pub const EXIT_WAIT_COMMAND_DONE: i32 = 13; // wait: --command-done, OSC 133 D fired (v6)
 pub const EXIT_BLOCK_UNAVAILABLE: i32 = 14; // read --block: evicted/nonexistent/markerless (v6)
 pub const EXIT_TARGET_NOT_IDLE: i32 = 15; // block pipe: receiving agent not idle (guard refused)
+pub const EXIT_NOT_FOUND: i32 = 16; // where: the fno_id is not in the registry (x-d865)
+pub const EXIT_NOT_PANE_HOSTED: i32 = 17; // where: in registry but hosts no live pane (x-d865)
+pub const EXIT_REGISTRY_UNAVAILABLE: i32 = 18; // where: the registry could not be read (x-d865)
 
 /// Default `pane wait` deadline when `--timeout` is omitted. There is never an
 /// infinite wait (Failure Modes: every wait is bounded).
@@ -1179,11 +1183,26 @@ enum SendSource {
 /// alongside on [`ParsedPane`]).
 #[derive(Debug, PartialEq, Eq)]
 enum PaneCmd {
-    Ls,
+    Ls {
+        /// (x-d865) `--fno-id <id>`: filter the listing to panes hosting this
+        /// fno session id (client-side over `PaneInfo.fno_id`).
+        fno_id: Option<String>,
+    },
     Read {
         pane: u64,
         lines: Option<u16>,
         block: Option<BlockSel>,
+    },
+    /// (x-d865) `pane split <pane> --direction <dir> [--focus]`.
+    Split {
+        pane: u64,
+        direction: Dir,
+        focus: bool,
+    },
+    /// (x-d865) `pane break <pane> [--name <s>]`.
+    Break {
+        pane: u64,
+        name: Option<String>,
     },
     Run {
         cwd: Option<String>,
@@ -1240,6 +1259,40 @@ fn parse_u64(s: &str, flag: &str) -> Result<u64, String> {
         .map_err(|_| format!("{flag} needs a number, got {s:?}"))
 }
 
+/// A direction word: `left|right|up|down` (x-d865, shared by split/run).
+fn parse_dir(s: &str, flag: &str) -> Result<Dir, String> {
+    match s {
+        "left" => Ok(Dir::Left),
+        "right" => Ok(Dir::Right),
+        "up" => Ok(Dir::Up),
+        "down" => Ok(Dir::Down),
+        _ => Err(format!(
+            "{flag} must be left, right, up, or down (got {s:?})"
+        )),
+    }
+}
+
+/// A `--tab <spec>` selector (x-d865). Grammar: `active` | `new` | `id:<n>` (the
+/// STABLE tab id, preferred in scripts) | `name:<s>` | a bare integer (an
+/// ordinal Index, convenience only - ordinals renumber) | any other bare word
+/// (a tab Name).
+fn parse_tab_sel(s: &str) -> Result<TabSel, String> {
+    if let Some(n) = s.strip_prefix("id:") {
+        return parse_u64(n, "--tab id:").map(TabSel::Id);
+    }
+    if let Some(name) = s.strip_prefix("name:") {
+        return Ok(TabSel::Name(name.to_string()));
+    }
+    match s {
+        "active" => Ok(TabSel::Active),
+        "new" => Ok(TabSel::New),
+        _ => match s.parse::<usize>() {
+            Ok(i) => Ok(TabSel::Index(i)),
+            Err(_) => Ok(TabSel::Name(s.to_string())),
+        },
+    }
+}
+
 /// `--block last` or `--block <seq>`.
 fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
     match s {
@@ -1269,6 +1322,8 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         let mut claim = false;
         let mut squad = None;
         let mut split = None;
+        let mut tab = None;
+        let mut at = None;
         let mut i = 1;
         while i < args.len() {
             let tok = args[i]
@@ -1291,19 +1346,12 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     squad = Some(name);
                 }
                 "--split" | "-x" | "split" => {
-                    let value = flag_value(args, &mut i, tok)?;
-                    split = Some(match value.as_str() {
-                        "left" => Dir::Left,
-                        "right" => Dir::Right,
-                        "up" => Dir::Up,
-                        "down" => Dir::Down,
-                        _ => {
-                            return Err(format!(
-                                "split/-x must be left, right, up, or down (got {value:?})"
-                            ))
-                        }
-                    });
+                    split = Some(parse_dir(&flag_value(args, &mut i, tok)?, "split/-x")?);
                 }
+                // (x-d865) exact placement: land in a named tab, adjacent to an
+                // anchor pane.
+                "--tab" => tab = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?),
+                "--at" => at = Some(parse_u64(&flag_value(args, &mut i, "--at")?, "--at")?),
                 t if t.starts_with("--") => return Err(format!("unknown flag: {t}")),
                 _ => break, // first bare token begins the command argv
             }
@@ -1333,6 +1381,8 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                         .unwrap_or(PaneTarget::CurrentRoute),
                     split,
                     here: false,
+                    tab,
+                    at,
                 },
             },
         });
@@ -1351,6 +1401,10 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut pid = None;
     let mut block = None;
     let mut command_done = false;
+    let mut direction = None;
+    let mut focus = false;
+    let mut name = None;
+    let mut fno_id = None;
     let mut positionals: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -1360,6 +1414,13 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         match tok {
             "--json" => json = true,
             "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            // (x-d865) split/break/ls flags.
+            "--direction" | "-d" => {
+                direction = Some(parse_dir(&flag_value(args, &mut i, tok)?, tok)?)
+            }
+            "--focus" => focus = true,
+            "--name" => name = Some(flag_value(args, &mut i, "--name")?),
+            "--fno-id" => fno_id = Some(flag_value(args, &mut i, "--fno-id")?),
             "--pid" => pid = Some(parse_u64(&flag_value(args, &mut i, "--pid")?, "--pid")? as u32),
             "--lines" => {
                 lines = Some(parse_u64(&flag_value(args, &mut i, "--lines")?, "--lines")? as u16)
@@ -1396,11 +1457,21 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     };
 
     let cmd = match verb {
-        "ls" => PaneCmd::Ls,
+        "ls" => PaneCmd::Ls { fno_id },
         "read" => PaneCmd::Read {
             pane: pane_arg("read")?,
             lines,
             block,
+        },
+        "split" => PaneCmd::Split {
+            pane: pane_arg("split")?,
+            direction: direction
+                .ok_or_else(|| "pane split needs --direction <left|right|up|down>".to_string())?,
+            focus,
+        },
+        "break" => PaneCmd::Break {
+            pane: pane_arg("break")?,
+            name: name.filter(|n| !n.trim().is_empty()),
         },
         "send" => {
             let pane = pane_arg("send")?;
@@ -1437,7 +1508,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         },
         other => {
             return Err(format!(
-                "unknown pane verb: {other} (ls|read|run|send|wait|kill|claim|release)"
+                "unknown pane verb: {other} (ls|read|run|send|wait|kill|claim|release|split|break)"
             ))
         }
     };
@@ -1466,13 +1537,353 @@ pub fn pane(args: &[OsString], env_session: Option<&str>) -> i32 {
     dispatch(&session, &sock, parsed.json, parsed.cmd)
 }
 
+/// Resolve `--session`/env, connect to the EXISTING server, run one control
+/// verb, render the reply. The shared spine of the `tab`/`layout` porcelains
+/// (x-d865); `where` has its own registry-first path.
+fn run_on_existing_server(
+    session_flag: Option<&str>,
+    env_session: Option<&str>,
+    json: bool,
+    verb: ControlVerb,
+) -> i32 {
+    let session = resolve_session(session_flag, env_session);
+    let sock = match proto::socket_path(&session) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("fno mux: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    let stream = match proto::connect_unix_timeout(&sock, PROBE_TIMEOUT) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("fno mux: cannot reach session {session:?}: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    match send_control(stream, verb, CONTROL_TIMEOUT) {
+        Ok(reply) => render_reply(reply, json, false, None),
+        Err(e) => {
+            eprintln!("fno mux: {e}");
+            EXIT_ERROR
+        }
+    }
+}
+
+/// Split off a leading `--session <s>` / `--json` prefix shared by the small
+/// `tab`/`layout` verbs, returning the rest for verb-specific parsing.
+fn take_common_flags(args: &[OsString]) -> Result<(Option<String>, bool, Vec<String>), String> {
+    let mut session = None;
+    let mut json = false;
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let tok = args[i]
+            .to_str()
+            .ok_or_else(|| "non-UTF-8 argument".to_string())?;
+        match tok {
+            "--json" => json = true,
+            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            other => rest.push(other.to_string()),
+        }
+        i += 1;
+    }
+    Ok((session, json, rest))
+}
+
+/// A `--squad <name>` -> `PaneTarget`, defaulting to `CurrentRoute`.
+fn squad_target(squad: Option<String>) -> PaneTarget {
+    squad
+        .map(PaneTarget::SquadName)
+        .unwrap_or(PaneTarget::CurrentRoute)
+}
+
+/// `fno mux tab ls|create|rename|join ...` (x-d865).
+pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
+    let verb = match args.first().and_then(|a| a.to_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            eprintln!("fno mux tab: needs a verb: ls|create|rename|join");
+            return EXIT_USAGE;
+        }
+    };
+    // Flag pass over the tokens after the verb.
+    let mut session = None;
+    let mut json = false;
+    let mut squad = None;
+    let mut name = None;
+    let mut tab_sel = None;
+    let mut src = None;
+    let mut at = None;
+    let mut dir = None;
+    let mut i = 1;
+    while i < args.len() {
+        let tok = match args[i].to_str() {
+            Some(t) => t,
+            None => {
+                eprintln!("fno mux tab: non-UTF-8 argument");
+                return EXIT_USAGE;
+            }
+        };
+        let res = (|| -> Result<(), String> {
+            match tok {
+                "--json" => json = true,
+                "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+                "--squad" | "-s" => squad = Some(flag_value(args, &mut i, tok)?),
+                "--name" => name = Some(flag_value(args, &mut i, "--name")?),
+                "--tab" => tab_sel = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?),
+                "--src" => src = Some(parse_tab_sel(&flag_value(args, &mut i, "--src")?)?),
+                "--at" => at = Some(parse_u64(&flag_value(args, &mut i, "--at")?, "--at")?),
+                "--dir" | "--direction" | "-d" => {
+                    dir = Some(parse_dir(&flag_value(args, &mut i, tok)?, tok)?)
+                }
+                t => return Err(format!("unknown flag: {t}")),
+            }
+            Ok(())
+        })();
+        if let Err(e) = res {
+            eprintln!("fno mux tab: {e}");
+            return EXIT_USAGE;
+        }
+        i += 1;
+    }
+
+    let verb = match verb.as_str() {
+        "ls" => ControlVerb::TabLs {
+            squad: squad_target(squad),
+        },
+        "create" => ControlVerb::TabCreate {
+            squad: squad_target(squad),
+            name: name.filter(|n| !n.trim().is_empty()),
+        },
+        "rename" => {
+            let (Some(tab), Some(name)) = (tab_sel, name) else {
+                eprintln!("fno mux tab rename: needs --tab <sel> and --name <s>");
+                return EXIT_USAGE;
+            };
+            ControlVerb::TabRename {
+                squad: squad_target(squad),
+                tab,
+                name,
+            }
+        }
+        "join" => {
+            let (Some(src_tab), Some(anchor_pane), Some(direction)) = (src, at, dir) else {
+                eprintln!("fno mux tab join: needs --src <sel> --at <pane> --dir <dir>");
+                return EXIT_USAGE;
+            };
+            ControlVerb::TabJoin {
+                src_tab,
+                anchor_pane,
+                direction,
+            }
+        }
+        other => {
+            eprintln!("fno mux tab: unknown verb {other} (ls|create|rename|join)");
+            return EXIT_USAGE;
+        }
+    };
+    run_on_existing_server(session.as_deref(), env_session, json, verb)
+}
+
+/// `fno mux layout get [--squad <s>] [--tab <sel>]` (x-d865).
+pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
+    let (session, json, rest) = match take_common_flags(args) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("fno mux layout: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    // The only verb is `get`; a bare `layout` also means get.
+    let flags = match rest.first().map(String::as_str) {
+        Some("get") | None => args,
+        Some(other) => {
+            eprintln!("fno mux layout: unknown verb {other} (get)");
+            return EXIT_USAGE;
+        }
+    };
+    let mut squad = None;
+    let mut tab_sel = None;
+    let mut i = 0;
+    while i < flags.len() {
+        let Some(tok) = flags[i].to_str() else {
+            eprintln!("fno mux layout: non-UTF-8 argument");
+            return EXIT_USAGE;
+        };
+        let res = (|| -> Result<(), String> {
+            match tok {
+                "get" | "--json" | "--session" => {
+                    if tok == "--session" {
+                        let _ = flag_value(flags, &mut i, "--session")?;
+                    }
+                }
+                "--squad" | "-s" => squad = Some(flag_value(flags, &mut i, tok)?),
+                "--tab" => tab_sel = Some(parse_tab_sel(&flag_value(flags, &mut i, "--tab")?)?),
+                t => return Err(format!("unknown flag: {t}")),
+            }
+            Ok(())
+        })();
+        if let Err(e) = res {
+            eprintln!("fno mux layout: {e}");
+            return EXIT_USAGE;
+        }
+        i += 1;
+    }
+    let scope = match (squad, tab_sel) {
+        (None, None) => LayoutScope::Session,
+        (sq, None) => LayoutScope::Squad(squad_target(sq)),
+        (sq, Some(tab)) => LayoutScope::Tab {
+            squad: squad_target(sq),
+            tab,
+        },
+    };
+    run_on_existing_server(
+        session.as_deref(),
+        env_session,
+        json,
+        ControlVerb::LayoutGet { scope },
+    )
+}
+
+/// `fno mux where <fno_id>` (x-d865): resolve an fno session id to its live
+/// location. Reads the registry to find the hosting mux session, connects to
+/// THAT session's socket, and rounds-trips one `PaneWhere`. The three failure
+/// modes get distinct exit codes (AC1-ERR); a registry read failure never reads
+/// as "not found".
+pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
+    // The caller's FNO_SESSION is irrelevant here: `where` resolves the HOST
+    // session from the registry, so an explicit --session is the only override.
+    let (session_flag, json, rest) = match take_common_flags(args) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("fno mux where: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    let Some(fno_id) = rest
+        .first()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        eprintln!("fno mux where: needs an fno_id");
+        return EXIT_USAGE;
+    };
+
+    // Read the registry to locate the hosting mux session. A read failure is
+    // REGISTRY_UNAVAILABLE, never a silent "not found" (Locked Decision 4).
+    let raw = match std::fs::read_to_string(crate::agents_view::registry_path()) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("fno mux where: no agent registry");
+            return EXIT_REGISTRY_UNAVAILABLE;
+        }
+        Err(e) => {
+            eprintln!("fno mux where: registry unreadable: {e}");
+            return EXIT_REGISTRY_UNAVAILABLE;
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let Some(rows) = crate::agents_view::derive_rows(&raw, now) else {
+        eprintln!("fno mux where: registry malformed");
+        return EXIT_REGISTRY_UNAVAILABLE;
+    };
+    let exact = |s: &Option<String>| s.as_deref() == Some(fno_id.as_str());
+    let prefix = |s: &Option<String>| s.as_deref().is_some_and(|v| v.starts_with(&fno_id));
+    let exact_rows: Vec<_> = rows
+        .iter()
+        .filter(|a| exact(&a.session_id) || exact(&a.harness_session_id))
+        .collect();
+    // Exact identity wins; a prefix must be unambiguous (a single distinct
+    // identity) or `where` refuses rather than report an unrelated pane (codex).
+    let matched: Vec<_> = if !exact_rows.is_empty() {
+        exact_rows
+    } else {
+        let prefix_rows: Vec<_> = rows
+            .iter()
+            .filter(|a| prefix(&a.session_id) || prefix(&a.harness_session_id))
+            .collect();
+        let mut ids: Vec<&str> = prefix_rows
+            .iter()
+            .filter_map(|a| a.session_id.as_deref())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.len() > 1 {
+            eprintln!(
+                "fno mux where: ambiguous prefix {fno_id:?} matches {} identities",
+                ids.len()
+            );
+            return EXIT_NOT_FOUND;
+        }
+        prefix_rows
+    };
+    if matched.is_empty() {
+        eprintln!("fno mux where: no session matches {fno_id:?}");
+        return EXIT_NOT_FOUND;
+    }
+    // The hosting mux session name from the first pane-hosted match.
+    let Some(host_session) = matched
+        .iter()
+        .find_map(|a| a.mux.as_ref().map(|(s, _)| s.clone()))
+    else {
+        eprintln!("fno mux where: {fno_id:?} hosts no live pane");
+        return EXIT_NOT_PANE_HOSTED;
+    };
+    // Prefer the explicit --session only if the caller gave one; else the host.
+    let session = resolve_session(session_flag.as_deref(), Some(&host_session));
+    let sock = match proto::socket_path(&session) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("fno mux where: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    let stream = match proto::connect_unix_timeout(&sock, PROBE_TIMEOUT) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("fno mux where: cannot reach hosting session {session:?}: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    match send_control(stream, ControlVerb::PaneWhere { fno_id }, CONTROL_TIMEOUT) {
+        Ok(reply) => render_reply(reply, json, false, None),
+        Err(e) => {
+            eprintln!("fno mux where: {e}");
+            EXIT_ERROR
+        }
+    }
+}
+
 /// Resolve `PaneCmd` -> a control verb + the read deadline, then run it.
 fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
+    // (x-d865) `pane ls --fno-id` filters the listing client-side over the
+    // reply's PaneInfo.fno_id, so capture the filter before `cmd` is consumed.
+    let ls_fno_id = match &cmd {
+        PaneCmd::Ls { fno_id } => fno_id.clone(),
+        _ => None,
+    };
     // `pane run` self-spawns a server for a script-only session (AC1-EDGE);
     // every other verb operates on an existing server. `pane ls` against no
     // server is "no panes" (exit 0); the rest are an error (nothing to act on).
     let (verb, read_timeout) = match cmd {
-        PaneCmd::Ls => (ControlVerb::PaneLs, CONTROL_TIMEOUT),
+        PaneCmd::Ls { .. } => (ControlVerb::PaneLs, CONTROL_TIMEOUT),
+        PaneCmd::Split {
+            pane,
+            direction,
+            focus,
+        } => (
+            ControlVerb::PaneSplit {
+                pane,
+                direction,
+                no_focus: !focus,
+            },
+            CONTROL_TIMEOUT,
+        ),
+        PaneCmd::Break { pane, name } => (ControlVerb::PaneBreak { pane, name }, CONTROL_TIMEOUT),
         PaneCmd::Read { pane, lines, block } => (
             ControlVerb::PaneRead { pane, lines, block },
             CONTROL_TIMEOUT,
@@ -1595,7 +2006,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
         }
     );
     match send_control(stream, verb, read_timeout) {
-        Ok(reply) => render_reply(reply, json, command_done_requested),
+        Ok(reply) => render_reply(reply, json, command_done_requested, ls_fno_id.as_deref()),
         Err(e) => {
             eprintln!("fno mux pane: {e}");
             EXIT_ERROR
@@ -1639,9 +2050,18 @@ fn send_control(
 /// Turn one server reply into stdout + an exit code. `command_done_requested`
 /// lets a `wait` note the markerless degradation (asked --command-done, got a
 /// quiet/timeout settle because the pane emitted no OSC 133 `D`).
-fn render_reply(reply: ServerMsg, json: bool, command_done_requested: bool) -> i32 {
+fn render_reply(
+    reply: ServerMsg,
+    json: bool,
+    command_done_requested: bool,
+    ls_fno_id: Option<&str>,
+) -> i32 {
     match reply {
-        ServerMsg::PaneList { panes } => {
+        ServerMsg::PaneList { mut panes } => {
+            // (x-d865) `pane ls --fno-id <id>` filters to panes carrying that id.
+            if let Some(want) = ls_fno_id {
+                panes.retain(|p| p.fno_id.as_deref() == Some(want));
+            }
             if json {
                 println!(
                     "{}",
@@ -1653,11 +2073,21 @@ fn render_reply(reply: ServerMsg, json: bool, command_done_requested: bool) -> i
                         .child_pid
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| "-".into());
+                    let fno = p.fno_id.as_deref().unwrap_or("-");
                     println!(
-                        "{} squad={} tab={} pid={} cwd={}",
-                        p.pane_id, p.squad_id, p.tab_id, pid, p.cwd
+                        "{} squad={} tab={} pid={} fno_id={} cwd={}",
+                        p.pane_id, p.squad_id, p.tab_id, pid, fno, p.cwd
                     );
                 }
+            }
+            EXIT_OK
+        }
+        ServerMsg::TabSpawned { tab_id } => {
+            // pane break receipt: EXACTLY the machine-readable new tab id.
+            if json {
+                println!("{}", serde_json::json!({ "tab_id": tab_id }));
+            } else {
+                println!("{tab_id}");
             }
             EXIT_OK
         }
@@ -1727,18 +2157,87 @@ fn render_reply(reply: ServerMsg, json: bool, command_done_requested: bool) -> i
             }
             wait_exit_code(outcome)
         }
+        ServerMsg::TabList { tabs } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&tabs).unwrap_or_else(|_| "[]".into())
+                );
+            } else {
+                for t in &tabs {
+                    let mark = if t.active { "*" } else { " " };
+                    let name = t.name.as_deref().unwrap_or("-");
+                    let panes = t
+                        .pane_ids
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    println!("{mark} {} name={} panes={}", t.tab_id, name, panes);
+                }
+            }
+            EXIT_OK
+        }
+        ServerMsg::LayoutTree { squads } => {
+            // Machine-first: the nested tree + geometry is only meaningful as
+            // JSON (a consumer diffs topology), so emit JSON regardless of flag.
+            println!(
+                "{}",
+                serde_json::to_string(&squads).unwrap_or_else(|_| "[]".into())
+            );
+            EXIT_OK
+        }
+        ServerMsg::PaneLocation {
+            fno_id,
+            squad_id,
+            squad_name,
+            tabs,
+            panes,
+        } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "fno_id": fno_id,
+                        "squad_id": squad_id,
+                        "squad_name": squad_name,
+                        "tabs": tabs.iter().map(|(id, n)| serde_json::json!({"tab_id": id, "name": n})).collect::<Vec<_>>(),
+                        "panes": panes,
+                    })
+                );
+            } else {
+                let sq = squad_name.as_deref().unwrap_or("-");
+                let tab_ids = tabs
+                    .iter()
+                    .map(|(id, _)| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let pane_ids = panes
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!("{fno_id} squad={squad_id} ({sq}) tabs={tab_ids} panes={pane_ids}");
+            }
+            EXIT_OK
+        }
         ServerMsg::Err { code, msg } => {
-            eprintln!("fno mux pane: {msg}");
-            // BLOCK_UNAVAILABLE gets its own exit code (AC2-ERR: a caller can
-            // tell "no such block" apart from a dead pane); TARGET_NOT_IDLE
-            // (a guarded send refused because the pane's turn is not takeable)
-            // gets EXIT_TARGET_NOT_IDLE so a mail sender demotes to durable
-            // instead of miscalling a stalled paste delivered; every other
-            // class shares the generic error code.
+            eprintln!("fno mux: {msg}");
+            // Each error class the CLI can act on gets its OWN exit code so a
+            // script can branch: BLOCK_UNAVAILABLE (AC2-ERR), TARGET_NOT_IDLE (a
+            // guarded send bounced), and the three `where` outcomes (x-d865:
+            // NOT_FOUND / NOT_PANE_HOSTED / REGISTRY_UNAVAILABLE stay distinct so
+            // a script never conflates "no such id" with "id has no live pane").
             if code == err_code::BLOCK_UNAVAILABLE {
                 EXIT_BLOCK_UNAVAILABLE
             } else if code == err_code::TARGET_NOT_IDLE {
                 EXIT_TARGET_NOT_IDLE
+            } else if code == err_code::NOT_FOUND {
+                EXIT_NOT_FOUND
+            } else if code == err_code::NOT_PANE_HOSTED {
+                EXIT_NOT_PANE_HOSTED
+            } else if code == err_code::REGISTRY_UNAVAILABLE {
+                EXIT_REGISTRY_UNAVAILABLE
             } else {
                 EXIT_ERROR
             }
@@ -1746,7 +2245,7 @@ fn render_reply(reply: ServerMsg, json: bool, command_done_requested: bool) -> i
         // The server only ever answers a control connection with the replies
         // above; anything else is a protocol violation.
         other => {
-            eprintln!("fno mux pane: unexpected server reply: {other:?}");
+            eprintln!("fno mux: unexpected server reply: {other:?}");
             EXIT_ERROR
         }
     }
@@ -2443,7 +2942,7 @@ mod tests {
             ParsedPane {
                 session: None,
                 json: false,
-                cmd: PaneCmd::Ls
+                cmd: PaneCmd::Ls { fno_id: None }
             }
         );
         assert_eq!(
@@ -2491,6 +2990,80 @@ mod tests {
     }
 
     #[test]
+    fn mux_pane_parse_split_break_and_ls_fno_id() {
+        // (x-d865) split needs a direction; --focus opts into focus.
+        assert_eq!(
+            parse_pane_args(&os(&["split", "5", "--direction", "right"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Split {
+                pane: 5,
+                direction: Dir::Right,
+                focus: false,
+            }
+        );
+        assert_eq!(
+            parse_pane_args(&os(&["split", "5", "-d", "up", "--focus"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Split {
+                pane: 5,
+                direction: Dir::Up,
+                focus: true,
+            }
+        );
+        assert!(
+            parse_pane_args(&os(&["split", "5"])).is_err(),
+            "split without --direction is a usage error"
+        );
+        assert_eq!(
+            parse_pane_args(&os(&["break", "9", "--name", "solo"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Break {
+                pane: 9,
+                name: Some("solo".into()),
+            }
+        );
+        assert_eq!(
+            parse_pane_args(&os(&["ls", "--fno-id", "abc123"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Ls {
+                fno_id: Some("abc123".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn mux_pane_parse_run_tab_and_anchor() {
+        // AC2-HP: `run --tab id:10 --at 2 --split down -- <argv>`.
+        let p = parse_pane_args(&os(&[
+            "run", "--tab", "id:10", "--at", "2", "--split", "down", "--", "/bin/cat",
+        ]))
+        .unwrap();
+        let PaneCmd::Run { placement, .. } = p.cmd else {
+            panic!("expected Run");
+        };
+        assert_eq!(placement.tab, Some(TabSel::Id(10)));
+        assert_eq!(placement.at, Some(2));
+        assert_eq!(placement.split, Some(Dir::Down));
+    }
+
+    #[test]
+    fn parse_tab_sel_grammar() {
+        assert_eq!(parse_tab_sel("active").unwrap(), TabSel::Active);
+        assert_eq!(parse_tab_sel("new").unwrap(), TabSel::New);
+        assert_eq!(parse_tab_sel("3").unwrap(), TabSel::Index(3));
+        assert_eq!(parse_tab_sel("id:7").unwrap(), TabSel::Id(7));
+        assert_eq!(
+            parse_tab_sel("name:bee").unwrap(),
+            TabSel::Name("bee".into())
+        );
+        assert_eq!(parse_tab_sel("bee").unwrap(), TabSel::Name("bee".into()));
+    }
+
+    #[test]
     fn mux_pane_parse_run_takes_argv_verbatim_after_flags() {
         // Leading flags are ours; the command argv (incl. ITS flags) is not.
         let p = parse_pane_args(&os(&[
@@ -2535,6 +3108,8 @@ mod tests {
             p.cmd,
             PaneCmd::Run {
                 placement: PanePlacement {
+                    tab: None,
+                    at: None,
                     target: PaneTarget::SquadName(ref name),
                     split: Some(crate::tree::Dir::Left),
                     ..
@@ -2549,6 +3124,8 @@ mod tests {
             aliases.cmd,
             PaneCmd::Run {
                 placement: PanePlacement {
+                    tab: None,
+                    at: None,
                     target: PaneTarget::SquadName(ref name),
                     split: Some(crate::tree::Dir::Right),
                     ..
@@ -2564,6 +3141,8 @@ mod tests {
             long.cmd,
             PaneCmd::Run {
                 placement: PanePlacement {
+                    tab: None,
+                    at: None,
                     target: PaneTarget::SquadName(ref name),
                     split: Some(crate::tree::Dir::Up),
                     ..
@@ -2661,13 +3240,16 @@ mod tests {
             code: err_code::TARGET_NOT_IDLE,
             msg: "receiving agent not idle".into(),
         };
-        assert_eq!(render_reply(refused, false, false), EXIT_TARGET_NOT_IDLE);
+        assert_eq!(
+            render_reply(refused, false, false, None),
+            EXIT_TARGET_NOT_IDLE
+        );
         // A different error class still collapses to the generic error code.
         let other = ServerMsg::Err {
             code: err_code::DEAD_PANE,
             msg: "no such pane".into(),
         };
-        assert_eq!(render_reply(other, false, false), EXIT_ERROR);
+        assert_eq!(render_reply(other, false, false, None), EXIT_ERROR);
     }
 
     #[test]

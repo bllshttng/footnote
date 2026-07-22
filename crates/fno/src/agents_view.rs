@@ -24,6 +24,14 @@ use crate::proto::{AgentBadge, AnswerablePrompt};
 pub struct RegistryAgent {
     pub name: String,
     pub cwd: String,
+    /// (x-d865) The row's own fno session id - the durable identity `pane ls`
+    /// reports as `fno_id` and `fno mux where <id>` resolves. `None` for a row
+    /// the registry wrote without one. Distinct from `mux.0` (the mux server's
+    /// session NAME) and `claude_session_uuid` (a claude transcript key).
+    pub session_id: Option<String>,
+    /// (x-d865) The harness session id (claude/codex uuid), an accepted
+    /// alternate spelling for `where` resolution. `None` when absent.
+    pub harness_session_id: Option<String>,
     /// Registry status is terminal (exited/permanent-dead).
     pub exited: bool,
     /// In-TTL inside-leg badge; `None` = liveness-only. Never a scraped guess.
@@ -1059,9 +1067,23 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
                 _ => (None, None, None),
             },
         };
+        // (x-d865) The row's durable identity, provider-agnostic (both are
+        // read unscoped: `where` resolves against either spelling).
+        let session_id = row
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let harness_session_id = row
+            .get("harness_session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         out.push(RegistryAgent {
             name: name.to_string(),
             cwd: cwd.to_string(),
+            session_id,
+            harness_session_id,
             exited,
             badge,
             reason,
@@ -1142,6 +1164,8 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             continue; // adopted / already owned by a registry row
         }
         foreign.push(RegistryAgent {
+            session_id: None,
+            harness_session_id: None,
             name: w.name.clone(),
             cwd: w.cwd.clone(),
             exited: false,
@@ -2363,6 +2387,8 @@ config_dir = "~/.claude-alt"
     // -------------------------------------------------------------------
     fn plain_row(name: &str, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         RegistryAgent {
+            session_id: None,
+            harness_session_id: None,
             name: name.into(),
             cwd: "/w".into(),
             exited,

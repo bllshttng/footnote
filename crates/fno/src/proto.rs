@@ -21,7 +21,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::tree::{Dir, Rect, TabId};
+use crate::tree::{Dir, Node, PaneId, Rect, TabId};
+
+/// `#[serde(default = ...)]` helper for a field whose omitted default is `true`
+/// rather than serde's `bool` default of `false` (x-d865, `PaneSplit.no_focus`).
+fn default_true() -> bool {
+    true
+}
 
 /// Bumped on any wire-incompatible change. The server outlives `cargo install`
 /// upgrades, so both sides exchange this at Attach and refuse loudly on skew.
@@ -214,6 +220,18 @@ use crate::tree::{Dir, Rect, TabId};
 /// Same case again - a new verb, not an additive field, so a v39 server cannot
 /// deserialize it and an unbumped upgraded client would lose its connection on
 /// the first relocation rather than at handshake.
+///
+/// v41 also carries the mesh crown fields (`AgentRow.crown_level`/`crown_scope`,
+/// additive + `#[serde(default)]`, documented inline on the fields); the two
+/// changes share the one version bump.
+///
+/// v41 (layout-api): the mux layout script API - `PaneInfo.fno_id`,
+/// `PanePlacement.{tab, at}` + `TabSel`, the `PaneSplit`/`Tab*`/`LayoutGet`/
+/// `PaneWhere`/`PaneBreak`/`TabJoin` control verbs (+ `TabList`/`LayoutTree`/
+/// `PaneLocation`/`TabSpawned` replies). The added FIELDS are all
+/// `#[serde(default)]`-tolerant, but the new VERBS are not - a v40 server cannot
+/// deserialize a `PaneSplit`, so one bump covers the whole node's wire delta
+/// (Locked Decision 7).
 pub const PROTO_VERSION: u32 = 41;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
@@ -421,6 +439,26 @@ pub enum PaneTarget {
     SquadId(u64),
 }
 
+/// Which tab a [`PanePlacement`] / [`LayoutScope`] addresses within a squad
+/// (v41, layout-api). `Index` is an ordinal convenience for interactive
+/// one-shots ONLY - ordinals renumber as tabs open and close, so a script that
+/// captured one earlier may hit a different tab; receipts return `Id`/`Name`,
+/// which are stable. `New` forces a fresh tab.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum TabSel {
+    /// The squad's currently active tab.
+    #[default]
+    Active,
+    /// The nth tab in display order (convenience only; ordinals renumber).
+    Index(usize),
+    /// A stable tab id (preferred in scripts).
+    Id(TabId),
+    /// An operator-chosen tab name (preferred in scripts).
+    Name(String),
+    /// Force a brand-new tab.
+    New,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct PanePlacement {
     #[serde(default)]
@@ -432,6 +470,15 @@ pub struct PanePlacement {
     /// conflicting combination. `#[serde(default)]` keeps v30 placements wire-tolerant.
     #[serde(default)]
     pub here: bool,
+    /// (v41, layout-api) Which tab in the resolved squad to place into. `None`
+    /// keeps the pre-v41 behavior (the squad's active tab, or a new one).
+    #[serde(default)]
+    pub tab: Option<TabSel>,
+    /// (v41, layout-api) An anchor pane to place ADJACENT to (with `split`). The
+    /// anchor must live in the resolved `tab`, else the server refuses with
+    /// [`err_code::BAD_REQUEST`]. `None` keeps the pre-v41 whole-tab placement.
+    #[serde(default)]
+    pub at: Option<u64>,
 }
 
 /// The script-API verbs (`fno mux pane ls|read|run|send|wait|kill`), each a
@@ -513,6 +560,67 @@ pub enum ControlVerb {
     /// claim held is still Ok (the burst may have raced a pane exit, which
     /// releases unconditionally).
     PaneRelease { pane: u64 },
+
+    // -- v41 (layout-api) script layout verbs; every reply carries created ids,
+    //    and NONE moves any viewer's focus unless it opts in. --
+    /// Split an ARBITRARY pane (not just the focused one) -> [`ServerMsg::PaneSpawned`]
+    /// (a split mints a fresh shell pane). Lifts `tree::split_node`'s
+    /// arbitrary-target ability to the wire. `no_focus` defaults true: a scripted
+    /// split never steals a human's focus (Locked Decision 3).
+    PaneSplit {
+        pane: u64,
+        direction: Dir,
+        // Default TRUE, not serde's `bool` default of false: a v41 client that
+        // omits the field must get the advertised no-focus-steal behavior
+        // (Locked Decision 3), never a silent focus grab.
+        #[serde(default = "default_true")]
+        no_focus: bool,
+    },
+    /// List a squad's tabs -> [`ServerMsg::TabList`].
+    TabLs { squad: PaneTarget },
+    /// Create a new tab in a squad (born with one shell leaf; a tab cannot exist
+    /// paneless) -> [`ServerMsg::PaneSpawned`] (the new leaf's pane id).
+    TabCreate {
+        squad: PaneTarget,
+        name: Option<String>,
+    },
+    /// Rename a tab -> [`ServerMsg::Ok`].
+    TabRename {
+        squad: PaneTarget,
+        tab: TabSel,
+        name: String,
+    },
+    /// Dump a layout scope's nested tree + per-pane geometry ->
+    /// [`ServerMsg::LayoutTree`] (structure + rects, so templates/reconcile can
+    /// diff topology - Locked Decision 5).
+    LayoutGet { scope: LayoutScope },
+    /// Resolve an `fno_id` to its live location -> [`ServerMsg::PaneLocation`],
+    /// or one of three DISTINCT error codes ([`err_code::REGISTRY_UNAVAILABLE`] /
+    /// [`err_code::NOT_FOUND`] / [`err_code::NOT_PANE_HOSTED`]); an empty
+    /// successful location is never a valid not-found (Locked Decision 4).
+    PaneWhere { fno_id: String },
+    /// Break a pane into its OWN new tab in the same squad, keeping its PTY alive
+    /// -> [`ServerMsg::TabSpawned`] (the created tab's id).
+    PaneBreak { pane: u64, name: Option<String> },
+    /// Join a whole source tab into the anchor pane's tab as a split, removing
+    /// the now-empty source tab -> [`ServerMsg::Ok`]. Refuses join-into-self up
+    /// front ([`err_code::BAD_REQUEST`]).
+    TabJoin {
+        src_tab: TabSel,
+        anchor_pane: u64,
+        direction: Dir,
+    },
+}
+
+/// What a [`ControlVerb::LayoutGet`] dumps (v41, layout-api).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LayoutScope {
+    /// Every squad's every tab.
+    Session,
+    /// One squad's tabs.
+    Squad(PaneTarget),
+    /// One tab in one squad.
+    Tab { squad: PaneTarget, tab: TabSel },
 }
 
 /// One sideline agent row inside [`ServerMsg::Layout`] (v5, brief US2). The
@@ -1113,6 +1221,8 @@ impl Command {
         Self::AttachAgent {
             id: id.into(),
             placement: PanePlacement {
+                tab: None,
+                at: None,
                 here: true,
                 ..PanePlacement::default()
             },
@@ -1127,7 +1237,10 @@ impl Command {
 /// a protocol bug, not a degraded mode); only pane-tagged self-contained
 /// `Frame`s are droppable (per-(client, pane) newest-wins). v1's `Cursor`
 /// variant is gone: it was never sent (the cursor rides inside `Frame`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Not `Eq` (was, pre-v41): `LayoutTree` embeds `tree::Node`, whose branch
+/// ratios are `f32` (no `Eq`, NaN). `PartialEq` is retained for tests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ServerMsg {
     /// A self-contained render frame (full grid + cursor) for ONE pane.
     /// Droppable: the server keeps only the newest unsent frame per
@@ -1249,6 +1362,56 @@ pub enum ServerMsg {
         name: String,
         lines: Vec<String>,
     },
+    // -- v41 (layout-api) control-verb replies --
+    /// Answer to [`ControlVerb::TabLs`].
+    TabList { tabs: Vec<TabInfo> },
+    /// Answer to [`ControlVerb::LayoutGet`]: the nested tree + per-pane geometry
+    /// for the requested scope (Locked Decision 5).
+    LayoutTree { squads: Vec<SquadLayout> },
+    /// Answer to [`ControlVerb::PaneWhere`]: where an `fno_id` lives right now.
+    /// The multi-tab / multi-pane shape is mirroring-ready (one id can host
+    /// several panes across tabs). Never emitted empty-but-successful.
+    PaneLocation {
+        fno_id: String,
+        squad_id: u64,
+        squad_name: Option<String>,
+        /// The tabs hosting this id's panes, each with its optional name.
+        tabs: Vec<(TabId, Option<String>)>,
+        /// The pane ids hosting this id.
+        panes: Vec<u64>,
+    },
+    /// Answer to [`ControlVerb::PaneBreak`]: the id of the freshly created tab.
+    TabSpawned { tab_id: TabId },
+}
+
+/// One tab in a [`ServerMsg::TabList`] (v41, layout-api). `pane_ids` are the
+/// tab's leaves in tree order; `active` marks the squad's currently viewed tab.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TabInfo {
+    pub tab_id: TabId,
+    pub name: Option<String>,
+    pub pane_ids: Vec<u64>,
+    pub active: bool,
+}
+
+/// One squad's layout in a [`ServerMsg::LayoutTree`] (v41, layout-api).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SquadLayout {
+    pub squad_id: u64,
+    pub squad_name: Option<String>,
+    pub tabs: Vec<TabLayout>,
+}
+
+/// One tab's structure + geometry in a [`SquadLayout`] (v41, layout-api). `root`
+/// is the nested pane tree; `panes` is that tree tiled into the tab's viewport
+/// (so a consumer gets both topology and rects without re-running `layout`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TabLayout {
+    pub tab_id: TabId,
+    pub name: Option<String>,
+    pub focus: PaneId,
+    pub root: Node,
+    pub panes: Vec<(u64, Rect)>,
 }
 
 /// One pane's metadata in a [`ServerMsg::PaneList`]. `cwd` is the squad's
@@ -1261,6 +1424,13 @@ pub struct PaneInfo {
     pub cwd: String,
     pub child_pid: Option<u32>,
     pub title: Option<String>,
+    /// (v41, layout-api) The `fno_id` of the session hosting this pane, filled
+    /// server-side from the registry join the mux already caches. `None` for a
+    /// pane with no registry row (an ad-hoc shell). `#[serde(default)]` keeps a
+    /// v40 reader wire-tolerant. Powers `pane ls --fno-id` and the reverse
+    /// direction of `where` (Locked Decision 6).
+    #[serde(default)]
+    pub fno_id: Option<String>,
 }
 
 /// Why a [`ControlVerb::PaneWait`] returned. The CLI maps each to a distinct
@@ -1324,6 +1494,16 @@ pub mod err_code {
     /// (busy/blocked agent) or a live relay holds its writer claim. The bytes
     /// did not land; the caller retries or overrides with `--force`.
     pub const TARGET_NOT_IDLE: u32 = 6;
+    /// (v41, layout-api) `PaneWhere` could not read the agents registry (missing
+    /// / unreadable / mid-write partial JSON). DISTINCT from NOT_FOUND: the id
+    /// might exist; the lookup itself failed. Never an empty-success (Locked 4).
+    pub const REGISTRY_UNAVAILABLE: u32 = 7;
+    /// (v41, layout-api) `PaneWhere`: the `fno_id` is absent from the registry.
+    pub const NOT_FOUND: u32 = 8;
+    /// (v41, layout-api) `PaneWhere`: the `fno_id` is in the registry but hosts
+    /// no live pane (a paneless bg/headless session). DISTINCT from NOT_FOUND so
+    /// a script can branch (Locked 4).
+    pub const NOT_PANE_HOSTED: u32 = 9;
 }
 
 /// One pane inside a [`TabMeta`] (v22, x-653d): the leaf id the session
@@ -2399,6 +2579,8 @@ mod tests {
     #[test]
     fn proto_v28_placement_roundtrips_for_pane_run_and_attach() {
         let placement = PanePlacement {
+            tab: None,
+            at: None,
             target: PaneTarget::SquadId(42),
             split: Some(Dir::Up),
             here: false,
@@ -2439,6 +2621,7 @@ mod tests {
                     cwd: "/code/footnote".into(),
                     child_pid: Some(4242),
                     title: None,
+                    fno_id: None,
                 }],
             },
             ServerMsg::PaneText {
@@ -2783,5 +2966,109 @@ mod tests {
             matches!(&got, Err(ProtoError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock),
             "idle stream must stay pollable, got {got:?}"
         );
+    }
+
+    // ---- v41 (x-d865) wire compatibility -------------------------------
+
+    #[test]
+    fn v41_control_verbs_and_replies_round_trip() {
+        use crate::tree::{Dir, Node};
+        let verbs = vec![
+            ControlVerb::PaneSplit {
+                pane: 4,
+                direction: Dir::Right,
+                no_focus: true,
+            },
+            ControlVerb::TabJoin {
+                src_tab: TabSel::Name("bee".into()),
+                anchor_pane: 7,
+                direction: Dir::Down,
+            },
+            ControlVerb::PaneWhere {
+                fno_id: "abcd1234".into(),
+            },
+            ControlVerb::LayoutGet {
+                scope: LayoutScope::Tab {
+                    squad: PaneTarget::SquadId(1),
+                    tab: TabSel::Index(2),
+                },
+            },
+        ];
+        for v in verbs {
+            let bytes = serde_json::to_vec(&v).unwrap();
+            let back: ControlVerb = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(v, back);
+        }
+
+        let layout = ServerMsg::LayoutTree {
+            squads: vec![SquadLayout {
+                squad_id: 1,
+                squad_name: Some("api".into()),
+                tabs: vec![TabLayout {
+                    tab_id: 10,
+                    name: None,
+                    focus: 2,
+                    root: Node::Branch {
+                        axis: crate::tree::Axis::Horizontal,
+                        children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
+                    },
+                    panes: vec![(
+                        1,
+                        Rect {
+                            x: 0,
+                            y: 0,
+                            rows: 24,
+                            cols: 40,
+                        },
+                    )],
+                }],
+            }],
+        };
+        let bytes = serde_json::to_vec(&layout).unwrap();
+        let back: ServerMsg = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(layout, back, "the nested tree + geometry survives the wire");
+
+        let loc = ServerMsg::PaneLocation {
+            fno_id: "abcd1234".into(),
+            squad_id: 1,
+            squad_name: None,
+            tabs: vec![(10, Some("bee".into()))],
+            panes: vec![4],
+        };
+        let bytes = serde_json::to_vec(&loc).unwrap();
+        assert_eq!(loc, serde_json::from_slice::<ServerMsg>(&bytes).unwrap());
+    }
+
+    #[test]
+    fn v40_paneinfo_json_defaults_fno_id_none() {
+        // A v40 PaneInfo omits fno_id entirely; a v41 reader defaults it to None
+        // (the skew window contract - Invariants / Locked Decision 7).
+        let v40 = r#"{"pane_id":4,"squad_id":1,"tab_id":7,
+                     "cwd":"/w","child_pid":4242,"title":null}"#;
+        let info: PaneInfo = serde_json::from_str(v40).unwrap();
+        assert_eq!(info.fno_id, None, "missing fno_id => None");
+    }
+
+    #[test]
+    fn v41_panesplit_omitted_no_focus_defaults_true() {
+        // A raw v41 client that omits no_focus must get the advertised no-steal
+        // behavior (Locked Decision 3), NOT serde's bool default of false.
+        let json = r#"{"PaneSplit":{"pane":4,"direction":"Right"}}"#;
+        match serde_json::from_str::<ControlVerb>(json).unwrap() {
+            ControlVerb::PaneSplit { no_focus, .. } => {
+                assert!(no_focus, "omitted no_focus must default true")
+            }
+            other => panic!("expected PaneSplit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v40_paneplacement_json_defaults_tab_and_at_none() {
+        // A v40 PanePlacement omits tab/at; a v41 reader defaults both to None,
+        // preserving the whole-tab placement behavior.
+        let v40 = r#"{"target":"CurrentRoute","split":null,"here":false}"#;
+        let p: PanePlacement = serde_json::from_str(v40).unwrap();
+        assert_eq!(p.tab, None);
+        assert_eq!(p.at, None);
     }
 }

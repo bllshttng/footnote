@@ -576,7 +576,13 @@ impl FakeClient {
             | ServerMsg::PaneSpawned { .. }
             | ServerMsg::Ok
             | ServerMsg::WaitDone { .. }
-            | ServerMsg::Err { .. } => {}
+            | ServerMsg::Err { .. }
+            // (x-d865) v41 layout script-verb replies: one-shot control
+            // connections only, never this attached client - ignore.
+            | ServerMsg::TabList { .. }
+            | ServerMsg::LayoutTree { .. }
+            | ServerMsg::PaneLocation { .. }
+            | ServerMsg::TabSpawned { .. } => {}
             // (x-c376) Peek transcript body: a client-interactive reply covered
             // by client unit tests, not the e2e absorber - ignore here.
             ServerMsg::PeekBody { .. } => {}
