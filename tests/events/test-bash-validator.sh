@@ -44,7 +44,7 @@ assert_eq "AC1-HP rc" 0 $rc
 assert_eq "AC1-HP stderr empty" "" "$out"
 
 # AC1-HP-2: valid audit-only phase_transition
-out=$(validate_event phase_transition '{"ts":"2026-05-07T09:30:42Z","type":"phase_transition","source":"abi-loop","data":{"gate_bearing":false,"phase":"review","nonce":"n","session_id":"s"}}' 2>&1)
+out=$(validate_event phase_transition '{"ts":"2026-05-07T09:30:42Z","type":"phase_transition","source":"fno-loop","data":{"gate_bearing":false,"phase":"review","nonce":"n","session_id":"s"}}' 2>&1)
 rc=$?
 assert_eq "AC1-HP-2 audit-only rc" 0 $rc
 

@@ -16,7 +16,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 PYTHON_SOURCES = [
-    "target", "megawalk", "megatron", "abi-loop",
+    "target", "megawalk", "megatron", "fno-loop",
     "hook", "subagent", "migration", "test", "backlog",
 ]
 

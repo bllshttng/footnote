@@ -60,7 +60,7 @@ RUST_EVENT_KINDS = [
 
 # Source values that must be in the envelope.source enum
 REQUIRED_SOURCES = [
-    "target", "megawalk", "megatron", "abi-loop",
+    "target", "megawalk", "megatron", "fno-loop",
     "hook", "subagent", "migration", "test", "backlog",
     "daemon",  # added in W7
 ]

@@ -36,7 +36,7 @@ cli/src/fno/events/schema.yaml      single source of truth
         |
         +-> scripts/migrate-events-shape.py         (one-shot legacy rewriter)
         |
-        +-> producer call sites                     (target, megatron, abi-loop)
+        +-> producer call sites                     (target, megatron, fno-loop)
 ```
 
 A CI parity test (`cli/tests/events/test_validator_parity.py`) runs both
@@ -92,7 +92,7 @@ tolerated.
 | `target` | the target skill / pre-promise sequence |
 | `megawalk` | the megawalk stop hook + roadmap loop |
 | `megatron` | mission lifecycle events |
-| `abi-loop` | HISTORICAL: the pre-wedge headless `fno loop` driver (verb removed in step-5 group 3); the source value survives in old journals |
+| `fno-loop` | HISTORICAL: the pre-wedge headless `fno loop` driver (verb removed in step-5 group 3); the source value survives in old journals |
 | `hook` | every other in-tree hook (PostToolUse, PreToolUse, etc.) |
 | `subagent` | reserved for direct subagent emissions |
 | `migration` | the one-shot `scripts/migrate-events-shape.py` |
@@ -225,7 +225,7 @@ ev = abilities_events.phase_transition(
     phase="review",
     nonce=state["provenance_nonce"],
     session_id=state["session_id"],
-    source="abi-loop",
+    source="fno-loop",
 )
 abilities_events.append_event(ev)
 ```

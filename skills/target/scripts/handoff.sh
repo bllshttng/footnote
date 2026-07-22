@@ -233,7 +233,7 @@ CLAIM_TTL="${_CLAIM_TTL_RAW:-2h}"
 # the same precedence order as cli/src/fno/harness_identity.py (x-efc7). The
 # successor name is namespaced by it (tgt-<node>-<harness>-gN) so two dispatchers
 # on different harnesses cannot collide on one registry name (x-3e70: codex's
-# self-handoff died on `agent tgt-fc7-g2 already exists` after abi-loop dispatched
+# self-handoff died on `agent tgt-fc7-g2 already exists` after fno-loop dispatched
 # a claude worker of the same name). Unknown/no-marker defaults to `claude`,
 # which both preserves the legacy claude lineage and stays distinct from a codex
 # lineage's name.

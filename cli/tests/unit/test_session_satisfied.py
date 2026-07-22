@@ -60,9 +60,9 @@ def test_session_satisfied_alternate_envelope_source() -> None:
         reason="pr_merged",
         session_id="s2",
         gate_state_hash="def456",
-        source="abi-loop",
+        source="fno-loop",
     )
-    assert event["source"] == "abi-loop"
+    assert event["source"] == "fno-loop"
 
 
 def test_session_satisfied_rejects_unknown_trigger() -> None:

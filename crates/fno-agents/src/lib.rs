@@ -779,7 +779,7 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["abi-loop", "active-backlog", "backlog", "daemon", "hook", "megatron", "megawalk", "migration", "observer", "skill_diff", "subagent", "target", "test"] },
+                        { "enum": ["fno-loop", "active-backlog", "backlog", "daemon", "hook", "megatron", "megawalk", "migration", "observer", "skill_diff", "subagent", "target", "test"] },
                         { "pattern": "^(worker|stream-worker):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"

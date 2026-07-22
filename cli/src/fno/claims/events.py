@@ -22,7 +22,7 @@ from fno.events import (
 from .types import Claim
 
 
-CLAIM_SOURCE = "abi-loop"
+CLAIM_SOURCE = "fno-loop"
 
 
 def _ts_now() -> str:

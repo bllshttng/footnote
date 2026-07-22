@@ -469,7 +469,7 @@ def done_race_collision(
     node_id: str,
     first_completed_at: str,
     second_attempt_at: str,
-    source: str = "abi-loop",
+    source: str = "fno-loop",
 ) -> dict[str, Any]:
     """Build a ``done_race_collision`` event.
 
@@ -559,7 +559,7 @@ def session_satisfied(
 
     ``trigger`` is the constrained data-level enum identifying which
     subsystem produced the signal. ``source`` is the envelope-level
-    producer identity (target, megawalk, abi-loop, hook).
+    producer identity (target, megawalk, fno-loop, hook).
 
     The enum is enforced here at build time so a typo at the call site
     fails fast rather than landing in events.jsonl as schema noise.
