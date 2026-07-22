@@ -13,12 +13,17 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)" || { echo "residual-check: not a git repo" >&2; exit 2; }
 cd "$ROOT"
 
-# The only allowed mentions: this guard's own pattern list, and third-party
-# packaging tokens in lockfiles (abi3 wheel tags, hermit-abi crate).
+# The only allowed mentions: this guard's own pattern list, third-party
+# packaging tokens in lockfiles (abi3 wheel tags, hermit-abi crate), and the
+# loc-ratchet trajectory - an append-only audit ledger whose past entries record
+# the original abilities->fno rename verbatim. Rewriting those reasons would
+# falsify history AND break the ratchet checker, which keys each entry's identity
+# on its reason (a modification reads as a removal). Old names there are history.
 KEEP_FILES=(
   ':!scripts/rename/**'
   ':!*.lock'
   ':!**/*.lock'
+  ':!scripts/ci/loc-ratchet-trajectory.yaml'
 )
 
 # pattern  label  [extra-pathspec ...]
