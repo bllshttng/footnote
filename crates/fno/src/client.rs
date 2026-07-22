@@ -4630,7 +4630,7 @@ impl View {
             lines.push(pad_to(&format!(" {marker} {} {name}", i + 1), W));
         }
         lines.push(pad_to(" h/← left · j/↓ down · k/↑ up · l/→ right", W));
-        lines.push(pad_to(" t/enter new tab · esc/q cancel", W));
+        lines.push(pad_to(" t/enter new tab · . here · esc/q cancel", W));
         lines
     }
 
@@ -9796,17 +9796,21 @@ async fn attach_place_keys(
             continue;
         }
 
-        let split = match key {
-            b'h' => Some(Some(Dir::Left)),
-            b'j' => Some(Some(Dir::Down)),
-            b'k' => Some(Some(Dir::Up)),
-            b'l' => Some(Some(Dir::Right)),
-            b't' | b'\r' | b'\n' => Some(None),
+        // (x-fbb1) `.` = attach here: repoint the focused pane; the server picks
+        // swap-viewer vs take-over-idle-shell. Route-anchored, so it ignores the
+        // digit-selected workspace (CurrentRoute + here, never a split).
+        let (split, here) = match key {
+            b'h' => (Some(Some(Dir::Left)), false),
+            b'j' => (Some(Some(Dir::Down)), false),
+            b'k' => (Some(Some(Dir::Up)), false),
+            b'l' => (Some(Some(Dir::Right)), false),
+            b't' | b'\r' | b'\n' => (Some(None), false),
+            b'.' => (Some(None), true),
             0x1b | b'q' => {
                 view.attach_place = None;
                 return Ok(StdinFlow::Continue);
             }
-            _ => None,
+            _ => (None, false),
         };
         let Some(split) = split else { continue };
         let picker = view.attach_place.take().unwrap();
@@ -9817,7 +9821,9 @@ async fn attach_place_keys(
             view.set_notice("agent is no longer attachable".into());
             return Ok(StdinFlow::Continue);
         }
-        if !view.layout.squads.iter().any(|s| s.id == picker.target) {
+        // `.`=here is route-anchored - it never touches the digit-selected
+        // workspace, so a vanished target must not block it (only split/new-tab).
+        if !here && !view.layout.squads.iter().any(|s| s.id == picker.target) {
             view.set_notice("workspace is no longer available".into());
             return Ok(StdinFlow::Continue);
         }
@@ -9826,9 +9832,13 @@ async fn attach_place_keys(
             &ClientMsg::Command(Command::AttachAgent {
                 id: picker.id,
                 placement: PanePlacement {
-                    target: PaneTarget::SquadId(picker.target),
+                    target: if here {
+                        PaneTarget::CurrentRoute
+                    } else {
+                        PaneTarget::SquadId(picker.target)
+                    },
                     split,
-                    here: false,
+                    here,
                     tab: None,
                     at: None,
                 },

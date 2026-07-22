@@ -178,6 +178,20 @@ impl PtyShell {
         self.child.lock().ok().and_then(|c| c.process_id())
     }
 
+    /// (x-fbb1) True when a foreground process OTHER than the shell owns the
+    /// PTY's controlling process group - i.e. the shell is running a child (a
+    /// build, an editor), not sitting at a bare prompt. `process_group_leader`
+    /// is `tcgetpgrp(master)`; at a bare prompt it equals the shell's own pid,
+    /// and a foreground child takes the terminal pgrp. Fail-closed: if either
+    /// read is `None` we treat the pane as busy, so `.`=here take-over never
+    /// reaps a shell we cannot prove idle.
+    pub fn has_foreground_child(&self) -> bool {
+        match (self.master.process_group_leader(), self.child_pid()) {
+            (Some(fg), Some(shell)) => fg != shell as libc::pid_t,
+            _ => true,
+        }
+    }
+
     /// Queue keystrokes for the child (the writer thread performs the actual
     /// blocking write, so this never blocks the caller). The caller decides
     /// what a failure means (the server drops input fail-closed once the
