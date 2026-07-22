@@ -64,7 +64,7 @@ Two states that are **not** death and must never be treated as such:
 
 **Spawn a teammate for a node (with the minion clause):**
 
-Assemble the payload with a quoted heredoc so the clause's backticks, `$`, and quotes pass through literally (a plain double-quoted payload runs the clause's backticks as command substitution during spawn):
+Assemble the payload with a quoted heredoc so the clause's single and double quotes pass through literally (the clause carries single quotes in its `RESULT:` line and a double quote in `<help reason="...">`; a plain double-quoted payload terminates at that inner double quote and splits the argument list during spawn):
 
 ```bash
 read -r -d '' payload <<'CLAUSE' || true   # read -d '' exits 1 at EOF; absorb it so set -e does not abort
@@ -89,7 +89,7 @@ Next: /fno:blueprint <node>." --from-self
 
 ```bash
 # spawn the successor FIRST, carrying the phase artifact - same quoted-heredoc
-# assembly as the primary spawn (the clause's backticks/quotes need it here too)
+# assembly as the primary spawn (the clause's single and double quotes need it here too)
 read -r -d '' payload <<'CLAUSE' || true
 Continue node x-b3a8 at /fno:blueprint. Prior /think artifact: <path>.
 <minion clause - paste verbatim from references/minion-clause.md>

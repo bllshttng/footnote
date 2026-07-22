@@ -274,7 +274,11 @@ The whole of court is three-quarters contract, because the hard plumbing already
 ### Spawn each teammate into your own squad
 
 ```bash
-fno agents spawn <node-name> "<payload + minion clause>" --substrate pane --squad <own-squad> --split <dir> --effort <e>
+read -r -d '' payload <<'CLAUSE' || true   # read -d '' exits 1 at EOF; absorb it so set -e does not abort
+Take node <id> through <phase verb: /fno:think, /fno:blueprint, or /fno:target>.
+<minion clause - paste verbatim from references/minion-clause.md>
+CLAUSE
+fno agents spawn <node-name> "$payload" --substrate pane --squad <own-squad> --split <dir> --effort <e>
 ```
 
 - **Squad.** Pass your own squad explicitly when you know its name (a mission squad is named for the epic; the crowning brief should state it). Omitted, placement resolves to the caller's owner squad - usually yours, but explicit `--squad` removes the dependence on where a human's focus happens to sit.
