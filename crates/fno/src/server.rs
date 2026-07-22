@@ -1034,6 +1034,22 @@ pub fn run(socket: PathBuf) -> i32 {
 // Core state + mutations (all on the core loop)
 // ---------------------------------------------------------------------------
 
+/// A queued US8 template-tab restore (x-c4d4). Re-applied once every fno binding
+/// resolves, or after [`MAX_RESTORE_ATTEMPTS`] AgentRows ticks (then a shell for
+/// each still-unresolved slot). `fallback_tid` is the zero-live-member
+/// placeholder tab to remove once real template tabs land.
+struct PendingRestore {
+    sid: u64,
+    specs: Vec<crate::squad_store::StoredTabSpec>,
+    fallback_tid: Option<TabId>,
+    attempts: u32,
+}
+
+/// AgentRows ticks a pending template restore waits for its bindings before it
+/// applies anyway with shells for the unresolved. The reader ticks ~1/s, so this
+/// is a generous few-second grace for restored sessions to register.
+const MAX_RESTORE_ATTEMPTS: u32 = 30;
+
 struct Core {
     session: Session,
     panes: HashMap<u64, PaneEntry>,
@@ -1172,6 +1188,10 @@ struct Core {
     /// the store on persist (US8 restore re-applies it). Keyed by session-scoped
     /// TabId; a closed tab's entry is inert (ids never reused, no GC needed).
     template_specs: HashMap<crate::tree::TabId, LayoutSpec>,
+    /// (x-c4d4) Template tabs awaiting a re-apply after restore, once their fno
+    /// bindings can resolve (the registry populates off-loop). Drained on every
+    /// AgentRows tick; empty in steady state.
+    pending_template_restores: Vec<PendingRestore>,
     /// (x-7561) Machine-global external-row lifecycle tombstones the sideline
     /// renders (stopped -> exited `x`-removable; failed/unknown/stopping/removing
     /// -> `!exited` with an in-flight reason). Loaded at restore, refreshed after
@@ -2440,7 +2460,14 @@ impl Core {
             .session
             .squad_mut(sid)
             .ok_or((err_code::BAD_REQUEST, "squad vanished".to_string()))?;
+        let tid = sq.tabs[ti].id;
         sq.tabs[ti].name = clean;
+        // (x-c4d4) A template tab's stored spec is keyed by tab name; a rename
+        // must re-persist so restore finds it under the new name and drops the
+        // old key (set_tab_specs replaces the squad's whole list by current tabs).
+        if self.template_specs.contains_key(&tid) {
+            self.persist_template_specs(sid);
+        }
         self.push_layout(true);
         Ok(())
     }
@@ -2805,30 +2832,43 @@ impl Core {
             )
         })?;
 
-        // 2. Resolve or create the target tab (by stable id thereafter, so later
-        //    tab removals never invalidate an index).
+        // 2. Resolve the target tab's viewport WITHOUT mutating yet. For an
+        //    existing tab, its rect; for a New tab, a representative rect (all
+        //    tabs in a squad share the client viewport) - so arity/fit are
+        //    validated before any tab is spawned (an unfittable New apply is
+        //    truly atomic, with no observable shell/id side effect).
         let created_new = matches!(tab_sel, TabSel::New);
-        let target_tid = if created_new {
-            self.create_tab_in(sid, None)?
+        let existing_tid: Option<TabId> = if created_new {
+            None
         } else {
             let ti = self
                 .resolve_tab_index(sid, tab_sel)
                 .map_err(|e| (err_code::BAD_REQUEST, e))?;
-            self.session.squad(sid).expect("resolve live").tabs[ti].id
+            Some(self.session.squad(sid).expect("resolve live").tabs[ti].id)
+        };
+        let vp = match existing_tid {
+            Some(t) => self.tab_rect(t),
+            None => self
+                .session
+                .squad(sid)
+                .and_then(|sq| sq.tabs.first().map(|t| t.id))
+                .map(|t| self.tab_rect(t))
+                .unwrap_or(Rect {
+                    x: 0,
+                    y: 0,
+                    rows: vt::DEFAULT_ROWS,
+                    cols: vt::DEFAULT_COLS,
+                }),
         };
 
-        // 3. Fit: tile the slot-index shape into the tab rect; any region below
-        //    the minimum names the overflowing slots and refuses atomically.
-        let vp = self.tab_rect(target_tid);
+        // 3. Fit (pre-mutation, atomic): any region below the minimum names the
+        //    overflowing slots and refuses; nothing is mutated.
         let overflow: Vec<u64> = tree::layout(&shape, vp)
             .into_iter()
             .filter(|(_, r)| r.rows < tree::MIN_ROWS || r.cols < tree::MIN_COLS)
             .map(|(slot, _)| slot)
             .collect();
         if !overflow.is_empty() {
-            if created_new {
-                self.remove_tab_by_id(sid, target_tid); // undo the New-tab side effect
-            }
             let slots = overflow
                 .iter()
                 .map(|s| s.to_string())
@@ -2861,8 +2901,8 @@ impl Core {
             })
             .collect();
 
-        // 5. Relocate reuse panes that live in a DIFFERENT tab; a reuse pane
-        //    already in the target tab stays put (reused from its old leaves).
+        // 4a. Two slots resolving to the SAME live pane would commit a duplicate
+        //     leaf (one session hosts one pane). Refuse pre-mutation, atomic.
         let reuse_set: std::collections::HashSet<u64> = plans
             .iter()
             .filter_map(|p| {
@@ -2873,6 +2913,21 @@ impl Core {
                 }
             })
             .collect();
+        let reuse_count = plans.iter().filter(|p| matches!(p, Plan::Reuse(_))).count();
+        if reuse_set.len() != reuse_count {
+            return Err((
+                err_code::BAD_REQUEST,
+                "two slots bind the same session (one session hosts one pane)".into(),
+            ));
+        }
+
+        // 5. Materialize the target tab now that arity/fit/dup all passed, then
+        //    relocate reuse panes that live in a DIFFERENT tab (a reuse pane
+        //    already in the target tab stays put, reused from its old leaves).
+        let target_tid = match existing_tid {
+            Some(t) => t,
+            None => self.create_tab_in(sid, None)?,
+        };
         let target_leaves_before: Vec<u64> = {
             let ti = self.tab_index_by_id(sid, target_tid);
             tree::leaves(&self.session.squad(sid).expect("live").tabs[ti].root)
@@ -2957,16 +3012,27 @@ impl Core {
             flat_row(&filled.iter().map(|(_, p)| *p).collect::<Vec<_>>())
         };
 
-        // 9. Reap spare shells the new tree did not consume (template-owned, so a
-        //    close is safe; a bound-live pane is never in `spare` by construction).
+        // 9. Dispose of spare panes the new tree did not consume. A shell closes;
+        //    a pane still hosting a LIVE session (a bound slot the new spec
+        //    dropped) is broken into its own tab instead - never reap a live
+        //    session's PTY (the load-bearing never-kill invariant), even on a
+        //    reshape that drops its binding.
         let kept: std::collections::HashSet<u64> = tree::leaves(&new_root).into_iter().collect();
         for p in spare {
-            if !kept.contains(&p) {
+            if kept.contains(&p) {
+                continue;
+            }
+            if self.pane_hosts_live_session(p) {
+                self.rehome_pane_to_new_tab(sid, p);
+            } else {
                 self.reap_pane(p);
             }
         }
 
-        // 10. Commit: swap the root, keep focus unless opted in / gone.
+        // 10. Commit: swap the root, keep focus unless opted in / gone. The
+        //     fallback focus is the tree's FIRST leaf (deterministic = slot 0),
+        //     never an arbitrary HashSet pick.
+        let first_leaf = tree::leaves(&new_root).first().copied();
         let ti = self.tab_index_by_id(sid, target_tid);
         let si = self
             .session
@@ -2984,9 +3050,7 @@ impl Core {
                 None
             };
             tab.root = new_root;
-            tab.focus = new_focus
-                .or_else(|| kept.iter().copied().next())
-                .unwrap_or(tab.focus);
+            tab.focus = new_focus.or(first_leaf).unwrap_or(tab.focus);
             if let Err(e) = tree::check_invariants(tab) {
                 e2e_log(format_args!("layout_apply produced an invalid tree: {e}"));
             }
@@ -3012,24 +3076,32 @@ impl Core {
             .expect("target tab live")
     }
 
-    /// Remove the tab with id `tid` from squad `sid` (the id-keyed twin of
-    /// `session.remove_tab`, which takes an index), reaping its panes and doing
-    /// the CloseTab cleanup. Used to undo a New tab when fit fails.
-    fn remove_tab_by_id(&mut self, sid: u64, tid: TabId) {
-        let Some(ti) = self
-            .session
-            .squad(sid)
-            .and_then(|sq| sq.tabs.iter().position(|t| t.id == tid))
-        else {
+    /// Does pane `p` currently host a live (non-exited) session in THIS mux
+    /// session? Used by the reconcile to tell a template-owned shell (safe to
+    /// close) from a bound session's pane whose slot the new spec dropped (must
+    /// survive - the never-kill invariant).
+    fn pane_hosts_live_session(&self, p: u64) -> bool {
+        self.agents.iter().any(|a| {
+            !a.exited
+                && matches!(&a.mux, Some((sess, pane)) if sess == &self.session_name && *pane == p)
+        })
+    }
+
+    /// Break a live pane out into its own new tab in squad `sid`, keeping its
+    /// PTY. The reconcile's escape hatch for a bound session whose slot a
+    /// re-apply dropped: its pane keeps running in a fresh tab instead of being
+    /// reaped.
+    fn rehome_pane_to_new_tab(&mut self, sid: u64, p: u64) {
+        let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             return;
         };
-        let panes = tree::leaves(&self.session.squad(sid).expect("live").tabs[ti].root);
-        for p in panes {
-            self.reap_pane(p);
-        }
-        self.session.remove_tab(sid, ti);
-        self.tab_areas.remove(&tid);
-        self.reanchor_views();
+        let tid = self.session.mint_tab_id();
+        self.session.squads[si].tabs.push(Tab {
+            name: None,
+            id: tid,
+            root: Node::Leaf(p),
+            focus: p,
+        });
     }
 
     /// Capture every template-managed, NAMED tab in squad `sid` into the store
@@ -3058,15 +3130,18 @@ impl Core {
         }
     }
 
-    /// Rebuild squad `sid`'s template-managed tabs from their stored specs (US8).
-    /// Each spec gets a fresh named tab addressed by id (so a member tab of the
-    /// same name never makes the target ambiguous), then a re-apply that pulls
-    /// the restored members' panes into the template topology. Bindings resolve
-    /// against the registry available NOW: at cold start the off-loop reader has
-    /// not populated `self.agents` yet, so slots restore as shells and bind on a
-    /// later re-apply once the sessions register (eventual, never a duplicate).
-    /// Per-tab failure is a notice, never a crash (restore isolation).
-    fn restore_template_tabs(&mut self, sid: u64, specs: &[crate::squad_store::StoredTabSpec]) {
+    /// Rebuild squad `sid`'s template-managed tabs from their stored specs (US8),
+    /// returning how many tabs were created. Each spec gets a fresh named tab
+    /// addressed by id (so a member tab of the same name never makes the target
+    /// ambiguous), then a re-apply that pulls the restored members' panes into
+    /// the template topology and empties their member tabs. Per-tab failure is a
+    /// notice, never a crash (restore isolation).
+    fn restore_template_tabs(
+        &mut self,
+        sid: u64,
+        specs: &[crate::squad_store::StoredTabSpec],
+    ) -> usize {
+        let mut created = 0;
         for st in specs {
             let tid = match self.create_tab_in(sid, Some(st.tab_name.clone())) {
                 Ok(t) => t,
@@ -3075,10 +3150,66 @@ impl Core {
                     continue;
                 }
             };
+            created += 1;
             if let Err((_, e)) = self.apply_spec(sid, &TabSel::Id(tid), &st.spec, false) {
                 self.notice_all(format!("restore: template apply {}: {e}", st.tab_name));
             }
         }
+        created
+    }
+
+    /// Drain queued US8 template restores (x-c4d4), called on every AgentRows
+    /// tick. A pending restore applies once every fno slot resolves (so live
+    /// sessions bind rather than restore as shells), or after
+    /// [`MAX_RESTORE_ATTEMPTS`] ticks (degrading unresolved slots to shells). On
+    /// apply it removes the zero-live-member fallback tab it superseded.
+    fn drain_template_restores(&mut self) {
+        if self.pending_template_restores.is_empty() {
+            return;
+        }
+        let mut keep = Vec::new();
+        for mut pr in std::mem::take(&mut self.pending_template_restores) {
+            pr.attempts += 1;
+            let all_resolve = pr.specs.iter().all(|st| {
+                st.spec.slots.iter().all(|s| match s {
+                    SlotBinding::Fno(id) => self.resolve_local_pane(id).is_some(),
+                    SlotBinding::Shell => true,
+                })
+            });
+            if !all_resolve && pr.attempts < MAX_RESTORE_ATTEMPTS {
+                keep.push(pr);
+                continue;
+            }
+            let created = self.restore_template_tabs(pr.sid, &pr.specs);
+            if created > 0 {
+                if let Some(tid) = pr.fallback_tid {
+                    self.remove_fallback_tab(pr.sid, tid);
+                }
+            }
+        }
+        self.pending_template_restores = keep;
+        self.push_layout(true);
+    }
+
+    /// Remove the zero-live-member fallback shell tab once real template tabs
+    /// have landed (x-c4d4). No-op if it is the squad's only remaining tab (the
+    /// >=1-tab invariant wins) or already gone.
+    fn remove_fallback_tab(&mut self, sid: u64, tid: TabId) {
+        let Some(sq) = self.session.squad(sid) else {
+            return;
+        };
+        if sq.tabs.len() < 2 {
+            return;
+        }
+        let Some(ti) = sq.tabs.iter().position(|t| t.id == tid) else {
+            return;
+        };
+        for p in tree::leaves(&self.session.squad(sid).expect("live").tabs[ti].root) {
+            self.reap_pane(p);
+        }
+        self.session.remove_tab(sid, ti);
+        self.tab_areas.remove(&tid);
+        self.reanchor_views();
     }
 
     /// Resolve a [`PaneTarget`] to a squad id, defaulting `CurrentRoute` to the
@@ -3323,6 +3454,9 @@ impl Core {
             let mut members: Vec<crate::squad_store::StoredMember> = Vec::new();
             // (tab, optional (attach_id, pid)) for each pane we build.
             let mut tabs: Vec<(Tab, Option<(String, u64)>)> = Vec::new();
+            // (x-c4d4) The zero-live-member fallback shell tab, if we create one;
+            // a deferred template restore removes it once real template tabs land.
+            let mut fallback_tid: Option<TabId> = None;
             for m in &ps.members {
                 if m.tombstone {
                     members.push(m.clone()); // already dead - stays a tombstone
@@ -3382,6 +3516,7 @@ impl Core {
                 match self.spawn_pane(rows, cols, &cwd0) {
                     Ok(pid) => {
                         let tid = self.session.mint_tab_id();
+                        fallback_tid = Some(tid);
                         tabs.push((
                             Tab {
                                 name: None,
@@ -3426,11 +3561,21 @@ impl Core {
             // Persist the reconciled membership (members dead at restore are now
             // tombstoned in the store).
             self.persist_squad(sid);
-            // (x-c4d4 US8) Rebuild template-managed tabs from their stored specs
-            // instead of the one-tab-per-member fallback: re-apply pulls each
-            // restored member's pane into the template topology; a slot whose
-            // session did not survive restores as a shell, never a duplicate.
-            self.restore_template_tabs(sid, &ps.tab_specs);
+            // (x-c4d4 US8) DEFER the template rebuild: at restore the off-loop
+            // registry reader has not populated `self.agents`, so applying now
+            // would bind every fno slot to a shell and leave the restored member
+            // panes stranded in their own tabs. Queue it and drain on the first
+            // AgentRows tick once the sessions register - the re-apply then pulls
+            // each restored pane into the template topology and empties its member
+            // tab. A slot whose session never returns degrades to a shell.
+            if !ps.tab_specs.is_empty() {
+                self.pending_template_restores.push(PendingRestore {
+                    sid,
+                    specs: ps.tab_specs.clone(),
+                    fallback_tid,
+                    attempts: 0,
+                });
+            }
         }
         // The restored squads must not steal the attaching client's view: its
         // per-client `view` is untouched, but add_squad flipped the global MRU
@@ -5657,6 +5802,12 @@ impl Core {
                         // Everyone who viewed the dead tab (sender included)
                         // re-anchors in this same mutation (AC2-ERR).
                         self.tab_areas.remove(&view.1);
+                        // (x-c4d4) A closed template tab must drop its stored spec
+                        // so restore never resurrects it (persist rewrites the
+                        // squad's whole list from the tabs that still exist).
+                        if self.template_specs.remove(&view.1).is_some() {
+                            self.persist_template_specs(sid);
+                        }
                         self.reanchor_views();
                         self.push_layout(true);
                         Flow::Continue
@@ -7125,6 +7276,10 @@ impl Core {
                 self.agents = rows;
                 self.branch_by_cwd = branches;
                 self.tail_by_session = tails;
+                // (x-c4d4) The registry just refreshed: a queued template restore
+                // whose fno bindings now resolve gets applied here, binding live
+                // sessions instead of shells.
+                self.drain_template_restores();
                 // Rects are unchanged; only the Layout's agent rows moved -
                 // push without re-emitting frames (AC1-UI: visible within one
                 // layout push; AC2-UI: the read happened off-loop).
@@ -7356,6 +7511,7 @@ async fn serve(
         diff_pane: None,
         squad_members: HashMap::new(),
         template_specs: HashMap::new(),
+        pending_template_restores: Vec::new(),
         external_lifecycle: Vec::new(),
         persist_degraded_notified: false,
         restored: false,
@@ -9809,6 +9965,84 @@ mod tests {
             panes_before,
             "arity refuse spawns nothing"
         );
+    }
+
+    #[test]
+    fn dropping_a_bound_slot_rehomes_the_live_pane_never_reaps_it() {
+        // Codex P1 regression: when a re-apply's slots are all bound (no shell
+        // slot to absorb it), a dropped bound session's pane must NOT be reaped -
+        // it is broken into its own tab, still running (the never-kill invariant).
+        let (mut core, p1) = template_core();
+        let p2 = core.spawn_pane(24, 80, "/a").unwrap();
+        let p3 = core.spawn_pane(24, 80, "/a").unwrap();
+        core.agents = vec![
+            bound_agent("S1", p1),
+            bound_agent("S2", p2),
+            bound_agent("S3", p3),
+        ];
+        let thirds = LayoutSpec {
+            template: TemplateName::RowThirds,
+            slots: vec![
+                SlotBinding::Fno("S1".into()),
+                SlotBinding::Fno("S2".into()),
+                SlotBinding::Fno("S3".into()),
+            ],
+        };
+        core.apply_spec(1, &TabSel::Id(5), &thirds, false).unwrap();
+
+        // Re-apply main-left binding ONLY S2 and S3 (both slots bound, no shell):
+        // S1 is dropped with nowhere to be reused.
+        let two = LayoutSpec {
+            template: TemplateName::MainLeft,
+            slots: vec![SlotBinding::Fno("S2".into()), SlotBinding::Fno("S3".into())],
+        };
+        core.apply_spec(1, &TabSel::Id(5), &two, false).unwrap();
+
+        assert!(
+            core.panes.contains_key(&p1),
+            "S1's live pane is never reaped"
+        );
+        let tab5 = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 5)
+            .unwrap();
+        assert!(
+            !tree::leaves(&tab5.root).contains(&p1),
+            "S1 left the template tab"
+        );
+        let hosted = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|t| tree::leaves(&t.root).contains(&p1));
+        assert!(hosted, "S1's pane lives on in a rehomed tab");
+    }
+
+    #[test]
+    fn two_slots_binding_the_same_session_are_refused_atomically() {
+        // Codex P1 regression: the same fno id in two slots would commit a
+        // duplicate PaneId leaf. Refuse pre-mutation.
+        let (mut core, p1) = template_core();
+        core.agents = vec![bound_agent("S1", p1)];
+        let panes_before = core.panes.len();
+        let dup = LayoutSpec {
+            template: TemplateName::MainLeft,
+            slots: vec![
+                SlotBinding::Fno("S1".into()),
+                SlotBinding::Fno("S1".into()),
+                SlotBinding::Shell,
+                SlotBinding::Shell,
+            ],
+        };
+        let err = core.apply_spec(1, &TabSel::Id(5), &dup, false).unwrap_err();
+        assert_eq!(err.0, err_code::BAD_REQUEST);
+        assert_eq!(core.panes.len(), panes_before, "the refusal spawns nothing");
     }
 
     #[test]
@@ -13248,6 +13482,7 @@ mod tests {
             diff_pane: None,
             squad_members: HashMap::new(),
             template_specs: HashMap::new(),
+            pending_template_restores: Vec::new(),
             external_lifecycle: Vec::new(),
             persist_degraded_notified: false,
             restored: false,
