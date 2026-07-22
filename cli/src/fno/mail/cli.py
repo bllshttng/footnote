@@ -1013,7 +1013,11 @@ def _name_lane_send(
     from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.harness_identity import canonical_handle
-    from fno.inbox.store import generate_msg_id, write_new_thread
+    from fno.inbox.store import (
+        classify_durable_owner,
+        generate_msg_id,
+        write_new_thread,
+    )
     from fno.mail.envelope import harness_for_provider, wrap_fno_mail
 
     if resolved is not None:
@@ -1157,6 +1161,22 @@ def _name_lane_send(
     if lanes:
         print(f"lanes tried: {', '.join(lanes)}", file=sys.stderr)
 
+    # Terminal classification (US6): a name lane reaches the durable floor only
+    # after every live rung missed. A self-send lands in the sender's own inbox
+    # and a live-listed-but-wedged recipient still has a turn-boundary drain, so
+    # both own as live-drain; every other miss (asleep, offline, unprovable) is
+    # optimistically resumable and owns as wake-daemon. The dead-letter verdict is
+    # the sweep's to make once a wake-daemon thread sits unread past its TTL - at
+    # birth we never know a recipient is gone for good (a token no store knows
+    # already exits 16 upstream), so the durable floor never escalates non-zero.
+    self_send = resolved is None and token is not None and token_lane == "self-send"
+    recipient_live = self_send or resolved is not None
+    owner = classify_durable_owner(
+        param_forced=False,
+        recipient_live=recipient_live,
+        recipient_resumable=not recipient_live,
+    )
+
     try:
         th = write_new_thread(
             recipient=recipient,
@@ -1167,6 +1187,7 @@ def _name_lane_send(
             to_kind="name",
             provider_to=provider,
             replies_to=reply_to,
+            owner=owner.value,
         )
     except (OSError, ValueError, RuntimeError) as exc2:
         print(f"durable envelope write failed for {recipient!r}: {exc2}", file=sys.stderr)
