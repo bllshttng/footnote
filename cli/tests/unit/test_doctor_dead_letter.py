@@ -181,3 +181,18 @@ def test_wake_daemon_within_horizon_not_flagged(bus):
         meta={"owner": "wake-daemon", "ttl_at": future},
     )
     assert doctor._stale_dead_letters() == []
+
+
+def test_dead_letter_owner_stamped_named_recipient_surfaces(bus):
+    # A registered-agent name like `alpha` is not a hex handle, but an
+    # owner-stamped durable envelope carries its own ttl_at, so the sweep must
+    # find it - hex-only recipient discovery used to miss named recipients
+    # (dispatch_send writes its durable fallback to the registry name).
+    _seed(
+        "alpha",
+        "stranded named recipient",
+        ts=_fresh_ts(),
+        meta={"owner": "wake-daemon", "ttl_at": "2020-01-01T00:00:00Z"},
+    )
+    found = doctor._stale_dead_letters()
+    assert [(f["handle"], f["owner"]) for f in found] == [("alpha", "wake-daemon")]

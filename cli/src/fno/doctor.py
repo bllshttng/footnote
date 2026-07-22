@@ -1433,7 +1433,13 @@ def _stale_dead_letters(
             # was unambiguous, so widening the pattern makes to_kind load-bearing.
             if getattr(m, "to_kind", "name") == "project":
                 continue
-            if _A2A_HANDLE_RE.match(to):
+            # An owner-stamped durable envelope carries its own terminal class and
+            # ttl_at, so sweep its recipient whatever the handle shape - a
+            # registered-agent name like `alpha` is not hex but is still a real
+            # addressee. The regex stays as the fallback for legacy handle mail
+            # that predates the US6 stamp.
+            meta = getattr(m, "meta", None) or {}
+            if meta.get("owner") or _A2A_HANDLE_RE.match(to):
                 recips.add(to)
     except Exception:  # noqa: BLE001 — a torn bus contributes no findings
         return []
