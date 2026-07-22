@@ -7,7 +7,7 @@ This is the ceremony the x-304c synthesis marked `ADD`: the retro interviews wer
 ## When it fires and who it targets
 
 - **When:** the epic's last wave has merged and you are about to abdicate. One pass, one interview per builder, then exit.
-- **Who:** every builder session that carried a node in this epic - still-live or resumable. Resolve them from the epic's children (`fno backlog epic status <epic>` gives node -> session -> PR) and `fno agents top` / `discovered-json` for handles. A dead-but-resumable session is `fno agents resume <short-id>`'d, interviewed, then left; a session gone to artifacts only (transcript, no roster row) is interviewed by resuming from its recorded cwd if worth it, else noted as unreachable.
+- **Who:** every builder session that carried a node in this epic. By the time the epic is done the builders have shipped and released their node claims, so `fno backlog epic status` (which derives `worker` from a live claim) and `top` / `discovered-json` (live sessions only) no longer map node -> session - they show only who is still up. The durable map is the **ledger** (`~/.fno/ledger.json`), which records `node -> session_id -> pr` per shipped node; read it to enumerate the epic's builders, then use the live probes to see which are still reachable. A still-live or resumable session is `fno agents resume <session-id>`'d, interviewed, then left; one gone to artifacts only (transcript, no roster row) is interviewed by resuming from its recorded cwd if worth it, else noted as unreachable.
 - The Director interviews because it holds cross-session knowledge a builder lacks - it saw every squad, so it can ask the sibling-aware follow-up a siloed builder cannot self-generate.
 
 ## Delivery mechanics
@@ -40,7 +40,7 @@ The maintainer's manual step was prodding thin answers with the lens. Do it your
 
 ## Where the account lands
 
-Write each builder's returned account to `internal/fno/retros/<date>-<session-short>-<node>.md` with frontmatter pinning `node`, `session`, `prs`, `epic`, `date`. These are the sources a later synthesis pass folds (the x-304c synthesis pinned six such files in its `sources:` frontmatter). The interview produces the raw accounts; synthesis is a separate pass.
+Write each builder's returned account to your project's retros directory as `<date>-<session-short>-<node>.md`, with frontmatter pinning `node`, `session`, `prs`, `epic`, `date`. The maintainer instance keeps these in the Obsidian vault at `internal/fno/retros/` (the same vault `fno plan path` writes plans to) - but `internal/` is a gitignored symlink that does not exist on a fresh checkout, so resolve your own location rather than assuming that path, and never write into a missing `internal/`. These accounts are the sources a later synthesis pass folds (the x-304c synthesis pinned six such files in its `sources:` frontmatter). The interview produces the raw accounts; synthesis is a separate pass.
 
 ## Retro epistemics (how much to trust what comes back)
 
