@@ -1686,7 +1686,56 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
     run_on_existing_server(session.as_deref(), env_session, json, verb)
 }
 
-/// `fno mux layout get [--squad <s>] [--tab <sel>]` (x-d865).
+/// A `--template <name>` -> [`TemplateName`] (x-c4d4). Names match the wire
+/// enum's kebab-case spelling.
+fn parse_template_name(s: &str) -> Result<crate::proto::TemplateName, String> {
+    use crate::proto::TemplateName::*;
+    match s {
+        "main-left" => Ok(MainLeft),
+        "main-top" => Ok(MainTop),
+        "row-thirds" => Ok(RowThirds),
+        "col-thirds" => Ok(ColThirds),
+        "grid-2x2" => Ok(Grid2x2),
+        other => Err(format!(
+            "unknown template {other} (main-left|main-top|row-thirds|col-thirds|grid-2x2)"
+        )),
+    }
+}
+
+/// A `--slot <spec>` -> [`SlotBinding`] (x-c4d4). `-` is an explicit shell slot;
+/// `fno:<id>` (or a bare `<id>`) binds a session. Only `-` is a shell, so a
+/// coordinator never accidentally leaves an intended binding empty.
+fn parse_slot(s: &str) -> crate::proto::SlotBinding {
+    use crate::proto::SlotBinding;
+    if s == "-" {
+        SlotBinding::Shell
+    } else if let Some(id) = s.strip_prefix("fno:") {
+        SlotBinding::Fno(id.to_string())
+    } else {
+        SlotBinding::Fno(s.to_string())
+    }
+}
+
+/// The on-disk `.toml` spec (x-c4d4): `template = "main-left"`,
+/// `slots = ["fno:af4dac55", "-", ...]`. Strings (not the wire enum shape) so a
+/// hand-authored file matches the `.fno` config idiom; converted to a
+/// [`LayoutSpec`] here, the same struct the `--template`/`--slot` flags build.
+#[derive(serde::Deserialize)]
+struct SpecFile {
+    template: String,
+    slots: Vec<String>,
+}
+
+fn load_spec_file(path: &str) -> Result<crate::proto::LayoutSpec, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let sf: SpecFile = toml::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+    Ok(crate::proto::LayoutSpec {
+        template: parse_template_name(&sf.template)?,
+        slots: sf.slots.iter().map(|s| parse_slot(s)).collect(),
+    })
+}
+
+/// `fno mux layout get|apply ...` (get: x-d865; apply: x-c4d4).
 pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
     let (session, json, rest) = match take_common_flags(args) {
         Ok(t) => t,
@@ -1695,11 +1744,14 @@ pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
             return EXIT_USAGE;
         }
     };
-    // The only verb is `get`; a bare `layout` also means get.
+    if rest.first().map(String::as_str) == Some("apply") {
+        return layout_apply_cli(session.as_deref(), env_session, json, &rest[1..]);
+    }
+    // Otherwise `get` (a bare `layout` also means get).
     let flags = match rest.first().map(String::as_str) {
         Some("get") | None => args,
         Some(other) => {
-            eprintln!("fno mux layout: unknown verb {other} (get)");
+            eprintln!("fno mux layout: unknown verb {other} (get|apply)");
             return EXIT_USAGE;
         }
     };
@@ -1743,6 +1795,81 @@ pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
         env_session,
         json,
         ControlVerb::LayoutGet { scope },
+    )
+}
+
+/// `fno mux layout apply --template <t> --slot <b>... | --spec <file>
+/// [--squad <s>] [--tab <sel>] [--focus] [--json]` (x-c4d4). Both input forms
+/// assemble the SAME [`LayoutSpec`]; the file form IS the persisted spec (US8),
+/// so apply and restore share one struct.
+fn layout_apply_cli(
+    session: Option<&str>,
+    env_session: Option<&str>,
+    json: bool,
+    rest: &[String],
+) -> i32 {
+    let mut template = None;
+    let mut slots = Vec::new();
+    let mut spec_file = None;
+    let mut squad = None;
+    let mut tab = None;
+    let mut focus = false;
+    let mut i = 0;
+    let res = (|| -> Result<(), String> {
+        while i < rest.len() {
+            let val = |i: &mut usize| -> Result<String, String> {
+                *i += 1;
+                rest.get(*i).cloned().ok_or_else(|| format!("{} needs a value", rest[*i - 1]))
+            };
+            match rest[i].as_str() {
+                "--template" | "-t" => template = Some(parse_template_name(&val(&mut i)?)?),
+                "--slot" => slots.push(parse_slot(&val(&mut i)?)),
+                "--spec" => spec_file = Some(val(&mut i)?),
+                "--squad" | "-s" => squad = Some(val(&mut i)?),
+                "--tab" => tab = Some(parse_tab_sel(&val(&mut i)?)?),
+                "--focus" => focus = true,
+                other => return Err(format!("unknown flag: {other}")),
+            }
+            i += 1;
+        }
+        Ok(())
+    })();
+    if let Err(e) = res {
+        eprintln!("fno mux layout apply: {e}");
+        return EXIT_USAGE;
+    }
+    let spec = match spec_file {
+        Some(f) => {
+            if template.is_some() || !slots.is_empty() {
+                eprintln!("fno mux layout apply: --spec cannot combine with --template/--slot");
+                return EXIT_USAGE;
+            }
+            match load_spec_file(&f) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("fno mux layout apply: {e}");
+                    return EXIT_USAGE;
+                }
+            }
+        }
+        None => {
+            let Some(template) = template else {
+                eprintln!("fno mux layout apply: needs --template <name> (+ --slot ...) or --spec <file>");
+                return EXIT_USAGE;
+            };
+            crate::proto::LayoutSpec { template, slots }
+        }
+    };
+    run_on_existing_server(
+        session,
+        env_session,
+        json,
+        ControlVerb::LayoutApply {
+            squad: squad_target(squad),
+            tab: tab.unwrap_or(TabSel::Active),
+            spec,
+            focus,
+        },
     )
 }
 
@@ -2241,6 +2368,23 @@ fn render_reply(
             } else {
                 EXIT_ERROR
             }
+        }
+        ServerMsg::LayoutApplied { results } => {
+            // The receipt IS the contract: a script captures each slot's pane id
+            // from here (never predicts). JSON is the primary form (per-slot
+            // outcome + pane id); the plain form is one line per slot.
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&results).unwrap_or_else(|_| "[]".into())
+                );
+            } else {
+                for r in &results {
+                    let pane = r.pane_id.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
+                    println!("slot {} pane={} {:?}", r.slot, pane, r.outcome);
+                }
+            }
+            EXIT_OK
         }
         // The server only ever answers a control connection with the replies
         // above; anything else is a protocol violation.
