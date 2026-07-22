@@ -14037,7 +14037,11 @@ mod tests {
         }
         let mut view = view_with_agents(agents);
         // Capped, no selector: 1 attention + budget-7 idle + a `+5 idle` fold row.
-        assert_eq!(rendered(&view, "idle"), 7, "the cap folds the idle overflow");
+        assert_eq!(
+            rendered(&view, "idle"),
+            7,
+            "the cap folds the idle overflow"
+        );
         // Select a VISIBLE idle row by its CAPPED-build index (x-8d3e: the only
         // index space the selector ever lives in). `set_selector` caches its
         // identity, so protect keeps the whole squad idle-expanded and no idle
