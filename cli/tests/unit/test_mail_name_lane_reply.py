@@ -115,12 +115,66 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
 
 
 def test_ac1err_unknown_msg_id_is_rejected_sending_nothing(runner, mailbox):
-    # AC1-ERR: a --to id absent from the bus is a hard error; nothing is sent.
+    # AC1-ERR: a --to id absent from BOTH the bus and the transcript is a hard
+    # error; nothing is sent.
     r = runner.invoke(
         app, ["mail", "reply", "--to", "msg-nope", "--from", "web", "--body", "hi"]
     )
     assert r.exit_code != 0
     assert _bus_msgs() == []
+
+
+def _seed_transcript_envelope(
+    monkeypatch, tmp_path, *, session_id: str, from_: str, msg_id: str
+) -> None:
+    """Write a claude transcript for <session_id> containing a live-injected
+    <fno_mail from=<from_> id=<msg_id>> envelope (JSON-escaped, as it lands), and
+    seam CLAUDE_CODE_SESSION_ID + the projects dir so resolve_live_sender finds
+    it. No bus record is written -- that is the whole point (LD11a)."""
+    import json
+
+    from fno.agents import discover
+
+    projects = tmp_path / "projects"
+    enc = projects / "-Users-x-proj"
+    enc.mkdir(parents=True, exist_ok=True)
+    envelope = (
+        f'<fno_mail from="{from_}" harness="claude-code" model="opus" '
+        f'id="{msg_id}">\nping\n</fno_mail>'
+    )
+    line = json.dumps({"type": "user", "message": {"role": "user", "content": envelope}})
+    (enc / f"{session_id}.jsonl").write_text(line + "\n", encoding="utf-8")
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(projects))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
+
+
+def test_us3_reply_to_live_injected_id_resolves_sender_from_transcript(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    # US3 / AC2-HP: a live-injected message wrote NO durable thread, so its id is
+    # not on the bus. `fno mail reply --to <id>` recovers the sender off this
+    # session's transcript and threads the correlation, addressed to that handle.
+    sender = "9a063cd3"
+    msg = "msg-live1"
+    # Isolate discovery FIRST (sender offline -> durable floor), then seed the
+    # transcript, which re-points the projects dir so resolve_live_sender reads
+    # my seeded envelope rather than the empty isolation dir.
+    _isolate_empty_discovery(monkeypatch, tmp_path)
+    _seed_transcript_envelope(
+        monkeypatch, tmp_path,
+        session_id="11111111-2222-3333-4444-555566667777",
+        from_=sender, msg_id=msg,
+    )
+
+    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "pong"])
+    assert r.exit_code == 0, r.output
+
+    replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
+    assert len(replies) == 1
+    rep = replies[0]
+    assert rep.to == sender  # addressed to the origin handle by identity
+    assert rep.in_reply_to == msg  # bus correlation off an id with no durable thread
+    assert f'reply_to="{msg}"' in rep.body  # wire attr equals the same id
 
 
 def test_ac2err_non_name_lane_routes_to_thread_store(runner, mailbox, monkeypatch):
