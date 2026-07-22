@@ -247,17 +247,7 @@ fn ask_unknown_name_stderr_byte_parity() {
     let ch = ClaudeHome::at(tmpdir("ask-parity-claude"));
     let cwd = tmpdir("ask-parity-cwd");
 
-    let out = dispatch_claude_ask(
-        &home,
-        &ch,
-        "myagent",
-        "msg",
-        "fno",
-        &cwd,
-        false,
-        None,
-        &[],
-    );
+    let out = dispatch_claude_ask(&home, &ch, "myagent", "msg", "fno", &cwd, false, None, &[]);
 
     // Python: f"unknown agent {name!r}; spawn it first: fno agents spawn {name} -p <provider>"
     // Rust must match this exactly (py_repr wraps in single quotes).
@@ -557,16 +547,7 @@ fn spawn_codex_once_collision_exits_2() {
     seed_registry(&home, "taken", "codex");
 
     let out = dispatch_codex_once(
-        &home,
-        "taken",
-        "msg",
-        "fno",
-        &cwd,
-        false,
-        None,
-        None,
-        None,
-        None,
+        &home, "taken", "msg", "fno", &cwd, false, None, None, None, None,
     );
 
     assert_eq!(out.exit_code, 2, "collision must exit 2: {}", out.stderr);

@@ -720,7 +720,11 @@ MemAvailable:    8000000 kB\n";
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
 
-        std::fs::write(fnodir.join("config.toml"), "[agents]\nworker_qos = \"off\"\n").unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nworker_qos = \"off\"\n",
+        )
+        .unwrap();
         // `sh` resolves on every CI platform (a non-resolving argv[0] is
         // deliberately left unwrapped so NotFound/127 semantics survive).
         let argv = vec!["sh".to_string(), "-c".to_string(), "true".to_string()];

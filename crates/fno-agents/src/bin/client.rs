@@ -3742,10 +3742,7 @@ mod tests {
         let out = render_list_json(&agents, &filters, &discovered);
         let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(parsed["discovered_count"], 1);
-        assert_eq!(
-            parsed["discovered_sessions"][0]["handle"],
-            "fno-aaaa1111"
-        );
+        assert_eq!(parsed["discovered_sessions"][0]["handle"], "fno-aaaa1111");
         assert_eq!(parsed["schema_version"], 2);
 
         let table = render_list_table(&agents, &discovered);

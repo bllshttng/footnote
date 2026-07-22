@@ -314,27 +314,10 @@ fn parity_create_happy_path() {
     let rs_out = tmpdir("par-c1-rs-out").join("out.jsonl");
 
     let (py_exit, py_reply) = py_codex(
-        "create",
-        None,
-        &cwd,
-        "hello",
-        "fno",
-        false,
-        &py_out,
-        10,
-        &bin_dir,
-        &extra,
+        "create", None, &cwd, "hello", "fno", false, &py_out, 10, &bin_dir, &extra,
     );
-    let (rs_exit, rs_reply) = rust_codex_create(
-        &cwd,
-        "hello",
-        "fno",
-        false,
-        &rs_out,
-        10,
-        &bin_dir,
-        &extra,
-    );
+    let (rs_exit, rs_reply) =
+        rust_codex_create(&cwd, "hello", "fno", false, &rs_out, 10, &bin_dir, &extra);
 
     assert_eq!(py_exit, 0, "Python create exit: {}", py_exit);
     assert_eq!(rs_exit, 0, "Rust create exit: {}", rs_exit);
@@ -423,27 +406,10 @@ fn parity_no_jsonl_nonzero_exit() {
     let rs_out = tmpdir("par-e1-rs-out").join("out.jsonl");
 
     let (py_exit, _) = py_codex(
-        "create",
-        None,
-        &cwd,
-        "hello",
-        "fno",
-        false,
-        &py_out,
-        10,
-        &bin_dir,
-        &extra,
+        "create", None, &cwd, "hello", "fno", false, &py_out, 10, &bin_dir, &extra,
     );
-    let (rs_exit, _) = rust_codex_create(
-        &cwd,
-        "hello",
-        "fno",
-        false,
-        &rs_out,
-        10,
-        &bin_dir,
-        &extra,
-    );
+    let (rs_exit, _) =
+        rust_codex_create(&cwd, "hello", "fno", false, &rs_out, 10, &bin_dir, &extra);
 
     // Both should exit 11 (NoSessionIdError fires before exit_code check in Python)
     assert_eq!(
@@ -485,27 +451,10 @@ fn parity_soft_error_promotion() {
     let rs_out = tmpdir("par-se1-rs-out").join("out.jsonl");
 
     let (py_exit, py_reply) = py_codex(
-        "create",
-        None,
-        &cwd,
-        "hello",
-        "fno",
-        false,
-        &py_out,
-        10,
-        &bin_dir,
-        &extra,
+        "create", None, &cwd, "hello", "fno", false, &py_out, 10, &bin_dir, &extra,
     );
-    let (rs_exit, rs_reply) = rust_codex_create(
-        &cwd,
-        "hello",
-        "fno",
-        false,
-        &rs_out,
-        10,
-        &bin_dir,
-        &extra,
-    );
+    let (rs_exit, rs_reply) =
+        rust_codex_create(&cwd, "hello", "fno", false, &rs_out, 10, &bin_dir, &extra);
 
     assert_eq!(py_exit, 0, "Python soft-error exit: {}", py_exit);
     assert_eq!(rs_exit, 0, "Rust soft-error exit: {}", rs_exit);
