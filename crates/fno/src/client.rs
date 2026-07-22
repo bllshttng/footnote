@@ -511,7 +511,7 @@ struct DropZone {
 struct PaneDrag {
     mover: u64,
     zone: Option<DropZone>,
-    /// (v42, x-d6a8 G1) The pointer is over the tab strip: the drop breaks the
+    /// (v43, x-d6a8 G1) The pointer is over the tab strip: the drop breaks the
     /// pane into its own new tab (`Command::BreakPane`) instead of relocating it
     /// within the tab (`Command::MovePane`). Mutually exclusive with `zone` - a
     /// cell is either the strip or the content area, never both.
@@ -519,7 +519,7 @@ struct PaneDrag {
     last_at: Instant,
 }
 
-/// (v42, x-d6a8 G2) A tab-cell relocation drag in flight: picking a whole tab up
+/// (v43, x-d6a8 G2) A tab-cell relocation drag in flight: picking a whole tab up
 /// from the strip to graft it into the current tab's content as a split
 /// (`Command::JoinTab`). Mirrors [`PaneDrag`]'s lifetime (ghost, timeout reaper,
 /// esc-cancel); `zone` is the content-edge candidate under the pointer.
@@ -530,7 +530,7 @@ struct TabDrag {
     last_at: Instant,
 }
 
-/// (v42, x-d6a8 G3) The drag source of a sideline agent row.
+/// (v43, x-d6a8 G3) The drag source of a sideline agent row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RowSource {
     /// A pane-hosted row: the drop moves its pane into the current tab's content,
@@ -541,7 +541,7 @@ enum RowSource {
     Attach(String),
 }
 
-/// (v42, x-d6a8 G3) A sideline-row placement drag in flight. Reuses the
+/// (v43, x-d6a8 G3) A sideline-row placement drag in flight. Reuses the
 /// content-area zone vocabulary; `RowSource` carries whether the drop moves a
 /// live pane or attaches a paneless session. Not `Copy` (the attach id is owned).
 #[derive(Clone, Debug)]
@@ -734,10 +734,10 @@ struct View {
     /// (x-aa95) The relocation drag in flight, if any. While `Some`, motion and
     /// release are intercepted before they reach a pane's PTY.
     pane_drag: Option<PaneDrag>,
-    /// (v42, x-d6a8 G2) A tab-cell join drag in flight. Same interception as
+    /// (v43, x-d6a8 G2) A tab-cell join drag in flight. Same interception as
     /// `pane_drag`; at most one of the three drags is ever live at a time.
     tab_drag: Option<TabDrag>,
-    /// (v42, x-d6a8 G3) A sideline-row placement drag in flight.
+    /// (v43, x-d6a8 G3) A sideline-row placement drag in flight.
     row_drag: Option<RowDrag>,
     /// (x-a496) A pending click-a-card confirm: the node to dispatch and its
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
@@ -2698,7 +2698,7 @@ impl View {
         Some(DropZone { target, dir })
     }
 
-    /// (v42, x-d6a8 G1) Whether a cell lies on the tab strip (the top bar right
+    /// (v43, x-d6a8 G1) Whether a cell lies on the tab strip (the top bar right
     /// of the sideline panel) rather than the content area. The same region
     /// [`View::chrome_hit`] treats as the strip, so a pane dropped anywhere on it
     /// breaks into a new tab.
@@ -2706,7 +2706,7 @@ impl View {
         row < TAB_BAR_ROWS && col >= self.panel_w()
     }
 
-    /// (v42, x-d6a8 G2) The stable tab id under a strip cell, if it names an
+    /// (v43, x-d6a8 G2) The stable tab id under a strip cell, if it names an
     /// existing tab (a drag SOURCE). Walks the same spans [`View::chrome_hit`]
     /// walks, so a drag pickup and a click resolve identically. The `+` (NewTab)
     /// is not a drag source, and a cell under the notice overlay is not the strip.
@@ -2735,7 +2735,7 @@ impl View {
         None
     }
 
-    /// (v42, x-d6a8 G3) The drag source of a sideline agent row under a cell, if
+    /// (v43, x-d6a8 G3) The drag source of a sideline agent row under a cell, if
     /// any. A pane-hosted row drags its pane; a paneless bg row drags its attach
     /// id; a row with neither (a dead external tombstone) is not draggable.
     fn row_drag_source_at(&self, row: u16, col: u16) -> Option<RowSource> {
@@ -2810,7 +2810,7 @@ impl View {
         })
     }
 
-    // ---- (v42, x-d6a8 G2) tab-cell join drag -------------------------------
+    // ---- (v43, x-d6a8 G2) tab-cell join drag -------------------------------
 
     fn begin_tab_drag(&mut self, src_tab: u64, now: Instant) {
         self.tab_drag = Some(TabDrag {
@@ -2861,7 +2861,7 @@ impl View {
         self.tab_drag.take().is_some()
     }
 
-    // ---- (v42, x-d6a8 G3) sideline-row placement drag ----------------------
+    // ---- (v43, x-d6a8 G3) sideline-row placement drag ----------------------
 
     fn begin_row_drag(&mut self, src: RowSource, now: Instant) {
         self.row_drag = Some(RowDrag {
@@ -19922,7 +19922,7 @@ mod tests {
         assert!(view.pane_drag.is_none(), "committing ends the drag");
     }
 
-    // ---- (v42, x-d6a8) US9 interactive drag commit functions ---------------
+    // ---- (v43, x-d6a8) US9 interactive drag commit functions ---------------
 
     #[test]
     fn g1_pane_drag_onto_the_strip_commits_a_break() {
