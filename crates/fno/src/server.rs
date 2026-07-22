@@ -38,9 +38,9 @@ use crate::backlog_view;
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
     BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
-    Frame, LayoutScope, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta, PanePlacement,
-    PaneTarget, ServerMsg, SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta, TabSel,
-    WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    Frame, LayoutScope, LayoutSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
+    PanePlacement, PaneTarget, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout,
+    SquadMeta, TabInfo, TabLayout, TabMeta, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
@@ -459,6 +459,13 @@ enum CoreMsg {
         src_tab: TabSel,
         anchor_pane: u64,
         direction: Dir,
+        reply: ControlReply,
+    },
+    LayoutApply {
+        squad: PaneTarget,
+        tab: TabSel,
+        spec: LayoutSpec,
+        focus: bool,
         reply: ControlReply,
     },
     /// A fresh registry-derived agent row set from the off-loop reader task
@@ -1159,6 +1166,12 @@ struct Core {
     /// inert (ids never reused; no GC - ponytail: a dead-sid leak is one small
     /// map entry per closed workspace per session, bounded by session length).
     squad_members: HashMap<u64, Vec<crate::squad_store::StoredMember>>,
+    /// (x-c4d4) The live layout spec of each template-managed tab: tab id ->
+    /// the spec last applied. A template tab is agent-managed by contract, so
+    /// this is the authority for the reconcile diff and the source captured into
+    /// the store on persist (US8 restore re-applies it). Keyed by session-scoped
+    /// TabId; a closed tab's entry is inert (ids never reused, no GC needed).
+    template_specs: HashMap<crate::tree::TabId, LayoutSpec>,
     /// (x-7561) Machine-global external-row lifecycle tombstones the sideline
     /// renders (stopped -> exited `x`-removable; failed/unknown/stopping/removing
     /// -> `!exited` with an in-flight reason). Loaded at restore, refreshed after
@@ -2650,6 +2663,361 @@ impl Core {
         }
     }
 
+    /// Resolve an fno session id to a single live pane it hosts in THIS session,
+    /// mirroring [`Self::pane_where`]'s exact-then-unambiguous-prefix match
+    /// (x-c4d4 reuses the x-d865 registry join). `None` for an id that resolves
+    /// to no live, pane-hosted, in-session session - the caller demotes that
+    /// slot to a shell (never a duplicate spawn of the dead session).
+    fn resolve_local_pane(&self, fno_id: &str) -> Option<u64> {
+        let id = fno_id.trim();
+        if id.is_empty() {
+            return None;
+        }
+        let exact: Vec<&RegistryAgent> = self.agents.iter().filter(|a| identity_exact(a, id)).collect();
+        let matched: Vec<&RegistryAgent> = if !exact.is_empty() {
+            exact
+        } else {
+            let prefix: Vec<&RegistryAgent> =
+                self.agents.iter().filter(|a| identity_prefix(a, id)).collect();
+            let mut ids: Vec<&str> = prefix.iter().filter_map(|a| a.session_id.as_deref()).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.len() > 1 {
+                return None; // ambiguous prefix is never a silent first-pick
+            }
+            prefix
+        };
+        matched.iter().find_map(|a| {
+            let (sess, pane) = a.mux.as_ref()?;
+            (sess == &self.session_name && self.panes.contains_key(pane)).then_some(*pane)
+        })
+    }
+
+    /// Detach `pane` from whatever tab currently holds it, keeping the PTY alive
+    /// (the [`Self::pane_break`] cleanup, minus the new-tab step). A no-op if the
+    /// pane is in no tab. Used to relocate a bound session's live pane into a
+    /// template tab without ever reaping it (Reconcile: relocate, never kill).
+    fn detach_pane_keep_pty(&mut self, pane: u64) {
+        let Some((sid, ti)) = self.session.find_pane(pane) else {
+            return;
+        };
+        let tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
+        let vp = self.tab_rect(tid);
+        let si = self.session.squads.iter().position(|s| s.id == sid).expect("squad live");
+        let outcome = {
+            let tab = &mut self.session.squads[si].tabs[ti];
+            tree::detach_leaf(tab, vp, pane)
+        };
+        // TabEmptied leaves the tree unchanged (the pane still nominally in that
+        // single-pane tab); dropping the tab frees the pane. Either way the PTY
+        // survives, ready to graft into the template tree.
+        if matches!(outcome, Ok(tree::DetachOutcome::TabEmptied)) {
+            self.session.remove_tab(sid, ti);
+            self.tab_areas.remove(&tid);
+            self.reanchor_views();
+        }
+    }
+
+    /// Create a fresh tab (one shell leaf) in squad `sid`, returning its stable
+    /// id. The sid-based twin of [`Self::tab_create`] (which resolves a
+    /// `PaneTarget` and returns the leaf pane); used where the squad id is
+    /// already in hand (template apply / restore).
+    fn create_tab_in(&mut self, sid: u64, name: Option<String>) -> Result<TabId, (u32, String)> {
+        let cwd = self.session.squad(sid).map(|s| s.canonical_cwd().to_string()).unwrap_or_default();
+        let pid = self
+            .spawn_pane(vt::DEFAULT_ROWS, vt::DEFAULT_COLS, &cwd)
+            .map_err(|e| (err_code::SPAWN_FAILED, e))?;
+        let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
+            self.reap_pane(pid);
+            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
+        };
+        let tid = self.session.mint_tab_id();
+        self.session.squads[si].tabs.push(Tab {
+            name: clean_tab_name(name),
+            id: tid,
+            root: Node::Leaf(pid),
+            focus: pid,
+        });
+        Ok(tid)
+    }
+
+    /// Realize a [`LayoutSpec`] onto a tab for [`ControlVerb::LayoutApply`]
+    /// (x-c4d4). Arity + fit are checked pre-mutation (atomic top-level `Err`);
+    /// past that, bound panes relocate in place, unbound/shell slots reuse a
+    /// spare shell or spawn one, and dropped shells close. A live bound pane is
+    /// never killed. Serialized by the single core loop: this whole method runs
+    /// as one atomic turn (no `.await`), so a concurrent apply cannot interleave
+    /// - the per-(squad,tab) busy flag the design left conditional is unneeded.
+    fn layout_apply(
+        &mut self,
+        squad: &PaneTarget,
+        tab_sel: &TabSel,
+        spec: &LayoutSpec,
+        focus: bool,
+    ) -> Result<Vec<SlotResult>, (u32, String)> {
+        let sid = self.resolve_squad(squad)?;
+        self.apply_spec(sid, tab_sel, spec, focus)
+    }
+
+    /// The sid-resolved core of [`Self::layout_apply`], shared with US8 restore
+    /// (which already knows the squad id it just built).
+    fn apply_spec(
+        &mut self,
+        sid: u64,
+        tab_sel: &TabSel,
+        spec: &LayoutSpec,
+        focus: bool,
+    ) -> Result<Vec<SlotResult>, (u32, String)> {
+        let k = spec.slots.len();
+
+        // 1. Topology + arity (pure, pre-mutation).
+        let shape = crate::templates::topology(spec.template, k).map_err(|e| {
+            let crate::templates::TemplateError::Arity { want, got, variadic } = e;
+            (
+                err_code::TEMPLATE_ARITY,
+                format!(
+                    "template arity: want {want}{}, got {got}",
+                    if variadic { "+" } else { "" }
+                ),
+            )
+        })?;
+
+        // 2. Resolve or create the target tab (by stable id thereafter, so later
+        //    tab removals never invalidate an index).
+        let created_new = matches!(tab_sel, TabSel::New);
+        let target_tid = if created_new {
+            self.create_tab_in(sid, None)?
+        } else {
+            let ti = self.resolve_tab_index(sid, tab_sel).map_err(|e| (err_code::BAD_REQUEST, e))?;
+            self.session.squad(sid).expect("resolve live").tabs[ti].id
+        };
+
+        // 3. Fit: tile the slot-index shape into the tab rect; any region below
+        //    the minimum names the overflowing slots and refuses atomically.
+        let vp = self.tab_rect(target_tid);
+        let overflow: Vec<u64> = tree::layout(&shape, vp)
+            .into_iter()
+            .filter(|(_, r)| r.rows < tree::MIN_ROWS || r.cols < tree::MIN_COLS)
+            .map(|(slot, _)| slot)
+            .collect();
+        if !overflow.is_empty() {
+            if created_new {
+                self.remove_tab_by_id(sid, target_tid); // undo the New-tab side effect
+            }
+            let slots = overflow.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",");
+            return Err((
+                err_code::TEMPLATE_UNFITTABLE,
+                format!("template {:?} does not fit: slots {slots} fall below the minimum", spec.template),
+            ));
+        }
+
+        // 4. Resolve each slot's binding to a live pane (reuse) or a shell need.
+        enum Plan {
+            Reuse(u64),
+            Shell,   // explicit `-`
+            Unbound, // an fno that resolved to no live pane -> shell, reported
+        }
+        let plans: Vec<Plan> = spec
+            .slots
+            .iter()
+            .map(|b| match b {
+                SlotBinding::Shell => Plan::Shell,
+                SlotBinding::Fno(id) => match self.resolve_local_pane(id) {
+                    Some(p) => Plan::Reuse(p),
+                    None => Plan::Unbound,
+                },
+            })
+            .collect();
+
+        // 5. Relocate reuse panes that live in a DIFFERENT tab; a reuse pane
+        //    already in the target tab stays put (reused from its old leaves).
+        let reuse_set: std::collections::HashSet<u64> =
+            plans.iter().filter_map(|p| if let Plan::Reuse(p) = p { Some(*p) } else { None }).collect();
+        let target_leaves_before: Vec<u64> = {
+            let ti = self.tab_index_by_id(sid, target_tid);
+            tree::leaves(&self.session.squad(sid).expect("live").tabs[ti].root)
+        };
+        for &p in &reuse_set {
+            if !target_leaves_before.contains(&p) {
+                self.detach_pane_keep_pty(p);
+            }
+        }
+
+        // 6. Spare shells to recycle for shell/unbound slots (idempotence: a
+        //    re-apply reuses these, spawning nothing). The target tab's current
+        //    leaves that are NOT bound reuse panes are template-owned shells.
+        let mut spare: Vec<u64> = target_leaves_before
+            .iter()
+            .copied()
+            .filter(|p| !reuse_set.contains(p))
+            .collect();
+
+        // 7. Assign a pane to every slot, spawning shells only after fit passed.
+        let cwd = self.session.squad(sid).map(|s| s.canonical_cwd().to_string()).unwrap_or_default();
+        let mut results: Vec<SlotResult> = Vec::with_capacity(k);
+        let mut filled: Vec<(usize, u64)> = Vec::with_capacity(k); // (slot idx, pane)
+        for (i, plan) in plans.into_iter().enumerate() {
+            let (pane, outcome) = match plan {
+                Plan::Reuse(p) => (Some(p), SlotOutcome::Reused),
+                Plan::Shell | Plan::Unbound => {
+                    // An fno slot that reached here resolved to no live pane -> shell,
+                    // reported Unbound; an explicit `-` slot is a plain Shell.
+                    let is_unbound = matches!(spec.slots[i], SlotBinding::Fno(_));
+                    let pane = spare.pop().or_else(|| {
+                        self.spawn_pane(vt::DEFAULT_ROWS, vt::DEFAULT_COLS, &cwd).ok()
+                    });
+                    match pane {
+                        Some(p) => (
+                            Some(p),
+                            if is_unbound { SlotOutcome::Unbound } else { SlotOutcome::Shell },
+                        ),
+                        None => (None, SlotOutcome::SpawnFailed),
+                    }
+                }
+            };
+            if let Some(p) = pane {
+                filled.push((i, p));
+            }
+            results.push(SlotResult { slot: i as u32, pane_id: pane, outcome });
+        }
+
+        // If every slot failed to obtain a pane (total PTY exhaustion), leave
+        // the tab untouched rather than commit an empty tree - the per-slot
+        // SpawnFailed results already tell the caller nothing landed.
+        if filled.is_empty() {
+            return Ok(results);
+        }
+
+        // 8. Build the committed tree. All slots filled -> the exact template.
+        //    A rare shell-spawn failure -> a flat even split over the surviving
+        //    panes (never an orphan, never a kill; the failed slot is reported).
+        // ponytail: the flat fallback only fires on PTY exhaustion; a reduced
+        // template shape is not worth the code when a plain row shows every pane.
+        let new_root = if filled.len() == k {
+            let map: std::collections::HashMap<u64, u64> =
+                filled.iter().map(|(slot, pane)| (*slot as u64, *pane)).collect();
+            substitute_leaves(&shape, &map)
+        } else {
+            flat_row(&filled.iter().map(|(_, p)| *p).collect::<Vec<_>>())
+        };
+
+        // 9. Reap spare shells the new tree did not consume (template-owned, so a
+        //    close is safe; a bound-live pane is never in `spare` by construction).
+        let kept: std::collections::HashSet<u64> = tree::leaves(&new_root).into_iter().collect();
+        for p in spare {
+            if !kept.contains(&p) {
+                self.reap_pane(p);
+            }
+        }
+
+        // 10. Commit: swap the root, keep focus unless opted in / gone.
+        let ti = self.tab_index_by_id(sid, target_tid);
+        let si = self.session.squads.iter().position(|s| s.id == sid).expect("live");
+        {
+            let tab = &mut self.session.squads[si].tabs[ti];
+            let new_focus = if focus {
+                filled.first().map(|(_, p)| *p)
+            } else if kept.contains(&tab.focus) {
+                Some(tab.focus)
+            } else {
+                None
+            };
+            tab.root = new_root;
+            tab.focus = new_focus.or_else(|| kept.iter().copied().next()).unwrap_or(tab.focus);
+            if let Err(e) = tree::check_invariants(tab) {
+                e2e_log(format_args!("layout_apply produced an invalid tree: {e}"));
+            }
+        }
+
+        // 11. Record the spec as the tab's live template + persist it (US8).
+        self.template_specs.insert(target_tid, spec.clone());
+        self.persist_template_specs(sid);
+
+        self.push_layout(true);
+        Ok(results)
+    }
+
+    /// The current index of the tab with id `tid` in squad `sid`. Callers hold a
+    /// stable `TabId` across tab removals and re-resolve the index at each use.
+    fn tab_index_by_id(&self, sid: u64, tid: TabId) -> usize {
+        self.session
+            .squad(sid)
+            .expect("squad live")
+            .tabs
+            .iter()
+            .position(|t| t.id == tid)
+            .expect("target tab live")
+    }
+
+    /// Remove the tab with id `tid` from squad `sid` (the id-keyed twin of
+    /// `session.remove_tab`, which takes an index), reaping its panes and doing
+    /// the CloseTab cleanup. Used to undo a New tab when fit fails.
+    fn remove_tab_by_id(&mut self, sid: u64, tid: TabId) {
+        let Some(ti) = self
+            .session
+            .squad(sid)
+            .and_then(|sq| sq.tabs.iter().position(|t| t.id == tid))
+        else {
+            return;
+        };
+        let panes = tree::leaves(&self.session.squad(sid).expect("live").tabs[ti].root);
+        for p in panes {
+            self.reap_pane(p);
+        }
+        self.session.remove_tab(sid, ti);
+        self.tab_areas.remove(&tid);
+        self.reanchor_views();
+    }
+
+    /// Capture every template-managed, NAMED tab in squad `sid` into the store
+    /// (US8). Restore re-applies these. Unnamed template tabs stay live-only
+    /// (no durable identity to key on). A store-write failure degrades
+    /// persistence only - the live layout stands (matches `persist_squad`).
+    fn persist_template_specs(&mut self, sid: u64) {
+        let Some(sq) = self.session.squad(sid) else {
+            return;
+        };
+        let name = sq.name.clone();
+        let Some(name) = name.filter(|n| !n.is_empty()) else {
+            return; // an unnamed (attach-born) squad is never persisted
+        };
+        let specs: Vec<crate::squad_store::StoredTabSpec> = sq
+            .tabs
+            .iter()
+            .filter_map(|t| {
+                let tab_name = t.name.clone().filter(|n| !n.is_empty())?;
+                let spec = self.template_specs.get(&t.id)?.clone();
+                Some(crate::squad_store::StoredTabSpec { tab_name, spec })
+            })
+            .collect();
+        if let Err(e) = crate::squad_store::set_tab_specs(&name, &specs) {
+            self.persist_degraded(&e);
+        }
+    }
+
+    /// Rebuild squad `sid`'s template-managed tabs from their stored specs (US8).
+    /// Each spec gets a fresh named tab addressed by id (so a member tab of the
+    /// same name never makes the target ambiguous), then a re-apply that pulls
+    /// the restored members' panes into the template topology. Bindings resolve
+    /// against the registry available NOW: at cold start the off-loop reader has
+    /// not populated `self.agents` yet, so slots restore as shells and bind on a
+    /// later re-apply once the sessions register (eventual, never a duplicate).
+    /// Per-tab failure is a notice, never a crash (restore isolation).
+    fn restore_template_tabs(&mut self, sid: u64, specs: &[crate::squad_store::StoredTabSpec]) {
+        for st in specs {
+            let tid = match self.create_tab_in(sid, Some(st.tab_name.clone())) {
+                Ok(t) => t,
+                Err((_, e)) => {
+                    self.notice_all(format!("restore: template tab {}: {e}", st.tab_name));
+                    continue;
+                }
+            };
+            if let Err((_, e)) = self.apply_spec(sid, &TabSel::Id(tid), &st.spec, false) {
+                self.notice_all(format!("restore: template apply {}: {e}", st.tab_name));
+            }
+        }
+    }
+
     /// Resolve a [`PaneTarget`] to a squad id, defaulting `CurrentRoute` to the
     /// active squad, for the tab/layout verbs.
     fn resolve_squad(&self, target: &PaneTarget) -> Result<u64, (u32, String)> {
@@ -2995,6 +3363,11 @@ impl Core {
             // Persist the reconciled membership (members dead at restore are now
             // tombstoned in the store).
             self.persist_squad(sid);
+            // (x-c4d4 US8) Rebuild template-managed tabs from their stored specs
+            // instead of the one-tab-per-member fallback: re-apply pulls each
+            // restored member's pane into the template topology; a slot whose
+            // session did not survive restores as a shell, never a duplicate.
+            self.restore_template_tabs(sid, &ps.tab_specs);
         }
         // The restored squads must not steal the attaching client's view: its
         // per-client `view` is untouched, but add_squad flipped the global MRU
@@ -6662,6 +7035,20 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
+            CoreMsg::LayoutApply {
+                squad,
+                tab,
+                spec,
+                focus,
+                reply,
+            } => {
+                let msg = match self.layout_apply(&squad, &tab, &spec, focus) {
+                    Ok(results) => ServerMsg::LayoutApplied { results },
+                    Err((code, msg)) => ServerMsg::Err { code, msg },
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
             CoreMsg::AgentTails { tails } => {
                 self.tail_by_session = tails;
                 self.push_layout(false);
@@ -6905,6 +7292,7 @@ async fn serve(
         attached: HashMap::new(),
         diff_pane: None,
         squad_members: HashMap::new(),
+        template_specs: HashMap::new(),
         external_lifecycle: Vec::new(),
         persist_degraded_notified: false,
         restored: false,
@@ -7476,6 +7864,41 @@ fn identity_prefix(a: &RegistryAgent, id: &str) -> bool {
     hit(&a.session_id) || hit(&a.harness_session_id)
 }
 
+/// Substitute slot-index leaves for real pane ids (x-c4d4): `templates::topology`
+/// returns a `Node` whose leaves ARE slot indices; this maps each to its
+/// resolved pane. `map` is a bijection over the slots present, so the result has
+/// unique leaves (the tree invariant).
+fn substitute_leaves(shape: &Node, map: &std::collections::HashMap<u64, u64>) -> Node {
+    match shape {
+        Node::Leaf(slot) => Node::Leaf(*map.get(slot).unwrap_or(slot)),
+        Node::Branch { axis, children } => Node::Branch {
+            axis: *axis,
+            children: children
+                .iter()
+                .map(|(r, c)| (*r, substitute_leaves(c, map)))
+                .collect(),
+        },
+    }
+}
+
+/// A flat evenly-weighted row of panes (x-c4d4 shell-spawn-failure fallback): a
+/// single pane is a bare leaf, else a horizontal branch. Ratios sum to exactly
+/// 1.0 (last absorbs the float remainder).
+fn flat_row(panes: &[u64]) -> Node {
+    if panes.len() == 1 {
+        return Node::Leaf(panes[0]);
+    }
+    let n = panes.len();
+    let each = 1.0 / n as f32;
+    let mut ratios = vec![each; n];
+    let rest: f32 = ratios[..n - 1].iter().sum();
+    ratios[n - 1] = 1.0 - rest;
+    Node::Branch {
+        axis: Axis::Horizontal,
+        children: ratios.into_iter().zip(panes).map(|(r, &p)| (r, Node::Leaf(p))).collect(),
+    }
+}
+
 /// A one-shot v4 control connection: version-check, route the verb to the core
 /// loop with a oneshot reply, answer with exactly one message, close. A client
 /// that vanishes mid-verb drops the reply receiver, which the off-loop
@@ -7702,6 +8125,22 @@ async fn handle_control(
                     src_tab,
                     anchor_pane,
                     direction,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::LayoutApply {
+            squad,
+            tab,
+            spec,
+            focus,
+        } => {
+            core_tx
+                .send(CoreMsg::LayoutApply {
+                    squad,
+                    tab,
+                    spec,
+                    focus,
                     reply: reply_tx,
                 })
                 .await
@@ -12438,6 +12877,7 @@ mod tests {
             attached: HashMap::new(),
             diff_pane: None,
             squad_members: HashMap::new(),
+            template_specs: HashMap::new(),
             external_lifecycle: Vec::new(),
             persist_degraded_notified: false,
             restored: false,

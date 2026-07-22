@@ -232,7 +232,7 @@ fn default_true() -> bool {
 /// `#[serde(default)]`-tolerant, but the new VERBS are not - a v40 server cannot
 /// deserialize a `PaneSplit`, so one bump covers the whole node's wire delta
 /// (Locked Decision 7).
-pub const PROTO_VERSION: u32 = 41;
+pub const PROTO_VERSION: u32 = 42;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -610,6 +610,26 @@ pub enum ControlVerb {
         anchor_pane: u64,
         direction: Dir,
     },
+
+    // -- v42 (x-c4d4) declarative layout templates. Applies a named shape with
+    //    ordered slot bindings to a whole tab; the substrate above (splits, tree
+    //    ops) is what it composes. Anchored to explicit tab/slot ids, never
+    //    CurrentRoute focus; no viewer focus change unless `focus` opts in. --
+    /// Realize a [`LayoutSpec`] onto `tab` in `squad`: resolve each slot's fno
+    /// binding to its live pane (reused in place) or a shell, arrange them into
+    /// the template's topology, and commit atomically -> [`ServerMsg::LayoutApplied`]
+    /// with a per-slot [`SlotResult`]. Idempotent: re-applying the same spec is a
+    /// no-op that reuses the existing panes (never respawns, never a duplicate).
+    LayoutApply {
+        squad: PaneTarget,
+        tab: TabSel,
+        spec: LayoutSpec,
+        /// Opt-in focus move to slot 0's pane; default never steals a viewer's
+        /// focus (Locked Decision 2). `#[serde(default)]` keeps a v41 reader
+        /// (which never sends this verb) irrelevant and a hand-authored spec terse.
+        #[serde(default)]
+        focus: bool,
+    },
 }
 
 /// What a [`ControlVerb::LayoutGet`] dumps (v41, layout-api).
@@ -621,6 +641,84 @@ pub enum LayoutScope {
     Squad(PaneTarget),
     /// One tab in one squad.
     Tab { squad: PaneTarget, tab: TabSel },
+}
+
+/// A named layout shape (v42, x-c4d4). Fixed vocabulary from the epic - a
+/// general layout DSL is explicitly out of scope. `topology(name, k)` in
+/// `templates.rs` turns one of these plus a slot count into a pure pane tree.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TemplateName {
+    /// `H[ s0, V[ s1.. ] ]` - one main pane full height on the left, the rest
+    /// stacked on the right. Arity k >= 2.
+    MainLeft,
+    /// `V[ s0, H[ s1.. ] ]` - one main pane full width on top, the rest in a
+    /// row below. Arity k >= 2.
+    MainTop,
+    /// `H[ s0, s1, s2 ]` - three columns. Arity k == 3.
+    RowThirds,
+    /// `V[ s0, s1, s2 ]` - three stacked rows. Arity k == 3.
+    ColThirds,
+    /// `V[ H[ s0, s1 ], H[ s2, s3 ] ]`. Arity k == 4.
+    Grid2x2,
+}
+
+/// A declarative layout to realize onto one tab (v42, x-c4d4). The CLI's
+/// `--template`/`--slot` flags and a persisted `.toml` spec assemble the SAME
+/// struct, so apply and restore share one code path (US8).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LayoutSpec {
+    pub template: TemplateName,
+    /// Ordered; a slot's index is its position in the template topology.
+    pub slots: Vec<SlotBinding>,
+}
+
+/// What one template slot binds to (v42, x-c4d4). Arrange-only: a slot names an
+/// existing session or an intentional empty shell - it never spawns a worker
+/// (that arrives with the roles group). A `Role` variant lands later without a
+/// wire break; a v42 reader that predates it treats the unknown variant as a
+/// hard version-skew error, never a silent misbind.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotBinding {
+    /// Bind this fno session id (resolved to its live pane via the registry
+    /// join). A dead / paneless id reconciles to a shell, reported, never a
+    /// duplicate of the dead session.
+    Fno(String),
+    /// An intentional empty shell slot.
+    Shell,
+}
+
+/// One slot's outcome in a [`ServerMsg::LayoutApplied`] receipt (v42, x-c4d4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SlotResult {
+    pub slot: u32,
+    /// The pane now occupying this slot; `None` only when its shell spawn failed.
+    pub pane_id: Option<u64>,
+    pub outcome: SlotOutcome,
+}
+
+/// How a slot was filled (v42, x-c4d4). Per-slot detail rides the receipt list,
+/// never the top-level `Err`: a partial success (one slot's shell failed to
+/// spawn) is still a success with detail, so live panes are never rolled back.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotOutcome {
+    /// A bound fno session's live pane, reused in place (PTY untouched, only
+    /// relocated into the template position). Arrange-only never spawns a
+    /// session, so a filled fno slot is always `Reused`.
+    Reused,
+    /// An explicit shell slot (`-`), filled with a bare shell pane.
+    Shell,
+    /// An fno slot whose id resolved to no live pane; filled with a shell
+    /// instead (reported so the caller knows the binding did not take).
+    Unbound,
+    /// A shell/unbound slot whose shell spawn failed; `pane_id` is `None`. The
+    /// slot is empty but the rest of the apply stands.
+    SpawnFailed,
+    /// Reserved for a future spawn-into-slot (roles group); never emitted by
+    /// this arrange-only node. Present so the wire shape is forward-stable.
+    Bound,
 }
 
 /// One sideline agent row inside [`ServerMsg::Layout`] (v5, brief US2). The
@@ -1382,6 +1480,12 @@ pub enum ServerMsg {
     },
     /// Answer to [`ControlVerb::PaneBreak`]: the id of the freshly created tab.
     TabSpawned { tab_id: TabId },
+    /// (v42, x-c4d4) Answer to [`ControlVerb::LayoutApply`]: one [`SlotResult`]
+    /// per requested slot, in slot order, so a script captures the created pane
+    /// ids from the receipt (never predicts them). A top-level `Err` (arity /
+    /// fit / unknown template) means nothing was mutated; a `LayoutApplied` with
+    /// a `SpawnFailed` slot is a reported partial success.
+    LayoutApplied { results: Vec<SlotResult> },
 }
 
 /// One tab in a [`ServerMsg::TabList`] (v41, layout-api). `pane_ids` are the
@@ -1504,6 +1608,15 @@ pub mod err_code {
     /// no live pane (a paneless bg/headless session). DISTINCT from NOT_FOUND so
     /// a script can branch (Locked 4).
     pub const NOT_PANE_HOSTED: u32 = 9;
+    /// (v42, x-c4d4) `LayoutApply`: a fixed-arity template got the wrong slot
+    /// count (e.g. `grid-2x2` with 3 slots). Pre-mutation, atomic.
+    pub const TEMPLATE_ARITY: u32 = 10;
+    /// (v42, x-c4d4) `LayoutApply`: the template's slots cannot tile the tab's
+    /// viewport above `MIN_ROWS x MIN_COLS`. The refusal names the overflowing
+    /// slots; the tab is left completely unchanged (atomic).
+    pub const TEMPLATE_UNFITTABLE: u32 = 11;
+    /// (v42, x-c4d4) `LayoutApply`: an unknown template name. Pre-mutation, atomic.
+    pub const TEMPLATE_UNKNOWN: u32 = 12;
 }
 
 /// One pane inside a [`TabMeta`] (v22, x-653d): the leaf id the session
@@ -2266,10 +2379,11 @@ mod tests {
     }
 
     #[test]
-    fn agent_row_crown_fields_are_serde_default_tolerant_and_proto_is_41() {
-        // The mux-crown wire lift: PROTO_VERSION bumps 40 -> 41, and the two
-        // additive crown fields are skew-tolerant both ways.
-        assert_eq!(PROTO_VERSION, 41);
+    fn agent_row_crown_fields_are_serde_default_tolerant_and_proto_is_42() {
+        // The mux-crown wire lift bumped PROTO_VERSION 40 -> 41; the templates
+        // node (x-c4d4) bumped it 41 -> 42. The two additive crown fields stay
+        // skew-tolerant both ways regardless of the version number.
+        assert_eq!(PROTO_VERSION, 42);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
                       "badge":null,"reason":null,"exited":false}"#;

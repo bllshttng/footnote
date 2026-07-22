@@ -86,6 +86,23 @@ pub struct StoredSquad {
     /// A cosmetic `YYYY-MM-DDThh:mm:ssZ` stamp, preserved across upserts.
     #[serde(default)]
     pub created_at: String,
+    /// (x-c4d4) The layout spec of each template-managed, named tab in this
+    /// squad. Restore re-applies these to rebuild the template topology (US8),
+    /// instead of the one-tab-per-member fallback. `#[serde(default)]` keeps a
+    /// pre-x-c4d4 store readable without a `STORE_VERSION` bump (an absent field
+    /// loads to `[]`, so no squad is quarantined).
+    #[serde(default)]
+    pub tab_specs: Vec<StoredTabSpec>,
+}
+
+/// One template-managed tab's persisted layout (x-c4d4). Keyed by `tab_name`,
+/// the durable tab identity (x-0f9d) - an unnamed tab has no stable key and is
+/// never persisted. `spec` is the SAME struct `LayoutApply` consumes, so restore
+/// is a plain re-apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredTabSpec {
+    pub tab_name: String,
+    pub spec: crate::proto::LayoutSpec,
 }
 
 /// The lifecycle state of a tracked EXTERNAL (claude-daemon) row (x-7561). A
@@ -255,19 +272,43 @@ pub fn load() -> Loaded {
 /// member close, and tombstone.
 pub fn upsert(name: &str, origins: &[String], members: &[StoredMember]) -> io::Result<()> {
     mutate(|squads| {
-        let created_at = squads
-            .iter()
-            .find(|s| s.name == name)
+        let existing = squads.iter().find(|s| s.name == name);
+        let created_at = existing
             .map(|s| s.created_at.clone())
             .filter(|c| !c.is_empty())
             .unwrap_or_else(now_iso);
+        // Preserve template tab specs (owned by set_tab_specs, not this path)
+        // across a membership upsert - the struct is rebuilt fresh, so an
+        // un-carried field would be silently wiped (x-c4d4).
+        let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
         squads.retain(|s| s.name != name);
         squads.push(StoredSquad {
             name: name.to_string(),
             origins: origins.to_vec(),
             members: members.to_vec(),
             created_at,
+            tab_specs,
         });
+    })
+}
+
+/// Set the template tab specs for `name` (x-c4d4), preserving its other fields.
+/// Inserts a minimal entry if the squad is not yet persisted (a template applied
+/// before any membership write). A store-write failure is the caller's to treat
+/// as degraded persistence (the live layout stands).
+pub fn set_tab_specs(name: &str, tab_specs: &[StoredTabSpec]) -> io::Result<()> {
+    mutate(|squads| {
+        if let Some(s) = squads.iter_mut().find(|s| s.name == name) {
+            s.tab_specs = tab_specs.to_vec();
+        } else {
+            squads.push(StoredSquad {
+                name: name.to_string(),
+                origins: Vec::new(),
+                members: Vec::new(),
+                created_at: now_iso(),
+                tab_specs: tab_specs.to_vec(),
+            });
+        }
     })
 }
 
@@ -286,18 +327,19 @@ pub fn rename(
     members: &[StoredMember],
 ) -> io::Result<()> {
     mutate(|squads| {
-        let created_at = squads
-            .iter()
-            .find(|s| s.name == old || s.name == new)
+        let existing = squads.iter().find(|s| s.name == old || s.name == new);
+        let created_at = existing
             .map(|s| s.created_at.clone())
             .filter(|c| !c.is_empty())
             .unwrap_or_else(now_iso);
+        let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
         squads.retain(|s| s.name != old && s.name != new);
         squads.push(StoredSquad {
             name: new.to_string(),
             origins: origins.to_vec(),
             members: members.to_vec(),
             created_at,
+            tab_specs,
         });
     })
 }
@@ -716,6 +758,7 @@ mod tests {
                     m("GHIJKLmn"),  // non-hex
                 ],
                 created_at: "2026-07-11T00:00:00Z".into(),
+                tab_specs: vec![],
             }],
             ..StoreFile::default()
         };
