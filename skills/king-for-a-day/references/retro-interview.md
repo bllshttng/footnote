@@ -21,7 +21,7 @@ PROMPT
 fno mail send <builder-handle> "$prompt" --from-self
 ```
 
-Follow the [minion delivery doctrine](minion-clause.md) in full, **including its peek-before-resend guard**. Both `delivered (hosted)` and `delivered (woken)` (an asleep-but-resumable builder woken to receive it) are success; any other receipt is undelivered, so peek the handle then re-send rather than trusting the queue (a `queued (durable)` interview is one the builder may never see). Resolve a live `<builder-handle>` from `fno agents discovered-json` / `top`. `fno mail send` wraps the body in its own `<fno_mail>` envelope, so the prompt below is body-only - do not add a second envelope.
+Follow the [minion delivery doctrine](minion-clause.md) in full, **including its peek-before-resend guard**. Both `delivered (hosted)` and `delivered (woken)` (an asleep-but-resumable builder woken to receive it) are success; any other receipt is undelivered, so peek the handle and re-send only if the peek shows the interview did not land - a `queued (durable)` receipt can be a live inject whose confirmation timed out, and a blind resend duplicates the interview prompt. Resolve a live `<builder-handle>` from `fno agents discovered-json` / `top`. `fno mail send` wraps the body in its own `<fno_mail>` envelope, so the prompt below is body-only - do not add a second envelope.
 
 ## The prompt (dogfooding lens baked in)
 
