@@ -35,16 +35,24 @@ def _paste_call(calls):
     return next(c for c in calls if "send" in c and "--stdin" in c)
 
 
+def _verbs(calls):
+    """The pane verb of each call (claim/send/release), argv[3]."""
+    return [c[3] for c in calls]
+
+
 def test_guarded_paste_carries_the_guarded_flag_and_confirms(monkeypatch):
-    # claim, paste, CR, release all succeed; guarded is the default.
-    calls = _install_fake_run(monkeypatch, [0, 0, 0, 0])
+    # Guarded send: paste, then CR. No claim/release -- holding the writer claim
+    # would self-block the server guard ("busy: relay").
+    calls = _install_fake_run(monkeypatch, [0, 0])
     assert dispatch._mux_pane_send(_entry(), "hi") is True
     assert "--guarded" in _paste_call(calls)
+    assert "claim" not in _verbs(calls), "a guarded send must not hold the writer claim"
+    assert "release" not in _verbs(calls)
 
 
 def test_not_idle_paste_stalls_to_durable(monkeypatch, capsys):
     # Guarded paste refused because the recipient's turn is not takeable.
-    calls = _install_fake_run(monkeypatch, [0, dispatch._MUX_EXIT_TARGET_NOT_IDLE, 0])
+    calls = _install_fake_run(monkeypatch, [dispatch._MUX_EXIT_TARGET_NOT_IDLE])
     assert dispatch._mux_pane_send(_entry(), "hi") is False
     # The CR submit never fires once the paste stalls -- no half-sent prompt.
     assert not any("--text" in c for c in calls)
@@ -52,8 +60,10 @@ def test_not_idle_paste_stalls_to_durable(monkeypatch, capsys):
     assert "stalled" in capsys.readouterr().err
 
 
-def test_unguarded_follow_up_omits_the_flag(monkeypatch):
-    # The peer follow-up lane keeps its raw, unguarded channel.
+def test_unguarded_follow_up_omits_the_flag_and_holds_claim(monkeypatch):
+    # The peer follow-up lane keeps its raw channel and holds the writer claim
+    # across the burst (claim, paste, CR, release).
     calls = _install_fake_run(monkeypatch, [0, 0, 0, 0])
     assert dispatch._mux_pane_send(_entry(), "hi", guarded=False) is True
     assert "--guarded" not in _paste_call(calls)
+    assert _verbs(calls) == ["claim", "send", "send", "release"]

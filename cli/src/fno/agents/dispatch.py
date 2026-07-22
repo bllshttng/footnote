@@ -4172,17 +4172,22 @@ def _build_mail_ctx(
 
 
 def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> bool:
-    """Live-inject to a mux-hosted agent via ``fno mux pane send``, holding
-    the pane's writer claim around the text-then-CR burst.
+    """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
     When ``guarded`` (the mail-delivery default, US4), the paste rides the
     server-side turn-taken interlock: a pane whose recipient is mid-turn refuses
     with EXIT_TARGET_NOT_IDLE and this returns False -- a ``stalled`` demotion to
     the caller's durable floor -- rather than swallowing the bytes and letting the
     sender report ``hosted`` (Locked Decision 4: hosted-on-bytes-written is
-    banned). ``guarded=False`` is the raw channel the writer-claim holder owns
-    (peer follow-up), left unguarded. The claim is best-effort (an unclaimed pane
-    refuses the acquire; send proceeds), but a failed send fails closed -> durable.
+    banned). A guarded send does NOT hold the pane's writer claim: the server
+    guard refuses any pane whose claim a live pid holds ("busy: relay"), so
+    holding our own claim would self-block every guarded send; the atomic
+    server-side idle check is itself the interleave protection for the paste.
+
+    ``guarded=False`` is the raw channel the writer-claim holder owns (peer
+    follow-up); it holds the claim across the text-then-CR burst so no other
+    writer interleaves. The claim is best-effort (an unclaimed pane refuses the
+    acquire; send proceeds), but a failed send fails closed -> durable.
     """
     mux = entry.mux or {}
     session = mux.get("session")
@@ -4214,8 +4219,8 @@ def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> b
             )
         return proc.returncode
 
-    claimed = _run(["claim", pane, "--pid", str(os.getpid())]) == 0
-    try:
+    def _paste_then_submit() -> bool:
+        # PaneSend is bytes; the CR submit waits for the TUI to absorb the paste.
         send_args = ["send", pane, "--stdin"]
         if guarded:
             send_args.append("--guarded")
@@ -4229,11 +4234,17 @@ def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> b
                     file=sys.stderr,
                 )
             return False
-        # PaneSend is bytes; the CR submit waits for the TUI to absorb the paste.
         # The CR is unguarded: the guarded paste already proved the pane idle, and
         # guarding the submit could strand a pasted-but-unsent prompt.
         time.sleep(0.3)
         return _run(["send", pane, "--text", "\r"]) == 0
+
+    if guarded:
+        return _paste_then_submit()
+
+    claimed = _run(["claim", pane, "--pid", str(os.getpid())]) == 0
+    try:
+        return _paste_then_submit()
     finally:
         if claimed:
             _run(["release", pane])
