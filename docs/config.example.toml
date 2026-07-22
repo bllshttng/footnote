@@ -193,6 +193,8 @@ no_docs = false
 max_iterations = 40
 
 [agents]
+# Per-verb spawn-defaults overlay keyed by the seed's leading slash-verb (agents.profiles.<verb>.{provider,model,effort,substrate,permission_mode}), one rung above agents.defaults in precedence. The verb key is the seed's first token, /-stripped and fno:-namespace-stripped, lowercase (/fno:think and /think resolve alike). No content-based inference; a table with no matching verb resolves exactly as agents.defaults.
+profiles = {}
 # Agent-launch confirmation policy (auto/always/never).
 confirm = "auto"
 # Auto-join every hand-started session to the roster at SessionStart (default false = opt-in via /fno-me). Spawned workers register regardless.
@@ -223,6 +225,10 @@ provider = ""
 model = ""
 # Default reasoning effort for bare spawns (minimal|low|medium|high|xhigh|max); an explicit --effort wins, empty = unset. Config-sourced effort degrades open on providers with no effort surface (gemini/agy).
 effort = ""
+# Default substrate for bare spawns (pane|bg|headless); an explicit substrate wins, empty = unset (per-provider default). Config-sourced value degrades open with a warning if incompatible with the resolved provider (e.g. bg is claude-only).
+substrate = ""
+# Default --permission-mode for bare spawns; an explicit flag wins, empty = unset. Config-sourced value degrades open with a warning if the resolved provider cannot map it (an explicit --permission-mode stays fail-closed).
+permission_mode = ""
 
 [agents.codex]
 # Use full-yolo (drop sandbox) for headless codex workers.

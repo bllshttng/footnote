@@ -14,20 +14,24 @@ from fno.agents.spawn_defaults import inject_spawn_defaults
 
 
 class _Defaults:
-    def __init__(self, provider="", model="", effort=""):
+    def __init__(self, provider="", model="", effort="", substrate="", permission_mode=""):
         self.provider = provider
         self.model = model
         self.effort = effort
+        self.substrate = substrate
+        self.permission_mode = permission_mode
 
 
 class _Settings:
-    def __init__(self, **kw):
-        self.agents = type("A", (), {"defaults": _Defaults(**kw)})()
+    def __init__(self, profiles=None, **kw):
+        # profiles: {verb: {field: value}} -> {verb: _Defaults}
+        prof = {k: _Defaults(**v) for k, v in (profiles or {}).items()}
+        self.agents = type("A", (), {"defaults": _Defaults(**kw), "profiles": prof})()
 
 
-def _inject(args, err=None, env=None, **cfg):
+def _inject(args, err=None, env=None, profiles=None, **cfg):
     return inject_spawn_defaults(
-        args, settings=_Settings(**cfg), stderr=err, env=env or {}
+        args, settings=_Settings(profiles=profiles, **cfg), stderr=err, env=env or {}
     )
 
 
@@ -235,3 +239,205 @@ def test_ambient_codex_with_matching_provider_still_injects():
         provider="codex", model="gpt-5-codex",
     )
     assert "--model" in out and out[out.index("--model") + 1] == "gpt-5-codex"
+
+
+# --------------------------------------------------------------------------- #
+# Per-verb profiles (x-3d5b)
+# --------------------------------------------------------------------------- #
+
+def test_ac1_hp_profile_field_injected_by_verb_key():
+    # AC1-HP: profile model + defaults effort, provenance names each rung.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "worker1", "/blueprint x-1234"], err=err,
+        provider="claude", effort="high",
+        profiles={"blueprint": {"model": "fable"}},
+    )
+    assert "--model" in out and out[out.index("--model") + 1] == "fable"
+    assert "--effort" in out and out[out.index("--effort") + 1] == "high"
+    msg = err.getvalue()
+    assert "model=agents.profiles.blueprint" in msg
+    assert "effort=agents.defaults" in msg
+
+
+def test_ac2_hp_substrate_and_permission_from_profile():
+    out = _inject(
+        ["spawn", "w", "/target x-9"],
+        provider="claude",
+        profiles={"target": {"substrate": "bg", "permission_mode": "yolo"}},
+    )
+    assert "--substrate" in out and out[out.index("--substrate") + 1] == "bg"
+    assert "--permission-mode" in out and out[out.index("--permission-mode") + 1] == "yolo"
+
+
+def test_ac2_hp_explicit_substrate_token_wins_permission_still_injects():
+    # A trailing `pane` token pins substrate (normalized to --substrate pane);
+    # only permission-mode is injected from the profile.
+    out = _inject(
+        ["spawn", "w", "/target x-9", "pane"],
+        provider="claude",
+        profiles={"target": {"substrate": "bg", "permission_mode": "yolo"}},
+    )
+    assert out[out.index("--substrate") + 1] == "pane"
+    assert out.count("--substrate") == 1
+    assert "--permission-mode" in out and out[out.index("--permission-mode") + 1] == "yolo"
+
+
+def test_ac3_hp_namespace_stripped_key():
+    # /fno:think fires the think profile identically to /think.
+    for seed in ("/think x", "/fno:think x"):
+        out = _inject(
+            ["spawn", "w", seed], provider="claude",
+            profiles={"think": {"model": "fable"}},
+        )
+        assert out[out.index("--model") + 1] == "fable", seed
+
+
+def test_ac4_err_incompatible_config_substrate_degrades_open():
+    # bg on a codex-resolved spawn: no --substrate injected, warning names it.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-p", "codex", "w", "/think x"], err=err,
+        profiles={"think": {"substrate": "bg"}},
+    )
+    assert "--substrate" not in out
+    msg = err.getvalue()
+    assert "substrate skipped" in msg
+    assert "bg" in msg and "codex" in msg
+    assert "agents.profiles.think.substrate" in msg
+
+
+def test_ac5_err_unknown_profile_provider_fails_closed():
+    # AC5-ERR: matched profile with a bad provider exits 2 naming the rung.
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "w", "/target x-1"], err=err,
+            profiles={"target": {"provider": "banana"}},
+        )
+    assert exc.value.code == 2
+    assert "agents.profiles.target.provider" in err.getvalue()
+
+
+def test_ac5_err_nonmatching_seed_spawns_normally_under_bad_profile():
+    # The same bad-provider profile does NOT fire for a /think seed.
+    out = _inject(
+        ["spawn", "w", "/think x"],
+        profiles={"target": {"provider": "banana"}},
+    )
+    assert out == ["spawn", "w", "/think x"]
+
+
+def test_ac6_edge_verb_not_first_token_no_profile():
+    # AC6-EDGE: verb not first -> no key; only defaults inject.
+    out = _inject(
+        ["spawn", "w", "fix the /target docs"],
+        provider="claude",
+        profiles={"target": {"model": "opus"}},
+    )
+    assert "--model" not in out  # target profile never fired
+    assert "--provider" in out  # defaults still applied
+
+
+def test_ac6_edge_absolute_path_never_matches():
+    out = _inject(
+        ["spawn", "w", "/usr/bin/x is a path"],
+        profiles={"usr": {"model": "opus"}},
+    )
+    assert "--model" not in out
+
+
+def test_ac7_edge_explicit_flag_beats_profile_beats_defaults():
+    # Explicit -m wins; without it, profile beats defaults.
+    out1 = _inject(
+        ["spawn", "-m", "haiku", "w", "/target x-1"],
+        model="sonnet", profiles={"target": {"model": "opus"}},
+    )
+    assert out1.count("--model") == 0  # only the explicit -m
+    assert "opus" not in out1 and "sonnet" not in out1
+
+    out2 = _inject(
+        ["spawn", "w", "/target x-1"],
+        model="sonnet", profiles={"target": {"model": "opus"}},
+    )
+    assert out2[out2.index("--model") + 1] == "opus"
+
+
+def test_uppercase_verb_no_key():
+    # Deliberate: the verb surface is lowercase; /Target does not match.
+    out = _inject(
+        ["spawn", "w", "/Target x-1"],
+        profiles={"target": {"model": "opus"}},
+    )
+    assert "--model" not in out
+
+
+def test_message_via_flag_keys_profile():
+    # The seed can arrive via --message rather than a positional.
+    out = _inject(
+        ["spawn", "w", "--message", "/blueprint x"],
+        profiles={"blueprint": {"model": "fable"}},
+    )
+    assert out[out.index("--model") + 1] == "fable"
+
+
+def test_ac9_ui_no_config_field_prints_no_applied_line():
+    # A spawn with zero injected fields prints no `applied` line.
+    err = io.StringIO()
+    _inject(["spawn", "w", "/target x"], err=err, profiles={"other": {"model": "x"}})
+    assert "applied" not in err.getvalue()
+
+
+def test_unknown_config_substrate_degrades_open():
+    # An unknown substrate value is never injected (it would exit 2 at the spawn
+    # parser); it degrades open with an "unknown substrate" warning.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "w", "/target x"], err=err, provider="claude",
+        profiles={"target": {"substrate": "banana"}},
+    )
+    assert "--substrate" not in out
+    assert "unknown substrate" in err.getvalue()
+
+
+def test_permission_mode_skipped_on_nonclaude_headless():
+    # codex headless cannot honor a mapped --permission-mode (its one-shot lane
+    # hardcodes its own bypass and exits 2); the config value degrades open.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-p", "codex", "-H", "w", "/target x"], err=err,
+        profiles={"target": {"permission_mode": "yolo"}},
+    )
+    assert "--permission-mode" not in out
+    assert "permission-mode skipped" in err.getvalue()
+
+
+def test_permission_mode_ok_on_nonclaude_pane():
+    # The pane lane maps every provider, so codex+pane honors a mapped value.
+    out = _inject(
+        ["spawn", "-p", "codex", "w", "/target x", "pane"],
+        profiles={"target": {"permission_mode": "yolo"}},
+    )
+    assert out[out.index("--permission-mode") + 1] == "yolo"
+
+
+def test_permission_mode_injected_on_bare_nonclaude_spawn_pane_default():
+    # No explicit substrate: `fno agents spawn` defaults to PANE (not the
+    # autonomous headless default), which maps codex permission modes - so the
+    # configured value must be injected, not skipped as incompatible.
+    out = _inject(
+        ["spawn", "-p", "codex", "w", "/target x"],
+        profiles={"target": {"permission_mode": "yolo"}},
+    )
+    assert out[out.index("--permission-mode") + 1] == "yolo"
+
+
+def test_explicit_yolo_suppresses_config_permission_mode():
+    # --yolo/-Y is the same knob as --permission-mode (mutually exclusive
+    # downstream); an explicit yolo must win, so no config value is injected.
+    for flag in ("--yolo", "-Y"):
+        out = _inject(
+            ["spawn", flag, "w", "/target x"], provider="claude",
+            profiles={"target": {"permission_mode": "bypassPermissions"}},
+        )
+        assert "--permission-mode" not in out, flag

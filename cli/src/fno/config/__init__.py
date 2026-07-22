@@ -1124,6 +1124,11 @@ class SpawnDefaultsBlock(BaseModel):
     provider: str = ""
     model: str = ""
     effort: str = ""
+    # substrate/permission_mode join the defaultable set (x-3d5b): config-sourced
+    # values degrade open with a warning on provider incompatibility at the spawn
+    # seam; an explicit flag stays fail-closed. Empty = unset, as above.
+    substrate: str = ""
+    permission_mode: str = ""
 
 
 class DispatchBlock(BaseModel):
@@ -1210,6 +1215,10 @@ class AgentsBlock(BaseModel):
 
     a2a: A2aBlock = Field(default_factory=A2aBlock)
     defaults: SpawnDefaultsBlock = Field(default_factory=SpawnDefaultsBlock)
+    # x-3d5b: per-verb overlay of `defaults`, keyed by the seed's leading
+    # slash-verb (`profiles.blueprint`, `profiles.target`, ...). Same block, one
+    # rung above defaults in precedence. Resolved at the spawn seam.
+    profiles: dict[str, SpawnDefaultsBlock] = Field(default_factory=dict)
     confirm: str = "auto"
     # When true, the SessionStart register hook auto-joins EVERY hand-started
     # session to the roster (discoverable + mail-addressable). Default false is
@@ -1261,6 +1270,17 @@ class AgentsBlock(BaseModel):
                 f"config.agents.dead_row_grace must be >= 0 seconds; got {v}"
             )
         return v
+
+    @field_validator("profiles", mode="before")
+    @classmethod
+    def _coerce_profiles(cls, v: object) -> object:
+        """A non-mapping `profiles` table, or a non-mapping profile value, degrades
+        to no profiles (AC8-FR): a config typo (`agents.profiles = "banana"` or
+        `agents.profiles.target = 5`) must never brick spawning. Degrade-toward-
+        safety, mirroring the _coerce_* idiom - never raise."""
+        if not isinstance(v, dict):
+            return {}
+        return {k: val for k, val in v.items() if isinstance(val, dict)}
 
     @field_validator("confirm")
     @classmethod
