@@ -201,6 +201,39 @@ def test_ac2_err_yaml_true_not_coerced_to_one(graph_env):
     assert read_entries() == before
 
 
+def test_explicit_null_refuses_not_treated_as_unset(graph_env):
+    # `max_children: null` is a present-but-invalid value (a blank/typo'd cap),
+    # not "no key" - it must fail closed, not silently fall back to config.
+    write_fm, read_entries, _ = graph_env
+    write_fm(max_children="null")
+    before = read_entries()
+    result = _decompose(2)  # would pass under config default 4 if treated as unset
+    assert result.exit_code != 0
+    assert "max_children" in result.output
+    assert read_entries() == before
+
+
+def test_relative_plan_path_resolved_against_epic_cwd(graph_env, tmp_path, monkeypatch):
+    # A relative epic plan_path must resolve against the epic's stored cwd, not the
+    # process cwd - otherwise the cap read misses the doc and silently drops.
+    write_fm, read_entries, _ = graph_env
+    write_fm(max_children=3)
+    # Point the epic's plan_path at a RELATIVE path (basename), cwd = tmp_path.
+    import fno.graph._constants as gc
+
+    g = json.loads(Path(gc.GRAPH_JSON).read_text())
+    g["entries"][0]["plan_path"] = "big.md#c1-anchor"  # relative
+    Path(gc.GRAPH_JSON).write_text(json.dumps(g) + "\n")
+    # Run from a DIFFERENT cwd so a process-cwd read would miss big.md.
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    result = _decompose(4)  # 4 > cap 3 -> must refuse (proves the cap was read)
+    assert result.exit_code != 0
+    assert "max_children=3" in result.output
+    assert not [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
+
+
 # -- AC1-EDGE: unset cap is byte-identical to today --
 
 
@@ -258,11 +291,11 @@ def test_ac3_edge_flag_cannot_loosen(graph_env):
 
 
 def test_resolve_cap_precedence():
-    from fno.graph._decompose import DecomposeError, resolve_effective_cap
+    from fno.graph._decompose import _UNSET, DecomposeError, resolve_effective_cap
 
-    # Unset: byte-identical fallback (explicit else config default).
-    assert resolve_effective_cap(None, None, 4)[0] == 4
-    assert resolve_effective_cap(None, 2, 4)[0] == 2
+    # Absent (_UNSET): byte-identical fallback (explicit else config default).
+    assert resolve_effective_cap(_UNSET, None, 4)[0] == 4
+    assert resolve_effective_cap(_UNSET, 2, 4)[0] == 2
     # Set: overrides config default upward.
     assert resolve_effective_cap(6, None, 4)[0] == 6
     # Set + tightening flag: min wins, source names the flag.
@@ -272,7 +305,8 @@ def test_resolve_cap_precedence():
     cap, src = resolve_effective_cap(6, 20, 4)
     assert cap == 6 and "max_children=6" in src
     # Fail-closed on invalid value, bool rejected first (not coerced to 1).
-    for bad in (True, False, 0, -1, "6", 6.5, [1]):
+    # `None` = explicit YAML null, now invalid (distinct from _UNSET).
+    for bad in (None, True, False, 0, -1, "6", 6.5, [1]):
         with pytest.raises(DecomposeError):
             resolve_effective_cap(bad, None, 4)
 

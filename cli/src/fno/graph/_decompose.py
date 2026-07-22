@@ -367,10 +367,17 @@ def find_orphans(
     return orphans
 
 
+# Sentinel distinguishing an ABSENT max_children key (fall back to --max-prs /
+# config) from an explicit `max_children: null` (present-but-invalid, fail-closed).
+# `.get("max_children")` collapses both to None, so the caller passes
+# `.get("max_children", _UNSET)` to preserve the distinction.
+_UNSET = object()
+
+
 def resolve_effective_cap(
     max_children: object,
     explicit_max_prs: Optional[int],
-    config_default: int,
+    config_default: Optional[int],
     epic_doc_rel: Optional[str] = None,
 ) -> tuple[int, str]:
     """Resolve the decompose ceiling and a human label naming its source.
@@ -380,23 +387,25 @@ def resolve_effective_cap(
         OVERRIDES the config default upward. An explicit `--max-prs` may only
         *tighten* it (effective = min); a larger flag cannot loosen the author's
         cap - that loosening is the exact bypass this closes.
-      - `max_children` unset: effective = explicit `--max-prs` if passed, else the
-        config default (byte-identical to the pre-change branch).
+      - `max_children` absent (`_UNSET`): effective = explicit `--max-prs` if
+        passed, else the config default. `config_default` is only read here, so
+        the caller passes None when this fallback is not taken.
 
-    Fail-closed on a present-but-invalid `max_children` (non-int, YAML bool, < 1):
-    a typo'd cap must fail loud, never silently protect nothing (Locked Decision 4).
-    `bool` is an `int` subclass, so it is rejected first - `max_children: true`
-    must never coerce to cap 1.
+    Fail-closed on a present-but-invalid `max_children` (explicit null, non-int,
+    YAML bool, < 1): a typo'd or blank cap must fail loud, never silently protect
+    nothing (Locked Decision 4). `bool` is an `int` subclass, so it is rejected
+    first - `max_children: true` must never coerce to cap 1.
     """
-    if max_children is None:
+    if max_children is _UNSET:
         if explicit_max_prs is not None:
             return explicit_max_prs, f"--max-prs {explicit_max_prs}"
         return config_default, f"config default {config_default}"
 
     if isinstance(max_children, bool) or not isinstance(max_children, int) or max_children < 1:
+        loc = f" (in {epic_doc_rel})" if epic_doc_rel else ""
         raise DecomposeError(
-            f"max_children in the epic frontmatter is invalid: {max_children!r}; "
-            "it must be an integer >= 1 (unset it to fall back to --max-prs / config)",
+            f"max_children in the epic frontmatter is invalid: {max_children!r}{loc}; "
+            "it must be an integer >= 1 (remove the key to fall back to --max-prs / config)",
             exit_code=1,
         )
 

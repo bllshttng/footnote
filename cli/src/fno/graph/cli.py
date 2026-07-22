@@ -1238,6 +1238,7 @@ def cmd_decompose(
     from fno.graph.store import locked_mutate_graph, read_graph, GraphUnreadableError
     from fno.graph._intake import _find_node, _would_create_cycle
     from fno.graph._decompose import (
+        _UNSET,
         DecomposeError,
         canonical_child_plan_path,
         child_plan_path,
@@ -1289,28 +1290,28 @@ def cmd_decompose(
     #    frontmatter is the author's durable per-epic cap (overrides the config
     #    default upward; an explicit --max-prs may only tighten it). With no
     #    max_children, resolution is byte-identical to before: explicit --max-prs
-    #    else config.blueprint.max_prs_per_epic. Capture the explicit-flag bit
-    #    BEFORE the config fallback overwrites the None sentinel.
-    explicit_max_prs = max_prs
-    from fno.config import load_settings
-    try:
-        config_default = load_settings().blueprint.max_prs_per_epic
-    except Exception as e:
-        emit_error(ctx, f"could not read config.blueprint.max_prs_per_epic: {e}")
-        raise typer.Exit(code=1)
+    #    else config.blueprint.max_prs_per_epic.
+    explicit_max_prs = max_prs  # captured before any fallback overwrites the None sentinel
 
     #    Read the epic's max_children read-only, pre-lock (advisory; the locked
     #    mutator re-resolves the epic). Any read failure -> absent cap -> current
     #    behavior (_read_plan_frontmatter fails safe to {}). A present-but-invalid
-    #    value is rejected by resolve_effective_cap below (fail-closed on value).
-    max_children: object = None
+    #    value (incl. explicit null) is rejected by resolve_effective_cap below.
+    #    _UNSET (not None) marks "no key", so an explicit `max_children: null`
+    #    fails closed instead of masquerading as absent.
+    max_children: object = _UNSET
     epic_doc_rel: Optional[str] = None
     try:
         epic_node = _find_node(read_graph(_graph_path()), epic_id)
         epic_plan_path = epic_node.get("plan_path") if epic_node else None
         if epic_plan_path:
             epic_doc = plan_base(epic_plan_path)
-            max_children = _read_plan_frontmatter(epic_doc).get("max_children")
+            # Resolve a relative plan_path against the epic's stored cwd, mirroring
+            # the in-lock base resolution - reading it against the process cwd would
+            # miss the doc when decompose runs elsewhere and silently drop the cap.
+            if not os.path.isabs(epic_doc):
+                epic_doc = os.path.join(epic_node.get("cwd") or os.getcwd(), epic_doc)
+            max_children = _read_plan_frontmatter(epic_doc).get("max_children", _UNSET)
             try:
                 epic_doc_rel = os.path.relpath(
                     epic_doc, epic_node.get("cwd") or os.getcwd()
@@ -1318,7 +1319,19 @@ def cmd_decompose(
             except ValueError:
                 epic_doc_rel = os.path.basename(epic_doc)
     except (DecomposeError, GraphUnreadableError, OSError):
-        max_children = None  # fail-safe: no cap, current behavior
+        max_children = _UNSET  # fail-safe: no cap, current behavior
+
+    #    Read config ONLY on the true fallback path (no max_children, no explicit
+    #    flag). A valid max_children or an explicit --max-prs makes config
+    #    irrelevant, so an unrelated config error must not abort decompose there.
+    config_default: Optional[int] = None
+    if max_children is _UNSET and explicit_max_prs is None:
+        from fno.config import load_settings
+        try:
+            config_default = load_settings().blueprint.max_prs_per_epic
+        except Exception as e:
+            emit_error(ctx, f"could not read config.blueprint.max_prs_per_epic: {e}")
+            raise typer.Exit(code=1)
 
     try:
         effective_cap, cap_source = resolve_effective_cap(
