@@ -2615,6 +2615,65 @@ impl Core {
         Ok(())
     }
 
+    /// Move `mover` out of its source tab to sit adjacent to `target` in another
+    /// tab - the cross-tab arm of [`Command::MovePane`] (a sideline-row drop whose
+    /// pane lives in a different tab from the drop). Composes the two #553
+    /// primitives: graft the mover leaf into the destination FIRST (validated
+    /// all-or-nothing), THEN detach it from the source. Ordering is load-bearing -
+    /// a min-size refusal returns from the graft before the source is ever
+    /// touched, so the pane is never left detached-but-ungrafted. Only the leaf id
+    /// moves between trees; the PTY is untouched (detach_leaf never reaps).
+    fn move_pane_cross_tab(
+        &mut self,
+        mover: u64,
+        (src_sid, src_ti): (u64, usize),
+        target: u64,
+        (dst_sid, dst_ti): (u64, usize),
+        dir: Dir,
+    ) -> Result<(), tree::MoveError> {
+        let src_si = self
+            .session
+            .squads
+            .iter()
+            .position(|s| s.id == src_sid)
+            .expect("src squad live");
+        let dst_si = self
+            .session
+            .squads
+            .iter()
+            .position(|s| s.id == dst_sid)
+            .expect("dst squad live");
+        let src_tid = self.session.squads[src_si].tabs[src_ti].id;
+        let dst_tid = self.session.squads[dst_si].tabs[dst_ti].id;
+        let src_vp = self.tab_rect(src_tid);
+        let dst_vp = self.tab_rect(dst_tid);
+
+        // Graft into the destination first, and focus the moved pane there while
+        // the dst index is still valid (removing the source tab below can shift
+        // sibling indices when both tabs share a squad). On Err the dst is
+        // unchanged and the source is never touched.
+        {
+            let dst_tab = &mut self.session.squads[dst_si].tabs[dst_ti];
+            tree::graft_subtree(dst_tab, dst_vp, target, dir, Node::Leaf(mover))?;
+            dst_tab.focus = mover;
+        }
+        // Graft committed: remove the mover from the source. It was present at
+        // resolution (find_pane, no intervening yield on the core loop), so
+        // detach cannot fail on presence; a now-empty source tab is dropped and
+        // its viewers re-anchored, exactly as pane_break / CloseTab do.
+        let outcome = {
+            let src_tab = &mut self.session.squads[src_si].tabs[src_ti];
+            tree::detach_leaf(src_tab, src_vp, mover)?
+        };
+        if matches!(outcome, tree::DetachOutcome::TabEmptied) {
+            self.session.remove_tab(src_sid, src_ti);
+            self.tab_areas.remove(&src_tid);
+            self.reanchor_views();
+        }
+        self.push_layout(true);
+        Ok(())
+    }
+
     /// Resolve an `fno_id` to its live location for [`ControlVerb::PaneWhere`],
     /// or one of the three distinct error codes. Never an empty-successful
     /// location (Locked Decision 4). REGISTRY_UNAVAILABLE is the CLI's to emit
@@ -5672,31 +5731,88 @@ impl Core {
                 Flow::Continue
             }
             Command::MovePane { mover, target, dir } => {
-                let Some(tab) = self.viewed_tab_mut(view) else {
-                    return Flow::Continue;
+                // Resolve both ends against the VIEWED tab first: that owns the
+                // keyboard-bind defaults (mover = focus; target = the pane the
+                // same geometry FocusDir uses lies `dir`-ward). A drop names both
+                // and skips the navigate.
+                let (mover, target) = {
+                    let Some(tab) = self.viewed_tab(view) else {
+                        return Flow::Continue;
+                    };
+                    let mover = mover.unwrap_or(tab.focus);
+                    let Some(target) = target.or_else(|| tree::navigate(&tab.root, vp, mover, dir))
+                    else {
+                        self.notice(client_id, "no pane in that direction");
+                        return Flow::Continue;
+                    };
+                    (mover, target)
                 };
-                // Loud on refusal, unlike ResizeSeam: a relocation is ONE
-                // deliberate gesture, not a stream, so a rejected drop that said
-                // nothing would read as the feature being broken. The tree is
-                // untouched on every error, so co-viewers need no correction
-                // push - only the sender learns anything.
-                // The keyboard bind names neither end: it moves the focused
-                // pane, and resolves its destination with the same geometry
-                // FocusDir uses, so "move down" lands where "focus down" would
-                // have gone. A drop names both and skips all of this.
-                let mover = mover.unwrap_or(tab.focus);
-                let Some(target) = target.or_else(|| tree::navigate(&tab.root, vp, mover, dir))
-                else {
-                    self.notice(client_id, "no pane in that direction");
-                    return Flow::Continue;
-                };
-                match tree::move_leaf(tab, vp, mover, target, dir) {
-                    Ok(()) => self.push_layout(true),
-                    // An origin drop is a cancel the client should not have sent;
-                    // silently accept it rather than scold the operator for a
-                    // gesture that, from their side, did nothing on purpose.
-                    Err(tree::MoveError::Origin) => {}
-                    Err(e) => self.notice(client_id, e.to_string()),
+                // A sideline-row drop can name a `mover` living in ANOTHER tab
+                // (the row carries the pane id, not the rendered layout). When the
+                // two ends live in different tabs, compose the cross-tab move
+                // (detach + graft, all-or-nothing); otherwise the within-tab
+                // move_leaf, unchanged. Loud on refusal, unlike ResizeSeam: a
+                // relocation is ONE deliberate gesture, so a rejected drop that
+                // said nothing would read as the feature being broken.
+                let src = self.session.find_pane(mover);
+                let dst = self.session.find_pane(target);
+                match (src, dst) {
+                    (Some(s), Some(d)) if s != d => {
+                        match self.move_pane_cross_tab(mover, s, target, d, dir) {
+                            Ok(()) => {}
+                            Err(tree::MoveError::Origin) => {}
+                            Err(e) => self.notice(client_id, e.to_string()),
+                        }
+                    }
+                    _ => {
+                        let Some(tab) = self.viewed_tab_mut(view) else {
+                            return Flow::Continue;
+                        };
+                        match tree::move_leaf(tab, vp, mover, target, dir) {
+                            Ok(()) => self.push_layout(true),
+                            // An origin drop is a cancel the client should not have
+                            // sent; silently accept it rather than scold the
+                            // operator for a gesture that, from their side, did
+                            // nothing on purpose.
+                            Err(tree::MoveError::Origin) => {}
+                            Err(e) => self.notice(client_id, e.to_string()),
+                        }
+                    }
+                }
+                Flow::Continue
+            }
+            Command::BreakPane { pane } => {
+                // The interactive twin of ControlVerb::PaneBreak: dispatch into
+                // the SAME pane_break (one tree-mutation site, Locked Decision 2).
+                // pane_break itself never touches a view; the gesture additionally
+                // repoints the ACTING client's focus onto the new tab (Locked
+                // Decision 3 - the script path leaves every viewer where it was).
+                match self.pane_break(pane, None) {
+                    Ok(new_tid) => {
+                        if let Some((sid, _)) = self.session.find_tab(new_tid) {
+                            self.set_view(client_id, sid, new_tid);
+                            self.push_layout(true);
+                        }
+                    }
+                    Err((_code, msg)) => self.notice(client_id, msg),
+                }
+                Flow::Continue
+            }
+            Command::JoinTab {
+                src_tab,
+                anchor_pane,
+                dir,
+            } => {
+                // The interactive twin of ControlVerb::TabJoin, into the SAME
+                // tab_join. The gesture picked up a concrete rendered cell, so it
+                // names a stable TabId; tab_join resolves a TabSel, so wrap it in
+                // Id. tab_join pushes the layout and re-anchors any viewer of the
+                // removed source tab. A self-join is refused BAD_REQUEST here (the
+                // client also suppresses it) - shown as a named Notice, not a
+                // silent swallow.
+                match self.tab_join(&TabSel::Id(src_tab), anchor_pane, dir) {
+                    Ok(()) => {}
+                    Err((_code, msg)) => self.notice(client_id, msg),
                 }
                 Flow::Continue
             }
@@ -10289,6 +10405,212 @@ mod tests {
         let view = core.clients[0].view;
         assert!(core.viewed_tab(view).is_some(), "re-anchored to a live tab");
         assert_ne!(view.1, brk, "not stranded on the removed source tab");
+    }
+
+    // ---- v43 (x-d6a8) US9 interactive drag Commands -------------------------
+    // (drain_notice helper is defined once below, near the StopAgent tests.)
+
+    #[test]
+    fn break_pane_command_focuses_the_acting_client_on_the_new_tab() {
+        // AC1-HP: the interactive break drops pane 1 (of tab 10's [1,2]) onto the
+        // strip. The acting client's focus follows the gesture onto the new tab.
+        let mut core = two_tab_core();
+        let (c, _rx) = live_client(7, 10); // viewing tab 10
+        core.clients.push(c);
+        core.command(7, Command::BreakPane { pane: 1 });
+        let view = core.client_view(7).unwrap();
+        let tab = core.viewed_tab(view).expect("focused a live tab");
+        assert_ne!(view.1, 10, "the acting client left the source tab");
+        assert_eq!(
+            tree::leaves(&tab.root),
+            vec![1],
+            "and landed on the freshly broken-out tab holding pane 1"
+        );
+        // The source tab survives with the sibling.
+        let src = core.session.squad(1).unwrap();
+        let a = src.tabs.iter().find(|t| t.id == 10).unwrap();
+        assert_eq!(tree::leaves(&a.root), vec![2], "sibling 2 stays in tab 10");
+    }
+
+    #[test]
+    fn pane_break_script_path_leaves_the_viewer_focus_unchanged() {
+        // AC1-HP (the "and": the script path does NOT move focus). The CoreMsg
+        // path a scripted ControlVerb::PaneBreak takes is pane_break itself; it
+        // never touches a view. A viewer of the (surviving) source tab stays put.
+        let mut core = two_tab_core();
+        let (c, _rx) = live_client(7, 10); // viewing tab 10 [1,2]
+        core.clients.push(c);
+        core.pane_break(1, None).unwrap(); // the script/CoreMsg path
+        assert_eq!(
+            core.client_view(7),
+            Some((1, 10)),
+            "the script break leaves the viewer on tab 10, unmoved"
+        );
+    }
+
+    #[test]
+    fn move_pane_cross_tab_grafts_into_viewed_tab_and_empties_the_source() {
+        // AC3-HP: a sideline-row drop names a mover (pane 3) living in tab 20,
+        // not the viewed tab 10 where target pane 2 lives. The cross-tab branch
+        // detaches 3 from 20 and grafts it beside 2; tab 20 empties and is
+        // removed. The pane id is preserved across trees (detach never reaps the
+        // PTY - the "child pid unchanged" invariant at the tree level).
+        let mut core = two_tab_core();
+        let (c, _rx) = live_client(7, 10); // viewing tab 10 [1,2]
+        core.clients.push(c);
+        core.command(
+            7,
+            Command::MovePane {
+                mover: Some(3),
+                target: Some(2),
+                dir: Dir::Right,
+            },
+        );
+        let sq = core.session.squad(1).unwrap();
+        assert!(
+            sq.tabs.iter().all(|t| t.id != 20),
+            "the emptied source tab 20 is removed"
+        );
+        let a = sq.tabs.iter().find(|t| t.id == 10).unwrap();
+        let mut ls = tree::leaves(&a.root);
+        ls.sort_unstable();
+        assert_eq!(ls, vec![1, 2, 3], "pane 3 moved into the viewed tab, id kept");
+        assert_eq!(a.focus, 3, "the moved pane is focused in its new home");
+        crate::tree::check_invariants(a).unwrap();
+    }
+
+    #[test]
+    fn within_tab_move_pane_is_unchanged_by_the_cross_tab_branch() {
+        // The cross-tab branch must not perturb the ordinary within-tab drag: a
+        // move whose mover and target share the viewed tab still routes through
+        // move_leaf.
+        let mut core = two_tab_core();
+        let (c, _rx) = live_client(7, 10); // viewing tab 10 [1,2]
+        core.clients.push(c);
+        core.command(
+            7,
+            Command::MovePane {
+                mover: Some(2),
+                target: Some(1),
+                dir: Dir::Up, // 2 above 1: a real reshape within tab 10
+            },
+        );
+        let a = core.session.squad(1).unwrap();
+        let t = a.tabs.iter().find(|t| t.id == 10).unwrap();
+        let mut ls = tree::leaves(&t.root);
+        ls.sort_unstable();
+        assert_eq!(ls, vec![1, 2], "both panes still in tab 10");
+        assert!(
+            matches!(t.root, Node::Branch { axis: Axis::Vertical, .. }),
+            "the within-tab move reshaped to a vertical split"
+        );
+        assert!(
+            core.session.squad(1).unwrap().tabs.iter().any(|t| t.id == 20),
+            "tab 20 is untouched by a within-tab move"
+        );
+    }
+
+    #[test]
+    fn join_tab_command_min_size_refusal_surfaces_a_named_notice_and_mutates_nothing() {
+        // AC1-ERR: a join that would push a pane below min-size is refused with a
+        // NAMED notice (not a bare "Error") and leaves BOTH trees exactly as they
+        // were (all-or-nothing).
+        let mut core = two_tab_core();
+        let (c, mut rx) = live_client(7, 10); // viewing tab 10 [1,2]
+        core.clients.push(c);
+        // The viewer's dims clamp the tab area (tab_area prefers a live viewer's
+        // dims over tab_areas): 8 cols cannot hold three MIN_COLS(8)-wide children.
+        core.clients[0].dims = (40, 8);
+        let before = core.session.squad(1).unwrap().tabs.clone();
+        core.command(
+            7,
+            Command::JoinTab {
+                src_tab: 20,
+                anchor_pane: 2,
+                dir: Dir::Right,
+            },
+        );
+        assert_eq!(
+            core.session.squad(1).unwrap().tabs,
+            before,
+            "a refused join mutates neither tree"
+        );
+        let notice = drain_notice(&mut rx).expect("a refused join notices the sender");
+        assert!(
+            notice.contains("minimum") || notice.contains("smaller"),
+            "the notice names the min-size reason, got: {notice:?}"
+        );
+    }
+
+    #[test]
+    fn join_tab_command_into_self_surfaces_a_named_notice() {
+        // AC1-ERR (self-join half): joining a tab into its own anchor pane is
+        // refused BAD_REQUEST server-side with a reason that names "itself".
+        let mut core = two_tab_core();
+        let (c, mut rx) = live_client(7, 10);
+        core.clients.push(c);
+        let before = core.session.squad(1).unwrap().tabs.clone();
+        // anchor pane 1 lives in tab 10; joining tab 10 into itself.
+        core.command(
+            7,
+            Command::JoinTab {
+                src_tab: 10,
+                anchor_pane: 1,
+                dir: Dir::Right,
+            },
+        );
+        assert_eq!(
+            core.session.squad(1).unwrap().tabs,
+            before,
+            "a self-join mutates nothing"
+        );
+        let notice = drain_notice(&mut rx).expect("a refused self-join notices the sender");
+        assert!(
+            notice.contains("itself"),
+            "the notice names the self-join reason, got: {notice:?}"
+        );
+    }
+
+    #[test]
+    fn break_then_failed_join_keeps_the_broken_pane_where_the_break_left_it() {
+        // AC2-FR: pane 1 breaks to its own tab; a following join of that tab that
+        // fails min-size leaves the broken pane exactly where the break put it
+        // (the pane id survives both ops - the tree-level "pid unchanged" claim).
+        let mut core = two_tab_core();
+        let (c, _rx) = live_client(7, 10);
+        core.clients.push(c);
+        core.command(7, Command::BreakPane { pane: 1 });
+        let brk = core.client_view(7).unwrap().1; // the new tab holding [1]
+        // Now cram the anchor tab so a join back would breach min-size.
+        core.tab_areas.insert(20, (40, 8));
+        let before_brk = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == brk)
+            .unwrap()
+            .clone();
+        core.command(
+            7,
+            Command::JoinTab {
+                src_tab: brk,
+                anchor_pane: 3, // pane 3 lives in the crammed tab 20
+                dir: Dir::Right,
+            },
+        );
+        let after = core.session.squad(1).unwrap();
+        let brk_tab = after
+            .tabs
+            .iter()
+            .find(|t| t.id == brk)
+            .expect("the broken-out tab still exists after the failed join");
+        assert_eq!(
+            brk_tab.root, before_brk.root,
+            "the failed join left the broken pane exactly as the break produced it"
+        );
+        assert_eq!(tree::leaves(&brk_tab.root), vec![1], "pane 1 kept its id");
     }
 
     #[test]
