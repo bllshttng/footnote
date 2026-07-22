@@ -4112,6 +4112,12 @@ def _switchboard_exchange(
 # for ~10s (40 * 250ms) before reporting not-confirmed; give it headroom.
 _MAIL_INJECT_TIMEOUT_S = 20.0
 
+# Rust mux pane exit code for a guarded send the server refused because the
+# recipient pane's turn is not takeable (crates/fno/src/mux_cli.rs
+# EXIT_TARGET_NOT_IDLE). The delivery ladder reads it as turn-not-taken -> a
+# stalled demotion to the durable floor, never a hosted receipt (US4, LD4).
+_MUX_EXIT_TARGET_NOT_IDLE = 15
+
 # Wake spawns key on the target session uuid, not on a fresh agent name: spawn
 # dedup scopes NAME, so two senders waking one session must derive the same name
 # to collide on its flock. Prefixed because a bare 8-hex name is refused.
@@ -4165,11 +4171,18 @@ def _build_mail_ctx(
     )
 
 
-def _mux_pane_send(entry: "AgentEntry", text: str) -> bool:
+def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> bool:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``, holding
-    the pane's writer claim around the text-then-CR burst. The claim is
-    best-effort (an unclaimed pane refuses the acquire; send proceeds), but a
-    failed send fails closed -> the caller's durable demotion.
+    the pane's writer claim around the text-then-CR burst.
+
+    When ``guarded`` (the mail-delivery default, US4), the paste rides the
+    server-side turn-taken interlock: a pane whose recipient is mid-turn refuses
+    with EXIT_TARGET_NOT_IDLE and this returns False -- a ``stalled`` demotion to
+    the caller's durable floor -- rather than swallowing the bytes and letting the
+    sender report ``hosted`` (Locked Decision 4: hosted-on-bytes-written is
+    banned). ``guarded=False`` is the raw channel the writer-claim holder owns
+    (peer follow-up), left unguarded. The claim is best-effort (an unclaimed pane
+    refuses the acquire; send proceeds), but a failed send fails closed -> durable.
     """
     mux = entry.mux or {}
     session = mux.get("session")
@@ -4179,7 +4192,9 @@ def _mux_pane_send(entry: "AgentEntry", text: str) -> bool:
     fno_bin = os.environ.get("FNO_BIN") or "fno"
     pane = str(pane_id)
 
-    def _run(args: list[str], stdin_text: Optional[str] = None) -> bool:
+    def _run(args: list[str], stdin_text: Optional[str] = None) -> int:
+        """Run one ``fno mux pane`` verb; return its exit code (-1 on spawn
+        failure). A non-zero code's stderr detail is surfaced, never swallowed."""
         try:
             proc = subprocess.run(
                 [fno_bin, "mux", "pane", *args, "--session", str(session)],
@@ -4190,23 +4205,35 @@ def _mux_pane_send(entry: "AgentEntry", text: str) -> bool:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             print(f"fno mux pane {args[0]} failed: {exc}", file=sys.stderr)
-            return False
+            return -1
         if proc.returncode != 0:
             detail = (proc.stderr or "").strip()
             print(
                 f"fno mux pane {args[0]} exited {proc.returncode}: {detail}",
                 file=sys.stderr,
             )
-            return False
-        return True
+        return proc.returncode
 
-    claimed = _run(["claim", pane, "--pid", str(os.getpid())])
+    claimed = _run(["claim", pane, "--pid", str(os.getpid())]) == 0
     try:
-        if not _run(["send", pane, "--stdin"], stdin_text=text):
+        send_args = ["send", pane, "--stdin"]
+        if guarded:
+            send_args.append("--guarded")
+        rc = _run(send_args, stdin_text=text)
+        if rc != 0:
+            if rc == _MUX_EXIT_TARGET_NOT_IDLE:
+                # Turn not taken: the recipient is mid-turn, so the paste never
+                # landed. Name the stall; the caller demotes to the durable floor.
+                print(
+                    f"mux pane {pane} stalled: recipient turn not taken; demoting to durable",
+                    file=sys.stderr,
+                )
             return False
         # PaneSend is bytes; the CR submit waits for the TUI to absorb the paste.
+        # The CR is unguarded: the guarded paste already proved the pane idle, and
+        # guarding the submit could strand a pasted-but-unsent prompt.
         time.sleep(0.3)
-        return _run(["send", pane, "--text", "\r"])
+        return _run(["send", pane, "--text", "\r"]) == 0
     finally:
         if claimed:
             _run(["release", pane])
@@ -4245,7 +4272,10 @@ def _mux_followup_path(
         short_id=ref,
     )
     wrapped = build_cross_session_container(message, from_name)
-    if not _mux_pane_send(existing, wrapped):
+    # Peer follow-up is the writer-claim holder's own raw channel: it has no
+    # durable floor to demote to, so it keeps the unguarded send (the turn-taken
+    # interlock is the mail-delivery lane's guarantee, not this one -- US4 scope).
+    if not _mux_pane_send(existing, wrapped, guarded=False):
         events.emit(
             "agent_followup_failed",
             stage="mux-send",
