@@ -1,9 +1,12 @@
 """Mail live-inject dispatch on the registry mux ref (4a-G2/G3, task 4.9/4.10).
 
-A mux-hosted row routes through `fno mux pane send` with the writer claim held
-around the text-then-CR burst; a dead pane fails closed so the caller demotes
-to the durable bus. The mux subprocess is faked; the real socket path is the
-agent_edge e2e.
+A mux-hosted mail row routes through `fno mux pane send --guarded` (US4): the
+server-side turn-taken interlock refuses a mid-turn recipient, so a stalled paste
+demotes to the durable bus instead of a false hosted receipt. A guarded send does
+NOT hold the writer claim -- the server guard reads any live claim holder as
+`busy: relay`, so holding our own claim would self-block every guarded send. The
+unguarded peer-follow-up lane still holds the claim around the text-then-CR burst.
+The mux subprocess is faked; the real socket path is the agent_edge e2e.
 """
 from __future__ import annotations
 
@@ -55,7 +58,10 @@ def _patch_mux(monkeypatch, fake: FakeMux) -> None:
     monkeypatch.setattr(dispatch_mod.subprocess, "run", fake)
 
 
-def test_inject_mux_row_claims_sends_and_releases(monkeypatch) -> None:
+def test_guarded_inject_pastes_and_submits_without_a_claim(monkeypatch) -> None:
+    # The mail-delivery default is guarded (US4): the server-side interlock is
+    # the authority, so the send never holds the writer claim (which the guard
+    # would read as busy: relay and self-refuse). Just paste --guarded, then CR.
     from fno.agents.dispatch import _mux_pane_send
 
     fake = FakeMux()
@@ -63,35 +69,48 @@ def test_inject_mux_row_claims_sends_and_releases(monkeypatch) -> None:
     assert _mux_pane_send(_mux_entry(), "<fno_mail>hi</fno_mail>") is True
 
     verbs = [c[0][3] for c in fake.calls]
-    assert verbs == ["claim", "send", "send", "release"]
+    assert verbs == ["send", "send"]
     for argv, _ in fake.calls:
         assert argv[argv.index("--session") + 1] == "work"
         assert argv[4] == "7"
-    # Envelope bytes ride --stdin verbatim; the CR submit is its own send.
-    send_text, cr = fake.calls[1], fake.calls[2]
-    assert "--stdin" in send_text[0]
-    assert send_text[1] == "<fno_mail>hi</fno_mail>"
+    # Envelope bytes ride --stdin --guarded verbatim; the CR submit is its own send.
+    paste, cr = fake.calls[0], fake.calls[1]
+    assert "--stdin" in paste[0] and "--guarded" in paste[0]
+    assert paste[1] == "<fno_mail>hi</fno_mail>"
     assert cr[0][cr[0].index("--text") + 1] == "\r"
 
 
-def test_inject_dead_pane_fails_closed_and_still_releases(monkeypatch) -> None:
+def test_guarded_dead_pane_fails_closed_with_no_cr(monkeypatch) -> None:
+    # A guarded paste the server refuses (or a dead pane) returns False with no
+    # CR submit -- and no claim/release, since a guarded send never claims.
     from fno.agents.dispatch import _mux_pane_send
 
     fake = FakeMux(fail_verbs={"send"})
     _patch_mux(monkeypatch, fake)
     assert _mux_pane_send(_mux_entry(), "hi") is False
-    verbs = [c[0][3] for c in fake.calls]
-    assert verbs == ["claim", "send", "release"], "no CR after a failed send"
+    assert [c[0][3] for c in fake.calls] == ["send"], "no CR, no claim/release"
 
 
-def test_inject_claim_refusal_is_fail_open(monkeypatch) -> None:
-    # A pane spawned without --claim refuses the acquire; the send proceeds
-    # and no release is issued.
+def test_unguarded_follow_up_claims_sends_and_releases(monkeypatch) -> None:
+    # The peer-follow-up lane keeps its raw channel: hold the writer claim across
+    # the text-then-CR burst, release after, and never pass --guarded.
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+    assert _mux_pane_send(_mux_entry(), "hi", guarded=False) is True
+    assert [c[0][3] for c in fake.calls] == ["claim", "send", "send", "release"]
+    assert "--guarded" not in fake.calls[1][0]
+
+
+def test_unguarded_claim_refusal_is_fail_open(monkeypatch) -> None:
+    # A pane spawned without --claim refuses the acquire; the unguarded send
+    # proceeds and no release is issued.
     from fno.agents.dispatch import _mux_pane_send
 
     fake = FakeMux(fail_verbs={"claim"})
     _patch_mux(monkeypatch, fake)
-    assert _mux_pane_send(_mux_entry(), "hi") is True
+    assert _mux_pane_send(_mux_entry(), "hi", guarded=False) is True
     verbs = [c[0][3] for c in fake.calls]
     assert verbs == ["claim", "send", "send"]
 
