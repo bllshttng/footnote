@@ -7,19 +7,18 @@ This is the ceremony the x-304c synthesis marked `ADD`: the retro interviews wer
 ## When it fires and who it targets
 
 - **When:** the epic's last wave has merged and you are about to abdicate. One pass, one interview per builder, then exit.
-- **Who:** every builder session that carried a node in this epic. By the time the epic is done the builders have shipped and released their node claims, so `fno backlog epic status` (which derives `worker` from a live claim) and `top` / `discovered-json` (live sessions only) no longer map node -> session - they show only who is still up. The durable map is the **ledger** (`~/.fno/ledger.json`), which records `node -> session_id -> pr` per shipped node; read it to enumerate the epic's builders, then use the live probes to see which are still reachable. A still-live or resumable session is `fno agents resume <session-id>`'d, interviewed, then left; one gone to artifacts only (transcript, no roster row) is interviewed by resuming from its recorded cwd if worth it, else noted as unreachable.
+- **Who:** every builder that carried a node in this epic. By the time the epic is done the builders have shipped and released their node claims, so `fno backlog epic status` (which derives `worker` from a live claim) and `top` / `discovered-json` (live sessions only) no longer map node -> builder - they show only who is still up. The durable map is the **ledger** (`fno.paths.ledger_json()`, `~/.fno/ledger.json` by default but honor a `config.paths.ledger_json` / `config.state_dir` override), which records `node -> run -> pr` per shipped node; read it to enumerate the epic's builders. Reaching a specific builder to interview it is then best-effort: mail the still-reachable ones (resolve a live handle from `fno agents discovered-json` / `top`), and for a builder gone to transcript-and-artifacts only, reconstruct its account from its transcript or note it unreachable. Do not treat the ledger's run id as a resumable session handle - it is the target run id, not the provider session id `fno agents resume` takes.
 - The Director interviews because it holds cross-session knowledge a builder lacks - it saw every squad, so it can ask the sibling-aware follow-up a siloed builder cannot self-generate.
 
 ## Delivery mechanics
 
-The interview is mailed. Reuse the [minion delivery doctrine](minion-clause.md): `fno mail send <builder-handle> "<prompt>" --from-self`, expect `delivered (hosted)`; on any other receipt re-resolve the handle and re-send, and `fno agents resume <short-id>` an idle builder before sending. A `queued (durable)` interview is one the builder may never see.
+The interview is mailed. Follow the [minion delivery doctrine](minion-clause.md) in full, **including its peek-before-resend guard**: `fno mail send <builder-handle> "<prompt>" --from-self`, expect `delivered (hosted)`, and on any other receipt peek the handle then re-send rather than trusting the queue (a `queued (durable)` interview is one the builder may never see). Resolve a live `<builder-handle>` from `fno agents discovered-json` / `top`. `fno mail send` wraps the body in its own `<fno_mail>` envelope, so the prompt below is body-only - do not add a second envelope.
 
 ## The prompt (dogfooding lens baked in)
 
-Paste this, filling the epic/node slots and the session-specific block:
+Paste this as the `fno mail send` body (it is body-only; `fno mail send` supplies the `<fno_mail>` envelope), filling the epic/node slots and the session-specific block:
 
 ```
-<fno_mail from="<king-handle>" to="<builder-handle>">
 Post-epic retro for <epic> (your node: <node>). You are one of several builders being interviewed; your first-person account becomes a filed project artifact, so be concrete and name ids/paths/commands.
 
 Lens: footnote building footnote. Answer as the fresh agent you were when you jumped in cold.
@@ -31,7 +30,6 @@ Lens: footnote building footnote. Answer as the fresh agent you were when you ju
 5. <session-specific questions - the king fills these from what it saw this builder hit: a claim flap, a stale base, a review it drained, a fork it survived. One or two, concrete. Omit the line if none.>
 
 Reply by mail (--from-self). I will ask one follow-up per thin answer.
-</fno_mail>
 ```
 
 ## The dig-deeper rule (baked in, no human prod)
@@ -40,7 +38,7 @@ The maintainer's manual step was prodding thin answers with the lens. Do it your
 
 ## Where the account lands
 
-Write each builder's returned account to your project's retros directory as `<date>-<session-short>-<node>.md`, with frontmatter pinning `node`, `session`, `prs`, `epic`, `date`. The maintainer instance keeps these in the Obsidian vault at `internal/fno/retros/` (the same vault `fno plan path` writes plans to) - but `internal/` is a gitignored symlink that does not exist on a fresh checkout, so resolve your own location rather than assuming that path, and never write into a missing `internal/`. These accounts are the sources a later synthesis pass folds (the x-304c synthesis pinned six such files in its `sources:` frontmatter). The interview produces the raw accounts; synthesis is a separate pass.
+Write each builder's account as `<date>-<session-short>-<node>.md`, with frontmatter pinning `node`, `session`, `prs`, `epic`, `date`. footnote has no dedicated retro-path config, so retros follow the plan artifact store deterministically: `fno plan path --slug <x>` resolves the configured plans directory (the maintainer instance is the Obsidian vault's `internal/fno/plans/`), and retros land in a `retros/` sibling of it. Resolve it that way rather than hard-coding a path - `internal/` itself is a gitignored vault symlink absent on a fresh checkout, and the plan-path resolver is what honors each project's config. These accounts are the sources a later synthesis pass folds (the x-304c synthesis pinned six such files in its `sources:` frontmatter). The interview produces the raw accounts; synthesis is a separate pass.
 
 ## Retro epistemics (how much to trust what comes back)
 
