@@ -130,6 +130,21 @@ pub enum MoveError {
     Origin,
 }
 
+/// [`detach_leaf`] outcome. Break/join (US9) remove a leaf but, unlike
+/// [`close`], the server keeps the PTY alive to re-home it; this type tells the
+/// server whether the source tab has any panes left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetachOutcome {
+    /// The detached leaf was the tab's ONLY pane. The tab holds nothing now -
+    /// the caller must discard it (a `Node` cannot represent "empty"). The tree
+    /// is left unchanged; there is nothing to keep.
+    TabEmptied,
+    /// The leaf was removed and the tree normalized. `new_focus` is the
+    /// surviving leaf focus landed on (re-anchored geometrically only when the
+    /// detached pane held focus; otherwise the prior focus is unchanged).
+    Detached { new_focus: PaneId },
+}
+
 // ---------------------------------------------------------------------------
 // layout: tree -> tiled rects
 // ---------------------------------------------------------------------------
@@ -683,6 +698,151 @@ fn nearest_surviving(panes: &[(PaneId, Rect)], from: Rect) -> Option<PaneId> {
         .min_by_key(|(_, dist)| *dist)
         .map(|(id, _)| id)
         .or_else(|| panes.first().map(|(id, _)| *id))
+}
+
+// ---------------------------------------------------------------------------
+// detach_leaf + graft_subtree (cross-tab break / join, US9)
+// ---------------------------------------------------------------------------
+
+/// Remove `pid`'s leaf and normalize the tree, WITHOUT reaping its PTY (unlike
+/// [`close`], which the server pairs with a reap). This is the tree half of a
+/// break/join: the pane id survives in the returned outcome so the server can
+/// re-home the still-live PTY into another tab.
+///
+/// Returns [`DetachOutcome::TabEmptied`] (tree untouched) when `pid` was the
+/// only leaf, or [`DetachOutcome::Detached`] after removal. `Err(PaneGone)` when
+/// `pid` isn't in the tree (tree unchanged). Detaching only ever grows the
+/// surviving panes, so it never fails on min-size.
+pub fn detach_leaf(
+    tab: &mut Tab,
+    viewport: Rect,
+    pid: PaneId,
+) -> Result<DetachOutcome, MoveError> {
+    if matches!(&tab.root, Node::Leaf(id) if *id == pid) {
+        return Ok(DetachOutcome::TabEmptied);
+    }
+
+    let before = layout(&tab.root, viewport);
+    let removed_rect = before.iter().find(|(id, _)| *id == pid).map(|(_, r)| *r);
+
+    match remove_leaf(&tab.root, pid) {
+        None => Err(MoveError::PaneGone),
+        Some(None) => unreachable!("remove_leaf(root) only returns Some(None) for a root Leaf, handled above"),
+        Some(Some(new_root)) => {
+            tab.root = normalize(new_root);
+            let new_focus = if tab.focus == pid {
+                let after = layout(&tab.root, viewport);
+                let from = removed_rect.unwrap_or(viewport);
+                // nearest_surviving falls back to first-survivor; a non-empty
+                // post-detach tree always has one, so the unwrap can't fire.
+                nearest_surviving(&after, from).unwrap_or_else(|| leaves(&tab.root)[0])
+            } else {
+                tab.focus
+            };
+            tab.focus = new_focus;
+            Ok(DetachOutcome::Detached { new_focus })
+        }
+    }
+}
+
+/// Splice a whole `subtree` adjacent to `anchor_pid` on `dir`'s axis, running
+/// the same per-pane/per-axis min-size validation [`split_directional`] uses.
+/// On `Err` the destination tree is UNCHANGED (all-or-nothing): the candidate
+/// is built and validated before it is committed.
+///
+/// The join half of break/join: the server detaches a subtree from the source
+/// tab (PTYs live), then grafts it here. Focus is left untouched - grafting is
+/// a structural splice, and the server decides focus per the gesture.
+pub fn graft_subtree(
+    dst_tab: &mut Tab,
+    viewport: Rect,
+    anchor_pid: PaneId,
+    dir: Dir,
+    subtree: Node,
+) -> Result<(), MoveError> {
+    if !leaves(&dst_tab.root).contains(&anchor_pid) {
+        return Err(MoveError::PaneGone);
+    }
+    let (axis, before) = match dir {
+        Dir::Left => (Axis::Horizontal, true),
+        Dir::Right => (Axis::Horizontal, false),
+        Dir::Up => (Axis::Vertical, true),
+        Dir::Down => (Axis::Vertical, false),
+    };
+    let Some(candidate) = graft_node(&dst_tab.root, anchor_pid, axis, before, &subtree) else {
+        return Err(MoveError::PaneGone);
+    };
+    // A grafted same-axis subtree lands as a nested same-axis branch; normalize
+    // flattens it (split_node never needs this - it inserts a bare leaf).
+    let candidate = normalize(candidate);
+
+    if layout(&candidate, viewport)
+        .iter()
+        .any(|(_, r)| r.rows < MIN_ROWS || r.cols < MIN_COLS)
+    {
+        return Err(MoveError::TooSmall {
+            min_rows: MIN_ROWS,
+            min_cols: MIN_COLS,
+        });
+    }
+
+    dst_tab.root = candidate;
+    Ok(())
+}
+
+/// Build the post-graft tree splicing `subtree` adjacent to `anchor` on
+/// `graft_axis`. `None` means `anchor` isn't in this subtree. The `split_node`
+/// shape generalized from "insert a new leaf" to "insert an arbitrary node":
+/// the anchor keeps half its slot, the grafted subtree takes the other half.
+fn graft_node(
+    node: &Node,
+    anchor: PaneId,
+    graft_axis: Axis,
+    before: bool,
+    subtree: &Node,
+) -> Option<Node> {
+    match node {
+        Node::Leaf(id) if *id == anchor => Some(Node::Branch {
+            axis: graft_axis,
+            children: if before {
+                vec![(0.5, subtree.clone()), (0.5, Node::Leaf(*id))]
+            } else {
+                vec![(0.5, Node::Leaf(*id)), (0.5, subtree.clone())]
+            },
+        }),
+        Node::Leaf(_) => None,
+        Node::Branch { axis, children } => {
+            if *axis == graft_axis {
+                if let Some(idx) = children
+                    .iter()
+                    .position(|(_, n)| matches!(n, Node::Leaf(id) if *id == anchor))
+                {
+                    let half = children[idx].0 / 2.0;
+                    let mut new_children = children.clone();
+                    new_children[idx] = (half, Node::Leaf(anchor));
+                    new_children.insert(
+                        if before { idx } else { idx + 1 },
+                        (half, subtree.clone()),
+                    );
+                    return Some(Node::Branch {
+                        axis: *axis,
+                        children: new_children,
+                    });
+                }
+            }
+            for (i, (ratio, child)) in children.iter().enumerate() {
+                if let Some(new_child) = graft_node(child, anchor, graft_axis, before, subtree) {
+                    let mut new_children = children.clone();
+                    new_children[i] = (*ratio, new_child);
+                    return Some(Node::Branch {
+                        axis: *axis,
+                        children: new_children,
+                    });
+                }
+            }
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2282,5 +2442,206 @@ mod adversarial_move_tests {
                 }
             }
         }
+    }
+
+    // US9 substrate: detach a leaf (PTY-preserving at the server) then graft it
+    // back somewhere else must never lose, duplicate, or corrupt a pane. Mirrors
+    // the move_leaf adversarial loop above (break+join == detach+graft).
+    #[test]
+    fn adversarial_detach_graft_preserves_invariants() {
+        for seed in 1..800u64 {
+            let mut r = R(seed);
+            let mut tab = Tab {
+                id: 0,
+                root: Node::Leaf(1),
+                focus: 1,
+                name: None,
+            };
+            let mut next_id = 2;
+            for _ in 0..r.pick(8) + 2 {
+                let ls = leaves(&tab.root);
+                tab.focus = ls[r.pick(ls.len())];
+                let d = dirs()[r.pick(4)];
+                if split_directional(&mut tab, BIG, d, next_id).is_ok() {
+                    next_id += 1;
+                }
+            }
+            check_invariants(&tab).unwrap_or_else(|e| panic!("seed {seed}: build broke: {e}"));
+
+            for step in 0..300 {
+                let ls = leaves(&tab.root);
+                if ls.len() < 2 {
+                    break;
+                }
+                let mut sorted_before = ls.clone();
+                sorted_before.sort_unstable();
+                let pid = ls[r.pick(ls.len())];
+                let before = tab.clone();
+
+                match detach_leaf(&mut tab, BIG, pid) {
+                    Ok(DetachOutcome::Detached { new_focus }) => {
+                        check_invariants(&tab).unwrap_or_else(|e| panic!(
+                            "seed {seed} step {step}: detach broke {e}\n{:?}", tab.root));
+                        assert!(leaves(&tab.root).contains(&new_focus),
+                            "seed {seed} step {step}: new_focus {new_focus} not a survivor");
+                        let mut after_detach = leaves(&tab.root);
+                        after_detach.sort_unstable();
+                        let mut expect = sorted_before.clone();
+                        expect.retain(|x| *x != pid);
+                        assert_eq!(expect, after_detach,
+                            "seed {seed} step {step}: detach {pid} changed the survivor set");
+
+                        let survivors = leaves(&tab.root);
+                        let anchor = survivors[r.pick(survivors.len())];
+                        let d = dirs()[r.pick(4)];
+                        match graft_subtree(&mut tab, BIG, anchor, d, Node::Leaf(pid)) {
+                            Ok(()) => {
+                                let mut after = leaves(&tab.root);
+                                after.sort_unstable();
+                                assert_eq!(sorted_before, after,
+                                    "seed {seed} step {step}: graft {pid}->{anchor} {d:?} changed pane set");
+                                check_invariants(&tab).unwrap_or_else(|e| panic!(
+                                    "seed {seed} step {step}: graft INVARIANT {e}\n{:?}", tab.root));
+                            }
+                            // min-size refusal: pid is detached-and-unplaced. Restore the
+                            // pre-step tree so the loop keeps a stable pane set to test against.
+                            Err(_) => tab = before,
+                        }
+                    }
+                    Ok(DetachOutcome::TabEmptied) => {
+                        unreachable!("seed {seed} step {step}: TabEmptied with {} leaves", ls.len());
+                    }
+                    Err(_) => assert_eq!(before, tab,
+                        "seed {seed} step {step}: detach mutated the tree on Err"),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod detach_graft_tests {
+    use super::*;
+
+    const VP: Rect = Rect {
+        x: 0,
+        y: 0,
+        rows: 24,
+        cols: 60,
+    };
+
+    fn leaf_tab(id: PaneId) -> Tab {
+        Tab {
+            id: 0,
+            root: Node::Leaf(id),
+            focus: id,
+            name: None,
+        }
+    }
+
+    // (1 over 3) | (2 over 4): a four-pane tab built by splits.
+    fn tab_1234() -> Tab {
+        let mut t = leaf_tab(1);
+        split_directional(&mut t, VP, Dir::Right, 2).unwrap();
+        t.focus = 1;
+        split_directional(&mut t, VP, Dir::Down, 3).unwrap();
+        t.focus = 2;
+        split_directional(&mut t, VP, Dir::Down, 4).unwrap();
+        t
+    }
+
+    #[test]
+    fn detach_leaf_removes_pane_keeps_others() {
+        let mut t = tab_1234();
+        let out = detach_leaf(&mut t, VP, 3).expect("3 is present");
+        assert!(matches!(out, DetachOutcome::Detached { .. }));
+        let mut ls = leaves(&t.root);
+        ls.sort_unstable();
+        assert_eq!(ls, vec![1, 2, 4]);
+        check_invariants(&t).expect("well-formed after detach");
+    }
+
+    #[test]
+    fn detach_last_pane_reports_tab_emptied() {
+        // AC1-EDGE substrate: the only leaf detaches -> caller drops the tab.
+        let mut t = leaf_tab(7);
+        assert_eq!(detach_leaf(&mut t, VP, 7), Ok(DetachOutcome::TabEmptied));
+    }
+
+    #[test]
+    fn detach_absent_pane_is_pane_gone_and_leaves_tree() {
+        let mut t = tab_1234();
+        let before = t.clone();
+        assert_eq!(detach_leaf(&mut t, VP, 99), Err(MoveError::PaneGone));
+        assert_eq!(before, t, "tree untouched on absent pane");
+    }
+
+    #[test]
+    fn detach_focused_pane_reanchors_focus() {
+        let mut t = tab_1234();
+        t.focus = 3;
+        let DetachOutcome::Detached { new_focus } = detach_leaf(&mut t, VP, 3).unwrap() else {
+            panic!("expected Detached");
+        };
+        assert!(leaves(&t.root).contains(&new_focus), "focus lands on a survivor");
+        assert_eq!(t.focus, new_focus);
+        assert_ne!(new_focus, 3);
+    }
+
+    #[test]
+    fn graft_subtree_splices_next_to_anchor() {
+        let mut dst = tab_1234();
+        graft_subtree(&mut dst, VP, 1, Dir::Right, Node::Leaf(50)).expect("legal graft");
+        let mut ls = leaves(&dst.root);
+        ls.sort_unstable();
+        assert_eq!(ls, vec![1, 2, 3, 4, 50]);
+        check_invariants(&dst).expect("well-formed after graft");
+    }
+
+    #[test]
+    fn graft_absent_anchor_is_pane_gone_and_leaves_tree() {
+        let mut dst = tab_1234();
+        let before = dst.clone();
+        assert_eq!(
+            graft_subtree(&mut dst, VP, 99, Dir::Right, Node::Leaf(50)),
+            Err(MoveError::PaneGone)
+        );
+        assert_eq!(before, dst);
+    }
+
+    #[test]
+    fn graft_min_size_refusal_leaves_tree_intact() {
+        // AC2-ERR: grafting a two-pane subtree into a viewport too narrow to
+        // hold the extra column must refuse and leave the destination exactly.
+        let tiny = Rect {
+            x: 0,
+            y: 0,
+            rows: 4,
+            cols: MIN_COLS + 1,
+        };
+        let mut dst = leaf_tab(1);
+        let before = dst.clone();
+        let big_subtree = Node::Branch {
+            axis: Axis::Horizontal,
+            children: vec![(0.5, Node::Leaf(50)), (0.5, Node::Leaf(51))],
+        };
+        let r = graft_subtree(&mut dst, tiny, 1, Dir::Right, big_subtree);
+        assert!(matches!(r, Err(MoveError::TooSmall { .. })), "got {r:?}");
+        assert_eq!(before, dst, "destination unchanged on min-size refusal");
+    }
+
+    #[test]
+    fn detach_then_graft_round_trips_pane_set() {
+        // Models: break pane 4 into its own tab, then join it back adjacent to 1.
+        let mut t = tab_1234();
+        let before: std::collections::BTreeSet<_> = leaves(&t.root).into_iter().collect();
+        assert!(matches!(
+            detach_leaf(&mut t, VP, 4).expect("present"),
+            DetachOutcome::Detached { .. }
+        ));
+        graft_subtree(&mut t, VP, 1, Dir::Down, Node::Leaf(4)).expect("legal");
+        let after: std::collections::BTreeSet<_> = leaves(&t.root).into_iter().collect();
+        assert_eq!(before, after, "pane set preserved across detach+graft");
+        check_invariants(&t).unwrap();
     }
 }
