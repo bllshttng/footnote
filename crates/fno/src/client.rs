@@ -31,7 +31,7 @@ use crate::proto::{
     self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentRow,
     AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg, Color,
     Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget, ProtoError,
-    ServerMsg, SquadMeta, TabSel, BUILD_VERSION, MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    ServerMsg, SquadMeta, BUILD_VERSION, MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME,
     PROTO_VERSION,
 };
 use crate::tree::{Axis, Dir, Rect, TabId};
@@ -2899,10 +2899,13 @@ impl View {
                 target: Some(zone.target),
                 dir: zone.dir,
             },
+            // The anchor (`at`) alone names the drop slot: the server resolves
+            // its squad and tab from the anchor pane's live location (overriding
+            // the agent's owner-squad routing), so the client leaves `tab`
+            // unset rather than guess "the active tab".
             RowSource::Attach(id) => Command::AttachAgent {
                 id,
                 placement: PanePlacement {
-                    tab: Some(TabSel::Active),
                     at: Some(zone.target),
                     split: Some(zone.dir),
                     here: false,
@@ -7365,7 +7368,10 @@ async fn handle_stdin(
         // timeout - for a gesture the operator has already finished. Nobody is
         // shift-selecting text mid-drag, so nothing is taken away here.
         let ends_a_drag = matches!(rep.kind, MouseKind::Release(MouseButton::Left))
-            && (view.pane_drag.is_some() || view.seam_drag.is_some());
+            && (view.pane_drag.is_some()
+                || view.seam_drag.is_some()
+                || view.tab_drag.is_some()
+                || view.row_drag.is_some());
         if rep.shift && !ends_a_drag {
             continue;
         }
@@ -20061,7 +20067,8 @@ mod tests {
     #[test]
     fn g3_paneless_row_drop_attaches_at_the_slot() {
         // AC3 (paneless half): a paneless bg row attaches at the drop slot with a
-        // placement anchored to the dropped-on pane in the current (Active) tab.
+        // placement anchored to the dropped-on pane; `tab` is left unset (the
+        // server resolves the tab from the anchor's live location).
         let mut view = three_pane_view();
         view.begin_row_drag(RowSource::Attach("c19cd2c3".into()), Instant::now());
         let (r, c) = seam_cell_between(&view, 11, 12);
@@ -20071,7 +20078,6 @@ mod tests {
             Some(Command::AttachAgent {
                 id: "c19cd2c3".into(),
                 placement: PanePlacement {
-                    tab: Some(TabSel::Active),
                     at: Some(11),
                     split: Some(Dir::Right),
                     here: false,

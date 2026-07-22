@@ -6134,15 +6134,36 @@ impl Core {
                     .find(|s| !row_cwd.is_empty() && s.owns_path(&row_cwd))
                     .map(|s| s.id)
                     .unwrap_or(view.0);
-                // An explicit UI target overrides owner routing for a fresh
-                // attach (Locked 7); a stale/unknown target fails closed with no
-                // spawn (AC4). Owner is always live, so resolution yields Some.
-                let dest = match self.resolve_placement_target(&placement.target, Some(owner)) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        self.notice(client_id, e);
+                // (x-d6a8 G3) An anchored drop ("attach beside THIS pane") names a
+                // concrete pane the operator can see, which overrides owner
+                // routing: the pane lands in the anchor's OWN tab, resolved from
+                // the anchor's live location, so the gesture places where it was
+                // dropped rather than in the agent's home squad. A stale anchor is
+                // refused pre-spawn, not mis-placed. A non-anchored attach (the
+                // sideline click, `at: None`) keeps owner routing and the pre-v41
+                // whole-tab placement untouched.
+                //
+                // An explicit UI target otherwise overrides owner routing for a
+                // fresh attach (Locked 7); a stale/unknown target fails closed
+                // with no spawn (AC4). Owner is always live, so resolution yields Some.
+                let (dest, effective) = if let Some(anchor) = placement.at {
+                    let Some((sid, ti)) = self.session.find_pane(anchor) else {
+                        self.notice(client_id, "stale drop: that pane is gone");
                         return Flow::Continue;
-                    }
+                    };
+                    let anchor_tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
+                    let mut p = placement.clone();
+                    p.tab = Some(TabSel::Id(anchor_tid));
+                    (Some(sid), p)
+                } else {
+                    let dest = match self.resolve_placement_target(&placement.target, Some(owner)) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            self.notice(client_id, e);
+                            return Flow::Continue;
+                        }
+                    };
+                    (dest, placement.clone())
                 };
                 // Spawn `claude attach <id>`: the claude supervisor PTYs the
                 // detached bg session into this pane. cwd is the agent row's,
@@ -6170,19 +6191,21 @@ impl Core {
                         return Flow::Continue;
                     }
                 };
-                // Place through the shared helper (Locked 1): a new tab, or a
-                // directional split beside the selected squad's active-tab
-                // focus. A
-                // refusal reaps the pane and leaves the row watch-only (AC7);
-                // the mapping is recorded ONLY after placement succeeds.
-                let (sid, tid, fell_back) =
-                    match self.place_spawned_pane(dest, &spawn_cwd, pid, placement.split) {
-                        Ok(landing) => landing,
-                        Err(e) => {
-                            self.notice(client_id, e);
-                            return Flow::Continue;
-                        }
-                    };
+                // Place through the shared v41 helper: it honors the anchored
+                // drop's `tab`/`at` (a split beside the exact drop pane), and
+                // otherwise falls through to place_spawned_pane's whole-tab
+                // placement unchanged (`at: None` -> a new tab or a split beside
+                // the selected squad's active-tab focus). A refusal reaps the pane
+                // and leaves the row watch-only (AC7); the mapping is recorded
+                // ONLY after placement succeeds.
+                let (sid, tid, fell_back) = match self.place_with(dest, &spawn_cwd, pid, &effective)
+                {
+                    Ok(landing) => landing,
+                    Err((_code, e)) => {
+                        self.notice(client_id, e);
+                        return Flow::Continue;
+                    }
+                };
                 self.attached.insert(id, pid);
                 self.set_view(client_id, sid, tid);
                 if fell_back {
@@ -11710,6 +11733,51 @@ mod tests {
                 .iter()
                 .any(|t| t.contains("open-here takes no split or target")));
         }
+    }
+
+    #[test]
+    fn attach_agent_anchored_drop_lands_beside_the_anchor_not_the_active_tab() {
+        // (x-d6a8 G3) Regression for the codex P1 finding: a paneless bg row
+        // dropped beside a SPECIFIC pane attaches in THAT pane's tab, beside it -
+        // honoring the drop slot - rather than splitting beside the squad's
+        // active-tab focus (the pre-fix place_spawned_pane behavior). The anchor
+        // determines both squad and tab, overriding owner routing.
+        set_attach_program(&["/bin/cat"]); // stand in for `claude attach`
+        let (mut core, client_id, p1, p2, _rx) = seen_test_core();
+        // View + activate the OTHER tab (id 2), so a non-anchored attach would
+        // land there; the anchor (p1, tab 1) must override that.
+        core.set_view(client_id, 1, 2);
+        core.session.squad_mut(1).unwrap().active_tab = 1; // index 1 == tab id 2
+        core.agents = vec![bg_row("bg", "/tmp/seen", Some("deadbee2"))];
+        let new_pid = core.next_pane_id;
+
+        core.command(
+            client_id,
+            Command::AttachAgent {
+                id: "deadbee2".into(),
+                placement: PanePlacement {
+                    at: Some(p1),
+                    split: Some(Dir::Right),
+                    ..Default::default()
+                },
+            },
+        );
+
+        let sq = core.session.squad(1).unwrap();
+        let tab1 = sq.tabs.iter().find(|t| t.id == 1).unwrap();
+        let mut ls = tree::leaves(&tab1.root);
+        ls.sort_unstable();
+        let mut expected = vec![p1, new_pid];
+        expected.sort_unstable();
+        assert_eq!(ls, expected, "attach landed beside the anchor p1 in tab 1");
+        let tab2 = sq.tabs.iter().find(|t| t.id == 2).unwrap();
+        assert_eq!(
+            tree::leaves(&tab2.root),
+            vec![p2],
+            "the active/viewed tab is untouched - the drop honored its anchor"
+        );
+        assert_eq!(core.attached.get("deadbee2"), Some(&new_pid), "B mapped");
+        core.reap_pane(new_pid); // don't leak the stand-in child
     }
 
     #[test]
