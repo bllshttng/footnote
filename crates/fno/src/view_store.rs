@@ -299,6 +299,21 @@ pub fn save_width(width: u16) {
     });
 }
 
+/// (x-2e86) Persist a density PRESET - mode, sort, and canonical width - in ONE
+/// locked mutation. A preset is a single logical choice of both mode and width,
+/// so writing density and width through separate `save_prefs`/`save_width` calls
+/// could interleave with another mux client (or be interrupted between them) and
+/// leave a persisted mode paired with a width from a different press. This makes
+/// the pair atomic so a later attach always observes a preset that was actually
+/// selected.
+pub fn save_preset(density: Density, sort: AgentSort, width: u16) {
+    mutate(|file| {
+        file.density = serde_json::to_value(density).ok();
+        file.sort = serde_json::to_value(sort).ok();
+        file.width = serde_json::to_value(width).ok();
+    });
+}
+
 /// Persist the sections the operator EXPLICITLY chose, merging them into the
 /// file under an exclusive lock.
 ///
@@ -653,6 +668,20 @@ mod tests {
         assert_eq!(
             load_prefs(),
             (Density::Extended, AgentSort::Squad, Some(60))
+        );
+    }
+
+    #[test]
+    fn save_preset_writes_mode_and_width_together() {
+        // A preset is one choice of both fields; save_preset persists them in one
+        // mutation so a reader never sees a mode paired with a stale width.
+        let _s = Scratch::new("preset-atomic");
+        save_width(45); // a prior dragged width
+        save_preset(Density::Extended, AgentSort::Status, 70);
+        assert_eq!(
+            load_prefs(),
+            (Density::Extended, AgentSort::Status, Some(70)),
+            "the preset overwrote both the mode and the dragged width"
         );
     }
 
