@@ -673,7 +673,10 @@ mod tests {
         std::fs::write(s.file(), raw).unwrap();
         let loaded = load();
         assert_eq!(loaded.squads.len(), 1, "not quarantined");
-        assert!(loaded.squads[0].tab_specs.is_empty(), "tab_specs defaults to empty");
+        assert!(
+            loaded.squads[0].tab_specs.is_empty(),
+            "tab_specs defaults to empty"
+        );
         assert!(loaded.notice.is_none());
     }
 
@@ -696,7 +699,11 @@ mod tests {
         upsert("w", &["/r".into()], &[m("c19cd2c3"), m("deadbeef")]).unwrap();
         let after = load();
         assert_eq!(after.squads[0].members.len(), 2, "membership updated");
-        assert_eq!(after.squads[0].tab_specs, vec![spec], "tab_specs preserved across upsert");
+        assert_eq!(
+            after.squads[0].tab_specs,
+            vec![spec],
+            "tab_specs preserved across upsert"
+        );
     }
 
     #[test]

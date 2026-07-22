@@ -1819,7 +1819,9 @@ fn layout_apply_cli(
         while i < rest.len() {
             let val = |i: &mut usize| -> Result<String, String> {
                 *i += 1;
-                rest.get(*i).cloned().ok_or_else(|| format!("{} needs a value", rest[*i - 1]))
+                rest.get(*i)
+                    .cloned()
+                    .ok_or_else(|| format!("{} needs a value", rest[*i - 1]))
             };
             match rest[i].as_str() {
                 "--template" | "-t" => template = Some(parse_template_name(&val(&mut i)?)?),
@@ -1854,7 +1856,9 @@ fn layout_apply_cli(
         }
         None => {
             let Some(template) = template else {
-                eprintln!("fno mux layout apply: needs --template <name> (+ --slot ...) or --spec <file>");
+                eprintln!(
+                    "fno mux layout apply: needs --template <name> (+ --slot ...) or --spec <file>"
+                );
                 return EXIT_USAGE;
             };
             crate::proto::LayoutSpec { template, slots }
@@ -2380,7 +2384,10 @@ fn render_reply(
                 );
             } else {
                 for r in &results {
-                    let pane = r.pane_id.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
+                    let pane = r
+                        .pane_id
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "-".into());
                     println!("slot {} pane={} {:?}", r.slot, pane, r.outcome);
                 }
             }

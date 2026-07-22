@@ -2673,13 +2673,23 @@ impl Core {
         if id.is_empty() {
             return None;
         }
-        let exact: Vec<&RegistryAgent> = self.agents.iter().filter(|a| identity_exact(a, id)).collect();
+        let exact: Vec<&RegistryAgent> = self
+            .agents
+            .iter()
+            .filter(|a| identity_exact(a, id))
+            .collect();
         let matched: Vec<&RegistryAgent> = if !exact.is_empty() {
             exact
         } else {
-            let prefix: Vec<&RegistryAgent> =
-                self.agents.iter().filter(|a| identity_prefix(a, id)).collect();
-            let mut ids: Vec<&str> = prefix.iter().filter_map(|a| a.session_id.as_deref()).collect();
+            let prefix: Vec<&RegistryAgent> = self
+                .agents
+                .iter()
+                .filter(|a| identity_prefix(a, id))
+                .collect();
+            let mut ids: Vec<&str> = prefix
+                .iter()
+                .filter_map(|a| a.session_id.as_deref())
+                .collect();
             ids.sort_unstable();
             ids.dedup();
             if ids.len() > 1 {
@@ -2703,7 +2713,12 @@ impl Core {
         };
         let tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
         let vp = self.tab_rect(tid);
-        let si = self.session.squads.iter().position(|s| s.id == sid).expect("squad live");
+        let si = self
+            .session
+            .squads
+            .iter()
+            .position(|s| s.id == sid)
+            .expect("squad live");
         let outcome = {
             let tab = &mut self.session.squads[si].tabs[ti];
             tree::detach_leaf(tab, vp, pane)
@@ -2723,7 +2738,11 @@ impl Core {
     /// `PaneTarget` and returns the leaf pane); used where the squad id is
     /// already in hand (template apply / restore).
     fn create_tab_in(&mut self, sid: u64, name: Option<String>) -> Result<TabId, (u32, String)> {
-        let cwd = self.session.squad(sid).map(|s| s.canonical_cwd().to_string()).unwrap_or_default();
+        let cwd = self
+            .session
+            .squad(sid)
+            .map(|s| s.canonical_cwd().to_string())
+            .unwrap_or_default();
         let pid = self
             .spawn_pane(vt::DEFAULT_ROWS, vt::DEFAULT_COLS, &cwd)
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
@@ -2772,7 +2791,11 @@ impl Core {
 
         // 1. Topology + arity (pure, pre-mutation).
         let shape = crate::templates::topology(spec.template, k).map_err(|e| {
-            let crate::templates::TemplateError::Arity { want, got, variadic } = e;
+            let crate::templates::TemplateError::Arity {
+                want,
+                got,
+                variadic,
+            } = e;
             (
                 err_code::TEMPLATE_ARITY,
                 format!(
@@ -2788,7 +2811,9 @@ impl Core {
         let target_tid = if created_new {
             self.create_tab_in(sid, None)?
         } else {
-            let ti = self.resolve_tab_index(sid, tab_sel).map_err(|e| (err_code::BAD_REQUEST, e))?;
+            let ti = self
+                .resolve_tab_index(sid, tab_sel)
+                .map_err(|e| (err_code::BAD_REQUEST, e))?;
             self.session.squad(sid).expect("resolve live").tabs[ti].id
         };
 
@@ -2804,10 +2829,17 @@ impl Core {
             if created_new {
                 self.remove_tab_by_id(sid, target_tid); // undo the New-tab side effect
             }
-            let slots = overflow.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",");
+            let slots = overflow
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
             return Err((
                 err_code::TEMPLATE_UNFITTABLE,
-                format!("template {:?} does not fit: slots {slots} fall below the minimum", spec.template),
+                format!(
+                    "template {:?} does not fit: slots {slots} fall below the minimum",
+                    spec.template
+                ),
             ));
         }
 
@@ -2831,8 +2863,16 @@ impl Core {
 
         // 5. Relocate reuse panes that live in a DIFFERENT tab; a reuse pane
         //    already in the target tab stays put (reused from its old leaves).
-        let reuse_set: std::collections::HashSet<u64> =
-            plans.iter().filter_map(|p| if let Plan::Reuse(p) = p { Some(*p) } else { None }).collect();
+        let reuse_set: std::collections::HashSet<u64> = plans
+            .iter()
+            .filter_map(|p| {
+                if let Plan::Reuse(p) = p {
+                    Some(*p)
+                } else {
+                    None
+                }
+            })
+            .collect();
         let target_leaves_before: Vec<u64> = {
             let ti = self.tab_index_by_id(sid, target_tid);
             tree::leaves(&self.session.squad(sid).expect("live").tabs[ti].root)
@@ -2854,7 +2894,11 @@ impl Core {
             .collect();
 
         // 7. Assign a pane to every slot, spawning shells only after fit passed.
-        let cwd = self.session.squad(sid).map(|s| s.canonical_cwd().to_string()).unwrap_or_default();
+        let cwd = self
+            .session
+            .squad(sid)
+            .map(|s| s.canonical_cwd().to_string())
+            .unwrap_or_default();
         let mut results: Vec<SlotResult> = Vec::with_capacity(k);
         let mut filled: Vec<(usize, u64)> = Vec::with_capacity(k); // (slot idx, pane)
         for (i, plan) in plans.into_iter().enumerate() {
@@ -2865,12 +2909,17 @@ impl Core {
                     // reported Unbound; an explicit `-` slot is a plain Shell.
                     let is_unbound = matches!(spec.slots[i], SlotBinding::Fno(_));
                     let pane = spare.pop_front().or_else(|| {
-                        self.spawn_pane(vt::DEFAULT_ROWS, vt::DEFAULT_COLS, &cwd).ok()
+                        self.spawn_pane(vt::DEFAULT_ROWS, vt::DEFAULT_COLS, &cwd)
+                            .ok()
                     });
                     match pane {
                         Some(p) => (
                             Some(p),
-                            if is_unbound { SlotOutcome::Unbound } else { SlotOutcome::Shell },
+                            if is_unbound {
+                                SlotOutcome::Unbound
+                            } else {
+                                SlotOutcome::Shell
+                            },
                         ),
                         None => (None, SlotOutcome::SpawnFailed),
                     }
@@ -2879,7 +2928,11 @@ impl Core {
             if let Some(p) = pane {
                 filled.push((i, p));
             }
-            results.push(SlotResult { slot: i as u32, pane_id: pane, outcome });
+            results.push(SlotResult {
+                slot: i as u32,
+                pane_id: pane,
+                outcome,
+            });
         }
 
         // If every slot failed to obtain a pane (total PTY exhaustion), leave
@@ -2895,8 +2948,10 @@ impl Core {
         // ponytail: the flat fallback only fires on PTY exhaustion; a reduced
         // template shape is not worth the code when a plain row shows every pane.
         let new_root = if filled.len() == k {
-            let map: std::collections::HashMap<u64, u64> =
-                filled.iter().map(|(slot, pane)| (*slot as u64, *pane)).collect();
+            let map: std::collections::HashMap<u64, u64> = filled
+                .iter()
+                .map(|(slot, pane)| (*slot as u64, *pane))
+                .collect();
             substitute_leaves(&shape, &map)
         } else {
             flat_row(&filled.iter().map(|(_, p)| *p).collect::<Vec<_>>())
@@ -2913,7 +2968,12 @@ impl Core {
 
         // 10. Commit: swap the root, keep focus unless opted in / gone.
         let ti = self.tab_index_by_id(sid, target_tid);
-        let si = self.session.squads.iter().position(|s| s.id == sid).expect("live");
+        let si = self
+            .session
+            .squads
+            .iter()
+            .position(|s| s.id == sid)
+            .expect("live");
         {
             let tab = &mut self.session.squads[si].tabs[ti];
             let new_focus = if focus {
@@ -2924,7 +2984,9 @@ impl Core {
                 None
             };
             tab.root = new_root;
-            tab.focus = new_focus.or_else(|| kept.iter().copied().next()).unwrap_or(tab.focus);
+            tab.focus = new_focus
+                .or_else(|| kept.iter().copied().next())
+                .unwrap_or(tab.focus);
             if let Err(e) = tree::check_invariants(tab) {
                 e2e_log(format_args!("layout_apply produced an invalid tree: {e}"));
             }
@@ -7896,7 +7958,11 @@ fn flat_row(panes: &[u64]) -> Node {
     ratios[n - 1] = 1.0 - rest;
     Node::Branch {
         axis: Axis::Horizontal,
-        children: ratios.into_iter().zip(panes).map(|(r, &p)| (r, Node::Leaf(p))).collect(),
+        children: ratios
+            .into_iter()
+            .zip(panes)
+            .map(|(r, &p)| (r, Node::Leaf(p)))
+            .collect(),
     }
 }
 
@@ -9460,13 +9526,17 @@ mod tests {
         core.shells = vec!["/bin/cat".into()];
         core.next_pane_id = 100;
         let p = core.spawn_pane(24, 80, "/a").unwrap();
-        core.session.add_squad(1, vec!["/a".into()], Some("sq".into()), leaf_tab(5, p));
+        core.session
+            .add_squad(1, vec!["/a".into()], Some("sq".into()), leaf_tab(5, p));
         core.tab_areas.insert(5, (24, 80));
         (core, p)
     }
 
     fn shell_spec(t: TemplateName, k: usize) -> LayoutSpec {
-        LayoutSpec { template: t, slots: (0..k).map(|_| SlotBinding::Shell).collect() }
+        LayoutSpec {
+            template: t,
+            slots: (0..k).map(|_| SlotBinding::Shell).collect(),
+        }
     }
 
     #[test]
@@ -9474,14 +9544,35 @@ mod tests {
         // AC1/AC2 shape: main-left with 4 shell slots -> H[ leaf, V[leaf,leaf,leaf] ].
         let (mut core, _p) = template_core();
         let results = core
-            .apply_spec(1, &TabSel::Id(5), &shell_spec(TemplateName::MainLeft, 4), false)
+            .apply_spec(
+                1,
+                &TabSel::Id(5),
+                &shell_spec(TemplateName::MainLeft, 4),
+                false,
+            )
             .unwrap();
         assert_eq!(results.len(), 4);
-        assert!(results.iter().all(|r| r.outcome == SlotOutcome::Shell && r.pane_id.is_some()));
-        let root = &core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 5).unwrap().root;
+        assert!(results
+            .iter()
+            .all(|r| r.outcome == SlotOutcome::Shell && r.pane_id.is_some()));
+        let root = &core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 5)
+            .unwrap()
+            .root;
         match root {
-            Node::Branch { axis: Axis::Horizontal, children } => {
-                assert!(matches!(children[0].1, Node::Leaf(_)), "slot 0 is the main leaf");
+            Node::Branch {
+                axis: Axis::Horizontal,
+                children,
+            } => {
+                assert!(
+                    matches!(children[0].1, Node::Leaf(_)),
+                    "slot 0 is the main leaf"
+                );
                 assert!(
                     matches!(&children[1].1, Node::Branch { axis: Axis::Vertical, children } if children.len() == 3),
                     "the rest stack vertically"
@@ -9499,11 +9590,29 @@ mod tests {
         let (mut core, _p) = template_core();
         let spec = shell_spec(TemplateName::MainLeft, 4);
         core.apply_spec(1, &TabSel::Id(5), &spec, false).unwrap();
-        let root1 = core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 5).unwrap().root.clone();
+        let root1 = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 5)
+            .unwrap()
+            .root
+            .clone();
         let panes1 = core.panes.len();
 
         let results = core.apply_spec(1, &TabSel::Id(5), &spec, false).unwrap();
-        let root2 = core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 5).unwrap().root.clone();
+        let root2 = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 5)
+            .unwrap()
+            .root
+            .clone();
         assert_eq!(root1, root2, "re-apply is byte-identical");
         assert_eq!(core.panes.len(), panes1, "no pane spawned or reaped");
         assert!(results.iter().all(|r| r.outcome == SlotOutcome::Shell));
@@ -9534,9 +9643,28 @@ mod tests {
         assert_eq!(results[0].pane_id, Some(p1), "S1's pane, reused in place");
         assert!(results[1..].iter().all(|r| r.outcome == SlotOutcome::Shell));
         // Source tab 5 emptied (its only pane relocated) -> removed.
-        assert!(core.session.squad(1).unwrap().tabs.iter().all(|t| t.id != 5), "source tab removed");
-        let target = core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == tid).unwrap();
-        assert_eq!(tree::leaves(&target.root)[0], p1, "p1 is the main-left leaf");
+        assert!(
+            core.session
+                .squad(1)
+                .unwrap()
+                .tabs
+                .iter()
+                .all(|t| t.id != 5),
+            "source tab removed"
+        );
+        let target = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == tid)
+            .unwrap();
+        assert_eq!(
+            tree::leaves(&target.root)[0],
+            p1,
+            "p1 is the main-left leaf"
+        );
     }
 
     #[test]
@@ -9558,14 +9686,22 @@ mod tests {
         core.apply_spec(1, &TabSel::Id(5), &spec, false).unwrap();
 
         // S2 exits: drop its registry row and reap its pane.
-        core.agents.retain(|a| a.session_id.as_deref() != Some("S2"));
+        core.agents
+            .retain(|a| a.session_id.as_deref() != Some("S2"));
         core.reap_pane(p2);
 
         let results = core.apply_spec(1, &TabSel::Id(5), &spec, false).unwrap();
-        assert_eq!(results[1].outcome, SlotOutcome::Unbound, "dead S2 slot is a reported shell");
+        assert_eq!(
+            results[1].outcome,
+            SlotOutcome::Unbound,
+            "dead S2 slot is a reported shell"
+        );
         assert!(results[1].pane_id.is_some(), "the unbound slot got a shell");
         assert!(!core.panes.contains_key(&p2), "no resurrected S2 pane");
-        assert!(core.panes.contains_key(&p1), "the surviving bound pane keeps running");
+        assert!(
+            core.panes.contains_key(&p1),
+            "the surviving bound pane keeps running"
+        );
         assert_eq!(results[0].pane_id, Some(p1));
     }
 
@@ -9577,19 +9713,42 @@ mod tests {
         core.agents = vec![bound_agent("S1", p1)];
         let grid = LayoutSpec {
             template: TemplateName::Grid2x2,
-            slots: vec![SlotBinding::Fno("S1".into()), SlotBinding::Shell, SlotBinding::Shell, SlotBinding::Shell],
+            slots: vec![
+                SlotBinding::Fno("S1".into()),
+                SlotBinding::Shell,
+                SlotBinding::Shell,
+                SlotBinding::Shell,
+            ],
         };
         core.apply_spec(1, &TabSel::Id(5), &grid, false).unwrap();
         assert!(core.panes.contains_key(&p1));
 
         let main_left = LayoutSpec {
             template: TemplateName::MainLeft,
-            slots: vec![SlotBinding::Fno("S1".into()), SlotBinding::Shell, SlotBinding::Shell],
+            slots: vec![
+                SlotBinding::Fno("S1".into()),
+                SlotBinding::Shell,
+                SlotBinding::Shell,
+            ],
         };
-        let results = core.apply_spec(1, &TabSel::Id(5), &main_left, false).unwrap();
-        assert_eq!(results[0].pane_id, Some(p1), "the bound pane survives the reshape");
+        let results = core
+            .apply_spec(1, &TabSel::Id(5), &main_left, false)
+            .unwrap();
+        assert_eq!(
+            results[0].pane_id,
+            Some(p1),
+            "the bound pane survives the reshape"
+        );
         assert!(core.panes.contains_key(&p1));
-        let root = &core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 5).unwrap().root;
+        let root = &core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 5)
+            .unwrap()
+            .root;
         assert_eq!(tree::leaves(root)[0], p1, "and lands as the main-left leaf");
     }
 
@@ -9599,10 +9758,35 @@ mod tests {
         // unchanged (the pre-mutation atomic refuse).
         let (mut core, _p) = template_core();
         core.tab_areas.insert(5, (3, 8)); // far too small for four tiles
-        let before = core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 5).unwrap().root.clone();
-        let err = core.apply_spec(1, &TabSel::Id(5), &shell_spec(TemplateName::Grid2x2, 4), false).unwrap_err();
+        let before = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 5)
+            .unwrap()
+            .root
+            .clone();
+        let err = core
+            .apply_spec(
+                1,
+                &TabSel::Id(5),
+                &shell_spec(TemplateName::Grid2x2, 4),
+                false,
+            )
+            .unwrap_err();
         assert_eq!(err.0, err_code::TEMPLATE_UNFITTABLE);
-        let after = core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 5).unwrap().root.clone();
+        let after = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 5)
+            .unwrap()
+            .root
+            .clone();
         assert_eq!(before, after, "the tab is left completely unchanged");
     }
 
@@ -9611,9 +9795,20 @@ mod tests {
         // AC7: grid-2x2 with three slots -> TEMPLATE_ARITY, no mutation.
         let (mut core, _p) = template_core();
         let panes_before = core.panes.len();
-        let err = core.apply_spec(1, &TabSel::Id(5), &shell_spec(TemplateName::Grid2x2, 3), false).unwrap_err();
+        let err = core
+            .apply_spec(
+                1,
+                &TabSel::Id(5),
+                &shell_spec(TemplateName::Grid2x2, 3),
+                false,
+            )
+            .unwrap_err();
         assert_eq!(err.0, err_code::TEMPLATE_ARITY);
-        assert_eq!(core.panes.len(), panes_before, "arity refuse spawns nothing");
+        assert_eq!(
+            core.panes.len(),
+            panes_before,
+            "arity refuse spawns nothing"
+        );
     }
 
     #[test]

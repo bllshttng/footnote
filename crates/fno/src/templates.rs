@@ -143,7 +143,11 @@ mod tests {
         check_invariants(&tab).expect("topology violates a tree invariant");
         let mut ls = leaves(node);
         ls.sort_unstable();
-        assert_eq!(ls, (0..k as u64).collect::<Vec<_>>(), "slots 0..k appear once");
+        assert_eq!(
+            ls,
+            (0..k as u64).collect::<Vec<_>>(),
+            "slots 0..k appear once"
+        );
     }
 
     #[test]
@@ -154,7 +158,13 @@ mod tests {
             Node::Branch { axis, children } => {
                 assert_eq!(*axis, Axis::Horizontal);
                 assert_eq!(children[0].1, Node::Leaf(0)); // main
-                assert!(matches!(children[1].1, Node::Branch { axis: Axis::Vertical, .. }));
+                assert!(matches!(
+                    children[1].1,
+                    Node::Branch {
+                        axis: Axis::Vertical,
+                        ..
+                    }
+                ));
             }
             _ => panic!("expected a branch"),
         }
@@ -182,7 +192,13 @@ mod tests {
             Node::Branch { axis, children } => {
                 assert_eq!(*axis, Axis::Vertical);
                 assert_eq!(children[0].1, Node::Leaf(0));
-                assert!(matches!(children[1].1, Node::Branch { axis: Axis::Horizontal, .. }));
+                assert!(matches!(
+                    children[1].1,
+                    Node::Branch {
+                        axis: Axis::Horizontal,
+                        ..
+                    }
+                ));
             }
             _ => panic!("expected a branch"),
         }
@@ -196,10 +212,19 @@ mod tests {
         assert_valid(&g, 4);
         // grid is a V of two H rows.
         match &g {
-            Node::Branch { axis: Axis::Vertical, children } => {
+            Node::Branch {
+                axis: Axis::Vertical,
+                children,
+            } => {
                 assert_eq!(children.len(), 2);
                 for (_, row) in children {
-                    assert!(matches!(row, Node::Branch { axis: Axis::Horizontal, .. }));
+                    assert!(matches!(
+                        row,
+                        Node::Branch {
+                            axis: Axis::Horizontal,
+                            ..
+                        }
+                    ));
                 }
             }
             _ => panic!("grid must be a vertical stack of rows"),
@@ -210,11 +235,19 @@ mod tests {
     fn fixed_arity_is_enforced() {
         assert_eq!(
             topology(TemplateName::Grid2x2, 3),
-            Err(TemplateError::Arity { want: 4, got: 3, variadic: false })
+            Err(TemplateError::Arity {
+                want: 4,
+                got: 3,
+                variadic: false
+            })
         );
         assert_eq!(
             topology(TemplateName::RowThirds, 2),
-            Err(TemplateError::Arity { want: 3, got: 2, variadic: false })
+            Err(TemplateError::Arity {
+                want: 3,
+                got: 2,
+                variadic: false
+            })
         );
     }
 
@@ -222,7 +255,11 @@ mod tests {
     fn variadic_minimum_arity_is_enforced() {
         assert_eq!(
             topology(TemplateName::MainLeft, 1),
-            Err(TemplateError::Arity { want: 2, got: 1, variadic: true })
+            Err(TemplateError::Arity {
+                want: 2,
+                got: 1,
+                variadic: true
+            })
         );
         // Larger k is fine for a variadic template.
         assert_valid(&topology(TemplateName::MainTop, 6).unwrap(), 6);
