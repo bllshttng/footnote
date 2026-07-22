@@ -1038,9 +1038,14 @@ frontmatter if present, else unset. Let `mc` = the epic doc's `max_children` if
 present and a **positive integer**, else unset (read it from the same epic
 frontmatter already loaded for the `scope: epic` / `max_prs:` auto-group
 decision above - no new reader). A present-but-malformed `max_children`
-(non-integer, `< 1`) is treated as **unset** here; blueprint never invents a cap
-from a bad value, and decompose issues the authoritative malformed-value refusal
-(x-066a US5).
+(non-integer, `< 1`) is **refused up front**, before grouping: exit non-zero
+with `epic max_children must be a positive integer` and create nothing. Do NOT
+treat a bad value as unset and defer the check to decompose - procedure step 3
+skips decompose entirely when the waves cohere into a single group, so deferring
+would let a malformed durable cap pass silently on that path. Blueprint fails
+fast so the refusal holds on every path, matching decompose's own
+malformed-value refusal (x-066a US5); blueprint never invents a cap from a bad
+value, nor silently falls back to the default on one.
 
 | Case | `N` (blueprint's grouping ceiling AND `--max-prs` forwarded) |
 |------|-------------------------------------------------------------|
