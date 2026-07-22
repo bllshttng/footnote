@@ -12,7 +12,16 @@ This is the ceremony the x-304c synthesis marked `ADD`: the retro interviews wer
 
 ## Delivery mechanics
 
-The interview is mailed. Follow the [minion delivery doctrine](minion-clause.md) in full, **including its peek-before-resend guard**: `fno mail send <builder-handle> "<prompt>" --from-self`. Both `delivered (hosted)` and `delivered (woken)` (an asleep-but-resumable builder woken to receive it) are success; any other receipt is undelivered, so peek the handle then re-send rather than trusting the queue (a `queued (durable)` interview is one the builder may never see). Resolve a live `<builder-handle>` from `fno agents discovered-json` / `top`. `fno mail send` wraps the body in its own `<fno_mail>` envelope, so the prompt below is body-only - do not add a second envelope.
+The interview is mailed. Assemble the prompt (below) with a quoted heredoc - it contains literal double quotes (e.g. `"the tooling"`) that would otherwise terminate the shell string and split the body into multiple arguments, and `fno mail send` takes only one:
+
+```bash
+read -r -d '' prompt <<'PROMPT' || true
+<the prompt block below, verbatim>
+PROMPT
+fno mail send <builder-handle> "$prompt" --from-self
+```
+
+Follow the [minion delivery doctrine](minion-clause.md) in full, **including its peek-before-resend guard**. Both `delivered (hosted)` and `delivered (woken)` (an asleep-but-resumable builder woken to receive it) are success; any other receipt is undelivered, so peek the handle then re-send rather than trusting the queue (a `queued (durable)` interview is one the builder may never see). Resolve a live `<builder-handle>` from `fno agents discovered-json` / `top`. `fno mail send` wraps the body in its own `<fno_mail>` envelope, so the prompt below is body-only - do not add a second envelope.
 
 ## The prompt (dogfooding lens baked in)
 
