@@ -421,6 +421,17 @@ def test_permission_mode_ok_on_nonclaude_pane():
     assert out[out.index("--permission-mode") + 1] == "yolo"
 
 
+def test_permission_mode_injected_on_bare_nonclaude_spawn_pane_default():
+    # No explicit substrate: `fno agents spawn` defaults to PANE (not the
+    # autonomous headless default), which maps codex permission modes - so the
+    # configured value must be injected, not skipped as incompatible.
+    out = _inject(
+        ["spawn", "-p", "codex", "w", "/target x"],
+        profiles={"target": {"permission_mode": "yolo"}},
+    )
+    assert out[out.index("--permission-mode") + 1] == "yolo"
+
+
 def test_explicit_yolo_suppresses_config_permission_mode():
     # --yolo/-Y is the same knob as --permission-mode (mutually exclusive
     # downstream); an explicit yolo must win, so no config value is injected.

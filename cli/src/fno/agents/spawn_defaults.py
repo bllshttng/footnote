@@ -641,21 +641,18 @@ def inject_spawn_defaults(
     # fail-closed behavior (has_permission short-circuits this branch).
     if cfg_permission and not _has_permission_mode(out[1:]):
         prov = resolved_provider()
-        eff_substrate = explicit_substrate or injected_substrate
-        if eff_substrate is None and prov:
-            try:
-                from fno.agents.harness_map import substrate_default
-
-                eff_substrate = substrate_default(prov)
-            except Exception:
-                eff_substrate = None
-        if prov and eff_substrate and _permission_mappable(prov, cfg_permission, eff_substrate):
+        # The effective substrate this spawn resolves to: an explicit pin, else a
+        # config value injected this run, else the `fno agents spawn` default -
+        # PANE (cli.py, not the autonomous-dispatch substrate_default, which picks
+        # headless for non-claude and would wrongly skip a pane-mappable mode).
+        eff_substrate = explicit_substrate or injected_substrate or "pane"
+        if prov and _permission_mappable(prov, cfg_permission, eff_substrate):
             inject += ["--permission-mode", cfg_permission]
             from_config.append(("permission_mode", permission_rung))  # type: ignore[arg-type]
         else:
             reason = (
                 f"{prov} cannot map permission mode {cfg_permission!r} on substrate {eff_substrate!r}"
-                if prov and eff_substrate
+                if prov
                 else "provider resolution failed"
             )
             print(
