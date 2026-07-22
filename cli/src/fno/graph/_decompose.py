@@ -399,6 +399,9 @@ def resolve_effective_cap(
     if max_children is _UNSET:
         if explicit_max_prs is not None:
             return explicit_max_prs, f"--max-prs {explicit_max_prs}"
+        # config_default is loaded by the caller on exactly this branch (absent
+        # cap AND no explicit flag), so it is non-None here.
+        assert config_default is not None
         return config_default, f"config default {config_default}"
 
     if isinstance(max_children, bool) or not isinstance(max_children, int) or max_children < 1:

@@ -1304,7 +1304,7 @@ def cmd_decompose(
     try:
         epic_node = _find_node(read_graph(_graph_path()), epic_id)
         epic_plan_path = epic_node.get("plan_path") if epic_node else None
-        if epic_plan_path:
+        if epic_node is not None and epic_plan_path:
             epic_doc = plan_base(epic_plan_path)
             # Resolve a relative plan_path against the epic's stored cwd, mirroring
             # the in-lock base resolution - reading it against the process cwd would
