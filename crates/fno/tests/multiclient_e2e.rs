@@ -394,12 +394,10 @@ fn multiclient_kill_server_live_stale_and_missing() {
     // the server process exits, and the pane child is dead (AC4-UI/FR).
     let out = fno_cmd(&scratch, &["mux", "kill-server", "main"]);
     assert!(out.status.success(), "live kill exits 0: {out:?}");
-    // Bounded wait for the Bye(killed) frame instead of a fixed 500ms bet:
-    // key on arrival, and on timeout fail with a named reason + state dump
-    // rather than an opaque empty-vec assert. Capped well under the job timeout.
-    c.wait(10, "Bye(killed)", |c| {
-        c.byes.iter().any(|r| r.contains("killed")).then_some(())
-    });
+    // Bounded wait for the kill to land: the Bye(killed) frame OR the socket
+    // closing, whichever wins the race (the two are unordered). Capped well
+    // under the job timeout; a timeout fails with a named reason + state dump.
+    c.wait_killed(10, |c| c.byes.iter().any(|r| r.contains("killed")));
     assert!(!scratch.sock().exists(), "socket must be unlinked");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
