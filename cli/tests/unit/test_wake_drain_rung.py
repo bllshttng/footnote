@@ -47,13 +47,14 @@ def test_heads_up_to_asleep_session_wakes_drain_agent(inbox_root, repo_root, mon
 
     monkeypatch.setattr("fno.agents.dispatch.wake_drain_agent", fake_wake)
 
-    h = write_new_thread("abc12345", "bob", Kind.HEADS_UP.value, "PR merged, take a look")
+    write_new_thread("abc12345", "bob", Kind.HEADS_UP.value, "PR merged, take a look")
     results = drain_inbox(repo_root, "abc12345")
 
     assert calls == ["abc12345-0000-0000-0000-000000000000"]
     assert results[0].action == "woke_drain_agent"
-    # The woken agent drains its own inbox; the thread must stay unread here.
-    assert read_unread_threads("abc12345")[0].path == h.path
+    # The render is consumed so the next drain does not re-wake; the woken agent
+    # drains the bus cursor independently of this markdown read_at.
+    assert read_unread_threads("abc12345") == []
 
 
 def test_wake_refusal_falls_through_to_triage(inbox_root, repo_root, monkeypatch):

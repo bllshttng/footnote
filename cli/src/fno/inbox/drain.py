@@ -220,6 +220,14 @@ def _try_wake_addressee(project: str, h: ThreadHandle) -> Optional[DrainResult]:
         return None
     if not delivered:
         return None
+    # Consume the render so the next drain does not re-wake: the woken agent's
+    # `drain-self` advances the bus cursor, which the markdown ThreadHandle's
+    # read_at does NOT track, so an unread render would re-fire the wake every
+    # cycle. Marking it read is independent of the bus drain the woken agent runs.
+    try:
+        mark_thread_read(h.path)
+    except (OSError, ValueError, TimeoutError):
+        pass
     return DrainResult(
         thread_id=h.thread_id,
         kind="heads-up",
