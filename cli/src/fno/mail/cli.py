@@ -1193,7 +1193,11 @@ def _name_lane_send(
         print(f"durable envelope write failed for {recipient!r}: {exc2}", file=sys.stderr)
         raise typer.Exit(code=12) from exc2
     _warn_deferred(recipient)
-    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr}")
+    # Routing-reason disclosure (US10): name WHY this is durable so a delivery
+    # bug is diagnosable from the sender's own terminal. A self-send can never
+    # inject itself; everything else here is a live miss.
+    reason = "self-send" if self_send else "live-miss"
+    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]")
 
 
 @mail_app.command("send")
@@ -1372,6 +1376,20 @@ def cmd_send(
             )
             raise typer.Exit(code=2)
 
+        # US10 kind-scoped guard: question/fyi are project-inbox drain contracts
+        # (question -> wake-signal, fyi -> memory). Addressed to a bare session
+        # handle they queue durable to an inbox nothing drains, so refuse and name
+        # the two real intents. heads-up to a handle stays accepted (the production
+        # notification pattern; its emitters are programmatic, not enumerable).
+        if to_project is None and kind in {Kind.QUESTION.value, Kind.FYI.value}:
+            print(
+                f"error: --kind {kind} to a session handle ({recipient}) has no "
+                f"drain that reads it. Drop --kind to inject it live, or add "
+                f"--to-project <project> to file it as a durable {kind} note.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+
         persist_to_memory = False
         if persist is not None:
             if persist != "memory":
@@ -1433,7 +1451,7 @@ def cmd_send(
             }))
         else:
             verb = "appended (durable) to" if res.appended else "queued (durable) for"
-            print(f"{res.msg_id} {verb} {recipient} [{kind}]")
+            print(f"{res.msg_id} {verb} {recipient} [param-forced: --kind {kind}]")
         return
 
     # Project mode: the message is the sole positional, so `send --to-project X
@@ -1472,11 +1490,14 @@ def cmd_send(
             _warn_deferred(result.recipient)
             print(
                 f"{result.msg_id} queued (durable) for {result.recipient} "
-                f"[project {to_project}]"
+                f"[project {to_project}] [live-miss]"
             )
         else:
             _warn_deferred(to_project, project=True)
-            print(f"{result.msg_id} queued (durable) for project {to_project}")
+            print(
+                f"{result.msg_id} queued (durable) for project {to_project} "
+                f"[param-forced: --to-project]"
+            )
         return
 
     # Name mode.

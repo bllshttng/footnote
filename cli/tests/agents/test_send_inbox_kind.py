@@ -100,9 +100,12 @@ def test_ac3_kind_send_projectless_error_names_real_flags(isolated, runner) -> N
     has -- never the bare ``--from`` (which lives only on the inbox verbs)."""
     scratch = isolated / "no-project"
     scratch.mkdir()
+    # --to-project reaches the sender-identity resolution this AC tests; a bare
+    # --kind fyi <handle> now hits the US10 kind-scoped guard first (see
+    # test_ac10_kind_fyi_to_handle_refused).
     result = _invoke(
         runner,
-        "acme-docs",
+        "--to-project", "acme-docs",
         "--kind", "fyi",
         "-b", "hi",
         "--cwd", str(scratch),
@@ -332,3 +335,46 @@ def test_cmd_send_from_self_without_identity_fails_loud(isolated, runner, monkey
     )
     assert result.exit_code == 2
     assert "no ambient harness identity" in (result.stdout + (result.stderr or ""))
+
+
+# ---------------------------------------------------------------------------
+# US10: kind-scoped guard (AC10) + routing-reason disclosure (AC9)
+# ---------------------------------------------------------------------------
+
+
+def _bus_len() -> int:
+    from fno.bus.log import iter_messages
+
+    return len(list(iter_messages()))
+
+
+@pytest.mark.parametrize("kind", ["question", "fyi"])
+def test_ac10_kind_question_or_fyi_to_handle_refused(isolated, runner, kind):
+    # A project-inbox kind aimed at a bare session handle has no drain; refuse,
+    # name the two real intents, and write nothing. Wording is pinned so the
+    # guidance cannot drift from the behavior.
+    result = _invoke(runner, "cafe0001", "--kind", kind, "-b", "hi")
+    assert result.exit_code == 2, result.output
+    out = result.output
+    assert f"--kind {kind} to a session handle" in out
+    assert "Drop --kind to inject it live" in out
+    assert f"add --to-project <project> to file it as a durable {kind} note" in out
+    assert _bus_len() == 0  # nothing written for the refused combo
+
+
+def test_ac10_kind_headsup_to_handle_accepted(isolated, runner):
+    # heads-up to a handle stays accepted (the production notification pattern;
+    # its emitters are programmatic and not statically enumerable).
+    result = _invoke(runner, "cafe0001", "--kind", "heads-up", "-b", "hi", "--from-name", "web")
+    assert result.exit_code == 0, result.output
+    assert "queued (durable)" in result.output
+    assert _bus_len() == 1
+
+
+def test_ac9_kind_receipt_discloses_param_forced(isolated, runner):
+    # AC9: a --kind durable receipt names WHY it is durable, at exit 0.
+    result = _invoke(
+        runner, "--to-project", "acme", "--kind", "heads-up", "-b", "hi", "--from-name", "web"
+    )
+    assert result.exit_code == 0, result.output
+    assert "param-forced: --kind heads-up" in result.output
