@@ -4127,6 +4127,11 @@ class _MailCtx:
     model: str
     node: Optional[str] = None
     to: Optional[str] = None
+    # This message's own bus msg-id (US1). Rendered as the additive `id` attr on
+    # both the live inject and the durable fallback so a registered-agent send is
+    # reply-correlatable and dedupable like the name-lane path. None on paths that
+    # do not carry a minted id (relay hops), keeping the envelope byte-identical.
+    id: Optional[str] = None
 
 
 def _build_mail_ctx(
@@ -4134,6 +4139,7 @@ def _build_mail_ctx(
     from_session: Optional[str],
     provider_from: Optional[str],
     to: Optional[str] = None,
+    id: Optional[str] = None,
 ) -> _MailCtx:
     """Build the ``<fno_mail>`` sender context from the dispatch provenance.
 
@@ -4155,6 +4161,7 @@ def _build_mail_ctx(
         harness=harness_for_provider(provider_from),
         model=resolve_self_model(),
         to=to or None,
+        id=id or None,
     )
 
 
@@ -4460,6 +4467,7 @@ def _deliver_live(
             model=mail.model,
             node=mail.node,
             to=mail.to,
+            id=mail.id,
         )
 
     # Dual-run dispatch on the row's live ref (4a-G2): a mux-hosted agent gets
@@ -4712,13 +4720,17 @@ def dispatch_send(
                 )
             # A `fno mail send <name>` is always directed -> stamp the recipient's
             # short id as the envelope `to` (node x-1f23: optional, set when known).
+            # Mint the id BEFORE building the ctx so the SAME id rides the live
+            # inject, the durable fallback, AND the durable thread record (US1 /
+            # Locked Decision 8: both _name_lane_send and _deliver_live carry it).
+            msg_id = generate_msg_id()
             mail_ctx = _build_mail_ctx(
                 from_name,
                 from_session,
                 provider_from,
                 to=(existing.short_id or None),
+                id=msg_id,
             )
-            msg_id = generate_msg_id()
 
             def _write_durable() -> None:
                 """Write the durable FALLBACK envelope: the pending-queue for an
@@ -4744,6 +4756,7 @@ def dispatch_send(
                         model=mail_ctx.model,
                         node=mail_ctx.node,
                         to=mail_ctx.to,
+                        id=mail_ctx.id,
                     )
                 try:
                     write_new_thread(

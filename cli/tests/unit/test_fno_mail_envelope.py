@@ -44,6 +44,46 @@ def test_open_tag_renders_reply_to_last_when_present():
     )
 
 
+def test_open_tag_renders_id_last_but_one_before_reply_to():
+    # US1: `id` is the message's own msg-id, additive and positioned last-but-one
+    # (immediately before reply_to). Mirrors Rust `fno_mail_open_renders_id`.
+    assert (
+        fno_mail_open(
+            from_="7d1f8bdc",
+            harness="claude-code",
+            model="opus-4.8",
+            to="claude-e5f6a7b8",
+            id="msg-abc123",
+            reply_to="msg-0091f3",
+        )
+        == '<fno_mail from="7d1f8bdc" harness="claude-code" model="opus-4.8" to="claude-e5f6a7b8" id="msg-abc123" reply_to="msg-0091f3">'
+    )
+
+
+def test_open_tag_renders_id_without_reply_to():
+    # A fresh send (not a reply) carries its own id but no reply_to.
+    assert (
+        fno_mail_open(
+            from_="7d1f8bdc", harness="claude-code", model="opus-4.8", id="msg-abc123"
+        )
+        == '<fno_mail from="7d1f8bdc" harness="claude-code" model="opus-4.8" id="msg-abc123">'
+    )
+
+
+def test_absent_id_is_byte_identical_to_pre_change():
+    # US1 boundary: an omitted id leaves the envelope byte-identical to today's
+    # output, so a send with no id and no reply_to is unchanged. id=None adds nothing.
+    assert fno_mail_open(
+        from_="7d1f8bdc", harness="claude-code", model="opus-4.8", node="x-26df"
+    ) == fno_mail_open(
+        from_="7d1f8bdc",
+        harness="claude-code",
+        model="opus-4.8",
+        node="x-26df",
+        id=None,
+    )
+
+
 def test_absent_reply_to_is_byte_identical_to_pre_change():
     # AC1-EDGE: an omitted reply_to leaves the envelope byte-identical to today's
     # fixture, so a plain send is unchanged. reply_to=None must add nothing.

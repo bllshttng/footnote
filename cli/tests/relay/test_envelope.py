@@ -41,6 +41,17 @@ def test_parse_unframed_is_none():
     assert not env.is_framed('<fno from="A" provider="claude"> hi')  # old tag is NOT the new one
 
 
+def test_relay_single_line_frame_is_deliberately_id_free():
+    # US1 boundary: the `id` attribute is on the PAIRED name-lane envelope
+    # (fno.mail.envelope + the Rust lockstep), NOT this single-line relay hop.
+    # The relay frame stays byte-identical -- id has no place here, and the
+    # relay parser rejects a paired name-lane open tag carrying id/reply_to as
+    # a valid single-line frame (the two transports stay distinct).
+    assert "id=" not in env.frame("sid-abc", "claude-code", "opus", "hello")
+    paired = '<fno_mail from="A" harness="claude-code" model="opus" id="msg-abc123"> hi'
+    assert env.parse(paired) is None
+
+
 # ---- hop_count / ttl over the bus meta -------------------------------------
 
 def test_hop_and_ttl_defaults_and_meta():

@@ -134,6 +134,12 @@ pub struct FnoMail<'a> {
     /// OPTIONAL. A peer's short sessionId, only when the turn is directed at a
     /// specific peer (omitted on broadcast/bus delivery).
     pub to: Option<&'a str>,
+    /// OPTIONAL. This message's OWN bus msg-id (`msg-XXXXXX`), minted once by the
+    /// sender before wrapping and reused in the durable write. Additive,
+    /// last-but-one (immediately before `reply_to`); lets a recipient reply to a
+    /// live-injected message that wrote no durable thread. Omitted when absent so
+    /// a plain send stays byte-identical.
+    pub id: Option<&'a str>,
     /// OPTIONAL. The bus msg-id this envelope answers (name-lane reply
     /// correlation). Additive, last in attribute order; runtime-stamped from
     /// `fno mail reply --to <msg-id>`, never agent-authored.
@@ -141,7 +147,7 @@ pub struct FnoMail<'a> {
 }
 
 /// Render the `<fno_mail ...>` open tag with double-quoted attributes:
-/// `<fno_mail from="..." harness="..." model="..."[ node="..."][ to="..."][ reply_to="..."]>`.
+/// `<fno_mail from="..." harness="..." model="..."[ node="..."][ to="..."][ id="..."][ reply_to="..."]>`.
 pub fn fno_mail_open(m: &FnoMail) -> String {
     let mut s = format!(
         "<fno_mail from=\"{}\" harness=\"{}\" model=\"{}\"",
@@ -152,6 +158,9 @@ pub fn fno_mail_open(m: &FnoMail) -> String {
     }
     if let Some(to) = m.to {
         s.push_str(&format!(" to=\"{to}\""));
+    }
+    if let Some(id) = m.id {
+        s.push_str(&format!(" id=\"{id}\""));
     }
     if let Some(reply_to) = m.reply_to {
         s.push_str(&format!(" reply_to=\"{reply_to}\""));
@@ -354,6 +363,7 @@ mod tests {
             model: "opus-4.8",
             node: Some("x-26df"),
             to: None,
+            id: None,
             reply_to: None,
         }
     }
@@ -373,6 +383,7 @@ mod tests {
             model: "opus-4.8",
             node: None,
             to: Some("claude-ee99ff00"),
+            id: None,
             reply_to: None,
         };
         assert_eq!(
@@ -392,11 +403,46 @@ mod tests {
             model: "opus-4.8",
             node: None,
             to: Some("claude-e5f6a7b8"),
+            id: None,
             reply_to: Some("msg-0091f3"),
         };
         assert_eq!(
             fno_mail_open(&reply),
             "<fno_mail from=\"7d1f8bdc\" harness=\"claude-code\" model=\"opus-4.8\" to=\"claude-e5f6a7b8\" reply_to=\"msg-0091f3\">"
+        );
+    }
+
+    #[test]
+    fn fno_mail_open_renders_id_last_but_one_before_reply_to() {
+        // US1: `id` is the message's OWN msg-id, additive and positioned
+        // last-but-one (immediately before reply_to). Parity-pinned by the Python
+        // `test_fno_mail_envelope.py` id cases.
+        let with_id = FnoMail {
+            from: "7d1f8bdc",
+            harness: "claude-code",
+            model: "opus-4.8",
+            node: None,
+            to: Some("claude-e5f6a7b8"),
+            id: Some("msg-abc123"),
+            reply_to: Some("msg-0091f3"),
+        };
+        assert_eq!(
+            fno_mail_open(&with_id),
+            "<fno_mail from=\"7d1f8bdc\" harness=\"claude-code\" model=\"opus-4.8\" to=\"claude-e5f6a7b8\" id=\"msg-abc123\" reply_to=\"msg-0091f3\">"
+        );
+        // A fresh send carries its own id but no reply_to.
+        let fresh = FnoMail {
+            from: "7d1f8bdc",
+            harness: "claude-code",
+            model: "opus-4.8",
+            node: None,
+            to: None,
+            id: Some("msg-abc123"),
+            reply_to: None,
+        };
+        assert_eq!(
+            fno_mail_open(&fresh),
+            "<fno_mail from=\"7d1f8bdc\" harness=\"claude-code\" model=\"opus-4.8\" id=\"msg-abc123\">"
         );
     }
 
