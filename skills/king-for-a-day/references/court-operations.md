@@ -67,7 +67,7 @@ Two states that are **not** death and must never be treated as such:
 Assemble the payload with a quoted heredoc so the clause's backticks, `$`, and quotes pass through literally (a plain double-quoted payload runs the clause's backticks as command substitution during spawn):
 
 ```bash
-read -r -d '' payload <<'CLAUSE'
+read -r -d '' payload <<'CLAUSE' || true   # read -d '' exits 1 at EOF; absorb it so set -e does not abort
 Take node x-b3a8 through /fno:think.
 <minion clause - paste verbatim from references/minion-clause.md>
 CLAUSE
@@ -88,9 +88,13 @@ Next: /fno:blueprint <node>." --from-self
 **Hand off on context pressure (report said `context: 62% used`, trigger is 50):**
 
 ```bash
-# spawn the successor FIRST, carrying the phase artifact
-fno agents spawn node-x-b3a8-g2 "Continue node x-b3a8 at /fno:blueprint. \
-Prior /think artifact: <path>. <minion clause>" \
+# spawn the successor FIRST, carrying the phase artifact - same quoted-heredoc
+# assembly as the primary spawn (the clause's backticks/quotes need it here too)
+read -r -d '' payload <<'CLAUSE' || true
+Continue node x-b3a8 at /fno:blueprint. Prior /think artifact: <path>.
+<minion clause - paste verbatim from references/minion-clause.md>
+CLAUSE
+fno agents spawn node-x-b3a8-g2 "$payload" \
   --substrate pane --squad epic-squad --split down --effort high
 # ...only after the successor's session header prints, close the predecessor
 # PANE (a mux row -> fno mux pane kill, not fno agents stop). Its <session>:<pane_id>

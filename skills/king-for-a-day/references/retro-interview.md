@@ -12,7 +12,7 @@ This is the ceremony the x-304c synthesis marked `ADD`: the retro interviews wer
 
 ## Delivery mechanics
 
-The interview is mailed. Follow the [minion delivery doctrine](minion-clause.md) in full, **including its peek-before-resend guard**: `fno mail send <builder-handle> "<prompt>" --from-self`, expect `delivered (hosted)`, and on any other receipt peek the handle then re-send rather than trusting the queue (a `queued (durable)` interview is one the builder may never see). Resolve a live `<builder-handle>` from `fno agents discovered-json` / `top`. `fno mail send` wraps the body in its own `<fno_mail>` envelope, so the prompt below is body-only - do not add a second envelope.
+The interview is mailed. Follow the [minion delivery doctrine](minion-clause.md) in full, **including its peek-before-resend guard**: `fno mail send <builder-handle> "<prompt>" --from-self`. Both `delivered (hosted)` and `delivered (woken)` (an asleep-but-resumable builder woken to receive it) are success; any other receipt is undelivered, so peek the handle then re-send rather than trusting the queue (a `queued (durable)` interview is one the builder may never see). Resolve a live `<builder-handle>` from `fno agents discovered-json` / `top`. `fno mail send` wraps the body in its own `<fno_mail>` envelope, so the prompt below is body-only - do not add a second envelope.
 
 ## The prompt (dogfooding lens baked in)
 
