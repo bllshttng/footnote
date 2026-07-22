@@ -164,6 +164,13 @@ struct StoreFile {
     density: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sort: Option<serde_json::Value>,
+    /// (x-2e86) The operator's chosen sideline width, once they drag the border
+    /// off its density-canonical size. `Value` for the same forward-compat
+    /// reason as `density`/`sort`; `None` (absent) means "use the current
+    /// density's canonical width" - the back-compat default so existing installs
+    /// are unchanged until their first drag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    width: Option<serde_json::Value>,
 }
 
 /// How much of each sideline row renders (x-b186). Orthogonal to the panel's
@@ -244,24 +251,33 @@ pub fn load() -> HashMap<SectionKey, SectionView> {
         .collect()
 }
 
-/// Read the persisted density and sort (x-b186).
+/// Read the persisted density, sort, and sideline width (x-b186, x-2e86).
 ///
 /// Missing, corrupt, or written by a build with a state this one cannot parse
-/// all resolve to the defaults (`Regular` + by-squad), independently per field:
-/// an unreadable `sort` never costs the operator their `density`. This is
-/// AC7-FR - the mux always starts, and the next gesture persists cleanly over
-/// whatever was there.
-pub fn load_prefs() -> (Density, AgentSort) {
+/// all resolve to the defaults (`Regular` + by-squad + no width), independently
+/// per field: an unreadable `sort` never costs the operator their `density`.
+/// This is AC7-FR - the mux always starts, and the next gesture persists cleanly
+/// over whatever was there.
+///
+/// The width is `Option`: `None` (absent, unparsable, or out of range) means
+/// "use the current density's canonical width" (AC5-ERR). A non-numeric value
+/// degrades to `None` rather than being retained, so the caller never carries a
+/// corrupt width and the first drag persists a clean number over it.
+pub fn load_prefs() -> (Density, AgentSort, Option<u16>) {
     #[cfg(test)]
     if TEST_PATH.with(|c| c.borrow().is_none()) {
-        return (Density::default(), AgentSort::default());
+        return (Density::default(), AgentSort::default(), None);
     }
     fn parse<T: serde::de::DeserializeOwned + Default>(v: Option<serde_json::Value>) -> T {
         v.and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default()
     }
     let file = read_raw();
-    (parse(file.density), parse(file.sort))
+    (
+        parse(file.density),
+        parse(file.sort),
+        parse::<Option<u16>>(file.width),
+    )
 }
 
 /// Persist the density and sort the operator chose. Best-effort, like every
@@ -270,6 +286,16 @@ pub fn save_prefs(density: Density, sort: AgentSort) {
     mutate(|file| {
         file.density = serde_json::to_value(density).ok();
         file.sort = serde_json::to_value(sort).ok();
+    });
+}
+
+/// (x-2e86) Persist the operator's dragged sideline width. The same locked
+/// read-modify-write core as [`save_prefs`], so a width write never clobbers a
+/// concurrent density/sort write from another mux client. Best-effort and
+/// fire-and-forget: a drag release must never block on the file write.
+pub fn save_width(width: u16) {
+    mutate(|file| {
+        file.width = serde_json::to_value(width).ok();
     });
 }
 
@@ -599,9 +625,45 @@ mod tests {
     fn prefs_default_then_round_trip() {
         let _s = Scratch::new("prefs-roundtrip");
         // AC7-FR: a missing file is not an error, it is the defaults.
-        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Squad));
+        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Squad, None));
         save_prefs(Density::Extended, AgentSort::Status);
-        assert_eq!(load_prefs(), (Density::Extended, AgentSort::Status));
+        assert_eq!(
+            load_prefs(),
+            (Density::Extended, AgentSort::Status, None),
+            "save_prefs leaves width untouched"
+        );
+    }
+
+    #[test]
+    fn width_round_trips_and_coexists_with_prefs() {
+        // x-2e86 US1: a dragged width persists, and shares the file with
+        // density/sort without either clobbering the other (one locked RMW).
+        let _s = Scratch::new("width-roundtrip");
+        save_prefs(Density::Slim, AgentSort::Status);
+        save_width(45);
+        assert_eq!(load_prefs(), (Density::Slim, AgentSort::Status, Some(45)));
+        // A later density write keeps the width; a later width write keeps the
+        // density.
+        save_prefs(Density::Extended, AgentSort::Squad);
+        assert_eq!(load_prefs(), (Density::Extended, AgentSort::Squad, Some(45)));
+        save_width(60);
+        assert_eq!(load_prefs(), (Density::Extended, AgentSort::Squad, Some(60)));
+    }
+
+    #[test]
+    fn corrupt_width_degrades_to_none_then_writes_clean() {
+        // AC5-ERR: a non-numeric width resolves to None (canonical), never a
+        // panic, and is NOT retained - the first save_width writes a clean
+        // number over the corruption.
+        let _s = Scratch::new("width-corrupt");
+        std::fs::write(
+            view_path(),
+            r#"{"version":1,"sections":{},"density":"regular","width":"wide"}"#,
+        )
+        .unwrap();
+        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Squad, None));
+        save_width(28);
+        assert_eq!(load_prefs().2, Some(28));
     }
 
     #[test]
@@ -615,11 +677,11 @@ mod tests {
                 .collect();
         save(&chosen);
         save_prefs(Density::Slim, AgentSort::Status);
-        assert_eq!(load_prefs(), (Density::Slim, AgentSort::Status));
+        assert_eq!(load_prefs(), (Density::Slim, AgentSort::Status, None));
         assert_eq!(load()[&SectionKey::Elsewhere], SectionView::Collapsed);
         // And the reverse order.
         save(&chosen);
-        assert_eq!(load_prefs(), (Density::Slim, AgentSort::Status));
+        assert_eq!(load_prefs(), (Density::Slim, AgentSort::Status, None));
     }
 
     #[test]
@@ -632,10 +694,10 @@ mod tests {
             r#"{"version":1,"sections":{},"density":"holographic","sort":"status"}"#,
         )
         .unwrap();
-        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Status));
+        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Status, None));
         // Wholly corrupt file: still the defaults, still no panic.
         std::fs::write(view_path(), "{ not json").unwrap();
-        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Squad));
+        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Squad, None));
         // And the next gesture writes cleanly over it.
         save_prefs(Density::Extended, AgentSort::Squad);
         assert_eq!(load_prefs().0, Density::Extended);
