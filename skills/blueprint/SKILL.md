@@ -15,428 +15,28 @@ ALWAYS use `fno backlog` commands or call `locked_mutate_graph()` from Python.
 Direct edits are blocked by the PreToolUse hook AND detected via hash sidecar.
 </HARD-GATE>
 
-Create implementation plans scaled to the task.
-
-## Plan Claims Ingestion (MANDATORY when input is a node id)
-
-Before any other classifier runs, check if the argument is an existing graph
-node ID. `parse-claims-arg.sh` recognizes the config-agnostic node-id shape
-`^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$` - the configured `id_prefix`/`id_hex_width`
-(e.g. `x-8af8`) and the legacy `ab-<8hex>` alike, never a hard-coded `ab-` only.
-A node id never collides with file paths or raw descriptions, so this check is
-cheap and goes first.
-
-When the argument matches, the rendered plan MUST declare `claims: <node-id>`
-in its frontmatter so `fno backlog intake` updates the existing idea-state
-node in place rather than creating a duplicate (see
-`cli/src/fno/graph/_intake.py::_resolve_claim`). Without the claim,
-every adopted spec compounds the dangling-idea-node cleanup debt.
-
-**Classify and resolve.** Run this BEFORE the failure-mode path classifier
-below so an ab-id never falls through to "design-doc path":
-
-```bash
-ARG="$1"  # First positional arg after mode modifiers are stripped.
-PARSER="${SKILL_DIR}/scripts/lib/parse-claims-arg.sh"
-# eval'd output sets CLAIMS_ID and (when set) CLAIMS_SEED_ARG.
-eval "$(bash "$PARSER" "$ARG")" || exit 1
-if [[ -n "${CLAIMS_ID:-}" ]]; then
-  ARG="$CLAIMS_SEED_ARG"
-  # ARG now carries the seed text; CLAIMS_ID carries the claim target.
-fi
-```
-
-After resolution, the plan body proceeds as if the user had pasted the
-node's title plus details directly. The classifier below sees a raw
-description (no slashes, no `.md`) and skips the failure-mode grep.
-
-**Render `claims:` into the plan frontmatter.** When `CLAIMS_ID` is non-
-empty, the rendered plan MUST write a literal `claims: $CLAIMS_ID` line at the
-top of the frontmatter (above `created:`) - the single `.md` is the only plan
-shape. The line is load-bearing for the post-write refusal below; the
-template's `claims:` comment is a doc note, not a substitute.
-
-**Post-write refusal.** After the plan file is written but BEFORE the
-collision-check + auto-intake steps (3a / 3b), verify the claim made it into
-the frontmatter. If not, halt:
-
-```bash
-if [[ -n "$CLAIMS_ID" ]]; then
-  if ! grep -qE "^claims:[[:space:]]+$CLAIMS_ID\$" "$PLAN_PATH" 2>/dev/null; then
-    echo "Error: input was an ab-id ($CLAIMS_ID) but the rendered plan does not declare 'claims: $CLAIMS_ID' in frontmatter. Refusing to adopt." >&2
-    exit 1
-  fi
-fi
-```
-
-The refusal halts before adoption so a malformed claim never lands on the
-graph. If you encounter the refusal in practice, hand-edit the frontmatter
-to add `claims: $CLAIMS_ID` and rerun, or invoke `/blueprint` with a raw
-description if the ab-id was passed by mistake.
-
-**Pass-through to intake.** The auto-intake step (3b) does not need to be told
-about the claim - `fno backlog intake` reads the frontmatter directly. When you
-want to override the frontmatter at intake time (e.g. repairing a past
-mistake), use `fno backlog intake <plan>.md --claims ab-XXX`.
-
-## Failure Mode Ingestion (MANDATORY when a design doc is supplied)
-
-`/think` is now contractually obligated to produce a `## Failure Modes`
-section in every design doc (see `skills/think/SKILL.md` Step 6b). `/blueprint`
-reflects the other side of that contract: when the input points to a design
-doc, `/blueprint` MUST read the Failure Modes section before writing any plan
-artifact and MUST refuse to proceed when the section is missing.
-
-**Detection.** Classify the argument (after stripping mode modifiers) in
-this order so a typo never bypasses the gate by silently degrading to
-"raw feature description":
-
-1. If the argument LOOKS like a file path - it contains `/`, or it ends
-   in `.md`, or it starts with `~`, `./`, `../`, or `/` - treat it as a
-   design-doc path. Resolve it (expand `~`, make absolute). If the file
-   does not exist or is not readable, refuse with a missing-file message
-   (see below). Do NOT fall through to raw-description mode.
-2. Otherwise, treat the argument as a raw feature description and skip
-   the grep check (there is nothing to read).
-
-This is deliberately strict: a user who types `path/to/desgin.md` (typo)
-gets a loud "file not found" rather than a silently-missed contract.
-
-**Check.** For a path that resolved to a readable file, grep for a literal
-level-2 heading `## Failure Modes`. Case-sensitive. A level-3 or deeper
-heading does NOT satisfy the check; neither does an in-prose mention. In
-the snippet below, `$DESIGN_DOC_PATH` is the resolved design-doc argument:
-
-```bash
-# $DESIGN_DOC_PATH is the absolute path resolved from the /blueprint argument.
-# $ARG is the raw argument text (before resolution) used for the path-shape
-# classifier below.
-if [[ "$ARG" == *"/"* || "$ARG" == *.md || "$ARG" == ~* || "$ARG" == ./* || "$ARG" == ../* ]]; then
-  if [[ ! -r "$DESIGN_DOC_PATH" ]]; then
-    echo "Design doc at $DESIGN_DOC_PATH is missing or unreadable. Check the path and retry." >&2
-    exit 1
-  fi
-  grep -q '^## Failure Modes$' "$DESIGN_DOC_PATH" || {
-    echo "Design doc at $DESIGN_DOC_PATH is missing ## Failure Modes section. Run /think first." >&2
-    exit 1
-  }
-fi
-```
-
-**Refusal message (verbatim template, where `{path}` stands for the
-resolved design-doc path):**
-
-```
-Design doc at {path} is missing ## Failure Modes section. Run /think first.
-```
-
-Print the message to stderr, halt before any write, and surface the halt as
-a non-zero status to the caller (target, operator, or the user shell). Do
-NOT attempt to auto-generate the missing section: the whole point of the
-gate is to force failure-mode thinking into `/think`, not to paper over a
-skipped step here.
-
-**Parse.** On success, extract the bullets under each of the four required
-sub-sections (Boundaries, Errors, Invariants, Concurrency). The expected
-structure is a bold label on its own line (`**Boundaries**`) followed by a
-dash-bullet list; match the label exactly and collect the bullets until the
-next bold label or the next `##` heading. Preserve the original bullet
-wording so the AC4-EDGE seeds can cite the source by name.
-
-**Seed AC4-EDGE criteria.** Emit seeds inline under the relevant
-`### N. [Change]` in the Changes section (or against the design doc's Execution
-Strategy waves on the mutation path), one `AC4-EDGE` per failure-mode bullet
-with a code touchpoint. Each seed MUST cite the source bullet by a short name
-taken from the design doc (e.g. `Cites "Double-submit" from design doc`).
-Irrelevant bullets (no code surface changes this plan) are skipped rather
-than padded: AC4-EDGE citations should map to actual implementation
-touchpoints, not decorate the plan with unrelated concerns.
-
-## Schema Citation Gate (graduated; DB-touching plans)
-
-A plan that changes the database without ever naming a real table, enum, or
-constraint is planning blind. This gate makes a DB-touching plan cite the
-schema, the same way Failure Mode Ingestion makes a plan carry failure modes.
-It is graduated: full / large plans fail closed, quick / small plans warn.
-
-**When the gate fires (AC3-FR).** Only when the codemap has a
-`## Database Schema` section (the schema is known). With no schema section
-there is nothing to validate against, so the gate does NOT fire and planning
-proceeds. Reuse the schema written at design time: if the design doc already
-carries a `## Schema Reconciliation` section, the touched tables it names are
-trusted candidate citations; otherwise read `.fno/codemap.md`'s
-`## Database Schema` section directly.
-
-**DB-touch detection (lowest-false-positive signal).** A plan is DB-touching
-when the schema section exists AND the plan's File Ownership Map / Files-to-
-Modify targets a DB path (`migrations/`, `supabase/`, `*.sql`, or a model /
-schema file) OR a task body names a known table/enum from the schema section.
-A heuristic keyword like the bare word "table" does NOT trip the gate.
-
-**Satisfaction.** A DB-touching task is satisfied when it cites at least one
-real identifier present in the schema section. An exact identifier match is
-required; a schema-qualified form is accepted (a task naming `user_accounts`
-matches a schema table `user_accounts`, and `public.user_accounts` is also
-accepted), but a partial token like `account` does not match.
-
-**Enforcement, graduated by size:**
-
-- **Full / L plans -> fail closed.** Refuse, in the same style as the missing
-  `## Failure Modes` refusal: print the message to stderr, halt before any
-  write, and surface a non-zero status. The refusal MUST name the uncited task
-  and list candidate identifiers from the schema section (AC3-ERR / AC3-UI):
-
-  ```
-  Plan task {task-id} touches the database but cites no real schema identifier.
-  Cite one of: {comma-separated tables/enums/constraints from the schema section}.
-  ```
-
-- **Quick / -S plans -> warn, proceed.** Emit a single-line warning on stderr
-  (`Warning: task {task-id} touches the DB without a schema citation`) and
-  continue (AC3-EDGE). Small blast radius does not justify blocking, mirroring
-  how the discovery gate relaxes for `-S`.
-
-Do NOT auto-insert a citation to silence the gate: as with Failure Mode
-Ingestion, the point is to force schema thinking into the plan, not to paper
-over its absence.
-
-## Executor Lock Transcription (when a design doc supplies a Locked Decision)
-
-When `/think` runs against a frontend or mixed-surface design, it captures
-the executor decision as a Locked Decisions entry (see
-`skills/think/references/executor-routing-prompt.md`). `/blueprint` transcribes
-that lock into the plan's frontmatter so the operator's three-tier resolver
-honors it without a runtime surface-inference fallback.
-
-Transcription is purely mechanical: same Locked Decisions input yields the
-same frontmatter output. No LLM judgment in this step.
-
-```bash
-# The locked-decision parser is the in-package module fno.executor._locked
-# (the SINGLE source of truth). In a checkout, point PYTHONPATH at cli/src so
-# it imports pre-install; an installed `fno` needs no PYTHONPATH.
-_PKG_SRC="$(cd "${CLAUDE_PLUGIN_ROOT:-$SKILL_DIR/../..}" 2>/dev/null && pwd)/cli/src"
-[[ -f "${_PKG_SRC}/fno/executor/_locked.py" ]] && export PYTHONPATH="${_PKG_SRC}${PYTHONPATH:+:${PYTHONPATH}}"
-LOCKED_VALUE=$(python3 -m fno.executor._locked < "$DESIGN_DOC_PATH")
-# LOCKED_VALUE is one of: '' | do | impeccable | mixed
-```
-
-Then:
-
-- **`do` or `impeccable`** - write `executor: <value>` to the plan `.md`
-  frontmatter (the single doc is the only plan shape). Replace any existing
-  `# executor:` comment from the template; never duplicate the key.
-- **`mixed`** - write `executor: do` at plan level (the safe default), then
-  emit `executor: impeccable` task blocks for any task whose file list
-  matches the operator's locked surface-inference patterns
-  (`**/*.tsx`, `**/*.jsx`, `components/**`, `routes/**`, `src/styles/**`).
-  This mirrors the operator resolver and keeps cost honest: impeccable runs
-  only where it earns its keep.
-- **Empty** - write nothing. The runtime surface-inference fallback handles
-  the plan correctly. No prompt; no warning.
-
-When the parser fails (malformed YAML, unreadable doc, regex miss) it emits
-empty stdout. /blueprint MUST NOT fabricate a lock; treat the empty result as
-"no decision recorded" and let surface inference handle it. Log a single
-warning line to stderr if the design doc has a Locked Decisions section but
-the parser found no recognizable executor entry, so the user knows the lock
-wasn't transcribed:
-
-```bash
-# Scope the orphan-mention check to the Locked Decisions section ONLY. A
-# document-global grep would false-positive on design docs that discuss the
-# operator's executor resolver in their Architecture section without ever
-# locking it - those are correct empty-parser cases, not orphan mentions.
-LOCKED_SECTION=$(awk '
-    BEGIN { inside = 0 }
-    /^##[[:space:]]/ {
-        if (inside) { exit }
-        if (tolower($0) ~ /^##[[:space:]]+locked[[:space:]]+decisions/) {
-            inside = 1; next
-        }
-    }
-    inside == 1 { print }
-' "$DESIGN_DOC_PATH")
-
-if [[ -n "$LOCKED_SECTION" && -z "$LOCKED_VALUE" ]] \
-    && printf '%s' "$LOCKED_SECTION" | grep -qi 'executor'; then
-    echo "warning: design doc mentions 'executor' inside Locked Decisions but the parser did not extract a canonical value (do|impeccable|mixed). Not transcribed; runtime surface inference will decide." >&2
-fi
-```
-
-When `/blueprint` re-runs against a design doc whose Locked Decisions changed
-since the previous invocation, re-transcribe: the parser is deterministic
-and the frontmatter overwrite is idempotent. Stale executor fields are
-the worst-case outcome; this guard prevents them.
-
-## Model Pin Transcription (x-571f: when a plan supplies a model)
-
-A plan can pin the model its dispatchers launch the node's worker on. Like the
-executor lock, the choice is made once at planning time; `/blueprint`
-transcribes it onto the graph node so every dispatcher honors it (US1-US3).
-Unset = today's provider default, no behavior change.
-
-Resolve the pin AFTER auto-intake has minted the node id (`$NODE_ID`), from two
-sources in precedence order (frontmatter wins):
-
-```bash
-# 1. Plan frontmatter `model:` (primary). Scope to the frontmatter block only.
-MODEL_PIN="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^model:/{sub(/^model:[[:space:]]*/,""); print; exit}' "$PLAN_INDEX")"
-# 2. Fallback: a `Model: <token>` Locked Decision (same parser module as the
-#    executor lock, selected with --key model; empty when none).
-if [[ -z "$MODEL_PIN" ]]; then
-  MODEL_PIN="$(python3 -m fno.executor._locked --key model < "$DESIGN_DOC_PATH")"
-fi
-```
-
-Then, only when non-empty, transcribe onto the node (idempotent; last writer
-wins, so a re-run with a changed pin overwrites cleanly):
-
-```bash
-[[ -n "$MODEL_PIN" ]] && fno backlog update "$NODE_ID" --model "$MODEL_PIN"
-```
-
-The `fno backlog update --model` verb validates the value as a single
-non-whitespace token; a malformed pin exits non-zero and leaves the node
-unchanged (surface the error, do not fabricate a pin). When `/blueprint`
-decomposes a scope:epic into child nodes, apply the same transcription to each
-child id it creates. No pin present -> write nothing (no `--model` call).
-
-### Model Routing (tier assignment, parallel to executor routing)
-
-Beyond an exact pin, a plan may express a **minimum quality tier** and let
-dispatch pick the cheapest reachable model that clears it (pareto routing). This
-mirrors executor routing: judged once at planning time, honored at every
-dispatch, and unset = today's provider default (no behavior change).
-
-Assign a tier per the task's nature, one line of rationale each:
-
-- **`low`** - mechanical work: a rename, a codemod, a doc tweak, boilerplate.
-- **`medium`** - a standard feature or fix that needs real reasoning but no
-  load-bearing judgment.
-- **`high`** - gate semantics, security, concurrency, migrations, or an
-  architecture decision where a weaker model's error is expensive.
-
-Precedence is `model:` (exact) over `model_tier:` (tier) over the provider
-default; an exact pin on the same task wins. Transcribe a plan-wide default from
-frontmatter onto the node (AFTER `$NODE_ID` is minted), idempotently:
-
-```bash
-# Plan frontmatter `model_tier:` (scope to the frontmatter block).
-MODEL_TIER="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^model_tier:/{sub(/^model_tier:[[:space:]]*/,""); print; exit}' "$PLAN_INDEX")"
-[[ -n "$MODEL_TIER" ]] && fno backlog update "$NODE_ID" --model-tier "$MODEL_TIER"
-```
-
-`fno backlog update --model-tier` validates the band (`high|medium|low`); an
-invalid value exits non-zero and leaves the node unchanged (surface it, do not
-fabricate a tier). Per-task tiers ride in task blocks as `model_tier:` lines
-(the do-phase reads them the same way it reads `executor:` task blocks). No tier
-and no pin present -> write nothing.
-
-## Blueprint Provenance Stamp (x-b6e4)
-
-After auto-intake mints `$NODE_ID` and the plan's Execution Strategy is
-finalized, stamp the lifecycle provenance so the graph records which
-session/harness planned the node (idempotent, append-only, best-effort):
-
-```bash
-[[ -n "$NODE_ID" ]] && { fno backlog session add "$NODE_ID" --phase blueprint \
-  || echo "blueprint: session add failed for $NODE_ID (non-fatal, provenance not stamped)" >&2; }
-```
-
-Harness + session id default from the ambient identity. A missing-identity
-warning is non-fatal; the stamp never blocks intake. When `/blueprint`
-decomposes a scope:epic into child nodes, this stamps the parent node only (the
-session planned the epic; child do-entries stamp themselves at execution).
-
-## PRODUCT.md Prereq Check (when executor: impeccable is locked)
-
-When `/blueprint` generates a plan that locks `executor: impeccable` at the plan
-level OR via per-task overrides, it MUST check for a valid PRODUCT.md before
-the auto-intake step. This is the spec-time half of the defense-in-depth
-prereq strategy (decision 3a); the runtime half lives in the operator
-dispatch gate (Phase 03).
-
-Run the check script after writing the plan files but before collision check
-and auto-intake:
-
-```bash
-SPEC_SCRIPTS="${SKILL_DIR}/scripts"
-bash "$SPEC_SCRIPTS/check-product-md.sh" "$PLAN_PATH"
-```
-
-The script:
-1. Detects whether the plan uses `executor: impeccable` anywhere.
-2. Searches for PRODUCT.md in order: `${REPO_ROOT}/PRODUCT.md`,
-   `${REPO_ROOT}/.agents/context/PRODUCT.md`,
-   `${REPO_ROOT}/docs/PRODUCT.md`.
-3. Validates the found file is non-empty AND >= 200 chars (filters `[TODO]`
-   stubs per /impeccable's loader contract).
-4. If missing or stale:
-   - Writes a `prerequisites:` block to the plan `.md`'s frontmatter:
-     ```yaml
-     prerequisites:
-       - kind: file
-         path: PRODUCT.md
-         missing_reason: "required by /impeccable's setup gate; runtime will hard-block at dispatch"
-     ```
-   - Prints a warning to stderr (never blocks; plan ships regardless):
-     ```
-     warning: this plan locks executor: impeccable but no PRODUCT.md was found.
-     Run /impeccable teach before /target dispatch, or /do waves will hard-block.
-     ```
-
-DESIGN.md gets softer treatment: if DESIGN.md is missing, add to
-`prerequisites_optional:` (different key, NOT gated at dispatch). The
-check script does not currently handle DESIGN.md - that is out of scope.
-
-The script always exits 0. Plan creation is not blocked.
-
-## impeccable_stages Pin Syntax
-
-When a task needs specific `/impeccable` subcommands (beyond the agent's
-default rule), `/blueprint` can write a per-task `impeccable_stages: [...]` YAML
-field:
-
-```yaml
-### Task 2.1: Build Hero Component
-
-executor: impeccable
-impeccable_stages: [craft, critique, harden]
-```
-
-Known stages baseline (validated by `validate-plan.sh`):
-
-```
-craft, critique, polish, harden, audit, layout,
-animate, bolder, colorize, delight, overdrive, quieter, typeset,
-distill, extract, adapt, shape, teach
-```
-
-Pin-only treatments (animate, bolder, colorize, delight, overdrive, quieter,
-typeset) are reachable ONLY via explicit `impeccable_stages` pins - the agent
-never picks them autonomously (decision 4). Pinning them is exactly what this
-field is for.
-
-Rules for valid pins:
-- List must be non-empty. `impeccable_stages: []` is an error (intent
-  unclear; the validator rejects it).
-- Every entry must be a known stage name. Unknown entries are errors.
-- Pin-only treatments listed here are valid; they are not "wrong" for being
-  pin-only.
-
-The `validate-plan.sh` script enforces these rules at `/blueprint` validation
-time (the validate step), so errors surface before auto-intake.
-
-## Kill Criteria Declaration (MANDATORY)
-
-Every plan `/blueprint` writes MUST declare `kill_criteria:` - abort conditions
-that target/do evaluate at wave and iteration boundaries. When any
-predicate holds, the engine emits `<aborted reason="{name}">`, the stop
-hook exits clean (symmetric to `<promise>`), and the ledger records the
-abort reason. This is how we prevent spinning-in-place burn loops.
-
-**Default entries (emit these when the plan doesn't override):**
+Create implementation plans scaled to the task. The output shape is always one plan `.md` (`plan == PR == node`); the input decides the path (mutate a `/think` doc in place, or create a fresh doc from an idea). Which gates fire is a READ of the input and the plan, not a guess - the dispatch table below names each trigger.
+
+## Gates (read by state)
+
+Each gate loads only when its trigger fires. The bodies (with verbatim scripts) live in [references/blueprint-gates.md](references/blueprint-gates.md); read a gate's section there when the trigger below is true. Do NOT run a gate whose trigger is false - a plan that fires no DB/executor/model/impeccable gate never mentions them.
+
+| Gate | Read its section when |
+|------|-----------------------|
+| Plan Claims Ingestion | the argument is an existing node id (`x-8af8` / `ab-<hex>`) - runs FIRST, before any classifier |
+| Failure Mode Ingestion | the argument resolves to a design-doc path - MANDATORY, refuses if `## Failure Modes` is missing |
+| Schema Citation Gate | the codemap has a `## Database Schema` section AND the plan touches the DB |
+| Executor Lock Transcription | a design doc supplies a Locked Decision (executor) |
+| Model Pin / Model Routing | the plan frontmatter sets `model:` or `model_tier:` |
+| Blueprint Provenance Stamp | always, after `$NODE_ID` is minted (tiny, best-effort) |
+| PRODUCT.md Prereq Check | the plan locks `executor: impeccable` (plan-level or per-task) |
+| impeccable_stages Pin Syntax | a task pins specific `/impeccable` stages |
+| done_probes | the deliverable is recurring / operational (a scheduler, watcher, daemon, cadence) - MANDATORY then, omit otherwise |
+| Collision check | always, unless `no-collision-check` (step 3a) |
+| Cross-project peer heads-up | a `peers` block exists and a Files-to-Modify row matches a peer surface (step 3a-bis) |
+| Epic decomposition (`group N`) | see [references/epic-decomposition.md](references/epic-decomposition.md) - `group`/`max_prs:`/`scope: epic` |
+
+**Kill Criteria (MANDATORY, every plan - the one gate that is always inline).** Every plan `/blueprint` writes MUST declare `kill_criteria:` in its `.md` frontmatter (including quick plans; the markdown-heading form is invisible to the parser). Emit these defaults when the plan does not override:
 
 ```yaml
 kill_criteria:
@@ -448,81 +48,7 @@ kill_criteria:
     reason: "Same test failing 3+ iterations - root cause unclear"
 ```
 
-**Placement.** ALWAYS in the plan `.md`'s frontmatter (alongside `created:`,
-`claims:`, `executor:`, etc.) - including quick plans. The markdown-heading form
-(`## Kill Criteria`) is invisible to the stamp/validate parser, so it is not
-used; frontmatter is the single source of truth across every plan.
-
-**Schema per entry:** `name` (string, identifier-style), `predicate`
-(string, from the known vocabulary below), `reason` (string, shown to the
-user at abort time).
-
-**Known predicate vocabulary** (validated by
-`scripts/validate-plan.sh`; unrecognized predicates produce a WARN and are
-skipped at runtime, so new predicates degrade gracefully):
-
-- `iteration > N` - iteration counter ceiling
-- `same_test_failing_for >= N` - stuck-test detector (reads
-  `verification.consecutive_failures`)
-- `files_outside(plan_path) > N` - scope-creep guard
-- `any_test_file_deleted` - detects deleted test files in the session
-
-**Optional entries.** Plans are free to add or swap entries - for example,
-a plan with a narrow file surface can enable `scope_creep`, or a plan with
-well-understood recovery loops can lift `iteration_ceiling` to 30.
-Malformed or missing fields are rejected by `validate-plan.sh` (errors),
-and unknown predicates are warnings.
-
-**Backward compatibility.** A plan without `kill_criteria:` behaves
-identically to today's engine - the evaluator returns exit 0 when the
-block is absent, and only the engine-wide defaults (if any) apply.
-
-## done_probes: operational evidence (MANDATORY for recurring deliverables)
-
-A plan whose deliverable is **recurring or operational** - a scheduler, a
-watcher, a daemon, a cadence, a LaunchAgent, anything whose value is that it
-keeps running - MUST declare 1-2 `done_probes` in its frontmatter.
-Everything else omits the field entirely.
-
-`fno-agents loop-check` runs each probe as the final `DonePRGreen` conjunct and
-refuses done until every one exits 0.
-The gate otherwise measures artifacts (PR + CI + review), which operational
-silence cannot falsify: grooming shipped three times without ever running,
-because the last mile (installing the agent, firing the first run) lives
-outside the repo where the worker's authority ends.
-A probe is what forces that last mile before the session can claim done.
-
-```yaml
-done_probes:
-  - "fno mail list --kind report --since 24h | grep -q groom"
-```
-
-**Assert freshness, never bare existence.**
-A probe like `test -f ~/.fno/groom-report.json` passes vacuously against
-launch-day dry-run residue, which is exactly the failure this field exists to
-catch.
-Bound every probe in time (`--since 24h`, an mtime check, a date-stamped
-lookup) so it can only pass if the thing ran recently.
-
-**End in a predicate, not a pipeline tail.**
-`... | grep -q x` exits on the grep; `... | tail -5` exits on the tail and
-masks the real status, so a broken command reads as a pass.
-
-**Use the block form above, or a single-line inline list** (`done_probes: ["cmd"]`).
-A declaration in any other shape (a multi-line inline list, say) refuses done as
-"probes undeterminable" rather than passing as if you had declared nothing -
-declaring a gate the loop cannot read must never read as no gate.
-
-**Constraints.** At most 3 probes (a gate, not a test suite); each gets a 60s
-native timeout and its whole process group is killed past it; a missing binary
-(127), a non-zero exit, and a timeout all fail closed with the command and code
-named in the block reason.
-Probes must be read-only and idempotent - two near-simultaneous fires may run
-them twice.
-There is no env override: a probe that cannot pass in this environment is
-resolved by editing the plan, which is visible in git.
-
----
+Full schema + predicate vocabulary: [references/blueprint-gates.md](references/blueprint-gates.md#kill-criteria-declaration-mandatory---full-detail).
 
 ## One output shape: a single `.md`
 
@@ -547,7 +73,7 @@ block; there is no `00-INDEX.md` and no phase files.
 When the argument is a raw idea / feature description (not a design-doc path),
 write one flat plan `.md`. Includes lightweight BDD acceptance criteria per
 change (1-2 Given/When/Then per change for happy path and primary error case)
-and always carries full frontmatter (see [Kill Criteria Declaration](#kill-criteria-declaration-mandatory)).
+and always carries full frontmatter (see the Kill Criteria block under [Gates](#gates-read-by-state)).
 
 ### Plan Save Location
 
@@ -575,7 +101,7 @@ fi
 ### Process
 
 1. **Understand** the request (ask if unclear). If the argument resolves to
-   a design-doc file, run the **Failure Mode Ingestion** check above BEFORE
+   a design-doc file, run the **Failure Mode Ingestion** gate ([references/blueprint-gates.md](references/blueprint-gates.md#failure-mode-ingestion-mandatory-when-a-design-doc-is-supplied)) BEFORE
    anything else. A missing `## Failure Modes` section halts the skill with
    the verbatim refusal message; a present section becomes the seed list
    for AC4-EDGE citations inline in the Changes section.
@@ -609,7 +135,7 @@ fi
    ```
    If `fno` is unavailable or codemap's deps are missing, skip silently. Read `.fno/codemap.md` if it exists - use it to identify god nodes, module boundaries, and dependency flow before Grep/Glob exploration. Top files in the output are highest-importance; changes to these need extra phases.
 2c. **Schema citation gate** - When a `## Database Schema` section exists in the
-   codemap, run the **Schema Citation Gate** (top of this file) before adopt.
+   codemap, run the **Schema Citation Gate** ([references/blueprint-gates.md](references/blueprint-gates.md#schema-citation-gate-graduated-db-touching-plans)) before adopt.
    Quick mode is `-S`-class, so it WARNS on an uncited DB-touching task and
    proceeds; it does not block.
 2b. **Discovery gate** - After structural context but before writing the plan,
@@ -639,137 +165,13 @@ fi
      raw-prose (no `$CLAIMS_ID`) case stays id-less here and is renamed at intake
      (step 3b-bis).
 
-   If a design doc was supplied, run the **Executor Lock Transcription** step
-   (top of this file) before writing the plan body so the parser's output can be
+   If a design doc was supplied, run the **Executor Lock Transcription** gate
+   ([references/blueprint-gates.md](references/blueprint-gates.md#executor-lock-transcription-when-a-design-doc-supplies-a-locked-decision)) before writing the plan body so the parser's output can be
    inlined into the plan's frontmatter as `executor: <value>`. Empty parser
    output leaves the frontmatter without an `executor:` field, falling through to
    runtime surface inference.
 
-3a. **Collision check** (skip if `no-collision-check` modifier or `--no-collision-check` flag)
-
-   After writing the plan but before auto-intake, scan pending plans on the
-   graph for file overlap so two parallel specs do not silently target the
-   same surface:
-
-   ```bash
-   fno backlog collisions check "$PLAN_PATH" --json > /tmp/collisions.json
-   ```
-
-   Read `/tmp/collisions.json`: `{"status": "ok"|"unevaluated", "collisions": [...]}`.
-   A `status` of `unevaluated` means the plan states no file surface, so nothing
-   was compared - that is NOT a clean result. Fill in the plan's
-   `## File Ownership Map` (or `## Files to Modify`) table and re-run before
-   adopting.
-
-   If any entry in `collisions` has `severity: "high"`, present
-   them via AskUserQuestion before adopting - unless `fno target status` shows
-   `authority: full` on the `attended` line (a live `/target beastmode` session), in
-   which case take the `recommended_action` for each entry, append one
-   `## Autonomous Decisions` entry naming the collision and the action, and
-   continue without prompting:
-
-   > Your plan touches files also touched by these in-flight plans:
-   >
-   > - **{with_node_id}** ({with_node_title}): {len(shared_files)} shared files [recommended: {recommended_action}]
-   >   *Rationale: {rationale}*
-   >
-   > Options:
-   > 1. **Proceed anyway** - adopt this plan as a new node; both plans land separately and may conflict at merge time.
-   > 2. **Modify {with_node_id} to absorb my changes** - print the existing plan path; cancel this new plan.
-   > 3. **Supersede {with_node_id}** - adopt this new plan and mark the old one as superseded.
-   > 4. **Cancel this new plan** - delete the file; do not adopt.
-
-   Apply the user's choice:
-
-   - **Option 1 (proceed):** continue to step 3b. Once the new node ID is
-     known, run `fno backlog update <new-id> --acknowledge-collisions
-     ab-XYZ,ab-ABC,...` so the new node carries an audit trail of the
-     collisions deliberately ignored.
-   - **Option 2 (modify):** print the existing plan path and exit cleanly.
-     The user edits the older plan; the new file is left on disk for
-     reference but not adopted.
-   - **Option 3 (supersede):** continue to step 3b. After adoption, run
-     `fno backlog supersede <new-id> --replaces ab-XYZ --reason "..."`.
-     Use the colliding plan's rationale or ask the user for a reason.
-   - **Option 4 (cancel):** delete the plan file and exit cleanly.
-
-   Medium and low-severity collisions are reported as single-line warnings on
-   stderr (`Warning: M shared files with ab-XYZ`) and never block auto-intake.
-
-   The `no-collision-check` positional modifier (and `--no-collision-check`
-   flag) skip this step entirely. Use case: "I know this collides; I'm doing
-   it on purpose." When this modifier is used, after auto-intake run
-   `fno backlog update <new-id> --acknowledge-collisions __skipped_check__`
-   so the audit trail distinguishes "I checked and accepted" from "I never
-   checked at all."
-
-3a-bis. **Cross-project peer heads-up** (Files-to-Modify intersection)
-
-   After the plan file is written and any collision check has resolved, but
-   BEFORE auto-intake, scan the plan's Files-to-Modify table for paths that
-   match a peer-owned surface. Mechanical resolution, not LLM judgment:
-
-   ```python
-   from fno.inbox.settings import read_peer_surfaces, read_surface_patterns
-   peers = read_peer_surfaces()           # {peer: [surface_name, ...]}
-   patterns = read_surface_patterns()     # {surface_name: [glob, ...]}
-   ```
-
-   For each peer, union the glob patterns of every surface that peer owns,
-   then test the plan's Files-to-Modify rows against that union. The
-   patterns intentionally use `**` for recursive matches (e.g. `src/api/**`),
-   so use a matcher that supports recursive globs across the project's
-   target Python (3.11+). `fnmatch.fnmatch` does NOT recurse on `**`, and
-   `pathlib.PurePath.match` only treats `**` as recursive starting in 3.13.
-   The portable choice is to translate the glob to a regex and match:
-
-   ```python
-   import re, fnmatch
-   def match_recursive(file_path: str, pat: str) -> bool:
-       # Translate `**` to `.*` (cross-segment) and `*` to `[^/]*` (single segment).
-       regex = (
-           re.escape(pat)
-           .replace(r"\*\*", ".*")
-           .replace(r"\*", "[^/]*")
-           .replace(r"\?", ".")
-       )
-       return re.fullmatch(regex, file_path) is not None
-   ```
-
-   For each peer with at least one match, check the rc on send and update
-   the dedup list:
-
-   ```bash
-   if [[ "<peer>" not in messaged_peers ]]; then
-     if fno mail send --to-project <peer> --kind heads-up \
-          --body "spec'd: <PLAN-TITLE>; touches surface <SURFACE-NAME>; ETA: <PLAN-TIMESTAMP>; plan: <PLAN-PATH>"; then
-       append_peer_to_messaged_peers "<peer>"  # in plan frontmatter
-     else
-       # Send failed (typo, recipient missing, lock contention). Record
-       # under messaged_peers_failed: so /target's ship recap retries
-       # rather than treating it as already-sent.
-       append_peer_to_messaged_peers_failed "<peer>" "<reason>"
-     fi
-   fi
-   ```
-
-   The dedup variable is named `messaged_peers` consistently across /think,
-   /blueprint, and /target - it is the same plan-frontmatter list, just read at
-   different phases.
-
-   Skip the step silently when:
-
-   - No `peers` block exists (opt-in by design)
-   - No surface pattern matches any Files-to-Modify entry (the change is
-     internal by definition)
-   - The same peer was already notified at /think time (entry already in
-     `messaged_peers:`)
-
-   Do NOT block on responses - sends are fire-and-forget. If a single file
-   could be claimed by surfaces owned by multiple peers and the canonical
-   owner is ambiguous, emit `<help reason="cross-project-disambiguation"
-   evidence="<file path>">` and skip those sends rather than multi-peer
-   blasting.
+3a. **Collision check + peer heads-up** (conditional). Between writing the plan and auto-intake, run the collision check (skip with `no-collision-check`) and, when a `peers` block exists, the cross-project peer heads-up. Both are gate-shaped, skip-flagged steps - full procedure (the `fno backlog collisions check` read, high-severity AskUserQuestion / beastmode auto-decision, the four options, and the peer-surface match + send) is in [references/blueprint-gates.md](references/blueprint-gates.md#collision-check-step-3a-skip-with-no-collision-check).
 
 3b. **Auto-intake to backlog** (skip if `no-adopt` modifier or `--no-adopt` flag)
 
@@ -796,6 +198,8 @@ fi
    Out of Scope). Setting either skips this step entirely. The plan file is
    already durably written, so intake failures never block the handoff
    message.
+
+   After `$NODE_ID` is minted, run the **Model Pin / Routing** and **Blueprint Provenance Stamp** gates ([references/blueprint-gates.md](references/blueprint-gates.md#model-pin-transcription-x-571f-when-a-plan-supplies-a-model)) when their triggers fire.
 
 3b-bis. **Node-bearing filename for raw-prose intake** (US5)
 
@@ -961,7 +365,7 @@ When the input to `/blueprint` is a path to an existing design doc (produced by 
 | Modifier | Effect |
 |---|---|
 | `quick` | Skip ## Execution Strategy (single-task; stamp status + kill_criteria) |
-| `group N` | Bounded epic decomposition: after intake, partition the waves into at most `N` cohesive delivery groups (one child node + PR each). See [Bounded Epic Decomposition](#bounded-epic-decomposition-group-n). Omit `N` to fall back to the epic's `max_children`, else `config.blueprint.max_prs_per_epic`. Auto-enabled for `scope: epic` docs. |
+| `group N` | Bounded epic decomposition: after intake, partition the waves into at most `N` cohesive delivery groups (one child node + PR each). See [references/epic-decomposition.md](references/epic-decomposition.md). Omit `N` to fall back to the epic's `max_children`, else `config.blueprint.max_prs_per_epic`. Auto-enabled for `scope: epic` docs. |
 | `no-group` | Opt OUT of auto-decomposition on a `scope: epic` doc: run the single-doc lean mutation (one epic node, one PR), the pre-auto-group behavior. |
 | `greenfield` | Skip File Ownership Map + Patterns to Reuse regardless of codebase state |
 | `brownfield` | Force file binding even on empty-codebase detect |
@@ -1002,205 +406,6 @@ Exit codes:
 
 Any attempt to write outside this allowlist exits 2. /think-owned sections (Overview, Architecture, User Stories, Failure Modes, Acceptance Criteria, Locked Decisions, etc.) are never touched.
 
-## Bounded Epic Decomposition (`group N`)
-
-Large epics (multi-wave design docs) ship better as a **bounded** number of
-focused PRs than as one giant PR or 12 tiny ones. The `group N` modifier
-partitions the epic's waves into at most `N` cohesive **delivery groups**,
-each becoming one child backlog node and one PR. Waves stay the internal
-execution unit; a group bundles 1+ waves. See
-`internal/fno/plans/2026-05-24-epic-scoped-execution.md` (C1).
-
-**When it runs.** Decomposition fires in either of two ways:
-
-- **Auto (epic inputs).** A bare `/blueprint <doc>` whose frontmatter declares
-  `scope: epic` (or whose `## Execution Strategy` has >1 wave) decomposes at the
-  resolved ceiling by default - so an epic never silently collapses into one
-  giant PR, and you never have to remember the `group` keyword. To opt OUT, pass
-  **`no-group`** (`/blueprint no-group <epic-doc>`): that preserves the exact old
-  single-PR behavior (the single-doc lean mutation) for an epic you have decided
-  really is one cohesive PR.
-- **Explicit (any doc).** The invocation carries the `group` keyword, OR the
-  plan frontmatter declares `max_prs:`. Use this to force a split on a doc that
-  is not flagged `scope: epic`.
-
-A **non-epic** doc with no `group`/`max_prs:` keeps the single-doc lean mutation
-unchanged - auto-group only changes the default for `scope: epic` inputs.
-
-**Resolve the ceiling `N`** as the minimum of every ceiling that applies, with
-the config default as the floor of last resort. This mirrors decompose's own
-`effective = min(max_children, explicit)` (x-066a) exactly, so blueprint's `N`
-and the `--max-prs` it forwards stay in lockstep with the CLI and the two
-surfaces never disagree about the cap.
-
-Let `explicit` = the `group N` arg if present, else the per-plan `max_prs:`
-frontmatter if present, else unset. Let `mc` = the epic doc's `max_children` if
-present and a **positive integer**, else unset (read it from the same epic
-frontmatter already loaded for the `scope: epic` / `max_prs:` auto-group
-decision above - no new reader). A present-but-malformed `max_children`
-(non-integer, `< 1`) is **refused up front**, before grouping: exit non-zero
-with `epic max_children must be a positive integer` and create nothing. Do NOT
-treat a bad value as unset and defer the check to decompose - procedure step 3
-skips decompose entirely when the waves cohere into a single group, so deferring
-would let a malformed durable cap pass silently on that path. Blueprint fails
-fast so the refusal holds on every path, matching decompose's own
-malformed-value refusal (x-066a US5); blueprint never invents a cap from a bad
-value, nor silently falls back to the default on one.
-
-| Case | `N` (blueprint's grouping ceiling AND `--max-prs` forwarded) |
-|------|-------------------------------------------------------------|
-| both `explicit` and `mc` set | `min(explicit, mc)` |
-| only `explicit` set | `explicit` |
-| only `mc` set | `mc` |
-| neither set | `config.blueprint.max_prs_per_epic` (default 4) |
-
-Read the config floor with:
-```bash
-N=$(fno config get config.blueprint.max_prs_per_epic 2>/dev/null || echo 4)
-```
-If `fno config get` is unavailable, default to 4. **Auto-group MUST degrade to
-today's single-doc behavior (not error) if the config read fails** - treat an
-unreadable ceiling as 4, never abort the blueprint. Because the epic's own
-`max_children` now sits above the config default in this ladder, an author who
-declares `max_children: 6` above a default of 4 gets 6 honored on the bare
-`/blueprint <epic-doc>` path (x-066a US3), not silently clamped to 4.
-
-`N` is a **ceiling, not a quota** (Locked Decision #3): cohesive work uses
-fewer groups; never pad to `N`. This guardrail applies identically to
-auto-group - an auto-decompose must never produce more than `N` groups, and a
-`scope: epic` doc whose waves cohere into one group still ships ONE PR (record
-it in `## Delivery Groups`, never force a split). Reject `group 0` / negative
-`N` with a non-zero exit and the message `group N must be >= 1` (AC1-ERR),
-creating nothing.
-
-**Procedure** (after the epic node is intaken in step 3b, so `EPIC_ID`
-is known):
-
-1. Read the `## Execution Strategy` waves from the doc.
-2. **Group by cohesion, surface, and dependency** (Locked Decision #8 - LLM
-   judgment, not a blind contiguous split). Keep a cohesive change (e.g. one
-   frontend surface) inside a single group. Order groups so a later group
-   `blocked_by` an earlier one only when there is a real dependency.
-3. If the grouping collapses to a single group, **skip decompose** - the epic
-   node is the one PR. Still record this in `## Delivery Groups`
-   (AC1-EDGE: never force a split).
-4. Write a `## Delivery Groups` section to the doc (this section is owned by
-   the decomposition step, NOT by `mutate_doc.py`; it is preserved across
-   `rewrite` re-runs). Format:
-   ```markdown
-   ## Delivery Groups
-
-   Ceiling: N (source: group-arg | frontmatter max_prs | epic max_children | config default)
-
-   | Group | Waves | PR scope | Depends on |
-   |-------|-------|----------|------------|
-   | 1 | 1-3 | foundation + schema | - |
-   | 2 | 4-5 | API surface | 1 |
-   | 3 | 6 | UI | 2 |
-   ```
-5. **Classify each cross-repo dependency `hard` or `contract`** (only for a
-   group that `blocked_by` a group in a *different* repo; same-repo edges are
-   always `hard`). Default is `hard` (the blocker must land before the dependent
-   builds). Propose `contract` (the dependent builds **now** against a
-   pinned interface, stubbing the unlanded parts) ONLY when **both** gates hold,
-   else keep `hard`:
-   - **Pin gate:** the design doc has a `## Interface Contract` section with a
-     `contract_version` (a G1 `/think` output). No pin ⇒ `hard`. The CLI
-     re-checks this and downgrades a `contract` request to `hard` **loudly** (a
-     warning on stderr and in the JSON `downgrades`) if the doc pins nothing, so
-     an honest mistake never ships a mocked PR, but propose `contract` only when
-     the pin is really there.
-   - **Independent-work gate:** the dependent has ≥ 1 wave of work that does NOT
-     need the blocker landed (real parallelism to win). A dependent that only
-     stubs ⇒ `hard`.
-
-   `contract` is **model-proposed, human-confirmed** (Locked Decision 6): show
-   the author which edge you propose to mark `contract` and why, and proceed only
-   on confirmation. To mark a group, add `"dep": "contract"` to it; the CLI
-   stamps `contract_version` (read from the doc) and `stub_against` on the child.
-
-6. Build the groups JSON and call the CLI (atomic + idempotent upsert). A
-   `contract` group just carries `"dep": "contract"` (it must already
-   `blocked_by` its blocker); everything else is unchanged:
-   ```bash
-   cat > /tmp/groups-$$.json <<'JSON'
-   [
-     {"slug": "1", "title": "Group 1: backend API", "waves": "1-3", "blocked_by_groups": []},
-     {"slug": "2", "title": "Group 2: frontend", "waves": "4-6", "blocked_by_groups": ["1"], "dep": "contract"},
-     {"slug": "3", "title": "Group 3: novel index engine", "waves": "7", "blocked_by_groups": ["1"], "needs_think": true}
-   ]
-   JSON
-   fno backlog decompose "$EPIC_ID" --max-prs "$N" --groups "@/tmp/groups-$$.json"
-   rm -f /tmp/groups-$$.json
-   ```
-   The verb creates one child node per group (`parent=$EPIC_ID`, its own
-   self-contained quick-plan scaffold at the canonical `fno plan path` name in
-   the child's own project plans dir - the path it prints as `scaffolded plan:`
-   / reports in the `--json` `scaffolded[]`), `blocked_by` resolved from
-   `blocked_by_groups`, prints the epic id and each child id with its wave
-   range, and is idempotent: re-running `/blueprint group N` on an
-   already-decomposed plan updates the same children in place (keyed on the
-   group slug) rather than duplicating (US4). A bad spec leaves the
-   graph untouched (AC1-FR) because the whole decomposition lands in one
-   locked mutation. If a re-decomposition drops a slug that already
-   shipped a PR, the verb refuses (exit 2) unless you pass `--force`; unshipped
-   dropped groups are left in place and reported as a warning.
-
-   **Set `needs_think: true` on a group that owns genuine unknowns** - a
-   feasibility spike, unresolved epic Open Questions, or a novel subsystem. That
-   child gets a dispatched `/think` + `/blueprint` design pass instead of the
-   inline-fill below (the decompose invocation is the consent for that spawn).
-   Leave it off (the default) for a group whose scope is already clear from the
-   epic; that child takes the inline-fill path.
-
-7. **Inline-fill every unflagged child BEFORE linking (MANDATORY).** Decompose
-   births each child UNLINKED (`status: stub`, no `plan_path` -> derives `idea`),
-   so nothing dispatches against an empty scaffold. You hold the epic in context
-   right now - the warmest window there will ever be - so rewrite each unflagged
-   child's scaffold (the path decompose reported as `scaffolded plan:` - a
-   canonical `YYYYMMDD-<slug>-<id>.md` in the child's own project plans dir) into
-   a real quick-plan, then link it:
-
-   - Fill `## Why (from epic)` (the seeded intent + Locked Decisions, narrowed to
-     what binds THIS child - transcribed, never a pointer back at the epic).
-   - Replace every stub marker: concrete `## Changes`, `## Files to Modify` (from
-     the epic's File Ownership Map), `## Verification` (the checks that prove this
-     slice), and a `kill_criteria`.
-   - Flip the frontmatter `status: stub` -> `status: ready` (`stub` is outside the
-     canonical PlanStatus vocabulary, so a linked-but-still-stub plan is later
-     archived by `fno plan reconcile-status`; the validator refuses to link one).
-   - Validate, THEN link (link LAST, after the content is real):
-     ```bash
-     bash "${SKILL_DIR}/scripts/validate-plan.sh" <child-plan> \
-       && fno backlog update <child-id> --plan-path <child-plan>
-     ```
-   The validator REFUSES a plan still carrying any stub marker or an empty
-   `## Why (from epic)`, so a half-filled child can never be linked. Linking flips
-   the child `ready` - that is the design-completion signal (there is no
-   `status: ready` to hand-write). A flagged (`needs_think`) child skips this: its
-   fan-out design pass produces the real doc and links it.
-
-**Slug stability.** Use stable slugs across re-decomposition so idempotency
-holds. Numeric (`1`, `2`, ...) is the simple default; named slugs
-(`auth-flow`) are fine as long as they do not change between runs.
-
-**Packaging: `separate` only.** Every child gets its own self-contained
-quick-plan file - `plan == PR == node` for children too. Decompose scaffolds a
-stub per child (`## Why (from epic)` + Context / Changes / Files to Modify /
-Verification, born `status: stub`) at the canonical `fno plan path` name in the
-child's own project plans dir (reported as `scaffolded plan:`; existing legacy
-`<stem>.group-<slug>.md` stubs are grandfathered in place), and births the
-child WITHOUT a `plan_path` - identity is the durable `group_slug` field, so the
-unlinked child is still found on re-decompose. Linking the filled plan (inline
-step 2, or the fan-out pass) is what makes it `ready`. It is the default (and
-only) packaging - `--plans` need not be passed; `--plans fragment` errors.
-
-Scaffolding is idempotent on the slug: re-running upserts the same children, an
-existing scaffolded file is never clobbered (a builder's edits survive a
-re-decompose), a designed child's `plan_path` is preserved (never unset), and a
-child still on the legacy `<doc>#group-<slug>` fragment form (from a pre-removal
-decompose) is repointed to its separate file in place.
-
 ## Ready-gated auto-launch (opt-in, default OFF) — Phase 2 / US6
 
 After a plan is written AND its claimed backlog node is intaked (the final step of both the single-doc creation and mutation paths), run the auto-launch gate as the LAST action:
@@ -1209,7 +414,7 @@ After a plan is written AND its claimed backlog node is intaked (the final step 
 bash "${SKILL_DIR}/scripts/autolaunch-on-ready.sh" "<plan-path>"
 ```
 
-This is a **no-op unless** `config.target.auto_launch_on_blueprint: true` is set in config.toml (DEFAULT OFF; an absent key reads as off, so existing behavior is unchanged for anyone who has not opted in). When enabled, it fire-and-forget dispatches the claimed node as a fresh `claude --bg` `/target` worker IFF the node is `status: ready` and not deferred — exactly the work that is "up-next." This auto-launch lane remains Claude-only: a non-Claude environment must report `parked` or `autolaunch-failed` and leave the node ready for an explicit supported dispatch, never pretend it started a native background worker. A `blocked`/`deferred` node, or one still in `idea`, is **parked** (pre-planned future work), never launched. The dispatched run defaults to `no-merge` (it lands a PR for review, not an auto-merge — Locked Decision 4). On dispatch failure the node stays `ready` and the blueprinted plan is intact for a manual `/target bg <node>` retry.
+This is a **no-op unless** `config.target.auto_launch_on_blueprint: true` is set in config.toml (DEFAULT OFF; an absent key reads as off, so existing behavior is unchanged for anyone who has not opted in). When enabled, it dispatches the claimed node as a fresh unsupervised `claude --bg` `/target` worker (which keeps an agent-view row and an attachable pane — unsupervised, not headless) IFF the node is `status: ready` and not deferred — exactly the work that is "up-next." This auto-launch lane remains Claude-only: a non-Claude environment must report `parked` or `autolaunch-failed` and leave the node ready for an explicit supported dispatch, never pretend it started a native background worker. A `blocked`/`deferred` node, or one still in `idea`, is **parked** (pre-planned future work), never launched. The dispatched run defaults to `no-merge` (it lands a PR for review, not an auto-merge — Locked Decision 4). On dispatch failure the node stays `ready` and the blueprinted plan is intact for a manual `/target bg <node>` retry.
 
 Relay the single decision line it prints (`auto-launched …` / `parked …` / `autolaunch-failed …`) to the user; it is never silent when the gate is ON. This keeps the planning session free to batch more `/think` + `/blueprint` while the dispatched worker runs (the fresh bg process is the only real context "clear"). The gate reuses the existing backlog state model — no new concept — so the developer's own discipline (marking future work `blocked_by`/`deferred`) IS the "only launch what's up-next" control.
 
@@ -1228,3 +433,26 @@ A string is treated as a feature description (not a path) when it:
 - Does not start with `~`, `./`, `../`, or `/`
 
 A path that looks like a path but does not exist on disk also triggers this redirect (exit 1) rather than falling through to raw-description mode. This is deliberate: a typo in a path gets a loud "file not found" rather than silently treating the argument as a description.
+
+## Gotchas
+
+Environment-specific traps that defy reasonable assumptions.
+
+- **A node-id argument must render `claims:` into the plan frontmatter, or intake DUPLICATES the node.** `/blueprint x-8af8` claims that node only if the plan writes a literal `claims: x-8af8` line; the template's commented `# claims:` is a doc note, not a substitute. The post-write refusal (Plan Claims Ingestion gate) halts before adoption when it is missing.
+- **A design-doc path with a typo must fail loud, never degrade to raw-description mode.** The path-shape classifier treats anything with `/`, `.md`, `~`, `./`, `../`, `/` as a path; a nonexistent one exits 1 with "file not found" rather than silently planning from the literal string.
+- **`## Failure Modes` at level 2 exactly.** The gate greps `^## Failure Modes$` case-sensitively; a level-3 heading or in-prose mention does NOT satisfy it, and the gate refuses rather than auto-generating the section.
+- **A malformed epic `max_children` (non-integer, `< 1`) is refused UP FRONT, before grouping** - not deferred to decompose, because a single-group collapse skips decompose entirely and would let the bad cap pass silently.
+- **`done_probes` must end in a predicate and assert freshness.** `... | tail -5` masks the real exit status (reads as a pass); `test -f <file>` passes vacuously against launch-day residue. Bound every probe in time.
+- **Plans save to the Obsidian vault, not git `docs/`.** Use `fno plan path --slug`; never hand-assemble the filename.
+
+## References
+
+- [references/blueprint-gates.md](references/blueprint-gates.md) - All state-keyed gates (claims, failure-mode, schema, executor, model, provenance, PRODUCT.md, impeccable_stages, done_probes, kill-criteria detail, collision, peer heads-up)
+- [references/epic-decomposition.md](references/epic-decomposition.md) - `group N` bounded epic decomposition
+- [references/discovery-gate.md](references/discovery-gate.md) - Discovery-gate question protocol
+- [references/quick-template.md](references/quick-template.md) - Full plan template
+- [references/single-doc-spec.md](references/single-doc-spec.md) - Single-doc mutation spec
+- [references/section-headers.md](references/section-headers.md) - Canonical section headers
+- [references/dependency-detection.md](references/dependency-detection.md) - depends_on resolution
+- [references/kill-criteria-howto.md](references/kill-criteria-howto.md) - Kill-criteria authoring guide
+- [references/linear-integration.md](references/linear-integration.md) - Linear sync
