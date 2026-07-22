@@ -38,11 +38,12 @@ use crate::backlog_view;
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
     BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
-    Frame, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta, PanePlacement, PaneTarget,
-    ServerMsg, SquadMeta, TabMeta, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    Frame, LayoutScope, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta, PanePlacement,
+    PaneTarget, ServerMsg, SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta, TabSel,
+    WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
-use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session};
+use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
 use crate::tree::{self, Axis, Dir, Node, Rect, Tab, TabId};
 use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
@@ -416,6 +417,48 @@ enum CoreMsg {
     },
     PaneRelease {
         pane: u64,
+        reply: ControlReply,
+    },
+    // -- v41 (x-d865) layout script verbs (all snapshot reads / inline
+    //    mutations, replying on the oneshot). --
+    PaneSplit {
+        pane: u64,
+        direction: Dir,
+        no_focus: bool,
+        reply: ControlReply,
+    },
+    TabLs {
+        squad: PaneTarget,
+        reply: ControlReply,
+    },
+    TabCreate {
+        squad: PaneTarget,
+        name: Option<String>,
+        reply: ControlReply,
+    },
+    TabRename {
+        squad: PaneTarget,
+        tab: TabSel,
+        name: String,
+        reply: ControlReply,
+    },
+    LayoutGet {
+        scope: LayoutScope,
+        reply: ControlReply,
+    },
+    PaneWhere {
+        fno_id: String,
+        reply: ControlReply,
+    },
+    PaneBreak {
+        pane: u64,
+        name: Option<String>,
+        reply: ControlReply,
+    },
+    TabJoin {
+        src_tab: TabSel,
+        anchor_pane: u64,
+        direction: Dir,
         reply: ControlReply,
     },
     /// A fresh registry-derived agent row set from the off-loop reader task
@@ -1921,11 +1964,25 @@ impl Core {
                     cwd,
                     child_pid: entry.pty.child_pid(),
                     title: None,
+                    // (x-d865) The fno_id join: the registry row whose mux ref
+                    // points at this pane in THIS session carries the durable
+                    // identity. Server-owned (self.agents is the cached read).
+                    fno_id: self.fno_id_for_pane(pid),
                 }
             })
             .collect();
         out.sort_by_key(|p| p.pane_id);
         out
+    }
+
+    /// The `fno_id` (durable session id) of the registry row hosting `pid` in
+    /// this session, if any. The forward half of the identity join (Locked
+    /// Decision 6); `PaneWhere` is the reverse.
+    fn fno_id_for_pane(&self, pid: u64) -> Option<String> {
+        self.agents.iter().find_map(|a| match &a.mux {
+            Some((sess, pane)) if sess == &self.session_name && *pane == pid => a.session_id.clone(),
+            _ => None,
+        })
     }
 
     fn resolve_placement_target(
@@ -2040,7 +2097,7 @@ impl Core {
         cols: u16,
         claim: bool,
         placement: PanePlacement,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, (u32, String)> {
         // Create-if-absent lives ONLY here on the script path (Locked 7, x-9f75): a `pane run --squad
         // <name>` for a not-yet-existing squad mints one so lanes group by project; AttachAgent / UI targets
         // stay fail-closed. Only an UNKNOWN name is creatable (blank / unknown id still error). Resolved
@@ -2049,25 +2106,27 @@ impl Core {
             PaneTarget::SquadName(name) => {
                 let n = name.trim();
                 if n.is_empty() {
-                    return Err("squad name cannot be blank".into());
+                    return Err((err_code::BAD_REQUEST, "squad name cannot be blank".into()));
                 }
                 match self.resolve_placement_target(&placement.target, None) {
                     Ok(d) => (d, None),
                     // Coupled to resolve_placement_target's error text: a name matching NO squad is
                     // creatable; an ambiguous name (2+ matches) still errors - never silently pick one.
                     Err(e) if e.starts_with("no such squad") => (None, Some(n.to_string())),
-                    Err(e) => return Err(e),
+                    Err(e) => return Err((err_code::BAD_REQUEST, e)),
                 }
             }
             _ => {
                 let current = self.session.find_by_cwd(&squad_key);
-                (
-                    self.resolve_placement_target(&placement.target, current)?,
-                    None,
-                )
+                let dest = self
+                    .resolve_placement_target(&placement.target, current)
+                    .map_err(|e| (err_code::BAD_REQUEST, e))?;
+                (dest, None)
             }
         };
-        let pid = self.spawn_pane_cmd(&argv, rows, cols, &cwd)?;
+        let pid = self
+            .spawn_pane_cmd(&argv, rows, cols, &cwd)
+            .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         if claim {
             // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).
             // The claim itself is acquired per-burst via PaneClaim.
@@ -2093,12 +2152,454 @@ impl Core {
             self.squad_members.insert(sid, Vec::new());
             self.persist_squad(sid);
         } else {
-            self.place_spawned_pane(dest, &squad_key, pid, placement.split)?;
+            // v41 (x-d865): place_with honors placement.tab / placement.at; it
+            // falls through to place_spawned_pane on the pre-v41 no-tab/no-anchor
+            // path, and reaps `pid` on any hard error so a bad anchor never
+            // orphans a pane.
+            self.place_with(dest, &squad_key, pid, &placement)?;
         }
         // Keep any attached client's view consistent; a script-only session
         // has no clients, so this is then a cheap no-op.
         self.push_layout(true);
         Ok(pid)
+    }
+
+    // ---- v41 (x-d865) layout script API ---------------------------------
+
+    /// Resolve a [`TabSel`] to a tab INDEX within `sid`. `New` is not a
+    /// selector here (callers that support creation handle it before calling).
+    fn resolve_tab_index(&self, sid: u64, sel: &TabSel) -> Result<usize, String> {
+        let sq = self
+            .session
+            .squad(sid)
+            .ok_or_else(|| format!("no such squad id: {sid}"))?;
+        if sq.tabs.is_empty() {
+            return Err(format!("squad {sid} has no tabs"));
+        }
+        match sel {
+            TabSel::Active => Ok(sq.active_tab.min(sq.tabs.len() - 1)),
+            TabSel::Index(i) => (*i < sq.tabs.len())
+                .then_some(*i)
+                .ok_or_else(|| format!("no tab at index {i}")),
+            TabSel::Id(id) => sq
+                .tabs
+                .iter()
+                .position(|t| t.id == *id)
+                .ok_or_else(|| format!("no tab with id {id}")),
+            TabSel::Name(n) => {
+                let mut hits = sq
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| t.name.as_deref() == Some(n.as_str()));
+                match (hits.next(), hits.next()) {
+                    (Some((i, _)), None) => Ok(i),
+                    (Some(_), Some(_)) => Err(format!("ambiguous tab name: {n}")),
+                    (None, _) => Err(format!("no tab named {n}")),
+                }
+            }
+            TabSel::New => Err("cannot select the 'new' tab of an existing set".into()),
+        }
+    }
+
+    /// Placement that honors `placement.tab` / `placement.at` (v41), reaping
+    /// `pid` on any hard error so a bad anchor never orphans a pane. The
+    /// pre-v41 no-tab/no-anchor path delegates to [`Self::place_spawned_pane`]
+    /// unchanged.
+    fn place_with(
+        &mut self,
+        dest: Option<u64>,
+        squad_key: &str,
+        pid: u64,
+        placement: &PanePlacement,
+    ) -> Result<(u64, TabId, bool), (u32, String)> {
+        if placement.tab.is_none() && placement.at.is_none() {
+            return self
+                .place_spawned_pane(dest, squad_key, pid, placement.split)
+                .map_err(|e| (err_code::SPAWN_FAILED, e));
+        }
+        let Some(sid) = dest else {
+            self.reap_pane(pid);
+            return Err((
+                err_code::BAD_REQUEST,
+                "a --tab/--at placement needs a resolved squad".into(),
+            ));
+        };
+        let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
+            self.reap_pane(pid);
+            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
+        };
+        // An explicit `New` tab ignores any anchor - it is born with this pane.
+        if matches!(placement.tab, Some(TabSel::New)) {
+            let tid = self.session.mint_tab_id();
+            self.session.squads[si].tabs.push(Tab {
+                name: None,
+                id: tid,
+                root: Node::Leaf(pid),
+                focus: pid,
+            });
+            return Ok((sid, tid, false));
+        }
+        let ti = match &placement.tab {
+            Some(sel) => match self.resolve_tab_index(sid, sel) {
+                Ok(ti) => ti,
+                Err(e) => {
+                    self.reap_pane(pid);
+                    return Err((err_code::BAD_REQUEST, e));
+                }
+            },
+            None => {
+                let sq = &self.session.squads[si];
+                sq.active_tab.min(sq.tabs.len().saturating_sub(1))
+            }
+        };
+        let tid = self.session.squads[si].tabs[ti].id;
+        let vp = self.tab_rect(tid);
+        let anchor = placement
+            .at
+            .unwrap_or(self.session.squads[si].tabs[ti].focus);
+        let dir = placement.split.unwrap_or(Dir::Down);
+        if !tree::leaves(&self.session.squads[si].tabs[ti].root).contains(&anchor) {
+            self.reap_pane(pid);
+            return Err((
+                err_code::BAD_REQUEST,
+                format!("anchor pane {anchor} is not in the target tab"),
+            ));
+        }
+        let res = {
+            let tab = &mut self.session.squads[si].tabs[ti];
+            tree::split_at(tab, vp, anchor, dir, pid)
+        };
+        match res {
+            Ok(()) => Ok((sid, tid, false)),
+            // Min-size refusal falls back to a fresh tab, never a dead-end -
+            // mirroring place_spawned_pane.
+            Err(tree::SplitError::TooSmall { .. }) => {
+                let ntid = self.session.mint_tab_id();
+                self.session.squads[si].tabs.push(Tab {
+                    name: None,
+                    id: ntid,
+                    root: Node::Leaf(pid),
+                    focus: pid,
+                });
+                Ok((sid, ntid, true))
+            }
+            Err(e) => {
+                self.reap_pane(pid);
+                Err((err_code::BAD_REQUEST, e.to_string()))
+            }
+        }
+    }
+
+    /// Split an ARBITRARY pane (not just the focus) into a fresh shell pane on
+    /// `direction`'s side. `no_focus` (default true on the wire) keeps every
+    /// viewer's focus put (Locked Decision 3); focus moves only on the opt-in.
+    /// Spawn-first, so a min-size refusal reaps the pre-spawned shell with the
+    /// tree untouched.
+    fn split_pane_script(
+        &mut self,
+        pane: u64,
+        direction: Dir,
+        no_focus: bool,
+    ) -> Result<u64, (u32, String)> {
+        let (sid, ti) = self
+            .session
+            .find_pane(pane)
+            .ok_or((err_code::DEAD_PANE, format!("no such pane: {pane}")))?;
+        let tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
+        let vp = self.tab_rect(tid);
+        let cwd = self
+            .session
+            .squad(sid)
+            .map(|s| s.canonical_cwd().to_string())
+            .unwrap_or_default();
+        let (rows, cols) = self
+            .panes
+            .get(&pane)
+            .map(|e| e.vt.size())
+            .unwrap_or((vp.rows, vp.cols));
+        let new_pid = self
+            .spawn_pane(rows, cols, &cwd)
+            .map_err(|e| (err_code::SPAWN_FAILED, e))?;
+        let si = self
+            .session
+            .squads
+            .iter()
+            .position(|s| s.id == sid)
+            .expect("squad live");
+        let res = {
+            let tab = &mut self.session.squads[si].tabs[ti];
+            tree::split_at(tab, vp, pane, direction, new_pid).map(|()| {
+                if !no_focus {
+                    tab.focus = new_pid;
+                }
+            })
+        };
+        match res {
+            Ok(()) => {
+                self.push_layout(true);
+                Ok(new_pid)
+            }
+            Err(e) => {
+                self.reap_pane(new_pid);
+                Err((err_code::BAD_REQUEST, e.to_string()))
+            }
+        }
+    }
+
+    /// List a squad's tabs for [`ControlVerb::TabLs`].
+    fn tab_ls(&self, squad: &PaneTarget) -> Result<Vec<TabInfo>, (u32, String)> {
+        let sid = self.resolve_squad(squad)?;
+        let sq = self
+            .session
+            .squad(sid)
+            .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?;
+        let active_ti = sq.active_tab.min(sq.tabs.len().saturating_sub(1));
+        Ok(sq
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| TabInfo {
+                tab_id: t.id,
+                name: t.name.clone(),
+                pane_ids: tree::leaves(&t.root),
+                active: i == active_ti,
+            })
+            .collect())
+    }
+
+    /// Create a new tab (born with one shell leaf) for [`ControlVerb::TabCreate`].
+    /// Returns the new leaf's pane id.
+    fn tab_create(&mut self, squad: &PaneTarget, name: Option<String>) -> Result<u64, (u32, String)> {
+        let sid = self.resolve_squad(squad)?;
+        let cwd = self
+            .session
+            .squad(sid)
+            .map(|s| s.canonical_cwd().to_string())
+            .unwrap_or_default();
+        let pid = self
+            .spawn_pane(vt::DEFAULT_ROWS, vt::DEFAULT_COLS, &cwd)
+            .map_err(|e| (err_code::SPAWN_FAILED, e))?;
+        let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
+            self.reap_pane(pid);
+            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
+        };
+        let tid = self.session.mint_tab_id();
+        self.session.squads[si].tabs.push(Tab {
+            name: name.filter(|n| !n.trim().is_empty()),
+            id: tid,
+            root: Node::Leaf(pid),
+            focus: pid,
+        });
+        self.push_layout(true);
+        Ok(pid)
+    }
+
+    /// Rename a tab for [`ControlVerb::TabRename`]. A blank name clears it.
+    fn tab_rename(
+        &mut self,
+        squad: &PaneTarget,
+        sel: &TabSel,
+        name: String,
+    ) -> Result<(), (u32, String)> {
+        let sid = self.resolve_squad(squad)?;
+        let ti = self
+            .resolve_tab_index(sid, sel)
+            .map_err(|e| (err_code::BAD_REQUEST, e))?;
+        let sq = self
+            .session
+            .squad_mut(sid)
+            .ok_or((err_code::BAD_REQUEST, "squad vanished".to_string()))?;
+        sq.tabs[ti].name = Some(name).filter(|n| !n.trim().is_empty());
+        self.push_layout(true);
+        Ok(())
+    }
+
+    /// The nested tree + per-pane geometry of one tab (Locked Decision 5).
+    fn tab_layout(&self, tab: &Tab) -> TabLayout {
+        let vp = self.tab_rect(tab.id);
+        TabLayout {
+            tab_id: tab.id,
+            name: tab.name.clone(),
+            focus: tab.focus,
+            root: tab.root.clone(),
+            panes: tree::layout(&tab.root, vp),
+        }
+    }
+
+    fn squad_layout(&self, sq: &Squad) -> SquadLayout {
+        SquadLayout {
+            squad_id: sq.id,
+            squad_name: sq.name.clone(),
+            tabs: sq.tabs.iter().map(|t| self.tab_layout(t)).collect(),
+        }
+    }
+
+    /// Dump a [`LayoutScope`] for [`ControlVerb::LayoutGet`].
+    fn layout_get(&self, scope: &LayoutScope) -> Result<Vec<SquadLayout>, (u32, String)> {
+        match scope {
+            LayoutScope::Session => Ok(self
+                .session
+                .squads
+                .iter()
+                .map(|s| self.squad_layout(s))
+                .collect()),
+            LayoutScope::Squad(t) => {
+                let sid = self.resolve_squad(t)?;
+                let sq = self
+                    .session
+                    .squad(sid)
+                    .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?;
+                Ok(vec![self.squad_layout(sq)])
+            }
+            LayoutScope::Tab { squad, tab } => {
+                let sid = self.resolve_squad(squad)?;
+                let ti = self
+                    .resolve_tab_index(sid, tab)
+                    .map_err(|e| (err_code::BAD_REQUEST, e))?;
+                let sq = self.session.squad(sid).expect("resolve_squad live");
+                Ok(vec![SquadLayout {
+                    squad_id: sq.id,
+                    squad_name: sq.name.clone(),
+                    tabs: vec![self.tab_layout(&sq.tabs[ti])],
+                }])
+            }
+        }
+    }
+
+    /// Break `pane` into its own new tab in the same squad, keeping the PTY
+    /// alive ([`tree::detach_leaf`], never a reap). If the source tab emptied,
+    /// remove it (AC1-EDGE: never leave an empty tab). Returns the new tab id.
+    fn pane_break(&mut self, pane: u64, name: Option<String>) -> Result<TabId, (u32, String)> {
+        let (sid, ti) = self
+            .session
+            .find_pane(pane)
+            .ok_or((err_code::DEAD_PANE, format!("no such pane: {pane}")))?;
+        let tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
+        let vp = self.tab_rect(tid);
+        let si = self
+            .session
+            .squads
+            .iter()
+            .position(|s| s.id == sid)
+            .expect("squad live");
+        let outcome = {
+            let tab = &mut self.session.squads[si].tabs[ti];
+            tree::detach_leaf(tab, vp, pane).map_err(|e| (err_code::BAD_REQUEST, e.to_string()))?
+        };
+        let new_tid = self.session.mint_tab_id();
+        let name = name.filter(|n| !n.trim().is_empty());
+        // Push the new tab FIRST so the squad is never transiently empty, then
+        // (for TabEmptied) drop the now-orphaned source tab that still holds
+        // this pane - otherwise the pane would live in two tabs.
+        self.session.squads[si].tabs.push(Tab {
+            name,
+            id: new_tid,
+            root: Node::Leaf(pane),
+            focus: pane,
+        });
+        if matches!(outcome, tree::DetachOutcome::TabEmptied) {
+            self.session.remove_tab(sid, ti);
+        }
+        self.push_layout(true);
+        Ok(new_tid)
+    }
+
+    /// Join a whole source tab into the anchor pane's tab as a split, removing
+    /// the source tab. Refuses join-into-self up front (BAD_REQUEST). All PTYs
+    /// survive; a min-size failure leaves BOTH trees untouched.
+    fn tab_join(&mut self, src_sel: &TabSel, anchor_pane: u64, dir: Dir) -> Result<(), (u32, String)> {
+        let (sid, dst_ti) = self.session.find_pane(anchor_pane).ok_or((
+            err_code::DEAD_PANE,
+            format!("no such anchor pane: {anchor_pane}"),
+        ))?;
+        let src_ti = self
+            .resolve_tab_index(sid, src_sel)
+            .map_err(|e| (err_code::BAD_REQUEST, e))?;
+        if src_ti == dst_ti {
+            return Err((err_code::BAD_REQUEST, "cannot join a tab into itself".into()));
+        }
+        let dst_tid = self.session.squad(sid).expect("find_pane live").tabs[dst_ti].id;
+        let vp = self.tab_rect(dst_tid);
+        let si = self
+            .session
+            .squads
+            .iter()
+            .position(|s| s.id == sid)
+            .expect("squad live");
+        let src_subtree = self.session.squads[si].tabs[src_ti].root.clone();
+        {
+            let tab = &mut self.session.squads[si].tabs[dst_ti];
+            tree::graft_subtree(tab, vp, anchor_pane, dir, src_subtree)
+                .map_err(|e| (err_code::BAD_REQUEST, e.to_string()))?;
+        }
+        // Graft committed (all-or-nothing): remove the src tab. Its panes rode
+        // into dst as a cloned subtree; remove_tab drops only the Tab, never a
+        // PTY, so no pane is reaped.
+        self.session.remove_tab(sid, src_ti);
+        self.push_layout(true);
+        Ok(())
+    }
+
+    /// Resolve an `fno_id` to its live location for [`ControlVerb::PaneWhere`],
+    /// or one of the three distinct error codes. Never an empty-successful
+    /// location (Locked Decision 4). REGISTRY_UNAVAILABLE is the CLI's to emit
+    /// (it reads registry.json); the server's cache is always consultable, so
+    /// an unmatched id here is NOT_FOUND, and a matched-but-paneless one is
+    /// NOT_PANE_HOSTED.
+    fn pane_where(&self, fno_id: &str) -> Result<ServerMsg, u32> {
+        let id = fno_id.trim();
+        if id.is_empty() {
+            return Err(err_code::NOT_FOUND);
+        }
+        let matched: Vec<&RegistryAgent> = self
+            .agents
+            .iter()
+            .filter(|a| identity_matches(a, id))
+            .collect();
+        if matched.is_empty() {
+            return Err(err_code::NOT_FOUND);
+        }
+        let mut panes: Vec<u64> = Vec::new();
+        let mut tabs: Vec<(TabId, Option<String>)> = Vec::new();
+        let mut squad_id: Option<u64> = None;
+        let mut squad_name: Option<String> = None;
+        for a in &matched {
+            let Some((sess, pane)) = &a.mux else { continue };
+            if sess != &self.session_name {
+                continue;
+            }
+            if let Some((sid, ti)) = self.session.find_pane(*pane) {
+                let sq = self.session.squad(sid).expect("find_pane live");
+                squad_id.get_or_insert(sid);
+                if squad_name.is_none() {
+                    squad_name = sq.name.clone();
+                }
+                panes.push(*pane);
+                let t = &sq.tabs[ti];
+                if !tabs.iter().any(|(tid, _)| *tid == t.id) {
+                    tabs.push((t.id, t.name.clone()));
+                }
+            }
+        }
+        match squad_id {
+            Some(squad_id) => Ok(ServerMsg::PaneLocation {
+                fno_id: id.to_string(),
+                squad_id,
+                squad_name,
+                tabs,
+                panes,
+            }),
+            None => Err(err_code::NOT_PANE_HOSTED),
+        }
+    }
+
+    /// Resolve a [`PaneTarget`] to a squad id, defaulting `CurrentRoute` to the
+    /// active squad, for the tab/layout verbs.
+    fn resolve_squad(&self, target: &PaneTarget) -> Result<u64, (u32, String)> {
+        self.resolve_placement_target(target, self.session.active_squad)
+            .map_err(|e| (err_code::BAD_REQUEST, e))?
+            .ok_or((err_code::BAD_REQUEST, "no target squad".into()))
     }
 
     /// A one-line refusal/notice to ONE client (BEL + transient message on
@@ -5905,10 +6406,7 @@ impl Core {
                 let cols = cols.unwrap_or(vt::DEFAULT_COLS);
                 let msg = match self.run_pane(squad_key, cwd, argv, rows, cols, claim, placement) {
                     Ok(pane_id) => ServerMsg::PaneSpawned { pane_id },
-                    Err(e) => ServerMsg::Err {
-                        code: err_code::SPAWN_FAILED,
-                        msg: e,
-                    },
+                    Err((code, msg)) => ServerMsg::Err { code, msg },
                 };
                 let _ = reply.send(msg);
                 Flow::Continue
@@ -6022,6 +6520,90 @@ impl Core {
                 // releases unconditionally.
                 self.claims.remove(&pane);
                 let _ = reply.send(ServerMsg::Ok);
+                Flow::Continue
+            }
+            // -- v41 (x-d865) layout script verbs. All reply inline; none moves
+            //    a viewer's focus (a script split's no_focus defaults true). --
+            CoreMsg::PaneSplit {
+                pane,
+                direction,
+                no_focus,
+                reply,
+            } => {
+                let msg = match self.split_pane_script(pane, direction, no_focus) {
+                    Ok(pane_id) => ServerMsg::PaneSpawned { pane_id },
+                    Err((code, msg)) => ServerMsg::Err { code, msg },
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
+            CoreMsg::TabLs { squad, reply } => {
+                let msg = match self.tab_ls(&squad) {
+                    Ok(tabs) => ServerMsg::TabList { tabs },
+                    Err((code, msg)) => ServerMsg::Err { code, msg },
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
+            CoreMsg::TabCreate { squad, name, reply } => {
+                let msg = match self.tab_create(&squad, name) {
+                    Ok(pane_id) => ServerMsg::PaneSpawned { pane_id },
+                    Err((code, msg)) => ServerMsg::Err { code, msg },
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
+            CoreMsg::TabRename {
+                squad,
+                tab,
+                name,
+                reply,
+            } => {
+                let msg = match self.tab_rename(&squad, &tab, name) {
+                    Ok(()) => ServerMsg::Ok,
+                    Err((code, msg)) => ServerMsg::Err { code, msg },
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
+            CoreMsg::LayoutGet { scope, reply } => {
+                let msg = match self.layout_get(&scope) {
+                    Ok(squads) => ServerMsg::LayoutTree { squads },
+                    Err((code, msg)) => ServerMsg::Err { code, msg },
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
+            CoreMsg::PaneWhere { fno_id, reply } => {
+                let msg = match self.pane_where(&fno_id) {
+                    Ok(location) => location,
+                    Err(code) => ServerMsg::Err {
+                        code,
+                        msg: format!("fno_id not located: {fno_id}"),
+                    },
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
+            CoreMsg::PaneBreak { pane, name, reply } => {
+                let msg = match self.pane_break(pane, name) {
+                    Ok(tab_id) => ServerMsg::TabSpawned { tab_id },
+                    Err((code, msg)) => ServerMsg::Err { code, msg },
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
+            CoreMsg::TabJoin {
+                src_tab,
+                anchor_pane,
+                direction,
+                reply,
+            } => {
+                let msg = match self.tab_join(&src_tab, anchor_pane, direction) {
+                    Ok(()) => ServerMsg::Ok,
+                    Err((code, msg)) => ServerMsg::Err { code, msg },
+                };
+                let _ = reply.send(msg);
                 Flow::Continue
             }
             CoreMsg::AgentTails { tails } => {
@@ -6826,6 +7408,15 @@ async fn read_guard_agents() -> Option<Vec<RegistryAgent>> {
     }
 }
 
+/// Does registry row `a` denote the session `id` names (x-d865)? `id` may be a
+/// full `session_id`, a full `harness_session_id`, or an unambiguous PREFIX of
+/// either (the `where` convenience; the CLI enforces prefix uniqueness before
+/// it ever connects). Empty ids never match - the caller guards.
+fn identity_matches(a: &RegistryAgent, id: &str) -> bool {
+    let hit = |s: &Option<String>| s.as_deref().is_some_and(|v| v == id || v.starts_with(id));
+    hit(&a.session_id) || hit(&a.harness_session_id)
+}
+
 /// A one-shot v4 control connection: version-check, route the verb to the core
 /// loop with a oneshot reply, answer with exactly one message, close. A client
 /// that vanishes mid-verb drops the reply receiver, which the off-loop
@@ -6971,6 +7562,87 @@ async fn handle_control(
             core_tx
                 .send(CoreMsg::PaneRelease {
                     pane,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        // -- v41 (x-d865) layout script verbs --
+        ControlVerb::PaneSplit {
+            pane,
+            direction,
+            no_focus,
+        } => {
+            core_tx
+                .send(CoreMsg::PaneSplit {
+                    pane,
+                    direction,
+                    no_focus,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::TabLs { squad } => {
+            core_tx
+                .send(CoreMsg::TabLs {
+                    squad,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::TabCreate { squad, name } => {
+            core_tx
+                .send(CoreMsg::TabCreate {
+                    squad,
+                    name,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::TabRename { squad, tab, name } => {
+            core_tx
+                .send(CoreMsg::TabRename {
+                    squad,
+                    tab,
+                    name,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::LayoutGet { scope } => {
+            core_tx
+                .send(CoreMsg::LayoutGet {
+                    scope,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::PaneWhere { fno_id } => {
+            core_tx
+                .send(CoreMsg::PaneWhere {
+                    fno_id,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::PaneBreak { pane, name } => {
+            core_tx
+                .send(CoreMsg::PaneBreak {
+                    pane,
+                    name,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::TabJoin {
+            src_tab,
+            anchor_pane,
+            direction,
+        } => {
+            core_tx
+                .send(CoreMsg::TabJoin {
+                    src_tab,
+                    anchor_pane,
+                    direction,
                     reply: reply_tx,
                 })
                 .await
@@ -7691,6 +8363,8 @@ mod tests {
 
     fn agent_in(sess: &str, pane: u64, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         RegistryAgent {
+            session_id: None,
+            harness_session_id: None,
             name: "w".into(),
             cwd: "/w".into(),
             exited,
@@ -7726,6 +8400,8 @@ mod tests {
             // A pane hosted by ANOTHER session -> that session's server renders
             // it; correctly skipped here.
             RegistryAgent {
+                session_id: None,
+                harness_session_id: None,
                 name: "foreign-pane".into(),
                 cwd: "/other".into(),
                 exited: false,
@@ -7744,6 +8420,8 @@ mod tests {
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
             RegistryAgent {
+                session_id: None,
+                harness_session_id: None,
                 name: "bg-worker".into(),
                 cwd: "/bg".into(),
                 exited: false,
@@ -7819,6 +8497,8 @@ mod tests {
             // but its registry cwd "/w" matches no origin - membership must win.
             agent_in("main", 42, None, false),
             RegistryAgent {
+                session_id: None,
+                harness_session_id: None,
                 name: "watcher".into(),
                 cwd: "/grp/backend/sub/dir".into(),
                 exited: false,
@@ -7859,6 +8539,8 @@ mod tests {
         let mut core = empty_core();
         core.agents = vec![
             RegistryAgent {
+                session_id: None,
+                harness_session_id: None,
                 name: "think-x-9999".into(),
                 cwd: "/w".into(),
                 exited: false,
@@ -7876,6 +8558,8 @@ mod tests {
             },
             // An exited external row (dead pane beat the upgrade): not attachable.
             RegistryAgent {
+                session_id: None,
+                harness_session_id: None,
                 name: "dead-ext".into(),
                 cwd: "/w".into(),
                 exited: true,
@@ -7927,6 +8611,8 @@ mod tests {
         // merge_rows would have set exited=false + external=true on this row,
         // but its mux pane (77) is absent from core.panes -> pane_dead.
         core.agents = vec![RegistryAgent {
+            session_id: None,
+            harness_session_id: None,
             name: "upgraded".into(),
             cwd: "/w".into(),
             exited: false,
@@ -8224,6 +8910,229 @@ mod tests {
             squad.tabs.iter().find(|t| t.id == tid).unwrap().root,
             Node::Leaf(3)
         );
+    }
+
+    // ---- v41 (x-d865) layout script API server ops ----------------------
+
+    /// squad 1: tab 10 = panes [1,2] (H-split); tab 20 "bee" = pane [3].
+    fn two_tab_core() -> Core {
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/a".into()],
+            None,
+            Tab {
+                name: None,
+                id: 10,
+                root: Node::Branch {
+                    axis: Axis::Horizontal,
+                    children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
+                },
+                focus: 1,
+            },
+        );
+        core.session.squad_mut(1).unwrap().tabs.push(Tab {
+            name: Some("bee".into()),
+            id: 20,
+            root: Node::Leaf(3),
+            focus: 3,
+        });
+        core.tab_areas.insert(10, (24, 80));
+        core.tab_areas.insert(20, (24, 80));
+        core.next_pane_id = 100;
+        core
+    }
+
+    #[test]
+    fn pane_break_moves_pane_to_new_tab_keeping_siblings() {
+        let mut core = two_tab_core();
+        let new_tid = core.pane_break(1, Some("solo".into())).unwrap();
+        let sq = core.session.squad(1).unwrap();
+        let a = sq.tabs.iter().find(|t| t.id == 10).unwrap();
+        assert_eq!(tree::leaves(&a.root), vec![2], "sibling 2 stays in the source tab");
+        let nt = sq.tabs.iter().find(|t| t.id == new_tid).unwrap();
+        assert_eq!(tree::leaves(&nt.root), vec![1], "1 broke into its own tab");
+        assert_eq!(nt.name.as_deref(), Some("solo"));
+    }
+
+    #[test]
+    fn pane_break_last_pane_removes_the_emptied_source_tab() {
+        // AC1-EDGE: pane 3 is tab 20's only leaf.
+        let mut core = two_tab_core();
+        let new_tid = core.pane_break(3, None).unwrap();
+        let sq = core.session.squad(1).unwrap();
+        assert!(
+            sq.tabs.iter().all(|t| t.id != 20),
+            "the emptied source tab is removed, not left blank"
+        );
+        let nt = sq.tabs.iter().find(|t| t.id == new_tid).unwrap();
+        assert_eq!(tree::leaves(&nt.root), vec![3]);
+    }
+
+    #[test]
+    fn tab_join_round_trips_a_break() {
+        // AC4-HP (tree half): break 1 into its own tab, then join it back next
+        // to sibling 2. The transient tab is gone; the pane set is preserved.
+        let mut core = two_tab_core();
+        let brk = core.pane_break(1, None).unwrap();
+        core.tab_join(&TabSel::Id(brk), 2, Dir::Right).unwrap();
+        let sq = core.session.squad(1).unwrap();
+        assert!(sq.tabs.iter().all(|t| t.id != brk), "the break tab is gone");
+        let a = sq.tabs.iter().find(|t| t.id == 10).unwrap();
+        let mut ls = tree::leaves(&a.root);
+        ls.sort_unstable();
+        assert_eq!(ls, vec![1, 2], "1 rejoined 2 in the original tab");
+        crate::tree::check_invariants(a).unwrap();
+    }
+
+    #[test]
+    fn tab_join_into_self_is_refused_bad_request() {
+        // AC2-EDGE: anchor 1 lives in tab 10; joining tab 10 into itself refuses.
+        let mut core = two_tab_core();
+        let before = core.session.squad(1).unwrap().tabs.clone();
+        let err = core.tab_join(&TabSel::Id(10), 1, Dir::Right).unwrap_err();
+        assert_eq!(err.0, err_code::BAD_REQUEST);
+        assert_eq!(
+            core.session.squad(1).unwrap().tabs,
+            before,
+            "a self-join mutates nothing"
+        );
+    }
+
+    #[test]
+    fn pane_where_distinguishes_found_absent_and_paneless() {
+        // AC1-ERR: three DISTINCT outcomes. F is pane-hosted (mux -> pane 1),
+        // G is a paneless bg row, Z is unknown.
+        let mut core = two_tab_core();
+        core.session_name = "sess".into();
+        let mut f = agent_in("sess", 1, None, false);
+        f.session_id = Some("F".into());
+        let mut g = agent(3, None, false);
+        g.mux = None; // paneless bg
+        g.session_id = Some("G".into());
+        core.agents = vec![f, g];
+
+        match core.pane_where("F") {
+            Ok(ServerMsg::PaneLocation { panes, tabs, .. }) => {
+                assert_eq!(panes, vec![1]);
+                assert_eq!(tabs, vec![(10, None)]);
+            }
+            other => panic!("F should resolve, got {other:?}"),
+        }
+        assert_eq!(core.pane_where("Z"), Err(err_code::NOT_FOUND));
+        assert_eq!(core.pane_where("G"), Err(err_code::NOT_PANE_HOSTED));
+    }
+
+    #[test]
+    fn fno_id_for_pane_forward_join() {
+        // AC3-HP reverse direction: pane -> fno_id via the registry join.
+        let mut core = two_tab_core();
+        core.session_name = "sess".into();
+        let mut f = agent_in("sess", 1, None, false);
+        f.session_id = Some("F".into());
+        core.agents = vec![f];
+        assert_eq!(core.fno_id_for_pane(1), Some("F".into()));
+        assert_eq!(core.fno_id_for_pane(2), None, "no registry row -> no fno_id");
+    }
+
+    #[test]
+    fn resolve_tab_index_by_id_name_and_index() {
+        let core = two_tab_core();
+        assert_eq!(core.resolve_tab_index(1, &TabSel::Id(20)).unwrap(), 1);
+        assert_eq!(
+            core.resolve_tab_index(1, &TabSel::Name("bee".into())).unwrap(),
+            1
+        );
+        assert_eq!(core.resolve_tab_index(1, &TabSel::Index(0)).unwrap(), 0);
+        assert!(core.resolve_tab_index(1, &TabSel::Name("nope".into())).is_err());
+        assert!(core.resolve_tab_index(1, &TabSel::Index(9)).is_err());
+    }
+
+    #[test]
+    fn layout_get_carries_nested_tree_and_geometry() {
+        // Locked Decision 5: structure AND rects.
+        let core = two_tab_core();
+        let squads = core.layout_get(&LayoutScope::Session).unwrap();
+        assert_eq!(squads.len(), 1);
+        let tab10 = squads[0].tabs.iter().find(|t| t.tab_id == 10).unwrap();
+        assert!(
+            matches!(tab10.root, Node::Branch { .. }),
+            "the nested tree is carried, not flattened"
+        );
+        assert_eq!(tab10.panes.len(), 2, "both panes are tiled with rects");
+        assert!(tab10.panes.iter().all(|(_, r)| r.cols > 0 && r.rows > 0));
+    }
+
+    #[test]
+    fn split_pane_script_splits_arbitrary_pane_without_stealing_focus() {
+        // AC1-HP + AC1-FR: split the NON-focused pane 2 (tab focus is 1); the
+        // new pane appears but the viewer's focus stays put.
+        let mut core = two_tab_core();
+        core.shells = vec!["/bin/cat".into()];
+        assert_eq!(core.session.squad(1).unwrap().tabs[0].focus, 1);
+        let new_pid = core.split_pane_script(2, Dir::Right, true).unwrap();
+        let tab = &core.session.squad(1).unwrap().tabs[0];
+        let mut ls = tree::leaves(&tab.root);
+        ls.sort_unstable();
+        assert_eq!(ls, vec![1, 2, new_pid], "the 3rd pane joined the tab");
+        assert_eq!(tab.focus, 1, "a scripted split never steals focus");
+        core.reap_pane(new_pid);
+    }
+
+    #[test]
+    fn run_pane_places_at_named_tab_and_anchor() {
+        // AC2-HP: --tab <id> --at <pane> --split down lands below the anchor in
+        // that exact tab; a bad anchor is BAD_REQUEST with no orphan pane.
+        let mut core = two_tab_core();
+        core.shells = vec!["/bin/cat".into()];
+        let before_panes = core.panes.len();
+        let pid = core
+            .run_pane(
+                "/a".into(),
+                "/a".into(),
+                vec!["/bin/cat".into()],
+                24,
+                80,
+                false,
+                PanePlacement {
+                    target: PaneTarget::SquadId(1),
+                    split: Some(Dir::Down),
+                    here: false,
+                    tab: Some(TabSel::Id(10)),
+                    at: Some(2),
+                },
+            )
+            .unwrap();
+        let tab = core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 10).unwrap();
+        assert!(tree::leaves(&tab.root).contains(&pid), "landed in tab 10");
+        core.reap_pane(pid);
+
+        // Bad anchor: pane 999 is not in tab 10 -> BAD_REQUEST, no orphan pane.
+        let panes_now = core.panes.len();
+        let err = core
+            .run_pane(
+                "/a".into(),
+                "/a".into(),
+                vec!["/bin/cat".into()],
+                24,
+                80,
+                false,
+                PanePlacement {
+                    target: PaneTarget::SquadId(1),
+                    split: Some(Dir::Down),
+                    here: false,
+                    tab: Some(TabSel::Id(10)),
+                    at: Some(999),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.0, err_code::BAD_REQUEST);
+        assert_eq!(
+            core.panes.len(),
+            panes_now,
+            "a bad anchor reaps the pre-spawned pane (no orphan)"
+        );
+        let _ = before_panes;
     }
 
     #[test]
@@ -8627,6 +9536,8 @@ mod tests {
     /// optional recorded claude session uuid.
     fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent {
         RegistryAgent {
+            session_id: None,
+            harness_session_id: None,
             name: name.into(),
             cwd: "/w".into(),
             exited: true,
@@ -8858,10 +9769,14 @@ mod tests {
         // `fno-agents` call. The external arm is checked before the live/exited
         // arms, so a dead external row still refuses on provenance.
         let ext_live = RegistryAgent {
+            session_id: None,
+            harness_session_id: None,
             external: true,
             ..bg_row("ext-a", "/tmp", Some("deadbee1"))
         };
         let ext_dead = RegistryAgent {
+            session_id: None,
+            harness_session_id: None,
             external: true,
             exited: true,
             ..bg_row("ext-b", "/tmp", Some("deadbee2"))
@@ -9020,6 +9935,8 @@ mod tests {
         use crate::squad_store::ExternalState as S;
         let mut core = empty_core();
         core.agents = vec![RegistryAgent {
+            session_id: None,
+            harness_session_id: None,
             external: true,
             ..bg_row("ext-live", "/tmp", Some("deadbeef"))
         }];
@@ -9040,6 +9957,8 @@ mod tests {
         // agent the external shadows; two same-named registry rows are ambiguous.
         // Both are fail-closed refusals, so no unrelated agent is ever stopped.
         let shared = |external, exited, attach: &str| RegistryAgent {
+            session_id: None,
+            harness_session_id: None,
             external,
             exited,
             ..bg_row("dup", "/tmp", Some(attach))
@@ -9131,6 +10050,8 @@ mod tests {
             Command::AttachAgent {
                 id: "deadbee1".into(),
                 placement: PanePlacement {
+                    tab: None,
+                    at: None,
                     target: PaneTarget::SquadName("ghost".into()),
                     split: None,
                     here: false,
@@ -9220,11 +10141,15 @@ mod tests {
         // contradiction - refused with no spawn.
         for placement in [
             PanePlacement {
+                tab: None,
+                at: None,
                 here: true,
                 split: Some(Dir::Right),
                 ..Default::default()
             },
             PanePlacement {
+                tab: None,
+                at: None,
                 here: true,
                 target: PaneTarget::SquadName("review".into()),
                 ..Default::default()
@@ -9986,6 +10911,8 @@ mod tests {
             Command::AttachAgent {
                 id: "deadbee2".into(),
                 placement: PanePlacement {
+                    tab: None,
+                    at: None,
                     target: PaneTarget::CurrentRoute,
                     split: Some(Dir::Right),
                     here: false,
@@ -10167,6 +11094,8 @@ mod tests {
     /// are the join surfaces; everything else is the quiet default.
     fn bg_row(name: &str, cwd: &str, attach: Option<&str>) -> RegistryAgent {
         RegistryAgent {
+            session_id: None,
+            harness_session_id: None,
             name: name.into(),
             cwd: cwd.into(),
             exited: false,
@@ -10358,10 +11287,14 @@ mod tests {
             bg_row("worker", "/w/x-bbb", None),
             // Rows that must NOT route: exited, pane-hosted, ready-card match.
             RegistryAgent {
+                session_id: None,
+                harness_session_id: None,
                 exited: true,
                 ..bg_row("tgt-x-ddd", "/w", Some("deadbee2"))
             },
             RegistryAgent {
+                session_id: None,
+                harness_session_id: None,
                 mux: Some(("test".into(), 5)),
                 ..bg_row("tgt-x-ddd", "/w", Some("deadbee3"))
             },
@@ -11468,6 +12401,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    tab: None,
+                    at: None,
                     target: PaneTarget::SquadName("review".into()),
                     split: None,
                     here: false,
@@ -11519,6 +12454,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    tab: None,
+                    at: None,
                     target: PaneTarget::SquadName("readyrule".into()),
                     split: None,
                     here: false,
@@ -11573,13 +12510,16 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    tab: None,
+                    at: None,
                     target: PaneTarget::SquadName("   ".into()),
                     split: None,
                     here: false,
                 },
             )
             .unwrap_err();
-        assert!(err.contains("blank"), "{err}");
+        assert!(err.1.contains("blank"), "{err:?}");
+        assert_eq!(err.0, err_code::BAD_REQUEST, "blank name is a bad request");
         assert_eq!(core.panes.len(), before, "no pane spawned on a blank name");
         assert!(core.session.squads.is_empty(), "no squad minted");
     }

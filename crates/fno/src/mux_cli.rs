@@ -1333,6 +1333,8 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                         .unwrap_or(PaneTarget::CurrentRoute),
                     split,
                     here: false,
+                    tab: None,
+                    at: None,
                 },
             },
         });
@@ -2535,6 +2537,8 @@ mod tests {
             p.cmd,
             PaneCmd::Run {
                 placement: PanePlacement {
+                    tab: None,
+                    at: None,
                     target: PaneTarget::SquadName(ref name),
                     split: Some(crate::tree::Dir::Left),
                     ..
@@ -2549,6 +2553,8 @@ mod tests {
             aliases.cmd,
             PaneCmd::Run {
                 placement: PanePlacement {
+                    tab: None,
+                    at: None,
                     target: PaneTarget::SquadName(ref name),
                     split: Some(crate::tree::Dir::Right),
                     ..
@@ -2564,6 +2570,8 @@ mod tests {
             long.cmd,
             PaneCmd::Run {
                 placement: PanePlacement {
+                    tab: None,
+                    at: None,
                     target: PaneTarget::SquadName(ref name),
                     split: Some(crate::tree::Dir::Up),
                     ..
