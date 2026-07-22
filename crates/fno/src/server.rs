@@ -10474,7 +10474,11 @@ mod tests {
         let a = sq.tabs.iter().find(|t| t.id == 10).unwrap();
         let mut ls = tree::leaves(&a.root);
         ls.sort_unstable();
-        assert_eq!(ls, vec![1, 2, 3], "pane 3 moved into the viewed tab, id kept");
+        assert_eq!(
+            ls,
+            vec![1, 2, 3],
+            "pane 3 moved into the viewed tab, id kept"
+        );
         assert_eq!(a.focus, 3, "the moved pane is focused in its new home");
         crate::tree::check_invariants(a).unwrap();
     }
@@ -10501,11 +10505,22 @@ mod tests {
         ls.sort_unstable();
         assert_eq!(ls, vec![1, 2], "both panes still in tab 10");
         assert!(
-            matches!(t.root, Node::Branch { axis: Axis::Vertical, .. }),
+            matches!(
+                t.root,
+                Node::Branch {
+                    axis: Axis::Vertical,
+                    ..
+                }
+            ),
             "the within-tab move reshaped to a vertical split"
         );
         assert!(
-            core.session.squad(1).unwrap().tabs.iter().any(|t| t.id == 20),
+            core.session
+                .squad(1)
+                .unwrap()
+                .tabs
+                .iter()
+                .any(|t| t.id == 20),
             "tab 20 is untouched by a within-tab move"
         );
     }
@@ -10581,7 +10596,7 @@ mod tests {
         core.clients.push(c);
         core.command(7, Command::BreakPane { pane: 1 });
         let brk = core.client_view(7).unwrap().1; // the new tab holding [1]
-        // Now cram the anchor tab so a join back would breach min-size.
+                                                  // Now cram the anchor tab so a join back would breach min-size.
         core.tab_areas.insert(20, (40, 8));
         let before_brk = core
             .session
