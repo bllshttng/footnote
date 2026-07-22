@@ -3710,6 +3710,14 @@ impl View {
     /// operator's. Mirrors the cursor logic in [`View::clamp_sideline_offset`],
     /// keyed on the focus row instead of the selector.
     fn reveal_focus_row(&mut self) {
+        // A live selector owns the scroll: `clamp_sideline_offset` already keeps
+        // the actionable cursor on-screen, and stealing that to reveal a focus
+        // band (which a background focus-follows-mouse can move independently of
+        // the cursor) would leave Enter/lifecycle keys acting on a scrolled-off
+        // row. The selector-visibility invariant wins (x-a621).
+        if self.selector.is_some() {
+            return;
+        }
         let focus = self.layout.focus;
         let visible = self.sideline_visible_rows();
         let total = self.display_rows().len();
@@ -14562,6 +14570,49 @@ mod tests {
         assert!(
             view.sideline_offset > 0,
             "the sideline scrolled to reveal the off-screen focus"
+        );
+    }
+
+    #[test]
+    fn focus_reveal_never_scrolls_an_open_selector_off_screen() {
+        // x-4374 (codex P2): an open selector owns the scroll - `clamp_sideline_offset`
+        // keeps that actionable cursor visible, and a focus change must NOT scroll
+        // it off-screen (Enter/lifecycle keys would then act on an invisible row).
+        let mut view = two_pane_view();
+        view.term = (6, 100);
+        let panes = view.layout.panes.clone();
+        let agents: Vec<AgentRow> = (0..8)
+            .map(|i| AgentRow {
+                name: format!("a{i}"),
+                pane_id: Some(100 + i),
+                ..focus_agent(0)
+            })
+            .collect();
+        let layout = |focus: u64, agents: Vec<AgentRow>| LayoutView {
+            squads: vec![meta(1, "footnote", 1, 0)],
+            active_squad: 1,
+            panes: panes.clone(),
+            focus,
+            area: (5, 72),
+            agents,
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        };
+        view.set_layout(layout(100, agents.clone()));
+        // Park the selector on the top agent row (display index 1) and pin the view.
+        view.selector = Some(1);
+        view.clamp_sideline_offset();
+        let visible = view.sideline_visible_rows();
+        // Focus jumps far below the fold - with a selector open, reveal must not fire.
+        view.set_layout(layout(107, agents.clone()));
+        let sel = view.selector.expect("selector still open");
+        assert!(
+            sel >= view.sideline_offset && sel < view.sideline_offset + visible,
+            "the selector {sel} stays visible in [{}, {})",
+            view.sideline_offset,
+            view.sideline_offset + visible
         );
     }
 
