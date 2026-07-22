@@ -28,9 +28,17 @@ Read-only; never writes; never raises (every read degrades to ``unknown``).
 """
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+# Exact tag openers only: `<promise>` / `<promise ...>`, never `<promised>` or a
+# word that merely starts with the tag name. Mirrors the loop runtime's protocol
+# so truth and the runtime agree on what a marker is.
+_PROMISE_RE = re.compile(r"<promise[>\s]")
+_WATCHING_RE = re.compile(r"<watching[>\s]")
+_HELP_RE = re.compile(r"<help[>\s]")
 
 # "silent for hours" (the brief's wording): below this the worker is between
 # turns; above it, nobody has touched the transcript and it is stalled. Surfaced
@@ -43,25 +51,36 @@ _TAIL_N = 40
 
 
 def classify_tail(
-    last_assistant_text: Optional[str],
+    last_role: Optional[str],
+    last_text: Optional[str],
     mtime_age_s: Optional[float],
     *,
     stalled_after_s: float = STALLED_AFTER_S,
 ) -> str:
-    """Pure classifier over the tail signals (see module docstring for the table).
+    """Pure classifier over the LAST transcript turn (see module docstring).
 
-    ``mtime_age_s is None`` means the transcript age is unknowable (e.g. an
-    opencode DB), so stalled cannot be proven and the fallback is ``working``.
+    Content signals (promise/watching/help/question) apply ONLY when the last
+    turn is the ASSISTANT's: a trailing user turn means the operator re-tasked
+    or answered, which clears any stale assistant signal (a ``<promise>`` before
+    a new user task is no longer ``done``; a question before the user's answer is
+    no longer ``your-move``) -- the worker owes the next move, so mtime decides.
+
+    ``watching`` outranks ``done`` because the loop runtime parks on
+    ``<watching>`` even when a ``<promise>`` is also present; reporting ``done``
+    there would contradict a still-parked worker.
+
+    ``mtime_age_s is None`` means the age is unknowable (an opencode DB has no
+    per-session file mtime), so stalled cannot be proven and the fallback is
+    ``working`` -- truth never falsely asserts a silent session.
     """
-    text = last_assistant_text or ""
-    # Open-ended tag prefixes match both bare (`<promise>`) and attributed
-    # (`<watching reason=...>`) forms.
-    if "<promise" in text:
-        return "done"
-    if "<watching" in text:
-        return "watching"
-    if text.rstrip().endswith("?") or "<help" in text:
-        return "your-move"
+    text = last_text or ""
+    if last_role == "assistant":
+        if _WATCHING_RE.search(text):
+            return "watching"
+        if _PROMISE_RE.search(text):
+            return "done"
+        if text.rstrip().endswith("?") or _HELP_RE.search(text):
+            return "your-move"
     if mtime_age_s is not None and mtime_age_s > stalled_after_s:
         return "stalled"
     return "working"
@@ -157,11 +176,11 @@ def resolve_session_truth(
     if not records:
         return unknown("no-records", session_id=sid)
 
-    last_assistant = next(
-        (r.text for r in reversed(records) if r.role == "assistant"), ""
-    )
+    # Classify the LAST turn, not the last assistant turn: a trailing user turn
+    # must clear a stale assistant promise/question (see classify_tail).
+    last = records[-1]
     age = _transcript_age_s(agent, sid, cwd, projects_root, codex_sessions_dir, now_s)
-    state = classify_tail(last_assistant, age, stalled_after_s=stalled_after_s)
+    state = classify_tail(last.role, last.text, age, stalled_after_s=stalled_after_s)
     return {
         "handle": handle,
         "state": state,
@@ -200,7 +219,7 @@ def _humanize_age(seconds: Optional[int]) -> str:
 def render_truth(result: dict[str, Any]) -> str:
     """One legible human line with the state and its evidence."""
     handle = result.get("handle", "?")
-    state = result.get("state")
+    state = str(result.get("state") or "")
     if state == "unknown":
         line = f"truth {handle}: unknown ({result.get('reason') or 'unresolved'})"
         suggestions = result.get("suggestions") or []

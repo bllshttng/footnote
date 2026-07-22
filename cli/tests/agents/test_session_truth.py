@@ -20,49 +20,61 @@ import pytest
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
-    "text,age,expected",
+    "role,text,age,expected",
     [
-        ("<promise>MISSION COMPLETE: shipped</promise>", 10, "done"),
-        ('<watching reason="ci" pr="5" timeout="30m">', 10, "watching"),
-        ("Which base branch should I use?", 10, "your-move"),
-        ('<help reason="stuck" evidence="x">need a decision</help>', 10, "your-move"),
-        ("still grinding on the parser", 10, "working"),
-        ("still grinding on the parser", 99999, "stalled"),
-        ("still grinding on the parser", None, "working"),  # can't prove stalled
-        # precedence: a content signal beats the mtime fallback even when old
-        ("<promise>done</promise>", 99999, "done"),
-        ("anything ending in a question?", 99999, "your-move"),
+        ("assistant", "<promise>MISSION COMPLETE: shipped</promise>", 10, "done"),
+        ("assistant", '<watching reason="ci" pr="5" timeout="30m">', 10, "watching"),
+        ("assistant", "Which base branch should I use?", 10, "your-move"),
+        ("assistant", '<help reason="stuck" evidence="x">need a decision</help>', 10, "your-move"),
+        ("assistant", "still grinding on the parser", 10, "working"),
+        ("assistant", "still grinding on the parser", 99999, "stalled"),
+        ("assistant", "still grinding on the parser", None, "working"),  # can't prove stalled
+        # a content signal beats the mtime fallback even when old
+        ("assistant", "<promise>done</promise>", 99999, "done"),
+        ("assistant", "anything ending in a question?", 99999, "your-move"),
+        # watching outranks promise when both appear (runtime parks watching)
+        ("assistant", "<promise>done</promise> but also <watching pr=1>", 10, "watching"),
+        # exact-marker discipline: a lookalike word is NOT a promise
+        ("assistant", "we <promised> to fix it, still working", 10, "working"),
+        # trailing USER turn clears a stale assistant signal -> worker's move
+        ("user", "<promise>done</promise> (quoted by the operator)", 10, "working"),
+        ("user", "here is your answer", 99999, "stalled"),
     ],
 )
-def test_classify_tail_precedence(text, age, expected):
+def test_classify_tail_precedence(role, text, age, expected):
     from fno.agents.session_truth import classify_tail
 
-    assert classify_tail(text, age) == expected
+    assert classify_tail(role, text, age) == expected
 
 
 def test_classify_tail_empty_text_fresh_is_working():
     from fno.agents.session_truth import classify_tail
 
-    assert classify_tail("", 5) == "working"
-    assert classify_tail(None, 5) == "working"
+    assert classify_tail("assistant", "", 5) == "working"
+    assert classify_tail("assistant", None, 5) == "working"
 
 
 # ---------------------------------------------------------------------------
 # resolve_session_truth: resolve + read the tail (AC2-HP / AC2-ERR)
 # ---------------------------------------------------------------------------
 
-def _write_claude_transcript(projects_root: Path, cwd: str, sid: str, texts: list[str]) -> Path:
-    slug = cwd.replace("/", "-").replace(".", "-")
+def _write_claude_transcript(
+    projects_root: Path, cwd: str, sid: str, turns: list, *, dir_slug: str = ""
+) -> Path:
+    """Write a transcript. ``turns`` items are either a str (assistant text) or a
+    (role, text) tuple, so a test can end on a user turn."""
+    slug = dir_slug or cwd.replace("/", "-").replace(".", "-")
     d = projects_root / slug
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"{sid}.jsonl"
     lines = []
-    for t in texts:
+    for turn in turns:
+        role, text = ("assistant", turn) if isinstance(turn, str) else turn
         lines.append(
             json.dumps(
                 {
-                    "type": "assistant",
-                    "message": {"role": "assistant", "content": [{"type": "text", "text": t}]},
+                    "type": role,
+                    "message": {"role": role, "content": [{"type": "text", "text": text}]},
                 }
             )
         )
@@ -105,6 +117,28 @@ def test_resolve_done_from_promise(tmp_path):
     session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
     result = resolve_session_truth("w1", resolve=_resolver(session), projects_root=tmp_path)
     assert result["state"] == "done"
+
+
+def test_resolve_user_turn_after_promise_is_working(tmp_path):
+    """P2 fix: assistant emits <promise>, then the operator sends a new task.
+    The last turn is the user's, so the worker owes the next move -> working,
+    not a stale done."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "abcdef12-9999-0000-0000-000000000000"
+    _write_claude_transcript(
+        tmp_path,
+        cwd,
+        sid,
+        ["<promise>MISSION COMPLETE</promise>", ("user", "actually, also handle the edge case")],
+    )
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path, now_s=None
+    )
+    assert result["state"] == "working"
 
 
 def test_resolve_stalled_when_transcript_old(tmp_path):

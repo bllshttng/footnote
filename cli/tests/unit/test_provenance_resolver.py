@@ -171,6 +171,69 @@ def test_transcript_resolves_when_only_worktree_dir_has_it(tmp_path):
     assert result.transcript_path.endswith(f"{session_id}.jsonl")
 
 
+def _conv(text: str) -> str:
+    import json
+    return json.dumps({"type": "assistant", "message": {"role": "assistant",
+                       "content": [{"type": "text", "text": text}]}})
+
+
+def _meta_stub() -> str:
+    import json
+    # header-only records CC writes; NO user/assistant turn -> a metadata stub.
+    return json.dumps({"type": "last-prompt", "sessionId": "x"})
+
+
+def test_newer_metadata_stub_loses_to_older_real_transcript(tmp_path):
+    """AC1-HP (codex P1): a NEWER worktree metadata-only stub must NOT win over
+    an OLDER canonical transcript that actually holds the conversation. mtime
+    alone would pick the empty stub and re-open the blind-peek failure."""
+    import os
+
+    from fno.provenance.resolver import resolve_transcript
+
+    canonical = "/Users/bb16/code/footnote/footnote"
+    worktree = "/Users/bb16/code/footnote/footnote/.claude/worktrees/x-a472"
+    sid = "4ec8a08b-9fe7-4550-8e40-00c7fd4e600a"
+
+    canon_dir = tmp_path / canonical.replace("/", "-").replace(".", "-")
+    wt_dir = tmp_path / worktree.replace("/", "-").replace(".", "-")
+    canon_dir.mkdir(parents=True)
+    wt_dir.mkdir(parents=True)
+    real = canon_dir / f"{sid}.jsonl"
+    stub = wt_dir / f"{sid}.jsonl"
+    real.write_text(_conv("actual conversation here") + "\n")
+    stub.write_text(_meta_stub() + "\n")
+    os.utime(real, (1000, 1000))  # older
+    os.utime(stub, (2000, 2000))  # newer, but content-free
+
+    result = resolve_transcript("claude", sid, worktree, projects_root=tmp_path)
+
+    assert result.resolved is True
+    assert result.transcript_path == str(real)  # content wins over newer mtime
+
+
+def test_full_uuid_ignores_orphaned_and_syncconflict_siblings(tmp_path):
+    """AC1-EDGE (codex P2): sibling artifacts sharing the uuid prefix
+    (`<uuid>.orphaned-*`, `<uuid>.sync-conflict-*`) must not make a full-uuid
+    resolution ambiguous or get chosen over the real `<uuid>.jsonl`."""
+    from fno.provenance.resolver import resolve_transcript
+
+    cwd = "/Users/bb16/code/footnote"
+    sid = "abcdef12-1234-5678-9abc-def012345678"
+    d = tmp_path / cwd.replace("/", "-").replace(".", "-")
+    d.mkdir(parents=True)
+    real = d / f"{sid}.jsonl"
+    real.write_text(_conv("real") + "\n")
+    (d / f"{sid}.orphaned-2026.jsonl").write_text(_conv("orphan") + "\n")
+    (d / f"{sid}.sync-conflict-20260101.jsonl").write_text(_conv("dup") + "\n")
+
+    result = resolve_transcript("claude", sid, cwd, projects_root=tmp_path)
+
+    assert result.resolved is True
+    assert result.transcript_path == str(real)
+    assert result.ambiguous is False
+
+
 # ---------------------------------------------------------------------------
 # AC-EDGE: file not found
 # ---------------------------------------------------------------------------
