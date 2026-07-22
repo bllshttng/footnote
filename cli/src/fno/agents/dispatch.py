@@ -4397,6 +4397,60 @@ def wake_and_deliver(
     return True, short
 
 
+def wake_drain_agent(
+    session_uuid: str, *, cwd: Optional[Path] = None
+) -> tuple[bool, str]:
+    """Wake an asleep-but-resumable claude session to drain its OWN inbox (US9,
+    rung 3 of the inbox-daemon ladder). The inbox daemon calls this for a
+    heads-up addressed to a session with no live turn boundary of its own - the
+    mail would otherwise pile durable forever, which is the wall this rung
+    removes.
+
+    A thin wrapper over ``wake_and_deliver``: waking to drain IS delivering a
+    waking prompt, so the concurrency guarantee comes for free. The name is
+    derived from the uuid (never the envelope msg-id), so two concurrent wakes
+    collide on one flock and the single-writer claim refuses the second - one
+    revival, not two writers on one transcript. Rides the revive-in-place
+    substrate rather than a one-shot ``claude -p`` because only the persistent
+    substrate holds that claim; a headless one-shot could not make concurrent
+    wakes collapse. Returns ``wake_and_deliver``'s ``(delivered, reason)``.
+    """
+    return wake_and_deliver(
+        session_uuid,
+        "You were woken to drain unread fno mail addressed to you. "
+        "Run `fno mail drain-self` to process it, then stop.",
+        cwd=cwd,
+    )
+
+
+def wake_if_asleep_claude(token: str) -> tuple[bool, Optional[str]]:
+    """Resolve ``token`` to a resumable-but-asleep claude session and wake it to
+    drain its own inbox (US9). Returns ``(True, short_id)`` on a revival, else
+    ``(False, None)`` - the token is a project name, a non-claude/ambiguous
+    token, or the wake refused (the session is actually live, or another wake is
+    in flight). Best-effort: a resolver or spawn error never raises.
+
+    Shared by the send-time heads-up path (``mail send <handle> --kind heads-up``,
+    the reachable trigger for a handle-addressed note) and the drain daemon rung.
+    ``resolve_reachable`` is liveness-blind, so an asleep session resolves here
+    even though it is absent from every live listing.
+    """
+    from fno.agents import discover as discover_mod
+
+    try:
+        reachable, _ambiguous = discover_mod.resolve_reachable(token)
+    except Exception:  # noqa: BLE001 - a resolver failure is not a delivery failure
+        return False, None
+    if reachable is None or reachable.agent != "claude":
+        return False, None
+    cwd = Path(reachable.cwd) if reachable.cwd else None
+    try:
+        delivered, detail = wake_drain_agent(reachable.session_id, cwd=cwd)
+    except (OSError, RuntimeError):
+        return False, None
+    return (True, detail) if delivered else (False, None)
+
+
 def _mail_inject_codex(thread_id: str, text: str) -> bool:
     """Inject ``text`` into a live codex session over the app-server daemon socket
     via the ``fno-agents mail-inject --provider codex`` verb (US8, node x-d899).

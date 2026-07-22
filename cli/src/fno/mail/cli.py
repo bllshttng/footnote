@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -1200,6 +1201,72 @@ def _name_lane_send(
     print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]")
 
 
+# Send-time human escalation for a question, per (sender, recipient). A burst
+# re-nudges every window rather than once forever (marker refreshed only on an
+# actual escalation, so the window runs from the last nudge, not the first send).
+_ESCALATION_DEBOUNCE_S = 300
+
+
+def _escalate_question(sender: str, recipient: str, summary: str) -> str:
+    """Notify the human at send time that a question needs them (Locked Decision
+    7: a question NEVER autonomous-responds - only the human answers it).
+
+    Debounced per (sender, recipient) so a chatty peer cannot spam the queue.
+    The caller writes the durable question thread regardless, so the ambient
+    unread count stays truthful even when this nudge is debounced. Best-effort
+    throughout: a notifier or filesystem failure never breaks the send. Returns
+    ``"escalated"`` (the human was notified), ``"debounced"`` (a recent nudge for
+    this pair suppressed it), or ``"notifier-unavailable"`` (no OS notifier on
+    this host, so nothing displayed - the caller must not claim escalation).
+    """
+    import hashlib
+
+    from fno.paths import state_dir
+
+    pair = hashlib.sha256(f"{sender}\x00{recipient}".encode()).hexdigest()[:16]
+    marker_dir = state_dir() / "mail-escalations"
+    marker = marker_dir / pair
+    try:
+        marker_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    # Atomically claim the debounce window via O_CREAT|O_EXCL: exactly one
+    # concurrent sender wins a fresh escalation, the rest see the marker and
+    # debounce. A check-then-touch here would let a concurrent burst from one
+    # pair all notify at once, defeating the debounce during the exact spike it
+    # exists to damp.
+    try:
+        fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.close(fd)
+    except FileExistsError:
+        try:
+            last = marker.stat().st_mtime
+        except OSError:
+            last = 0.0
+        if time.time() - last < _ESCALATION_DEBOUNCE_S:
+            return "debounced"
+        try:
+            os.utime(marker, None)  # stale window: refresh so the next runs from now
+        except OSError:
+            pass
+    except OSError:
+        pass  # a missing marker just re-notifies; it never suppresses the durable write
+    # Only report escalation when the notification actually displayed:
+    # send_notification returns (code, err) and a nonzero code means no OS
+    # notifier (a headless host), so the human was NOT notified.
+    try:
+        from fno.notify._impl import send_notification
+
+        one_line = summary.split("\n", 1)[0][:120]
+        code, _err = send_notification(
+            f"fno mail: question from {sender}",
+            f"{one_line} - run `fno mail drain-self`",
+        )
+    except Exception:  # noqa: BLE001 - a notifier failure never breaks the send
+        code = 1
+    return "escalated" if code == 0 else "notifier-unavailable"
+
+
 @mail_app.command("send")
 def cmd_send(
     name: str | None = typer.Argument(
@@ -1441,6 +1508,23 @@ def cmd_send(
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             raise typer.Exit(code=2) from exc
+
+        # A question never gets an autonomous responder (US9 wakes only heads-up);
+        # it escalates to the human at send time instead, debounced per pair.
+        if kind == Kind.QUESTION.value:
+            reason = _escalate_question(sender, recipient, content)
+            if reason == "escalated":
+                print(f"escalated to human ({recipient})", file=sys.stderr)
+        # A heads-up to a resumable-but-asleep claude session is woken at send
+        # time to drain it: the per-project watch daemon drains project inboxes,
+        # never a session-handle inbox, so send time is the reachable trigger
+        # (US9). The durable note is already written, so a wake miss loses nothing.
+        elif kind == Kind.HEADS_UP.value:
+            from fno.agents.dispatch import wake_if_asleep_claude
+
+            woke, short = wake_if_asleep_claude(recipient)
+            if woke:
+                print(f"woke {recipient} to drain (bg thread {short})", file=sys.stderr)
 
         if json_out:
             import json as _json
