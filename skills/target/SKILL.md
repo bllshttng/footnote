@@ -34,7 +34,7 @@ That is the whole job when a backlog node or plan is already bound. `fno target 
 
 **Which path you are on is a READ, not a guess** - dispatch off the node's real state (`fno backlog get <id>`), never self-classification:
 
-- **ready node** (a plan is bound and its frontmatter reads `status: ready`): you are on the spine above. Run it and stop. Do not load the idea, blueprint, discovery, or handoff references - they do not apply.
+- **ready node** (a plan is bound and its frontmatter reads `status: ready`): you are on the spine above. The idea-first work (think, blueprint, discovery) is already done - do not re-open it or load its references. Two things still scale with the run and are NOT skipped: the **size profile** (S/M/L) sets the post-build phases (M adds docs + external; L adds adversarial, browser, clean - [references/pipeline-and-philosophy.md](references/pipeline-and-philosophy.md)), and a **multi-wave** plan invokes the wave-boundary handoff at each wave ([references/self-handoff.md](references/self-handoff.md)). A flat single-file plan (the dominant case) has neither and also skips `ph_write`.
 - **design-rung node** (a plan is bound but its frontmatter still reads `status: design`): take the `/blueprint`-first branch below, then the spine.
 - **bare idea** (no plan): take the `/think` then `/blueprint` branch below, then the spine.
 
@@ -50,6 +50,7 @@ That is the whole job when a backlog node or plan is already bound. `fno target 
 - **only if** the orienter printed `boundary-reconcile: STALE`: perform **Step 0** before any code commit - for each stale blocker, read its merged diff (`gh pr diff <n>`) and append a `### <blocker> landed ... - boundary reconcile` landed-facts section to the plan/brief. This is a *different* thing from de-stub reconcile below (hard-serialized dependent vs a stubbed contract). Full procedure + section format: [references/boundary-reconcile.md](references/boundary-reconcile.md).
 - **only if** spawned to de-stub a merged blocker: [§0b Reconcile mode](#0b-reconcile-mode---reconcile-manifest).
 - **only if** a Claude Plan-Mode plan was just approved (attended): [references/plan-mode-frontdoor.md](references/plan-mode-frontdoor.md).
+- **only if** `config.review.reviewers` includes `sigma`: SKIP the spine's pre-ship `/review` advisory run - a configured sigma reviewer runs ONCE on the final shipped HEAD instead ([references/ship-and-promise.md](references/ship-and-promise.md)). Running it pre-ship too pays for the six-agent panel twice, and the first attestation is invalidated by any later ship/fix commit.
 
 ---
 
@@ -133,7 +134,7 @@ Completion is decided by `fno-agents loop-check` from external truth (PR + CI + 
 
 ## The full pipeline + phase philosophy
 
-For a from-idea or multi-phase run, the whole phase map (think -> blueprint -> do -> clean -> review -> validate -> docs -> ship -> external) and the compose-don't-hardcode rationale (which skill runs each phase, on which model, and when a phase applies) live in [references/pipeline-and-philosophy.md](references/pipeline-and-philosophy.md). A ready node with a bound plan does not need it - the spine is the happy path. Completion is the world (PR green + reviewed), never a phase checklist.
+For a from-idea run, a multi-phase run, or any **M/L** ready node, the whole phase map (think -> blueprint -> do -> clean -> review -> validate -> docs -> ship -> external) and the compose-don't-hardcode rationale (which skill runs each phase, on which model, and when a phase applies) live in [references/pipeline-and-philosophy.md](references/pipeline-and-philosophy.md) - load it to see which post-build phases (docs, external, adversarial) your size profile runs. A flat or small (S) ready plan does not need it: the spine is the happy path. Completion is the world (PR green + reviewed), never a phase checklist.
 
 ## Usage
 
@@ -257,7 +258,7 @@ fi
 
 ### 4. Execute Pipeline
 
-**Boundary handoff + cross-project routing.** At a pipeline boundary (blueprint->do, or a wave boundary during do/review) you may hand the rest of the run to a fresh-context successor; and a legacy `cross_project: true` manifest routes to spawn-into-project rather than a (removed) parallel pipeline. Both, plus the `RESULT: BLOCKED` claim-wait stop and the decision-line exit table, are in [references/self-handoff.md](references/self-handoff.md) - load it at a boundary. Never invoke a handoff mid-wave or mid-task.
+**Boundary handoff + cross-project routing.** For a multi-wave plan, INVOKE the handoff helper (`handoff.sh --boundary wave`) at every wave boundary (and at the blueprint->do boundary) - always invoke it, never skip it: its pressure probe parks itself when context is low and spawns a fresh-context successor when context is high, so skipping it silently drops that succession and a high-context run barrels into later waves. A legacy `cross_project: true` manifest routes to spawn-into-project rather than a (removed) parallel pipeline. The helper contract, the `RESULT: BLOCKED` claim-wait stop, and the decision-line exit table are in [references/self-handoff.md](references/self-handoff.md) - load it at a boundary. Never invoke a handoff mid-wave or mid-task.
 
 ---
 

@@ -6,7 +6,16 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TARGET_SKILL="$REPO_ROOT/skills/target/SKILL.md"
+TARGET_SKILL_MD="$REPO_ROOT/skills/target/SKILL.md"
+# x-a858 lean-spine split: the phase-handoff wiring (ph_write/ph_read schema,
+# per-phase examples, fallback, logging) moved out of SKILL.md into this
+# reference via progressive disclosure. SKILL.md now delegates to it with a
+# load condition. Assert the wiring across SKILL.md + the reference together,
+# and separately that SKILL.md still points a reader at the reference.
+PHASE_HANDOFF_REF="$REPO_ROOT/skills/target/references/phase-handoff.md"
+TARGET_SKILL="$(mktemp)"
+cat "$TARGET_SKILL_MD" "$PHASE_HANDOFF_REF" > "$TARGET_SKILL" 2>/dev/null
+trap 'rm -f "$TARGET_SKILL"' EXIT
 
 PASS=0
 FAIL=0
@@ -14,7 +23,16 @@ FAIL=0
 pass() { echo "  PASS: $*"; ((PASS++)) || true; }
 fail() { echo "  FAIL: $*"; ((FAIL++)) || true; }
 
-echo "=== Story 3: Phase artifact wiring in SKILL.md tests ==="
+echo "=== Story 3: Phase artifact wiring (SKILL.md + phase-handoff.md) tests ==="
+
+# ---------------------------------------------------------------
+# x-a858: SKILL.md must still point a reader at the phase-handoff reference
+# ---------------------------------------------------------------
+if grep -q "references/phase-handoff.md" "$TARGET_SKILL_MD"; then
+  pass "x-a858: target/SKILL.md delegates to references/phase-handoff.md"
+else
+  fail "x-a858: target/SKILL.md no longer points to references/phase-handoff.md"
+fi
 
 # ---------------------------------------------------------------
 # AC1-HP: target/SKILL.md contains ph_write and ph_read references

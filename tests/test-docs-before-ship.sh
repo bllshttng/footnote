@@ -31,6 +31,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SKILL="$REPO_ROOT/skills/target/SKILL.md"
 SHIP_PHASE_REF="$REPO_ROOT/skills/target/references/ship-phase.md"
+# x-a858 lean-spine split: the pipeline map + Philosophy table live here, and the
+# prior-phase mapping in phase-handoff.md. Ordering invariant unchanged.
+PIPELINE_REF="$REPO_ROOT/skills/target/references/pipeline-and-philosophy.md"
+PHASE_HANDOFF_REF="$REPO_ROOT/skills/target/references/phase-handoff.md"
 
 PASS=0
 FAIL=0
@@ -49,13 +53,21 @@ if [[ ! -f "$SHIP_PHASE_REF" ]]; then
     fail "skills/target/references/ship-phase.md not found at $SHIP_PHASE_REF"
     exit 1
 fi
+if [[ ! -f "$PIPELINE_REF" ]]; then
+    fail "skills/target/references/pipeline-and-philosophy.md not found at $PIPELINE_REF"
+    exit 1
+fi
+if [[ ! -f "$PHASE_HANDOFF_REF" ]]; then
+    fail "skills/target/references/phase-handoff.md not found at $PHASE_HANDOFF_REF"
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 1. In the Philosophy phase table, the "Docs" row must come BEFORE the "Ship"
 #    row. Rows look like "| Docs | `/ship-docs` | ... |" and "| Ship | ... |".
 # ---------------------------------------------------------------------------
-DOCS_LINE=$(grep -nE '^\|[[:space:]]*Docs[[:space:]]*\|' "$SKILL" | head -1 | cut -d: -f1)
-SHIP_LINE=$(grep -nE '^\|[[:space:]]*Ship[[:space:]]*\|' "$SKILL" | head -1 | cut -d: -f1)
+DOCS_LINE=$(grep -nE '^\|[[:space:]]*Docs[[:space:]]*\|' "$PIPELINE_REF" | head -1 | cut -d: -f1)
+SHIP_LINE=$(grep -nE '^\|[[:space:]]*Ship[[:space:]]*\|' "$PIPELINE_REF" | head -1 | cut -d: -f1)
 
 if [[ -z "$DOCS_LINE" ]]; then
     fail "Philosophy table: no 'Docs' row found"
@@ -72,8 +84,8 @@ fi
 #    "| docs | ... |" and "| ship | ... |"), docs must come before ship so the
 #    handoff chain matches the docs-before-ship pipeline order.
 # ---------------------------------------------------------------------------
-INV_DOCS_LINE=$(grep -nE '^\|[[:space:]]*docs[[:space:]]*\|' "$SKILL" | head -1 | cut -d: -f1)
-INV_SHIP_LINE=$(grep -nE '^\|[[:space:]]*ship[[:space:]]*\|' "$SKILL" | head -1 | cut -d: -f1)
+INV_DOCS_LINE=$(grep -nE '^\|[[:space:]]*docs[[:space:]]*\|' "$PHASE_HANDOFF_REF" | head -1 | cut -d: -f1)
+INV_SHIP_LINE=$(grep -nE '^\|[[:space:]]*ship[[:space:]]*\|' "$PHASE_HANDOFF_REF" | head -1 | cut -d: -f1)
 
 if [[ -z "$INV_DOCS_LINE" ]]; then
     fail "Prior-phase mapping: no '| docs |' row found"
@@ -90,7 +102,7 @@ fi
 #    and ride in any auto-merge (the anti-stranding rationale). This replaces
 #    the removed `docs_generated` boolean-gate assertion.
 # ---------------------------------------------------------------------------
-if grep -qE 'run BEFORE .*pr create.*included in any auto-merge' "$SKILL"; then
+if grep -qE 'run BEFORE .*pr create.*included in any auto-merge' "$PIPELINE_REF"; then
     pass "Pipeline prose documents docs/browser run BEFORE /pr create and ride in any auto-merge"
 else
     fail "Pipeline prose missing the docs-before-/pr-create anti-stranding rationale"
@@ -113,18 +125,18 @@ fi
 #    must list /ship-docs before /pr create. Scoped to box lines inside the
 #    "## The Full Pipeline" section so we don't match references elsewhere.
 # ---------------------------------------------------------------------------
-PIPELINE_START=$(grep -nE '^## The Full Pipeline' "$SKILL" | head -1 | cut -d: -f1)
+PIPELINE_START=$(grep -nE '^## The Full Pipeline' "$PIPELINE_REF" | head -1 | cut -d: -f1)
 if [[ -z "$PIPELINE_START" ]]; then
     fail "Top-level pipeline: '## The Full Pipeline' heading not found"
 else
     # Find the closing `## ` heading that ends the section
-    PIPELINE_END=$(awk -v start="$PIPELINE_START" 'NR > start && /^## / { print NR; exit }' "$SKILL")
+    PIPELINE_END=$(awk -v start="$PIPELINE_START" 'NR > start && /^## / { print NR; exit }' "$PIPELINE_REF")
     PIPELINE_END=${PIPELINE_END:-99999}
     # Extract box-drawn lines (start with │) between PIPELINE_START and PIPELINE_END
     BOX_SHIP_DOCS=$(awk -v start="$PIPELINE_START" -v end="$PIPELINE_END" \
-        'NR > start && NR < end && /^│.*\/ship-docs/ { print NR; exit }' "$SKILL")
+        'NR > start && NR < end && /^│.*\/ship-docs/ { print NR; exit }' "$PIPELINE_REF")
     BOX_PR_CREATE=$(awk -v start="$PIPELINE_START" -v end="$PIPELINE_END" \
-        'NR > start && NR < end && /^│.*\/pr create/ { print NR; exit }' "$SKILL")
+        'NR > start && NR < end && /^│.*\/pr create/ { print NR; exit }' "$PIPELINE_REF")
     if [[ -z "$BOX_SHIP_DOCS" || -z "$BOX_PR_CREATE" ]]; then
         fail "Top-level ASCII pipeline: missing /ship-docs or /pr create in the box"
     elif (( BOX_SHIP_DOCS < BOX_PR_CREATE )); then
