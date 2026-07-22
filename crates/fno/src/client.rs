@@ -714,6 +714,14 @@ struct View {
     /// split arrow sequence can never half-close the selector and leak its
     /// tail into the pane (gemini medium).
     sel_esc: Vec<u8>,
+    /// (x-f331) The [`View::selector`] was armed by a pointer resting in the
+    /// panel, not by an explicit `leader+w`. Pointer-in-panel arms the selector
+    /// so `x`/`X`/`r`/`space` act on the pointed-at row (one regime, closes the
+    /// old PTY leak where a bare `x` fell through to the focused pane). A
+    /// hover-arm is motion-fresh: only the action-verb set acts on it, and the
+    /// first key OUTSIDE that set disarms and forwards, so a pointer parked over
+    /// the sideline never swallows typing into the focused pane (AC2-EDGE).
+    sel_hover_armed: bool,
     /// (x-a621) First-visible [`View::display_rows`] index in the sideline:
     /// follow-the-cursor scroll offset so rows below the fold render and take
     /// the mouse. 0 (top-anchored) whenever the catalog fits the height.
@@ -799,6 +807,14 @@ struct View {
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
     confirm: Option<ConfirmAction>,
+    /// (x-f331) The [`View::display_rows`] index the live `confirm` acts on,
+    /// captured from the selector before `open_confirm` clears it, so the prompt
+    /// paints AT the target row rather than the far bottom row (AC2-UI). `None`
+    /// for a global confirm (reap) or a mouse-opened confirm with no selector -
+    /// those fall back to the bottom row. A stale index (the row raced out of the
+    /// catalog) also falls back, so a layout push never anchors the prompt on the
+    /// wrong row (AC1-FR); the dispatch itself is already name/id-keyed, not index.
+    confirm_target_row: Option<usize>,
     /// (x-9e5e) The pending new-workspace name buffer, `Some` while the `+`
     /// create overlay is open. Keys divert to [`create_keys`]: printable append,
     /// Backspace pops, Enter sends [`Command::NewSquad`] (empty keeps it open),
@@ -1526,6 +1542,7 @@ impl View {
             section_chosen: HashMap::new(),
             selector: None,
             sel_esc: Vec::new(),
+            sel_hover_armed: false,
             sideline_offset: 0,
             answers: None,
             ans_esc: Vec::new(),
@@ -1551,6 +1568,7 @@ impl View {
             tab_drag: None,
             row_drag: None,
             confirm: None,
+            confirm_target_row: None,
             create: None,
             create_esc: Vec::new(),
             rename: None,
@@ -1843,7 +1861,12 @@ impl View {
     /// keystrokes that follow the confirm's resolution (sigma review x-260a -
     /// reachable by mouse-clicking a card while leader+w is open).
     fn open_confirm(&mut self, action: ConfirmAction) {
+        // (x-f331) Capture the acted-on row BEFORE clearing the selector so the
+        // prompt paints AT that row, not the far bottom row (AC2-UI). A
+        // mouse/global confirm with no selector leaves this None -> bottom row.
+        self.confirm_target_row = self.selector;
         self.selector = None;
+        self.sel_hover_armed = false;
         self.answers = None;
         self.search = None;
         // A half-typed workspace name is dropped too (gemini review): the
@@ -3464,6 +3487,31 @@ impl View {
         // a cell off the sideline text column clears it.
         self.hover_row = self.sideline_row_at(row, col);
 
+        // (x-f331) Pointer-in-panel ARMS the selector to the hovered actionable
+        // row - one regime, so x/X/r/space act on the row under the pointer and
+        // a bare verb no longer leaks into the focused pane. Only touch a free or
+        // already-hover-armed selector; an explicit leader+w selector keeps
+        // keyboard control. Off an actionable row (a spacer, header label, or the
+        // pane), a hover-arm disarms, so a pointer parked off the rows never holds
+        // the keys. `selector_anchor(i) == Some(i)` is true only when i itself is
+        // an actionable (non-inert) row.
+        if self.selector.is_none() || self.sel_hover_armed {
+            match self
+                .hover_row
+                .filter(|&i| self.selector_anchor(i) == Some(i))
+            {
+                Some(i) => {
+                    self.selector = Some(i);
+                    self.sel_hover_armed = true;
+                }
+                None if self.sel_hover_armed => {
+                    self.selector = None;
+                    self.sel_hover_armed = false;
+                }
+                None => {}
+            }
+        }
+
         // Accent whatever grabbable chrome sits under the pointer (independent
         // of the focus-follow off-switch below).
         self.refresh_hover_affordances(row, col);
@@ -4634,6 +4682,27 @@ impl View {
     /// Paint the confirm prompt over the bottom row (x-a496 dispatch; x-96e8
     /// squad removal). Blank first (the x-5041 divider-bleed gotcha), then the
     /// BOLD prompt whose wording tracks the action being confirmed.
+    /// (x-f331) The outer row a live confirm prompt paints on: the acted-on
+    /// sideline row when it is still in the catalog and visible, else the bottom
+    /// row. Anchoring the prompt at the target row is AC2-UI - a bottom-row
+    /// prompt far from the row reads as "nothing happened". A target that raced
+    /// out of the catalog (or scrolled off) falls back to the bottom row, so a
+    /// layout push never anchors on the wrong row (AC1-FR); the dispatch itself
+    /// is name/id-keyed, never this index, so it is already drift-safe.
+    fn confirm_anchor_row(&self, rows: usize) -> usize {
+        let bottom = rows.saturating_sub(1);
+        match self.confirm_target_row {
+            Some(i)
+                if i >= self.sideline_offset
+                    && i < self.display_rows().len()
+                    && (i - self.sideline_offset) < bottom =>
+            {
+                i - self.sideline_offset
+            }
+            _ => bottom,
+        }
+    }
+
     fn draw_confirm_line(
         &self,
         cells: &mut [Cell],
@@ -4641,7 +4710,7 @@ impl View {
         cols: usize,
         action: &ConfirmAction,
     ) {
-        let r = rows - 1;
+        let r = self.confirm_anchor_row(rows);
         for c in 0..cols {
             cells[r * cols + c] = Cell::default();
         }
@@ -5210,6 +5279,14 @@ impl View {
             // never a stale one on a previously-focused row.
             let is_focus =
                 matches!(&drow, DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus));
+            // (x-f331) An EXITED focused row is legibly dead: it drops the bright
+            // band for a DIM accent so a dead "you are here" never reads as a live
+            // one (the screenshot case - a focus band on an EXITED row was
+            // indistinguishable from a selector).
+            let focus_exited = matches!(
+                &drow,
+                DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus) && a.exited
+            );
             // A full-width band fills the panel edge-to-edge: the focused row (its
             // standing band) plus every header (so a SELECTED header inverts
             // edge-to-edge - headers are otherwise demoted to plain/BOLD by
@@ -5219,7 +5296,7 @@ impl View {
             // (x-df4c) The row tuple carries `fg` now: most rows are
             // `Color::Default`, but a needs-attention (Blocked) agent row or card
             // paints the accent, so the color must reach the cells below.
-            let (text, mut flags, fg) = match drow {
+            let (text, mut flags, mut fg) = match drow {
                 DisplayRow::Sel(row) => {
                     let squad = self.layout.squads.iter().find(|s| s.id == row.squad);
                     let Some(squad) = squad else { continue };
@@ -5457,8 +5534,19 @@ impl View {
             // a parked selector leaves the row as the sole standing band; a
             // selector ON the focused row XOR-de-inverts it under the cursor, the
             // same grammar the old header bands used, so the selection still reads.
+            // (x-f331) Three distinct treatments so "you are here" reads apart
+            // from the selector's "about to act here": the focus band wears the
+            // ACCENT colour (accent fg -> accent bg under INVERSE) vs the
+            // selector's plain-INVERSE bar. An EXITED focus row is DIM accent, no
+            // bright band. The accent survives weak-BOLD themes (it is a colour,
+            // not a weight), which the highlight-distinctness AC requires.
             if is_focus {
-                flags |= cell_flags::INVERSE;
+                if focus_exited {
+                    flags |= cell_flags::DIM;
+                } else {
+                    flags |= cell_flags::INVERSE;
+                }
+                fg = LATTICE_ACCENT;
             }
             // The selector cursor OR the mouse hover paints the INVERSE bar
             // (x-a496); both are display indices now (x-260a), so the bar can
@@ -5508,6 +5596,12 @@ impl View {
             if is_band {
                 for j in col..text_w {
                     cells[r * cols + j].flags = flags;
+                    // (x-f331) Carry the accent across the focus band's padding so
+                    // the whole band is one colour, not accent-under-text +
+                    // default-under-pad.
+                    if is_focus {
+                        cells[r * cols + j].fg = fg;
+                    }
                 }
             } else if highlit {
                 for j in col..text_w {
@@ -5755,6 +5849,18 @@ fn view_caret(v: SectionView) -> char {
         SectionView::LiveOnly => '▿',
         SectionView::Collapsed => '▸',
     }
+}
+
+/// (x-f331) The action-verb keys a HOVER-ARMED selector captures on the
+/// pointed-at row: remove/stop (`x`), bulk reap (`X`), rename (`r`), peek
+/// (space), recruit-mark (tab). Everything else - navigation, and any typing -
+/// disarms the hover-arm and forwards to the focused pane, so a parked pointer
+/// never swallows shell input (AC2-EDGE). Enter is deliberately absent: a lone
+/// Enter is far likelier to be shell input than an attach gesture. Verbs that
+/// mutate are already confirm-gated at the row, so a stray leading verb at most
+/// opens a dismissable prompt.
+fn is_sideline_verb(b: u8) -> bool {
+    matches!(b, b'x' | b'X' | b'r' | b' ' | b'\t')
 }
 
 fn row_is_inert(drow: &DisplayRow) -> bool {
@@ -7902,6 +8008,19 @@ async fn handle_stdin(
         // (j/k, Esc, later digit/attach) never leak to the selector underneath.
         return peek_keys(view, &passthrough, sock_w).await;
     }
+    // (x-f331) A hover-armed selector is motion-fresh: only the action-verb set
+    // acts on the pointed-at row; the first key OUTSIDE it disarms the arm and
+    // falls through to the pane, so a pointer parked over the sideline never
+    // swallows typing into the focused shell (AC2-EDGE). An explicitly-opened
+    // selector (sel_hover_armed=false) stays fully modal below.
+    if view.selector.is_some() && view.sel_hover_armed {
+        if passthrough.first().is_some_and(|&b| is_sideline_verb(b)) {
+            return selector_keys(view, &passthrough, sock_w).await;
+        }
+        view.selector = None;
+        view.sel_hover_armed = false;
+        // fall through: forward this chunk to the focused pane.
+    }
     if view.selector.is_some() {
         return selector_keys(view, &passthrough, sock_w).await;
     }
@@ -8006,6 +8125,10 @@ async fn dispatch_event(
                 // column header, where the cursor would paint nothing and Enter
                 // would only ring. Anchor onto the first actionable row instead.
                 view.selector = view.selector_anchor(0);
+                // An explicit open is a full modal, never a motion-fresh
+                // hover-arm - clear any stale hover flag so j/k and typing are
+                // owned by the selector, not disarmed on the first non-verb key.
+                view.sel_hover_armed = false;
                 view.sel_esc.clear();
                 // Open at the top: a stale offset from a prior session must
                 // not hide row 0 (x-a621).
@@ -9537,31 +9660,28 @@ async fn selector_keys(
                         apply_hit(view, hit, sock_w).await?;
                     }
                     // Out of range / Header: unreachable via j/k, but a stale
-                    // cursor gets a BEL, never a silent close.
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
+                    // cursor gets an on-screen notice, never a silent close or a
+                    // bare beep (x-f331 US3).
+                    None => view.set_notice("no action for this row".into()),
                 }
             }
             b'r' => {
                 // Rename the squad at the cursor (x-96e8). Tab/other rows have
-                // no squad rename here (leader+, renames a tab), so they BEL.
+                // no squad rename here (leader+, renames a tab), so they notice.
                 let squad = match view.display_rows().get(cur) {
                     Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
                     _ => None,
                 };
                 match squad {
                     Some(sq) => view.open_rename(RenameTarget::Squad(sq)),
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
+                    None => view.set_notice("only a workspace row can be renamed".into()),
                 }
             }
             b' ' => {
                 // Open the read-only peek overlay on the focused agent row
                 // (x-c376): its status sentence + recent transcript, read from
                 // disk (peek/logs read disk; only attach spawns a pane). Any
-                // non-agent row BELs (selector convention). The selector stays
+                // non-agent row notices why (x-f331 US3). The selector stays
                 // open underneath; Esc drops back into it at the peeked row.
                 let name = match view.display_rows().get(cur) {
                     Some(DisplayRow::Agent(a)) => Some(a.name.clone()),
@@ -9569,9 +9689,7 @@ async fn selector_keys(
                 };
                 match name {
                     Some(name) => fetch_peek(view, cur, name, sock_w).await?,
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
+                    None => view.set_notice("only an agent row can be peeked".into()),
                 }
             }
             b'\t' => {
@@ -9598,7 +9716,7 @@ async fn selector_keys(
                 // Open the recruit name prompt for the marked rows (x-8f11). With
                 // no marks, fall back to marking the focused attachable row first
                 // (the grid's single-recruit `m`, generalized); a non-attachable
-                // focused row with no marks BELs.
+                // focused row with no marks notices why (x-f331 US3).
                 if view.marks.is_empty() {
                     let id = match view.display_rows().get(cur) {
                         Some(DisplayRow::Agent(a)) if a.attach_id.is_some() && !a.exited => {
@@ -9612,7 +9730,7 @@ async fn selector_keys(
                             view.open_recruit();
                         }
                         None => {
-                            let _ = raw_out(b"\x07");
+                            view.set_notice("only a live attachable agent can be recruited".into())
                         }
                     }
                 } else {
@@ -9658,11 +9776,12 @@ async fn selector_keys(
             b'X' => {
                 // Bulk reap (x-7561): uppercase `X` from ANY agent row confirms
                 // `fno-agents reap`. Contextual on agent rows only (headers stay
-                // inert - no selector surgery); a non-agent row BELs. Too-short
-                // terminal refuses rather than arm an invisible confirm (x-260a).
+                // inert - no selector surgery); a non-agent row notices why
+                // (x-f331 US3). Too-short terminal refuses rather than arm an
+                // invisible confirm (x-260a).
                 let on_agent = matches!(view.display_rows().get(cur), Some(DisplayRow::Agent(_)));
                 if !on_agent {
-                    let _ = raw_out(b"\x07");
+                    view.set_notice("reap works on an agent row".into());
                 } else if view.term.0 < MIN_ROWS_FOR_STATUS {
                     view.set_notice("terminal too short for the confirm prompt".into());
                 } else {
@@ -9774,15 +9893,13 @@ async fn selector_keys(
                             label: name,
                         });
                     }
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
+                    None => view.set_notice("no action for this row".into()),
                 }
             }
             b'J' | b'K' => {
                 // Reorder the squad at the cursor down (`J`) / up (`K`) the
                 // sideline (x-96e8). The cursor follows the squad via sel_follow
-                // on the authoritative next Layout. Tab/other rows BEL.
+                // on the authoritative next Layout. Tab/other rows notice why.
                 let squad = match view.display_rows().get(cur) {
                     Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
                     _ => None,
@@ -9798,9 +9915,7 @@ async fn selector_keys(
                         .await
                         .map_err(|e| format!("move-squad send failed: {e}"))?;
                     }
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
+                    None => view.set_notice("only a workspace row can be reordered".into()),
                 }
             }
             b'm' => {
@@ -9821,7 +9936,7 @@ async fn selector_keys(
                 // picker over the OTHER squads (a squad is moved with J/K, not
                 // m). Tab rows left the sideline (x-0090), so `m` on a squad row
                 // targets that squad's ACTIVE tab - the one shown in the tab bar.
-                // A non-squad row, or nowhere to move to (one squad), BELs.
+                // A non-squad row, or nowhere to move to (one squad), notices why.
                 let picked = match view.display_rows().get(cur) {
                     Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
                     _ => None,
@@ -9841,9 +9956,7 @@ async fn selector_keys(
                 });
                 match picked {
                     Some((tid, dsts)) => view.open_move_pick(tid, dsts),
-                    None => {
-                        let _ = raw_out(b"\x07");
-                    }
+                    None => view.set_notice("no other workspace to move this tab to".into()),
                 }
             }
             0x1b | b'q' => view.selector = None,
@@ -11731,6 +11844,124 @@ mod tests {
     }
 
     #[test]
+    fn xf331_focus_band_and_selector_are_distinct_treatments() {
+        // x-f331 US2/AC1-UI: the focus band wears the ACCENT colour while a
+        // selector parked on a DIFFERENT row is a plain-INVERSE bar in the default
+        // colour - three-distinguishable, and the distinction is colour (survives
+        // weak-BOLD themes), not weight.
+        let mut view = two_pane_view();
+        view.layout.agents.push(focus_agent(11)); // owns focused pane 11 -> row 1
+        view.selector = Some(3); // notes squad header, a different actionable row
+        view.hover_row = None;
+        let frame = view.compose();
+        let cols = frame.cols as usize;
+
+        let focus_cell = frame.cells[cols]; // display row 1: the focus band
+        assert_eq!(
+            focus_cell.flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "the focus row still wears a band"
+        );
+        assert_eq!(
+            focus_cell.fg, LATTICE_ACCENT,
+            "the focus band wears the accent colour"
+        );
+
+        let sel_cell = frame.cells[3 * cols]; // display row 3: the selector bar
+        assert_eq!(
+            sel_cell.flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "the selector row is an inverse bar"
+        );
+        assert_ne!(
+            sel_cell.fg, LATTICE_ACCENT,
+            "the selector bar is NOT the focus accent - the two read as distinct"
+        );
+    }
+
+    #[test]
+    fn xf331_exited_focus_row_is_dim_accent_not_a_bright_band() {
+        // x-f331 US2/AC1-UI: a focus band on an EXITED row drops the bright
+        // INVERSE band for a DIM accent, so a dead "you are here" reads as dead
+        // (the screenshot case that was indistinguishable from a selector).
+        let mut view = two_pane_view();
+        let mut agent = focus_agent(11);
+        agent.exited = true;
+        view.layout.agents.push(agent);
+        let frame = view.compose();
+        let cols = frame.cols as usize;
+        let cell = frame.cells[cols]; // display row 1: the exited focus row
+        assert_eq!(
+            cell.flags & cell_flags::INVERSE,
+            0,
+            "an exited focus row drops the bright band"
+        );
+        assert_eq!(
+            cell.flags & cell_flags::DIM,
+            cell_flags::DIM,
+            "it is dimmed - legibly dead"
+        );
+        assert_eq!(cell.fg, LATTICE_ACCENT, "still the accent colour");
+    }
+
+    #[test]
+    fn xf331_confirm_anchors_at_the_target_row_not_the_bottom() {
+        // x-f331 US4/AC2-UI: open_confirm captures the acted-on row before it
+        // clears the selector, and the prompt paints AT that row's outer position,
+        // never the terminal's far bottom row.
+        let mut view = two_pane_view();
+        view.selector = Some(2); // the notes squad header (actionable)
+        view.open_confirm(ConfirmAction {
+            action: ConfirmKind::RemoveSquad {
+                squad: 2,
+                panes: 1,
+                last: false,
+            },
+            label: "notes".into(),
+        });
+        assert_eq!(
+            view.confirm_target_row,
+            Some(2),
+            "the target row is captured before the selector clears"
+        );
+        assert_eq!(view.selector, None, "open_confirm clears the selector");
+
+        let rows = view.term.0 as usize;
+        assert_eq!(
+            view.confirm_anchor_row(rows),
+            2,
+            "the prompt anchors at the target's outer row"
+        );
+        assert_ne!(
+            view.confirm_anchor_row(rows),
+            rows - 1,
+            "not the far bottom row"
+        );
+
+        let frame = view.compose();
+        let cols = frame.cols as usize;
+        let row2: String = (0..cols).map(|c| frame.cells[2 * cols + c].c).collect();
+        assert!(
+            row2.contains("close workspace"),
+            "the confirm prompt paints at the target row: {row2:?}"
+        );
+    }
+
+    #[test]
+    fn xf331_confirm_falls_back_to_bottom_when_target_scrolls_out() {
+        // x-f331 AC1-FR: a target that raced out of the catalog (index past the
+        // rows) falls back to the bottom row rather than anchoring on a wrong row.
+        let mut view = two_pane_view();
+        view.confirm_target_row = Some(999); // stale: no such display row
+        let rows = view.term.0 as usize;
+        assert_eq!(
+            view.confirm_anchor_row(rows),
+            rows - 1,
+            "a stale target dismisses to the bottom row, never a wrong row"
+        );
+    }
+
+    #[test]
     fn overlay_viewport_matches_content_origin_and_dims() {
         // x-e9c3: overlay_viewport() is the single source of centering
         // geometry every popover shares - it must track content_dims()/
@@ -12645,19 +12876,62 @@ mod tests {
     }
 
     #[test]
-    fn hover_highlights_sideline_row_without_switching_squad() {
-        // change #3 AC1-UI + AC2-EDGE: hovering a sideline row sets hover_row and
-        // the active squad/tab never change; moving off the panel clears it.
-        let mut view = two_pane_view(); // rows: 0 footnote (active), 1 notes
+    fn hover_arms_selector_on_the_pointed_row_without_switching_squad() {
+        // (x-f331 US1, was hover_highlights_sideline_row_without_switching_squad):
+        // hovering an ACTIONABLE sideline row now ARMS the selector to it (one
+        // regime, so x/X/r act on the pointed-at row), the highlight is still set,
+        // and the active squad/tab never change. A spacer or the pane disarms.
+        // Rows (two_pane_view): idx 0 footnote header (actionable), idx 1 Blank
+        // spacer (inert), idx 2 notes header (actionable).
+        let mut view = two_pane_view();
         let before = view.layout.active_squad;
-        view.on_hover(1, 5, Instant::now()); // outer row 1 = notes row (index 1) - x-cd67 US1
-        assert_eq!(view.hover_row, Some(1));
+
+        view.on_hover(0, 5, Instant::now()); // outer row 0 = footnote squad header
+        assert_eq!(view.hover_row, Some(0));
+        assert_eq!(view.selector, Some(0), "hover arms the selector to the row");
+        assert!(
+            view.sel_hover_armed,
+            "the arm is motion-fresh (hover-armed)"
+        );
         assert_eq!(
             view.layout.active_squad, before,
             "hover never switches squad"
         );
+
+        // Hover onto the inert spacer: highlight tracks the cell, but nothing
+        // actionable is there, so the hover-arm disarms rather than pointing the
+        // verbs at a spacer.
+        view.on_hover(1, 5, Instant::now());
+        assert_eq!(view.hover_row, Some(1));
+        assert_eq!(view.selector, None, "an inert row disarms the hover-arm");
+        assert!(!view.sel_hover_armed);
+
+        // Re-arm on a fresh actionable row (pointer motion re-arms).
+        view.on_hover(2, 5, Instant::now());
+        assert_eq!(view.selector, Some(2), "motion re-arms to the new row");
+        assert!(view.sel_hover_armed);
+
         view.on_hover(5, 40, Instant::now()); // onto pane content
         assert_eq!(view.hover_row, None, "off the panel clears the highlight");
+        assert_eq!(view.selector, None, "off the panel disarms the selector");
+        assert!(!view.sel_hover_armed);
+    }
+
+    #[test]
+    fn hover_arm_does_not_clobber_an_explicit_selector() {
+        // (x-f331) An explicit leader+w selector (sel_hover_armed=false) keeps
+        // keyboard control: a stray hover does not demote it to a motion-fresh arm
+        // that j/k would disarm.
+        let mut view = two_pane_view();
+        view.selector = Some(2); // opened explicitly, not hover-armed
+        view.sel_hover_armed = false;
+        view.on_hover(0, 5, Instant::now()); // hover a different actionable row
+        assert_eq!(
+            view.selector,
+            Some(2),
+            "explicit selector is not moved by hover"
+        );
+        assert!(!view.sel_hover_armed, "explicit selector stays fully modal");
     }
 
     #[test]
@@ -19867,6 +20141,78 @@ mod tests {
             })
         );
         assert_eq!(v.rename, None, "submit closes the overlay");
+    }
+
+    #[tokio::test]
+    async fn xf331_hover_armed_x_acts_on_the_row_not_the_pane() {
+        // x-f331 AC1-HP: with the pointer over a squad header, x opens the
+        // close-workspace confirm on THAT row and no `x` leaks to the focused
+        // pane's PTY (the old bare-key leak this node closes).
+        let mut v = two_pane_view();
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        v.on_hover(0, 5, Instant::now()); // hover-arm the footnote squad header
+        assert_eq!(v.selector, Some(0));
+        assert!(v.sel_hover_armed);
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"x", &mut buf)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                v.confirm.as_ref().map(|c| &c.action),
+                Some(ConfirmKind::RemoveSquad { .. })
+            ),
+            "x on the hovered squad header opens the close-workspace confirm"
+        );
+        assert!(buf.is_empty(), "no x reaches the focused pane's PTY");
+        assert_eq!(
+            v.confirm_target_row,
+            Some(0),
+            "the confirm targets the hovered row"
+        );
+    }
+
+    #[tokio::test]
+    async fn xf331_hover_armed_non_verb_key_disarms_and_forwards() {
+        // x-f331 AC2-EDGE: a pointer parked over the sideline hover-arms the
+        // selector, but the first NON-verb key disarms the arm and forwards to the
+        // focused pane - typing into the shell is never swallowed.
+        let mut v = two_pane_view();
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        v.on_hover(0, 5, Instant::now()); // hover-arm the header row
+        assert_eq!(v.selector, Some(0));
+        assert!(v.sel_hover_armed);
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"l", &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(v.selector, None, "a non-verb key disarms the hover-arm");
+        assert!(!v.sel_hover_armed);
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Input(bytes) => {
+                assert_eq!(bytes, b"l", "the key forwards to the focused pane")
+            }
+            other => panic!("a non-verb key should forward to the pane, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn xf331_selector_r_on_a_non_squad_row_notices_not_beeps() {
+        // x-f331 US3/AC1-ERR: a refused sideline action prints a notice naming
+        // why, never a bare beep. `r` (rename workspace) on an agent row refuses.
+        let mut v = unified_rows_view();
+        let mut buf: Vec<u8> = Vec::new();
+        let idx = agent_row_at(&v, |a| a.pane_id == Some(10));
+        v.selector = Some(idx);
+        selector_keys(&mut v, b"r", &mut buf).await.unwrap();
+        assert!(v.rename.is_none(), "r on an agent row opens no rename");
+        assert!(
+            v.notice.is_some(),
+            "the refusal is a visible notice, not a bare beep"
+        );
     }
 
     #[tokio::test]
