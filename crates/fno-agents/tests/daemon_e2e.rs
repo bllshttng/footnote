@@ -338,13 +338,30 @@ async fn drift_warned_on_list_stderr_only() {
     }
 
     // Start the daemon FROM the copy so its current_exe() == dcopy; it records the
-    // copy's fingerprint at startup.
-    let mut daemon = Command::new(&dcopy)
-        .env("FNO_AGENTS_HOME", home.root())
-        .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
-        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
-        .spawn()
-        .expect("daemon spawns from copy");
+    // copy's fingerprint at startup. Retry on ETXTBSY: a binary freshly written by
+    // fs::copy can briefly refuse to exec ("Text file busy", code 26) while the
+    // kernel still holds a write reference, racing this copy-then-spawn on a loaded
+    // CI runner. The window is milliseconds; bound the retry so a real failure fails.
+    let spawn_daemon = || {
+        Command::new(&dcopy)
+            .env("FNO_AGENTS_HOME", home.root())
+            .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
+            .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
+            .spawn()
+    };
+    let mut daemon = {
+        let mut attempt = 0;
+        loop {
+            match spawn_daemon() {
+                Ok(child) => break child,
+                Err(e) if e.raw_os_error() == Some(26) && attempt < 50 => {
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("daemon spawns from copy: {e:?}"),
+            }
+        }
+    };
     wait_for(&home.supervisor_sock(), Duration::from_secs(10));
 
     // A served status RPC only returns once the daemon is in its accept loop,

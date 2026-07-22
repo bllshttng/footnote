@@ -233,6 +233,18 @@ fn rerun_allowed(agents: &[RegistryAgent], session: &str, pane: u64) -> Result<(
     }
 }
 
+/// (x-fbb1) Whether a focused NON-viewer leaf may be taken over by `.`=here.
+/// Pure over the three inputs so the reap gate (the safety-critical bit) is
+/// unit-testable without a Core, mirroring [`rerun_allowed`]. Take-over is
+/// allowed iff the leaf is the tab's ONLY pane, a plain shell (`cmd == None`,
+/// not a `pane run` / agent pane), and a pristine idle shell (has drawn a
+/// prompt but run nothing - see [`vt::Pane::is_pristine_idle_shell`]). Any other
+/// shape - a split, an agent pane, or a shell that has run/started anything -
+/// refuses, so `.` never kills live work.
+fn idle_shell_takeover(leaf_count: usize, cmd: Option<&str>, pristine_idle: bool) -> bool {
+    leaf_count == 1 && cmd.is_none() && pristine_idle
+}
+
 /// The last `n` non-empty lines of `text`, joined by `\n` - the mux-server twin
 /// of the daemon's `Region::BottomNonEmptyLines` extraction (x-c929). The crates
 /// share no code, so this is a focused copy (like `rfc3339_like_to_secs`); it
@@ -6120,13 +6132,27 @@ impl Core {
                         .iter()
                         .find(|(_, &p)| p == focus)
                         .map(|(k, _)| k.clone());
-                    let Some(displaced_id) = displaced else {
-                        self.notice(
-                            client_id,
-                            "focused pane is not a detachable viewer - use split or new tab",
-                        );
-                        return Flow::Continue;
-                    };
+                    // (x-fbb1) A viewer displaces (swap, unchanged). A non-viewer is accepted only
+                    // when it is a lone idle shell - take over the empty tab, the reported bug.
+                    // Reaping a shell mints no `attached` entry (no detached session to preserve),
+                    // so the spawn-first / replace_leaf / reap-last dance below is otherwise identical.
+                    if displaced.is_none() {
+                        let leaf_count = self
+                            .viewed_tab(view)
+                            .map(|t| tree::leaves(&t.root).len())
+                            .unwrap_or(0);
+                        let takeover = self.panes.get(&focus).is_some_and(|p| {
+                            idle_shell_takeover(
+                                leaf_count,
+                                p.cmd.as_deref(),
+                                p.vt.is_pristine_idle_shell(),
+                            )
+                        });
+                        if !takeover {
+                            self.notice(client_id, "tab is not empty - use split or new tab");
+                            return Flow::Continue;
+                        }
+                    }
                     // Anchor the spawn at B's row cwd, else the viewed squad's cwd (same rule as a fresh attach).
                     let row_cwd = self
                         .agents
@@ -6178,10 +6204,14 @@ impl Core {
                     // Reap-last (Locked 4): F's viewer dies but the displaced session keeps running detached
                     // and resurfaces watch-only (x-7561 external-lifecycle - viewport moved, nothing killed).
                     self.reap_pane(focus);
-                    self.notice(
-                        client_id,
-                        format!("opened here; {displaced_id} detached (watch-only)"),
-                    );
+                    match &displaced {
+                        Some(did) => self.notice(
+                            client_id,
+                            format!("opened here; {did} detached (watch-only)"),
+                        ),
+                        // (x-fbb1) Take-over: the reaped shell had no detached session to resurface.
+                        None => self.notice(client_id, "took over tab"),
+                    }
                     self.push_layout(true);
                     return Flow::Continue;
                 }
@@ -11971,20 +12001,37 @@ mod tests {
     }
 
     #[test]
-    fn open_here_refuses_non_viewer_focus_before_spawn() {
-        // AC1-ERR: the focused pane is a direct/shell pane (not in `attached`), so open-here refuses
-        // fail-closed with no spawn - killing its PTY child would kill real work.
+    fn open_here_takes_over_lone_idle_shell() {
+        // x-fbb1 (the reported bug): the focused pane is a lone idle shell (not in `attached`).
+        // `.`=here reaps it and lands B as the tab's only pane - "take over the empty tab".
+        set_attach_program(&["/bin/cat"]); // stand in for `claude attach`
         let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+        let view = core.client_view(client_id).unwrap();
+        let shell = core.viewed_tab(view).unwrap().focus;
+        // Make the shell a pristine idle shell: a real mux shell draws its first prompt (OSC 133 A)
+        // and has run nothing. Without this the pane never emitted markers and take-over refuses.
+        core.panes
+            .get_mut(&shell)
+            .unwrap()
+            .vt
+            .feed(b"\x1b]133;A\x07");
         core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
-        let panes_before = core.panes.len();
+        let new_pid = core.next_pane_id;
 
         core.command(client_id, Command::attach_agent_here("deadbee2"));
 
-        assert_eq!(core.panes.len(), panes_before, "no pane spawned");
-        assert!(!core.attached.contains_key("deadbee2"), "nothing mapped");
+        let tab = core.viewed_tab(view).unwrap();
+        assert_eq!(tab.root, Node::Leaf(new_pid), "B took the tab's only slot");
+        assert_eq!(tab.focus, new_pid, "focus follows the take-over");
+        assert!(
+            !core.panes.contains_key(&shell),
+            "the idle shell was reaped"
+        );
+        assert_eq!(core.attached.get("deadbee2"), Some(&new_pid), "B mapped");
         assert!(drain_notices(&mut rx)
             .iter()
-            .any(|t| t.contains("not a detachable viewer")));
+            .any(|t| t.contains("took over tab")));
+        core.reap_pane(new_pid); // don't leak the stand-in child
     }
 
     #[test]
@@ -12159,30 +12206,50 @@ mod tests {
     }
 
     #[test]
-    fn open_here_guard_reads_current_focus_not_client_identity() {
-        // AC2-FR: the displacement guard evaluates whatever pane is focused NOW (re-resolved server-side), so
-        // if focus moved to a non-viewer (e.g. the original viewer exited under the click) open-here refuses
-        // rather than blindly displacing an unintended pane. Here the focus is a non-viewer, a viewer elsewhere.
+    fn open_here_reads_current_focus_never_the_elsewhere_viewer() {
+        // AC2-FR: the displacement guard evaluates whatever pane is focused NOW (re-resolved
+        // server-side). Focus is a lone idle shell, so open-here takes it over (x-fbb1); a viewer
+        // sits on ANOTHER tab and must be left completely untouched - open-here never displaces a
+        // pane the operator is not looking at.
+        set_attach_program(&["/bin/cat"]);
         let (mut core, client_id, p1, p2, mut rx) = seen_test_core();
         let view = core.client_view(client_id).unwrap();
         let focus = core.viewed_tab(view).unwrap().focus;
-        // A viewer exists, but on the OTHER (unfocused) pane; focus is a plain
-        // pane not in `attached`.
+        // A viewer exists, but on the OTHER (unviewed) tab's pane; focus is a pristine idle shell.
         let other = if focus == p1 { p2 } else { p1 };
+        core.panes
+            .get_mut(&focus)
+            .unwrap()
+            .vt
+            .feed(b"\x1b]133;A\x07");
         core.attached.insert("deadbee1".into(), other);
         core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
-        let panes_before = core.panes.len();
+        let new_pid = core.next_pane_id;
 
         core.command(client_id, Command::attach_agent_here("deadbee2"));
 
-        assert_eq!(core.panes.len(), panes_before, "no pane spawned");
+        assert!(
+            !core.panes.contains_key(&focus),
+            "the focused idle shell was taken over"
+        );
+        assert_eq!(
+            core.attached.get("deadbee2"),
+            Some(&new_pid),
+            "B landed on the focused slot"
+        );
         assert!(
             core.panes.contains_key(&other),
             "the elsewhere viewer is never touched"
         );
+        assert_eq!(
+            core.attached.get("deadbee1"),
+            Some(&other),
+            "the elsewhere viewer's mapping is intact"
+        );
         assert!(drain_notices(&mut rx)
             .iter()
-            .any(|t| t.contains("not a detachable viewer")));
+            .any(|t| t.contains("took over tab")));
+        core.reap_pane(new_pid);
     }
 
     // -- git diff side pane ----------------------------------------------
@@ -13325,6 +13392,19 @@ mod tests {
             rerun_allowed(&[agent(9, Some(AgentBadge::Working), false)], "main", 7),
             Ok(())
         );
+    }
+
+    #[test]
+    fn idle_shell_takeover_verdicts() {
+        // Take-over: the tab's only pane is a plain, pristine idle shell (the reported bug).
+        assert!(idle_shell_takeover(1, None, true));
+        // Refuse: the shell has run or started something (foreground program, exec, or a
+        // background/stopped job) - not pristine, so `.` must not reap it.
+        assert!(!idle_shell_takeover(1, None, false));
+        // Refuse: more than one leaf - `.` is scoped to the "only pane" case; splits use h/j/k/l.
+        assert!(!idle_shell_takeover(2, None, true));
+        // Refuse: an agent / `pane run` pane (cmd set) is never a disposable shell.
+        assert!(!idle_shell_takeover(1, Some("claude attach ab12"), true));
     }
 
     /// A scratch store dir for write-through tests, installed via the per-thread

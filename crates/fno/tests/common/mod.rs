@@ -114,6 +114,11 @@ impl ClientHarness {
         for a in args {
             cmd.arg(a);
         }
+        // Hermetic launch: if the suite itself runs inside a mux session
+        // (FNO_SESSION set), the spawned client would self-exit with "already
+        // inside mux session" and every e2e write would EIO. Clear it so the
+        // harness client always behaves as a fresh top-level launch.
+        cmd.env_remove("FNO_SESSION");
         cmd.env("FNO_MUX_DIR", &scratch.0);
         cmd.env("SHELL", "/bin/sh");
         cmd.env("TERM", "xterm-256color");
