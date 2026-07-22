@@ -197,6 +197,39 @@ def test_resolve_never_raises_on_broken_resolver(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# opencode activity age from message timestamps (codex/bot P2)
+# ---------------------------------------------------------------------------
+
+def test_opencode_activity_epoch_from_messages(tmp_path):
+    import sqlite3
+
+    from fno.agents.session_truth import _opencode_activity_epoch
+
+    db = tmp_path / "opencode.db"
+    con = sqlite3.connect(db)
+    con.execute(
+        "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, "
+        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)"
+    )
+    # time_updated is epoch MILLISECONDS; newest wins.
+    con.executemany(
+        "INSERT INTO message VALUES (?,?,?,?,?)",
+        [
+            ("m1", "ses_abc", 1_000_000, 1_000_000_000_000, "{}"),
+            ("m2", "ses_abc", 2_000_000, 1_784_000_000_000, "{}"),
+            ("m3", "ses_other", 3_000_000, 1_999_999_999_999, "{}"),
+        ],
+    )
+    con.commit()
+    con.close()
+
+    epoch = _opencode_activity_epoch("ses_abc", db)
+    assert epoch == 1_784_000_000.0  # newest for ses_abc, scaled ms -> s
+
+    assert _opencode_activity_epoch("ses_missing", db) is None
+
+
+# ---------------------------------------------------------------------------
 # render_truth: one legible human line (AC3-UI)
 # ---------------------------------------------------------------------------
 

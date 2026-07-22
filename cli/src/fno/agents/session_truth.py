@@ -94,12 +94,14 @@ def _transcript_age_s(
     codex_sessions_dir: Optional[Path],
     now_s: Optional[float],
 ) -> Optional[float]:
-    """Seconds since the session's transcript file was last written, or None.
+    """Seconds since the session's newest activity, or None if unknowable.
 
-    Uses the x-a472 transcript resolver (newest across all project dirs), so the
-    age reflects the LIVE worktree transcript, not a stale canonical stub. None
-    when there is no per-file mtime to read (unresolved, or an opencode store
-    whose single DB mtime says nothing about one session)."""
+    Uses the x-a472 transcript resolver (content-aware across all project dirs),
+    so a jsonl age reflects the LIVE transcript, not a stale stub. For opencode
+    the store is shared, so a per-file mtime is meaningless; the age comes from
+    the session's newest message timestamp instead (the store already indexes
+    ``(session_id, time_created)``), so an opencode session can go ``stalled``
+    like any other. None only when nothing resolves."""
     from fno.provenance.resolver import resolve_transcript
 
     try:
@@ -110,13 +112,40 @@ def _transcript_age_s(
             projects_root=projects_root,
             codex_sessions_dir=codex_sessions_dir,
         )
-        if not rt.resolved or not rt.transcript_path or rt.kind != "jsonl":
+        if not rt.resolved or not rt.transcript_path:
             return None
-        mtime = Path(rt.transcript_path).stat().st_mtime
+        if rt.kind == "opencode-db":
+            mtime = _opencode_activity_epoch(session_id, Path(rt.transcript_path))
+            if mtime is None:
+                return None
+        else:
+            mtime = Path(rt.transcript_path).stat().st_mtime
     except Exception:  # noqa: BLE001 — any read failure -> age unknown (working)
         return None
     now = now_s if now_s is not None else time.time()
     return max(0.0, now - mtime)
+
+
+def _opencode_activity_epoch(session_id: str, db_path: Path) -> Optional[float]:
+    """Newest message time for an opencode session, in epoch SECONDS, or None.
+
+    Read-only single-column aggregate against the shared store (a stray write is
+    destructive: WAL + ON DELETE CASCADE). ``time_updated`` is epoch
+    milliseconds, so scale to seconds. None when the session has no message or
+    the store is unreadable (the caller then reports age-unknown -> working)."""
+    from fno.agents.discover import opencode_query
+
+    try:
+        rows = opencode_query(
+            db_path,
+            "SELECT MAX(time_updated) FROM message WHERE session_id = ?",
+            (session_id,),
+        )
+    except Exception:  # noqa: BLE001 — locked / schema-drifted store -> unknown
+        return None
+    if not rows or rows[0][0] is None:
+        return None
+    return float(rows[0][0]) / 1000.0
 
 
 def resolve_session_truth(
