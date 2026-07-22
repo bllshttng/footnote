@@ -2938,15 +2938,23 @@ impl Core {
             }
         }
 
-        // 6. Spare shells to recycle for shell/unbound slots. Drained in tree
-        //    order (FIFO) so a re-apply reassigns each shell to the SAME slot it
-        //    held - the tree comes back byte-identical (AC3 idempotence). A LIFO
-        //    pop would reverse the shells across slots and defeat that.
-        let mut spare: std::collections::VecDeque<u64> = target_leaves_before
+        // 6. Partition the leftovers (target-tab panes the new spec does not
+        //    reuse). A live bound leftover must NEVER be recycled as a shell in
+        //    step 7 - it can only be rehomed in step 9 - so only genuine shells
+        //    feed the recycle pool. Recycling a live pane into a Shell/Unbound
+        //    slot silently absorbs a running agent under an `outcome: Shell`
+        //    report (x-3f39); the never-kill guard in step 9 never sees it
+        //    because step 7 consumed it first. Splitting up front makes the
+        //    step-9 reap provably shell-only.
+        //    Shells drain in tree order (FIFO) so a re-apply reassigns each shell
+        //    to the SAME slot it held - the tree comes back byte-identical (AC3
+        //    idempotence). A LIFO pop would reverse the shells across slots.
+        let (live_leftovers, shell_pool): (Vec<u64>, Vec<u64>) = target_leaves_before
             .iter()
             .copied()
             .filter(|p| !reuse_set.contains(p))
-            .collect();
+            .partition(|&p| self.pane_hosts_live_session(p));
+        let mut spare: std::collections::VecDeque<u64> = shell_pool.into();
 
         // 7. Assign a pane to every slot, spawning shells only after fit passed.
         let cwd = self
@@ -3012,21 +3020,23 @@ impl Core {
             flat_row(&filled.iter().map(|(_, p)| *p).collect::<Vec<_>>())
         };
 
-        // 9. Dispose of spare panes the new tree did not consume. A shell closes;
-        //    a pane still hosting a LIVE session (a bound slot the new spec
-        //    dropped) is broken into its own tab instead - never reap a live
-        //    session's PTY (the load-bearing never-kill invariant), even on a
-        //    reshape that drops its binding.
+        // 9. Dispose of leftovers the new tree did not consume. The step-6
+        //    partition guarantees `spare` is shell-only, so an unconsumed shell
+        //    is a plain reap - the never-kill invariant is enforced by
+        //    construction, not by a downstream check racing step-7 recycling.
+        //    Live leftovers (a bound slot the new spec dropped) rehome into their
+        //    own tab, never reaped - the load-bearing never-kill invariant.
         let kept: std::collections::HashSet<u64> = tree::leaves(&new_root).into_iter().collect();
         for p in spare {
-            if kept.contains(&p) {
-                continue;
-            }
-            if self.pane_hosts_live_session(p) {
-                self.rehome_pane_to_new_tab(sid, p);
-            } else {
+            if !kept.contains(&p) {
                 self.reap_pane(p);
             }
+        }
+        // A live leftover is in neither reuse_set nor the shell pool, so it can
+        // never be a leaf of new_root; the kept check would always pass. Rehome
+        // unconditionally.
+        for p in live_leftovers {
+            self.rehome_pane_to_new_tab(sid, p);
         }
 
         // 10. Commit: swap the root, keep focus unless opted in / gone. The
@@ -5421,6 +5431,13 @@ impl Core {
                 // push delivers ModeSync -> Layout -> frames in order
                 // (AC2-ERR).
                 self.tab_areas.remove(&tid);
+                // (x-cde1) Closing the last pane removes the tab too, so it must
+                // honor the same de-persist contract as Command::CloseTab: a
+                // template tab drops its stored spec or restore resurrects the
+                // closed tab (persist rewrites the squad's list from live tabs).
+                if self.template_specs.remove(&tid).is_some() {
+                    self.persist_template_specs(sid);
+                }
                 self.reanchor_views();
                 self.push_layout(true);
                 Flow::Continue
@@ -6180,6 +6197,7 @@ impl Core {
                             .squad_mut(sid)
                             .expect("find_tab live squad")
                             .tabs[ti];
+                        let tid = t.id;
                         // Blank-after-sanitize CLEARS the rename back to the
                         // derived label (Locked 2: "reset to auto" is a
                         // meaningful rename target).
@@ -6188,6 +6206,14 @@ impl Core {
                         // (x-0f9d US4) Persist so the chosen tab name survives a
                         // restart; a no-op for an unnamed/untracked squad.
                         self.persist_squad(sid);
+                        // (x-cde1) persist_squad preserves tab_specs byte-for-byte,
+                        // so a template tab's stored spec would keep the OLD name
+                        // key across this overlay rename - the same re-persist
+                        // tab_rename does for the wire-API path. Guarded so a
+                        // non-template tab causes no store churn.
+                        if self.template_specs.contains_key(&tid) {
+                            self.persist_template_specs(sid);
+                        }
                     }
                     None => self.notice(client_id, "no such tab"),
                 }
@@ -10022,6 +10048,213 @@ mod tests {
             .iter()
             .any(|t| tree::leaves(&t.root).contains(&p1));
         assert!(hosted, "S1's pane lives on in a rehomed tab");
+    }
+
+    #[test]
+    fn recycle_never_absorbs_a_live_leftover_into_a_shell_slot() {
+        // x-3f39: the reap path was guarded in b7cff6d0, but the recycle-as-shell
+        // path was not. A re-apply whose new spec carries a Shell slot must NOT
+        // hand a dropped live agent's pane to it (step 7); the live leftover
+        // rehomes to its own tab and the Shell slot gets a genuinely fresh shell.
+        let (mut core, p1) = template_core();
+        let p2 = core.spawn_pane(24, 80, "/a").unwrap();
+        let p3 = core.spawn_pane(24, 80, "/a").unwrap();
+        core.agents = vec![
+            bound_agent("S1", p1),
+            bound_agent("S2", p2),
+            bound_agent("S3", p3),
+        ];
+        let thirds = LayoutSpec {
+            template: TemplateName::RowThirds,
+            slots: vec![
+                SlotBinding::Fno("S1".into()),
+                SlotBinding::Fno("S2".into()),
+                SlotBinding::Fno("S3".into()),
+            ],
+        };
+        core.apply_spec(1, &TabSel::Id(5), &thirds, false).unwrap();
+
+        // Re-apply main-left binding S2 + a SHELL slot: S1 and S3 are dropped
+        // live leftovers and the shell slot is a recycle target.
+        let spec = LayoutSpec {
+            template: TemplateName::MainLeft,
+            slots: vec![SlotBinding::Fno("S2".into()), SlotBinding::Shell],
+        };
+        let results = core.apply_spec(1, &TabSel::Id(5), &spec, false).unwrap();
+
+        // Slot 0 reuses S2; slot 1 is a genuine fresh shell, never a live pane.
+        assert_eq!(results[0].pane_id, Some(p2), "slot 0 reuses S2");
+        assert_eq!(results[1].outcome, SlotOutcome::Shell);
+        let shell_pane = results[1].pane_id.expect("shell slot filled");
+        assert_ne!(shell_pane, p1, "shell slot must not be S1's live pane");
+        assert_ne!(shell_pane, p3, "shell slot must not be S3's live pane");
+
+        // AC1-FR: both live leftovers survive (never reaped) and each rehomes to
+        // a tab of its own, out of the template tab.
+        assert!(
+            core.panes.contains_key(&p1),
+            "S1's live pane is never reaped"
+        );
+        assert!(
+            core.panes.contains_key(&p3),
+            "S3's live pane is never reaped"
+        );
+        let sq = core.session.squad(1).unwrap();
+        let tab5_leaves = tree::leaves(&sq.tabs.iter().find(|t| t.id == 5).unwrap().root);
+        assert!(
+            !tab5_leaves.contains(&p1) && !tab5_leaves.contains(&p3),
+            "dropped live panes left the template tab"
+        );
+        for p in [p1, p3] {
+            let hosted = sq
+                .tabs
+                .iter()
+                .any(|t| t.id != 5 && tree::leaves(&t.root).contains(&p));
+            assert!(hosted, "live leftover {p} lives on in its own rehomed tab");
+        }
+    }
+
+    #[test]
+    fn idempotent_reapply_recycles_a_genuine_shell_not_a_new_pane() {
+        // AC3-EDGE: the step-6 partition must not disturb genuine-shell
+        // recycling. A real shell is not live-bound, so it stays in the recycle
+        // pool and a re-apply of the same spec reuses it FIFO - no new spawn, no
+        // rehome tab.
+        let (mut core, p1) = template_core();
+        core.agents = vec![bound_agent("S1", p1)];
+        let spec = LayoutSpec {
+            template: TemplateName::MainLeft,
+            slots: vec![SlotBinding::Fno("S1".into()), SlotBinding::Shell],
+        };
+        let r1 = core.apply_spec(1, &TabSel::Id(5), &spec, false).unwrap();
+        let shell1 = r1[1].pane_id.expect("shell filled");
+        let tabs_after_first = core.session.squad(1).unwrap().tabs.len();
+
+        let r2 = core.apply_spec(1, &TabSel::Id(5), &spec, false).unwrap();
+        assert_eq!(r2[0].pane_id, Some(p1), "S1 still reused in slot 0");
+        assert_eq!(
+            r2[1].pane_id,
+            Some(shell1),
+            "the same genuine shell recycles, not a new spawn"
+        );
+        assert_eq!(
+            core.session.squad(1).unwrap().tabs.len(),
+            tabs_after_first,
+            "no rehome tab created for a genuine shell"
+        );
+    }
+
+    #[test]
+    fn overlay_rename_repersists_template_spec_under_new_name() {
+        // x-cde1 AC1-HP: Command::RenameTab (the interactive overlay path, not
+        // the ControlVerb::TabRename wire API) must re-persist a template tab's
+        // spec so restore finds it under the NEW name. persist_squad alone
+        // preserves tab_specs byte-for-byte, keeping the stale old key.
+        let _s = StoreScratch::new("cde1-rename");
+        let (mut core, _p) = template_core();
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.session.squad_mut(1).unwrap().tabs[0].name = Some("grid".into());
+        core.apply_spec(
+            1,
+            &TabSel::Id(5),
+            &shell_spec(TemplateName::MainLeft, 2),
+            false,
+        )
+        .unwrap();
+        let loaded = crate::squad_store::load();
+        let specs = &loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "sq")
+            .unwrap()
+            .tab_specs;
+        assert_eq!(specs.len(), 1);
+        assert_eq!(
+            specs[0].tab_name, "grid",
+            "persisted under the original name"
+        );
+
+        // apply_spec's layout push reaps the test client (dropped receiver);
+        // re-register it so the rename command has a live sender to act on.
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(
+            1,
+            Command::RenameTab {
+                tab: 5,
+                name: "reviews".into(),
+            },
+        );
+
+        let loaded = crate::squad_store::load();
+        let specs = &loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "sq")
+            .unwrap()
+            .tab_specs;
+        assert_eq!(specs.len(), 1, "still exactly one template spec");
+        assert_eq!(specs[0].tab_name, "reviews", "re-keyed under the new name");
+        assert!(
+            !specs.iter().any(|s| s.tab_name == "grid"),
+            "no stale old key survives"
+        );
+    }
+
+    #[test]
+    fn implicit_tab_teardown_drops_template_spec() {
+        // x-cde1 AC2-HP: closing a template tab's last pane via close_pane removes
+        // the tab and must drop its stored spec, or restore resurrects the closed
+        // tab. A second tab keeps the session alive so the removal hits the
+        // tab-removed branch (not SessionEmpty/shutdown).
+        let _s = StoreScratch::new("cde1-close");
+        let (mut core, _p) = template_core();
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.create_tab_in(1, None)
+            .expect("second tab keeps the session alive");
+        core.session.squad_mut(1).unwrap().tabs[0].name = Some("grid".into());
+        core.apply_spec(
+            1,
+            &TabSel::Id(5),
+            &shell_spec(TemplateName::MainLeft, 2),
+            false,
+        )
+        .unwrap();
+        let loaded = crate::squad_store::load();
+        let specs = &loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "sq")
+            .unwrap()
+            .tab_specs;
+        assert_eq!(specs.len(), 1, "spec persisted before teardown");
+
+        // Close tab 5's panes one at a time; the last close removes the tab.
+        let leaves = tree::leaves(
+            &core
+                .session
+                .squad(1)
+                .unwrap()
+                .tabs
+                .iter()
+                .find(|t| t.id == 5)
+                .unwrap()
+                .root,
+        );
+        for p in leaves {
+            core.close_pane(p);
+        }
+
+        let loaded = crate::squad_store::load();
+        let specs = &loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "sq")
+            .unwrap()
+            .tab_specs;
+        assert!(
+            !specs.iter().any(|s| s.tab_name == "grid"),
+            "the closed template tab's spec is dropped from the store"
+        );
     }
 
     #[test]
