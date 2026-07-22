@@ -674,6 +674,32 @@ impl FakeClient {
         }
     }
 
+    /// Like [`wait`], but for a KILL: a killed server sends `Bye(killed)` and
+    /// closes its socket in an unordered race, so a closed stream is EQUALLY
+    /// valid proof the kill landed. Returns on `pred` or on close; only a
+    /// timeout panics. Kept separate from `wait` so a normal wait still treats a
+    /// premature close as the bug it is (the generic path panicked here under
+    /// full-suite parallel load when the socket closed before the Bye was read).
+    pub fn wait_killed(&mut self, secs: u64, pred: impl Fn(&FakeClient) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if pred(self) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "never saw the kill (neither Bye(killed) nor a closed stream) within {secs}s; byes: {:?}",
+                    self.byes
+                );
+            }
+            match self.next_msg() {
+                Wire::Msg(m) => self.absorb(m),
+                Wire::Idle => {}
+                Wire::Closed => return,
+            }
+        }
+    }
+
     pub fn wait_layout(
         &mut self,
         secs: u64,
