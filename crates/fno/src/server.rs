@@ -5758,9 +5758,12 @@ impl Core {
                 let dst = self.session.find_pane(target);
                 match (src, dst) {
                     (Some(s), Some(d)) if s != d => {
+                        // move_pane_cross_tab propagates only PaneGone / TooSmall
+                        // (from detach_leaf / graft_subtree); Origin is a
+                        // within-tab move_leaf verdict and cannot arise here, so
+                        // every real Err is a named notice.
                         match self.move_pane_cross_tab(mover, s, target, d, dir) {
                             Ok(()) => {}
-                            Err(tree::MoveError::Origin) => {}
                             Err(e) => self.notice(client_id, e.to_string()),
                         }
                     }
