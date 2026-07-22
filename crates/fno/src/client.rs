@@ -7530,18 +7530,28 @@ async fn handle_stdin(
                 }
                 MouseKind::Release(MouseButton::Left) => {
                     view.row_drag_to(rep.row, rep.col, Instant::now());
+                    // Capture the pressed row's source BEFORE commit consumes the
+                    // drag, so a zone-less release can verify it landed back on the
+                    // SAME row.
+                    let pressed = view.row_drag.as_ref().map(|d| d.src.clone());
                     match view.commit_row_drag() {
                         Some(cmd) => {
                             write_msg(sock_w, &ClientMsg::Command(cmd))
                                 .await
                                 .map_err(|e| format!("row place send failed: {e}"))?;
                         }
-                        // A zone-less release still on the sideline is a plain
-                        // click: run the row's own action (focus / attach),
-                        // unchanged from a press-click. Off the sideline it is a
-                        // cancelled drag.
+                        // A zone-less release is a plain click ONLY when the
+                        // pointer is still on the row it was pressed on: run that
+                        // row's own action (focus / attach), unchanged from a
+                        // press-click. A slip to a different row - or a layout
+                        // shift under a held button, or a release over pinned
+                        // chrome (row_drag_source_at skips the density button) -
+                        // resolves to a different source (or None), so the gesture
+                        // cancels rather than acting on the wrong agent.
                         None => {
-                            if view.sideline_row_at(rep.row, rep.col).is_some() {
+                            if pressed.is_some()
+                                && view.row_drag_source_at(rep.row, rep.col) == pressed
+                            {
                                 if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
                                     apply_hit(view, hit, sock_w).await?;
                                 }

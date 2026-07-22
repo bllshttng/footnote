@@ -2648,18 +2648,14 @@ impl Core {
         let src_vp = self.tab_rect(src_tid);
         let dst_vp = self.tab_rect(dst_tid);
 
-        // A CROSS-SQUAD move takes a persisted member out of its source
-        // workspace, so capture its member context BEFORE the move (find_pane
-        // still resolves it in the source) and de-recruit it below - otherwise
-        // its `squad_members` entry lingers under a squad it no longer lives in
-        // (or that the move then removes). A same-squad cross-tab move keeps the
-        // member in place, so it is not captured; a non-member pane yields None
-        // (reconcile is then a no-op). Mirrors the CloseTab de-recruit.
-        let moved_member = if src_sid != dst_sid {
-            self.member_ctx(mover)
-        } else {
-            None
-        };
+        // Capture the source's persistence state BEFORE the move (find_pane still
+        // resolves the mover in its source): its member context if the mover is a
+        // recruited member, and the source squad's persisted name. The move can
+        // relocate a member across workspaces, keep it in place in the same
+        // workspace, or empty and remove the source squad entirely - each needs a
+        // different persistence reconcile below.
+        let moved_member = self.member_ctx(mover);
+        let src_persisted_name = self.session.squad(src_sid).and_then(|s| s.name.clone());
 
         // Graft into the destination first, and focus the moved pane there while
         // the dst index is still valid (removing the source tab below can shift
@@ -2683,12 +2679,30 @@ impl Core {
             self.tab_areas.remove(&src_tid);
             self.reanchor_views();
         }
-        // De-recruit the moved member from its (now former) source workspace. The
-        // helper removes it from `squad_members` and, if the source squad did not
-        // survive the move, drops the whole entry and its persisted name - so no
-        // stale membership references a squad the pane left or the move removed.
-        // `None` (same-squad move or a non-member pane) is a no-op.
-        self.reconcile_member_close(moved_member, false);
+        // Reconcile the source workspace's persistence against what the move did:
+        if self.session.squad(src_sid).is_none() {
+            // The move emptied and removed the source squad. Depersist the whole
+            // workspace REGARDLESS of whether the moved pane was a member - a
+            // named workspace's own initial shell counts, and a lingering
+            // `squad_members` entry would resurrect the workspace (and keep its
+            // name reserved) on restart.
+            if let Some(name) = src_persisted_name {
+                self.squad_members.remove(&src_sid);
+                self.persist_remove_name(&name);
+            }
+        } else if let Some(ctx) = moved_member {
+            if src_sid != dst_sid {
+                // Cross-squad: the member left its source workspace - de-recruit
+                // it (drop from squad_members) and persist, the CloseTab path.
+                self.reconcile_member_close(Some(ctx), false);
+            } else {
+                // Same-squad relocation: the member stays, but its hosting tab
+                // changed, so persist to refresh its stored `tab_name` (else a
+                // restart before the next persisting action restores it to the
+                // old tab).
+                self.persist_squad(src_sid);
+            }
+        }
         self.push_layout(true);
         Ok(())
     }
@@ -13614,6 +13628,133 @@ mod tests {
         assert!(
             harden.members.iter().all(|m| m.attach_id != "c19cd2c3"),
             "the moved member is de-recruited from the source workspace"
+        );
+    }
+
+    #[test]
+    fn same_squad_member_move_refreshes_the_stored_tab_name() {
+        // (x-d6a8, codex P1) Relocating a persisted member BETWEEN tabs in the
+        // same squad keeps its membership but must refresh its stored tab_name,
+        // else a restart before the next persisting action restores it to the old
+        // tab.
+        let _s = StoreScratch::new("same-squad-member-tabname");
+        let mut core = empty_core();
+        // Workspace "harden" (squad 7): member pane 100 in tab "old", plus a tab
+        // "new" (pane 101) to relocate it beside.
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("harden".into()),
+            Tab {
+                name: Some("old".into()),
+                id: 7,
+                root: Node::Leaf(100),
+                focus: 100,
+            },
+        );
+        core.session.squad_mut(7).unwrap().tabs.push(Tab {
+            name: Some("new".into()),
+            id: 70,
+            root: Node::Leaf(101),
+            focus: 101,
+        });
+        core.squad_members.insert(
+            7,
+            vec![crate::squad_store::StoredMember {
+                attach_id: "c19cd2c3".into(),
+                tombstone: false,
+                tab_name: Some("old".into()),
+            }],
+        );
+        core.attached.insert("c19cd2c3".into(), 100);
+        core.persist_squad(7);
+
+        // Move member pane 100 from tab "old" beside pane 101 in tab "new".
+        let src = core.session.find_pane(100).expect("member pane");
+        let dst = core.session.find_pane(101).expect("dst pane");
+        assert_eq!(src.0, dst.0, "precondition: a same-squad move");
+        assert_ne!(src.1, dst.1, "precondition: a cross-tab move");
+        core.move_pane_cross_tab(100, src, 101, dst, Dir::Right)
+            .expect("same-squad member move");
+
+        let loaded = crate::squad_store::load();
+        let harden = loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "harden")
+            .expect("workspace survives");
+        let member = harden
+            .members
+            .iter()
+            .find(|m| m.attach_id == "c19cd2c3")
+            .expect("member kept");
+        assert_eq!(
+            member.tab_name.as_deref(),
+            Some("new"),
+            "the stored tab_name follows the member into its new tab"
+        );
+    }
+
+    #[test]
+    fn cross_squad_move_of_a_named_workspace_shell_depersists_it() {
+        // (x-d6a8, codex P1) Dragging a named workspace's own (non-member) shell
+        // into another squad empties and removes the workspace; its persisted
+        // entry and reserved name must not survive to resurrect it on restart.
+        let _s = StoreScratch::new("depersist-emptied-workspace");
+        let mut core = empty_core();
+        // A named workspace "review" (squad 7) with a single NON-member shell.
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("review".into()),
+            Tab {
+                name: None,
+                id: 7,
+                root: Node::Leaf(100),
+                focus: 100,
+            },
+        );
+        core.squad_members.insert(7, Vec::new()); // named, no recruited members
+        core.persist_squad(7);
+        assert!(
+            crate::squad_store::load()
+                .squads
+                .iter()
+                .any(|s| s.name == "review"),
+            "precondition: the workspace is persisted"
+        );
+        core.session.add_squad(
+            8,
+            vec!["/other".into()],
+            Some("other".into()),
+            Tab {
+                name: None,
+                id: 8,
+                root: Node::Leaf(200),
+                focus: 200,
+            },
+        );
+
+        let src = core.session.find_pane(100).expect("shell pane");
+        let dst = core.session.find_pane(200).expect("dst pane");
+        core.move_pane_cross_tab(100, src, 200, dst, Dir::Right)
+            .expect("cross-squad shell move");
+
+        assert!(core.session.squad(7).is_none(), "source squad removed");
+        assert!(
+            !core.squad_members.contains_key(&7),
+            "in-memory members entry cleared"
+        );
+        assert!(
+            crate::squad_store::load()
+                .squads
+                .iter()
+                .all(|s| s.name != "review"),
+            "the emptied workspace is depersisted, not resurrected on restart"
+        );
+        assert!(
+            !core.named_squad_taken("review"),
+            "its name is no longer reserved"
         );
     }
 
