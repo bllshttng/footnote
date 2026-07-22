@@ -96,6 +96,7 @@ impl ClientHarness {
     }
 
     fn spawn_full(scratch: &Scratch, envs: &[(&str, &str)], args: &[&str]) -> Self {
+        scrub_inherited_mux_env();
         // 60 columns: below the sideline's auto-hide threshold (panel 28 +
         // min content 40), so the panel stays hidden and Phase-1-era screen
         // assertions see bare content lines under the 1-row tab bar. The
@@ -322,6 +323,23 @@ impl Drop for ServerProc {
     }
 }
 
+/// Scrub the mux env this test PROCESS inherited when the suite is itself run
+/// from inside a mux session (`FNO_SESSION`/`FNO_PANE` set). Every fno the
+/// harness spawns - client, autospawned server, and the pane shell under it -
+/// inherits this process's env, so a leaked `FNO_SESSION` makes the pane shell
+/// behave as if nested and repaints its prompt, breaking the screen-exact
+/// reattach assertions (which pass only with a clean env, e.g. in CI). Removing
+/// it once at the process level, before any spawn, restores the CI environment.
+/// A nested-guard test still sets `FNO_SESSION` explicitly via its `envs`, which
+/// is applied per-child after this scrub, so those cases are unaffected.
+fn scrub_inherited_mux_env() {
+    static SCRUB: std::sync::Once = std::sync::Once::new();
+    SCRUB.call_once(|| {
+        std::env::remove_var("FNO_SESSION");
+        std::env::remove_var("FNO_PANE");
+    });
+}
+
 /// Spawn the real server binary headless on `sock`, with `envs` overriding
 /// the inherited environment (SHELL, PATH for the git-stub cases, ...).
 #[allow(dead_code)]
@@ -332,6 +350,7 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    scrub_inherited_mux_env();
     // Reap the server if this test process dies without running Drop (SIGKILL,
     // panic=abort, cargo-test timeout) — x-4e30. A test that needs a specific
     // grace (or none) overrides via `envs`, which is applied after.
