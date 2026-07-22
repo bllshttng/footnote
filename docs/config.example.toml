@@ -83,7 +83,8 @@ enabled = false
 unclaimed_ttl = 1800
 
 [blueprint]
-# Cap on group PRs per decomposed epic.
+# Default cap on group PRs per decomposed epic. An epic plan-doc's
+# `max_children:` frontmatter overrides this per-epic; --max-prs may only tighten.
 max_prs_per_epic = 4
 
 [backlog]
