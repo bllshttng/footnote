@@ -57,6 +57,28 @@ def test_ac3_hp_verbatim_body_and_real_title():
     assert "retry loop never resets" in c.title
 
 
+def test_codex_badge_subscript_stripped_from_title():
+    """The codex review bot wraps its priority badge in <sub><sub>..</sub></sub>;
+    the tags must not survive into the title (which slugified to sub-sub-sub-sub)."""
+    item = RawItem(
+        kind=KIND_REVIEW,
+        text=(
+            "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)"
+            "</sub></sub>  Reject duplicate pane bindings before committing**"
+        ),
+        source_pr=555,
+        source_id="3629390387",
+        severity="medium",
+        url="https://github.com/o/r/pull/555#discussion_r3629390387",
+        reviewer="chatgpt-codex-connector[bot]",
+    )
+    title = derive_title(item)
+    assert "sub" not in title.lower().split()  # no bare "sub" token to slugify
+    assert "<" not in title and ">" not in title
+    assert not title.endswith("*")
+    assert title == "Reject duplicate pane bindings before committing"
+
+
 def test_ac3_err_uncited_candidate_rejected():
     """AC3-ERR: a candidate with no source_pr/source id is marked uncited (no node)."""
     item = RawItem(kind=KIND_REVIEW, text="some floating finding", source_pr=None, source_id="")
