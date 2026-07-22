@@ -1199,7 +1199,9 @@ def cmd_decompose(
         "--max-prs",
         help=(
             "Ceiling on group/PR count. Rejects when groups exceed it (N is a "
-            "ceiling, not a quota). Defaults to config.blueprint.max_prs_per_epic."
+            "ceiling, not a quota). Defaults to config.blueprint.max_prs_per_epic. "
+            "An epic doc's `max_children:` frontmatter overrides that default; "
+            "--max-prs may then only tighten it (never loosen the author's cap)."
         ),
     ),
     force: bool = typer.Option(
@@ -1233,7 +1235,7 @@ def cmd_decompose(
     """
     import sys as _sys
     from fno.graph._constants import mint_node_id
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import locked_mutate_graph, read_graph, GraphUnreadableError
     from fno.graph._intake import _find_node, _would_create_cycle
     from fno.graph._decompose import (
         DecomposeError,
@@ -1245,10 +1247,12 @@ def cmd_decompose(
         find_orphans,
         is_shipped,
         plan_base,
+        resolve_effective_cap,
         scaffold_separate_plan,
         separate_plan_path,
         validate_groups,
     )
+    from fno.graph._intake import _read_plan_frontmatter
     from fno.handoff.output import emit_error, json_mode
 
     if plans == "fragment":
@@ -1281,21 +1285,52 @@ def cmd_decompose(
         emit_error(ctx, f"--groups is not valid JSON: {e}")
         raise typer.Exit(code=1)
 
-    # 2. Resolve the ceiling: explicit --max-prs wins; else fall back to
-    #    config.blueprint.max_prs_per_epic. load_settings() already returns the
-    #    default (4) when config.blueprint is absent, so a raise here means the
-    #    config is present but invalid - surface it rather than masking it with 4.
-    if max_prs is None:
-        from fno.config import load_settings
-        try:
-            max_prs = load_settings().blueprint.max_prs_per_epic
-        except Exception as e:
-            emit_error(ctx, f"could not read config.blueprint.max_prs_per_epic: {e}")
-            raise typer.Exit(code=1)
+    # 2. Resolve the ceiling. Precedence: a `max_children` in the epic doc's
+    #    frontmatter is the author's durable per-epic cap (overrides the config
+    #    default upward; an explicit --max-prs may only tighten it). With no
+    #    max_children, resolution is byte-identical to before: explicit --max-prs
+    #    else config.blueprint.max_prs_per_epic. Capture the explicit-flag bit
+    #    BEFORE the config fallback overwrites the None sentinel.
+    explicit_max_prs = max_prs
+    from fno.config import load_settings
+    try:
+        config_default = load_settings().blueprint.max_prs_per_epic
+    except Exception as e:
+        emit_error(ctx, f"could not read config.blueprint.max_prs_per_epic: {e}")
+        raise typer.Exit(code=1)
+
+    #    Read the epic's max_children read-only, pre-lock (advisory; the locked
+    #    mutator re-resolves the epic). Any read failure -> absent cap -> current
+    #    behavior (_read_plan_frontmatter fails safe to {}). A present-but-invalid
+    #    value is rejected by resolve_effective_cap below (fail-closed on value).
+    max_children: object = None
+    epic_doc_rel: Optional[str] = None
+    try:
+        epic_node = _find_node(read_graph(_graph_path()), epic_id)
+        epic_plan_path = epic_node.get("plan_path") if epic_node else None
+        if epic_plan_path:
+            epic_doc = plan_base(epic_plan_path)
+            max_children = _read_plan_frontmatter(epic_doc).get("max_children")
+            try:
+                epic_doc_rel = os.path.relpath(
+                    epic_doc, epic_node.get("cwd") or os.getcwd()
+                )
+            except ValueError:
+                epic_doc_rel = os.path.basename(epic_doc)
+    except (DecomposeError, GraphUnreadableError, OSError):
+        max_children = None  # fail-safe: no cap, current behavior
+
+    try:
+        effective_cap, cap_source = resolve_effective_cap(
+            max_children, explicit_max_prs, config_default, epic_doc_rel
+        )
+    except DecomposeError as e:
+        emit_error(ctx, str(e))
+        raise typer.Exit(code=e.exit_code)
 
     # 3. Validate the spec entirely before touching the graph (atomicity).
     try:
-        norm = validate_groups(parsed, max_prs)
+        norm = validate_groups(parsed, effective_cap, cap_source)
     except DecomposeError as e:
         emit_error(ctx, str(e))
         raise typer.Exit(code=e.exit_code)
