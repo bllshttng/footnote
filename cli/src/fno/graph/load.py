@@ -21,11 +21,16 @@ from fno.graph._constants import GRAPH_JSON
 # The graph and its sidecar are two sequential atomic replaces under the write
 # lock; a lock-free reader can land between them and see new graph bytes against
 # the old sidecar. Re-read BOTH files a bounded number of times before raising:
-# the window is milliseconds, so a retry lands consistent, while a genuine
-# corruption still raises once the attempts are spent. Bounded, never a
-# wait-until-consistent loop: worst case is (_ATTEMPTS - 1) * _SLEEP_S.
-_RETRY_ATTEMPTS = 5
-_RETRY_SLEEP_S = 0.01
+# the window is normally milliseconds, so a retry lands consistent, while a
+# genuine corruption still raises once the attempts are spent (a corrupt file
+# mismatches on EVERY attempt, so a larger ceiling never masks real corruption).
+# The budget must exceed the worst-case window: on a saturated host a
+# GIL-starved writer (or a slow atomic replace) can hold the two-write window
+# open well past a few milliseconds. Bounded, never a wait-until-consistent
+# loop: worst case is (_ATTEMPTS - 1) * _SLEEP_S (~0.25s), paid only by a
+# genuine corruption; a consistent read returns on the first attempt.
+_RETRY_ATTEMPTS = 12
+_RETRY_SLEEP_S = 0.023
 
 
 class GraphCorruptionError(Exception):
