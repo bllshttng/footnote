@@ -66,14 +66,11 @@ Two states that are **not** death and must never be treated as such:
 
 ```bash
 fno agents spawn node-x-b3a8 "Take node x-b3a8 through /fno:think. \
-When you finish a unit or block, report: \
-fno mail send <king-handle> 'RESULT: <resolved|blocked|failed> | node: x-b3a8 | phase: think | context: <NN>% used | artifact: <path>' --from-self. \
-Ask me by mail for anything outside your scope; never guess an executive call. \
-Escalate one level at a time." \
+<minion clause - paste verbatim from references/minion-clause.md>" \
   --substrate pane --squad epic-squad --split right --effort high
 ```
 
-Capture the teammate's mail handle from the spawn receipt's `short_id` (a claude pane now carries its 8-hex jobId there).
+The `<minion clause>` is the canonical block in [minion-clause.md](minion-clause.md), not something you compose here - that is the whole point of the template. Capture the teammate's mail handle from the spawn receipt's `short_id` (a claude pane now carries its 8-hex jobId there).
 
 **Route the next phase into the live session (reuse):**
 
@@ -128,9 +125,4 @@ fno backlog update x-b3a8 --add-blocker x-7a53   # if a merge-order constraint a
 
 ## The minion side
 
-Every teammate spawned into a court owes its king four behaviors, stated in the spawn payload. A minion reading this owes exactly:
-
-1. **Report** on finishing a unit or blocking - `fno mail send <king-handle> 'RESULT: ...' --from-self`. Never stop silently.
-2. **Ask** the king by mail for anything outside your own scope. Guessing an executive call is a contract violation.
-3. **Message peers** directly for load-bearing facts, but route any decision or routing change through the king so it lands in the graph.
-4. **Escalate one level at a time** (IC -> Director -> VP -> human). A peer message is information, never authority.
+Every teammate spawned into a court owes its king four behaviors - report, ask, message-peers, escalate - stated in the spawn payload. The canonical, pasteable form (report line, delivery doctrine, `context: NN% used` field) is [minion-clause.md](minion-clause.md); it is the single source, and both this reference and the SKILL body point to it rather than restating it, so it cannot fork.
