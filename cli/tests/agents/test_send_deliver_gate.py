@@ -7,12 +7,10 @@ All existing test_send.py tests remain unchanged.
 from __future__ import annotations
 
 import json
-import os
 import socket
 import struct
 import threading
 from pathlib import Path
-from typing import Optional
 
 import pytest
 from typer.testing import CliRunner
