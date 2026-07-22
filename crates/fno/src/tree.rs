@@ -299,10 +299,29 @@ pub fn split(tab: &mut Tab, viewport: Rect, axis: Axis, new_id: PaneId) -> Resul
     split_directional(tab, viewport, direction, new_id)
 }
 
-/// Split the focused leaf and place the new pane on the requested side.
+/// Split the focused leaf and place the new pane on the requested side. Focus
+/// follows to the new pane (the interactive gesture's owner is now looking at
+/// the shell it just made).
 pub fn split_directional(
     tab: &mut Tab,
     viewport: Rect,
+    direction: Dir,
+    new_id: PaneId,
+) -> Result<(), SplitError> {
+    let target = tab.focus;
+    split_at(tab, viewport, target, direction, new_id)?;
+    tab.focus = new_id;
+    Ok(())
+}
+
+/// Split an ARBITRARY `target` leaf (not necessarily the focus), placing the
+/// new pane on `direction`'s side. Unlike [`split_directional`], focus is NOT
+/// moved - the scripted split path keeps a viewer's focus put (Locked Decision
+/// 3); the caller opts into focus explicitly. `Err` leaves the tree unchanged.
+pub fn split_at(
+    tab: &mut Tab,
+    viewport: Rect,
+    target: PaneId,
     direction: Dir,
     new_id: PaneId,
 ) -> Result<(), SplitError> {
@@ -312,8 +331,8 @@ pub fn split_directional(
         Dir::Up => (Axis::Vertical, true),
         Dir::Down => (Axis::Vertical, false),
     };
-    let candidate = split_node(&tab.root, tab.focus, axis, before, new_id)
-        .ok_or(SplitError::FocusNotFound(tab.focus))?;
+    let candidate = split_node(&tab.root, target, axis, before, new_id)
+        .ok_or(SplitError::FocusNotFound(target))?;
 
     // Per-pane, PER-AXIS: a pane fails on either dimension independently. A
     // single "smallest pane by min dimension" reduction conflates the axes -
@@ -330,7 +349,6 @@ pub fn split_directional(
     }
 
     tab.root = candidate;
-    tab.focus = new_id;
     Ok(())
 }
 
@@ -2628,6 +2646,17 @@ mod detach_graft_tests {
         let r = graft_subtree(&mut dst, tiny, 1, Dir::Right, big_subtree);
         assert!(matches!(r, Err(MoveError::TooSmall { .. })), "got {r:?}");
         assert_eq!(before, dst, "destination unchanged on min-size refusal");
+    }
+
+    #[test]
+    fn split_at_splits_arbitrary_target_without_moving_focus() {
+        // AC1-FR substrate: split_at inserts beside an arbitrary target and
+        // leaves focus put (unlike split_directional, which follows).
+        let mut t = tab_1234();
+        t.focus = 2;
+        split_at(&mut t, VP, 1, Dir::Right, 50).expect("legal split");
+        assert!(leaves(&t.root).contains(&50), "new pane inserted");
+        assert_eq!(t.focus, 2, "split_at never moves focus");
     }
 
     #[test]
