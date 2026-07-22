@@ -1266,7 +1266,9 @@ fn parse_dir(s: &str, flag: &str) -> Result<Dir, String> {
         "right" => Ok(Dir::Right),
         "up" => Ok(Dir::Up),
         "down" => Ok(Dir::Down),
-        _ => Err(format!("{flag} must be left, right, up, or down (got {s:?})")),
+        _ => Err(format!(
+            "{flag} must be left, right, up, or down (got {s:?})"
+        )),
     }
 }
 
@@ -1349,9 +1351,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 // (x-d865) exact placement: land in a named tab, adjacent to an
                 // anchor pane.
                 "--tab" => tab = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?),
-                "--at" => {
-                    at = Some(parse_u64(&flag_value(args, &mut i, "--at")?, "--at")?)
-                }
+                "--at" => at = Some(parse_u64(&flag_value(args, &mut i, "--at")?, "--at")?),
                 t if t.starts_with("--") => return Err(format!("unknown flag: {t}")),
                 _ => break, // first bare token begins the command argv
             }
@@ -1578,7 +1578,9 @@ fn take_common_flags(args: &[OsString]) -> Result<(Option<String>, bool, Vec<Str
     let mut rest = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        let tok = args[i].to_str().ok_or_else(|| "non-UTF-8 argument".to_string())?;
+        let tok = args[i]
+            .to_str()
+            .ok_or_else(|| "non-UTF-8 argument".to_string())?;
         match tok {
             "--json" => json = true,
             "--session" => session = Some(flag_value(args, &mut i, "--session")?),
@@ -1591,7 +1593,9 @@ fn take_common_flags(args: &[OsString]) -> Result<(Option<String>, bool, Vec<Str
 
 /// A `--squad <name>` -> `PaneTarget`, defaulting to `CurrentRoute`.
 fn squad_target(squad: Option<String>) -> PaneTarget {
-    squad.map(PaneTarget::SquadName).unwrap_or(PaneTarget::CurrentRoute)
+    squad
+        .map(PaneTarget::SquadName)
+        .unwrap_or(PaneTarget::CurrentRoute)
 }
 
 /// `fno mux tab ls|create|rename|join ...` (x-d865).
@@ -1757,7 +1761,11 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
             return EXIT_USAGE;
         }
     };
-    let Some(fno_id) = rest.first().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+    let Some(fno_id) = rest
+        .first()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
         eprintln!("fno mux where: needs an fno_id");
         return EXIT_USAGE;
     };
@@ -1796,7 +1804,9 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
         return EXIT_NOT_FOUND;
     }
     // The hosting mux session name from the first pane-hosted match.
-    let Some(host_session) = matched.iter().find_map(|a| a.mux.as_ref().map(|(s, _)| s.clone()))
+    let Some(host_session) = matched
+        .iter()
+        .find_map(|a| a.mux.as_ref().map(|(s, _)| s.clone()))
     else {
         eprintln!("fno mux where: {fno_id:?} hosts no live pane");
         return EXIT_NOT_PANE_HOSTED;
@@ -1851,9 +1861,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             },
             CONTROL_TIMEOUT,
         ),
-        PaneCmd::Break { pane, name } => {
-            (ControlVerb::PaneBreak { pane, name }, CONTROL_TIMEOUT)
-        }
+        PaneCmd::Break { pane, name } => (ControlVerb::PaneBreak { pane, name }, CONTROL_TIMEOUT),
         PaneCmd::Read { pane, lines, block } => (
             ControlVerb::PaneRead { pane, lines, block },
             CONTROL_TIMEOUT,
@@ -2963,7 +2971,9 @@ mod tests {
     fn mux_pane_parse_split_break_and_ls_fno_id() {
         // (x-d865) split needs a direction; --focus opts into focus.
         assert_eq!(
-            parse_pane_args(&os(&["split", "5", "--direction", "right"])).unwrap().cmd,
+            parse_pane_args(&os(&["split", "5", "--direction", "right"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Split {
                 pane: 5,
                 direction: Dir::Right,
@@ -2971,7 +2981,9 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["split", "5", "-d", "up", "--focus"])).unwrap().cmd,
+            parse_pane_args(&os(&["split", "5", "-d", "up", "--focus"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Split {
                 pane: 5,
                 direction: Dir::Up,
@@ -2983,14 +2995,18 @@ mod tests {
             "split without --direction is a usage error"
         );
         assert_eq!(
-            parse_pane_args(&os(&["break", "9", "--name", "solo"])).unwrap().cmd,
+            parse_pane_args(&os(&["break", "9", "--name", "solo"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Break {
                 pane: 9,
                 name: Some("solo".into()),
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["ls", "--fno-id", "abc123"])).unwrap().cmd,
+            parse_pane_args(&os(&["ls", "--fno-id", "abc123"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Ls {
                 fno_id: Some("abc123".into()),
             }
@@ -3018,7 +3034,10 @@ mod tests {
         assert_eq!(parse_tab_sel("new").unwrap(), TabSel::New);
         assert_eq!(parse_tab_sel("3").unwrap(), TabSel::Index(3));
         assert_eq!(parse_tab_sel("id:7").unwrap(), TabSel::Id(7));
-        assert_eq!(parse_tab_sel("name:bee").unwrap(), TabSel::Name("bee".into()));
+        assert_eq!(
+            parse_tab_sel("name:bee").unwrap(),
+            TabSel::Name("bee".into())
+        );
         assert_eq!(parse_tab_sel("bee").unwrap(), TabSel::Name("bee".into()));
     }
 
@@ -3199,7 +3218,10 @@ mod tests {
             code: err_code::TARGET_NOT_IDLE,
             msg: "receiving agent not idle".into(),
         };
-        assert_eq!(render_reply(refused, false, false, None), EXIT_TARGET_NOT_IDLE);
+        assert_eq!(
+            render_reply(refused, false, false, None),
+            EXIT_TARGET_NOT_IDLE
+        );
         // A different error class still collapses to the generic error code.
         let other = ServerMsg::Err {
             code: err_code::DEAD_PANE,

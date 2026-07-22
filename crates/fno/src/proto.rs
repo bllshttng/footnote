@@ -592,10 +592,7 @@ pub enum ControlVerb {
     PaneWhere { fno_id: String },
     /// Break a pane into its OWN new tab in the same squad, keeping its PTY alive
     /// -> [`ServerMsg::TabSpawned`] (the created tab's id).
-    PaneBreak {
-        pane: u64,
-        name: Option<String>,
-    },
+    PaneBreak { pane: u64, name: Option<String> },
     /// Join a whole source tab into the anchor pane's tab as a split, removing
     /// the now-empty source tab -> [`ServerMsg::Ok`]. Refuses join-into-self up
     /// front ([`err_code::BAD_REQUEST`]).
@@ -3006,7 +3003,15 @@ mod tests {
                         axis: crate::tree::Axis::Horizontal,
                         children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(2))],
                     },
-                    panes: vec![(1, Rect { x: 0, y: 0, rows: 24, cols: 40 })],
+                    panes: vec![(
+                        1,
+                        Rect {
+                            x: 0,
+                            y: 0,
+                            rows: 24,
+                            cols: 40,
+                        },
+                    )],
                 }],
             }],
         };

@@ -731,11 +731,7 @@ fn nearest_surviving(panes: &[(PaneId, Rect)], from: Rect) -> Option<PaneId> {
 /// only leaf, or [`DetachOutcome::Detached`] after removal. `Err(PaneGone)` when
 /// `pid` isn't in the tree (tree unchanged). Detaching only ever grows the
 /// surviving panes, so it never fails on min-size.
-pub fn detach_leaf(
-    tab: &mut Tab,
-    viewport: Rect,
-    pid: PaneId,
-) -> Result<DetachOutcome, MoveError> {
+pub fn detach_leaf(tab: &mut Tab, viewport: Rect, pid: PaneId) -> Result<DetachOutcome, MoveError> {
     if matches!(&tab.root, Node::Leaf(id) if *id == pid) {
         return Ok(DetachOutcome::TabEmptied);
     }
@@ -745,7 +741,9 @@ pub fn detach_leaf(
 
     match remove_leaf(&tab.root, pid) {
         None => Err(MoveError::PaneGone),
-        Some(None) => unreachable!("remove_leaf(root) only returns Some(None) for a root Leaf, handled above"),
+        Some(None) => {
+            unreachable!("remove_leaf(root) only returns Some(None) for a root Leaf, handled above")
+        }
         Some(Some(new_root)) => {
             tab.root = normalize(new_root);
             let new_focus = if tab.focus == pid {
@@ -838,10 +836,8 @@ fn graft_node(
                     let half = children[idx].0 / 2.0;
                     let mut new_children = children.clone();
                     new_children[idx] = (half, Node::Leaf(anchor));
-                    new_children.insert(
-                        if before { idx } else { idx + 1 },
-                        (half, subtree.clone()),
-                    );
+                    new_children
+                        .insert(if before { idx } else { idx + 1 }, (half, subtree.clone()));
                     return Some(Node::Branch {
                         axis: *axis,
                         children: new_children,
@@ -2498,16 +2494,21 @@ mod adversarial_move_tests {
 
                 match detach_leaf(&mut tab, BIG, pid) {
                     Ok(DetachOutcome::Detached { new_focus }) => {
-                        check_invariants(&tab).unwrap_or_else(|e| panic!(
-                            "seed {seed} step {step}: detach broke {e}\n{:?}", tab.root));
-                        assert!(leaves(&tab.root).contains(&new_focus),
-                            "seed {seed} step {step}: new_focus {new_focus} not a survivor");
+                        check_invariants(&tab).unwrap_or_else(|e| {
+                            panic!("seed {seed} step {step}: detach broke {e}\n{:?}", tab.root)
+                        });
+                        assert!(
+                            leaves(&tab.root).contains(&new_focus),
+                            "seed {seed} step {step}: new_focus {new_focus} not a survivor"
+                        );
                         let mut after_detach = leaves(&tab.root);
                         after_detach.sort_unstable();
                         let mut expect = sorted_before.clone();
                         expect.retain(|x| *x != pid);
-                        assert_eq!(expect, after_detach,
-                            "seed {seed} step {step}: detach {pid} changed the survivor set");
+                        assert_eq!(
+                            expect, after_detach,
+                            "seed {seed} step {step}: detach {pid} changed the survivor set"
+                        );
 
                         let survivors = leaves(&tab.root);
                         let anchor = survivors[r.pick(survivors.len())];
@@ -2518,8 +2519,12 @@ mod adversarial_move_tests {
                                 after.sort_unstable();
                                 assert_eq!(sorted_before, after,
                                     "seed {seed} step {step}: graft {pid}->{anchor} {d:?} changed pane set");
-                                check_invariants(&tab).unwrap_or_else(|e| panic!(
-                                    "seed {seed} step {step}: graft INVARIANT {e}\n{:?}", tab.root));
+                                check_invariants(&tab).unwrap_or_else(|e| {
+                                    panic!(
+                                        "seed {seed} step {step}: graft INVARIANT {e}\n{:?}",
+                                        tab.root
+                                    )
+                                });
                             }
                             // min-size refusal: pid is detached-and-unplaced. Restore the
                             // pre-step tree so the loop keeps a stable pane set to test against.
@@ -2527,10 +2532,15 @@ mod adversarial_move_tests {
                         }
                     }
                     Ok(DetachOutcome::TabEmptied) => {
-                        unreachable!("seed {seed} step {step}: TabEmptied with {} leaves", ls.len());
+                        unreachable!(
+                            "seed {seed} step {step}: TabEmptied with {} leaves",
+                            ls.len()
+                        );
                     }
-                    Err(_) => assert_eq!(before, tab,
-                        "seed {seed} step {step}: detach mutated the tree on Err"),
+                    Err(_) => assert_eq!(
+                        before, tab,
+                        "seed {seed} step {step}: detach mutated the tree on Err"
+                    ),
                 }
             }
         }
@@ -2601,7 +2611,10 @@ mod detach_graft_tests {
         let DetachOutcome::Detached { new_focus } = detach_leaf(&mut t, VP, 3).unwrap() else {
             panic!("expected Detached");
         };
-        assert!(leaves(&t.root).contains(&new_focus), "focus lands on a survivor");
+        assert!(
+            leaves(&t.root).contains(&new_focus),
+            "focus lands on a survivor"
+        );
         assert_eq!(t.focus, new_focus);
         assert_ne!(new_focus, 3);
     }

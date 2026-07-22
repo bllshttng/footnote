@@ -1980,7 +1980,9 @@ impl Core {
     /// Decision 6); `PaneWhere` is the reverse.
     fn fno_id_for_pane(&self, pid: u64) -> Option<String> {
         self.agents.iter().find_map(|a| match &a.mux {
-            Some((sess, pane)) if sess == &self.session_name && *pane == pid => a.session_id.clone(),
+            Some((sess, pane)) if sess == &self.session_name && *pane == pid => {
+                a.session_id.clone()
+            }
             _ => None,
         })
     }
@@ -2370,7 +2372,11 @@ impl Core {
 
     /// Create a new tab (born with one shell leaf) for [`ControlVerb::TabCreate`].
     /// Returns the new leaf's pane id.
-    fn tab_create(&mut self, squad: &PaneTarget, name: Option<String>) -> Result<u64, (u32, String)> {
+    fn tab_create(
+        &mut self,
+        squad: &PaneTarget,
+        name: Option<String>,
+    ) -> Result<u64, (u32, String)> {
         let sid = self.resolve_squad(squad)?;
         let cwd = self
             .session
@@ -2508,7 +2514,12 @@ impl Core {
     /// Join a whole source tab into the anchor pane's tab as a split, removing
     /// the source tab. Refuses join-into-self up front (BAD_REQUEST). All PTYs
     /// survive; a min-size failure leaves BOTH trees untouched.
-    fn tab_join(&mut self, src_sel: &TabSel, anchor_pane: u64, dir: Dir) -> Result<(), (u32, String)> {
+    fn tab_join(
+        &mut self,
+        src_sel: &TabSel,
+        anchor_pane: u64,
+        dir: Dir,
+    ) -> Result<(), (u32, String)> {
         let (sid, dst_ti) = self.session.find_pane(anchor_pane).ok_or((
             err_code::DEAD_PANE,
             format!("no such anchor pane: {anchor_pane}"),
@@ -2517,7 +2528,10 @@ impl Core {
             .resolve_tab_index(sid, src_sel)
             .map_err(|e| (err_code::BAD_REQUEST, e))?;
         if src_ti == dst_ti {
-            return Err((err_code::BAD_REQUEST, "cannot join a tab into itself".into()));
+            return Err((
+                err_code::BAD_REQUEST,
+                "cannot join a tab into itself".into(),
+            ));
         }
         let dst_tid = self.session.squad(sid).expect("find_pane live").tabs[dst_ti].id;
         let vp = self.tab_rect(dst_tid);
@@ -8949,7 +8963,11 @@ mod tests {
         let new_tid = core.pane_break(1, Some("solo".into())).unwrap();
         let sq = core.session.squad(1).unwrap();
         let a = sq.tabs.iter().find(|t| t.id == 10).unwrap();
-        assert_eq!(tree::leaves(&a.root), vec![2], "sibling 2 stays in the source tab");
+        assert_eq!(
+            tree::leaves(&a.root),
+            vec![2],
+            "sibling 2 stays in the source tab"
+        );
         let nt = sq.tabs.iter().find(|t| t.id == new_tid).unwrap();
         assert_eq!(tree::leaves(&nt.root), vec![1], "1 broke into its own tab");
         assert_eq!(nt.name.as_deref(), Some("solo"));
@@ -9032,7 +9050,11 @@ mod tests {
         f.session_id = Some("F".into());
         core.agents = vec![f];
         assert_eq!(core.fno_id_for_pane(1), Some("F".into()));
-        assert_eq!(core.fno_id_for_pane(2), None, "no registry row -> no fno_id");
+        assert_eq!(
+            core.fno_id_for_pane(2),
+            None,
+            "no registry row -> no fno_id"
+        );
     }
 
     #[test]
@@ -9040,11 +9062,14 @@ mod tests {
         let core = two_tab_core();
         assert_eq!(core.resolve_tab_index(1, &TabSel::Id(20)).unwrap(), 1);
         assert_eq!(
-            core.resolve_tab_index(1, &TabSel::Name("bee".into())).unwrap(),
+            core.resolve_tab_index(1, &TabSel::Name("bee".into()))
+                .unwrap(),
             1
         );
         assert_eq!(core.resolve_tab_index(1, &TabSel::Index(0)).unwrap(), 0);
-        assert!(core.resolve_tab_index(1, &TabSel::Name("nope".into())).is_err());
+        assert!(core
+            .resolve_tab_index(1, &TabSel::Name("nope".into()))
+            .is_err());
         assert!(core.resolve_tab_index(1, &TabSel::Index(9)).is_err());
     }
 
@@ -9103,7 +9128,14 @@ mod tests {
                 },
             )
             .unwrap();
-        let tab = core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 10).unwrap();
+        let tab = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 10)
+            .unwrap();
         assert!(tree::leaves(&tab.root).contains(&pid), "landed in tab 10");
         core.reap_pane(pid);
 
