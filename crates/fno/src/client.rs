@@ -199,6 +199,13 @@ const HINT_DELAY: Duration = Duration::from_millis(400);
 /// Transient notice lifetime on the tab bar.
 const NOTICE_TTL: Duration = Duration::from_secs(3);
 
+/// (x-c5ee) The top-K live-row cap per rendered squad: attention rows
+/// (Blocked/Working/DoneUnseen) always render, then idle rows fill up to this
+/// many LIVE rows total; the idle overflow folds into one `+N idle` row. Sized
+/// a little above a typical attention set so the common squad emits no fold.
+/// Dead rows sit outside this budget under the section view's control.
+const SQUAD_ROW_CAP: usize = 8;
+
 /// How long the pointer must settle on one new pane before focus follows it
 /// (x-a496). 1003 reports every crossed cell, so a fast sweep produces a burst;
 /// only a pane that stays under the pointer this long steals focus, coalescing
@@ -707,6 +714,12 @@ struct View {
     /// recomputed on every attach, so persisting it would let this build
     /// re-seed over a value a NEWER build wrote and this one could not parse.
     section_chosen: HashMap<SectionKey, SectionView>,
+    /// (x-c5ee) Squads the operator has expanded past the top-K idle cap for
+    /// THIS session - a transient "show me all the idle rows", not a durable
+    /// preference (that layer is [`SectionView`]). Ephemeral by design: dropped
+    /// on restart, and a dead-squad key left in it is inert, so it never needs
+    /// pruning.
+    idle_expanded: HashSet<SectionKey>,
     /// Selector cursor into [`View::display_rows`], when open (x-260a: one
     /// index space shared with painting, hover, and mouse hit-testing).
     selector: Option<usize>,
@@ -1529,6 +1542,7 @@ impl View {
             aux_esc: Vec::new(),
             section_view,
             section_chosen: HashMap::new(),
+            idle_expanded: HashSet::new(),
             selector: None,
             sel_esc: Vec::new(),
             sel_hover_armed: false,
@@ -3211,6 +3225,10 @@ impl View {
             // cursor still skips it (the x-260a "never rests on a label"
             // invariant): this makes it CLICKABLE, not selectable.
             DisplayRow::Header { key, .. } => Some(ChromeHit::CycleSection(key.clone())),
+            // (x-c5ee) The idle fold row toggles its squad's idle expansion -
+            // the idle sibling of a header's CycleSection. Actionable, so it is
+            // NOT inert: both a click and a selector Enter route here.
+            DisplayRow::IdleFold { key, .. } => Some(ChromeHit::ToggleIdle(key.clone())),
             // Inert rows (subline, spacer, table column header) resolve to no
             // action (x-cd67).
             DisplayRow::Sub(_)
@@ -3857,6 +3875,21 @@ impl View {
         // Hiding rows shrinks the row set; re-clamp so a scrolled sideline never
         // skips past the new last row (x-a621).
         self.clamp_sideline_offset();
+    }
+
+    /// (x-c5ee) Toggle a squad's top-K idle expansion: a squad in the set shows
+    /// all its idle rows, one absent folds the overflow behind `+N idle`. A pure
+    /// local flip, never persisted (the durable layer is [`SectionView`]), then
+    /// re-anchor the selector and re-clamp - the row set just changed size under
+    /// the cursor, exactly like a section cycle. Idempotent per press.
+    fn toggle_idle(&mut self, key: SectionKey) {
+        let held = self.selected_agent_name();
+        if !self.idle_expanded.remove(&key) {
+            self.idle_expanded.insert(key);
+        }
+        // `reanchor_selector` owns the clamp too, so the cursor follows its agent
+        // when the fold/unfold moves it and never dangles past the new last row.
+        self.reanchor_selector(held);
     }
 
     /// A section's exited rows. ONE predicate behind both `LiveOnly`'s hiding
@@ -5109,6 +5142,26 @@ impl View {
     }
 
     fn tree_rows(&self) -> Vec<DisplayRow<'_>> {
+        // (x-c5ee) The idle cap must never fold the row the selector rests on
+        // (AC2-FR). Resolve that agent's name from an UNCAPPED build - reading
+        // `selected_agent_name()` here would call `display_rows()` and recurse
+        // back into this builder. Only when a selector is actually open (the
+        // transient leader+w nav mode) do we pay the extra build; the steady
+        // paint keeps its single pass.
+        let protect = match self.selector {
+            Some(i) => match self.build_tree_rows(None, false).get(i) {
+                Some(DisplayRow::Agent(a)) => Some(a.name.clone()),
+                _ => None,
+            },
+            None => None,
+        };
+        self.build_tree_rows(protect.as_deref(), true)
+    }
+
+    /// Build the sideline tree. `apply_cap` gates the top-K idle cap (x-c5ee);
+    /// `protect`, when set, is the selected agent's name whose squad must render
+    /// its idle rows in full so the cursor never lands on a folded row.
+    fn build_tree_rows(&self, protect: Option<&str>, apply_cap: bool) -> Vec<DisplayRow<'_>> {
         let mut out = Vec::new();
         // (x-cd67 US3) Section spacing only with more than one workspace: a
         // single squad has no groups to separate (US3 verify: absent with 1
@@ -5133,7 +5186,8 @@ impl View {
             // while the header's `✗N` rollup keeps them discoverable; live rows
             // keep their original order. Display filtering only - nothing is
             // reaped (that is x-f300).
-            let view = self.section_view(&section_key(s));
+            let key = section_key(s);
+            let view = self.section_view(&key);
             if view != SectionView::Collapsed {
                 let section_base = section_project_base(&s.canonical_cwd);
                 // (US9 crown) Order coordinators above leaves within the squad,
@@ -5150,7 +5204,36 @@ impl View {
                     .filter(|a| view == SectionView::Expanded || !a.exited)
                     .collect();
                 squad_agents.sort_by_key(|a| crown_rank(a.crown_level));
-                for a in squad_agents {
+                // (x-c5ee) Top-K idle cap: attention rows (live, non-idle) always
+                // render; idle rows fill to SQUAD_ROW_CAP live rows total; the
+                // idle overflow folds into one `+N idle` row. Dead rows (present
+                // only in Expanded) sit OUTSIDE the budget under the view's
+                // control, so `+N idle` and the header's `✗N` never double-count.
+                let attention = squad_agents
+                    .iter()
+                    .filter(|&a| !a.exited && !is_idle_row(a))
+                    .count();
+                let idle_total = squad_agents.iter().filter(|&a| is_idle_row(a)).count();
+                let idle_budget = SQUAD_ROW_CAP.saturating_sub(attention);
+                let hidden = idle_total.saturating_sub(idle_budget);
+                // A squad shows all its idle rows when the cap is off, when the
+                // operator toggled it open, or when the selector rests on one of
+                // its idle rows (AC2-FR: never fold the selected row).
+                let show_all_idle = !apply_cap
+                    || self.idle_expanded.contains(&key)
+                    || protect.is_some_and(|n| {
+                        squad_agents
+                            .iter()
+                            .any(|&a| is_idle_row(a) && a.name.as_str() == n)
+                    });
+                let mut idle_shown = 0usize;
+                for &a in &squad_agents {
+                    if is_idle_row(a) && !show_all_idle {
+                        if idle_shown >= idle_budget {
+                            continue; // folded into the `+N idle` row below
+                        }
+                        idle_shown += 1;
+                    }
                     out.push(DisplayRow::Agent(a));
                     // (x-6851 US3) Exception-based subline: a Sub row follows the
                     // agent ONLY when its cwd_base differs from the squad's
@@ -5159,6 +5242,16 @@ impl View {
                     if agent_is_foreign(a, section_base) {
                         out.push(DisplayRow::Sub(a.cwd_base.clone().unwrap_or_default()));
                     }
+                }
+                // Emit the fold row whenever there is idle overflow: `+N idle`
+                // when folded, `- fewer` when shown (so the expansion reverses
+                // from the same spot). No row when nothing overflows (no `+0`).
+                if apply_cap && hidden > 0 {
+                    out.push(DisplayRow::IdleFold {
+                        key: key.clone(),
+                        hidden,
+                        expanded: show_all_idle,
+                    });
                 }
             }
         }
@@ -5599,6 +5692,20 @@ impl View {
                 DisplayRow::TableEmpty => {
                     ("  no agents".to_string(), cell_flags::DIM, Color::Default)
                 }
+                // (x-c5ee) The idle fold: `+N idle` folded, `- fewer` expanded.
+                // Indented 4 cells to sit under the agent rows like a `Sub`, and
+                // DIM as a quiet summary - but it is NOT inert, so the selector's
+                // INVERSE bar still lifts it when the cursor lands on it.
+                DisplayRow::IdleFold {
+                    hidden, expanded, ..
+                } => {
+                    let label = if expanded {
+                        "    - fewer".to_string()
+                    } else {
+                        format!("    +{hidden} idle")
+                    };
+                    (label, cell_flags::DIM, Color::Default)
+                }
             };
             // (x-4374) The focused row wears the band via INVERSE in its base
             // flags, set BEFORE the selector/hover XOR below so the two compose:
@@ -5787,6 +5894,18 @@ enum DisplayRow<'a> {
     /// a header with nothing under it reads as a stalled table, so the empty
     /// state is stated rather than implied.
     TableEmpty,
+    /// (x-c5ee) The top-K idle fold: a squad with more live idle rows than the
+    /// cap folds the overflow behind this one row. `hidden` is the foldable
+    /// count (the idle rows past the cap, always > 0 when this row is emitted).
+    /// Unlike the inert rows above it is ACTIONABLE - a click / selector Enter
+    /// toggles the squad's idle expansion (the idle sibling of a header's
+    /// `CycleSection`), so it is NOT in `row_is_inert` and the cursor can rest
+    /// on it. Folded it paints `+N idle`; expanded it paints `- fewer`.
+    IdleFold {
+        key: SectionKey,
+        hidden: usize,
+        expanded: bool,
+    },
 }
 
 /// (x-1d91) A dispatched Backlog reorder verb awaiting confirmation from the feed.
@@ -6010,6 +6129,9 @@ enum ChromeHit {
     /// Flip the active squad row's caret locally (x-2f99); no socket write.
     /// (x-975a) Advance one sideline section through the view cycle.
     CycleSection(SectionKey),
+    /// (x-c5ee) Toggle a squad's top-K idle expansion - the idle sibling of
+    /// `CycleSection`. A pure local set flip, no socket write.
+    ToggleIdle(SectionKey),
     /// (x-b186) Advance the sideline density: the top-right button's click,
     /// routed to the same mutation the keybind runs so the two cannot diverge.
     CycleDensity,
@@ -6081,6 +6203,14 @@ fn pane_state(badge: Option<AgentBadge>, seen: bool) -> PaneState {
         Some(AgentBadge::Done) => PaneState::DoneUnseen,
         None => PaneState::Idle,
     }
+}
+
+/// (x-c5ee) A LIVE idle row - the top-K cap's fold target. Exited is checked
+/// first, exactly as [`agent_lattice_state`] does, so a dead worker (whose
+/// `pane_state` also reads `Idle`) is never mistaken for live idle and swept
+/// into `+N idle`: dead rows are the section view's business, not the cap's.
+fn is_idle_row(a: &AgentRow) -> bool {
+    !a.exited && pane_state(a.badge, a.seen) == PaneState::Idle
 }
 
 /// Why a session needs a human, worst-first (x-feec). Declaration order IS the
@@ -8421,6 +8551,8 @@ async fn apply_hit(
         // Pure state flip, no I/O - usable even when the socket write path
         // is failing (x-2f99, AC1-FR).
         ChromeHit::CycleSection(key) => view.cycle_section(key),
+        // (x-c5ee) Pure local set flip, like CycleSection - no I/O.
+        ChromeHit::ToggleIdle(key) => view.toggle_idle(key),
         // (x-b186) The density button. The panel width moved with the density,
         // so unlike CycleSection this owes the server a new content viewport.
         ChromeHit::CycleDensity => {
@@ -12045,6 +12177,9 @@ mod tests {
         for p in 100..140u64 {
             view.layout.agents.push(AgentRow {
                 name: format!("w{p}"),
+                // (x-c5ee) Working, not idle, so the top-K cap never folds them:
+                // this test needs a long, fully-rendered scrollable list.
+                badge: Some(AgentBadge::Working),
                 ..focus_agent(p)
             });
         }
@@ -13285,6 +13420,7 @@ mod tests {
             Some(ChromeHit::Confirm(_)) => "Confirm",
             Some(ChromeHit::OpenCreate) => "OpenCreate",
             Some(ChromeHit::CycleSection(_)) => "CycleSection",
+            Some(ChromeHit::ToggleIdle(_)) => "ToggleIdle",
             Some(ChromeHit::OpenSidelineMenu { .. }) => "OpenSidelineMenu",
             Some(ChromeHit::OpenAttachPlace { .. }) => "OpenAttachPlace",
             Some(ChromeHit::CycleDensity) => "CycleDensity",
@@ -13631,6 +13767,222 @@ mod tests {
             SectionView::Expanded,
             "an operator's saved expand of ~ elsewhere survives its Collapsed default"
         );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- x-c5ee US2: the top-K idle cap ----
+
+    /// The fold row's `(hidden, expanded)` if one is emitted, else None.
+    fn idle_fold(v: &View) -> Option<(usize, bool)> {
+        v.display_rows().iter().find_map(|r| match r {
+            DisplayRow::IdleFold {
+                hidden, expanded, ..
+            } => Some((*hidden, *expanded)),
+            _ => None,
+        })
+    }
+
+    /// Count rendered agent rows whose name starts with `prefix`.
+    fn rendered(v: &View, prefix: &str) -> usize {
+        v.display_rows()
+            .iter()
+            .filter(|r| matches!(r, DisplayRow::Agent(a) if a.name.starts_with(prefix)))
+            .count()
+    }
+
+    // The active squad's canonical key in the two_pane_view fixture.
+    fn footnote_key() -> SectionKey {
+        SectionKey::Squad("/code/footnote".into())
+    }
+
+    // AC3-HP (x-c5ee): 2 Working + 12 Idle, cap 8 -> both Working render, 6 idle
+    // fill to the cap, and a `+6 idle` fold row follows.
+    #[test]
+    fn idle_cap_folds_the_overflow_into_plus_n_idle() {
+        let dir = isolate_view_store("cap-hp");
+        let mut agents = vec![
+            sv_agent(1, "w1", Some(AgentBadge::Working), false),
+            sv_agent(1, "w2", Some(AgentBadge::Working), false),
+        ];
+        for i in 0..12 {
+            agents.push(sv_agent(1, &format!("idle{i}"), None, false));
+        }
+        let view = view_with_agents(agents);
+        assert_eq!(rendered(&view, "w"), 2, "attention rows always render");
+        assert_eq!(
+            rendered(&view, "idle"),
+            6,
+            "idle fills to the cap of 8 live"
+        );
+        assert_eq!(idle_fold(&view), Some((6, false)), "a folded +6 idle row");
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC2-UI (x-c5ee): attention rows are never folded - 10 Blocked, 0 idle, cap
+    // 8 -> all 10 render, no fold row.
+    #[test]
+    fn attention_rows_are_never_folded_by_the_cap() {
+        let dir = isolate_view_store("cap-att");
+        let agents: Vec<AgentRow> = (0..10)
+            .map(|i| sv_agent(1, &format!("b{i}"), Some(AgentBadge::Blocked), false))
+            .collect();
+        let view = view_with_agents(agents);
+        assert_eq!(
+            rendered(&view, "b"),
+            10,
+            "all 10 attention rows render past the cap"
+        );
+        assert_eq!(idle_fold(&view), None, "no idle -> no fold row");
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC (x-c5ee): exactly SQUAD_ROW_CAP idle rows emit no fold (never a `+0`).
+    #[test]
+    fn exactly_cap_idle_rows_emit_no_fold() {
+        let dir = isolate_view_store("cap-exact");
+        let agents: Vec<AgentRow> = (0..SQUAD_ROW_CAP)
+            .map(|i| sv_agent(1, &format!("idle{i}"), None, false))
+            .collect();
+        let view = view_with_agents(agents);
+        assert_eq!(
+            rendered(&view, "idle"),
+            SQUAD_ROW_CAP,
+            "the whole idle set fits"
+        );
+        assert_eq!(
+            idle_fold(&view),
+            None,
+            "no +0 idle row when it fits exactly"
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC3-EDGE (x-c5ee): an Expanded squad with 2 exited + 13 idle renders both
+    // dead rows (Expanded shows them), 8 live idle (dead never consume the cap),
+    // and a `+5 idle` fold - not `+7` (the dead rows are not counted as idle).
+    #[test]
+    fn dead_rows_stay_in_the_dead_bucket_not_the_idle_fold() {
+        let dir = isolate_view_store("cap-dead");
+        let mut agents = vec![
+            sv_agent(1, "dead1", None, true),
+            sv_agent(1, "dead2", None, true),
+        ];
+        for i in 0..13 {
+            agents.push(sv_agent(1, &format!("idle{i}"), None, false));
+        }
+        let mut view = view_with_agents(agents);
+        view.set_squad_view(1, SectionView::Expanded);
+        assert_eq!(rendered(&view, "dead"), 2, "Expanded shows every dead row");
+        assert_eq!(rendered(&view, "idle"), 8, "the cap budgets live rows only");
+        assert_eq!(
+            idle_fold(&view),
+            Some((5, false)),
+            "+5 idle, dead not counted"
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC4-EDGE (x-c5ee): the same squad in LiveOnly hides the dead rows but the
+    // idle fold is unchanged - the cap never counted the dead in the first place.
+    #[test]
+    fn live_only_hides_dead_and_keeps_the_same_idle_fold() {
+        let dir = isolate_view_store("cap-liveonly");
+        let mut agents = vec![
+            sv_agent(1, "dead1", None, true),
+            sv_agent(1, "dead2", None, true),
+        ];
+        for i in 0..13 {
+            agents.push(sv_agent(1, &format!("idle{i}"), None, false));
+        }
+        let mut view = view_with_agents(agents);
+        view.set_squad_view(1, SectionView::LiveOnly);
+        assert_eq!(rendered(&view, "dead"), 0, "LiveOnly hides the dead rows");
+        assert_eq!(rendered(&view, "idle"), 8, "the live idle cap is unchanged");
+        assert_eq!(idle_fold(&view), Some((5, false)), "still +5 idle");
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC1-UI (x-c5ee): the fold toggles visibly and reversibly - folded `+N idle`
+    // -> all idle shown with a `- fewer` affordance -> folded again.
+    #[test]
+    fn idle_fold_toggles_visibly_and_reversibly() {
+        let dir = isolate_view_store("cap-toggle");
+        let mut agents = vec![sv_agent(1, "w", Some(AgentBadge::Working), false)];
+        for i in 0..12 {
+            agents.push(sv_agent(1, &format!("idle{i}"), None, false));
+        }
+        let mut view = view_with_agents(agents);
+        assert_eq!(
+            rendered(&view, "idle"),
+            7,
+            "1 attention + 7 idle fills the cap"
+        );
+        assert_eq!(idle_fold(&view), Some((5, false)), "folded: +5 idle");
+
+        view.toggle_idle(footnote_key());
+        assert_eq!(rendered(&view, "idle"), 12, "expanded shows every idle row");
+        assert_eq!(idle_fold(&view), Some((5, true)), "the - fewer affordance");
+
+        view.toggle_idle(footnote_key());
+        assert_eq!(rendered(&view, "idle"), 7, "toggling again re-folds");
+        assert_eq!(idle_fold(&view), Some((5, false)));
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC2-FR (x-c5ee): the selected idle agent is never folded - its squad
+    // renders idle-expanded and the selector stays on that agent.
+    #[test]
+    fn selected_idle_agent_is_never_folded() {
+        let dir = isolate_view_store("cap-sel");
+        let mut agents = vec![sv_agent(1, "w", Some(AgentBadge::Working), false)];
+        for i in 0..12 {
+            agents.push(sv_agent(1, &format!("idle{i}"), None, false));
+        }
+        let mut view = view_with_agents(agents);
+        // Uncapped order: Sel(0), w(1), idle0(2)..idle11(13). Rest on idle11,
+        // which the cap would otherwise fold.
+        view.selector = Some(13);
+        assert_eq!(
+            rendered(&view, "idle"),
+            12,
+            "the squad renders idle-expanded so the selected agent is visible"
+        );
+        assert!(
+            matches!(
+                view.display_rows().get(13),
+                Some(DisplayRow::Agent(a)) if a.name == "idle11"
+            ),
+            "the selector still rests on that agent"
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC1-UI (x-c5ee): a click / selector Enter on the fold row toggles idle -
+    // it is actionable, not inert.
+    #[test]
+    fn idle_fold_row_action_toggles_idle() {
+        let dir = isolate_view_store("cap-action");
+        let agents: Vec<AgentRow> = (0..12)
+            .map(|i| sv_agent(1, &format!("idle{i}"), None, false))
+            .collect();
+        let view = view_with_agents(agents);
+        let i = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::IdleFold { .. }))
+            .expect("a fold row");
+        assert!(matches!(
+            view.row_action(i),
+            Some(ChromeHit::ToggleIdle(SectionKey::Squad(_)))
+        ));
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -14466,12 +14818,14 @@ mod tests {
     #[test]
     fn chrome_hit_bottom_chrome_row_is_swallowed() {
         // Enough agents that display_rows() reaches the last terminal row.
+        // (x-c5ee) Working, not idle: attention rows are never folded by the
+        // top-K cap, so all 40 render and the list still reaches the bottom.
         let agents: Vec<AgentRow> = (0..40)
             .map(|i| AgentRow {
                 squad: Some(1),
                 name: format!("a{i}"),
                 pane_id: Some(100 + i),
-                badge: None,
+                badge: Some(AgentBadge::Working),
                 reason: None,
                 exited: false,
                 answerable: None,
