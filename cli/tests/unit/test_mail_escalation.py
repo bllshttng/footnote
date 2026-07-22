@@ -92,6 +92,30 @@ def test_debounce_is_per_sender_recipient_pair(runner, mailbox, notified):
     assert len(notified) == 2
 
 
+def test_headsup_send_wakes_asleep_claude_addressee(runner, mailbox, monkeypatch):
+    # US9 P1: the per-project watch daemon never drains a handle inbox, so a
+    # heads-up to a resumable-but-asleep claude handle is woken at send time.
+    from fno.agents.discover import ReachableSession
+
+    monkeypatch.setattr(
+        "fno.agents.discover.resolve_reachable",
+        lambda t, **k: (ReachableSession(session_id="sess-uuid-1", source="transcript", agent="claude"), []),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_drain_agent",
+        lambda sid, **k: calls.append(sid) or (True, "wake-sessuui"),
+    )
+    res = runner.invoke(
+        app,
+        ["mail", "send", "--to-project", "peer", "--kind", "heads-up",
+         "--from-name", "bob", "--body", "PR merged, take a look"],
+    )
+    assert res.exit_code == 0, res.output
+    assert calls == ["sess-uuid-1"], "a heads-up to an asleep claude handle wakes it at send time"
+    assert _unread_count(runner, "peer") == 1  # durable note is still written
+
+
 def test_fyi_and_heads_up_do_not_escalate(runner, mailbox, notified):
     for kind in ("fyi", "heads-up"):
         runner.invoke(

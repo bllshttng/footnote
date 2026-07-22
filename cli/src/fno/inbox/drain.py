@@ -199,25 +199,9 @@ def _try_wake_addressee(project: str, h: ThreadHandle) -> Optional[DrainResult]:
     fall through to triage). Best-effort: a resolver or spawn error never breaks
     the drain.
     """
-    from fno.agents.discover import resolve_reachable
-    from fno.agents.dispatch import wake_drain_agent
+    from fno.agents.dispatch import wake_if_asleep_claude
 
-    try:
-        reachable, _ambiguous = resolve_reachable(project)
-    except Exception:  # noqa: BLE001 - a resolver failure must not break the drain
-        return None
-    if reachable is None or reachable.agent != "claude":
-        return None
-    cwd = None
-    if reachable.cwd:
-        try:
-            cwd = Path(reachable.cwd)
-        except (TypeError, ValueError):
-            cwd = None
-    try:
-        delivered, _detail = wake_drain_agent(reachable.session_id, cwd=cwd)
-    except Exception:  # noqa: BLE001 - a spawn error falls through to triage
-        return None
+    delivered, _short = wake_if_asleep_claude(project)
     if not delivered:
         return None
     # Consume the render so the next drain does not re-wake: the woken agent's

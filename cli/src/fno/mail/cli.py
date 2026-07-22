@@ -1515,6 +1515,16 @@ def cmd_send(
             reason = _escalate_question(sender, recipient, content)
             if reason == "escalated":
                 print(f"escalated to human ({recipient})", file=sys.stderr)
+        # A heads-up to a resumable-but-asleep claude session is woken at send
+        # time to drain it: the per-project watch daemon drains project inboxes,
+        # never a session-handle inbox, so send time is the reachable trigger
+        # (US9). The durable note is already written, so a wake miss loses nothing.
+        elif kind == Kind.HEADS_UP.value:
+            from fno.agents.dispatch import wake_if_asleep_claude
+
+            woke, short = wake_if_asleep_claude(recipient)
+            if woke:
+                print(f"woke {recipient} to drain (bg thread {short})", file=sys.stderr)
 
         if json_out:
             import json as _json
