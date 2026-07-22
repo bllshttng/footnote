@@ -283,9 +283,9 @@ fno agents spawn <node-name> "<payload + minion clause>" --substrate pane --squa
 
 ### The minion contract rides every spawn payload
 
-The coordination contract is two-sided: your duties are worthless if the teammate does not know its own. End every spawn payload with a standard clause covering four behaviors:
+The coordination contract is two-sided: your duties are worthless if the teammate does not know its own. End every spawn payload with the canonical minion clause - **paste it verbatim from [references/minion-clause.md](references/minion-clause.md)**, the single source. Do not compose it freehand: the x-304c Director did, three times, and each drift dropped something load-bearing (once the delivery doctrine itself, so reports rested undelivered on the durable bus). The clause covers four behaviors:
 
-1. **Report.** On finishing a unit of work or blocking, `fno mail send <king-handle> 'RESULT: <resolved|blocked|failed> | node: <id> | phase: <think|blueprint|do|review> | context: <NN>% used | artifact: <path-or-PR>' --from-self`. Never stop and wait silently.
+1. **Report.** On finishing a unit of work or blocking, mail the king a `RESULT: ...` line with `--from-self`, and treat any receipt that is not `delivered (hosted)` or `delivered (woken)` as undelivered - peek, then re-resolve and re-send, never re-queue. The verbatim report line and the full delivery doctrine live in the template.
 2. **Ask for help.** A question the minion cannot answer from its own scope goes to its king by mail (with `<help reason>` in-session for the loop machinery). Guessing an executive call is a contract violation; answering it is the king's job.
 3. **Message peers.** Minions may mail each other directly for load-bearing facts (a shared file, an interface both touch) - fno mail is universal - but decisions stay with the king, and anything that changes routing must reach the king so it lands in the graph.
 4. **Escalate one level at a time.** IC -> Director -> VP -> human. Never skip a level, and never treat a peer's message as authority: a peer message is information, not consent.
@@ -322,6 +322,14 @@ The one reason to mint a new session is **context pressure**. Every teammate rep
 2. **Rule:** approve, revise (mail the revision back into the same session), or escalate to the human when the call is outside your scope. Rule once per (node, phase, artifact) - a duplicate report is acked, not re-ruled.
 3. **Route** the next phase per the session-reuse policy above.
 4. **Encode:** update the graph (`--dispatch-verb`, `--dispatch-brief`, blockers, rank) so the ruling survives you. A ruling delivered only by mail dies with the transcript.
+
+### Post-epic: interview the court
+
+When the epic's **last** wave has merged - not merely this wave - run the retro interview as a standard court step before you abdicate. This is the ceremony the x-304c synthesis marked `ADD`: the best-performing ritual of that epic, which until now was prose in a human's head (the maintainer hand-asked the Director to interview each builder and prodded the thin answers with the dogfooding lens). You hold the cross-session view every builder lacks, so you are the one who runs it.
+
+Interview each builder session that carried a node in this epic - mail it the prompt, collect its first-person account, write the account to your project's retros directory (the template names how to resolve it; do not assume the gitignored `internal/` vault path exists). The dogfooding-lens questions and the dig-deeper follow-up are baked into the template so it fires without prodding. The full prompt, delivery mechanics, landing path, and retro epistemics (how much to trust what comes back) are in [references/retro-interview.md](references/retro-interview.md) - load it when the epic completes.
+
+This is one pass, one interview per builder, then exit; it is not a synthesis (that is a separate pass under a two-plus-sessions bar). A wave-scoped court over a single wave of a larger epic skips this step and leaves it for whoever abdicates the epic's final wave.
 
 ### Abdicate at the wave boundary
 

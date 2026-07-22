@@ -64,16 +64,17 @@ Two states that are **not** death and must never be treated as such:
 
 **Spawn a teammate for a node (with the minion clause):**
 
+Assemble the payload with a quoted heredoc so the clause's backticks, `$`, and quotes pass through literally (a plain double-quoted payload runs the clause's backticks as command substitution during spawn):
+
 ```bash
-fno agents spawn node-x-b3a8 "Take node x-b3a8 through /fno:think. \
-When you finish a unit or block, report: \
-fno mail send <king-handle> 'RESULT: <resolved|blocked|failed> | node: x-b3a8 | phase: think | context: <NN>% used | artifact: <path>' --from-self. \
-Ask me by mail for anything outside your scope; never guess an executive call. \
-Escalate one level at a time." \
-  --substrate pane --squad epic-squad --split right --effort high
+read -r -d '' payload <<'CLAUSE' || true   # read -d '' exits 1 at EOF; absorb it so set -e does not abort
+Take node x-b3a8 through /fno:think.
+<minion clause - paste verbatim from references/minion-clause.md>
+CLAUSE
+fno agents spawn node-x-b3a8 "$payload" --substrate pane --squad epic-squad --split right --effort high
 ```
 
-Capture the teammate's mail handle from the spawn receipt's `short_id` (a claude pane now carries its 8-hex jobId there).
+The `<minion clause>` is the canonical block in [minion-clause.md](minion-clause.md), not something you compose here - that is the whole point of the template. Capture the teammate's mail handle from the spawn receipt's `short_id` (a claude pane now carries its 8-hex jobId there).
 
 **Route the next phase into the live session (reuse):**
 
@@ -87,9 +88,13 @@ Next: /fno:blueprint <node>." --from-self
 **Hand off on context pressure (report said `context: 62% used`, trigger is 50):**
 
 ```bash
-# spawn the successor FIRST, carrying the phase artifact
-fno agents spawn node-x-b3a8-g2 "Continue node x-b3a8 at /fno:blueprint. \
-Prior /think artifact: <path>. <minion clause>" \
+# spawn the successor FIRST, carrying the phase artifact - same quoted-heredoc
+# assembly as the primary spawn (the clause's backticks/quotes need it here too)
+read -r -d '' payload <<'CLAUSE' || true
+Continue node x-b3a8 at /fno:blueprint. Prior /think artifact: <path>.
+<minion clause - paste verbatim from references/minion-clause.md>
+CLAUSE
+fno agents spawn node-x-b3a8-g2 "$payload" \
   --substrate pane --squad epic-squad --split down --effort high
 # ...only after the successor's session header prints, close the predecessor
 # PANE (a mux row -> fno mux pane kill, not fno agents stop). Its <session>:<pane_id>
@@ -128,9 +133,4 @@ fno backlog update x-b3a8 --add-blocker x-7a53   # if a merge-order constraint a
 
 ## The minion side
 
-Every teammate spawned into a court owes its king four behaviors, stated in the spawn payload. A minion reading this owes exactly:
-
-1. **Report** on finishing a unit or blocking - `fno mail send <king-handle> 'RESULT: ...' --from-self`. Never stop silently.
-2. **Ask** the king by mail for anything outside your own scope. Guessing an executive call is a contract violation.
-3. **Message peers** directly for load-bearing facts, but route any decision or routing change through the king so it lands in the graph.
-4. **Escalate one level at a time** (IC -> Director -> VP -> human). A peer message is information, never authority.
+Every teammate spawned into a court owes its king four behaviors - report, ask, message-peers, escalate - stated in the spawn payload. The canonical, pasteable form (report line, delivery doctrine, `context: NN% used` field) is [minion-clause.md](minion-clause.md); it is the single source, and both this reference and the SKILL body point to it rather than restating it, so it cannot fork.
