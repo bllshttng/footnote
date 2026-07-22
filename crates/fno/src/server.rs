@@ -2562,6 +2562,13 @@ impl Core {
             self.tab_areas.remove(&tid);
             self.reanchor_views();
         }
+        // (x-d6a8) The broken pane's hosting tab changed (it moved into a new
+        // tab, and its old tab may be gone), so refresh the persisted member
+        // tab_names for a tracked workspace - else a restart before the next
+        // persist restores the member to the old/removed tab. In the shared
+        // helper so the script (ControlVerb) and drag (Command) paths stay
+        // consistent; a no-op for a squad with no recruited members.
+        self.persist_squad_if_members(sid);
         self.push_layout(true);
         Ok(new_tid)
     }
@@ -2611,6 +2618,11 @@ impl Core {
         self.session.remove_tab(sid, src_ti);
         self.tab_areas.remove(&src_tid);
         self.reanchor_views();
+        // (x-d6a8) The joined tab's members now live in the anchor's tab (their
+        // hosting tab changed and the source tab is gone), so refresh the
+        // persisted member tab_names for a tracked workspace - same shared-helper
+        // reconcile as pane_break, covering both the script and drag paths.
+        self.persist_squad_if_members(sid);
         self.push_layout(true);
         Ok(())
     }
@@ -3383,6 +3395,17 @@ impl Core {
         let members = self.squad_members.get(&sid).cloned().unwrap_or_default();
         if let Err(e) = crate::squad_store::upsert(&name, &origins, &members) {
             self.persist_degraded(&e);
+        }
+    }
+
+    /// (x-d6a8) Refresh a tracked workspace's persisted member `tab_name`s after
+    /// a tree op that relocated a member's hosting tab (break / join). Only fires
+    /// when the squad actually has recruited members, so it never newly persists
+    /// an unnamed or member-less squad; `persist_squad` then re-derives each
+    /// member's tab from the live tree.
+    fn persist_squad_if_members(&mut self, sid: u64) {
+        if self.squad_members.get(&sid).is_some_and(|m| !m.is_empty()) {
+            self.persist_squad(sid);
         }
     }
 
@@ -13755,6 +13778,119 @@ mod tests {
         assert!(
             !core.named_squad_taken("review"),
             "its name is no longer reserved"
+        );
+    }
+
+    #[test]
+    fn break_of_a_member_pane_refreshes_the_stored_tab_name() {
+        // (x-d6a8, codex P1) Breaking a persisted member's pane into a new tab
+        // changes its hosting tab; the stored tab_name must refresh (inside the
+        // shared pane_break helper, so the script and drag paths agree), else a
+        // restart restores the member to its old tab.
+        let _s = StoreScratch::new("break-member-tabname");
+        let mut core = empty_core();
+        // Workspace "harden" (squad 7): member pane 100 sharing tab "home" with 101.
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("harden".into()),
+            Tab {
+                name: Some("home".into()),
+                id: 7,
+                root: Node::Branch {
+                    axis: Axis::Horizontal,
+                    children: vec![(0.5, Node::Leaf(100)), (0.5, Node::Leaf(101))],
+                },
+                focus: 100,
+            },
+        );
+        core.squad_members.insert(
+            7,
+            vec![crate::squad_store::StoredMember {
+                attach_id: "c19cd2c3".into(),
+                tombstone: false,
+                tab_name: Some("home".into()),
+            }],
+        );
+        core.attached.insert("c19cd2c3".into(), 100);
+        core.tab_areas.insert(7, (24, 80));
+        core.persist_squad(7);
+
+        core.pane_break(100, Some("solo".into()))
+            .expect("break the member pane");
+
+        let loaded = crate::squad_store::load();
+        let member = loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "harden")
+            .expect("workspace persisted")
+            .members
+            .iter()
+            .find(|m| m.attach_id == "c19cd2c3")
+            .expect("member kept");
+        assert_eq!(
+            member.tab_name.as_deref(),
+            Some("solo"),
+            "the stored tab_name follows the member into the broken-out tab"
+        );
+    }
+
+    #[test]
+    fn join_of_a_member_tab_refreshes_the_stored_tab_name() {
+        // (x-d6a8, codex P1) Joining a persisted member's tab into another changes
+        // its hosting tab; the stored tab_name must refresh in the shared tab_join
+        // helper (same reconcile as pane_break).
+        let _s = StoreScratch::new("join-member-tabname");
+        let mut core = empty_core();
+        // Squad 7: tab "src" holds member pane 100; tab "dst" holds anchor 200.
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("harden".into()),
+            Tab {
+                name: Some("src".into()),
+                id: 7,
+                root: Node::Leaf(100),
+                focus: 100,
+            },
+        );
+        core.session.squad_mut(7).unwrap().tabs.push(Tab {
+            name: Some("dst".into()),
+            id: 20,
+            root: Node::Leaf(200),
+            focus: 200,
+        });
+        core.squad_members.insert(
+            7,
+            vec![crate::squad_store::StoredMember {
+                attach_id: "c19cd2c3".into(),
+                tombstone: false,
+                tab_name: Some("src".into()),
+            }],
+        );
+        core.attached.insert("c19cd2c3".into(), 100);
+        core.tab_areas.insert(7, (24, 80));
+        core.tab_areas.insert(20, (24, 80));
+        core.persist_squad(7);
+
+        core.tab_join(&TabSel::Id(7), 200, Dir::Right)
+            .expect("join the member's tab into dst");
+
+        let loaded = crate::squad_store::load();
+        let member = loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "harden")
+            .expect("workspace persisted")
+            .members
+            .iter()
+            .find(|m| m.attach_id == "c19cd2c3")
+            .expect("member kept");
+        assert_eq!(
+            member.tab_name.as_deref(),
+            Some("dst"),
+            "the stored tab_name follows the member into the join destination"
         );
     }
 
