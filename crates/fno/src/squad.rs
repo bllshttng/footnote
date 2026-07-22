@@ -49,6 +49,13 @@ pub struct Squad {
     /// A user-given workspace name (explicit `NewSquad`), or `None` when the
     /// display label derives from `origins`.
     pub name: Option<String>,
+    /// A DURABLE persistence identity, minted lazily the first time an unnamed
+    /// squad is persisted (empty until then). Because the model permits two
+    /// squads to share an origin, `origins` is NOT a stable key: an unnamed
+    /// squad persists and restores under this key so two same-origin squads
+    /// (cross-session home squads, or two cleared names) never collide in the
+    /// store. A named squad keys by `name` and leaves this empty.
+    pub key: String,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
 }
@@ -158,6 +165,9 @@ impl Session {
             id,
             origins,
             name,
+            // Minted lazily at first persist (unnamed squads only); restore
+            // adopts the persisted key so a rebuilt squad keeps its identity.
+            key: String::new(),
             tabs: vec![first_tab],
             active_tab: 0,
         });

@@ -1,11 +1,16 @@
 //! Persisted named squads (`~/.fno/squads.json`): the durable half of the
 //! session-scoped [`crate::squad::Squad`] model.
 //!
-//! Only explicit NAMED workspaces persist (`NewSquad` / bulk recruit). An
-//! attach-born origin squad re-derives from a fresh attach and a member's PANE
-//! is ephemeral (re-created at restore, never stored); the store holds only the
-//! workspace name, its origins, and its member attach-ids. Identity is `name`,
-//! unique in the file (Locked Decision 4).
+//! Every squad persists (operator decision: any squad created remains across a
+//! restart, TUI or API), not only explicit NAMED workspaces. Identity is `name`
+//! when the squad is named, else a durable per-squad `key` minted on first
+//! persist (see [`mint_key`] / [`same_squad`]) - NOT `origins`, because the
+//! model permits two squads to share an origin, so origins would collide two
+//! distinct unnamed squads (two cleared names, or two sessions' home for one
+//! repo). A squad with neither a name nor a key has no identity and is the one
+//! thing that does not persist. A member's PANE is still ephemeral (re-created
+//! at restore, never stored); the store holds the identity, its origins (for
+//! restore / owns_path), and its member attach-ids.
 //!
 //! Same rules as the rest of this crate: the FILE is the contract (no
 //! cross-crate import), all I/O degrades the persistence, never the session -
@@ -75,10 +80,31 @@ pub struct StoredMember {
     pub tab_name: Option<String>,
 }
 
-/// One persisted named workspace.
+/// A durable per-squad identity for an UNNAMED squad, minted the first time it
+/// persists (a named squad keys by `name` and leaves this empty). 16 hex chars
+/// from `/dev/urandom` - unique without a `rand`/`uuid` dependency. A read
+/// failure falls back to a monotonic-ish stamp so a mint never blocks a persist.
+pub fn mint_key() -> String {
+    let mut buf = [0u8; 8];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
+        .is_ok()
+    {
+        return buf.iter().map(|b| format!("{b:02x}")).collect();
+    }
+    format!("t{:x}", now_secs())
+}
+
+/// One persisted squad. Named workspaces key by `name`; an unnamed squad (empty
+/// `name` - a home squad or a project lane) keys by its durable `key`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredSquad {
     pub name: String,
+    /// The durable identity of an UNNAMED squad (empty for a named one). Keeps
+    /// two same-origin unnamed squads distinct in the store. `#[serde(default)]`
+    /// keeps a pre-key store readable (absent -> empty), no STORE_VERSION bump.
+    #[serde(default)]
+    pub key: String,
     #[serde(default)]
     pub origins: Vec<String>,
     #[serde(default)]
@@ -267,12 +293,37 @@ pub fn load() -> Loaded {
     }
 }
 
-/// Insert-or-replace the entry named `name`, preserving its `created_at` if it
-/// already exists (else stamping now). Write-through for `NewSquad`, recruit,
-/// member close, and tombstone.
-pub fn upsert(name: &str, origins: &[String], members: &[StoredMember]) -> io::Result<()> {
+/// Match a stored squad by identity: a NAMED squad (`name` non-empty) is keyed
+/// by `name`; an UNNAMED squad (empty `name` - a home squad, a project lane) is
+/// keyed by its durable `key`, which keeps two same-origin unnamed squads
+/// distinct. An empty name + empty key has no identity and matches nothing.
+fn same_squad(s: &StoredSquad, name: &str, key: &str) -> bool {
+    if name.is_empty() {
+        !key.is_empty() && s.name.is_empty() && s.key == key
+    } else {
+        s.name == name
+    }
+}
+
+/// Insert-or-replace the entry with this identity (`name` if named, else the
+/// durable `key`), preserving its `created_at` if it already exists (else
+/// stamping now). Write-through for `NewSquad`, recruit, member close, tombstone,
+/// and an unnamed home squad / project lane (operator decision: every squad
+/// persists). `origins` is stored (for restore + owns_path) but is NOT identity.
+pub fn upsert(
+    name: &str,
+    key: &str,
+    origins: &[String],
+    members: &[StoredMember],
+) -> io::Result<()> {
+    // A squad with neither a name nor a durable key has no identity across a
+    // restart, so it cannot be persisted (nor found again). Skip it here, the
+    // one place every write path funnels through, rather than at each caller.
+    if name.is_empty() && key.is_empty() {
+        return Ok(());
+    }
     mutate(|squads| {
-        let existing = squads.iter().find(|s| s.name == name);
+        let existing = squads.iter().find(|s| same_squad(s, name, key));
         let created_at = existing
             .map(|s| s.created_at.clone())
             .filter(|c| !c.is_empty())
@@ -281,9 +332,10 @@ pub fn upsert(name: &str, origins: &[String], members: &[StoredMember]) -> io::R
         // across a membership upsert - the struct is rebuilt fresh, so an
         // un-carried field would be silently wiped (x-c4d4).
         let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
-        squads.retain(|s| s.name != name);
+        squads.retain(|s| !same_squad(s, name, key));
         squads.push(StoredSquad {
             name: name.to_string(),
+            key: key.to_string(),
             origins: origins.to_vec(),
             members: members.to_vec(),
             created_at,
@@ -303,6 +355,7 @@ pub fn set_tab_specs(name: &str, tab_specs: &[StoredTabSpec]) -> io::Result<()> 
         } else {
             squads.push(StoredSquad {
                 name: name.to_string(),
+                key: String::new(), // templates are a named-squad feature
                 origins: Vec::new(),
                 members: Vec::new(),
                 created_at: now_iso(),
@@ -312,10 +365,11 @@ pub fn set_tab_specs(name: &str, tab_specs: &[StoredTabSpec]) -> io::Result<()> 
     })
 }
 
-/// Delete the entry named `name` (a user-closed / removed workspace). A name
-/// not present is a silent no-op.
-pub fn remove(name: &str) -> io::Result<()> {
-    mutate(|squads| squads.retain(|s| s.name != name))
+/// Delete the entry with this identity (`name` if named, else the durable
+/// `key`): a user-closed / removed workspace, or an unnamed lane whose last pane
+/// closed. An identity not present is a silent no-op.
+pub fn remove(name: &str, key: &str) -> io::Result<()> {
+    mutate(|squads| squads.retain(|s| !same_squad(s, name, key)))
 }
 
 /// Rename `old` -> `new` in one locked mutation, carrying `created_at` across
@@ -336,6 +390,7 @@ pub fn rename(
         squads.retain(|s| s.name != old && s.name != new);
         squads.push(StoredSquad {
             name: new.to_string(),
+            key: String::new(), // rename is a named->named op
             origins: origins.to_vec(),
             members: members.to_vec(),
             created_at,
@@ -691,12 +746,12 @@ mod tests {
                 slots: vec![SlotBinding::Fno("S1".into()), SlotBinding::Shell],
             },
         };
-        upsert("w", &["/r".into()], &[m("c19cd2c3")]).unwrap();
+        upsert("w", "", &["/r".into()], &[m("c19cd2c3")]).unwrap();
         set_tab_specs("w", std::slice::from_ref(&spec)).unwrap();
         assert_eq!(load().squads[0].tab_specs, vec![spec.clone()]);
         // A later membership upsert must NOT wipe the template specs (they are
         // owned by set_tab_specs, and upsert rebuilds the struct fresh).
-        upsert("w", &["/r".into()], &[m("c19cd2c3"), m("deadbeef")]).unwrap();
+        upsert("w", "", &["/r".into()], &[m("c19cd2c3"), m("deadbeef")]).unwrap();
         let after = load();
         assert_eq!(after.squads[0].members.len(), 2, "membership updated");
         assert_eq!(
@@ -709,13 +764,19 @@ mod tests {
     #[test]
     fn upsert_then_load_roundtrips_and_preserves_created_at() {
         let _s = Scratch::new("roundtrip");
-        upsert("harden", &["/repo".into()], &[m("c19cd2c3")]).unwrap();
+        upsert("harden", "", &["/repo".into()], &[m("c19cd2c3")]).unwrap();
         let first = load();
         assert_eq!(first.squads.len(), 1);
         let created = first.squads[0].created_at.clone();
         assert!(created.ends_with('Z') && created.len() == 20, "{created}");
         // A second upsert (new members) keeps the original created_at.
-        upsert("harden", &["/repo".into()], &[m("c19cd2c3"), m("deadbeef")]).unwrap();
+        upsert(
+            "harden",
+            "",
+            &["/repo".into()],
+            &[m("c19cd2c3"), m("deadbeef")],
+        )
+        .unwrap();
         let second = load();
         assert_eq!(second.squads.len(), 1, "upsert replaces, never dupes");
         assert_eq!(second.squads[0].members.len(), 2);
@@ -730,7 +791,7 @@ mod tests {
         let s = Scratch::new("tabname");
         let mut named = m("c19cd2c3");
         named.tab_name = Some("reviews".into());
-        upsert("work", &["/repo".into()], &[named]).unwrap();
+        upsert("work", "", &["/repo".into()], &[named]).unwrap();
         let loaded = load();
         assert_eq!(
             loaded.squads[0].members[0].tab_name.as_deref(),
@@ -793,6 +854,7 @@ mod tests {
             version: STORE_VERSION,
             squads: vec![StoredSquad {
                 name: "w".into(),
+                key: String::new(),
                 origins: vec![],
                 members: vec![
                     m("c19cd2c3"),  // good
@@ -814,14 +876,50 @@ mod tests {
     #[test]
     fn remove_and_rename_mutate_by_name() {
         let _s = Scratch::new("remove-rename");
-        upsert("a", &[], &[m("11111111")]).unwrap();
-        upsert("b", &[], &[m("22222222")]).unwrap();
+        upsert("a", "", &[], &[m("11111111")]).unwrap();
+        upsert("b", "", &[], &[m("22222222")]).unwrap();
         rename("a", "aa", &["/x".into()], &[m("11111111")]).unwrap();
-        remove("b").unwrap();
+        remove("b", "").unwrap();
         let loaded = load();
         let names: Vec<_> = loaded.squads.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["aa"], "a renamed, b removed");
         assert_eq!(loaded.squads[0].origins, vec!["/x".to_string()]);
+    }
+
+    #[test]
+    fn unnamed_squad_persists_keyed_by_durable_key() {
+        // Operator decision: every squad remains across restart, not only named
+        // workspaces. An unnamed squad (empty name - the home squad, a lane) is
+        // keyed by its durable KEY, not its origins - so two same-origin unnamed
+        // squads stay distinct (the codex P1: two cleared names, or two sessions'
+        // home for one repo). Same key -> replace in place; distinct keys with the
+        // SAME origins -> two entries; a keyless unnamed squad is not persisted.
+        let _s = Scratch::new("unnamed-key");
+        upsert("", "k1", &["/repo".into()], &[m("aaaaaaaa")]).unwrap();
+        upsert("", "k2", &["/repo".into()], &[m("bbbbbbbb")]).unwrap();
+        // Same key -> replace, not duplicate.
+        upsert("", "k1", &["/repo".into()], &[m("aaaaaaaa"), m("cccccccc")]).unwrap();
+        // No name and no key -> no identity -> skipped silently.
+        upsert("", "", &["/repo".into()], &[m("dddddddd")]).unwrap();
+        let loaded = load();
+        assert_eq!(
+            loaded.squads.len(),
+            2,
+            "two same-origin unnamed squads stay distinct by key; the keyless one is skipped"
+        );
+        let k1 = loaded
+            .squads
+            .iter()
+            .find(|s| s.key == "k1")
+            .expect("lane k1 persisted by key");
+        assert!(k1.name.is_empty(), "restored unnamed");
+        assert_eq!(k1.members.len(), 2, "same-key upsert replaced in place");
+        // Remove by key drops exactly that lane, leaving its same-origin sibling.
+        remove("", "k1").unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 1);
+        assert_eq!(loaded.squads[0].key, "k2");
+        assert_eq!(loaded.squads[0].origins, vec!["/repo".to_string()]);
     }
 
     #[test]
@@ -832,7 +930,7 @@ mod tests {
         let s = Scratch::new("write-corrupt");
         std::fs::write(s.file(), "{garbage not json").unwrap();
         let before = std::fs::read_to_string(s.file()).unwrap();
-        let res = upsert("w", &[], &[m("c19cd2c3")]);
+        let res = upsert("w", "", &[], &[m("c19cd2c3")]);
         assert!(res.is_err(), "a write onto corrupt content fails loud");
         assert_eq!(
             std::fs::read_to_string(s.file()).unwrap(),
@@ -869,13 +967,13 @@ mod tests {
         // The version-1 object carries both collections; a squad write must
         // preserve lifecycle records and a lifecycle CAS must preserve squads.
         let _s = Scratch::new("both-collections");
-        upsert("w", &["/repo".into()], &[m("c19cd2c3")]).unwrap();
+        upsert("w", "", &["/repo".into()], &[m("c19cd2c3")]).unwrap();
         assert!(matches!(
             begin_external_stop("deadbeef", "ext", "/tmp").unwrap(),
             LifecycleCas::Committed { generation: 1 }
         ));
         // A SECOND squad write must not clobber the lifecycle record.
-        upsert("w2", &[], &[m("11111111")]).unwrap();
+        upsert("w2", "", &[], &[m("11111111")]).unwrap();
         let loaded = load();
         assert_eq!(loaded.squads.len(), 2, "both squads survive");
         assert_eq!(
