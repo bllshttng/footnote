@@ -1379,20 +1379,6 @@ def _drain_hook_wired(hooks_json: Optional[Path] = None) -> Optional[bool]:
     return any("mail-drain" in c or "drain-self" in c for c in cmds)
 
 
-def _live_a2a_handles() -> set[str]:
-    """Every address a live session answers to (alias, short, canonical)."""
-    out: set[str] = set()
-    try:
-        from fno.agents import discover
-        from fno.harness_identity import canonical_handle
-
-        for s in discover.discover_live_sessions():
-            out.update({s.handle, s.short_id, canonical_handle(s.session_id)})
-    except Exception:  # noqa: BLE001 — discovery is best-effort here
-        pass
-    return out
-
-
 def _parse_bus_ts(ts: str) -> Optional[object]:
     from datetime import datetime, timezone
 
@@ -1402,25 +1388,43 @@ def _parse_bus_ts(ts: str) -> Optional[object]:
         return None
 
 
+def _stranded(m, *, cutoff, ref) -> bool:
+    """Whether an unread envelope has passed its terminal TTL.
+
+    A US6-stamped envelope carries a per-owner ``ttl_at`` (a dead-letter's is its
+    birth, so it surfaces immediately; a wake-daemon's is +6h); use it. Legacy
+    mail with no ``ttl_at`` falls back to the blanket age cutoff."""
+    meta = getattr(m, "meta", None) or {}
+    ttl_raw = meta.get("ttl_at")
+    if ttl_raw:
+        ttl = _parse_bus_ts(str(ttl_raw))
+        if ttl is not None:
+            return ref >= ttl
+    ts = _parse_bus_ts(getattr(m, "ts", ""))
+    return ts is not None and ts <= cutoff
+
+
 def _stale_dead_letters(
     *,
     max_age_hours: float = _DEAD_LETTER_AGE_HOURS,
     now: Optional[object] = None,
-    live_handles: Optional[set[str]] = None,
 ) -> list[dict]:
-    """Unread bus mail older than ``max_age_hours`` addressed to a handle with no
-    live session. One scan collects the dead handle-recipients; ``scan_unread``
-    then applies the per-recipient cursor so only genuinely-undrained mail counts."""
+    """Unread bus mail past its terminal TTL, addressed to a session handle.
+
+    Keys on TTL expiry + the per-recipient drain cursor (``scan_unread``), NOT
+    roster liveness (AC8-FR): a wedged session listed live whose drain never
+    advanced its cursor still escalates once its ``ttl_at`` passes, while a
+    session that genuinely drained (cursor advanced) never surfaces. Each finding
+    carries the US6 ``owner`` so downstream surfaces can name the terminal class."""
     from datetime import datetime, timedelta, timezone
 
     from fno.bus.cursor import scan_unread
     from fno.bus.log import iter_messages
 
-    live = live_handles if live_handles is not None else _live_a2a_handles()
     ref = now or datetime.now(tz=timezone.utc)
     cutoff = ref - timedelta(hours=max_age_hours)
 
-    dead_recips: set[str] = set()
+    recips: set[str] = set()
     try:
         for m in iter_messages(warn=False):
             to = getattr(m, "to", "") or ""
@@ -1429,22 +1433,27 @@ def _stale_dead_letters(
             # was unambiguous, so widening the pattern makes to_kind load-bearing.
             if getattr(m, "to_kind", "name") == "project":
                 continue
-            if _A2A_HANDLE_RE.match(to) and to not in live:
-                dead_recips.add(to)
+            if _A2A_HANDLE_RE.match(to):
+                recips.add(to)
     except Exception:  # noqa: BLE001 — a torn bus contributes no findings
         return []
 
     out: list[dict] = []
-    for handle in sorted(dead_recips):
+    for handle in sorted(recips):
         try:
             unread = scan_unread(handle, warn=False)
         except Exception:  # noqa: BLE001
             continue
         for m in unread:
-            ts = _parse_bus_ts(getattr(m, "ts", ""))
-            if ts is not None and ts <= cutoff:
+            if _stranded(m, cutoff=cutoff, ref=ref):
+                meta = getattr(m, "meta", None) or {}
                 out.append(
-                    {"handle": handle, "msg_id": getattr(m, "id", ""), "ts": getattr(m, "ts", "")}
+                    {
+                        "handle": handle,
+                        "msg_id": getattr(m, "id", ""),
+                        "ts": getattr(m, "ts", ""),
+                        "owner": meta.get("owner"),
+                    }
                 )
     return out
 
