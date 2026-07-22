@@ -15,7 +15,6 @@ def _patch(monkeypatch, g: Path) -> None:
     import fno.graph._constants as gc
     import fno.graph.store as gs
     import fno.paths as paths
-    lock = g.parent / "graph.lock"
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", g.parent / "graph.md")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
@@ -108,3 +107,79 @@ def test_merged_stamps_scoped_by_repo(tmp_path, monkeypatch):
 
     assert [r["phase"] for r in _sessions(g, "x-foot0388")] == ["ship"]
     assert _sessions(g, "ab-abil0388") == []  # other repo never stamped
+
+
+# --- fno pr merge closes its own node (baked-in reconcile, no memory) ---------
+
+
+def _fake_gh_url(url: str):
+    class _R:
+        ok = True
+        stdout = url
+        stderr = ""
+    return lambda args, cwd: _R()
+
+
+def test_find_pr_node_id_by_url_when_number_absent():
+    import fno.pr._merge as M
+    entries = [{"id": "ab-x", "pr_url": "https://x/pull/5"}]
+    assert M._find_pr_node_id(entries, 5, "https://x/pull/5") == "ab-x"
+    # no int pr_number AND no url to match on -> unresolved (not a wrong guess)
+    assert M._find_pr_node_id(entries, 5, "") is None
+
+
+def test_reconcile_merged_pr_node_stamps_number_and_closes(tmp_path, monkeypatch):
+    # A node linked ONLY by pr_url (no pr_number) is invisible to bare reconcile
+    # (forward scan needs an int number; reverse map needs the id in the branch).
+    # `fno pr merge` must still find it, stamp the number, and run the scoped close.
+    url = "https://github.com/bllshttng/footnote/pull/777"
+    g = _make_graph(tmp_path, [{"id": "ab-recon001", "title": "t", "pr_url": url}])
+    _patch(monkeypatch, g)
+    import fno.pr._merge as M
+    monkeypatch.setattr(M, "_gh", _fake_gh_url(url))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(M, "run", lambda argv, cwd=None: calls.append(argv))
+
+    M._reconcile_merged_pr_node(777, cwd=str(tmp_path))
+
+    from fno.graph.store import read_graph
+    node = next(e for e in read_graph(g) if e["id"] == "ab-recon001")
+    assert node["pr_number"] == 777  # canonical link now stamped
+    assert len(calls) == 1
+    assert calls[0][-4:] == ["backlog", "reconcile", "--node", "ab-recon001"]
+
+
+def test_reconcile_merged_pr_node_noop_without_matching_node(tmp_path, monkeypatch):
+    g = _make_graph(tmp_path, [{"id": "ab-other01", "title": "t", "pr_number": 1}])
+    _patch(monkeypatch, g)
+    import fno.pr._merge as M
+    monkeypatch.setattr(
+        M, "_gh", _fake_gh_url("https://github.com/bllshttng/footnote/pull/999")
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(M, "run", lambda argv, cwd=None: calls.append(argv))
+
+    M._reconcile_merged_pr_node(999, cwd=str(tmp_path))
+
+    assert calls == []  # no node for PR #999 -> nothing closed
+
+
+def test_on_confirmed_merge_syncs_status_and_closes_node(tmp_path, monkeypatch):
+    # The single merged-path choke: sync merge_status AND close the node.
+    url = "https://github.com/bllshttng/footnote/pull/555"
+    g = _make_graph(tmp_path, [{"id": "ab-conf001", "title": "t", "pr_number": 555,
+                                "pr_url": url}])
+    _patch(monkeypatch, g)
+    _clear_env(monkeypatch)
+    import fno.pr._merge as M
+    monkeypatch.setattr(M, "_gh", _fake_gh_url(url))
+    monkeypatch.setattr(M, "_repo_slug", lambda cwd: "bllshttng/footnote")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(M, "run", lambda argv, cwd=None: calls.append(argv))
+
+    M._on_confirmed_merge(555, str(tmp_path))
+
+    from fno.graph.store import read_graph
+    node = next(e for e in read_graph(g) if e["id"] == "ab-conf001")
+    assert node.get("merge_status") == "merged"          # sync ran
+    assert calls and calls[0][-4:] == ["backlog", "reconcile", "--node", "ab-conf001"]  # close ran

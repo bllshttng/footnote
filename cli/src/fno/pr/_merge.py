@@ -145,6 +145,113 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
         _stamp_ship_provenance(pr_number, cwd)
 
 
+def _find_pr_node_id(
+    entries: List[dict], pr_number: int, pr_url: str = ""
+) -> "Optional[str]":
+    """The graph node linked to this PR, resolved robustly (baked-in, no memory).
+
+    Match order: primary/additional ``pr_number``, then ``pr_url``. The url
+    fallback is load-bearing: a node linked only by url - or created off a branch
+    whose name does not carry the node id - is invisible to bare
+    ``fno backlog reconcile`` (its forward scan needs an int ``pr_number`` and its
+    reverse map needs the id in the branch name). ``fno pr merge`` knows the exact
+    number and url, so it can always find and stamp its own node.
+    """
+    for e in entries:
+        if e.get("pr_number") == pr_number:
+            return e.get("id")
+        for extra in e.get("additional_prs") or []:
+            if isinstance(extra, dict) and extra.get("number") == pr_number:
+                return e.get("id")
+    url = (pr_url or "").strip()
+    if url:
+        for e in entries:
+            if (e.get("pr_url") or "").strip() == url:
+                return e.get("id")
+            for extra in e.get("additional_prs") or []:
+                if isinstance(extra, dict) and (extra.get("url") or "").strip() == url:
+                    return e.get("id")
+    return None
+
+
+def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
+    """Close the just-merged PR's backlog node synchronously (baked into merge).
+
+    ``_run_post_merge_followups`` only drops a ``.triage-pending`` sentinel for a
+    later stop-hook / ritual to consume; a standalone ``fno pr merge`` from a
+    worktree or bg session never fires that hook, so the node stays open - the
+    exact gap that made ``fno pr merge`` no better than ``gh pr merge``. Close it
+    here so the merge always closes its own loop, with no memory/workaround:
+
+      1. Resolve THIS PR's node by number, else url (a url-only / off-convention
+         link is invisible to bare reconcile).
+      2. Stamp ``pr_number`` on it (idempotent) so the canonical link exists for
+         this and every later pass - reconcile's forward scan keys on it.
+      3. Run ``fno backlog reconcile --node <id>`` (mark done, stamp the plan,
+         drop the retro sentinel) - the full, tested close path, reused not
+         duplicated.
+
+    Best-effort: any failure is a non-fatal stderr note; never blocks the merge.
+    """
+    try:
+        from fno.paths import graph_json
+        from fno.graph.store import locked_mutate_graph, read_graph
+
+        path = graph_json()
+        if not path.exists():
+            return
+        pr_url = ""
+        view = _gh(
+            ["pr", "view", str(pr_number), "--json", "url", "-q", ".url"],
+            cwd or os.getcwd(),
+        )
+        if view.ok:
+            pr_url = view.stdout.strip()
+        nid = _find_pr_node_id(read_graph(path), pr_number, pr_url)
+        if not nid:
+            return  # no node linked to this PR - nothing to close
+
+        def _mut(entries: List[dict]) -> List[dict]:
+            for e in entries:
+                if e.get("id") == nid:
+                    if e.get("pr_number") != pr_number:
+                        e["pr_number"] = pr_number
+                    if pr_url and not (e.get("pr_url") or "").strip():
+                        e["pr_url"] = pr_url
+                    break
+            return entries
+
+        locked_mutate_graph(path, _mut)
+
+        from fno import _subprocess_util
+
+        run(
+            [*_subprocess_util.fno_py_cmd(), "backlog", "reconcile", "--node", nid],
+            cwd=cwd or os.getcwd(),
+        )
+    except (Exception, SystemExit):
+        # Never block the merge outcome on the node-close (mirrors
+        # _sync_graph_merge_status: SystemExit covers locked_mutate_graph's
+        # sys.exit on a corrupt graph).
+        print(
+            f"fno pr merge: post-merge node reconcile for PR #{pr_number} "
+            "skipped (non-fatal)",
+            file=sys.stderr,
+        )
+
+
+def _on_confirmed_merge(pr_number: int, cwd: str = "") -> None:
+    """Every graph side-effect of a CONFIRMED (immediate) merge, in one place.
+
+    Sync merge_status + stamp ship provenance (``_sync_graph_merge_status``), then
+    close the node (``_reconcile_merged_pr_node``). The three merged code paths
+    call this ONE function so the node-close can never be forgotten on one of
+    them; the queued/failed paths keep calling ``_sync_graph_merge_status`` alone.
+    """
+    _sync_graph_merge_status("merged", pr_number, cwd)
+    _reconcile_merged_pr_node(pr_number, cwd)
+
+
 def _repo_slug(cwd: str) -> "Optional[str]":
     """The merge's ``<owner>/<repo>`` slug, or None if gh can't say (x-d5f9).
 
@@ -640,7 +747,7 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
             _sync_graph_merge_status("queued", pr_number)
         else:
             _emit(pr_number, "merged", "merged immediately", strategy, err=False)
-            _sync_graph_merge_status("merged", pr_number, repo)
+            _on_confirmed_merge(pr_number, repo)
         _run_post_merge_followups(pr_number, strategy, repo)
         return 0
 
@@ -662,7 +769,7 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
                 strategy,
                 err=False,
             )
-            _sync_graph_merge_status("merged", pr_number, repo)
+            _on_confirmed_merge(pr_number, repo)
             _run_post_merge_followups(pr_number, strategy, repo)
             return 0
         # (b) Not merged yet -> merge SERVER-SIDE via the API (no local checkout).
@@ -686,7 +793,7 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
                 strategy,
                 err=False,
             )
-            _sync_graph_merge_status("merged", pr_number, repo)
+            _on_confirmed_merge(pr_number, repo)
             _run_post_merge_followups(pr_number, strategy, repo)
             return 0
 
