@@ -6314,6 +6314,68 @@ def cmd_advance(
         typer.echo(" ".join(parts))
 
 
+@cli.command("reconcile-findings", hidden=True)
+def cmd_reconcile_findings(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Close the addressed nodes (default: dry-run, mutate nothing).",
+    ),
+) -> None:
+    """Close phantom retro-triage nodes a later commit already addressed.
+
+    Retro files a node from a reviewer comment; on an autonomously-merged,
+    bot-reviewed PR the fix often lands after the comment without the thread
+    being resolved or replied to, so the node is filed for work already done
+    (x-632c). This re-runs the harvest addressed-detection against each open
+    retro node's source PR and closes the ones now addressed - the
+    reconciliation counterpart to the harvest-side suppression. Dry-run by
+    default; ``--apply`` closes via ``fno backlog done --force``. A PR whose
+    review state can't be read is skipped, never closed on uncertainty.
+    """
+    import subprocess
+
+    from fno.graph.store import read_graph
+    from fno.retro.reconcile_findings import scan_addressed_findings
+
+    entries = read_graph(_graph_path())
+    warnings: list = []
+    findings = scan_addressed_findings(entries, warnings=warnings)
+    for w in warnings:
+        typer.echo(w, err=True)
+
+    if not findings:
+        typer.echo("reconcile-findings: no addressed phantom retro nodes found")
+        return
+
+    for f in findings:
+        typer.echo(f"{f.node_id}  PR #{f.pr_number}  comment {f.comment_id}  ({f.signal})")
+
+    if not apply:
+        typer.echo(
+            f"\n{len(findings)} node(s) would close. Re-run with --apply to close them."
+        )
+        return
+
+    closed = 0
+    for f in findings:
+        reason = (
+            f"addressed on PR #{f.pr_number} ({f.signal}); retro reconcile-findings "
+            f"re-check - fix landed without the thread being resolved/replied"
+        )
+        proc = subprocess.run(
+            ["fno", "backlog", "done", f.node_id, "--force", "--reason", reason]
+        )
+        if proc.returncode == 0:
+            closed += 1
+        else:
+            typer.echo(
+                f"reconcile-findings: close of {f.node_id} failed (rc={proc.returncode})",
+                err=True,
+            )
+    typer.echo(f"reconcile-findings: closed {closed}/{len(findings)} node(s)")
+
+
 @cli.command("reconcile", hidden=True)
 def cmd_reconcile(
     dry_run: bool = typer.Option(
