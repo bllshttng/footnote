@@ -2843,10 +2843,11 @@ impl Core {
             }
         }
 
-        // 6. Spare shells to recycle for shell/unbound slots (idempotence: a
-        //    re-apply reuses these, spawning nothing). The target tab's current
-        //    leaves that are NOT bound reuse panes are template-owned shells.
-        let mut spare: Vec<u64> = target_leaves_before
+        // 6. Spare shells to recycle for shell/unbound slots. Drained in tree
+        //    order (FIFO) so a re-apply reassigns each shell to the SAME slot it
+        //    held - the tree comes back byte-identical (AC3 idempotence). A LIFO
+        //    pop would reverse the shells across slots and defeat that.
+        let mut spare: std::collections::VecDeque<u64> = target_leaves_before
             .iter()
             .copied()
             .filter(|p| !reuse_set.contains(p))
@@ -2863,7 +2864,7 @@ impl Core {
                     // An fno slot that reached here resolved to no live pane -> shell,
                     // reported Unbound; an explicit `-` slot is a plain Shell.
                     let is_unbound = matches!(spec.slots[i], SlotBinding::Fno(_));
-                    let pane = spare.pop().or_else(|| {
+                    let pane = spare.pop_front().or_else(|| {
                         self.spawn_pane(vt::DEFAULT_ROWS, vt::DEFAULT_COLS, &cwd).ok()
                     });
                     match pane {
@@ -8504,6 +8505,7 @@ async fn client_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::TemplateName; // x-c4d4 tests; not referenced by name in non-test code
 
     #[test]
     fn node_from_argv_reads_the_wrapper_token() {
@@ -9439,6 +9441,179 @@ mod tests {
         core.tab_areas.insert(20, (24, 80));
         core.next_pane_id = 100;
         core
+    }
+
+    // ---- v42 (x-c4d4) declarative layout templates -----------------------
+
+    /// A registry row binding fno id `sess_id` to live `pane` in the test
+    /// session ("test"), so `resolve_local_pane` can find it.
+    fn bound_agent(sess_id: &str, pane: u64) -> RegistryAgent {
+        let mut a = agent_in("test", pane, None, false);
+        a.session_id = Some(sess_id.into());
+        a
+    }
+
+    /// A one-tab squad (id 1) whose single tab (id 5) holds one real spawned
+    /// shell pane, plus a scratch shell so template shell slots can spawn.
+    fn template_core() -> (Core, u64) {
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        core.next_pane_id = 100;
+        let p = core.spawn_pane(24, 80, "/a").unwrap();
+        core.session.add_squad(1, vec!["/a".into()], Some("sq".into()), leaf_tab(5, p));
+        core.tab_areas.insert(5, (24, 80));
+        (core, p)
+    }
+
+    fn shell_spec(t: TemplateName, k: usize) -> LayoutSpec {
+        LayoutSpec { template: t, slots: (0..k).map(|_| SlotBinding::Shell).collect() }
+    }
+
+    #[test]
+    fn apply_realizes_the_template_topology_over_shells() {
+        // AC1/AC2 shape: main-left with 4 shell slots -> H[ leaf, V[leaf,leaf,leaf] ].
+        let (mut core, _p) = template_core();
+        let results = core
+            .apply_spec(1, &TabSel::Id(5), &shell_spec(TemplateName::MainLeft, 4), false)
+            .unwrap();
+        assert_eq!(results.len(), 4);
+        assert!(results.iter().all(|r| r.outcome == SlotOutcome::Shell && r.pane_id.is_some()));
+        let root = &core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 5).unwrap().root;
+        match root {
+            Node::Branch { axis: Axis::Horizontal, children } => {
+                assert!(matches!(children[0].1, Node::Leaf(_)), "slot 0 is the main leaf");
+                assert!(
+                    matches!(&children[1].1, Node::Branch { axis: Axis::Vertical, children } if children.len() == 3),
+                    "the rest stack vertically"
+                );
+            }
+            other => panic!("expected H[leaf, V[..]], got {other:?}"),
+        }
+        assert_eq!(tree::leaves(root).len(), 4, "four live panes");
+    }
+
+    #[test]
+    fn reapply_same_spec_is_byte_identical_and_reuses_panes() {
+        // AC3: re-applying the same spec spawns nothing, closes nothing, and the
+        // tree comes back byte-identical (the FIFO spare-drain contract).
+        let (mut core, _p) = template_core();
+        let spec = shell_spec(TemplateName::MainLeft, 4);
+        core.apply_spec(1, &TabSel::Id(5), &spec, false).unwrap();
+        let root1 = core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 5).unwrap().root.clone();
+        let panes1 = core.panes.len();
+
+        let results = core.apply_spec(1, &TabSel::Id(5), &spec, false).unwrap();
+        let root2 = core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 5).unwrap().root.clone();
+        assert_eq!(root1, root2, "re-apply is byte-identical");
+        assert_eq!(core.panes.len(), panes1, "no pane spawned or reaped");
+        assert!(results.iter().all(|r| r.outcome == SlotOutcome::Shell));
+    }
+
+    #[test]
+    fn bound_fno_slot_reuses_its_live_pane_and_empties_its_source_tab() {
+        // AC1 core: a live session S1 in its own tab; apply main-left binding
+        // slot 0 to it -> S1's pane becomes the left main, its source tab empties
+        // and is removed, and no pane is spawned for that slot.
+        let (mut core, p1) = template_core(); // p1 lives in tab 5
+        core.agents = vec![bound_agent("S1", p1)];
+        // A second, empty target tab to apply into.
+        let tid = core.create_tab_in(1, Some("grid".into())).unwrap();
+        core.tab_areas.insert(tid, (24, 80));
+
+        let spec = LayoutSpec {
+            template: TemplateName::MainLeft,
+            slots: vec![
+                SlotBinding::Fno("S1".into()),
+                SlotBinding::Shell,
+                SlotBinding::Shell,
+                SlotBinding::Shell,
+            ],
+        };
+        let results = core.apply_spec(1, &TabSel::Id(tid), &spec, false).unwrap();
+        assert_eq!(results[0].outcome, SlotOutcome::Reused);
+        assert_eq!(results[0].pane_id, Some(p1), "S1's pane, reused in place");
+        assert!(results[1..].iter().all(|r| r.outcome == SlotOutcome::Shell));
+        // Source tab 5 emptied (its only pane relocated) -> removed.
+        assert!(core.session.squad(1).unwrap().tabs.iter().all(|t| t.id != 5), "source tab removed");
+        let target = core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == tid).unwrap();
+        assert_eq!(tree::leaves(&target.root)[0], p1, "p1 is the main-left leaf");
+    }
+
+    #[test]
+    fn dead_binding_reconciles_to_a_shell_never_a_duplicate() {
+        // AC4: slot 1 bound to S2; S2 exits; re-apply -> slot 1 Unbound (shell),
+        // no second S2 pane, the surviving bound pane keeps running.
+        let (mut core, p1) = template_core();
+        let p2 = core.spawn_pane(24, 80, "/a").unwrap();
+        core.agents = vec![bound_agent("S1", p1), bound_agent("S2", p2)];
+        let spec = LayoutSpec {
+            template: TemplateName::MainLeft,
+            slots: vec![
+                SlotBinding::Fno("S1".into()),
+                SlotBinding::Fno("S2".into()),
+                SlotBinding::Shell,
+                SlotBinding::Shell,
+            ],
+        };
+        core.apply_spec(1, &TabSel::Id(5), &spec, false).unwrap();
+
+        // S2 exits: drop its registry row and reap its pane.
+        core.agents.retain(|a| a.session_id.as_deref() != Some("S2"));
+        core.reap_pane(p2);
+
+        let results = core.apply_spec(1, &TabSel::Id(5), &spec, false).unwrap();
+        assert_eq!(results[1].outcome, SlotOutcome::Unbound, "dead S2 slot is a reported shell");
+        assert!(results[1].pane_id.is_some(), "the unbound slot got a shell");
+        assert!(!core.panes.contains_key(&p2), "no resurrected S2 pane");
+        assert!(core.panes.contains_key(&p1), "the surviving bound pane keeps running");
+        assert_eq!(results[0].pane_id, Some(p1));
+    }
+
+    #[test]
+    fn reshape_never_kills_the_live_bound_pane() {
+        // AC5: a grid-2x2 with a bound slot 0; reshape to main-left keeps that
+        // pane's id (its PTY untouched, only relocated).
+        let (mut core, p1) = template_core();
+        core.agents = vec![bound_agent("S1", p1)];
+        let grid = LayoutSpec {
+            template: TemplateName::Grid2x2,
+            slots: vec![SlotBinding::Fno("S1".into()), SlotBinding::Shell, SlotBinding::Shell, SlotBinding::Shell],
+        };
+        core.apply_spec(1, &TabSel::Id(5), &grid, false).unwrap();
+        assert!(core.panes.contains_key(&p1));
+
+        let main_left = LayoutSpec {
+            template: TemplateName::MainLeft,
+            slots: vec![SlotBinding::Fno("S1".into()), SlotBinding::Shell, SlotBinding::Shell],
+        };
+        let results = core.apply_spec(1, &TabSel::Id(5), &main_left, false).unwrap();
+        assert_eq!(results[0].pane_id, Some(p1), "the bound pane survives the reshape");
+        assert!(core.panes.contains_key(&p1));
+        let root = &core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 5).unwrap().root;
+        assert_eq!(tree::leaves(root)[0], p1, "and lands as the main-left leaf");
+    }
+
+    #[test]
+    fn unfittable_template_is_refused_atomically() {
+        // AC6: a tab too small to tile grid-2x2 -> TEMPLATE_UNFITTABLE, tab
+        // unchanged (the pre-mutation atomic refuse).
+        let (mut core, _p) = template_core();
+        core.tab_areas.insert(5, (3, 8)); // far too small for four tiles
+        let before = core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 5).unwrap().root.clone();
+        let err = core.apply_spec(1, &TabSel::Id(5), &shell_spec(TemplateName::Grid2x2, 4), false).unwrap_err();
+        assert_eq!(err.0, err_code::TEMPLATE_UNFITTABLE);
+        let after = core.session.squad(1).unwrap().tabs.iter().find(|t| t.id == 5).unwrap().root.clone();
+        assert_eq!(before, after, "the tab is left completely unchanged");
+    }
+
+    #[test]
+    fn arity_mismatch_is_refused_before_any_mutation() {
+        // AC7: grid-2x2 with three slots -> TEMPLATE_ARITY, no mutation.
+        let (mut core, _p) = template_core();
+        let panes_before = core.panes.len();
+        let err = core.apply_spec(1, &TabSel::Id(5), &shell_spec(TemplateName::Grid2x2, 3), false).unwrap_err();
+        assert_eq!(err.0, err_code::TEMPLATE_ARITY);
+        assert_eq!(core.panes.len(), panes_before, "arity refuse spawns nothing");
     }
 
     #[test]

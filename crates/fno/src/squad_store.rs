@@ -664,6 +664,42 @@ mod tests {
     }
 
     #[test]
+    fn pre_xc4d4_store_loads_without_tab_specs_field() {
+        // AC9: a store written before x-c4d4 has no `tab_specs` key. It must load
+        // unquarantined (STORE_VERSION unchanged), defaulting tab_specs to empty.
+        let s = Scratch::new("no-tab-specs");
+        // Hand-write a v1 squad object WITHOUT the tab_specs key.
+        let raw = r#"{"version":1,"squads":[{"name":"w","origins":[],"members":[],"created_at":"2026-07-11T00:00:00Z"}]}"#;
+        std::fs::write(s.file(), raw).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 1, "not quarantined");
+        assert!(loaded.squads[0].tab_specs.is_empty(), "tab_specs defaults to empty");
+        assert!(loaded.notice.is_none());
+    }
+
+    #[test]
+    fn set_tab_specs_persists_and_upsert_preserves_it() {
+        use crate::proto::{LayoutSpec, SlotBinding, TemplateName};
+        let _s = Scratch::new("tab-specs");
+        let spec = StoredTabSpec {
+            tab_name: "grid".into(),
+            spec: LayoutSpec {
+                template: TemplateName::MainLeft,
+                slots: vec![SlotBinding::Fno("S1".into()), SlotBinding::Shell],
+            },
+        };
+        upsert("w", &["/r".into()], &[m("c19cd2c3")]).unwrap();
+        set_tab_specs("w", std::slice::from_ref(&spec)).unwrap();
+        assert_eq!(load().squads[0].tab_specs, vec![spec.clone()]);
+        // A later membership upsert must NOT wipe the template specs (they are
+        // owned by set_tab_specs, and upsert rebuilds the struct fresh).
+        upsert("w", &["/r".into()], &[m("c19cd2c3"), m("deadbeef")]).unwrap();
+        let after = load();
+        assert_eq!(after.squads[0].members.len(), 2, "membership updated");
+        assert_eq!(after.squads[0].tab_specs, vec![spec], "tab_specs preserved across upsert");
+    }
+
+    #[test]
     fn upsert_then_load_roundtrips_and_preserves_created_at() {
         let _s = Scratch::new("roundtrip");
         upsert("harden", &["/repo".into()], &[m("c19cd2c3")]).unwrap();
