@@ -368,14 +368,20 @@ def _text_from_content(content) -> str:
 def _apply_window(
     pairs: list[tuple[str, str, Optional[float]]], created_at
 ) -> list[tuple[str, str, Optional[float]]]:
-    """Prefer records at-or-before created_at + window. An unparseable created_at
-    or a window that excludes everything falls back to the plain tail."""
+    """Prefer records at-or-before created_at + window (the conversation that
+    birthed the node). The plain-tail fallback applies ONLY when timestamps are
+    unusable - an unparseable created_at, or no record carrying a timestamp. When
+    records ARE timestamped but every one falls after the cutoff (e.g. the node's
+    session kept going long after filing and the bounded tail holds only later
+    turns), the tail is OMITTED rather than injecting that unrelated later
+    conversation into the brief."""
     cutoff = _parse_ts(created_at)
     if cutoff is None:
         return pairs
+    if not any(p[2] is not None for p in pairs):
+        return pairs
     cutoff += _CREATED_AT_WINDOW_SECONDS
-    windowed = [p for p in pairs if p[2] is not None and p[2] <= cutoff]
-    return windowed if windowed else pairs
+    return [p for p in pairs if p[2] is not None and p[2] <= cutoff]
 
 
 def _format_pairs(

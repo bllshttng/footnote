@@ -98,9 +98,7 @@ def resolve_transcript(
     """
     root = projects_root if projects_root is not None else _DEFAULT_PROJECTS_ROOT
 
-    # opencode's cwd is not part of its store lookup (the session id is the key),
-    # so it is exempt from the cwd guard below; every other harness needs both.
-    if not session_id or (harness != "opencode" and not cwd):
+    if not session_id:
         return ResolvedTranscript(
             harness=harness,
             session_id=session_id,
@@ -109,6 +107,8 @@ def resolve_transcript(
             reason="missing-input",
         )
 
+    # codex keys on the session id in the rollout; opencode keys on the session
+    # id in the store. Neither needs cwd (only claude does, for its slug).
     if harness == "codex":
         return _resolve_codex(harness, session_id, cwd, codex_sessions_dir)
     if harness == "opencode":
@@ -122,6 +122,16 @@ def resolve_transcript(
             cwd=cwd,
             resolved=False,
             reason="harness-not-supported",
+        )
+
+    # claude needs cwd for the projects slug (the guard above narrows it to str).
+    if not cwd:
+        return ResolvedTranscript(
+            harness=harness,
+            session_id=session_id,
+            cwd=cwd,
+            resolved=False,
+            reason="missing-input",
         )
 
     # Claude resolution

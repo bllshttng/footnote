@@ -380,3 +380,28 @@ def test_never_raises_on_garbage_node(tmp_path):
     for bad in [{}, {"id": None}, {"details": 12345}, {"dispatch_brief": 999}]:
         brief, tag = resolve_dispatch_brief(bad, briefs_dir=tmp_path)
         assert tag in {"none", "synth-details", "synth-details+tail", "synth-tail"}
+
+
+def test_all_records_after_cutoff_omits_tail(tmp_path):
+    """codex review P1: when every timestamped record falls after created_at+120s
+    (the node's session kept going long after filing and the bounded tail holds
+    only later turns), the tail is OMITTED, not filled with the later unrelated
+    conversation."""
+    cwd = "/Users/bb16/code/footnote"
+    sid = "abcd1234-0000-0000-0000-00000000dead"
+    _write_claude_transcript(
+        tmp_path, cwd, sid,
+        [
+            # Both records are well after created_at + 120s.
+            _claude_msg("user", "LATER_UNRELATED_ONE", "2026-07-21T05:00:00Z"),
+            _claude_msg("assistant", "LATER_UNRELATED_TWO", "2026-07-21T05:01:00Z"),
+        ],
+    )
+    node = {
+        "id": "x-1", "title": "T", "details": "one-liner",
+        "source_harness": "claude", "source_session_id": sid, "source_cwd": cwd,
+        "created_at": "2026-07-21T00:00:00Z",
+    }
+    brief, tag = resolve_dispatch_brief(node, briefs_dir=tmp_path, projects_root=tmp_path)
+    assert tag == "synth-details"  # tail omitted, not injected
+    assert "LATER_UNRELATED" not in brief
