@@ -25,6 +25,7 @@ pub mod pty;
 pub mod server;
 pub mod squad;
 pub mod squad_store;
+pub mod templates;
 pub mod tree;
 pub mod version;
 pub mod view_store;
