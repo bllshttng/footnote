@@ -3260,6 +3260,9 @@ impl View {
             && self.agent_sort == AgentSort::Status)
             .then(|| self.selected_agent_name())
             .flatten();
+        // (x-4374) Capture the focused pane before the swap so a focus CHANGE can
+        // pull the newly-focused row into view once the catalog settles.
+        let focus_prev = self.layout.focus;
         self.layout = layout;
         // Selector re-anchors to a live, actionable row on catalog change
         // (AC6-FR): clamp into the unified rows, then step off an inert Header
@@ -3311,6 +3314,12 @@ impl View {
         // Re-clamp the sideline scroll offset against the new catalog so a
         // shrunk row set never leaves the offset past the last row (x-a621).
         self.clamp_sideline_offset();
+        // (x-4374) On a focus CHANGE, scroll the focused-row band into view - a
+        // band the operator scrolled past is no better than the old gutter. Only
+        // on a change, so a plain scrape tick never fights a manual scroll.
+        if self.layout.focus != focus_prev {
+            self.reveal_focus_row();
+        }
         // Drop a pending focus-follow whose target pane vanished, so a settle can
         // never fire `FocusPane` at a dead id (the server would refuse it anyway).
         if let Some((pane, _)) = self.hover_pending {
@@ -3689,6 +3698,35 @@ impl View {
             } else if cur >= self.sideline_offset + visible {
                 self.sideline_offset = cur + 1 - visible;
             }
+        }
+        self.sideline_offset = self.sideline_offset.min(total - visible);
+    }
+
+    /// (x-4374) Scroll the focused pane's sideline row into the visible window,
+    /// moving [`View::sideline_offset`] the least it takes - the focused-row band
+    /// is useless if it scrolled off. Deliberately narrow: a focused pane with no
+    /// visible row (a bare shell pane, or a row inside a folded/LiveOnly section)
+    /// scrolls nothing and NEVER auto-expands a fold - fold state is the
+    /// operator's. Mirrors the cursor logic in [`View::clamp_sideline_offset`],
+    /// keyed on the focus row instead of the selector.
+    fn reveal_focus_row(&mut self) {
+        let focus = self.layout.focus;
+        let visible = self.sideline_visible_rows();
+        let total = self.display_rows().len();
+        if visible == 0 || total <= visible {
+            return;
+        }
+        let Some(idx) = self
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.pane_id == Some(focus)))
+        else {
+            return;
+        };
+        if idx < self.sideline_offset {
+            self.sideline_offset = idx;
+        } else if idx >= self.sideline_offset + visible {
+            self.sideline_offset = idx + 1 - visible;
         }
         self.sideline_offset = self.sideline_offset.min(total - visible);
     }
@@ -14474,6 +14512,56 @@ mod tests {
         assert!(
             elsewhere_line.contains("·reviews"),
             "the background-tab row keeps its badge: {elsewhere_line:?}"
+        );
+    }
+
+    #[test]
+    fn focus_change_scrolls_the_band_into_view() {
+        // x-4374 (AC auto-scroll): when focus moves to a row below the fold, the
+        // sideline scrolls the least it takes to reveal the focused-row band; a
+        // top-row focus needs no scroll.
+        let mut view = two_pane_view();
+        view.term = (6, 100); // a short panel: fewer visible rows than total
+        let panes = view.layout.panes.clone();
+        let agents: Vec<AgentRow> = (0..8)
+            .map(|i| AgentRow {
+                name: format!("a{i}"),
+                pane_id: Some(100 + i),
+                ..focus_agent(0)
+            })
+            .collect();
+        let layout = |focus: u64, agents: Vec<AgentRow>| LayoutView {
+            squads: vec![meta(1, "footnote", 1, 0)],
+            active_squad: 1,
+            panes: panes.clone(),
+            focus,
+            area: (5, 72),
+            agents,
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        };
+        // Focus on the top agent row's pane: it already fits, so no scroll.
+        view.set_layout(layout(100, agents.clone()));
+        assert_eq!(view.sideline_offset, 0, "a top focus needs no scroll");
+        // Focus jumps to the last agent (pane 107), well below the fold.
+        view.set_layout(layout(107, agents.clone()));
+        let visible = view.sideline_visible_rows();
+        let idx = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.pane_id == Some(107)))
+            .unwrap();
+        assert!(
+            idx >= view.sideline_offset && idx < view.sideline_offset + visible,
+            "focused row {idx} is inside the window [{}, {})",
+            view.sideline_offset,
+            view.sideline_offset + visible
+        );
+        assert!(
+            view.sideline_offset > 0,
+            "the sideline scrolled to reveal the off-screen focus"
         );
     }
 
