@@ -1338,10 +1338,10 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 "--claim" => claim = true,
                 "--session" => session = Some(flag_value(args, &mut i, "--session")?),
                 "--cwd" => cwd = Some(flag_value(args, &mut i, "--cwd")?),
-                "--squad" | "-s" | "squad" => {
+                "--workspace" | "--squad" | "-s" | "workspace" | "squad" => {
                     let name = flag_value(args, &mut i, tok)?;
                     if name.trim().is_empty() {
-                        return Err("squad/-s needs a nonblank squad name".into());
+                        return Err("--workspace/-s needs a nonblank workspace name".into());
                     }
                     squad = Some(name);
                 }
@@ -1591,7 +1591,7 @@ fn take_common_flags(args: &[OsString]) -> Result<(Option<String>, bool, Vec<Str
     Ok((session, json, rest))
 }
 
-/// A `--squad <name>` -> `PaneTarget`, defaulting to `CurrentRoute`.
+/// A `--workspace <name>` (alias `--squad`) -> `PaneTarget`, defaulting to `CurrentRoute`.
 fn squad_target(squad: Option<String>) -> PaneTarget {
     squad
         .map(PaneTarget::SquadName)
@@ -1629,7 +1629,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
             match tok {
                 "--json" => json = true,
                 "--session" => session = Some(flag_value(args, &mut i, "--session")?),
-                "--squad" | "-s" => squad = Some(flag_value(args, &mut i, tok)?),
+                "--workspace" | "--squad" | "-s" => squad = Some(flag_value(args, &mut i, tok)?),
                 "--name" => name = Some(flag_value(args, &mut i, "--name")?),
                 "--tab" => tab_sel = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?),
                 "--src" => src = Some(parse_tab_sel(&flag_value(args, &mut i, "--src")?)?),
@@ -1770,7 +1770,7 @@ pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
                         let _ = flag_value(flags, &mut i, "--session")?;
                     }
                 }
-                "--squad" | "-s" => squad = Some(flag_value(flags, &mut i, tok)?),
+                "--workspace" | "--squad" | "-s" => squad = Some(flag_value(flags, &mut i, tok)?),
                 "--tab" => tab_sel = Some(parse_tab_sel(&flag_value(flags, &mut i, "--tab")?)?),
                 t => return Err(format!("unknown flag: {t}")),
             }
@@ -1799,7 +1799,7 @@ pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
 }
 
 /// `fno mux layout apply --template <t> --slot <b>... | --spec <file>
-/// [--squad <s>] [--tab <sel>] [--focus] [--json]` (x-c4d4). Both input forms
+/// [--workspace <s>] [--tab <sel>] [--focus] [--json]` (x-c4d4). Both input forms
 /// assemble the SAME [`LayoutSpec`]; the file form IS the persisted spec (US8),
 /// so apply and restore share one struct.
 fn layout_apply_cli(
@@ -1827,7 +1827,7 @@ fn layout_apply_cli(
                 "--template" | "-t" => template = Some(parse_template_name(&val(&mut i)?)?),
                 "--slot" => slots.push(parse_slot(&val(&mut i)?)),
                 "--spec" => spec_file = Some(val(&mut i)?),
-                "--squad" | "-s" => squad = Some(val(&mut i)?),
+                "--workspace" | "--squad" | "-s" => squad = Some(val(&mut i)?),
                 "--tab" => tab = Some(parse_tab_sel(&val(&mut i)?)?),
                 "--focus" => focus = true,
                 other => return Err(format!("unknown flag: {other}")),
@@ -3301,7 +3301,23 @@ mod tests {
                 ..
             } if name == "review"
         ));
+        // --workspace is an alias for --squad (US2): same PaneTarget.
+        let ws = parse_pane_args(&os(&[
+            "run", "--workspace", "review", "--split", "up", "--", "echo",
+        ]))
+        .unwrap();
+        assert!(matches!(
+            ws.cmd,
+            PaneCmd::Run {
+                placement: PanePlacement {
+                    target: PaneTarget::SquadName(ref name),
+                    ..
+                },
+                ..
+            } if name == "review"
+        ));
         assert!(parse_pane_args(&os(&["run", "squad", " ", "--", "echo"])).is_err());
+        assert!(parse_pane_args(&os(&["run", "--workspace", " ", "--", "echo"])).is_err());
         assert!(parse_pane_args(&os(&["run", "split", "diagonal", "--", "echo"])).is_err());
         assert!(parse_pane_args(&os(&["run", "--target", "review", "--", "echo"])).is_err());
     }

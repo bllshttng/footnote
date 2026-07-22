@@ -730,10 +730,10 @@ fn validate_spawn_placement(params: &Value, substrate: &str) -> Result<(), Strin
     let split = params.get("split").and_then(Value::as_str);
 
     if squad.is_some_and(|name| name.trim().is_empty()) {
-        return Err("--squad/-s needs a nonblank squad name".into());
+        return Err("--workspace/-s needs a nonblank workspace name".into());
     }
     if (squad.is_some() || split.is_some()) && substrate != "pane" {
-        return Err("--squad/-s and --split/-x apply only to --substrate pane \
+        return Err("--workspace/-s and --split/-x apply only to --substrate pane \
              (bg/headless have no pane geometry)"
             .into());
     }
@@ -1421,6 +1421,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--model",
         "--mode",
         "--substrate",
+        "--workspace",
         "--squad",
         "--split",
         "--permission-mode",
@@ -1469,8 +1470,8 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--provider" | "-p" => {
                 params.insert("provider".into(), str_arg(&mut it, "--provider")?);
             }
-            "--squad" | "-s" => {
-                params.insert("squad".into(), str_arg(&mut it, "-s/--squad")?);
+            "--workspace" | "--squad" | "-s" => {
+                params.insert("squad".into(), str_arg(&mut it, "-s/--workspace")?);
             }
             "--split" | "-x" => {
                 params.insert("split".into(), str_arg(&mut it, "-x/--split")?);
@@ -2941,7 +2942,7 @@ mod tests {
         let params = serde_json::json!({"squad": "reviews"});
         assert_eq!(
             validate_spawn_placement(&params, "bg"),
-            Err("--squad/-s and --split/-x apply only to --substrate pane \
+            Err("--workspace/-s and --split/-x apply only to --substrate pane \
                  (bg/headless have no pane geometry)"
                 .to_string())
         );
