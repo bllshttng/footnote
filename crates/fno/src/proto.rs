@@ -232,7 +232,14 @@ fn default_true() -> bool {
 /// `#[serde(default)]`-tolerant, but the new VERBS are not - a v40 server cannot
 /// deserialize a `PaneSplit`, so one bump covers the whole node's wire delta
 /// (Locked Decision 7).
-pub const PROTO_VERSION: u32 = 42;
+///
+/// v43 (x-d6a8, US9 drag faces): `Command::BreakPane`/`JoinTab` - the interactive
+/// drag counterparts of the `PaneBreak`/`TabJoin` control verbs, dispatching into
+/// the same `CoreMsg`s. New verbs, not additive fields, so a v42 server cannot
+/// deserialize a `BreakPane` and an unbumped client would lose its connection on
+/// the first pane-break drag rather than at handshake. Rides on top of the x-c4d4
+/// layout-template v42 bump (independent additive wire deltas, one version each).
+pub const PROTO_VERSION: u32 = 43;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -1011,6 +1018,28 @@ pub enum Command {
     MovePane {
         mover: Option<u64>,
         target: Option<u64>,
+        dir: Dir,
+    },
+    /// (v43, x-d6a8) Break `pane` into its OWN new tab, the drop of a pane grip
+    /// onto the tab strip. Dispatches into the SAME [`CoreMsg::PaneBreak`] the
+    /// [`ControlVerb::PaneBreak`] script path sends (one tree-mutation site); the
+    /// interactive path additionally repoints the acting client's focus to the
+    /// new tab, which the script path never does (Locked Decision 3). `pane` is
+    /// named from the drag source, a leaf in the sender's current tab; a stale id
+    /// is refused fail-closed by the server, like `MovePane`.
+    BreakPane {
+        pane: u64,
+    },
+    /// (v43, x-d6a8) Join the whole `src_tab` into `anchor_pane`'s tab as a split
+    /// on `dir`, removing the now-empty source tab - the drop of a tab cell onto a
+    /// content edge. Dispatches into the SAME [`CoreMsg::TabJoin`] the
+    /// [`ControlVerb::TabJoin`] script path sends. `src_tab` is a concrete stable
+    /// [`TabId`] the drag picked up (not the script path's `TabSel`: a gesture
+    /// grabs one specific rendered cell, never "the active tab"). A join-into-self
+    /// is refused `BAD_REQUEST` server-side, and suppressed client-side.
+    JoinTab {
+        src_tab: TabId,
+        anchor_pane: u64,
         dir: Dir,
     },
     NewTab,
@@ -2354,6 +2383,31 @@ mod tests {
     }
 
     #[test]
+    fn proto_v43_us9_drag_commands_roundtrip() {
+        // US9 (x-d6a8): the two interactive drag verbs are additive Command
+        // variants that ride the 43 bump. Externally-tagged, so a v42 server
+        // cannot decode them at all - the PROTO_VERSION handshake is what stops
+        // the skew (a mismatched client is told to restart the server), NOT a
+        // serde default. What we assert here is (a) the canonical version and
+        // (b) the new variants survive the codec losslessly, exactly the
+        // discipline every prior new-verb bump followed.
+        assert_eq!(PROTO_VERSION, 43);
+        for msg in [
+            ClientMsg::Command(Command::BreakPane { pane: 7 }),
+            ClientMsg::Command(Command::JoinTab {
+                src_tab: 3,
+                anchor_pane: 11,
+                dir: Dir::Right,
+            }),
+        ] {
+            let bytes = encode(&msg).unwrap();
+            let mut cursor = std::io::Cursor::new(bytes);
+            let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();
+            assert_eq!(decoded, msg);
+        }
+    }
+
+    #[test]
     fn agent_row_from_v13_json_defaults_attach_id_none() {
         // A pre-v14 (v13) AgentRow omits `attach_id` entirely (skip-when-None).
         // A v14 reader must decode it as `None`, never fail - the wire
@@ -2379,11 +2433,12 @@ mod tests {
     }
 
     #[test]
-    fn agent_row_crown_fields_are_serde_default_tolerant_and_proto_is_42() {
+    fn agent_row_crown_fields_are_serde_default_tolerant_and_proto_is_43() {
         // The mux-crown wire lift bumped PROTO_VERSION 40 -> 41; the templates
-        // node (x-c4d4) bumped it 41 -> 42. The two additive crown fields stay
-        // skew-tolerant both ways regardless of the version number.
-        assert_eq!(PROTO_VERSION, 42);
+        // node (x-c4d4) bumped it 41 -> 42; the US9 drag faces (x-d6a8) bumped it
+        // 42 -> 43. The two additive crown fields stay skew-tolerant both ways
+        // regardless of the version number.
+        assert_eq!(PROTO_VERSION, 43);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
                       "badge":null,"reason":null,"exited":false}"#;

@@ -511,6 +511,43 @@ struct DropZone {
 struct PaneDrag {
     mover: u64,
     zone: Option<DropZone>,
+    /// (v43, x-d6a8 G1) The pointer is over the tab strip: the drop breaks the
+    /// pane into its own new tab (`Command::BreakPane`) instead of relocating it
+    /// within the tab (`Command::MovePane`). Mutually exclusive with `zone` - a
+    /// cell is either the strip or the content area, never both.
+    on_strip: bool,
+    last_at: Instant,
+}
+
+/// (v43, x-d6a8 G2) A tab-cell relocation drag in flight: picking a whole tab up
+/// from the strip to graft it into the current tab's content as a split
+/// (`Command::JoinTab`). Mirrors [`PaneDrag`]'s lifetime (ghost, timeout reaper,
+/// esc-cancel); `zone` is the content-edge candidate under the pointer.
+#[derive(Clone, Copy, Debug)]
+struct TabDrag {
+    src_tab: u64,
+    zone: Option<DropZone>,
+    last_at: Instant,
+}
+
+/// (v43, x-d6a8 G3) The drag source of a sideline agent row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RowSource {
+    /// A pane-hosted row: the drop moves its pane into the current tab's content,
+    /// a cross-tab `Command::MovePane` (the pane lives in another tab).
+    Pane(u64),
+    /// A paneless bg row: the drop attaches it at the drop slot
+    /// (`Command::AttachAgent` with a placement).
+    Attach(String),
+}
+
+/// (v43, x-d6a8 G3) A sideline-row placement drag in flight. Reuses the
+/// content-area zone vocabulary; `RowSource` carries whether the drop moves a
+/// live pane or attaches a paneless session. Not `Copy` (the attach id is owned).
+#[derive(Clone, Debug)]
+struct RowDrag {
+    src: RowSource,
+    zone: Option<DropZone>,
     last_at: Instant,
 }
 
@@ -697,6 +734,11 @@ struct View {
     /// (x-aa95) The relocation drag in flight, if any. While `Some`, motion and
     /// release are intercepted before they reach a pane's PTY.
     pane_drag: Option<PaneDrag>,
+    /// (v43, x-d6a8 G2) A tab-cell join drag in flight. Same interception as
+    /// `pane_drag`; at most one of the three drags is ever live at a time.
+    tab_drag: Option<TabDrag>,
+    /// (v43, x-d6a8 G3) A sideline-row placement drag in flight.
+    row_drag: Option<RowDrag>,
     /// (x-a496) A pending click-a-card confirm: the node to dispatch and its
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
@@ -1442,6 +1484,8 @@ impl View {
             sideline_drag: None,
             hover_grip: None,
             pane_drag: None,
+            tab_drag: None,
+            row_drag: None,
             confirm: None,
             create: None,
             create_esc: Vec::new(),
@@ -2654,10 +2698,76 @@ impl View {
         Some(DropZone { target, dir })
     }
 
+    /// (v43, x-d6a8 G1) Whether a cell lies on the tab strip (the top bar right
+    /// of the sideline panel) rather than the content area. The same region
+    /// [`View::chrome_hit`] treats as the strip, so a pane dropped anywhere on it
+    /// breaks into a new tab.
+    fn strip_at(&self, row: u16, col: u16) -> bool {
+        row < TAB_BAR_ROWS && col >= self.panel_w()
+    }
+
+    /// (v43, x-d6a8 G2) The stable tab id under a strip cell, if it names an
+    /// existing tab (a drag SOURCE). Walks the same spans [`View::chrome_hit`]
+    /// walks, so a drag pickup and a click resolve identically. The `+` (NewTab)
+    /// is not a drag source, and a cell under the notice overlay is not the strip.
+    fn tab_cell_at(&self, row: u16, col: u16) -> Option<u64> {
+        let panel_w = self.panel_w();
+        if row >= TAB_BAR_ROWS || col < panel_w {
+            return None;
+        }
+        let col = col as usize;
+        if let Some((start, text)) = self.notice_overlay(self.term.1 as usize) {
+            if col >= start && col < start + text.chars().count() {
+                return None;
+            }
+        }
+        let mut c = panel_w as usize;
+        for span in self.tab_bar_spans() {
+            let w = span.text.chars().count();
+            if col >= c && col < c + w {
+                return match span.hit? {
+                    TabHit::Tab(tid) => Some(tid),
+                    TabHit::NewTab => None,
+                };
+            }
+            c += w;
+        }
+        None
+    }
+
+    /// (v43, x-d6a8 G3) The drag source of a sideline agent row under a cell, if
+    /// any. A pane-hosted row drags its pane; a paneless bg row drags its attach
+    /// id; a row with neither (a dead external tombstone) is not draggable.
+    fn row_drag_source_at(&self, row: u16, col: u16) -> Option<RowSource> {
+        // The density button is pinned chrome painted over row 0 (chrome_hit
+        // resolves it to CycleDensity before any row action). A press there must
+        // cycle density, not drag the agent row drawn underneath it - so it is
+        // never a drag source. Mirrors chrome_hit's own row-0 guard.
+        if row == 0 {
+            if let Some(range) = self.density_button_range(self.panel_w() as usize) {
+                if range.contains(&(col as usize)) {
+                    return None;
+                }
+            }
+        }
+        let i = self.sideline_row_at(row, col)?;
+        match self.display_rows().get(i)? {
+            DisplayRow::Agent(a) => {
+                if let Some(pid) = a.pane_id {
+                    Some(RowSource::Pane(pid))
+                } else {
+                    a.attach_id.clone().map(RowSource::Attach)
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn begin_pane_drag(&mut self, mover: u64, now: Instant) {
         self.pane_drag = Some(PaneDrag {
             mover,
             zone: None,
+            on_strip: false,
             last_at: now,
         });
     }
@@ -2668,20 +2778,27 @@ impl View {
         let Some(mover) = self.pane_drag.map(|d| d.mover) else {
             return false;
         };
+        // Over the strip (G1): the drop breaks the pane into its own tab, so the
+        // content zone is cleared - a cell is the strip XOR a content zone.
+        let on_strip = self.strip_at(row, col);
         // A zone the dragged pane already occupies is the origin: no highlight,
         // so the gesture reads as "this drop does nothing" before the release.
         // BOTH flanks count - a seam is addressed by its left/top pane, so the
         // divider a pane already abuts on its far side names the NEIGHBOUR and
         // would otherwise light up as a real destination.
         let abuts = |s: Seam| s.a == mover || s.b == mover;
-        let zone = self
-            .drop_zone_at(row, col)
-            .filter(|z| z.target != mover && self.pane_rect(mover).is_some())
-            .filter(|_| !self.seam_at(row, col).is_some_and(abuts));
+        let zone = if on_strip {
+            None
+        } else {
+            self.drop_zone_at(row, col)
+                .filter(|z| z.target != mover && self.pane_rect(mover).is_some())
+                .filter(|_| !self.seam_at(row, col).is_some_and(abuts))
+        };
         let drag = self.pane_drag.as_mut().expect("checked above");
         drag.last_at = now;
-        let changed = drag.zone != zone;
+        let changed = drag.zone != zone || drag.on_strip != on_strip;
         drag.zone = zone;
+        drag.on_strip = on_strip;
         changed
     }
 
@@ -2690,14 +2807,127 @@ impl View {
     /// `None` on every cancel path - released off any zone, on the origin, or
     /// after the dragged pane went away - so a cancelled drag provably puts
     /// nothing on the wire rather than sending a command the server will refuse.
+    /// Over the strip it breaks the pane into its own tab instead (G1).
     fn commit_pane_drag(&mut self) -> Option<Command> {
         let drag = self.pane_drag.take()?;
+        if drag.on_strip {
+            return Some(Command::BreakPane { pane: drag.mover });
+        }
         let zone = drag.zone?;
         Some(Command::MovePane {
             mover: Some(drag.mover),
             target: Some(zone.target),
             dir: zone.dir,
         })
+    }
+
+    // ---- (v43, x-d6a8 G2) tab-cell join drag -------------------------------
+
+    fn begin_tab_drag(&mut self, src_tab: u64, now: Instant) {
+        self.tab_drag = Some(TabDrag {
+            src_tab,
+            zone: None,
+            last_at: now,
+        });
+    }
+
+    /// Track a tab-cell drag to a content-edge zone. Returns whether the
+    /// highlight changed. A drag of the CURRENT tab lights nothing: any zone in
+    /// its own content would be a self-join, suppressed exactly like an origin
+    /// drop (x-aa95 grammar).
+    fn tab_drag_to(&mut self, row: u16, col: u16, now: Instant) -> bool {
+        let Some(src_tab) = self.tab_drag.map(|d| d.src_tab) else {
+            return false;
+        };
+        let self_join = self.active_squad_active_tab_id() == Some(src_tab);
+        let zone = if self_join {
+            None
+        } else {
+            self.drop_zone_at(row, col)
+        };
+        let drag = self.tab_drag.as_mut().expect("checked above");
+        drag.last_at = now;
+        let changed = drag.zone != zone;
+        drag.zone = zone;
+        changed
+    }
+
+    /// End the tab-cell drag and return the join command, or `None` on any cancel
+    /// path (off-zone, or a self-join onto the source tab's own content - the
+    /// server also refuses BAD_REQUEST, belt and braces).
+    fn commit_tab_drag(&mut self) -> Option<Command> {
+        let drag = self.tab_drag.take()?;
+        if self.active_squad_active_tab_id() == Some(drag.src_tab) {
+            return None;
+        }
+        let zone = drag.zone?;
+        Some(Command::JoinTab {
+            src_tab: drag.src_tab,
+            anchor_pane: zone.target,
+            dir: zone.dir,
+        })
+    }
+
+    fn cancel_tab_drag(&mut self) -> bool {
+        self.tab_drag.take().is_some()
+    }
+
+    // ---- (v43, x-d6a8 G3) sideline-row placement drag ----------------------
+
+    fn begin_row_drag(&mut self, src: RowSource, now: Instant) {
+        self.row_drag = Some(RowDrag {
+            src,
+            zone: None,
+            last_at: now,
+        });
+    }
+
+    /// Track a sideline-row drag to a content-edge zone. Unlike a pane drag this
+    /// does NOT gate on `pane_rect(mover)`: a pane-hosted row names a pane living
+    /// in ANOTHER tab, off the current layout by design (the server resolves it).
+    fn row_drag_to(&mut self, row: u16, col: u16, now: Instant) -> bool {
+        if self.row_drag.is_none() {
+            return false;
+        }
+        let zone = self.drop_zone_at(row, col);
+        let drag = self.row_drag.as_mut().expect("checked above");
+        drag.last_at = now;
+        let changed = drag.zone != zone;
+        drag.zone = zone;
+        changed
+    }
+
+    /// End the sideline-row drag and return its placement command, or `None` off
+    /// any zone. A pane-hosted row moves its pane cross-tab (`MovePane`); a
+    /// paneless bg row attaches at the drop slot (`AttachAgent` with a placement
+    /// anchored to the dropped-on pane in the current tab).
+    fn commit_row_drag(&mut self) -> Option<Command> {
+        let drag = self.row_drag.take()?;
+        let zone = drag.zone?;
+        Some(match drag.src {
+            RowSource::Pane(pid) => Command::MovePane {
+                mover: Some(pid),
+                target: Some(zone.target),
+                dir: zone.dir,
+            },
+            // The anchor (`at`) alone names the drop slot: the server resolves
+            // its squad and tab from the anchor pane's live location (overriding
+            // the agent's owner-squad routing), so the client leaves `tab`
+            // unset rather than guess "the active tab".
+            RowSource::Attach(id) => Command::AttachAgent {
+                id,
+                placement: PanePlacement {
+                    at: Some(zone.target),
+                    split: Some(zone.dir),
+                    here: false,
+                    ..PanePlacement::default()
+                },
+            },
+        })
+    }
+
+    fn cancel_row_drag(&mut self) -> bool {
+        self.row_drag.take().is_some()
     }
 
     /// Abandon a drag with no command. Esc, the timeout, and the dragged pane
@@ -3917,7 +4147,13 @@ impl View {
         // runs ahead of it, so the thing being moved stays the thing lit.
         let active_seam = self.seam_drag.map(|d| d.seam).or(self.hover_seam);
         // x-aa95: the candidate drop zone, lit while a relocation drag is live.
-        let drop_zone = self.pane_drag.and_then(|d| d.zone);
+        // (x-d6a8) The tab-cell and sideline-row drags reuse the SAME content-edge
+        // zone vocabulary, so one of the three lights the seam/band identically.
+        let drop_zone = self
+            .pane_drag
+            .and_then(|d| d.zone)
+            .or_else(|| self.tab_drag.and_then(|d| d.zone))
+            .or_else(|| self.row_drag.as_ref().and_then(|d| d.zone));
         // Divider glyphs for in-area content cells no pane covers: pick by
         // which neighbors are panes so vertical strips read '│', horizontal
         // '─', crossings '┼'. Dim so chrome never shouts over content.
@@ -4492,17 +4728,37 @@ impl View {
         // 0 too and tabs read as owned by the active workspace rather than the
         // reverse. `panel_w == 0` (no sideline) -> origin 0, byte-identical to
         // the pre-scoping full-width strip.
+        // (x-d6a8 G1) While a pane is dragged, the whole strip reads as a break
+        // target (accent), brightening to INVERSE the moment the pointer is over
+        // it (the "drop here to break into a new tab" affordance). (G2) While a
+        // tab cell is dragged, that cell dims to read as lifted - the same
+        // origin-marking the pane grip uses during a relocation.
+        let break_active = self.pane_drag.map(|d| d.on_strip);
+        let lifted_tab = self.tab_drag.map(|d| d.src_tab);
         let mut c = self.panel_w() as usize;
         'spans: for span in self.tab_bar_spans() {
+            let (fg, flags) = if let Some(on_strip) = break_active {
+                let f = if on_strip {
+                    cell_flags::INVERSE
+                } else {
+                    cell_flags::BOLD
+                };
+                (LATTICE_ACCENT, f)
+            } else if matches!((lifted_tab, span.hit), (Some(t), Some(TabHit::Tab(tid))) if t == tid)
+            {
+                (span.fg, span.flags | cell_flags::DIM)
+            } else {
+                (span.fg, span.flags)
+            };
             for ch in span.text.chars() {
                 if c >= cols {
                     break 'spans;
                 }
                 cells[c] = Cell {
                     c: ch,
-                    fg: span.fg,
+                    fg,
                     bg: Color::Default,
-                    flags: span.flags,
+                    flags,
                 };
                 c += 1;
             }
@@ -6676,6 +6932,20 @@ async fn attach_and_run(
         // leave the drag latched, swallowing every later mouse event. Expire it.
         let seam_drag_deadline = view.seam_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
         let pane_drag_deadline = view.pane_drag.map(|d| d.last_at + PANE_DRAG_TIMEOUT);
+        // (x-d6a8 AC1-FR) The tab-cell and sideline-row drags share the same
+        // dead-drag reaper: a mouse-up that never arrives must not latch the
+        // gesture. Only one of the three is ever live, so one deadline over both
+        // new drags suffices.
+        let new_drag_deadline = view
+            .tab_drag
+            .map(|d| d.last_at + PANE_DRAG_TIMEOUT)
+            .into_iter()
+            .chain(
+                view.row_drag
+                    .as_ref()
+                    .map(|d| d.last_at + PANE_DRAG_TIMEOUT),
+            )
+            .min();
         tokio::select! {
             msg = srv_rx.recv() => match msg.unwrap_or(Err(ProtoError::Closed)) {
                 Ok(ServerMsg::Frame { pane_id, frame }) => {
@@ -7037,6 +7307,22 @@ async fn attach_and_run(
                 }
             }
             _ = async {
+                match new_drag_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if new_drag_deadline.is_some() => {
+                // (x-d6a8 AC1-FR) Same discrete-jump reasoning as the pane drag:
+                // a tab-join / row-place whose release went missing applies
+                // NOTHING. Clear whichever new drag is live; the struct is cleared
+                // internally so a late release cannot commit a stale command.
+                view.cancel_tab_drag();
+                view.cancel_row_drag();
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            _ = async {
                 match hover_deadline {
                     Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
                     None => std::future::pending().await,
@@ -7093,7 +7379,10 @@ async fn handle_stdin(
         // timeout - for a gesture the operator has already finished. Nobody is
         // shift-selecting text mid-drag, so nothing is taken away here.
         let ends_a_drag = matches!(rep.kind, MouseKind::Release(MouseButton::Left))
-            && (view.pane_drag.is_some() || view.seam_drag.is_some());
+            && (view.pane_drag.is_some()
+                || view.seam_drag.is_some()
+                || view.tab_drag.is_some()
+                || view.row_drag.is_some());
         if rep.shift && !ends_a_drag {
             continue;
         }
@@ -7192,6 +7481,92 @@ async fn handle_stdin(
                 }
             }
         }
+        // (x-d6a8 G2) a tab-cell join drag owns the mouse, same ownership rule as
+        // a pane drag: the pointer's whole job is to leave the strip it grabbed.
+        if view.tab_drag.is_some() {
+            match rep.kind {
+                MouseKind::Drag(MouseButton::Left) => {
+                    view.tab_drag_to(rep.row, rep.col, Instant::now());
+                    continue;
+                }
+                MouseKind::Release(MouseButton::Left) => {
+                    view.tab_drag_to(rep.row, rep.col, Instant::now());
+                    let src = view.tab_drag.map(|d| d.src_tab);
+                    match view.commit_tab_drag() {
+                        Some(cmd) => {
+                            write_msg(sock_w, &ClientMsg::Command(cmd))
+                                .await
+                                .map_err(|e| format!("tab join send failed: {e}"))?;
+                        }
+                        // A zone-less release still ON the strip is a plain click:
+                        // select the tab (the click-to-select affordance the strip
+                        // has always had). Released off the strip it is a cancelled
+                        // drag - nothing travels.
+                        None => {
+                            if let Some(tid) = src {
+                                if view.strip_at(rep.row, rep.col) {
+                                    write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(tid)))
+                                        .await
+                                        .map_err(|e| format!("tab select send failed: {e}"))?;
+                                }
+                            }
+                        }
+                    }
+                    view.refresh_hover_affordances(rep.row, rep.col);
+                    continue;
+                }
+                _ => {
+                    view.cancel_tab_drag();
+                    view.refresh_hover_affordances(rep.row, rep.col);
+                }
+            }
+        }
+        // (x-d6a8 G3) a sideline-row placement drag owns the mouse.
+        if view.row_drag.is_some() {
+            match rep.kind {
+                MouseKind::Drag(MouseButton::Left) => {
+                    view.row_drag_to(rep.row, rep.col, Instant::now());
+                    continue;
+                }
+                MouseKind::Release(MouseButton::Left) => {
+                    view.row_drag_to(rep.row, rep.col, Instant::now());
+                    // Capture the pressed row's source BEFORE commit consumes the
+                    // drag, so a zone-less release can verify it landed back on the
+                    // SAME row.
+                    let pressed = view.row_drag.as_ref().map(|d| d.src.clone());
+                    match view.commit_row_drag() {
+                        Some(cmd) => {
+                            write_msg(sock_w, &ClientMsg::Command(cmd))
+                                .await
+                                .map_err(|e| format!("row place send failed: {e}"))?;
+                        }
+                        // A zone-less release is a plain click ONLY when the
+                        // pointer is still on the row it was pressed on: run that
+                        // row's own action (focus / attach), unchanged from a
+                        // press-click. A slip to a different row - or a layout
+                        // shift under a held button, or a release over pinned
+                        // chrome (row_drag_source_at skips the density button) -
+                        // resolves to a different source (or None), so the gesture
+                        // cancels rather than acting on the wrong agent.
+                        None => {
+                            if pressed.is_some()
+                                && view.row_drag_source_at(rep.row, rep.col) == pressed
+                            {
+                                if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
+                                    apply_hit(view, hit, sock_w).await?;
+                                }
+                            }
+                        }
+                    }
+                    view.refresh_hover_affordances(rep.row, rep.col);
+                    continue;
+                }
+                _ => {
+                    view.cancel_row_drag();
+                    view.refresh_hover_affordances(rep.row, rep.col);
+                }
+            }
+        }
         // x-d807: the sideline border drag, same ownership rule as a seam drag.
         // Client-local: the sideline is never on the wire, so a snap only tells
         // the server its content area changed.
@@ -7235,6 +7610,18 @@ async fn handle_stdin(
         // an agent's pane, opens a tab, or opens a card-dispatch confirm - it
         // never reaches the pane underneath.
         if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+            // (x-d6a8 G2/G3) a tab cell and a sideline agent row are DRAG SOURCES.
+            // Begin the drag before chrome_hit (which would apply the click action
+            // immediately); a zone-less release falls back to that same click
+            // action (select / focus / attach), so a plain click is unchanged.
+            if let Some(tid) = view.tab_cell_at(rep.row, rep.col) {
+                view.begin_tab_drag(tid, Instant::now());
+                continue;
+            }
+            if let Some(src) = view.row_drag_source_at(rep.row, rep.col) {
+                view.begin_row_drag(src, Instant::now());
+                continue;
+            }
             if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
                 apply_hit(view, hit, sock_w).await?;
                 continue;
@@ -7324,6 +7711,17 @@ async fn handle_stdin(
     // escape sequence cannot read as a cancel.
     if view.pane_drag.is_some() && passthrough == [0x1b] {
         view.cancel_pane_drag();
+        return Ok(StdinFlow::Continue);
+    }
+    // (x-d6a8 AC1-FR) A bare Esc cancels a tab-cell or sideline-row drag too. No
+    // command travels; the same lone-0x1b match so an arrow key cannot read as a
+    // cancel.
+    if view.tab_drag.is_some() && passthrough == [0x1b] {
+        view.cancel_tab_drag();
+        return Ok(StdinFlow::Continue);
+    }
+    if view.row_drag.is_some() && passthrough == [0x1b] {
+        view.cancel_row_drag();
         return Ok(StdinFlow::Continue);
     }
     if view.digest.is_some() {
@@ -19549,6 +19947,309 @@ mod tests {
             })
         );
         assert!(view.pane_drag.is_none(), "committing ends the drag");
+    }
+
+    // ---- (v43, x-d6a8) US9 interactive drag commit functions ---------------
+
+    #[test]
+    fn g1_pane_drag_onto_the_strip_commits_a_break() {
+        // AC1-HP (commit half): a pane dragged onto the tab strip breaks into its
+        // own tab (BreakPane), not a within-tab MovePane. The strip cell also
+        // clears the content zone: a cell is strip XOR content.
+        let mut view = three_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        // First over a real content seam: a MovePane candidate.
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.pane_drag_to(r, c, Instant::now());
+        assert!(view.pane_drag.and_then(|d| d.zone).is_some());
+        // Then up onto the strip (row 0, right of the sideline panel).
+        let changed = view.pane_drag_to(0, view.panel_w(), Instant::now());
+        assert!(changed, "moving onto the strip redraws");
+        let d = view.pane_drag.expect("still dragging");
+        assert!(d.on_strip, "the pointer is over the strip");
+        assert!(d.zone.is_none(), "the content zone is cleared on the strip");
+        assert_eq!(
+            view.commit_pane_drag(),
+            Some(Command::BreakPane { pane: 10 }),
+            "a strip drop breaks the pane"
+        );
+        assert!(view.pane_drag.is_none(), "committing ends the drag");
+    }
+
+    #[test]
+    fn g1_pane_drag_off_the_strip_still_moves_within_the_tab() {
+        // The strip branch must not perturb the ordinary drag: leaving the strip
+        // for a content seam commits MovePane exactly as before.
+        let mut view = three_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        view.pane_drag_to(0, view.panel_w(), Instant::now()); // over strip
+        let (r, c) = seam_cell_between(&view, 11, 12); // back to content
+        view.pane_drag_to(r, c, Instant::now());
+        assert!(!view.pane_drag.unwrap().on_strip, "left the strip");
+        assert_eq!(
+            view.commit_pane_drag(),
+            Some(Command::MovePane {
+                mover: Some(10),
+                target: Some(11),
+                dir: Dir::Right
+            })
+        );
+    }
+
+    #[test]
+    fn g2_tab_drag_onto_a_content_edge_commits_a_join() {
+        // AC2-HP: dragging a NON-current tab (id 0; the current tab is 1) onto a
+        // content edge of the current tab joins it there.
+        let mut view = three_pane_view();
+        view.begin_tab_drag(0, Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        assert!(
+            view.tab_drag_to(r, c, Instant::now()),
+            "entering a zone redraws"
+        );
+        assert!(view.tab_drag.and_then(|d| d.zone).is_some());
+        assert_eq!(
+            view.commit_tab_drag(),
+            Some(Command::JoinTab {
+                src_tab: 0,
+                anchor_pane: 11,
+                dir: Dir::Right
+            })
+        );
+        assert!(view.tab_drag.is_none(), "committing ends the drag");
+    }
+
+    #[test]
+    fn g2_tab_drag_of_the_current_tab_is_a_suppressed_self_join() {
+        // AC2-EDGE: the current tab (id 1) dropped on its own content lights
+        // nothing and commits nothing - the client suppresses the no-op (the
+        // server would also refuse BAD_REQUEST).
+        let mut view = three_pane_view();
+        view.begin_tab_drag(1, Instant::now()); // 1 IS the current tab
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.tab_drag_to(r, c, Instant::now());
+        assert!(
+            view.tab_drag.and_then(|d| d.zone).is_none(),
+            "a self-join lights no zone"
+        );
+        assert_eq!(view.commit_tab_drag(), None, "and commits nothing");
+    }
+
+    #[test]
+    fn g2_tab_drag_off_zone_or_cancelled_sends_nothing() {
+        // AC1-EDGE / AC1-FR: an off-zone release, and a cancelled drag (the
+        // timeout/esc path clears the struct internally), both send nothing.
+        let mut view = three_pane_view();
+        view.begin_tab_drag(0, Instant::now());
+        // Released with no zone ever set.
+        assert_eq!(view.commit_tab_drag(), None, "off-zone -> nothing");
+        // Cancel clears the struct internally, so a late commit finds nothing.
+        view.begin_tab_drag(0, Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.tab_drag_to(r, c, Instant::now());
+        assert!(view.cancel_tab_drag(), "a live drag cancels");
+        assert!(
+            view.tab_drag.is_none(),
+            "the struct is cleared, not just the zone"
+        );
+        assert_eq!(
+            view.commit_tab_drag(),
+            None,
+            "a late release commits nothing"
+        );
+    }
+
+    #[test]
+    fn g3_pane_hosted_row_drop_moves_the_off_layout_pane_cross_tab() {
+        // AC3-HP (commit half): a pane-hosted row names a pane (99) that is NOT
+        // in the current layout - off-layout by design (Domain Pitfall: the row
+        // drop must NOT gate on pane_rect(mover)). It still commits a MovePane.
+        let mut view = three_pane_view();
+        assert!(
+            view.pane_rect(99).is_none(),
+            "precondition: 99 is off-layout"
+        );
+        view.begin_row_drag(RowSource::Pane(99), Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        assert!(
+            view.row_drag_to(r, c, Instant::now()),
+            "entering a zone redraws"
+        );
+        assert_eq!(
+            view.commit_row_drag(),
+            Some(Command::MovePane {
+                mover: Some(99),
+                target: Some(11),
+                dir: Dir::Right
+            })
+        );
+    }
+
+    #[test]
+    fn g3_paneless_row_drop_attaches_at_the_slot() {
+        // AC3 (paneless half): a paneless bg row attaches at the drop slot with a
+        // placement anchored to the dropped-on pane; `tab` is left unset (the
+        // server resolves the tab from the anchor's live location).
+        let mut view = three_pane_view();
+        view.begin_row_drag(RowSource::Attach("c19cd2c3".into()), Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.row_drag_to(r, c, Instant::now());
+        assert_eq!(
+            view.commit_row_drag(),
+            Some(Command::AttachAgent {
+                id: "c19cd2c3".into(),
+                placement: PanePlacement {
+                    at: Some(11),
+                    split: Some(Dir::Right),
+                    here: false,
+                    ..PanePlacement::default()
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn g3_row_drop_off_zone_or_cancelled_sends_nothing() {
+        // AC1-EDGE / AC1-FR for the row drag: off-zone and cancelled both quiet.
+        let mut view = three_pane_view();
+        view.begin_row_drag(RowSource::Pane(99), Instant::now());
+        assert_eq!(view.commit_row_drag(), None, "off-zone -> nothing");
+        view.begin_row_drag(RowSource::Attach("dead".into()), Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.row_drag_to(r, c, Instant::now());
+        assert!(view.cancel_row_drag(), "a live drag cancels");
+        assert!(view.row_drag.is_none(), "the struct is cleared internally");
+        assert_eq!(
+            view.commit_row_drag(),
+            None,
+            "a late release commits nothing"
+        );
+    }
+
+    #[test]
+    fn tab_cell_at_resolves_a_strip_cell_to_its_tab() {
+        // The drag-source hit-test for G2: a strip cell names its tab id, a
+        // content cell and the sideline column do not, and neither does the `+`.
+        let view = three_pane_view(); // squad 1, tabs [0,1], active 1
+        let pw = view.panel_w();
+        // The strip leads with a squad-name span (not a drag source), so scan for
+        // the first cell that names a tab; it must be tab 0.
+        let first_tab = (pw..view.term.1).find_map(|c| view.tab_cell_at(0, c));
+        assert_eq!(first_tab, Some(0), "the first tab span names tab 0");
+        assert_eq!(
+            view.tab_cell_at(5, pw),
+            None,
+            "a content-row cell is not a tab"
+        );
+        if pw > 0 {
+            assert_eq!(
+                view.tab_cell_at(0, 0),
+                None,
+                "the sideline column is not the strip"
+            );
+        }
+    }
+
+    #[test]
+    fn row_drag_source_at_resolves_pane_hosted_and_paneless_rows() {
+        // The drag-source hit-test for G3, reusing the exact fixture + row
+        // coordinates of chrome_hit_agent_rows_focus_or_hint: worker (pane 10) at
+        // row 1, bg-claude (attach) at row 8, bg-other (neither) at row 9.
+        let hosted = focus_agent(10);
+        let mut bg_attach = focus_agent(0);
+        bg_attach.squad = None;
+        bg_attach.name = "bg-claude".into();
+        bg_attach.pane_id = None;
+        bg_attach.attach_id = Some("c19cd2c3".into());
+        let mut bg_plain = focus_agent(0);
+        bg_plain.squad = None;
+        bg_plain.name = "bg-other".into();
+        bg_plain.pane_id = None;
+        bg_plain.attach_id = None;
+        let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
+        assert_eq!(
+            view.row_drag_source_at(1, 4),
+            Some(RowSource::Pane(10)),
+            "a pane-hosted row drags its pane"
+        );
+        assert_eq!(
+            view.row_drag_source_at(8, 4),
+            Some(RowSource::Attach("c19cd2c3".into())),
+            "a paneless bg row drags its attach id"
+        );
+        assert_eq!(
+            view.row_drag_source_at(9, 4),
+            None,
+            "a row with neither pane nor attach is not a drag source"
+        );
+    }
+
+    #[test]
+    fn row_drag_source_at_skips_the_density_button_over_an_agent_row() {
+        // (x-d6a8, codex P2) The row-0 density button overlays a scrolled agent
+        // row; a press on the button must cycle density (chrome_hit), not start a
+        // row drag on the agent underneath.
+        let mut view = view_with_agents(vec![focus_agent(10)]);
+        view.sideline_offset = 1; // scroll so an agent row paints at row 0
+        let pw = view.panel_w() as usize;
+        let Some(range) = view.density_button_range(pw) else {
+            return; // panel too narrow for the button; the guard is moot
+        };
+        let btn = range.start as u16;
+        // Precondition: a real agent row sits under the button cell.
+        let i = view
+            .sideline_row_at(0, btn)
+            .expect("the button col is a sideline row");
+        assert!(
+            matches!(view.display_rows().get(i), Some(DisplayRow::Agent(_))),
+            "an agent row is under the density button"
+        );
+        // Yet the button cell is NOT a drag source - it cycles density instead.
+        assert_eq!(
+            view.row_drag_source_at(0, btn),
+            None,
+            "the density button is not a drag source"
+        );
+    }
+
+    #[test]
+    fn g1_strip_lights_inverse_while_a_pane_is_dragged_over_it() {
+        // AC1-UI (headless slice): a pane dragged onto the strip lights the strip
+        // INVERSE - the "drop here to break" affordance. The visual is otherwise a
+        // manual-checklist item, but that a strip cell changes is assertable.
+        let mut view = three_pane_view();
+        view.begin_pane_drag(10, Instant::now());
+        view.pane_drag_to(0, view.panel_w(), Instant::now()); // over the strip
+        let frame = view.compose();
+        let cols = view.term.1 as usize;
+        let cell = frame.cells[view.panel_w() as usize]; // row 0, first strip cell
+        assert_eq!(
+            cell.flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "the strip reads as an insert target while a pane hovers it"
+        );
+        let _ = cols;
+    }
+
+    #[test]
+    fn g2_tab_drag_lights_the_destination_zone() {
+        // AC1-UI (headless slice): a tab-cell drag reuses the content-edge zone
+        // highlight, so the destination seam lights INVERSE just like a pane drag.
+        let mut view = three_pane_view();
+        view.begin_tab_drag(0, Instant::now()); // a non-current tab
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        assert!(
+            view.tab_drag_to(r, c, Instant::now()),
+            "entering a zone redraws"
+        );
+        let frame = view.compose();
+        let cols = view.term.1 as usize;
+        let lit = frame.cells[r as usize * cols + c as usize];
+        assert_eq!(
+            lit.flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "the tab-drag destination zone lights the same as a pane drag"
+        );
     }
 
     #[test]

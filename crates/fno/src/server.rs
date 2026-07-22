@@ -2562,6 +2562,13 @@ impl Core {
             self.tab_areas.remove(&tid);
             self.reanchor_views();
         }
+        // (x-d6a8) The broken pane's hosting tab changed (it moved into a new
+        // tab, and its old tab may be gone), so refresh the persisted member
+        // tab_names for a tracked workspace - else a restart before the next
+        // persist restores the member to the old/removed tab. In the shared
+        // helper so the script (ControlVerb) and drag (Command) paths stay
+        // consistent; a no-op for a squad with no recruited members.
+        self.persist_squad_if_members(sid);
         self.push_layout(true);
         Ok(new_tid)
     }
@@ -2611,6 +2618,103 @@ impl Core {
         self.session.remove_tab(sid, src_ti);
         self.tab_areas.remove(&src_tid);
         self.reanchor_views();
+        // (x-d6a8) The joined tab's members now live in the anchor's tab (their
+        // hosting tab changed and the source tab is gone), so refresh the
+        // persisted member tab_names for a tracked workspace - same shared-helper
+        // reconcile as pane_break, covering both the script and drag paths.
+        self.persist_squad_if_members(sid);
+        self.push_layout(true);
+        Ok(())
+    }
+
+    /// Move `mover` out of its source tab to sit adjacent to `target` in another
+    /// tab - the cross-tab arm of [`Command::MovePane`] (a sideline-row drop whose
+    /// pane lives in a different tab from the drop). Composes the two #553
+    /// primitives: graft the mover leaf into the destination FIRST (validated
+    /// all-or-nothing), THEN detach it from the source. Ordering is load-bearing -
+    /// a min-size refusal returns from the graft before the source is ever
+    /// touched, so the pane is never left detached-but-ungrafted. Only the leaf id
+    /// moves between trees; the PTY is untouched (detach_leaf never reaps).
+    fn move_pane_cross_tab(
+        &mut self,
+        mover: u64,
+        (src_sid, src_ti): (u64, usize),
+        target: u64,
+        (dst_sid, dst_ti): (u64, usize),
+        dir: Dir,
+    ) -> Result<(), tree::MoveError> {
+        let src_si = self
+            .session
+            .squads
+            .iter()
+            .position(|s| s.id == src_sid)
+            .expect("src squad live");
+        let dst_si = self
+            .session
+            .squads
+            .iter()
+            .position(|s| s.id == dst_sid)
+            .expect("dst squad live");
+        let src_tid = self.session.squads[src_si].tabs[src_ti].id;
+        let dst_tid = self.session.squads[dst_si].tabs[dst_ti].id;
+        let src_vp = self.tab_rect(src_tid);
+        let dst_vp = self.tab_rect(dst_tid);
+
+        // Capture the source's persistence state BEFORE the move (find_pane still
+        // resolves the mover in its source): its member context if the mover is a
+        // recruited member, and the source squad's persisted name. The move can
+        // relocate a member across workspaces, keep it in place in the same
+        // workspace, or empty and remove the source squad entirely - each needs a
+        // different persistence reconcile below.
+        let moved_member = self.member_ctx(mover);
+        let src_persisted_name = self.session.squad(src_sid).and_then(|s| s.name.clone());
+
+        // Graft into the destination first, and focus the moved pane there while
+        // the dst index is still valid (removing the source tab below can shift
+        // sibling indices when both tabs share a squad). On Err the dst is
+        // unchanged and the source is never touched.
+        {
+            let dst_tab = &mut self.session.squads[dst_si].tabs[dst_ti];
+            tree::graft_subtree(dst_tab, dst_vp, target, dir, Node::Leaf(mover))?;
+            dst_tab.focus = mover;
+        }
+        // Graft committed: remove the mover from the source. It was present at
+        // resolution (find_pane, no intervening yield on the core loop), so
+        // detach cannot fail on presence; a now-empty source tab is dropped and
+        // its viewers re-anchored, exactly as pane_break / CloseTab do.
+        let outcome = {
+            let src_tab = &mut self.session.squads[src_si].tabs[src_ti];
+            tree::detach_leaf(src_tab, src_vp, mover)?
+        };
+        if matches!(outcome, tree::DetachOutcome::TabEmptied) {
+            self.session.remove_tab(src_sid, src_ti);
+            self.tab_areas.remove(&src_tid);
+            self.reanchor_views();
+        }
+        // Reconcile the source workspace's persistence against what the move did:
+        if self.session.squad(src_sid).is_none() {
+            // The move emptied and removed the source squad. Depersist the whole
+            // workspace REGARDLESS of whether the moved pane was a member - a
+            // named workspace's own initial shell counts, and a lingering
+            // `squad_members` entry would resurrect the workspace (and keep its
+            // name reserved) on restart.
+            if let Some(name) = src_persisted_name {
+                self.squad_members.remove(&src_sid);
+                self.persist_remove_name(&name);
+            }
+        } else if let Some(ctx) = moved_member {
+            if src_sid != dst_sid {
+                // Cross-squad: the member left its source workspace - de-recruit
+                // it (drop from squad_members) and persist, the CloseTab path.
+                self.reconcile_member_close(Some(ctx), false);
+            } else {
+                // Same-squad relocation: the member stays, but its hosting tab
+                // changed, so persist to refresh its stored `tab_name` (else a
+                // restart before the next persisting action restores it to the
+                // old tab).
+                self.persist_squad(src_sid);
+            }
+        }
         self.push_layout(true);
         Ok(())
     }
@@ -3291,6 +3395,17 @@ impl Core {
         let members = self.squad_members.get(&sid).cloned().unwrap_or_default();
         if let Err(e) = crate::squad_store::upsert(&name, &origins, &members) {
             self.persist_degraded(&e);
+        }
+    }
+
+    /// (x-d6a8) Refresh a tracked workspace's persisted member `tab_name`s after
+    /// a tree op that relocated a member's hosting tab (break / join). Only fires
+    /// when the squad actually has recruited members, so it never newly persists
+    /// an unnamed or member-less squad; `persist_squad` then re-derives each
+    /// member's tab from the live tree.
+    fn persist_squad_if_members(&mut self, sid: u64) {
+        if self.squad_members.get(&sid).is_some_and(|m| !m.is_empty()) {
+            self.persist_squad(sid);
         }
     }
 
@@ -5672,31 +5787,91 @@ impl Core {
                 Flow::Continue
             }
             Command::MovePane { mover, target, dir } => {
-                let Some(tab) = self.viewed_tab_mut(view) else {
-                    return Flow::Continue;
+                // Resolve both ends against the VIEWED tab first: that owns the
+                // keyboard-bind defaults (mover = focus; target = the pane the
+                // same geometry FocusDir uses lies `dir`-ward). A drop names both
+                // and skips the navigate.
+                let (mover, target) = {
+                    let Some(tab) = self.viewed_tab(view) else {
+                        return Flow::Continue;
+                    };
+                    let mover = mover.unwrap_or(tab.focus);
+                    let Some(target) = target.or_else(|| tree::navigate(&tab.root, vp, mover, dir))
+                    else {
+                        self.notice(client_id, "no pane in that direction");
+                        return Flow::Continue;
+                    };
+                    (mover, target)
                 };
-                // Loud on refusal, unlike ResizeSeam: a relocation is ONE
-                // deliberate gesture, not a stream, so a rejected drop that said
-                // nothing would read as the feature being broken. The tree is
-                // untouched on every error, so co-viewers need no correction
-                // push - only the sender learns anything.
-                // The keyboard bind names neither end: it moves the focused
-                // pane, and resolves its destination with the same geometry
-                // FocusDir uses, so "move down" lands where "focus down" would
-                // have gone. A drop names both and skips all of this.
-                let mover = mover.unwrap_or(tab.focus);
-                let Some(target) = target.or_else(|| tree::navigate(&tab.root, vp, mover, dir))
-                else {
-                    self.notice(client_id, "no pane in that direction");
-                    return Flow::Continue;
-                };
-                match tree::move_leaf(tab, vp, mover, target, dir) {
-                    Ok(()) => self.push_layout(true),
-                    // An origin drop is a cancel the client should not have sent;
-                    // silently accept it rather than scold the operator for a
-                    // gesture that, from their side, did nothing on purpose.
-                    Err(tree::MoveError::Origin) => {}
-                    Err(e) => self.notice(client_id, e.to_string()),
+                // A sideline-row drop can name a `mover` living in ANOTHER tab
+                // (the row carries the pane id, not the rendered layout). When the
+                // two ends live in different tabs, compose the cross-tab move
+                // (detach + graft, all-or-nothing); otherwise the within-tab
+                // move_leaf, unchanged. Loud on refusal, unlike ResizeSeam: a
+                // relocation is ONE deliberate gesture, so a rejected drop that
+                // said nothing would read as the feature being broken.
+                let src = self.session.find_pane(mover);
+                let dst = self.session.find_pane(target);
+                match (src, dst) {
+                    (Some(s), Some(d)) if s != d => {
+                        // move_pane_cross_tab propagates only PaneGone / TooSmall
+                        // (from detach_leaf / graft_subtree); Origin is a
+                        // within-tab move_leaf verdict and cannot arise here, so
+                        // every real Err is a named notice.
+                        match self.move_pane_cross_tab(mover, s, target, d, dir) {
+                            Ok(()) => {}
+                            Err(e) => self.notice(client_id, e.to_string()),
+                        }
+                    }
+                    _ => {
+                        let Some(tab) = self.viewed_tab_mut(view) else {
+                            return Flow::Continue;
+                        };
+                        match tree::move_leaf(tab, vp, mover, target, dir) {
+                            Ok(()) => self.push_layout(true),
+                            // An origin drop is a cancel the client should not have
+                            // sent; silently accept it rather than scold the
+                            // operator for a gesture that, from their side, did
+                            // nothing on purpose.
+                            Err(tree::MoveError::Origin) => {}
+                            Err(e) => self.notice(client_id, e.to_string()),
+                        }
+                    }
+                }
+                Flow::Continue
+            }
+            Command::BreakPane { pane } => {
+                // The interactive twin of ControlVerb::PaneBreak: dispatch into
+                // the SAME pane_break (one tree-mutation site, Locked Decision 2).
+                // pane_break itself never touches a view; the gesture additionally
+                // repoints the ACTING client's focus onto the new tab (Locked
+                // Decision 3 - the script path leaves every viewer where it was).
+                match self.pane_break(pane, None) {
+                    Ok(new_tid) => {
+                        if let Some((sid, _)) = self.session.find_tab(new_tid) {
+                            self.set_view(client_id, sid, new_tid);
+                            self.push_layout(true);
+                        }
+                    }
+                    Err((_code, msg)) => self.notice(client_id, msg),
+                }
+                Flow::Continue
+            }
+            Command::JoinTab {
+                src_tab,
+                anchor_pane,
+                dir,
+            } => {
+                // The interactive twin of ControlVerb::TabJoin, into the SAME
+                // tab_join. The gesture picked up a concrete rendered cell, so it
+                // names a stable TabId; tab_join resolves a TabSel, so wrap it in
+                // Id. tab_join pushes the layout and re-anchors any viewer of the
+                // removed source tab. A self-join is refused BAD_REQUEST here (the
+                // client also suppresses it) - shown as a named Notice, not a
+                // silent swallow.
+                match self.tab_join(&TabSel::Id(src_tab), anchor_pane, dir) {
+                    Ok(()) => {}
+                    Err((_code, msg)) => self.notice(client_id, msg),
                 }
                 Flow::Continue
             }
@@ -6015,15 +6190,36 @@ impl Core {
                     .find(|s| !row_cwd.is_empty() && s.owns_path(&row_cwd))
                     .map(|s| s.id)
                     .unwrap_or(view.0);
-                // An explicit UI target overrides owner routing for a fresh
-                // attach (Locked 7); a stale/unknown target fails closed with no
-                // spawn (AC4). Owner is always live, so resolution yields Some.
-                let dest = match self.resolve_placement_target(&placement.target, Some(owner)) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        self.notice(client_id, e);
+                // (x-d6a8 G3) An anchored drop ("attach beside THIS pane") names a
+                // concrete pane the operator can see, which overrides owner
+                // routing: the pane lands in the anchor's OWN tab, resolved from
+                // the anchor's live location, so the gesture places where it was
+                // dropped rather than in the agent's home squad. A stale anchor is
+                // refused pre-spawn, not mis-placed. A non-anchored attach (the
+                // sideline click, `at: None`) keeps owner routing and the pre-v41
+                // whole-tab placement untouched.
+                //
+                // An explicit UI target otherwise overrides owner routing for a
+                // fresh attach (Locked 7); a stale/unknown target fails closed
+                // with no spawn (AC4). Owner is always live, so resolution yields Some.
+                let (dest, effective) = if let Some(anchor) = placement.at {
+                    let Some((sid, ti)) = self.session.find_pane(anchor) else {
+                        self.notice(client_id, "stale drop: that pane is gone");
                         return Flow::Continue;
-                    }
+                    };
+                    let anchor_tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
+                    let mut p = placement.clone();
+                    p.tab = Some(TabSel::Id(anchor_tid));
+                    (Some(sid), p)
+                } else {
+                    let dest = match self.resolve_placement_target(&placement.target, Some(owner)) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            self.notice(client_id, e);
+                            return Flow::Continue;
+                        }
+                    };
+                    (dest, placement.clone())
                 };
                 // Spawn `claude attach <id>`: the claude supervisor PTYs the
                 // detached bg session into this pane. cwd is the agent row's,
@@ -6051,19 +6247,21 @@ impl Core {
                         return Flow::Continue;
                     }
                 };
-                // Place through the shared helper (Locked 1): a new tab, or a
-                // directional split beside the selected squad's active-tab
-                // focus. A
-                // refusal reaps the pane and leaves the row watch-only (AC7);
-                // the mapping is recorded ONLY after placement succeeds.
-                let (sid, tid, fell_back) =
-                    match self.place_spawned_pane(dest, &spawn_cwd, pid, placement.split) {
-                        Ok(landing) => landing,
-                        Err(e) => {
-                            self.notice(client_id, e);
-                            return Flow::Continue;
-                        }
-                    };
+                // Place through the shared v41 helper: it honors the anchored
+                // drop's `tab`/`at` (a split beside the exact drop pane), and
+                // otherwise falls through to place_spawned_pane's whole-tab
+                // placement unchanged (`at: None` -> a new tab or a split beside
+                // the selected squad's active-tab focus). A refusal reaps the pane
+                // and leaves the row watch-only (AC7); the mapping is recorded
+                // ONLY after placement succeeds.
+                let (sid, tid, fell_back) = match self.place_with(dest, &spawn_cwd, pid, &effective)
+                {
+                    Ok(landing) => landing,
+                    Err((_code, e)) => {
+                        self.notice(client_id, e);
+                        return Flow::Continue;
+                    }
+                };
                 self.attached.insert(id, pid);
                 self.set_view(client_id, sid, tid);
                 if fell_back {
@@ -10291,6 +10489,227 @@ mod tests {
         assert_ne!(view.1, brk, "not stranded on the removed source tab");
     }
 
+    // ---- v43 (x-d6a8) US9 interactive drag Commands -------------------------
+    // (drain_notice helper is defined once below, near the StopAgent tests.)
+
+    #[test]
+    fn break_pane_command_focuses_the_acting_client_on_the_new_tab() {
+        // AC1-HP: the interactive break drops pane 1 (of tab 10's [1,2]) onto the
+        // strip. The acting client's focus follows the gesture onto the new tab.
+        let mut core = two_tab_core();
+        let (c, _rx) = live_client(7, 10); // viewing tab 10
+        core.clients.push(c);
+        core.command(7, Command::BreakPane { pane: 1 });
+        let view = core.client_view(7).unwrap();
+        let tab = core.viewed_tab(view).expect("focused a live tab");
+        assert_ne!(view.1, 10, "the acting client left the source tab");
+        assert_eq!(
+            tree::leaves(&tab.root),
+            vec![1],
+            "and landed on the freshly broken-out tab holding pane 1"
+        );
+        // The source tab survives with the sibling.
+        let src = core.session.squad(1).unwrap();
+        let a = src.tabs.iter().find(|t| t.id == 10).unwrap();
+        assert_eq!(tree::leaves(&a.root), vec![2], "sibling 2 stays in tab 10");
+    }
+
+    #[test]
+    fn pane_break_script_path_leaves_the_viewer_focus_unchanged() {
+        // AC1-HP (the "and": the script path does NOT move focus). The CoreMsg
+        // path a scripted ControlVerb::PaneBreak takes is pane_break itself; it
+        // never touches a view. A viewer of the (surviving) source tab stays put.
+        let mut core = two_tab_core();
+        let (c, _rx) = live_client(7, 10); // viewing tab 10 [1,2]
+        core.clients.push(c);
+        core.pane_break(1, None).unwrap(); // the script/CoreMsg path
+        assert_eq!(
+            core.client_view(7),
+            Some((1, 10)),
+            "the script break leaves the viewer on tab 10, unmoved"
+        );
+    }
+
+    #[test]
+    fn move_pane_cross_tab_grafts_into_viewed_tab_and_empties_the_source() {
+        // AC3-HP: a sideline-row drop names a mover (pane 3) living in tab 20,
+        // not the viewed tab 10 where target pane 2 lives. The cross-tab branch
+        // detaches 3 from 20 and grafts it beside 2; tab 20 empties and is
+        // removed. The pane id is preserved across trees (detach never reaps the
+        // PTY - the "child pid unchanged" invariant at the tree level).
+        let mut core = two_tab_core();
+        let (c, _rx) = live_client(7, 10); // viewing tab 10 [1,2]
+        core.clients.push(c);
+        core.command(
+            7,
+            Command::MovePane {
+                mover: Some(3),
+                target: Some(2),
+                dir: Dir::Right,
+            },
+        );
+        let sq = core.session.squad(1).unwrap();
+        assert!(
+            sq.tabs.iter().all(|t| t.id != 20),
+            "the emptied source tab 20 is removed"
+        );
+        let a = sq.tabs.iter().find(|t| t.id == 10).unwrap();
+        let mut ls = tree::leaves(&a.root);
+        ls.sort_unstable();
+        assert_eq!(
+            ls,
+            vec![1, 2, 3],
+            "pane 3 moved into the viewed tab, id kept"
+        );
+        assert_eq!(a.focus, 3, "the moved pane is focused in its new home");
+        crate::tree::check_invariants(a).unwrap();
+    }
+
+    #[test]
+    fn within_tab_move_pane_is_unchanged_by_the_cross_tab_branch() {
+        // The cross-tab branch must not perturb the ordinary within-tab drag: a
+        // move whose mover and target share the viewed tab still routes through
+        // move_leaf.
+        let mut core = two_tab_core();
+        let (c, _rx) = live_client(7, 10); // viewing tab 10 [1,2]
+        core.clients.push(c);
+        core.command(
+            7,
+            Command::MovePane {
+                mover: Some(2),
+                target: Some(1),
+                dir: Dir::Up, // 2 above 1: a real reshape within tab 10
+            },
+        );
+        let a = core.session.squad(1).unwrap();
+        let t = a.tabs.iter().find(|t| t.id == 10).unwrap();
+        let mut ls = tree::leaves(&t.root);
+        ls.sort_unstable();
+        assert_eq!(ls, vec![1, 2], "both panes still in tab 10");
+        assert!(
+            matches!(
+                t.root,
+                Node::Branch {
+                    axis: Axis::Vertical,
+                    ..
+                }
+            ),
+            "the within-tab move reshaped to a vertical split"
+        );
+        assert!(
+            core.session
+                .squad(1)
+                .unwrap()
+                .tabs
+                .iter()
+                .any(|t| t.id == 20),
+            "tab 20 is untouched by a within-tab move"
+        );
+    }
+
+    #[test]
+    fn join_tab_command_min_size_refusal_surfaces_a_named_notice_and_mutates_nothing() {
+        // AC1-ERR: a join that would push a pane below min-size is refused with a
+        // NAMED notice (not a bare "Error") and leaves BOTH trees exactly as they
+        // were (all-or-nothing).
+        let mut core = two_tab_core();
+        let (c, mut rx) = live_client(7, 10); // viewing tab 10 [1,2]
+        core.clients.push(c);
+        // The viewer's dims clamp the tab area (tab_area prefers a live viewer's
+        // dims over tab_areas): 8 cols cannot hold three MIN_COLS(8)-wide children.
+        core.clients[0].dims = (40, 8);
+        let before = core.session.squad(1).unwrap().tabs.clone();
+        core.command(
+            7,
+            Command::JoinTab {
+                src_tab: 20,
+                anchor_pane: 2,
+                dir: Dir::Right,
+            },
+        );
+        assert_eq!(
+            core.session.squad(1).unwrap().tabs,
+            before,
+            "a refused join mutates neither tree"
+        );
+        let notice = drain_notice(&mut rx).expect("a refused join notices the sender");
+        assert!(
+            notice.contains("minimum") || notice.contains("smaller"),
+            "the notice names the min-size reason, got: {notice:?}"
+        );
+    }
+
+    #[test]
+    fn join_tab_command_into_self_surfaces_a_named_notice() {
+        // AC1-ERR (self-join half): joining a tab into its own anchor pane is
+        // refused BAD_REQUEST server-side with a reason that names "itself".
+        let mut core = two_tab_core();
+        let (c, mut rx) = live_client(7, 10);
+        core.clients.push(c);
+        let before = core.session.squad(1).unwrap().tabs.clone();
+        // anchor pane 1 lives in tab 10; joining tab 10 into itself.
+        core.command(
+            7,
+            Command::JoinTab {
+                src_tab: 10,
+                anchor_pane: 1,
+                dir: Dir::Right,
+            },
+        );
+        assert_eq!(
+            core.session.squad(1).unwrap().tabs,
+            before,
+            "a self-join mutates nothing"
+        );
+        let notice = drain_notice(&mut rx).expect("a refused self-join notices the sender");
+        assert!(
+            notice.contains("itself"),
+            "the notice names the self-join reason, got: {notice:?}"
+        );
+    }
+
+    #[test]
+    fn break_then_failed_join_keeps_the_broken_pane_where_the_break_left_it() {
+        // AC2-FR: pane 1 breaks to its own tab; a following join of that tab that
+        // fails min-size leaves the broken pane exactly where the break put it
+        // (the pane id survives both ops - the tree-level "pid unchanged" claim).
+        let mut core = two_tab_core();
+        let (c, _rx) = live_client(7, 10);
+        core.clients.push(c);
+        core.command(7, Command::BreakPane { pane: 1 });
+        let brk = core.client_view(7).unwrap().1; // the new tab holding [1]
+                                                  // Now cram the anchor tab so a join back would breach min-size.
+        core.tab_areas.insert(20, (40, 8));
+        let before_brk = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == brk)
+            .unwrap()
+            .clone();
+        core.command(
+            7,
+            Command::JoinTab {
+                src_tab: brk,
+                anchor_pane: 3, // pane 3 lives in the crammed tab 20
+                dir: Dir::Right,
+            },
+        );
+        let after = core.session.squad(1).unwrap();
+        let brk_tab = after
+            .tabs
+            .iter()
+            .find(|t| t.id == brk)
+            .expect("the broken-out tab still exists after the failed join");
+        assert_eq!(
+            brk_tab.root, before_brk.root,
+            "the failed join left the broken pane exactly as the break produced it"
+        );
+        assert_eq!(tree::leaves(&brk_tab.root), vec![1], "pane 1 kept its id");
+    }
+
     #[test]
     fn tab_create_and_rename_sanitize_names() {
         // codex P2: control bytes stripped and length capped at the wire
@@ -11370,6 +11789,51 @@ mod tests {
                 .iter()
                 .any(|t| t.contains("open-here takes no split or target")));
         }
+    }
+
+    #[test]
+    fn attach_agent_anchored_drop_lands_beside_the_anchor_not_the_active_tab() {
+        // (x-d6a8 G3) Regression for the codex P1 finding: a paneless bg row
+        // dropped beside a SPECIFIC pane attaches in THAT pane's tab, beside it -
+        // honoring the drop slot - rather than splitting beside the squad's
+        // active-tab focus (the pre-fix place_spawned_pane behavior). The anchor
+        // determines both squad and tab, overriding owner routing.
+        set_attach_program(&["/bin/cat"]); // stand in for `claude attach`
+        let (mut core, client_id, p1, p2, _rx) = seen_test_core();
+        // View + activate the OTHER tab (id 2), so a non-anchored attach would
+        // land there; the anchor (p1, tab 1) must override that.
+        core.set_view(client_id, 1, 2);
+        core.session.squad_mut(1).unwrap().active_tab = 1; // index 1 == tab id 2
+        core.agents = vec![bg_row("bg", "/tmp/seen", Some("deadbee2"))];
+        let new_pid = core.next_pane_id;
+
+        core.command(
+            client_id,
+            Command::AttachAgent {
+                id: "deadbee2".into(),
+                placement: PanePlacement {
+                    at: Some(p1),
+                    split: Some(Dir::Right),
+                    ..Default::default()
+                },
+            },
+        );
+
+        let sq = core.session.squad(1).unwrap();
+        let tab1 = sq.tabs.iter().find(|t| t.id == 1).unwrap();
+        let mut ls = tree::leaves(&tab1.root);
+        ls.sort_unstable();
+        let mut expected = vec![p1, new_pid];
+        expected.sort_unstable();
+        assert_eq!(ls, expected, "attach landed beside the anchor p1 in tab 1");
+        let tab2 = sq.tabs.iter().find(|t| t.id == 2).unwrap();
+        assert_eq!(
+            tree::leaves(&tab2.root),
+            vec![p2],
+            "the active/viewed tab is untouched - the drop honored its anchor"
+        );
+        assert_eq!(core.attached.get("deadbee2"), Some(&new_pid), "B mapped");
+        core.reap_pane(new_pid); // don't leak the stand-in child
     }
 
     #[test]
@@ -13131,6 +13595,302 @@ mod tests {
         assert!(
             after_user.squads[0].members.is_empty(),
             "member de-recruited"
+        );
+    }
+
+    #[test]
+    fn cross_squad_member_move_de_recruits_from_the_source() {
+        // (x-d6a8, codex P1) Moving a persisted member's pane into another
+        // squad's tab de-recruits it from the source workspace - its
+        // squad_members entry must not linger under a squad it no longer lives
+        // in. Regression for the codex re-review finding on move_pane_cross_tab.
+        let _s = StoreScratch::new("cross-squad-member-move");
+        let mut core = empty_core();
+        // Source workspace "harden" (squad 7): member pane 100 in tab 7, plus a
+        // second tab (pane 101) so the squad SURVIVES the move.
+        named_member_squad(&mut core, 7, "harden", 100, "c19cd2c3");
+        core.session.squad_mut(7).unwrap().tabs.push(Tab {
+            name: None,
+            id: 70,
+            root: Node::Leaf(101),
+            focus: 101,
+        });
+        core.persist_squad(7);
+        // Destination squad 8 with a tab to drop into.
+        core.session.add_squad(
+            8,
+            vec!["/other".into()],
+            Some("review".into()),
+            Tab {
+                name: None,
+                id: 8,
+                root: Node::Leaf(200),
+                focus: 200,
+            },
+        );
+
+        let src = core.session.find_pane(100).expect("member pane live");
+        let dst = core.session.find_pane(200).expect("anchor pane live");
+        assert_ne!(src.0, dst.0, "precondition: a cross-squad move");
+        core.move_pane_cross_tab(100, src, 200, dst, Dir::Right)
+            .expect("cross-squad move");
+
+        // The pane moved into squad 8...
+        assert_eq!(
+            core.session.find_pane(100).map(|(s, _)| s),
+            Some(8),
+            "pane moved to squad 8"
+        );
+        // ...and its membership no longer lingers in the persisted source.
+        let loaded = crate::squad_store::load();
+        let harden = loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "harden")
+            .expect("source workspace survives its second tab");
+        assert!(
+            harden.members.iter().all(|m| m.attach_id != "c19cd2c3"),
+            "the moved member is de-recruited from the source workspace"
+        );
+    }
+
+    #[test]
+    fn same_squad_member_move_refreshes_the_stored_tab_name() {
+        // (x-d6a8, codex P1) Relocating a persisted member BETWEEN tabs in the
+        // same squad keeps its membership but must refresh its stored tab_name,
+        // else a restart before the next persisting action restores it to the old
+        // tab.
+        let _s = StoreScratch::new("same-squad-member-tabname");
+        let mut core = empty_core();
+        // Workspace "harden" (squad 7): member pane 100 in tab "old", plus a tab
+        // "new" (pane 101) to relocate it beside.
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("harden".into()),
+            Tab {
+                name: Some("old".into()),
+                id: 7,
+                root: Node::Leaf(100),
+                focus: 100,
+            },
+        );
+        core.session.squad_mut(7).unwrap().tabs.push(Tab {
+            name: Some("new".into()),
+            id: 70,
+            root: Node::Leaf(101),
+            focus: 101,
+        });
+        core.squad_members.insert(
+            7,
+            vec![crate::squad_store::StoredMember {
+                attach_id: "c19cd2c3".into(),
+                tombstone: false,
+                tab_name: Some("old".into()),
+            }],
+        );
+        core.attached.insert("c19cd2c3".into(), 100);
+        core.persist_squad(7);
+
+        // Move member pane 100 from tab "old" beside pane 101 in tab "new".
+        let src = core.session.find_pane(100).expect("member pane");
+        let dst = core.session.find_pane(101).expect("dst pane");
+        assert_eq!(src.0, dst.0, "precondition: a same-squad move");
+        assert_ne!(src.1, dst.1, "precondition: a cross-tab move");
+        core.move_pane_cross_tab(100, src, 101, dst, Dir::Right)
+            .expect("same-squad member move");
+
+        let loaded = crate::squad_store::load();
+        let harden = loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "harden")
+            .expect("workspace survives");
+        let member = harden
+            .members
+            .iter()
+            .find(|m| m.attach_id == "c19cd2c3")
+            .expect("member kept");
+        assert_eq!(
+            member.tab_name.as_deref(),
+            Some("new"),
+            "the stored tab_name follows the member into its new tab"
+        );
+    }
+
+    #[test]
+    fn cross_squad_move_of_a_named_workspace_shell_depersists_it() {
+        // (x-d6a8, codex P1) Dragging a named workspace's own (non-member) shell
+        // into another squad empties and removes the workspace; its persisted
+        // entry and reserved name must not survive to resurrect it on restart.
+        let _s = StoreScratch::new("depersist-emptied-workspace");
+        let mut core = empty_core();
+        // A named workspace "review" (squad 7) with a single NON-member shell.
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("review".into()),
+            Tab {
+                name: None,
+                id: 7,
+                root: Node::Leaf(100),
+                focus: 100,
+            },
+        );
+        core.squad_members.insert(7, Vec::new()); // named, no recruited members
+        core.persist_squad(7);
+        assert!(
+            crate::squad_store::load()
+                .squads
+                .iter()
+                .any(|s| s.name == "review"),
+            "precondition: the workspace is persisted"
+        );
+        core.session.add_squad(
+            8,
+            vec!["/other".into()],
+            Some("other".into()),
+            Tab {
+                name: None,
+                id: 8,
+                root: Node::Leaf(200),
+                focus: 200,
+            },
+        );
+
+        let src = core.session.find_pane(100).expect("shell pane");
+        let dst = core.session.find_pane(200).expect("dst pane");
+        core.move_pane_cross_tab(100, src, 200, dst, Dir::Right)
+            .expect("cross-squad shell move");
+
+        assert!(core.session.squad(7).is_none(), "source squad removed");
+        assert!(
+            !core.squad_members.contains_key(&7),
+            "in-memory members entry cleared"
+        );
+        assert!(
+            crate::squad_store::load()
+                .squads
+                .iter()
+                .all(|s| s.name != "review"),
+            "the emptied workspace is depersisted, not resurrected on restart"
+        );
+        assert!(
+            !core.named_squad_taken("review"),
+            "its name is no longer reserved"
+        );
+    }
+
+    #[test]
+    fn break_of_a_member_pane_refreshes_the_stored_tab_name() {
+        // (x-d6a8, codex P1) Breaking a persisted member's pane into a new tab
+        // changes its hosting tab; the stored tab_name must refresh (inside the
+        // shared pane_break helper, so the script and drag paths agree), else a
+        // restart restores the member to its old tab.
+        let _s = StoreScratch::new("break-member-tabname");
+        let mut core = empty_core();
+        // Workspace "harden" (squad 7): member pane 100 sharing tab "home" with 101.
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("harden".into()),
+            Tab {
+                name: Some("home".into()),
+                id: 7,
+                root: Node::Branch {
+                    axis: Axis::Horizontal,
+                    children: vec![(0.5, Node::Leaf(100)), (0.5, Node::Leaf(101))],
+                },
+                focus: 100,
+            },
+        );
+        core.squad_members.insert(
+            7,
+            vec![crate::squad_store::StoredMember {
+                attach_id: "c19cd2c3".into(),
+                tombstone: false,
+                tab_name: Some("home".into()),
+            }],
+        );
+        core.attached.insert("c19cd2c3".into(), 100);
+        core.tab_areas.insert(7, (24, 80));
+        core.persist_squad(7);
+
+        core.pane_break(100, Some("solo".into()))
+            .expect("break the member pane");
+
+        let loaded = crate::squad_store::load();
+        let member = loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "harden")
+            .expect("workspace persisted")
+            .members
+            .iter()
+            .find(|m| m.attach_id == "c19cd2c3")
+            .expect("member kept");
+        assert_eq!(
+            member.tab_name.as_deref(),
+            Some("solo"),
+            "the stored tab_name follows the member into the broken-out tab"
+        );
+    }
+
+    #[test]
+    fn join_of_a_member_tab_refreshes_the_stored_tab_name() {
+        // (x-d6a8, codex P1) Joining a persisted member's tab into another changes
+        // its hosting tab; the stored tab_name must refresh in the shared tab_join
+        // helper (same reconcile as pane_break).
+        let _s = StoreScratch::new("join-member-tabname");
+        let mut core = empty_core();
+        // Squad 7: tab "src" holds member pane 100; tab "dst" holds anchor 200.
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("harden".into()),
+            Tab {
+                name: Some("src".into()),
+                id: 7,
+                root: Node::Leaf(100),
+                focus: 100,
+            },
+        );
+        core.session.squad_mut(7).unwrap().tabs.push(Tab {
+            name: Some("dst".into()),
+            id: 20,
+            root: Node::Leaf(200),
+            focus: 200,
+        });
+        core.squad_members.insert(
+            7,
+            vec![crate::squad_store::StoredMember {
+                attach_id: "c19cd2c3".into(),
+                tombstone: false,
+                tab_name: Some("src".into()),
+            }],
+        );
+        core.attached.insert("c19cd2c3".into(), 100);
+        core.tab_areas.insert(7, (24, 80));
+        core.tab_areas.insert(20, (24, 80));
+        core.persist_squad(7);
+
+        core.tab_join(&TabSel::Id(7), 200, Dir::Right)
+            .expect("join the member's tab into dst");
+
+        let loaded = crate::squad_store::load();
+        let member = loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "harden")
+            .expect("workspace persisted")
+            .members
+            .iter()
+            .find(|m| m.attach_id == "c19cd2c3")
+            .expect("member kept");
+        assert_eq!(
+            member.tab_name.as_deref(),
+            Some("dst"),
+            "the stored tab_name follows the member into the join destination"
         );
     }
 
