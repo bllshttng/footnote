@@ -1013,7 +1013,11 @@ def _name_lane_send(
     from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.harness_identity import canonical_handle
-    from fno.inbox.store import generate_msg_id, write_new_thread
+    from fno.inbox.store import (
+        classify_durable_owner,
+        generate_msg_id,
+        write_new_thread,
+    )
     from fno.mail.envelope import harness_for_provider, wrap_fno_mail
 
     if resolved is not None:
@@ -1157,6 +1161,22 @@ def _name_lane_send(
     if lanes:
         print(f"lanes tried: {', '.join(lanes)}", file=sys.stderr)
 
+    # Terminal classification (US6): a name lane reaches the durable floor only
+    # after every live rung missed. A self-send lands in the sender's own inbox
+    # and a live-listed-but-wedged recipient still has a turn-boundary drain, so
+    # both own as live-drain; every other miss (asleep, offline, unprovable) is
+    # optimistically resumable and owns as wake-daemon. The dead-letter verdict is
+    # the sweep's to make once a wake-daemon thread sits unread past its TTL - at
+    # birth we never know a recipient is gone for good (a token no store knows
+    # already exits 16 upstream), so the durable floor never escalates non-zero.
+    self_send = resolved is None and token is not None and token_lane == "self-send"
+    recipient_live = self_send or resolved is not None
+    owner = classify_durable_owner(
+        param_forced=False,
+        recipient_live=recipient_live,
+        recipient_resumable=not recipient_live,
+    )
+
     try:
         th = write_new_thread(
             recipient=recipient,
@@ -1167,12 +1187,17 @@ def _name_lane_send(
             to_kind="name",
             provider_to=provider,
             replies_to=reply_to,
+            owner=owner.value,
         )
     except (OSError, ValueError, RuntimeError) as exc2:
         print(f"durable envelope write failed for {recipient!r}: {exc2}", file=sys.stderr)
         raise typer.Exit(code=12) from exc2
     _warn_deferred(recipient)
-    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr}")
+    # Routing-reason disclosure (US10): name WHY this is durable so a delivery
+    # bug is diagnosable from the sender's own terminal. A self-send can never
+    # inject itself; everything else here is a live miss.
+    reason = "self-send" if self_send else "live-miss"
+    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]")
 
 
 @mail_app.command("send")
@@ -1220,9 +1245,10 @@ def cmd_send(
     kind: str | None = typer.Option(
         None, "--kind", "-k",
         help=(
-            "Inbox kind (heads-up | question | fyi). When set, the message is an "
-            "inbox-style durable note the recipient's drain dispatches on; omit "
-            "for a default agent-to-agent send (live if a peer is hosted)."
+            "Inbox kind (heads-up | question | fyi). A project-inbox drain "
+            "contract, so pair it with --to-project; question/fyi to a bare "
+            "session handle is refused (a handle has no drain that reads them). "
+            "Omit --kind for a default agent-to-agent send (live if a peer is hosted)."
         ),
     ),
     reply_to: str | None = typer.Option(
@@ -1351,6 +1377,20 @@ def cmd_send(
             )
             raise typer.Exit(code=2)
 
+        # US10 kind-scoped guard: question/fyi are project-inbox drain contracts
+        # (question -> wake-signal, fyi -> memory). Addressed to a bare session
+        # handle they queue durable to an inbox nothing drains, so refuse and name
+        # the two real intents. heads-up to a handle stays accepted (the production
+        # notification pattern; its emitters are programmatic, not enumerable).
+        if to_project is None and kind in {Kind.QUESTION.value, Kind.FYI.value}:
+            print(
+                f"error: --kind {kind} to a session handle ({recipient}) has no "
+                f"drain that reads it. Drop --kind to inject it live, or add "
+                f"--to-project <project> to file it as a durable {kind} note.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+
         persist_to_memory = False
         if persist is not None:
             if persist != "memory":
@@ -1412,7 +1452,7 @@ def cmd_send(
             }))
         else:
             verb = "appended (durable) to" if res.appended else "queued (durable) for"
-            print(f"{res.msg_id} {verb} {recipient} [{kind}]")
+            print(f"{res.msg_id} {verb} {recipient} [param-forced: --kind {kind}]")
         return
 
     # Project mode: the message is the sole positional, so `send --to-project X
@@ -1451,11 +1491,14 @@ def cmd_send(
             _warn_deferred(result.recipient)
             print(
                 f"{result.msg_id} queued (durable) for {result.recipient} "
-                f"[project {to_project}]"
+                f"[project {to_project}] [live-miss]"
             )
         else:
             _warn_deferred(to_project, project=True)
-            print(f"{result.msg_id} queued (durable) for project {to_project}")
+            print(
+                f"{result.msg_id} queued (durable) for project {to_project} "
+                f"[param-forced: --to-project]"
+            )
         return
 
     # Name mode.

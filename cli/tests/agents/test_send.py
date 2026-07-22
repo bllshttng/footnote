@@ -450,7 +450,7 @@ def test_dispatch_send_rejects_over_1mib_body(tmp_path: Path, monkeypatch) -> No
     assert exc_info.value.exit_code == 2
     # No envelope should have been written
     threads = read_all_threads("red")
-    assert len(threads) == 0, f"No envelope should be written on body-size rejection"
+    assert len(threads) == 0, "No envelope should be written on body-size rejection"
 
 
 # ---------------------------------------------------------------------------
@@ -872,3 +872,43 @@ def test_us2_unknown_handle_errors_with_suggestions(runner, tmp_path, monkeypatc
     assert res.exit_code != 0
     assert "Closest live sessions" in res.output
     assert "fno-think001" in res.output
+
+
+def test_dispatch_send_durable_stamps_wake_daemon_owner(tmp_path: Path, monkeypatch) -> None:
+    """US6: a registered-agent send whose live inject misses writes its durable
+    fallback stamped owner=wake-daemon on the bus, so the sweep classifies it by
+    the terminal model instead of blanket age semantics."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.agents.providers import claude as claude_mod
+    from fno.agents.providers.claude import ProviderSocketError
+    from fno.agents.providers._claude_session_registry import SessionLocator
+
+    monkeypatch.setattr(
+        claude_mod, "locate_session",
+        lambda short_id, home=None: SessionLocator(
+            pid=12345, short_id=short_id,
+            messaging_socket_path=_sock_path(tmp_path),
+            jobs_dir=tmp_path / "jobs",
+        ),
+    )
+    monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
+
+    def _failing_send(sock_path: str, content: str, from_name: str) -> None:
+        raise ProviderSocketError("connection refused")
+
+    monkeypatch.setattr(claude_mod, "send_to_session", _failing_send)
+
+    from fno.agents.dispatch import dispatch_send
+    from fno.bus.log import iter_messages
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    result = dispatch_send(name="red", message="FYI done", provider=None, cwd=cwd)
+
+    assert result.delivery == "durable"
+    envs = [m for m in iter_messages(warn=False) if m.id == result.msg_id]
+    assert len(envs) == 1
+    assert envs[0].meta.get("owner") == "wake-daemon"
+    assert envs[0].meta.get("ttl_at")  # derived from the owner class

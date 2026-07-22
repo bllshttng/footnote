@@ -122,11 +122,15 @@ The session's slug also resolves. The retired `<harness>-<short-id>` form (`clau
 Every session prints its own handle in its startup header; find a peer's with `fno agents discovered-json` or `fno agents top`.
 Add `--from-self` to stamp your own reply handle so the answer comes back to you, and do not trust a sender's advertised `from-name` as an address - it can be stale.
 
-The fallbacks, and why they rank below: `fno mail send <name>` reaches a registered agent (fine when the name resolves); `--to-project <X>` is anycast that queues durable into what may be a ghost inbox when no live peer resolves - and the receipt still reads like success.
+The fallbacks, and why they rank below: `fno mail send <name>` reaches a registered agent (fine when the name resolves); `--to-project <X>` is anycast that queues durable into what may be a ghost inbox when no live peer resolves - the receipt now names the routing-reason (`[live-miss]`, `[param-forced: --to-project]`) so a durable demotion is legible rather than reading like success, but a durable queue is still not a live delivery.
 A live inject writes nothing to the bus; the durable envelope is written only when the inject misses, so it survives a dead recipient as recovery, not delivery.
 **Treat any receipt that is not `delivered (hosted)` as not delivered: re-resolve the handle and send again, do not re-queue.**
 And do not settle for the queue when the peer is merely idle - the handle you mailed is the same id these take, so bring it back and get the answer now:
 `fno agents peek <short-id>` (alive?) · `resume <short-id>` (idle -> live, then re-send) · `attach <short-id>` (drive it yourself, claude).
+
+Match the terminal to the message: a send that changes the recipient's next action - a ruling, an instruction, a decision they must act on - must terminate `delivered (hosted)` or `delivered (woken)`; a pure ack or FYI may rest durable, but only when the receipt names a live drain owner (`live-drain` / `wake-daemon` / `inbox-drain`). A `dead-letter` owner means nothing drains it, so a durable rest there is silent loss.
+
+No observation probe is proof a peer is dead: `peek`, discovery, a stale status token, and a claim pid reading as a corpse can all lie in unison - a peer that ran `EnterWorktree` moved its transcript to a worktree-keyed project dir, so every probe pointed at the old location reads empty. The one authoritative pre-dead-declaration check is the session's transcript file itself (its worktree-keyed project dir, by mtime/tail). And any probe or receipt that names a store must say WHICH store it read, or a stale read is indistinguishable from a real absence.
 
 **Observe (read-only, never drive).**
 `fno agents list` · `status` (daemon liveness + per-agent state) · `top` (every live worker process, fno-spawned and foreign alike) · `logs <name>` · `peek <handle>` (read-only observation of any peer you could message) · `needs` (the needs-me queue) · `digest --session <s>` (catch-up fold) · `trace <name>` (dispatch lifecycle).

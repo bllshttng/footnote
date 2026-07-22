@@ -84,6 +84,63 @@ class Kind(str, Enum):
 
 VALID_KINDS = frozenset(k.value for k in Kind)
 
+
+class DurableOwner(str, Enum):
+    """Who drains a durable thread (the four-terminal invariant, US6).
+
+    ``queued (durable)`` is transitional, never terminal: every durable write is
+    stamped with the owner that will drain it, so a thread nobody can reach is a
+    ``dead-letter`` from birth rather than silent quicksand.
+    """
+
+    LIVE_DRAIN = "live-drain"      # recipient has a turn boundary; drains next turn
+    WAKE_DAEMON = "wake-daemon"    # asleep-but-resumable; woken by the wake daemon
+    INBOX_DRAIN = "inbox-drain"    # deliberate --kind/--to-project note; project inbox drains it
+    DEAD_LETTER = "dead-letter"    # no live session, no resumable session, no drain wiring
+
+
+# TTL horizon per owner class (hours). Executor's discretion (epic Claude's
+# Discretion 1). A dead-letter's ttl_at is its birth: it escalates immediately,
+# not after a wait. The others give their drain one horizon to run before the
+# sweep reclassifies an unread thread as a stranded dead-letter.
+_OWNER_TTL_HOURS: dict[str, float] = {
+    DurableOwner.LIVE_DRAIN.value: 1.0,
+    DurableOwner.WAKE_DAEMON.value: 6.0,
+    DurableOwner.INBOX_DRAIN.value: 24.0,
+    DurableOwner.DEAD_LETTER.value: 0.0,
+}
+
+
+def classify_durable_owner(
+    *,
+    param_forced: bool,
+    recipient_live: bool,
+    recipient_resumable: bool,
+) -> DurableOwner:
+    """Classify a durable write's owner from the signals a send choke point has.
+
+    Precedence is deliberate: a ``--kind``/``--to-project`` send chose the durable
+    inbox lane on purpose (``param_forced``), so it owns as ``inbox-drain`` even
+    when a live peer exists. Otherwise a live recipient drains on its next turn,
+    an asleep-but-resumable one is woken by the daemon, and anything else is a
+    dead-letter at birth.
+    """
+    if param_forced:
+        return DurableOwner.INBOX_DRAIN
+    if recipient_live:
+        return DurableOwner.LIVE_DRAIN
+    if recipient_resumable:
+        return DurableOwner.WAKE_DAEMON
+    return DurableOwner.DEAD_LETTER
+
+
+def ttl_at_for(owner: DurableOwner | str, created: datetime) -> datetime:
+    """The ``ttl_at`` horizon for an owner class, measured from ``created``."""
+    from datetime import timedelta
+
+    key = owner.value if isinstance(owner, DurableOwner) else owner
+    return created + timedelta(hours=_OWNER_TTL_HOURS.get(key, 0.0))
+
 # Map deprecated kinds -> what to use instead. Reading these tokens from
 # the CLI exits non-zero with a hint pointing at the replacement.
 DEPRECATED_KINDS: dict[str, str] = {
@@ -530,6 +587,8 @@ def _append_to_bus(
     from_session: Optional[str] = None,
     from_model: Optional[str] = None,
     to_kind: Optional[str] = None,
+    owner: Optional[str] = None,
+    ttl_at: Optional[datetime] = None,
 ) -> None:
     """Append a versioned envelope to the canonical bus log (the durable write).
 
@@ -547,6 +606,13 @@ def _append_to_bus(
         meta["persist_to_memory"] = True
     if render_path is not None:
         meta["render_path"] = str(render_path)
+    # Terminal classification (US6): stamp who drains this durable thread and
+    # when the dead-letter sweep should reclassify it if they have not. The bus
+    # envelope is the system of record the sweep reads.
+    if owner is not None:
+        meta["owner"] = owner
+    if ttl_at is not None:
+        meta["ttl_at"] = _format_dt(ttl_at)
     _bus_append(
         Envelope(
             id=msg_id,
@@ -658,6 +724,7 @@ def post_inbox_message(
             replies_to=reply_to,
             persist_to_memory=persist_to_memory,
             refs=refs,
+            owner=DurableOwner.INBOX_DRAIN.value,
         )
         return PostResult(
             msg_id=handle.thread_id, thread_path=handle.path, appended=False, orphan=True
@@ -667,6 +734,7 @@ def post_inbox_message(
         recipient, sender, kind, body,
         persist_to_memory=persist_to_memory,
         refs=refs,
+        owner=DurableOwner.INBOX_DRAIN.value,
     )
     return PostResult(
         msg_id=handle.thread_id, thread_path=handle.path, appended=False, orphan=False
@@ -689,11 +757,19 @@ def write_new_thread(
     from_session: Optional[str] = None,
     from_model: Optional[str] = None,
     to_kind: Optional[str] = None,
+    owner: Optional[str] = None,
+    ttl_at: Optional[datetime] = None,
 ) -> ThreadHandle:
     """Create a new thread file. Returns the resulting handle.
 
     Filename: ``{YYYY-MM-DD}-{slug}.md`` (slug from first 5 words of body).
     On collision, appends ``-1``, ``-2``, ... until an unused name is found.
+
+    ``owner``/``ttl_at`` stamp the durable thread's terminal classification (US6):
+    who will drain it and when the dead-letter sweep should reclassify it if they
+    have not. They ride the bus envelope ``meta`` (the system of record the sweep
+    reads), so a caller that omits them writes a thread indistinguishable from
+    before.
     """
     if kind not in VALID_KINDS:
         raise ValueError(f"invalid kind: {kind!r}; expected one of {sorted(VALID_KINDS)}")
@@ -701,6 +777,11 @@ def write_new_thread(
         msg_id = generate_msg_id()
     if timestamp is None:
         timestamp = datetime.now(tz=timezone.utc)
+    # Derive the sweep horizon from the owner class once the created timestamp is
+    # known, so every caller passes only the classification. An explicit ttl_at
+    # (e.g. a caller reclassifying) wins.
+    if owner is not None and ttl_at is None:
+        ttl_at = ttl_at_for(owner, timestamp)
 
     inbox = inbox_dir_for(recipient)
     inbox.mkdir(parents=True, exist_ok=True)
@@ -774,6 +855,8 @@ def write_new_thread(
             from_session=from_session,
             from_model=from_model,
             to_kind=to_kind,
+            owner=owner,
+            ttl_at=ttl_at,
         )
     except Exception:
         try:
