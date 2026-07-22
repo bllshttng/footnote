@@ -4630,7 +4630,7 @@ impl View {
             lines.push(pad_to(&format!(" {marker} {} {name}", i + 1), W));
         }
         lines.push(pad_to(" h/← left · j/↓ down · k/↑ up · l/→ right", W));
-        lines.push(pad_to(" t/enter new tab · . here · esc/q cancel", W));
+        lines.push(pad_to(" enter/space here · t new tab · esc/q cancel", W));
         lines
     }
 
@@ -9796,16 +9796,17 @@ async fn attach_place_keys(
             continue;
         }
 
-        // (x-fbb1) `.` = attach here: repoint the focused pane; the server picks
-        // swap-viewer vs take-over-idle-shell. Route-anchored, so it ignores the
-        // digit-selected workspace (CurrentRoute + here, never a split).
+        // (x-fbb1) Enter/Space = attach here: repoint the focused pane; the server picks
+        // swap-viewer vs take-over-idle-shell. "Here" is the stronger primary CTA, so it owns
+        // the confirm keys; `t` alone is the secondary new-tab. Route-anchored, so here ignores
+        // the digit-selected workspace (CurrentRoute + here, never a split).
         let (split, here) = match key {
             b'h' => (Some(Some(Dir::Left)), false),
             b'j' => (Some(Some(Dir::Down)), false),
             b'k' => (Some(Some(Dir::Up)), false),
             b'l' => (Some(Some(Dir::Right)), false),
-            b't' | b'\r' | b'\n' => (Some(None), false),
-            b'.' => (Some(None), true),
+            b'\r' | b'\n' | b' ' => (Some(None), true),
+            b't' => (Some(None), false),
             0x1b | b'q' => {
                 view.attach_place = None;
                 return Ok(StdinFlow::Continue);
@@ -9821,7 +9822,7 @@ async fn attach_place_keys(
             view.set_notice("agent is no longer attachable".into());
             return Ok(StdinFlow::Continue);
         }
-        // `.`=here is route-anchored - it never touches the digit-selected
+        // Here is route-anchored - it never touches the digit-selected
         // workspace, so a vanished target must not block it (only split/new-tab).
         if !here && !view.layout.squads.iter().any(|s| s.id == picker.target) {
             view.set_notice("workspace is no longer available".into());
@@ -17110,7 +17111,8 @@ mod tests {
         v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-        attach_place_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        // `t` is the secondary new-tab; Enter/Space are now "here" (the primary CTA).
+        attach_place_keys(&mut v, b"t", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
         let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
         assert_eq!(
@@ -17135,6 +17137,36 @@ mod tests {
             .unwrap();
         assert!(cancelled.is_empty());
         assert!(v.attach_place.is_none());
+    }
+
+    #[tokio::test]
+    async fn attach_placement_enter_and_space_send_here() {
+        // (x-fbb1) Enter and Space are the primary CTA: attach here (route-anchored, no split),
+        // NOT a new tab. `t` alone is the new tab.
+        for key in [b"\r".as_slice(), b" ".as_slice()] {
+            let mut v = unified_rows_view();
+            v.selector = Some(8); // bg-claude
+            let mut buf = Vec::new();
+            selector_keys(&mut v, b"p", &mut buf).await.unwrap();
+            attach_place_keys(&mut v, key, &mut buf).await.unwrap();
+            let mut cur = std::io::Cursor::new(buf);
+            let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+            assert_eq!(
+                msg,
+                ClientMsg::Command(Command::AttachAgent {
+                    id: "c19cd2c3".into(),
+                    placement: PanePlacement {
+                        tab: None,
+                        at: None,
+                        target: PaneTarget::CurrentRoute,
+                        split: None,
+                        here: true,
+                    },
+                }),
+                "key {key:?} sends here"
+            );
+            assert!(v.attach_place.is_none());
+        }
     }
 
     #[tokio::test]
