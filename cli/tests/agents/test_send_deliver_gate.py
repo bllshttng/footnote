@@ -985,9 +985,15 @@ def test_cmd_gate_retired_prints_pointer(runner: CliRunner) -> None:
 def test_deliver_live_claude_mcp_send_only_no_reply_wait(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """codex #459 P2: a reachable MCP channel delivers via the send-only
-    sidecar push (build_channel_notification + send_to_channel), never the
-    blocking ask_followup_via_mcp, and never falls through to the socket."""
+    """A reachable MCP channel still rides the send-only sidecar push
+    (build_channel_notification + send_to_channel), never the blocking
+    ask_followup_via_mcp (codex #459 P2 preserved).
+
+    But a fire-and-forget channel push is bytes-to-channel, not confirmed
+    turn-taken, so Locked Decision 4 (hosted-on-bytes-written is banned, US5)
+    forbids reporting it as ``hosted``. The push is now best-effort and control
+    falls through to the confirming control.sock lane, which misses in this test
+    env (no live daemon/session) -> the send lands on the durable floor."""
     use_tmpdir(monkeypatch, tmp_path)
 
     from fno.agents.registry import AgentEntry, write_registry
@@ -1032,17 +1038,20 @@ def test_deliver_live_claude_mcp_send_only_no_reply_wait(
         name="claude-mcp", message="fyi built", provider=None, cwd=cwd
     )
 
-    assert result.delivery == "hosted"
-    assert len(push_calls) == 1, "MCP sidecar push must be used"
+    # LD4 (US5): an unconfirmed channel push is not a hosted terminal; it falls
+    # through to the confirming lane, which misses in-test -> durable floor.
+    assert result.delivery == "durable"
+    assert len(push_calls) == 1, "MCP sidecar push must still be attempted (best-effort)"
     assert push_calls[0][0] == "abcd1234"
-    assert len(socket_calls) == 0, "socket path must not fire when MCP delivers"
+    assert len(socket_calls) == 0, "the blocking send_to_session path must not fire"
     assert len(ask_mcp_calls) == 0, "blocking ask_followup_via_mcp must NOT be used for send"
 
 
 def test_deliver_live_claude_mcp_error_falls_back_to_socket(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, capsys
 ) -> None:
-    """MCP sidecar failure falls through to the socket path (demotion chain)."""
+    """MCP sidecar failure falls through to the socket path (demotion chain),
+    and the failure reason is surfaced on stderr rather than swallowed (US5)."""
     use_tmpdir(monkeypatch, tmp_path)
 
     from fno.agents.registry import AgentEntry, write_registry
@@ -1090,6 +1099,8 @@ def test_deliver_live_claude_mcp_error_falls_back_to_socket(
 
     assert result.delivery == "hosted"
     assert len(inject_calls) == 1, "control.sock inject must fire on sidecar failure"
+    # US5: the dropped push must be diagnosable from the sender's terminal.
+    assert "sidecar gone" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

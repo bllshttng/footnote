@@ -4578,7 +4578,7 @@ def _deliver_live(
             mcp_alive = False
         if mcp_alive:
             try:
-                # Fire-and-forget via the MCP sidecar: the send-only half of
+                # Best-effort push via the MCP sidecar: the send-only half of
                 # ask_followup_via_mcp (build notification + push to channel),
                 # WITHOUT its wait_for_reply poll - send never blocks for a
                 # reply (codex #459 P2: the old call used nonexistent kwargs
@@ -4595,9 +4595,20 @@ def _deliver_live(
                     },
                 )
                 _mcp_client.send_to_channel(entry.mcp_channel_id, envelope)
-                return True
-            except Exception:
-                pass  # fall through to socket path
+            except Exception as exc:
+                # US5: never swallow the reason - a dropped push must be
+                # diagnosable from the sender's terminal.
+                print(
+                    f"mcp channel push to {entry.name!r} failed: {exc}; "
+                    "trying the control.sock lane",
+                    file=sys.stderr,
+                )
+            # A channel push is bytes-to-channel, not confirmed turn-taken
+            # (Locked Decision 4: hosted-on-bytes-written is banned). Do NOT
+            # report hosted here; fall through to the control.sock lane below,
+            # which polls the recipient transcript before confirming. An MCP-only
+            # peer with no control.sock handle then lands on the durable floor,
+            # deduped by the envelope id at the recipient (US5).
 
     # Live inject over control.sock (adopted `claude --bg`, the fno-agents
     # mail-inject verb, G1; node x-1f23). The claude PTY worker.sock lane retired
