@@ -1215,7 +1215,9 @@ def _escalate_question(sender: str, recipient: str, summary: str) -> str:
     The caller writes the durable question thread regardless, so the ambient
     unread count stays truthful even when this nudge is debounced. Best-effort
     throughout: a notifier or filesystem failure never breaks the send. Returns
-    ``"escalated"`` or ``"debounced"``.
+    ``"escalated"`` (the human was notified), ``"debounced"`` (a recent nudge for
+    this pair suppressed it), or ``"notifier-unavailable"`` (no OS notifier on
+    this host, so nothing displayed - the caller must not claim escalation).
     """
     import hashlib
 
@@ -1225,27 +1227,44 @@ def _escalate_question(sender: str, recipient: str, summary: str) -> str:
     marker_dir = state_dir() / "mail-escalations"
     marker = marker_dir / pair
     try:
-        last = marker.stat().st_mtime
-    except OSError:
-        last = 0.0
-    if time.time() - last < _ESCALATION_DEBOUNCE_S:
-        return "debounced"
-    try:
         marker_dir.mkdir(parents=True, exist_ok=True)
-        marker.touch()
+    except OSError:
+        pass
+    # Atomically claim the debounce window via O_CREAT|O_EXCL: exactly one
+    # concurrent sender wins a fresh escalation, the rest see the marker and
+    # debounce. A check-then-touch here would let a concurrent burst from one
+    # pair all notify at once, defeating the debounce during the exact spike it
+    # exists to damp.
+    try:
+        fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.close(fd)
+    except FileExistsError:
+        try:
+            last = marker.stat().st_mtime
+        except OSError:
+            last = 0.0
+        if time.time() - last < _ESCALATION_DEBOUNCE_S:
+            return "debounced"
+        try:
+            os.utime(marker, None)  # stale window: refresh so the next runs from now
+        except OSError:
+            pass
     except OSError:
         pass  # a missing marker just re-notifies; it never suppresses the durable write
+    # Only report escalation when the notification actually displayed:
+    # send_notification returns (code, err) and a nonzero code means no OS
+    # notifier (a headless host), so the human was NOT notified.
     try:
         from fno.notify._impl import send_notification
 
         one_line = summary.split("\n", 1)[0][:120]
-        send_notification(
+        code, _err = send_notification(
             f"fno mail: question from {sender}",
             f"{one_line} - run `fno mail drain-self`",
         )
     except Exception:  # noqa: BLE001 - a notifier failure never breaks the send
-        pass
-    return "escalated"
+        code = 1
+    return "escalated" if code == 0 else "notifier-unavailable"
 
 
 @mail_app.command("send")

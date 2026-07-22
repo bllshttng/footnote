@@ -102,6 +102,21 @@ def test_fyi_and_heads_up_do_not_escalate(runner, mailbox, notified):
     assert notified == [], "only question escalates to the human"
 
 
+def test_notifier_unavailable_does_not_claim_escalation(runner, mailbox, monkeypatch):
+    # A headless host: send_notification returns (1, err) rather than raising.
+    monkeypatch.setattr(
+        "fno.notify._impl.send_notification", lambda t, m: (1, "no notifier")
+    )
+    res = runner.invoke(
+        app,
+        ["mail", "send", "--to-project", "web", "--kind", "question",
+         "--from-name", "etl", "--body", "q"],
+    )
+    assert res.exit_code == 0, res.output
+    assert "escalated to human" not in res.output, "no false claim when nothing displayed"
+    assert _unread_count(runner, "web") == 1
+
+
 def test_escalation_failure_never_breaks_the_send(runner, mailbox, monkeypatch):
     def boom(title: str, message: str):
         raise RuntimeError("no display")
