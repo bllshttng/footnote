@@ -2648,6 +2648,19 @@ impl Core {
         let src_vp = self.tab_rect(src_tid);
         let dst_vp = self.tab_rect(dst_tid);
 
+        // A CROSS-SQUAD move takes a persisted member out of its source
+        // workspace, so capture its member context BEFORE the move (find_pane
+        // still resolves it in the source) and de-recruit it below - otherwise
+        // its `squad_members` entry lingers under a squad it no longer lives in
+        // (or that the move then removes). A same-squad cross-tab move keeps the
+        // member in place, so it is not captured; a non-member pane yields None
+        // (reconcile is then a no-op). Mirrors the CloseTab de-recruit.
+        let moved_member = if src_sid != dst_sid {
+            self.member_ctx(mover)
+        } else {
+            None
+        };
+
         // Graft into the destination first, and focus the moved pane there while
         // the dst index is still valid (removing the source tab below can shift
         // sibling indices when both tabs share a squad). On Err the dst is
@@ -2670,6 +2683,12 @@ impl Core {
             self.tab_areas.remove(&src_tid);
             self.reanchor_views();
         }
+        // De-recruit the moved member from its (now former) source workspace. The
+        // helper removes it from `squad_members` and, if the source squad did not
+        // survive the move, drops the whole entry and its persisted name - so no
+        // stale membership references a squad the pane left or the move removed.
+        // `None` (same-squad move or a non-member pane) is a no-op.
+        self.reconcile_member_close(moved_member, false);
         self.push_layout(true);
         Ok(())
     }
@@ -13539,6 +13558,62 @@ mod tests {
         assert!(
             after_user.squads[0].members.is_empty(),
             "member de-recruited"
+        );
+    }
+
+    #[test]
+    fn cross_squad_member_move_de_recruits_from_the_source() {
+        // (x-d6a8, codex P1) Moving a persisted member's pane into another
+        // squad's tab de-recruits it from the source workspace - its
+        // squad_members entry must not linger under a squad it no longer lives
+        // in. Regression for the codex re-review finding on move_pane_cross_tab.
+        let _s = StoreScratch::new("cross-squad-member-move");
+        let mut core = empty_core();
+        // Source workspace "harden" (squad 7): member pane 100 in tab 7, plus a
+        // second tab (pane 101) so the squad SURVIVES the move.
+        named_member_squad(&mut core, 7, "harden", 100, "c19cd2c3");
+        core.session.squad_mut(7).unwrap().tabs.push(Tab {
+            name: None,
+            id: 70,
+            root: Node::Leaf(101),
+            focus: 101,
+        });
+        core.persist_squad(7);
+        // Destination squad 8 with a tab to drop into.
+        core.session.add_squad(
+            8,
+            vec!["/other".into()],
+            Some("review".into()),
+            Tab {
+                name: None,
+                id: 8,
+                root: Node::Leaf(200),
+                focus: 200,
+            },
+        );
+
+        let src = core.session.find_pane(100).expect("member pane live");
+        let dst = core.session.find_pane(200).expect("anchor pane live");
+        assert_ne!(src.0, dst.0, "precondition: a cross-squad move");
+        core.move_pane_cross_tab(100, src, 200, dst, Dir::Right)
+            .expect("cross-squad move");
+
+        // The pane moved into squad 8...
+        assert_eq!(
+            core.session.find_pane(100).map(|(s, _)| s),
+            Some(8),
+            "pane moved to squad 8"
+        );
+        // ...and its membership no longer lingers in the persisted source.
+        let loaded = crate::squad_store::load();
+        let harden = loaded
+            .squads
+            .iter()
+            .find(|s| s.name == "harden")
+            .expect("source workspace survives its second tab");
+        assert!(
+            harden.members.iter().all(|m| m.attach_id != "c19cd2c3"),
+            "the moved member is de-recruited from the source workspace"
         );
     }
 

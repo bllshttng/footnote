@@ -2739,6 +2739,17 @@ impl View {
     /// any. A pane-hosted row drags its pane; a paneless bg row drags its attach
     /// id; a row with neither (a dead external tombstone) is not draggable.
     fn row_drag_source_at(&self, row: u16, col: u16) -> Option<RowSource> {
+        // The density button is pinned chrome painted over row 0 (chrome_hit
+        // resolves it to CycleDensity before any row action). A press there must
+        // cycle density, not drag the agent row drawn underneath it - so it is
+        // never a drag source. Mirrors chrome_hit's own row-0 guard.
+        if row == 0 {
+            if let Some(range) = self.density_button_range(self.panel_w() as usize) {
+                if range.contains(&(col as usize)) {
+                    return None;
+                }
+            }
+        }
         let i = self.sideline_row_at(row, col)?;
         match self.display_rows().get(i)? {
             DisplayRow::Agent(a) => {
@@ -20160,6 +20171,34 @@ mod tests {
             view.row_drag_source_at(9, 4),
             None,
             "a row with neither pane nor attach is not a drag source"
+        );
+    }
+
+    #[test]
+    fn row_drag_source_at_skips_the_density_button_over_an_agent_row() {
+        // (x-d6a8, codex P2) The row-0 density button overlays a scrolled agent
+        // row; a press on the button must cycle density (chrome_hit), not start a
+        // row drag on the agent underneath.
+        let mut view = view_with_agents(vec![focus_agent(10)]);
+        view.sideline_offset = 1; // scroll so an agent row paints at row 0
+        let pw = view.panel_w() as usize;
+        let Some(range) = view.density_button_range(pw) else {
+            return; // panel too narrow for the button; the guard is moot
+        };
+        let btn = range.start as u16;
+        // Precondition: a real agent row sits under the button cell.
+        let i = view
+            .sideline_row_at(0, btn)
+            .expect("the button col is a sideline row");
+        assert!(
+            matches!(view.display_rows().get(i), Some(DisplayRow::Agent(_))),
+            "an agent row is under the density button"
+        );
+        // Yet the button cell is NOT a drag source - it cycles density instead.
+        assert_eq!(
+            view.row_drag_source_at(0, btn),
+            None,
+            "the density button is not a drag source"
         );
     }
 
