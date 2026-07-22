@@ -211,3 +211,27 @@ def test_ac6_edge_no_explicit_provider_injects_model_unchanged():
     assert out == ["spawn", "--model", "opus", "w"]  # byte-identical to pre-fix
     # the "leaving model to the harness" skip line must NOT fire here
     assert "leaving model to the harness" not in err.getvalue()
+
+
+def test_residual_ambient_codex_leaves_claude_model_to_harness():
+    # x-0e29: no explicit -p, provider unset, but a CODEX-ambient marker. The
+    # provider-less claude-shaped model (opus) must NOT ride onto the inferred
+    # codex spawn (it 400s after the round-trip). home=claude != target=codex.
+    err = io.StringIO()
+    out = _inject(["spawn", "w"], err=err, env={"CODEX_THREAD_ID": "x"}, model="opus")
+    assert out == ["spawn", "w"]  # no --model injected
+    assert "--model" not in out and "opus" not in out
+    msg = err.getvalue()
+    # the leave reason names the model, the scope (claude), and the target (codex)
+    assert "opus" in msg and "claude" in msg and "codex" in msg
+    assert "leaving model to the harness" in msg
+
+
+def test_ambient_codex_with_matching_provider_still_injects():
+    # A codex-primary user who BINDS the model (provider=codex) keeps injection
+    # under a codex-ambient session: home=codex == target=codex.
+    out = _inject(
+        ["spawn", "w"], env={"CODEX_THREAD_ID": "x"},
+        provider="codex", model="gpt-5-codex",
+    )
+    assert "--model" in out and out[out.index("--model") + 1] == "gpt-5-codex"

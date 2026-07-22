@@ -386,6 +386,36 @@ def _collect_refs(
 # Commands
 # ---------------------------------------------------------------------------
 
+def _reply_to_name_handle(
+    body_text: str, *, from_project: Optional[str], target: str, to_msg: str
+) -> None:
+    """Send a name-lane reply to ``target`` (a canonical handle): resolve it live
+    and inject, else durable-floor to it. Shared by the bus-record reply path and
+    the US3 transcript-recovered live-sender path.
+
+    ``from_name=from_project`` stays None by default so stamp_from auto-stamps
+    THIS session's canonical bare short-id -- the handle the original sender
+    replies back to and that drain-self scans, NOT a project name."""
+    from fno.agents import discover as discover_mod
+
+    resolved, _ = discover_mod.resolve_or_suggest(target)
+    if resolved is not None:
+        _name_lane_send(
+            body_text, from_name=from_project, resolved=resolved, reply_to=to_msg
+        )
+    else:
+        # AC1-FR: the original sender is no longer live -> durable floor addressed
+        # to their canonical handle, still drainable. No provider: it is only
+        # consulted on the live-inject path, which a None `resolved` already skips.
+        _name_lane_send(
+            body_text,
+            from_name=from_project,
+            resolved=None,
+            recipient=target,
+            reply_to=to_msg,
+        )
+
+
 @mail_app.command("reply")
 def cmd_reply(
     to_msg: str = typer.Option(..., "--to", help="msg-id to reply to"),
@@ -420,8 +450,6 @@ def cmd_reply(
 
     orig = next((m for m in iter_messages() if m.id == to_msg), None)
     if orig is not None and orig.to_kind == "name":
-        from fno.agents import discover as discover_mod
-
         # A stored sender predating the address flip carries the retired
         # `<harness>-<short8>` form. That is a fact about an old RECORD, not a
         # mistake by whoever is replying, and the address it would carry today is
@@ -440,32 +468,26 @@ def cmd_reply(
             )
             target = migrated
 
-        # from_name defaults to None so stamp_from auto-stamps THIS session's
-        # canonical bare short-id -- the handle the original
-        # sender replies back to and that drain-self scans, NOT a project name.
-        resolved, _ = discover_mod.resolve_or_suggest(target)
-        if resolved is not None:
-            _name_lane_send(
-                body_text, from_name=from_project, resolved=resolved, reply_to=to_msg
-            )
-        else:
-            # AC1-FR: the original sender is no longer live -> durable floor
-            # addressed to their canonical handle, still drainable.
-            # No provider: it is only consulted on the live-inject path, which a
-            # None `resolved` already skipped.
-            _name_lane_send(
-                body_text,
-                from_name=from_project,
-                resolved=None,
-                recipient=target,
-                reply_to=to_msg,
-            )
+        _reply_to_name_handle(body_text, from_project=from_project, target=target, to_msg=to_msg)
         return
     if orig is None:
-        # AC1-ERR / LD4: the name lane cannot invent a target from nothing. Every
-        # real message is durable-first (on the bus), so an id absent from the bus
-        # is genuinely unknown -- hard error, never a silent self-note.
-        print(f"msg-id {to_msg!r} not in the bus log", file=sys.stderr)
+        # US3: a live-confirmed delivery writes no durable thread (LD11a), so the
+        # id is not on the bus. Before erroring, recover the sender off THIS
+        # session's transcript -- where the injected <fno_mail id=...> envelope
+        # already carries `from` -- and reply to that handle by identity. A miss
+        # (id genuinely absent everywhere) falls through to the hard error below.
+        from fno.mail.reply_resolve import resolve_live_sender
+
+        live_sender = resolve_live_sender(to_msg)
+        if live_sender:
+            _reply_to_name_handle(
+                body_text, from_project=from_project, target=live_sender, to_msg=to_msg
+            )
+            return
+        # AC1-ERR / LD4: the name lane cannot invent a target from nothing. An id
+        # absent from BOTH the bus and the transcript is genuinely unknown -- hard
+        # error, never a silent self-note.
+        print(f"msg-id {to_msg!r} not in the bus log or this session's transcript", file=sys.stderr)
         raise typer.Exit(code=1)
 
     # Thread-store reply path (non-name-lane): resolve the sender project here so
@@ -991,7 +1013,11 @@ def _name_lane_send(
     from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.harness_identity import canonical_handle
-    from fno.inbox.store import write_new_thread
+    from fno.inbox.store import (
+        classify_durable_owner,
+        generate_msg_id,
+        write_new_thread,
+    )
     from fno.mail.envelope import harness_for_provider, wrap_fno_mail
 
     if resolved is not None:
@@ -1015,6 +1041,13 @@ def _name_lane_send(
             token_reachable.agent if token_reachable is not None else provider
         ) or "claude"
 
+    # Mint the msg-id ONCE, before wrapping (Locked Decision 2): the same id
+    # rides the live-injected envelope AND any durable fallback, so a recipient
+    # can reply --to it whether or not a durable thread was written, and the
+    # drain dedups a bounded-duplicate on that one id. Passing it to
+    # write_new_thread below reuses it instead of minting a second.
+    msg_id = generate_msg_id()
+
     # Wire `to` carries the canonical handle, matching the durable-bus recipient
     # exactly -- `from` is already a handle via stamp_from, so both attrs agree.
     wrapped = wrap_fno_mail(
@@ -1028,6 +1061,7 @@ def _name_lane_send(
         harness=harness_for_provider(h) if (h := infer_invoking_harness()) else "cli",
         model=resolve_self_model(),
         to=recipient,
+        id=msg_id,
         reply_to=reply_to,
     )
 
@@ -1110,11 +1144,15 @@ def _name_lane_send(
 
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""
+    # Surface the minted id so the sender can quote it and the recipient (who
+    # also sees it in the injected <fno_mail id=...>) can reply --to it even
+    # though a live-confirmed delivery writes no durable thread (US3).
+    idtag = f" id:{msg_id}"
     if injected and woken_as:
-        print(f"delivered (woken) to {recipient}{corr} [revived as bg thread {woken_as}]")
+        print(f"delivered (woken) to {recipient}{idtag}{corr} [revived as bg thread {woken_as}]")
         return
     if injected:
-        print(f"delivered (hosted) to {recipient}{live}{corr}")
+        print(f"delivered (hosted) to {recipient}{idtag}{live}{corr}")
         return
 
     # Every live rung that applied has now been attempted and missed. Durable is
@@ -1123,6 +1161,22 @@ def _name_lane_send(
     if lanes:
         print(f"lanes tried: {', '.join(lanes)}", file=sys.stderr)
 
+    # Terminal classification (US6): a name lane reaches the durable floor only
+    # after every live rung missed. A self-send lands in the sender's own inbox
+    # and a live-listed-but-wedged recipient still has a turn-boundary drain, so
+    # both own as live-drain; every other miss (asleep, offline, unprovable) is
+    # optimistically resumable and owns as wake-daemon. The dead-letter verdict is
+    # the sweep's to make once a wake-daemon thread sits unread past its TTL - at
+    # birth we never know a recipient is gone for good (a token no store knows
+    # already exits 16 upstream), so the durable floor never escalates non-zero.
+    self_send = resolved is None and token is not None and token_lane == "self-send"
+    recipient_live = self_send or resolved is not None
+    owner = classify_durable_owner(
+        param_forced=False,
+        recipient_live=recipient_live,
+        recipient_resumable=not recipient_live,
+    )
+
     assert recipient is not None  # resolved by the name-lane logic before the durable write
     try:
         th = write_new_thread(
@@ -1130,15 +1184,21 @@ def _name_lane_send(
             sender=stamp_from(from_name),
             kind="send",
             body=wrapped,
+            msg_id=msg_id,
             to_kind="name",
             provider_to=provider,
             replies_to=reply_to,
+            owner=owner.value,
         )
     except (OSError, ValueError, RuntimeError) as exc2:
         print(f"durable envelope write failed for {recipient!r}: {exc2}", file=sys.stderr)
         raise typer.Exit(code=12) from exc2
     _warn_deferred(recipient)
-    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr}")
+    # Routing-reason disclosure (US10): name WHY this is durable so a delivery
+    # bug is diagnosable from the sender's own terminal. A self-send can never
+    # inject itself; everything else here is a live miss.
+    reason = "self-send" if self_send else "live-miss"
+    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]")
 
 
 @mail_app.command("send")
@@ -1186,9 +1246,10 @@ def cmd_send(
     kind: str | None = typer.Option(
         None, "--kind", "-k",
         help=(
-            "Inbox kind (heads-up | question | fyi). When set, the message is an "
-            "inbox-style durable note the recipient's drain dispatches on; omit "
-            "for a default agent-to-agent send (live if a peer is hosted)."
+            "Inbox kind (heads-up | question | fyi). A project-inbox drain "
+            "contract, so pair it with --to-project; question/fyi to a bare "
+            "session handle is refused (a handle has no drain that reads them). "
+            "Omit --kind for a default agent-to-agent send (live if a peer is hosted)."
         ),
     ),
     reply_to: str | None = typer.Option(
@@ -1317,6 +1378,20 @@ def cmd_send(
             )
             raise typer.Exit(code=2)
 
+        # US10 kind-scoped guard: question/fyi are project-inbox drain contracts
+        # (question -> wake-signal, fyi -> memory). Addressed to a bare session
+        # handle they queue durable to an inbox nothing drains, so refuse and name
+        # the two real intents. heads-up to a handle stays accepted (the production
+        # notification pattern; its emitters are programmatic, not enumerable).
+        if to_project is None and kind in {Kind.QUESTION.value, Kind.FYI.value}:
+            print(
+                f"error: --kind {kind} to a session handle ({recipient}) has no "
+                f"drain that reads it. Drop --kind to inject it live, or add "
+                f"--to-project <project> to file it as a durable {kind} note.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+
         persist_to_memory = False
         if persist is not None:
             if persist != "memory":
@@ -1378,7 +1453,7 @@ def cmd_send(
             }))
         else:
             verb = "appended (durable) to" if res.appended else "queued (durable) for"
-            print(f"{res.msg_id} {verb} {recipient} [{kind}]")
+            print(f"{res.msg_id} {verb} {recipient} [param-forced: --kind {kind}]")
         return
 
     # Project mode: the message is the sole positional, so `send --to-project X
@@ -1417,11 +1492,14 @@ def cmd_send(
             _warn_deferred(result.recipient)
             print(
                 f"{result.msg_id} queued (durable) for {result.recipient} "
-                f"[project {to_project}]"
+                f"[project {to_project}] [live-miss]"
             )
         else:
             _warn_deferred(to_project, project=True)
-            print(f"{result.msg_id} queued (durable) for project {to_project}")
+            print(
+                f"{result.msg_id} queued (durable) for project {to_project} "
+                f"[param-forced: --to-project]"
+            )
         return
 
     # Name mode.

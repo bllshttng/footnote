@@ -578,6 +578,9 @@ fn gemini_registry_entry(name: &str, cwd: &str, sid: &str, log_path: &str) -> Re
         exited_at: None,
         mux: None,
         screen_state: None,
+        crown_level: None,
+        crown_scope: None,
+        crown_grantor: None,
     }
 }
 

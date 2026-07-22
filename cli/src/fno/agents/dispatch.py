@@ -4128,6 +4128,11 @@ class _MailCtx:
     model: str
     node: Optional[str] = None
     to: Optional[str] = None
+    # This message's own bus msg-id (US1). Rendered as the additive `id` attr on
+    # both the live inject and the durable fallback so a registered-agent send is
+    # reply-correlatable and dedupable like the name-lane path. None on paths that
+    # do not carry a minted id (relay hops), keeping the envelope byte-identical.
+    id: Optional[str] = None
 
 
 def _build_mail_ctx(
@@ -4135,6 +4140,7 @@ def _build_mail_ctx(
     from_session: Optional[str],
     provider_from: Optional[str],
     to: Optional[str] = None,
+    id: Optional[str] = None,
 ) -> _MailCtx:
     """Build the ``<fno_mail>`` sender context from the dispatch provenance.
 
@@ -4156,6 +4162,7 @@ def _build_mail_ctx(
         harness=harness_for_provider(provider_from),
         model=resolve_self_model(),
         to=to or None,
+        id=id or None,
     )
 
 
@@ -4461,6 +4468,7 @@ def _deliver_live(
             model=mail.model,
             node=mail.node,
             to=mail.to,
+            id=mail.id,
         )
 
     # Dual-run dispatch on the row's live ref (4a-G2): a mux-hosted agent gets
@@ -4699,7 +4707,11 @@ def dispatch_send(
             # exclusion falls back to the always-present from_ name. from_model is
             # NOT set on the durable envelope (AgentEntry has no model field; we do
             # not fabricate one -- LD11 forward-compat).
-            from fno.inbox.store import generate_msg_id, write_new_thread
+            from fno.inbox.store import (
+                DurableOwner,
+                generate_msg_id,
+                write_new_thread,
+            )
 
             sender_entry = next((e for e in entries if e.name == from_name), None)
             from_session = provider_from = None
@@ -4713,13 +4725,17 @@ def dispatch_send(
                 )
             # A `fno mail send <name>` is always directed -> stamp the recipient's
             # short id as the envelope `to` (node x-1f23: optional, set when known).
+            # Mint the id BEFORE building the ctx so the SAME id rides the live
+            # inject, the durable fallback, AND the durable thread record (US1 /
+            # Locked Decision 8: both _name_lane_send and _deliver_live carry it).
+            msg_id = generate_msg_id()
             mail_ctx = _build_mail_ctx(
                 from_name,
                 from_session,
                 provider_from,
                 to=(existing.short_id or None),
+                id=msg_id,
             )
-            msg_id = generate_msg_id()
 
             def _write_durable() -> None:
                 """Write the durable FALLBACK envelope: the pending-queue for an
@@ -4745,6 +4761,7 @@ def dispatch_send(
                         model=mail_ctx.model,
                         node=mail_ctx.node,
                         to=mail_ctx.to,
+                        id=mail_ctx.id,
                     )
                 try:
                     write_new_thread(
@@ -4757,6 +4774,12 @@ def dispatch_send(
                         provider_to=existing.harness,
                         provider_from=provider_from,
                         from_session=from_session,
+                        # US6: a registered-agent send reaches this durable
+                        # fallback only after the live inject missed, so the
+                        # recipient is asleep-but-resumable (it drains its inbox
+                        # on its next turn). The sweep escalates to dead-letter
+                        # if it sits unread past the wake-daemon horizon.
+                        owner=DurableOwner.WAKE_DAEMON.value,
                     )
                 except (OSError, ValueError, RuntimeError) as exc:
                     events.emit(
@@ -5059,7 +5082,7 @@ def dispatch_send_to_project(
     # (and bus mirror) record to == project (to_kind=project); the next drain in
     # that project picks it up, EXCLUDING the sender (Group 1, ab-ba91b807). The
     # sender identity is best-effort - exclusion falls back to the from_ name.
-    from fno.inbox.store import write_new_thread
+    from fno.inbox.store import DurableOwner, write_new_thread
 
     from_session = provider_from = None
     try:
@@ -5084,6 +5107,9 @@ def dispatch_send_to_project(
             to_kind="project",
             from_session=from_session,
             provider_from=provider_from,
+            # US6: an explicit --to-project note deliberately chose the durable
+            # project-inbox lane; the project's own drain owns it.
+            owner=DurableOwner.INBOX_DRAIN.value,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         events.emit("agent_send_failed", stage="durable-write", name=project)

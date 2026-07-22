@@ -41,20 +41,24 @@ def fno_mail_open(
     model: str,
     node: Optional[str] = None,
     to: Optional[str] = None,
+    id: Optional[str] = None,
     reply_to: Optional[str] = None,
 ) -> str:
     """Render the ``<fno_mail ...>`` OPEN tag with double-quoted attributes:
-    ``<fno_mail from="..." harness="..." model="..."[ node="..."][ to="..."][ reply_to="..."]>``.
+    ``<fno_mail from="..." harness="..." model="..."[ node="..."][ to="..."][ id="..."][ reply_to="..."]>``.
 
     Mirrors Rust ``fno_mail_open``. The relay PTY hop reuses this open tag for its
     single-line, no-close transport variant (the Enter newline is its delimiter).
-    ``reply_to`` (the answered bus msg-id) is additive, last, and omitted when
-    absent, so a plain send stays byte-identical."""
+    ``id`` (this message's own bus msg-id) and ``reply_to`` (the answered bus
+    msg-id) are additive; ``id`` is last-but-one, ``reply_to`` last, and both are
+    omitted when absent, so a plain send stays byte-identical."""
     s = f'<fno_mail from="{from_}" harness="{harness}" model="{model}"'
     if node:
         s += f' node="{node}"'
     if to:
         s += f' to="{to}"'
+    if id:
+        s += f' id="{id}"'
     if reply_to:
         s += f' reply_to="{reply_to}"'
     return s + ">"
@@ -68,6 +72,7 @@ def wrap_fno_mail(
     model: str,
     node: Optional[str] = None,
     to: Optional[str] = None,
+    id: Optional[str] = None,
     reply_to: Optional[str] = None,
 ) -> str:
     """Wrap ``body`` in the PAIRED ``<fno_mail>`` envelope::
@@ -81,6 +86,6 @@ def wrap_fno_mail(
     message is self-recording -- ``grep <fno_mail>`` across transcripts
     reconstructs the a2a history."""
     open_tag = fno_mail_open(
-        from_=from_, harness=harness, model=model, node=node, to=to, reply_to=reply_to
+        from_=from_, harness=harness, model=model, node=node, to=to, id=id, reply_to=reply_to
     )
     return f"{open_tag}\n{body}\n</fno_mail>"

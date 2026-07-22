@@ -51,6 +51,10 @@ class WhoamiResult:
     status: Optional[str] = None
     live_status: Optional[str] = None
     node: Optional[str] = None
+    # Crown (US9): a rendered "level N, scope=X (by <grantor>)" when this
+    # session's row carries an orchestrator crown, so a compacted king recovers
+    # its own authority. None for an uncrowned worker.
+    crown: Optional[str] = None
     resolved_via: Optional[str] = None  # "env" | "session-fallback" | None
     warnings: list[str] = field(default_factory=list)
     exit_code: int = 0
@@ -227,6 +231,11 @@ def resolve_self(
         except Exception:  # noqa: BLE001 — best-effort, silent
             node = None
 
+    crown: Optional[str] = None
+    if row is not None and row.crown_label is not None:
+        by = row.crown_grantor or "human"
+        crown = f"{row.crown_label} (by {by})"
+
     return WhoamiResult(
         registered=True,
         name=name,
@@ -236,6 +245,7 @@ def resolve_self(
         status=status,
         live_status=live_status,
         node=node,
+        crown=crown,
         resolved_via=resolved_via,
         warnings=warnings,
         exit_code=0,
@@ -322,6 +332,8 @@ def render_human(result: WhoamiResult) -> str:
         lines.append(f"live_status: {result.live_status}")
     if result.node:
         lines.append(f"node:        {result.node}")
+    if result.crown:
+        lines.append(f"crown:       {result.crown}")
     return "\n".join(lines)
 
 
@@ -341,6 +353,7 @@ def render_json(result: WhoamiResult) -> str:
             "status": result.status,
             "live_status": result.live_status,
             "node": result.node,
+            "crown": result.crown,
             "resolved_via": result.resolved_via,
         },
         indent=2,
