@@ -367,7 +367,64 @@ def find_orphans(
     return orphans
 
 
-def validate_groups(groups: object, max_prs: Optional[int]) -> list[NormalizedGroup]:
+# Sentinel distinguishing an ABSENT max_children key (fall back to --max-prs /
+# config) from an explicit `max_children: null` (present-but-invalid, fail-closed).
+# `.get("max_children")` collapses both to None, so the caller passes
+# `.get("max_children", _UNSET)` to preserve the distinction.
+_UNSET = object()
+
+
+def resolve_effective_cap(
+    max_children: object,
+    explicit_max_prs: Optional[int],
+    config_default: Optional[int],
+    epic_doc_rel: Optional[str] = None,
+) -> tuple[int, str]:
+    """Resolve the decompose ceiling and a human label naming its source.
+
+    Precedence (Locked Decisions 2-3):
+      - `max_children` set (valid int >= 1) is the epic author's durable cap and
+        OVERRIDES the config default upward. An explicit `--max-prs` may only
+        *tighten* it (effective = min); a larger flag cannot loosen the author's
+        cap - that loosening is the exact bypass this closes.
+      - `max_children` absent (`_UNSET`): effective = explicit `--max-prs` if
+        passed, else the config default. `config_default` is only read here, so
+        the caller passes None when this fallback is not taken.
+
+    Fail-closed on a present-but-invalid `max_children` (explicit null, non-int,
+    YAML bool, < 1): a typo'd or blank cap must fail loud, never silently protect
+    nothing (Locked Decision 4). `bool` is an `int` subclass, so it is rejected
+    first - `max_children: true` must never coerce to cap 1.
+    """
+    if max_children is _UNSET:
+        if explicit_max_prs is not None:
+            return explicit_max_prs, f"--max-prs {explicit_max_prs}"
+        # config_default is loaded by the caller on exactly this branch (absent
+        # cap AND no explicit flag), so it is non-None here.
+        assert config_default is not None
+        return config_default, f"config default {config_default}"
+
+    if isinstance(max_children, bool) or not isinstance(max_children, int) or max_children < 1:
+        loc = f" (in {epic_doc_rel})" if epic_doc_rel else ""
+        raise DecomposeError(
+            f"max_children in the epic frontmatter is invalid: {max_children!r}{loc}; "
+            "it must be an integer >= 1 (remove the key to fall back to --max-prs / config)",
+            exit_code=1,
+        )
+
+    src = f"max_children={max_children}"
+    if epic_doc_rel:
+        src += f" (from {epic_doc_rel})"
+    if explicit_max_prs is not None and explicit_max_prs < max_children:
+        return explicit_max_prs, f"--max-prs {explicit_max_prs} (tightening {src})"
+    return max_children, src
+
+
+def validate_groups(
+    groups: object,
+    max_prs: Optional[int],
+    cap_source: Optional[str] = None,
+) -> list[NormalizedGroup]:
     """Validate the group spec; return the normalized list or raise DecomposeError.
 
     Checks (all before any graph write, so the caller stays atomic):
@@ -376,6 +433,10 @@ def validate_groups(groups: object, max_prs: Optional[int]) -> list[NormalizedGr
       - slugs are well-formed and unique
       - blocked_by_groups reference declared slugs
       - the inter-group dependency graph is acyclic
+
+    `cap_source` labels where the ceiling came from (`max_children` + doc path,
+    `--max-prs`, or the config default) so an overflow refusal is self-describing;
+    it defaults to `--max-prs N` when the caller passes nothing.
     """
     if max_prs is not None and max_prs < 1:
         raise DecomposeError(
@@ -388,9 +449,18 @@ def validate_groups(groups: object, max_prs: Optional[int]) -> list[NormalizedGr
             exit_code=1,
         )
     if max_prs is not None and len(groups) > max_prs:
+        src = cap_source or f"--max-prs {max_prs}"
+        # Slugs are still untrusted here (per-group validation runs below), so a
+        # non-str slug falls through to a positional label rather than crashing
+        # `join` with a TypeError that would escape the caller's DecomposeError catch.
+        overflow = [
+            (g["slug"] if isinstance(g, dict) and isinstance(g.get("slug"), str) and g["slug"] else f"#{i + 1}")
+            for i, g in enumerate(groups[max_prs:], start=max_prs)
+        ]
         raise DecomposeError(
-            f"{len(groups)} groups exceed the ceiling --max-prs {max_prs}; "
-            "regroup into fewer delivery groups (N is a ceiling, not a quota)",
+            f"{len(groups)} groups exceed the cap {src}; "
+            f"fold these {len(overflow)} into earlier groups: {', '.join(overflow)} "
+            "(the cap is a ceiling, not a quota)",
             exit_code=1,
         )
 

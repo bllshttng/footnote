@@ -85,7 +85,7 @@ FIELD_META: dict[str, Meta] = {
         default_source="readme",
     ),
     # --- config.blueprint.* ---
-    "blueprint.max_prs_per_epic": Meta("advanced", "Cap on group PRs per decomposed epic."),
+    "blueprint.max_prs_per_epic": Meta("advanced", "Default cap on group PRs per decomposed epic; an epic plan-doc's max_children frontmatter overrides it per-epic and --max-prs may only tighten it."),
     # --- config.backlog.* ---
     "backlog.maintain.staleness_days": Meta("advanced", "Age (days) before an idea is flagged stale."),
     "backlog.maintain.max_failed_attempts": Meta("advanced", "Consecutive failures before a node auto-defers."),

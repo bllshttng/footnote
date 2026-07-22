@@ -32,7 +32,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `project.id` | str (optional) | _(none)_ | advanced | Project identifier. |
 | `project.vision` | str (optional) | _(none)_ | always | One-paragraph statement of what this codebase is and why. |
 | `inbox.unclaimed_ttl` | int | `1800` | advanced | Seconds past which a sent-but-unclaimed bus message is surfaced back to its sender (turn-boundary nudge + `fno mail status`). |
-| `blueprint.max_prs_per_epic` | int | `4` | advanced | Cap on group PRs per decomposed epic. |
+| `blueprint.max_prs_per_epic` | int | `4` | advanced | Default cap on group PRs per decomposed epic; an epic plan-doc's max_children frontmatter overrides it per-epic and --max-prs may only tighten it. |
 | `backlog.maintain.staleness_days` | int | `30` | advanced | Age (days) before an idea is flagged stale. |
 | `backlog.maintain.max_failed_attempts` | int | `3` | advanced | Consecutive failures before a node auto-defers. |
 | `backlog.maintain.validity_days` | int | `60` | advanced | Age (days) before a stale idea enters the validity sweep. |
