@@ -3866,12 +3866,43 @@ impl View {
     /// reads a stable identity instead of re-resolving an index against a
     /// differently-capped build. The `display_rows()` call here reads the PRIOR
     /// cached `sel_agent` for its own protect, so it never recurses.
+    ///
+    /// When the selection changes the PROTECTED squad, the row set reflows (the
+    /// old protected squad collapses, shifting every later index), so the raw
+    /// `idx` the caller computed against the old build goes stale. Re-locate the
+    /// target row by identity against the reflowed build so `selector` and the
+    /// painted rows agree (a following Enter / lifecycle key must act on the row
+    /// the cursor is actually on).
     fn set_selector(&mut self, idx: Option<usize>) {
-        self.selector = idx;
-        self.sel_agent = idx.and_then(|i| match self.display_rows().get(i) {
+        let Some(i) = idx else {
+            self.selector = None;
+            self.sel_agent = None;
+            return;
+        };
+        // `i` is valid against the current build: the caller computed it there,
+        // and that build reads the still-current `sel_agent` for its protect.
+        let rows = self.display_rows();
+        let target = rows.get(i).map(row_key);
+        let new_agent = match rows.get(i) {
             Some(DisplayRow::Agent(a)) => Some(a.name.clone()),
             _ => None,
-        });
+        };
+        drop(rows);
+        self.selector = Some(i);
+        if new_agent == self.sel_agent {
+            return; // protect unchanged -> no reflow -> `i` stays valid
+        }
+        self.sel_agent = new_agent;
+        // The protected squad changed. Re-find the target by identity in the
+        // reflowed build; a vanished or inert target falls back to the anchor.
+        self.selector = match target {
+            Some(t) if t != RowKey::Other => self
+                .display_rows()
+                .iter()
+                .position(|r| row_key(r) == t)
+                .or_else(|| self.selector_anchor(i)),
+            _ => self.selector_anchor(i),
+        };
     }
 
     /// Put the selector back on `held` after the row set changed under it.
@@ -6086,6 +6117,36 @@ fn view_caret(v: SectionView) -> char {
 /// opens a dismissable prompt.
 fn is_sideline_verb(b: u8) -> bool {
     matches!(b, b'x' | b'X' | b'r' | b' ' | b'\t')
+}
+
+/// (x-8d3e) A stable identity for the selectable display rows. `set_selector`
+/// uses it to re-locate the cursor's target after a change to the protected
+/// squad reflows the row set (the previously protected squad collapses, shifting
+/// every later index). The inert rows the cursor never rests on all collapse to
+/// `Other` - they are never a re-anchor target.
+#[derive(PartialEq, Eq)]
+enum RowKey {
+    Agent(String),
+    Squad(u64, Option<usize>),
+    Card(String),
+    Idle(SectionKey),
+    NewSquad,
+    Other,
+}
+
+fn row_key(drow: &DisplayRow) -> RowKey {
+    match drow {
+        DisplayRow::Agent(a) => RowKey::Agent(a.name.clone()),
+        DisplayRow::Sel(s) => RowKey::Squad(s.squad, s.tab),
+        DisplayRow::Card(c) => RowKey::Card(c.id.clone()),
+        DisplayRow::IdleFold { key, .. } => RowKey::Idle(key.clone()),
+        DisplayRow::NewSquad => RowKey::NewSquad,
+        DisplayRow::Header { .. }
+        | DisplayRow::Sub(_)
+        | DisplayRow::Blank
+        | DisplayRow::TableHead
+        | DisplayRow::TableEmpty => RowKey::Other,
+    }
 }
 
 fn row_is_inert(drow: &DisplayRow) -> bool {
@@ -14140,6 +14201,57 @@ mod tests {
                 Some(DisplayRow::Agent(a)) if a.name == "idle11"
             ),
             "the cursor stays on idle11"
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // x-8d3e regression (codex P1 on #570): moving the selector to a row BELOW an
+    // expanded squad's idle overflow must survive the reflow when that squad
+    // collapses. The destination index is computed while the squad is expanded;
+    // leaving the idle row drops protection, the squad folds, and every later
+    // index shifts - so `selector` must be re-resolved by identity, never left
+    // pointing at the now-stale numeric index (or a following Enter acts on the
+    // wrong row).
+    #[test]
+    fn set_selector_reanchors_when_the_protected_squad_collapses() {
+        let dir = isolate_view_store("cap-reflow");
+        let mut agents = vec![sv_agent(1, "w", Some(AgentBadge::Working), false)];
+        for i in 0..12 {
+            agents.push(sv_agent(1, &format!("idle{i}"), None, false));
+        }
+        let mut view = view_with_agents(agents);
+        // Select a visible idle row -> squad 1 expands (all 12 idle render).
+        let idle0 = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "idle0"))
+            .unwrap();
+        view.set_selector(Some(idle0));
+        assert_eq!(rendered(&view, "idle"), 12, "precondition: squad expanded");
+        // Aim at the create-workspace footer, which sits BELOW the idle overflow,
+        // so its index shifts when the squad folds. This is the expanded index.
+        let footer_expanded = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::NewSquad))
+            .unwrap();
+        view.set_selector(Some(footer_expanded));
+        // The selection is no longer an idle agent, so squad 1 folds back...
+        assert_eq!(
+            rendered(&view, "idle"),
+            7,
+            "squad folds after the cursor leaves the idle row"
+        );
+        // ...and the cursor still rests on the footer, at its NEW (lower) index.
+        let sel = view.selector.unwrap();
+        assert!(
+            matches!(view.display_rows().get(sel), Some(DisplayRow::NewSquad)),
+            "selector re-anchored to the footer across the reflow"
+        );
+        assert!(
+            sel < footer_expanded,
+            "the footer's index shifted up when the squad folded"
         );
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);
