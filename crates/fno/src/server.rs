@@ -933,6 +933,16 @@ fn sanitize_tab_name(raw: &str) -> String {
     sanitize_name(raw, MAX_TAB_NAME)
 }
 
+/// (x-d865) The layout script verbs' tab-name boundary: sanitize control bytes
+/// and cap length exactly like `Command::RenameTab`, then drop an empty result
+/// to `None` (a blank name clears / stays unnamed). Applied by `tab_create`,
+/// `tab_rename`, and `pane_break` so a scripted name can never emit terminal
+/// escapes through `tab ls` or bypass the storage cap.
+fn clean_tab_name(raw: Option<String>) -> Option<String> {
+    let cleaned = sanitize_tab_name(raw?.as_str());
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
 /// Whether an event ended the session.
 #[derive(PartialEq)]
 enum Flow {
@@ -2392,7 +2402,7 @@ impl Core {
         };
         let tid = self.session.mint_tab_id();
         self.session.squads[si].tabs.push(Tab {
-            name: name.filter(|n| !n.trim().is_empty()),
+            name: clean_tab_name(name),
             id: tid,
             root: Node::Leaf(pid),
             focus: pid,
@@ -2412,11 +2422,12 @@ impl Core {
         let ti = self
             .resolve_tab_index(sid, sel)
             .map_err(|e| (err_code::BAD_REQUEST, e))?;
+        let clean = clean_tab_name(Some(name));
         let sq = self
             .session
             .squad_mut(sid)
             .ok_or((err_code::BAD_REQUEST, "squad vanished".to_string()))?;
-        sq.tabs[ti].name = Some(name).filter(|n| !n.trim().is_empty());
+        sq.tabs[ti].name = clean;
         self.push_layout(true);
         Ok(())
     }
@@ -2494,18 +2505,22 @@ impl Core {
             tree::detach_leaf(tab, vp, pane).map_err(|e| (err_code::BAD_REQUEST, e.to_string()))?
         };
         let new_tid = self.session.mint_tab_id();
-        let name = name.filter(|n| !n.trim().is_empty());
         // Push the new tab FIRST so the squad is never transiently empty, then
         // (for TabEmptied) drop the now-orphaned source tab that still holds
         // this pane - otherwise the pane would live in two tabs.
         self.session.squads[si].tabs.push(Tab {
-            name,
+            name: clean_tab_name(name),
             id: new_tid,
             root: Node::Leaf(pane),
             focus: pane,
         });
         if matches!(outcome, tree::DetachOutcome::TabEmptied) {
             self.session.remove_tab(sid, ti);
+            // The source tab is gone: clear its cached area and re-anchor any
+            // client that was viewing it, exactly as the CloseTab path does -
+            // otherwise push_layout would skip that client with a blank view.
+            self.tab_areas.remove(&tid);
+            self.reanchor_views();
         }
         self.push_layout(true);
         Ok(new_tid)
@@ -2541,6 +2556,7 @@ impl Core {
             .iter()
             .position(|s| s.id == sid)
             .expect("squad live");
+        let src_tid = self.session.squads[si].tabs[src_ti].id;
         let src_subtree = self.session.squads[si].tabs[src_ti].root.clone();
         {
             let tab = &mut self.session.squads[si].tabs[dst_ti];
@@ -2549,8 +2565,12 @@ impl Core {
         }
         // Graft committed (all-or-nothing): remove the src tab. Its panes rode
         // into dst as a cloned subtree; remove_tab drops only the Tab, never a
-        // PTY, so no pane is reaped.
+        // PTY, so no pane is reaped. Clear the removed tab's cached area and
+        // re-anchor any client viewing it (the CloseTab contract) so push_layout
+        // never leaves that viewer on a dangling tab.
         self.session.remove_tab(sid, src_ti);
+        self.tab_areas.remove(&src_tid);
+        self.reanchor_views();
         self.push_layout(true);
         Ok(())
     }
@@ -2566,11 +2586,33 @@ impl Core {
         if id.is_empty() {
             return Err(err_code::NOT_FOUND);
         }
-        let matched: Vec<&RegistryAgent> = self
+        // Exact identity wins; a prefix only resolves when it is unambiguous
+        // (hits a single distinct identity). An ambiguous prefix is NOT_FOUND,
+        // never a silent pick of the first registry row (codex P2).
+        let exact: Vec<&RegistryAgent> = self
             .agents
             .iter()
-            .filter(|a| identity_matches(a, id))
+            .filter(|a| identity_exact(a, id))
             .collect();
+        let matched: Vec<&RegistryAgent> = if !exact.is_empty() {
+            exact
+        } else {
+            let prefix: Vec<&RegistryAgent> = self
+                .agents
+                .iter()
+                .filter(|a| identity_prefix(a, id))
+                .collect();
+            let mut ids: Vec<&str> = prefix
+                .iter()
+                .filter_map(|a| a.session_id.as_deref())
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.len() > 1 {
+                return Err(err_code::NOT_FOUND);
+            }
+            prefix
+        };
         if matched.is_empty() {
             return Err(err_code::NOT_FOUND);
         }
@@ -7422,12 +7464,15 @@ async fn read_guard_agents() -> Option<Vec<RegistryAgent>> {
     }
 }
 
-/// Does registry row `a` denote the session `id` names (x-d865)? `id` may be a
-/// full `session_id`, a full `harness_session_id`, or an unambiguous PREFIX of
-/// either (the `where` convenience; the CLI enforces prefix uniqueness before
-/// it ever connects). Empty ids never match - the caller guards.
-fn identity_matches(a: &RegistryAgent, id: &str) -> bool {
-    let hit = |s: &Option<String>| s.as_deref().is_some_and(|v| v == id || v.starts_with(id));
+/// Does registry row `a` carry `id` as a FULL `session_id` or `harness_session_id`?
+fn identity_exact(a: &RegistryAgent, id: &str) -> bool {
+    a.session_id.as_deref() == Some(id) || a.harness_session_id.as_deref() == Some(id)
+}
+
+/// Does `id` PREFIX either of row `a`'s identity spellings (x-d865)? The `where`
+/// convenience; the caller rejects an ambiguous prefix (2+ distinct identities).
+fn identity_prefix(a: &RegistryAgent, id: &str) -> bool {
+    let hit = |s: &Option<String>| s.as_deref().is_some_and(|v| v.starts_with(id));
     hit(&a.session_id) || hit(&a.harness_session_id)
 }
 
@@ -9165,6 +9210,86 @@ mod tests {
             "a bad anchor reaps the pre-spawned pane (no orphan)"
         );
         let _ = before_panes;
+    }
+
+    /// A client with a LIVE reliable receiver, so `push_layout` never drops it
+    /// as dead mid-test (the bare `client()` helper drops its receiver). Returns
+    /// the receiver to keep in scope for the test's lifetime.
+    fn live_client(id: u64, view_tab: TabId) -> (Client, mpsc::Receiver<ServerMsg>) {
+        let (tx, rx) = mpsc::channel::<ServerMsg>(RELIABLE_CAP);
+        let mut c = client(id, view_tab, (24, 80), false);
+        c.reliable_tx = tx;
+        (c, rx)
+    }
+
+    #[test]
+    fn pane_break_reanchors_a_client_on_the_emptied_source_tab() {
+        // codex P1: breaking a tab's last pane while a client views it must
+        // re-anchor that client, never leave a dangling view push_layout skips.
+        let mut core = two_tab_core();
+        let (c, _rx) = live_client(1, 20); // viewing tab 20 (pane 3 only)
+        core.clients.push(c);
+        core.pane_break(3, None).unwrap();
+        let view = core.clients[0].view;
+        assert!(core.viewed_tab(view).is_some(), "re-anchored to a live tab");
+        assert_ne!(view.1, 20, "not stranded on the removed tab");
+    }
+
+    #[test]
+    fn tab_join_reanchors_a_client_on_the_removed_source_tab() {
+        // codex P1: the join removes the source tab; a viewer of it re-anchors.
+        let mut core = two_tab_core();
+        let brk = core.pane_break(1, None).unwrap(); // src tab `brk` holds [1]
+        let (c, _rx) = live_client(1, brk);
+        core.clients.push(c);
+        core.tab_join(&TabSel::Id(brk), 2, Dir::Right).unwrap();
+        let view = core.clients[0].view;
+        assert!(core.viewed_tab(view).is_some(), "re-anchored to a live tab");
+        assert_ne!(view.1, brk, "not stranded on the removed source tab");
+    }
+
+    #[test]
+    fn tab_create_and_rename_sanitize_names() {
+        // codex P2: control bytes stripped and length capped at the wire
+        // boundary, exactly like Command::RenameTab.
+        let mut core = two_tab_core();
+        core.shells = vec!["/bin/cat".into()];
+        let pid = core
+            .tab_create(&PaneTarget::SquadId(1), Some("\x1b[31mwork".into()))
+            .unwrap();
+        let (sid, ti) = core.session.find_pane(pid).unwrap();
+        let name = core.session.squad(sid).unwrap().tabs[ti]
+            .name
+            .clone()
+            .unwrap();
+        assert!(!name.contains('\x1b'), "escape byte stripped: {name:?}");
+        core.reap_pane(pid);
+
+        core.tab_rename(
+            &PaneTarget::SquadId(1),
+            &TabSel::Id(10),
+            "x".repeat(MAX_TAB_NAME + 50),
+        )
+        .unwrap();
+        let renamed = core.session.squad(1).unwrap().tabs[0].name.clone().unwrap();
+        assert!(renamed.len() <= MAX_TAB_NAME, "oversized name capped");
+    }
+
+    #[test]
+    fn pane_where_rejects_ambiguous_prefix_but_exact_wins() {
+        // codex P2: two identities share a prefix -> refuse; an exact id resolves.
+        let mut core = two_tab_core();
+        core.session_name = "sess".into();
+        let mut a = agent_in("sess", 1, None, false);
+        a.session_id = Some("abc111".into());
+        let mut b = agent_in("sess", 2, None, false);
+        b.session_id = Some("abc222".into());
+        core.agents = vec![a, b];
+        assert_eq!(core.pane_where("abc"), Err(err_code::NOT_FOUND));
+        match core.pane_where("abc111") {
+            Ok(ServerMsg::PaneLocation { panes, .. }) => assert_eq!(panes, vec![1]),
+            other => panic!("exact prefix should resolve: {other:?}"),
+        }
     }
 
     #[test]

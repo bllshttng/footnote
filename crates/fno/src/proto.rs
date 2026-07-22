@@ -23,6 +23,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::tree::{Dir, Node, PaneId, Rect, TabId};
 
+/// `#[serde(default = ...)]` helper for a field whose omitted default is `true`
+/// rather than serde's `bool` default of `false` (x-d865, `PaneSplit.no_focus`).
+fn default_true() -> bool {
+    true
+}
+
 /// Bumped on any wire-incompatible change. The server outlives `cargo install`
 /// upgrades, so both sides exchange this at Attach and refuse loudly on skew.
 /// There is no automated backstop tying this to the message shapes: bump it in
@@ -564,7 +570,10 @@ pub enum ControlVerb {
     PaneSplit {
         pane: u64,
         direction: Dir,
-        #[serde(default)]
+        // Default TRUE, not serde's `bool` default of false: a v41 client that
+        // omits the field must get the advertised no-focus-steal behavior
+        // (Locked Decision 3), never a silent focus grab.
+        #[serde(default = "default_true")]
         no_focus: bool,
     },
     /// List a squad's tabs -> [`ServerMsg::TabList`].
@@ -3038,6 +3047,19 @@ mod tests {
                      "cwd":"/w","child_pid":4242,"title":null}"#;
         let info: PaneInfo = serde_json::from_str(v40).unwrap();
         assert_eq!(info.fno_id, None, "missing fno_id => None");
+    }
+
+    #[test]
+    fn v41_panesplit_omitted_no_focus_defaults_true() {
+        // A raw v41 client that omits no_focus must get the advertised no-steal
+        // behavior (Locked Decision 3), NOT serde's bool default of false.
+        let json = r#"{"PaneSplit":{"pane":4,"direction":"Right"}}"#;
+        match serde_json::from_str::<ControlVerb>(json).unwrap() {
+            ControlVerb::PaneSplit { no_focus, .. } => {
+                assert!(no_focus, "omitted no_focus must default true")
+            }
+            other => panic!("expected PaneSplit, got {other:?}"),
+        }
     }
 
     #[test]

@@ -1791,14 +1791,36 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
         eprintln!("fno mux where: registry malformed");
         return EXIT_REGISTRY_UNAVAILABLE;
     };
-    let id_match = |s: &Option<String>| {
-        s.as_deref()
-            .is_some_and(|v| v == fno_id || v.starts_with(&fno_id))
-    };
-    let matched: Vec<_> = rows
+    let exact = |s: &Option<String>| s.as_deref() == Some(fno_id.as_str());
+    let prefix = |s: &Option<String>| s.as_deref().is_some_and(|v| v.starts_with(&fno_id));
+    let exact_rows: Vec<_> = rows
         .iter()
-        .filter(|a| id_match(&a.session_id) || id_match(&a.harness_session_id))
+        .filter(|a| exact(&a.session_id) || exact(&a.harness_session_id))
         .collect();
+    // Exact identity wins; a prefix must be unambiguous (a single distinct
+    // identity) or `where` refuses rather than report an unrelated pane (codex).
+    let matched: Vec<_> = if !exact_rows.is_empty() {
+        exact_rows
+    } else {
+        let prefix_rows: Vec<_> = rows
+            .iter()
+            .filter(|a| prefix(&a.session_id) || prefix(&a.harness_session_id))
+            .collect();
+        let mut ids: Vec<&str> = prefix_rows
+            .iter()
+            .filter_map(|a| a.session_id.as_deref())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.len() > 1 {
+            eprintln!(
+                "fno mux where: ambiguous prefix {fno_id:?} matches {} identities",
+                ids.len()
+            );
+            return EXIT_NOT_FOUND;
+        }
+        prefix_rows
+    };
     if matched.is_empty() {
         eprintln!("fno mux where: no session matches {fno_id:?}");
         return EXIT_NOT_FOUND;
