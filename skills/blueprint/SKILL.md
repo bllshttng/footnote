@@ -961,7 +961,7 @@ When the input to `/blueprint` is a path to an existing design doc (produced by 
 | Modifier | Effect |
 |---|---|
 | `quick` | Skip ## Execution Strategy (single-task; stamp status + kill_criteria) |
-| `group N` | Bounded epic decomposition: after intake, partition the waves into at most `N` cohesive delivery groups (one child node + PR each). See [Bounded Epic Decomposition](#bounded-epic-decomposition-group-n). Omit `N` to fall back to `config.blueprint.max_prs_per_epic`. Auto-enabled for `scope: epic` docs. |
+| `group N` | Bounded epic decomposition: after intake, partition the waves into at most `N` cohesive delivery groups (one child node + PR each). See [Bounded Epic Decomposition](#bounded-epic-decomposition-group-n). Omit `N` to fall back to the epic's `max_children`, else `config.blueprint.max_prs_per_epic`. Auto-enabled for `scope: epic` docs. |
 | `no-group` | Opt OUT of auto-decomposition on a `scope: epic` doc: run the single-doc lean mutation (one epic node, one PR), the pre-auto-group behavior. |
 | `greenfield` | Skip File Ownership Map + Patterns to Reuse regardless of codebase state |
 | `brownfield` | Force file binding even on empty-codebase detect |
@@ -1027,18 +1027,38 @@ execution unit; a group bundles 1+ waves. See
 A **non-epic** doc with no `group`/`max_prs:` keeps the single-doc lean mutation
 unchanged - auto-group only changes the default for `scope: epic` inputs.
 
-**Resolve the ceiling `N`** (first match wins):
+**Resolve the ceiling `N`** as the minimum of every ceiling that applies, with
+the config default as the floor of last resort. This mirrors decompose's own
+`effective = min(max_children, explicit)` (x-066a) exactly, so blueprint's `N`
+and the `--max-prs` it forwards stay in lockstep with the CLI and the two
+surfaces never disagree about the cap.
 
-1. Explicit `group N` (e.g. `/blueprint group 5 <doc>`) -> `N`.
-2. `group`/auto-group with per-plan `max_prs:` in frontmatter -> that value.
-3. `group`/auto-group with neither -> `config.blueprint.max_prs_per_epic`
-   (default 4). Read it with:
-   ```bash
-   N=$(fno config get config.blueprint.max_prs_per_epic 2>/dev/null || echo 4)
-   ```
-   If `fno config get` is unavailable, default to 4. **Auto-group MUST degrade to
-   today's single-doc behavior (not error) if the config read fails** - treat an
-   unreadable ceiling as 4, never abort the blueprint.
+Let `explicit` = the `group N` arg if present, else the per-plan `max_prs:`
+frontmatter if present, else unset. Let `mc` = the epic doc's `max_children` if
+present and a **positive integer**, else unset (read it from the same epic
+frontmatter already loaded for the `scope: epic` / `max_prs:` auto-group
+decision above - no new reader). A present-but-malformed `max_children`
+(non-integer, `< 1`) is treated as **unset** here; blueprint never invents a cap
+from a bad value, and decompose issues the authoritative malformed-value refusal
+(x-066a US5).
+
+| Case | `N` (blueprint's grouping ceiling AND `--max-prs` forwarded) |
+|------|-------------------------------------------------------------|
+| both `explicit` and `mc` set | `min(explicit, mc)` |
+| only `explicit` set | `explicit` |
+| only `mc` set | `mc` |
+| neither set | `config.blueprint.max_prs_per_epic` (default 4) |
+
+Read the config floor with:
+```bash
+N=$(fno config get config.blueprint.max_prs_per_epic 2>/dev/null || echo 4)
+```
+If `fno config get` is unavailable, default to 4. **Auto-group MUST degrade to
+today's single-doc behavior (not error) if the config read fails** - treat an
+unreadable ceiling as 4, never abort the blueprint. Because the epic's own
+`max_children` now sits above the config default in this ladder, an author who
+declares `max_children: 6` above a default of 4 gets 6 honored on the bare
+`/blueprint <epic-doc>` path (x-066a US3), not silently clamped to 4.
 
 `N` is a **ceiling, not a quota** (Locked Decision #3): cohesive work uses
 fewer groups; never pad to `N`. This guardrail applies identically to
@@ -1065,7 +1085,7 @@ is known):
    ```markdown
    ## Delivery Groups
 
-   Ceiling: N (source: group-arg | frontmatter max_prs | config default)
+   Ceiling: N (source: group-arg | frontmatter max_prs | epic max_children | config default)
 
    | Group | Waves | PR scope | Depends on |
    |-------|-------|----------|------------|
