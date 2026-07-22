@@ -3469,6 +3469,8 @@ impl Core {
                                 updated_at: a.updated_at,
                                 pr: pr_by_holder.get(a.name.as_str()).copied(),
                                 tail: self.compose_tail(a),
+                                crown_level: a.crown_level,
+                                crown_scope: a.crown_scope.clone(),
                             }
                         }
                         None => {
@@ -3502,6 +3504,9 @@ impl Core {
                                 updated_at: None,
                                 pr: None,
                                 tail: None,
+                                // A bare shell pane has no registry entry, so no crown.
+                                crown_level: None,
+                                crown_scope: None,
                             }
                         }
                     };
@@ -3543,6 +3548,8 @@ impl Core {
                         updated_at: a.updated_at,
                         pr: pr_by_holder.get(a.name.as_str()).copied(),
                         tail: self.compose_tail(a),
+                        crown_level: a.crown_level,
+                        crown_scope: a.crown_scope.clone(),
                     });
                 }
                 None => {
@@ -3584,6 +3591,8 @@ impl Core {
                         updated_at: a.updated_at,
                         pr: pr_by_holder.get(a.name.as_str()).copied(),
                         tail: self.compose_tail(a),
+                        crown_level: a.crown_level,
+                        crown_scope: a.crown_scope.clone(),
                     });
                 }
             }
@@ -3624,6 +3633,9 @@ impl Core {
                     updated_at: None,
                     pr: None,
                     tail: None,
+                    // A dead-member tombstone has no registry entry, so no crown.
+                    crown_level: None,
+                    crown_scope: None,
                 });
             }
         }
@@ -3692,6 +3704,9 @@ impl Core {
                 updated_at: None,
                 pr: None,
                 tail: None,
+                // An external-daemon row is not an fno-registry worker: no crown.
+                crown_level: None,
+                crown_scope: None,
             });
         }
         out
@@ -7688,6 +7703,8 @@ mod tests {
             account: None,
             claude_session_uuid: None,
             updated_at: None,
+            crown_level: None,
+            crown_scope: None,
         }
     }
 
@@ -7721,6 +7738,8 @@ mod tests {
                 account: None,
                 claude_session_uuid: None,
                 updated_at: None,
+                crown_level: None,
+                crown_scope: None,
             },
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
@@ -7737,6 +7756,8 @@ mod tests {
                 account: None,
                 claude_session_uuid: None,
                 updated_at: None,
+                crown_level: None,
+                crown_scope: None,
             },
         ];
         let rows = core.agent_rows();
@@ -7810,6 +7831,8 @@ mod tests {
                 account: None,
                 claude_session_uuid: None,
                 updated_at: None,
+                crown_level: None,
+                crown_scope: None,
             },
         ];
         let rows = core.agent_rows();
@@ -7848,6 +7871,8 @@ mod tests {
                 account: None,
                 claude_session_uuid: None,
                 updated_at: None,
+                crown_level: None,
+                crown_scope: None,
             },
             // An exited external row (dead pane beat the upgrade): not attachable.
             RegistryAgent {
@@ -7863,6 +7888,8 @@ mod tests {
                 account: None,
                 claude_session_uuid: None,
                 updated_at: None,
+                crown_level: None,
+                crown_scope: None,
             },
         ];
         assert!(
@@ -7912,6 +7939,8 @@ mod tests {
             account: None,
             claude_session_uuid: None,
             updated_at: None,
+            crown_level: None,
+            crown_scope: None,
         }];
         let rows = core.agent_rows();
         let row = rows.iter().find(|r| r.name == "upgraded").unwrap();
@@ -8610,6 +8639,8 @@ mod tests {
             account: None,
             claude_session_uuid: uuid.map(str::to_owned),
             updated_at: None,
+            crown_level: None,
+            crown_scope: None,
         }
     }
 
@@ -10148,6 +10179,8 @@ mod tests {
             account: None,
             claude_session_uuid: None,
             updated_at: None,
+            crown_level: None,
+            crown_scope: None,
         }
     }
 
