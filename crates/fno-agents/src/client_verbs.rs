@@ -3133,7 +3133,7 @@ mod tests {
     #[test]
     fn tail_lines_keepends_appends_missing_newline() {
         let dir = std::env::temp_dir().join(format!(
-            "abi-cv-logs-{}-{}",
+            "fno-cv-logs-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3227,7 +3227,7 @@ mod tests {
     #[test]
     fn load_registry_entries_reads_agents_key_and_validates() {
         let dir = std::env::temp_dir().join(format!(
-            "abi-cv-reg-{}-{}",
+            "fno-cv-reg-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3379,7 +3379,7 @@ mod tests {
     #[test]
     fn load_registry_gate_shape_check_x8dfc() {
         let dir = std::env::temp_dir().join(format!(
-            "abi-cv-reg8dfc-{}-{}",
+            "fno-cv-reg8dfc-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3474,7 +3474,7 @@ mod tests {
     #[test]
     fn append_agents_event_writes_python_envelope() {
         let dir = std::env::temp_dir().join(format!(
-            "abi-cv-event-{}-{}",
+            "fno-cv-event-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

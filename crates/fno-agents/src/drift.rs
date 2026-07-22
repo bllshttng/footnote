@@ -139,7 +139,7 @@ mod tests {
 
     fn tmp_path(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("abi_drift_{}_{}_{tag}", std::process::id(), {
+        p.push(format!("fno_drift_{}_{}_{tag}", std::process::id(), {
             use std::sync::atomic::{AtomicU32, Ordering};
             static C: AtomicU32 = AtomicU32::new(0);
             C.fetch_add(1, Ordering::Relaxed)

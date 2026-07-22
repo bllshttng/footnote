@@ -1,7 +1,7 @@
 """Hidden deprecated flag aliases (short-flags Phase 3, ab-a04f3f1a).
 
 The two-spelling unification in the short-flag design
-(``internal/fno/design/2026-06-03-abi-cli-short-flags.md``)
+(``internal/fno/design/2026-06-03-fno-cli-short-flags.md``)
 canonicalizes ``--session-id`` and ``--pr-number``. The old spellings
 (``--session``, ``--pr``) survive as hidden deprecated aliases: each is a
 SEPARATE ``typer.Option(..., hidden=True)`` whose value is folded into the

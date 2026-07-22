@@ -32,7 +32,7 @@ def _write_state(base: Path, session_id: str = SESSION_ID, status: str = "IN_PRO
     return path
 
 
-def _run_abi(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
+def _run_fno(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
     cli_dir = Path(__file__).parent.parent.parent
     return subprocess.run(
         ["uv", "run", "fno-py", *args],
@@ -48,7 +48,7 @@ def _run_abi(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
 def test_state_show_v2_reads_v2_when_present(tmp_path):
     _write_state(tmp_path / ".fno" / "v2", session_id="v2-session")
 
-    completed = _run_abi(
+    completed = _run_fno(
         ["state", "show", "--v2", "--path", str(tmp_path / ".fno" / "v2" / "target-state.md")],
         cwd=tmp_path,
     )
@@ -61,7 +61,7 @@ def test_state_show_v2_default_path_picks_v2(tmp_path):
     """Without --path, --v2 auto-resolves to .fno/v2/target-state.md."""
     _write_state(tmp_path / ".fno" / "v2", session_id="default-v2")
 
-    completed = _run_abi(["state", "show", "--v2"], cwd=tmp_path)
+    completed = _run_fno(["state", "show", "--v2"], cwd=tmp_path)
 
     assert completed.returncode == 0, f"stderr: {completed.stderr}"
     assert "default-v2" in completed.stdout
@@ -74,7 +74,7 @@ def test_state_show_v2_falls_back_to_v1_with_stderr_note(tmp_path):
     # v2 dir does NOT exist
     assert not (tmp_path / ".fno" / "v2").exists()
 
-    completed = _run_abi(["state", "show", "--v2"], cwd=tmp_path)
+    completed = _run_fno(["state", "show", "--v2"], cwd=tmp_path)
 
     assert completed.returncode == 0
     assert "v1-fallback" in completed.stdout
@@ -88,7 +88,7 @@ def test_state_show_without_v2_uses_v1(tmp_path):
     # v2 state also exists; without --v2 we must NOT read it
     _write_state(tmp_path / ".fno" / "v2", session_id="should-not-be-read")
 
-    completed = _run_abi(["state", "show"], cwd=tmp_path)
+    completed = _run_fno(["state", "show"], cwd=tmp_path)
 
     assert completed.returncode == 0
     assert "pure-v1" in completed.stdout

@@ -15,7 +15,7 @@
 #   TRANSCRIPT_PATH         - path to the active transcript .jsonl
 #   SESSION_STATE_FILE      - path to .fno/session-state.md
 #   SESSION_SENTINEL        - path to .fno/.session-registered
-#   SCRIPT_DIR              - path to the abilities plugin root (parent of scripts/)
+#   SCRIPT_DIR              - path to the fno plugin root (parent of scripts/)
 #   LOG_FILE                - path to the stop-hook log file
 #   log()                   - logging function from the hook
 
@@ -34,9 +34,9 @@ _detect_planning_session() {
     # Only matches the Skill tool invocation pattern, not mentions in text
     if [[ -f "$TRANSCRIPT_PATH" ]]; then
         local detected
-        detected=$(grep -o '"skill"[[:space:]]*:[[:space:]]*"abilities:\(think\|plan\|audit\)"' "$TRANSCRIPT_PATH" 2>/dev/null \
+        detected=$(grep -o '"skill"[[:space:]]*:[[:space:]]*"fno:\(think\|plan\|audit\)"' "$TRANSCRIPT_PATH" 2>/dev/null \
             | head -1 \
-            | sed 's/.*"abilities:\([^"]*\)".*/\1/')
+            | sed 's/.*"fno:\([^"]*\)".*/\1/')
         if [[ -n "$detected" ]]; then
             log "Planning session detected via transcript scan: $detected"
             echo "$detected"
@@ -102,7 +102,7 @@ for line in open('$TRANSCRIPT_PATH'):
             if isinstance(c,dict) and c.get('name')=='Skill':
                 inp = c.get('input',{})
                 sk = inp.get('skill','')
-                if sk == 'abilities:$SESSION_TYPE':
+                if sk == 'fno:$SESSION_TYPE':
                     args = inp.get('args','')
                     args = re.sub(r'--\S+\s*', '', args).strip()
                     if args:

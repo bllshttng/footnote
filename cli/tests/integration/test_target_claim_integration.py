@@ -46,10 +46,10 @@ def test_init_target_state_acquires_claim_when_node_id_present(tmp_path):
     it via env vars, run, and assert the state file references both fields
     and the .fno/claims/*.lock file exists.
     """
-    # Minimal abi-resolvable graph
-    abi_home = tmp_path / ".fno-home"
-    abi_home.mkdir()
-    graph = abi_home / "graph.json"
+    # Minimal fno-resolvable graph
+    fno_home = tmp_path / ".fno-home"
+    fno_home.mkdir()
+    graph = fno_home / "graph.json"
     graph.write_text(
         '{"entries":[{"id":"ab-testit","plan_path":"plans/test.md",'
         '"status":"ready","priority":"p2","project":"fno"}]}'
@@ -68,7 +68,7 @@ def test_init_target_state_acquires_claim_when_node_id_present(tmp_path):
         "TARGET_START": "1",
         "TARGET_INPUT": "ab-testit",
         "TARGET_SIZE": "S",
-        "HOME": str(abi_home.parent),  # so the script's path-discovery works
+        "HOME": str(fno_home.parent),  # so the script's path-discovery works
     })
 
     # Run from the fake repo root
@@ -111,13 +111,13 @@ def test_init_target_state_acquires_claim_when_node_id_present(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-# test_stop_hook_contains_abi_claim_release_block removed (ab-d0337fbc): the
+# test_stop_hook_contains_fno_claim_release_block removed (ab-d0337fbc): the
 # stop hook is a read-only shim and no longer releases claims on exit; a dead
 # session's claim goes stale via PID-liveness and is recovered by the next
 # `fno claim acquire`. scripts/lib/claim-release.sh deleted with it.
 
 
-def test_init_target_state_contains_abi_claim_acquire_block(tmp_path):
+def test_init_target_state_contains_fno_claim_acquire_block(tmp_path):
     """init-target-state.sh must contain the PR1 fno claim acquire block."""
     init_text = INIT_SCRIPT.read_text(encoding="utf-8")
     assert "fno claim acquire" in init_text, (

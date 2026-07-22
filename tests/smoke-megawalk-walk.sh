@@ -103,7 +103,7 @@ DRIVER_STUB
 echo "Case 1: happy_walk"
 {
   PROJ="$TMP_DIR/proj1"
-  STUB_ABI_DIR="$TMP_DIR/stub_abi_1"
+  STUB_ABI_DIR="$TMP_DIR/stub_fno_1"
   mk_project "$PROJ"
   mkdir -p "$STUB_ABI_DIR"
 
@@ -217,7 +217,7 @@ STUBEOF
 echo "Case 2: park_on_done3"
 {
   PROJ="$TMP_DIR/proj2"
-  STUB_ABI_DIR="$TMP_DIR/stub_abi_2"
+  STUB_ABI_DIR="$TMP_DIR/stub_fno_2"
   mk_project "$PROJ"
   mkdir -p "$STUB_ABI_DIR"
   mkdir -p "$PROJ/.fno/claims"

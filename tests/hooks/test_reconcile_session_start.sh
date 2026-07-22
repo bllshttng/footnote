@@ -34,7 +34,7 @@ trap 'rm -rf "$WORK"' EXIT
 # --- Fake `fno` on PATH: records its args and emits a reconcile-shaped JSON. ---
 FAKEBIN="$WORK/bin"
 mkdir -p "$FAKEBIN"
-export FNO_CALL_LOG="$WORK/abi-calls.log"
+export FNO_CALL_LOG="$WORK/fno-calls.log"
 : > "$FNO_CALL_LOG"
 cat > "$FAKEBIN/fno" <<'FAKE'
 #!/usr/bin/env bash

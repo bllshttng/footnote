@@ -61,7 +61,7 @@ use serde_json::json;
 
 use crate::claims::{self, ClaimState};
 use crate::events::EventEmitter;
-use crate::loop_megawalk::{abi_cmd, retry_etxtbsy};
+use crate::loop_megawalk::{fno_cmd, retry_etxtbsy};
 use crate::loop_runtime::{
     CloseOutcome, Evidence, GlobalJournalPath, Journal, ProjectJournalPath, UnitResult,
 };
@@ -129,7 +129,7 @@ pub struct DrainConfig {
     /// dispatch time via `advance --epic`, not here).
     pub cwd: PathBuf,
     /// The `fno` binary name/path (FNO_BIN override honored by the caller).
-    pub abi_bin: String,
+    pub fno_bin: String,
     /// The active mission's epic id - the `advance --epic <mission>` argument.
     pub mission: String,
     /// Cross-tick consecutive-failure limit (the circuit breaker).
@@ -164,8 +164,8 @@ pub enum MissionDispatch {
 /// Best-effort `fno backlog defer <node>` for the circuit-breaker park. Graph
 /// state, recoverable via `fno backlog undefer`. Node ids are global, so the
 /// epic's cwd is a valid working dir for the child-node defer.
-fn defer_node(abi_bin: &str, cwd: &Path, node: &str, reason: &str) {
-    let _ = abi_cmd(abi_bin)
+fn defer_node(fno_bin: &str, cwd: &Path, node: &str, reason: &str) {
+    let _ = fno_cmd(fno_bin)
         .current_dir(cwd)
         .args(["backlog", "defer", node, "--reason", reason])
         .output();
@@ -180,7 +180,7 @@ fn node_has_pr_ref(cfg: &DrainConfig, node_id: &str) -> bool {
     // (a concurrent `fno update`) must not read as "healthy, has PR" and quietly
     // disable the guard.
     let Ok(out) = retry_etxtbsy(|| {
-        abi_cmd(&cfg.abi_bin)
+        fno_cmd(&cfg.fno_bin)
             .args(["backlog", "get", node_id])
             .current_dir(&cfg.cwd)
             .output()
@@ -310,7 +310,7 @@ fn map_outcome(
                     "auto-failure: {} consecutive failed drains",
                     cfg.failure_limit
                 );
-                defer_node(&cfg.abi_bin, &cfg.cwd, &node, &reason_str);
+                defer_node(&cfg.fno_bin, &cfg.cwd, &node, &reason_str);
                 breaker.reset(&node);
                 let _ = journal.append(
                     "active_backlog_parked",
@@ -478,7 +478,7 @@ fn resolve_dispatch(
         )
     } else if is_done_reason(&ev.reason) {
         match retry_etxtbsy(|| {
-            abi_cmd(&cfg.abi_bin)
+            fno_cmd(&cfg.fno_bin)
                 .args(["backlog", "done", node_id])
                 .current_dir(&cfg.cwd)
                 .output()
@@ -564,7 +564,7 @@ fn dispatch_mission(
     journal: &Journal,
 ) -> MissionDispatch {
     let out = match retry_etxtbsy(|| {
-        abi_cmd(&cfg.abi_bin)
+        fno_cmd(&cfg.fno_bin)
             // --continuation: never reactivate the mission and retire an inactive
             // one, so an operator `--stop` between drain ticks is not undone.
             .args([
@@ -669,8 +669,8 @@ pub struct ResolvedTarget {
 /// Shell `fno config active-backlog --json` to discover enabled drain targets.
 /// Best-effort: any failure (missing fno, non-zero exit, unparseable output)
 /// yields an empty list, so the feature simply stays dormant.
-pub fn resolve_targets(abi_bin: &str) -> Vec<ResolvedTarget> {
-    match abi_cmd(abi_bin)
+pub fn resolve_targets(fno_bin: &str) -> Vec<ResolvedTarget> {
+    match fno_cmd(fno_bin)
         .args(["config", "active-backlog", "--json"])
         .output()
     {
@@ -692,8 +692,8 @@ struct FanoutTarget {
 /// Shell `fno config status-sinks --json` to discover fanout targets. Best-effort:
 /// any failure (missing fno, non-zero exit, unparseable output) yields an empty
 /// list, so a broken config never crashes the daemon - it just runs no fanout.
-fn resolve_fanout_targets(abi_bin: &str) -> Vec<FanoutTarget> {
-    match abi_cmd(abi_bin)
+fn resolve_fanout_targets(fno_bin: &str) -> Vec<FanoutTarget> {
+    match fno_cmd(fno_bin)
         .args(["config", "status-sinks", "--json"])
         .output()
     {
@@ -732,7 +732,7 @@ async fn output_with_cap(mut cmd: tokio::process::Command, cap: Duration) -> boo
     }
 }
 
-async fn per_project_fanout_loop(target: FanoutTarget, abi_bin: String, shutdown: Arc<AtomicBool>) {
+async fn per_project_fanout_loop(target: FanoutTarget, fno_bin: String, shutdown: Arc<AtomicBool>) {
     let project = target.project.clone();
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -740,14 +740,14 @@ async fn per_project_fanout_loop(target: FanoutTarget, abi_bin: String, shutdown
         }
         // Re-resolve between ticks so config changes land without a daemon
         // restart; removing this project's sinks EXITS the loop.
-        let interval = match resolve_fanout_targets(&abi_bin)
+        let interval = match resolve_fanout_targets(&fno_bin)
             .into_iter()
             .find(|t| t.project == project)
         {
             Some(t) => Duration::from_secs(t.interval_seconds.max(1)),
             None => break, // sinks removed for this project -> stop ticking.
         };
-        let mut cmd = tokio::process::Command::new(&abi_bin);
+        let mut cmd = tokio::process::Command::new(&fno_bin);
         cmd.args(["status-fanout", "tick"]).current_dir(&target.cwd);
         // Failure otherwise swallowed (next tick retries; at-least-once cursor
         // semantics). The kill must NOT be silent - the one line below is required.
@@ -778,11 +778,11 @@ fn journal_for(cwd: &Path) -> Journal {
 /// carries no mission id (a malformed receipt). No driver-lib preflight: the
 /// worker drivers are resolved per CHILD project inside `advance --epic`, not at
 /// the epic's cwd, so the epic project need not itself be drivable.
-fn drain_config_for(target: &ResolvedTarget, abi_bin: &str) -> Option<DrainConfig> {
+fn drain_config_for(target: &ResolvedTarget, fno_bin: &str) -> Option<DrainConfig> {
     let mission = target.mission.clone()?;
     Some(DrainConfig {
         cwd: PathBuf::from(&target.cwd),
-        abi_bin: abi_bin.to_string(),
+        fno_bin: fno_bin.to_string(),
         mission,
         failure_limit: target.failure_limit,
     })
@@ -852,7 +852,7 @@ async fn wait_for_wake(
 /// that is safe by design - the dispatched worker owns its `node:<id>` claim
 /// independently and the live-claims filter excludes it on the next start.
 pub async fn run_supervisor(
-    abi_bin: String,
+    fno_bin: String,
     emitter: EventEmitter,
     live: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
@@ -873,8 +873,8 @@ pub async fn run_supervisor(
         tasks.retain(|_, h| !h.is_finished());
         fanout_tasks.retain(|_, h| !h.is_finished());
 
-        let targets = resolve_targets(&abi_bin);
-        let fanout_targets = resolve_fanout_targets(&abi_bin);
+        let targets = resolve_targets(&fno_bin);
+        let fanout_targets = resolve_fanout_targets(&fno_bin);
         // `live` keeps the daemon out of idle-exit while ANY supervised work
         // exists - drain OR fanout. A sink-only project (no active_backlog) must
         // keep the daemon alive, else the daemon idle-exits and kills its fanout
@@ -895,7 +895,7 @@ pub async fn run_supervisor(
             if let std::collections::hash_map::Entry::Vacant(slot) = tasks.entry(mission) {
                 slot.insert(tokio::spawn(mission_drain_loop(
                     target,
-                    abi_bin.clone(),
+                    fno_bin.clone(),
                     emitter.clone(),
                     Arc::clone(&shutdown),
                 )));
@@ -910,7 +910,7 @@ pub async fn run_supervisor(
             {
                 slot.insert(tokio::spawn(per_project_fanout_loop(
                     ft,
-                    abi_bin.clone(),
+                    fno_bin.clone(),
                     Arc::clone(&shutdown),
                 )));
             }
@@ -950,7 +950,7 @@ async fn sleep_interruptible(total: Duration, shutdown: &Arc<AtomicBool>) {
 /// was cleared), or `advance --epic` reports the mission deactivated / all done.
 async fn mission_drain_loop(
     target: ResolvedTarget,
-    abi_bin: String,
+    fno_bin: String,
     emitter: EventEmitter,
     shutdown: Arc<AtomicBool>,
 ) {
@@ -974,7 +974,7 @@ async fn mission_drain_loop(
         // Re-resolve this mission's liveness. If its epic dropped out of the
         // target set (mission_active cleared externally), exit the loop (the
         // supervisor will not respawn it).
-        let current = resolve_targets(&abi_bin)
+        let current = resolve_targets(&fno_bin)
             .into_iter()
             .find(|t| t.mission.as_deref() == Some(mission.as_str()));
         let Some(t) = current else {
@@ -982,7 +982,7 @@ async fn mission_drain_loop(
         };
         let interval = Duration::from_secs(t.interval_seconds.max(1));
 
-        let Some(cfg) = drain_config_for(&t, &abi_bin) else {
+        let Some(cfg) = drain_config_for(&t, &fno_bin) else {
             // Malformed target (no mission id); back off and re-check.
             sleep_interruptible(interval, &shutdown).await;
             continue;
@@ -1159,10 +1159,10 @@ mod tests {
         p.display().to_string()
     }
 
-    fn test_cfg(tmp: &std::path::Path, abi_bin: String, failure_limit: u32) -> DrainConfig {
+    fn test_cfg(tmp: &std::path::Path, fno_bin: String, failure_limit: u32) -> DrainConfig {
         DrainConfig {
             cwd: tmp.to_path_buf(),
-            abi_bin,
+            fno_bin,
             mission: "x-epic".to_string(),
             failure_limit,
         }

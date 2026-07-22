@@ -342,9 +342,9 @@ def test_cleanup_skips_in_progress_target_session(tmp_repo, isolated_env):
     create = run_wtm("create", ".", "active-test", cwd=tmp_repo, env=isolated_env)
     wt_path = Path(parse_json(create.stdout)["path"])
 
-    abil = wt_path / ".fno"
-    abil.mkdir(parents=True, exist_ok=True)
-    (abil / "target-state.md").write_text(textwrap.dedent("""
+    fnodir = wt_path / ".fno"
+    fnodir.mkdir(parents=True, exist_ok=True)
+    (fnodir / "target-state.md").write_text(textwrap.dedent("""
         ---
         status: IN_PROGRESS
         ---
@@ -387,9 +387,9 @@ def test_migrate_auto_removes_stale_but_preserves_live(tmp_repo, isolated_env):
 
     live = run_wtm("create", ".", "live-wt", cwd=tmp_repo, env=isolated_env)
     live_path = Path(parse_json(live.stdout)["path"])
-    abil = live_path / ".fno"
-    abil.mkdir(parents=True, exist_ok=True)
-    (abil / "target-state.md").write_text("---\nstatus: IN_PROGRESS\n---\n")
+    fnodir = live_path / ".fno"
+    fnodir.mkdir(parents=True, exist_ok=True)
+    (fnodir / "target-state.md").write_text("---\nstatus: IN_PROGRESS\n---\n")
 
     result = run_wtm("migrate", "--auto", cwd=tmp_repo, env=isolated_env)
     assert result.returncode == 0, result.stderr
@@ -409,9 +409,9 @@ def test_migrate_treats_unreadable_state_as_live(tmp_repo, isolated_env):
     """
     create = run_wtm("create", ".", "unreadable-test", cwd=tmp_repo, env=isolated_env)
     wt_path = Path(parse_json(create.stdout)["path"])
-    abil = wt_path / ".fno"
-    abil.mkdir(parents=True, exist_ok=True)
-    state = abil / "target-state.md"
+    fnodir = wt_path / ".fno"
+    fnodir.mkdir(parents=True, exist_ok=True)
+    state = fnodir / "target-state.md"
     state.write_text("---\nstatus: IN_PROGRESS\n---\n")
     try:
         state.chmod(0o000)  # unreadable

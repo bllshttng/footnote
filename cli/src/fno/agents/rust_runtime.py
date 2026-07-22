@@ -24,7 +24,7 @@ only *installed* binaries (bundled wheel dir / launcher sibling / ``PATH``) and
 ignores the cargo dev target; a dev opts into the local build with
 ``FNO_AGENTS_RUNTIME=rust``. This makes the change reversible per-invocation.
 
-Design: ``internal/fno/design/2026-05-22-abi-pty-supervisor-and-drive.md``
+Design: ``internal/fno/design/2026-05-22-fno-pty-supervisor-and-drive.md``
 (line 136 — "Python ``fno agents <verb>`` is a thin Typer wrapper that execs
 ``fno-agents <verb>``"). Plan: ``plans/2026-05-25-phase6-w6-distribution.md``.
 """

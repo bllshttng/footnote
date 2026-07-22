@@ -1,7 +1,7 @@
 """fno.plan._folder_audit - precondition check for folder-reader removal.
 
 Counts folder plans (dirs holding ``00-INDEX.md``) whose owning graph node is
-NOT terminal. "Owning" is a basename join on ``plan_path`` (the abilities->fno
+NOT terminal. "Owning" is a basename join on ``plan_path`` (the fno->fno
 rename + ``internal/`` symlink mean absolute roots differ between the graph's
 recorded ``plan_path`` and the vault's resolved plans dir - x-429f established
 this join is the only reliable match). A folder plan with no owning node, or

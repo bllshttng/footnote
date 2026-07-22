@@ -58,9 +58,9 @@ def test_default_settings_path_returns_project_local_when_exists(
     # Create a project-local settings.yaml at cwd/.fno/settings.yaml
     cwd = tmp_path / "my-project"
     cwd.mkdir()
-    abilities_dir = cwd / ".fno"
-    abilities_dir.mkdir()
-    local_settings = abilities_dir / "config.toml"
+    fno_dir = cwd / ".fno"
+    fno_dir.mkdir()
+    local_settings = fno_dir / "config.toml"
     local_settings.write_text("schema_version = 1\n", encoding="utf-8")
 
     # Override PWD so _default_settings_path uses our test dir

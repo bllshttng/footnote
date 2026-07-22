@@ -30,7 +30,7 @@ fn short_lock_path() -> PathBuf {
     use std::sync::atomic::{AtomicU32, Ordering};
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    PathBuf::from(format!("/tmp/abiflk{}_{}.lock", std::process::id(), n))
+    PathBuf::from(format!("/tmp/fnoflk{}_{}.lock", std::process::id(), n))
 }
 
 /// Run a python snippet that tries to flock `path` non-blocking, printing

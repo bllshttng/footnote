@@ -118,7 +118,7 @@ def scan_file(rel_path: Path) -> list[dict]:
         # which also matches the legacy form, does not double-flag the
         # same callsite as both mapped and unmapped.
         mapped_spans: list[tuple[int, int]] = []
-        for pattern, abi_verb in MAPPINGS:
+        for pattern, fno_verb in MAPPINGS:
             for m in re.finditer(pattern, line):
                 mapped_spans.append(m.span())
                 entries.append({
@@ -126,7 +126,7 @@ def scan_file(rel_path: Path) -> list[dict]:
                     "line": lineno,
                     "current": line.rstrip(),
                     "match": m.group(0),
-                    "proposed": abi_verb,
+                    "proposed": fno_verb,
                     "kind": file_kind(rel_path),
                 })
         # Catch unmapped direct invocations for human review. Iterate

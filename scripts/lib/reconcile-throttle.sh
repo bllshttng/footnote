@@ -23,7 +23,7 @@ RECONCILE_THROTTLE_SECONDS="${RECONCILE_THROTTLE_SECONDS:-900}"
 # Resolve an `fno` runner. Hooks run in a minimal env where ~/.local/bin may
 # not be on PATH. Prefer PATH, then the common user-install location. Echoes
 # the command (or nothing) and returns non-zero when none is found.
-_reconcile_resolve_abi() {
+_reconcile_resolve_fno() {
     if command -v fno >/dev/null 2>&1; then
         echo "fno"
         return 0
@@ -64,9 +64,9 @@ reconcile_maybe_fire() {
         fi
     fi
 
-    local abi_cmd
-    abi_cmd="$(_reconcile_resolve_abi)" || return 0
-    [[ -n "$abi_cmd" ]] || return 0
+    local fno_cmd
+    fno_cmd="$(_reconcile_resolve_fno)" || return 0
+    [[ -n "$fno_cmd" ]] || return 0
 
     # Claim the throttle window BEFORE launching so a parallel caller starting
     # in the same instant sees a fresh stamp and skips.
@@ -100,7 +100,7 @@ reconcile_maybe_fire() {
         "$2" retro run >/dev/null 2>&1 || true
         "$2" backlog capture tidy >/dev/null 2>&1 || true
         "$2" retro drain-postmortems >/dev/null 2>&1 || true
-    ' _ "$repo_root" "$abi_cmd" "$result" >/dev/null 2>&1 &
+    ' _ "$repo_root" "$fno_cmd" "$result" >/dev/null 2>&1 &
     disown 2>/dev/null || true
 
     return 0

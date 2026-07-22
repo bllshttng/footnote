@@ -122,7 +122,7 @@ class SourceNotFoundError(Exception):
     """Raised when the fno source path cannot be located."""
 
 
-def _looks_like_abi_source(path: Path) -> bool:
+def _looks_like_fno_source(path: Path) -> bool:
     """True if path contains a pyproject.toml declaring ``[project] name = "fno"``.
 
     Parses the TOML rather than substring-matching so a stray ``name = "fno"``
@@ -154,7 +154,7 @@ def _discover_source(override: Optional[Path] = None) -> Path:
     """
     if override is not None:
         path = override.expanduser().resolve()
-        if not _looks_like_abi_source(path):
+        if not _looks_like_fno_source(path):
             raise SourceNotFoundError(
                 f"--source {path} does not contain a pyproject.toml with "
                 "name = 'fno'. Pass a path to the fno CLI source directory."
@@ -182,13 +182,13 @@ def _discover_source(override: Optional[Path] = None) -> Path:
         if path in seen:
             continue
         seen.add(path)
-        if _looks_like_abi_source(path):
+        if _looks_like_fno_source(path):
             return path
 
     raise SourceNotFoundError(
-        "Could not locate the fno CLI source. Pass --source /path/to/abilities/cli, "
+        "Could not locate the fno CLI source. Pass --source /path/to/fno/cli, "
         "set $FNO_SOURCE, or install the fno plugin into "
-        "~/.claude/plugins/abilities/."
+        "~/.claude/plugins/fno/."
     )
 
 

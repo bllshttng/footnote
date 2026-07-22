@@ -84,11 +84,11 @@ def create_worktree(
         )
 
     # Symlink .fno into the worktree so state files remain shared
-    abilities_src = (repo_root / ".fno").resolve()
-    abilities_link = wt_path / ".fno"
-    if abilities_src.exists() and not abilities_link.exists():
+    fno_src = (repo_root / ".fno").resolve()
+    fno_link = wt_path / ".fno"
+    if fno_src.exists() and not fno_link.exists():
         try:
-            abilities_link.symlink_to(abilities_src)
+            fno_link.symlink_to(fno_src)
         except OSError:
             # Filesystem may not support symlinks - document and continue
             pass
@@ -168,9 +168,9 @@ def remove_worktree(
     Resolution order for the path to remove (Gemini HIGH PR #234):
 
     1. If ``name`` is a full canonical directory name (e.g.
-       ``abi-foo`` from ``list_worktrees``), use
+       ``fno-foo`` from ``list_worktrees``), use
        ``~/.fno/worktrees/{name}/`` directly. This is the round-
-       trip case: list emits ``abi-foo`` then remove takes the same
+       trip case: list emits ``fno-foo`` then remove takes the same
        string back.
     2. Else if a canonical worktree exists at
        ``~/.fno/worktrees/{proj}-{name}/`` (the slug-only case
@@ -181,7 +181,7 @@ def remove_worktree(
 
     The earlier "canonical-only-if-exists, else legacy" shape silently
     double-prepended the project id when called as
-    ``remove_worktree(name="abi-foo")`` and missed every canonical
+    ``remove_worktree(name="fno-foo")`` and missed every canonical
     worktree listed by ``list_worktrees`` until the path drifted.
 
     Args:

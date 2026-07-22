@@ -247,7 +247,7 @@ def test_cmd_send_ref_flags_ride_in_thread(isolated, runner) -> None:
     assert refs.get("ref_node") == "ab-1f3c9a2b"
 
 
-def test_cmd_send_explicit_from_name_abilities_is_honored(isolated, runner) -> None:
+def test_cmd_send_explicit_from_name_fno_is_honored(isolated, runner) -> None:
     """An explicit --from-name (even the literal 'fno') wins verbatim;
     only an UNSET --from-name resolves the sender from settings."""
     from fno.inbox.store import read_unread_threads

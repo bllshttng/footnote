@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # check-no-hardcoded-paths.sh - CI gate that blocks new hardcoded ~/.fno
-# path literals from landing in the abilities codebase.
+# path literals from landing in the fno codebase.
 #
 # After Phase 03 of the path-config migration (plan 2026-05-14-path-config-impl),
 # all path resolution must go through:

@@ -33,7 +33,7 @@ fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 # Resolve the `fno` command: prefer an installed binary, fall back to
 # `python -m fno.cli` against the in-repo venv. Both spell the same
 # surface; the alias behavior is independent of invocation shape.
-resolve_abi() {
+resolve_fno() {
     if command -v fno >/dev/null 2>&1; then
         echo "fno"
         return
@@ -46,9 +46,9 @@ resolve_abi() {
     echo "python3 -m fno.cli"
 }
 
-ABI=$(resolve_abi)
+ABI=$(resolve_fno)
 
-run_abi() {
+run_fno() {
     # shellcheck disable=SC2086
     $ABI "$@"
 }
@@ -73,7 +73,7 @@ verb_in_help() {
 # --- Scenario 1: fno backlog --help lists advertised verbs ------------------
 # x-71b6 In-N-Out tiering: intake/ready are hidden now (still invocable); probe
 # the advertised menu instead.
-out=$(run_abi backlog --help 2>&1)
+out=$(run_fno backlog --help 2>&1)
 for verb in add done next find triage; do
     if verb_in_help "$verb" "$out"; then
         pass "backlog --help lists '$verb'"
@@ -83,7 +83,7 @@ for verb in add done next find triage; do
 done
 
 # --- Scenario 2: fno graph --help identical verb surface --------------------
-graph_out=$(run_abi graph --help 2>&1)
+graph_out=$(run_fno graph --help 2>&1)
 if verb_in_help "find" "$graph_out"; then
     pass "graph --help lists 'find' (alias shares app)"
 else
@@ -91,7 +91,7 @@ else
 fi
 
 # --- Scenario 3: fno --help hides graph, shows backlog ----------------------
-top_out=$(run_abi --help 2>&1)
+top_out=$(run_fno --help 2>&1)
 if verb_in_help "backlog" "$top_out"; then
     pass "top-level help shows 'backlog'"
 else
@@ -112,7 +112,7 @@ title: Intake Test Plan
 # Body
 EOF
 
-intake_out=$(run_abi backlog intake "$plan_a" 2>&1)
+intake_out=$(run_fno backlog intake "$plan_a" 2>&1)
 if [[ "$intake_out" == *"adopted ab-"* ]]; then
     pass "intake creates a node"
 else
@@ -129,7 +129,7 @@ title: Adopt Alias Test Plan
 EOF
 
 adopt_rc=0
-adopt_combined=$(run_abi backlog adopt "$plan_b" 2>&1) || adopt_rc=$?
+adopt_combined=$(run_fno backlog adopt "$plan_b" 2>&1) || adopt_rc=$?
 
 if [[ "$adopt_rc" -ne 0 ]]; then
     pass "adopt alias is gone (non-zero exit)"
@@ -155,7 +155,7 @@ print(entries[-1]['id'] if entries else '')
 if [[ -z "$node_id" ]]; then
     fail "no node ID available for done test"
 else
-    done_out=$(run_abi backlog done "$node_id" 2>&1)
+    done_out=$(run_fno backlog done "$node_id" 2>&1)
     if [[ "$done_out" == *"Marked $node_id done"* ]]; then
         pass "done marks node complete"
     else
@@ -180,7 +180,7 @@ fi
 
 # --- Scenario 7: done is idempotent on re-run -------------------------------
 if [[ -n "$node_id" ]]; then
-    done_again=$(run_abi backlog done "$node_id" 2>&1)
+    done_again=$(run_fno backlog done "$node_id" 2>&1)
     rc=$?
     if [[ $rc -eq 0 ]]; then
         pass "done rerun exits 0 (idempotent)"

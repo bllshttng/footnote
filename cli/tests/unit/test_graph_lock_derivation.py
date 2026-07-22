@@ -21,7 +21,7 @@ from fno.graph.store import _graph_lock_path, locked_mutate_graph
 def test_lock_is_resolved_sibling(tmp_path):
     g = tmp_path / "graph.json"
     assert _graph_lock_path(g) == Path(str(g.resolve()) + ".lock")
-    assert "/tmp/abilities-graph.lock" not in str(_graph_lock_path(g))
+    assert "/tmp/fno-graph.lock" not in str(_graph_lock_path(g))
 
 
 # --- AC4: aliased spellings of one file derive one lock inode ---

@@ -7,7 +7,7 @@ depending on the installed `fno` snapshot. Proves:
   * a bare `/target ab-XXXX` input (no plan) acquires node:<id>,
   * the acquire uses a TTL and the global root (FNO_CLAIMS_ROOT=$HOME),
   * exit 1 (held-by-other) refuses via the .target-cancelled sentinel,
-  * exit 2 (usage / stale-abi) does NOT block the session.
+  * exit 2 (usage / stale-fno) does NOT block the session.
 """
 from __future__ import annotations
 

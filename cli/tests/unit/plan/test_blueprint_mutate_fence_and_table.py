@@ -47,7 +47,7 @@ _ARCH_WITH_FENCED_DIAGRAM = """## Architecture
 The layout looks like this:
 
 ```
-abilities/
+fno/
 ├── .claude-plugin/          # Plugin manifest
 ├── skills/                  # Skills directory
 ├── scripts/                 # Validation, metrics

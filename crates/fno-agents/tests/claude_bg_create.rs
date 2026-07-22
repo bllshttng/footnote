@@ -12,7 +12,7 @@ use std::time::Duration;
 
 fn tmpdir(tag: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "abi-ask-create-{}-{}-{}",
+        "fno-ask-create-{}-{}-{}",
         tag,
         std::process::id(),
         std::time::SystemTime::now()

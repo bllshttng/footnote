@@ -59,8 +59,8 @@ fn real_node_json(id: &str, title: &str, plan_path: Option<&str>) -> String {
   "title": "{title}",
   "priority": "p2",
   "domain": "code",
-  "project": "abilities",
-  "cwd": "/home/user/code/abilities",
+  "project": "fno",
+  "cwd": "/home/user/code/fno",
   "size": null,
   "plan_path": {pp}
 }}"#
@@ -122,15 +122,15 @@ exit 0"#,
             node_json = real_node_json(
                 "ab-7303e5d7",
                 "Group 2: megawalk over the loop",
-                Some("/home/user/code/abilities/internal/fno/design/2026-06-05.md#group-2")
+                Some("/home/user/code/fno/internal/fno/design/2026-06-05.md#group-2")
             ),
             call_log_str = call_log_str,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
+    let fno_stub = bin_dir.join("fno").display().to_string();
     let mut q = MegawalkQueue::new(
-        abi_stub, None,  // project filter
+        fno_stub, None,  // project filter
         false, // all
     );
 
@@ -144,7 +144,7 @@ exit 0"#,
     );
     assert_eq!(
         unit.plan_path.as_deref(),
-        Some("/home/user/code/abilities/internal/fno/design/2026-06-05.md#group-2")
+        Some("/home/user/code/fno/internal/fno/design/2026-06-05.md#group-2")
     );
 
     // Verify claim was acquired with the right key and holder prefix.
@@ -185,8 +185,8 @@ fi
 exit 0"#,
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
     let result = q.next().expect("no error");
     assert!(result.is_none(), "null output must return None");
 }
@@ -213,8 +213,8 @@ fi
 exit 0"#,
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
     match q.next() {
         Err(e) => {
             let err_str = e.to_string();
@@ -271,8 +271,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
     let unit = q.next().expect("no error").expect("expected Some(unit)");
     assert_eq!(
         unit.id, "ab-bbbbbbbb",
@@ -310,8 +310,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
     let err_str = match q.next() {
         Err(e) => e.to_string(),
         Ok(_) => panic!("exhausted retries must return Err"),
@@ -356,8 +356,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
     let unit = q.next().unwrap().unwrap();
 
     let evidence = Evidence {
@@ -426,8 +426,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
     let unit = q.next().unwrap().unwrap();
 
     let evidence = Evidence {
@@ -498,8 +498,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
     let unit = q.next().unwrap().unwrap();
 
     let evidence = Evidence {
@@ -573,9 +573,9 @@ fn ac10_e2e_run_loop_two_nodes_then_nowork() {
     let bin_dir = tmp.path().join("bin");
 
     // Project journal where loop runtime writes events.
-    let abilities_dir = tmp.path().join("project").join(".fno");
-    fs::create_dir_all(&abilities_dir).unwrap();
-    let project_journal = abilities_dir.join("events.jsonl");
+    let fno_dir = tmp.path().join("project").join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
+    let project_journal = fno_dir.join("events.jsonl");
     let global_journal = tmp.path().join("global-events.jsonl");
 
     let _node_a_key = "20260606T000000Z-mwXXXXX-aaaaaa";
@@ -661,8 +661,8 @@ exit 0"#,
     let path_str = path_with(&bin_dir);
 
     // Build the queue, journal, budget, and dispatcher.
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut queue = MegawalkQueue::new(abi_stub.clone(), None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut queue = MegawalkQueue::new(fno_stub.clone(), None, false);
 
     let journal = Journal::new_raw(project_journal.clone(), global_journal.clone());
     let budget = LoopBudget::new(10).unwrap();
@@ -739,7 +739,7 @@ exit 0"#,
         lib_path.clone(),
         env,
         tmp.path().join("project"),
-        abi_stub.clone(),
+        fno_stub.clone(),
         false, // allow_merge
     );
 
@@ -788,9 +788,9 @@ fn ac11_p0_failure_via_production_queue_triggers_policy_pause() {
     let lib_dir = tmp.path().join("lib");
 
     // Project journal (walker cwd).
-    let abilities_dir = tmp.path().join(".fno");
-    fs::create_dir_all(&abilities_dir).unwrap();
-    let project_journal = abilities_dir.join("events.jsonl");
+    let fno_dir = tmp.path().join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
+    let project_journal = fno_dir.join("events.jsonl");
     let global_journal = tmp.path().join("global-events.jsonl");
 
     // ── stub driver lib (never emits a termination event) ─────────────────
@@ -828,7 +828,7 @@ exit 1
   "title": "Critical p0 task",
   "priority": "p0",
   "domain": "code",
-  "project": "abilities",
+  "project": "fno",
   "cwd": "/tmp",
   "size": null,
   "plan_path": null
@@ -873,10 +873,10 @@ exit 0"#,
     write_stub(&bin_dir, "claude", "exit 0");
 
     let path_str = path_with(&bin_dir);
-    let abi_stub = bin_dir.join("fno").display().to_string();
+    let fno_stub = bin_dir.join("fno").display().to_string();
 
     // ── build the production MegawalkQueue ────────────────────────────────
-    let mut queue = MegawalkQueue::new(abi_stub.clone(), None, false);
+    let mut queue = MegawalkQueue::new(fno_stub.clone(), None, false);
     let journal = Journal::new_raw(project_journal.clone(), global_journal.clone());
     // per_unit_max_dispatches = 2: after 2 dispatches without a termination
     // event the unit is parked as NoProgress, and the p0 policy fires on the
@@ -911,7 +911,7 @@ exit 0"#,
         lib_path.clone(),
         env,
         tmp.path().to_path_buf(),
-        abi_stub.clone(),
+        fno_stub.clone(),
         false,
     );
 
@@ -1008,9 +1008,9 @@ fn ac12_parked_node_claim_held_not_released() {
     let call_log_str = call_log.display().to_string();
 
     // Project journal for the walk.
-    let abilities_dir = tmp.path().join(".fno");
-    fs::create_dir_all(&abilities_dir).unwrap();
-    let project_journal = abilities_dir.join("events.jsonl");
+    let fno_dir = tmp.path().join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
+    let project_journal = fno_dir.join("events.jsonl");
     let global_journal = tmp.path().join("global-events.jsonl");
 
     // Stub fno:
@@ -1095,13 +1095,13 @@ driver_invoke() {{
 
     write_stub(&bin_dir, "claude", "exit 0");
     let path_str = path_with(&bin_dir);
-    let abi_stub = bin_dir.join("fno").display().to_string();
+    let fno_stub = bin_dir.join("fno").display().to_string();
 
     // The dispatcher cwd must exist (ShelloutDispatcher uses current_dir).
     let dispatch_cwd = tmp.path().join("project");
     fs::create_dir_all(&dispatch_cwd).unwrap();
 
-    let mut queue = MegawalkQueue::new(abi_stub.clone(), None, false);
+    let mut queue = MegawalkQueue::new(fno_stub.clone(), None, false);
     let journal = Journal::new_raw(project_journal.clone(), global_journal.clone());
     let budget = LoopBudget::new(10).unwrap();
 
@@ -1129,7 +1129,7 @@ driver_invoke() {{
     ];
 
     let dispatcher =
-        MegawalkDispatcher::new(lib_path.clone(), env, dispatch_cwd, abi_stub.clone(), false);
+        MegawalkDispatcher::new(lib_path.clone(), env, dispatch_cwd, fno_stub.clone(), false);
 
     let cancel = || false;
     let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &cancel, None)
@@ -1217,9 +1217,9 @@ fn ac13_max_units_one_stops_after_first_unit() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
 
-    let abilities_dir = tmp.path().join(".fno");
-    fs::create_dir_all(&abilities_dir).unwrap();
-    let project_journal = abilities_dir.join("events.jsonl");
+    let fno_dir = tmp.path().join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
+    let project_journal = fno_dir.join("events.jsonl");
     let global_journal = tmp.path().join("global-events.jsonl");
 
     let node_a = real_node_json("ab-maxu-aaa", "Max-units Node A", None);
@@ -1293,14 +1293,14 @@ driver_invoke() {{
 
     write_stub(&bin_dir, "claude", "exit 0");
     let path_str = path_with(&bin_dir);
-    let abi_stub = bin_dir.join("fno").display().to_string();
+    let fno_stub = bin_dir.join("fno").display().to_string();
 
     // The dispatcher cwd must exist (ShelloutDispatcher uses current_dir).
     let dispatch_cwd = tmp.path().join("project");
     fs::create_dir_all(&dispatch_cwd).unwrap();
 
     // Build MegawalkQueue with max_units = Some(1).
-    let mut queue = MegawalkQueue::new_with_max_units(abi_stub.clone(), None, false, Some(1));
+    let mut queue = MegawalkQueue::new_with_max_units(fno_stub.clone(), None, false, Some(1));
     let journal = Journal::new_raw(project_journal.clone(), global_journal.clone());
     let budget = LoopBudget::new(10).unwrap();
 
@@ -1328,7 +1328,7 @@ driver_invoke() {{
     ];
 
     let dispatcher =
-        MegawalkDispatcher::new(lib_path.clone(), env, dispatch_cwd, abi_stub.clone(), false);
+        MegawalkDispatcher::new(lib_path.clone(), env, dispatch_cwd, fno_stub.clone(), false);
 
     let cancel = || false;
     let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &cancel, None)
@@ -1486,8 +1486,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
 
     let err = match q.next() {
         Err(e) => e,
@@ -1549,8 +1549,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
 
     let err = match q.next() {
         Err(e) => e,
@@ -1604,8 +1604,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
     let unit = q.next().unwrap().unwrap();
 
     // Budget reason + a non-empty synthesized diagnostic.
@@ -1717,7 +1717,7 @@ fn ac19_p0_failure_cleared_in_production_queue_after_success() {
   "title": "p0 prod node",
   "priority": "p0",
   "domain": "code",
-  "project": "abilities",
+  "project": "fno",
   "cwd": "/tmp",
   "size": null,
   "plan_path": null
@@ -1773,8 +1773,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
 
     // Step 1: dequeue p0 node, close with failure -> sets policy_p0_failure.
     let unit_a = q.next().unwrap().unwrap();
@@ -1876,9 +1876,9 @@ fn ac20_max_units_1_with_parked_unit_stops_walk() {
     let call_log = tmp.path().join("calls.log");
     let call_log_str = call_log.display().to_string();
 
-    let abilities_dir = tmp.path().join(".fno");
-    fs::create_dir_all(&abilities_dir).unwrap();
-    let project_journal = abilities_dir.join("events.jsonl");
+    let fno_dir = tmp.path().join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
+    let project_journal = fno_dir.join("events.jsonl");
     let global_journal = tmp.path().join("global-events.jsonl");
 
     // Node A and B are both ready.
@@ -1947,13 +1947,13 @@ driver_invoke() {{
 
     write_stub(&bin_dir, "claude", "exit 0");
     let path_str = path_with(&bin_dir);
-    let abi_stub = bin_dir.join("fno").display().to_string();
+    let fno_stub = bin_dir.join("fno").display().to_string();
 
     let dispatch_cwd = tmp.path().join("project");
     fs::create_dir_all(&dispatch_cwd).unwrap();
 
     // max_units = 1: even if the unit parks, the walk should stop after one unit.
-    let mut queue = MegawalkQueue::new_with_max_units(abi_stub.clone(), None, false, Some(1));
+    let mut queue = MegawalkQueue::new_with_max_units(fno_stub.clone(), None, false, Some(1));
     let journal = Journal::new_raw(project_journal.clone(), global_journal.clone());
     let budget = LoopBudget::new(10).unwrap();
 
@@ -1981,7 +1981,7 @@ driver_invoke() {{
     ];
 
     let dispatcher =
-        MegawalkDispatcher::new(lib_path.clone(), env, dispatch_cwd, abi_stub.clone(), false);
+        MegawalkDispatcher::new(lib_path.clone(), env, dispatch_cwd, fno_stub.clone(), false);
 
     let cancel = || false;
     let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &cancel, None)
@@ -2073,7 +2073,7 @@ driver_invoke() { exit 0; }
 
     write_stub(&bin_dir, "claude", "exit 0");
     let path_str = path_with(&bin_dir);
-    let abi_stub = bin_dir.join("fno").display().to_string();
+    let fno_stub = bin_dir.join("fno").display().to_string();
     let cwd = tmp.path().join("project");
     fs::create_dir_all(&cwd).unwrap();
 
@@ -2122,7 +2122,7 @@ driver_invoke() { exit 0; }
             "--cwd",
             cwd.to_str().unwrap(),
         ])
-        .env("FNO_BIN", &abi_stub)
+        .env("FNO_BIN", &fno_stub)
         .env("PATH", &path_str)
         .output()
         .expect("failed to spawn fno-agents");
@@ -2183,8 +2183,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
 
     let unit = q
         .next()
@@ -2225,9 +2225,9 @@ fn ac23_mission_env_injected_when_node_has_mission_fields() {
     let env_dump = tmp.path().join("env_dump.txt");
     let env_dump_str = env_dump.display().to_string();
 
-    let abilities_dir = tmp.path().join(".fno");
-    fs::create_dir_all(&abilities_dir).unwrap();
-    let project_journal = abilities_dir.join("events.jsonl");
+    let fno_dir = tmp.path().join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
+    let project_journal = fno_dir.join("events.jsonl");
     let global_journal = tmp.path().join("global-events.jsonl");
 
     // Node JSON with all four mission fields (as _node_summary will emit them).
@@ -2237,7 +2237,7 @@ fn ac23_mission_env_injected_when_node_has_mission_fields() {
   "title": "Fleet node with mission",
   "priority": "p2",
   "domain": "code",
-  "project": "abilities",
+  "project": "fno",
   "cwd": "/tmp",
   "size": null,
   "plan_path": null,
@@ -2309,10 +2309,10 @@ driver_invoke() {{
     let max_file = lib_dir.join("driver-default-max");
     fs::write(&max_file, "10\n").unwrap();
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
+    let fno_stub = bin_dir.join("fno").display().to_string();
     let path_str = path_with(&bin_dir);
 
-    let mut queue = MegawalkQueue::new(abi_stub.clone(), None, false);
+    let mut queue = MegawalkQueue::new(fno_stub.clone(), None, false);
     let journal = Journal::new_raw(project_journal.clone(), global_journal.clone());
     let budget = LoopBudget::new(10).unwrap();
 
@@ -2341,7 +2341,7 @@ driver_invoke() {{
         lib_path.clone(),
         env,
         tmp.path().to_path_buf(),
-        abi_stub.clone(),
+        fno_stub.clone(),
         false,
     );
 
@@ -2387,9 +2387,9 @@ fn ac24_no_mission_env_when_node_has_no_mission_id() {
     let env_dump = tmp.path().join("env_dump.txt");
     let env_dump_str = env_dump.display().to_string();
 
-    let abilities_dir = tmp.path().join(".fno");
-    fs::create_dir_all(&abilities_dir).unwrap();
-    let project_journal = abilities_dir.join("events.jsonl");
+    let fno_dir = tmp.path().join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
+    let project_journal = fno_dir.join("events.jsonl");
     let global_journal = tmp.path().join("global-events.jsonl");
 
     // Plain node with null mission fields (what _node_summary emits for non-fleet).
@@ -2398,7 +2398,7 @@ fn ac24_no_mission_env_when_node_has_no_mission_id() {
   "title": "Regular non-fleet node",
   "priority": "p2",
   "domain": "code",
-  "project": "abilities",
+  "project": "fno",
   "cwd": "/tmp",
   "size": null,
   "plan_path": null,
@@ -2459,10 +2459,10 @@ driver_invoke() {{
     fs::set_permissions(&lib_path, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(lib_dir.join("driver-default-max"), "10\n").unwrap();
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
+    let fno_stub = bin_dir.join("fno").display().to_string();
     let path_str = path_with(&bin_dir);
 
-    let mut queue = MegawalkQueue::new(abi_stub.clone(), None, false);
+    let mut queue = MegawalkQueue::new(fno_stub.clone(), None, false);
     let journal = Journal::new_raw(project_journal.clone(), global_journal.clone());
     let budget = LoopBudget::new(10).unwrap();
 
@@ -2490,7 +2490,7 @@ driver_invoke() {{
         lib_path.clone(),
         env,
         tmp.path().to_path_buf(),
-        abi_stub.clone(),
+        fno_stub.clone(),
         false,
     );
 
@@ -2522,7 +2522,7 @@ fn ac25_mission_id_without_wave_returns_loud_queue_error() {
   "title": "Corrupted fleet node",
   "priority": "p2",
   "domain": "code",
-  "project": "abilities",
+  "project": "fno",
   "cwd": "/tmp",
   "size": null,
   "plan_path": null,
@@ -2549,8 +2549,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut queue = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut queue = MegawalkQueue::new(fno_stub, None, false);
 
     // next() must return a LoopError::Queue naming the node id and the missing field.
     match queue.next() {
@@ -2582,9 +2582,9 @@ fn ac26_mission_from_msg_id_null_maps_to_empty_string() {
     let env_dump = tmp.path().join("env_dump.txt");
     let env_dump_str = env_dump.display().to_string();
 
-    let abilities_dir = tmp.path().join(".fno");
-    fs::create_dir_all(&abilities_dir).unwrap();
-    let project_journal = abilities_dir.join("events.jsonl");
+    let fno_dir = tmp.path().join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
+    let project_journal = fno_dir.join("events.jsonl");
     let global_journal = tmp.path().join("global-events.jsonl");
 
     // mission_from_msg_id is null, all others present.
@@ -2593,7 +2593,7 @@ fn ac26_mission_from_msg_id_null_maps_to_empty_string() {
   "title": "Fleet node no from_msg_id",
   "priority": "p2",
   "domain": "code",
-  "project": "abilities",
+  "project": "fno",
   "cwd": "/tmp",
   "size": null,
   "plan_path": null,
@@ -2656,10 +2656,10 @@ driver_invoke() {{
     fs::set_permissions(&lib_path, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(lib_dir.join("driver-default-max"), "10\n").unwrap();
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
+    let fno_stub = bin_dir.join("fno").display().to_string();
     let path_str = path_with(&bin_dir);
 
-    let mut queue = MegawalkQueue::new(abi_stub.clone(), None, false);
+    let mut queue = MegawalkQueue::new(fno_stub.clone(), None, false);
     let journal = Journal::new_raw(project_journal.clone(), global_journal.clone());
     let budget = LoopBudget::new(10).unwrap();
 
@@ -2687,7 +2687,7 @@ driver_invoke() {{
         lib_path.clone(),
         env,
         tmp.path().to_path_buf(),
-        abi_stub.clone(),
+        fno_stub.clone(),
         false,
     );
 
@@ -2757,7 +2757,7 @@ exit 0"#,
     // claude stub for preflight binary check.
     write_stub(&bin_dir, "claude", "exit 0");
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
+    let fno_stub = bin_dir.join("fno").display().to_string();
     let path_str = path_with(&bin_dir);
     let cwd_dir = tmp.path().join("project");
     fs::create_dir_all(&cwd_dir).unwrap();
@@ -2804,7 +2804,7 @@ exit 0"#,
             "--cwd",
             cwd_dir.to_str().unwrap(),
         ])
-        .env("FNO_BIN", &abi_stub)
+        .env("FNO_BIN", &fno_stub)
         .env("PATH", &path_str)
         .output()
         .expect("failed to spawn fno-agents");
@@ -2867,8 +2867,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
     let unit = q.next().unwrap().unwrap();
 
     let evidence = Evidence {
@@ -2934,8 +2934,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
     let unit = q.next().unwrap().unwrap();
 
     let evidence = Evidence {
@@ -2985,8 +2985,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
 
     // Close 3 AwaitingMerge units directly (DonePRGreen reason + done exit 5).
     for i in 0..3 {
@@ -3042,8 +3042,8 @@ exit 0"#,
         ),
     );
 
-    let abi_stub = bin_dir.join("fno").display().to_string();
-    let mut q = MegawalkQueue::new(abi_stub, None, false);
+    let fno_stub = bin_dir.join("fno").display().to_string();
+    let mut q = MegawalkQueue::new(fno_stub, None, false);
 
     // Close 3 DonePRGreen units whose `backlog done` fails -> Parked -> failure.
     for i in 0..3 {

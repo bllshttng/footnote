@@ -27,7 +27,7 @@ fn short_home() -> AgentsHome {
     // pid + counter: collision-proof across parallel tests, and short enough
     // for the Unix-socket sun_path limit.
     AgentsHome::at(PathBuf::from(format!(
-        "/tmp/abie{}_{}",
+        "/tmp/fnoe{}_{}",
         std::process::id(),
         n
     )))
@@ -324,7 +324,7 @@ async fn drift_warned_on_list_stderr_only() {
     // A private copy of the daemon binary we can replace out from under the
     // running process (the running process keeps the old inode).
     let dcopy = PathBuf::from(format!(
-        "/tmp/abidcopy_{}_{}",
+        "/tmp/fnodcopy_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

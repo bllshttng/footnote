@@ -57,7 +57,7 @@ jobs:
           manifest="${{ matrix.dir }}/Cargo.toml"
           # Reject the stale untracked pre-rename crate dir so it can never be
           # packaged; the literal name is an intentional reference. fno-rename-keep
-          stale='abi-agents'  # fno-rename-keep
+          stale='fno-agents'  # fno-rename-keep
           case "$manifest" in
             *"$stale"*)
               echo "refusing to use a stale pre-rename crate path: $manifest"; exit 1;;
@@ -94,7 +94,7 @@ jobs:
           manifest="${{ matrix.dir }}/Cargo.toml"
           # Reject the stale untracked pre-rename crate dir so it can never be
           # published; the literal name is an intentional reference. fno-rename-keep
-          stale='abi-agents'  # fno-rename-keep
+          stale='fno-agents'  # fno-rename-keep
           case "$manifest" in
             *"$stale"*)
               echo "refusing to use a stale pre-rename crate path: $manifest"; exit 1;;

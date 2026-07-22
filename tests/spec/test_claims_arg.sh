@@ -96,7 +96,7 @@ cat > "$FIXTURE_HOME/.fno/graph.json" <<'JSON'
       "parent": null,
       "title": "Fixture idea node",
       "type": "feature",
-      "project": "abilities",
+      "project": "fno",
       "cwd": "/tmp/fixture",
       "priority": "p2",
       "domain": "code",

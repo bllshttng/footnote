@@ -57,7 +57,7 @@ except Exception:
 
         # Use git stash create + store to create a recoverable ref
         # WITHOUT modifying the working tree (stash push would remove files)
-        STASH_MSG="abilities-checkpoint-before-${AGENT_NAME// /-}"
+        STASH_MSG="fno-checkpoint-before-${AGENT_NAME// /-}"
         STASH_SHA=$(git stash create "$STASH_MSG" 2>/dev/null)
         if [[ -n "$STASH_SHA" ]]; then
             git stash store -m "$STASH_MSG" "$STASH_SHA" 2>/dev/null || true
@@ -80,7 +80,7 @@ except Exception:
         echo "{\"ts\":\"$TS\",\"type\":\"subagent_done\",\"agent\":\"$AGENT_NAME\"}" >> "$EVENTS_LOG" 2>/dev/null
 
         # Pop stash if one was created for this agent
-        STASH_MSG="abilities-checkpoint-before-${AGENT_NAME// /-}"
+        STASH_MSG="fno-checkpoint-before-${AGENT_NAME// /-}"
         STASH_REF=$(git stash list 2>/dev/null | grep "$STASH_MSG" | head -1 | cut -d: -f1)
         if [[ -n "$STASH_REF" ]]; then
             # Don't pop - just log that a recovery point exists.

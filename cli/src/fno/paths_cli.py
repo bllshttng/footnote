@@ -62,7 +62,7 @@ def shell_stub() -> None:
     with tempfile.NamedTemporaryFile(
         mode="w",
         suffix=".sh",
-        prefix="abi-paths-",
+        prefix="fno-paths-",
         delete=False,
         encoding="utf-8",
     ) as f:

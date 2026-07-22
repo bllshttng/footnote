@@ -14,7 +14,7 @@ a stray project-local ledger in the repo checkout. The dual-write is removed
      setup-worktree.sh's link_file, config_cli's activity probe) transparently
      resolves to the single global ledger rather than a dangling path.
 
-Holds the same flock the register path takes (/tmp/abilities-ledger.lock) and
+Holds the same flock the register path takes (/tmp/fno-ledger.lock) and
 refuses on contention, so a live stop-hook append can never interleave.
 
 Usage:
@@ -32,7 +32,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-LEDGER_LOCK_PATH = Path("/tmp/abilities-ledger.lock")
+LEDGER_LOCK_PATH = Path("/tmp/fno-ledger.lock")
 
 
 def _entries(data: object) -> list[dict]:

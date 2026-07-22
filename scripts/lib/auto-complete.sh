@@ -7,7 +7,7 @@
 # Behavior is identical to the inline definitions; the helper's only
 # consumer is the promise-branch entry condition in the hook.
 #
-# Constrained sources (check_pr, pr_merge, ci_watcher, abi_gate_manual)
+# Constrained sources (check_pr, pr_merge, ci_watcher, fno_gate_manual)
 # emit session_satisfied events; the LLM cannot forge one because the
 # stop hook checks the event's gate_state_hash against the current
 # state-file md5 (staleness check). Auto-complete is an alternative

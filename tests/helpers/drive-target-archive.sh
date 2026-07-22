@@ -32,7 +32,7 @@ export LOG_FILE
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 
 # Resolve the archive-artifacts lib path. Prefer the project's own copy when
-# this driver runs inside the abilities repo checkout; fall back to the
+# this driver runs inside the fno repo checkout; fall back to the
 # installed plugin location otherwise.
 ARCHIVE_LIB=""
 SCRIPT_DIR_OF_TEST="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

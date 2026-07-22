@@ -483,7 +483,7 @@ class TestAgentNamespaceRetired:
     absent (clean usage error), not a silent wrong result."""
 
     @pytest.mark.parametrize("verb", ["whoami", "status", "suggest", "capabilities"])
-    def test_abi_agent_verb_is_absent(self, tmp_path, runner, monkeypatch, verb):
+    def test_fno_agent_verb_is_absent(self, tmp_path, runner, monkeypatch, verb):
         project = _make_workspace(tmp_path, target=True)
         result = _invoke(runner, project, monkeypatch, "agent", verb)
         assert result.exit_code != 0

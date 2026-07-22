@@ -24,7 +24,7 @@ cd .claude/worktrees/<name>
 bash scripts/setup/setup-worktree.sh
 ```
 
-The setup script links the canonical `internal/`, the project-level `.fno/` state (settings, tasks, ledger, inbox, wake-signals, codemap), the `.claude/` subdirs (`agents`, `commands`, `skills`, `settings.local.json`, `scheduled_tasks*`), and the `.agents/` provider/agent config. It auto-resolves the canonical via `CANONICAL` env var, then `CONDUCTOR_ROOT_PATH`, then `git rev-parse --git-common-dir`, then `$HOME/code/me/abilities`. See `scripts/setup/setup-worktree.sh` for the full contract.
+The setup script links the canonical `internal/`, the project-level `.fno/` state (settings, tasks, ledger, inbox, wake-signals, codemap), the `.claude/` subdirs (`agents`, `commands`, `skills`, `settings.local.json`, `scheduled_tasks*`), and the `.agents/` provider/agent config. It auto-resolves the canonical via `CANONICAL` env var, then `CONDUCTOR_ROOT_PATH`, then `git rev-parse --git-common-dir`, then `$HOME/code/me/fno`. See `scripts/setup/setup-worktree.sh` for the full contract.
 
 **Enter the worktree in-session (harness step).** A footnote `/target` cold-start prints the worktree path in its `fno target start` receipt, then calls the harness **EnterWorktree** tool with `path=<that worktree>` so the session actually runs from inside the worktree - a shell `cd` does not persist across tool calls. Location-agnostic: any path in `git worktree list` is enterable on first entry, so this works identically for a configured `worktrees_base` and the harness-native default. See `skills/target/SKILL.md` for the full cold-start ritual and its caveats.
 
@@ -94,7 +94,7 @@ Wire the script into `~/.claude/settings.json` so `claude --worktree <name>` red
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/code/abilities/scripts/setup/worktree-create-hook.sh"
+            "command": "bash ~/code/fno/scripts/setup/worktree-create-hook.sh"
           }
         ]
       }
@@ -142,7 +142,7 @@ The granular contract is in `scripts/setup/setup-worktree.sh`. In summary:
 | `.fno/config.toml`, `tasks.json`, `tasks.md`, `ledger.json`, `ledger.md` | Symlink to canonical | Shared project state; target gates and backlog must be coherent across worktrees |
 | `.fno/codemap.md` | Symlink (regenerable artifact; last-writer-wins) | Latest map visible everywhere |
 | `.fno/wake-signals/` | Symlink to canonical | Wake signals dropped by the inbox drain; read per-project, not per-worktree |
-| `internal/agents/abilities/inbox.md` | Reached via the `internal/` symlink (no separate link) | Cross-project inbox lives in the Obsidian vault, not under `.fno/` |
+| `internal/agents/fno/inbox.md` | Reached via the `internal/` symlink (no separate link) | Cross-project inbox lives in the Obsidian vault, not under `.fno/` |
 | `.claude/agents/`, `commands/`, `skills/` | Symlink to canonical | Locally-installed agents/commands/skills, shared across worktrees |
 | `.claude/settings.local.json` | Symlink to canonical | Permission allowlist and autoMemoryDirectory pin |
 | `.claude/scheduled_tasks.json`, `.lock` | Symlink to canonical | `/schedule` skill state; lock prevents concurrent-worktree races |

@@ -2157,7 +2157,7 @@ def cmd_attach(
     fno's exit code mirrors claude's on detach.
 
     Codex / gemini: refused with exit 13 and a hint pointing at Phase 6
-    (the abi-owned supervisor) as the planned landing for cross-provider
+    (the fno-owned supervisor) as the planned landing for cross-provider
     attach.
     """
     from fno.agents.dispatch import DispatchAskError, attach_agent

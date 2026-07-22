@@ -106,9 +106,9 @@ def test_fetch_review_comments_flattens_slurped_pages():
 # --- carve-out harvest (malformed-line tolerance) -------------------------
 
 def test_harvest_carveouts_filters_session_and_skips_malformed(tmp_path: Path):
-    abil = tmp_path / ".fno"
-    abil.mkdir()
-    (abil / "carveouts.jsonl").write_text(
+    fnodir = tmp_path / ".fno"
+    fnodir.mkdir()
+    (fnodir / "carveouts.jsonl").write_text(
         '{"id":"cv-1","session_id":"S1","kind":"deferred","need":"q","description":"d1"}\n'
         "this is not json\n"
         '{"id":"cv-2","session_id":"S2","kind":"oos-bug","description":"d2"}\n',
@@ -127,9 +127,9 @@ def test_harvest_carveouts_filters_session_and_skips_malformed(tmp_path: Path):
 
 
 def test_harvest_carveouts_all_sessions_when_unfiltered(tmp_path: Path):
-    abil = tmp_path / ".fno"
-    abil.mkdir()
-    (abil / "carveouts.jsonl").write_text(
+    fnodir = tmp_path / ".fno"
+    fnodir.mkdir()
+    (fnodir / "carveouts.jsonl").write_text(
         '{"id":"cv-1","session_id":"S1","kind":"deferred","description":"d1"}\n'
         '{"id":"cv-2","session_id":"S2","kind":"oos-bug","description":"d2"}\n',
         encoding="utf-8",
@@ -141,9 +141,9 @@ def test_harvest_carveouts_all_sessions_when_unfiltered(tmp_path: Path):
 def test_harvest_carveouts_skips_non_object_line(tmp_path: Path):
     """A valid-JSON but non-object line (bare list/string) is skipped with a warning,
     never an AttributeError crashing the harvest (gemini high on PR #465)."""
-    abil = tmp_path / ".fno"
-    abil.mkdir()
-    (abil / "carveouts.jsonl").write_text(
+    fnodir = tmp_path / ".fno"
+    fnodir.mkdir()
+    (fnodir / "carveouts.jsonl").write_text(
         '[1, 2, 3]\n'  # valid JSON, not an object
         '"just a string"\n'
         '{"id":"cv-1","kind":"deferred","description":"d1"}\n',
@@ -159,9 +159,9 @@ def test_harvest_carveouts_skips_backfill(tmp_path: Path):
     """ab-4a1a4fea: a kind:backfill carve-out is routed to /pr merged's backfill
     slot, NOT swept into generic retro triage. It must SURVIVE the harvest (never
     classified, never returned in harvested ids the caller would consume)."""
-    abil = tmp_path / ".fno"
-    abil.mkdir()
-    (abil / "carveouts.jsonl").write_text(
+    fnodir = tmp_path / ".fno"
+    fnodir.mkdir()
+    (fnodir / "carveouts.jsonl").write_text(
         '{"id":"cv-1","session_id":"S1","kind":"deferred","description":"d1"}\n'
         '{"id":"cv-2","session_id":"S1","kind":"backfill","need":"mig","description":"bf"}\n',
         encoding="utf-8",

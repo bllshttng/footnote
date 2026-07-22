@@ -146,7 +146,7 @@ def stamp_ledger(session_id: str, verdict: str, ledger_path: Path) -> bool:
     fno.cost._register). Returns True when a row was updated."""
     if not session_id or not ledger_path.exists():
         return False
-    lock_fd = os.open("/tmp/abilities-ledger.lock", os.O_CREAT | os.O_RDWR)
+    lock_fd = os.open("/tmp/fno-ledger.lock", os.O_CREAT | os.O_RDWR)
     try:
         # Bounded, non-blocking acquisition: this runs synchronously inside the
         # stop hook's finalize, so an orphaned lock holder must cost seconds,

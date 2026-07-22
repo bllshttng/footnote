@@ -87,7 +87,7 @@ def test_maintain_cli_apply_prunes_temp_leak(tmp_graph):
     _seed(
         tmp_graph,
         [
-            _node("ab-keep01", cwd="/home/u/code/abilities", project="fno"),
+            _node("ab-keep01", cwd="/home/u/code/fno", project="fno"),
             _node("ab-leak01", cwd="/tmp/pytest-of-x/pytest-1/p"),
         ],
     )
@@ -193,7 +193,7 @@ def test_maintain_cli_prints_per_leg_counts(tmp_graph):
 
 
 def test_maintain_cli_appends_health_history(tmp_graph):
-    _seed(tmp_graph, [_node("ab-keep02", cwd="/home/u/code/abilities", project="fno")])
+    _seed(tmp_graph, [_node("ab-keep02", cwd="/home/u/code/fno", project="fno")])
     result = _invoke(["--apply"])
     assert result.exit_code == 0, result.output
 

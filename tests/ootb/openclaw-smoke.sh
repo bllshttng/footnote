@@ -30,7 +30,7 @@ OPENCLAW_REPO="${OPENCLAW_REPO:-$HOME/code/tools/bots/openclaw}"
 
 # 1. Throwaway worktree of openclaw
 WORKTREE=$(mktemp -d -t openclaw-smoke-XXXXXX)
-BRANCH="abilities-smoke-$(date +%s)"
+BRANCH="fno-smoke-$(date +%s)"
 (cd "$OPENCLAW_REPO" && git worktree add -b "$BRANCH" "$WORKTREE" 2>/dev/null) || {
   rm -rf "$WORKTREE"
   fail "could not create openclaw worktree"
@@ -47,10 +47,10 @@ trap cleanup EXIT
 cd "$WORKTREE"
 log "worktree=$WORKTREE"
 
-# 2. Symlink abilities skills into openclaw's skill path (idempotent).
+# 2. Symlink fno skills into openclaw's skill path (idempotent).
 # Verify an existing path points at the same tree - otherwise the test would
 # silently exercise a different install.
-SKILL_LINK="$HOME/.openclaw/workspace/skills/abilities"
+SKILL_LINK="$HOME/.openclaw/workspace/skills/fno"
 EXPECTED_SKILL_TARGET="${REPO_ROOT}/skills"
 CREATED_SKILL_LINK=0
 if [[ ! -e "$SKILL_LINK" ]]; then

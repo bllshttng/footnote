@@ -23,7 +23,7 @@ from fno.events import (
 
 def test_session_satisfied_sources_constant() -> None:
     assert SESSION_SATISFIED_SOURCES == frozenset(
-        {"check_pr", "pr_merge", "ci_watcher", "abi_gate_manual", "delegated"}
+        {"check_pr", "pr_merge", "ci_watcher", "fno_gate_manual", "delegated"}
     )
 
 
@@ -105,7 +105,7 @@ def test_session_satisfied_unknown_kwarg_rejected() -> None:
 
 
 @pytest.mark.parametrize(
-    "trigger", ["check_pr", "pr_merge", "ci_watcher", "abi_gate_manual", "delegated"]
+    "trigger", ["check_pr", "pr_merge", "ci_watcher", "fno_gate_manual", "delegated"]
 )
 def test_session_satisfied_all_triggers_validate(trigger: str) -> None:
     event = session_satisfied(
@@ -136,7 +136,7 @@ def test_auto_complete_triggered_keyword_only() -> None:
 
 
 @pytest.mark.parametrize(
-    "trigger", ["check_pr", "pr_merge", "ci_watcher", "abi_gate_manual", "delegated"]
+    "trigger", ["check_pr", "pr_merge", "ci_watcher", "fno_gate_manual", "delegated"]
 )
 def test_auto_complete_triggered_all_triggers_validate(trigger: str) -> None:
     event = auto_complete_triggered(trigger=trigger, session_id="s")

@@ -321,15 +321,15 @@ const MAX_CLAIM_RETRIES: usize = 5;
 
 /// Build a Command for the `fno` binary.
 ///
-/// Binary resolution: `abi_bin` (the path/name given at construction time,
+/// Binary resolution: `fno_bin` (the path/name given at construction time,
 /// overridden by `$FNO_BIN` for tests).  If `FNO_BIN` is set and non-empty,
-/// it wins; otherwise `abi_bin` is used as-is (callers pass "fno" for
+/// it wins; otherwise `fno_bin` is used as-is (callers pass "fno" for
 /// production and a tempdir stub path for tests).
-pub(crate) fn abi_cmd(abi_bin: &str) -> Command {
+pub(crate) fn fno_cmd(fno_bin: &str) -> Command {
     let binary = std::env::var("FNO_BIN")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| abi_bin.to_string());
+        .unwrap_or_else(|| fno_bin.to_string());
     Command::new(binary)
 }
 
@@ -361,8 +361,8 @@ pub(crate) fn retry_etxtbsy<T>(
 /// Run `fno doctor --json` best-effort and return whether the output indicates
 /// a stale installation.  Any failure (I/O, parse) is treated as "unknown"
 /// and does not append the staleness hint.
-fn is_abi_stale(abi_bin: &str) -> bool {
-    let out = match abi_cmd(abi_bin).args(["doctor", "--json"]).output() {
+fn is_fno_stale(fno_bin: &str) -> bool {
+    let out = match fno_cmd(fno_bin).args(["doctor", "--json"]).output() {
         Ok(o) => o,
         Err(_) => return false,
     };
@@ -375,8 +375,8 @@ fn is_abi_stale(abi_bin: &str) -> bool {
 }
 
 /// Append a staleness hint to an error message if `fno doctor` says stale.
-pub(crate) fn maybe_stale_hint(msg: String, abi_bin: &str) -> String {
-    if is_abi_stale(abi_bin) {
+pub(crate) fn maybe_stale_hint(msg: String, fno_bin: &str) -> String {
+    if is_fno_stale(fno_bin) {
         format!("{msg}; installed fno may be stale - run `fno update`")
     } else {
         msg
@@ -525,7 +525,7 @@ struct ClaimEntry {
 /// N-th unit, then the outer loop calls `next()` which returns None -> NoWork.
 pub struct MegawalkQueue {
     /// Path or name of the fno binary.  `$FNO_BIN` env overrides for tests.
-    abi_bin: String,
+    fno_bin: String,
     /// Optional `--project <name>` filter.
     project: Option<String>,
     /// When true, pass `--all` to `fno backlog next`.
@@ -559,12 +559,12 @@ pub struct MegawalkQueue {
 impl MegawalkQueue {
     /// Construct a MegawalkQueue.
     ///
-    /// `abi_bin`: "fno" in production; a stub path in tests (or override via
+    /// `fno_bin`: "fno" in production; a stub path in tests (or override via
     ///   `$FNO_BIN`).
     /// `project`: optional project filter passed as `--project <p>` to `fno backlog next`.
     /// `all`: when true, pass `--all` instead of `--project`.
-    pub fn new(abi_bin: String, project: Option<String>, all: bool) -> Self {
-        Self::new_with_max_units(abi_bin, project, all, None)
+    pub fn new(fno_bin: String, project: Option<String>, all: bool) -> Self {
+        Self::new_with_max_units(fno_bin, project, all, None)
     }
 
     /// Construct a MegawalkQueue with an optional max-units cap.
@@ -574,13 +574,13 @@ impl MegawalkQueue {
     /// Must be >= 1; callers are responsible for rejecting 0 before calling
     /// (the verb glue in loop_target.rs exits 2 on N == 0).
     pub fn new_with_max_units(
-        abi_bin: String,
+        fno_bin: String,
         project: Option<String>,
         all: bool,
         max_units: Option<u64>,
     ) -> Self {
         Self {
-            abi_bin,
+            fno_bin,
             project,
             all,
             active_claims: HashMap::new(),
@@ -677,7 +677,7 @@ impl Queue for MegawalkQueue {
             let _ = attempt; // retry count tracked implicitly
 
             // ── shell fno backlog next ────────────────────────────────────────
-            let mut cmd = abi_cmd(&self.abi_bin);
+            let mut cmd = fno_cmd(&self.fno_bin);
             cmd.args(["backlog", "next"]);
             if self.all {
                 cmd.arg("--all");
@@ -691,7 +691,7 @@ impl Queue for MegawalkQueue {
             let out = retry_etxtbsy(|| cmd.output()).map_err(|e| {
                 LoopError::Queue(maybe_stale_hint(
                     format!("fno backlog next: spawn failed: {e}"),
-                    &self.abi_bin,
+                    &self.fno_bin,
                 ))
             })?;
 
@@ -699,7 +699,7 @@ impl Queue for MegawalkQueue {
                 let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
                 return Err(LoopError::Queue(maybe_stale_hint(
                     format!("fno backlog next: exit {}: {stderr}", out.status),
-                    &self.abi_bin,
+                    &self.fno_bin,
                 )));
             }
 
@@ -714,7 +714,7 @@ impl Queue for MegawalkQueue {
             let v: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
                 LoopError::Queue(maybe_stale_hint(
                     format!("fno backlog next: JSON parse error: {e} (stdout: {stdout:?})"),
-                    &self.abi_bin,
+                    &self.fno_bin,
                 ))
             })?;
 
@@ -723,7 +723,7 @@ impl Queue for MegawalkQueue {
                 _ => {
                     return Err(LoopError::Queue(maybe_stale_hint(
                         format!("fno backlog next: missing or empty 'id' field in: {stdout:?}"),
-                        &self.abi_bin,
+                        &self.fno_bin,
                     )));
                 }
             };
@@ -777,7 +777,7 @@ impl Queue for MegawalkQueue {
             let claim_holder = format!("target-session:{session_key}");
 
             let claim_out = retry_etxtbsy(|| {
-                abi_cmd(&self.abi_bin)
+                fno_cmd(&self.fno_bin)
                     .args([
                         "claim",
                         "acquire",
@@ -798,7 +798,7 @@ impl Queue for MegawalkQueue {
             .map_err(|e| {
                 LoopError::Queue(maybe_stale_hint(
                     format!("fno claim acquire: spawn failed: {e}"),
-                    &self.abi_bin,
+                    &self.fno_bin,
                 ))
             })?;
 
@@ -845,7 +845,7 @@ impl Queue for MegawalkQueue {
                     let code = claim_out.status.code().unwrap_or(-1);
                     return Err(LoopError::Queue(maybe_stale_hint(
                         format!("fno claim acquire {claim_key}: exit {code}: {stderr}"),
-                        &self.abi_bin,
+                        &self.fno_bin,
                     )));
                 }
             }
@@ -857,7 +857,7 @@ impl Queue for MegawalkQueue {
                 "fno backlog next: exhausted {MAX_CLAIM_RETRIES} attempts; every ready node \
                  is claimed by another session (last node may be stuck)"
             ),
-            &self.abi_bin,
+            &self.fno_bin,
         )))
     }
 
@@ -916,7 +916,7 @@ impl Queue for MegawalkQueue {
             CloseOutcome::AwaitingMerge
         } else if should_done {
             let done_out = retry_etxtbsy(|| {
-                abi_cmd(&self.abi_bin)
+                fno_cmd(&self.fno_bin)
                     .args(["backlog", "done", &unit.id])
                     .output()
             })
@@ -984,7 +984,7 @@ impl Queue for MegawalkQueue {
                 let claim_holder = format!("target-session:{session_key}");
 
                 let release_result = retry_etxtbsy(|| {
-                    abi_cmd(&self.abi_bin)
+                    fno_cmd(&self.fno_bin)
                         .args(["claim", "release", &claim_key, "--holder", &claim_holder])
                         .env(
                             "FNO_CLAIMS_ROOT",
@@ -1030,7 +1030,7 @@ impl Queue for MegawalkQueue {
                 let claim_holder = format!("target-session:{session_key}");
 
                 let refresh_result = retry_etxtbsy(|| {
-                    abi_cmd(&self.abi_bin)
+                    fno_cmd(&self.fno_bin)
                         .args([
                             "claim",
                             "acquire",
@@ -1099,7 +1099,7 @@ pub struct MegawalkDispatcher {
     static_env: Vec<(String, String)>,
     cwd: PathBuf,
     /// Reserved for future use (e.g. fno claim refresh per dispatch).
-    _abi_bin: String,
+    _fno_bin: String,
     allow_merge: bool,
 }
 
@@ -1108,7 +1108,7 @@ impl MegawalkDispatcher {
         driver_lib: PathBuf,
         static_env: Vec<(String, String)>,
         cwd: PathBuf,
-        abi_bin: String,
+        fno_bin: String,
         allow_merge: bool,
     ) -> Self {
         Self {
@@ -1121,7 +1121,7 @@ impl MegawalkDispatcher {
             // is a no-op when already canonical and falls back to the given cwd
             // when resolution is ambiguous (git missing / bare).
             cwd: crate::paths::canonical_repo_root(&cwd).unwrap_or(cwd),
-            _abi_bin: abi_bin,
+            _fno_bin: fno_bin,
             allow_merge,
         }
     }
@@ -1347,9 +1347,9 @@ fn run_inner(
     let walker_root = crate::paths::canonical_repo_root(&cwd).unwrap_or_else(|| cwd.clone());
     let walker_key = format!("walker:{}", walker_root.display());
     let walker_holder = format!("megawalk-loop:{}", std::process::id());
-    let abi_bin = std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+    let fno_bin = std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string());
 
-    let walker_claim_result = abi_cmd(&abi_bin)
+    let walker_claim_result = fno_cmd(&fno_bin)
         .args([
             "claim",
             "acquire",
@@ -1382,10 +1382,10 @@ fn run_inner(
     }
 
     // ── build static env ──────────────────────────────────────────────────────
-    let abilities_dir = cwd.join(".fno");
-    let output_file = abilities_dir.join("target-last-output.txt");
-    let history_file = abilities_dir.join("target-history.txt");
-    let signal_file = abilities_dir.join("target-promise.signal");
+    let fno_dir = cwd.join(".fno");
+    let output_file = fno_dir.join("target-last-output.txt");
+    let history_file = fno_dir.join("target-history.txt");
+    let signal_file = fno_dir.join("target-promise.signal");
 
     let mut env: Vec<(String, String)> = vec![
         (
@@ -1429,7 +1429,7 @@ fn run_inner(
     install_sigint_handler();
 
     // ── build journal ─────────────────────────────────────────────────────────
-    let project_events = abilities_dir.join("events.jsonl");
+    let project_events = fno_dir.join("events.jsonl");
     let home_dir = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp"));
@@ -1462,7 +1462,7 @@ fn run_inner(
     // recover the work. Best-effort only: if the command fails for any reason,
     // skip silently (claim narration is informational, not a gate).
     {
-        let claim_out = abi_cmd(&abi_bin)
+        let claim_out = fno_cmd(&fno_bin)
             .args([
                 "claim",
                 "list",
@@ -1498,10 +1498,10 @@ fn run_inner(
     }
 
     // ── build queue and dispatcher ────────────────────────────────────────────
-    let mut queue = MegawalkQueue::new_with_max_units(abi_bin.clone(), project, all, max_units)
+    let mut queue = MegawalkQueue::new_with_max_units(fno_bin.clone(), project, all, max_units)
         .with_mission(mission.clone());
     let dispatcher =
-        MegawalkDispatcher::new(lib_path, env, cwd.clone(), abi_bin.clone(), allow_merge);
+        MegawalkDispatcher::new(lib_path, env, cwd.clone(), fno_bin.clone(), allow_merge);
 
     // ── parallel-cap notice ───────────────────────────────────────────────────
     // Group-2 ships the conservative sequential default (Claude's Discretion 3).
@@ -1527,7 +1527,7 @@ fn run_inner(
     // makes leaked claims recoverable, but explicit release is cleaner and
     // makes tests deterministic (Gemini HIGH finding).
     let release_walker_claim = || {
-        let _ = abi_cmd(&abi_bin)
+        let _ = fno_cmd(&fno_bin)
             .args(["claim", "release", &walker_key, "--holder", &walker_holder])
             .output();
     };

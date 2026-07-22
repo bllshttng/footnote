@@ -4,7 +4,7 @@ Task 2.5 of plan 2026-05-14-path-config-impl.
 
 All tests use tmp_path + monkeypatch isolation. An autouse fixture pins
 FNO_REPO_ROOT to tmp_path so resolve_repo_root() is isolated
-(feedback_abi_repo_root_leaks_between_tests memory entry).
+(feedback_fno_repo_root_leaks_between_tests memory entry).
 """
 from __future__ import annotations
 
@@ -278,7 +278,7 @@ def test_emit_paths_sh_validation_failure_clear_error(
     _set_settings(
         monkeypatch,
         tmp_path,
-        "schema_version: 1\nconfig:\n  state_dir: '/home/*/abilities'\n",
+        "schema_version: 1\nconfig:\n  state_dir: '/home/*/fno'\n",
     )
     # Clear caches after the env was set
     from fno import config as config_mod

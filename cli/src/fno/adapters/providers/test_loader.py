@@ -624,9 +624,9 @@ class TestSaveProvidersCorruptFile:
             "    daily_limit: 5.00\n"
             "  : this_is_broken_yaml: [unclosed\n"  # deliberately malformed
         )
-        abilities_dir = tmp_path / ".fno"
-        abilities_dir.mkdir(parents=True, exist_ok=True)
-        settings_path = abilities_dir / "config.toml"
+        fno_dir = tmp_path / ".fno"
+        fno_dir.mkdir(parents=True, exist_ok=True)
+        settings_path = fno_dir / "config.toml"
         settings_path.write_text(corrupt_content, encoding="utf-8")
 
         original_bytes = settings_path.read_bytes()
@@ -650,7 +650,7 @@ class TestSaveProvidersCorruptFile:
         assert settings_path.read_bytes() == original_bytes
 
         # No temp file leaked under .fno/
-        leaked = [f for f in abilities_dir.iterdir() if f != settings_path]
+        leaked = [f for f in fno_dir.iterdir() if f != settings_path]
         assert leaked == [], f"Temp file(s) leaked: {leaked}"
 
 

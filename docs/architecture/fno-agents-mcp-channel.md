@@ -25,7 +25,7 @@ Parent: [fno-agents-registry-and-dispatch.md](fno-agents-registry-and-dispatch.m
 
 Both the per-user sidecar daemon and the per-session channel-server child ship in `cli/src/fno/mcp/`, but they have **different lifecycle owners**:
 
-- **Sidecar (`sidecar.py`)** is fno-owned. Lazy-start / lazy-exit. The bind path resolves to `$XDG_RUNTIME_DIR/abilities/sidecar.sock` if set, else `paths.state_dir() / "sidecar.sock"`. Single-leader via socket-bind exclusivity. Idle-exits after 30 minutes with zero registered channels.
+- **Sidecar (`sidecar.py`)** is fno-owned. Lazy-start / lazy-exit. The bind path resolves to `$XDG_RUNTIME_DIR/fno/sidecar.sock` if set, else `paths.state_dir() / "sidecar.sock"`. Single-leader via socket-bind exclusivity. Idle-exits after 30 minutes with zero registered channels.
 - **Channel server (`channel_server.py`)** is CC-owned. CC reads the footnote plugin's `.mcp.json` at session start and spawns the child as a stdio subprocess. fno has no `start`/`stop` for it.
 
 The sidecar exists because CC spawns one channel server per session and they don't share pipes. Without a per-user rendezvous, external `fno agents ask` pokes from sibling processes cannot reach the right channel server. The sidecar holds an in-memory `session_id -> writer` map and routes pokes to the registered child.
@@ -113,7 +113,7 @@ The smoke script (`cli/scripts/smoke/validate-mcp-channel.sh`, gated behind `MCP
 
 ## Operational notes
 
-- Sidecar logs land under `$XDG_STATE_HOME/abilities/sidecar.log` (default `~/.local/state/abilities/sidecar.log`).
+- Sidecar logs land under `$XDG_STATE_HOME/fno/sidecar.log` (default `~/.local/state/fno/sidecar.log`).
 - The sidecar state file (`sidecar-state.json`) is flushed on SIGTERM but not on SIGKILL. Channel servers re-register on next session boot; the registry's `mcp_channel_id` is the persistent source of truth.
 - macOS AF_UNIX path limit is 104 chars. Long `$HOME` values are rare in practice, but the operator-visible error (`AF_UNIX path too long`) is transparent.
 - The smoke script is gated behind `MCP_SMOKE=1` so CI without the footnote CLI venv skips it. Run it manually after bumping the channels-reference doc or upgrading Claude Code.

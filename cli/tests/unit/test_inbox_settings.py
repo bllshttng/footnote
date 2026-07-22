@@ -3,9 +3,9 @@ import pytest
 
 
 def _write_settings(tmp_path, body: str) -> None:
-    abilities_dir = tmp_path / ".fno"
-    abilities_dir.mkdir(parents=True, exist_ok=True)
-    (abilities_dir / "settings.yaml").write_text(body, encoding="utf-8")
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir(parents=True, exist_ok=True)
+    (fno_dir / "settings.yaml").write_text(body, encoding="utf-8")
 
 
 def test_watch_settings_default(tmp_path):
@@ -20,9 +20,9 @@ def test_notify_on_send_valid_values(tmp_path):
     from fno.inbox.settings import read_watch_settings, WatchSettings
 
     for valid in ("question_only", "all", "off"):
-        abilities_dir = tmp_path / ".fno"
-        abilities_dir.mkdir(parents=True, exist_ok=True)
-        (abilities_dir / "settings.yaml").write_text(
+        fno_dir = tmp_path / ".fno"
+        fno_dir.mkdir(parents=True, exist_ok=True)
+        (fno_dir / "settings.yaml").write_text(
             f"config:\n  inbox:\n    watch:\n      enabled: true\n      notify_on_send: {valid}\n",
             encoding="utf-8",
         )
@@ -37,9 +37,9 @@ def test_notify_on_send_typo_fails_closed(tmp_path, capsys):
     """
     from fno.inbox.settings import read_watch_settings
 
-    abilities_dir = tmp_path / ".fno"
-    abilities_dir.mkdir(parents=True, exist_ok=True)
-    (abilities_dir / "settings.yaml").write_text(
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir(parents=True, exist_ok=True)
+    (fno_dir / "settings.yaml").write_text(
         "config:\n  inbox:\n    watch:\n      enabled: true\n      notify_on_send: always\n",
         encoding="utf-8",
     )

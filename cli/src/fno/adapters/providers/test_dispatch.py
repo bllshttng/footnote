@@ -38,9 +38,9 @@ def _write_settings(tmp_path: Path, records: list[dict]) -> Path:
             }
         }
     }
-    abilities_dir = tmp_path / ".fno"
-    abilities_dir.mkdir(parents=True, exist_ok=True)
-    settings_path = abilities_dir / "settings.yaml"
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = fno_dir / "settings.yaml"
     settings_path.write_text(yaml.safe_dump(settings))
     return tmp_path
 

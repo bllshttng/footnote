@@ -399,7 +399,7 @@ def phase_0_decision(
 ) -> dict[str, Any]:
     """Build a ``phase_0_decision`` event.
 
-    Used by the abi-daemon Phase 0 measurement spike (and any similar
+    Used by the fno-daemon Phase 0 measurement spike (and any similar
     measurement-gated phases). Routes through ``_build`` so the canonical
     ``data`` envelope is used and the event passes schema validation.
 
@@ -537,7 +537,7 @@ def backlog_done_forced(
 
 
 SESSION_SATISFIED_SOURCES = frozenset(
-    {"check_pr", "pr_merge", "ci_watcher", "abi_gate_manual", "delegated"}
+    {"check_pr", "pr_merge", "ci_watcher", "fno_gate_manual", "delegated"}
 )
 # "delegated" is shell-emitted (skills/target/scripts/handoff.sh); the rest are Python-emitted.
 

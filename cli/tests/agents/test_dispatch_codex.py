@@ -647,7 +647,7 @@ def test_yolo_does_not_bypass_from_name_validator(workdir, fake_codex_create):
     fake_codex_create.assert_not_called()
 
 
-def test_default_from_name_is_abilities(workdir, fake_codex_create):
+def test_default_from_name_is_fno(workdir, fake_codex_create):
     """Repointed at _codex_create_path."""
     from fno.agents.dispatch import _codex_create_path
     _codex_create_path(

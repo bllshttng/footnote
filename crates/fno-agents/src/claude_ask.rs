@@ -1680,7 +1680,7 @@ impl Drop for AgentLock {
     }
 }
 
-/// Stable abi-side log path for `fno agents logs <name>` (`_derive_log_path`).
+/// Stable fno-side log path for `fno agents logs <name>` (`_derive_log_path`).
 fn derive_log_path(home: &AgentsHome, name: &str) -> PathBuf {
     home.root()
         .join("agents")
@@ -2764,7 +2764,7 @@ mod tests {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let p = std::env::temp_dir().join(format!(
-            "abi-claude-ask-{}-{}-{}",
+            "fno-claude-ask-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2801,7 +2801,7 @@ mod tests {
         // color codes (`backgrounded · \x1b[36m<id>\x1b[39m · <name>`), which
         // the matcher used to reject (leading ESC is not a hexdigit). The id
         // must survive the colorization.
-        let out = "backgrounded \u{b7} \u{1b}[36m441064a2\u{1b}[39m \u{b7} abigates\n";
+        let out = "backgrounded \u{b7} \u{1b}[36m441064a2\u{1b}[39m \u{b7} fnogates\n";
         assert_eq!(parse_short_id(out).unwrap(), "441064a2");
     }
 

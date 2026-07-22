@@ -7,7 +7,7 @@ namespace; retired in ab-12dd2a5d (the ``suggest`` / ``capabilities`` verbs were
 trimmed and the survivors relocated to top-level). ``fno agents`` (plural, the
 dispatch mesh) is unrelated and untouched.
 
-See internal/fno/plans/2026-05-11-abi-agent-introspection.md.
+See internal/fno/plans/2026-05-11-fno-agent-introspection.md.
 """
 from fno.agent.cli import status_command, whoami_command
 from fno.agent.state import (

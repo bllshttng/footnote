@@ -511,14 +511,14 @@ event_types:
       properties:
         ratio:
           type: number
-          description: "Aggregate abi_wall_seconds / phase_wall_seconds ratio across sampled sessions."
+          description: "Aggregate fno_wall_seconds / phase_wall_seconds ratio across sampled sessions."
         decision:
           type: string
           enum: [abort_daemon, reads_only_v1, full_v1]
           description: "Gate outcome: abort_daemon (<15%), reads_only_v1 (15-30%), full_v1 (>=30%)."
         evidence_path:
           type: string
-          description: "Path to the decision artifact (e.g., .fno/measurements/YYYY-MM-DD-abi-overhead.md)."
+          description: "Path to the decision artifact (e.g., .fno/measurements/YYYY-MM-DD-fno-overhead.md)."
     consumers: [operator]
 
   - name: graph_reloaded
@@ -803,14 +803,14 @@ event_types:
     consumers: [operator]
 
   - name: session_satisfied
-    description: "Signals that a target session's work is complete; alternative to <promise> tag emission. The stop hook scans for these and may auto-release the Stop hook when a fresh event matches the current session and the three-factor gates are still satisfied. Data.source is the constrained subsystem that produced the signal (check_pr, pr_merge, ci_watcher, abi_gate_manual, delegated); envelope source is the producer identity."
+    description: "Signals that a target session's work is complete; alternative to <promise> tag emission. The stop hook scans for these and may auto-release the Stop hook when a fresh event matches the current session and the three-factor gates are still satisfied. Data.source is the constrained subsystem that produced the signal (check_pr, pr_merge, ci_watcher, fno_gate_manual, delegated); envelope source is the producer identity."
     sources: [target, megawalk, fno-loop, hook]
     data:
       required: [source, reason, session_id, gate_state_hash]
       properties:
         source:
           type: string
-          enum: [check_pr, pr_merge, ci_watcher, abi_gate_manual, delegated]
+          enum: [check_pr, pr_merge, ci_watcher, fno_gate_manual, delegated]
           description: "Which constrained subsystem emitted this satisfaction signal"
         reason:
           type: string
@@ -834,7 +834,7 @@ event_types:
       properties:
         source:
           type: string
-          enum: [check_pr, pr_merge, ci_watcher, abi_gate_manual, delegated]
+          enum: [check_pr, pr_merge, ci_watcher, fno_gate_manual, delegated]
           description: "Which session_satisfied data.source triggered this auto-complete"
         session_id:
           type: string

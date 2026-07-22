@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-off: claim merged footnote PRs that no ledger row accounts for.
 
-Over a rename (``abilities`` -> ``footnote``, one GitHub repo, continuous PR
+Over a rename (``fno`` -> ``footnote``, one GitHub repo, continuous PR
 numbers) many merged PRs never got an execution row - autonomous bg threads
 ship without a session-URL trailer, so finalize's ledger write never fires. The
 scoreboard then reports those PRs as work that never happened.
@@ -48,7 +48,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-LEDGER_LOCK_PATH = Path("/tmp/abilities-ledger.lock")
+LEDGER_LOCK_PATH = Path("/tmp/fno-ledger.lock")
 
 # A node-id-shaped token: short alpha(+num) prefix, dash, 4-8 hex. Same shape as
 # backfill-ledger-node-id.py; the exact-match-against-graph guard rejects any
@@ -59,9 +59,9 @@ _TOKEN = re.compile(r"\b([a-z][a-z0-9]{0,9}-[0-9a-f]{4,8})\b")
 _MERGE = re.compile(r"Merge pull request #(\d+) from \S+?/(\S+)")
 
 # A ledger row's PR belongs to this repo iff its pr_url points at footnote or its
-# pre-rename name abilities (same repo); regready/readyrule are different repos.
-_REPO_URL = re.compile(r"github\.com/[^/]+/(?:footnote|abilities)/pull/(\d+)")
-_SAME_REPO_PROJECTS = {"footnote", "abilities", "fno"}
+# pre-rename name fno (same repo); regready/readyrule are different repos.
+_REPO_URL = re.compile(r"github\.com/[^/]+/(?:footnote|fno)/pull/(\d+)")
+_SAME_REPO_PROJECTS = {"footnote", "fno", "fno"}
 
 # A merged PR is a delivered node. The scoreboard fold windows every row on
 # `completed` and counts a row as shipped only when `termination_reason` is in
@@ -126,7 +126,7 @@ def _same_repo(row: dict) -> bool:
 
 
 def claimed_prs(rows: list[dict]) -> set[int]:
-    """PR numbers already claimed by a row for THIS repo (footnote/abilities)."""
+    """PR numbers already claimed by a row for THIS repo (footnote/fno)."""
     out: set[int] = set()
     for r in rows:
         if not isinstance(r, dict) or not _same_repo(r):
@@ -339,7 +339,7 @@ def _self_test() -> int:
 
     rows = [
         {"project": "footnote", "pr_number": 460},
-        {"pr_url": "https://github.com/bllshttng/abilities/pull/300"},   # same repo, no number
+        {"pr_url": "https://github.com/bllshttng/fno/pull/300"},   # same repo, no number
         {"pr_url": "https://github.com/bllshttng/regready/pull/458"},    # different repo
         {"project": "readyrule-web", "pr_number": 458},                 # different repo
     ]

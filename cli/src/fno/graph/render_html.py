@@ -612,7 +612,7 @@ _JS = """\
   // Per-column collapse state persisted across re-renders. Keyed by
   // column name so closing Later once stays closed everywhere
   // (master AND per-project sections, since each has its own Later).
-  var COL_KEY = 'abi-kanban-col-state';
+  var COL_KEY = 'fno-kanban-col-state';
   function loadColState() {
     try { return JSON.parse(localStorage.getItem(COL_KEY) || '{}'); }
     catch (e) { return {}; }

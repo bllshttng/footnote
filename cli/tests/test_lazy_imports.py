@@ -31,7 +31,7 @@ def _run_py(code: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _run_abi(*args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+def _run_fno(*args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     """Run the installed `fno` binary with given args."""
     return subprocess.run(
         ["fno", *args],
@@ -70,7 +70,7 @@ sys.exit(len(found))
 """.format(forbidden=_FORBIDDEN_AFTER_HELP)
 
 
-def test_abi_help_does_not_import_sub_app_modules():
+def test_fno_help_does_not_import_sub_app_modules():
     """AC3-EDGE: sys.modules after `fno --help` excludes sub-app bodies."""
     result = _run_py(_CHECK_CODE_HELP)
     assert result.returncode == 0, (
@@ -94,7 +94,7 @@ sys.exit(len(found))
 """
 
 
-def test_abi_paths_does_not_import_heavy_subapps():
+def test_fno_paths_does_not_import_heavy_subapps():
     """AC3-HP: `fno paths state-dir` only loads the paths sub-app."""
     result = _run_py(_CHECK_CODE_PATHS)
     assert result.returncode == 0, (
@@ -184,7 +184,7 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
-def test_abi_help_lists_only_advertised_menu():
+def test_fno_help_lists_only_advertised_menu():
     """AC1-HP: fno --help advertises the curated menu and hides the rest."""
     from fno.cli import app
     from typer.testing import CliRunner
@@ -316,7 +316,7 @@ def test_executor_resolve_group_shape_preserved():
 # Real-subprocess smoke for the installed entry point
 # ---------------------------------------------------------------------------
 
-def test_abi_backlog_ready_via_real_subprocess():
+def test_fno_backlog_ready_via_real_subprocess():
     """Smoke test the installed `fno-py` console script through the lazy group.
 
     Exercises the full ``[project.scripts]`` entry-point wiring + lazy

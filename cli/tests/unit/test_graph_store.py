@@ -246,7 +246,7 @@ def test_regression_mutate_renders_siblings_not_global(tmp_path, monkeypatch):
     default again, the fake_home assertions below trip instead of polluting
     the developer's actual ~/.fno.
     """
-    fake_home = tmp_path / "fake_home_abilities"
+    fake_home = tmp_path / "fake_home_fno"
     fake_home.mkdir()
     monkeypatch.setattr(
         "fno.graph._constants._state_dir", lambda: fake_home

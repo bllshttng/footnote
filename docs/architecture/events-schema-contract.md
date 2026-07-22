@@ -218,16 +218,16 @@ envelope inline with `jq` and append.
 Import the typed builders from `fno.events`:
 
 ```python
-from fno import events as abilities_events
+from fno import events as fno_events
 
-ev = abilities_events.phase_transition(
+ev = fno_events.phase_transition(
     gate="quality_check_passed",
     phase="review",
     nonce=state["provenance_nonce"],
     session_id=state["session_id"],
     source="fno-loop",
 )
-abilities_events.append_event(ev)
+fno_events.append_event(ev)
 ```
 
 Builders use keyword-only arguments so unknown kwargs raise `TypeError`

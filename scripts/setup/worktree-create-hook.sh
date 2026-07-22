@@ -9,12 +9,12 @@
 # Wiring (pick one; do NOT pick both for the same repo - hooks merge in
 # parallel and matching hooks are run concurrently, which races):
 #
-#   1. User-global (recommended for non-abilities projects): point your
+#   1. User-global (recommended for non-fno projects): point your
 #      `~/.claude/settings.json` `hooks.WorktreeCreate` at this script. It
 #      will redirect every `claude --worktree` invocation across every
 #      project to its canonical conductor location.
 #
-#   2. Plugin-level (for abilities-ecosystem projects): the abilities
+#   2. Plugin-level (for fno-ecosystem projects): the fno
 #      plugin's WorktreeCreate hook at `hooks/worktree-setup.sh` does the
 #      same redirect when `worktree.use_conductor_canonical: true` is set
 #      in `.fno/settings.yaml`. Prefer this over wiring this script
@@ -102,8 +102,8 @@ fi
 
 # Run the canonical setup script inside the new worktree if it exists.
 # The script handles internal/ symlink, .fno/ state linking, .claude/
-# subdir symlinks, etc. - all abilities-specific. When this hook is wired
-# user-global (see .claude/rules/worktrees.md) and lands in a non-abilities
+# subdir symlinks, etc. - all fno-specific. When this hook is wired
+# user-global (see .claude/rules/worktrees.md) and lands in a non-fno
 # repo, the script is absent; treat that as a bare checkout and continue
 # rather than aborting the hook (codex P1).
 SETUP="$WORKTREE_PATH/scripts/setup/setup-worktree.sh"

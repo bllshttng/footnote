@@ -33,7 +33,7 @@ def _node(node_id: str, **overrides) -> dict:
         "title": "default-title",
         "type": "feature",
         "project": "fno",
-        "cwd": "/tmp/abilities",
+        "cwd": "/tmp/fno",
         "priority": "p2",
         "domain": "code",
         "blocked_by": [],
@@ -474,7 +474,7 @@ def test_intake_claim_preserves_existing_project_and_cwd(
     target = next(e for e in entries if e["id"] == "ab-1dea1234")
     # Original project/cwd values preserved verbatim.
     assert target["project"] == "fno"
-    assert target["cwd"] == "/tmp/abilities"
+    assert target["cwd"] == "/tmp/fno"
 
 
 def test_intake_claim_backfills_only_null_fields(tmp_path, capsys):

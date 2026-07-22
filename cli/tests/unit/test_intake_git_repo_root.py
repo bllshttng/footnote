@@ -21,9 +21,9 @@ def test_returns_helper_result_normalized(monkeypatch: pytest.MonkeyPatch) -> No
     from fno.graph import _intake
 
     monkeypatch.setattr(
-        _intake._paths, "resolve_canonical_worktree", lambda *a, **k: Path("/repos/abilities")
+        _intake._paths, "resolve_canonical_worktree", lambda *a, **k: Path("/repos/fno")
     )
-    assert _intake._git_repo_root() == os.path.normpath("/repos/abilities")
+    assert _intake._git_repo_root() == os.path.normpath("/repos/fno")
 
 
 def test_falls_back_to_show_toplevel_when_helper_none(

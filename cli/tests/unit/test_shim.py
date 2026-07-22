@@ -44,9 +44,9 @@ def test_shim_import_error_exits_3(tmp_path: Path) -> None:
     # Stub fno package: __init__.py raises ImportError on import.
     # The shim's sys.path.insert(0, cli/src) puts this ahead of the
     # runner's venv site-packages, so this stub wins the import race.
-    abilities_pkg = cli_src / "fno"
-    abilities_pkg.mkdir()
-    (abilities_pkg / "__init__.py").write_text(
+    fno_pkg = cli_src / "fno"
+    fno_pkg.mkdir()
+    (fno_pkg / "__init__.py").write_text(
         'raise ImportError("forced for #24 ImportError-branch test")\n'
     )
 

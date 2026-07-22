@@ -86,7 +86,7 @@ def _socket_path() -> Path:
 
     Order: explicit ``$FNO_SIDECAR_SOCKET`` override (set by the
     client's lazy-start path when a non-default sock_path was requested,
-    codex P2 review on PR #323), then ``$XDG_RUNTIME_DIR/abilities/
+    codex P2 review on PR #323), then ``$XDG_RUNTIME_DIR/fno/
     sidecar.sock`` (Linux desktop convention; manual on macOS), then
     ``<state_dir>/sidecar.sock`` via ``fno.paths.state_dir()`` so
     the path-config override surface (config.state_dir in settings.yaml)

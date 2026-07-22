@@ -252,9 +252,9 @@ def test_auto_detect_project_from_settings(tmp_graph, tmp_path, monkeypatch):
     monkeypatch.chdir(cwd)
     monkeypatch.setenv("HOME", str(tmp_path))
     # Make .fno/settings.yaml resolve to our settings file at the project root.
-    abilities_dir = cwd / ".fno"
-    abilities_dir.mkdir()
-    (abilities_dir / "settings.yaml").write_text(settings.read_text())
+    fno_dir = cwd / ".fno"
+    fno_dir.mkdir()
+    (fno_dir / "settings.yaml").write_text(settings.read_text())
 
     r = _invoke("--json", "backlog", "add", "Auto-detect test")
     assert r.exit_code == 0, r.output
@@ -303,9 +303,9 @@ def test_relative_cwd_resolves_to_absolute(tmp_graph, tmp_path, monkeypatch):
     """
     cwd = tmp_path / "relrepo"
     cwd.mkdir()
-    abilities_dir = cwd / ".fno"
-    abilities_dir.mkdir()
-    (abilities_dir / "settings.yaml").write_text(
+    fno_dir = cwd / ".fno"
+    fno_dir.mkdir()
+    (fno_dir / "settings.yaml").write_text(
         "work:\n"
         "  workspaces:\n"
         "    home:\n"

@@ -753,8 +753,8 @@ fn walk_policy_target_queue_returns_dispatch_then_drained() {
     use fno_agents::loop_target::TargetQueue;
 
     let dir = TempDir::new().unwrap();
-    let abilities_dir = dir.path().join(".fno");
-    fs::create_dir_all(&abilities_dir).unwrap();
+    let fno_dir = dir.path().join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
 
     // Write minimal target-state.md.
     let manifest = r#"---
@@ -765,7 +765,7 @@ plan_path: "/tmp/plan.md"
 ---
 # Target Session State
 "#;
-    fs::write(abilities_dir.join("target-state.md"), manifest).unwrap();
+    fs::write(fno_dir.join("target-state.md"), manifest).unwrap();
 
     let mut queue = TargetQueue::from_manifest(dir.path()).unwrap();
 

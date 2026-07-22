@@ -321,14 +321,14 @@ def test_ac1_edge2_worktree_resolves_to_parent_repo(tmp_path, monkeypatch):
     import fno.graph._intake as intake
 
     def fake_detect(cwd_path=None):
-        if cwd_path and cwd_path.rstrip("/").endswith("/code/me/abilities"):
+        if cwd_path and cwd_path.rstrip("/").endswith("/code/me/fno"):
             return "fno"
         return None
 
     monkeypatch.setattr(intake, "detect_project_from_settings", fake_detect)
     ct = _write_session(
         sdir, 111, session_id="uuid-wt", job_id="wt000001",
-        cwd="/Users/x/code/me/abilities/.claude/worktrees/feat-x",
+        cwd="/Users/x/code/me/fno/.claude/worktrees/feat-x",
     )
     sessions = discover.discover_live_sessions(
         sessions_dir=sdir,

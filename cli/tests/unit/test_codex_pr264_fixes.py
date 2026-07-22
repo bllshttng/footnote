@@ -151,7 +151,7 @@ def test_health_load_config_failsopen_on_invalid_settings(
     # Write an invalid settings.yaml - glob char in state_dir fails Pydantic validation
     bad_settings = tmp_path / "bad-settings.yaml"
     bad_settings.write_text(
-        "schema_version: 1\nconfig:\n  state_dir: '/home/*/abilities'\n",
+        "schema_version: 1\nconfig:\n  state_dir: '/home/*/fno'\n",
         encoding="utf-8",
     )
     # Wire FNO_CONFIG to point at the bad settings file
@@ -209,7 +209,7 @@ def test_collision_load_thresholds_failsopen_on_invalid_settings(
     # Write an invalid settings.yaml - glob char in state_dir fails Pydantic validation
     bad_settings = tmp_path / "bad-collision-settings.yaml"
     bad_settings.write_text(
-        "schema_version: 1\nconfig:\n  state_dir: '/home/*/abilities'\n",
+        "schema_version: 1\nconfig:\n  state_dir: '/home/*/fno'\n",
         encoding="utf-8",
     )
     # Wire FNO_CONFIG to point at the bad settings file

@@ -2,7 +2,7 @@
 
 Rust PTY supervisor substrate for footnote multi-CLI agents (Phase 6, backlog `ab-a09e1eaf`).
 
-This crate is the substrate half of the Phase 6 design (`~/your-vault/internal/fno/design/2026-05-22-abi-pty-supervisor-and-drive.md`). It gives codex / gemini (and future OpenCode) agents the persistent-session, attach/detach, drive UX that Claude has. Python `fno agents <verb>` shells into the daemon/client binary; the daemon talks to per-agent workers over Unix sockets.
+This crate is the substrate half of the Phase 6 design (`~/your-vault/internal/fno/design/2026-05-22-fno-pty-supervisor-and-drive.md`). It gives codex / gemini (and future OpenCode) agents the persistent-session, attach/detach, drive UX that Claude has. Python `fno agents <verb>` shells into the daemon/client binary; the daemon talks to per-agent workers over Unix sockets.
 
 ## Wave status
 

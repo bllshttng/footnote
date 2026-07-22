@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SessionStart hook for abilities plugin — cross-platform
+# SessionStart hook for fno plugin — cross-platform
 # Injects project vision into session context.
 # Wraps existing Claude Code-specific hooks and re-formats output per platform.
 
@@ -176,8 +176,8 @@ fi
 #    (fleet → walker → session stack, gates, provider). Helps the agent
 #    re-orient after a fresh start or compaction.
 whoami_content=""
-if [[ -f "${SCRIPT_DIR}/inject-abi-agent-whoami.sh" ]]; then
-    raw_whoami=$(bash "${SCRIPT_DIR}/inject-abi-agent-whoami.sh" 2>/dev/null || echo "")
+if [[ -f "${SCRIPT_DIR}/inject-fno-agent-whoami.sh" ]]; then
+    raw_whoami=$(bash "${SCRIPT_DIR}/inject-fno-agent-whoami.sh" 2>/dev/null || echo "")
     if [[ -n "$raw_whoami" ]]; then
         whoami_content=$(echo "$raw_whoami" | jq -r '.hookSpecificOutput.additionalContext // .additional_context // empty' 2>/dev/null || echo "$raw_whoami")
     fi

@@ -26,7 +26,7 @@
 #   paths with spaces, unicode titles). No `-c "$arg"` interpolation means no
 #   injection surface: the arg is bound to os.environ, never spliced into a
 #   shell or python string.
-# - The python module path requires the `abilities` package to be importable.
+# - The python module path requires the `fno` package to be importable.
 #   When the import fails (e.g. environments without uv / venv), the resolver
 #   soft-fails to echoing the arg unchanged, preserving the historical
 #   contract for non-Python environments.
@@ -115,7 +115,7 @@ PYEOF
             # import-error stderr from the heredoc on its own can read like
             # a fatal failure when the resolver actually succeeded with the
             # legacy matcher.
-            echo "[graph-resolve] abilities package unavailable; falling back to legacy exact-match resolver (partial-prefix queries will not resolve)" >&2
+            echo "[graph-resolve] fno package unavailable; falling back to legacy exact-match resolver (partial-prefix queries will not resolve)" >&2
             _resolve_arg_legacy "$arg"
             return $?
             ;;
@@ -129,7 +129,7 @@ PYEOF
 }
 
 # Legacy fallback: exact-match only, no prefix support. Used when the
-# abilities package can't be imported (no uv, no venv, no PYTHONPATH).
+# fno package can't be imported (no uv, no venv, no PYTHONPATH).
 # Mirrors the pre-fuzzy behavior so older environments are not regressed.
 _resolve_arg_legacy() {
     local arg="$1"
@@ -139,7 +139,7 @@ _resolve_arg_legacy() {
         # prefix in a non-Python environment doesn't see silent passthrough
         # and assume the resolver worked.
         if [[ "$arg" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]+$ ]]; then
-            echo "[graph-resolve] partial/short node id '$arg' cannot resolve in legacy mode; pass a full <prefix>-<4..8 hex> id or install the abilities python package" >&2
+            echo "[graph-resolve] partial/short node id '$arg' cannot resolve in legacy mode; pass a full <prefix>-<4..8 hex> id or install the fno python package" >&2
         fi
         echo "$arg"
         return 0

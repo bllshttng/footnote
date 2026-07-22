@@ -102,7 +102,7 @@ owner_pid: 12345                     # PPID of the init subprocess; transient, b
                                      # so it can PROVE life but never disprove it - and
                                      # never anchors an authority grant.
 owner_started_at: "2026-06-05T03:00:00Z"
-owner_cwd: "~/conductor/workspaces/abilities/my-feature"
+owner_cwd: "~/conductor/workspaces/fno/my-feature"
                                      # absolute path to the worktree at init time
 claude_session_id: "abc123def"       # Claude session UUID; TARGET_TRANSCRIPT_ID/
                                      # CLAUDE_CODE_SESSION_ID semantics are unchanged

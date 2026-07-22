@@ -411,7 +411,7 @@ def test_list_pr_number_matches_pr_url_suffix(_repo: Path, monkeypatch):
     lj.write_text(json.dumps({"entries": [
         {"pr_url": "https://github.com/bllshttng/footnote/pull/480", "session_id": "S1"},
         # Same number, different repo: must NOT be attributed to this PR.
-        {"pr_url": "https://github.com/bllshttng/abilities/pull/480", "session_id": "SX"},
+        {"pr_url": "https://github.com/bllshttng/fno/pull/480", "session_id": "SX"},
     ]}), encoding="utf-8")
     _pin_ledger(monkeypatch, lj)
     _write_backfills(_repo)

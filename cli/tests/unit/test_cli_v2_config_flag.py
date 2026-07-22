@@ -58,9 +58,9 @@ def test_load_v2_config_flag_returns_true_when_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC6-HP: _load_v2_config_flag returns True when v2_enabled: true."""
-    abilities_dir = tmp_path / ".fno"
-    abilities_dir.mkdir()
-    settings = abilities_dir / "settings.yaml"
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir()
+    settings = fno_dir / "settings.yaml"
     settings.write_text(
         "schema_version: 1\nconfig:\n  v2_enabled: true\n",
         encoding="utf-8",

@@ -6,7 +6,7 @@ CLI for the footnote autonomous delivery pipeline.
 
 ```bash
 # Install (from a local checkout of this repo)
-uv tool install /path/to/abilities/cli
+uv tool install /path/to/fno/cli
 
 # Sanity check
 fno --version
@@ -270,8 +270,8 @@ a real manifest.
 
 ### See also
 
-- Design doc: `internal/fno/plans/2026-05-11-abi-agent-introspection.md`
-- Plan: `internal/fno/plans/2026-05-11-abi-agent-introspection/`
+- Design doc: `internal/fno/plans/2026-05-11-fno-agent-introspection.md`
+- Plan: `internal/fno/plans/2026-05-11-fno-agent-introspection/`
 
 ## Configuration
 

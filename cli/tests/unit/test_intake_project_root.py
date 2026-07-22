@@ -37,12 +37,12 @@ def test_workspaces_schema_returns_expanded_path(tmp_path):
             main:
               projects:
                 - name: fno
-                  path: ~/code/me/abilities
+                  path: ~/code/me/fno
     """))
     with _patch_candidates(cfg):
         result = project_root_from_settings("fno")
 
-    expected = os.path.abspath(os.path.expanduser("~/code/me/abilities"))
+    expected = os.path.abspath(os.path.expanduser("~/code/me/fno"))
     assert result == expected
 
 
@@ -57,12 +57,12 @@ def test_legacy_flat_schema_returns_expanded_path(tmp_path):
         work:
           projects:
             fno:
-              path: ~/code/me/abilities
+              path: ~/code/me/fno
     """))
     with _patch_candidates(cfg):
         result = project_root_from_settings("fno")
 
-    expected = os.path.abspath(os.path.expanduser("~/code/me/abilities"))
+    expected = os.path.abspath(os.path.expanduser("~/code/me/fno"))
     assert result == expected
 
 
@@ -79,7 +79,7 @@ def test_unmapped_project_returns_none(tmp_path):
             main:
               projects:
                 - name: fno
-                  path: ~/code/me/abilities
+                  path: ~/code/me/fno
     """))
     with _patch_candidates(cfg):
         result = project_root_from_settings("no-such-project")

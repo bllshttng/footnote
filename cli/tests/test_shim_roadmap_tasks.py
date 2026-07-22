@@ -113,7 +113,7 @@ def test_ac3_err_shim_relocated_missing_cli_src():
     )
 
 
-def test_ac3_fr_cli_src_exists_but_no_abilities_package():
+def test_ac3_fr_cli_src_exists_but_no_fno_package():
     """AC3-FR: cli/src exists but fno package absent; ImportError branch fires.
 
     The assert passes (cli/src dir is present), but the import fails.

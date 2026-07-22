@@ -58,14 +58,14 @@ CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-.claude/settings.json}"
 CLAUDE_SETTINGS_LOCAL="${CLAUDE_SETTINGS_LOCAL:-.claude/settings.local.json}"
 
 # Extract a value from Claude Code's .claude/settings.json or settings.local.json
-# Maps Claude Code native keys to abilities config keys:
+# Maps Claude Code native keys to fno config keys:
 #   plansDirectory → plans.focused_path, plans.full_path
 _get_from_claude_settings() {
     local file="$1" key="$2"
     [[ -f "$file" ]] || return 1
     command -v jq &>/dev/null || return 1
 
-    # Map abilities config keys → Claude Code JSON keys
+    # Map fno config keys → Claude Code JSON keys
     local json_key=""
     case "$key" in
         plans.focused_path|plans.full_path) json_key="plansDirectory" ;;
@@ -446,8 +446,8 @@ domain_exists() {
 # Lookup order (first match wins):
 #   1. .claude/settings.local.json   (user overrides, not committed)
 #   2. .claude/settings.json         (project-level, committed)
-#   3. .fno/settings.yaml      (abilities config, local override)
-#   4. ~/.fno/settings.yaml  (abilities config, global)
+#   3. .fno/settings.yaml      (fno config, local override)
+#   4. ~/.fno/settings.yaml  (fno config, global)
 #   5. .fno/config.yaml        (legacy, backwards compat)
 #
 # Claude Code settings.json key mapping:

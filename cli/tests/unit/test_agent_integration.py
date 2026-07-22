@@ -21,7 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = Path(__file__).parent / "fixtures" / "agent"
 
 
-def _abi(args, cwd: Path, env: dict = None) -> subprocess.CompletedProcess:
+def _fno(args, cwd: Path, env: dict = None) -> subprocess.CompletedProcess:
     """Invoke `fno` via uv run --project cli."""
     full_env = os.environ.copy()
     if env:
@@ -65,7 +65,7 @@ def _build_full_fixture(tmp_path: Path) -> tuple[Path, Path]:
 def test_command_runs_against_full_fixture(tmp_path, verb):
     project, fake_home = _build_full_fixture(tmp_path)
     env = {"HOME": str(fake_home)}
-    result = _abi([verb], cwd=project, env=env)
+    result = _fno([verb], cwd=project, env=env)
     assert result.returncode == 0, (
         f"fno {verb} failed: rc={result.returncode}\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
@@ -77,7 +77,7 @@ def test_command_runs_against_full_fixture(tmp_path, verb):
 def test_command_json_mode_emits_valid_json(tmp_path, verb):
     project, fake_home = _build_full_fixture(tmp_path)
     env = {"HOME": str(fake_home)}
-    result = _abi([verb, "--json"], cwd=project, env=env)
+    result = _fno([verb, "--json"], cwd=project, env=env)
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload is not None
@@ -86,7 +86,7 @@ def test_command_json_mode_emits_valid_json(tmp_path, verb):
 def test_whoami_full_fixture_shows_all_layers(tmp_path):
     project, fake_home = _build_full_fixture(tmp_path)
     env = {"HOME": str(fake_home)}
-    result = _abi(["whoami"], cwd=project, env=env)
+    result = _fno(["whoami"], cwd=project, env=env)
     assert result.returncode == 0
     out = result.stdout
     assert "fleet-fixture-001" in out
@@ -94,12 +94,12 @@ def test_whoami_full_fixture_shows_all_layers(tmp_path):
     assert "claude" in out
 
 
-def test_abi_agent_namespace_absent(tmp_path):
+def test_fno_agent_namespace_absent(tmp_path):
     """AC2-EDGE: the retired `fno agent` (singular) namespace is gone end-to-end
     - a clean usage error (non-zero), not a silent wrong result."""
     project, fake_home = _build_full_fixture(tmp_path)
     env = {"HOME": str(fake_home)}
-    result = _abi(["agent", "whoami"], cwd=project, env=env)
+    result = _fno(["agent", "whoami"], cwd=project, env=env)
     assert result.returncode != 0
     assert "No such command 'agent'" in (result.stdout + result.stderr)
 
@@ -137,7 +137,7 @@ def test_read_only_invariant_repeated_invocations(tmp_path):
     before = _hashes()
     for _ in range(25):
         for verb in ("whoami", "status"):
-            result = _abi([verb], cwd=project, env=env)
+            result = _fno([verb], cwd=project, env=env)
             assert result.returncode == 0, (
                 f"verb {verb} failed: {result.stderr}"
             )
@@ -156,17 +156,17 @@ def test_end_to_end_journey_consistent_session_id(tmp_path):
     expected_sid = "20260512T010101Z-99999-fixaaa"
 
     # whoami: session id visible bare
-    r1 = _abi(["whoami"], cwd=project, env=env)
+    r1 = _fno(["whoami"], cwd=project, env=env)
     assert r1.returncode == 0
     assert expected_sid in r1.stdout
 
     # status: session id in the session: line
-    r2 = _abi(["status"], cwd=project, env=env)
+    r2 = _fno(["status"], cwd=project, env=env)
     assert r2.returncode == 0
     assert expected_sid in r2.stdout
 
     # status JSON mode -> dict with events_tail key
-    r3 = _abi(["status", "--json"], cwd=project, env=env)
+    r3 = _fno(["status", "--json"], cwd=project, env=env)
     assert r3.returncode == 0
     payload = json.loads(r3.stdout)
     assert "events_tail" in payload
@@ -175,7 +175,7 @@ def test_end_to_end_journey_consistent_session_id(tmp_path):
 @pytest.mark.parametrize("verb", ["whoami", "status"])
 def test_command_help_resolves(tmp_path, verb):
     """Both commands respond to --help with rc=0."""
-    result = _abi([verb, "--help"], cwd=REPO_ROOT)
+    result = _fno([verb, "--help"], cwd=REPO_ROOT)
     assert result.returncode == 0
     assert "Usage:" in result.stdout
 
@@ -183,7 +183,7 @@ def test_command_help_resolves(tmp_path, verb):
 def test_no_walker_flag_drops_walker_layer(tmp_path):
     project, fake_home = _build_full_fixture(tmp_path)
     env = {"HOME": str(fake_home)}
-    result = _abi(["whoami", "--no-walker"], cwd=project, env=env)
+    result = _fno(["whoami", "--no-walker"], cwd=project, env=env)
     assert result.returncode == 0
     assert "walker:" not in result.stdout
 
@@ -191,7 +191,7 @@ def test_no_walker_flag_drops_walker_layer(tmp_path):
 def test_no_fleet_flag_drops_fleet_layer(tmp_path):
     project, fake_home = _build_full_fixture(tmp_path)
     env = {"HOME": str(fake_home)}
-    result = _abi(["whoami", "--no-fleet"], cwd=project, env=env)
+    result = _fno(["whoami", "--no-fleet"], cwd=project, env=env)
     assert result.returncode == 0
     assert "fleet:" not in result.stdout
 
@@ -201,7 +201,7 @@ def test_state_file_override(tmp_path):
     override = tmp_path / "custom.md"
     override.write_text((FIXTURES / "session-state-think.md").read_text())
     env = {"HOME": str(fake_home)}
-    result = _abi(
+    result = _fno(
         ["whoami", "--state-file", str(override)],
         cwd=project, env=env,
     )
@@ -216,6 +216,6 @@ def test_malformed_session_state_exits_2(tmp_path):
     (fno / "target-state.md").write_text(
         (FIXTURES / "malformed-state.md").read_text()
     )
-    result = _abi(["whoami"], cwd=project)
+    result = _fno(["whoami"], cwd=project)
     assert result.returncode == 2
     assert "malformed" in result.stderr.lower()

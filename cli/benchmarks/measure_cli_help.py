@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Benchmark harness for ``abi --help`` startup latency.
+"""Benchmark harness for ``fno --help`` startup latency.
 
-Runs ``abi --help`` N times via subprocess and reports the median wall time.
+Runs ``fno --help`` N times via subprocess and reports the median wall time.
 The goal pinned by ``2026-05-14-cli-lazy-imports.md`` is a >=30% drop in
 median latency from the 225ms baseline measured before the lazy-imports
 refactor (target: <=158ms median).
 
 Methodology
 -----------
-1. Spawn fresh ``abi --help`` subprocesses (no warm-up runs).
+1. Spawn fresh ``fno --help`` subprocesses (no warm-up runs).
 2. Time each invocation with ``time.perf_counter``.
 3. Report p25/p50/p75/p95 from the sample.
 4. Write JSON evidence to ``cli/benchmarks/cli_help_results.json``.
@@ -17,7 +17,7 @@ Usage
 -----
     python cli/benchmarks/measure_cli_help.py
     python cli/benchmarks/measure_cli_help.py --runs 30
-    python cli/benchmarks/measure_cli_help.py --binary /path/to/abi
+    python cli/benchmarks/measure_cli_help.py --binary /path/to/fno
 
 Re-bench guidance
 -----------------
@@ -47,13 +47,13 @@ BASELINE_MS = 225.0
 TARGET_MS = 158.0  # 30% drop from the baseline
 
 
-def _resolve_abi(explicit: str | None) -> str:
+def _resolve_fno(explicit: str | None) -> str:
     if explicit:
         return explicit
-    binary = shutil.which("abi")
+    binary = shutil.which("fno")
     if not binary:
-        print("error: 'abi' binary not on PATH", file=sys.stderr)
-        print("  install with: uv tool install <abilities-repo>/cli", file=sys.stderr)
+        print("error: 'fno' binary not on PATH", file=sys.stderr)
+        print("  install with: uv tool install <fno-repo>/cli", file=sys.stderr)
         sys.exit(2)
     return binary
 
@@ -89,7 +89,7 @@ def main() -> int:
     parser.add_argument(
         "--binary",
         default=None,
-        help="path to abi binary (default: shutil.which('abi'))",
+        help="path to fno binary (default: shutil.which('fno'))",
     )
     parser.add_argument(
         "--output",
@@ -99,7 +99,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    binary = _resolve_abi(args.binary)
+    binary = _resolve_fno(args.binary)
     print(f"benchmark: {binary} --help  (n={args.runs})")
     samples = _measure(binary, args.runs)
     stats = _summarize(samples)

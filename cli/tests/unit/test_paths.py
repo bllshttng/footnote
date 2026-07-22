@@ -5,7 +5,7 @@ Task 1.4: Round out coverage for all AC items.
 
 All tests use tmp_path + monkeypatch isolation. An autouse fixture pins
 FNO_REPO_ROOT to tmp_path so resolve_repo_root() is isolated
-(feedback_abi_repo_root_leaks_between_tests memory entry).
+(feedback_fno_repo_root_leaks_between_tests memory entry).
 """
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ def test_resolve_repo_root_still_importable() -> None:
     assert isinstance(result, Path)
 
 
-def test_resolve_repo_root_respects_abi_repo_root_env(
+def test_resolve_repo_root_respects_fno_repo_root_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC1-HP: resolve_repo_root() returns FNO_REPO_ROOT when set.
@@ -121,31 +121,31 @@ def _make_plugin_root(path: Path) -> Path:
     return path
 
 
-def test_abi_repo_root_warns_when_pinned_to_abilities_from_foreign_repo(
+def test_fno_repo_root_warns_when_pinned_to_fno_from_foreign_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """FNO_REPO_ROOT pinned at the fno plugin root + a different cwd repo
     emits a one-line stderr heads-up (the silent-wrong-project footgun)."""
     import fno.paths as paths_mod
 
-    abilities_dir = _make_plugin_root(tmp_path / "fno")
+    fno_dir = _make_plugin_root(tmp_path / "fno")
     other_repo = tmp_path / "acme-web"
     other_repo.mkdir()
-    monkeypatch.setenv("FNO_REPO_ROOT", str(abilities_dir))
-    # cwd (the pytest cwd) is not inside abilities_dir, so the same-repo
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fno_dir))
+    # cwd (the pytest cwd) is not inside fno_dir, so the same-repo
     # short-circuit does not fire; the (stubbed) git probe reports other_repo.
     monkeypatch.setattr(paths_mod.subprocess, "run", _fake_git_toplevel(other_repo))
 
     paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
     result = paths_mod.resolve_repo_root()
 
-    assert result == abilities_dir.resolve()  # warning is non-fatal
+    assert result == fno_dir.resolve()  # warning is non-fatal
     err = capsys.readouterr().err
     assert "FNO_REPO_ROOT pins" in err
-    assert str(abilities_dir.resolve()) in err
+    assert str(fno_dir.resolve()) in err
 
 
-def test_abi_repo_root_no_warning_when_root_is_not_plugin_root(
+def test_fno_repo_root_no_warning_when_root_is_not_plugin_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A non-plugin-root FNO_REPO_ROOT (e.g. the tmp test hook, even if named
@@ -161,7 +161,7 @@ def test_abi_repo_root_no_warning_when_root_is_not_plugin_root(
     assert "FNO_REPO_ROOT pins" not in capsys.readouterr().err
 
 
-def test_abi_repo_root_no_warning_when_cwd_is_inside_the_pinned_repo(
+def test_fno_repo_root_no_warning_when_cwd_is_inside_the_pinned_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Running inside the fno plugin root with FNO_REPO_ROOT pointing at
@@ -172,9 +172,9 @@ def test_abi_repo_root_no_warning_when_cwd_is_inside_the_pinned_repo(
     cwd is inside the pinned root."""
     import fno.paths as paths_mod
 
-    abilities_dir = _make_plugin_root(tmp_path / "fno")
-    monkeypatch.setenv("FNO_REPO_ROOT", str(abilities_dir))
-    monkeypatch.chdir(abilities_dir)
+    fno_dir = _make_plugin_root(tmp_path / "fno")
+    monkeypatch.setenv("FNO_REPO_ROOT", str(fno_dir))
+    monkeypatch.chdir(fno_dir)
     # subprocess.run stubbed WITHOUT stdout, like the CLI-wrapper tests. The
     # cwd-inside-resolved short-circuit must return before this is ever called;
     # if it isn't, accessing .stdout would raise.
@@ -193,7 +193,7 @@ def test_abi_repo_root_no_warning_when_cwd_is_inside_the_pinned_repo(
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_canonical_repo_root_respects_abi_repo_root_env(
+def test_resolve_canonical_repo_root_respects_fno_repo_root_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """FNO_REPO_ROOT pins the canonical resolver too (test-isolation hook).
@@ -671,7 +671,7 @@ def test_unknown_template_variable_rejected(
     _set_settings(
         monkeypatch,
         tmp_path,
-        "schema_version: 1\nconfig:\n  state_dir: '/home/{foo}/abilities'\n",
+        "schema_version: 1\nconfig:\n  state_dir: '/home/{foo}/fno'\n",
     )
 
     from fno.paths import state_dir

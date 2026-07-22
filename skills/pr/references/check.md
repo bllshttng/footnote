@@ -464,7 +464,7 @@ For each candidate that passes the bar, call `write-memory-entry.sh`:
 SESSION_ID=$(grep -E "^[[:space:]]*session_id:" "$STATE_DIR/target-state.md" 2>/dev/null \
     | tail -1 | sed -e 's/^[[:space:]]*session_id:[[:space:]]*//' -e 's/[[:space:]]*$//')
 # Memory dir uses Claude's slash-encoded full-path scheme (e.g.
-# /Users/foo/code/me/abilities -> -Users-foo-code-me-abilities). MUST match
+# /Users/foo/code/me/fno -> -Users-foo-code-me-fno). MUST match
 # the pre-promise pass recipe so both checkpoints land entries in the same
 # directory. Using basename here would write to ~/.claude/projects/<dir>/memory/
 # which is NOT where Claude reads MEMORY.md from.

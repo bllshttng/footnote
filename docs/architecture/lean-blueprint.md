@@ -4,7 +4,7 @@
 
 `/blueprint` now mutates the upstream design doc in place rather than creating a separate folder plan (a `00-INDEX.md` + N phase files). When a developer runs `/think` and then `/blueprint <doc-path>`, the same markdown file gains execution metadata - waves, file bindings, kill_criteria - appended as new sections without restating the content that already exists. That single file is the canonical artifact for the feature from design through ship. The old folder-plan output is still supported for plans already in flight, but new plans use the single-doc format.
 
-The motivation was measured redundancy: on the `abi-claim` plan, the folder approach produced 14,000 words across 7 files where 5,200 words in 1 file conveyed the same information. Worker briefs under the old approach consumed ~5,500 tokens; scoped briefs under the new approach consume ~1,000.
+The motivation was measured redundancy: on the `fno-claim` plan, the folder approach produced 14,000 words across 7 files where 5,200 words in 1 file conveyed the same information. Worker briefs under the old approach consumed ~5,500 tokens; scoped briefs under the new approach consume ~1,000.
 
 ## Single-doc lifecycle
 

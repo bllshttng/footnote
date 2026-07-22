@@ -1,4 +1,4 @@
-You are running a smoke test for the abilities target loop wrapper.
+You are running a smoke test for the fno target loop wrapper.
 
 Output exactly the following and nothing else, then stop:
 

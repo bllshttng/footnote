@@ -250,7 +250,7 @@ def test_unreadable_state_path_does_not_raise():
     """A candidate whose state file can't be stat'd is skipped, not fatal."""
     # Nonexistent path exercises the guarded exists() branch.
     assert git_protection._parse_active_state(
-        Path("/nonexistent/abilities-test/target-state.md")) is None
+        Path("/nonexistent/fno-test/target-state.md")) is None
 
 
 # ---------------------------------------------------------------------------

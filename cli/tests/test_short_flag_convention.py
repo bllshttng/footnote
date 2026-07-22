@@ -1,7 +1,7 @@
 """Short-flag convention enforcement (ab-3ff64151 Phase 1, ab-e893ba6e Phase 2,
 ab-a04f3f1a Phase 3).
 
-The design (``internal/fno/design/2026-06-03-abi-cli-short-flags.md``)
+The design (``internal/fno/design/2026-06-03-fno-cli-short-flags.md``)
 locks a single short-flag scheme for the ``fno`` Typer CLI:
 
 * UPPERCASE letters are a small fixed GLOBAL register that means the same

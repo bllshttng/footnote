@@ -69,7 +69,7 @@ uv run python cli/scripts/migrate_source_field.py ~/.fno/graph.json
 
 The script:
 
-- Acquires the same `/tmp/abilities-graph.lock` flock that
+- Acquires the same `/tmp/fno-graph.lock` flock that
   `fno backlog intake` uses, so a concurrent intake in another
   terminal cannot race the read-modify-write window.
 - Atomic-renames a `.tmp` file over the target so a crash mid-write

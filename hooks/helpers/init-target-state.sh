@@ -304,7 +304,7 @@ if [[ -f "$_CONFIG_SH" ]]; then
   source "$_CONFIG_SH"
 fi
 # config.sh sources the `fno paths` shell-stub, which exports STATE_DIR as the
-# GLOBAL abilities home ($HOME/.fno) - a name collision with this
+# GLOBAL fno home ($HOME/.fno) - a name collision with this
 # script's project-local STATE_DIR. Re-derive ours or every sentinel/manifest
 # path below silently retargets the global dir (caught by
 # tests/hooks/test_pending_plan_wipe.sh, ab-d0337fbc).

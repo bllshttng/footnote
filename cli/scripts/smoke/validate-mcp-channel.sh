@@ -14,7 +14,7 @@
 # comes from channels-reference.md §Notification format, not from
 # runtime capture."
 #
-# Gated behind MCP_SMOKE=1 so CI without the abilities CLI venv skips
+# Gated behind MCP_SMOKE=1 so CI without the fno CLI venv skips
 # it. Humans run this after bumping the channels-reference doc (or the
 # CC research-preview API) to verify the fno side still emits the
 # expected shape.

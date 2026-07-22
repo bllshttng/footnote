@@ -42,9 +42,9 @@ def _md5(path: Path) -> str:
 
 
 def _write_state(cwd: Path, *, session_id: str, status: str = "IN_PROGRESS", pr_number: int = 42) -> Path:
-    abil = cwd / ".fno"
-    abil.mkdir(parents=True, exist_ok=True)
-    state = abil / "target-state.md"
+    fnodir = cwd / ".fno"
+    fnodir.mkdir(parents=True, exist_ok=True)
+    state = fnodir / "target-state.md"
     state.write_text(
         "---\n"
         f"status: {status}\n"

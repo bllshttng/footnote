@@ -15,7 +15,7 @@
 #
 # Tests run by sourcing graph-resolve.sh in a subshell so each case starts
 # clean, and pointing GRAPH_JSON at tests/fixtures/graph-fuzzy.json. The
-# `abilities` package must be importable for the resolver to call resolve_id;
+# `fno` package must be importable for the resolver to call resolve_id;
 # we use `uv run` from the cli/ dir to provide that.
 
 set -uo pipefail
@@ -32,7 +32,7 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1 :: $2"; FAIL=$((FAIL + 1)); }
 
 # Skip cleanly when uv isn't available - the harness needs uv to make the
-# abilities package importable inside the python heredoc embedded in
+# fno package importable inside the python heredoc embedded in
 # graph-resolve.sh. The legacy fallback path (rc=5) is exercised by a
 # dedicated test below that intentionally bypasses uv.
 if ! command -v uv >/dev/null 2>&1; then
@@ -64,7 +64,7 @@ run_resolve() {
                 export "$pair"
             done
         fi
-        # Use uv run to ensure the abilities package is on PYTHONPATH.
+        # Use uv run to ensure the fno package is on PYTHONPATH.
         # The script body is a literal single-quoted string; the arg is
         # read from RUN_RESOLVE_ARG via the environment.
         uv run --quiet bash -c 'source "$0" && resolve_arg "$RUN_RESOLVE_ARG"' "$RESOLVER" 2>"$STDERR_CAPTURE"
@@ -194,7 +194,7 @@ else
     fail "missing graph.json" "expected 'ab-9728b70b', got '$result'"
 fi
 
-# 9. Legacy fallback: when the abilities package is not importable, the
+# 9. Legacy fallback: when the fno package is not importable, the
 # resolver should fall back to exact-match-only and tell the user that
 # partial prefixes cannot resolve in this environment. Simulate by
 # pointing PYTHONPATH at an empty directory that shadows the package.

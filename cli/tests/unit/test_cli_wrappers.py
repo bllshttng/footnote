@@ -1,6 +1,6 @@
 """Cross-wrapper smoke tests: all 8 new fno subcommands respond to --help.
 
-Task 02.2 of plan 2026-05-11-abi-cli-promotion-wrappers.
+Task 02.2 of plan 2026-05-11-fno-cli-promotion-wrappers.
 """
 from __future__ import annotations
 

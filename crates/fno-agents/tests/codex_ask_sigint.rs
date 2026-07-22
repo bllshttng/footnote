@@ -29,7 +29,7 @@ static SIGNAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn tmpdir(tag: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "abi-codex-sigint-{}-{}-{}",
+        "fno-codex-sigint-{}-{}-{}",
         tag,
         std::process::id(),
         std::time::SystemTime::now()
@@ -102,7 +102,7 @@ fn codex_create_ctrl_c_forwards_sigint_and_exits_130() {
         &home,
         "sigint-agent",
         "hi",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_secs(30)), // large timeout: the interrupt wins
@@ -170,7 +170,7 @@ fn sigint_ignored_parent_disposition_is_preserved() {
         &home,
         "ign-agent",
         "hi",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_secs(10)),

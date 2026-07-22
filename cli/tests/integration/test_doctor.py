@@ -7,7 +7,7 @@ AC4-ERR: state_dir under /tmp exits non-zero with reason
 AC4-FR: missing settings.yaml exits non-zero without traceback
 AC4-EDGE: plans_dir under ~/Dropbox flags sync-conflict reason
 
-Autouse fixture pins FNO_REPO_ROOT per feedback_abi_repo_root_leaks_between_tests.
+Autouse fixture pins FNO_REPO_ROOT per feedback_fno_repo_root_leaks_between_tests.
 """
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ def test_doctor_flags_tmp_state_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC4-ERR: state_dir under /tmp exits non-zero with temp-directory reason."""
-    state_dir = "/tmp/abilities-test-state"
+    state_dir = "/tmp/fno-test-state"
     settings = _write_settings(
         tmp_path,
         f"schema_version: 1\nconfig:\n  state_dir: {state_dir}/\n",

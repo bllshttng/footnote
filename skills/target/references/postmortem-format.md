@@ -22,7 +22,7 @@ type: target-postmortem
 session_id: 20260427T153200Z-12345-a1b2c3
 generated_at: 2026-04-27T15:32:04Z
 target_invocation: "/target M ab-a5e142a2"
-plan_path: ~/code/abilities/internal/fno/plans/2026-04-27-postmortem-and-verifiers/
+plan_path: ~/code/fno/internal/fno/plans/2026-04-27-postmortem-and-verifiers/
 mode: medium
 blocked_phase: validate
 blocked_reason:
@@ -178,7 +178,7 @@ When target blocked extremely early (e.g. preflight failure):
 type: target-postmortem
 session_id: 20260427T155500Z-00042-deadbe
 generated_at: 2026-04-27T15:55:02Z
-plan_path: ~/code/abilities/internal/fno/plans/2026-04-27-postmortem-and-verifiers/
+plan_path: ~/code/fno/internal/fno/plans/2026-04-27-postmortem-and-verifiers/
 blocked_phase: init
 blocked_reason:
   kind: environment

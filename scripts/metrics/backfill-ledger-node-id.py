@@ -36,7 +36,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-LEDGER_LOCK_PATH = Path("/tmp/abilities-ledger.lock")
+LEDGER_LOCK_PATH = Path("/tmp/fno-ledger.lock")
 
 # A node-id-shaped token: a short alpha(+num) prefix, a dash, and 4-8 hex.
 # Covers the legacy ``ab-1a2b3c4d`` (8 hex) and the current ``x-1a2b`` (4 hex),

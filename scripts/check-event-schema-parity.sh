@@ -44,7 +44,7 @@ done
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # ---------------------------------------------------------------------------
-# Python interpreter: prefer the cli venv's python (which has abilities
+# Python interpreter: prefer the cli venv's python (which has fno
 # installed) over the system python3. The cli venv is created by `uv sync`
 # in cli/. Fall back to `python3` if the venv isn't present (e.g. CI after
 # `uv sync` installs to PATH via uv's managed env or the wheel is installed

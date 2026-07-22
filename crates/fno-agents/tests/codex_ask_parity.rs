@@ -4,7 +4,7 @@
 //! `create`/`resume`) and the Rust `codex_ask` path, and asserts identical
 //! behavior: reply text, exit code, and key events.jsonl field presence.
 //!
-//! Skips (not fails) when `python3` or the `abilities` package is unavailable,
+//! Skips (not fails) when `python3` or the `fno` package is unavailable,
 //! following the `claude_ask_parity.rs` skip-when-unavailable policy.
 //!
 //! Cases covered:
@@ -27,7 +27,7 @@ use std::process::Command;
 /// same pattern as the fix in tests/codex_ask_dispatch.rs).
 static PATH_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Path to `cli/src` so Python can import the `abilities` package.
+/// Path to `cli/src` so Python can import the `fno` package.
 fn pythonpath() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/src")
 }
@@ -43,7 +43,7 @@ fn python_available() -> bool {
 
 fn tmpdir(tag: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "abi-codex-parity-{}-{}-{}",
+        "fno-codex-parity-{}-{}-{}",
         tag,
         std::process::id(),
         std::time::SystemTime::now()
@@ -119,7 +119,7 @@ from pathlib import Path
 from fno.agents.providers import codex as c
 
 prompt = os.environ.get("PROMPT","")
-from_name = os.environ.get("FROM_NAME","abilities")
+from_name = os.environ.get("FROM_NAME","fno")
 output_path = Path(os.environ["OUTPUT_PATH"])
 cwd = Path(os.environ["CWD"])
 session_id = os.environ.get("SESSION_ID","")
@@ -318,7 +318,7 @@ fn parity_create_happy_path() {
         None,
         &cwd,
         "hello",
-        "abilities",
+        "fno",
         false,
         &py_out,
         10,
@@ -328,7 +328,7 @@ fn parity_create_happy_path() {
     let (rs_exit, rs_reply) = rust_codex_create(
         &cwd,
         "hello",
-        "abilities",
+        "fno",
         false,
         &rs_out,
         10,
@@ -373,7 +373,7 @@ fn parity_resume_happy_path() {
         Some(session_id),
         &cwd,
         "follow up",
-        "abilities",
+        "fno",
         false,
         &py_out,
         10,
@@ -384,7 +384,7 @@ fn parity_resume_happy_path() {
         session_id,
         &cwd,
         "follow up",
-        "abilities",
+        "fno",
         false,
         &rs_out,
         10,
@@ -427,7 +427,7 @@ fn parity_no_jsonl_nonzero_exit() {
         None,
         &cwd,
         "hello",
-        "abilities",
+        "fno",
         false,
         &py_out,
         10,
@@ -437,7 +437,7 @@ fn parity_no_jsonl_nonzero_exit() {
     let (rs_exit, _) = rust_codex_create(
         &cwd,
         "hello",
-        "abilities",
+        "fno",
         false,
         &rs_out,
         10,
@@ -489,7 +489,7 @@ fn parity_soft_error_promotion() {
         None,
         &cwd,
         "hello",
-        "abilities",
+        "fno",
         false,
         &py_out,
         10,
@@ -499,7 +499,7 @@ fn parity_soft_error_promotion() {
     let (rs_exit, rs_reply) = rust_codex_create(
         &cwd,
         "hello",
-        "abilities",
+        "fno",
         false,
         &rs_out,
         10,
@@ -536,7 +536,7 @@ import os, sys
 sys.path.insert(0, os.environ["PYTHONPATH"])
 from fno.agents.providers.codex import inject_from_name
 prompt = os.environ.get("PROMPT","")
-from_name = os.environ.get("FROM_NAME","abilities")
+from_name = os.environ.get("FROM_NAME","fno")
 sys.stdout.write(inject_from_name(prompt, from_name))
 "#;
 

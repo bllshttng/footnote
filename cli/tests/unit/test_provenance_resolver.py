@@ -38,7 +38,7 @@ def test_ac_hp_exact_id_match(tmp_path):
     """AC-HP: exact session_id + matching .jsonl -> resolved=True, correct path."""
     from fno.provenance.resolver import resolve_transcript
 
-    cwd = "/Users/bb16/code/me/abilities"
+    cwd = "/Users/bb16/code/me/fno"
     session_id = "4ec8a08b-9fe7-4550-8e40-00c7fd4e600a"
     projects_root = _make_projects_root(tmp_path, cwd, session_id)
 
@@ -56,11 +56,11 @@ def test_ac_hp_slug_leading_slash_to_dash(tmp_path):
     """AC-HP: leading '/' in cwd becomes leading '-' in the slug (confirmed example)."""
     from fno.provenance.resolver import resolve_transcript
 
-    cwd = "/Users/bb16/code/me/abilities"
+    cwd = "/Users/bb16/code/me/fno"
     session_id = "4ec8a08b-9fe7-4550-8e40-00c7fd4e600a"
 
     # Build the tree manually to confirm slug calculation
-    slug = "-Users-bb16-code-me-abilities"
+    slug = "-Users-bb16-code-me-fno"
     proj_dir = tmp_path / slug
     proj_dir.mkdir(parents=True, exist_ok=True)
     (proj_dir / f"{session_id}.jsonl").write_text("{}\n")

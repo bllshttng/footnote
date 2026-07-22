@@ -65,7 +65,7 @@ The watcher catches every merge within one poll interval. If you want a **termin
 # Wrap the gh merge subcommand so a successful terminal merge fires the ritual
 # right away. `command gh ...` calls the real CLI; the ritual is idempotent
 # per-PR (marker-keyed), so a later watcher poll for the same PR is a no-op.
-abi-merge() {
+fno-merge() {
   command gh pr merge "$@" || return $?
   # Resolve the PR number: explicit numeric arg, else the current branch's PR.
   local pr
@@ -75,7 +75,7 @@ abi-merge() {
 }
 ```
 
-Run `abi-merge <pr-number>` (or `abi-merge` on a PR branch) instead of the bare merge subcommand. Leave it out entirely if you prefer to let the interval watcher handle everything.
+Run `fno-merge <pr-number>` (or `fno-merge` on a PR branch) instead of the bare merge subcommand. Leave it out entirely if you prefer to let the interval watcher handle everything.
 
 ## Tests
 

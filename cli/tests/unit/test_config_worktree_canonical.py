@@ -37,9 +37,9 @@ def _isolate(monkeypatch: pytest.MonkeyPatch):
 
 
 def _write_settings(root: Path, parking_lot_path: str) -> None:
-    abil = root / ".fno"
-    abil.mkdir(parents=True, exist_ok=True)
-    (abil / "settings.yaml").write_text(
+    fnodir = root / ".fno"
+    fnodir.mkdir(parents=True, exist_ok=True)
+    (fnodir / "settings.yaml").write_text(
         "schema_version: 1\nconfig:\n  post_merge:\n"
         f"    parking_lot_path: {parking_lot_path}\n",
         encoding="utf-8",

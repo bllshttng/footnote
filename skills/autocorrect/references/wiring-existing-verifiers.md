@@ -5,7 +5,7 @@ A pre-commit verifier becomes a corrections.log writer by adding one bash line t
 ## The calling convention
 
 ```bash
-bash ~/code/me/abilities/scripts/corrections-verifier-log.sh \
+bash ~/code/me/fno/scripts/corrections-verifier-log.sh \
   --source <verifier-id> \
   --location "<file:line | session-id | repo>" \
   --severity <S0|S1|S2> \
@@ -27,7 +27,7 @@ for file in $(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(md|t
   if grep -nP '[\x{2014}]' "$file" >/dev/null 2>&1; then
     LINE=$(grep -nP '[\x{2014}]' "$file" | head -1 | cut -d: -f1)
     echo "emdash detected in $file:$LINE" >&2
-    bash ~/code/me/abilities/scripts/corrections-verifier-log.sh \
+    bash ~/code/me/fno/scripts/corrections-verifier-log.sh \
       --source emdash-grep \
       --location "$file:$LINE" \
       --severity S1 \

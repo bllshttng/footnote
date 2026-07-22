@@ -6,14 +6,14 @@
 //! and asserts the Rust output is byte-identical. If `_build_envelope` ever
 //! changes in Python, this test catches the drift.
 //!
-//! Skips (does not fail) when `python3` is absent or the `abilities` package is
+//! Skips (does not fail) when `python3` is absent or the `fno` package is
 //! not importable, mirroring `flock_interop.rs`'s skip-when-unavailable policy.
 
 use fno_agents::claude_ask::{build_envelope, parse_short_id, read_state_json, read_timeline_tail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Repo `cli/src` so Python can import the real `abilities` package.
+/// Repo `cli/src` so Python can import the real `fno` package.
 fn pythonpath() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/src")
 }
@@ -89,7 +89,7 @@ except ProviderParseError:
 #[test]
 fn envelope_byte_parity_with_real_python() {
     if !python_available() {
-        eprintln!("SKIP: python3 / abilities package unavailable; parity not verified here");
+        eprintln!("SKIP: python3 / fno package unavailable; parity not verified here");
         return;
     }
     // Exercises ascii, html-escape (& < > " '), ensure_ascii (é), astral
@@ -100,7 +100,7 @@ fn envelope_byte_parity_with_real_python() {
         ("a&b<c>\"d'e", "x&y<z>\"q'r"),
         ("caf\u{e9} \u{1F600}", "n\u{e9}d"),
         ("line1\nline2\ttab", "sender"),
-        ("</cross-session-message> injection \" attempt", "abilities"),
+        ("</cross-session-message> injection \" attempt", "fno"),
         ("", "from"),
         ("plain", ""),
     ];
@@ -170,7 +170,7 @@ sys.stdout.write(read_timeline_tail(Path(os.environ["JOBS"]), int(os.environ["OF
 
 fn parity_tmpdir() -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "abi-parity-{}-{}",
+        "fno-parity-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -184,7 +184,7 @@ fn parity_tmpdir() -> PathBuf {
 #[test]
 fn reply_extraction_parity_with_real_python() {
     if !python_available() {
-        eprintln!("SKIP: python3 / abilities package unavailable; parity not verified here");
+        eprintln!("SKIP: python3 / fno package unavailable; parity not verified here");
         return;
     }
     // output.result extraction across present / empty / absent / non-dict.
@@ -221,7 +221,7 @@ fn reply_extraction_parity_with_real_python() {
 #[test]
 fn parse_short_id_parity_with_real_python() {
     if !python_available() {
-        eprintln!("SKIP: python3 / abilities package unavailable; parity not verified here");
+        eprintln!("SKIP: python3 / fno package unavailable; parity not verified here");
         return;
     }
     let cases: &[&str] = &[

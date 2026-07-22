@@ -700,8 +700,8 @@ def _rank_of(g: Path, node_id: str):
 
 def test_ac1_hp_rank_top_pins_to_lane_front(tmp_graph):
     """AC1-HP: `rank A --top` sorts A before B in the same lane on the board."""
-    a = _add("AlphaCard", project="fno", priority="p1")  # Now/abilities
-    b = _add("BetaCard", project="fno", priority="p1")   # Now/abilities
+    a = _add("AlphaCard", project="fno", priority="p1")  # Now/fno
+    b = _add("BetaCard", project="fno", priority="p1")   # Now/fno
 
     r = _invoke("backlog", "rank", a, "--top")
     assert r.exit_code == 0, r.output
@@ -801,7 +801,7 @@ def test_ac1_err_cross_lane_anchor_rejected(tmp_graph):
 
 def test_ac1_edge_only_node_in_lane_bottom(tmp_graph):
     """AC1-EDGE: --bottom on the sole node in a lane succeeds with a valid rank."""
-    a = _add("LonelyCard", project="fno", priority="p3")  # Later/abilities (alone)
+    a = _add("LonelyCard", project="fno", priority="p3")  # Later/fno (alone)
     r = _invoke("backlog", "rank", a, "--bottom")
     assert r.exit_code == 0, r.output
     assert isinstance(_rank_of(tmp_graph, a), (int, float))

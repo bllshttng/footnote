@@ -19,7 +19,7 @@
 # Autonomy is untouched: the proposer stays at its config default `report`
 # (dry-run) level. This helper only lights the ignition; it never flips level.
 
-# Reuse reconcile's _reconcile_resolve_abi verbatim by sourcing it - zero edits
+# Reuse reconcile's _reconcile_resolve_fno verbatim by sourcing it - zero edits
 # to reconcile's logic (Locked Decision 6). We do NOT reuse _reconcile_mtime: it
 # is BSD-first (stat -f %m) and returns non-numeric garbage under GNU coreutils,
 # so this file carries its own GNU-first _eval_sweep_mtime.
@@ -96,49 +96,49 @@ _eval_sweep_trim_log() {
     return 0
 }
 
-# _eval_sweep_run_stages <repo_root> <abi_cmd> <log> [<claim_key> <holder>]
+# _eval_sweep_run_stages <repo_root> <fno_cmd> <log> [<claim_key> <holder>]
 # The detached wrapper body: run each sweep/tick stage under a time bound,
 # appending to <log>, then release the singleton claim. Sweep MUST precede tick
 # per skill (tick consumes the run_complete the sweep emits); the wrapper bounds
 # stages individually and never reorders them. Always returns 0.
 _eval_sweep_run_stages() {
-    local repo_root="$1" abi_cmd="$2" log="$3" claim_key="${4:-}" holder="${5:-}"
+    local repo_root="$1" fno_cmd="$2" log="$3" claim_key="${4:-}" holder="${5:-}"
     cd "$repo_root" 2>/dev/null || return 0
     mkdir -p "$(dirname "$log")" 2>/dev/null || true
     _eval_sweep_trim_log "$log"
     printf '=== eval-sweep run %s pid=%s ===\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" >> "$log" 2>/dev/null || true
-    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$abi_cmd" observer sweep  --skill blueprint >> "$log" 2>&1 || true
-    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$abi_cmd" observer sweep  --skill review    >> "$log" 2>&1 || true
-    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$abi_cmd" skill-diff tick --skill blueprint >> "$log" 2>&1 || true
-    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$abi_cmd" skill-diff tick --skill review    >> "$log" 2>&1 || true
-    [[ -n "$claim_key" ]] && "$abi_cmd" claim release "$claim_key" --holder "$holder" >/dev/null 2>&1
+    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" observer sweep  --skill blueprint >> "$log" 2>&1 || true
+    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" observer sweep  --skill review    >> "$log" 2>&1 || true
+    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" skill-diff tick --skill blueprint >> "$log" 2>&1 || true
+    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" skill-diff tick --skill review    >> "$log" 2>&1 || true
+    [[ -n "$claim_key" ]] && "$fno_cmd" claim release "$claim_key" --holder "$holder" >/dev/null 2>&1
     return 0
 }
 
-# _eval_sweep_paused <abi_cmd>
+# _eval_sweep_paused <fno_cmd>
 # True (0) when the loops kill switch is active, so the fire is skipped. The
 # eval sweep IS loop activity, so `fno loops pause-all` must stop it. Fail
 # CLOSED: any output that does not begin with "not paused" / "expired" (a
 # corrupt or unreadable state included) is treated as paused (Claude's
 # Discretion 2 - single source of truth via the CLI, fail-closed on ambiguity).
 _eval_sweep_paused() {
-    local abi_cmd="$1" status
-    status="$("$abi_cmd" loops status 2>/dev/null)" || return 0
+    local fno_cmd="$1" status
+    status="$("$fno_cmd" loops status 2>/dev/null)" || return 0
     case "$status" in
         "not paused"* | "expired"*) return 1 ;;
         *) return 0 ;;
     esac
 }
 
-# _eval_sweep_try_claim <abi_cmd> <key> <holder>
+# _eval_sweep_try_claim <fno_cmd> <key> <holder>
 # Acquire the singleton claim, classifying by `fno claim acquire`'s exit code
 # (claims/cli.py): 0 = acquired (we launch), 1 = ClaimHeldByOther (a live sibling
 # holds it, skip), any other = claim layer error (stale install / usage) so
 # degrade to stamp-only throttling and still fire (AC1-ERR). The holder is unique
 # per fire, so a still-held claim yields 1 rather than an idempotent re-acquire.
 _eval_sweep_try_claim() {
-    local abi_cmd="$1" key="$2" holder="$3" rc
-    "$abi_cmd" claim acquire "$key" --holder "$holder" --ttl "$EVAL_SWEEP_CLAIM_TTL" >/dev/null 2>&1
+    local fno_cmd="$1" key="$2" holder="$3" rc
+    "$fno_cmd" claim acquire "$key" --holder "$holder" --ttl "$EVAL_SWEEP_CLAIM_TTL" >/dev/null 2>&1
     rc=$?
     case "$rc" in
         0) echo "acquired" ;;
@@ -171,13 +171,13 @@ eval_sweep_maybe_fire() {
         fi
     fi
 
-    local abi_cmd
-    abi_cmd="$(_reconcile_resolve_abi)" || return 0
-    [[ -n "$abi_cmd" ]] || return 0
+    local fno_cmd
+    fno_cmd="$(_reconcile_resolve_fno)" || return 0
+    [[ -n "$fno_cmd" ]] || return 0
 
     # Honor the pause-all kill switch (fail-closed). Do NOT claim the stamp when
     # paused: an unpause should let the next session fire, not wait a full window.
-    _eval_sweep_paused "$abi_cmd" && return 0
+    _eval_sweep_paused "$fno_cmd" && return 0
 
     # Singleton claim closes the burst race the stamp alone cannot (two sessions
     # starting in the same instant both saw an old stamp). Acquire BEFORE writing
@@ -186,7 +186,7 @@ eval_sweep_maybe_fire() {
     slug="$(basename "$canonical")"
     claim_key="eval-sweep:$slug"
     holder="eval-sweep:${HOSTNAME:-h}:$$:$(date +%s)"
-    claim_state="$(_eval_sweep_try_claim "$abi_cmd" "$claim_key" "$holder")"
+    claim_state="$(_eval_sweep_try_claim "$fno_cmd" "$claim_key" "$holder")"
     [[ "$claim_state" == "held" ]] && return 0
     # "acquired" -> release at wrapper end; "degraded" -> stamp-only, nothing to release.
     [[ "$claim_state" == "acquired" ]] || { claim_key=""; holder=""; }
@@ -200,7 +200,7 @@ eval_sweep_maybe_fire() {
     nohup bash -c '
         source "$1/eval-sweep-throttle.sh" 2>/dev/null || exit 0
         _eval_sweep_run_stages "$2" "$3" "$4" "$5" "$6"
-    ' _ "$_EVAL_SWEEP_LIB_DIR" "$repo_root" "$abi_cmd" "$log" "$claim_key" "$holder" >/dev/null 2>&1 &
+    ' _ "$_EVAL_SWEEP_LIB_DIR" "$repo_root" "$fno_cmd" "$log" "$claim_key" "$holder" >/dev/null 2>&1 &
     disown 2>/dev/null || true
 
     return 0

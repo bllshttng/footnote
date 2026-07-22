@@ -10,7 +10,7 @@ Every git worktree created by footnote lives at exactly one shape:
 
 Examples:
 
-- `~/.fno/worktrees/abi-provider-rotation-codex-ab-1234abcd/`
+- `~/.fno/worktrees/fno-provider-rotation-codex-ab-1234abcd/`
 - `~/.fno/worktrees/web-onboarding-cleanup/`
 - `~/.fno/worktrees/acme-web-citation-extractor/`
 
@@ -23,10 +23,10 @@ A second-pass review flagged the `.claude/` prefix as Claude-specific implementa
 
 ## Why flat with a project prefix
 
-| Property | Flat (`abi-foo`) | Nested (`fno/foo`) |
+| Property | Flat (`fno-foo`) | Nested (`fno/foo`) |
 |---|---|---|
 | Single canonical home across all projects | yes | yes |
-| Cleanup sweep | `ls ~/.fno/worktrees/abi-*` | `ls ~/.fno/worktrees/fno/` (with empty-dir trail) |
+| Cleanup sweep | `ls ~/.fno/worktrees/fno-*` | `ls ~/.fno/worktrees/fno/` (with empty-dir trail) |
 | Provenance at a glance | yes (prefix is right there) | yes (one level deeper) |
 | `cd` ergonomics | one segment | two segments |
 | Empty-project-dir clutter | none | leftover empty `fno/` dirs after sweep |

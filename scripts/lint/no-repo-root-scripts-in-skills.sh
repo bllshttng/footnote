@@ -3,8 +3,8 @@
 # Skills must call ${SKILL_DIR}/scripts/X (preferred for portability) or
 # `fno <verb>` (when the polished CLI surface is the right abstraction).
 #
-# Reason: ${REPO_ROOT}/scripts/X resolves only inside the abilities repo
-# itself. In any other project where the abilities plugin is installed,
+# Reason: ${REPO_ROOT}/scripts/X resolves only inside the fno repo
+# itself. In any other project where the fno plugin is installed,
 # the path is missing and skills silently no-op (or fail). Bundles live
 # alongside the skill and ship with the plugin; CLI verbs resolve via PATH.
 #

@@ -1507,7 +1507,7 @@ def _rust_pty_row(name: str = "worker-claude", **overrides) -> dict:
         "provider": "claude",
         "cwd": "/Users/x/proj",
         "project_root": "/Users/x/proj",
-        "messaging_socket_path": "/tmp/abilities/sock/wk-abc123.sock",
+        "messaging_socket_path": "/tmp/fno/sock/wk-abc123.sock",
         "status": "live",
         "created_at": "2026-05-26T00:00:00Z",
         "pid": 4242,
@@ -1546,7 +1546,7 @@ def test_rust_pty_row_loads_without_bricking(tmp_path: Path, monkeypatch) -> Non
     assert e.project_root == "/Users/x/proj"
     assert e.pid == 4242
     assert e.pid_start_time == 123456789
-    assert e.messaging_socket_path == "/tmp/abilities/sock/wk-abc123.sock"
+    assert e.messaging_socket_path == "/tmp/fno/sock/wk-abc123.sock"
     assert e.cc_session_id == "cc-xyz"
     assert e.last_reconciled_at == "2026-05-26T01:00:00Z"
 

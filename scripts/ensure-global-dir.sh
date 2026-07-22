@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Ensure ~/.fno/ exists and is accessible from sandboxed environments.
 #
-# Creates the global abilities directory and registers it with each detected
+# Creates the global fno directory and registers it with each detected
 # AI CLI's sandbox/permissions so tools can read/write to it.
 #
 # Supports: Claude Code, Codex CLI, Gemini CLI
@@ -73,5 +73,5 @@ if [ -f "$GEMINI_SETTINGS" ] || command -v gemini >/dev/null 2>&1; then
 fi
 
 echo ""
-echo "Global abilities directory ready at $GLOBAL_DIR"
+echo "Global fno directory ready at $GLOBAL_DIR"
 echo "Signals and cross-project state will be stored here."

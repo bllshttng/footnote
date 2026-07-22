@@ -46,9 +46,9 @@ def _cli_cmd() -> list[str]:
     import shutil
     # The console script is `fno-py` (the Rust mux binary owns `fno`); the state
     # CLI is Python, so target it directly rather than through the mux front door.
-    abilities_exe = shutil.which("fno-py")
-    if abilities_exe:
-        return [abilities_exe]
+    fno_exe = shutil.which("fno-py")
+    if fno_exe:
+        return [fno_exe]
     # Fallback: invoke via typer's app directly
     return [sys.executable, "-c",
             "from fno.cli import app; app()"]

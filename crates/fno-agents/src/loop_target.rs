@@ -498,7 +498,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
                 } else {
                     eprintln!(
                         "fno-agents loop run: cannot resolve driver lib directory. \
-                         Pass --driver-lib-dir <path> (the abilities plugin's \
+                         Pass --driver-lib-dir <path> (the fno plugin's \
                          scripts/lib directory) or set FNO_DRIVER_LIB_DIR env."
                     );
                     return Ok(2);
@@ -549,10 +549,10 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
 
     // ── build static env for the dispatcher ──────────────────────────────────
     // Mirrors run-target-loop.sh:36-40.
-    let abilities_dir = cwd.join(".fno");
-    let output_file = abilities_dir.join("target-last-output.txt");
-    let history_file = abilities_dir.join("target-history.txt");
-    let signal_file = abilities_dir.join("target-promise.signal");
+    let fno_dir = cwd.join(".fno");
+    let output_file = fno_dir.join("target-last-output.txt");
+    let history_file = fno_dir.join("target-history.txt");
+    let signal_file = fno_dir.join("target-promise.signal");
 
     let mut env: Vec<(String, String)> = vec![
         (
@@ -599,7 +599,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     install_sigint_handler();
 
     // ── build journal ─────────────────────────────────────────────────────────
-    let project_events = abilities_dir.join("events.jsonl");
+    let project_events = fno_dir.join("events.jsonl");
     let home_dir = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp"));

@@ -711,7 +711,7 @@ def test_reconcile_triggers_advance_after_close(cli_env, monkeypatch):
     graph_path, _ = cli_env
     _make_graph(
         graph_path,
-        [_node("ab-adv", pr_number=700, project="fno", cwd="/proj/abilities")],
+        [_node("ab-adv", pr_number=700, project="fno", cwd="/proj/fno")],
     )
     monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({700: "MERGED"}))
 
@@ -736,7 +736,7 @@ def test_reconcile_triggers_advance_after_close(cli_env, monkeypatch):
     # (its cwd), not the reconcile's cwd.
     assert calls == [{
         "closed": "ab-adv", "project": "fno",
-        "project_root": _P("/proj/abilities"), "node_done": True,
+        "project_root": _P("/proj/fno"), "node_done": True,
     }]
 
 
