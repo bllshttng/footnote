@@ -645,9 +645,15 @@ mod tests {
         // A later density write keeps the width; a later width write keeps the
         // density.
         save_prefs(Density::Extended, AgentSort::Squad);
-        assert_eq!(load_prefs(), (Density::Extended, AgentSort::Squad, Some(45)));
+        assert_eq!(
+            load_prefs(),
+            (Density::Extended, AgentSort::Squad, Some(45))
+        );
         save_width(60);
-        assert_eq!(load_prefs(), (Density::Extended, AgentSort::Squad, Some(60)));
+        assert_eq!(
+            load_prefs(),
+            (Density::Extended, AgentSort::Squad, Some(60))
+        );
     }
 
     #[test]

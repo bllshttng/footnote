@@ -12250,8 +12250,16 @@ mod tests {
         arm_sideline_drag(&mut view, Instant::now());
 
         view.drag_sideline_to(200, Instant::now()); // far right
-        assert_eq!(view.panel_w(), 40, "content bound (40) beats the 60% cap (48)");
-        assert_eq!(view.content_dims().1, MIN_CONTENT_COLS, "exactly the minimum content");
+        assert_eq!(
+            view.panel_w(),
+            40,
+            "content bound (40) beats the 60% cap (48)"
+        );
+        assert_eq!(
+            view.content_dims().1,
+            MIN_CONTENT_COLS,
+            "exactly the minimum content"
+        );
 
         view.drag_sideline_to(0, Instant::now()); // far left
         assert_eq!(view.panel_w(), MIN_SLIM_PANEL_W, "clamps at the slim floor");
@@ -12269,12 +12277,20 @@ mod tests {
         arm_sideline_drag(&mut view, Instant::now());
 
         view.drag_sideline_to(MIN_EXTENDED_PANEL_W - 2, Instant::now()); // want 29 < 30
-        assert_eq!(view.density, Density::Regular, "demoted to the widest fitting mode");
+        assert_eq!(
+            view.density,
+            Density::Regular,
+            "demoted to the widest fitting mode"
+        );
         assert!(view.sideline_width < MIN_EXTENDED_PANEL_W);
 
         view.drag_sideline_to(0, Instant::now()); // keeps shrinking past the old floor
         assert_eq!(view.panel_w(), MIN_SLIM_PANEL_W);
-        assert_eq!(view.density, Density::Regular, "no further demote below Regular");
+        assert_eq!(
+            view.density,
+            Density::Regular,
+            "no further demote below Regular"
+        );
     }
 
     #[test]
@@ -12329,7 +12345,10 @@ mod tests {
         view.drag_sideline_to(50, Instant::now());
         assert_ne!(view.sideline_width, PANEL_W);
 
-        assert!(view.revert_sideline_drag(), "reverting a moved drag reports a change");
+        assert!(
+            view.revert_sideline_drag(),
+            "reverting a moved drag reports a change"
+        );
         assert_eq!(view.sideline_width, PANEL_W, "back to the width at grab");
         assert!(view.sideline_drag.is_none(), "the drag ended");
     }
@@ -19004,12 +19023,27 @@ mod tests {
         // Row 0, so the cell index is the column.
         let glyph_cell = &frame.cells[range.start];
         let pad_cell = &frame.cells[range.end - 1]; // the cell before the divider
-        assert_eq!(glyph_cell.c, density_glyph(v.density), "glyph leads the button");
-        assert_eq!(glyph_cell.flags, cell_flags::INVERSE, "glyph cell is the button");
+        assert_eq!(
+            glyph_cell.c,
+            density_glyph(v.density),
+            "glyph leads the button"
+        );
+        assert_eq!(
+            glyph_cell.flags,
+            cell_flags::INVERSE,
+            "glyph cell is the button"
+        );
         assert_eq!(pad_cell.c, ' ', "the divider-adjacent cell is a pad");
-        assert_eq!(pad_cell.flags, 0, "the pad is plain, giving real breathing room");
+        assert_eq!(
+            pad_cell.flags, 0,
+            "the pad is plain, giving real breathing room"
+        );
         // The divider itself is the very next column.
-        assert_eq!(range.end, pw - 1, "the button ends right before the divider");
+        assert_eq!(
+            range.end,
+            pw - 1,
+            "the button ends right before the divider"
+        );
     }
 
     fn view_with_agents(agents: Vec<AgentRow>) -> View {
