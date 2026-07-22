@@ -721,8 +721,17 @@ struct View {
     /// pruning.
     idle_expanded: HashSet<SectionKey>,
     /// Selector cursor into [`View::display_rows`], when open (x-260a: one
-    /// index space shared with painting, hover, and mouse hit-testing).
+    /// index space shared with painting, hover, and mouse hit-testing). Written
+    /// only through [`View::set_selector`] so `sel_agent` never desyncs.
     selector: Option<usize>,
+    /// (x-8d3e) The name of the agent the selector rests on, cached at
+    /// selector-write time. The idle-cap `protect` in [`View::tree_rows`] reads
+    /// THIS, not a fresh index lookup: re-deriving the identity from `selector`
+    /// against a differently-capped build reads the wrong row (the uncapped
+    /// build restores every folded idle row and emits no fold row, so every
+    /// index past the first fold shifts). `None` when the selector is closed or
+    /// off an agent row. Ephemeral render state, never persisted.
+    sel_agent: Option<String>,
     /// Pending escape bytes in selector mode, carried ACROSS reads so a
     /// split arrow sequence can never half-close the selector and leak its
     /// tail into the pane (gemini medium).
@@ -1556,6 +1565,7 @@ impl View {
             section_chosen: HashMap::new(),
             idle_expanded: HashSet::new(),
             selector: None,
+            sel_agent: None,
             sel_esc: Vec::new(),
             sel_hover_armed: false,
             sideline_offset: 0,
@@ -1837,7 +1847,7 @@ impl View {
     /// selector/answers in `handle_stdin`, so a lingering selector would
     /// otherwise swallow the typed name (codex peer review).
     fn open_create(&mut self) {
-        self.selector = None;
+        self.set_selector(None);
         self.answers = None;
         self.search = None;
         self.rename = None;
@@ -1855,7 +1865,7 @@ impl View {
     /// keyboard-opened overlays first (x-260a). The marks are NOT cleared - they
     /// are the payload; Esc keeps them, a submit clears them.
     fn open_recruit(&mut self) {
-        self.selector = None;
+        self.set_selector(None);
         self.answers = None;
         self.search = None;
         self.rename = None;
@@ -1875,7 +1885,7 @@ impl View {
     /// keystrokes that follow the confirm's resolution (sigma review x-260a -
     /// reachable by mouse-clicking a card while prefix+w is open).
     fn open_confirm(&mut self, action: ConfirmAction) {
-        self.selector = None;
+        self.set_selector(None);
         self.sel_hover_armed = false;
         self.answers = None;
         self.search = None;
@@ -1905,7 +1915,7 @@ impl View {
     /// discipline as [`View::open_create`] (a lingering selector would swallow
     /// the name).
     fn open_rename(&mut self, target: RenameTarget) {
-        self.selector = None;
+        self.set_selector(None);
         self.answers = None;
         self.search = None;
         self.move_pick = None;
@@ -1981,7 +1991,7 @@ impl View {
     /// candidate destination squads (source excluded, capped at 9) in the order
     /// a digit selects them. Same overlay-clearing discipline as the others.
     fn open_move_pick(&mut self, tab: TabId, squads: Vec<u64>) {
-        self.selector = None;
+        self.set_selector(None);
         self.answers = None;
         self.search = None;
         self.create = None;
@@ -1996,7 +2006,7 @@ impl View {
     }
 
     fn open_attach_place(&mut self, id: String, target: u64, squads: Vec<u64>) {
-        self.selector = None;
+        self.set_selector(None);
         self.answers = None;
         self.search = None;
         self.create = None;
@@ -3518,11 +3528,11 @@ impl View {
                 .filter(|&i| self.selector_anchor(i) == Some(i))
             {
                 Some(i) => {
-                    self.selector = Some(i);
+                    self.set_selector(Some(i));
                     self.sel_hover_armed = true;
                 }
                 None if self.sel_hover_armed => {
-                    self.selector = None;
+                    self.set_selector(None);
                     self.sel_hover_armed = false;
                 }
                 None => {}
@@ -3622,7 +3632,7 @@ impl View {
                     })
                     .or_else(|| self.selector.and_then(|cur| self.selector_anchor(cur))),
             };
-            self.selector = anchored;
+            self.set_selector(anchored);
         }
         // Needs-me overlay re-anchors to the SAME item across a scrape tick
         // (x-feec AC3-UI): a resolved row drops out, the queue re-sorts, and the
@@ -3850,6 +3860,20 @@ impl View {
         }
     }
 
+    /// (x-8d3e) The one write point for [`View::selector`]. Records the selected
+    /// row's agent identity into `sel_agent` from the CURRENT painted build (the
+    /// build this index was computed against), so `tree_rows`' idle-cap protect
+    /// reads a stable identity instead of re-resolving an index against a
+    /// differently-capped build. The `display_rows()` call here reads the PRIOR
+    /// cached `sel_agent` for its own protect, so it never recurses.
+    fn set_selector(&mut self, idx: Option<usize>) {
+        self.selector = idx;
+        self.sel_agent = idx.and_then(|i| match self.display_rows().get(i) {
+            Some(DisplayRow::Agent(a)) => Some(a.name.clone()),
+            _ => None,
+        });
+    }
+
     /// Put the selector back on `held` after the row set changed under it.
     ///
     /// Identity first (the agent is still there, just elsewhere), then the
@@ -3866,7 +3890,7 @@ impl View {
                 .iter()
                 .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == name))
             {
-                self.selector = Some(i);
+                self.set_selector(Some(i));
                 // A re-order can move the agent outside the scroll window, and a
                 // cursor with no visible row still takes contextual keys - so
                 // scroll to it rather than leaving it off-screen.
@@ -3874,7 +3898,8 @@ impl View {
                 return;
             }
         }
-        self.selector = self.selector.and_then(|cur| self.selector_anchor(cur));
+        let anchored = self.selector.and_then(|cur| self.selector_anchor(cur));
+        self.set_selector(anchored);
         self.clamp_sideline_offset();
     }
 
@@ -4205,16 +4230,17 @@ impl View {
         }
         match self.selector {
             Some(cur) if !self.sel_hover_armed => {
-                self.selector = Some(if down {
+                let next = if down {
                     self.selector_down(cur)
                 } else {
                     self.selector_up(cur)
-                });
+                };
+                self.set_selector(Some(next));
                 self.clamp_sideline_offset();
             }
             _ => {
                 if self.sel_hover_armed {
-                    self.selector = None;
+                    self.set_selector(None);
                     self.sel_hover_armed = false;
                 }
                 self.sideline_offset = if down {
@@ -5157,20 +5183,14 @@ impl View {
     }
 
     fn tree_rows(&self) -> Vec<DisplayRow<'_>> {
-        // (x-c5ee) The idle cap must never fold the row the selector rests on
-        // (AC2-FR). Resolve that agent's name from an UNCAPPED build - reading
-        // `selected_agent_name()` here would call `display_rows()` and recurse
-        // back into this builder. Only when a selector is actually open (the
-        // transient prefix+w nav mode) do we pay the extra build; the steady
-        // paint keeps its single pass.
-        let protect = match self.selector {
-            Some(i) => match self.build_tree_rows(None, false).get(i) {
-                Some(DisplayRow::Agent(a)) => Some(a.name.clone()),
-                _ => None,
-            },
-            None => None,
-        };
-        self.build_tree_rows(protect.as_deref(), true)
+        // (x-c5ee / x-8d3e) The idle cap must never fold the row the selector
+        // rests on (AC2-FR). Read the selected agent's identity from the
+        // `sel_agent` cache, written by `set_selector` against the painted build
+        // the index came from. Re-deriving it here from `selector` (as the
+        // original x-c5ee did, via an UNCAPPED build) reads the wrong row once a
+        // squad folds idle overflow: the uncapped build restores every folded
+        // row and emits no fold row, so every index past the first fold shifts.
+        self.build_tree_rows(self.sel_agent.as_deref(), true)
     }
 
     /// Build the sideline tree. `apply_cap` gates the top-K idle cap (x-c5ee);
@@ -8244,7 +8264,7 @@ async fn handle_stdin(
         if passthrough.first().is_some_and(|&b| is_sideline_verb(b)) {
             return selector_keys(view, &passthrough, sock_w).await;
         }
-        view.selector = None;
+        view.set_selector(None);
         view.sel_hover_armed = false;
         // fall through: forward this chunk to the focused pane.
     }
@@ -8351,7 +8371,8 @@ async fn dispatch_event(
                 // Row 0 is NOT always actionable: Extended opens on the inert
                 // column header, where the cursor would paint nothing and Enter
                 // would only ring. Anchor onto the first actionable row instead.
-                view.selector = view.selector_anchor(0);
+                let anchored = view.selector_anchor(0);
+                view.set_selector(anchored);
                 // An explicit open is a full modal, never a motion-fresh
                 // hover-arm - clear any stale hover flag so j/k and typing are
                 // owned by the selector, not disarmed on the first non-verb key.
@@ -9333,7 +9354,7 @@ async fn execute_aux_action(
                 .iter()
                 .position(|r| matches!(r, DisplayRow::Card(c) if c.id == node))
             {
-                Some(i) => view.selector = Some(i),
+                Some(i) => view.set_selector(Some(i)),
                 None => view.set_notice(format!("{node} is no longer in the backlog")),
             }
         }
@@ -9697,7 +9718,7 @@ async fn peek_keys(
                     Some(ChromeHit::Notice(msg)) => view.set_notice(msg.to_string()),
                     Some(hit) => {
                         view.clear_peek();
-                        view.selector = None;
+                        view.set_selector(None);
                         apply_hit(view, hit, sock_w).await?;
                     }
                     None => {
@@ -9749,7 +9770,7 @@ async fn peek_keys(
                 let restore = view.selector.is_some();
                 view.clear_peek();
                 if restore {
-                    view.selector = Some(cursor);
+                    view.set_selector(Some(cursor));
                 }
             }
             // Everything else is swallowed - never a pane leak (prefix-layer
@@ -9870,8 +9891,14 @@ async fn selector_keys(
             view.sel_follow = None;
         }
         match k {
-            b'j' => view.selector = Some(view.selector_down(cur)),
-            b'k' => view.selector = Some(view.selector_up(cur)),
+            b'j' => {
+                let n = view.selector_down(cur);
+                view.set_selector(Some(n));
+            }
+            b'k' => {
+                let n = view.selector_up(cur);
+                view.set_selector(Some(n));
+            }
             b'l' | b'h' => {
                 // Expand/collapse applies to squad rows; every other variant
                 // no-ops (matching today's tab rows). Materialize the owned id
@@ -9900,7 +9927,7 @@ async fn selector_keys(
                     // operator stays in the list to pick another row.
                     Some(ChromeHit::Notice(msg)) => view.set_notice(msg.to_string()),
                     Some(hit) => {
-                        view.selector = None;
+                        view.set_selector(None);
                         apply_hit(view, hit, sock_w).await?;
                     }
                     // Out of range / Header: unreachable via j/k, but a stale
@@ -10203,7 +10230,7 @@ async fn selector_keys(
                     None => view.set_notice("no other workspace to move this tab to".into()),
                 }
             }
-            0x1b | b'q' => view.selector = None,
+            0x1b | b'q' => view.set_selector(None),
             _ => {}
         }
     }
@@ -14009,20 +14036,106 @@ mod tests {
             agents.push(sv_agent(1, &format!("idle{i}"), None, false));
         }
         let mut view = view_with_agents(agents);
-        // Uncapped order: Sel(0), w(1), idle0(2)..idle11(13). Rest on idle11,
-        // which the cap would otherwise fold.
-        view.selector = Some(13);
+        // Capped, no selector: 1 attention + budget-7 idle + a `+5 idle` fold row.
+        assert_eq!(rendered(&view, "idle"), 7, "the cap folds the idle overflow");
+        // Select a VISIBLE idle row by its CAPPED-build index (x-8d3e: the only
+        // index space the selector ever lives in). `set_selector` caches its
+        // identity, so protect keeps the whole squad idle-expanded and no idle
+        // row the cursor could reach is folded away (AC2-FR).
+        let idle0 = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "idle0"))
+            .unwrap();
+        view.set_selector(Some(idle0));
         assert_eq!(
             rendered(&view, "idle"),
             12,
-            "the squad renders idle-expanded so the selected agent is visible"
+            "the selected squad renders idle-expanded so no idle row is folded"
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // x-8d3e regression (the PR #566 review scenario): the selector resting on
+    // the `+N idle` fold row must not mis-resolve into a phantom agent. The old
+    // protect re-derived the selected identity from an UNCAPPED build, which
+    // restores every folded row and emits no fold row, so a capped fold-row
+    // index landed on an unrelated idle agent - expanding its squad, moving the
+    // fold row out from under the cursor, and making Enter miss the toggle. The
+    // fold row must stay put and `row_action` must resolve it to ToggleIdle.
+    #[test]
+    fn selector_on_fold_row_stays_actionable() {
+        let dir = isolate_view_store("cap-foldsel");
+        let mut agents = vec![sv_agent(1, "w", Some(AgentBadge::Working), false)];
+        for i in 0..12 {
+            agents.push(sv_agent(1, &format!("idle{i}"), None, false));
+        }
+        let mut view = view_with_agents(agents);
+        let fold_at = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::IdleFold { .. }))
+            .expect("a fold row");
+        view.set_selector(Some(fold_at));
+        // The fold row is not an agent, so sel_agent is None: no squad is
+        // force-expanded and the fold row keeps its index across the repaint.
+        assert!(
+            matches!(
+                view.display_rows().get(fold_at),
+                Some(DisplayRow::IdleFold { .. })
+            ),
+            "the fold row stays under the cursor across a repaint"
         );
         assert!(
             matches!(
-                view.display_rows().get(13),
+                view.row_action(fold_at),
+                Some(ChromeHit::ToggleIdle(SectionKey::Squad(_)))
+            ),
+            "Enter on the fold row toggles idle, not a phantom agent"
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // x-8d3e regression (AC3-FR): once protect expands a squad, navigating onto
+    // an idle overflow row - visible ONLY because of that expansion, and absent
+    // from any capped-unprotected build - must keep the squad expanded on the
+    // next paint. This is why the identity is cached from the painted build
+    // rather than re-resolved against a freshly-built capped row set.
+    #[test]
+    fn selector_on_overflow_idle_row_keeps_squad_expanded() {
+        let dir = isolate_view_store("cap-overflow");
+        let mut agents = vec![sv_agent(1, "w", Some(AgentBadge::Working), false)];
+        for i in 0..12 {
+            agents.push(sv_agent(1, &format!("idle{i}"), None, false));
+        }
+        let mut view = view_with_agents(agents);
+        let idle0 = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "idle0"))
+            .unwrap();
+        view.set_selector(Some(idle0));
+        assert_eq!(rendered(&view, "idle"), 12, "protect expanded the squad");
+        // idle11 is an overflow row, now visible; navigate onto it.
+        let idle11 = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "idle11"))
+            .unwrap();
+        view.set_selector(Some(idle11));
+        assert_eq!(
+            rendered(&view, "idle"),
+            12,
+            "the squad stays expanded on the selected overflow row"
+        );
+        assert!(
+            matches!(
+                view.display_rows().get(idle11),
                 Some(DisplayRow::Agent(a)) if a.name == "idle11"
             ),
-            "the selector still rests on that agent"
+            "the cursor stays on idle11"
         );
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);
