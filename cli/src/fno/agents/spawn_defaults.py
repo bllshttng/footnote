@@ -5,8 +5,10 @@ Every `fno agents spawn` / `/agent spawn` passes the Python dispatch seam
 `config.agents.defaults` field-by-field on argv HERE covers pane, bg, headless,
 and the Rust route with zero Rust changes (Locked Decision 9).
 
-Precedence per field: explicit CLI flag > `agents.defaults` > built-in. Fields
-resolve independently, with ONE exception: the `model` default is provider-
+Precedence per field: explicit CLI flag > `agents.profiles.<verb>` > `agents.
+defaults` > built-in. The profile layer (x-3d5b) is the same block keyed by the
+seed's leading slash-verb, merged over defaults field-wise before injection.
+Fields resolve independently, with ONE exception: the `model` default is provider-
 scoped. A bare scalar `model` with no `provider` is scoped to the harness it was
 written for - the config `provider`, else the builtin default (claude), NOT the
 ambient harness (whose shape the model may not match). A spawn that resolves to a
@@ -366,18 +368,28 @@ def _profile_key(seed: Optional[str]) -> Optional[str]:
 
 
 def _has_permission_mode(toks: Sequence[str]) -> bool:
-    """Whether ``--permission-mode`` is pinned, up to the ``--argv`` boundary."""
+    """Whether the permission control is pinned, up to the ``--argv`` boundary.
+    ``--yolo``/``-Y`` count: they are the same knob as ``--permission-mode`` and
+    are mutually exclusive with it downstream, so a config value injected
+    alongside an explicit ``--yolo`` would exit 2 (explicit intent must win)."""
     for t in toks:
         if t == "--argv":
             break
-        if t == "--permission-mode" or t.startswith("--permission-mode="):
+        if (
+            t in ("--permission-mode", "--yolo", "-Y")
+            or t.startswith("--permission-mode=")
+        ):
             return True
     return False
 
 
 def _substrate_compatible(substrate: str, provider: str) -> bool:
-    """``bg`` is claude-only; ``pane``/``headless`` are universal. A config-sourced
-    substrate incompatible with the resolved provider degrades open (warn, skip)."""
+    """A config-sourced substrate must be a KNOWN value AND honored by the
+    resolved provider. ``bg`` is claude-only; ``pane``/``headless`` are universal.
+    An unknown value (or ``bg`` on a non-bg provider) degrades open (warn, skip) -
+    never injected to fail at the spawn parser (both exit 2 there otherwise)."""
+    if substrate not in _SUBSTRATES:
+        return False
     if substrate != "bg":
         return True
     try:
@@ -388,11 +400,16 @@ def _substrate_compatible(substrate: str, provider: str) -> bool:
         return provider == "claude"
 
 
-def _permission_mappable(provider: str, mode: str) -> bool:
-    """Whether the resolved provider can map this permission value. Reuses the
-    fail-closed pane mapper (claude passes any value through); an unmappable pair
-    degrades open for a config-sourced value (an explicit flag stays fail-closed
-    downstream)."""
+def _permission_mappable(provider: str, mode: str, substrate: Optional[str]) -> bool:
+    """Whether the resolved (provider, substrate) can honor a mapped
+    permission-mode. Mirrors the spawn parser's own gate: claude honors it on
+    every substrate; a non-claude provider maps it ONLY on the pane lane
+    (bg/headless hardcode their own bypass and exit 2 on ``--permission-mode``).
+    A config value that would be refused there degrades open (warn, skip)."""
+    if provider == "claude":
+        return True
+    if substrate != "pane":
+        return False
     try:
         from fno.agents.mux_spawn import permission_pane_tokens
 
@@ -409,14 +426,16 @@ def inject_spawn_defaults(
     env: Optional[Mapping[str, str]] = None,
     stderr: Optional[IO[str]] = None,
 ) -> List[str]:
-    """Return ``args`` with `agents.defaults` fields injected where absent.
+    """Return ``args`` with config spawn-defaults injected where absent.
 
-    Only acts on a `spawn` verb (``args[0] == "spawn"``). Returns the input
-    unchanged for any other verb, or when the config load fails (a bad config
-    must never brick spawning). Raises ``SystemExit(2)`` on an unknown config
-    provider (AC4-ERR). Config-sourced effort degrades open on a provider with
-    no reasoning-effort surface (AC6-ERR); an explicit ``--effort`` is left for
-    x-a0e0's fail-closed validation downstream.
+    Fields resolve field-wise from the merged view `agents.profiles.<verb>` (the
+    seed's leading slash-verb, x-3d5b) over `agents.defaults`, so an explicit CLI
+    flag > profile > defaults > built-in. Only acts on a `spawn` verb
+    (``args[0] == "spawn"``). Returns the input unchanged for any other verb, or
+    when the config load fails (a bad config must never brick spawning). Raises
+    ``SystemExit(2)`` on an unknown config provider (AC5-ERR). Config-sourced
+    effort/substrate/permission_mode degrade open on an incompatible resolved
+    provider (warn, skip); an explicit flag stays fail-closed downstream.
     """
     out = list(args)
     if not out or out[0] != "spawn":
@@ -551,7 +570,7 @@ def inject_spawn_defaults(
             print(
                 f"fno agents spawn: config model {cfg_model!r} is scoped to "
                 f"{home}; spawn resolves {target}, leaving model to the harness "
-                "(bind agents.defaults.provider to apply it cross-harness)",
+                f"(bind {model_rung}.provider to apply it cross-harness)",
                 file=err,
             )
 
@@ -592,36 +611,51 @@ def inject_spawn_defaults(
 
     # Substrate (x-3d5b): inject when no explicit substrate is pinned (flag,
     # positional token, -H/-o, or resume-implied bg - all visible post-normalize).
-    # A config-sourced value incompatible with the resolved provider degrades open.
-    if cfg_substrate and _has_explicit_substrate(out[1:]) is None:
+    # A config-sourced value that is unknown, or incompatible with the resolved
+    # provider, degrades open (warn, skip) rather than failing at the spawn parser.
+    explicit_substrate = _has_explicit_substrate(out[1:])
+    injected_substrate: Optional[str] = None
+    if cfg_substrate and explicit_substrate is None:
         prov = resolved_provider()
         if prov and _substrate_compatible(cfg_substrate, prov):
             inject += ["--substrate", cfg_substrate]
+            injected_substrate = cfg_substrate
             from_config.append(("substrate", substrate_rung))  # type: ignore[arg-type]
         else:
-            reason = (
-                f"{prov} does not support substrate {cfg_substrate!r} (bg is claude-only)"
-                if prov
-                else "provider resolution failed"
-            )
+            if not prov:
+                reason = "provider resolution failed"
+            elif cfg_substrate not in _SUBSTRATES:
+                reason = f"unknown substrate (valid: {', '.join(_SUBSTRATES)})"
+            else:
+                reason = f"{prov} does not support substrate {cfg_substrate!r} (bg is claude-only)"
             print(
                 f"fno agents spawn: substrate skipped ({reason}); "
                 f"{substrate_rung}.substrate = {cfg_substrate!r} ignored",
                 file=err,
             )
 
-    # Permission mode (x-3d5b): same shape as substrate. An unmappable config
-    # value degrades open; an explicit --permission-mode keeps fail-closed
-    # downstream (has_permission short-circuits this branch).
+    # Permission mode (x-3d5b): same shape as substrate, but the compatibility
+    # check depends on the EFFECTIVE substrate (explicit pin > this-run injection >
+    # per-provider default), because a non-claude bg/headless lane refuses a
+    # mapped --permission-mode. An explicit --permission-mode/--yolo keeps the
+    # fail-closed behavior (has_permission short-circuits this branch).
     if cfg_permission and not _has_permission_mode(out[1:]):
         prov = resolved_provider()
-        if prov and _permission_mappable(prov, cfg_permission):
+        eff_substrate = explicit_substrate or injected_substrate
+        if eff_substrate is None and prov:
+            try:
+                from fno.agents.harness_map import substrate_default
+
+                eff_substrate = substrate_default(prov)
+            except Exception:
+                eff_substrate = None
+        if prov and eff_substrate and _permission_mappable(prov, cfg_permission, eff_substrate):
             inject += ["--permission-mode", cfg_permission]
             from_config.append(("permission_mode", permission_rung))  # type: ignore[arg-type]
         else:
             reason = (
-                f"{prov} cannot map permission mode {cfg_permission!r}"
-                if prov
+                f"{prov} cannot map permission mode {cfg_permission!r} on substrate {eff_substrate!r}"
+                if prov and eff_substrate
                 else "provider resolution failed"
             )
             print(

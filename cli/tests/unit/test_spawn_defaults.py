@@ -386,3 +386,47 @@ def test_ac9_ui_no_config_field_prints_no_applied_line():
     err = io.StringIO()
     _inject(["spawn", "w", "/target x"], err=err, profiles={"other": {"model": "x"}})
     assert "applied" not in err.getvalue()
+
+
+def test_unknown_config_substrate_degrades_open():
+    # An unknown substrate value is never injected (it would exit 2 at the spawn
+    # parser); it degrades open with an "unknown substrate" warning.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "w", "/target x"], err=err, provider="claude",
+        profiles={"target": {"substrate": "banana"}},
+    )
+    assert "--substrate" not in out
+    assert "unknown substrate" in err.getvalue()
+
+
+def test_permission_mode_skipped_on_nonclaude_headless():
+    # codex headless cannot honor a mapped --permission-mode (its one-shot lane
+    # hardcodes its own bypass and exits 2); the config value degrades open.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-p", "codex", "-H", "w", "/target x"], err=err,
+        profiles={"target": {"permission_mode": "yolo"}},
+    )
+    assert "--permission-mode" not in out
+    assert "permission-mode skipped" in err.getvalue()
+
+
+def test_permission_mode_ok_on_nonclaude_pane():
+    # The pane lane maps every provider, so codex+pane honors a mapped value.
+    out = _inject(
+        ["spawn", "-p", "codex", "w", "/target x", "pane"],
+        profiles={"target": {"permission_mode": "yolo"}},
+    )
+    assert out[out.index("--permission-mode") + 1] == "yolo"
+
+
+def test_explicit_yolo_suppresses_config_permission_mode():
+    # --yolo/-Y is the same knob as --permission-mode (mutually exclusive
+    # downstream); an explicit yolo must win, so no config value is injected.
+    for flag in ("--yolo", "-Y"):
+        out = _inject(
+            ["spawn", flag, "w", "/target x"], provider="claude",
+            profiles={"target": {"permission_mode": "bypassPermissions"}},
+        )
+        assert "--permission-mode" not in out, flag
