@@ -139,9 +139,12 @@ def test_ac_edge_claude_file_not_found(tmp_path):
 # AC-EDGE: foreign harnesses
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("harness", ["codex", "gemini", "antigravity", "weird", "openai"])
+@pytest.mark.parametrize("harness", ["gemini", "antigravity", "weird", "openai"])
 def test_ac_edge_foreign_harness_not_supported(tmp_path, harness):
-    """AC-EDGE: any non-claude harness -> resolved=False, no raise, reason set."""
+    """AC-EDGE: an unsupported harness -> resolved=False, no raise, reason set.
+
+    codex/opencode are supported now (AC4-HP); agy/gemini/etc. stay unsupported.
+    """
     from fno.provenance.resolver import resolve_transcript
 
     result = resolve_transcript(
@@ -212,8 +215,139 @@ def test_result_is_json_serializable(tmp_path):
     import dataclasses
     from fno.provenance.resolver import resolve_transcript
 
-    result = resolve_transcript("codex", "sid", "/cwd", projects_root=tmp_path)
+    # Inject an empty codex root so this never scans the real ~/.codex.
+    result = resolve_transcript(
+        "codex", "sid", "/cwd", projects_root=tmp_path, codex_sessions_dir=tmp_path
+    )
     # Must not raise
     serialized = json.dumps(dataclasses.asdict(result))
     parsed = json.loads(serialized)
     assert parsed["resolved"] is False
+    assert parsed["kind"] == "jsonl"  # default field is JSON-serializable
+
+
+# ---------------------------------------------------------------------------
+# AC4-HP: codex + opencode arms resolve against injected stores
+# ---------------------------------------------------------------------------
+
+def _write_codex_rollout(sessions_dir: Path, session_id: str, cwd: str) -> Path:
+    """Fake ~/.codex/sessions/YYYY/MM/DD/rollout-...<uuid>.jsonl with a
+    session_meta line 1 (the real codex 0.1x shape)."""
+    import json as _json
+
+    day = sessions_dir / "2026" / "07" / "21"
+    day.mkdir(parents=True, exist_ok=True)
+    # Rollout filename embeds the session id (codex convention -> fast path).
+    path = day / f"rollout-2026-07-21T00-00-00-{session_id}.jsonl"
+    path.write_text(
+        _json.dumps({"type": "session_meta", "payload": {"id": session_id, "cwd": cwd}})
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_ac4_codex_resolves_by_filename(tmp_path):
+    """AC4-HP: codex rollout embedding the session uuid resolves, kind=jsonl."""
+    from fno.provenance.resolver import resolve_transcript
+
+    sid = "019f837c-3461-7911-811f-3290b8b34934"
+    cwd = "/Users/bb16/code/footnote"
+    rollout = _write_codex_rollout(tmp_path, sid, cwd)
+
+    result = resolve_transcript("codex", sid, cwd, codex_sessions_dir=tmp_path)
+
+    assert result.resolved is True
+    assert result.transcript_path == str(rollout)
+    assert result.kind == "jsonl"
+
+
+def test_ac4_codex_resolves_by_session_meta_fallback(tmp_path):
+    """AC4-HP: a rollout named by a turn id still resolves via session_meta."""
+    import json as _json
+    from fno.provenance.resolver import resolve_transcript
+
+    sid = "019f837c-3461-7911-811f-3290b8b34934"
+    cwd = "/Users/bb16/code/footnote"
+    day = tmp_path / "2026" / "07" / "21"
+    day.mkdir(parents=True, exist_ok=True)
+    # Filename carries a TURN id, not the session id -> forces the meta fallback.
+    path = day / "rollout-2026-07-21T00-00-00-aaaaaaaa-turn-0000-0000-000000000000.jsonl"
+    path.write_text(
+        _json.dumps({"type": "session_meta", "payload": {"id": sid, "cwd": cwd}}) + "\n",
+        encoding="utf-8",
+    )
+
+    result = resolve_transcript("codex", sid, cwd, codex_sessions_dir=tmp_path)
+
+    assert result.resolved is True
+    assert result.transcript_path == str(path)
+
+
+def test_ac4_codex_not_found(tmp_path):
+    """AC4-HP: no matching rollout -> resolved=False, no raise."""
+    from fno.provenance.resolver import resolve_transcript
+
+    result = resolve_transcript(
+        "codex", "no-such-sid", "/cwd", codex_sessions_dir=tmp_path
+    )
+    assert result.resolved is False
+    assert result.reason == "not-found"
+
+
+def _make_opencode_db(tmp_path: Path, session_id: str) -> Path:
+    """Minimal opencode.db with the real session/message/part shape."""
+    import sqlite3
+
+    db = tmp_path / "opencode.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT,
+                              time_updated INTEGER);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT,
+                              time_created INTEGER, data TEXT);
+        CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT,
+                           session_id TEXT, time_created INTEGER, data TEXT);
+        """
+    )
+    con.execute(
+        "INSERT INTO session VALUES (?,?,?)", (session_id, "/Users/bb16", 1784093335827)
+    )
+    con.commit()
+    con.close()
+    return db
+
+
+def test_ac4_opencode_resolves(tmp_path):
+    """AC4-HP: an opencode session id present in the store resolves, kind=opencode-db."""
+    from fno.provenance.resolver import resolve_transcript
+
+    db = _make_opencode_db(tmp_path, "ses_test")
+    result = resolve_transcript("opencode", "ses_test", None, opencode_db_path=db)
+
+    assert result.resolved is True
+    assert result.transcript_path == str(db)
+    assert result.kind == "opencode-db"
+
+
+def test_ac4_opencode_id_not_case_folded(tmp_path):
+    """Domain pitfall: ses_ ids are mixed-case and must never be folded."""
+    from fno.provenance.resolver import resolve_transcript
+
+    db = _make_opencode_db(tmp_path, "ses_MixedCase")
+    miss = resolve_transcript("opencode", "ses_mixedcase", None, opencode_db_path=db)
+    assert miss.resolved is False
+    hit = resolve_transcript("opencode", "ses_MixedCase", None, opencode_db_path=db)
+    assert hit.resolved is True
+
+
+def test_ac4_opencode_missing_db(tmp_path):
+    """AC4-HP: absent store -> resolved=False, no raise."""
+    from fno.provenance.resolver import resolve_transcript
+
+    result = resolve_transcript(
+        "opencode", "ses_x", None, opencode_db_path=tmp_path / "nope.db"
+    )
+    assert result.resolved is False
+    assert result.reason == "not-found"

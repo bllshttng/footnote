@@ -192,6 +192,41 @@ def _codex_meta(path: Path) -> Optional[tuple[str, str]]:
     return sid, str(cwd or "")
 
 
+def codex_rollout_for_session(
+    session_id: str, *, sessions_dir: Optional[Path] = None
+) -> Optional[Path]:
+    """Rollout jsonl for a codex ``session_id``, or None. Never raises.
+
+    Fast path: codex embeds the session uuid in the rollout filename, so a
+    filename substring match wins without opening a file. Fallback: a rollout
+    named by a turn id still carries the session id in its first ``session_meta``
+    line (reused via ``_codex_meta``); scan newest-first. ``sessions_dir`` is
+    injectable so tests never touch the developer's real ``~/.codex``.
+    """
+    if not session_id:
+        return None
+    root = sessions_dir if sessions_dir is not None else default_codex_sessions_dir()
+    try:
+        paths = list(root.rglob("rollout-*.jsonl"))
+    except OSError:
+        return None
+    for path in paths:
+        if session_id in path.name:
+            return path
+    for path in sorted(paths, key=_safe_rollout_mtime, reverse=True):
+        meta = _codex_meta(path)
+        if meta is not None and meta[0] == session_id:
+            return path
+    return None
+
+
+def _safe_rollout_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _discover_from_codex(
     codex_sessions_dir: Path,
     *,

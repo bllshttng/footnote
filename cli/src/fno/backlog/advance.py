@@ -47,6 +47,7 @@ from typing import Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
+from fno.provenance import autobrief as _autobrief
 
 _LOG = logging.getLogger(__name__)
 
@@ -1109,12 +1110,13 @@ def dispatch_lanes(
             # a per-lane config.local.toml there would write into canonical .fno.
             if worktree.resolve() != canonical.resolve():
                 _seed_lane_local_settings(worktree, node_id, base_pid)
+            _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
             short_id = _spawn_worker(
                 node_id, str(worktree), slug,
                 model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
                 provider=eff_provider,
                 verb=node.get("dispatch_verb"),
-                brief=node.get("dispatch_brief"),
+                brief=_brief,
             )
         except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
             # Release BOTH the boot-window reservation and the dispatch-time lane
@@ -1134,6 +1136,7 @@ def dispatch_lanes(
                 "agent_name": _worker_agent_name(node_id, slug),
                 "lane": True,
                 "worktree": str(worktree),
+                "brief": _brief_tag,
             },
             ev_path,
         )
@@ -1468,6 +1471,7 @@ def advance(
             eff_provider = failover_harness
         else:
             eff_provider = provider if provider is not None else node.get("provider")
+        _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
         short_id = _spawn_worker(
             node_id, node_cwd, node.get("slug") or node.get("title"),
             model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
@@ -1475,7 +1479,7 @@ def advance(
             harness=failover_harness,
             extra_env=failover_env,
             verb=node.get("dispatch_verb"),
-            brief=node.get("dispatch_brief"),
+            brief=_brief,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -1492,12 +1496,17 @@ def advance(
             "node_id": node_id,
             "short_id": short_id,
             "agent_name": _worker_agent_name(node_id, node.get("slug") or node.get("title")),
+            "brief": _brief_tag,
             **({"closed_node_id": closed_node_id} if closed_node_id else {}),
         },
         ev_path,
     )
     if verbose:
-        print(f"advance: dispatched {node_id} -> target worker {short_id}", file=sys.stderr)
+        print(
+            f"advance: dispatched {node_id} -> target worker {short_id} "
+            f"(brief={_brief_tag})",
+            file=sys.stderr,
+        )
     # Wake the active-backlog drain daemon (node x-c070): a successor may now be
     # unblocked. Best-effort; the poll floor is the guarantee.
     try:
@@ -1732,12 +1741,13 @@ def _converge_one(
 
     try:
         eff_provider = provider if provider is not None else node_meta.get("provider")
+        _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node_meta)
         short_id = _spawn_worker(
             node_id, root, slug,
             model=_route_resolve.node_model(node_meta, explicit=model, provider=eff_provider),
             provider=eff_provider,
             verb=node_meta.get("dispatch_verb"),
-            brief=node_meta.get("dispatch_brief"),
+            brief=_brief,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -1753,6 +1763,7 @@ def _converge_one(
             "short_id": short_id,
             "agent_name": _worker_agent_name(node_id, slug),
             "cross_project": cross_project,
+            "brief": _brief_tag,
         }),
         ev_path,
     )
@@ -1761,7 +1772,7 @@ def _converge_one(
         _kind = "cross-project" if cross_project else "same-project"
         print(
             f"advance: dispatched {_scope}{_kind} {node_id} -> "
-            f"target worker {short_id} (--cwd {root})",
+            f"target worker {short_id} (--cwd {root}) (brief={_brief_tag})",
             file=sys.stderr,
         )
     return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)

@@ -506,7 +506,16 @@ for id in "${NODES[@]}"; do
   # select(. != "") before // empty: jq's // treats "" as truthy (repo idiom).
   dispatch_verb="$(printf '%s' "$node_json" | jq -r '.dispatch_verb | select(. != "") // empty' 2>/dev/null)"
   dispatch_brief="$(printf '%s' "$node_json" | jq -r '.dispatch_brief | select(. != "") // empty' 2>/dev/null)"
-  TARGET_BRIEF_ENV=""
+  # Auto-brief for EVERY dispatch branch below (x-d1f4): resolve the node's brief
+  # chain (explicit dispatch_brief > sidecar > details > transcript tail) once,
+  # here, so a plain node with NO dispatch_verb/brief still cold-starts with
+  # context instead of an empty TARGET_BRIEF. No --brief is passed: the porcelain
+  # auto-resolves the whole chain from --node (its rung 1 already reads the graph
+  # node's dispatch_brief), which avoids word-splitting a multi-word brief. An
+  # oversized/refused explicit brief still fail-closes in the verb/brief branch's
+  # own resolve below. Best-effort: a resolve failure / stale fno leaves it empty.
+  TARGET_BRIEF_ENV="$(fno dispatch resolve --node "$id" --harness "$DISPATCH_PROVIDER" -J 2>/dev/null \
+    | jq -r '.env.TARGET_BRIEF | select(. != "") // empty' 2>/dev/null)"
   if [[ -n "$dispatch_verb" || -n "$dispatch_brief" ]]; then
     # --harness so the resolver normalizes the verb per-harness (x-a5e4): a
     # `/target` verb resolves to `$fno:target {id}` on codex, `/target {id}` on
