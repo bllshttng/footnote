@@ -807,14 +807,6 @@ struct View {
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
     confirm: Option<ConfirmAction>,
-    /// (x-f331) The [`View::display_rows`] index the live `confirm` acts on,
-    /// captured from the selector before `open_confirm` clears it, so the prompt
-    /// paints AT the target row rather than the far bottom row (AC2-UI). `None`
-    /// for a global confirm (reap) or a mouse-opened confirm with no selector -
-    /// those fall back to the bottom row. A stale index (the row raced out of the
-    /// catalog) also falls back, so a layout push never anchors the prompt on the
-    /// wrong row (AC1-FR); the dispatch itself is already name/id-keyed, not index.
-    confirm_target_row: Option<usize>,
     /// (x-9e5e) The pending new-workspace name buffer, `Some` while the `+`
     /// create overlay is open. Keys divert to [`create_keys`]: printable append,
     /// Backspace pops, Enter sends [`Command::NewSquad`] (empty keeps it open),
@@ -1568,7 +1560,6 @@ impl View {
             tab_drag: None,
             row_drag: None,
             confirm: None,
-            confirm_target_row: None,
             create: None,
             create_esc: Vec::new(),
             rename: None,
@@ -1861,10 +1852,6 @@ impl View {
     /// keystrokes that follow the confirm's resolution (sigma review x-260a -
     /// reachable by mouse-clicking a card while leader+w is open).
     fn open_confirm(&mut self, action: ConfirmAction) {
-        // (x-f331) Capture the acted-on row BEFORE clearing the selector so the
-        // prompt paints AT that row, not the far bottom row (AC2-UI). A
-        // mouse/global confirm with no selector leaves this None -> bottom row.
-        self.confirm_target_row = self.selector;
         self.selector = None;
         self.sel_hover_armed = false;
         self.answers = None;
@@ -4103,10 +4090,17 @@ impl View {
         self.sideline_offset = self.sideline_offset.min(total - visible);
     }
 
-    /// Wheel-scroll the sideline list by one row. With the selector open it walks
-    /// the cursor (reusing the j/k path so the highlight and offset stay
+    /// Wheel-scroll the sideline list by one row. With an EXPLICIT selector open
+    /// it walks the cursor (reusing the j/k path so the highlight and offset stay
     /// coherent); otherwise it nudges the scroll offset directly, bounded to the
     /// catalog. A sideline that already fits its height is a no-op.
+    ///
+    /// (x-f331) A HOVER-armed selector is a transient pointer-follow, not a modal
+    /// cursor, so the wheel must scroll the list rather than walk it - otherwise
+    /// the wheel moves the selector away from the pointer, leaving `hover_row` and
+    /// `selector` on two different rows (codex P2). Scrolling shifts the rows out
+    /// from under the pointer, so the arm is disarmed here; the next pointer Move
+    /// re-hit-tests and re-arms.
     fn scroll_sideline(&mut self, down: bool) {
         let total = self.display_rows().len();
         let visible = self.sideline_visible_rows();
@@ -4114,7 +4108,7 @@ impl View {
             return;
         }
         match self.selector {
-            Some(cur) => {
+            Some(cur) if !self.sel_hover_armed => {
                 self.selector = Some(if down {
                     self.selector_down(cur)
                 } else {
@@ -4122,7 +4116,11 @@ impl View {
                 });
                 self.clamp_sideline_offset();
             }
-            None => {
+            _ => {
+                if self.sel_hover_armed {
+                    self.selector = None;
+                    self.sel_hover_armed = false;
+                }
                 self.sideline_offset = if down {
                     (self.sideline_offset + 1).min(total - visible)
                 } else {
@@ -4685,22 +4683,47 @@ impl View {
     /// (x-f331) The outer row a live confirm prompt paints on: the acted-on
     /// sideline row when it is still in the catalog and visible, else the bottom
     /// row. Anchoring the prompt at the target row is AC2-UI - a bottom-row
-    /// prompt far from the row reads as "nothing happened". A target that raced
-    /// out of the catalog (or scrolled off) falls back to the bottom row, so a
-    /// layout push never anchors on the wrong row (AC1-FR); the dispatch itself
-    /// is name/id-keyed, never this index, so it is already drift-safe.
-    fn confirm_anchor_row(&self, rows: usize) -> usize {
+    /// prompt far from the row reads as "nothing happened". The target is
+    /// resolved by IDENTITY every paint (via [`View::confirm_target_index`]), not
+    /// a captured index, so a scrape/layout push that reorders or removes rows
+    /// re-anchors to the still-valid row or dismisses to the bottom - it can never
+    /// paint beside an unrelated row that drifted under a stale index (AC1-FR,
+    /// codex P2). The dispatch is likewise identity-keyed, so it is drift-safe too.
+    fn confirm_anchor_row(&self, rows: usize, action: &ConfirmAction) -> usize {
         let bottom = rows.saturating_sub(1);
-        match self.confirm_target_row {
-            Some(i)
-                if i >= self.sideline_offset
-                    && i < self.display_rows().len()
-                    && (i - self.sideline_offset) < bottom =>
-            {
+        match self.confirm_target_index(action) {
+            Some(i) if i >= self.sideline_offset && (i - self.sideline_offset) < bottom => {
                 i - self.sideline_offset
             }
             _ => bottom,
         }
+    }
+
+    /// (x-f331) The display-row index the confirm's target CURRENTLY occupies,
+    /// matched by the identity carried in the [`ConfirmAction`] (squad id, agent
+    /// name, or external/dismiss attach_id, or a card node) - never a captured
+    /// numeric index. A global confirm (reap / clear-dead) has no row, and a
+    /// target that vanished returns `None`; both fall back to the bottom row.
+    fn confirm_target_index(&self, action: &ConfirmAction) -> Option<usize> {
+        self.display_rows()
+            .iter()
+            .position(|r| match (&action.action, r) {
+                (ConfirmKind::RemoveSquad { squad, .. }, DisplayRow::Sel(s)) => {
+                    s.tab.is_none() && s.squad == *squad
+                }
+                (
+                    ConfirmKind::StopAgent { name } | ConfirmKind::RemoveAgent { name },
+                    DisplayRow::Agent(a),
+                ) => a.name == *name,
+                (
+                    ConfirmKind::StopExternal { attach_id, .. }
+                    | ConfirmKind::RemoveExternal { attach_id, .. }
+                    | ConfirmKind::DismissMember { attach_id, .. },
+                    DisplayRow::Agent(a),
+                ) => a.attach_id.as_deref() == Some(attach_id.as_str()),
+                (ConfirmKind::Dispatch { node }, DisplayRow::Card(c)) => c.id == *node,
+                _ => false,
+            })
     }
 
     fn draw_confirm_line(
@@ -4710,7 +4733,7 @@ impl View {
         cols: usize,
         action: &ConfirmAction,
     ) {
-        let r = self.confirm_anchor_row(rows);
+        let r = self.confirm_anchor_row(rows, action);
         for c in 0..cols {
             cells[r * cols + c] = Cell::default();
         }
@@ -11906,9 +11929,9 @@ mod tests {
 
     #[test]
     fn xf331_confirm_anchors_at_the_target_row_not_the_bottom() {
-        // x-f331 US4/AC2-UI: open_confirm captures the acted-on row before it
-        // clears the selector, and the prompt paints AT that row's outer position,
-        // never the terminal's far bottom row.
+        // x-f331 US4/AC2-UI: the confirm prompt resolves its target by identity
+        // (the squad id) and paints AT that row's outer position, never the
+        // terminal's far bottom row.
         let mut view = two_pane_view();
         view.selector = Some(2); // the notes squad header (actionable)
         view.open_confirm(ConfirmAction {
@@ -11919,24 +11942,15 @@ mod tests {
             },
             label: "notes".into(),
         });
-        assert_eq!(
-            view.confirm_target_row,
-            Some(2),
-            "the target row is captured before the selector clears"
-        );
         assert_eq!(view.selector, None, "open_confirm clears the selector");
 
         let rows = view.term.0 as usize;
+        let anchor = view.confirm_anchor_row(rows, view.confirm.as_ref().unwrap());
         assert_eq!(
-            view.confirm_anchor_row(rows),
-            2,
-            "the prompt anchors at the target's outer row"
+            anchor, 2,
+            "the prompt anchors at the target's outer row (squad 2 -> display row 2)"
         );
-        assert_ne!(
-            view.confirm_anchor_row(rows),
-            rows - 1,
-            "not the far bottom row"
-        );
+        assert_ne!(anchor, rows - 1, "not the far bottom row");
 
         let frame = view.compose();
         let cols = frame.cols as usize;
@@ -11948,16 +11962,59 @@ mod tests {
     }
 
     #[test]
-    fn xf331_confirm_falls_back_to_bottom_when_target_scrolls_out() {
-        // x-f331 AC1-FR: a target that raced out of the catalog (index past the
-        // rows) falls back to the bottom row rather than anchoring on a wrong row.
-        let mut view = two_pane_view();
-        view.confirm_target_row = Some(999); // stale: no such display row
+    fn xf331_confirm_falls_back_to_bottom_when_target_vanishes() {
+        // x-f331 AC1-FR (codex P2): the anchor is resolved by identity every
+        // paint, so a target whose row is no longer in the catalog dismisses to
+        // the bottom row - it never paints beside an unrelated row that drifted
+        // under a stale numeric index.
+        let view = two_pane_view();
         let rows = view.term.0 as usize;
+        let gone = ConfirmAction {
+            action: ConfirmKind::RemoveSquad {
+                squad: 999, // no such squad in the catalog
+                panes: 1,
+                last: false,
+            },
+            label: "gone".into(),
+        };
         assert_eq!(
-            view.confirm_anchor_row(rows),
+            view.confirm_anchor_row(rows, &gone),
             rows - 1,
-            "a stale target dismisses to the bottom row, never a wrong row"
+            "a vanished target dismisses to the bottom row, never a wrong row"
+        );
+    }
+
+    #[test]
+    fn xf331_wheel_scrolls_not_walks_a_hover_armed_selector() {
+        // x-f331 (codex P2): a hover-armed selector is a pointer-follow, so a
+        // wheel event scrolls the list and disarms - it must NOT walk the selector
+        // away from the pointer (which would strand hover_row and selector on two
+        // different rows and misdirect the next x/r/space).
+        let mut view = two_pane_view();
+        for p in 100..140u64 {
+            view.layout.agents.push(AgentRow {
+                name: format!("w{p}"),
+                ..focus_agent(p)
+            });
+        }
+        assert!(
+            view.display_rows().len() > view.sideline_visible_rows(),
+            "sanity: the sideline exceeds the viewport so scroll is live"
+        );
+        view.selector = Some(1);
+        view.sel_hover_armed = true;
+        view.hover_row = Some(1);
+        let before = view.sideline_offset;
+        view.scroll_sideline(true);
+        assert!(!view.sel_hover_armed, "the wheel disarms the hover-arm");
+        assert_eq!(
+            view.selector, None,
+            "the wheel does not walk a hover-armed selector"
+        );
+        assert_eq!(
+            view.sideline_offset,
+            before + 1,
+            "the wheel scrolls the list instead of moving the cursor"
         );
     }
 
@@ -20166,11 +20223,8 @@ mod tests {
             "x on the hovered squad header opens the close-workspace confirm"
         );
         assert!(buf.is_empty(), "no x reaches the focused pane's PTY");
-        assert_eq!(
-            v.confirm_target_row,
-            Some(0),
-            "the confirm targets the hovered row"
-        );
+        let anchor = v.confirm_anchor_row(v.term.0 as usize, v.confirm.as_ref().unwrap());
+        assert_eq!(anchor, 0, "the confirm anchors at the hovered squad's row");
     }
 
     #[tokio::test]
