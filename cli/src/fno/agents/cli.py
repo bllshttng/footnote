@@ -435,7 +435,7 @@ def cmd_crown(
     # Authorize + stamp the grantor provenance (first match wins).
     caller_has_crown = caller_row is not None and caller_row.crown_level is not None
     resolved_level = level
-    if caller_has_crown and _scope_is_subset(scope, caller_row.crown_scope):
+    if caller_row is not None and caller_has_crown and _scope_is_subset(scope, caller_row.crown_scope):
         grantor = caller_row.session_id or caller_row.name  # superset-king
         if resolved_level is None:
             resolved_level = (caller_row.crown_level or 0) + 1

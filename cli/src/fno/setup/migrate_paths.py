@@ -98,7 +98,7 @@ def _build_detected_dict(detected: dict[str, Any]) -> dict[str, Any]:
         )
 
     config = ConfigBlock(**config_kwargs)
-    model = SettingsModel(schema_version=1, config=config)
+    model = SettingsModel(schema_version=1, config=config)  # type: ignore[call-arg]  # legacy `config=` unwrapped by the _unwrap before-validator
 
     # Return only the schema keys this migration manages; callers will
     # deep-merge this on top of any existing settings.yaml so extra keys

@@ -339,9 +339,9 @@ def daemon_deliver(
         # claim, so the live ``worker.sock`` is the routability signal and the worker
         # actor's single-socket serialization prevents interleaving.
         if res.inject_handle and res.inject_handle.startswith("worker:"):
-            short_id = res.inject_handle.split(":", 1)[1]
+            wsid = res.inject_handle.split(":", 1)[1]
             return deliver_worker(
-                short_id, framed, provider=res.provider, settle_ms=settle_ms, timeout=timeout
+                wsid, framed, provider=res.provider, settle_ms=settle_ms, timeout=timeout
             )
 
         sid = res.session_id

@@ -199,7 +199,7 @@ def _live_agents_workers() -> dict[str, RegistryEntry]:
         if not isinstance(e, dict):
             continue
         provider = e.get("harness") or e.get("provider")
-        if provider in (None, "claude"):
+        if not isinstance(provider, str) or provider == "claude":
             continue  # claude rides the discover + session-uuid lane, not this bridge
         if e.get("host_mode") != "interactive":
             continue  # ONLY an explicit interactive PTY worker serves worker.submit;

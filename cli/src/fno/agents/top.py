@@ -51,7 +51,7 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
             }
         )
     # Heaviest first: the row the operator is looking for when RAM is tight.
-    rows.sort(key=lambda r: -(r["rss_mb"] or 0))
+    rows.sort(key=lambda r: -float(r["rss_mb"] or 0))
     return rows
 
 

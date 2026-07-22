@@ -47,9 +47,12 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import typer
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 # The verb the narrow capability probe checks for: the newest gate-bearing
 # verb. A missing `backlog inbox` (PR #329 gate) was the failure that
@@ -143,6 +146,8 @@ def _parse_field_meta_keys(source_text: str) -> Optional[frozenset[str]]:
         elif isinstance(node, ast.Assign):
             targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
         if "FIELD_META" not in targets:
+            continue
+        if not isinstance(node, (ast.AnnAssign, ast.Assign)):
             continue
         if not isinstance(node.value, ast.Dict):
             # A bare `FIELD_META: dict[...]` annotation (value None) or a computed
@@ -726,7 +731,7 @@ def _groom_health() -> dict[str, Any]:
         return {
             "state": state,
             "hours": hours,
-            "stale": state == "never" or (state == "ran" and hours > GROOM_STALE_HOURS),
+            "stale": state == "never" or (state == "ran" and hours is not None and hours > GROOM_STALE_HOURS),
             "agent_installed": plist.exists(),
         }
     except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
@@ -1379,7 +1384,7 @@ def _drain_hook_wired(hooks_json: Optional[Path] = None) -> Optional[bool]:
     return any("mail-drain" in c or "drain-self" in c for c in cmds)
 
 
-def _parse_bus_ts(ts: str) -> Optional[object]:
+def _parse_bus_ts(ts: str) -> Optional[datetime]:
     from datetime import datetime, timezone
 
     try:
@@ -1407,7 +1412,7 @@ def _stranded(m, *, cutoff, ref) -> bool:
 def _stale_dead_letters(
     *,
     max_age_hours: float = _DEAD_LETTER_AGE_HOURS,
-    now: Optional[object] = None,
+    now: Optional[datetime] = None,
 ) -> list[dict]:
     """Unread bus mail past its terminal TTL, addressed to a session handle.
 

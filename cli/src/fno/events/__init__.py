@@ -155,6 +155,7 @@ def validate(event: dict[str, Any]) -> None:
         )
 
     type_name = event["type"]
+    assert EVENT_TYPES is not None  # _require_schema() above guarantees it is loaded
     if type_name not in EVENT_TYPES:
         raise ValidationError(f"unknown event type: {type_name}")
 

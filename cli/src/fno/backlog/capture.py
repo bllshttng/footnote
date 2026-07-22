@@ -1016,7 +1016,7 @@ def _build_digest(open_items: list[dict]) -> list[str]:
     ]
     dated = sorted(
         (a for a in annotated if a[0] is not None),
-        key=lambda a: (a[0].group(1), a[1]),
+        key=lambda a: (a[0].group(1) if a[0] is not None else "", a[1]),
     )
     undated = [a for a in annotated if a[0] is None]  # stable source order
     jc_lines: list[str] = []

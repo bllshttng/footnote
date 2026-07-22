@@ -233,6 +233,9 @@ def _dispatch_one(
         priority = picked.get("priority")
         explicit = False
 
+    if not isinstance(node_id, str) or not node_id:
+        return {"outcome": "failed", "detail": "resolved node has no id"}
+
     # 1b. Quota-aware defer (x-5d3e). Only the ambient/autonomous default
     #     selection defers; an explicit --node dispatch always fires (LD#5).
     #     Fail-open: defer_dispatch off, p0, or UNKNOWN headroom -> proceed.

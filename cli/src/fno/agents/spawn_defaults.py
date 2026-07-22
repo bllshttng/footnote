@@ -266,6 +266,7 @@ def normalize_spawn_args(
             print("fno agents spawn: -r/--resume needs a session uuid or 8-hex short-id", file=err)
             raise SystemExit(2)
         low = raw_value.lower()
+        resolved: Optional[str]
         if _UUID_RE.match(low):
             resolved = low
         elif _SHORT_ID_RE.match(low):
@@ -406,7 +407,7 @@ def inject_spawn_defaults(
 
         home = cfg_provider or "claude"
         try:
-            if (explicit_provider or "").strip():
+            if explicit_provider and explicit_provider.strip():
                 target: Optional[str] = explicit_provider.strip()
             elif cfg_provider:
                 target = cfg_provider

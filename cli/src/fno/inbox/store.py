@@ -440,6 +440,7 @@ def _parse_thread_text(text: str, path: Path) -> Optional[ThreadHandle]:
 
     if not all([thread_id, from_project, to_project, kind, created]):
         return None
+    assert created is not None  # the all(...) guard above ensures it parsed
 
     read_at_raw = fm.get("read_at")
     read_at = _parse_dt(read_at_raw) if read_at_raw else None

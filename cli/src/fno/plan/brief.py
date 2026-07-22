@@ -154,7 +154,7 @@ def parse_locked_decisions(text: str) -> list[dict[str, Any]]:
 
     Each entry dict has: number, title, rationale, application, tags, body.
     """
-    entries = []
+    entries: list[dict[str, Any]] = []
     # Match numbered items at the start of a line
     pattern = re.compile(
         r"^(\d+)\.\s+\*\*(.+?)\*\*\s*(.*?)(?=^\d+\.\s+\*\*|\Z)",
@@ -194,7 +194,7 @@ def parse_failure_modes(text: str) -> list[dict[str, Any]]:
 
     Each entry dict has: category, bullet, tags.
     """
-    entries = []
+    entries: list[dict[str, Any]] = []
     current_category = "General"
     for line in text.splitlines():
         line = line.rstrip()
@@ -222,7 +222,7 @@ def parse_patterns(text: str) -> list[dict[str, Any]]:
         |---|---|---|
         | `code` | path | reason |
     """
-    entries = []
+    entries: list[dict[str, Any]] = []
     header_seen = False
     separator_seen = False
 
@@ -264,7 +264,7 @@ def parse_acceptance_criteria(text: str) -> list[dict[str, Any]]:
 
     Each entry dict has: ac_type, code, text, tags.
     """
-    entries = []
+    entries: list[dict[str, Any]] = []
     # Match bold AC codes at start of line or paragraph
     pattern = re.compile(
         r"\*\*(AC\d+-([A-Z]+)(?:\s+[^*]*)?):\*\*\s*(.+?)(?=\*\*AC\d+|\Z)",

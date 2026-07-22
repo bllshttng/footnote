@@ -100,6 +100,7 @@ class TestStormCap:
         for i in range(4):
             r = ctrl.attempt_swap(current_provider_id=prev, error=err)
             assert r.decision is SwapDecision.SWAPPED, f"swap {i+1} should succeed"
+            assert r.new_provider_id is not None
             prev = r.new_provider_id
 
         assert ctrl.snapshot_state().swaps_this_phase == 4
@@ -127,6 +128,7 @@ class TestStormCap:
         for _ in range(3):
             r = ctrl.attempt_swap(current_provider_id=prev, error=err)
             assert r.decision is SwapDecision.SWAPPED
+            assert r.new_provider_id is not None
             prev = r.new_provider_id
 
         # 4th attempt: cap reached
@@ -175,6 +177,7 @@ class TestStormCap:
         for i in range(5):
             r = ctrl.attempt_swap(current_provider_id=prev, error=err)
             assert r.decision is SwapDecision.SWAPPED, f"swap {i+1}/5"
+            assert r.new_provider_id is not None
             prev = r.new_provider_id
 
         # 6th swap: blocked
@@ -204,7 +207,9 @@ class TestStormCap:
         err = normalize(http_status=529, exit_code=None, body="")
         prev = "a"
         for _ in range(3):
-            prev = ctrl_a.attempt_swap(current_provider_id=prev, error=err).new_provider_id
+            _swapped = ctrl_a.attempt_swap(current_provider_id=prev, error=err).new_provider_id
+            assert _swapped is not None
+            prev = _swapped
 
         # Phase B opens: a fresh controller for the new phase. The state
         # file persists from phase A, but the controller for phase B sees

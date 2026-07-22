@@ -878,7 +878,7 @@ def _lane_harness(eff_provider: Optional[str]) -> str:
     matching `_spawn_worker`'s `prov = eff_provider or "claude"` default so the
     worktree lands where the worker actually runs.
     """
-    return eff_provider if (eff_provider or "") in _NON_CLAUDE_HARNESSES else "claude"
+    return eff_provider if (eff_provider and eff_provider in _NON_CLAUDE_HARNESSES) else "claude"
 
 
 def _run_setup_worktree(worktree: Path, canonical_root: Path) -> None:

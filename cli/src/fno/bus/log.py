@@ -220,7 +220,7 @@ def from_json_line(line: str) -> Envelope:
         request_id=obj.get("request_id"),
         in_reply_to=obj.get("in_reply_to"),
         delivery=obj.get("delivery"),
-        meta=obj.get("meta") if isinstance(obj.get("meta"), dict) else {},
+        meta=_meta if isinstance((_meta := obj.get("meta")), dict) else {},
         from_session=obj.get("from_session"),
         from_model=obj.get("from_model"),
         to_kind=obj.get("to_kind"),

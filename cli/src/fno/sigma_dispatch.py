@@ -485,7 +485,7 @@ class _DispatchClaudeTask:
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: object,
-    ) -> bool:
+    ) -> None:
         duration_ms = int((time.monotonic() - (self._start_ts or 0)) * 1000)
         outcome = "ok" if self._completed else "orchestrator_skipped"
 
@@ -502,7 +502,7 @@ class _DispatchClaudeTask:
             repo_root=self.repo_root,
             outcome=outcome,
         )
-        return False  # never suppress an exception from inside the block
+        return None  # never suppress an exception from inside the block
 
 
 # ---------------------------------------------------------------------------
@@ -581,7 +581,7 @@ class _DispatchSubprocess:
         self.provenance_nonce = provenance_nonce
 
         # Set during __enter__ / __exit__
-        self._proc = None  # subprocess.Popen
+        self._proc: subprocess.Popen | None = None
         self._start_ts: float | None = None
 
     def _build_spawn_args(self) -> tuple[list[str], dict]:
@@ -630,11 +630,11 @@ class _DispatchSubprocess:
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: object,
-    ) -> bool:
+    ) -> None:
         if self._proc is None:
             # __enter__ didn't complete (e.g. spawn_with_provider_snapshot raised).
             # No complete event - correct: spawn event was not emitted.
-            return False
+            return None
 
         # Block until subprocess completes (invariant 10).
         # Default timeout: 30 minutes (1800s), matching the hermes delegate_task
@@ -691,7 +691,7 @@ class _DispatchSubprocess:
             stderr=stderr_bytes,
             repo_root=self.repo_root,
         )
-        return False  # never suppress exceptions from inside the block
+        return None  # never suppress exceptions from inside the block
 
 
 @contextlib.contextmanager
@@ -743,6 +743,7 @@ def dispatch_sigma_subagent(
     """
     root = repo_root or Path.cwd()
 
+    ctx: _DispatchClaudeTask | _DispatchSubprocess
     if cli == "claude":
         ctx = _DispatchClaudeTask(
             agent_name=agent_name,

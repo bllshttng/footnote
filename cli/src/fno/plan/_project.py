@@ -195,7 +195,8 @@ def project_graph_nodes(
                 parent = _find_node(entries, parent_id)
                 if parent is not None and parent.get("type") == "epic":
                     wave_map, _ = compute_waves(parent_id, entries)
-                    wave_val = wave_map.get(node.get("id"))
+                    _wid = node.get("id")
+                    wave_val = wave_map.get(_wid) if isinstance(_wid, str) else None
             augmented["wave"] = wave_val
             if project_node_to_plan(augmented, p):
                 rewritten += 1

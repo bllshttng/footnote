@@ -108,7 +108,8 @@ def _classify(raw: object) -> Optional[_Ev]:
     if not isinstance(raw, dict):
         return None
     etype = raw.get("type") or raw.get("kind")
-    data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
+    _data = raw.get("data")
+    data = _data if isinstance(_data, dict) else raw
     node_id = data.get("unit_id") or data.get("node_id") or data.get("graph_node_id")
     if not isinstance(node_id, str) or not node_id:
         return None

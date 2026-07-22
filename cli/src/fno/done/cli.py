@@ -456,6 +456,7 @@ def done_command(
         raise typer.Exit(code=2)
 
     node_id = match.id
+    assert node_id is not None  # the exact-match guard above ensures a resolved id
     node = next(e for e in entries if e.get("id") == node_id)
     domain = node.get("domain") or "code"
 

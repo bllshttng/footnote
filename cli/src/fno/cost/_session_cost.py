@@ -106,7 +106,7 @@ class SessionMetrics:
     def primary_model(self) -> str:
         if not self.models:
             return "unknown"
-        return max(self.models, key=self.models.get)
+        return max(self.models, key=lambda m: self.models[m])
 
 
 def model_tier(model_name: str, speed: str | None = None) -> str:
@@ -268,7 +268,7 @@ def parse_transcript(
             fresh per-file set is used (single-file dedup still applies).
     """
     metrics = SessionMetrics(session_id=session_id)
-    prev_context_size = [None]
+    prev_context_size: list[float | None] = [None]
     if seen is None:
         seen = set()
 

@@ -1178,6 +1178,7 @@ def _name_lane_send(
         recipient_resumable=not recipient_live,
     )
 
+    assert recipient is not None  # resolved by the name-lane logic before the durable write
     try:
         th = write_new_thread(
             recipient=recipient,

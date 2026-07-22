@@ -197,9 +197,10 @@ def _load_fleet_state(
         except MalformedStateError as exc:
             warnings.append(f"fleet: malformed {exc.path.name}, skipping")
             continue
-        status = str(data.get("status", "")).lower()
-        if status not in {"running", "paused"}:
+        raw_status = str(data.get("status", "")).lower()
+        if raw_status not in {"running", "paused"}:
             continue
+        status: FleetStatus = "paused" if raw_status == "paused" else "running"
         projects = data.get("projects") or {}
         if not isinstance(projects, dict):
             continue
@@ -254,6 +255,7 @@ def _load_session_state(
     warnings: List[str],
     detected: List[Path],
 ) -> Optional[SessionState]:
+    kind: SessionKind
     if state_file_override is not None:
         if not state_file_override.exists():
             # Explicit user request - the typo deserves a hard error, not a

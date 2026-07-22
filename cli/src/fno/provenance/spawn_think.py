@@ -39,6 +39,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Optional
 
 from fno import _subprocess_util
@@ -187,7 +188,7 @@ def _settings_for(project_root: Optional[Path]):
 def think_spawn_enabled(
     *,
     project_root: Optional[Path] = None,
-    env: Optional[dict] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> bool:
     """Resolve whether born-with-why /think spawn is armed.
 
@@ -288,7 +289,7 @@ def _bump_daily_count() -> None:
 def _attended_mode(
     project_root: Optional[Path] = None,
     *,
-    env: Optional[dict] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> str:
     """Resolve the attended opt-in: ``spawn`` (real bg /think) or ``offer`` (B, x-5d51).
 
@@ -333,7 +334,7 @@ def _scan_md_field(text: str, key: str) -> Optional[str]:
     return value
 
 
-def _owned_manifest_attended(project_root: Path, environ: dict) -> Optional[bool]:
+def _owned_manifest_attended(project_root: Path, environ: Mapping[str, str]) -> Optional[bool]:
     """Return the ``attended`` flag of THIS session's target-state manifest.
 
     Ownership is proven exactly as graph.cli._session_provenance does it: the
@@ -365,7 +366,7 @@ def _owned_manifest_attended(project_root: Path, environ: dict) -> Optional[bool
 def classify_presence(
     *,
     project_root: Optional[Path] = None,
-    env: Optional[dict] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> str:
     """Classify the originating session as ``attended`` or ``away``.
 
@@ -1052,7 +1053,7 @@ def dispatch_conversational(
     harness: str = "claude",
     project_root: Optional[Path] = None,
     events_path: Optional[Path] = None,
-    env: Optional[dict] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> ThinkSpawnResult:
     """C (x-0a9c): explicit conversational /think dispatch for a named node.
 
@@ -1116,7 +1117,7 @@ def maybe_spawn_think(
     reason: str = REASON_BIRTH,
     project_root: Optional[Path] = None,
     events_path: Optional[Path] = None,
-    env: Optional[dict] = None,
+    env: Optional[Mapping[str, str]] = None,
     run_state: Optional[RunState] = None,
     invocation_suffix: Optional[str] = None,
     quiet: bool = False,

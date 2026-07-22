@@ -62,7 +62,7 @@ def _session_id_for(entry: Any) -> Optional[str]:
     from fno.agents.registry import HARNESS_SESSION_ID_FIELDS
 
     key = getattr(entry, "harness", None)
-    field_name = HARNESS_SESSION_ID_FIELDS.get(key)
+    field_name = HARNESS_SESSION_ID_FIELDS.get(key) if key else None
     return getattr(entry, field_name, None) if field_name else None
 
 

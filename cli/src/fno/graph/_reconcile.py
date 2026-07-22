@@ -1234,7 +1234,7 @@ def origin_transcript_exists(
     produce a full-fidelity row. A missing manifest (archived worktree) returns
     False and dispatch falls to cold + the reconcile backstop.
     """
-    if _origin_transcript_path(session_id, cwd, harness) is None:
+    if cwd is None or _origin_transcript_path(session_id, cwd, harness) is None:
         return False
     return (Path(cwd) / ".fno" / "target-state.md").is_file()
 
@@ -1461,7 +1461,7 @@ def dispatch_post_merge_ritual(
         # warm miss does. (Corrects a review P1: an early return here silently
         # skipped the ritual for every dead-origin merge.)
         finalized_origin = False
-        if origin_dead and origin_transcript_exists(source_session_id, source_cwd, source_harness):
+        if origin_dead and source_cwd is not None and origin_transcript_exists(source_session_id, source_cwd, source_harness):
             _tpath = _origin_transcript_path(source_session_id, source_cwd, source_harness)
             if _tpath is not None:
                 _finalize = finalize_origin if finalize_origin is not None else _finalize_origin_ledger

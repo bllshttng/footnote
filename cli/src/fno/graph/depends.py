@@ -15,7 +15,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import TypedDict, Union
+from typing import TypedDict, Union, cast
 
 from fno.graph._constants import has_node_id_prefix
 
@@ -80,7 +80,7 @@ def _parse_frontmatter(plan_path: Path) -> _FrontmatterData | None:
             val = val.strip('"').strip("'")
             current_key = key
             result[key] = val if val else None
-    return result
+    return cast(_FrontmatterData, result)
 
 
 def _first_h1(plan_path: Path) -> str | None:

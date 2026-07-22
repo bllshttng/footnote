@@ -35,7 +35,7 @@ def reason_is_infra_failure(reason: Optional[str]) -> bool:
     ledger that would not parse reads exactly like "this PR has no owning
     session", and the infra failure is never investigated.
     """
-    return bool(reason) and reason.startswith(_INFRA_REASON_OPENERS)
+    return reason is not None and reason.startswith(_INFRA_REASON_OPENERS)
 
 
 def _entry_owns_pr(entry: dict, pr: int, slug_l: str) -> bool:
