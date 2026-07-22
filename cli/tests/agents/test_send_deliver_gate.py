@@ -980,17 +980,13 @@ def test_cmd_gate_retired_prints_pointer(runner: CliRunner) -> None:
 # Codex PR #459 round 1
 # ---------------------------------------------------------------------------
 
-def test_deliver_live_claude_mcp_send_only_no_reply_wait(
+def test_deliver_live_mcp_row_delivers_via_control_sock(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """codex #459 P2: a reachable MCP channel delivers via the send-only
-    sidecar push (build_channel_notification + send_to_channel), never the
-    blocking ask_followup_via_mcp.
-
-    A successful push is terminal: it does NOT fall through to the control.sock
-    lane, which would deliver the same turn twice (the MCP copy is not in the
-    drain's seen-set). Retiring this redundant unconfirmed fast lane in favor of
-    the confirming control.sock lane is a deferred LD4 follow-up."""
+    """The redundant MCP fast lane is retired (US5): a row with an mcp_channel_id
+    delivers over the confirming control.sock lane, never the fire-and-forget
+    send_to_channel push (which reported hosted on bytes-written, banned by LD4).
+    """
     use_tmpdir(monkeypatch, tmp_path)
 
     from fno.agents.registry import AgentEntry, write_registry
@@ -1006,20 +1002,6 @@ def test_deliver_live_claude_mcp_send_only_no_reply_wait(
         )
     ])
 
-    from fno.agents.providers import claude as claude_mod
-    monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: True)
-
-    socket_calls: list = []
-    monkeypatch.setattr(
-        claude_mod, "send_to_session", lambda *a, **kw: socket_calls.append(1)
-    )
-
-    ask_mcp_calls: list = []
-    monkeypatch.setattr(
-        claude_mod, "ask_followup_via_mcp",
-        lambda *a, **kw: ask_mcp_calls.append(1),
-    )
-
     from fno.mcp import client as mcp_client
     push_calls: list = []
     monkeypatch.setattr(
@@ -1027,60 +1009,11 @@ def test_deliver_live_claude_mcp_send_only_no_reply_wait(
         lambda routing_key, envelope: push_calls.append((routing_key, envelope)),
     )
 
-    from fno.agents.dispatch import dispatch_send
-
-    cwd = tmp_path / "work"
-    cwd.mkdir()
-    result = dispatch_send(
-        name="claude-mcp", message="fyi built", provider=None, cwd=cwd
-    )
-
-    # A successful MCP push is terminal (no double-delivery via the socket lane).
-    assert result.delivery == "hosted"
-    assert len(push_calls) == 1, "MCP sidecar push must be used"
-    assert push_calls[0][0] == "abcd1234"
-    assert len(socket_calls) == 0, "socket path must not fire when MCP delivers"
-    assert len(ask_mcp_calls) == 0, "blocking ask_followup_via_mcp must NOT be used for send"
-
-
-def test_deliver_live_claude_mcp_error_falls_back_to_socket(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    """MCP sidecar failure falls through to the socket path (demotion chain),
-    and the failure reason is surfaced on stderr rather than swallowed (US5)."""
-    use_tmpdir(monkeypatch, tmp_path)
-
-    from fno.agents.registry import AgentEntry, write_registry
-    write_registry([
-        AgentEntry(
-            name="claude-mcp2",
-            harness="claude",
-            cwd="/tmp",
-            log_path="/tmp/claude-mcp2.log",
-            short_id="efgh5678",
-            status="live",
-            mcp_channel_id="efgh5678",
-        )
-    ])
-
-    from fno.agents.providers import claude as claude_mod
-
-    monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: True)
-
-    from fno.mcp import client as mcp_client
-
-    def _boom(routing_key, envelope):
-        raise mcp_client.MCPSidecarUnreachable("sidecar gone")
-
-    monkeypatch.setattr(mcp_client, "send_to_channel", _boom)
-
-    # The control.sock inject (mail-inject verb) is the socket-path successor.
     from fno.agents import dispatch as dispatch_mod
-
     inject_calls: list = []
 
     def _ok_inject(recipient: str, text: str) -> bool:
-        inject_calls.append({"recipient": recipient, "text": text})
+        inject_calls.append(recipient)
         return True
 
     monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", _ok_inject)
@@ -1090,13 +1023,56 @@ def test_deliver_live_claude_mcp_error_falls_back_to_socket(
     cwd = tmp_path / "work"
     cwd.mkdir()
     result = dispatch_send(
-        name="claude-mcp2", message="fyi built", provider=None, cwd=cwd
+        name="claude-mcp", message="fyi built", provider=None, cwd=cwd
     )
 
     assert result.delivery == "hosted"
-    assert len(inject_calls) == 1, "control.sock inject must fire on sidecar failure"
-    # US5: the dropped push must be diagnosable from the sender's terminal.
-    assert "sidecar gone" in capsys.readouterr().err
+    assert len(push_calls) == 0, "the retired MCP fast lane must not fire"
+    assert inject_calls == ["abcd1234"], "delivery rides the confirming control.sock lane"
+
+
+def test_deliver_live_mcp_channel_id_is_the_recipient_fallback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No former MCP recipient is stranded by the lane retirement: a live row
+    whose plain short_id was cleared (x-3dac) and which carries no
+    harness_session_id still resolves a control.sock recipient via its
+    mcp_channel_id -- which is the original roster-resolvable short_id, minted 1:1
+    by register_mcp_channel."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import AgentEntry, write_registry
+    write_registry([
+        AgentEntry(
+            name="claude-mcp-only",
+            harness="claude",
+            cwd="/tmp",
+            log_path="/tmp/claude-mcp-only.log",
+            short_id="",                # cleared on a live row (x-3dac)
+            status="live",
+            mcp_channel_id="efgh5678",  # == the original short_id
+        )
+    ])
+
+    from fno.agents import dispatch as dispatch_mod
+    inject_calls: list = []
+
+    def _ok_inject(recipient: str, text: str) -> bool:
+        inject_calls.append(recipient)
+        return True
+
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", _ok_inject)
+
+    from fno.agents.dispatch import dispatch_send
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    result = dispatch_send(
+        name="claude-mcp-only", message="fyi built", provider=None, cwd=cwd
+    )
+
+    assert result.delivery == "hosted"
+    assert inject_calls == ["efgh5678"], "recipient falls back to mcp_channel_id"
 
 
 # ---------------------------------------------------------------------------

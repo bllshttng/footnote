@@ -4543,9 +4543,6 @@ def _deliver_live(
         )
         return False
 
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.base import ReachabilityProbeError
-
     # Group 2 (Task 3.1): both-endpoints-live switchboard fast lane. When B is a
     # held stream-json thread the daemon drives a turn against it and (the A2A
     # default, Task 4.1 gates it by config) mirrors B's reply back into A. The
@@ -4581,57 +4578,21 @@ def _deliver_live(
     if _switchboard_exchange(entry.name, from_name, wrapped, relay_ctxs):
         return True
 
-    # MCP-channel probe (mirrors _followup_path :334-366).
-    if entry.mcp_channel_id:
-        try:
-            mcp_alive = claude_mod.mcp_channel_reachable(entry.mcp_channel_id, timeout=0.25)
-        except ReachabilityProbeError:
-            mcp_alive = False
-        if mcp_alive:
-            try:
-                # Send-only push via the MCP sidecar: the send half of
-                # ask_followup_via_mcp (build notification + push to channel),
-                # WITHOUT its wait_for_reply poll - send never blocks for a
-                # reply (codex #459 P2: the old call used nonexistent kwargs
-                # and would also have blocked polling for a reply).
-                from fno.mcp import build_channel_notification
-                from fno.mcp import client as _mcp_client
-
-                envelope = build_channel_notification(
-                    content=wrapped,
-                    meta={
-                        "source": "fno",
-                        "from_name": from_name,
-                        "session_id": entry.mcp_channel_id,
-                    },
-                )
-                _mcp_client.send_to_channel(entry.mcp_channel_id, envelope)
-                # A successful push is terminal: falling through to the
-                # control.sock lane would deliver this same turn a second time
-                # (the MCP copy is not in the drain's seen-set, so a durable
-                # fallback could also be processed later). See the deferred LD4
-                # note: the honest fix is to retire this redundant unconfirmed
-                # fast lane, since mcp_channel_id == short_id makes the confirming
-                # control.sock lane reach the same peer.
-                return True
-            except Exception as exc:
-                # US5: never swallow the reason - a dropped push must be
-                # diagnosable from the sender's terminal - then fall through to
-                # the confirming control.sock lane below.
-                print(
-                    f"mcp channel push to {entry.name!r} failed: {exc}; "
-                    "trying the control.sock lane",
-                    file=sys.stderr,
-                )
-
     # Live inject over control.sock (adopted `claude --bg`, the fno-agents
-    # mail-inject verb, G1; node x-1f23). The claude PTY worker.sock lane retired
-    # with daemon PTY hosting (x-f54c), so every live claude row now carries an
-    # empty plain `short_id` -- the worker lane can no longer resolve a mail
-    # recipient, leaving control.sock the sole live path (x-3dac). The mail-inject
-    # verb resolves the handle itself via ClaudeRoster (accepts the full session
-    # uuid or 8-hex short id) and returns False (-> durable) when not reachable.
-    recipient = entry.harness_session_id or entry.short_id
+    # mail-inject verb, G1; node x-1f23). This is the SOLE claude live lane: the
+    # PTY worker.sock lane retired with daemon PTY hosting (x-f54c, x-3dac), and
+    # the redundant MCP-channel fast lane retired here (US5) because it reported
+    # hosted on an unconfirmed bytes-written push (Locked Decision 4) while
+    # reaching no peer the control.sock lane cannot. The mail-inject verb resolves
+    # the handle itself via ClaudeRoster (accepts the full session uuid or 8-hex
+    # short id) and confirms transcript growth before reporting delivered.
+    #
+    # Recipient resolution guarantees no former MCP recipient is stranded:
+    # mcp_channel_id is minted 1:1 from short_id by its sole producer
+    # (register_mcp_channel), so it IS a roster-resolvable id. Live rows can carry
+    # an empty plain `short_id` (x-3dac), so mcp_channel_id is the load-bearing
+    # fallback for an MCP-registered row whose short_id field was since cleared.
+    recipient = entry.harness_session_id or entry.short_id or entry.mcp_channel_id
     if not recipient:
         return False
     return _mail_inject_claude(recipient, wrapped)
