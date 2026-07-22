@@ -4870,6 +4870,14 @@ impl View {
                     // instead names its repo with a ` (basename)` suffix. Tab vs
                     // orphan are mutually exclusive, so at most one suffix lands.
                     match self.agent_tab_context(a.squad, a.tab) {
+                        // (x-4374) The badge means "this session lives on a tab
+                        // you are not looking at": suppress it when the row's pane
+                        // is in the viewer's active (squad, tab). A row in a
+                        // background tab or another squad keeps it, so quietness is
+                        // the "you are here" signal.
+                        Some(_)
+                            if a.squad == Some(self.layout.active_squad)
+                                && a.tab == self.active_squad_active_tab_id() => {}
                         Some(TabContext::Named(name)) => text.push_str(&format!(" ·{name}")),
                         Some(TabContext::Ordinal(ord)) => text.push_str(&format!(" ·{ord}")),
                         None => {
@@ -14414,6 +14422,58 @@ mod tests {
             cells[3 * cols].flags & cell_flags::DIM,
             0,
             "the inactive header is plain, not DIM (present, not disabled)"
+        );
+    }
+
+    #[test]
+    fn tab_badge_marks_only_rows_on_other_tabs() {
+        // x-4374 (AC6): the tab badge means "this session lives on a tab you are
+        // not looking at". A row whose pane is in the viewer's active (squad, tab)
+        // drops the badge; a row in a background named tab keeps it.
+        let mut view = two_pane_view();
+        let panes = view.layout.panes.clone();
+        let mut footnote = meta(1, "footnote", 2, 0); // active tab = id 0
+        footnote.tabs[1].name = "reviews".into();
+        footnote.tabs[1].named = true;
+        let here = AgentRow {
+            name: "here".into(),
+            tab: Some(0), // the viewer's active tab -> no badge
+            ..focus_agent(0)
+        };
+        let elsewhere = AgentRow {
+            name: "elsewhere".into(),
+            tab: Some(1), // a background tab -> badge
+            ..focus_agent(0)
+        };
+        view.set_layout(LayoutView {
+            squads: vec![footnote],
+            active_squad: 1,
+            panes,
+            focus: 999, // no row owns focus; keep the band out of this test
+            area: (29, 72),
+            agents: vec![here, elsewhere],
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        });
+        let (rows, cols, panel_w) = (29usize, 72usize, 28usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        view.draw_sideline(&mut cells, rows, cols, panel_w);
+        let row_text =
+            |r: usize| -> String { (0..panel_w - 1).map(|c| cells[r * cols + c].c).collect() };
+        // Row 0 = squad header, row 1 = "here", row 2 = "elsewhere" (single squad,
+        // so no spacer precedes the rows).
+        let here_line = row_text(1);
+        let elsewhere_line = row_text(2);
+        assert!(here_line.contains("here"), "sanity: {here_line:?}");
+        assert!(
+            !here_line.contains('·'),
+            "the active-tab row drops the badge: {here_line:?}"
+        );
+        assert!(
+            elsewhere_line.contains("·reviews"),
+            "the background-tab row keeps its badge: {elsewhere_line:?}"
         );
     }
 
