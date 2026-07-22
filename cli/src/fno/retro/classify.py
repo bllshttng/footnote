@@ -29,7 +29,9 @@ TITLE_CAP = 100
 BODY_CAP = 6000
 
 _BADGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)|!\[[^\]]*\]")  # ![alt](url) or ![alt]
+_HTML_TAG = re.compile(r"</?[a-zA-Z][^>]*>")  # <sub>..</sub>, <br>, etc.
 _MD_LEAD = re.compile(r"^[#>\-\*\s`]+")
+_MD_TRAIL = re.compile(r"[\*`\s]+$")  # trailing bold/code markers (_MD_LEAD is ^-anchored)
 
 
 def severity_to_priority(severity: str | None) -> str:
@@ -45,8 +47,12 @@ def severity_to_tier(severity: str | None) -> str:
 
 def _clean_line(text: str) -> str:
     for raw in text.splitlines():
-        stripped = _BADGE_RE.sub("", raw).strip()
-        stripped = _MD_LEAD.sub("", stripped).strip()
+        stripped = _BADGE_RE.sub("", raw)
+        # The codex review bot wraps its priority badge in <sub><sub>..</sub></sub>;
+        # without this the tags survive the badge strip and slugify to sub-sub-sub-sub.
+        stripped = _HTML_TAG.sub("", stripped)
+        stripped = _MD_LEAD.sub("", stripped)
+        stripped = _MD_TRAIL.sub("", stripped).strip()
         if stripped:
             return stripped
     return ""

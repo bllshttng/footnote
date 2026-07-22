@@ -560,8 +560,9 @@ def test_addressed_ids_from_comments_nonbot_reply_no_commit_after_not_addressed(
     assert result == set()
 
 
-def test_addressed_ids_from_comments_only_bot_reply_not_addressed():
-    """(iii) Only a bot reply -> NOT addressed."""
+def test_addressed_ids_from_comments_bot_finding_no_human_reply_commit_after_addressed():
+    """(iii) A BOT finding with only a bot reply (no human engagement) but a
+    commit-after IS addressed: bot findings skip the reply gate (x-632c)."""
     comments = [
         {
             "id": "30",
@@ -582,17 +583,54 @@ def test_addressed_ids_from_comments_only_bot_reply_not_addressed():
     ]
     commit_dates = ["2024-01-04T10:00:00+00:00"]
     result = harvest.addressed_ids_from_comments(comments, commit_dates)
-    assert result == set()
+    assert result == {"30"}
 
 
-def test_addressed_ids_from_comments_no_reply_not_addressed():
-    """(iv) No reply -> NOT addressed."""
+def test_addressed_ids_from_comments_bot_finding_no_reply_commit_after_addressed():
+    """(iv) The x-632c case: a bot finding, no reply at all, but a commit landed
+    after -> addressed. This is the gap that filed already-fixed findings."""
     comments = [
         {
             "id": "40",
             "body": "![high] major issue",
+            "reviewer": "chatgpt-codex-connector[bot]",
+            "is_bot": True,
+            "in_reply_to_id": None,
+            "created_at": "2024-01-04T10:00:00Z",
+        },
+    ]
+    commit_dates = ["2024-01-05T10:00:00+00:00"]
+    result = harvest.addressed_ids_from_comments(comments, commit_dates)
+    assert result == {"40"}
+
+
+def test_addressed_ids_from_comments_bot_finding_no_commit_after_still_files():
+    """A bot finding with NO subsequent commit is shipped-as-is -> not addressed
+    (so a genuinely-declined finding still becomes a node)."""
+    comments = [
+        {
+            "id": "45",
+            "body": "![high] shipped as-is",
             "reviewer": "gemini[bot]",
             "is_bot": True,
+            "in_reply_to_id": None,
+            "created_at": "2024-01-05T10:00:00Z",
+        },
+    ]
+    commit_dates = ["2024-01-04T10:00:00+00:00"]  # commit BEFORE the finding
+    result = harvest.addressed_ids_from_comments(comments, commit_dates)
+    assert result == set()
+
+
+def test_addressed_ids_from_comments_human_finding_no_reply_commit_after_not_addressed():
+    """A HUMAN reviewer's finding keeps the strict gate: a commit-after WITHOUT a
+    non-bot reply does not bury it (only bot findings skip the reply gate)."""
+    comments = [
+        {
+            "id": "40h",
+            "body": "please guard this",
+            "reviewer": "a-human-reviewer",
+            "is_bot": False,
             "in_reply_to_id": None,
             "created_at": "2024-01-04T10:00:00Z",
         },
@@ -866,7 +904,9 @@ def test_harvest_reviews_skips_addressed_bot_finding():
 
 
 def test_harvest_reviews_still_open_finding_survives():
-    """A still-open finding (no non-bot reply) is NOT suppressed."""
+    """A still-open bot finding - flagged with NO subsequent commit (shipped
+    as-is) - is NOT suppressed. (A commit-after would now mark it addressed;
+    see test_addressed_ids_from_comments_bot_finding_no_reply_commit_after.)"""
     comments = [
         {
             "id": "200",
@@ -874,10 +914,10 @@ def test_harvest_reviews_still_open_finding_survives():
             "reviewer": "gemini[bot]",
             "is_bot": True,
             "in_reply_to_id": None,
-            "created_at": "2024-01-01T10:00:00Z",
+            "created_at": "2024-01-02T10:00:00Z",
         },
     ]
-    commit_dates = ["2024-01-02T10:00:00+00:00"]
+    commit_dates = ["2024-01-01T10:00:00+00:00"]  # commit BEFORE -> genuinely open
     items = harvest.harvest_reviews(
         comments=comments,
         resolved_ids=set(),

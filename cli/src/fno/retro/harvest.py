@@ -315,14 +315,21 @@ def addressed_ids_from_comments(
     comments: list[dict],
     commit_dates: list[str],
 ) -> "set[str]":
-    """Compute comment ids that are addressed by a non-bot reply + later commit.
+    """Compute comment ids the PR's own history shows as addressed.
 
     Pure function, no IO. A TOP-LEVEL comment (no ``in_reply_to_id``) is treated
-    as a finding. It is addressed when:
+    as a finding. It is addressed when it clears an ENGAGEMENT gate AND has work
+    evidence:
 
-    1. At least one non-bot reply exists in the thread, AND
-    2. Either a commit was pushed STRICTLY after the finding's ``created_at``
-       timestamp, OR any non-bot reply body contains ``wontfix:`` (any case).
+    - Work evidence: a commit pushed STRICTLY after the finding's ``created_at``,
+      OR a non-bot reply body containing ``wontfix:`` (any case).
+    - Engagement gate: a HUMAN reviewer's finding needs at least one non-bot
+      reply first (so an unrelated commit cannot bury a live human concern). A
+      BOT reviewer's finding (``is_bot``) skips the reply requirement entirely -
+      on an autonomously-merged PR the fixing agent commits and merges without
+      replying or clicking "Resolve", so the reply would never come (x-632c: the
+      fix landed 21 min after the codex comment, thread never touched). Work
+      evidence alone addresses a bot finding.
 
     Comments with missing ``is_bot`` / ``in_reply_to_id`` / ``created_at`` keys
     degrade gracefully (read as not-bot / top-level / no-timestamp) so a caller
@@ -352,8 +359,6 @@ def addressed_ids_from_comments(
             continue
         replies = reply_map.get(finding_id, [])
         non_bot_replies = [(bot, body) for (bot, body) in replies if not bot]
-        if not non_bot_replies:
-            continue  # no non-bot reply -> definitely not addressed
 
         # Check whether any commit landed STRICTLY after the finding was posted.
         # Parse the finding ts once; a missing/unparseable ts biases to
@@ -364,11 +369,27 @@ def addressed_ids_from_comments(
             if finding_dt is not None
             else False
         )
-        # Check whether any non-bot reply explicitly waives the finding.
+        # A non-bot reply explicitly waiving the finding also addresses it.
         wontfix = any(
             "wontfix:" in body.lower() for (_, body) in non_bot_replies
         )
-        if commit_after or wontfix:
+
+        # Engagement gate. A HUMAN reviewer's finding must earn a non-bot reply
+        # before a nearby commit is read as addressing it - otherwise an unrelated
+        # commit would silently bury a human's live concern. A BOT reviewer's
+        # finding (codex/gemini) never earns a reply or a "Resolve" click on an
+        # autonomously-merged PR: the fixing agent commits and merges without
+        # touching the thread. Requiring a reply there was the gap that filed
+        # already-fixed findings as live nodes (x-632c: the fix landed 21 min
+        # after the codex comment, yet the thread stayed unresolved, un-outdated,
+        # and unreplied). So bot findings skip the reply requirement; work
+        # evidence (a post-comment commit, or a wontfix reply) alone addresses
+        # them. A merged PR passed the review gate, so a surviving bot finding is
+        # addressed or advisory - both low-value as nodes - and its comment still
+        # lives on the PR for recovery. A bot finding with NO subsequent commit is
+        # genuinely shipped-as-is and still files.
+        engaged = True if bool(c.get("is_bot", False)) else bool(non_bot_replies)
+        if engaged and (commit_after or wontfix):
             addressed.add(finding_id)
 
     return addressed
