@@ -4729,24 +4729,45 @@ impl View {
     }
 
     /// (US9 crown) Hierarchy indent for a row within its squad: the count of
-    /// DISTINCT crown ranks in the squad strictly above this row's rank. Zero
-    /// when no higher-ranked row exists, so an all-un-crowned squad indents by 0
-    /// and paints byte-identical to before. Derived from the live layout (never a
-    /// carried value), so it always matches the current mesh; the max is bounded
-    /// by the number of distinct ranks (<= 3 steps), so it never runs off-screen.
+    /// DISTINCT crown ranks strictly above this row's rank among the rows that
+    /// actually RENDER. Zero when no higher-ranked visible row exists, so an
+    /// all-un-crowned squad indents by 0 and paints byte-identical to before. It
+    /// mirrors `tree_rows`' own visibility filter (an exited coordinator hidden
+    /// by a LiveOnly squad must not contribute a phantom indent step), so the
+    /// indent never references a row that is off-screen. The max is bounded by
+    /// the number of distinct ranks (<= 3 steps), so it never runs off-screen.
     fn crown_indent(&self, a: &AgentRow) -> usize {
         let mine = crown_rank(a.crown_level);
+        let expanded = self.squad_section_view(a.squad) == SectionView::Expanded;
         let mut above: Vec<u8> = self
             .layout
             .agents
             .iter()
             .filter(|o| o.squad == a.squad)
+            .filter(|o| expanded || !o.exited)
             .map(|o| crown_rank(o.crown_level))
             .filter(|&r| r < mine)
             .collect();
         above.sort_unstable();
         above.dedup();
         above.len()
+    }
+
+    /// The section-view state (Expanded / LiveOnly / Collapsed) of the section a
+    /// row lives in - a squad, or the Elsewhere catch-all for a squadless row.
+    /// Used to keep `crown_indent`'s row set in step with what `tree_rows`
+    /// actually paints. An unknown squad defaults to Expanded (count everything).
+    fn squad_section_view(&self, squad: Option<u64>) -> SectionView {
+        match squad {
+            Some(id) => self
+                .layout
+                .squads
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| self.section_view(&section_key(s)))
+                .unwrap_or(SectionView::Expanded),
+            None => self.section_view(&SectionKey::Elsewhere),
+        }
     }
 
     fn draw_sideline(&self, cells: &mut [Cell], rows: usize, cols: usize, panel_w: usize) {
@@ -18218,6 +18239,27 @@ mod tests {
         };
         assert_eq!(steps2("dir"), 0);
         assert_eq!(steps2("leaf"), 1);
+    }
+
+    #[test]
+    fn crown_indent_ignores_exited_coordinator_hidden_by_liveonly() {
+        // The indent must reference only rows that render: an exited coordinator
+        // dropped by a LiveOnly squad must not leave its leaves indented under a
+        // phantom.
+        let mut vp = crowned_row("vp", 2, Some(0), Some("p"));
+        vp.exited = true;
+        let leaf = crowned_row("leaf", 3, None, None);
+        let mut v = view_with_agents(vec![vp, leaf]);
+        let indent = |v: &View, name: &str| {
+            let a = v.layout.agents.iter().find(|a| a.name == name).unwrap();
+            v.crown_indent(a)
+        };
+        // Expanded: the exited VP still renders, so the leaf indents under it.
+        assert_eq!(indent(&v, "leaf"), 1);
+        // LiveOnly hides the exited VP -> no coordinator on screen -> no indent.
+        v.cycle_squad(1);
+        assert_eq!(v.squad_view(1), SectionView::LiveOnly);
+        assert_eq!(indent(&v, "leaf"), 0, "no phantom indent under a hidden VP");
     }
 
     #[test]
