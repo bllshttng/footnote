@@ -6141,7 +6141,11 @@ impl Core {
                             .map(|t| tree::leaves(&t.root).len())
                             .unwrap_or(0);
                         let takeover = self.panes.get(&focus).is_some_and(|p| {
-                            idle_shell_takeover(leaf_count, p.cmd.as_deref(), p.pty.has_foreground_child())
+                            idle_shell_takeover(
+                                leaf_count,
+                                p.cmd.as_deref(),
+                                p.pty.has_foreground_child(),
+                            )
                         });
                         if !takeover {
                             self.notice(client_id, "tab is not empty - use split or new tab");
@@ -12012,7 +12016,10 @@ mod tests {
         let tab = core.viewed_tab(view).unwrap();
         assert_eq!(tab.root, Node::Leaf(new_pid), "B took the tab's only slot");
         assert_eq!(tab.focus, new_pid, "focus follows the take-over");
-        assert!(!core.panes.contains_key(&shell), "the idle shell was reaped");
+        assert!(
+            !core.panes.contains_key(&shell),
+            "the idle shell was reaped"
+        );
         assert_eq!(core.attached.get("deadbee2"), Some(&new_pid), "B mapped");
         assert!(drain_notices(&mut rx)
             .iter()
