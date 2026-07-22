@@ -722,16 +722,19 @@ struct View {
     idle_expanded: HashSet<SectionKey>,
     /// Selector cursor into [`View::display_rows`], when open (x-260a: one
     /// index space shared with painting, hover, and mouse hit-testing). Written
-    /// only through [`View::set_selector`] so `sel_agent` never desyncs.
+    /// only through [`View::set_selector`] so `sel_protect` never desyncs.
     selector: Option<usize>,
-    /// (x-8d3e) The name of the agent the selector rests on, cached at
-    /// selector-write time. The idle-cap `protect` in [`View::tree_rows`] reads
-    /// THIS, not a fresh index lookup: re-deriving the identity from `selector`
-    /// against a differently-capped build reads the wrong row (the uncapped
-    /// build restores every folded idle row and emits no fold row, so every
-    /// index past the first fold shifts). `None` when the selector is closed or
-    /// off an agent row. Ephemeral render state, never persisted.
-    sel_agent: Option<String>,
+    /// (x-8d3e) The squad whose idle rows the idle-cap `protect` must keep
+    /// expanded: the squad of the idle agent the selector rests on, cached at
+    /// selector-write time. [`View::tree_rows`] reads THIS, not a fresh index
+    /// lookup - re-deriving the identity from `selector` against a
+    /// differently-capped build reads the wrong row (the uncapped build restores
+    /// every folded idle row and emits no fold row, so every index past the
+    /// first fold shifts). Keyed on the squad id, not an agent name: a name is
+    /// not unique across squads, and the squad is exactly what protect expands.
+    /// `None` when the selector is closed or not on an idle agent row. Ephemeral
+    /// render state, never persisted.
+    sel_protect: Option<u64>,
     /// Pending escape bytes in selector mode, carried ACROSS reads so a
     /// split arrow sequence can never half-close the selector and leak its
     /// tail into the pane (gemini medium).
@@ -1565,7 +1568,7 @@ impl View {
             section_chosen: HashMap::new(),
             idle_expanded: HashSet::new(),
             selector: None,
-            sel_agent: None,
+            sel_protect: None,
             sel_esc: Vec::new(),
             sel_hover_armed: false,
             sideline_offset: 0,
@@ -3860,12 +3863,12 @@ impl View {
         }
     }
 
-    /// (x-8d3e) The one write point for [`View::selector`]. Records the selected
-    /// row's agent identity into `sel_agent` from the CURRENT painted build (the
-    /// build this index was computed against), so `tree_rows`' idle-cap protect
-    /// reads a stable identity instead of re-resolving an index against a
-    /// differently-capped build. The `display_rows()` call here reads the PRIOR
-    /// cached `sel_agent` for its own protect, so it never recurses.
+    /// (x-8d3e) The one write point for [`View::selector`]. Records the squad
+    /// whose idle rows must stay expanded into `sel_protect` from the CURRENT
+    /// painted build (the build this index was computed against), so `tree_rows`'
+    /// idle-cap protect reads a stable identity instead of re-resolving an index
+    /// against a differently-capped build. The `display_rows()` call here reads
+    /// the PRIOR cached `sel_protect` for its own protect, so it never recurses.
     ///
     /// When the selection changes the PROTECTED squad, the row set reflows (the
     /// old protected squad collapses, shifting every later index), so the raw
@@ -3876,23 +3879,25 @@ impl View {
     fn set_selector(&mut self, idx: Option<usize>) {
         let Some(i) = idx else {
             self.selector = None;
-            self.sel_agent = None;
+            self.sel_protect = None;
             return;
         };
         // `i` is valid against the current build: the caller computed it there,
-        // and that build reads the still-current `sel_agent` for its protect.
+        // and that build reads the still-current `sel_protect` for its protect.
         let rows = self.display_rows();
         let target = rows.get(i).map(row_key);
-        let new_agent = match rows.get(i) {
-            Some(DisplayRow::Agent(a)) => Some(a.name.clone()),
+        // Protect the squad of the selected IDLE row (an attention row is never
+        // folded, so it needs no protection); everything else clears it.
+        let new_protect = match rows.get(i) {
+            Some(DisplayRow::Agent(a)) if is_idle_row(a) => a.squad,
             _ => None,
         };
         drop(rows);
         self.selector = Some(i);
-        if new_agent == self.sel_agent {
-            return; // protect unchanged -> no reflow -> `i` stays valid
+        if new_protect == self.sel_protect {
+            return; // protected squad unchanged -> no reflow -> `i` stays valid
         }
-        self.sel_agent = new_agent;
+        self.sel_protect = new_protect;
         // The protected squad changed. Re-find the target by identity in the
         // reflowed build; a vanished or inert target falls back to the anchor.
         self.selector = match target {
@@ -5215,19 +5220,20 @@ impl View {
 
     fn tree_rows(&self) -> Vec<DisplayRow<'_>> {
         // (x-c5ee / x-8d3e) The idle cap must never fold the row the selector
-        // rests on (AC2-FR). Read the selected agent's identity from the
-        // `sel_agent` cache, written by `set_selector` against the painted build
-        // the index came from. Re-deriving it here from `selector` (as the
-        // original x-c5ee did, via an UNCAPPED build) reads the wrong row once a
-        // squad folds idle overflow: the uncapped build restores every folded
-        // row and emits no fold row, so every index past the first fold shifts.
-        self.build_tree_rows(self.sel_agent.as_deref(), true)
+        // rests on (AC2-FR). Read the protected squad from the `sel_protect`
+        // cache, written by `set_selector` against the painted build the index
+        // came from. Re-deriving it here from `selector` (as the original
+        // x-c5ee did, via an UNCAPPED build) reads the wrong row once a squad
+        // folds idle overflow: the uncapped build restores every folded row and
+        // emits no fold row, so every index past the first fold shifts.
+        self.build_tree_rows(self.sel_protect, true)
     }
 
     /// Build the sideline tree. `apply_cap` gates the top-K idle cap (x-c5ee);
-    /// `protect`, when set, is the selected agent's name whose squad must render
-    /// its idle rows in full so the cursor never lands on a folded row.
-    fn build_tree_rows(&self, protect: Option<&str>, apply_cap: bool) -> Vec<DisplayRow<'_>> {
+    /// `protect`, when set, is the squad id whose idle rows must render in full
+    /// so the cursor never lands on a folded row (x-8d3e: keyed on the squad, not
+    /// an agent name - a name is not unique across squads).
+    fn build_tree_rows(&self, protect: Option<u64>, apply_cap: bool) -> Vec<DisplayRow<'_>> {
         let mut out = Vec::new();
         // (x-cd67 US3) Section spacing only with more than one workspace: a
         // single squad has no groups to separate (US3 verify: absent with 1
@@ -5285,13 +5291,8 @@ impl View {
                 // A squad shows all its idle rows when the cap is off, when the
                 // operator toggled it open, or when the selector rests on one of
                 // its idle rows (AC2-FR: never fold the selected row).
-                let show_all_idle = !apply_cap
-                    || self.idle_expanded.contains(&key)
-                    || protect.is_some_and(|n| {
-                        squad_agents
-                            .iter()
-                            .any(|&a| is_idle_row(a) && a.name.as_str() == n)
-                    });
+                let show_all_idle =
+                    !apply_cap || self.idle_expanded.contains(&key) || protect == Some(s.id);
                 let mut idle_shown = 0usize;
                 for &a in &squad_agents {
                     if is_idle_row(a) && !show_all_idle {
@@ -6126,7 +6127,16 @@ fn is_sideline_verb(b: u8) -> bool {
 /// `Other` - they are never a re-anchor target.
 #[derive(PartialEq, Eq)]
 enum RowKey {
-    Agent(String),
+    // An agent name is NOT unique (two rows can share one - the server's own
+    // ambiguity checks and `agent_hit` disambiguate on pane_id / attach_id), so
+    // the key carries every disambiguator or the re-anchor lookup could jump to
+    // the wrong agent's pane (codex #570).
+    Agent {
+        squad: Option<u64>,
+        name: String,
+        pane_id: Option<u64>,
+        attach_id: Option<String>,
+    },
     Squad(u64, Option<usize>),
     Card(String),
     Idle(SectionKey),
@@ -6136,7 +6146,12 @@ enum RowKey {
 
 fn row_key(drow: &DisplayRow) -> RowKey {
     match drow {
-        DisplayRow::Agent(a) => RowKey::Agent(a.name.clone()),
+        DisplayRow::Agent(a) => RowKey::Agent {
+            squad: a.squad,
+            name: a.name.clone(),
+            pane_id: a.pane_id,
+            attach_id: a.attach_id.clone(),
+        },
         DisplayRow::Sel(s) => RowKey::Squad(s.squad, s.tab),
         DisplayRow::Card(c) => RowKey::Card(c.id.clone()),
         DisplayRow::IdleFold { key, .. } => RowKey::Idle(key.clone()),
@@ -14143,7 +14158,7 @@ mod tests {
             .position(|r| matches!(r, DisplayRow::IdleFold { .. }))
             .expect("a fold row");
         view.set_selector(Some(fold_at));
-        // The fold row is not an agent, so sel_agent is None: no squad is
+        // The fold row is not an agent, so sel_protect is None: no squad is
         // force-expanded and the fold row keeps its index across the repaint.
         assert!(
             matches!(
@@ -14255,6 +14270,31 @@ mod tests {
         );
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // x-8d3e regression (codex P1 on #570): a `RowKey` for an agent row must
+    // carry its disambiguators (pane_id / attach_id / squad), not just the name -
+    // two rows can share a name, and a name-only key would re-anchor the cursor
+    // onto the wrong agent's pane after a reflow.
+    #[test]
+    fn row_key_disambiguates_same_named_agents() {
+        let mut pane_a = sv_agent(1, "dup", None, false);
+        pane_a.pane_id = Some(100);
+        let mut pane_b = sv_agent(1, "dup", None, false);
+        pane_b.pane_id = Some(200);
+        assert!(
+            row_key(&DisplayRow::Agent(&pane_a)) != row_key(&DisplayRow::Agent(&pane_b)),
+            "same name, different pane -> distinct row keys"
+        );
+        // A paneless watch-only row disambiguates on attach_id instead.
+        let mut watch_a = sv_agent(2, "dup", None, false);
+        watch_a.attach_id = Some("job-a".into());
+        let mut watch_b = sv_agent(2, "dup", None, false);
+        watch_b.attach_id = Some("job-b".into());
+        assert!(
+            row_key(&DisplayRow::Agent(&watch_a)) != row_key(&DisplayRow::Agent(&watch_b)),
+            "same name, different attach_id -> distinct row keys"
+        );
     }
 
     // AC1-UI (x-c5ee): a click / selector Enter on the fold row toggles idle -
