@@ -115,32 +115,70 @@ const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_NAME + COL_TAIL + COL_PR + COL_TI
 const MIN_EXTENDED_PANEL_W: u16 = COL_STATUS + COL_NAME + COL_PR + 1;
 
 /// (x-b186) Columns the top-right density button reserves on the sideline's
-/// first row: a leading space plus the state glyph.
+/// first row: the state glyph plus a trailing pad (x-2e86) so it does not sit
+/// flush against the divider.
 const DENSITY_BTN_W: usize = 2;
 
-/// (x-b186) The density button's glyph. Each state paints a DIFFERENT one, so a
-/// press changes the button as well as the geometry - a press with no visible
-/// change would read as a dead control.
-/// A density's `(want, floor)` widths. Free-standing rather than a method so
-/// the border drag can price a state the sideline is not currently in.
-fn density_bounds_of(d: Density) -> (u16, u16) {
+/// (x-2e86) The width a density jumps to when picked as a preset (the density
+/// key or button): each mode's canonical size. Free-standing so the preset
+/// path can price a mode without being in it.
+fn canonical_width(d: Density) -> u16 {
     match d {
-        // Slim CLAMPS rather than hides: it is explicitly the non-hidden
-        // state, so cycling into it must never make the sideline vanish
-        // (that is what `b` is for). Its floor is the narrowest rail that
-        // still shows a caret plus a rollup pair; `header_band_text` drops
-        // the counts and then truncates the label below that.
-        Density::Slim => (SLIM_PANEL_W, MIN_SLIM_PANEL_W),
-        Density::Regular => (PANEL_W, PANEL_W),
-        Density::Extended => (EXTENDED_PANEL_W, MIN_EXTENDED_PANEL_W),
+        Density::Slim => SLIM_PANEL_W,
+        Density::Regular => PANEL_W,
+        Density::Extended => EXTENDED_PANEL_W,
     }
 }
 
-fn density_glyph(d: Density) -> char {
+/// (x-2e86) The narrowest width at which a density still renders its structure.
+/// A drag below this demotes the density (Locked 5). Only `Extended` has a
+/// floor above [`MIN_SLIM_PANEL_W`]: the tree and the rail truncate gracefully
+/// down to the slim floor, but the table needs room for status + name + PR.
+fn min_render_width(d: Density) -> u16 {
     match d {
-        Density::Slim => '▏',
-        Density::Regular => '▤',
-        Density::Extended => '▦',
+        Density::Slim | Density::Regular => MIN_SLIM_PANEL_W,
+        Density::Extended => MIN_EXTENDED_PANEL_W,
+    }
+}
+
+/// (x-2e86) The smallest terminal room ([`sideline_max_width`]) at which a
+/// density is shown at all; below it the rail AUTO-HIDES so the panes keep the
+/// screen, rather than rendering a rail too cramped to be worth its columns.
+///
+/// This is the pre-x-2e86 per-density floor, and it is deliberately NOT
+/// [`min_render_width`]: a `Slim` rail stays useful squished to
+/// [`MIN_SLIM_PANEL_W`], but a `Regular` tree below [`PANEL_W`] or an `Extended`
+/// table below [`MIN_EXTENDED_PANEL_W`] is too tight to read, so on a narrow
+/// terminal those hide (giving content the room) exactly as they did before free
+/// width. It gates on terminal CAPACITY, not on the stored width, so a rail the
+/// terminal CAN admit still renders at a small DRAGGED width (a drag-to-8 Regular
+/// shows, because the terminal that fits 28 also fits 8).
+fn min_admit_width(d: Density) -> u16 {
+    match d {
+        Density::Slim => MIN_SLIM_PANEL_W,
+        Density::Regular => PANEL_W,
+        Density::Extended => MIN_EXTENDED_PANEL_W,
+    }
+}
+
+/// (x-2e86) The largest sideline width this terminal allows: 60% of the columns,
+/// but never so wide that content drops below [`MIN_CONTENT_COLS`] - the tighter
+/// bound wins. Saturating throughout (a u32 intermediate for the 60%) so a
+/// degenerate terminal underflows to 0 rather than panicking; `panel_w` reads
+/// that 0 as "too narrow, hide the rail".
+fn sideline_max_width(term_cols: u16) -> u16 {
+    let sixty = ((term_cols as u32) * 3 / 5) as u16;
+    sixty.min(term_cols.saturating_sub(MIN_CONTENT_COLS))
+}
+
+fn density_glyph(d: Density) -> char {
+    // (x-2e86) A fill ramp - rail, tree, table - reading as increasing density.
+    // All three are East-Asian-width 1 (U+2581/2584/2588), which the button's
+    // column math and the header-band composition require.
+    match d {
+        Density::Slim => '▁',
+        Density::Regular => '▄',
+        Density::Extended => '█',
     }
 }
 /// The tab bar row.
@@ -487,6 +525,16 @@ struct SeamDrag {
     last_at: Instant,
 }
 
+/// (x-2e86) A sideline right-border drag in flight. `start_width` is the width
+/// at grab, so a bare Esc reverts to it (mirroring [`SeamDrag::start_pos`]);
+/// `last_at` refreshes on every column of motion so a swallowed mouse-up expires
+/// via the same stuck-drag timeout seam and pane drags use (Locked 9).
+#[derive(Clone, Copy, Debug)]
+struct SidelineDrag {
+    start_width: u16,
+    last_at: Instant,
+}
+
 /// (x-aa95) Where a drop would put the dragged pane: adjacent to `target` on
 /// its `dir` side.
 ///
@@ -606,10 +654,18 @@ struct View {
     /// Orthogonal to [`View::density`]: this is visibility, that is how much
     /// each visible row shows. `Slim` is a narrow rail, NOT a hidden panel.
     panel_on: bool,
-    /// (x-b186) Sideline density, persisted by [`crate::view_store`]. Drives
-    /// the panel width via [`View::density_bounds`] and the row set via
-    /// [`View::display_rows`].
+    /// (x-b186) Sideline density, persisted by [`crate::view_store`]. Since
+    /// x-2e86 it drives only the row set (via [`View::display_rows`]) and the
+    /// preset width jump - the rendered width is [`View::sideline_width`], an
+    /// independent value the border drag sets freely.
     density: Density,
+    /// (x-2e86) The operator's chosen sideline width in columns (the stored
+    /// intent), independent of the density. Resolved once at startup from the
+    /// persisted width, or the density's canonical width when none is stored.
+    /// [`View::panel_w`] clamps it to the terminal transiently; this value is
+    /// never overwritten by that clamp, so a terminal shrink-then-grow restores
+    /// it (AC1-FR).
+    sideline_width: u16,
     /// (x-b186) Extended-table row order, persisted alongside the density.
     /// Inert in the other two densities (they render no table).
     agent_sort: AgentSort,
@@ -724,9 +780,9 @@ struct View {
     seam_drag: Option<SeamDrag>,
     /// (x-d807) True while the pointer is over the sideline's right border, and
     /// the border-drag in flight. The sideline stays client-local (never on the
-    /// wire) and snaps between density states rather than taking a free width.
+    /// wire); the drag sets a free width (x-2e86, reversing x-b186's snap-only).
     hover_sideline_border: bool,
-    sideline_drag: Option<Density>,
+    sideline_drag: Option<SidelineDrag>,
     /// (x-aa95) The pane whose grip the pointer is over, accented so the grip
     /// reads as grabbable before the press - the same "no portable cursor
     /// shape" constraint that makes [`View::hover_seam`] the whole affordance.
@@ -1440,7 +1496,14 @@ impl View {
         // (x-b186) Layout-independent, unlike the section map above, so it is
         // safe to resolve against the empty placeholder layout a real attach
         // constructs with. A missing or corrupt store reads as the defaults.
-        let (density, agent_sort) = view_store::load_prefs();
+        let (density, agent_sort, stored_width) = view_store::load_prefs();
+        // (x-2e86) The stored intent, resolved once. Deliberately NOT clamped to
+        // the current terminal here: `panel_w` clamps transiently on every paint,
+        // and pre-clamping the stored value would let a small startup terminal
+        // permanently shrink a width chosen on a large one (AC1-FR / Locked 4).
+        // `None` (fresh install or corrupt width) falls back to the density's
+        // canonical size, so nothing changes until the first drag.
+        let sideline_width = stored_width.unwrap_or_else(|| canonical_width(density));
         View {
             backlog_pending: None,
             term,
@@ -1449,6 +1512,7 @@ impl View {
             frames: HashMap::new(),
             panel_on: true,
             density,
+            sideline_width,
             agent_sort,
             status_on: true,
             hint: false,
@@ -2239,41 +2303,32 @@ impl View {
             .position(|r| matches!(r, DisplayRow::Sel(s) if s.tab.is_none() && s.squad == id))
     }
 
-    /// (x-b186) The panel width this density WANTS, before any terminal clamp,
-    /// and the floor below which the panel hides instead of shrinking further.
-    ///
-    /// Regular's want and floor are both [`PANEL_W`], so its behaviour on a
-    /// narrow terminal is exactly what it was before densities existed
-    /// (auto-hide, AC6-EDGE) - the clamp path below is reachable only from
-    /// Extended, which is the state that asks for more than it may get.
-    fn density_bounds(&self) -> (u16, u16) {
-        density_bounds_of(self.density)
-    }
-
     /// The sideline's width in columns, or 0 when it is not rendering.
     ///
     /// The single width authority (AC5-EDGE): every consumer routes through
     /// here, so the work-pane minimum is enforced in ONE place rather than at
-    /// each call site. A density never shrinks content below
-    /// [`MIN_CONTENT_COLS`] - it clamps down to the widest legal width, and
-    /// hides entirely once even its floor would not fit.
+    /// each call site. Since x-2e86 the width is [`View::sideline_width`] (the
+    /// operator's stored intent) clamped to `[MIN_SLIM_PANEL_W .. `
+    /// [`sideline_max_width`]`]`, not a pure function of the density. The clamp
+    /// is TRANSIENT: `sideline_width` is never mutated here, so a terminal
+    /// shrink-then-grow restores the chosen width (AC1-FR / Locked 4).
     ///
-    /// Note there is no stored "previous Regular width" to restore on leaving
-    /// Extended: width is a pure function of the density, so exiting recomputes
-    /// Regular's exactly. The border drag does not change that - it snaps
-    /// between whole density states rather than taking a free width, so this
-    /// stays a pure function of the density (x-b186: a rail that resizes freely
-    /// shifts the content area on unrelated events).
+    /// The rail auto-hides when the terminal cannot admit the current density
+    /// (`max < `[`min_admit_width`]`)`: a `Regular` tree or `Extended` table too
+    /// cramped to read gives its columns back to the panes, exactly as before
+    /// free width. `Slim`'s admit floor is [`MIN_SLIM_PANEL_W`], so it hides only
+    /// when even the slim rail cannot leave [`MIN_CONTENT_COLS`] (AC6-EDGE). The
+    /// gate is on terminal CAPACITY, not the stored width, so a rail the terminal
+    /// admits still shows at a small dragged width.
     fn panel_w(&self) -> u16 {
         if !self.panel_on {
             return 0;
         }
-        let (want, floor) = self.density_bounds();
-        let room = self.term.1.saturating_sub(MIN_CONTENT_COLS);
-        if room < floor {
+        let max = sideline_max_width(self.term.1);
+        if max < min_admit_width(self.density) {
             return 0;
         }
-        want.min(room)
+        self.sideline_width.clamp(MIN_SLIM_PANEL_W, max)
     }
 
     /// Whether the bottom row belongs to chrome. Geometry beats the toggle:
@@ -2479,9 +2534,34 @@ impl View {
     }
 
     /// End a sideline-border drag and recompute hover; see [`View::end_seam_drag`].
+    ///
+    /// (x-2e86) Persists the reached width on the way out - but only if the drag
+    /// actually moved it, so a bare press-and-release on the border writes
+    /// nothing. Every non-revert end routes here (release, a non-left event, and
+    /// the stuck-drag timeout), so all three keep the width the operator dragged
+    /// to (AC2-FR); only Esc reverts, via [`View::revert_sideline_drag`].
     fn end_sideline_drag(&mut self, row: u16, col: u16) {
-        self.sideline_drag = None;
+        if let Some(drag) = self.sideline_drag.take() {
+            if drag.start_width != self.sideline_width {
+                view_store::save_width(self.sideline_width);
+            }
+        }
         self.refresh_hover_affordances(row, col);
+    }
+
+    /// (x-2e86) End a sideline drag by reverting to the width at grab (a bare
+    /// Esc), mirroring [`View::revert_seam_drag`]. Returns whether the width
+    /// changed, so the caller re-reports the content viewport only when it did.
+    /// Client-local, so unlike the seam revert nothing travels to the server
+    /// beyond the resulting `Resize`; the on-disk width is untouched because a
+    /// reverted drag never persisted.
+    fn revert_sideline_drag(&mut self) -> bool {
+        let Some(drag) = self.sideline_drag.take() else {
+            return false;
+        };
+        let changed = self.sideline_width != drag.start_width;
+        self.sideline_width = drag.start_width;
+        changed
     }
 
     /// True on the sideline's right border column - the grab band for the
@@ -2530,58 +2610,51 @@ impl View {
         })
     }
 
-    /// The sideline states this terminal is wide enough to render, paired with
-    /// the width each would take. `None` is the hidden state, always offered.
+    /// (x-2e86) Set the sideline to a free width from the dragged border column,
+    /// clamped to `[MIN_SLIM_PANEL_W .. `[`sideline_max_width`]`]`. Returns
+    /// whether the width changed, so the caller re-reports the content viewport
+    /// only on a real crossing (the drag reports far more cells than columns).
     ///
-    /// Filtering by what fits is what keeps a drag on a narrow terminal from
-    /// snapping to a state `panel_w` would then refuse to draw, which would
-    /// read as the sideline vanishing at random.
-    fn density_snap_targets(&self) -> Vec<(Option<Density>, u16)> {
-        let room = self.term.1.saturating_sub(MIN_CONTENT_COLS);
-        let mut out = vec![(None, 0u16)];
-        out.extend(
-            [Density::Slim, Density::Regular, Density::Extended]
-                .into_iter()
-                .filter_map(|d| {
-                    let (want, floor) = density_bounds_of(d);
-                    (room >= floor).then_some((Some(d), want.min(room)))
-                }),
-        );
-        out
-    }
-
-    /// Snap the sideline to whichever state's width sits nearest the dragged
-    /// border column. Returns whether anything changed.
-    ///
-    /// Deliberately snap-only: x-b186 fixed these widths because a rail that
-    /// takes a free width shifts the content area on unrelated events. The drag
-    /// is a faster way to reach the states the density button already cycles,
-    /// not a new degree of freedom.
-    fn snap_sideline_to(&mut self, col: u16) -> bool {
+    /// Reverses x-b186's snap-only rule: the width is now continuous. The lower
+    /// clamp is the constant `MIN_SLIM_PANEL_W`, NOT the current density's floor,
+    /// so a drag can shrink past a mode's structural floor - crossing it demotes
+    /// the mode (Locked 5) rather than stopping the drag (AC2-EDGE).
+    fn drag_sideline_to(&mut self, col: u16, now: Instant) -> bool {
+        // Every drag report is motion, even one that clamps to the same width at
+        // a bound: refresh the stuck-drag deadline FIRST, before any early
+        // return, so an actively-held drag pinned against a clamp never expires
+        // under the hand (codex P2). Only a genuinely report-less interval - the
+        // swallowed mouse-up - then lets the timeout fire.
+        if let Some(drag) = self.sideline_drag.as_mut() {
+            drag.last_at = now;
+        }
+        let max = sideline_max_width(self.term.1);
+        // A WINCH can shrink the terminal below MIN_SLIM + MIN_CONTENT mid-drag,
+        // making `max < MIN_SLIM_PANEL_W`; a `clamp(MIN_SLIM_PANEL_W, max)` with
+        // min > max panics (codex P2). The rail is hidden at that size, so there
+        // is nothing to set - keep the stored width for when it grows back.
+        if max < MIN_SLIM_PANEL_W {
+            return false;
+        }
         // The border sits on the sideline's last column, so the width the
         // operator is asking for is one past it.
-        let want = col.saturating_add(1);
-        let targets = self.density_snap_targets();
-        let Some(&(pick, _)) = targets.iter().min_by_key(|(_, w)| w.abs_diff(want)) else {
-            return false;
-        };
-        let before = (self.panel_on, self.density);
-        let held = self.selected_agent_name();
-        match pick {
-            None => self.panel_on = false,
-            Some(d) => {
-                self.panel_on = true;
-                self.density = d;
-            }
-        }
-        if before == (self.panel_on, self.density) {
+        let want = col.saturating_add(1).clamp(MIN_SLIM_PANEL_W, max);
+        if want == self.sideline_width {
             return false;
         }
-        view_store::save_prefs(self.density, self.agent_sort);
-        // Same ordering as cycle_density: the row set changes with the density,
-        // so re-anchor the selector before clamping the scroll to it.
-        self.reanchor_selector(held);
-        self.clamp_sideline_offset();
+        self.sideline_width = want;
+        // Locked 5: a drag below the current mode's structural floor demotes the
+        // mode to the widest that still renders. Only Extended has a floor above
+        // MIN_SLIM_PANEL_W, so in practice this is Extended -> Regular; Regular
+        // and Slim render down to the slim floor and never trip it. Same
+        // re-anchor ordering as `cycle_density`: the row set changes with the
+        // density, so re-anchor the selector (which re-clamps the scroll) after.
+        if self.sideline_width < min_render_width(self.density) {
+            let held = self.selected_agent_name();
+            self.density = Density::Regular;
+            view_store::save_prefs(self.density, self.agent_sort);
+            self.reanchor_selector(held);
+        }
         true
     }
 
@@ -3629,9 +3702,22 @@ impl View {
     /// Every press changes both the panel geometry and the button glyph in the
     /// same frame, so no press is ever visually inert.
     fn cycle_density(&mut self) {
+        // (x-2e86, concurrency invariant) A density press during a live border
+        // drag would fight the pointer for the width, so the in-flight drag owns
+        // it until release: ignore the preset while dragging (AC3-FR).
+        if self.sideline_drag.is_some() {
+            return;
+        }
         let held = self.selected_agent_name();
         self.density = self.density.next();
-        view_store::save_prefs(self.density, self.agent_sort);
+        // (x-2e86) A preset press picks the mode AND jumps the width to that
+        // mode's canonical size, deliberately overwriting any dragged width -
+        // that width jump is what makes each press visibly a preset (Locked 2).
+        // Mode and width are one choice, so they persist in ONE locked mutation
+        // (codex P2): separate writes could interleave with another mux client
+        // and pair a mode with a width from a different press.
+        self.sideline_width = canonical_width(self.density);
+        view_store::save_preset(self.density, self.agent_sort, self.sideline_width);
         // The row set changes with the density (slim suppresses agent rows,
         // extended adds a column header), so a scrolled sideline must re-clamp
         // or it can sit past the new last row (x-a621). Ordering matters: the
@@ -5444,15 +5530,23 @@ impl View {
         // `sideline_row_at` needs no special case. The header band underneath
         // already right-aligns a droppable rollup strip, so the two columns this
         // takes cost at worst the least-severe rollup pair, never the label.
+        //
+        // (x-2e86) Layout is [inverse glyph][plain pad]: the glyph leads and the
+        // divider-adjacent cell is a NON-inverse space, so the button reads one
+        // column in from the border (the operator's padding ask) without shifting
+        // `range.start` - the header band keeps every column it had, so a tight
+        // slim rail never loses its rollup to the pad (AC1-HP).
         if rows > 0 {
             if let Some(range) = self.density_button_range(panel_w) {
                 let glyph = density_glyph(self.density);
+                let start = range.start;
                 for (n, c) in range.clone().enumerate() {
+                    let is_pad = n + 1 == DENSITY_BTN_W; // the trailing cell is the pad
                     cells[c] = Cell {
-                        c: if n == 0 { ' ' } else { glyph },
+                        c: if c == start { glyph } else { ' ' },
                         fg: Color::Default,
                         bg: Color::Default,
-                        flags: cell_flags::INVERSE,
+                        flags: if is_pad { 0 } else { cell_flags::INVERSE },
                     };
                 }
             }
@@ -6932,6 +7026,10 @@ async fn attach_and_run(
         // leave the drag latched, swallowing every later mouse event. Expire it.
         let seam_drag_deadline = view.seam_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
         let pane_drag_deadline = view.pane_drag.map(|d| d.last_at + PANE_DRAG_TIMEOUT);
+        // (x-2e86, Locked 9) The sideline drag now latches continuous resize, so
+        // a swallowed mouse-up is worse than under the old single-snap drag.
+        // Give it the same backstop seam/pane drags already have.
+        let sideline_drag_deadline = view.sideline_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
         // (x-d6a8 AC1-FR) The tab-cell and sideline-row drags share the same
         // dead-drag reaper: a mouse-up that never arrives must not latch the
         // gesture. Only one of the three is ever live, so one deadline over both
@@ -7292,6 +7390,23 @@ async fn attach_and_run(
                 }
             }
             _ = async {
+                match sideline_drag_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if sideline_drag_deadline.is_some() => {
+                // (x-2e86, AC2-FR) Same "keep the reached width" reasoning as the
+                // seam reaper: the resize was real up to the missing release, so
+                // `end_sideline_drag` ends it exactly as a release would (and
+                // persists the reached width). Coords the drag last saw are gone,
+                // so refresh hover at the border's current column.
+                let col = view.panel_w().saturating_sub(1);
+                view.end_sideline_drag(TAB_BAR_ROWS, col);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            _ = async {
                 match pane_drag_deadline {
                     Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
                     None => std::future::pending().await,
@@ -7568,12 +7683,13 @@ async fn handle_stdin(
             }
         }
         // x-d807: the sideline border drag, same ownership rule as a seam drag.
-        // Client-local: the sideline is never on the wire, so a snap only tells
-        // the server its content area changed.
+        // Client-local: the sideline is never on the wire, so a width change only
+        // tells the server its content area changed (x-2e86: a free width now,
+        // reported per crossed column so inner apps reflow live).
         if view.sideline_drag.is_some() {
             match rep.kind {
                 MouseKind::Drag(MouseButton::Left) => {
-                    if view.snap_sideline_to(rep.col) {
+                    if view.drag_sideline_to(rep.col, Instant::now()) {
                         let (r, c) = view.content_dims();
                         write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
                             .await
@@ -7641,9 +7757,14 @@ async fn handle_stdin(
                 continue;
             }
             // Likewise the sideline's own border. Also after chrome_hit, so the
-            // density button keeps the cells it draws on.
+            // density button keeps the cells it draws on. Remember the width at
+            // grab so a bare Esc reverts, and stamp `last_at` for the stuck-drag
+            // timeout (x-2e86).
             if view.on_sideline_border(rep.row, rep.col) {
-                view.sideline_drag = Some(view.density);
+                view.sideline_drag = Some(SidelineDrag {
+                    start_width: view.sideline_width,
+                    last_at: Instant::now(),
+                });
                 continue;
             }
         }
@@ -7711,6 +7832,19 @@ async fn handle_stdin(
     // escape sequence cannot read as a cancel.
     if view.pane_drag.is_some() && passthrough == [0x1b] {
         view.cancel_pane_drag();
+        return Ok(StdinFlow::Continue);
+    }
+    // x-2e86: a bare Esc during a sideline-border drag reverts the width to where
+    // the drag began, mirroring the seam revert. Client-local, so only a Resize
+    // travels (and only if the width actually changed) - the layout is the
+    // client's own, not the server's.
+    if view.sideline_drag.is_some() && passthrough == [0x1b] {
+        if view.revert_sideline_drag() {
+            let (rows, cols) = view.content_dims();
+            write_msg(sock_w, &ClientMsg::Resize { rows, cols })
+                .await
+                .map_err(|e| format!("sideline revert resize send failed: {e}"))?;
+        }
         return Ok(StdinFlow::Continue);
     }
     // (x-d6a8 AC1-FR) A bare Esc cancels a tab-cell or sideline-row drag too. No
@@ -12022,7 +12156,10 @@ mod tests {
         );
 
         // A drag in flight keeps it accented even while the pointer runs ahead.
-        view.sideline_drag = Some(view.density);
+        view.sideline_drag = Some(SidelineDrag {
+            start_width: view.sideline_width,
+            last_at: Instant::now(),
+        });
         let drag_f = view.compose();
         assert_eq!(
             cell(&drag_f, 5, border).flags,
@@ -12078,7 +12215,10 @@ mod tests {
             "stale seam accent cleared on cancel"
         );
 
-        view.sideline_drag = Some(view.density);
+        view.sideline_drag = Some(SidelineDrag {
+            start_width: view.sideline_width,
+            last_at: Instant::now(),
+        });
         view.hover_sideline_border = true;
         view.end_sideline_drag(5, 40); // off the border column
         assert!(view.sideline_drag.is_none(), "the sideline drag ended");
@@ -12088,72 +12228,227 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sideline_border_drag_snaps_between_density_states() {
-        // AC2-HP: the drag reaches exactly the states the density button
-        // cycles, at exactly their fixed widths. No intermediate free-form
-        // width is ever rendered (Locked Decision 4 / x-b186).
-        let mut view = two_pane_view();
-        view.term = (30, 120); // wide enough for every state
-        view.density = Density::Regular;
-        assert_eq!(view.panel_w(), PANEL_W);
+    /// Put a live sideline drag on `view` so `drag_sideline_to` refreshes its
+    /// deadline (and Esc/timeout have something to end), then return the grab
+    /// instant. Mirrors how the press arm arms the drag.
+    fn arm_sideline_drag(view: &mut View, t0: Instant) {
+        view.sideline_drag = Some(SidelineDrag {
+            start_width: view.sideline_width,
+            last_at: t0,
+        });
+    }
 
-        // Drag inward past the Slim midpoint.
-        assert!(view.snap_sideline_to(SLIM_PANEL_W - 1));
-        assert_eq!(view.density, Density::Slim);
+    /// (x-2e86) Set the density AND its canonical width, exactly as a preset
+    /// press does. Since x-2e86 the width is independent of the density, so a
+    /// test that only wants "the user is in mode X" must set both - a bare
+    /// `view.density = X` would leave the previous width and no longer widen the
+    /// rail. The transient `panel_w` clamp then reproduces the pre-x-2e86
+    /// per-density width on any terminal.
+    fn set_density(view: &mut View, d: Density) {
+        view.density = d;
+        view.sideline_width = canonical_width(d);
+    }
+
+    #[test]
+    fn sideline_border_drag_sets_a_free_continuous_width() {
+        // AC1-HP: the drag sets ANY width, not one of three snapped states.
+        let mut view = two_pane_view();
+        view.term = (30, 120); // max = min(72, 80) = 72
+        view.density = Density::Regular;
+        arm_sideline_drag(&mut view, Instant::now());
+
+        // Drag the border to column 44 -> 45 columns, exactly where the pointer
+        // is, not the nearest canonical width.
+        assert!(view.drag_sideline_to(44, Instant::now()));
+        assert_eq!(view.sideline_width, 45);
+        assert_eq!(view.panel_w(), 45);
+        assert_eq!(view.density, Density::Regular, "a free drag keeps the mode");
+
+        // One column further is a distinct width (no snapping quantum).
+        assert!(view.drag_sideline_to(45, Instant::now()));
+        assert_eq!(view.panel_w(), 46);
+
+        // Re-reporting the same column is a no-op (keeps the wire quiet).
+        assert!(
+            !view.drag_sideline_to(45, Instant::now()),
+            "no crossing, no change"
+        );
+    }
+
+    #[test]
+    fn sideline_drag_clamps_to_min_slim_and_the_terminal_max() {
+        // AC1-EDGE: on an 80-col terminal 60% = 48 but term - MIN_CONTENT_COLS
+        // = 40, so the tighter content bound wins; the floor is MIN_SLIM, never
+        // hidden.
+        let mut view = two_pane_view();
+        view.term = (30, 80);
+        view.density = Density::Regular;
+        arm_sideline_drag(&mut view, Instant::now());
+
+        view.drag_sideline_to(200, Instant::now()); // far right
         assert_eq!(
             view.panel_w(),
-            SLIM_PANEL_W,
-            "lands on the fixed Slim width, not where the pointer was"
+            40,
+            "content bound (40) beats the 60% cap (48)"
+        );
+        assert_eq!(
+            view.content_dims().1,
+            MIN_CONTENT_COLS,
+            "exactly the minimum content"
         );
 
-        // Outward to Extended.
-        assert!(view.snap_sideline_to(EXTENDED_PANEL_W - 1));
-        assert_eq!(view.density, Density::Extended);
-        assert_eq!(view.panel_w(), EXTENDED_PANEL_W);
-
-        // All the way in hides it - the same state `b` toggles.
-        assert!(view.snap_sideline_to(0));
-        assert!(!view.panel_on);
-        assert_eq!(view.panel_w(), 0);
+        view.drag_sideline_to(0, Instant::now()); // far left
+        assert_eq!(view.panel_w(), MIN_SLIM_PANEL_W, "clamps at the slim floor");
+        assert!(view.panel_on, "the drag never hides the rail - `b` does");
     }
 
     #[test]
-    fn sideline_border_snaps_to_the_nearest_state_by_midpoint() {
+    fn sideline_drag_below_a_mode_floor_demotes_the_mode() {
+        // AC2-EDGE: dragging Extended below MIN_EXTENDED_PANEL_W (30) demotes to
+        // Regular, and the drag keeps shrinking past that floor to MIN_SLIM (the
+        // lower clamp is the constant, not the mode's floor).
         let mut view = two_pane_view();
         view.term = (30, 120);
-        view.density = Density::Slim;
-        // Just past halfway between Slim (16) and Regular (28) takes Regular.
-        let midpoint = (SLIM_PANEL_W + PANEL_W) / 2;
-        assert!(view.snap_sideline_to(midpoint));
-        assert_eq!(view.density, Density::Regular);
-        // Just short of it stays Slim, and reports no change.
-        view.density = Density::Slim;
-        assert!(
-            !view.snap_sideline_to(midpoint - 2),
-            "short of the midpoint is a no-op, not a churned save"
+        set_density(&mut view, Density::Extended); // width -> EXTENDED_PANEL_W
+        arm_sideline_drag(&mut view, Instant::now());
+
+        view.drag_sideline_to(MIN_EXTENDED_PANEL_W - 2, Instant::now()); // want 29 < 30
+        assert_eq!(
+            view.density,
+            Density::Regular,
+            "demoted to the widest fitting mode"
         );
-        assert_eq!(view.density, Density::Slim);
+        assert!(view.sideline_width < MIN_EXTENDED_PANEL_W);
+
+        view.drag_sideline_to(0, Instant::now()); // keeps shrinking past the old floor
+        assert_eq!(view.panel_w(), MIN_SLIM_PANEL_W);
+        assert_eq!(
+            view.density,
+            Density::Regular,
+            "no further demote below Regular"
+        );
     }
 
     #[test]
-    fn sideline_border_never_snaps_to_a_state_the_terminal_cannot_show() {
-        // A snap to a state panel_w would then refuse to draw would read as the
-        // sideline vanishing at random.
+    fn a_preset_press_jumps_width_over_a_dragged_one() {
+        // AC2-HP: after a free drag, the density key is a preset - it jumps to
+        // the new mode's canonical width, not back to the dragged value.
         let mut view = two_pane_view();
-        view.term = (30, MIN_CONTENT_COLS + PANEL_W); // room for Regular, not Extended
-        view.density = Density::Regular;
-        assert!(
-            !view
-                .density_snap_targets()
-                .iter()
-                .any(|(d, _)| *d == Some(Density::Extended)),
-            "Extended is not offered when it does not fit"
+        view.term = (30, 120);
+        set_density(&mut view, Density::Regular);
+        arm_sideline_drag(&mut view, Instant::now());
+        view.drag_sideline_to(50, Instant::now()); // dragged to 51
+        view.end_sideline_drag(TAB_BAR_ROWS, view.panel_w().saturating_sub(1));
+        assert_eq!(view.sideline_width, 51);
+
+        view.cycle_density(); // Regular -> Extended preset
+        assert_eq!(view.density, Density::Extended);
+        assert_eq!(
+            view.sideline_width,
+            canonical_width(Density::Extended),
+            "the preset overwrote the dragged width"
         );
-        // Dragging far outward takes the widest state that DOES fit.
-        view.snap_sideline_to(200);
-        assert_eq!(view.density, Density::Regular);
-        assert!(view.panel_w() > 0, "the sideline still renders");
+        view.cycle_density(); // -> Slim
+        assert_eq!(view.sideline_width, canonical_width(Density::Slim));
+        view.cycle_density(); // -> Regular (28, not the earlier 51)
+        assert_eq!(view.sideline_width, canonical_width(Density::Regular));
+    }
+
+    #[test]
+    fn a_drag_report_after_a_mid_drag_winch_does_not_panic() {
+        // codex P2: a WINCH shrinking the terminal below MIN_SLIM + MIN_CONTENT
+        // while a drag is live makes sideline_max_width < MIN_SLIM; the old
+        // `clamp(MIN_SLIM, max)` with min > max panicked. It must no-op instead.
+        let mut view = two_pane_view();
+        view.term = (30, 120);
+        set_density(&mut view, Density::Regular);
+        arm_sideline_drag(&mut view, Instant::now());
+        view.drag_sideline_to(50, Instant::now());
+        // The terminal collapses below MIN_SLIM_PANEL_W + MIN_CONTENT_COLS.
+        view.term = (30, MIN_CONTENT_COLS + MIN_SLIM_PANEL_W - 2);
+        assert!(sideline_max_width(view.term.1) < MIN_SLIM_PANEL_W);
+        // The next report must not panic; it is a no-op (the rail is hidden).
+        assert!(!view.drag_sideline_to(60, Instant::now()));
+        assert_eq!(view.panel_w(), 0, "the rail is hidden at this size");
+    }
+
+    #[test]
+    fn a_clamped_drag_report_still_refreshes_the_timeout() {
+        // codex P2: while the pointer keeps moving past the max bound each report
+        // clamps to the same width; last_at must still advance, or an actively
+        // held drag expires under the hand. Only a report-less gap should time out.
+        let mut view = two_pane_view();
+        view.term = (30, 80); // max = 40
+        set_density(&mut view, Density::Regular);
+        let t0 = Instant::now();
+        arm_sideline_drag(&mut view, t0);
+        // Drag to the max bound (40), then report a further column: same width,
+        // but a later timestamp.
+        view.drag_sideline_to(200, t0);
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(
+            !view.drag_sideline_to(201, t1),
+            "still pinned at the max: no width change"
+        );
+        assert_eq!(
+            view.sideline_drag.unwrap().last_at,
+            t1,
+            "yet the stuck-drag deadline advanced with the motion"
+        );
+    }
+
+    #[test]
+    fn density_key_is_ignored_during_a_live_drag() {
+        // AC3-FR: a density press mid-drag does not fight the pointer - the drag
+        // owns the width until release.
+        let mut view = two_pane_view();
+        view.term = (30, 120);
+        view.density = Density::Regular;
+        arm_sideline_drag(&mut view, Instant::now());
+        view.drag_sideline_to(50, Instant::now());
+        let (w, d) = (view.sideline_width, view.density);
+
+        view.cycle_density(); // pressed while dragging
+        assert_eq!(view.density, d, "density unchanged mid-drag");
+        assert_eq!(view.sideline_width, w, "width unchanged mid-drag");
+    }
+
+    #[test]
+    fn esc_reverts_a_sideline_drag_to_its_start_width() {
+        // Mirrors the seam-drag Esc revert: the width returns to the grab value.
+        let mut view = two_pane_view();
+        view.term = (30, 120);
+        view.density = Density::Regular;
+        view.sideline_width = PANEL_W;
+        arm_sideline_drag(&mut view, Instant::now());
+        view.drag_sideline_to(50, Instant::now());
+        assert_ne!(view.sideline_width, PANEL_W);
+
+        assert!(
+            view.revert_sideline_drag(),
+            "reverting a moved drag reports a change"
+        );
+        assert_eq!(view.sideline_width, PANEL_W, "back to the width at grab");
+        assert!(view.sideline_drag.is_none(), "the drag ended");
+    }
+
+    #[test]
+    fn a_timed_out_sideline_drag_keeps_the_reached_width() {
+        // AC2-FR: the stuck-drag timeout ends the drag as a release would - it
+        // keeps the reached width, it does not revert to start_width.
+        let mut view = two_pane_view();
+        view.term = (30, 120);
+        view.density = Density::Regular;
+        view.sideline_width = PANEL_W;
+        arm_sideline_drag(&mut view, Instant::now());
+        view.drag_sideline_to(50, Instant::now());
+        let reached = view.sideline_width;
+        assert_ne!(reached, PANEL_W);
+
+        // The reaper ends it via end_sideline_drag (as a release does).
+        view.end_sideline_drag(TAB_BAR_ROWS, view.panel_w().saturating_sub(1));
+        assert!(view.sideline_drag.is_none(), "the drag ended");
+        assert_eq!(view.sideline_width, reached, "width kept, not reverted");
     }
 
     #[test]
@@ -15365,7 +15660,12 @@ mod tests {
     #[test]
     fn client_compose_panel_autohides_below_min_width() {
         let mut view = two_pane_view();
-        // AC6-EDGE: 60 < 28 + 40 -> panel hidden, content takes full width.
+        // AC6-EDGE: on a 60-col terminal a Regular tree cannot leave MIN_CONTENT
+        // (max = 20 < min_admit_width(Regular) = 28), so the rail auto-hides and
+        // content takes the full width - the shipped narrow-terminal behaviour,
+        // preserved through the free-width change (x-2e86 admits a density only
+        // when the terminal can show it usefully; a squished tree yields to the
+        // panes).
         view.term = (30, 60);
         assert_eq!(view.panel_w(), 0);
         // 30 rows minus tab bar + status row (both visible at this height).
@@ -18237,7 +18537,7 @@ mod tests {
             agent_row("w", 4, Some(AgentBadge::Working), false),
             agent_row("b", 5, Some(AgentBadge::Blocked), false),
         ]);
-        v.density = Density::Slim;
+        set_density(&mut v, Density::Slim);
         let rows = v.display_rows();
         assert!(
             rows.iter()
@@ -18270,7 +18570,7 @@ mod tests {
         external.external = true; // no pr, no stamp, no tail by construction
 
         let mut v = wide_view(vec![owned, external]);
-        v.density = Density::Extended;
+        set_density(&mut v, Density::Extended);
         let frame = v.compose();
         let text = frame_text(&frame);
         let line = |needle: &str| {
@@ -18319,7 +18619,7 @@ mod tests {
             "precondition: the collapsed tree hides its agent rows"
         );
 
-        v.density = Density::Extended;
+        set_density(&mut v, Density::Extended);
         let names: Vec<String> = v
             .display_rows()
             .iter()
@@ -18356,7 +18656,7 @@ mod tests {
             agent_row("blocked", 6, Some(AgentBadge::Blocked), false),
             agent_row("working", 7, Some(AgentBadge::Working), false),
         ]);
-        v.density = Density::Extended;
+        set_density(&mut v, Density::Extended);
 
         let names = |v: &View| -> Vec<String> {
             v.display_rows()
@@ -18398,7 +18698,7 @@ mod tests {
             exited,
             agent_row("live", 9, Some(AgentBadge::Working), false),
         ]);
-        v.density = Density::Extended;
+        set_density(&mut v, Density::Extended);
         v.agent_sort = AgentSort::Status;
         let names: Vec<String> = v
             .display_rows()
@@ -18420,7 +18720,7 @@ mod tests {
     #[test]
     fn extended_clamps_and_drops_columns_before_starving_panes() {
         let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
-        v.density = Density::Extended;
+        set_density(&mut v, Density::Extended);
         assert_eq!(v.panel_w(), EXTENDED_PANEL_W, "wide terminal: every column");
         assert_eq!(
             TableCols::fitting(EXTENDED_PANEL_W - 1),
@@ -18453,7 +18753,7 @@ mod tests {
     #[test]
     fn persisted_extended_on_a_narrow_terminal_degrades_not_corrupts() {
         let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
-        v.density = Density::Extended;
+        set_density(&mut v, Density::Extended);
         for cols in [200u16, 120, 90, 70, 50, 30, 10] {
             v.term = (24, cols);
             let w = v.panel_w();
@@ -18498,7 +18798,7 @@ mod tests {
             agent_row("idle", 4, None, false),
             agent_row("blocked", 5, Some(AgentBadge::Blocked), false),
         ]);
-        v.density = Density::Extended;
+        set_density(&mut v, Density::Extended);
         let idle_at = v
             .display_rows()
             .iter()
@@ -18568,12 +18868,13 @@ mod tests {
     }
 
     // (codex P2) Slim is the explicitly NON-hidden density, so a narrow terminal
-    // must clamp it, not make it vanish. Giving it floor == want meant cycling
-    // into the rail removed the sideline entirely below 56 columns.
+    // must clamp it, not make it vanish. Its admit floor is MIN_SLIM, so it
+    // renders squished where a Regular tree - whose admit floor is PANEL_W -
+    // instead auto-hides (x-2e86 preserves that per-density asymmetry).
     #[test]
     fn slim_clamps_on_a_narrow_terminal_instead_of_hiding() {
         let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
-        v.density = Density::Slim;
+        set_density(&mut v, Density::Slim);
         // Narrower than the rail wants, but wide enough to still show one.
         v.term = (24, MIN_CONTENT_COLS + SLIM_PANEL_W - 4);
         let w = v.panel_w();
@@ -18581,7 +18882,9 @@ mod tests {
         assert!(w < SLIM_PANEL_W, "and it clamped: {w}");
         assert!(v.term.1 - w >= MIN_CONTENT_COLS, "pane keeps its minimum");
         let _ = v.compose(); // must not panic at the clamped width
-                             // Regular at the same width still auto-hides (unchanged behaviour).
+                             // Regular at the same width still auto-hides: its
+                             // admit floor (PANEL_W) is above this room, so the
+                             // tree yields to the panes rather than squishing.
         v.density = Density::Regular;
         assert_eq!(v.panel_w(), 0);
     }
@@ -18590,7 +18893,7 @@ mod tests {
     #[test]
     fn extended_zero_agents_states_the_empty_case() {
         let mut v = wide_view(vec![]);
-        v.density = Density::Extended;
+        set_density(&mut v, Density::Extended);
         let rows = v.display_rows();
         assert!(matches!(rows.first(), Some(DisplayRow::TableHead)));
         assert!(
@@ -18637,7 +18940,7 @@ mod tests {
             agent_row("idle", 4, None, false),
             agent_row("busy", 5, Some(AgentBadge::Working), false),
         ]);
-        v.density = Density::Extended;
+        set_density(&mut v, Density::Extended);
         v.agent_sort = AgentSort::Status;
         let at = |v: &View, name: &str| {
             v.display_rows()
@@ -18668,7 +18971,7 @@ mod tests {
     #[test]
     fn open_selector_skips_the_inert_table_header() {
         let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
-        v.density = Density::Extended;
+        set_density(&mut v, Density::Extended);
         assert!(matches!(
             v.display_rows().first(),
             Some(DisplayRow::TableHead)
@@ -18687,7 +18990,7 @@ mod tests {
     #[test]
     fn slim_width_that_renders_is_also_keyboard_selectable() {
         let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
-        v.density = Density::Slim;
+        set_density(&mut v, Density::Slim);
         v.term = (24, MIN_CONTENT_COLS + MIN_SLIM_PANEL_W + 1);
         assert!(v.panel_w() > 0, "the rail renders at this width");
         assert!(
@@ -18718,7 +19021,7 @@ mod tests {
             .collect();
         let mut v = wide_view(agents);
         v.term = (12, EXTENDED_PANEL_W + MIN_CONTENT_COLS + 10); // short: scrolls
-        v.density = Density::Extended;
+        set_density(&mut v, Density::Extended);
         let at = |v: &View, n: &str| {
             v.display_rows()
                 .iter()
@@ -18780,6 +19083,42 @@ mod tests {
         assert!(
             top.contains(density_glyph(Density::Regular)),
             "and the button is there too: {top:?}"
+        );
+    }
+
+    #[test]
+    fn density_button_glyph_sits_one_column_off_the_divider() {
+        // AC4-UI (x-2e86): the glyph leads the button and the divider-adjacent
+        // cell is a plain (non-inverse) pad, so the glyph reads one column in
+        // from the border. The pad costs the header band NOTHING (range.start is
+        // unchanged), which is why the tight-slim rollup test still holds.
+        let v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
+        let pw = v.panel_w() as usize;
+        let range = v.density_button_range(pw).unwrap();
+        let frame = v.compose();
+        // Row 0, so the cell index is the column.
+        let glyph_cell = &frame.cells[range.start];
+        let pad_cell = &frame.cells[range.end - 1]; // the cell before the divider
+        assert_eq!(
+            glyph_cell.c,
+            density_glyph(v.density),
+            "glyph leads the button"
+        );
+        assert_eq!(
+            glyph_cell.flags,
+            cell_flags::INVERSE,
+            "glyph cell is the button"
+        );
+        assert_eq!(pad_cell.c, ' ', "the divider-adjacent cell is a pad");
+        assert_eq!(
+            pad_cell.flags, 0,
+            "the pad is plain, giving real breathing room"
+        );
+        // The divider itself is the very next column.
+        assert_eq!(
+            range.end,
+            pw - 1,
+            "the button ends right before the divider"
         );
     }
 
