@@ -6,7 +6,7 @@ Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical so
 
 ## Working principles
 
-0. **Worktree-first.** Enter a dedicated feature worktree before editing, generating, or committing. Keep the canonical main checkout unclogged. Prune after merge.
+0. **Worktree-first.** Whenever possible, enter a dedicated feature worktree before editing, generating, or committing (`worktree.policy = "never"` projects work in place by design). Keep the canonical main checkout unclogged. Prune after merge.
 1. **Think before coding.** State assumptions; if uncertain, ask. Surface alternative interpretations and simpler options instead of silently picking.
 2. **Simplicity first.** Minimum code that solves the problem. No speculative features, single-use abstractions, unrequested config. If 200 lines could be 50, rewrite.
 3. **OSS-first: fix in the project, never memory-only.** Anything load-bearing (workaround, invariant, gotcha, "next time do X") goes in code, docs, `--help` text, a gate, a test, or a filed node - never private agent memory, which ships to nobody. Full rule: [.claude/rules/oss-fix-not-memory.md](.claude/rules/oss-fix-not-memory.md).

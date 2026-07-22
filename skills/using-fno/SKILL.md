@@ -7,7 +7,7 @@ description: Loaded at every SessionStart so the agent knows the two footnote su
 
 This workspace has the `footnote` plugin installed. Two surfaces compose: skills call CLI verbs internally. Knowing both keeps you from hand-editing state files the CLI manages.
 
-**Worktree-first default:** enter a dedicated feature worktree before editing, generating, or committing; keep the canonical checkout unclogged; prune after the PR lands.
+**Worktree-first default:** whenever possible, enter a dedicated feature worktree before editing, generating, or committing; keep the canonical checkout unclogged; prune after the PR lands. Exception: a project whose resolved `worktree.policy` is `never` works in place on the canonical checkout by design.
 
 ## 1. Slash-command workflows (orchestration, reasoning-required)
 
