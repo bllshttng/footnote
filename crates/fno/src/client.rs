@@ -1198,6 +1198,9 @@ enum MenuAction {
     /// Remove EVERY exited row in the target section (x-f300). The section comes
     /// from [`MenuTarget::Section`], so this stays payload-free and `Copy`.
     ClearDead,
+    /// Open the rename overlay for a workspace section header - menu parity with
+    /// selector `r` (x-96e8). Only built for a section carrying a squad id.
+    Rename,
 }
 
 /// Build the per-state row menu for the agent at `display_rows()` index `i`,
@@ -1348,11 +1351,11 @@ fn remove_dead(a: &AgentRow) -> Command {
 /// bulk verb server-side, which the single-process `ReapAgents` already models.
 const CLEAR_DEAD_MAX: usize = 25;
 
-/// (x-f300) The section-header context menu: the bulk counterpart to the row
-/// menu's single Remove. `dead` is the count the label advertises AND the number
-/// the commit will run, so the two can never disagree. Caller guarantees
-/// `dead > 0` - a section with nothing to clear gets a Notice, not a menu whose
-/// only entry no-ops.
+/// (x-f300) The section-header context menu. A workspace section (`squad`
+/// present) offers `Rename` - menu parity with selector `r`. `Clear dead` is
+/// added only when `dead > 0`; its label count is both what it advertises AND
+/// what the commit runs, so the two can never disagree. The caller guarantees
+/// at least one of {renamable, `dead > 0`} holds, so the menu is never empty.
 fn build_section_menu(
     key: SectionKey,
     label: String,
@@ -1360,19 +1363,28 @@ fn build_section_menu(
     dead: usize,
     anchor: Anchor,
 ) -> RowMenu {
-    let rows = vec![
-        PopupRow::Header(label.clone()),
-        PopupRow::Rule,
-        PopupRow::Entry {
+    let mut rows = vec![PopupRow::Header(label.clone()), PopupRow::Rule];
+    let mut actions: Vec<MenuAction> = Vec::new();
+    if squad.is_some() {
+        rows.push(PopupRow::Entry {
+            glyph: "✎".into(),
+            label: "Rename".into(),
+            hint: String::new(),
+        });
+        actions.push(MenuAction::Rename);
+    }
+    if dead > 0 {
+        rows.push(PopupRow::Entry {
             glyph: "✕".into(),
             label: format!("Clear dead ({dead})"),
             hint: String::new(),
-        },
-    ];
+        });
+        actions.push(MenuAction::ClearDead);
+    }
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Section { key, label, squad },
-        actions: vec![MenuAction::ClearDead],
+        actions,
     }
 }
 
@@ -2194,7 +2206,10 @@ impl View {
                 // `section_dead_rows` refused as ambiguous - it never claims
                 // there are no dead rows when the truth is we won't guess which.
                 let dead = self.section_dead_rows(&key, squad).len();
-                if dead == 0 {
+                // A workspace section always has a menu (it can be renamed). A
+                // non-workspace header (Elsewhere/Mission) with nothing to clear
+                // says so rather than opening a one-entry no-op menu.
+                if dead == 0 && squad.is_none() {
                     self.set_notice(format!("no dead rows in {label}"));
                     return false;
                 }
@@ -8957,10 +8972,17 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("backlog verb send failed: {e}"))?;
             return Ok(());
         }
-        // (x-f300) The section menu's only action, resolved against the section
-        // rather than a single row.
+        // (x-f300) The section menu's clear-dead action, resolved against the
+        // section rather than a single row.
         (MenuTarget::Section { key, label, squad }, MenuAction::ClearDead) => {
             return clear_dead_confirm(view, key, label, squad);
+        }
+        // A workspace section's Rename opens the same overlay as selector `r`
+        // (x-96e8). The id is the section's squad, so a non-workspace header
+        // (`squad: None`) can never reach it - it falls to the refuse arm below.
+        (MenuTarget::Section { squad: Some(id), .. }, MenuAction::Rename) => {
+            view.open_rename(RenameTarget::Squad(id));
+            return Ok(());
         }
         // A menu is built for exactly one target kind, so a crossed pair can only
         // come from a bug; refuse rather than guess at a target.
@@ -9052,6 +9074,9 @@ async fn execute_row_menu_action(
         // target ever reaches a Backlog verb. Kept as a visible refusal rather
         // than a silent no-op, so a future miswiring says something.
         MenuAction::Backlog(_) => view.set_notice("action does not apply to an agent".into()),
+        // Unreachable: Rename is built only for a workspace section, which
+        // returns above. Visible refusal over a silent no-op.
+        MenuAction::Rename => view.set_notice("action does not apply to an agent".into()),
         MenuAction::Stop | MenuAction::Remove => {
             // A confirm owns the bottom row; a too-short terminal refuses rather
             // than arm an invisible prompt (matching the selector's stop/reap).
@@ -15265,13 +15290,16 @@ mod tests {
 
     #[test]
     fn row_menu_opens_only_on_menu_bearing_rows() {
-        // (x-f300) A squad row now opens the SECTION menu when it holds dead
-        // rows - but `unified_rows_view` has none, so the refusal here is the
-        // no-dead path (asserted by name below), not "headers never open".
+        // A workspace header is always menu-bearing now (US3: it offers Rename),
+        // even in `unified_rows_view`, which has no dead rows to clear.
         let mut v = unified_rows_view();
         let hdr = squad_header_at(&v, 1);
-        assert!(!v.open_row_menu(hdr, Anchor::Center));
-        assert!(v.row_menu.is_none());
+        assert!(v.open_row_menu(hdr, Anchor::Center));
+        assert_eq!(
+            v.row_menu.as_ref().unwrap().actions,
+            vec![super::MenuAction::Rename]
+        );
+        v.row_menu = None;
         // A truly menu-less row (the dim subline) refuses with no notice at all.
         // A FOREIGN cwd is what makes display_rows emit the Sub line, so the
         // fixture has to opt in - `.expect` rather than `if let`, so a fixture
@@ -15313,10 +15341,13 @@ mod tests {
     async fn arm_clear_dead(v: &mut View, squad: u64) {
         let hdr = squad_header_at(v, squad);
         assert!(v.open_row_menu(hdr, Anchor::Center), "section menu opens");
-        assert_eq!(
-            v.row_menu.as_ref().unwrap().actions,
-            vec![super::MenuAction::ClearDead]
-        );
+        // Rename now leads the workspace menu, so explicitly select Clear dead.
+        let m = v.row_menu.as_mut().unwrap();
+        m.popup.sel = m
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::ClearDead)
+            .expect("clear-dead entry present");
         let mut buf: Vec<u8> = Vec::new();
         row_menu_execute_selected(v, &mut buf).await.unwrap();
         assert!(buf.is_empty(), "the menu entry only arms the confirm");
@@ -15349,15 +15380,61 @@ mod tests {
     }
 
     #[test]
-    fn clear_dead_refuses_a_section_with_no_dead_rows() {
-        // The menu never renders an entry that would no-op: a fully-live section
-        // gets a notice instead of a one-entry menu (AC-EDGE).
-        let mut v = view_with_agents(vec![]);
-        v.layout.agents = vec![lifecycle_row("live-a", false, false)];
-        let hdr = squad_header_at(&v, 1);
+    fn nonworkspace_section_with_no_dead_rows_gets_a_notice() {
+        // The menu never renders a no-op entry: a NON-workspace band (Elsewhere)
+        // with nothing to clear and nothing to rename gets a notice, not a
+        // one-entry menu (AC-EDGE). A workspace section always opens (Rename).
+        let orphan_live = {
+            let mut r = lifecycle_row("stray-live", false, false);
+            r.squad = Some(99); // no such squad -> Elsewhere band
+            r
+        };
+        let mut v = view_with_agents(vec![orphan_live]);
+        let hdr = v
+            .display_rows()
+            .iter()
+            .position(
+                |r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::Elsewhere),
+            )
+            .expect("elsewhere band");
         assert!(!v.open_row_menu(hdr, Anchor::Center));
         assert!(v.row_menu.is_none());
         assert!(v.notice.is_some(), "and says why");
+    }
+
+    #[tokio::test]
+    async fn workspace_section_menu_offers_rename() {
+        // US3: a workspace section header offers Rename (menu parity with
+        // selector `r`), even with no dead rows to clear.
+        let mut v = view_with_agents(vec![]);
+        v.layout.agents = vec![lifecycle_row("live-a", false, false)];
+        let hdr = squad_header_at(&v, 1);
+        assert!(v.open_row_menu(hdr, Anchor::Center), "workspace menu opens");
+        assert_eq!(
+            v.row_menu.as_ref().unwrap().actions,
+            vec![super::MenuAction::Rename],
+            "no dead rows -> Rename only"
+        );
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "opening the overlay sends nothing");
+        assert_eq!(
+            v.rename.map(|(t, _)| t),
+            Some(RenameTarget::Squad(1)),
+            "opens the rename overlay for this workspace"
+        );
+    }
+
+    #[test]
+    fn workspace_section_menu_offers_rename_then_clear_dead() {
+        // With dead rows present the workspace menu offers BOTH, Rename first.
+        let mut v = view_with_dead_interleaved();
+        let hdr = squad_header_at(&v, 1);
+        assert!(v.open_row_menu(hdr, Anchor::Center));
+        assert_eq!(
+            v.row_menu.as_ref().unwrap().actions,
+            vec![super::MenuAction::Rename, super::MenuAction::ClearDead]
+        );
     }
 
     #[tokio::test]
