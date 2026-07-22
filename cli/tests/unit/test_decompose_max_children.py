@@ -277,6 +277,21 @@ def test_resolve_cap_precedence():
             resolve_effective_cap(bad, None, 4)
 
 
+def test_overflow_message_survives_non_string_slug():
+    # A truthy non-str slug in an overflow group must degrade to a positional
+    # label, not crash `join` with a TypeError that escapes the DecomposeError
+    # catch and shows the user a traceback instead of a refusal.
+    from fno.graph._decompose import DecomposeError, validate_groups
+
+    groups = [
+        {"slug": "a", "title": "t"},
+        {"slug": 7, "title": "t"},  # non-str slug, over the cap of 1
+    ]
+    with pytest.raises(DecomposeError) as ei:
+        validate_groups(groups, 1, "max_children=1")
+    assert "#2" in str(ei.value)  # positional fallback for the bad slug
+
+
 # -- AC1-FR: unreadable epic doc degrades to current behavior --
 
 

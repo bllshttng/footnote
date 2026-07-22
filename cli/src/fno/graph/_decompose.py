@@ -438,8 +438,11 @@ def validate_groups(
         )
     if max_prs is not None and len(groups) > max_prs:
         src = cap_source or f"--max-prs {max_prs}"
+        # Slugs are still untrusted here (per-group validation runs below), so a
+        # non-str slug falls through to a positional label rather than crashing
+        # `join` with a TypeError that would escape the caller's DecomposeError catch.
         overflow = [
-            (g.get("slug") if isinstance(g, dict) and g.get("slug") else f"#{i + 1}")
+            (g["slug"] if isinstance(g, dict) and isinstance(g.get("slug"), str) and g["slug"] else f"#{i + 1}")
             for i, g in enumerate(groups[max_prs:], start=max_prs)
         ]
         raise DecomposeError(
