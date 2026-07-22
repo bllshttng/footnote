@@ -134,24 +134,22 @@ def resolve_transcript(
             reason="missing-input",
         )
 
-    # Claude resolution
+    # Claude resolution. Transcript-truth (x-a472): a session's transcript
+    # migrates between project dirs -- EnterWorktree re-keys it from the
+    # canonical cwd's slug to the worktree cwd's slug, and a stale or empty stub
+    # lingers in the old dir. Trusting the passed cwd's slug goes blind exactly
+    # when a bg worker enters its worktree (peek/discovery then read the stub and
+    # report "no activity" on a live worker). So we search EVERY project dir for
+    # this session id and let the newest write win. cwd stays required (a claude
+    # pointer without it is missing-input, guarded above) but no longer scopes
+    # the search. session_id is globally unique, so a store-wide match on a full
+    # uuid is the same session wherever it lives, never a cross-session collision.
     try:
-        proj_dir = root / _slug(cwd)
-
-        # Try exact match first
-        exact = proj_dir / f"{session_id}.jsonl"
-        if exact.exists():
-            return ResolvedTranscript(
-                harness=harness,
-                session_id=session_id,
-                cwd=cwd,
-                resolved=True,
-                transcript_path=str(exact),
-            )
-
-        # Glob for prefix match (session_id may be an 8-hex prefix). Escape the
-        # id so a stray glob metachar ('*', '?', '[') in it can't widen the match.
-        matches = sorted(proj_dir.glob(f"{_glob.escape(session_id)}*.jsonl"))
+        # Escape the id so a stray glob metachar ('*', '?', '[') in an 8-hex
+        # prefix can't widen the match. `*/` scopes to one-level project dirs
+        # (the CC layout), never the UUID tool-results subdirs.
+        esc = _glob.escape(session_id)
+        matches = sorted(root.glob(f"*/{esc}*.jsonl"))
         if not matches:
             return ResolvedTranscript(
                 harness=harness,
@@ -161,15 +159,26 @@ def resolve_transcript(
                 reason="not-found",
             )
 
-        # One or more matches: return first (sorted deterministically), note ambiguity
-        first = matches[0]
+        stems = {m.name for m in matches}
+        if len(stems) > 1:
+            # A short (8-hex) prefix matched two DISTINCT session uuids across
+            # the store: genuinely ambiguous. Preserve the first-sorted +
+            # ambiguous contract rather than guessing across two sessions.
+            chosen = matches[0]
+            ambiguous = True
+        else:
+            # One session, possibly copied across the canonical + worktree dirs:
+            # the newest write is the live transcript, the older is the stub.
+            chosen = max(matches, key=lambda p: p.stat().st_mtime)
+            ambiguous = False
+
         return ResolvedTranscript(
             harness=harness,
             session_id=session_id,
             cwd=cwd,
             resolved=True,
-            transcript_path=str(first),
-            ambiguous=len(matches) > 1,
+            transcript_path=str(chosen),
+            ambiguous=ambiguous,
         )
 
     except Exception:

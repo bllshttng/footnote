@@ -115,6 +115,63 @@ def test_ac_hp_prefix_glob_multiple_matches_returns_first_sorted(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# AC1-HP (x-a472): transcript resolution spans project dirs, newest wins
+# ---------------------------------------------------------------------------
+
+def test_worktree_transcript_wins_over_stale_canonical_stub(tmp_path):
+    """AC1-HP: after EnterWorktree the live transcript lives in a worktree-keyed
+    project dir while a stale stub sits in the canonical dir. The resolver must
+    return the WORKTREE transcript (newest mtime), not the canonical stub -- the
+    original blind-after-EnterWorktree bug."""
+    import os
+
+    from fno.provenance.resolver import resolve_transcript
+
+    canonical = "/Users/bb16/code/footnote/footnote"
+    worktree = "/Users/bb16/code/footnote/footnote/.claude/worktrees/x-a472"
+    session_id = "4ec8a08b-9fe7-4550-8e40-00c7fd4e600a"
+
+    # Session was dispatched with the canonical cwd (what the roster/registry
+    # records), so that is the cwd the caller passes.
+    canon_dir = tmp_path / canonical.replace("/", "-").replace(".", "-")
+    wt_dir = tmp_path / worktree.replace("/", "-").replace(".", "-")
+    canon_dir.mkdir(parents=True)
+    wt_dir.mkdir(parents=True)
+    stub = canon_dir / f"{session_id}.jsonl"
+    live = wt_dir / f"{session_id}.jsonl"
+    stub.write_text("")  # empty canonical stub, written at dispatch
+    live.write_text('{"type":"assistant"}\n')
+    # Make the worktree transcript strictly newer.
+    os.utime(stub, (1000, 1000))
+    os.utime(live, (2000, 2000))
+
+    result = resolve_transcript("claude", session_id, canonical, projects_root=tmp_path)
+
+    assert result.resolved is True
+    assert result.transcript_path == str(live)
+    assert result.ambiguous is False
+
+
+def test_transcript_resolves_when_only_worktree_dir_has_it(tmp_path):
+    """AC1-HP: the canonical dir has no stub at all (session only ever wrote in
+    the worktree). The cwd-slug dir misses; the store-wide search still finds it."""
+    from fno.provenance.resolver import resolve_transcript
+
+    canonical = "/Users/bb16/code/footnote/footnote"
+    worktree = "/Users/bb16/code/footnote/footnote/.claude/worktrees/x-a472"
+    session_id = "abcdef12-1234-5678-9abc-def012345678"
+
+    wt_dir = tmp_path / worktree.replace("/", "-").replace(".", "-")
+    wt_dir.mkdir(parents=True)
+    (wt_dir / f"{session_id}.jsonl").write_text('{"type":"assistant"}\n')
+
+    result = resolve_transcript("claude", session_id, canonical, projects_root=tmp_path)
+
+    assert result.resolved is True
+    assert result.transcript_path.endswith(f"{session_id}.jsonl")
+
+
+# ---------------------------------------------------------------------------
 # AC-EDGE: file not found
 # ---------------------------------------------------------------------------
 
