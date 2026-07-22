@@ -1492,15 +1492,12 @@ impl View {
         // pruning against it would delete every persisted entry before the
         // session ever learns what squads exist. `set_layout` owns the prune,
         // where a real squad list is in hand.
-        let mut section_view = view_store::load();
-        // Seed with the active squad so the first frame already shows its tabs
-        // (and the focused tab's `*` marker) without any keypress (x-2f99) -
-        // only where the store had no opinion, so a persisted collapse holds.
-        // A no-op on the real attach path, whose layout is the empty
-        // placeholder; the first `set_layout` seeds under the same rule.
-        if let Some(key) = squad_key(&layout, layout.active_squad) {
-            section_view.entry(key).or_insert(SectionView::Expanded);
-        }
+        // (x-c5ee) Load-only: the map holds persisted operator choices, nothing
+        // else. The active-squad "open on first frame" default is no longer
+        // seeded here - it lives in `section_view()`, computed live each frame so
+        // a majority-exited squad can downgrade to LiveOnly as agents exit
+        // (AC3-FR), which a one-time seed snapshot cannot.
+        let section_view = view_store::load();
         // (x-b186) Layout-independent, unlike the section map above, so it is
         // safe to resolve against the empty placeholder layout a real attach
         // constructs with. A missing or corrupt store reads as the defaults.
@@ -3547,41 +3544,12 @@ impl View {
         // reorder verb gets. Checked against the incoming backlog before it is
         // stored, since the comparison is against the dispatch-time snapshot.
         self.confirm_backlog_pending(&layout.backlog);
-        // The FIRST real layout is initialization, not an operator gesture: the
-        // attach path builds this View against an empty placeholder, so every
-        // squad and mission below would read as brand-new and its seed would
-        // clobber the state restored from disk. On that push the seeds defer to
-        // a persisted opinion; every later push keeps today's insert-wins
-        // behavior, so a genuine mid-session activation still expands.
-        let initializing = self.layout.squads.is_empty();
-        let seed = |map: &mut HashMap<SectionKey, SectionView>, key: SectionKey| {
-            if initializing {
-                map.entry(key).or_insert(SectionView::Expanded);
-            } else {
-                map.insert(key, SectionView::Expanded);
-            }
-        };
-        // Auto-expand the newly active squad so focus is always visible - but
-        // only on an `active_squad` CHANGE: layout pushes arrive on every
-        // scrape tick, so an unconditional insert would fight manual collapse
-        // (x-2f99, AC1-EDGE). Insert-only: activation never collapses others.
-        if layout.active_squad != self.layout.active_squad {
-            if let Some(key) = squad_key(&layout, layout.active_squad) {
-                seed(&mut self.section_view, key);
-            }
-        }
-        // A synthetic mission-squad header defaults to expanded the first time
-        // it appears - it has no `active_squad` moment to ride in on (it is
-        // never selectable server-side), so without this its grouped workers
-        // would be invisible until a manual toggle. Insert-only, like the
-        // active-squad seed above: a later manual collapse persists across
-        // ticks instead of being fought back open.
-        let prev_ids: HashSet<u64> = self.layout.squads.iter().map(|s| s.id).collect();
-        for s in &layout.squads {
-            if is_mission_squad(s.id) && !prev_ids.contains(&s.id) {
-                seed(&mut self.section_view, section_key(s));
-            }
-        }
+        // (x-c5ee) No active-squad or mission seed here: the "active squad and
+        // missions open by default" rule is computed live in `section_view()`,
+        // so it tracks agents exiting mid-session (a majority-exited section
+        // downgrades to LiveOnly, AC3-FR) and leaves this map holding only the
+        // operator's own persisted choices - which is exactly what
+        // `section_view()`'s step-1 precedence reads.
         // Prune squads that vanished server-side so the in-memory map only
         // holds live sections. This never reaches disk on its own: `save`
         // merges rather than replaces, precisely so one session's absent squad
@@ -3710,14 +3678,82 @@ impl View {
         self.notice = Some((text, Instant::now() + NOTICE_TTL));
     }
 
-    /// A section's current view state. A squad the map has no entry for reads
-    /// `Collapsed` (today's semantics: only the active squad seeds open); a
-    /// fixed `~` section reads `Expanded` (they have always rendered in full).
+    /// A section's effective view, resolved live every frame (x-c5ee). The one
+    /// authority behind both the caret glyph and the row filter, so they can
+    /// never disagree. Order:
+    ///   1. An explicit persisted operator choice wins verbatim - it survives a
+    ///      restart and outranks every computed default below (Locked 2, AC1-FR).
+    ///   2. Else a computed default, recomputed from the layout in hand:
+    ///      - the active squad and every mission open `Expanded`, downgrading to
+    ///        `LiveOnly` when the section is majority-exited so the dead rows
+    ///        fold behind the header's `✗N` while the live agents stay up;
+    ///      - an inactive squad stays `Collapsed` - surfacing live rows across
+    ///        every idle workspace is the opposite of attention-focus;
+    ///      - the two pull-sections `~ elsewhere` / `~ backlog` default
+    ///        `Collapsed`, one click from their own header + rollup.
+    /// The active-squad/mission default lives HERE, not in a map-seed: a seed is
+    /// a one-time snapshot that cannot downgrade to LiveOnly as agents exit
+    /// mid-session, and it pollutes the map that should hold only choices.
     fn section_view(&self, key: &SectionKey) -> SectionView {
-        self.section_view.get(key).copied().unwrap_or(match key {
-            SectionKey::Squad(_) => SectionView::Collapsed,
-            _ => SectionView::Expanded,
-        })
+        if let Some(chosen) = self.section_view.get(key).copied() {
+            return chosen;
+        }
+        match key {
+            SectionKey::Mission(_) => self.expanded_or_live_only(key),
+            SectionKey::Squad(_) if self.is_active_squad(key) => self.expanded_or_live_only(key),
+            SectionKey::Squad(_) | SectionKey::Elsewhere | SectionKey::WorkQueue => {
+                SectionView::Collapsed
+            }
+        }
+    }
+
+    /// The Expanded-tier computed default: `Expanded`, or `LiveOnly` when the
+    /// section is majority-exited (its dead rows then fold behind the header's
+    /// `✗N` while the live rows stay). Only ever downgrades an Expanded default;
+    /// never upgrades a Collapsed inactive squad (Locked 3).
+    fn expanded_or_live_only(&self, key: &SectionKey) -> SectionView {
+        if self.majority_exited(key) {
+            SectionView::LiveOnly
+        } else {
+            SectionView::Expanded
+        }
+    }
+
+    /// Whether `key` names the currently active squad. Compared through
+    /// `squad_matches` (allocation-free) rather than minting a `SectionKey` for
+    /// the active id on every call - `section_view` is per-section-per-frame hot.
+    fn is_active_squad(&self, key: &SectionKey) -> bool {
+        self.layout
+            .squads
+            .iter()
+            .find(|s| s.id == self.layout.active_squad)
+            .is_some_and(|s| squad_matches(s, key))
+    }
+
+    /// Strict-majority-exited over the section's own rows (`exited * 2 > total`).
+    /// Zero rows is never a majority (an empty section keeps Expanded) and a
+    /// 50/50 split is not either, so only a real majority downgrades to LiveOnly.
+    /// Walks the same membership `section_dead_rows` does, live off the layout
+    /// and never cached, so it tracks agents exiting mid-session. Only the
+    /// Expanded-tier keys (active squad, mission) reach it; every other key has
+    /// no squad match and reads as "not a majority".
+    fn majority_exited(&self, key: &SectionKey) -> bool {
+        let Some(id) = self
+            .layout
+            .squads
+            .iter()
+            .find(|s| squad_matches(s, key))
+            .map(|s| s.id)
+        else {
+            return false;
+        };
+        let mut total = 0usize;
+        let mut exited = 0usize;
+        for a in self.layout.agents.iter().filter(|a| a.squad == Some(id)) {
+            total += 1;
+            exited += a.exited as usize;
+        }
+        exited * 2 > total
     }
 
     /// Advance a section one step through the view cycle (x-975a): pure client
@@ -3886,6 +3922,18 @@ impl View {
         if let Some(key) = squad_key(&self.layout, id) {
             self.section_view.insert(key, view);
         }
+    }
+
+    /// (x-c5ee) Force both pull-sections open so a test that exercises orphan
+    /// (`~ elsewhere`) or backlog (`~ backlog`) rows renders them past their new
+    /// Collapsed defaults. The collapse itself has dedicated AC tests; a test
+    /// about card actions or orphan rows should not silently lose them.
+    #[cfg(test)]
+    fn expand_pull_sections(&mut self) {
+        self.section_view
+            .insert(SectionKey::Elsewhere, SectionView::Expanded);
+        self.section_view
+            .insert(SectionKey::WorkQueue, SectionView::Expanded);
     }
 
     /// Agents matched to no live squad - the `~ elsewhere` section's membership.
@@ -11911,6 +11959,9 @@ mod tests {
         let mut agent = focus_agent(11);
         agent.exited = true;
         view.layout.agents.push(agent);
+        // (x-c5ee) The squad's only agent is exited -> it would default LiveOnly
+        // and hide the row; force Expanded so the exited focus row still paints.
+        view.set_squad_view(1, SectionView::Expanded);
         let frame = view.compose();
         let cols = frame.cols as usize;
         let cell = frame.cells[cols]; // display row 1: the exited focus row
@@ -13081,9 +13132,10 @@ mod tests {
             backlog_lanes: vec![(crate::backlog_view::UNLANED.into(), 1)],
             backlog_stale: false,
         });
-        // display_rows (x-0090, no tab rows): [footnote squad, + new workspace,
-        // Header, Card] -> the card is index 3, at outer row 3 (x-cd67 US1: the
-        // sideline owns row 0, so outer row == display index).
+        view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
+                                     // display_rows (x-0090, no tab rows): [footnote squad, + new workspace,
+                                     // Header, Card] -> the card is index 3, at outer row 3 (x-cd67 US1: the
+                                     // sideline owns row 0, so outer row == display index).
         match view.chrome_hit(3, 5) {
             Some(ChromeHit::Confirm(a)) => {
                 assert!(
@@ -13137,8 +13189,9 @@ mod tests {
             backlog_lanes: Vec::new(),
             backlog_stale: false,
         });
-        // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
-        // blocked, in-flight] -> the cards paint at outer rows 3, 4 (x-cd67 US1).
+        view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
+                                     // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
+                                     // blocked, in-flight] -> the cards paint at outer rows 3, 4 (x-cd67 US1).
         assert!(
             matches!(view.chrome_hit(3, 5), Some(ChromeHit::Notice(_))),
             "blocked card -> notice, not confirm"
@@ -13197,8 +13250,9 @@ mod tests {
             backlog_lanes: Vec::new(),
             backlog_stale: false,
         });
-        // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
-        // 4 cards] -> rows 3-6 (x-cd67 US1: outer row == display index).
+        view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
+                                     // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
+                                     // 4 cards] -> rows 3-6 (x-cd67 US1: outer row == display index).
         assert_eq!(cmds(view.chrome_hit(3, 5)), vec![Command::FocusPane(11)]);
         assert_eq!(
             cmds(view.chrome_hit(4, 5)),
@@ -13348,24 +13402,30 @@ mod tests {
         assert!(view.squad_view(2) == SectionView::Collapsed);
     }
 
-    // AC1-HP + Locked 3: activation auto-expands the newly active squad and
-    // never collapses the others.
+    // AC1-HP + Locked 3 (x-c5ee): the active squad defaults Expanded and an
+    // inactive squad with no explicit choice defaults Collapsed. The default is
+    // computed live in `section_view`, so switching the active squad re-points
+    // which one opens with no map write - the squad you leave folds back to its
+    // header (attention-first), it is not force-collapsed.
     #[test]
-    fn set_layout_auto_expands_on_activation_change() {
+    fn active_squad_defaults_expanded_inactive_collapsed_on_activation_change() {
         let mut view = two_pane_view();
         view.set_layout(two_squad_layout(2));
         assert!(
             view.squad_view(2) == SectionView::Expanded,
-            "newly active squad expands"
+            "the active squad defaults expanded"
         );
         assert!(
-            view.squad_view(1) == SectionView::Expanded,
-            "activation never collapses others"
+            view.squad_view(1) == SectionView::Collapsed,
+            "an inactive squad with no explicit choice defaults collapsed"
         );
     }
 
-    // AC1-EDGE: manual collapse of the active squad survives the ~250ms
-    // scrape-tick layout pushes - auto-expand fires on CHANGE only.
+    // AC1-EDGE + Locked 2 (x-c5ee): an explicit collapse of the active squad
+    // outranks the computed Expanded default - it survives both the ~250ms
+    // scrape-tick pushes AND a later re-activation. Only an explicit re-expand
+    // (another cycle) brings it back, never an activation - the old force-seed
+    // that re-opened on re-activation is gone.
     #[test]
     fn manual_collapse_survives_same_active_layout_push() {
         let mut view = two_pane_view();
@@ -13376,10 +13436,13 @@ mod tests {
             view.squad_view(1) == SectionView::Collapsed,
             "a push with an unchanged active_squad must not re-expand"
         );
-        // A real activation change still re-expands on re-activation.
+        // Re-activation must NOT re-expand: the explicit choice wins.
         view.set_layout(two_squad_layout(2));
         view.set_layout(two_squad_layout(1));
-        assert!(view.squad_view(1) == SectionView::Expanded);
+        assert!(
+            view.squad_view(1) == SectionView::Collapsed,
+            "an explicit collapse outranks the active-squad default on re-activation"
+        );
     }
 
     // AC3-EDGE: an expanded squad removed server-side leaves `expanded`.
@@ -13396,12 +13459,13 @@ mod tests {
         assert!(view.squad_view(2) == SectionView::Expanded);
     }
 
-    // A synthetic mission squad has no `active_squad` moment to auto-expand
-    // on (it is never selectable server-side), so it must seed expanded on
-    // its first appearance - else its grouped workers stay invisible with no
-    // way to reveal them (codex review of x-1a47 change 2/3, P1-a).
+    // A synthetic mission squad has no `active_squad` moment to ride in on (it
+    // is never selectable server-side), so `section_view` gives every mission
+    // the Expanded-tier default directly (x-c5ee) - else its grouped workers
+    // stay invisible with no way to reveal them (codex review of x-1a47 change
+    // 2/3, P1-a). No seed: the default is computed live.
     #[test]
-    fn set_layout_seeds_new_mission_squad_expanded_by_default() {
+    fn new_mission_squad_defaults_expanded() {
         let mut view = two_pane_view();
         let mut layout = two_squad_layout(1);
         let mid = mission_meta(1, "mux-squad  1/2").id;
@@ -13409,8 +13473,166 @@ mod tests {
         view.set_layout(layout);
         assert!(
             view.squad_view(mid) == SectionView::Expanded,
-            "new mission seeds expanded"
+            "a mission defaults expanded via section_view"
         );
+    }
+
+    // (x-c5ee) A section-view agent: only the fields the majority check reads
+    // (squad, exited) matter; badge/seen round out a plausible row.
+    fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
+        AgentRow {
+            squad: Some(squad),
+            name: name.into(),
+            pane_id: None,
+            badge,
+            reason: None,
+            exited,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            subline: None,
+            tab: None,
+            account: None,
+            updated_at: None,
+            pr: None,
+            tail: None,
+            crown_level: None,
+            crown_scope: None,
+        }
+    }
+
+    // (x-c5ee) Point the view store at a fresh temp dir so a computed-default
+    // test never reads or writes the real `~/.fno/mux-view.json` (hermeticity).
+    // Caller clears with `clear_test_path` + removes the returned dir.
+    fn isolate_view_store(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("fno-view-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::view_store::set_test_path(&dir);
+        dir
+    }
+
+    // AC1-HP (x-c5ee): a majority-exited active squad defaults to LiveOnly, no
+    // persisted choice needed - the dead rows fold behind the header's ✗N.
+    #[test]
+    fn majority_exited_active_squad_defaults_live_only() {
+        let dir = isolate_view_store("majexit");
+        let view = view_with_agents(vec![
+            sv_agent(1, "a", Some(AgentBadge::Done), true),
+            sv_agent(1, "b", Some(AgentBadge::Done), true),
+            sv_agent(1, "c", Some(AgentBadge::Done), true),
+            sv_agent(1, "d", Some(AgentBadge::Working), false),
+        ]);
+        assert_eq!(
+            view.squad_view(1),
+            SectionView::LiveOnly,
+            "3 of 4 exited is a majority -> LiveOnly"
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC2-EDGE (x-c5ee): a 50/50 split is not a strict majority, so the active
+    // squad keeps its Expanded default.
+    #[test]
+    fn even_split_active_squad_stays_expanded() {
+        let dir = isolate_view_store("even");
+        let view = view_with_agents(vec![
+            sv_agent(1, "a", None, true),
+            sv_agent(1, "b", None, true),
+            sv_agent(1, "c", None, false),
+            sv_agent(1, "d", None, false),
+        ]);
+        assert_eq!(
+            view.squad_view(1),
+            SectionView::Expanded,
+            "exited * 2 > total is false for 2 of 4"
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC1-EDGE (x-c5ee): an empty active squad keeps Expanded (0 is never a
+    // majority).
+    #[test]
+    fn empty_active_squad_stays_expanded() {
+        let dir = isolate_view_store("empty");
+        let view = view_with_agents(vec![]);
+        assert_eq!(view.squad_view(1), SectionView::Expanded);
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC3-FR (x-c5ee): the majority default recomputes as agents exit
+    // mid-session, with no operator gesture and no persisted write - the whole
+    // reason the default is live in `section_view` rather than a one-time seed.
+    #[test]
+    fn majority_default_recomputes_as_agents_exit() {
+        let dir = isolate_view_store("recompute");
+        let mut view = view_with_agents(vec![
+            sv_agent(1, "a", Some(AgentBadge::Working), false),
+            sv_agent(1, "b", Some(AgentBadge::Working), false),
+            sv_agent(1, "c", Some(AgentBadge::Working), false),
+            sv_agent(1, "d", Some(AgentBadge::Done), true),
+        ]);
+        assert_eq!(
+            view.squad_view(1),
+            SectionView::Expanded,
+            "1 of 4 exited is not a majority"
+        );
+        // Two more finish and exit; no operator gesture touches the section.
+        view.layout.agents = vec![
+            sv_agent(1, "a", Some(AgentBadge::Done), true),
+            sv_agent(1, "b", Some(AgentBadge::Done), true),
+            sv_agent(1, "c", Some(AgentBadge::Working), false),
+            sv_agent(1, "d", Some(AgentBadge::Done), true),
+        ];
+        assert_eq!(
+            view.squad_view(1),
+            SectionView::LiveOnly,
+            "3 of 4 exited now -> the default tracks the exits, no seed to go stale"
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC2-HP (x-c5ee): the two pull-sections default Collapsed - the top of the
+    // panel is the operator's own agents, the pull-sections one click away.
+    #[test]
+    fn pull_sections_default_collapsed() {
+        let dir = isolate_view_store("pull");
+        let view = two_pane_view();
+        assert_eq!(
+            view.section_view(&SectionKey::Elsewhere),
+            SectionView::Collapsed
+        );
+        assert_eq!(
+            view.section_view(&SectionKey::WorkQueue),
+            SectionView::Collapsed
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC1-FR (x-c5ee): an explicit persisted choice outranks the new Collapsed
+    // pull-section default. Inserted straight into the map to mirror a value
+    // loaded from disk, without touching the real store.
+    #[test]
+    fn persisted_choice_outranks_pull_section_default() {
+        let dir = isolate_view_store("pull-persist");
+        let mut view = two_pane_view();
+        view.section_view
+            .insert(SectionKey::Elsewhere, SectionView::Expanded);
+        assert_eq!(
+            view.section_view(&SectionKey::Elsewhere),
+            SectionView::Expanded,
+            "an operator's saved expand of ~ elsewhere survives its Collapsed default"
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // A manual collapse of a mission squad must survive later ticks the same
@@ -13650,21 +13872,31 @@ mod tests {
                 .filter(|r| matches!(r, DisplayRow::Card(_)))
                 .count()
         };
-        assert_eq!(cards(&view), 1, "queue renders expanded by default");
-
-        view.cycle_section(SectionKey::WorkQueue);
+        // (x-c5ee) The queue now defaults Collapsed (AC2-HP): no cards until the
+        // operator expands it.
         assert_eq!(
             view.section_view(&SectionKey::WorkQueue),
             SectionView::Collapsed,
-            "binary: straight to collapsed, never LiveOnly"
+            "queue defaults collapsed"
         );
-        assert_eq!(cards(&view), 0, "collapsed hides the cards");
+        assert_eq!(cards(&view), 0, "collapsed by default hides the cards");
 
+        // Binary cycle: Collapsed -> Expanded, never through LiveOnly (a card
+        // has no exited state).
         view.cycle_section(SectionKey::WorkQueue);
         assert_eq!(
             view.section_view(&SectionKey::WorkQueue),
             SectionView::Expanded
         );
+        assert_eq!(cards(&view), 1, "expanded shows the card");
+
+        view.cycle_section(SectionKey::WorkQueue);
+        assert_eq!(
+            view.section_view(&SectionKey::WorkQueue),
+            SectionView::Collapsed,
+            "binary: straight back to collapsed, never LiveOnly"
+        );
+        assert_eq!(cards(&view), 0, "collapsed hides the cards");
     }
 
     // A `~` section header is CLICKABLE (it cycles its own view) but stays
@@ -13842,12 +14074,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // A genuine mid-session activation still expands, so deferring to the
-    // persisted value on the FIRST push did not disable the x-2f99 seed.
+    // A genuine mid-session activation still expands (x-2f99 preserved under
+    // x-c5ee): squad 2 sits at its inactive-default Collapsed with no explicit
+    // choice, and activating it flips the computed default to Expanded. No
+    // `set_squad_view` here - that would write an EXPLICIT choice, which now
+    // outranks activation (Locked 2), a different case covered elsewhere.
     #[test]
     fn later_activation_still_expands_a_collapsed_squad() {
         let mut view = two_pane_view();
-        view.set_squad_view(2, SectionView::Collapsed);
+        assert_eq!(
+            view.squad_view(2),
+            SectionView::Collapsed,
+            "squad 2 starts at the inactive default"
+        );
         view.set_layout(LayoutView {
             squads: vec![meta(1, "footnote", 2, 1), meta(2, "notes", 1, 0)],
             active_squad: 2,
@@ -13999,6 +14238,7 @@ mod tests {
             orphan("stray-live", false),
             orphan("stray-dead", true),
         ]);
+        view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
         assert_eq!(agent_names(&view), vec!["stray-live", "stray-dead"]);
 
         view.cycle_section(SectionKey::Elsewhere);
@@ -14044,6 +14284,7 @@ mod tests {
             crown_scope: None,
         };
         let mut view = view_with_agents(vec![orphan("a", false), orphan("b", true)]);
+        view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
         assert!(frame_text(&view.compose()).contains("▾~ elsewhere"));
         view.cycle_section(SectionKey::Elsewhere);
         assert!(frame_text(&view.compose()).contains("▿~ elsewhere"));
@@ -14196,12 +14437,13 @@ mod tests {
             crown_level: None,
             crown_scope: None,
         };
-        let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
-        // Agents-first display order (x-0090; no tab rows) with x-cd67 US1
-        // (sideline owns row 0, terminal row == display index) + Blank spacers:
-        // squad 1 (0), "worker" (1), Blank (2), squad 2 (3), Blank footer spacer
-        // (4), "+ new workspace" footer (5), Blank (6), "~ elsewhere" header (7),
-        // orphan "bg-claude" (8), orphan "bg-other" (9).
+        let mut view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
+        view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
+                                     // Agents-first display order (x-0090; no tab rows) with x-cd67 US1
+                                     // (sideline owns row 0, terminal row == display index) + Blank spacers:
+                                     // squad 1 (0), "worker" (1), Blank (2), squad 2 (3), Blank footer spacer
+                                     // (4), "+ new workspace" footer (5), Blank (6), "~ elsewhere" header (7),
+                                     // orphan "bg-claude" (8), orphan "bg-other" (9).
         assert_eq!(cmds(view.chrome_hit(1, 4)), vec![Command::FocusPane(10)]);
         assert!(matches!(
             view.chrome_hit(8, 4),
@@ -14886,6 +15128,9 @@ mod tests {
         tomb.tombstone = true;
         tomb.attach_id = Some("deadbeef".into());
         let mut v = view_with_agents(vec![tomb]);
+        // (x-c5ee) The squad's only agent is exited, so it would default LiveOnly
+        // and hide the dead row; force Expanded to exercise the Remove path.
+        v.set_squad_view(1, SectionView::Expanded);
         let idx = agent_row_at(&v, |a| a.name == "cc-member");
         assert!(v.open_row_menu(idx, Anchor::Center));
         let sel = v
@@ -15408,6 +15653,7 @@ mod tests {
             backlog_lanes: Vec::new(),
             backlog_stale: false,
         });
+        view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
         let frame = view.compose();
         let text = frame_text(&frame);
         let lines: Vec<&str> = text.lines().collect();
@@ -15959,6 +16205,7 @@ mod tests {
             backlog_lanes: Vec::new(),
             backlog_stale: false,
         });
+        view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
         let frame = view.compose();
         let cols = frame.cols as usize;
         let text = frame_text(&frame);
@@ -16278,6 +16525,13 @@ mod tests {
             card("x-blk", CardState::Blocked),
             card("x-fly", CardState::InFlight),
         ];
+        // (x-c5ee) These tests exercise rows INSIDE `~ elsewhere` and `~ backlog`
+        // (peek, attach, selector nav, card actions), so expand both past their
+        // new Collapsed defaults - the collapse itself has its own AC test.
+        v.section_view
+            .insert(SectionKey::Elsewhere, SectionView::Expanded);
+        v.section_view
+            .insert(SectionKey::WorkQueue, SectionView::Expanded);
         v
     }
 
@@ -16288,6 +16542,10 @@ mod tests {
     fn backlog_view(cards: Vec<BacklogCard>, total: usize) -> View {
         let mut v = two_pane_view();
         v.set_layout(backlog_layout(cards, total));
+        // (x-c5ee) `~ backlog` now defaults Collapsed; these tests assert on
+        // rendered card rows, so open it. The collapse has its own AC test.
+        v.section_view
+            .insert(SectionKey::WorkQueue, SectionView::Expanded);
         v
     }
 
@@ -16548,6 +16806,7 @@ mod tests {
         layout.backlog_stale = true;
         let mut v = two_pane_view();
         v.set_layout(layout);
+        v.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
         let rows = v.display_rows();
         assert!(
             rows.iter()
@@ -20947,7 +21206,8 @@ mod tests {
         bg_plain.name = "bg-other".into();
         bg_plain.pane_id = None;
         bg_plain.attach_id = None;
-        let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
+        let mut view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
+        view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
         assert_eq!(
             view.row_drag_source_at(1, 4),
             Some(RowSource::Pane(10)),
