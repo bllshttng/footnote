@@ -122,7 +122,7 @@ The session's slug also resolves. The retired `<harness>-<short-id>` form (`clau
 Every session prints its own handle in its startup header; find a peer's with `fno agents discovered-json` or `fno agents top`.
 Add `--from-self` to stamp your own reply handle so the answer comes back to you, and do not trust a sender's advertised `from-name` as an address - it can be stale.
 
-The fallbacks, and why they rank below: `fno mail send <name>` reaches a registered agent (fine when the name resolves); `--to-project <X>` is anycast that queues durable into what may be a ghost inbox when no live peer resolves - and the receipt still reads like success.
+The fallbacks, and why they rank below: `fno mail send <name>` reaches a registered agent (fine when the name resolves); `--to-project <X>` is anycast that queues durable into what may be a ghost inbox when no live peer resolves - the receipt now names the routing-reason (`[live-miss]`, `[param-forced: --to-project]`) so a durable demotion is legible rather than reading like success, but a durable queue is still not a live delivery.
 A live inject writes nothing to the bus; the durable envelope is written only when the inject misses, so it survives a dead recipient as recovery, not delivery.
 **Treat any receipt that is not `delivered (hosted)` as not delivered: re-resolve the handle and send again, do not re-queue.**
 And do not settle for the queue when the peer is merely idle - the handle you mailed is the same id these take, so bring it back and get the answer now:

@@ -1113,4 +1113,4 @@ also no-ops: `claude --print` has no `CLAUDE_JOB_DIR` / agent-view row to reap.
 - Design + locked decisions: `internal/fno/design/2026-05-30-auto-post-merge-ritual.md`
 - Post-ship-window design (backfill/handoff slots, dropped Step-0 quiesce): `internal/fno/plans/2026-06-02-target-post-ship-phase.md`
 - Reused verbs: `fno backlog reconcile`, `fno retro run`, `fno backlog idea`, `fno carveout list`, `fno carveout resolve`.
-- The cross-project message bus (different thing): `skills/inbox/SKILL.md`.
+- The cross-project message bus (different thing): `skills/mail/SKILL.md`.

@@ -1245,9 +1245,10 @@ def cmd_send(
     kind: str | None = typer.Option(
         None, "--kind", "-k",
         help=(
-            "Inbox kind (heads-up | question | fyi). When set, the message is an "
-            "inbox-style durable note the recipient's drain dispatches on; omit "
-            "for a default agent-to-agent send (live if a peer is hosted)."
+            "Inbox kind (heads-up | question | fyi). A project-inbox drain "
+            "contract, so pair it with --to-project; question/fyi to a bare "
+            "session handle is refused (a handle has no drain that reads them). "
+            "Omit --kind for a default agent-to-agent send (live if a peer is hosted)."
         ),
     ),
     reply_to: str | None = typer.Option(
