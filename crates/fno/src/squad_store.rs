@@ -1,11 +1,13 @@
 //! Persisted named squads (`~/.fno/squads.json`): the durable half of the
 //! session-scoped [`crate::squad::Squad`] model.
 //!
-//! Only explicit NAMED workspaces persist (`NewSquad` / bulk recruit). An
-//! attach-born origin squad re-derives from a fresh attach and a member's PANE
-//! is ephemeral (re-created at restore, never stored); the store holds only the
-//! workspace name, its origins, and its member attach-ids. Identity is `name`,
-//! unique in the file (Locked Decision 4).
+//! Every squad persists (operator decision: any squad created remains across a
+//! restart, TUI or API), not only explicit NAMED workspaces. Identity is `name`
+//! when the squad is named, else its `origins` (an unnamed home squad / project
+//! lane, keyed by the repo root it owns) - see [`same_squad`]. A squad with
+//! NEITHER a name nor an origin has no stable key and is the one thing that does
+//! not persist. A member's PANE is still ephemeral (re-created at restore, never
+//! stored); the store holds the identity plus its member attach-ids.
 //!
 //! Same rules as the rest of this crate: the FILE is the contract (no
 //! cross-crate import), all I/O degrades the persistence, never the session -
@@ -267,12 +269,32 @@ pub fn load() -> Loaded {
     }
 }
 
-/// Insert-or-replace the entry named `name`, preserving its `created_at` if it
-/// already exists (else stamping now). Write-through for `NewSquad`, recruit,
-/// member close, and tombstone.
+/// Match a stored squad by identity: a NAMED squad (`name` non-empty) is keyed
+/// by `name` and `origins` is ignored; an UNNAMED squad (empty `name` - the
+/// home squad, a project lane) is keyed by its `origins`, its only stable
+/// identity across a restart. An empty-name + empty-origins query has no key
+/// and matches nothing (such a squad is not persistable).
+fn same_squad(s: &StoredSquad, name: &str, origins: &[String]) -> bool {
+    if name.is_empty() {
+        !origins.is_empty() && s.name.is_empty() && s.origins == origins
+    } else {
+        s.name == name
+    }
+}
+
+/// Insert-or-replace the entry with this identity (`name` if named, else
+/// `origins`), preserving its `created_at` if it already exists (else stamping
+/// now). Write-through for `NewSquad`, recruit, member close, tombstone, and an
+/// unnamed home squad / project lane (operator decision: every squad persists).
 pub fn upsert(name: &str, origins: &[String], members: &[StoredMember]) -> io::Result<()> {
+    // A squad with neither a name nor an origin has no stable key across a
+    // restart, so it cannot be persisted (nor found again). Skip it here, the
+    // one place every write path funnels through, rather than at each caller.
+    if name.is_empty() && origins.is_empty() {
+        return Ok(());
+    }
     mutate(|squads| {
-        let existing = squads.iter().find(|s| s.name == name);
+        let existing = squads.iter().find(|s| same_squad(s, name, origins));
         let created_at = existing
             .map(|s| s.created_at.clone())
             .filter(|c| !c.is_empty())
@@ -281,7 +303,7 @@ pub fn upsert(name: &str, origins: &[String], members: &[StoredMember]) -> io::R
         // across a membership upsert - the struct is rebuilt fresh, so an
         // un-carried field would be silently wiped (x-c4d4).
         let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
-        squads.retain(|s| s.name != name);
+        squads.retain(|s| !same_squad(s, name, origins));
         squads.push(StoredSquad {
             name: name.to_string(),
             origins: origins.to_vec(),
@@ -312,10 +334,11 @@ pub fn set_tab_specs(name: &str, tab_specs: &[StoredTabSpec]) -> io::Result<()> 
     })
 }
 
-/// Delete the entry named `name` (a user-closed / removed workspace). A name
-/// not present is a silent no-op.
-pub fn remove(name: &str) -> io::Result<()> {
-    mutate(|squads| squads.retain(|s| s.name != name))
+/// Delete the entry with this identity (`name` if named, else `origins`): a
+/// user-closed / removed workspace, or an unnamed lane whose last pane closed.
+/// An identity not present is a silent no-op.
+pub fn remove(name: &str, origins: &[String]) -> io::Result<()> {
+    mutate(|squads| squads.retain(|s| !same_squad(s, name, origins)))
 }
 
 /// Rename `old` -> `new` in one locked mutation, carrying `created_at` across
@@ -817,11 +840,45 @@ mod tests {
         upsert("a", &[], &[m("11111111")]).unwrap();
         upsert("b", &[], &[m("22222222")]).unwrap();
         rename("a", "aa", &["/x".into()], &[m("11111111")]).unwrap();
-        remove("b").unwrap();
+        remove("b", &[]).unwrap();
         let loaded = load();
         let names: Vec<_> = loaded.squads.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["aa"], "a renamed, b removed");
         assert_eq!(loaded.squads[0].origins, vec!["/x".to_string()]);
+    }
+
+    #[test]
+    fn unnamed_squad_persists_keyed_by_origins() {
+        // Operator decision: every squad remains across restart, not only named
+        // workspaces. An unnamed squad (empty name - the home squad, a lane) is
+        // keyed by its origins: it upserts, round-trips, and removes by origins;
+        // a same-origins re-upsert replaces (no duplicate); a squad with neither
+        // name nor origins has no key and is not persisted.
+        let _s = Scratch::new("unnamed-origins");
+        upsert("", &["/repo/a".into()], &[m("aaaaaaaa")]).unwrap();
+        upsert("", &["/repo/b".into()], &[m("bbbbbbbb")]).unwrap();
+        // Same origins -> replace, not duplicate.
+        upsert("", &["/repo/a".into()], &[m("aaaaaaaa"), m("cccccccc")]).unwrap();
+        // No stable key -> skipped silently.
+        upsert("", &[], &[m("dddddddd")]).unwrap();
+        let loaded = load();
+        assert_eq!(
+            loaded.squads.len(),
+            2,
+            "two unnamed lanes, no key-less entry"
+        );
+        let a = loaded
+            .squads
+            .iter()
+            .find(|s| s.origins == vec!["/repo/a".to_string()])
+            .expect("lane a persisted by origins");
+        assert!(a.name.is_empty(), "restored unnamed");
+        assert_eq!(a.members.len(), 2, "same-origins upsert replaced in place");
+        // Remove by origins drops exactly that lane.
+        remove("", &["/repo/a".into()]).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 1);
+        assert_eq!(loaded.squads[0].origins, vec!["/repo/b".to_string()]);
     }
 
     #[test]
