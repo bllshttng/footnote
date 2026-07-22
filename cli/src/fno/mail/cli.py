@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -1200,6 +1201,53 @@ def _name_lane_send(
     print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]")
 
 
+# Send-time human escalation for a question, per (sender, recipient). A burst
+# re-nudges every window rather than once forever (marker refreshed only on an
+# actual escalation, so the window runs from the last nudge, not the first send).
+_ESCALATION_DEBOUNCE_S = 300
+
+
+def _escalate_question(sender: str, recipient: str, summary: str) -> str:
+    """Notify the human at send time that a question needs them (Locked Decision
+    7: a question NEVER autonomous-responds - only the human answers it).
+
+    Debounced per (sender, recipient) so a chatty peer cannot spam the queue.
+    The caller writes the durable question thread regardless, so the ambient
+    unread count stays truthful even when this nudge is debounced. Best-effort
+    throughout: a notifier or filesystem failure never breaks the send. Returns
+    ``"escalated"`` or ``"debounced"``.
+    """
+    import hashlib
+
+    from fno.paths import state_dir
+
+    pair = hashlib.sha256(f"{sender}\x00{recipient}".encode()).hexdigest()[:16]
+    marker_dir = state_dir() / "mail-escalations"
+    marker = marker_dir / pair
+    try:
+        last = marker.stat().st_mtime
+    except OSError:
+        last = 0.0
+    if time.time() - last < _ESCALATION_DEBOUNCE_S:
+        return "debounced"
+    try:
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except OSError:
+        pass  # a missing marker just re-notifies; it never suppresses the durable write
+    try:
+        from fno.notify._impl import send_notification
+
+        one_line = summary.split("\n", 1)[0][:120]
+        send_notification(
+            f"fno mail: question from {sender}",
+            f"{one_line} - run `fno mail drain-self`",
+        )
+    except Exception:  # noqa: BLE001 - a notifier failure never breaks the send
+        pass
+    return "escalated"
+
+
 @mail_app.command("send")
 def cmd_send(
     name: str | None = typer.Argument(
@@ -1441,6 +1489,13 @@ def cmd_send(
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             raise typer.Exit(code=2) from exc
+
+        # A question never gets an autonomous responder (US9 wakes only heads-up);
+        # it escalates to the human at send time instead, debounced per pair.
+        if kind == Kind.QUESTION.value:
+            reason = _escalate_question(sender, recipient, content)
+            if reason == "escalated":
+                print(f"escalated to human ({recipient})", file=sys.stderr)
 
         if json_out:
             import json as _json
