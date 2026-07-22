@@ -325,7 +325,7 @@ enum CoreMsg {
         region_lines: u16,
         keystroke: Vec<u8>,
     },
-    /// (v11, x-6f77) "Grab work" (leader+g): dispatch the next ready node into a
+    /// (v11, x-6f77) "Grab work" (prefix+g): dispatch the next ready node into a
     /// new pane. `id` is the requesting client (for the outcome notice). The
     /// spawn runs OFF the core loop in a detached task (it shells `fno dispatch
     /// one`); the pane appears via the existing registry reader, and only the
@@ -333,7 +333,7 @@ enum CoreMsg {
     DispatchNext {
         id: u64,
         /// (x-c914) The requesting client's session-local active account, so
-        /// leader+g routes the spawn to it just like a targeted card click.
+        /// prefix+g routes the spawn to it just like a targeted card click.
         account: Option<String>,
     },
     /// The off-loop dispatch task's outcome, routed back so the notice is sent
@@ -1085,7 +1085,7 @@ struct Core {
     shells: Vec<OsString>,
     out_tx: mpsc::Sender<(u64, Vec<u8>)>,
     exit_tx: mpsc::Sender<u64>,
-    /// A clone of the core channel so an off-loop task (the leader+g dispatch
+    /// A clone of the core channel so an off-loop task (the prefix+g dispatch
     /// shell-out) can route its outcome back as a `CoreMsg::DispatchResult`
     /// (x-6f77), the same off-loop-work-feeds-the-loop shape as the registry
     /// reader.
@@ -1380,7 +1380,7 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
     // open to a notice rather than wedging.
     const DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
     // A targeted node (a clicked work-queue card, x-a496) pins `--node`; without
-    // it the porcelain picks the board's next ready node (leader+g). The claim
+    // it the porcelain picks the board's next ready node (prefix+g). The claim
     // race, lane cap, and verdict shape are identical either way.
     let mut args = vec!["dispatch", "one", "--mux-session", session, "--json"];
     if let Some(n) = node {
@@ -1762,7 +1762,7 @@ async fn run_claim_sweep() -> Option<HashMap<String, String>> {
 
 /// Whether `node` (an id or slug) names a READY card in the server's backlog
 /// snapshot (x-a496, codex peer review). A targeted card dispatch must refuse a
-/// blocked / in-flight / unknown node - the same nodes `leader+g` would never
+/// blocked / in-flight / unknown node - the same nodes `prefix+g` would never
 /// select - so a click cannot start work with unmet deps even if the client's
 /// (staler) Layout still showed it ready. Pure so the gate is unit-testable
 /// without touching the subprocess spawn.
@@ -3864,7 +3864,7 @@ impl Core {
         }
     }
 
-    /// "Grab work" (leader+g, x-6f77): dispatch the next ready backlog node into
+    /// "Grab work" (prefix+g, x-6f77): dispatch the next ready backlog node into
     /// a new pane. Selection + claim + spawn is the Python porcelain's job (`fno
     /// dispatch one`), shelled OFF the core loop in a detached task so a slow
     /// backlog read never stalls a pane. The launched pane appears through the
@@ -6421,7 +6421,7 @@ impl Core {
             }
             Command::DispatchNode { node, account } => {
                 // Targeted work-queue dispatch (a clicked card, x-a496). Reuses
-                // the leader+g porcelain pinned to `--node`; the claim race
+                // the prefix+g porcelain pinned to `--node`; the claim race
                 // (already-worked node bounces `already-dispatching`) and lane
                 // cap live in `fno dispatch one`. Routes through CoreMsg::Command,
                 // so the read-only-observer refusal already fired upstream.
@@ -6430,7 +6430,7 @@ impl Core {
                 // (codex peer review): the client already gates the confirm to a
                 // ready card, but the server's snapshot is fresher, so a card that
                 // went blocked/in-flight between the client's Layout and the click
-                // is refused here - it must not start work leader+g would never
+                // is refused here - it must not start work prefix+g would never
                 // pick. An unknown or non-ready id fails closed to a notice, like
                 // the other catalog-named commands (and covers an empty id).
                 if card_ready_to_dispatch(&self.backlog, &node) {
@@ -7089,7 +7089,7 @@ impl Core {
                 Flow::Continue
             }
             Command::CopySelection => {
-                // Keyboard copy (leader+y): the focused pane's selection, else the
+                // Keyboard copy (prefix+y): the focused pane's selection, else the
                 // newest completed block (precedence + refusals in copy_source).
                 // Nothing to copy is a plain notice; reuses the mouse-release channel.
                 let text = self
@@ -7719,7 +7719,7 @@ fn dead_pane(pane: u64) -> ServerMsg {
     }
 }
 
-/// The leader+y copy source precedence (epic Locked 6 / cv-4ac072b6): the active
+/// The prefix+y copy source precedence (epic Locked 6 / cv-4ac072b6): the active
 /// `selection`, else the newest completed OSC 133 `block`. An open (still
 /// streaming), truncated/evicted, or markerless-implicit block never copies -
 /// `None` here makes the caller show the "nothing selected" notice rather than
@@ -13092,7 +13092,7 @@ mod tests {
     fn card_ready_gate_only_passes_ready_cards() {
         // x-a496 (codex peer review): a targeted dispatch only proceeds for a
         // READY card named by id or slug; blocked / in-flight / unknown ids are
-        // refused, so a click can't start work leader+g would skip.
+        // refused, so a click can't start work prefix+g would skip.
         let card = |id: &str, slug: &str, state| BacklogCard {
             id: id.into(),
             slug: slug.into(),

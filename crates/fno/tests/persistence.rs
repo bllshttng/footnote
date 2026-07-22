@@ -100,7 +100,7 @@ fn persistence_reattach_restores_the_exact_screen() {
             }
         }
     };
-    h.type_bytes(b"\x02d"); // leader+d detach
+    h.type_bytes(b"\x02d"); // prefix+d detach
     assert!(h.wait_exit(10).success());
     drop(h);
 
@@ -122,7 +122,7 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
     // "open" in the foreground exactly like an editor session.
     h.type_bytes(b"printf '\\033[?1049h\\033[2J\\033[HALT-SCREEN-HELD'; cat\r");
     h.wait_screen(15, |s| s.contains("ALT-SCREEN-HELD"));
-    h.type_bytes(b"\x02d"); // leader+d: detach with the alt screen active
+    h.type_bytes(b"\x02d"); // prefix+d: detach with the alt screen active
     assert!(h.wait_exit(10).success());
     drop(h);
 
@@ -148,16 +148,16 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
 fn persistence_multi_pane_reattach_is_screen_exact() {
     let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // AC3-HP/AC5-FR generalized to N panes through the REAL client: build a
-    // split via leader chords, put distinct markers in both panes, detach,
+    // split via prefix chords, put distinct markers in both panes, detach,
     // reattach - the settled screen (chrome + both panes) is byte-identical.
     let scratch = Scratch::new("multipane");
     let mut h = ClientHarness::spawn(&scratch);
     h.wait_prompt(15);
-    h.type_bytes(b"\x02%"); // leader+% : split H, focus lands right
+    h.type_bytes(b"\x02%"); // prefix+% : split H, focus lands right
     h.wait_screen(15, |s| s.lines().skip(1).any(|l| l.contains('│')));
     h.type_bytes(b"echo marker-right\r");
     h.wait_screen(15, |s| s.contains("marker-right"));
-    h.type_bytes(b"\x02h"); // leader+h : focus left
+    h.type_bytes(b"\x02h"); // prefix+h : focus left
     h.type_bytes(b"echo marker-left\r");
     h.wait_screen(15, |s| s.contains("marker-left"));
     let before = {
@@ -174,7 +174,7 @@ fn persistence_multi_pane_reattach_is_screen_exact() {
             }
         }
     };
-    h.type_bytes(b"\x02d"); // leader+d detach
+    h.type_bytes(b"\x02d"); // prefix+d detach
     assert!(h.wait_exit(10).success());
     drop(h);
 

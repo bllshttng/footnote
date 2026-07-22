@@ -217,7 +217,7 @@ async fn run(args: Vec<String>) -> i32 {
     // `needs` (x-feec): read-only needs-me-queue fold over events.jsonl +
     // ledger.json across ALL sessions, emitting review_wedged / budget_stop
     // items. Never touches the daemon; exits 0 on empty. The mux client shells
-    // this off-loop when the leader+a overlay opens.
+    // this off-loop when the prefix+a overlay opens.
     if verb == "needs" {
         return fno_agents::needs::run_needs(&args[1..], &AgentsHome::from_env()).await;
     }

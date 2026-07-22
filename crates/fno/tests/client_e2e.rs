@@ -123,7 +123,7 @@ fn client_e2e_detach_exits_client_and_leaves_server_running() {
     h.wait_screen(15, |s| !s.trim().is_empty());
     h.type_bytes(b"BEFORE_DETACH=yes\r");
     std::thread::sleep(Duration::from_millis(300));
-    h.type_bytes(b"\x02d"); // leader+d -> detach (Locked 11)
+    h.type_bytes(b"\x02d"); // prefix+d -> detach (Locked 11)
     let status = h.wait_exit(10);
     assert!(status.success(), "detach must exit 0, got {status:?}");
     drop(h);
