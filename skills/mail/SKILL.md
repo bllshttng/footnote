@@ -73,6 +73,13 @@ A harness-prefixed address (`claude-<short-id>`) is refused, not translated. If
 you hit that error, something built the address the retired way - fix that,
 do not hand-edit the string and move on.
 
+No probe is proof a peer is dead. `peek`, discovery, a status token, and a claim
+pid can all read stale at once - a peer that ran `EnterWorktree` moved its
+transcript to a worktree-keyed project dir, so a probe pointed at the old path
+reads empty. The one authoritative pre-dead-declaration check is the session's
+transcript file itself (its worktree-keyed project dir, by mtime/tail); any
+receipt or probe that names a store must say WHICH store it read.
+
 ## Verb router
 
 The first whitespace token of the argument is the **verb**. Route on it, then run
