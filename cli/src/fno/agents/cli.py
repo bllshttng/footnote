@@ -1944,6 +1944,42 @@ def cmd_top(
     print(render_top(as_json=as_json))
 
 
+@agents_app.command("truth", hidden=True)
+def cmd_truth(
+    handle: str = typer.Argument(
+        ..., help="Worker handle / short id / session id (as in `fno agents list`)."
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit a single JSON object instead of a line."
+    ),
+) -> None:
+    """Classify a worker's supervision state from its transcript TAIL.
+
+    done | watching | your-move | working | stalled | unknown -- read from the
+    transcript, the only surface that does not lie about a live bg worker (argv,
+    pid, the daemon record, and state.json's state field were each caught lying
+    in one evening). This is the supervision state agent-view's working/idle
+    cannot express. Read-only; exits 13 on an unresolvable handle (peek parity),
+    0 otherwise.
+    """
+    import json as _json
+
+    from fno.agents.session_truth import render_truth, resolve_session_truth
+
+    result = resolve_session_truth(handle)
+    if json_out:
+        payload = {
+            k: result.get(k)
+            for k in ("handle", "state", "reason", "last_activity_age_s", "session_id")
+        }
+        sys.stdout.write(_json.dumps(payload) + "\n")
+    else:
+        sys.stdout.write(render_truth(result) + "\n")
+    sys.stdout.flush()
+    if result.get("state") == "unknown" and result.get("reason") == "not-found":
+        raise typer.Exit(code=13)
+
+
 @agents_app.command("ping", hidden=True)
 def cmd_ping() -> None:
     """Health check (placeholder).

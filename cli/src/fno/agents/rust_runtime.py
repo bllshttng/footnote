@@ -213,6 +213,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # (grantor-class provenance + registry RMW via update_registry); no Rust
     # client port, so it must never auto-route to the daemon.
     "crown",
+    # x-a472: the transcript-tail supervision classifier (`fno agents truth`).
+    # Read-only, pure Python (fno.agents.session_truth reads the transcript via
+    # peek); no Rust client port, so it must never auto-route to the daemon.
+    "truth",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs
