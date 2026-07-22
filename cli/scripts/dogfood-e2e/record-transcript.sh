@@ -50,7 +50,7 @@ for line in skill_lines:
     if m:
         by_skill[m.group(1)] += 1
 
-# Count abilities CLI invocations from "INVOKE[N]: abilities ..." lines
+# Count fno CLI invocations from "INVOKE[N]: fno ..." lines
 invoke_lines = [l for l in lines if re.match(r'^INVOKE\[', l)]
 total_invocations = len(invoke_lines)
 
@@ -58,7 +58,7 @@ total_invocations = len(invoke_lines)
 subcommands = ['state', 'graph', 'runtime', 'worker', 'event', 'gate', 'reality-check', 'probe']
 by_subcommand = {}
 for sub in subcommands:
-    by_subcommand[sub] = sum(1 for l in invoke_lines if f'abilities {sub}' in l)
+    by_subcommand[sub] = sum(1 for l in invoke_lines if f'fno {sub}' in l)
 
 result = {
     "total_invocations": total_invocations,

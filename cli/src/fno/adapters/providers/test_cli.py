@@ -295,14 +295,14 @@ class TestAtomicWrite:
     def test_add_readonly_settings_exits_nonzero(self, tmp_path: Path):
         """AC02.5-FR: add with read-only settings.yaml exits non-zero; file unchanged."""
         # Create a pre-existing settings.yaml and make the .fno dir read-only
-        abilities_dir = tmp_path / ".fno"
-        abilities_dir.mkdir(parents=True)
-        settings = abilities_dir / "config.toml"
+        fno_dir = tmp_path / ".fno"
+        fno_dir.mkdir(parents=True)
+        settings = fno_dir / "config.toml"
         settings.write_text("v2_enabled = false\n", encoding="utf-8")
         original_content = settings.read_text(encoding="utf-8")
 
         # Make the parent directory read-only so atomic_write can't create a temp file
-        abilities_dir.chmod(stat.S_IRUSR | stat.S_IXUSR)  # r-x: can list, can't write
+        fno_dir.chmod(stat.S_IRUSR | stat.S_IXUSR)  # r-x: can list, can't write
         try:
             creds = tmp_path / ".claude"
             creds.mkdir()
@@ -319,11 +319,11 @@ class TestAtomicWrite:
             )
             assert result.exit_code != 0
             # Content must be unchanged
-            abilities_dir.chmod(stat.S_IRWXU)  # restore to read
+            fno_dir.chmod(stat.S_IRWXU)  # restore to read
             assert settings.read_text(encoding="utf-8") == original_content
         finally:
             # Always restore permissions so pytest can clean up tmp_path
-            abilities_dir.chmod(stat.S_IRWXU)
+            fno_dir.chmod(stat.S_IRWXU)
 
 
 # ---------------------------------------------------------------------------

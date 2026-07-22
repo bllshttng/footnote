@@ -65,13 +65,13 @@ def test_check_migration_passes_state_dir_to_run_migration(
     _check_migration() runs, mock run_migration, verify it's called with the
     custom state_dir as settings_root.
     """
-    custom_state = tmp_path / "custom-abi"
+    custom_state = tmp_path / "custom-fno"
     custom_state.mkdir()
 
     # Write a settings.yaml that sets a custom state_dir
-    abilities_dir = tmp_path / ".fno"
-    abilities_dir.mkdir()
-    settings_file = abilities_dir / "settings.yaml"
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir()
+    settings_file = fno_dir / "settings.yaml"
     settings_file.write_text(
         f"schema_version: 1\nconfig:\n  state_dir: '{custom_state}'\n",
         encoding="utf-8",
@@ -143,9 +143,9 @@ def test_check_migration_does_not_delete_tmp_outside_lock(
     custom_state = tmp_path / "state-f"
     custom_state.mkdir()
 
-    abilities_dir = tmp_path / ".fno"
-    abilities_dir.mkdir()
-    settings_file = abilities_dir / "settings.yaml"
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir()
+    settings_file = fno_dir / "settings.yaml"
     settings_file.write_text(
         f"schema_version: 1\nconfig:\n  state_dir: '{custom_state}'\n",
         encoding="utf-8",
@@ -169,7 +169,7 @@ def test_check_migration_does_not_delete_tmp_outside_lock(
 
     # Create a fake "in-flight" .tmp file as if another process is writing it
     # Put it next to the settings.yaml that config_file() will return
-    inflight_tmp = abilities_dir / ".settings.yaml.FAKEPID.tmp"
+    inflight_tmp = fno_dir / ".settings.yaml.FAKEPID.tmp"
     inflight_tmp.write_text("inflight content", encoding="utf-8")
     assert inflight_tmp.exists(), "setup: inflight tmp must exist"
 

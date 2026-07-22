@@ -440,15 +440,15 @@ mod tests {
     }
 
     fn write_project_settings(name: &str, body: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("abi-headless-{}-{name}", std::process::id()));
-        let abil = dir.join(".fno");
-        std::fs::create_dir_all(&abil).unwrap();
-        std::fs::write(abil.join("config.toml"), body).unwrap();
+        let dir = std::env::temp_dir().join(format!("fno-headless-{}-{name}", std::process::id()));
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(fnodir.join("config.toml"), body).unwrap();
         dir
     }
 
     fn write_file(name: &str, body: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("abi-headless-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fno-headless-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("explicit.toml");
         std::fs::write(&f, body).unwrap();
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn headless_yolo_enabled_honors_abilities_config_short_circuit() {
+    fn headless_yolo_enabled_honors_fno_config_short_circuit() {
         // FNO_CONFIG is the SOLE source when set (mirrors the Python
         // loader), so a full-yolo opt-in there wins even though the cwd carries
         // no settings (which would otherwise resolve to the BOUNDED default).
@@ -484,7 +484,7 @@ mod tests {
             "[agents.gemini]\nheadless_yolo = true\n",
         );
         std::env::set_var("FNO_CONFIG", &f);
-        let cwd = std::env::temp_dir().join(format!("abi-headless-{}-nocfg", std::process::id()));
+        let cwd = std::env::temp_dir().join(format!("fno-headless-{}-nocfg", std::process::id()));
         std::fs::create_dir_all(&cwd).unwrap();
         let got = headless_yolo_enabled("gemini", &cwd);
         clear_config_env();
@@ -495,12 +495,12 @@ mod tests {
     }
 
     #[test]
-    fn headless_yolo_enabled_abilities_config_absent_key_defaults_bounded() {
+    fn headless_yolo_enabled_fno_config_absent_key_defaults_bounded() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_config_env();
         let f = write_file("explicit-empty", "schema_version = 1\n");
         std::env::set_var("FNO_CONFIG", &f);
-        let cwd = std::env::temp_dir().join(format!("abi-headless-{}-nocfg2", std::process::id()));
+        let cwd = std::env::temp_dir().join(format!("fno-headless-{}-nocfg2", std::process::id()));
         std::fs::create_dir_all(&cwd).unwrap();
         let got = headless_yolo_enabled("codex", &cwd);
         clear_config_env();

@@ -27,7 +27,7 @@ INTERVAL="${POST_MERGE_INTERVAL:-600}"
 [[ "$INTERVAL" =~ ^[0-9]+$ ]] || { echo "install: POST_MERGE_INTERVAL must be an integer (got '$INTERVAL')" >&2; exit 1; }
 
 # Unique label per CHECKOUT: two clones sharing a basename (fork + upstream, or
-# two `abilities` clones) would otherwise render the same label + plist path and
+# two `fno` clones) would otherwise render the same label + plist path and
 # clobber each other's agent (Codex P2, PR #390). Append a short hash of the
 # absolute repo root. Shared with uninstall.sh's resolution.
 ROOT_HASH="$(printf '%s' "$REPO_ROOT" | shasum 2>/dev/null | cut -d' ' -f1 | cut -c1-8)"

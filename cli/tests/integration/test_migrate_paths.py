@@ -14,7 +14,7 @@ Tests cover:
 - AC2b-FR: --force re-runs despite sentinel
 
 All tests pass `settings_root=` directly for isolation.
-Autouse fixture pins FNO_REPO_ROOT (feedback_abi_repo_root_leaks_between_tests).
+Autouse fixture pins FNO_REPO_ROOT (feedback_fno_repo_root_leaks_between_tests).
 """
 from __future__ import annotations
 

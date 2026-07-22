@@ -1225,7 +1225,7 @@ def test_dispatch_ask_followup_ctrl_c_during_poll_releases_lock(
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
-def test_dispatch_ask_followup_default_from_name_is_abilities(
+def test_dispatch_ask_followup_default_from_name_is_fno(
     tmp_path: Path, monkeypatch
 ) -> None:
     """AC2-EDGE: default from_name='fno' reaches the provider call."""

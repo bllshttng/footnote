@@ -4,7 +4,7 @@
 //! (`providers/gemini.py` `create`/`resume`) and the Rust `gemini_ask` path,
 //! asserting identical reply text + exit code. Mirrors `codex_ask_parity.rs`.
 //!
-//! Skips (not fails) when `python3` or the `abilities` package is unavailable.
+//! Skips (not fails) when `python3` or the `fno` package is unavailable.
 //!
 //! Cases:
 //! - create / resume happy path (single JSON blob -> reply)
@@ -44,7 +44,7 @@ fn python_available() -> bool {
 
 fn tmpdir(tag: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "abi-gemini-parity-{}-{}-{}",
+        "fno-gemini-parity-{}-{}-{}",
         tag,
         std::process::id(),
         std::time::SystemTime::now()
@@ -100,7 +100,7 @@ from pathlib import Path
 from fno.agents.providers import gemini as g
 
 prompt = os.environ.get("PROMPT","")
-from_name = os.environ.get("FROM_NAME","abilities")
+from_name = os.environ.get("FROM_NAME","fno")
 output_path = Path(os.environ["OUTPUT_PATH"])
 cwd = Path(os.environ["CWD"])
 session_id = os.environ.get("SESSION_ID","")
@@ -254,7 +254,7 @@ fn parity_create_happy_path() {
         None,
         &cwd,
         "hi",
-        "abilities",
+        "fno",
         false,
         &tmpdir("c1-pyo").join("o.jsonl"),
         10,
@@ -266,7 +266,7 @@ fn parity_create_happy_path() {
         None,
         &cwd,
         "hi",
-        "abilities",
+        "fno",
         false,
         &tmpdir("c1-rso").join("o.jsonl"),
         10,
@@ -301,7 +301,7 @@ fn parity_resume_happy_path() {
         Some(sid),
         &cwd,
         "again",
-        "abilities",
+        "fno",
         false,
         &tmpdir("r1-pyo").join("o.jsonl"),
         10,
@@ -313,7 +313,7 @@ fn parity_resume_happy_path() {
         Some(sid),
         &cwd,
         "again",
-        "abilities",
+        "fno",
         false,
         &tmpdir("r1-rso").join("o.jsonl"),
         10,
@@ -342,7 +342,7 @@ fn parity_null_response_empty_reply() {
         None,
         &cwd,
         "hi",
-        "abilities",
+        "fno",
         false,
         &tmpdir("nr-pyo").join("o.jsonl"),
         10,
@@ -354,7 +354,7 @@ fn parity_null_response_empty_reply() {
         None,
         &cwd,
         "hi",
-        "abilities",
+        "fno",
         false,
         &tmpdir("nr-rso").join("o.jsonl"),
         10,
@@ -385,7 +385,7 @@ fn parity_schema_drift_missing_stats_exit_11() {
         None,
         &cwd,
         "hi",
-        "abilities",
+        "fno",
         false,
         &tmpdir("sd-pyo").join("o.jsonl"),
         10,
@@ -397,7 +397,7 @@ fn parity_schema_drift_missing_stats_exit_11() {
         None,
         &cwd,
         "hi",
-        "abilities",
+        "fno",
         false,
         &tmpdir("sd-rso").join("o.jsonl"),
         10,
@@ -430,7 +430,7 @@ fn parity_nonzero_exit_propagates() {
         None,
         &cwd,
         "hi",
-        "abilities",
+        "fno",
         false,
         &tmpdir("nz-pyo").join("o.jsonl"),
         10,
@@ -442,7 +442,7 @@ fn parity_nonzero_exit_propagates() {
         None,
         &cwd,
         "hi",
-        "abilities",
+        "fno",
         false,
         &tmpdir("nz-rso").join("o.jsonl"),
         10,
@@ -483,7 +483,7 @@ fn parity_stderr_noise_does_not_corrupt_parse() {
         None,
         &cwd,
         "hi",
-        "abilities",
+        "fno",
         false,
         &tmpdir("se-pyo").join("o.jsonl"),
         10,
@@ -495,7 +495,7 @@ fn parity_stderr_noise_does_not_corrupt_parse() {
         None,
         &cwd,
         "hi",
-        "abilities",
+        "fno",
         false,
         &tmpdir("se-rso").join("o.jsonl"),
         10,
@@ -517,7 +517,7 @@ fn parity_inject_from_name() {
 import os, sys
 sys.path.insert(0, os.environ["PYTHONPATH"])
 from fno.agents.providers.gemini import inject_from_name
-sys.stdout.write(inject_from_name(os.environ.get("PROMPT",""), os.environ.get("FROM_NAME","abilities")))
+sys.stdout.write(inject_from_name(os.environ.get("PROMPT",""), os.environ.get("FROM_NAME","fno")))
 "#;
     for (prompt, from_name) in [
         ("hello world", "alice"),

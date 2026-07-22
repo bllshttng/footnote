@@ -253,7 +253,7 @@ def test_create_worktree_delegates_to_shared(tmp_path, monkeypatch):
     """create_worktree on the hermes adapter calls _shared.create_worktree."""
     monkeypatch.chdir(tmp_path)
     sentinel = {
-        "worktree_path": str(tmp_path / ".fno" / "worktrees" / "abi-x"),
+        "worktree_path": str(tmp_path / ".fno" / "worktrees" / "fno-x"),
         "branch": "feature/x",
         "status": "created",
     }

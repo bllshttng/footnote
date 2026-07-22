@@ -9,7 +9,7 @@
 # Python roadmap-tasks.py uses fcntl.flock internally for its own writes.
 # This wrapper serializes shell-initiated mutations.
 
-TASK_LOCK_DIR="/tmp/abilities-ledger.lock.d"
+TASK_LOCK_DIR="/tmp/fno-ledger.lock.d"
 TASK_LOCK_TIMEOUT=30  # seconds
 
 with_task_lock() {

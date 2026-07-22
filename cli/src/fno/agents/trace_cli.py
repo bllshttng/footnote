@@ -41,7 +41,7 @@ from fno import paths
 def _parse_iso8601(s: str) -> datetime:
     """Parse an ISO8601 timestamp into a timezone-aware UTC datetime.
 
-    Accepts the canonical ``YYYY-MM-DDTHH:MM:SSZ`` (the abi-stamped shape
+    Accepts the canonical ``YYYY-MM-DDTHH:MM:SSZ`` (the fno-stamped shape
     in events.jsonl) as well as ``+00:00`` offsets and fractional
     seconds. Naive timestamps (no tz) are assumed UTC so they compare
     correctly against the aware-UTC stamps the emitter produces.

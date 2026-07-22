@@ -95,7 +95,7 @@ jobs:
         # flock_interop.rs spawns a real python3 subprocess to verify that
         # Rust flock and Python fcntl.flock serialize correctly. ubuntu-latest
         # ships with Python 3 on PATH; this step ensures a known version and
-        # installs the abilities package so the parity check can also run.
+        # installs the fno package so the parity check can also run.
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"

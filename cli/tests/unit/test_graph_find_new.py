@@ -163,7 +163,7 @@ def test_scenario4_hp_new_creates_entry(tmp_graph):
     # `fno new` creates plan-less nodes, so they derive to idea (not ready).
     # The `ready` state requires a plan_path.
     assert e["status"] == "idea"
-    assert e["source"] == "abi-new"
+    assert e["source"] == "fno-new"
 
 
 def test_new_default_domain_is_code(tmp_graph):

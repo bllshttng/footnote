@@ -24,7 +24,7 @@
 # invariants forbid.
 set -euo pipefail
 
-readonly PIN_MARKER='<!-- abilities-pinned-skill -->'
+readonly PIN_MARKER='<!-- fno-pinned-skill -->'
 
 die() { echo "pin-skill: $*" >&2; exit 1; }
 
@@ -39,7 +39,7 @@ Usage:
   scripts/pin-skill.sh list
 
 A pin writes skills/<name>/SKILL.md as a prose redirect to /<verb> [mode]
-(never a Skill() call), carrying the marker <!-- abilities-pinned-skill -->
+(never a Skill() call), carrying the marker <!-- fno-pinned-skill -->
 so unpin only ever removes generated shims, never a user-authored skill of
 the same name. --replace overwrites an existing non-pin skill's SKILL.md
 (the one-release deprecation path), preserving sibling files the bundler may

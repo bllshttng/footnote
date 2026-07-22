@@ -179,7 +179,7 @@ def test_block_mapping_of_mappings_projects_shape():
 
         projects:
           fno:
-            repo: ~/code/me/abilities
+            repo: ~/code/me/fno
             order: 1
           chingu:
             repo: ~/code/me/chingu
@@ -194,7 +194,7 @@ created: 2026-04-27
 scope: cross-project
 projects:
   fno:
-    repo: ~/code/me/abilities
+    repo: ~/code/me/fno
     order: 1
   chingu:
     repo: ~/code/me/chingu
@@ -210,7 +210,7 @@ expected_url_count: 2
     )
     assert "fno:" in fields["projects"].text
     assert "chingu:" in fields["projects"].text
-    assert "repo: ~/code/me/abilities" in fields["projects"].text
+    assert "repo: ~/code/me/fno" in fields["projects"].text
 
     # round-trip preserves the projects map intact
     serialized = stamp_plan.serialize_frontmatter(fields)

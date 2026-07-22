@@ -10,7 +10,7 @@ Two artifacts ship in this package, with two different lifecycle owners
   Claude session as ``notifications/claude/channel``. Lifecycle owned
   by CC.
 - ``sidecar`` — the per-user Unix-socket daemon at
-  ``~/.fno/sidecar.sock`` (or ``$XDG_RUNTIME_DIR/abilities/...``).
+  ``~/.fno/sidecar.sock`` (or ``$XDG_RUNTIME_DIR/fno/...``).
   Lazy-start / lazy-exit. Holds the in-memory ``session_id -> channel
   server stdio pipe`` map. Lifecycle owned by fno.
 

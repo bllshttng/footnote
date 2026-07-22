@@ -165,7 +165,7 @@ def update(
 
             try:
                 from fno.events import _build
-                event = _build("cost_subprocess_failed", "abi-loop", event_data)
+                event = _build("cost_subprocess_failed", "fno-loop", event_data)
                 append_event(event)
             except Exception as exc:  # noqa: BLE001
                 print(

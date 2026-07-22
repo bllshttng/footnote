@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# archive-worktree.sh - safely tear down an abilities worktree.
+# archive-worktree.sh - safely tear down an fno worktree.
 #
 # Mirrors scripts/setup/setup-worktree.sh in reverse: kills processes
 # rooted in the worktree path (with operator confirmation), runs strict

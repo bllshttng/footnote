@@ -87,7 +87,7 @@ def test_ac_hp_no_provenance_exits_zero(tmp_graph):
 def test_ac_hp_source_edge_resolved(tmp_graph, tmp_path, monkeypatch):
     """AC-HP: node with source_session_id + matching transcript -> resolved path shown."""
     session_id = "4ec8a08b-9fe7-4550-8e40-00c7fd4e600a"
-    cwd = "/Users/bb16/code/me/abilities"
+    cwd = "/Users/bb16/code/me/fno"
 
     # Build a fake projects_root with the transcript file
     slug = cwd.replace("/", "-").replace(".", "-")

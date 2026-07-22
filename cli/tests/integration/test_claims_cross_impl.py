@@ -238,7 +238,7 @@ def test_python_stale_rust_reclaims_archives_and_audits(tmp_path: Path) -> None:
     kinds = [e["type"] for e in events(tmp_path)]
     assert "claim_stale_reclaimed" in kinds
     reclaimed = [e for e in events(tmp_path) if e["type"] == "claim_stale_reclaimed"][0]
-    assert reclaimed["source"] == "abi-loop"
+    assert reclaimed["source"] == "fno-loop"
     assert reclaimed["data"]["previous_holder"] == "pty:dead"
 
 

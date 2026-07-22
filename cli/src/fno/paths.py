@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from fno.config import SettingsModel
 
 
-def _warn_if_foreign_abi_repo_root(resolved: Path) -> None:
+def _warn_if_foreign_fno_repo_root(resolved: Path) -> None:
     """One-line heads-up when ``FNO_REPO_ROOT`` pins the fno plugin root
     while the cwd is a *different* git repo.
 
@@ -104,7 +104,7 @@ def resolve_repo_root() -> Path:
     env_root = os.environ.get("FNO_REPO_ROOT")
     if env_root:
         resolved = Path(env_root).resolve()
-        _warn_if_foreign_abi_repo_root(resolved)
+        _warn_if_foreign_fno_repo_root(resolved)
         return resolved
     try:
         result = subprocess.run(
@@ -1032,7 +1032,7 @@ _PLUGIN_MARKER_RELPATH = "hooks/helpers/init-target-state.sh"
 
 def _plugin_root_pointer() -> Path:
     # ~/.fno (or $FNO_HOME). Computed inline - paths.py has no
-    # abilities_home() helper, and reading the env fresh each call (no cache)
+    # fno_home() helper, and reading the env fresh each call (no cache)
     # matches the session-start hook's ${FNO_HOME:-$HOME/.fno}
     # exactly, so the hook-written pointer and this reader always agree.
     home = os.environ.get("FNO_HOME")

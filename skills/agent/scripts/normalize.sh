@@ -392,11 +392,11 @@ resolve_project() {
     "$PROJECT_ROOT_RESOLVER" "$_proj" 2>/dev/null
     return 0
   fi
-  local abi_bin shebang
-  abi_bin="$(command -v fno 2>/dev/null)" || { printf 'error\tfno not on PATH (cannot resolve --project %s)\n' "$_proj"; return 0; }
+  local fno_bin shebang
+  fno_bin="$(command -v fno 2>/dev/null)" || { printf 'error\tfno not on PATH (cannot resolve --project %s)\n' "$_proj"; return 0; }
   # Strip a trailing CR: a CRLF-lined fno (WSL / git autocrlf) would leave \r on
   # the shebang and break the interpreter exec.
-  shebang="$(head -1 "$abi_bin" 2>/dev/null | sed 's/^#![[:space:]]*//' | tr -d '\r')"
+  shebang="$(head -1 "$fno_bin" 2>/dev/null | sed 's/^#![[:space:]]*//' | tr -d '\r')"
   # Same interpreter guard as resolve_from_config: only a python entrypoint can
   # import the fno package. A shell-wrapper fno means the resolver is unreachable.
   [[ -n "$shebang" && "$shebang" == *python* ]] || { printf 'error\tproject resolver unavailable (fno is not a python entrypoint)\n'; return 0; }
@@ -568,10 +568,10 @@ resolve_from_config() {
     "$DISPATCH_PROVIDER_RESOLVER" "$1" 2>/dev/null || true
     return 0
   fi
-  local abi_bin shebang
-  abi_bin="$(command -v fno 2>/dev/null)" || return 0
-  shebang="$(head -1 "$abi_bin" 2>/dev/null | sed 's/^#![[:space:]]*//')"
-  # Only a python interpreter can import the abilities package. A shell-wrapper
+  local fno_bin shebang
+  fno_bin="$(command -v fno 2>/dev/null)" || return 0
+  shebang="$(head -1 "$fno_bin" 2>/dev/null | sed 's/^#![[:space:]]*//')"
+  # Only a python interpreter can import the fno package. A shell-wrapper
   # fno (e.g. shebang "/bin/bash") or an empty shebang means the resolver is
   # unreachable from here - fall back to claude rather than running the Python
   # under the wrong interpreter.

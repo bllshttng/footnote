@@ -43,10 +43,10 @@ def test_folder_with_no_owning_node_not_counted(tmp_path: Path) -> None:
 
 def test_basename_join_ignores_absolute_root_mismatch(tmp_path: Path) -> None:
     # Graph plan_path is under a different absolute root than plans_root
-    # (abilities-vs-fno rename); basename join must still match.
+    # (fno-vs-fno rename); basename join must still match.
     _make_folder_plan(tmp_path, "renamed-root-folder")
     entries = [
-        {"id": "ab-4", "status": "ready", "plan_path": "/Users/other/abilities/plans/renamed-root-folder"}
+        {"id": "ab-4", "status": "ready", "plan_path": "/Users/other/fno/plans/renamed-root-folder"}
     ]
     owners = scan(tmp_path, entries)
     assert owners is not None

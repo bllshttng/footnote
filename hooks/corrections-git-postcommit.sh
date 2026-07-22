@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # Resolve our shared helpers. The hook is normally invoked from ~/.claude/.git/hooks/post-commit
-# which is a symlink to this file in the abilities repo; resolve through the symlink.
+# which is a symlink to this file in the fno repo; resolve through the symlink.
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || stat -f %Y "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

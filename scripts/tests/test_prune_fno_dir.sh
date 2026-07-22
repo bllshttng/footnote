@@ -24,11 +24,11 @@ fixture_dir() {
     local name="$1"
     local d
     d=$(mktemp -d)
-    mkdir -p "$d/abilities"
-    : > "$d/abilities/tasks.json"          # delete target
-    : > "$d/abilities/.DS_Store"           # delete target
-    : > "$d/abilities/settings.yaml.bak"   # archive target
-    : > "$d/abilities/graph.json"          # keep (untouched)
+    mkdir -p "$d/fno"
+    : > "$d/fno/tasks.json"          # delete target
+    : > "$d/fno/.DS_Store"           # delete target
+    : > "$d/fno/settings.yaml.bak"   # archive target
+    : > "$d/fno/graph.json"          # keep (untouched)
     echo "$d"
 }
 
@@ -44,38 +44,38 @@ if echo "$HELP_OUT" | grep -q -i "dry-run"; then pass "mentions dry-run"; else f
 # ---- T02: dry-run leaves files alone ----
 echo "T02: dry-run leaves files alone"
 F=$(fixture_dir t02)
-FNO_DIR="$F/abilities" bash "$PRUNE" >/dev/null 2>&1
+FNO_DIR="$F/fno" bash "$PRUNE" >/dev/null 2>&1
 RC=$?
 if [[ $RC -eq 0 ]]; then pass "dry-run rc=0"; else fail "dry-run rc=$RC (expected 0)"; fi
-if [[ -f "$F/abilities/tasks.json" ]]; then pass "tasks.json preserved"; else fail "tasks.json deleted by dry-run"; fi
-if [[ -f "$F/abilities/.DS_Store" ]]; then pass ".DS_Store preserved"; else fail ".DS_Store deleted by dry-run"; fi
-if [[ -f "$F/abilities/settings.yaml.bak" ]]; then pass "settings.yaml.bak preserved"; else fail "settings.yaml.bak moved by dry-run"; fi
-if [[ ! -d "$F/abilities/archive" ]]; then pass "archive dir not created in dry-run"; else fail "archive dir created in dry-run"; fi
+if [[ -f "$F/fno/tasks.json" ]]; then pass "tasks.json preserved"; else fail "tasks.json deleted by dry-run"; fi
+if [[ -f "$F/fno/.DS_Store" ]]; then pass ".DS_Store preserved"; else fail ".DS_Store deleted by dry-run"; fi
+if [[ -f "$F/fno/settings.yaml.bak" ]]; then pass "settings.yaml.bak preserved"; else fail "settings.yaml.bak moved by dry-run"; fi
+if [[ ! -d "$F/fno/archive" ]]; then pass "archive dir not created in dry-run"; else fail "archive dir created in dry-run"; fi
 rm -rf "$F"
 
 # ---- T03: --apply deletes + archives correctly ----
 echo "T03: --apply deletes + archives"
 F=$(fixture_dir t03)
-FNO_DIR="$F/abilities" bash "$PRUNE" --apply >/dev/null 2>&1
+FNO_DIR="$F/fno" bash "$PRUNE" --apply >/dev/null 2>&1
 RC=$?
 if [[ $RC -eq 0 ]]; then pass "apply rc=0"; else fail "apply rc=$RC (expected 0)"; fi
-if [[ ! -e "$F/abilities/tasks.json" ]]; then pass "tasks.json deleted"; else fail "tasks.json still present"; fi
-if [[ ! -e "$F/abilities/.DS_Store" ]]; then pass ".DS_Store deleted"; else fail ".DS_Store still present"; fi
-if [[ ! -e "$F/abilities/settings.yaml.bak" ]]; then pass "settings.yaml.bak moved"; else fail "settings.yaml.bak still in place"; fi
-if [[ -f "$F/abilities/archive/2026-04/settings.yaml.bak" ]]; then pass "settings.yaml.bak in archive"; else fail "settings.yaml.bak missing from archive"; fi
-if [[ -f "$F/abilities/graph.json" ]]; then pass "graph.json untouched"; else fail "graph.json deleted (out-of-scope!)"; fi
+if [[ ! -e "$F/fno/tasks.json" ]]; then pass "tasks.json deleted"; else fail "tasks.json still present"; fi
+if [[ ! -e "$F/fno/.DS_Store" ]]; then pass ".DS_Store deleted"; else fail ".DS_Store still present"; fi
+if [[ ! -e "$F/fno/settings.yaml.bak" ]]; then pass "settings.yaml.bak moved"; else fail "settings.yaml.bak still in place"; fi
+if [[ -f "$F/fno/archive/2026-04/settings.yaml.bak" ]]; then pass "settings.yaml.bak in archive"; else fail "settings.yaml.bak missing from archive"; fi
+if [[ -f "$F/fno/graph.json" ]]; then pass "graph.json untouched"; else fail "graph.json deleted (out-of-scope!)"; fi
 rm -rf "$F"
 
 # ---- T04: idempotent --apply re-run is a no-op success ----
 echo "T04: idempotent re-run"
 F=$(fixture_dir t04)
-FNO_DIR="$F/abilities" bash "$PRUNE" --apply >/dev/null 2>&1
+FNO_DIR="$F/fno" bash "$PRUNE" --apply >/dev/null 2>&1
 RC1=$?
-FNO_DIR="$F/abilities" bash "$PRUNE" --apply >/dev/null 2>&1
+FNO_DIR="$F/fno" bash "$PRUNE" --apply >/dev/null 2>&1
 RC2=$?
 if [[ $RC1 -eq 0 && $RC2 -eq 0 ]]; then pass "both runs rc=0"; else fail "rc1=$RC1 rc2=$RC2 (expected 0,0)"; fi
-if [[ -f "$F/abilities/archive/2026-04/settings.yaml.bak" ]]; then pass "archive intact after re-run"; else fail "archive disturbed by re-run"; fi
-if [[ -f "$F/abilities/graph.json" ]]; then pass "keep file intact after re-run"; else fail "keep file affected by re-run"; fi
+if [[ -f "$F/fno/archive/2026-04/settings.yaml.bak" ]]; then pass "archive intact after re-run"; else fail "archive disturbed by re-run"; fi
+if [[ -f "$F/fno/graph.json" ]]; then pass "keep file intact after re-run"; else fail "keep file affected by re-run"; fi
 rm -rf "$F"
 
 # ---- T05: missing FNO_DIR exits non-zero ----
@@ -87,24 +87,24 @@ if [[ $RC -ne 0 ]]; then pass "rc=$RC (expected non-zero)"; else fail "rc=0 on m
 # ---- T06: investigate items always advertised, never touched ----
 echo "T06: investigate items advertised but not touched"
 F=$(fixture_dir t06)
-mkdir -p "$F/abilities/signals"
-OUT=$(FNO_DIR="$F/abilities" bash "$PRUNE" --apply 2>&1)
+mkdir -p "$F/fno/signals"
+OUT=$(FNO_DIR="$F/fno" bash "$PRUNE" --apply 2>&1)
 if echo "$OUT" | grep -q "signals/"; then pass "signals/ listed"; else fail "signals/ missing from advisory output"; fi
 if echo "$OUT" | grep -q "INVESTIGATE"; then pass "INVESTIGATE header present"; else fail "INVESTIGATE header missing"; fi
-if [[ -d "$F/abilities/signals" ]]; then pass "signals/ untouched"; else fail "signals/ was modified"; fi
+if [[ -d "$F/fno/signals" ]]; then pass "signals/ untouched"; else fail "signals/ was modified"; fi
 rm -rf "$F"
 
 # ---- T06b: convo-signals.jsonl + evals-history.jsonl + metrics.jsonl are delete targets (capture removed) ----
 echo "T06b: convo-signals.jsonl + evals-history.jsonl + metrics.jsonl deleted on --apply"
 F=$(fixture_dir t06b)
-: > "$F/abilities/convo-signals.jsonl"
-: > "$F/abilities/evals-history.jsonl"
-: > "$F/abilities/metrics.jsonl"
-OUT=$(FNO_DIR="$F/abilities" bash "$PRUNE" --apply 2>&1)
+: > "$F/fno/convo-signals.jsonl"
+: > "$F/fno/evals-history.jsonl"
+: > "$F/fno/metrics.jsonl"
+OUT=$(FNO_DIR="$F/fno" bash "$PRUNE" --apply 2>&1)
 if echo "$OUT" | grep -q "convo-signals.jsonl"; then pass "convo-signals.jsonl listed as delete candidate"; else fail "convo-signals.jsonl missing from delete output"; fi
-if [[ ! -e "$F/abilities/convo-signals.jsonl" ]]; then pass "convo-signals.jsonl deleted"; else fail "convo-signals.jsonl still present"; fi
-if [[ ! -e "$F/abilities/evals-history.jsonl" ]]; then pass "evals-history.jsonl deleted"; else fail "evals-history.jsonl still present"; fi
-if [[ ! -e "$F/abilities/metrics.jsonl" ]]; then pass "metrics.jsonl deleted"; else fail "metrics.jsonl still present"; fi
+if [[ ! -e "$F/fno/convo-signals.jsonl" ]]; then pass "convo-signals.jsonl deleted"; else fail "convo-signals.jsonl still present"; fi
+if [[ ! -e "$F/fno/evals-history.jsonl" ]]; then pass "evals-history.jsonl deleted"; else fail "evals-history.jsonl still present"; fi
+if [[ ! -e "$F/fno/metrics.jsonl" ]]; then pass "metrics.jsonl deleted"; else fail "metrics.jsonl still present"; fi
 rm -rf "$F"
 
 # ---- T07: unknown flag exits with usage error ----
@@ -117,28 +117,28 @@ if echo "$ERR" | grep -q -i "unknown argument"; then pass "error message helpful
 # ---- T08: archive collision with identical bytes -> reconciles silently ----
 echo "T08: archive collision (identical) reconciles"
 F=$(fixture_dir t08)
-mkdir -p "$F/abilities/archive/2026-04"
+mkdir -p "$F/fno/archive/2026-04"
 # pre-seed dest with identical bytes to source
-echo "same-bytes" > "$F/abilities/settings.yaml.bak"
-echo "same-bytes" > "$F/abilities/archive/2026-04/settings.yaml.bak"
-FNO_DIR="$F/abilities" bash "$PRUNE" --apply >/dev/null 2>&1
+echo "same-bytes" > "$F/fno/settings.yaml.bak"
+echo "same-bytes" > "$F/fno/archive/2026-04/settings.yaml.bak"
+FNO_DIR="$F/fno" bash "$PRUNE" --apply >/dev/null 2>&1
 RC=$?
 if [[ $RC -eq 0 ]]; then pass "rc=0 on identical-bytes reconciliation"; else fail "rc=$RC (expected 0)"; fi
-if [[ ! -e "$F/abilities/settings.yaml.bak" ]]; then pass "source removed after reconciliation"; else fail "source still present (idempotency leak)"; fi
-if [[ -f "$F/abilities/archive/2026-04/settings.yaml.bak" ]]; then pass "dest preserved"; else fail "dest removed unexpectedly"; fi
+if [[ ! -e "$F/fno/settings.yaml.bak" ]]; then pass "source removed after reconciliation"; else fail "source still present (idempotency leak)"; fi
+if [[ -f "$F/fno/archive/2026-04/settings.yaml.bak" ]]; then pass "dest preserved"; else fail "dest removed unexpectedly"; fi
 rm -rf "$F"
 
 # ---- T09: archive collision with different bytes -> conflict, rc!=0, both preserved ----
 echo "T09: archive collision (divergent) flags conflict"
 F=$(fixture_dir t09)
-mkdir -p "$F/abilities/archive/2026-04"
-echo "new-content" > "$F/abilities/settings.yaml.bak"
-echo "old-content" > "$F/abilities/archive/2026-04/settings.yaml.bak"
-FNO_DIR="$F/abilities" bash "$PRUNE" --apply >"$F/out" 2>"$F/err"
+mkdir -p "$F/fno/archive/2026-04"
+echo "new-content" > "$F/fno/settings.yaml.bak"
+echo "old-content" > "$F/fno/archive/2026-04/settings.yaml.bak"
+FNO_DIR="$F/fno" bash "$PRUNE" --apply >"$F/out" 2>"$F/err"
 RC=$?
 if [[ $RC -eq 3 ]]; then pass "rc=3 on conflict"; else fail "rc=$RC (expected 3)"; fi
-if [[ -f "$F/abilities/settings.yaml.bak" ]]; then pass "source preserved"; else fail "source destroyed during conflict"; fi
-if [[ -f "$F/abilities/archive/2026-04/settings.yaml.bak" ]]; then pass "dest preserved"; else fail "dest destroyed during conflict"; fi
+if [[ -f "$F/fno/settings.yaml.bak" ]]; then pass "source preserved"; else fail "source destroyed during conflict"; fi
+if [[ -f "$F/fno/archive/2026-04/settings.yaml.bak" ]]; then pass "dest preserved"; else fail "dest destroyed during conflict"; fi
 if grep -q "CONFLICT" "$F/err"; then pass "conflict surfaced on stderr"; else fail "conflict not surfaced"; fi
 rm -rf "$F"
 

@@ -192,7 +192,7 @@ def test_missing_requires_block_fails(tmp_path):
     assert "does not declare 'fno'" in result.stderr
 
 
-def test_missing_abi_in_requires_fails(tmp_path):
+def test_missing_fno_in_requires_fails(tmp_path):
     """A requires.binaries: block that lists other binaries but not fno
     fails the lint."""
     skill_md = textwrap.dedent(
@@ -214,7 +214,7 @@ def test_missing_abi_in_requires_fails(tmp_path):
     assert "does not declare 'fno'" in result.stderr
 
 
-def test_requires_with_abi_passes(tmp_path):
+def test_requires_with_fno_passes(tmp_path):
     """The exact format target/megawalk/megatron use passes the lint."""
     _make_skill(tmp_path, "target", _CLEAN_SKILL_FRONTMATTER)
     result = _run(["bash", str(LINT), "--root", str(tmp_path)])

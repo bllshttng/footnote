@@ -192,7 +192,7 @@ def test_cmd_ask_rejects_from_name_too_long(
     assert "from-name must be <=128 chars" in err
 
 
-def test_cmd_ask_from_name_default_is_abilities(
+def test_cmd_ask_from_name_default_is_fno(
     tmp_path: Path, monkeypatch
 ) -> None:
     """AC2-EDGE: default --from-name is "fno" — passthrough to dispatch."""

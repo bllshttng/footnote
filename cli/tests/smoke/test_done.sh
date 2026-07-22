@@ -25,7 +25,7 @@ cat > "$TMP/.fno/graph.json" <<'JSON'
 JSON
 
 export HOME="$TMP"
-export FNO_GRAPH_JSON_LOCK=/tmp/abilities-smoke-done.lock
+export FNO_GRAPH_JSON_LOCK=/tmp/fno-smoke-done.lock
 
 # Closing with --pr now demands gh-resolved MERGED evidence, and CI has no
 # authenticated gh. Stub one that reports merged so the cases below keep

@@ -64,9 +64,9 @@ fi
 # Resolve TWO independent roots. The old code resolved a single
 # REPO_ROOT_RESOLVED from the SCRIPT's own dir (git -C SCRIPT_DIR) and used it
 # for BOTH set-gate.sh AND the gate artifact + target-state.md. From a worktree
-# those are different trees: the script lives in the abilities plugin, the state
+# those are different trees: the script lives in the fno plugin, the state
 # lives in the target project. The conflation wrote the memory gate artifact
-# into the abilities repo and flipped (or failed to flip) the wrong/absent
+# into the fno repo and flipped (or failed to flip) the wrong/absent
 # state file, so memory_pass_passed silently never landed for the running
 # session. Split them:
 #   - PLUGIN_ROOT  -> where set-gate.sh lives (the script's own tree).

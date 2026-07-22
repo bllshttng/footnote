@@ -1330,7 +1330,7 @@ pub fn maybe_run_gemini_ask(
     let from_name = params
         .get("from_name")
         .and_then(|v| v.as_str())
-        .unwrap_or("abilities");
+        .unwrap_or("fno");
     // cv-16eb2200: resolve_ask_cwd warns at the canonicalize-fallback point.
     let cwd = crate::subprocess_ask::resolve_ask_cwd(params.get("cwd").and_then(|v| v.as_str()));
     let timeout = params

@@ -215,7 +215,7 @@
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-abi-agent-whoami.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-fno-agent-whoami.sh"
           },
           {
             "type": "command",

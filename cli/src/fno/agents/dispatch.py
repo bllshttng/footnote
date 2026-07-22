@@ -71,7 +71,7 @@ DispatchKind = Literal["create", "followup"]
 # - Test code can read it cheaply for assertion (or ignore it; helpers
 #   that don't observe the contextvar fall back to legacy ``emit``).
 _DISPATCH_CTX: contextvars.ContextVar[Optional[EventContext]] = contextvars.ContextVar(
-    "abi_dispatch_ctx", default=None
+    "fno_dispatch_ctx", default=None
 )
 
 
@@ -737,7 +737,7 @@ def _stamp_status(
 
 
 def _derive_log_path(name: str) -> Path:
-    """Stable abi-side log path for `fno agents logs <name>` (US3 plumbing)."""
+    """Stable fno-side log path for `fno agents logs <name>` (US3 plumbing)."""
     return paths.state_dir() / "agents" / "logs" / f"{name}.log"
 
 
@@ -3460,7 +3460,7 @@ def attach_agent(name: str) -> AttachResult:
     detaches. fno's exit code mirrors claude's.
 
     codex / gemini: exit 13 with a message pointing at Phase 6 (the
-    future abi-owned supervisor) as the planned landing for cross-
+    future fno-owned supervisor) as the planned landing for cross-
     provider attach (Locked Decision 13).
 
     NO per-agent flock is acquired (Locked Decision 8b): attach holds

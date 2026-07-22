@@ -23,7 +23,7 @@
 set -uo pipefail
 
 # Resolve the schema path with a fallback chain so downstream consumer
-# projects (anywhere the abilities scripts are invoked from outside this
+# projects (anywhere the fno scripts are invoked from outside this
 # plugin's repo) can still find the canonical schema that ships with the
 # plugin. Precedence:
 #   1. EVENTS_SCHEMA_PATH env var (explicit override)

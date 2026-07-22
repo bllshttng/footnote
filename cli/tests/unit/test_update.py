@@ -40,21 +40,21 @@ def _write_pyproject(directory: Path, name: str = "fno") -> None:
     )
 
 
-def test_looks_like_abi_source_true_for_abilities_pyproject(tmp_path: Path) -> None:
+def test_looks_like_fno_source_true_for_fno_pyproject(tmp_path: Path) -> None:
     _write_pyproject(tmp_path / "cli")
-    assert update._looks_like_abi_source(tmp_path / "cli") is True
+    assert update._looks_like_fno_source(tmp_path / "cli") is True
 
 
-def test_looks_like_abi_source_false_for_other_pyproject(tmp_path: Path) -> None:
+def test_looks_like_fno_source_false_for_other_pyproject(tmp_path: Path) -> None:
     _write_pyproject(tmp_path / "cli", name="something-else")
-    assert update._looks_like_abi_source(tmp_path / "cli") is False
+    assert update._looks_like_fno_source(tmp_path / "cli") is False
 
 
-def test_looks_like_abi_source_false_when_missing(tmp_path: Path) -> None:
-    assert update._looks_like_abi_source(tmp_path / "nonexistent") is False
+def test_looks_like_fno_source_false_when_missing(tmp_path: Path) -> None:
+    assert update._looks_like_fno_source(tmp_path / "nonexistent") is False
 
 
-def test_looks_like_abi_source_false_when_name_outside_project_table(
+def test_looks_like_fno_source_false_when_name_outside_project_table(
     tmp_path: Path,
 ) -> None:
     """Guard against false-match: `name = "fno"` outside [project] must not count."""
@@ -63,15 +63,15 @@ def test_looks_like_abi_source_false_when_name_outside_project_table(
         '[tool.example]\nname = "fno"\n',
         encoding="utf-8",
     )
-    assert update._looks_like_abi_source(tmp_path) is False
+    assert update._looks_like_fno_source(tmp_path) is False
 
 
-def test_looks_like_abi_source_false_on_malformed_toml(tmp_path: Path) -> None:
+def test_looks_like_fno_source_false_on_malformed_toml(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "this is not [valid toml = at all",
         encoding="utf-8",
     )
-    assert update._looks_like_abi_source(tmp_path) is False
+    assert update._looks_like_fno_source(tmp_path) is False
 
 
 def test_discover_source_with_override_validates(tmp_path: Path) -> None:
@@ -192,9 +192,9 @@ def test_target_in_progress_returns_true_on_oserror(
     # Set up a real target-state.md path that raises PermissionError on read
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    abilities_dir = repo_root / ".fno"
-    abilities_dir.mkdir()
-    state_file = abilities_dir / "target-state.md"
+    fno_dir = repo_root / ".fno"
+    fno_dir.mkdir()
+    state_file = fno_dir / "target-state.md"
     state_file.write_text("---\nstatus: IN_PROGRESS\n---\n")
     state_file.chmod(0o000)  # unreadable
 
@@ -470,8 +470,8 @@ def _init_git_repo_with_crate(directory: Path) -> tuple[str, str]:
     return head_rev, crate_rev
 
 
-def _make_abi_source(directory: Path) -> Path:
-    """Create a minimal abi-source directory with a valid pyproject.toml."""
+def _make_fno_source(directory: Path) -> Path:
+    """Create a minimal fno-source directory with a valid pyproject.toml."""
     cli_dir = directory / "cli"
     cli_dir.mkdir(parents=True, exist_ok=True)
     (cli_dir / "pyproject.toml").write_text(
@@ -1026,7 +1026,7 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
     """AC1-HP CLI: runner.invoke with --source fires rust leg before execvp."""
     repo = tmp_path / "repo"
     _head, crate_rev = _init_git_repo_with_crate(repo)
-    cli_src = _make_abi_source(repo)
+    cli_src = _make_fno_source(repo)
     marker_file = tmp_path / "installed-rust-rev"
     monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker_file)
     monkeypatch.setattr(update, "_INSTALLED_REV_FILE", tmp_path / "installed-rev")
@@ -1153,7 +1153,7 @@ def test_ac1_err_cli_execvp_still_called_after_cargo_failure(
     """AC1-ERR CLI: cargo failure does NOT abort the python install leg."""
     repo = tmp_path / "repo"
     _head, crate_rev = _init_git_repo_with_crate(repo)
-    cli_src = _make_abi_source(repo)
+    cli_src = _make_fno_source(repo)
     monkeypatch.setattr(update, "_RUST_MARKER_FILE", tmp_path / "installed-rust-rev")
     monkeypatch.setattr(update, "_INSTALLED_REV_FILE", tmp_path / "installed-rev")
     monkeypatch.setattr(update, "_CACHE_FILE", tmp_path / "source-path")
@@ -1290,7 +1290,7 @@ def test_ac1_edge_no_rust_flag_skips_refresh(
     """AC1-EDGE (c): --no-rust -> _refresh_rust_bins never called."""
     repo = tmp_path / "repo"
     _init_git_repo_with_crate(repo)
-    cli_src = _make_abi_source(repo)
+    cli_src = _make_fno_source(repo)
     monkeypatch.setattr(update, "_RUST_MARKER_FILE", tmp_path / "installed-rust-rev")
     monkeypatch.setattr(update, "_INSTALLED_REV_FILE", tmp_path / "installed-rev")
     monkeypatch.setattr(update, "_CACHE_FILE", tmp_path / "source-path")
@@ -1316,7 +1316,7 @@ def test_ac1_edge_dry_run_shows_both_would_run_lines(
     """AC1-EDGE (d): --dry-run prints both 'Would run:' lines, executes neither."""
     repo = tmp_path / "repo"
     _head, crate_rev = _init_git_repo_with_crate(repo)
-    cli_src = _make_abi_source(repo)
+    cli_src = _make_fno_source(repo)
     marker_file = tmp_path / "installed-rust-rev"
     monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker_file)
     monkeypatch.setattr(update, "_INSTALLED_REV_FILE", tmp_path / "installed-rev")
@@ -1367,7 +1367,7 @@ def test_ac1_edge_rust_and_no_rust_together_exits_2(
     """AC1-EDGE (e): --rust --no-rust together -> exit code 2."""
     repo = tmp_path / "repo"
     _init_git_repo_with_crate(repo)
-    cli_src = _make_abi_source(repo)
+    cli_src = _make_fno_source(repo)
     monkeypatch.setattr(update, "_target_in_progress", lambda: False)
 
     result = runner.invoke(app, ["update", "--source", str(cli_src), "--rust", "--no-rust"])

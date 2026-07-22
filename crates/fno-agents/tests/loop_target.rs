@@ -27,12 +27,12 @@ use tempfile::TempDir;
 
 /// Write a minimal target-state.md with the given fields.
 fn write_manifest(dir: &Path, session_id: &str, input: &str, plan_path: &str) {
-    let abilities_dir = dir.join(".fno");
-    fs::create_dir_all(&abilities_dir).unwrap();
+    let fno_dir = dir.join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
     let content = format!(
         "---\nsession_id: {session_id}\ninput: \"{input}\"\nplan_path: \"{plan_path}\"\n---\n"
     );
-    fs::write(abilities_dir.join("target-state.md"), content).unwrap();
+    fs::write(fno_dir.join("target-state.md"), content).unwrap();
 }
 
 /// Write a stub driver lib at `lib_dir/driver-<name>.sh`.
@@ -325,8 +325,8 @@ fn driver_default_max_sources_lib() {
 fn e2e_binary_happy_path() {
     let dir = TempDir::new().unwrap();
     let lib_dir = dir.path().join("lib");
-    let abilities_dir = dir.path().join(".fno");
-    let events_file = abilities_dir.join("events.jsonl");
+    let fno_dir = dir.path().join(".fno");
+    let events_file = fno_dir.join("events.jsonl");
 
     // driver_invoke writes a DonePRGreen termination event then exits 0.
     let events_path = events_file.display().to_string();
@@ -437,8 +437,8 @@ fn e2e_binary_iteration_ceiling() {
     );
 
     // Journal should have 2 node_failed events and a loop_terminated with Budget.
-    let abilities_dir = dir.path().join(".fno");
-    let events_file = abilities_dir.join("events.jsonl");
+    let fno_dir = dir.path().join(".fno");
+    let events_file = fno_dir.join("events.jsonl");
     let events = read_jsonl(&events_file);
 
     let failed_count = events
@@ -583,8 +583,8 @@ exit 0"#,
 fn e2e_resume_no_duplicate_session() {
     let dir = TempDir::new().unwrap();
     let lib_dir = dir.path().join("lib");
-    let abilities_dir = dir.path().join(".fno");
-    let events_file = abilities_dir.join("events.jsonl");
+    let fno_dir = dir.path().join(".fno");
+    let events_file = fno_dir.join("events.jsonl");
     let marker_file = dir.path().join("dispatch_marker.txt");
 
     // Seed a termination event BEFORE running the loop.
@@ -882,12 +882,12 @@ fn preflight_missing_driver_invoke_rejected() {
 #[test]
 fn manifest_missing_session_id_clean_error() {
     let dir = TempDir::new().unwrap();
-    let abilities_dir = dir.path().join(".fno");
-    fs::create_dir_all(&abilities_dir).unwrap();
+    let fno_dir = dir.path().join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
 
     // Write a manifest with no session_id field.
     fs::write(
-        abilities_dir.join("target-state.md"),
+        fno_dir.join("target-state.md"),
         "---\ninput: \"something\"\nplan_path: \"\"\n---\n",
     )
     .unwrap();
@@ -942,9 +942,9 @@ fn env_contract_real_driver_claude_code() {
     }
 
     let dir = TempDir::new().unwrap();
-    let abilities_dir = dir.path().join(".fno");
-    fs::create_dir_all(&abilities_dir).unwrap();
-    let events_file = abilities_dir.join("events.jsonl");
+    let fno_dir = dir.path().join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
+    let events_file = fno_dir.join("events.jsonl");
     let argv_file = dir.path().join("argv_dump.txt");
     let env_file = dir.path().join("env_dump.txt");
 

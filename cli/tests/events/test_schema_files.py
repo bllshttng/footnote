@@ -14,7 +14,7 @@ EVENTS_V3 = SCHEMAS_DIR / "events-v3.json"
 STATUS_V1 = SCHEMAS_DIR / "status-v1.json"
 
 PYTHON_SOURCES = [
-    "target", "megawalk", "megatron", "abi-loop",
+    "target", "megawalk", "megatron", "fno-loop",
     "hook", "subagent", "migration", "test", "backlog",
 ]
 

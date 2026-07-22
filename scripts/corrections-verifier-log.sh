@@ -3,7 +3,7 @@
 # to record a correction event.
 #
 # Designed to be called by verifier scripts in production repos (your project,
-# abilities, etc.) when they block a commit. Appends exactly one structured
+# fno, etc.) when they block a commit. Appends exactly one structured
 # line to ~/.fno/corrections.log with locking.
 #
 # Usage:

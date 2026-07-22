@@ -206,7 +206,7 @@ rm -rf "$_TMP3"
 
 # ── T4/T5: write-once via Python CLI ────────────────────────────────────────
 if [[ -z "$PYTHON_CLI" ]]; then
-  skip "T4: Python CLI not available (no cli/.venv/bin/python with abilities importable)"
+  skip "T4: Python CLI not available (no cli/.venv/bin/python with fno importable)"
   skip "T5: Python CLI not available"
 else
   # T4: writing 'status' must be refused with exit 5

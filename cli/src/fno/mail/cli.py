@@ -341,7 +341,7 @@ def _collect_status(project: str, repo_root: Path) -> StatusSnapshot:
     unread = sum(1 for h in threads if h.is_unread)
     inbox = inbox_dir_for(project)
 
-    log_path = repo_root / ".fno" / "abi-watch.log"
+    log_path = repo_root / ".fno" / "fno-watch.log"
     return StatusSnapshot(
         daemon=_daemon_loaded(project).value,
         inbox_path=str(inbox),

@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
-# residual-check.sh -- CI guard for the abilities->fno rename (AC4-FR).
+# residual-check.sh -- permanent zero-tolerance gate for legacy `abilities`/`abi`
+# branding. The one-release back-compat window is closed: no compat shims, no
+# migration exemptions. Any structural old-name pattern fails the build.
 #
-# Fails the build if any STRUCTURAL (technical) old-name pattern survives the
-# sweep. This is the "no half-rename ships" gate. It checks only the anchored,
-# build-critical patterns -- NOT prose uses of the English word "abilities",
-# which are Tier-2 brand copy reviewed by hand.
-#
-# Intentional references to the old name (migration docs, the compat shims that
-# READ the old env vars for one-release fallback) are exempted two ways:
-#   1. files listed in KEEP_FILES below
-#   2. any single line tagged with the marker `fno-rename-keep`
+# This file itself names the forbidden patterns (that is what a guard does), so
+# it is self-exempt; third-party lockfiles (`abi3` wheel tags, the `hermit-abi`
+# crate) are unrelated packaging vocabulary and are exempt too.
 #
 # Exit 0 = clean; exit 1 = residual found (prints offenders); exit 2 = env error.
 set -euo pipefail
@@ -17,22 +13,16 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)" || { echo "residual-check: not a git repo" >&2; exit 2; }
 cd "$ROOT"
 
-# Files allowed to mention the old names (the rename tooling + compat shims).
+# The only allowed mentions: this guard's own pattern list, third-party
+# packaging tokens in lockfiles (abi3 wheel tags, hermit-abi crate), and the
+# loc-ratchet trajectory - an append-only audit ledger whose past entries record
+# the original abilities->fno rename verbatim. Rewriting those reasons would
+# falsify history AND break the ratchet checker, which keys each entry's identity
+# on its reason (a modification reads as a removal). Old names there are history.
 KEEP_FILES=(
   ':!scripts/rename/**'
   ':!*.lock'
   ':!**/*.lock'
-  ':!cli/src/fno/_compat_env.py'
-  ':!cli/tests/unit/test_compat_env.py'
-  ':!crates/fno-agents/src/compat_env.rs'
-  ':!CHANGELOG.md'
-  ':!**/CHANGELOG.md'
-  # .gitignore intentionally keeps the legacy `.abilities/` ignore through the
-  # one-release migration window (pattern lines can't carry an inline marker).
-  ':!.gitignore'
-  # The loc-ratchet trajectory is an append-only ledger whose past entries record
-  # the old `abi-agents`/`abilities.` names verbatim (and the rename entry itself
-  # names both old and new paths). It is exempt from the rename guard.
   ':!scripts/ci/loc-ratchet-trajectory.yaml'
 )
 
@@ -69,10 +59,8 @@ done
 if [[ $fail -ne 0 ]]; then
   cat >&2 <<'EOF'
 
-A structural old-name pattern survived the rename. Re-run the sweep:
-    scripts/rename/rename-to-fno.sh
-or, for an intentional reference (migration doc / compat shim), add the line
-marker `fno-rename-keep` or list the file in residual-check.sh KEEP_FILES.
+A legacy abilities/abi name reached the tree. Rename it to the fno equivalent.
+There is no back-compat exemption: the migration window is closed.
 EOF
   exit 1
 fi

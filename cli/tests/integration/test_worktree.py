@@ -53,9 +53,9 @@ def tmp_git_repo(tmp_path: Path, monkeypatch):
         cwd=tmp_path, check=True, capture_output=True
     )
     # Declare a stable project id so worktree path resolution is deterministic.
-    abilities_dir = tmp_path / ".fno"
-    abilities_dir.mkdir(exist_ok=True)
-    (abilities_dir / "config.toml").write_text(
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir(exist_ok=True)
+    (fno_dir / "config.toml").write_text(
         f'[project]\nid = "{_PROJECT_ID}"\n', encoding="utf-8",
     )
     return tmp_path
@@ -105,8 +105,8 @@ def test_ac1_hp_worktree_create(tmp_git_repo):
         assert branch_result.stdout.strip() == f"feature/{name}"
 
         # Check .fno symlink
-        abilities_link = wt_path / ".fno"
-        assert abilities_link.is_symlink(), ".fno should be a symlink in the worktree"
+        fno_link = wt_path / ".fno"
+        assert fno_link.is_symlink(), ".fno should be a symlink in the worktree"
 
         assert result["worktree_path"] == str(wt_path)
         assert result["branch"] == f"feature/{name}"

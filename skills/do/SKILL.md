@@ -26,7 +26,7 @@ This is a **router**, not a monolith. It parses the first argument token as a mo
 
 ## Step 0: Location preflight (before any write)
 
-`/do` writes code. Before resolving the mode, consult the shared location verdict (the SAME one `/target` and `/fix` use, so the canonical-main rule never drifts). Resolve the plugin root portably so the helper is found on non-Claude surfaces too (where `CLAUDE_PLUGIN_ROOT` is unset and the project checkout is NOT the abilities plugin): try `CLAUDE_PLUGIN_ROOT`, then `CODEX_PLUGIN_ROOT`, then the persisted `~/.fno/plugin-root` pointer (written by `session-start.sh`), then the git root.
+`/do` writes code. Before resolving the mode, consult the shared location verdict (the SAME one `/target` and `/fix` use, so the canonical-main rule never drifts). Resolve the plugin root portably so the helper is found on non-Claude surfaces too (where `CLAUDE_PLUGIN_ROOT` is unset and the project checkout is NOT the fno plugin): try `CLAUDE_PLUGIN_ROOT`, then `CODEX_PLUGIN_ROOT`, then the persisted `~/.fno/plugin-root` pointer (written by `session-start.sh`), then the git root.
 
 ```bash
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/plugin-root" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null)}}"

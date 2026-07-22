@@ -32,7 +32,7 @@ def short_home(tmp_path: Path):
     ``tmp_path`` is well past it (~150 chars). Allocate the test home
     under ``/tmp`` so the sidecar socket fits.
     """
-    home = Path(tempfile.mkdtemp(prefix="abi-mcp-", dir="/tmp"))
+    home = Path(tempfile.mkdtemp(prefix="fno-mcp-", dir="/tmp"))
     try:
         yield home
     finally:

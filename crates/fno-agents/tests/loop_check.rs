@@ -1616,7 +1616,7 @@ fn corrupt_manifest_allows_exit() {
 fn events_appended_to_both_project_and_global() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
-    let global_dir = tmp.path().join("global_abilities");
+    let global_dir = tmp.path().join("global_fno");
     fs::create_dir_all(cwd.join(".fno")).unwrap();
     isolate_settings(cwd);
     fs::create_dir_all(&global_dir).unwrap();

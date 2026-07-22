@@ -1,5 +1,5 @@
 {
-  "binary": "~/.local/bin/abi",
+  "binary": "~/.local/bin/fno",
   "baseline_ms": 225.0,
   "target_ms": 158.0,
   "stats": {

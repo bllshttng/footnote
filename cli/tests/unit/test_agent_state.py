@@ -29,23 +29,23 @@ def _build_workspace(tmp_path: Path, *, target: bool = False, walker: bool = Fal
                     malformed_target: bool = False) -> Path:
     """Materialize a fake project_root with selected state layers present."""
     project = tmp_path / "project"
-    abilities_dir = project / ".fno"
-    abilities_dir.mkdir(parents=True)
+    fno_dir = project / ".fno"
+    fno_dir.mkdir(parents=True)
 
     if target and not malformed_target:
-        (abilities_dir / "target-state.md").write_text(
+        (fno_dir / "target-state.md").write_text(
             (FIXTURES / "target-state.md").read_text()
         )
     if malformed_target:
-        (abilities_dir / "target-state.md").write_text(
+        (fno_dir / "target-state.md").write_text(
             (FIXTURES / "malformed-state.md").read_text()
         )
     if walker:
-        (abilities_dir / "megawalk-state.md").write_text(
+        (fno_dir / "megawalk-state.md").write_text(
             (FIXTURES / "megawalk-state.md").read_text()
         )
     if session:
-        (abilities_dir / "session-state.md").write_text(
+        (fno_dir / "session-state.md").write_text(
             (FIXTURES / "session-state-think.md").read_text()
         )
     if fleet:
@@ -142,7 +142,7 @@ def test_ac6_edge_non_git_project_falls_back_to_cwd(tmp_path, monkeypatch):
     assert any("not a git repo" in w for w in ctx.warnings)
 
 
-def test_ac7_edge_empty_abilities_dir_degrades_cleanly(tmp_path):
+def test_ac7_edge_empty_fno_dir_degrades_cleanly(tmp_path):
     """AC7-EDGE: no .fno/ at all -> all layers None, no warnings, no errors."""
     project = tmp_path / "empty_project"
     project.mkdir()

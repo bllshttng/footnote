@@ -9,7 +9,7 @@ Tests cover:
 - Atomic write uses tmp + rename (not truncate)
 
 An autouse fixture pins FNO_REPO_ROOT to tmp_path
-(feedback_abi_repo_root_leaks_between_tests memory entry).
+(feedback_fno_repo_root_leaks_between_tests memory entry).
 """
 from __future__ import annotations
 

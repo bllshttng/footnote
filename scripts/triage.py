@@ -26,7 +26,7 @@ if _cli_src.is_dir() and str(_cli_src) not in sys.path:
     sys.path.insert(0, str(_cli_src))
 
 
-def _abi_on_path() -> bool:
+def _fno_on_path() -> bool:
     # Check for `fno-py` (the Python CLI console script), matching what `_forward`
     # actually calls - the mux binary owns `fno`, and `fno-py` is what runs the
     # `backlog triage` verb.
@@ -44,7 +44,7 @@ def _abi_on_path() -> bool:
 
 def _forward(argv: list[str]) -> int:
     """Try installed CLI first; fall back to in-repo import; error otherwise."""
-    if _abi_on_path():
+    if _fno_on_path():
         return subprocess.call(["fno-py", "backlog", "triage", *argv])
 
     try:

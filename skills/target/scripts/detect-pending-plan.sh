@@ -213,7 +213,7 @@ cmd_consume() {
         exit 3
       fi
       # transient/unknown: proceed under the mkdir lock; log for observability.
-      _log_event "$sd" "plan_mode_claim_skipped" "abi_acquire_rc_${rc}"
+      _log_event "$sd" "plan_mode_claim_skipped" "fno_acquire_rc_${rc}"
     fi
   fi
 

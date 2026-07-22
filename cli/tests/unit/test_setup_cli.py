@@ -63,13 +63,13 @@ def test_migrate_paths_cmd_passes_state_dir_to_run_migration(
     Strategy: configure a custom state_dir, invoke migrate_paths_cmd via
     typer CliRunner, intercept run_migration, verify settings_root kwarg.
     """
-    custom_state = tmp_path / "custom-abi-e"
+    custom_state = tmp_path / "custom-fno-e"
     custom_state.mkdir()
 
     # Write settings pointing to custom state_dir
-    abilities_dir = tmp_path / ".fno"
-    abilities_dir.mkdir()
-    settings_file = abilities_dir / "settings.yaml"
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir()
+    settings_file = fno_dir / "settings.yaml"
     settings_file.write_text(
         f"schema_version: 1\nconfig:\n  state_dir: '{custom_state}'\n",
         encoding="utf-8",

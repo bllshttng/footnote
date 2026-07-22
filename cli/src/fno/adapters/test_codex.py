@@ -193,7 +193,7 @@ def test_spawn_worker_os_error_surfaces_as_spawn_failed(monkeypatch):
 def test_create_worktree_delegates_to_shared(tmp_path, monkeypatch):
     """create_worktree on the codex adapter calls _shared.create_worktree."""
     monkeypatch.chdir(tmp_path)
-    expected_path = str(tmp_path / ".fno" / "worktrees" / "abi-x")
+    expected_path = str(tmp_path / ".fno" / "worktrees" / "fno-x")
     sentinel = {
         "worktree_path": expected_path,
         "branch": "feature/x",

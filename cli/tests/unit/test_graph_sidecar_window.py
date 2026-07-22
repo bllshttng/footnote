@@ -79,7 +79,9 @@ def test_ac2edge_mismatch_retries_are_bounded(tmp_path, monkeypatch):
     with pytest.raises(GraphCorruptionError):
         load_graph(g)
     # A bounded number of retries -- never an unbounded wait-until-consistent.
-    assert 1 <= sleeps["n"] <= 10
+    # Bound by the ceiling itself (it sleeps between attempts, so at most
+    # _RETRY_ATTEMPTS - 1 times) rather than a magic number that drifts.
+    assert 1 <= sleeps["n"] <= load_mod._RETRY_ATTEMPTS - 1
 
 
 # --- AC4-EDGE (Errors): a broken sidecar is not graph corruption ---

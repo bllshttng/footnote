@@ -716,18 +716,22 @@ MemAvailable:    8000000 kB\n";
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("abi-gate-qos-{}", std::process::id()));
-        let abil = dir.join(".fno");
-        std::fs::create_dir_all(&abil).unwrap();
+        let dir = std::env::temp_dir().join(format!("fno-gate-qos-{}", std::process::id()));
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
 
-        std::fs::write(abil.join("config.toml"), "[agents]\nworker_qos = \"off\"\n").unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nworker_qos = \"off\"\n",
+        )
+        .unwrap();
         // `sh` resolves on every CI platform (a non-resolving argv[0] is
         // deliberately left unwrapped so NotFound/127 semantics survive).
         let argv = vec!["sh".to_string(), "-c".to_string(), "true".to_string()];
         assert_eq!(qos_wrap(&dir, argv.clone()), argv, "off = identity");
 
         std::fs::write(
-            abil.join("config.toml"),
+            fnodir.join("config.toml"),
             "[agents]\nworker_qos = \"utility\"\n",
         )
         .unwrap();

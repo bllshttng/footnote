@@ -16,7 +16,7 @@ from fno.graph import maintain as m
 
 
 WS = {
-    "fno": "/home/u/code/abilities",
+    "fno": "/home/u/code/fno",
     "etl": "/home/u/code/etl",
 }
 
@@ -32,21 +32,21 @@ def _n(node_id: str, **over) -> dict:
 
 def test_rescope_project_null_cwd_maps_to_project():
     fixes = m.detect_rescope_fixes(
-        [_n("ab-1", project=None, cwd="/home/u/code/abilities")], WS
+        [_n("ab-1", project=None, cwd="/home/u/code/fno")], WS
     )
     assert len(fixes) == 1
     assert fixes[0].new_project == "fno"
-    assert fixes[0].new_cwd == "/home/u/code/abilities"
+    assert fixes[0].new_cwd == "/home/u/code/fno"
 
 
 def test_rescope_worktree_cwd_with_correct_project_fixes_cwd():
     fixes = m.detect_rescope_fixes(
-        [_n("ab-2", project="fno", cwd="/home/u/conductor/workspaces/abilities/foo")],
+        [_n("ab-2", project="fno", cwd="/home/u/conductor/workspaces/fno/foo")],
         WS,
     )
     assert len(fixes) == 1
     assert fixes[0].new_project == "fno"
-    assert fixes[0].new_cwd == "/home/u/code/abilities"
+    assert fixes[0].new_cwd == "/home/u/code/fno"
 
 
 def test_rescope_unknown_project_name_cwd_maps_elsewhere():
@@ -99,7 +99,7 @@ def test_worktree_repo_hint_custom_base_unset_declines(monkeypatch):
 
 def test_rescope_correct_node_is_noop():
     fixes = m.detect_rescope_fixes(
-        [_n("ab-5", project="fno", cwd="/home/u/code/abilities")], WS
+        [_n("ab-5", project="fno", cwd="/home/u/code/fno")], WS
     )
     assert fixes == []
 
@@ -124,7 +124,7 @@ def test_is_temp_cwd_variants():
     assert m.is_temp_cwd("/private/var/folders/aa/bb/T/fno-test-home-xyz")
     assert m.is_temp_cwd("/Users/u/x/pytest-of-u/pytest-12")
     # Not a leak: a real cwd.
-    assert not m.is_temp_cwd("/home/u/code/abilities")
+    assert not m.is_temp_cwd("/home/u/code/fno")
     assert not m.is_temp_cwd(None)
     assert not m.is_temp_cwd("")
     # A legitimate checkout / scratch worktree under a bare temp ROOT (no
@@ -136,7 +136,7 @@ def test_is_temp_cwd_variants():
 
 def test_detect_temp_leaks():
     entries = [
-        _n("ab-good", cwd="/home/u/code/abilities"),
+        _n("ab-good", cwd="/home/u/code/fno"),
         _n("ab-leak", cwd="/tmp/pytest-of-x/pytest-1/proj"),
     ]
     assert m.detect_temp_leaks(entries) == ["ab-leak"]

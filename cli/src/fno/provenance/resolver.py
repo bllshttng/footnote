@@ -5,7 +5,7 @@ Core primitive: resolve_transcript(harness, session_id, cwd) -> ResolvedTranscri
 Claude layout:
     ~/.claude/projects/<slug(cwd)>/<session_id>.jsonl
 where slug(cwd) replaces BOTH '/' and '.' with '-'.
-Example: /Users/bb16/code/me/abilities -> -Users-bb16-code-me-abilities
+Example: /Users/bb16/code/me/fno -> -Users-bb16-code-me-fno
 
 Codex resolves to the rollout jsonl embedding the session id (kind="jsonl");
 opencode resolves to the SQLite store, with the session id as the lookup key
@@ -57,8 +57,8 @@ def _slug(cwd: str) -> str:
     """Convert an absolute cwd path to a Claude projects-directory slug.
 
     Both '/' and '.' are replaced with '-'.  A leading '/' becomes a
-    leading '-', so '/Users/bb16/code/me/abilities' maps to
-    '-Users-bb16-code-me-abilities' (confirmed from real ~/.claude layout).
+    leading '-', so '/Users/bb16/code/me/fno' maps to
+    '-Users-bb16-code-me-fno' (confirmed from real ~/.claude layout).
     """
     return cwd.replace("/", "-").replace(".", "-")
 

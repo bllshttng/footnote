@@ -17,13 +17,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-HOOK="${REPO_ROOT}/hooks/inject-abi-agent-whoami.sh"
+HOOK="${REPO_ROOT}/hooks/inject-fno-agent-whoami.sh"
 HOOKS_JSON="${REPO_ROOT}/hooks/hooks.json"
 
-log()  { printf '[abi-agent-whoami-hook] %s\n' "$*"; }
-fail() { printf '[abi-agent-whoami-hook] FAIL: %s\n' "$*" >&2; exit 1; }
-pass() { printf '[abi-agent-whoami-hook] PASS: %s\n' "$*"; }
-skip() { printf '[abi-agent-whoami-hook] SKIP: %s\n' "$*" >&2; exit 77; }
+log()  { printf '[fno-agent-whoami-hook] %s\n' "$*"; }
+fail() { printf '[fno-agent-whoami-hook] FAIL: %s\n' "$*" >&2; exit 1; }
+pass() { printf '[fno-agent-whoami-hook] PASS: %s\n' "$*"; }
+skip() { printf '[fno-agent-whoami-hook] SKIP: %s\n' "$*" >&2; exit 77; }
 
 command -v python3 &>/dev/null || skip "python3 not on PATH"
 # Scenario 4 (timeout-cap behavior) requires timeout(1) or gtimeout(1).
@@ -52,13 +52,13 @@ grep -q '_with_timeout()' "$HOOK" \
 # hooks.json validates as JSON and contains the new entry under SessionStart.
 python3 -c "import json,sys; json.load(open('$HOOKS_JSON'))" \
     || fail "hooks.json failed JSON parse"
-python3 - "$HOOKS_JSON" <<'PYEOF' || fail "hooks.json does not register inject-abi-agent-whoami.sh under SessionStart"
+python3 - "$HOOKS_JSON" <<'PYEOF' || fail "hooks.json does not register inject-fno-agent-whoami.sh under SessionStart"
 import json, sys
 data = json.load(open(sys.argv[1]))
 ss = data.get("hooks", {}).get("SessionStart", [])
 for group in ss:
     for h in group.get("hooks", []):
-        if "inject-abi-agent-whoami.sh" in h.get("command", ""):
+        if "inject-fno-agent-whoami.sh" in h.get("command", ""):
             sys.exit(0)
 sys.exit(1)
 PYEOF
@@ -68,7 +68,7 @@ pass "structural: hook script, skip guards, timeout cap, hooks.json registration
 
 # Scenario 1: skip when fno is not on PATH. Run in a tempdir with .fno/
 # present so the second guard does NOT bail first; PATH stripped of fno.
-TMP=$(mktemp -d -t abi-agent-whoami-XXXXXX)
+TMP=$(mktemp -d -t fno-agent-whoami-XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
 mkdir -p "$TMP/.fno"
@@ -82,14 +82,14 @@ pass "scenario 1: silent skip when fno missing from PATH"
 
 # Scenario 2: skip when .fno/ dir is absent. Use a stub fno shim so the
 # first guard passes; the second must bail.
-STUB_DIR=$(mktemp -d -t abi-agent-whoami-stub-XXXXXX)
+STUB_DIR=$(mktemp -d -t fno-agent-whoami-stub-XXXXXX)
 cat >"$STUB_DIR/fno" <<'STUBEOF'
 #!/usr/bin/env bash
 echo "project: /stub"
 STUBEOF
 chmod +x "$STUB_DIR/fno"
 
-TMP2=$(mktemp -d -t abi-agent-whoami-no-abilities-XXXXXX)
+TMP2=$(mktemp -d -t fno-agent-whoami-no-fno-XXXXXX)
 set +e
 OUT=$(cd "$TMP2" && PATH="$STUB_DIR:/usr/bin:/bin" bash "$HOOK" 2>&1)
 rc=$?
@@ -102,7 +102,7 @@ pass "scenario 2: silent skip when .fno/ dir absent"
 # Scenario 3: with both fno (stub) and .fno/ present, the hook emits a
 # fenced block carrying the stub's output. We assert on the header text and
 # on the presence of the stub's whoami line so we know wiring is end-to-end.
-TMP3=$(mktemp -d -t abi-agent-whoami-real-XXXXXX)
+TMP3=$(mktemp -d -t fno-agent-whoami-real-XXXXXX)
 mkdir -p "$TMP3/.fno"
 set +e
 OUT=$(cd "$TMP3" && PATH="$STUB_DIR:/usr/bin:/bin" bash "$HOOK" 2>&1)
@@ -123,14 +123,14 @@ pass "scenario 3: emits fenced block with whoami output when both conditions met
 # Requires timeout(1) or gtimeout(1); the hook degrades gracefully on hosts
 # without either, but the cap itself only fires when one is available.
 if [[ $TIMEOUT_AVAILABLE -eq 1 ]]; then
-    HANG_DIR=$(mktemp -d -t abi-agent-whoami-hang-XXXXXX)
+    HANG_DIR=$(mktemp -d -t fno-agent-whoami-hang-XXXXXX)
     cat >"$HANG_DIR/fno" <<'HANGEOF'
 #!/usr/bin/env bash
 sleep 10
 HANGEOF
     chmod +x "$HANG_DIR/fno"
 
-    TMP4=$(mktemp -d -t abi-agent-whoami-hang-run-XXXXXX)
+    TMP4=$(mktemp -d -t fno-agent-whoami-hang-run-XXXXXX)
     mkdir -p "$TMP4/.fno"
 
     start_ms=$(python3 -c 'import time; print(int(time.time()*1000))')

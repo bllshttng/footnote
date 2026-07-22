@@ -53,7 +53,7 @@ case "$sub $verb" in
       # x-a5e4: a node with dispatch_verb takes the verb/brief resolver path.
       verb_fragment=""
       [[ -f "$S/verb_$id" ]] && verb_fragment=",\"dispatch_verb\":\"$(cat "$S/verb_$id")\""
-      # Emit _resolved_cwd when set, otherwise omit the field (stale-abi sim).
+      # Emit _resolved_cwd when set, otherwise omit the field (stale-fno sim).
       if [[ -f "$S/resolved_cwd_$id" ]]; then
         printf '{"id":"%s","status":"%s","_resolved_cwd":"%s","cwd":"%s"%s%s}\n' \
           "$id" "$(cat "$S/status_$id")" \
@@ -760,8 +760,8 @@ set_cwd ab-aaaa1111 /recorded/other
 # no set_resolved_cwd: mock emits only cwd field
 out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
 echo "$out" | grep -q -- "--cwd /recorded/other" \
-  && pass "AC1-EDGE: stale-abi fallback (no _resolved_cwd) uses raw cwd" \
-  || fail "AC1-EDGE: stale-abi fallback wrong: $out"
+  && pass "AC1-EDGE: stale-fno fallback (no _resolved_cwd) uses raw cwd" \
+  || fail "AC1-EDGE: stale-fno fallback wrong: $out"
 
 # ---- AC1-UI: launched and dry-run lines contain a cwd= token ----
 reset_mock; set_status ab-aaaa1111 ready

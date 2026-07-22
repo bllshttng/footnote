@@ -103,7 +103,7 @@ def test_other_fields_unchanged(tmp_path):
         "source": "adopt",
         "title": "rich",
         "project": "fno",
-        "cwd": "/home/user/code/abilities",
+        "cwd": "/home/user/code/fno",
         "blocked_by": ["ab-other0002"],
         "priority": "p1",
         "domain": "code",

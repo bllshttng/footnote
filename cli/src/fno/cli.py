@@ -201,8 +201,6 @@ def callback(
     json_output: bool = typer.Option(False, "--json", "-J", help="output JSON where supported"),
     version: bool = typer.Option(False, "--version", help="show version and exit", is_eager=True),
 ) -> None:
-    from fno._compat_env import backfill_legacy_env
-    backfill_legacy_env()  # one-release legacy-env back-fill (see fno._compat_env)
     _check_migration()
     _warn_deprecated_alias_if_needed()
     ctx.ensure_object(dict)

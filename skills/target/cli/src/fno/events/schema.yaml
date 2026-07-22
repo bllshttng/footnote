@@ -37,7 +37,7 @@ envelope:
       # daemon.rs). Per-agent worker sources (worker:<id>, stream-worker:<id>) are
       # pattern sources, validated by both the Python and bash validators via the
       # `patterns` list below (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, abi-loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog]
+      enum: [target, megawalk, megatron, fno-loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -64,7 +64,7 @@ event_types:
 
   - name: phase_transition
     description: "A gate flipped to true (gate_bearing=true) OR an audit-only phase boundary crossed (gate_bearing=false)."
-    sources: [target, megawalk, abi-loop, hook]
+    sources: [target, megawalk, fno-loop, hook]
     data:
       required: [gate_bearing, phase, nonce, session_id]
       properties:
@@ -445,7 +445,7 @@ event_types:
       Emitted when register_session_cost's session-cost.py subprocess returns
       non-zero. The direct-JSON fallback still writes to ledger.json; this
       event is the forensic trail.
-    sources: [abi-loop, hook]
+    sources: [fno-loop, hook]
     data:
       required:
         - session_id
@@ -485,7 +485,7 @@ event_types:
       value that differs from the computed derivation (e.g. legacy
       graph.json with stale field). The computed value wins; this
       event records the drift for forensic audit.
-    sources: [abi-loop, migration, subagent]
+    sources: [fno-loop, migration, subagent]
     data:
       required:
         - entry_id
@@ -511,14 +511,14 @@ event_types:
       properties:
         ratio:
           type: number
-          description: "Aggregate abi_wall_seconds / phase_wall_seconds ratio across sampled sessions."
+          description: "Aggregate fno_wall_seconds / phase_wall_seconds ratio across sampled sessions."
         decision:
           type: string
           enum: [abort_daemon, reads_only_v1, full_v1]
           description: "Gate outcome: abort_daemon (<15%), reads_only_v1 (15-30%), full_v1 (>=30%)."
         evidence_path:
           type: string
-          description: "Path to the decision artifact (e.g., .fno/measurements/YYYY-MM-DD-abi-overhead.md)."
+          description: "Path to the decision artifact (e.g., .fno/measurements/YYYY-MM-DD-fno-overhead.md)."
     consumers: [operator]
 
   - name: graph_reloaded
@@ -569,7 +569,7 @@ event_types:
 
   - name: integrity_warning
     description: "Forensic notice that a gate verification path accepted a degraded input. Non-blocking but auditable."
-    sources: [target, abi-loop, hook]
+    sources: [target, fno-loop, hook]
     data:
       required: [kind, phase, session_id, artifact_path]
       properties:
@@ -590,7 +590,7 @@ event_types:
 
   - name: done_race_collision
     description: "Two fno done calls landed on the same node; second saw status already done."
-    sources: [abi-loop]
+    sources: [fno-loop]
     data:
       required: [node_id, first_completed_at, second_attempt_at]
       properties:
@@ -644,7 +644,7 @@ event_types:
 
   - name: claim_acquired
     description: "A work-claim was acquired on a key. First write to .fno/claims/<key>.lock."
-    sources: [abi-loop, target, megawalk, megatron, hook]
+    sources: [fno-loop, target, megawalk, megatron, hook]
     data:
       required: [key, holder, pid, host, acquired_at]
       properties:
@@ -673,7 +673,7 @@ event_types:
 
   - name: claim_released
     description: "A claim was released by its owner. Lock file unlinked."
-    sources: [abi-loop, target, megawalk, megatron, hook]
+    sources: [fno-loop, target, megawalk, megatron, hook]
     data:
       required: [key, holder, pid, host, acquired_at, duration_held_ms]
       properties:
@@ -696,7 +696,7 @@ event_types:
 
   - name: claim_refreshed
     description: "A TTL claim's expires_at was extended by its owner."
-    sources: [abi-loop, target, megawalk, megatron]
+    sources: [fno-loop, target, megawalk, megatron]
     data:
       required: [key, holder, pid, host, acquired_at, expires_at]
       properties:
@@ -719,7 +719,7 @@ event_types:
 
   - name: claim_stale_reclaimed
     description: "A stale claim was recovered by a new holder. Old file archived to .expired/."
-    sources: [abi-loop, target, megawalk, megatron]
+    sources: [fno-loop, target, megawalk, megatron]
     data:
       required: [key, holder, pid, host, acquired_at, previous_holder, previous_pid]
       properties:
@@ -746,7 +746,7 @@ event_types:
 
   - name: claim_force_overridden
     description: "Operator administratively dropped a claim regardless of owner."
-    sources: [abi-loop, hook]
+    sources: [fno-loop, hook]
     data:
       required: [key, override_reason]
       properties:
@@ -765,7 +765,7 @@ event_types:
 
   - name: claim_idempotent_reacquired
     description: "Same holder re-acquired a key it already owns (resume/restart path)."
-    sources: [abi-loop, target, megawalk, megatron]
+    sources: [fno-loop, target, megawalk, megatron]
     data:
       required: [key, holder, pid, host, acquired_at, previous_acquired_at]
       properties:
@@ -788,7 +788,7 @@ event_types:
 
   - name: claim_clock_skew_rejected
     description: "A refresh was rejected because computed expires_at landed in the past."
-    sources: [abi-loop, target, megawalk, megatron]
+    sources: [fno-loop, target, megawalk, megatron]
     data:
       required: [key, now_ms, expires_at, reason]
       properties:
@@ -803,14 +803,14 @@ event_types:
     consumers: [operator]
 
   - name: session_satisfied
-    description: "Signals that a target session's work is complete; alternative to <promise> tag emission. The stop hook scans for these and may auto-release the Stop hook when a fresh event matches the current session and the three-factor gates are still satisfied. Data.source is the constrained subsystem that produced the signal (check_pr, pr_merge, ci_watcher, abi_gate_manual, delegated); envelope source is the producer identity."
-    sources: [target, megawalk, abi-loop, hook]
+    description: "Signals that a target session's work is complete; alternative to <promise> tag emission. The stop hook scans for these and may auto-release the Stop hook when a fresh event matches the current session and the three-factor gates are still satisfied. Data.source is the constrained subsystem that produced the signal (check_pr, pr_merge, ci_watcher, fno_gate_manual, delegated); envelope source is the producer identity."
+    sources: [target, megawalk, fno-loop, hook]
     data:
       required: [source, reason, session_id, gate_state_hash]
       properties:
         source:
           type: string
-          enum: [check_pr, pr_merge, ci_watcher, abi_gate_manual, delegated]
+          enum: [check_pr, pr_merge, ci_watcher, fno_gate_manual, delegated]
           description: "Which constrained subsystem emitted this satisfaction signal"
         reason:
           type: string
@@ -834,7 +834,7 @@ event_types:
       properties:
         source:
           type: string
-          enum: [check_pr, pr_merge, ci_watcher, abi_gate_manual, delegated]
+          enum: [check_pr, pr_merge, ci_watcher, fno_gate_manual, delegated]
           description: "Which session_satisfied data.source triggered this auto-complete"
         session_id:
           type: string
@@ -2151,14 +2151,14 @@ event_types:
     consumers: [operator]
 
   - name: think_skipped
-    description: "Emitted by a dispatch trigger (x-6a10 birth, x-122a A2 lifecycle) when it deliberately spawns/offers nothing. The reason discriminates no-origin / bulk-intake / cap-exceeded / already-claimed / claim-error / spawn-failed / no-node-id / unresolved-pointer (A2 relevance filter) / daily-cap (A2 per-day ceiling). A gate-off evaluation emits NOTHING (no-op); this fires only when the gate is on."
+    description: "Emitted by a dispatch trigger (x-6a10 birth, x-122a A2 lifecycle) when it deliberately spawns/offers nothing. The reason discriminates no-origin / bulk-intake / cap-exceeded / already-claimed / claim-error / spawn-failed / no-node-id / unresolved-pointer (A2 relevance filter) / daily-cap (A2 per-day ceiling) / not-design-warranting (a bug or size-S node too small for a design fan-out). A gate-off evaluation emits NOTHING (no-op); this fires only when the gate is on."
     sources: [backlog]
     data:
       required: [reason]
       properties:
         reason:
           type: string
-          enum: [no-origin, bulk-intake, cap-exceeded, already-claimed, claim-error, spawn-failed, no-node-id, unresolved-pointer, daily-cap]
+          enum: [no-origin, bulk-intake, cap-exceeded, already-claimed, claim-error, spawn-failed, no-node-id, unresolved-pointer, daily-cap, not-design-warranting]
           description: "Why the dispatch spawned/offered nothing this evaluation."
         trigger:
           type: string

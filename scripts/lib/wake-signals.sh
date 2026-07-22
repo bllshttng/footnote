@@ -11,7 +11,7 @@
 # skipped so sessions without the wake substrate are unaffected.
 #
 # Requires (set by caller):
-#   SCRIPT_DIR - path to the abilities plugin root (parent of scripts/)
+#   SCRIPT_DIR - path to the fno plugin root (parent of scripts/)
 #   REPO_ROOT  - project repo root (current working tree)
 #   STATE_DIR  - .fno/ directory for the project
 

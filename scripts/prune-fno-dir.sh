@@ -48,7 +48,7 @@ Options:
   -h, --help     Print this help and exit.
 
 Environment:
-  FNO_DIR  Override the global abilities directory path (default
+  FNO_DIR  Override the global fno directory path (default
                  $HOME/.fno). Used by tests to point at a fixture.
 
 Scope guard:

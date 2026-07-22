@@ -11,7 +11,7 @@ Tests cover:
 - AC4b-EDGE: walks correctly from a subdirectory (guard still finds repo root)
 
 All tests use tmp_path + monkeypatch for isolation.
-Autouse fixture pins FNO_REPO_ROOT (memory: feedback_abi_repo_root_leaks_between_tests).
+Autouse fixture pins FNO_REPO_ROOT (memory: feedback_fno_repo_root_leaks_between_tests).
 Actual uv/pip install logic is stubbed so tests don't try to download anything.
 """
 from __future__ import annotations
@@ -286,7 +286,7 @@ def test_update_without_source_rev_execs_plain_install_when_no_refresh(
 # ---------------------------------------------------------------------------
 
 
-def _make_abi_source(directory: Path) -> Path:
+def _make_fno_source(directory: Path) -> Path:
     """Create a minimal fno source directory with a valid pyproject.toml."""
     cli_dir = directory / "cli"
     cli_dir.mkdir(parents=True, exist_ok=True)
@@ -311,7 +311,7 @@ def test_doctor_fix_python_stale_delegates_to_real_update_command(
     from fno import doctor, update
 
     # Make a minimal fno source so _discover_source succeeds.
-    src = _make_abi_source(tmp_path)
+    src = _make_fno_source(tmp_path)
     monkeypatch.setattr(update, "_discover_source", lambda override=None: src)
     monkeypatch.setattr(update, "_target_in_progress", lambda: False)
     monkeypatch.setattr(update, "_INSTALLED_REV_FILE", tmp_path / "installed-rev")

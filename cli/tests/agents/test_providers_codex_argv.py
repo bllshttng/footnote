@@ -27,7 +27,7 @@ def test_inject_from_name_bracket_prefix():
     assert out == "[from: orchestrator-main]\n\nwrite the schema"
 
 
-def test_inject_from_name_default_abilities():
+def test_inject_from_name_default_fno():
     # The US2 default from_name is "fno"; this function is a pure
     # string operation, so the caller passes whatever they validated.
     out = codex_mod.inject_from_name("msg", "fno")

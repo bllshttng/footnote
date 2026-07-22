@@ -892,8 +892,8 @@ def _colliding_repo_graph(tmp_path):
     return _make_graph(tmp_path, [
         {"id": "x-foot0001", "title": "footnote node", "pr_number": 388,
          "pr_url": "https://github.com/bllshttng/footnote/pull/388"},
-        {"id": "ab-abil0001", "title": "abilities node", "pr_number": 388,
-         "pr_url": "https://github.com/bllshttng/abilities/pull/388"},
+        {"id": "ab-fnl0001", "title": "fno node", "pr_number": 388,
+         "pr_url": "https://github.com/bllshttng/fno/pull/388"},
     ])
 
 
@@ -909,7 +909,7 @@ def test_stamp_repo_scoped_picks_right_node(tmp_path, monkeypatch):
     )
     assert (node_id, status) == ("x-foot0001", "added")
     assert _node_sessions(g, "x-foot0001")[0]["phase"] == "ship"
-    assert _node_sessions(g, "ab-abil0001") == []  # untouched
+    assert _node_sessions(g, "ab-fnl0001") == []  # untouched
 
 
 def test_stamp_repo_scoped_no_match_skips(tmp_path, monkeypatch):
@@ -924,7 +924,7 @@ def test_stamp_repo_scoped_no_match_skips(tmp_path, monkeypatch):
     )
     assert (node_id, status) == (None, "no-node")
     assert _node_sessions(g, "x-foot0001") == []
-    assert _node_sessions(g, "ab-abil0001") == []
+    assert _node_sessions(g, "ab-fnl0001") == []
 
 
 def test_stamp_repo_none_falls_back_to_bare_number(tmp_path, monkeypatch):
@@ -984,7 +984,7 @@ def test_stamp_repo_scoped_matches_additional_prs_url(tmp_path, monkeypatch):
         {"id": "x-addl0001", "title": "t", "pr_number": 12,
          "pr_url": "https://github.com/bllshttng/footnote/pull/12",
          "additional_prs": [
-             {"number": 388, "url": "https://github.com/bllshttng/abilities/pull/388", "note": None}
+             {"number": 388, "url": "https://github.com/bllshttng/fno/pull/388", "note": None}
          ]},
     ])
     _patch_graph(monkeypatch, g)
@@ -992,7 +992,7 @@ def test_stamp_repo_scoped_matches_additional_prs_url(tmp_path, monkeypatch):
 
     node_id, status = stamp_session_for_pr(
         g, 388, phase="ship", harness="claude", session_id="S",
-        repo="bllshttng/abilities",
+        repo="bllshttng/fno",
     )
     assert (node_id, status) == ("x-addl0001", "added")
 
@@ -1065,8 +1065,8 @@ def test_cli_session_add_pr_repo_scopes_resolution(tmp_path, monkeypatch):
     g = _make_graph(tmp_path, [
         {"id": "x-clifoot1", "title": "t", "pr_number": 388,
          "pr_url": "https://github.com/bllshttng/footnote/pull/388"},
-        {"id": "ab-cliabil1", "title": "u", "pr_number": 388,
-         "pr_url": "https://github.com/bllshttng/abilities/pull/388"},
+        {"id": "ab-clifn1", "title": "u", "pr_number": 388,
+         "pr_url": "https://github.com/bllshttng/fno/pull/388"},
     ])
     _patch_graph(monkeypatch, g)
     monkeypatch.setattr(C, "_graph_path", lambda: g)
@@ -1080,7 +1080,7 @@ def test_cli_session_add_pr_repo_scopes_resolution(tmp_path, monkeypatch):
     assert r.exit_code == 0, r.output
     assert json.loads(r.output)["node_id"] == "x-clifoot1"
     by_id = {e["id"]: e for e in read_graph(g)}
-    assert by_id["ab-cliabil1"].get("sessions", []) == []  # other repo untouched
+    assert by_id["ab-clifn1"].get("sessions", []) == []  # other repo untouched
 
 
 def _stub_slug(monkeypatch, slug):
@@ -1164,8 +1164,8 @@ def test_cli_session_add_pr_auto_resolves_repo_slug(tmp_path, monkeypatch):
     g = _make_graph(tmp_path, [
         {"id": "x-autofoot", "title": "t", "pr_number": 480,
          "pr_url": "https://github.com/bllshttng/footnote/pull/480"},
-        {"id": "ab-autoabil", "title": "u", "pr_number": 480,
-         "pr_url": "https://github.com/bllshttng/abilities/pull/480"},
+        {"id": "ab-autofn", "title": "u", "pr_number": 480,
+         "pr_url": "https://github.com/bllshttng/fno/pull/480"},
     ])
     _patch_graph(monkeypatch, g)
     monkeypatch.setattr(C, "_graph_path", lambda: g)
@@ -1179,7 +1179,7 @@ def test_cli_session_add_pr_auto_resolves_repo_slug(tmp_path, monkeypatch):
     assert r.exit_code == 0, r.output
     assert json.loads(r.output)["node_id"] == "x-autofoot"
     by_id = {e["id"]: e for e in read_graph(g)}
-    assert by_id["ab-autoabil"].get("sessions", []) == []
+    assert by_id["ab-autofn"].get("sessions", []) == []
 
 
 def test_cli_session_add_resolved_slug_never_falls_back_to_bare(tmp_path, monkeypatch):
@@ -1241,7 +1241,7 @@ def test_cli_session_add_auto_slug_never_stamps_a_foreign_repo_node(tmp_path, mo
 
     g = _make_graph(tmp_path, [
         {"id": "ab-foreign1", "title": "t", "pr_number": 1700,
-         "pr_url": "https://github.com/bllshttng/abilities/pull/1700"},
+         "pr_url": "https://github.com/bllshttng/fno/pull/1700"},
     ])
     _patch_graph(monkeypatch, g)
     monkeypatch.setattr(C, "_graph_path", lambda: g)
@@ -1267,7 +1267,7 @@ def test_cli_session_add_auto_slug_fallback_needs_every_candidate_unattributable
     g = _make_graph(tmp_path, [
         {"id": "ab-legacy03", "title": "t", "pr_number": 1800},
         {"id": "ab-foreign2", "title": "u", "pr_number": 1800,
-         "pr_url": "https://github.com/bllshttng/abilities/pull/1800"},
+         "pr_url": "https://github.com/bllshttng/fno/pull/1800"},
     ])
     _patch_graph(monkeypatch, g)
     monkeypatch.setattr(C, "_graph_path", lambda: g)

@@ -42,20 +42,20 @@ chmod +x "$STUB"
 # Initialize the isolated graph.json so `fno new` has somewhere to write.
 echo '{"_lock_version": 1, "entries": []}' > "$FAKE_HOME/.fno/graph.json"
 
-run_abi() {
+run_fno() {
   FNO_INBOX_ROOT="$INBOX_ROOT" HOME="$FAKE_HOME" \
     FNO_INBOX_TRIAGE_STUB="$STUB" \
     uv run --project "$CLI_DIR" fno-py "$@"
 }
 
 # 1) proj-a sends a heads-up to proj-b.
-SEND_OUT=$(cd "$PROJ_A" && run_abi mail send --to-project proj-b --kind heads-up \
+SEND_OUT=$(cd "$PROJ_A" && run_fno mail send --to-project proj-b --kind heads-up \
     --body "region data source live in PR 112; please plumb region column" \
     --ref-pr 112 --json)
 SENT_MSG=$(echo "$SEND_OUT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read().splitlines()[-1])['msg_id'])")
 
 # 2) proj-b drains. Triage runs, fno new files a graph node in FAKE_HOME.
-DRAIN_OUT=$(cd "$PROJ_B" && run_abi mail drain --json --max 1)
+DRAIN_OUT=$(cd "$PROJ_B" && run_fno mail drain --json --max 1)
 NODE_ID=$(echo "$DRAIN_OUT" | python3 -c "
 import json, sys
 results = json.loads(sys.stdin.read())
@@ -87,7 +87,7 @@ print(f"ok: provenance on {e['id']} (source_inbox_msg={e['source_inbox_msg']})")
 PY
 
 # 4) Idempotency: a second drain after the first must do nothing for this thread.
-DRAIN2=$(cd "$PROJ_B" && run_abi mail drain --json --max 10)
+DRAIN2=$(cd "$PROJ_B" && run_fno mail drain --json --max 10)
 if [[ "$DRAIN2" != "[]" ]]; then
   echo "FAIL: second drain should be empty (heads-up was already acked); got: $DRAIN2" >&2
   exit 1

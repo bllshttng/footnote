@@ -1,7 +1,7 @@
 //! Integration tests for the mission drain tick (x-a4dc K2).
 //!
 //! These exercise `mission_drain_tick`'s real IO branches against a stub `fno`
-//! binary (passed directly as `DrainConfig.abi_bin`) with the loop Journal
+//! binary (passed directly as `DrainConfig.fno_bin`) with the loop Journal
 //! pointed at a tempdir so no real `~/.fno` state is touched. The mission drain
 //! dispatches by shelling K1's converge core (`fno backlog advance --epic <id>
 //! --json`) and reconciles the dispatched nodes from events on later ticks. The
@@ -54,10 +54,10 @@ fn journal_events(project_journal: &Path) -> Vec<String> {
         .collect()
 }
 
-fn cfg_for(tmp: &Path, abi_bin: PathBuf, mission: &str) -> DrainConfig {
+fn cfg_for(tmp: &Path, fno_bin: PathBuf, mission: &str) -> DrainConfig {
     DrainConfig {
         cwd: tmp.to_path_buf(),
-        abi_bin: abi_bin.display().to_string(),
+        fno_bin: fno_bin.display().to_string(),
         mission: mission.to_string(),
         failure_limit: 3,
     }

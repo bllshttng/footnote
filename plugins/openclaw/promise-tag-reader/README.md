@@ -6,7 +6,7 @@ Writes `.fno/target-promise.signal` when the assistant draft response contains a
 
 ```bash
 mkdir -p ~/.openclaw/plugins
-ln -sfn /path/to/abilities/plugins/openclaw/promise-tag-reader \
+ln -sfn /path/to/fno/plugins/openclaw/promise-tag-reader \
   ~/.openclaw/plugins/promise-tag-reader
 ```
 

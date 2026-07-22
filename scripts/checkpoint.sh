@@ -6,7 +6,7 @@ OUT_DIR="$ROOT_DIR/.fno/checkpoints"
 mkdir -p "$OUT_DIR"
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
-OUT="$OUT_DIR/abilities-${STAMP}.md"
+OUT="$OUT_DIR/fno-${STAMP}.md"
 
 {
   echo "# Abilities checkpoint"

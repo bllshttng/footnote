@@ -14,7 +14,7 @@ use std::time::Duration;
 
 fn tmpdir(tag: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "abi-ask-dispatch-{}-{}-{}",
+        "fno-ask-dispatch-{}-{}-{}",
         tag,
         std::process::id(),
         std::time::SystemTime::now()
@@ -80,21 +80,10 @@ fn validation_rejects_bad_inputs() {
     let cwd = tmpdir("val-cwd");
     let d = Duration::from_secs(1);
 
-    let empty_name =
-        dispatch_claude_ask(&home, &ch, "", "hi", "abilities", &cwd, false, Some(d), &[]);
+    let empty_name = dispatch_claude_ask(&home, &ch, "", "hi", "fno", &cwd, false, Some(d), &[]);
     assert_eq!(empty_name.exit_code, 2);
 
-    let sep_name = dispatch_claude_ask(
-        &home,
-        &ch,
-        "a/b",
-        "hi",
-        "abilities",
-        &cwd,
-        false,
-        Some(d),
-        &[],
-    );
+    let sep_name = dispatch_claude_ask(&home, &ch, "a/b", "hi", "fno", &cwd, false, Some(d), &[]);
     assert_eq!(sep_name.exit_code, 2);
 
     let shortid_shape = dispatch_claude_ask(
@@ -102,7 +91,7 @@ fn validation_rejects_bad_inputs() {
         &ch,
         "7c5dcf5d",
         "hi",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(d),
@@ -110,17 +99,8 @@ fn validation_rejects_bad_inputs() {
     );
     assert_eq!(shortid_shape.exit_code, 2);
 
-    let empty_msg = dispatch_claude_ask(
-        &home,
-        &ch,
-        "alice",
-        "   ",
-        "abilities",
-        &cwd,
-        false,
-        Some(d),
-        &[],
-    );
+    let empty_msg =
+        dispatch_claude_ask(&home, &ch, "alice", "   ", "fno", &cwd, false, Some(d), &[]);
     assert_eq!(empty_msg.exit_code, 2);
 
     let bad_from = dispatch_claude_ask(&home, &ch, "alice", "hi", "a<b", &cwd, false, Some(d), &[]);
@@ -146,7 +126,7 @@ fn ask_unknown_name_exits_16_not_create() {
         &ch,
         "alice",
         "hello",
-        "abilities",
+        "fno",
         &cwd,
         false,
         None,
@@ -183,7 +163,7 @@ fn spawn_writes_python_readable_row_and_emits_done() {
         &ch,
         "alice",
         "hello",
-        "abilities",
+        "fno",
         &cwd,
         false,
         None,
@@ -242,7 +222,7 @@ fn spawn_yolo_maps_to_bypass_permissions() {
         &ch,
         "bob",
         "hi",
-        "abilities",
+        "fno",
         &cwd,
         true,
         None,
@@ -316,7 +296,7 @@ fn followup_socket_reply_stamps_live_and_emits() {
         &ch,
         "alice",
         "ping",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_secs(3)),
@@ -362,7 +342,7 @@ fn followup_orphan_socket_null_exit_13_stamps_orphaned() {
         &ch,
         "alice",
         "ping",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_secs(2)),
@@ -385,7 +365,7 @@ fn short_sock() -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let n = SEQ.fetch_add(1, Ordering::SeqCst);
     PathBuf::from(format!(
-        "/tmp/abiask{}-{}-{}.sock",
+        "/tmp/fnoask{}-{}-{}.sock",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -395,7 +375,7 @@ fn short_sock() -> PathBuf {
     ))
 }
 
-/// Unlink a bound socket file so /tmp/abiask*.sock doesn't accumulate
+/// Unlink a bound socket file so /tmp/fnoask*.sock doesn't accumulate
 /// (UnixListener::drop does not remove the path).
 fn cleanup_sock(sock: &Path) {
     let _ = fs::remove_file(sock);
@@ -450,7 +430,7 @@ fn followup_poll_timeout_exit_15() {
         &ch,
         "alice",
         "ping",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_millis(250)),
@@ -523,7 +503,7 @@ fn concurrent_followups_serialize_on_flock() {
                 &c,
                 "alice",
                 "ping",
-                "abilities",
+                "fno",
                 &cwd,
                 false,
                 Some(Duration::from_secs(5)),
@@ -557,7 +537,7 @@ fn spawn_missing_cli_exit_14() {
         &ch,
         "alice",
         "hi",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_secs(5)),
@@ -593,7 +573,7 @@ fn create_corrupt_registry_exit_12_no_spawn() {
         &ch,
         "alice",
         "hi",
-        "abilities",
+        "fno",
         &cwd,
         false,
         None,
@@ -617,7 +597,7 @@ fn followup_missing_short_id_exit_12() {
         &ch,
         "alice",
         "ping",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_secs(2)),
@@ -645,7 +625,7 @@ fn followup_interactive_claude_row_refuses_worker_short() {
         &ch,
         "host1",
         "ping",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_secs(2)),

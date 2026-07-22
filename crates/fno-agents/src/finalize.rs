@@ -1338,7 +1338,7 @@ fn expand_handoffs_template(raw: &str, home: Option<&Path>, project: &str) -> Op
 }
 
 /// Project name = basename of the MAIN worktree (the first `git worktree list
-/// --porcelain` entry), so a linked worktree resolves to "abilities", not the
+/// --porcelain` entry), so a linked worktree resolves to "fno", not the
 /// worktree directory name. The porcelain first-entry is robust across layouts
 /// (--separate-git-dir, bare) where the `--git-common-dir` parent is wrong
 /// (gemini review HIGH). Falls back to the cwd basename.

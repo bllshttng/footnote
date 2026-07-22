@@ -30,7 +30,7 @@ HERMES_REPO="${HERMES_REPO:-$HOME/code/tools/bots/hermes-agent}"
 
 # 1. Throwaway worktree of hermes-agent
 WORKTREE=$(mktemp -d -t hermes-smoke-XXXXXX)
-BRANCH="abilities-smoke-$(date +%s)"
+BRANCH="fno-smoke-$(date +%s)"
 (cd "$HERMES_REPO" && git worktree add -b "$BRANCH" "$WORKTREE" 2>/dev/null) || {
   rm -rf "$WORKTREE"
   fail "could not create hermes worktree"
@@ -47,10 +47,10 @@ trap cleanup EXIT
 cd "$WORKTREE"
 log "worktree=$WORKTREE"
 
-# 2. Symlink abilities skills into ~/.hermes/skills/abilities (idempotent).
+# 2. Symlink fno skills into ~/.hermes/skills/fno (idempotent).
 # Verify an existing path points at the same tree - otherwise the test would
 # silently exercise a different install.
-SKILL_LINK="$HOME/.hermes/skills/abilities"
+SKILL_LINK="$HOME/.hermes/skills/fno"
 EXPECTED_SKILL_TARGET="${REPO_ROOT}/skills"
 CREATED_SKILL_LINK=0
 if [[ ! -e "$SKILL_LINK" ]]; then

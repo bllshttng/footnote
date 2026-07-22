@@ -399,7 +399,7 @@ def phase_0_decision(
 ) -> dict[str, Any]:
     """Build a ``phase_0_decision`` event.
 
-    Used by the abi-daemon Phase 0 measurement spike (and any similar
+    Used by the fno-daemon Phase 0 measurement spike (and any similar
     measurement-gated phases). Routes through ``_build`` so the canonical
     ``data`` envelope is used and the event passes schema validation.
 
@@ -469,7 +469,7 @@ def done_race_collision(
     node_id: str,
     first_completed_at: str,
     second_attempt_at: str,
-    source: str = "abi-loop",
+    source: str = "fno-loop",
 ) -> dict[str, Any]:
     """Build a ``done_race_collision`` event.
 
@@ -537,7 +537,7 @@ def backlog_done_forced(
 
 
 SESSION_SATISFIED_SOURCES = frozenset(
-    {"check_pr", "pr_merge", "ci_watcher", "abi_gate_manual", "delegated"}
+    {"check_pr", "pr_merge", "ci_watcher", "fno_gate_manual", "delegated"}
 )
 # "delegated" is shell-emitted (skills/target/scripts/handoff.sh); the rest are Python-emitted.
 
@@ -559,7 +559,7 @@ def session_satisfied(
 
     ``trigger`` is the constrained data-level enum identifying which
     subsystem produced the signal. ``source`` is the envelope-level
-    producer identity (target, megawalk, abi-loop, hook).
+    producer identity (target, megawalk, fno-loop, hook).
 
     The enum is enforced here at build time so a typo at the call site
     fails fast rather than landing in events.jsonl as schema noise.

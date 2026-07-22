@@ -119,9 +119,9 @@ Re-bench guidance: run `rm -rf cli/.venv && uv sync` first to avoid
 A future refactor must preserve:
 
 1. `fno --help` does not import sub-app bodies. Test:
-   `tests/test_lazy_imports.py::test_abi_help_does_not_import_sub_app_modules`.
+   `tests/test_lazy_imports.py::test_fno_help_does_not_import_sub_app_modules`.
 2. `fno paths state-dir` does not import `megawalk` or `megatron`.
-   Test: `test_abi_paths_does_not_import_megawalk`.
+   Test: `test_fno_paths_does_not_import_megawalk`.
 3. Single-command sub-apps keep their group shape. Test:
    `test_executor_resolve_group_shape_preserved`.
 4. Megawalk and megatron's extended exit-code documentation appears in

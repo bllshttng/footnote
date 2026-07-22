@@ -11,18 +11,18 @@ from unittest.mock import MagicMock, patch
 
 def _make_ledger(tmp_path: Path) -> Path:
     """Create a minimal ledger.json."""
-    abilities_dir = tmp_path / ".fno"
-    abilities_dir.mkdir(parents=True, exist_ok=True)
-    ledger_path = abilities_dir / "ledger.json"
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir(parents=True, exist_ok=True)
+    ledger_path = fno_dir / "ledger.json"
     ledger_path.write_text("[]")
     return ledger_path
 
 
 def _make_graph(tmp_path: Path, node_id: str = "ab-12345678") -> Path:
     """Create a minimal graph.json with one node in the canonical {'entries': [...]} envelope."""
-    abilities_dir = tmp_path / ".fno"
-    abilities_dir.mkdir(parents=True, exist_ok=True)
-    graph_path = abilities_dir / "graph.json"
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir(parents=True, exist_ok=True)
+    graph_path = fno_dir / "graph.json"
     node = {
         "id": node_id,
         "title": "Test Feature",
@@ -156,9 +156,9 @@ def _make_failed_result(returncode: int, stderr: str) -> subprocess.CompletedPro
 
 
 def _events_path(tmp_path: Path) -> Path:
-    abilities_dir = tmp_path / ".fno"
-    abilities_dir.mkdir(parents=True, exist_ok=True)
-    return abilities_dir / "events.jsonl"
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir(parents=True, exist_ok=True)
+    return fno_dir / "events.jsonl"
 
 
 def _read_events(events_path: Path) -> list[dict]:

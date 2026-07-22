@@ -14,7 +14,7 @@ legacy em-dash still parses on read:
   - dismissed: ``- [-] fu-3a8c1f - title (p1) (dismissed: <reason>)``
 
 Items are addressed by ``fu-id``, never by line number (Obsidian edits shift
-lines). See internal/fno/design/2026-05-22-abi-backlog-inbox.md.
+lines). See internal/fno/design/2026-05-22-fno-backlog-inbox.md.
 
 CLI surface: ``fno backlog capture`` (canonical) with ``fno backlog inbox``
 kept as a hidden deprecated alias (same Typer app; see the graph -> backlog

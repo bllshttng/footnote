@@ -17,14 +17,14 @@
 #
 # The fake `fno` stub in STUB_BIN logs every invocation to CALL_LOG and
 # is scriptable per-scenario via marker files in SCENARIO_DIR:
-#   $SCENARIO_DIR/abi-ask-rc      -> numeric rc for `fno agents spawn`
-#   $SCENARIO_DIR/abi-ask-out     -> stdout for `fno agents spawn`
-#   $SCENARIO_DIR/abi-list-out    -> stdout for `fno agents list` (JSON)
-#   $SCENARIO_DIR/abi-claim-rc    -> rc for every `fno claim` invocation
+#   $SCENARIO_DIR/fno-ask-rc      -> numeric rc for `fno agents spawn`
+#   $SCENARIO_DIR/fno-ask-out     -> stdout for `fno agents spawn`
+#   $SCENARIO_DIR/fno-list-out    -> stdout for `fno agents list` (JSON)
+#   $SCENARIO_DIR/fno-claim-rc    -> rc for every `fno claim` invocation
 #                                    (default 0; set to non-zero to fail selectively)
-#   $SCENARIO_DIR/abi-claim-acquire-rc -> rc for claim acquire only
-#   $SCENARIO_DIR/abi-claim-release-rc -> rc for claim release only
-#   $SCENARIO_DIR/abi-event-emit-rc    -> rc for fno event emit
+#   $SCENARIO_DIR/fno-claim-acquire-rc -> rc for claim acquire only
+#   $SCENARIO_DIR/fno-claim-release-rc -> rc for claim release only
+#   $SCENARIO_DIR/fno-event-emit-rc    -> rc for fno event emit
 
 set -uo pipefail
 
@@ -205,13 +205,13 @@ EOF
   touch "$CALL_LOG"
 
   # Default stub responses
-  echo "0"  > "$sbx/scenario/abi-ask-rc"
+  echo "0"  > "$sbx/scenario/fno-ask-rc"
   # Group 1 (ab-8b3e4fe0): the claude create is `agents spawn`, whose receipt
   # is one compact JSON line carrying .short_id (handoff.sh parses it via jq).
-  printf '{"name": "tgt-x", "short_id": "abc123", "provider": "claude", "status": "live"}\n' > "$sbx/scenario/abi-ask-out"
+  printf '{"name": "tgt-x", "short_id": "abc123", "provider": "claude", "status": "live"}\n' > "$sbx/scenario/fno-ask-out"
   # Default list output: shows the agent as live after spawn
   # Will be overridden per scenario
-  printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live"}]}\n' "${NODE_ID:3:8}" "$TEST_HARNESS" > "$sbx/scenario/abi-list-out"
+  printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live"}]}\n' "${NODE_ID:3:8}" "$TEST_HARNESS" > "$sbx/scenario/fno-list-out"
 
   # Write the expected holder into scenario dir so the stub can read it
   echo "target-session:${SESSION_ID}" > "$sbx/scenario/expected-holder"
@@ -232,26 +232,26 @@ subcmd2="${2:-}"
 
 case "$subcmd1 $subcmd2" in
   "agents spawn")
-    rc_file="$SCENARIO_DIR/abi-ask-rc"
-    out_file="$SCENARIO_DIR/abi-ask-out"
+    rc_file="$SCENARIO_DIR/fno-ask-rc"
+    out_file="$SCENARIO_DIR/fno-ask-out"
     rc=0; [ -f "$rc_file" ] && rc=$(cat "$rc_file")
     [ -f "$out_file" ] && cat "$out_file"
     exit "$rc"
     ;;
   "agents list")
-    out_file="$SCENARIO_DIR/abi-list-out"
+    out_file="$SCENARIO_DIR/fno-list-out"
     [ -f "$out_file" ] && cat "$out_file" || echo '{"agents":[]}'
     exit 0
     ;;
   "claim acquire")
     # Check for selective override.
-    # abi-claim-acquire-node-rc applies only to node: key acquires;
-    # abi-claim-acquire-rc applies to all acquires (fallback).
+    # fno-claim-acquire-node-rc applies only to node: key acquires;
+    # fno-claim-acquire-rc applies to all acquires (fallback).
     _acq_key="${3:-}"
     case "$_acq_key" in
       node:*)
-        node_rc_file="$SCENARIO_DIR/abi-claim-acquire-node-rc"
-        rc_file="$SCENARIO_DIR/abi-claim-acquire-rc"
+        node_rc_file="$SCENARIO_DIR/fno-claim-acquire-node-rc"
+        rc_file="$SCENARIO_DIR/fno-claim-acquire-rc"
         if [ -f "$node_rc_file" ]; then
           rc=$(cat "$node_rc_file")
         elif [ -f "$rc_file" ]; then
@@ -261,14 +261,14 @@ case "$subcmd1 $subcmd2" in
         fi
         ;;
       *)
-        rc_file="$SCENARIO_DIR/abi-claim-acquire-rc"
+        rc_file="$SCENARIO_DIR/fno-claim-acquire-rc"
         [ -f "$rc_file" ] && rc=$(cat "$rc_file") || rc=0
         ;;
     esac
     exit "$rc"
     ;;
   "claim release")
-    rc_file="$SCENARIO_DIR/abi-claim-release-rc"
+    rc_file="$SCENARIO_DIR/fno-claim-release-rc"
     [ -f "$rc_file" ] && rc=$(cat "$rc_file") || rc=0
     exit "$rc"
     ;;
@@ -292,7 +292,7 @@ case "$subcmd1 $subcmd2" in
     exit 0
     ;;
   "event emit")
-    rc_file="$SCENARIO_DIR/abi-event-emit-rc"
+    rc_file="$SCENARIO_DIR/fno-event-emit-rc"
     [ -f "$rc_file" ] && rc=$(cat "$rc_file") || rc=0
     if [ "$rc" -eq 0 ]; then
       # Parse --type, --data, --events, --source from args (simulate real fno writer)
@@ -427,8 +427,8 @@ check_contains "H1-HP: delegated event has source=target" '"source":"target"' "$
 echo ""
 echo "=== Scenario 2: AC1-ERR spawn failure ==="
 SBX="$(make_sandbox s2)"
-echo "1" > "$SBX/scenario/abi-ask-rc"
-echo "" > "$SBX/scenario/abi-ask-out"
+echo "1" > "$SBX/scenario/fno-ask-rc"
+echo "" > "$SBX/scenario/fno-ask-out"
 
 CALL_LOG="$SBX/call-log"
 HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
@@ -472,7 +472,7 @@ echo ""
 echo "=== Scenario 3: verify timeout ==="
 SBX="$(make_sandbox s3)"
 # ask succeeds but list returns empty agents
-echo '{"agents":[]}' > "$SBX/scenario/abi-list-out"
+echo '{"agents":[]}' > "$SBX/scenario/fno-list-out"
 
 CALL_LOG="$SBX/call-log"
 HANDOFF_VERIFY_TIMEOUT=3 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
@@ -630,7 +630,7 @@ echo ""
 echo "=== Scenario 9: restore_failed ==="
 SBX="$(make_sandbox s9)"
 # ask succeeds; list returns empty so verify times out
-echo '{"agents":[]}' > "$SBX/scenario/abi-list-out"
+echo '{"agents":[]}' > "$SBX/scenario/fno-list-out"
 
 # We need to intercept AFTER the archive mv succeeds but BEFORE restore.
 # Strategy: put a shadow `mv` in stub-bin that fails only when the
@@ -684,10 +684,10 @@ echo ""
 echo "=== Scenario 10: C1 claim-lost on spawn-fail ==="
 SBX="$(make_sandbox s10)"
 # ask fails
-echo "1" > "$SBX/scenario/abi-ask-rc"
-echo "" > "$SBX/scenario/abi-ask-out"
+echo "1" > "$SBX/scenario/fno-ask-rc"
+echo "" > "$SBX/scenario/fno-ask-out"
 # node: acquire fails (simulates another worker grabbed it in the gap)
-echo "1" > "$SBX/scenario/abi-claim-acquire-node-rc"
+echo "1" > "$SBX/scenario/fno-claim-acquire-node-rc"
 
 CALL_LOG="$SBX/call-log"
 HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
@@ -718,9 +718,9 @@ echo ""
 echo "=== Scenario 11: C1 claim-lost on verify-fail ==="
 SBX="$(make_sandbox s11)"
 # ask succeeds but list returns empty so verify times out
-echo '{"agents":[]}' > "$SBX/scenario/abi-list-out"
+echo '{"agents":[]}' > "$SBX/scenario/fno-list-out"
 # node: acquire fails during re-acquire
-echo "1" > "$SBX/scenario/abi-claim-acquire-node-rc"
+echo "1" > "$SBX/scenario/fno-claim-acquire-node-rc"
 
 CALL_LOG="$SBX/call-log"
 HANDOFF_VERIFY_TIMEOUT=3 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
@@ -1007,10 +1007,10 @@ echo "=== Scenario 20: AC1-HP live receiptless child (backfill) ==="
 SBX="$(make_sandbox s20)"
 # Spawn exits 0 but the receipt carries no short_id key.
 printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
-  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-ask-out"
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-ask-out"
 # Registry row IS live and DOES carry a short_id to backfill from.
 printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live","short_id":"reg789"}]}\n' \
-  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-list-out"
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-list-out"
 
 CALL_LOG="$SBX/call-log"
 HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
@@ -1035,9 +1035,9 @@ echo ""
 echo "=== Scenario 21: AC3-FR phantom spawn parks after poll ==="
 SBX="$(make_sandbox s21)"
 printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
-  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-ask-out"
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-ask-out"
 # No child ever appears in the registry.
-echo '{"agents":[]}' > "$SBX/scenario/abi-list-out"
+echo '{"agents":[]}' > "$SBX/scenario/fno-list-out"
 
 CALL_LOG="$SBX/call-log"
 HANDOFF_VERIFY_TIMEOUT=3 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
@@ -1066,10 +1066,10 @@ echo ""
 echo "=== Scenario 22: AC4-EDGE live child, empty short_id, no session_id ==="
 SBX="$(make_sandbox s22)"
 printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
-  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-ask-out"
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-ask-out"
 # Live row with empty short_id and empty session_id -> nothing to backfill.
 printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live","short_id":"","session_id":""}]}\n' \
-  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-list-out"
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-list-out"
 
 CALL_LOG="$SBX/call-log"
 HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
@@ -1093,9 +1093,9 @@ echo ""
 echo "=== Scenario 22b: AC4-EDGE empty short_id falls back to session_id ==="
 SBX="$(make_sandbox s22b)"
 printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
-  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-ask-out"
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-ask-out"
 printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live","short_id":"","session_id":"sess456"}]}\n' \
-  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-list-out"
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-list-out"
 
 CALL_LOG="$SBX/call-log"
 HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
@@ -1116,10 +1116,10 @@ echo ""
 echo "=== Scenario 23: AC5-EDGE timeout re-acquire loses race ==="
 SBX="$(make_sandbox s23)"
 printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
-  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/abi-ask-out"
-echo '{"agents":[]}' > "$SBX/scenario/abi-list-out"
+  "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-ask-out"
+echo '{"agents":[]}' > "$SBX/scenario/fno-list-out"
 # Re-acquire of node:<id> fails because a lagging child already claimed it.
-echo "1" > "$SBX/scenario/abi-claim-acquire-node-rc"
+echo "1" > "$SBX/scenario/fno-claim-acquire-node-rc"
 
 CALL_LOG="$SBX/call-log"
 HANDOFF_VERIFY_TIMEOUT=3 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"

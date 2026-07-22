@@ -93,7 +93,7 @@ for skill in "${ALL_RETIRED[@]}"; do
   #     to a CLI verb. The `.` after the name is the discriminator: a slash
   #     command never has a file extension immediately after.
   #   - bare-word usages in stage lists (e.g. impeccable's `distill, extract`)
-  #   - `abilities:<name>` alias form (false-positives on slash-command matchers
+  #   - `fno:<name>` alias form (false-positives on slash-command matchers
   #     that route to commands/<name>.md for a cut skill whose command
   #     surface is intentionally preserved)
   #   - bare quoted strings "<name>" without `Skill(` context - false-positives
@@ -156,7 +156,7 @@ done
 # above would false-positive on those, so renamed skills are matched ONLY by
 # their two unambiguous stale forms:
 #   - old skill dir path:        skills/<old>/    (trailing slash is the boundary)
-#   - old skill slash/alias name: abilities:<old>  (whole-token boundary)
+#   - old skill slash/alias name: fno:<old>  (whole-token boundary)
 # Both discriminate the retired skill from `fno agents` (space) and from the
 # generic "(skills/agents)" dir-pair prose in docs (no trailing slash).
 RENAMED_OLD_NAMES=(agents)
@@ -165,7 +165,7 @@ for old in "${RENAMED_OLD_NAMES[@]}"; do
     echo "AUDIT ERROR: malformed renamed skill name '$old'" >&2
     exit 2
   fi
-  pattern="(skills/${old}/)|(abilities:${old}([^A-Za-z0-9_-]|\$))"
+  pattern="(skills/${old}/)|(fno:${old}([^A-Za-z0-9_-]|\$))"
   set +e
   raw=$(grep -IrEn "$pattern" "${SCAN_PATHS[@]}" 2>/dev/null)
   rc=$?

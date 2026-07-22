@@ -16,7 +16,7 @@ static PATH_MUTEX: Mutex<()> = Mutex::new(());
 
 fn tmpdir(tag: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "abi-spawn-routing-{}-{}-{}",
+        "fno-spawn-routing-{}-{}-{}",
         tag,
         std::process::id(),
         std::time::SystemTime::now()
@@ -115,7 +115,7 @@ fn ask_unknown_name_claude_exits_16() {
         &ch,
         "ghost",
         "hi",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_secs(3)),
@@ -161,7 +161,7 @@ fn ask_unknown_name_codex_exits_16() {
         &home,
         "ghost-codex",
         "hi",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_secs(3)),
@@ -206,7 +206,7 @@ fn ask_unknown_name_gemini_exits_16() {
         &home,
         "ghost-gemini",
         "hi",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_secs(3)),
@@ -247,17 +247,7 @@ fn ask_unknown_name_stderr_byte_parity() {
     let ch = ClaudeHome::at(tmpdir("ask-parity-claude"));
     let cwd = tmpdir("ask-parity-cwd");
 
-    let out = dispatch_claude_ask(
-        &home,
-        &ch,
-        "myagent",
-        "msg",
-        "abilities",
-        &cwd,
-        false,
-        None,
-        &[],
-    );
+    let out = dispatch_claude_ask(&home, &ch, "myagent", "msg", "fno", &cwd, false, None, &[]);
 
     // Python: f"unknown agent {name!r}; spawn it first: fno agents spawn {name} -p <provider>"
     // Rust must match this exactly (py_repr wraps in single quotes).
@@ -292,7 +282,7 @@ fn ask_known_agent_still_routes_to_followup() {
         &ch,
         "alice",
         "hi",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_millis(200)),
@@ -326,7 +316,7 @@ fn spawn_claude_receipt_byte_shape() {
         &ch,
         "myspawn",
         "hello",
-        "abilities",
+        "fno",
         &cwd,
         false,
         None,
@@ -393,7 +383,7 @@ fn spawn_claude_receipt_surfaces_moved_cwd() {
         &ch,
         "movedspawn",
         "hello",
-        "abilities",
+        "fno",
         &cwd,
         false,
         None,
@@ -438,7 +428,7 @@ fn spawn_claude_collision_exits_2() {
         &ch,
         "existing",
         "hello",
-        "abilities",
+        "fno",
         &cwd,
         false,
         None,
@@ -490,7 +480,7 @@ fn spawn_codex_once_happy_path() {
         &home,
         "ephemeral-codex",
         "do something once",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_secs(10)),
@@ -557,16 +547,7 @@ fn spawn_codex_once_collision_exits_2() {
     seed_registry(&home, "taken", "codex");
 
     let out = dispatch_codex_once(
-        &home,
-        "taken",
-        "msg",
-        "abilities",
-        &cwd,
-        false,
-        None,
-        None,
-        None,
-        None,
+        &home, "taken", "msg", "fno", &cwd, false, None, None, None, None,
     );
 
     assert_eq!(out.exit_code, 2, "collision must exit 2: {}", out.stderr);
@@ -597,7 +578,7 @@ fn spawn_codex_once_create_failure_no_registry_entry() {
         &home,
         "will-fail",
         "msg",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_secs(3)),
@@ -645,7 +626,7 @@ fn spawn_gemini_once_happy_path() {
         &home,
         "ephemeral-gemini",
         "do something once",
-        "abilities",
+        "fno",
         &cwd,
         false,
         Some(Duration::from_secs(10)),
@@ -697,7 +678,7 @@ fn spawn_gemini_once_happy_path() {
 fn find_client_bin() -> std::path::PathBuf {
     // `cargo test` sets CARGO_MANIFEST_DIR; binary lands under target/debug.
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // Walk up to workspace root (fno/crates/fno-agents -> abilities/)
+    // Walk up to workspace root (fno/crates/fno-agents -> fno/)
     let target = manifest
         .parent()
         .unwrap()

@@ -38,9 +38,6 @@ __pycache__/
 # it, so `git add -A` would stage it. Ignore the symlink form too.
 .fno
 **/.fno
-# Legacy state dir (abilities -> fno rename): ignored through the migration window.
-.abilities/
-**/.abilities/
 # But track the example config file - it is documentation, not runtime state
 !.fno/settings.yaml.example
 !**/.fno/settings.yaml.example

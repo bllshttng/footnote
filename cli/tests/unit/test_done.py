@@ -132,7 +132,7 @@ def _stub_subprocess(
 # -- tests --
 
 
-def test_scenario1_hp_abi_done_noargs_auto_detects_pr(tmp_graph, monkeypatch):
+def test_scenario1_hp_fno_done_noargs_auto_detects_pr(tmp_graph, monkeypatch):
     """Scenario 1 (HP): no args + matching branch + gh pr resolves everything."""
     _seed(tmp_graph, [{
         "id": "ab-tot00001",
@@ -156,7 +156,7 @@ def test_scenario1_hp_abi_done_noargs_auto_detects_pr(tmp_graph, monkeypatch):
     assert entry["merge_status"] == "merged"
 
 
-def test_scenario2_hp_abi_done_id_pr_explicit(tmp_graph, monkeypatch):
+def test_scenario2_hp_fno_done_id_pr_explicit(tmp_graph, monkeypatch):
     """Scenario 2 (HP): explicit id + --pr derives URL via gh repo view."""
     _seed(tmp_graph, [{
         "id": "ab-54e461b6",

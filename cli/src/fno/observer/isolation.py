@@ -321,7 +321,7 @@ def _encode_path_for_claude_projects(path: Path) -> str:
     """Encode an absolute path to the Claude projects dir convention.
 
     Claude maps every non-[a-zA-Z0-9] character in the absolute path to '-'.
-    Example: ``/tmp/abi-eval-task-abc`` -> ``-tmp-abi-eval-task-abc``
+    Example: ``/tmp/fno-eval-task-abc`` -> ``-tmp-fno-eval-task-abc``
     """
     return re.sub(r"[^a-zA-Z0-9]", "-", str(path))
 
@@ -437,16 +437,16 @@ def default_real_state_paths(repo_root: Path) -> dict[str, Path]:
         repo_root: The fno repo root (for repo-local events.jsonl).
     """
     home = Path.home()
-    abilities_home = home / ".fno"
+    fno_home = home / ".fno"
     return {
-        "ledger_json": abilities_home / "ledger.json",
-        "graph_json": abilities_home / "graph.json",
+        "ledger_json": fno_home / "ledger.json",
+        "graph_json": fno_home / "graph.json",
         "repo_events_jsonl": repo_root / ".fno" / "events.jsonl",
-        "global_events_jsonl": abilities_home / "events.jsonl",
-        "memory_dir": abilities_home / "memory",
+        "global_events_jsonl": fno_home / "events.jsonl",
+        "memory_dir": fno_home / "memory",
         # corrections.log was re-homed to ~/.fno/ by the placement-rule wave
         # (ab-f063 W2); scan it there, not the dead ~/.claude/ location.
-        "corrections_log": abilities_home / "corrections.log",
+        "corrections_log": fno_home / "corrections.log",
     }
 
 

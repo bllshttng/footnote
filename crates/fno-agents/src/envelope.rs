@@ -73,7 +73,7 @@ impl Envelope for JsonEnvelope {
 
 /// No-op envelope for Claude. Claude is not PTY-managed (its
 /// [`Provider::as_pty`](crate::provider::Provider::as_pty) returns `None`), and
-/// its out-of-band framing is CC's sanctioned `<channel source="abilities">`
+/// its out-of-band framing is CC's sanctioned `<channel source="fno">`
 /// wrapper. This impl is therefore unreachable on the daemon's PTY path and
 /// exists only for trait completeness; it returns the message unchanged.
 pub struct NoEnvelope;

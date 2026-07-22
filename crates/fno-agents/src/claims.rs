@@ -577,7 +577,7 @@ fn archive_claim(path: &Path, ts_ms: i64) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Best-effort audit append to `<events_dir>/.fno/events.jsonl` using the
-/// SAME envelope the Python emitter writes: `{ts, type, source: "abi-loop",
+/// SAME envelope the Python emitter writes: `{ts, type, source: "fno-loop",
 /// data}` — so an operator reading the log (or `fno event audit`) sees the
 /// identical record regardless of which implementation performed the
 /// operation. Deliberately NOT the crate's Branch-B `EventEmitter`: that
@@ -597,7 +597,7 @@ fn emit_claim_event(events_dir: Option<&Path>, type_name: &str, data: Map<String
     let event = json!({
         "ts": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         "type": type_name,
-        "source": "abi-loop",
+        "source": "fno-loop",
         "data": Value::Object(data),
     });
     if let Err(e) = append_event_line(&events_path, &event) {
@@ -1752,7 +1752,7 @@ mod tests {
         let events = read_events(&td);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "claim_acquired");
-        assert_eq!(events[0]["source"], "abi-loop");
+        assert_eq!(events[0]["source"], "fno-loop");
         assert_eq!(events[0]["data"]["holder"], "pty:me");
         assert_eq!(events[0]["data"]["reason"], "testing");
         assert_eq!(events[0]["data"]["expires_at"], Value::Null);

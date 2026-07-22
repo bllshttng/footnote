@@ -29,7 +29,7 @@ FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-resolve_abi() {
+resolve_fno() {
     if command -v fno >/dev/null 2>&1; then
         echo "fno"
         return
@@ -42,8 +42,8 @@ resolve_abi() {
     echo "python3 -m fno.cli"
 }
 
-ABI=$(resolve_abi)
-run_abi() {
+ABI=$(resolve_fno)
+run_fno() {
     # shellcheck disable=SC2086
     $ABI "$@"
 }
@@ -56,7 +56,7 @@ echo
 # Pipe JSON to Python via stdin so multiline plan excerpts don't break embedded
 # triple-quoted strings. stderr is discarded so diagnostics don't pollute the
 # JSON stream.
-run_abi --json backlog triage context --all 2>/dev/null > "$TMP/ctx.json"
+run_fno --json backlog triage context --all 2>/dev/null > "$TMP/ctx.json"
 empty_count=$(python3 -c "import json,sys; print(len(json.load(sys.stdin).get('candidates', [])))" < "$TMP/ctx.json")
 if [[ "$empty_count" == "0" ]]; then
     pass "context returns empty candidates on empty graph"
@@ -82,10 +82,10 @@ title: Plan Y
 Line 2 of plan Y.
 EOF
 
-run_abi backlog intake "$plan_x" >/dev/null 2>&1
-run_abi backlog intake "$plan_y" >/dev/null 2>&1
+run_fno backlog intake "$plan_x" >/dev/null 2>&1
+run_fno backlog intake "$plan_y" >/dev/null 2>&1
 
-run_abi --json backlog triage context --all 2>/dev/null > "$TMP/ctx.json"
+run_fno --json backlog triage context --all 2>/dev/null > "$TMP/ctx.json"
 candidate_count=$(python3 -c "import json,sys; print(len(json.load(sys.stdin).get('candidates', [])))" < "$TMP/ctx.json")
 if [[ "$candidate_count" == "2" ]]; then
     pass "context returns 2 candidates after 2 intakes"
@@ -94,7 +94,7 @@ else
 fi
 
 # --- Scenario 3: context --deep includes plan_excerpt ----------------------
-run_abi --json backlog triage context --deep --all 2>/dev/null > "$TMP/ctx-deep.json"
+run_fno --json backlog triage context --deep --all 2>/dev/null > "$TMP/ctx-deep.json"
 excerpt_check=$(python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -110,7 +110,7 @@ fi
 # --- Scenario 4: validate accepts clean / rejects cycle --------------------
 clean_prop="$TMP/clean.json"
 echo '{"dependencies": [], "priority_changes": [], "duplicates": []}' > "$clean_prop"
-run_abi --json backlog triage validate "$clean_prop" >/dev/null 2>&1
+run_fno --json backlog triage validate "$clean_prop" >/dev/null 2>&1
 clean_rc=$?
 if [[ $clean_rc -eq 0 ]]; then
     pass "validate accepts empty proposal (exit 0)"
@@ -150,7 +150,7 @@ cat > "$cycle_prop" <<EOF
   "duplicates": []
 }
 EOF
-cycle_out=$(run_abi backlog triage validate "$cycle_prop" 2>&1)
+cycle_out=$(run_fno backlog triage validate "$cycle_prop" 2>&1)
 cycle_rc=$?
 if [[ $cycle_rc -ne 0 ]]; then
     pass "validate exits non-zero on cycle-creating edge"
@@ -190,7 +190,7 @@ EOF
 
 # Rendering is idempotent; we only check content changed as expected.
 md_before_hash=$(shasum "$GRAPH_MD" 2>/dev/null | awk '{print $1}' || echo "absent")
-run_abi backlog triage apply "$apply_prop" >/dev/null 2>&1
+run_fno backlog triage apply "$apply_prop" >/dev/null 2>&1
 applied_rc=$?
 
 if [[ $applied_rc -eq 0 ]]; then
@@ -228,7 +228,7 @@ fi
 
 # --- Scenario 6: propose --dry-run emits a valid template ------------------
 # Capture only stdout; dry-run writes its human-readable summary to stderr.
-run_abi --json backlog triage propose --dry-run --all 2>/dev/null > "$TMP/dry.json"
+run_fno --json backlog triage propose --dry-run --all 2>/dev/null > "$TMP/dry.json"
 dry_keys=$(python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -253,7 +253,7 @@ d['entries'][1]['project'] = 'alpha'
 # Both still need completed_at == None to count as pending
 json.dump(d, open(p, 'w'))
 "
-run_abi --json backlog triage projects 2>/dev/null > "$TMP/projects.json"
+run_fno --json backlog triage projects 2>/dev/null > "$TMP/projects.json"
 projects_check=$(python3 -c "
 import json, sys
 d = json.load(sys.stdin)

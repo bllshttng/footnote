@@ -106,7 +106,7 @@ def _wait_for_sidecar(sock_path: Path, *, deadline: float) -> bool:
 def _spawn_detached_sidecar(sock_path: Path) -> Optional[subprocess.Popen[Any]]:
     """Spawn the sidecar in a new session (detached from this process).
 
-    Mirror of ``abi-supervisor`` lazy-start. Returns the Popen handle on
+    Mirror of ``fno-supervisor`` lazy-start. Returns the Popen handle on
     success (caller does NOT wait on it). Returns ``None`` if Python
     can't find itself (extremely unusual; tested defensively).
     """

@@ -20,7 +20,7 @@ runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
-def _pin_abi_repo_root(monkeypatch):
+def _pin_fno_repo_root(monkeypatch):
     """Pin FNO_REPO_ROOT to the real repo so resolve_repo_root finds
     scripts/lib/. Other tests in the suite (e.g. test_gate_honesty,
     test_gates) set FNO_REPO_ROOT to tmp dirs and that env-var can leak

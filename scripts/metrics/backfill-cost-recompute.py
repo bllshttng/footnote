@@ -40,7 +40,7 @@ files are never modified (fno.cost._session_cost keys the per-session cost
 lookup off session_id).
 
 Concurrency contract: the ledger pass holds the same flock the register
-path uses (/tmp/abilities-ledger.lock, see register-task.py), and --apply
+path uses (/tmp/fno-ledger.lock, see register-task.py), and --apply
 refuses to run while live target sessions hold claims (~/.fno/claims)
 unless --force is given. Atomic temp+fsync+replace writes remain the
 corruption backstop either way.
@@ -77,7 +77,7 @@ NODE_MARKER = "cost_backfill_recompute"
 LEGACY_OPUS47_MARKER = "cost_backfilled_for_opus47"
 # Same lock the register path takes (register-task.py) so a stop-hook
 # append can never interleave with this read-modify-write.
-LEDGER_LOCK_PATH = Path("/tmp/abilities-ledger.lock")
+LEDGER_LOCK_PATH = Path("/tmp/fno-ledger.lock")
 
 
 def is_opus_48(model: str | None) -> bool:
@@ -384,7 +384,7 @@ def patch_graph(
         return counters
 
     # locked_mutate_graph is the canonical graph write surface: flock on
-    # /tmp/abilities-graph.lock, timestamped backup, SHA256 sidecar, and
+    # /tmp/fno-graph.lock, timestamped backup, SHA256 sidecar, and
     # derived-view re-render. Imported from the in-repo source tree so the
     # script works without the cli package installed system-wide.
     sys.path.insert(0, str(REPO_ROOT / "cli" / "src"))

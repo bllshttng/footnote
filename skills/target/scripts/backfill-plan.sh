@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # backfill-plan.sh - deterministic scaffolding for the Plan Mode backfill adapter.
 #
-# Turns a native Plan Mode plan into a gate-passing abilities design doc. The one
+# Turns a native Plan Mode plan into a gate-passing fno design doc. The one
 # genuinely new piece of reasoning - synthesizing ## Failure Modes and the 5 BDD
 # Acceptance Criteria from the native plan's intent - is LLM-powered and lives in
 # the /target skill body (see skills/target/SKILL.md and references/plan-mode-backfill.md).

@@ -153,7 +153,7 @@ def test_audit_rejects_malformed_skill_name(tmp_path: Path) -> None:
     not (REPO_ROOT / "cli" / "pyproject.toml").exists(),
     reason="run from the cli workspace",
 )
-def test_abi_stale_skill_refs_wrapper_matches_bash() -> None:
+def test_fno_stale_skill_refs_wrapper_matches_bash() -> None:
     """`fno lint stale-skill-refs` exits with the same code as the bash script.
 
     Re-homed from `fno consolidation audit` (x-71b6): the audit is a lint gate,
@@ -168,15 +168,15 @@ def test_abi_stale_skill_refs_wrapper_matches_bash() -> None:
         text=True,
         env=env,
     )
-    abi_proc = subprocess.run(
+    fno_proc = subprocess.run(
         ["uv", "run", "fno-py", "lint", "stale-skill-refs"],
         cwd=cli_dir,
         capture_output=True,
         text=True,
         env=env,
     )
-    assert bash_proc.returncode == abi_proc.returncode, (
-        f"bash={bash_proc.returncode}, fno={abi_proc.returncode}\n"
+    assert bash_proc.returncode == fno_proc.returncode, (
+        f"bash={bash_proc.returncode}, fno={fno_proc.returncode}\n"
         f"bash stdout: {bash_proc.stdout[-500:]}\n"
-        f"fno stdout: {abi_proc.stdout[-500:]}"
+        f"fno stdout: {fno_proc.stdout[-500:]}"
     )

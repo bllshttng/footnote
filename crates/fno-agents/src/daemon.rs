@@ -900,12 +900,12 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let ab_live = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ab_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ab_handle = {
-        let abi_bin = std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+        let fno_bin = std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string());
         let ab_emitter = EventEmitter::new(ctx.home.events_jsonl(), "active-backlog");
         let live = Arc::clone(&ab_live);
         let shutdown = Arc::clone(&ab_shutdown);
         tokio::spawn(crate::active_backlog::run_supervisor(
-            abi_bin, ab_emitter, live, shutdown,
+            fno_bin, ab_emitter, live, shutdown,
         ))
     };
 
@@ -4103,7 +4103,7 @@ fn handle_push_to_channel(ctx: &Ctx, req: &Request) -> Response {
 fn deliver_envelope(channel_id: &str, envelope: &Value) -> Result<(), String> {
     use std::io::Write;
     use std::process::Stdio;
-    let mut child = crate::loop_megawalk::abi_cmd("fno")
+    let mut child = crate::loop_megawalk::fno_cmd("fno")
         .args(["mcp", "send", "--session-id", channel_id])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -5600,7 +5600,7 @@ done
         use std::sync::atomic::{AtomicU32, Ordering};
         static C: AtomicU32 = AtomicU32::new(0);
         let n = C.fetch_add(1, Ordering::Relaxed);
-        let p = PathBuf::from(format!("/tmp/abisb{tag}{}_{n}", std::process::id()));
+        let p = PathBuf::from(format!("/tmp/fnosb{tag}{}_{n}", std::process::id()));
         let home = AgentsHome::at(&p);
         home.ensure_root().unwrap();
         home

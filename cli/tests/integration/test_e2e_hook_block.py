@@ -71,7 +71,7 @@ def test_hook_blocks_edit_or_write_to_graph_json(tool):
 
 
 @pytest.mark.parametrize("tool", ["Edit", "Write"])
-def test_block_reason_mentions_abi_backlog(tool):
+def test_block_reason_mentions_fno_backlog(tool):
     """The block message must redirect users at the canonical CLI."""
     home = os.path.expanduser("~")
     payload = {

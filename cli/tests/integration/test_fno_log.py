@@ -130,9 +130,9 @@ def test_read_progress_returns_last_n(tmp_path: Path):
     """AC1-HP: read_progress(last_n=3) returns 3 most recent of 5 entries."""
     from fno.agent_progress import read_progress
 
-    abilities_dir = tmp_path / ".fno"
-    abilities_dir.mkdir()
-    progress_file = abilities_dir / "agent-progress.jsonl"
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir()
+    progress_file = fno_dir / "agent-progress.jsonl"
 
     entries = [
         {"ts": f"2026-04-29T0{i}:00:00Z", "session_id": "test", "kind": "activity", "summary": f"entry {i}"}

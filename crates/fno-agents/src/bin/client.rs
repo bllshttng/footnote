@@ -619,7 +619,7 @@ fn maybe_run_claude_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
     let from_name = params
         .get("from_name")
         .and_then(|v| v.as_str())
-        .unwrap_or("abilities");
+        .unwrap_or("fno");
     // ask is a follow-up to an already-registered session: dispatch_claude_ask
     // takes the cwd as `_cwd` and never launches in it. So resolve only an
     // explicit --cwd (canonicalized, Python's `Path(cwd).resolve()`; empty is
@@ -811,7 +811,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     let from_name = params
         .get("from_name")
         .and_then(|v| v.as_str())
-        .unwrap_or("abilities");
+        .unwrap_or("fno");
     // --cwd > --here (caller) > default canonical (x-85fe); resolve_dispatch_cwd
     // canonicalizes an explicit --cwd and shells to git on the default path
     // (no --cwd, no --here). Resolve only for CLIENT-SIDE spawns, which are the
@@ -2831,7 +2831,7 @@ mod tests {
             "myagent".to_string(),
             "hello there".to_string(),
             "--from-name".to_string(),
-            "abilities".to_string(),
+            "fno".to_string(),
             "--yolo".to_string(),
             "--timeout".to_string(),
             "30".to_string(),
@@ -2844,7 +2844,7 @@ mod tests {
         let (method, params) = result.unwrap();
         assert_eq!(method, "agent.ask");
         assert_eq!(params["name"], "myagent");
-        assert_eq!(params["from_name"], "abilities");
+        assert_eq!(params["from_name"], "fno");
         assert_eq!(params["yolo"], true);
         assert_eq!(params["timeout"], 30u64);
     }
@@ -3730,28 +3730,25 @@ mod tests {
         let agents = json!([]);
         let filters = json!({"cwd": null, "provider": null, "status": null});
         let discovered = vec![json!({
-            "handle": "abilities-aaaa1111",
+            "handle": "fno-aaaa1111",
             "short_id": "aaaa1111",
             "session_id": "uuid-1",
             "pid": 4242,
             "cwd": "/Users/x/code/proj",
-            "project": "abilities",
+            "project": "fno",
             "status": "busy",
             "agent": "claude",
         })];
         let out = render_list_json(&agents, &filters, &discovered);
         let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(parsed["discovered_count"], 1);
-        assert_eq!(
-            parsed["discovered_sessions"][0]["handle"],
-            "abilities-aaaa1111"
-        );
+        assert_eq!(parsed["discovered_sessions"][0]["handle"], "fno-aaaa1111");
         assert_eq!(parsed["schema_version"], 2);
 
         let table = render_list_table(&agents, &discovered);
         assert!(table.contains("DISCOVERED LIVE SESSIONS (1, host-local)"));
         assert!(table.contains("HANDLE"));
-        assert!(table.contains("abilities-aaaa1111"));
+        assert!(table.contains("fno-aaaa1111"));
         assert!(table.contains("busy"));
     }
 

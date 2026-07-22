@@ -24,7 +24,7 @@ runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
-def _pin_abi_repo_root(monkeypatch):
+def _pin_fno_repo_root(monkeypatch):
     """Pin FNO_REPO_ROOT to the real repo so resolve_repo_root finds
     scripts/lib/. CI smoke runs all tests together and other test files
     set FNO_REPO_ROOT to tmp dirs, which leaks into this session."""

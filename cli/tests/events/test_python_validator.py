@@ -45,7 +45,7 @@ def test_validate_audit_only_phase_transition() -> None:
     event = {
         "ts": "2026-05-07T09:30:42Z",
         "type": "phase_transition",
-        "source": "abi-loop",
+        "source": "fno-loop",
         "data": {
             "gate_bearing": False,
             "phase": "review",
@@ -180,7 +180,7 @@ def test_phase_transition_builder_happy() -> None:
 
 def test_phase_transition_builder_audit_only() -> None:
     ev = phase_transition(
-        phase="review", nonce="x", session_id="s", source="abi-loop", gate_bearing=False
+        phase="review", nonce="x", session_id="s", source="fno-loop", gate_bearing=False
     )
     assert ev["data"]["gate_bearing"] is False
     assert "gate" not in ev["data"]
@@ -259,7 +259,7 @@ def test_done_race_collision_builder_happy() -> None:
         second_attempt_at="2026-05-15T12:00:00+00:00",
     )
     assert ev["type"] == "done_race_collision"
-    assert ev["source"] == "abi-loop"
+    assert ev["source"] == "fno-loop"
     assert ev["data"]["node_id"] == "ab-deadbeef"
 
 

@@ -5170,9 +5170,9 @@ def cmd_pick(
     #   cands.tsv  : the immutable snapshot of candidates the picker reads
     #   pending.txt: empty file the keybinds append intents to
     #   awk.script : the renderer logic invoked by fzf reload
-    fd_cand, cand_path = tempfile.mkstemp(prefix="abi-pick-", suffix=".cands.tsv")
-    fd_pend, pend_path = tempfile.mkstemp(prefix="abi-pick-", suffix=".pending.txt")
-    fd_awk, awk_path = tempfile.mkstemp(prefix="abi-pick-", suffix=".awk")
+    fd_cand, cand_path = tempfile.mkstemp(prefix="fno-pick-", suffix=".cands.tsv")
+    fd_pend, pend_path = tempfile.mkstemp(prefix="fno-pick-", suffix=".pending.txt")
+    fd_awk, awk_path = tempfile.mkstemp(prefix="fno-pick-", suffix=".awk")
     # Seed pending.txt with a sentinel comment line. Awk's NR==FNR test
     # misfires when the first file is empty (FNR resets at file
     # boundary so the first record of file 2 also has NR==FNR), and
@@ -8253,7 +8253,7 @@ def cmd_new(
             "merge_status": None,
             "artifact_url": None,
             "completion_note": None,
-            "source": "abi-new",
+            "source": "fno-new",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "source_kind": source_kind,
             "source_project": source_project,

@@ -43,7 +43,7 @@ Both helpers trim env values and coerce empty/whitespace to `None`. Neither rais
 resolve_transcript(harness, session_id, cwd) -> ResolvedTranscript
 ```
 
-For `claude` it resolves `~/.claude/projects/<slug(cwd)>/<session_id>.jsonl`, where `slug(cwd)` replaces both `/` and `.` with `-` (e.g. `/Users/bb16/code/me/abilities` -> `-Users-bb16-code-me-abilities`). It tries an exact `<session_id>.jsonl` first, then globs `<session_id>*.jsonl` because the id may be an 8-hex prefix; multiple matches return the first deterministically with `ambiguous=True`. A foreign harness (`codex`, `gemini`, anything else) returns `resolved=False` with `reason="harness-not-supported"` rather than guessing. Missing inputs and unexpected OS errors also return `resolved=False`; the function never raises.
+For `claude` it resolves `~/.claude/projects/<slug(cwd)>/<session_id>.jsonl`, where `slug(cwd)` replaces both `/` and `.` with `-` (e.g. `/Users/bb16/code/me/fno` -> `-Users-bb16-code-me-fno`). It tries an exact `<session_id>.jsonl` first, then globs `<session_id>*.jsonl` because the id may be an 8-hex prefix; multiple matches return the first deterministically with `ambiguous=True`. A foreign harness (`codex`, `gemini`, anything else) returns `resolved=False` with `reason="harness-not-supported"` rather than guessing. Missing inputs and unexpected OS errors also return `resolved=False`; the function never raises.
 
 The separation is deliberate: capture the pointer universally and harness-agnostically now (cheap, future-proof against the next CLI swap), resolve it lazily and per-harness only for harnesses actually read back. The codex resolver is deferred until codex session capture is fixed upstream; gemini and antigravity have no transcript store to resolve.
 

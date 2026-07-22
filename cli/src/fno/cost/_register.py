@@ -529,7 +529,7 @@ def _write_ledger_data(tasks_path: Path, data: dict) -> None:
 def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
     """Append entry to a ledger.json file atomically with flock."""
     tasks_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = Path("/tmp/abilities-ledger.lock")
+    lock_path = Path("/tmp/fno-ledger.lock")
 
     lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
     try:
@@ -599,7 +599,7 @@ def upsert_ledger_pr(
 
     Reconcile-side backstop (x-88df Part 2) for the transcript-gone tail: the
     merge event knows ``(node, pr, project, merged_at)`` but no ``finalize`` ran.
-    Under the SAME ``/tmp/abilities-ledger.lock`` flock the register path uses:
+    Under the SAME ``/tmp/fno-ledger.lock`` flock the register path uses:
 
     - existing execution row with ``pr_number`` null -> stamp pr_number/pr_url
       WITHOUT touching its full-fidelity fields -> returns ``"stamped"``
@@ -612,7 +612,7 @@ def upsert_ledger_pr(
     """
     ledger_path = _paths.ledger_json()
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = Path("/tmp/abilities-ledger.lock")
+    lock_path = Path("/tmp/fno-ledger.lock")
 
     lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
     try:

@@ -4,7 +4,7 @@
 //! `create`/`resume`) and the Rust `codex_ask` path, and asserts identical
 //! behavior: reply text, exit code, and key events.jsonl field presence.
 //!
-//! Skips (not fails) when `python3` or the `abilities` package is unavailable,
+//! Skips (not fails) when `python3` or the `fno` package is unavailable,
 //! following the `claude_ask_parity.rs` skip-when-unavailable policy.
 //!
 //! Cases covered:
@@ -27,7 +27,7 @@ use std::process::Command;
 /// same pattern as the fix in tests/codex_ask_dispatch.rs).
 static PATH_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Path to `cli/src` so Python can import the `abilities` package.
+/// Path to `cli/src` so Python can import the `fno` package.
 fn pythonpath() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/src")
 }
@@ -43,7 +43,7 @@ fn python_available() -> bool {
 
 fn tmpdir(tag: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "abi-codex-parity-{}-{}-{}",
+        "fno-codex-parity-{}-{}-{}",
         tag,
         std::process::id(),
         std::time::SystemTime::now()
@@ -119,7 +119,7 @@ from pathlib import Path
 from fno.agents.providers import codex as c
 
 prompt = os.environ.get("PROMPT","")
-from_name = os.environ.get("FROM_NAME","abilities")
+from_name = os.environ.get("FROM_NAME","fno")
 output_path = Path(os.environ["OUTPUT_PATH"])
 cwd = Path(os.environ["CWD"])
 session_id = os.environ.get("SESSION_ID","")
@@ -314,27 +314,10 @@ fn parity_create_happy_path() {
     let rs_out = tmpdir("par-c1-rs-out").join("out.jsonl");
 
     let (py_exit, py_reply) = py_codex(
-        "create",
-        None,
-        &cwd,
-        "hello",
-        "abilities",
-        false,
-        &py_out,
-        10,
-        &bin_dir,
-        &extra,
+        "create", None, &cwd, "hello", "fno", false, &py_out, 10, &bin_dir, &extra,
     );
-    let (rs_exit, rs_reply) = rust_codex_create(
-        &cwd,
-        "hello",
-        "abilities",
-        false,
-        &rs_out,
-        10,
-        &bin_dir,
-        &extra,
-    );
+    let (rs_exit, rs_reply) =
+        rust_codex_create(&cwd, "hello", "fno", false, &rs_out, 10, &bin_dir, &extra);
 
     assert_eq!(py_exit, 0, "Python create exit: {}", py_exit);
     assert_eq!(rs_exit, 0, "Rust create exit: {}", rs_exit);
@@ -373,7 +356,7 @@ fn parity_resume_happy_path() {
         Some(session_id),
         &cwd,
         "follow up",
-        "abilities",
+        "fno",
         false,
         &py_out,
         10,
@@ -384,7 +367,7 @@ fn parity_resume_happy_path() {
         session_id,
         &cwd,
         "follow up",
-        "abilities",
+        "fno",
         false,
         &rs_out,
         10,
@@ -423,27 +406,10 @@ fn parity_no_jsonl_nonzero_exit() {
     let rs_out = tmpdir("par-e1-rs-out").join("out.jsonl");
 
     let (py_exit, _) = py_codex(
-        "create",
-        None,
-        &cwd,
-        "hello",
-        "abilities",
-        false,
-        &py_out,
-        10,
-        &bin_dir,
-        &extra,
+        "create", None, &cwd, "hello", "fno", false, &py_out, 10, &bin_dir, &extra,
     );
-    let (rs_exit, _) = rust_codex_create(
-        &cwd,
-        "hello",
-        "abilities",
-        false,
-        &rs_out,
-        10,
-        &bin_dir,
-        &extra,
-    );
+    let (rs_exit, _) =
+        rust_codex_create(&cwd, "hello", "fno", false, &rs_out, 10, &bin_dir, &extra);
 
     // Both should exit 11 (NoSessionIdError fires before exit_code check in Python)
     assert_eq!(
@@ -485,27 +451,10 @@ fn parity_soft_error_promotion() {
     let rs_out = tmpdir("par-se1-rs-out").join("out.jsonl");
 
     let (py_exit, py_reply) = py_codex(
-        "create",
-        None,
-        &cwd,
-        "hello",
-        "abilities",
-        false,
-        &py_out,
-        10,
-        &bin_dir,
-        &extra,
+        "create", None, &cwd, "hello", "fno", false, &py_out, 10, &bin_dir, &extra,
     );
-    let (rs_exit, rs_reply) = rust_codex_create(
-        &cwd,
-        "hello",
-        "abilities",
-        false,
-        &rs_out,
-        10,
-        &bin_dir,
-        &extra,
-    );
+    let (rs_exit, rs_reply) =
+        rust_codex_create(&cwd, "hello", "fno", false, &rs_out, 10, &bin_dir, &extra);
 
     assert_eq!(py_exit, 0, "Python soft-error exit: {}", py_exit);
     assert_eq!(rs_exit, 0, "Rust soft-error exit: {}", rs_exit);
@@ -536,7 +485,7 @@ import os, sys
 sys.path.insert(0, os.environ["PYTHONPATH"])
 from fno.agents.providers.codex import inject_from_name
 prompt = os.environ.get("PROMPT","")
-from_name = os.environ.get("FROM_NAME","abilities")
+from_name = os.environ.get("FROM_NAME","fno")
 sys.stdout.write(inject_from_name(prompt, from_name))
 "#;
 

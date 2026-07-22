@@ -4,7 +4,7 @@
 # Verifies that each driver skill (/target, /megawalk, /megatron) is
 # self-contained at the skill-folder level so the folder can be lifted
 # into any markdown-aware runtime (Codex, Gemini, openclaw, etc.) without
-# the surrounding abilities-plugin context.
+# the surrounding fno-plugin context.
 #
 # Three checks per driver skill:
 #   1. No Skill() runtime calls. Driver skills must use Read for

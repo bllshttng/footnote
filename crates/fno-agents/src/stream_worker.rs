@@ -1479,7 +1479,7 @@ mod tests {
         use std::sync::atomic::AtomicU32;
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        PathBuf::from(format!("/tmp/abisw{tag}{}_{}", std::process::id(), n))
+        PathBuf::from(format!("/tmp/fnosw{tag}{}_{}", std::process::id(), n))
     }
 
     const FAKE_EMITTER: &str = r#"

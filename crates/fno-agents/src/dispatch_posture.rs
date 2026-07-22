@@ -1,6 +1,6 @@
 //! Harness-aware ownership posture for the autonomous dispatch guard (x-3e70).
 //!
-//! The abi-loop / megawalk dispatchers default every worker to `claude`. When a
+//! The fno-loop / megawalk dispatchers default every worker to `claude`. When a
 //! foreign harness (codex / gemini) is already working a node - or is about to,
 //! inside its own worktree, before its claim lands - a default-claude dispatch
 //! stampedes it (observed 2026-07-09: a claude worker was dispatched onto a node

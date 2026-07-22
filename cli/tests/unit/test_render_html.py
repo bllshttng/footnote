@@ -117,7 +117,7 @@ def test_render_html_columns_are_collapsible_details(tmp_path: Path):
     assert '<details class="col col-triage" data-col="Triage">' in text
     assert '<details class="col col-now" data-col="Now" open>' in text
     # localStorage persistence key + capture-phase toggle listener present.
-    assert "abi-kanban-col-state" in text
+    assert "fno-kanban-col-state" in text
     assert "addEventListener('toggle'" in text
 
 
@@ -196,8 +196,8 @@ def test_canonicalize_plan_path():
     # worktree-rooted falls back to last /internal/ even without vault hint
     assert _canonicalize_plan_path("~/conductor/wt/x/internal/etl/plans/X/") == "internal/etl/plans/X/"
     # deprecated dev/ is no longer recognized as canonical
-    assert _canonicalize_plan_path("dev/abilities/plans/X.md") is None
-    assert _canonicalize_plan_path("~/myvault/dev/abilities/plans/X", vault="myvault") is None
+    assert _canonicalize_plan_path("dev/fno/plans/X.md") is None
+    assert _canonicalize_plan_path("~/myvault/dev/fno/plans/X", vault="myvault") is None
     # unrecognizable paths
     assert _canonicalize_plan_path("src/code.py") is None
     assert _canonicalize_plan_path(None) is None
@@ -550,9 +550,9 @@ def test_render_html_project_local_settings_cannot_shadow_global_vault(
     # through load_settings() this would shadow the global config and zero
     # out the vault on the model-default obsidian.enabled=false.
     project_root = tmp_path / "project"
-    abilities_dir = project_root / ".fno"
-    abilities_dir.mkdir(parents=True)
-    (abilities_dir / "settings.yaml").write_text(
+    fno_dir = project_root / ".fno"
+    fno_dir.mkdir(parents=True)
+    (fno_dir / "settings.yaml").write_text(
         "config:\n  budget_cap: 100\n", encoding="utf-8"
     )
     monkeypatch.chdir(project_root)

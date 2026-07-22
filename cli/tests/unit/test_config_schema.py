@@ -362,9 +362,9 @@ def test_load_settings_falls_through_on_corrupt_project_local(
     # Create fake home with a valid global settings.yaml
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    global_abilities = fake_home / ".fno"
-    global_abilities.mkdir()
-    global_settings = global_abilities / "settings.yaml"
+    global_fno = fake_home / ".fno"
+    global_fno.mkdir()
+    global_settings = global_fno / "settings.yaml"
     global_settings.write_text(
         "schema_version: 1\nconfig:\n  state_dir: '/custom-from-global/'\n",
         encoding="utf-8",
@@ -373,9 +373,9 @@ def test_load_settings_falls_through_on_corrupt_project_local(
     # Create a project-local settings.yaml that is malformed
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    local_abilities = repo_root / ".fno"
-    local_abilities.mkdir()
-    local_settings = local_abilities / "settings.yaml"
+    local_fno = repo_root / ".fno"
+    local_fno.mkdir()
+    local_settings = local_fno / "settings.yaml"
     local_settings.write_text(":::bad yaml:::\n  - broken: [unterminated", encoding="utf-8")
 
     monkeypatch.delenv("FNO_CONFIG", raising=False)
@@ -482,9 +482,9 @@ def test_project_local_settings_anchored_to_repo_root_not_cwd(
 
     # Set up a fake repo root with a .fno/settings.yaml
     repo_root = tmp_path / "my-repo"
-    abilities_dir = repo_root / ".fno"
-    abilities_dir.mkdir(parents=True)
-    settings_file = abilities_dir / "settings.yaml"
+    fno_dir = repo_root / ".fno"
+    fno_dir.mkdir(parents=True)
+    settings_file = fno_dir / "settings.yaml"
     settings_file.write_text(
         "schema_version: 1\nconfig:\n  state_dir: '/custom/from-repo-root/'\n",
         encoding="utf-8",
@@ -534,7 +534,7 @@ def test_env_var_takes_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 # ---------------------------------------------------------------------------
 
 
-def test_unknown_key_no_warning_without_abi_debug(
+def test_unknown_key_no_warning_without_fno_debug(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Fix 3: unknown key emits NO warning when FNO_DEBUG is unset."""
@@ -559,7 +559,7 @@ def test_unknown_key_no_warning_without_abi_debug(
     )
 
 
-def test_unknown_key_emits_warning_with_abi_debug(
+def test_unknown_key_emits_warning_with_fno_debug(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Fix 3: unknown key DOES emit warning when FNO_DEBUG=1."""

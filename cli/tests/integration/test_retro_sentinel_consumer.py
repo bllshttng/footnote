@@ -132,9 +132,9 @@ def test_dedup_against_existing_nodes(tmp_path: Path):
 
 def test_fast_path_triage_pending_shape(tmp_path: Path):
     """Wave 4.3: the .triage-pending fast-path file uses the same sentinel shape/routine."""
-    abil = tmp_path / ".fno"
-    abil.mkdir()
-    tp = abil / ".triage-pending"
+    fnodir = tmp_path / ".fno"
+    fnodir.mkdir()
+    tp = fnodir / ".triage-pending"
     tp.write_text(
         json.dumps(
             {"pr_number": 50, "pr_url": "https://github.com/o/r/pull/50",

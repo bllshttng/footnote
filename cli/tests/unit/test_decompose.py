@@ -27,7 +27,7 @@ def _node(node_id: str, **overrides) -> dict:
         "title": "default-title",
         "type": "feature",
         "project": "fno",
-        "cwd": "/tmp/abilities",
+        "cwd": "/tmp/fno",
         "priority": "p2",
         "domain": "code",
         "blocked_by": [],

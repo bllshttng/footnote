@@ -39,14 +39,14 @@ def tmp_graph(tmp_path, monkeypatch):
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
 
-    abilities_dir = home / ".fno"
-    abilities_dir.mkdir(parents=True, exist_ok=True)
+    fno_dir = home / ".fno"
+    fno_dir.mkdir(parents=True, exist_ok=True)
 
     # GRAPH_JSON is computed at import time from Path.home(); monkeypatch
     # it to the temp path so reads/writes land in the test sandbox.
-    monkeypatch.setattr(gc, "GRAPH_JSON", abilities_dir / "graph.json")
+    monkeypatch.setattr(gc, "GRAPH_JSON", fno_dir / "graph.json")
 
-    return abilities_dir
+    return fno_dir
 
 
 def _write_idea_nodes(graph_path: Path, n: int) -> None:
@@ -913,9 +913,9 @@ def test_health_mismatch_check_exit4(tmp_graph, monkeypatch):
         "    notifications:\n"
         "      surfaces: [log_only]\n"
     )
-    abilities_dir = tmp_graph.parent / ".fno"
-    abilities_dir.mkdir(exist_ok=True)
-    (abilities_dir / "settings.yaml").write_text(settings_text)
+    fno_dir = tmp_graph.parent / ".fno"
+    fno_dir.mkdir(exist_ok=True)
+    (fno_dir / "settings.yaml").write_text(settings_text)
     monkeypatch.chdir(tmp_graph.parent)
 
     result = runner.invoke(

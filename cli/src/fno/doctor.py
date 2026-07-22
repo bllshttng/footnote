@@ -265,12 +265,12 @@ def _probe_installed_verb() -> ProbeResult:
     directly keeps this check working even when the front door binary is not
     installed - the front door only forwards here anyway.
     """
-    abi_bin = shutil.which("fno-py")
-    if not abi_bin:
+    fno_bin = shutil.which("fno-py")
+    if not fno_bin:
         return "unknown"
     try:
         result = subprocess.run(
-            [abi_bin, *_PROBE_VERB, "--help"],
+            [fno_bin, *_PROBE_VERB, "--help"],
             capture_output=True,
             text=True,
             check=False,

@@ -6,7 +6,7 @@ AC4-HP: paths.X() resolves under tmp_path after use_tmpdir
 AC4-EDGE: calling use_tmpdir twice clears the cache between calls
 AC4-EDGE: no real ~/.fno state is read after use_tmpdir
 
-Autouse fixture pins FNO_REPO_ROOT per feedback_abi_repo_root_leaks_between_tests.
+Autouse fixture pins FNO_REPO_ROOT per feedback_fno_repo_root_leaks_between_tests.
 """
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def test_use_tmpdir_does_not_touch_real_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC4-HP: no path resolves to real ~/.fno/ after use_tmpdir."""
-    real_home_abilities = Path.home() / ".fno"
+    real_home_fno = Path.home() / ".fno"
 
     from fno.paths_testing import use_tmpdir
     use_tmpdir(monkeypatch, tmp_path)
@@ -81,7 +81,7 @@ def test_use_tmpdir_does_not_touch_real_home(
     from fno.paths import graph_json, ledger_json, state_dir
     for accessor in (state_dir, graph_json, ledger_json):
         result = accessor()
-        assert not str(result).startswith(str(real_home_abilities)), (
+        assert not str(result).startswith(str(real_home_fno)), (
             f"{accessor.__name__}() returned path under real ~/.fno: {result}"
         )
 

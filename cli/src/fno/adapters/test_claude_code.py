@@ -15,7 +15,7 @@ def test_create_worktree_delegates_to_shared(tmp_path, monkeypatch):
     """AC1.2-HP: ClaudeCodeAdapter.create_worktree must delegate to _shared.create_worktree."""
     monkeypatch.chdir(tmp_path)
 
-    expected_path = str(tmp_path / ".fno" / "worktrees" / "abi-delegated")
+    expected_path = str(tmp_path / ".fno" / "worktrees" / "fno-delegated")
     sentinel = {
         "worktree_path": expected_path,
         "branch": "feature/delegated",
@@ -37,7 +37,7 @@ def test_create_worktree_passes_base_through(tmp_path, monkeypatch):
     """Delegation preserves the base= keyword argument."""
     monkeypatch.chdir(tmp_path)
 
-    expected_path = str(tmp_path / ".fno" / "worktrees" / "abi-x")
+    expected_path = str(tmp_path / ".fno" / "worktrees" / "fno-x")
     with mock.patch(
         "fno.adapters.claude_code._create_worktree",
         return_value={
@@ -55,12 +55,12 @@ def test_create_worktree_returns_already_exists_via_delegation(tmp_path, monkeyp
     """End-to-end delegation: existing path short-circuits without invoking git."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / ".fno" / "worktrees" / "abi-preexisting").mkdir(parents=True)
+    (tmp_path / ".fno" / "worktrees" / "fno-preexisting").mkdir(parents=True)
 
     with mock.patch("fno.adapters._shared.subprocess.run") as mock_run, \
          mock.patch(
              "fno.adapters._shared.worktree_path",
-             return_value=tmp_path / ".fno" / "worktrees" / "abi-preexisting",
+             return_value=tmp_path / ".fno" / "worktrees" / "fno-preexisting",
          ):
         result = ClaudeCodeAdapter().create_worktree(name="preexisting")
 

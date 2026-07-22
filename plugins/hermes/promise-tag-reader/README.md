@@ -6,7 +6,7 @@ Writes `.fno/target-promise.signal` when the assistant response contains a `<pro
 
 ```bash
 mkdir -p ~/.hermes/plugins
-ln -sfn /path/to/abilities/plugins/hermes/promise-tag-reader \
+ln -sfn /path/to/fno/plugins/hermes/promise-tag-reader \
   ~/.hermes/plugins/promise-tag-reader
 ```
 

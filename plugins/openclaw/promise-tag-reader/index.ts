@@ -44,7 +44,7 @@ async function writeSentinel(cwd: string, inner: string): Promise<void> {
 }
 
 export default {
-  name: "abilities-promise-tag-reader",
+  name: "fno-promise-tag-reader",
   hooks: {
     before_agent_reply: async (
       event: BeforeAgentReplyEvent,
@@ -67,7 +67,7 @@ export default {
         // reply - the wrapper's stdout-scan fallback is the safety net. Log
         // to stderr so the failure is at least observable when it happens.
         console.error(
-          "[abilities-promise-tag-reader] sentinel write failed:",
+          "[fno-promise-tag-reader] sentinel write failed:",
           err,
         );
       }

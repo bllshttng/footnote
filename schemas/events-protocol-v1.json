@@ -23,7 +23,7 @@
       "description": "Producer identity; consumers route on this. A fixed-string source, or a per-agent worker.",
       "oneOf": [
         {
-          "enum": ["target", "megawalk", "megatron", "abi-loop", "hook", "subagent", "migration", "test", "backlog", "daemon", "observer", "skill_diff", "active-backlog"]
+          "enum": ["target", "megawalk", "megatron", "fno-loop", "hook", "subagent", "migration", "test", "backlog", "daemon", "observer", "skill_diff", "active-backlog"]
         },
         {
           "type": "string",

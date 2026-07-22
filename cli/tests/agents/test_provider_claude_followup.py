@@ -34,7 +34,7 @@ def _short_sock_path() -> str:
     ``/private/var/folders/...`` regularly exceeds that. Tests that need a
     real bound socket use this helper instead of ``tmp_path / "sock"``.
     """
-    return os.path.join("/tmp", f"abi-us2-{uuid.uuid4().hex[:12]}.sock")
+    return os.path.join("/tmp", f"fno-us2-{uuid.uuid4().hex[:12]}.sock")
 
 
 # ---------------------------------------------------------------------------

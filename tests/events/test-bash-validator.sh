@@ -44,7 +44,7 @@ assert_eq "AC1-HP rc" 0 $rc
 assert_eq "AC1-HP stderr empty" "" "$out"
 
 # AC1-HP-2: valid audit-only phase_transition
-out=$(validate_event phase_transition '{"ts":"2026-05-07T09:30:42Z","type":"phase_transition","source":"abi-loop","data":{"gate_bearing":false,"phase":"review","nonce":"n","session_id":"s"}}' 2>&1)
+out=$(validate_event phase_transition '{"ts":"2026-05-07T09:30:42Z","type":"phase_transition","source":"fno-loop","data":{"gate_bearing":false,"phase":"review","nonce":"n","session_id":"s"}}' 2>&1)
 rc=$?
 assert_eq "AC1-HP-2 audit-only rc" 0 $rc
 
@@ -127,7 +127,7 @@ assert_contains "AC4-EDGE schema-unavailable diag" "$out" "schema unavailable"
 # Plugin-root fallback: when the schema is absent from the project repo but
 # FNO_REPO_ROOT points at a plugin checkout that ships the schema, resolution
 # MUST find it there. Repro: downstream consumer project (e.g. acme-web)
-# invoking fno gate set against the abilities plugin. See target-loop incident
+# invoking fno gate set against the fno plugin. See target-loop incident
 # on PR #500 / inbox msg-b5312b.
 plugin_root=$(cd "$REPO_ROOT" && pwd)
 fallback_tmp=$(mktemp -d)
@@ -135,17 +135,17 @@ fallback_tmp=$(mktemp -d)
     cd "$fallback_tmp"
     git init -q >/dev/null 2>&1
     FNO_REPO_ROOT="$plugin_root" \
-    EVENTS_SCHEMA_CACHE="/tmp/abi-fallback-cache-$$" \
+    EVENTS_SCHEMA_CACHE="/tmp/fno-fallback-cache-$$" \
         bash -c "source '$VALIDATOR'; validate_event phase_transition '{\"ts\":\"2026-05-07T09:30:42Z\",\"type\":\"phase_transition\",\"source\":\"target\",\"data\":{\"gate_bearing\":true,\"gate\":\"ledger_updated\",\"phase\":\"register\",\"nonce\":\"abc\",\"session_id\":\"s\"}}'"
 )
 rc=$?
-rm -rf "$fallback_tmp" "/tmp/abi-fallback-cache-$$"
+rm -rf "$fallback_tmp" "/tmp/fno-fallback-cache-$$"
 assert_eq "plugin-root fallback rc" 0 $rc
 
 # Lib-relative fallback (tier 3): from a foreign cwd with NO schema env vars
 # set (the plain-terminal case), resolution MUST still find the schema bundled
 # beside this lib inside the plugin. Fix for ab-fe825805: an operator running
-# `fno gate set` from a non-abilities repo must not have to export
+# `fno gate set` from a non-fno repo must not have to export
 # FNO_REPO_ROOT/CLAUDE_PLUGIN_ROOT - overloading FNO_REPO_ROOT silently
 # repoints `fno config get` at the wrong project. BASH_SOURCE self-location
 # resolves the bundled schema with zero env vars.
@@ -154,11 +154,11 @@ selfloc_tmp=$(mktemp -d)
     cd "$selfloc_tmp"
     git init -q >/dev/null 2>&1
     env -u EVENTS_SCHEMA_PATH -u FNO_REPO_ROOT -u CLAUDE_PLUGIN_ROOT \
-        EVENTS_SCHEMA_CACHE="/tmp/abi-selfloc-cache-$$" \
+        EVENTS_SCHEMA_CACHE="/tmp/fno-selfloc-cache-$$" \
         bash -c "source '$VALIDATOR'; validate_event phase_transition '{\"ts\":\"2026-05-07T09:30:42Z\",\"type\":\"phase_transition\",\"source\":\"target\",\"data\":{\"gate_bearing\":true,\"gate\":\"ledger_updated\",\"phase\":\"register\",\"nonce\":\"abc\",\"session_id\":\"s\"}}'"
 )
 rc=$?
-rm -rf "$selfloc_tmp" "/tmp/abi-selfloc-cache-$$"
+rm -rf "$selfloc_tmp" "/tmp/fno-selfloc-cache-$$"
 assert_eq "lib-relative fallback (no env vars) rc" 0 $rc
 
 if [[ $fail -ne 0 ]]; then

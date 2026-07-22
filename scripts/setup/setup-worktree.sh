@@ -8,7 +8,7 @@
 #
 # Conductor calls this via conductor.json's scripts.setup hook with
 # CONDUCTOR_ROOT_PATH set to the canonical project. Manual `git worktree
-# add` or the abilities git-worktrees skill should call this directly.
+# add` or the fno git-worktrees skill should call this directly.
 #
 # Safety contract (load-bearing):
 #   - Uses `ln -sf` to create or refresh symlinks; never `rm -rf` a target
@@ -28,7 +28,7 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 #   1. CANONICAL env var (manual override)
 #   2. CONDUCTOR_ROOT_PATH (set by Conductor when invoking via scripts.setup)
 #   3. git-common-dir resolution (works from any worktree of the same repo)
-#   4. $HOME/code/me/abilities (last-ditch fallback for non-git contexts)
+#   4. $HOME/code/me/fno (last-ditch fallback for non-git contexts)
 CANONICAL="${CANONICAL:-${CONDUCTOR_ROOT_PATH:-}}"
 if [[ -z "$CANONICAL" ]]; then
   # In a worktree, git-common-dir points at the main repo's .git directory.
@@ -37,7 +37,7 @@ if [[ -z "$CANONICAL" ]]; then
   if [[ -n "$COMMON_DIR" && -d "$COMMON_DIR" ]]; then
     CANONICAL=$(cd "$COMMON_DIR/.." && pwd)
   else
-    CANONICAL="$HOME/code/me/abilities"
+    CANONICAL="$HOME/code/me/fno"
   fi
 fi
 
@@ -137,7 +137,7 @@ link_dir() {
 # Shared content (Obsidian vault link)
 link_dir "internal"
 
-# Shared abilities state (project-level, propagates across worktrees)
+# Shared fno state (project-level, propagates across worktrees)
 link_file ".fno/config.toml"
 # config.local.toml is deliberately NOT linked: it is the one config file kept
 # per-worktree, layering the collision-prone keys (post_merge.parking_lot_path,
@@ -228,7 +228,7 @@ fi
 # Per-CLI config roots. All four are gitignored at the top level so they
 # are safe to symlink wholesale when present. Skip-if-missing so the link
 # step is a no-op for CLIs the canonical hasn't onboarded yet.
-#   .agents         - provider/agent config (Codex, openclaw, abilities)
+#   .agents         - provider/agent config (Codex, openclaw, fno)
 #   .codex          - Codex CLI project state
 #   .codex-plugin   - Codex plugin manifests
 #   .gemini         - Gemini CLI project state (settings.json, agents/)

@@ -822,7 +822,7 @@ def test_us2_send_by_handle_is_session_addressed(runner, tmp_path, monkeypatch):
 
     fake = DiscoveredSession(
         session_id="uuid-tgt", short_id="tgt00001", handle="fno-tgt00001",
-        pid=123, cwd="/x/abilities", project="fno", status="idle",
+        pid=123, cwd="/x/fno", project="fno", status="idle",
     )
     monkeypatch.setattr(discover_mod, "resolve_or_suggest", lambda h, **kw: (fake, []))
     # Force the live-inject miss so the send deterministically writes the floor.

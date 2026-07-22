@@ -99,7 +99,7 @@ python3 scripts/metrics/backfill-cost-recompute.py --apply    # write
   SHA256 sidecar). `session_id` fields are never rewritten - the budget
   enforcement path greps by session-id prefix.
 - Concurrency: holds the register path's ledger flock
-  (`/tmp/abilities-ledger.lock`); `--apply` refuses while live
+  (`/tmp/fno-ledger.lock`); `--apply` refuses while live
   target-session claims exist in `~/.fno/claims` (both TTL and
   PID-liveness claim shapes). `--force` overrides for a quiesced system you
   know is safe. The ledger and graph passes are individually atomic but not
