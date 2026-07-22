@@ -4737,6 +4737,13 @@ impl View {
     /// indent never references a row that is off-screen. The max is bounded by
     /// the number of distinct ranks (<= 3 steps), so it never runs off-screen.
     fn crown_indent(&self, a: &AgentRow) -> usize {
+        // The `~ elsewhere` catch-all is a FLAT cross-project section that
+        // tree_rows never crown-sorts, so a squadless row must take no
+        // squad-derived indent - otherwise an unrelated crowned orphan would
+        // nest an un-crowned one it was never ordered above.
+        if a.squad.is_none() {
+            return 0;
+        }
         let mine = crown_rank(a.crown_level);
         let expanded = self.squad_section_view(a.squad) == SectionView::Expanded;
         let mut above: Vec<u8> = self
@@ -18260,6 +18267,27 @@ mod tests {
         v.cycle_squad(1);
         assert_eq!(v.squad_view(1), SectionView::LiveOnly);
         assert_eq!(indent(&v, "leaf"), 0, "no phantom indent under a hidden VP");
+    }
+
+    #[test]
+    fn crown_indent_zero_for_squadless_orphan_rows() {
+        // Orphans (`~ elsewhere`) are a flat cross-project section, never
+        // crown-sorted; a crowned orphan must not indent an unrelated one.
+        let mut coord = crowned_row("orphan-dir", 2, Some(1), Some("epic"));
+        coord.squad = None;
+        let mut leaf = crowned_row("orphan-leaf", 3, None, None);
+        leaf.squad = None;
+        let v = view_with_agents(vec![coord, leaf]);
+        let indent = |name: &str| {
+            let a = v.layout.agents.iter().find(|a| a.name == name).unwrap();
+            v.crown_indent(a)
+        };
+        assert_eq!(indent("orphan-dir"), 0, "squadless coordinator: no indent");
+        assert_eq!(
+            indent("orphan-leaf"),
+            0,
+            "squadless leaf: not nested under a stranger"
+        );
     }
 
     #[test]
