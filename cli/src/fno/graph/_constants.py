@@ -76,7 +76,7 @@ def _briefs_dir() -> Path:
 # We define them as regular names for backward-compat; they resolve state_dir()
 # lazily by calling the helpers above.
 
-def __getattr__(name: str) -> object:
+def __getattr__(name: str) -> Path:
     _lazy = {
         "GRAPH_JSON": _graph_json,
         "GRAPH_MD": _graph_md,

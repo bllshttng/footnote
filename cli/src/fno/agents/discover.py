@@ -1588,7 +1588,7 @@ def discover_live_sessions(
             continue
         pid = data.get("pid")
         try:
-            pid = int(pid)
+            pid = int(pid)  # type: ignore[arg-type]  # None/bad -> caught below
         except (TypeError, ValueError):
             try:
                 pid = int(f.stem)

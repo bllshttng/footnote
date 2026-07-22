@@ -126,7 +126,7 @@ def render_artifact_markdown(
 
     # Cross-model cost / coverage line (OQ2). Only when a run was attributed to
     # any provider (cross-model engaged); the all-claude OFF path adds nothing.
-    used = sorted({o.provider for o in result.outcomes if getattr(o, "provider", None)})
+    used = sorted({p for o in result.outcomes if (p := getattr(o, "provider", None))})
     if used:
         non_claude = [p for p in used if p != "claude"]
         if non_claude:

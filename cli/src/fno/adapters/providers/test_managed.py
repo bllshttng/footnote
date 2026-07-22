@@ -17,7 +17,7 @@ from typer.testing import CliRunner
 
 from fno.adapters.providers import managed
 from fno.adapters.providers.cli import cli as providers_app
-from fno.adapters.providers.model import ProviderRecord, ProvidersConfig
+from fno.adapters.providers.model import _CLI_LITERAL, ProviderRecord, ProvidersConfig
 
 runner = CliRunner()
 
@@ -39,7 +39,7 @@ def _codex_blob(token: str) -> str:
     )
 
 
-def _rec(id_: str, cli: str = "claude") -> ProviderRecord:
+def _rec(id_: str, cli: _CLI_LITERAL = "claude") -> ProviderRecord:
     return ProviderRecord(id=id_, name=id_, cli=cli, auth="managed")
 
 

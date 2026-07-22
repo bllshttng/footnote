@@ -112,6 +112,9 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
             exited_at: None,
             mux: None,
             screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
         });
     })
     .unwrap();
@@ -274,6 +277,9 @@ fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agen
             exited_at: None,
             mux: None,
             screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
         });
     })
     .unwrap();

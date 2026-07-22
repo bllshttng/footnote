@@ -439,8 +439,9 @@ def _run_codex(
     # from inside this codex session attribute back to the parent agent.
     # When agent_self is None (direct caller, no parent context) we pass
     # env=None so the child inherits the parent process env unchanged.
+    spawn_env: Optional[dict[str, str]]
     if agent_self is not None or route_env:
-        spawn_env: Optional[dict[str, str]] = dict(os.environ)
+        spawn_env = dict(os.environ)
         if agent_self is not None:
             spawn_env["FNO_AGENT_SELF"] = agent_self
             spawn_env["FNO_AGENT_PROVIDER"] = "codex"

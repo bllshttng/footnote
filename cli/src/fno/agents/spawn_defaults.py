@@ -7,13 +7,14 @@ and the Rust route with zero Rust changes (Locked Decision 9).
 
 Precedence per field: explicit CLI flag > `agents.defaults` > built-in. Fields
 resolve independently, with ONE exception: the `model` default is provider-
-scoped. A bare scalar `model` with no `provider` belongs to the harness it was
-written for (the config `provider`, else the inferred one), so a spawn that
-resolves to a DIFFERENT harness (e.g. `-p codex` over a claude-shaped `model`)
-leaves the model to that harness rather than forcing an incompatible one. An
-explicit `-m/--model` always wins. Scope is the operator-initiated spawn surface
-only; autonomous dispatch computes its own routing and reaches the seam as
-explicit flags, never displaced by these.
+scoped. A bare scalar `model` with no `provider` is scoped to the harness it was
+written for - the config `provider`, else the builtin default (claude), NOT the
+ambient harness (whose shape the model may not match). A spawn that resolves to a
+DIFFERENT harness (an explicit `-p codex`, OR a codex-ambient session, over a
+claude-shaped `model`) leaves the model to that harness rather than forcing an
+incompatible one. An explicit `-m/--model` always wins. Scope is the operator-
+initiated spawn surface only; autonomous dispatch computes its own routing and
+reaches the seam as explicit flags, never displaced by these.
 """
 from __future__ import annotations
 
@@ -265,6 +266,7 @@ def normalize_spawn_args(
             print("fno agents spawn: -r/--resume needs a session uuid or 8-hex short-id", file=err)
             raise SystemExit(2)
         low = raw_value.lower()
+        resolved: Optional[str]
         if _UUID_RE.match(low):
             resolved = low
         elif _SHORT_ID_RE.match(low):
@@ -391,38 +393,45 @@ def inject_spawn_defaults(
         from_config.append("provider")
 
     if cfg_model and not has_model:
-        # The ambient config model applies only to the harness it was written
-        # for. Mirror the effort branch's resolution: the IMPLIED provider is the
-        # config provider, else harness inference; the RESOLVED provider is an
-        # explicit -p, else the implied. Inject only when they agree - a codex
-        # spawn must not inherit a claude model (it 400s after the round-trip),
-        # and an explicit --model stays the supported cross-harness override.
+        # A provider-less config model is scoped to the harness it was written
+        # for, but nothing on disk records which harness that was. Scope it to
+        # the HOME provider - the config provider, else the builtin default
+        # (claude, the same fallback resolve_dispatch_provider uses) - NOT the
+        # ambient harness. Inject only when the spawn's resolved TARGET equals
+        # that home: a codex spawn (explicit `-p codex` OR a codex-ambient
+        # session) must not inherit a claude model (it 400s after the round-trip);
+        # an explicit --model stays the supported cross-harness override. This
+        # never maps a model value to a provider (no catalog); it only scopes an
+        # UNqualified default the way the rest of dispatch scopes one.
         from fno.agents.provider_resolve import resolve_dispatch_provider
 
+        home = cfg_provider or "claude"
         try:
-            implied = cfg_provider or resolve_dispatch_provider(None, env=env)[0]
+            if explicit_provider and explicit_provider.strip():
+                target: Optional[str] = explicit_provider.strip()
+            elif cfg_provider:
+                target = cfg_provider
+            else:
+                target = resolve_dispatch_provider(None, env=env)[0]
         except Exception:
-            # Degrade open (AC5-FR): resolve_dispatch_provider is newly reached
-            # here, and a raise must never brick a spawn that would otherwise
-            # work. No implied provider => no basis to inject => inject nothing.
+            # Degrade open (AC5-FR): a resolution raise must never brick a spawn
+            # that would otherwise work. No target => no basis to inject.
             print(
                 "fno agents spawn: provider resolution failed; "
                 "leaving model to the harness",
                 file=err,
             )
-            implied = None
-        if implied:
-            resolved = (explicit_provider or "").strip() or implied
-            if resolved == implied:
-                inject += ["--model", cfg_model]
-                from_config.append("model")
-            else:
-                print(
-                    f"fno agents spawn: config model {cfg_model!r} targets "
-                    f"{implied}; spawn resolves {resolved}, leaving model to "
-                    "the harness",
-                    file=err,
-                )
+            target = None
+        if target and target == home:
+            inject += ["--model", cfg_model]
+            from_config.append("model")
+        elif target:
+            print(
+                f"fno agents spawn: config model {cfg_model!r} is scoped to "
+                f"{home}; spawn resolves {target}, leaving model to the harness "
+                "(bind agents.defaults.provider to apply it cross-harness)",
+                file=err,
+            )
 
     if cfg_effort and not has_effort:
         # Effort surface depends on the RESOLVED provider: an explicit -p flag,

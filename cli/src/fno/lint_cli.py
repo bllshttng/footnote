@@ -4,7 +4,7 @@ from __future__ import annotations
 import ast
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import click
 import typer
@@ -197,7 +197,7 @@ def menu_caps() -> None:
     from fno.cli import LAZY_SUBCOMMANDS, app as root_app
 
     root = typer.main.get_command(root_app)
-    top_visible = _visible_command_names(root)
+    top_visible = _visible_command_names(cast("click.Group", root))
     failures: list[str] = []
 
     if len(top_visible) > MENU_CAP_TOP_LEVEL:
@@ -235,7 +235,7 @@ def menu_caps() -> None:
         # `click.Group` - an isinstance check here silently skips every sub-app.
         if not hasattr(sub_group, "list_commands"):
             continue
-        sub_visible = _visible_command_names(sub_group)
+        sub_visible = _visible_command_names(cast("click.Group", sub_group))
         if len(sub_visible) > MENU_CAP_SUB_APP:
             over = ", ".join(sub_visible[MENU_CAP_SUB_APP:])
             failures.append(

@@ -300,7 +300,7 @@ def make_selection_sort_key(entries: list[dict], orphans: Optional[frozenset[str
         pid = node.get("parent")
         epic = id_to_entry.get(pid) if pid else None
         if epic is not None:
-            in_progress_rank = 0 if epic_in_progress.get(pid) else 1
+            in_progress_rank = 0 if (pid and epic_in_progress.get(pid)) else 1
             return (
                 band,                    # curated rank band (ranked first)
                 0,                       # epic-children tier (before loose)

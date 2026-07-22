@@ -62,7 +62,7 @@ def read_signals(repo_root: Path, kind: SignalKind | None = None) -> list[dict]:
     """Read all signals (optionally filtered by kind). Does NOT delete.
 
     Used for non-destructive previews. Hook readers use drain_signals."""
-    out = []
+    out: list[dict] = []
     d = signals_dir(repo_root)
     if not d.is_dir():
         return out

@@ -159,6 +159,7 @@ def test_pane_spawn_gates_as_pane_and_releases_on_success(
         provider = "claude"
         session = "mux-s"
         pane_id = "%1"
+        short_id = "abcd1234"  # US8: the pane receipt now carries the jobId
 
     monkeypatch.setattr(
         mux_mod, "dispatch_spawn_pane", lambda **kw: PaneResult()

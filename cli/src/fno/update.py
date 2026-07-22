@@ -694,6 +694,8 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     if (
         not force
         and installed_bin is not None
+        and subtree is not None
+        and installed_rev is not None
         and installed_rev == subtree
         and _triad_same_build(installed_bin.parent, subtree)
     ):

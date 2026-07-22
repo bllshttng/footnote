@@ -338,10 +338,10 @@ def resolve_node(query: Optional[str], entries: list[Entry]) -> IdMatch:
         by_id = {e.get("id"): e for e in entries if e.get("id")}
         for p in prefixes:
             cand = f"{p}{q}"
-            e = by_id.get(cand)
-            if e is not None:
+            hit = by_id.get(cand)
+            if hit is not None:
                 return IdMatch(
-                    kind="exact", id=cand, candidates=(e,),
+                    kind="exact", id=cand, candidates=(hit,),
                     note=f"bare hex '{q}' -> {cand}",
                 )
         tried = ", ".join(f"{p}{q}" for p in prefixes)

@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -1013,7 +1014,11 @@ def _name_lane_send(
     from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.harness_identity import canonical_handle
-    from fno.inbox.store import generate_msg_id, write_new_thread
+    from fno.inbox.store import (
+        classify_durable_owner,
+        generate_msg_id,
+        write_new_thread,
+    )
     from fno.mail.envelope import harness_for_provider, wrap_fno_mail
 
     if resolved is not None:
@@ -1157,6 +1162,23 @@ def _name_lane_send(
     if lanes:
         print(f"lanes tried: {', '.join(lanes)}", file=sys.stderr)
 
+    # Terminal classification (US6): a name lane reaches the durable floor only
+    # after every live rung missed. A self-send lands in the sender's own inbox
+    # and a live-listed-but-wedged recipient still has a turn-boundary drain, so
+    # both own as live-drain; every other miss (asleep, offline, unprovable) is
+    # optimistically resumable and owns as wake-daemon. The dead-letter verdict is
+    # the sweep's to make once a wake-daemon thread sits unread past its TTL - at
+    # birth we never know a recipient is gone for good (a token no store knows
+    # already exits 16 upstream), so the durable floor never escalates non-zero.
+    self_send = resolved is None and token is not None and token_lane == "self-send"
+    recipient_live = self_send or resolved is not None
+    owner = classify_durable_owner(
+        param_forced=False,
+        recipient_live=recipient_live,
+        recipient_resumable=not recipient_live,
+    )
+
+    assert recipient is not None  # resolved by the name-lane logic before the durable write
     try:
         th = write_new_thread(
             recipient=recipient,
@@ -1167,12 +1189,83 @@ def _name_lane_send(
             to_kind="name",
             provider_to=provider,
             replies_to=reply_to,
+            owner=owner.value,
         )
     except (OSError, ValueError, RuntimeError) as exc2:
         print(f"durable envelope write failed for {recipient!r}: {exc2}", file=sys.stderr)
         raise typer.Exit(code=12) from exc2
     _warn_deferred(recipient)
-    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr}")
+    # Routing-reason disclosure (US10): name WHY this is durable so a delivery
+    # bug is diagnosable from the sender's own terminal. A self-send can never
+    # inject itself; everything else here is a live miss.
+    reason = "self-send" if self_send else "live-miss"
+    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]")
+
+
+# Send-time human escalation for a question, per (sender, recipient). A burst
+# re-nudges every window rather than once forever (marker refreshed only on an
+# actual escalation, so the window runs from the last nudge, not the first send).
+_ESCALATION_DEBOUNCE_S = 300
+
+
+def _escalate_question(sender: str, recipient: str, summary: str) -> str:
+    """Notify the human at send time that a question needs them (Locked Decision
+    7: a question NEVER autonomous-responds - only the human answers it).
+
+    Debounced per (sender, recipient) so a chatty peer cannot spam the queue.
+    The caller writes the durable question thread regardless, so the ambient
+    unread count stays truthful even when this nudge is debounced. Best-effort
+    throughout: a notifier or filesystem failure never breaks the send. Returns
+    ``"escalated"`` (the human was notified), ``"debounced"`` (a recent nudge for
+    this pair suppressed it), or ``"notifier-unavailable"`` (no OS notifier on
+    this host, so nothing displayed - the caller must not claim escalation).
+    """
+    import hashlib
+
+    from fno.paths import state_dir
+
+    pair = hashlib.sha256(f"{sender}\x00{recipient}".encode()).hexdigest()[:16]
+    marker_dir = state_dir() / "mail-escalations"
+    marker = marker_dir / pair
+    try:
+        marker_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    # Atomically claim the debounce window via O_CREAT|O_EXCL: exactly one
+    # concurrent sender wins a fresh escalation, the rest see the marker and
+    # debounce. A check-then-touch here would let a concurrent burst from one
+    # pair all notify at once, defeating the debounce during the exact spike it
+    # exists to damp.
+    try:
+        fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.close(fd)
+    except FileExistsError:
+        try:
+            last = marker.stat().st_mtime
+        except OSError:
+            last = 0.0
+        if time.time() - last < _ESCALATION_DEBOUNCE_S:
+            return "debounced"
+        try:
+            os.utime(marker, None)  # stale window: refresh so the next runs from now
+        except OSError:
+            pass
+    except OSError:
+        pass  # a missing marker just re-notifies; it never suppresses the durable write
+    # Only report escalation when the notification actually displayed:
+    # send_notification returns (code, err) and a nonzero code means no OS
+    # notifier (a headless host), so the human was NOT notified.
+    try:
+        from fno.notify._impl import send_notification
+
+        one_line = summary.split("\n", 1)[0][:120]
+        code, _err = send_notification(
+            f"fno mail: question from {sender}",
+            f"{one_line} - run `fno mail drain-self`",
+        )
+    except Exception:  # noqa: BLE001 - a notifier failure never breaks the send
+        code = 1
+    return "escalated" if code == 0 else "notifier-unavailable"
 
 
 @mail_app.command("send")
@@ -1220,9 +1313,10 @@ def cmd_send(
     kind: str | None = typer.Option(
         None, "--kind", "-k",
         help=(
-            "Inbox kind (heads-up | question | fyi). When set, the message is an "
-            "inbox-style durable note the recipient's drain dispatches on; omit "
-            "for a default agent-to-agent send (live if a peer is hosted)."
+            "Inbox kind (heads-up | question | fyi). A project-inbox drain "
+            "contract, so pair it with --to-project; question/fyi to a bare "
+            "session handle is refused (a handle has no drain that reads them). "
+            "Omit --kind for a default agent-to-agent send (live if a peer is hosted)."
         ),
     ),
     reply_to: str | None = typer.Option(
@@ -1351,6 +1445,20 @@ def cmd_send(
             )
             raise typer.Exit(code=2)
 
+        # US10 kind-scoped guard: question/fyi are project-inbox drain contracts
+        # (question -> wake-signal, fyi -> memory). Addressed to a bare session
+        # handle they queue durable to an inbox nothing drains, so refuse and name
+        # the two real intents. heads-up to a handle stays accepted (the production
+        # notification pattern; its emitters are programmatic, not enumerable).
+        if to_project is None and kind in {Kind.QUESTION.value, Kind.FYI.value}:
+            print(
+                f"error: --kind {kind} to a session handle ({recipient}) has no "
+                f"drain that reads it. Drop --kind to inject it live, or add "
+                f"--to-project <project> to file it as a durable {kind} note.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+
         persist_to_memory = False
         if persist is not None:
             if persist != "memory":
@@ -1402,6 +1510,23 @@ def cmd_send(
             print(f"error: {exc}", file=sys.stderr)
             raise typer.Exit(code=2) from exc
 
+        # A question never gets an autonomous responder (US9 wakes only heads-up);
+        # it escalates to the human at send time instead, debounced per pair.
+        if kind == Kind.QUESTION.value:
+            reason = _escalate_question(sender, recipient, content)
+            if reason == "escalated":
+                print(f"escalated to human ({recipient})", file=sys.stderr)
+        # A heads-up to a resumable-but-asleep claude session is woken at send
+        # time to drain it: the per-project watch daemon drains project inboxes,
+        # never a session-handle inbox, so send time is the reachable trigger
+        # (US9). The durable note is already written, so a wake miss loses nothing.
+        elif kind == Kind.HEADS_UP.value:
+            from fno.agents.dispatch import wake_if_asleep_claude
+
+            woke, short = wake_if_asleep_claude(recipient)
+            if woke:
+                print(f"woke {recipient} to drain (bg thread {short})", file=sys.stderr)
+
         if json_out:
             import json as _json
 
@@ -1412,7 +1537,7 @@ def cmd_send(
             }))
         else:
             verb = "appended (durable) to" if res.appended else "queued (durable) for"
-            print(f"{res.msg_id} {verb} {recipient} [{kind}]")
+            print(f"{res.msg_id} {verb} {recipient} [param-forced: --kind {kind}]")
         return
 
     # Project mode: the message is the sole positional, so `send --to-project X
@@ -1451,11 +1576,14 @@ def cmd_send(
             _warn_deferred(result.recipient)
             print(
                 f"{result.msg_id} queued (durable) for {result.recipient} "
-                f"[project {to_project}]"
+                f"[project {to_project}] [live-miss]"
             )
         else:
             _warn_deferred(to_project, project=True)
-            print(f"{result.msg_id} queued (durable) for project {to_project}")
+            print(
+                f"{result.msg_id} queued (durable) for project {to_project} "
+                f"[param-forced: --to-project]"
+            )
         return
 
     # Name mode.

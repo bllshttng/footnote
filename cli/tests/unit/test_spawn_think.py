@@ -267,6 +267,69 @@ def test_no_origin_skipped(iso, monkeypatch, patch_spawn):
     assert len(evs) == 1 and evs[0]["data"]["reason"] == "no-origin"
 
 
+def test_bug_node_skipped_not_design_warranting(iso, monkeypatch, patch_spawn):
+    # A `bug` node is a reproduce-and-fix, not a design fan-out: it must skip an
+    # automatic /think even when otherwise eligible (the x-0e29 mechanism fix).
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    spawn_calls, _ = patch_spawn
+    res = st.maybe_spawn_think(_node(type="bug"), env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "skipped" and res.reason == "not-design-warranting"
+    assert spawn_calls == []
+
+
+def test_size_s_node_skipped_not_design_warranting(iso, monkeypatch, patch_spawn):
+    # A size-S node (even a feature) is too small for a design fan-out.
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    spawn_calls, _ = patch_spawn
+    res = st.maybe_spawn_think(_node(type="feature", size="S"),
+                               env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "skipped" and res.reason == "not-design-warranting"
+    assert spawn_calls == []
+
+
+def test_design_warranting_feature_still_spawns(iso, monkeypatch, patch_spawn):
+    # Guard against over-gating: a plain feature (not a bug, not size-S) still
+    # fans out to /think exactly as before.
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    spawn_calls, _ = patch_spawn
+    res = st.maybe_spawn_think(_node(type="feature", size="M"),
+                               env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "spawned"
+    assert len(spawn_calls) == 1
+
+
+def test_conversational_bypasses_design_warranting_gate(iso, monkeypatch, patch_spawn):
+    # The explicit conversational verb is the operator's opt-in: it dispatches a
+    # /think on ANYTHING, including a bug, bypassing the auto-fan-out gate.
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    monkeypatch.setenv("FNO_THINK_SPAWN_ATTENDED", "spawn")
+    spawn_calls, _ = patch_spawn
+    res = st.maybe_spawn_think(_node(type="bug", size="S"),
+                               reason=st.REASON_CONVERSATIONAL,
+                               env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "spawned"
+    assert len(spawn_calls) == 1
+
+
+def test_forced_decompose_child_bypasses_design_warranting_gate(iso, monkeypatch, patch_spawn):
+    # A `needs_think` decompose child rides chain_blueprint=True as operator
+    # consent (decompose is the opt-in). Even a bug/size-S child must get its
+    # forced design pass, not be left an unlinked idea by the size gate (Codex P1).
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    monkeypatch.setenv("FNO_THINK_SPAWN_ATTENDED", "spawn")
+    spawn_calls, _ = patch_spawn
+    res = st.maybe_spawn_think(_node(type="bug", size="S"),
+                               chain_blueprint=True,
+                               env=dict(__import__("os").environ),
+                               events_path=iso, project_root=iso.parent.parent)
+    assert res.decision == "spawned"
+    assert len(spawn_calls) == 1
+
+
 def test_exactly_one_event_per_evaluation(iso, monkeypatch, patch_spawn):
     """AC1-UI: a gate-on evaluation emits exactly one decision event."""
     monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")

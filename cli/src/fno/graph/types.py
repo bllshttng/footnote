@@ -217,7 +217,7 @@ class Entry(BaseModel):
         if isinstance(v, bool):
             raise ValueError("rank must be a real number, not a bool")
         try:
-            f = float(v)
+            f = float(v)  # type: ignore[arg-type]  # raw validator input; bad types caught below
         except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError(f"rank must be a finite number, got {v!r}") from exc
         if not math.isfinite(f):
@@ -278,7 +278,7 @@ class Entry(BaseModel):
                 pass
         return data
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]  # pydantic computed_field over property
     @property
     def status(self) -> str:
         """Derive entry status from single-entry fields.

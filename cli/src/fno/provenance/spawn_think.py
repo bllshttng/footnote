@@ -39,6 +39,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Optional
 
 from fno import _subprocess_util
@@ -187,7 +188,7 @@ def _settings_for(project_root: Optional[Path]):
 def think_spawn_enabled(
     *,
     project_root: Optional[Path] = None,
-    env: Optional[dict] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> bool:
     """Resolve whether born-with-why /think spawn is armed.
 
@@ -288,7 +289,7 @@ def _bump_daily_count() -> None:
 def _attended_mode(
     project_root: Optional[Path] = None,
     *,
-    env: Optional[dict] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> str:
     """Resolve the attended opt-in: ``spawn`` (real bg /think) or ``offer`` (B, x-5d51).
 
@@ -333,7 +334,7 @@ def _scan_md_field(text: str, key: str) -> Optional[str]:
     return value
 
 
-def _owned_manifest_attended(project_root: Path, environ: dict) -> Optional[bool]:
+def _owned_manifest_attended(project_root: Path, environ: Mapping[str, str]) -> Optional[bool]:
     """Return the ``attended`` flag of THIS session's target-state manifest.
 
     Ownership is proven exactly as graph.cli._session_provenance does it: the
@@ -365,7 +366,7 @@ def _owned_manifest_attended(project_root: Path, environ: dict) -> Optional[bool
 def classify_presence(
     *,
     project_root: Optional[Path] = None,
-    env: Optional[dict] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> str:
     """Classify the originating session as ``attended`` or ``away``.
 
@@ -1052,7 +1053,7 @@ def dispatch_conversational(
     harness: str = "claude",
     project_root: Optional[Path] = None,
     events_path: Optional[Path] = None,
-    env: Optional[dict] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> ThinkSpawnResult:
     """C (x-0a9c): explicit conversational /think dispatch for a named node.
 
@@ -1116,7 +1117,7 @@ def maybe_spawn_think(
     reason: str = REASON_BIRTH,
     project_root: Optional[Path] = None,
     events_path: Optional[Path] = None,
-    env: Optional[dict] = None,
+    env: Optional[Mapping[str, str]] = None,
     run_state: Optional[RunState] = None,
     invocation_suffix: Optional[str] = None,
     quiet: bool = False,
@@ -1174,6 +1175,27 @@ def maybe_spawn_think(
     #    (human-typed at a bare terminal lands here) -> skip{no-origin} (AC1-ERR).
     if not (node.get("source_session_id") or "").strip():
         return skip("no-origin")
+
+    # 3b. Eligibility: automatic /think fan-out is for design-warranting work
+    #     (a new feature, an epic needing decomposition), NOT a small bug. A
+    #     `bug` or a size-`S` node is a reproduce-and-fix, not a design
+    #     exploration; auto-spawning a full /think design session for it is
+    #     disproportionate ceremony (the residual-edge bug that motivated this
+    #     gate was a size-S bug that fanned out to a whole /think). CONSENTED
+    #     fan-outs bypass this, because neither is an automatic trigger: the
+    #     explicit conversational verb (the operator invoking it IS the opt-in)
+    #     and a forced decompose child (`chain_blueprint` - a `needs_think` group
+    #     the operator flagged for a design pass, decompose.py's forced lane). A
+    #     consented small-bug child must still be designed + linked, never left an
+    #     unlinked idea by this size/type gate.
+    if reason != REASON_CONVERSATIONAL and not chain_blueprint:
+        node_type = (node.get("type") or "").strip().lower()
+        node_size = (node.get("size") or "").strip().upper()
+        if node_type == "bug" or node_size == "S":
+            return skip(
+                "not-design-warranting",
+                detail=f"type={node_type or '?'} size={node_size or '?'}",
+            )
 
     # 4. Blast-radius cap (AC4-EDGE): a bulk run over the cap skips the rest and
     #    logs the truncation (never silent).

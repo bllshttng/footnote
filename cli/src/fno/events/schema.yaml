@@ -2151,14 +2151,14 @@ event_types:
     consumers: [operator]
 
   - name: think_skipped
-    description: "Emitted by a dispatch trigger (x-6a10 birth, x-122a A2 lifecycle) when it deliberately spawns/offers nothing. The reason discriminates no-origin / bulk-intake / cap-exceeded / already-claimed / claim-error / spawn-failed / no-node-id / unresolved-pointer (A2 relevance filter) / daily-cap (A2 per-day ceiling). A gate-off evaluation emits NOTHING (no-op); this fires only when the gate is on."
+    description: "Emitted by a dispatch trigger (x-6a10 birth, x-122a A2 lifecycle) when it deliberately spawns/offers nothing. The reason discriminates no-origin / bulk-intake / cap-exceeded / already-claimed / claim-error / spawn-failed / no-node-id / unresolved-pointer (A2 relevance filter) / daily-cap (A2 per-day ceiling) / not-design-warranting (a bug or size-S node too small for a design fan-out). A gate-off evaluation emits NOTHING (no-op); this fires only when the gate is on."
     sources: [backlog]
     data:
       required: [reason]
       properties:
         reason:
           type: string
-          enum: [no-origin, bulk-intake, cap-exceeded, already-claimed, claim-error, spawn-failed, no-node-id, unresolved-pointer, daily-cap]
+          enum: [no-origin, bulk-intake, cap-exceeded, already-claimed, claim-error, spawn-failed, no-node-id, unresolved-pointer, daily-cap, not-design-warranting]
           description: "Why the dispatch spawned/offered nothing this evaluation."
         trigger:
           type: string

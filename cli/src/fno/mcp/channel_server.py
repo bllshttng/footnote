@@ -325,6 +325,8 @@ async def _mcp_dispatch_loop(reader: asyncio.StreamReader) -> None:
             )
             continue
         method = req.get("method")
+        if not isinstance(method, str):
+            method = ""
         if "id" in req:
             handler = _REQUEST_HANDLERS.get(method, _handle_method_not_found)
             try:

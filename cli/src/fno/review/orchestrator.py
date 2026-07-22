@@ -530,6 +530,7 @@ def orchestrate_review_parallel(
         key: str | None = None
 
         if can_cache:
+            assert session_id is not None and artifacts_dir is not None  # can_cache guarantees both
             resolved_sha = git_sha_value if git_sha_value is not None else _cache.git_sha()
             ph = _cache.prompt_hash(resolved_prompts)
             key = _cache.cache_key(session_id, resolved_sha, ph, provider_set)
@@ -566,6 +567,7 @@ def orchestrate_review_parallel(
         # OFF path no outcome carries a provider, so this falls back to
         # ``provider_set`` (None) and the legacy key is reproduced exactly.
         if can_cache and key is not None and resolved_sha is not None:
+            assert session_id is not None and artifacts_dir is not None  # can_cache guarantees both
             if result.workers_failed == 0 and not result.suspicious:
                 try:
                     actual_dim = (

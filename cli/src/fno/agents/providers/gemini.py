@@ -424,8 +424,9 @@ def _run_gemini(
 
     # Inject FNO_AGENT_* env vars so nested `fno agents ask` calls
     # from inside this gemini session attribute back to the parent agent.
+    spawn_env: Optional[dict[str, str]]
     if agent_self is not None:
-        spawn_env: Optional[dict[str, str]] = dict(os.environ)
+        spawn_env = dict(os.environ)
         spawn_env["FNO_AGENT_SELF"] = agent_self
         spawn_env["FNO_AGENT_PROVIDER"] = "gemini"
     else:

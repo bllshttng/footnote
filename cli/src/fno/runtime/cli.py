@@ -158,11 +158,12 @@ def spawn_cmd(
         raise typer.Exit(code=1)
 
     # External success: register the worker
+    _pid = spawn_result.get("pid")
     register_worker(
         worker_id=spawn_result["worker_id"],
         task=prompt,
         campaign="",
-        pid=spawn_result.get("pid"),
+        pid=_pid if isinstance(_pid, int) else None,
         workers_file=workers_file,
     )
 

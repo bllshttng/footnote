@@ -154,7 +154,7 @@ def is_full(batch: dict) -> bool:
 
 
 def _is_open(batch: Optional[dict]) -> bool:
-    return bool(batch) and batch.get("status") == "open"
+    return batch is not None and batch.get("status") == "open"
 
 
 # ---------------------------------------------------------------------------
@@ -626,7 +626,7 @@ def prepare_batch(
             if sr.returncode != 0:
                 return {"mode": "solo", "reason": f"setup-worktree failed: {(sr.stderr or '').strip()[:160]}"}
         try:
-            b = open_batch(
+            b: Optional[dict] = open_batch(
                 domain=domain, branch=branch, worktree=worktree,
                 max_nodes=_config_max_nodes(root), root=root,
             )

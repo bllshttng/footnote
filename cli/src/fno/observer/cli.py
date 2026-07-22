@@ -556,7 +556,8 @@ def _read_target_events() -> dict:
     events = read_jsonl_events(_events_paths(), kinds={"loop_check", "termination"})
     by_session: dict[str, list[dict]] = {}
     for e in events:
-        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        _data = e.get("data")
+        data = _data if isinstance(_data, dict) else {}
         sid = data.get("session_id")
         if isinstance(sid, str) and sid:
             by_session.setdefault(sid, []).append(e)

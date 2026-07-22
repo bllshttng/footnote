@@ -73,6 +73,13 @@ A harness-prefixed address (`claude-<short-id>`) is refused, not translated. If
 you hit that error, something built the address the retired way - fix that,
 do not hand-edit the string and move on.
 
+No probe is proof a peer is dead. `peek`, discovery, a status token, and a claim
+pid can all read stale at once - a peer that ran `EnterWorktree` moved its
+transcript to a worktree-keyed project dir, so a probe pointed at the old path
+reads empty. The one authoritative pre-dead-declaration check is the session's
+transcript file itself (its worktree-keyed project dir, by mtime/tail); any
+receipt or probe that names a store must say WHICH store it read.
+
 ## Verb router
 
 The first whitespace token of the argument is the **verb**. Route on it, then run
@@ -234,6 +241,34 @@ wake-signal; fyi -> log/memory). Run it raw and relay the summary:
 fno mail drain            # default cap of 10 threads
 fno mail drain --max 25   # raise the per-call cap
 ```
+
+---
+
+## Cross-project `--kind` notes: the three axes
+
+A send has three orthogonal axes; keep them separate or a note lands in an inbox
+nothing drains.
+
+- **Addressee** - WHO. A live session handle (`send <name>`) or a project
+  (`--to-project <X>`). A session handle is a moving target; a project inbox is
+  a durable mailbox its members drain.
+- **Lane** - HOW it travels. Live-inject first, durable bus as the fallback. You
+  do not choose this; the delivery model does. A durable receipt names WHY it is
+  durable (`[live-miss]`, `[self-send]`, `[param-forced: --kind ...]`).
+- **Kind** - a **project-inbox drain contract**, set with `--kind`. The
+  recipient project's drain dispatches on it: `heads-up` -> LLM triage (may file
+  a graph node with provenance back to your thread); `question` -> drops a
+  wake-signal and stays unread until a human answers; `fyi` -> inform-only
+  (`--persist memory`, fyi-only, writes a recipient memory file future sessions
+  recall). Reply to any of them with `--reply-to <msg-id>` (appends to the thread).
+
+`--kind` is a **project-inbox flag**, so it needs `--to-project`. A bare
+`--kind question`/`--kind fyi` to a session handle is refused (a handle has no
+drain that reads those kinds) - the error names the two real intents: drop
+`--kind` to inject live, or add `--to-project` to file a durable note.
+`--kind heads-up` to a handle stays accepted (the production notification
+pattern). Architecture and per-kind handler detail:
+[docs/architecture/cross-project-inbox.md](../../docs/architecture/cross-project-inbox.md).
 
 ---
 

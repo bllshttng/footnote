@@ -174,12 +174,12 @@ def _resolve_plan_for_blast(plan_path: Optional[str], input_: Optional[str]) -> 
         matched: list[dict] = []
         seen: set[str] = set()
         for tok in tokens:
-            entry = by_id.get(tok.lower())
-            if entry is not None:
-                key = entry.get("id", "").lower()
+            hit = by_id.get(tok.lower())
+            if hit is not None:
+                key = hit.get("id", "").lower()
                 if key not in seen:
                     seen.add(key)
-                    matched.append(entry)
+                    matched.append(hit)
         if len(matched) == 1:
             return matched[0].get("plan_path") or None
     except Exception:
@@ -407,7 +407,7 @@ def init(
         # documented init path lets callers pin the resolved profile via the env
         # var, not only --size). Treat it as explicit so a low-blast plan never
         # strips ceremony the operator already pinned.
-        env_size = os.environ.get("TARGET_SIZE", "").strip().upper()
+        env_size: Optional[str] = os.environ.get("TARGET_SIZE", "").strip().upper()
         env_size = env_size if env_size in {"S", "M", "L"} else None
         effective, announce = _modulate_size(
             result.get("verdict", "unknown"),
@@ -448,14 +448,14 @@ def init(
     # inherit the parent env wholesale, so per-provider scrubbing cannot cover it).
     env["TARGET_BEASTMODE"] = "1" if beastmode else ""
 
-    result = subprocess.run(["bash", str(script_path)], check=False, env=env)
-    if result.returncode == 0:
+    proc = subprocess.run(["bash", str(script_path)], check=False, env=env)
+    if proc.returncode == 0:
         if beastmode:
             _warn_if_authority_not_granted()
         _print_orientation_report()
         _maybe_dispatch_work_start()
         _maybe_reconcile_lane_slot()
-    raise typer.Exit(code=propagate_returncode(result.returncode))
+    raise typer.Exit(code=propagate_returncode(proc.returncode))
 
 
 def _warn_if_authority_not_granted(project_root: Optional[Path] = None) -> None:
@@ -642,8 +642,9 @@ def _resolve_node_id(node: str) -> str:
         data = load_graph(graph_json())
         entries = data if isinstance(data, list) else []
         match = resolve_node(node, entries)
-        if getattr(match, "kind", "none") == "exact" and getattr(match, "id", None):
-            return match.id
+        node_id = getattr(match, "id", None)
+        if getattr(match, "kind", "none") == "exact" and node_id:
+            return node_id
     except Exception:  # noqa: BLE001 - best-effort; the raw arg still works
         pass
     return node

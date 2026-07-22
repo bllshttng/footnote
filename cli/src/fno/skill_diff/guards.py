@@ -44,7 +44,8 @@ def filter_cited_hunks(hunks: Iterable[dict]) -> tuple[list[dict], list[dict]]:
     surviving hunk points at a specific observed failure. A caller that gets an
     empty ``kept`` takes the no-diff-helps path rather than opening an empty PR.
     """
-    kept, dropped = [], []
+    kept: list[dict] = []
+    dropped: list[dict] = []
     for h in hunks:
         cites = [c for c in (h.get("cited_finding_ids") or []) if c]
         (kept if cites else dropped).append(h)

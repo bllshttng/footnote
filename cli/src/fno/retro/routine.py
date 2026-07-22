@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     from fno.retro.keep_going import FollowupResult
@@ -124,7 +124,7 @@ def triage_pr(
 
     gh_unavailable = False
     if comments is None:
-        kwargs = {"repo": repo, "warnings": warnings}
+        kwargs: dict[str, Any] = {"repo": repo, "warnings": warnings}
         if gh_runner is not None:
             kwargs["gh_runner"] = gh_runner
         before = len(warnings)
@@ -298,6 +298,9 @@ def triage_postmortems(
             # One-off: no work filed, but the entry is still consumed.
             report.dispositions[item.source_id] = "archived"
             _stamp(item.source_id)
+            continue
+
+        if candidate is None:
             continue
 
         kept, _skipped = dedup_candidates([candidate], existing_keys=seen)

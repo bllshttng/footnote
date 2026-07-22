@@ -44,6 +44,7 @@ from fno.agents.providers import KNOWN_PROVIDERS
 from fno.agents.providers.base import ProviderResult, ReachabilityProbeError
 from fno.agents.registry import (
     AgentEntry,
+    AgentStatus,
     RegistryVersionError,
     load_registry,
     update_registry,
@@ -689,7 +690,7 @@ def _followup_path(
 def _stamp_status(
     name: str,
     *,
-    status: str,
+    status: AgentStatus,
     last_message_at: Optional[str | Callable[[], str]] = None,
     last_message_at_preserve: bool = False,
 ):
@@ -2194,7 +2195,7 @@ def dispatch_spawn(
                             short_id="",
                             reply=result.stdout,
                         )
-                    result = _claude_create_path(
+                    created = _claude_create_path(
                         name=name,
                         message=message,
                         cwd=cwd,
@@ -2219,7 +2220,7 @@ def dispatch_spawn(
                         kind="created",
                         name=name,
                         provider="claude",
-                        short_id=result.short_id,
+                        short_id=created.short_id,
                     )
 
                 # 4c. codex/gemini --once: create + exchange + teardown.
@@ -3198,7 +3199,7 @@ def reconcile_agents(
                     }
                 )
                 continue
-            new_status = "live" if reachable else "orphaned"
+            new_status: AgentStatus = "live" if reachable else "orphaned"
 
         elif entry.harness == "codex":
             if codex_index_state != "ready":
@@ -4438,6 +4439,60 @@ def wake_and_deliver(
     return True, short
 
 
+def wake_drain_agent(
+    session_uuid: str, *, cwd: Optional[Path] = None
+) -> tuple[bool, str]:
+    """Wake an asleep-but-resumable claude session to drain its OWN inbox (US9,
+    rung 3 of the inbox-daemon ladder). The inbox daemon calls this for a
+    heads-up addressed to a session with no live turn boundary of its own - the
+    mail would otherwise pile durable forever, which is the wall this rung
+    removes.
+
+    A thin wrapper over ``wake_and_deliver``: waking to drain IS delivering a
+    waking prompt, so the concurrency guarantee comes for free. The name is
+    derived from the uuid (never the envelope msg-id), so two concurrent wakes
+    collide on one flock and the single-writer claim refuses the second - one
+    revival, not two writers on one transcript. Rides the revive-in-place
+    substrate rather than a one-shot ``claude -p`` because only the persistent
+    substrate holds that claim; a headless one-shot could not make concurrent
+    wakes collapse. Returns ``wake_and_deliver``'s ``(delivered, reason)``.
+    """
+    return wake_and_deliver(
+        session_uuid,
+        "You were woken to drain unread fno mail addressed to you. "
+        "Run `fno mail drain-self` to process it, then stop.",
+        cwd=cwd,
+    )
+
+
+def wake_if_asleep_claude(token: str) -> tuple[bool, Optional[str]]:
+    """Resolve ``token`` to a resumable-but-asleep claude session and wake it to
+    drain its own inbox (US9). Returns ``(True, short_id)`` on a revival, else
+    ``(False, None)`` - the token is a project name, a non-claude/ambiguous
+    token, or the wake refused (the session is actually live, or another wake is
+    in flight). Best-effort: a resolver or spawn error never raises.
+
+    Shared by the send-time heads-up path (``mail send <handle> --kind heads-up``,
+    the reachable trigger for a handle-addressed note) and the drain daemon rung.
+    ``resolve_reachable`` is liveness-blind, so an asleep session resolves here
+    even though it is absent from every live listing.
+    """
+    from fno.agents import discover as discover_mod
+
+    try:
+        reachable, _ambiguous = discover_mod.resolve_reachable(token)
+    except Exception:  # noqa: BLE001 - a resolver failure is not a delivery failure
+        return False, None
+    if reachable is None or reachable.agent != "claude":
+        return False, None
+    cwd = Path(reachable.cwd) if reachable.cwd else None
+    try:
+        delivered, detail = wake_drain_agent(reachable.session_id, cwd=cwd)
+    except (OSError, RuntimeError):
+        return False, None
+    return (True, detail) if delivered else (False, None)
+
+
 def _mail_inject_codex(thread_id: str, text: str) -> bool:
     """Inject ``text`` into a live codex session over the app-server daemon socket
     via the ``fno-agents mail-inject --provider codex`` verb (US8, node x-d899).
@@ -4722,7 +4777,11 @@ def dispatch_send(
             # exclusion falls back to the always-present from_ name. from_model is
             # NOT set on the durable envelope (AgentEntry has no model field; we do
             # not fabricate one -- LD11 forward-compat).
-            from fno.inbox.store import generate_msg_id, write_new_thread
+            from fno.inbox.store import (
+                DurableOwner,
+                generate_msg_id,
+                write_new_thread,
+            )
 
             sender_entry = next((e for e in entries if e.name == from_name), None)
             from_session = provider_from = None
@@ -4785,6 +4844,12 @@ def dispatch_send(
                         provider_to=existing.harness,
                         provider_from=provider_from,
                         from_session=from_session,
+                        # US6: a registered-agent send reaches this durable
+                        # fallback only after the live inject missed, so the
+                        # recipient is asleep-but-resumable (it drains its inbox
+                        # on its next turn). The sweep escalates to dead-letter
+                        # if it sits unread past the wake-daemon horizon.
+                        owner=DurableOwner.WAKE_DAEMON.value,
                     )
                 except (OSError, ValueError, RuntimeError) as exc:
                     events.emit(
@@ -5087,7 +5152,7 @@ def dispatch_send_to_project(
     # (and bus mirror) record to == project (to_kind=project); the next drain in
     # that project picks it up, EXCLUDING the sender (Group 1, ab-ba91b807). The
     # sender identity is best-effort - exclusion falls back to the from_ name.
-    from fno.inbox.store import write_new_thread
+    from fno.inbox.store import DurableOwner, write_new_thread
 
     from_session = provider_from = None
     try:
@@ -5112,6 +5177,9 @@ def dispatch_send_to_project(
             to_kind="project",
             from_session=from_session,
             provider_from=provider_from,
+            # US6: an explicit --to-project note deliberately chose the durable
+            # project-inbox lane; the project's own drain owns it.
+            owner=DurableOwner.INBOX_DRAIN.value,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         events.emit("agent_send_failed", stage="durable-write", name=project)
