@@ -64,6 +64,12 @@ pub struct RegistryAgent {
     /// and `exited_at`. `None` when none parsed. Feeds the peek `changed Ns ago`
     /// line via `AgentRow.updated_at`.
     pub updated_at: Option<u64>,
+    /// The spawn-stamped crown altitude (0 VP / 1 Director / 2 IC), mesh-owned;
+    /// `None` = an un-crowned leaf. Read-only here - the sideline orders and
+    /// indents by it, the mux never writes it.
+    pub crown_level: Option<u32>,
+    /// The project/epic/node id the crown rules over, for the inline crown badge.
+    pub crown_scope: Option<String>,
 }
 
 /// One claude-roster worker as the sideline consumes it (three fields, not
@@ -967,6 +973,17 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
         .flatten()
         .filter_map(rfc3339_like_to_secs)
         .max();
+        // (US9 crown) Mesh-owned role metadata, additive: absent -> un-crowned.
+        // Parsed tolerantly like every other field; the FILE is the contract.
+        let crown_level = row
+            .get("crown_level")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
+        let crown_scope = row
+            .get("crown_scope")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let (badge, reason, answerable) = match inside_leg {
             Some(leg) if !leg.is_null() => {
                 let live = report_is_live(
@@ -1055,6 +1072,8 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             account: None,
             claude_session_uuid,
             updated_at,
+            crown_level,
+            crown_scope,
         });
     }
     // Stable order so row-set equality (the change gate) and the rendered
@@ -1137,6 +1156,9 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             // and carries no registry stamps.
             claude_session_uuid: None,
             updated_at: None,
+            // A roster worker carries no crown (crown is an fno-registry fact).
+            crown_level: None,
+            crown_scope: None,
         });
     }
     drop(reg_ids); // release the borrow of `out` before extending it
@@ -1737,6 +1759,28 @@ mod tests {
     }
 
     #[test]
+    fn derive_rows_carries_crown_level_and_scope() {
+        // The registry->row parse boundary: a spawn-stamped crown reaches the
+        // RegistryAgent; an un-crowned row carries None (additive, absence-safe).
+        let raw = reg(
+            r#"{"name":"dir","cwd":"/w","status":"live","provider":"claude",
+                "crown_level":1,"crown_scope":"epic-x"},
+               {"name":"leaf","cwd":"/w","status":"live","provider":"claude"},
+               {"name":"partial","cwd":"/w","status":"live","provider":"claude",
+                "crown_level":0,"crown_scope":""}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        assert_eq!(get("dir").crown_level, Some(1));
+        assert_eq!(get("dir").crown_scope.as_deref(), Some("epic-x"));
+        assert_eq!(get("leaf").crown_level, None, "un-crowned => None");
+        assert_eq!(get("leaf").crown_scope, None);
+        // An empty scope string degrades to None (the badge then shows `?`).
+        assert_eq!(get("partial").crown_level, Some(0));
+        assert_eq!(get("partial").crown_scope, None, "empty scope => None");
+    }
+
+    #[test]
     fn derive_rows_updated_at_is_max_parseable_stamp() {
         // US7: updated_at is the max of the parseable stamps; a row with none is
         // None (no changed-ago line rendered).
@@ -2331,6 +2375,8 @@ config_dir = "~/.claude-alt"
             account: None,
             claude_session_uuid: None,
             updated_at: None,
+            crown_level: None,
+            crown_scope: None,
         }
     }
 

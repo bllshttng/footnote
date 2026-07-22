@@ -214,7 +214,7 @@ use crate::tree::{Dir, Rect, TabId};
 /// Same case again - a new verb, not an additive field, so a v39 server cannot
 /// deserialize it and an unbumped upgraded client would lose its connection on
 /// the first relocation rather than at handshake.
-pub const PROTO_VERSION: u32 = 40;
+pub const PROTO_VERSION: u32 = 41;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -634,6 +634,19 @@ pub struct AgentRow {
     /// `#[serde(default)]` keeps a v36 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail: Option<String>,
+    /// (v41) The crown altitude of this row, mesh-owned (the spawn-stamped crown
+    /// ladder: 0 VP/project, 1 Director/epic, 2 IC/node). `None` = an un-crowned
+    /// leaf worker. The sideline orders coordinators above leaves within a squad
+    /// by this; the mux only renders it, never writes it. `#[serde(default)]`
+    /// keeps a v40 reader wire-tolerant (a missing crown reads as un-crowned).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crown_level: Option<u32>,
+    /// (v41) The project/epic/node id this row's crown rules over, for the inline
+    /// `L{level} {scope}` badge. `None` on an un-crowned row or a partial crown
+    /// (the badge then shows `?`). Rendered verbatim - no graph lookup on the
+    /// paint path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crown_scope: Option<String>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -2073,6 +2086,33 @@ mod tests {
     }
 
     #[test]
+    fn agent_row_crown_fields_are_serde_default_tolerant_and_proto_is_41() {
+        // The mux-crown wire lift: PROTO_VERSION bumps 40 -> 41, and the two
+        // additive crown fields are skew-tolerant both ways.
+        assert_eq!(PROTO_VERSION, 41);
+        // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
+        let older = r#"{"squad":null,"name":"bg","pane_id":null,
+                      "badge":null,"reason":null,"exited":false}"#;
+        let row: AgentRow = serde_json::from_str(older).unwrap();
+        assert_eq!(row.crown_level, None, "missing crown_level => None");
+        assert_eq!(row.crown_scope, None, "missing crown_scope => None");
+        // A crowned row round-trips losslessly.
+        let mut crowned = row.clone();
+        crowned.crown_level = Some(1);
+        crowned.crown_scope = Some("epic-x".into());
+        let wire = serde_json::to_string(&crowned).unwrap();
+        let back: AgentRow = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back.crown_level, Some(1));
+        assert_eq!(back.crown_scope.as_deref(), Some("epic-x"));
+        // An un-crowned row omits the keys on the wire (skip_serializing_if), so
+        // a pre-41 reader never sees an unknown field.
+        assert!(
+            !serde_json::to_string(&row).unwrap().contains("crown_level"),
+            "un-crowned row omits crown on the wire"
+        );
+    }
+
+    #[test]
     fn agent_row_from_pre_seen_json_defaults_seen_false() {
         // AC1-ERR (x-4328): a pre-v23 AgentRow omits `seen` entirely. A v23
         // reader must decode it as `false` - the client then degrades to the
@@ -2215,6 +2255,8 @@ mod tests {
                         updated_at: None,
                         pr: None,
                         tail: None,
+                        crown_level: None,
+                        crown_scope: None,
                     },
                     AgentRow {
                         squad: None,
@@ -2235,6 +2277,8 @@ mod tests {
                         updated_at: None,
                         pr: None,
                         tail: None,
+                        crown_level: None,
+                        crown_scope: None,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),

@@ -4654,13 +4654,21 @@ impl View {
             let view = self.section_view(&section_key(s));
             if view != SectionView::Collapsed {
                 let section_base = section_project_base(&s.canonical_cwd);
-                for a in self
+                // (US9 crown) Order coordinators above leaves within the squad,
+                // higher altitude first. Stable by crown_rank ONLY, never
+                // (rank, name): the squad's existing order (pane-tree, then
+                // name-sorted watch-only) is the tiebreak, so an all-un-crowned
+                // squad keeps its bytes. The name-sort in the derive/merge
+                // change-gate is a separate concern and stays untouched.
+                let mut squad_agents: Vec<&AgentRow> = self
                     .layout
                     .agents
                     .iter()
                     .filter(|a| a.squad == Some(s.id))
                     .filter(|a| view == SectionView::Expanded || !a.exited)
-                {
+                    .collect();
+                squad_agents.sort_by_key(|a| crown_rank(a.crown_level));
+                for a in squad_agents {
                     out.push(DisplayRow::Agent(a));
                     // (x-6851 US3) Exception-based subline: a Sub row follows the
                     // agent ONLY when its cwd_base differs from the squad's
@@ -4764,6 +4772,55 @@ impl View {
             }
         }
         out
+    }
+
+    /// (US9 crown) Hierarchy indent for a row within its squad: the count of
+    /// DISTINCT crown ranks strictly above this row's rank among the rows that
+    /// actually RENDER. Zero when no higher-ranked visible row exists, so an
+    /// all-un-crowned squad indents by 0 and paints byte-identical to before. It
+    /// mirrors `tree_rows`' own visibility filter (an exited coordinator hidden
+    /// by a LiveOnly squad must not contribute a phantom indent step), so the
+    /// indent never references a row that is off-screen. The max is bounded by
+    /// the number of distinct ranks (<= 3 steps), so it never runs off-screen.
+    fn crown_indent(&self, a: &AgentRow) -> usize {
+        // The `~ elsewhere` catch-all is a FLAT cross-project section that
+        // tree_rows never crown-sorts, so a squadless row must take no
+        // squad-derived indent - otherwise an unrelated crowned orphan would
+        // nest an un-crowned one it was never ordered above.
+        if a.squad.is_none() {
+            return 0;
+        }
+        let mine = crown_rank(a.crown_level);
+        let expanded = self.squad_section_view(a.squad) == SectionView::Expanded;
+        let mut above: Vec<u8> = self
+            .layout
+            .agents
+            .iter()
+            .filter(|o| o.squad == a.squad)
+            .filter(|o| expanded || !o.exited)
+            .map(|o| crown_rank(o.crown_level))
+            .filter(|&r| r < mine)
+            .collect();
+        above.sort_unstable();
+        above.dedup();
+        above.len()
+    }
+
+    /// The section-view state (Expanded / LiveOnly / Collapsed) of the section a
+    /// row lives in - a squad, or the Elsewhere catch-all for a squadless row.
+    /// Used to keep `crown_indent`'s row set in step with what `tree_rows`
+    /// actually paints. An unknown squad defaults to Expanded (count everything).
+    fn squad_section_view(&self, squad: Option<u64>) -> SectionView {
+        match squad {
+            Some(id) => self
+                .layout
+                .squads
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| self.section_view(&section_key(s)))
+                .unwrap_or(SectionView::Expanded),
+            None => self.section_view(&SectionKey::Elsewhere),
+        }
     }
 
     fn draw_sideline(&self, cells: &mut [Cell], rows: usize, cols: usize, panel_w: usize) {
@@ -4910,6 +4967,13 @@ impl View {
                         Some(acct) => format!(" {mark}{glyph} @{acct} {}", a.name),
                         None => format!(" {mark}{glyph} {}", a.name),
                     };
+                    // (US9 crown) Indent the row under any higher-altitude
+                    // coordinators in its squad. Zero steps -> no prefix -> a
+                    // squad with no coordinator stays byte-identical.
+                    let steps = self.crown_indent(a);
+                    if steps > 0 {
+                        text = format!("{}{text}", "  ".repeat(steps));
+                    }
                     // (x-0090, x-0f9d US3) A pane row names its hosting tab
                     // inside-out: a NAMED tab shows its name (`·reviews`), an
                     // unnamed tab shows the `·N` ordinal. An orphan row (no tab)
@@ -4945,6 +5009,13 @@ impl View {
                     if let Some(reason) = a.reason.as_deref().filter(|x| !x.is_empty()) {
                         text.push_str(": ");
                         text.push_str(reason);
+                    }
+                    // (US9 crown) The inline coordinator badge, mesh vocabulary
+                    // `L{level} {scope}` (scope `?` when a partial crown carries
+                    // none). Absent on an un-crowned row, so no byte changes there.
+                    if let Some(level) = a.crown_level {
+                        let scope = a.crown_scope.as_deref().unwrap_or("?");
+                        text.push_str(&format!(" [L{level} {scope}]"));
                     }
                     // External (roster-surfaced) is a MODIFIER, not a state
                     // (x-df4c AC1-UI): the row keeps its lattice style and ORs
@@ -5354,6 +5425,19 @@ fn section_project_base(canonical_cwd: &str) -> Option<&str> {
     Path::new(canonical_cwd)
         .file_name()
         .and_then(|b| b.to_str())
+}
+
+/// (US9 crown) The sort/indent rank of a crown altitude within a squad:
+/// coordinators rank by altitude (0 VP, 1 Director, 2 IC), an un-crowned leaf
+/// ranks last (3). A `crown_level` past the shipped 0..=2 ladder (a newer
+/// server, or corruption) clamps into the IC coordinator band rather than
+/// producing an unbounded indent - it degrades to "some coordinator", never a
+/// broken layout.
+fn crown_rank(level: Option<u32>) -> u8 {
+    match level {
+        Some(l) => l.min(2) as u8,
+        None => 3,
+    }
 }
 
 /// (x-6851 US3) Whether an agent's cwd is FOREIGN to its section: its `cwd_base`
@@ -10314,6 +10398,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         // A pane-hosted row focuses regardless of the active squad.
         assert!(
@@ -10362,6 +10448,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         match agent_hit(&row, 1) {
             ChromeHit::OpenAttachPlace { id, squad } => {
@@ -10609,6 +10697,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         }
     }
 
@@ -11016,6 +11106,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         }
     }
 
@@ -12375,6 +12467,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         view_with_agents(vec![
             row("live-a", false),
@@ -12544,6 +12638,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         }]);
         let hdr = view
             .display_rows()
@@ -12843,6 +12939,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         let mut view = view_with_agents(vec![
             orphan("stray-live", false),
@@ -12889,6 +12987,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         let mut view = view_with_agents(vec![orphan("a", false), orphan("b", true)]);
         assert!(frame_text(&view.compose()).contains("▾~ elsewhere"));
@@ -12993,6 +13093,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         // A watch-only bg row with a claude jobId: a click opens the placement
         // picker (x-9c5f) so the operator chooses the split direction.
@@ -13015,6 +13117,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         // A watch-only row with no attach target: a click can only hint.
         let bg_plain = AgentRow {
@@ -13036,6 +13140,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         let view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         // Agents-first display order (x-0090; no tab rows) with x-cd67 US1
@@ -13085,6 +13191,8 @@ mod tests {
                 updated_at: None,
                 pr: None,
                 tail: None,
+                crown_level: None,
+                crown_scope: None,
             })
             .collect();
         let view = view_with_agents(agents);
@@ -13376,6 +13484,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         let bg = super::build_row_menu(&mk("bg", None, Some("id"), false), Anchor::Center);
         assert!(bg.actions.contains(&super::MenuAction::NewTab));
@@ -13927,6 +14037,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         let mut v = view_with_agents(vec![mk("dup", Some(5)), mk("dup", Some(9))]);
         // Open the menu on the SECOND "dup" (pane 9) and pick Focus.
@@ -14190,6 +14302,8 @@ mod tests {
                     updated_at: None,
                     pr: None,
                     tail: None,
+                    crown_level: None,
+                    crown_scope: None,
                 },
                 AgentRow {
                     squad: Some(1),
@@ -14210,6 +14324,8 @@ mod tests {
                     updated_at: None,
                     pr: None,
                     tail: None,
+                    crown_level: None,
+                    crown_scope: None,
                 },
                 AgentRow {
                     squad: None,
@@ -14230,6 +14346,8 @@ mod tests {
                     updated_at: None,
                     pr: None,
                     tail: None,
+                    crown_level: None,
+                    crown_scope: None,
                 },
             ],
             focus_node: None,
@@ -14305,6 +14423,8 @@ mod tests {
                 updated_at: None,
                 pr: None,
                 tail: None,
+                crown_level: None,
+                crown_scope: None,
             }
         }
         let mut view = two_pane_view();
@@ -14708,6 +14828,8 @@ mod tests {
                     updated_at: None,
                     pr: None,
                     tail: None,
+                    crown_level: None,
+                    crown_scope: None,
                 },
                 AgentRow {
                     squad: None,
@@ -14728,6 +14850,8 @@ mod tests {
                     updated_at: None,
                     pr: None,
                     tail: None,
+                    crown_level: None,
+                    crown_scope: None,
                 },
                 AgentRow {
                     squad: None,
@@ -14748,6 +14872,8 @@ mod tests {
                     updated_at: None,
                     pr: None,
                     tail: None,
+                    crown_level: None,
+                    crown_scope: None,
                 },
                 // x-df4c AC1-UI: an EXTERNAL row that is also Blocked - the
                 // load-bearing "attention is never dimmed" branch. The accent
@@ -14771,6 +14897,8 @@ mod tests {
                     updated_at: None,
                     pr: None,
                     tail: None,
+                    crown_level: None,
+                    crown_scope: None,
                 },
             ],
             focus_node: None,
@@ -15067,6 +15195,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         let card = |id: &str, state| BacklogCard {
             id: id.into(),
@@ -15705,6 +15835,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         let loading = PeekView {
             cursor: 0,
@@ -16126,6 +16258,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         let mut v = view_with_agents(vec![tomb]);
         v.set_squad_view(1, SectionView::Expanded);
@@ -16167,6 +16301,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         }
     }
 
@@ -16763,6 +16899,8 @@ mod tests {
                 updated_at: None,
                 pr: None,
                 tail: None,
+                crown_level: None,
+                crown_scope: None,
             },
             AgentRow {
                 squad: Some(1),
@@ -16783,6 +16921,8 @@ mod tests {
                 updated_at: None,
                 pr: None,
                 tail: None,
+                crown_level: None,
+                crown_scope: None,
             },
         ];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
@@ -16839,6 +16979,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         };
         let bare = row("zsh", 10, None);
         let blocked = row("claude", 11, Some(AgentBadge::Blocked));
@@ -16899,6 +17041,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         }];
         let composed = NavView {
             query: "notes".into(),
@@ -16948,6 +17092,8 @@ mod tests {
                 updated_at: None,
                 pr: None,
                 tail: None,
+                crown_level: None,
+                crown_scope: None,
             },
             AgentRow {
                 squad: Some(2),
@@ -16968,6 +17114,8 @@ mod tests {
                 updated_at: None,
                 pr: None,
                 tail: None,
+                crown_level: None,
+                crown_scope: None,
             },
         ];
         let rows = v.nav_rows();
@@ -17052,6 +17200,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         }];
         let idx = v
             .nav_rows()
@@ -17463,6 +17613,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         }];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
         assert!(
@@ -17621,6 +17773,8 @@ mod tests {
             updated_at: None,
             pr: None,
             tail: None,
+            crown_level: None,
+            crown_scope: None,
         }
     }
 
@@ -18213,6 +18367,174 @@ mod tests {
         let mut v = two_pane_view();
         v.layout.agents = agents;
         v
+    }
+
+    // ---- US9: hierarchy-ordered sideline from mesh crown metadata ----
+
+    /// A live squad-1 row carrying a crown (or none). Not blocked - a plain live
+    /// coordinator/leaf, the shape the sideline orders.
+    fn crowned_row(name: &str, pane: u64, level: Option<u32>, scope: Option<&str>) -> AgentRow {
+        let mut r = blocked_row(name, pane, None);
+        r.badge = None;
+        r.crown_level = level;
+        r.crown_scope = scope.map(str::to_string);
+        r
+    }
+
+    /// The rendered order of agent-row names (post crown sort).
+    fn agent_order(v: &View) -> Vec<String> {
+        v.display_rows()
+            .iter()
+            .filter_map(|r| match r {
+                DisplayRow::Agent(a) => Some(a.name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn crown_rank_maps_altitudes_and_clamps_out_of_range() {
+        assert_eq!(crown_rank(None), 3, "un-crowned leaf ranks last");
+        assert_eq!(crown_rank(Some(0)), 0);
+        assert_eq!(crown_rank(Some(1)), 1);
+        assert_eq!(crown_rank(Some(2)), 2);
+        // A newer server's higher altitude degrades to "some coordinator",
+        // never an unbounded rank.
+        assert_eq!(crown_rank(Some(9)), 2);
+    }
+
+    #[test]
+    fn crown_coordinator_sorts_above_ics_within_squad() {
+        let v = view_with_agents(vec![
+            crowned_row("ic-a", 2, None, None),
+            crowned_row("dir", 3, Some(1), Some("epic-x")),
+            crowned_row("ic-b", 4, None, None),
+        ]);
+        let order = agent_order(&v);
+        assert_eq!(order.first().map(String::as_str), Some("dir"));
+        // The un-crowned rows follow, keeping their existing (input) order -
+        // a stable crown-rank sort, never a name re-sort (byte-identity).
+        assert_eq!(order, vec!["dir", "ic-a", "ic-b"]);
+    }
+
+    #[test]
+    fn crown_multiple_altitudes_order_highest_first() {
+        let v = view_with_agents(vec![
+            crowned_row("node-ic", 2, Some(2), Some("n")),
+            crowned_row("vp", 3, Some(0), Some("proj")),
+            crowned_row("director", 4, Some(1), Some("epic")),
+        ]);
+        assert_eq!(agent_order(&v), vec!["vp", "director", "node-ic"]);
+    }
+
+    #[test]
+    fn crown_all_uncrowned_squad_keeps_order_and_paints_no_badge_or_indent() {
+        // The common case (Operator Intent): a stable sort of equal ranks is
+        // the identity, so the squad's order is unchanged and no crown ceremony
+        // reaches the paint - the no-regression path.
+        let v = view_with_agents(vec![
+            crowned_row("zeta", 2, None, None),
+            crowned_row("alpha", 3, None, None),
+        ]);
+        assert_eq!(agent_order(&v), vec!["zeta", "alpha"]);
+        let text = frame_text(&v.compose());
+        for line in text
+            .lines()
+            .filter(|l| l.contains("zeta") || l.contains("alpha"))
+        {
+            assert!(
+                !line.contains('['),
+                "no crown badge on un-crowned row: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn crown_indent_is_dense_rank_within_squad() {
+        let v = view_with_agents(vec![
+            crowned_row("vp", 2, Some(0), Some("p")),
+            crowned_row("dir", 3, Some(1), Some("e")),
+            crowned_row("ic", 4, None, None),
+        ]);
+        let steps = |name: &str| {
+            let a = v.layout.agents.iter().find(|a| a.name == name).unwrap();
+            v.crown_indent(a)
+        };
+        assert_eq!(steps("vp"), 0);
+        assert_eq!(steps("dir"), 1);
+        assert_eq!(steps("ic"), 2);
+
+        // One coordinator + a leaf: dense rank means the leaf is exactly one
+        // step below, though the raw ranks are 1 and 3.
+        let v2 = view_with_agents(vec![
+            crowned_row("dir", 2, Some(1), Some("e")),
+            crowned_row("leaf", 3, None, None),
+        ]);
+        let steps2 = |name: &str| {
+            let a = v2.layout.agents.iter().find(|a| a.name == name).unwrap();
+            v2.crown_indent(a)
+        };
+        assert_eq!(steps2("dir"), 0);
+        assert_eq!(steps2("leaf"), 1);
+    }
+
+    #[test]
+    fn crown_indent_ignores_exited_coordinator_hidden_by_liveonly() {
+        // The indent must reference only rows that render: an exited coordinator
+        // dropped by a LiveOnly squad must not leave its leaves indented under a
+        // phantom.
+        let mut vp = crowned_row("vp", 2, Some(0), Some("p"));
+        vp.exited = true;
+        let leaf = crowned_row("leaf", 3, None, None);
+        let mut v = view_with_agents(vec![vp, leaf]);
+        let indent = |v: &View, name: &str| {
+            let a = v.layout.agents.iter().find(|a| a.name == name).unwrap();
+            v.crown_indent(a)
+        };
+        // Expanded: the exited VP still renders, so the leaf indents under it.
+        assert_eq!(indent(&v, "leaf"), 1);
+        // LiveOnly hides the exited VP -> no coordinator on screen -> no indent.
+        v.cycle_squad(1);
+        assert_eq!(v.squad_view(1), SectionView::LiveOnly);
+        assert_eq!(indent(&v, "leaf"), 0, "no phantom indent under a hidden VP");
+    }
+
+    #[test]
+    fn crown_indent_zero_for_squadless_orphan_rows() {
+        // Orphans (`~ elsewhere`) are a flat cross-project section, never
+        // crown-sorted; a crowned orphan must not indent an unrelated one.
+        let mut coord = crowned_row("orphan-dir", 2, Some(1), Some("epic"));
+        coord.squad = None;
+        let mut leaf = crowned_row("orphan-leaf", 3, None, None);
+        leaf.squad = None;
+        let v = view_with_agents(vec![coord, leaf]);
+        let indent = |name: &str| {
+            let a = v.layout.agents.iter().find(|a| a.name == name).unwrap();
+            v.crown_indent(a)
+        };
+        assert_eq!(indent("orphan-dir"), 0, "squadless coordinator: no indent");
+        assert_eq!(
+            indent("orphan-leaf"),
+            0,
+            "squadless leaf: not nested under a stranger"
+        );
+    }
+
+    #[test]
+    fn crown_malformed_scope_orders_by_level_and_badges_question_mark() {
+        // A partial crown (level set, scope None) must never panic: it orders at
+        // its altitude and its badge scope degrades to `?`.
+        let v = view_with_agents(vec![
+            crowned_row("dir", 2, Some(1), None),
+            crowned_row("leaf", 3, None, None),
+        ]);
+        assert_eq!(agent_order(&v).first().map(String::as_str), Some("dir"));
+        let text = frame_text(&v.compose());
+        let dir_line = text.lines().find(|l| l.contains("dir")).unwrap();
+        assert!(
+            dir_line.contains("[L1 ?]"),
+            "malformed scope badges ?: {dir_line:?}"
+        );
     }
 
     // A roster row with an arbitrary badge/seen (x-feec): a join target for a
