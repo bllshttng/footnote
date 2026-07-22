@@ -33,7 +33,8 @@ Every agent-to-agent payload carries the `<fno_mail>` envelope - king to teammat
 | Job | Verb |
 |---|---|
 | Spawn a teammate pane | `fno agents spawn <name> "<payload>" --substrate pane --squad <s> --split <dir> --effort <e>` |
-| Anoint a sub-king (crown) | `fno agents spawn <name> "<payload>" --substrate pane --crown level=<N>,scope=<scope>` |
+| Anoint a sub-king at spawn | `fno agents spawn <name> "<payload>" --substrate pane --crown level=<N>,scope=<scope>` |
+| Coronate a running session in place | `fno agents crown <handle> --scope <scope> [--level N]` (scope = epic/project/node id; level 0..2) |
 | Read your own crown | `fno whoami` (prints a `crown:` line when your row holds one) |
 | Message a live teammate | `fno mail send <handle> "<msg>" --from-self` |
 | Resolve a handle you lost | `fno agents discovered-json` · `fno agents top` |

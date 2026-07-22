@@ -42,8 +42,11 @@ Two rules keep the court from growing:
 
 State your level, altitude, and scope in your own opening line, so the transcript records what you believed you were authorized to do.
 
-**The crown is stamped at spawn, never self-declared.**
-A grantor bestows it with `fno agents spawn ... --crown level=N,scope=<scope>`; the child's registry row records `level`, `scope`, and the grantor (the spawning session, or `human`), the same provenance discipline as harness-stamped mail identity.
+**The crown is stamped by a grantor, never self-declared.**
+Bestow it at spawn with `fno agents spawn ... --crown level=N,scope=<scope>`, or coronate an already-running session in place with `fno agents crown <handle> --scope <scope> [--level N]` (for an organically grown session that authored an epic - authorship is candidacy, the crown still flows from a grantor).
+Either way the row records `level`, `scope`, and the grantor (a live superset-king, the attended `human`, or a standing `config-grant`), the same provenance discipline as harness-stamped mail identity.
+`scope` is the epic/project/node id the crown rules over; `level` is the ladder altitude `0..2` (VP=0 project, Director=1 epic, IC=2 node).
+The promotion verb refuses a self-grant and a second live crown over one scope, and an unattended session needs either a superset crown or `config.agents.crown_config_grant` (default off).
 So a crown is externally verifiable, not a claim a session makes about itself: `fno agents list`/`top` mark crowned rows (a minion resolves who to escalate to, and a second live crown over one scope is detectable), and `fno whoami` prints your own crown line so you recover your authority after a compaction.
 Crown liveness is just row liveness - the crown dies with the session, no separate lifecycle.
 

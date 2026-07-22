@@ -286,11 +286,12 @@ def cmd_watch(
     raise typer.Exit(rc)
 
 
-# A crown ladder is a handful of altitudes (VP -> Director -> IC). Cap the level
-# well inside the Rust registry row's u32 crown_level so a fat-fingered level
-# (Python int is arbitrary-precision) cannot overflow the u32 on the daemon's
-# read and poison the whole shared store (US9 review).
-_MAX_CROWN_LEVEL = 255
+# The crown ladder is exactly three altitudes: VP (0, project) -> Director
+# (1, epic) -> IC (2, node). A level outside 0..2 is not a real crown, so it is
+# refused - this both enforces the ladder and keeps crown_level far inside the
+# Rust registry row's u32 (a fat-fingered arbitrary-precision Python int can't
+# overflow it and poison the shared store).
+_MAX_CROWN_LEVEL = 2
 
 
 def _parse_crown(spec: str) -> tuple[int, str]:
@@ -335,6 +336,150 @@ def _parse_crown(spec: str) -> tuple[int, str]:
         print("--crown scope must be nonblank", file=sys.stderr)
         raise typer.Exit(code=2)
     return level, parts["scope"]
+
+
+def _scope_is_subset(target_scope: str, grantor_scope: str | None) -> bool:
+    """Is ``target_scope`` a subset of the grantor's crown scope (US10)?
+
+    Scopes are opaque ids/names, so structural project>epic>node containment is
+    not derivable in code. The enforceable rule: a grantor may grant a DIFFERENT
+    (narrower) scope, never re-grant its own - a same-scope grant would be a peer
+    crown, already refused by the one-live-crown-per-scope rule. Deeper
+    containment is the grantor's good-faith responsibility, the same trust the
+    crown model places in a crowning brief.
+    """
+    return bool(grantor_scope) and target_scope != grantor_scope
+
+
+@agents_app.command("crown", hidden=True)
+def cmd_crown(
+    handle: str = typer.Argument(
+        ..., help="Existing agent handle (name / 8-hex / session id) to coronate in place."
+    ),
+    scope: str = typer.Option(
+        ...,
+        "--scope",
+        help="The epic / project / node id the crown rules over (e.g. --scope x-d92e).",
+    ),
+    level: int | None = typer.Option(
+        None,
+        "--level",
+        help=(
+            "Ladder altitude 0..2 (VP=0 project, Director=1 epic, IC=2 node). "
+            "Default: the grantor's level+1 (superset-king), else 0."
+        ),
+    ),
+) -> None:
+    """Coronate an EXISTING session in place (US10): write the US9 crown fields
+    onto ``handle``'s registry row.
+
+    The crown is GRANTED, never self-declared - the grantor class is stamped as
+    provenance: a live superset-crown holder (scope validated against its own
+    row), an attended human (a shell with no agent identity in env), or a
+    standing config grant (``config.agents.crown_config_grant``, DEFAULT OFF).
+    Refuses a self-grant and a second live crown over the same scope.
+    """
+    from fno.agents.registry import (
+        AgentResolutionError,
+        load_registry,
+        resolve_agent,
+        update_registry,
+    )
+    from fno.config import load_settings
+
+    scope = scope.strip()
+    if not scope:
+        print("--scope must be nonblank", file=sys.stderr)
+        raise typer.Exit(code=2)
+    if level is not None and (level < 0 or level > _MAX_CROWN_LEVEL):
+        print(
+            f"--level must be between 0 and {_MAX_CROWN_LEVEL}; got {level}",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
+    try:
+        target = resolve_agent(handle).entry
+    except AgentResolutionError as exc:
+        print(f"no agent for handle {handle!r}: {exc}", file=sys.stderr)
+        raise typer.Exit(code=2)
+
+    # The caller's own identity: a spawned agent carries FNO_AGENT_SELF, a human
+    # shell does not. That absence IS the attended-human signal.
+    caller_self = (os.environ.get("FNO_AGENT_SELF") or "").strip()
+    caller_row = None
+    if caller_self:
+        try:
+            caller_row = resolve_agent(caller_self).entry
+        except AgentResolutionError:
+            caller_row = None
+
+    # Refusal: never self-declared - a session cannot crown its own row.
+    if caller_row is not None and caller_row.name == target.name:
+        print(
+            "refusing a self-grant: a crown is bestowed, never self-declared",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
+    # Refusal: one live crown per scope.
+    for e in load_registry():
+        if e.name != target.name and e.crown_scope == scope and e.status == "live":
+            print(
+                f"refusing: {e.name!r} already holds a live crown over scope "
+                f"{scope!r} (one live crown per scope)",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+
+    # Authorize + stamp the grantor provenance (first match wins).
+    caller_has_crown = caller_row is not None and caller_row.crown_level is not None
+    resolved_level = level
+    if caller_has_crown and _scope_is_subset(scope, caller_row.crown_scope):
+        grantor = caller_row.session_id or caller_row.name  # superset-king
+        if resolved_level is None:
+            resolved_level = (caller_row.crown_level or 0) + 1
+    elif load_settings().agents.crown_config_grant:
+        grantor = "config-grant"
+    elif not caller_self:
+        grantor = "human"  # an attended human shell (no agent identity)
+    else:
+        print(
+            f"refusing: this session holds no superset crown over {scope!r}, is "
+            "not an attended human, and config.agents.crown_config_grant is off. "
+            "Grant from a superset-king, a human shell, or enable the config grant.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    if resolved_level is None:
+        resolved_level = 0
+    if resolved_level > _MAX_CROWN_LEVEL:
+        print(
+            f"refusing: derived crown level {resolved_level} exceeds the ceiling "
+            f"{_MAX_CROWN_LEVEL}",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
+    def _crown(rows: list) -> list:
+        for r in rows:
+            if r.name == target.name:
+                r.crown_level = resolved_level
+                r.crown_scope = scope
+                r.crown_grantor = grantor
+        return rows
+
+    update_registry(_crown)
+    print(
+        json.dumps(
+            {
+                "crowned": target.name,
+                "level": resolved_level,
+                "scope": scope,
+                "grantor": grantor,
+            }
+        )
+    )
 
 
 @agents_app.command("spawn")
@@ -567,9 +712,10 @@ def cmd_spawn(
         "--crown",
         help=(
             "Bestow an orchestrator crown on the spawned worker (US9): "
-            "'level=N,scope=X' (level int >= 0, nonblank scope). Stamped on the "
-            "child's registry row with the grantor derived from THIS session - a "
-            "crown is granted, never self-declared."
+            "'level=N,scope=X'. scope = the epic / project / node id the crown "
+            "rules over (e.g. scope=x-d92e); level = the ladder altitude 0..2 "
+            "(VP=0 project, Director=1 epic, IC=2 node). Stamped on the child's "
+            "row with the grantor derived from THIS session - never self-declared."
         ),
     ),
     node: str | None = typer.Option(

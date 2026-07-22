@@ -36,8 +36,8 @@ def test_parse_crown_valid_orderfree() -> None:
         "level=-1,scope=x",    # negative
         "level=1,scope=",      # blank scope
         "garbage",             # no k=v
-        "level=99999999999,scope=x",  # > u32::MAX would poison the Rust registry
-        "level=256,scope=x",   # just over the sane ceiling
+        "level=3,scope=x",     # just over the ladder ceiling (0..2)
+        "level=99999999999,scope=x",  # absurd, and would overflow the Rust u32
     ],
 )
 def test_parse_crown_rejects_malformed(spec: str) -> None:
@@ -219,3 +219,105 @@ def test_top_rows_join_the_crown_by_name() -> None:
     )
     assert _rows([w], {"king-epic": "L1 epic-x"})[0]["crown"] == "L1 epic-x"
     assert _rows([w], {})[0]["crown"] is None
+
+
+# --- US10: `fno agents crown` promotion verb ---------------------------------
+
+from types import SimpleNamespace
+
+
+def _entry(name: str, **kw):
+    from fno.agents.registry import AgentEntry
+    return AgentEntry(name=name, cwd="/w", log_path="", harness="claude", **kw)
+
+
+def _seed(monkeypatch, tmp_path, rows) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import write_registry
+    write_registry(rows)
+
+
+def _crown(monkeypatch, args, *, self_env: Optional[str]):
+    from typer.testing import CliRunner
+    from fno.agents.cli import agents_app
+    if self_env is None:
+        monkeypatch.delenv("FNO_AGENT_SELF", raising=False)
+    else:
+        monkeypatch.setenv("FNO_AGENT_SELF", self_env)
+    return CliRunner().invoke(agents_app, ["crown", *args])
+
+
+def _rows_by_name():
+    from fno.agents.registry import load_registry
+    return {e.name: e for e in load_registry()}
+
+
+def test_crown_human_grant_is_the_default(tmp_path: Path, monkeypatch) -> None:
+    # A shell with no agent identity in env is an attended human (level 0).
+    _seed(monkeypatch, tmp_path, [_entry("worker", short_id="aaaa1111")])
+    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env=None)
+    assert r.exit_code == 0, r.output
+    row = _rows_by_name()["worker"]
+    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (0, "epic-x", "human")
+
+
+def test_crown_superset_king_stamps_grantor_and_derives_level(tmp_path: Path, monkeypatch) -> None:
+    caller = _entry("king", short_id="bbbb2222", crown_level=1, crown_scope="proj-a")
+    _seed(monkeypatch, tmp_path, [caller, _entry("worker", short_id="cccc3333")])
+    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env="king")
+    assert r.exit_code == 0, r.output
+    row = _rows_by_name()["worker"]
+    assert row.crown_scope == "epic-x"
+    assert row.crown_level == 2  # grantor level 1 + 1
+    assert row.crown_grantor == "bbbb2222"  # the grantor's session id, provenance
+
+
+def test_crown_config_grant_when_knob_on(tmp_path: Path, monkeypatch) -> None:
+    _seed(monkeypatch, tmp_path, [_entry("bot", short_id="bbbb2222"), _entry("worker", short_id="cccc3333")])
+    stub = SimpleNamespace(agents=SimpleNamespace(crown_config_grant=True))
+    monkeypatch.setattr("fno.config.load_settings", lambda: stub)
+    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env="bot")
+    assert r.exit_code == 0, r.output
+    assert _rows_by_name()["worker"].crown_grantor == "config-grant"
+
+
+def test_crown_refuses_self_grant(tmp_path: Path, monkeypatch) -> None:
+    _seed(monkeypatch, tmp_path, [_entry("king", short_id="bbbb2222", crown_level=1, crown_scope="proj-a")])
+    r = _crown(monkeypatch, ["king", "--scope", "epic-x"], self_env="king")
+    assert r.exit_code == 2
+    assert "self-grant" in r.output.lower()
+
+
+def test_crown_refuses_second_live_crown_over_one_scope(tmp_path: Path, monkeypatch) -> None:
+    existing = _entry("king1", short_id="bbbb2222", crown_level=1, crown_scope="epic-x", status="live")
+    _seed(monkeypatch, tmp_path, [existing, _entry("worker", short_id="cccc3333")])
+    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env=None)
+    assert r.exit_code == 2
+    assert "one live crown per scope" in r.output.lower()
+
+
+def test_crown_refuses_unattended_agent_without_superset_or_config(tmp_path: Path, monkeypatch) -> None:
+    _seed(monkeypatch, tmp_path, [_entry("bot", short_id="bbbb2222"), _entry("worker", short_id="cccc3333")])
+    stub = SimpleNamespace(agents=SimpleNamespace(crown_config_grant=False))
+    monkeypatch.setattr("fno.config.load_settings", lambda: stub)
+    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env="bot")
+    assert r.exit_code == 2
+    assert "superset" in r.output.lower() or "config" in r.output.lower()
+
+
+def test_crown_explicit_level_and_bound(tmp_path: Path, monkeypatch) -> None:
+    _seed(monkeypatch, tmp_path, [_entry("worker", short_id="aaaa1111")])
+    ok = _crown(monkeypatch, ["worker", "--scope", "epic-x", "--level", "2"], self_env=None)
+    assert ok.exit_code == 0, ok.output
+    assert _rows_by_name()["worker"].crown_level == 2  # IC, the deepest crown
+    # just over the ladder (0..2) is refused
+    _seed(monkeypatch, tmp_path, [_entry("worker", short_id="aaaa1111")])
+    bad = _crown(monkeypatch, ["worker", "--scope", "epic-x", "--level", "3"], self_env=None)
+    assert bad.exit_code == 2
+
+
+def test_crown_refuses_unknown_handle(tmp_path: Path, monkeypatch) -> None:
+    _seed(monkeypatch, tmp_path, [_entry("worker", short_id="aaaa1111")])
+    r = _crown(monkeypatch, ["ghost", "--scope", "epic-x"], self_env=None)
+    assert r.exit_code == 2
+    assert "no agent" in r.output.lower()
