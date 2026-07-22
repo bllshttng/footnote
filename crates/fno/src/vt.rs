@@ -275,6 +275,19 @@ impl Pane {
         (self.rows, self.cols)
     }
 
+    /// (x-fbb1) True when this pane is a pristine, idle mux shell - safe to reap
+    /// for `.`=here take-over. Requires positive OSC 133 evidence: markers are
+    /// active (`saw_marker`, so the signal is trustworthy - an un-integrated
+    /// shell reads false and is never reaped), NO command is running (`open` is
+    /// None, which catches both a foreground program and an `exec` replacement,
+    /// since `exec` emits `C` and never its `D`), and NO command has ever run
+    /// (`blocks` empty - any completed command, including a background or stopped
+    /// job, leaves a block). Anything the shell has touched fails this, so
+    /// take-over never reaps live work (the P1 the tcgetpgrp check missed).
+    pub fn is_pristine_idle_shell(&self) -> bool {
+        self.saw_marker && self.open.is_none() && self.blocks.is_empty()
+    }
+
     /// Snapshot the ACTIVE grid (alt screen included - `Term` swaps grids
     /// internally, so vim's screen is what a reattaching client redraws from)
     /// into a self-contained [`Frame`].
@@ -2323,6 +2336,28 @@ mod tests {
         assert_eq!(pane.search_open("zz-no-such-token"), (0, 0));
         assert_eq!(pane.selected_block, None);
         assert_eq!(pane.rerun_command().as_deref(), Some("echo three"));
+    }
+
+    #[test]
+    fn is_pristine_idle_shell_gates_takeover() {
+        // (x-fbb1) The `.`=here take-over reap gate. Only a shell that has drawn a prompt and run
+        // nothing is safe to reap.
+        // No markers yet (un-integrated / not-yet-prompted): not trustworthy -> refuse.
+        let mut pane = Pane::new(6, 40);
+        assert!(!pane.is_pristine_idle_shell(), "no OSC 133 markers seen");
+        // Drew a prompt, ran nothing: the empty tab -> pristine idle. A bare `D` (first precmd,
+        // no open block) creates no block, so `blocks` stays empty.
+        pane.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07");
+        assert!(pane.is_pristine_idle_shell(), "prompt drawn, nothing run");
+        // A command is running now (open `C`, no `D`) - also the `exec nvim` case: refuse.
+        let mut running = Pane::new(6, 40);
+        running.feed(b"\x1b]133;A\x07\x1b]133;C\x07");
+        assert!(!running.is_pristine_idle_shell(), "a command is running");
+        // Ran a command and returned to a prompt (a completed block, e.g. a backgrounded or
+        // stopped job left one): refuse - not pristine.
+        let mut ran = Pane::new(6, 40);
+        ran.feed(b"\x1b]133;C\x07out\x1b]133;D;0\x07\x1b]133;A\x07");
+        assert!(!ran.is_pristine_idle_shell(), "a command has already run");
     }
 
     #[test]

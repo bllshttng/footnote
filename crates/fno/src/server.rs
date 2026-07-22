@@ -237,11 +237,12 @@ fn rerun_allowed(agents: &[RegistryAgent], session: &str, pane: u64) -> Result<(
 /// Pure over the three inputs so the reap gate (the safety-critical bit) is
 /// unit-testable without a Core, mirroring [`rerun_allowed`]. Take-over is
 /// allowed iff the leaf is the tab's ONLY pane, a plain shell (`cmd == None`,
-/// not a `pane run` / agent pane), and idle (no foreground child). Any other
-/// shape - a split, an agent pane, or a shell running a foreground program -
+/// not a `pane run` / agent pane), and a pristine idle shell (has drawn a
+/// prompt but run nothing - see [`vt::Pane::is_pristine_idle_shell`]). Any other
+/// shape - a split, an agent pane, or a shell that has run/started anything -
 /// refuses, so `.` never kills live work.
-fn idle_shell_takeover(leaf_count: usize, cmd: Option<&str>, has_foreground_child: bool) -> bool {
-    leaf_count == 1 && cmd.is_none() && !has_foreground_child
+fn idle_shell_takeover(leaf_count: usize, cmd: Option<&str>, pristine_idle: bool) -> bool {
+    leaf_count == 1 && cmd.is_none() && pristine_idle
 }
 
 /// The last `n` non-empty lines of `text`, joined by `\n` - the mux-server twin
@@ -6144,7 +6145,7 @@ impl Core {
                             idle_shell_takeover(
                                 leaf_count,
                                 p.cmd.as_deref(),
-                                p.pty.has_foreground_child(),
+                                p.vt.is_pristine_idle_shell(),
                             )
                         });
                         if !takeover {
@@ -12002,12 +12003,18 @@ mod tests {
     #[test]
     fn open_here_takes_over_lone_idle_shell() {
         // x-fbb1 (the reported bug): the focused pane is a lone idle shell (not in `attached`).
-        // `.`=here reaps it and lands B as the tab's only pane - "take over the empty tab". The
-        // `/bin/cat` stand-in is the pane's own child, so its foreground pgrp == its pid: idle.
+        // `.`=here reaps it and lands B as the tab's only pane - "take over the empty tab".
         set_attach_program(&["/bin/cat"]); // stand in for `claude attach`
         let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
         let view = core.client_view(client_id).unwrap();
         let shell = core.viewed_tab(view).unwrap().focus;
+        // Make the shell a pristine idle shell: a real mux shell draws its first prompt (OSC 133 A)
+        // and has run nothing. Without this the pane never emitted markers and take-over refuses.
+        core.panes
+            .get_mut(&shell)
+            .unwrap()
+            .vt
+            .feed(b"\x1b]133;A\x07");
         core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
         let new_pid = core.next_pane_id;
 
@@ -12208,8 +12215,13 @@ mod tests {
         let (mut core, client_id, p1, p2, mut rx) = seen_test_core();
         let view = core.client_view(client_id).unwrap();
         let focus = core.viewed_tab(view).unwrap().focus;
-        // A viewer exists, but on the OTHER (unviewed) tab's pane; focus is a plain idle shell.
+        // A viewer exists, but on the OTHER (unviewed) tab's pane; focus is a pristine idle shell.
         let other = if focus == p1 { p2 } else { p1 };
+        core.panes
+            .get_mut(&focus)
+            .unwrap()
+            .vt
+            .feed(b"\x1b]133;A\x07");
         core.attached.insert("deadbee1".into(), other);
         core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
         let new_pid = core.next_pane_id;
@@ -13384,14 +13396,15 @@ mod tests {
 
     #[test]
     fn idle_shell_takeover_verdicts() {
-        // Take-over: the tab's only pane is a plain, idle shell (the reported bug).
-        assert!(idle_shell_takeover(1, None, false));
-        // Refuse: the shell is running a foreground child - `.` must not kill it.
-        assert!(!idle_shell_takeover(1, None, true));
+        // Take-over: the tab's only pane is a plain, pristine idle shell (the reported bug).
+        assert!(idle_shell_takeover(1, None, true));
+        // Refuse: the shell has run or started something (foreground program, exec, or a
+        // background/stopped job) - not pristine, so `.` must not reap it.
+        assert!(!idle_shell_takeover(1, None, false));
         // Refuse: more than one leaf - `.` is scoped to the "only pane" case; splits use h/j/k/l.
-        assert!(!idle_shell_takeover(2, None, false));
+        assert!(!idle_shell_takeover(2, None, true));
         // Refuse: an agent / `pane run` pane (cmd set) is never a disposable shell.
-        assert!(!idle_shell_takeover(1, Some("claude attach ab12"), false));
+        assert!(!idle_shell_takeover(1, Some("claude attach ab12"), true));
     }
 
     /// A scratch store dir for write-through tests, installed via the per-thread
