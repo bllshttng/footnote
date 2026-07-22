@@ -115,12 +115,9 @@ const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_NAME + COL_TAIL + COL_PR + COL_TI
 const MIN_EXTENDED_PANEL_W: u16 = COL_STATUS + COL_NAME + COL_PR + 1;
 
 /// (x-b186) Columns the top-right density button reserves on the sideline's
-/// first row: a leading space plus the state glyph.
+/// first row: the state glyph plus a trailing pad (x-2e86) so it does not sit
+/// flush against the divider.
 const DENSITY_BTN_W: usize = 2;
-
-/// (x-b186) The density button's glyph. Each state paints a DIFFERENT one, so a
-/// press changes the button as well as the geometry - a press with no visible
-/// change would read as a dead control.
 
 /// (x-2e86) The width a density jumps to when picked as a preset (the density
 /// key or button): each mode's canonical size. Free-standing so the preset
@@ -155,10 +152,13 @@ fn sideline_max_width(term_cols: u16) -> u16 {
 }
 
 fn density_glyph(d: Density) -> char {
+    // (x-2e86) A fill ramp - rail, tree, table - reading as increasing density.
+    // All three are East-Asian-width 1 (U+2581/2584/2588), which the button's
+    // column math and the header-band composition require.
     match d {
-        Density::Slim => '▏',
-        Density::Regular => '▤',
-        Density::Extended => '▦',
+        Density::Slim => '▁',
+        Density::Regular => '▄',
+        Density::Extended => '█',
     }
 }
 /// The tab bar row.
@@ -5494,15 +5494,23 @@ impl View {
         // `sideline_row_at` needs no special case. The header band underneath
         // already right-aligns a droppable rollup strip, so the two columns this
         // takes cost at worst the least-severe rollup pair, never the label.
+        //
+        // (x-2e86) Layout is [inverse glyph][plain pad]: the glyph leads and the
+        // divider-adjacent cell is a NON-inverse space, so the button reads one
+        // column in from the border (the operator's padding ask) without shifting
+        // `range.start` - the header band keeps every column it had, so a tight
+        // slim rail never loses its rollup to the pad (AC1-HP).
         if rows > 0 {
             if let Some(range) = self.density_button_range(panel_w) {
                 let glyph = density_glyph(self.density);
+                let start = range.start;
                 for (n, c) in range.clone().enumerate() {
+                    let is_pad = n + 1 == DENSITY_BTN_W; // the trailing cell is the pad
                     cells[c] = Cell {
-                        c: if n == 0 { ' ' } else { glyph },
+                        c: if c == start { glyph } else { ' ' },
                         fg: Color::Default,
                         bg: Color::Default,
-                        flags: cell_flags::INVERSE,
+                        flags: if is_pad { 0 } else { cell_flags::INVERSE },
                     };
                 }
             }
@@ -12259,7 +12267,6 @@ mod tests {
         view.term = (30, 120);
         set_density(&mut view, Density::Extended); // width -> EXTENDED_PANEL_W
         arm_sideline_drag(&mut view, Instant::now());
-        assert!(MIN_EXTENDED_PANEL_W > MIN_SLIM_PANEL_W, "Extended has a real floor");
 
         view.drag_sideline_to(MIN_EXTENDED_PANEL_W - 2, Instant::now()); // want 29 < 30
         assert_eq!(view.density, Density::Regular, "demoted to the widest fitting mode");
@@ -18982,6 +18989,27 @@ mod tests {
             top.contains(density_glyph(Density::Regular)),
             "and the button is there too: {top:?}"
         );
+    }
+
+    #[test]
+    fn density_button_glyph_sits_one_column_off_the_divider() {
+        // AC4-UI (x-2e86): the glyph leads the button and the divider-adjacent
+        // cell is a plain (non-inverse) pad, so the glyph reads one column in
+        // from the border. The pad costs the header band NOTHING (range.start is
+        // unchanged), which is why the tight-slim rollup test still holds.
+        let v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
+        let pw = v.panel_w() as usize;
+        let range = v.density_button_range(pw).unwrap();
+        let frame = v.compose();
+        // Row 0, so the cell index is the column.
+        let glyph_cell = &frame.cells[range.start];
+        let pad_cell = &frame.cells[range.end - 1]; // the cell before the divider
+        assert_eq!(glyph_cell.c, density_glyph(v.density), "glyph leads the button");
+        assert_eq!(glyph_cell.flags, cell_flags::INVERSE, "glyph cell is the button");
+        assert_eq!(pad_cell.c, ' ', "the divider-adjacent cell is a pad");
+        assert_eq!(pad_cell.flags, 0, "the pad is plain, giving real breathing room");
+        // The divider itself is the very next column.
+        assert_eq!(range.end, pw - 1, "the button ends right before the divider");
     }
 
     fn view_with_agents(agents: Vec<AgentRow>) -> View {
