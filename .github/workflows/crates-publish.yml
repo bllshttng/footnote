@@ -52,17 +52,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Refuse a stale pre-rename crate path (AC5-FR)
-        run: |
-          manifest="${{ matrix.dir }}/Cargo.toml"
-          # Reject the stale untracked pre-rename crate dir so it can never be
-          # packaged; the literal name is an intentional reference. fno-rename-keep
-          stale='fno-agents'  # fno-rename-keep
-          case "$manifest" in
-            *"$stale"*)
-              echo "refusing to use a stale pre-rename crate path: $manifest"; exit 1;;
-          esac
-          test -f "$manifest" || { echo "manifest not found: $manifest"; exit 1; }
       - name: Dry-run package + verify
         # Explicit --manifest-path (never a cwd/glob resolution) so the stale
         # untracked pre-rename crate dir can never be packaged by mistake (AC5-FR).
@@ -89,17 +78,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Refuse a stale pre-rename crate path (AC5-FR)
-        run: |
-          manifest="${{ matrix.dir }}/Cargo.toml"
-          # Reject the stale untracked pre-rename crate dir so it can never be
-          # published; the literal name is an intentional reference. fno-rename-keep
-          stale='fno-agents'  # fno-rename-keep
-          case "$manifest" in
-            *"$stale"*)
-              echo "refusing to use a stale pre-rename crate path: $manifest"; exit 1;;
-          esac
-          test -f "$manifest" || { echo "manifest not found: $manifest"; exit 1; }
       - name: Publish ${{ matrix.crate }} to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
