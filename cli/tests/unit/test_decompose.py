@@ -85,9 +85,7 @@ def graph_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gc, "GRAPH_HTML", tmp_path / "graph.html")
-    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
 
     def read_entries():
         return json.loads(g.read_text())["entries"]
@@ -631,9 +629,7 @@ def graph_env_real_doc(
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gc, "GRAPH_HTML", tmp_path / "graph.html")
-    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
 
     def read_entries():
         return json.loads(g.read_text())["entries"]
@@ -684,9 +680,7 @@ def _wire_graph(tmp_path, monkeypatch, epic):
     monkeypatch.setattr(gc, "GRAPH_JSON", tmp_path / "graph.json")
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gc, "GRAPH_HTML", tmp_path / "graph.html")
-    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     monkeypatch.setattr(gs, "GRAPH_JSON", tmp_path / "graph.json")
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     (tmp_path / "graph.json").write_text(json.dumps({"entries": [epic]}) + "\n")
 
     def read_entries():

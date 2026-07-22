@@ -11,7 +11,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import typer
 
@@ -24,6 +24,9 @@ from fno.adapters.providers.model import (
     ProviderRecord,
     ProviderUnavailableError,
 )
+
+if TYPE_CHECKING:
+    from fno.adapters.providers.model import ProvidersConfig
 
 cli = typer.Typer(name="providers", help="Manage provider records and active selection.")
 
@@ -55,7 +58,7 @@ def _settings_path_for_scope(scope: str) -> Path:
         return _resolve_home() / ".fno" / "config.toml"
 
 
-def _load(scope: str = "global") -> "fno.adapters.providers.model.ProvidersConfig":  # type: ignore[name-defined]
+def _load(scope: str = "global") -> "ProvidersConfig":
     """Load providers config; error on validation failure."""
     from fno.adapters.providers.loader import load_providers
     repo_root = _get_repo_root()
@@ -939,7 +942,6 @@ def combos_add(
     """Add a new combo. Validates each provider exists; refuses if combo already exists."""
     from fno.adapters.providers.loader import (
         atomic_mutate_settings,
-        load_providers,
     )
     from fno.adapters.providers.rotation import Combo
 

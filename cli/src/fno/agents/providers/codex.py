@@ -434,7 +434,6 @@ def _run_codex(
     last_error_msg: str = ""
     exit_code: int = -1
     sigkill_escalated: bool = False
-    keyboard_interrupted = False
 
     # Inject FNO_AGENT_* env vars so nested `fno agents ask` calls
     # from inside this codex session attribute back to the parent agent.
@@ -522,7 +521,6 @@ def _run_codex(
                 proc, tee_fh, types_seen, _stderr_warn
             )
         except KeyboardInterrupt:
-            keyboard_interrupted = True
             # Forward SIGINT to the codex process group (subshells too).
             _killpg(_signal.SIGINT)
             # Best-effort wait so the child can clean up before we exit.

@@ -1,7 +1,7 @@
 """Reap dead workers: soft-delete abandoned entries in workers.jsonl."""
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fno.runtime.registry import read_workers, update_worker_status

@@ -675,7 +675,6 @@ def append_history(
     history_path.parent.mkdir(parents=True, exist_ok=True)
     cutoff = datetime.now(timezone.utc) - timedelta(days=retain_days)
     surviving: list[dict[str, Any]] = []
-    abort_overwrite = False
     if history_path.exists():
         try:
             text = history_path.read_text(encoding="utf-8")

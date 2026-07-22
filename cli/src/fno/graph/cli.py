@@ -137,6 +137,33 @@ def _graph_path() -> Path:
     return GRAPH_JSON
 
 
+# Distinct from exit 1 ("graph read cleanly, node absent"): the graph itself
+# could not be read. click reserves 2 for usage errors, so 3 is the first free
+# code. A resolution caller that today treats any non-zero as "absent" keeps
+# failing closed; one that cares can tell a wedged graph from a typo.
+GRAPH_UNREADABLE_EXIT = 3
+
+
+def _resolve_entries_or_exit(id: str):
+    """Read the graph strictly for a resolution verb.
+
+    Returns the entries on a clean read (populated or empty). On an unreadable
+    graph, prints a message that names the read failure and the path -- never
+    "No node matching", which would assert the node is absent -- and exits with
+    the distinct GRAPH_UNREADABLE_EXIT instead of 1.
+    """
+    from fno.graph.store import read_graph_strict, GraphUnreadableError
+
+    try:
+        return read_graph_strict(_graph_path())
+    except GraphUnreadableError as e:
+        typer.echo(
+            f"Could not read the graph cleanly, so '{id}' cannot be resolved: {e}",
+            err=True,
+        )
+        raise typer.Exit(code=GRAPH_UNREADABLE_EXIT)
+
+
 def _archive_path() -> Path:
     from fno.graph._constants import GRAPH_ARCHIVE_JSON
     return GRAPH_ARCHIVE_JSON
@@ -1749,7 +1776,7 @@ def _intake_impl(
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
         _prepare_intake, _build_intake_node,
-        _collect_intake_paths, _validate_cli_deps, _match_plan_in_graph,
+        _validate_cli_deps,
     )
 
     # Reject removed --batch flag
@@ -3590,14 +3617,15 @@ def cmd_get(
         "typo'd token can never silently seed.",
     ),
 ) -> None:
-    from fno.graph.store import read_graph
     from fno.graph.fuzzy import resolve_node
 
     # Pre-rename spelling; shell consumers outside this repo still pass it.
     if field == "_status":
         field = "status"
 
-    entries = read_graph(_graph_path())
+    # Strict read: exit 1 stays "read cleanly, node absent"; an unreadable graph
+    # gets GRAPH_UNREADABLE_EXIT so a caller cannot mistake it for an absent node.
+    entries = _resolve_entries_or_exit(id)
     # Deterministic resolution tiers 1-3 (ab-f82e8083): exact ab-id, exact slug,
     # bare-8-hex re-prefix. A slug/bare-hex argument resolves to the same node
     # an ab-id would, so the spawn VALIDATE step (`fno backlog get "$node"`)
@@ -3625,9 +3653,12 @@ def cmd_get(
     # Read-through fallback: a node the sweep archived still resolves here
     # (read-only). Mutating verbs stay working-graph-only and error instead.
     from fno.paths import graph_archive_json
+    from fno.graph.store import read_graph
 
     archive_path = graph_archive_json()
     if archive_path.exists():
+        # Best-effort, read-only: an unreadable archive degrades to the final
+        # miss below rather than erroring, so keep the soft reader here.
         archived = read_graph(archive_path)
         amatch = resolve_node(id, archived)
         if amatch.kind == "exact":
@@ -3750,11 +3781,12 @@ def cmd_provenance(
     For each edge that carries a session id the resolver is run (claude only;
     codex/gemini/etc. return resolved=False). Read-only: no graph mutation.
     """
-    from fno.graph.store import read_graph
     from fno.graph.fuzzy import resolve_node
     from fno.provenance.resolver import resolve_transcript, _DEFAULT_PROJECTS_ROOT
 
-    entries = read_graph(_graph_path())
+    # Strict read for the same reason cmd_get uses it: a wedged graph must not
+    # read as "No node matching", which asserts the node is absent.
+    entries = _resolve_entries_or_exit(id)
     match = resolve_node(id, entries)
     if match.kind != "exact":
         typer.echo(f"No node matching '{id}' in {_graph_path()}", err=True)
@@ -7880,7 +7912,6 @@ def _collect_intake_paths_typer(plan_paths: list[str], from_list: Optional[str])
 
 def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None:
     """Multi-path intake flow delegating to intake helpers."""
-    from fno.graph._constants import PRIORITY_ORDER
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
         _prepare_intake, _build_intake_node, _validate_cli_deps,
@@ -8249,7 +8280,6 @@ def cmd_rehash(
     then update the sidecar to match.
     """
     import hashlib
-    import shutil
     import tempfile
 
     path = _graph_path()

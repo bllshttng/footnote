@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
-    from fno.review.orchestrator import Finding, OrchestratorResult
+    from fno.review.orchestrator import OrchestratorResult
 
 
 # ---------------------------------------------------------------------------

@@ -732,7 +732,7 @@ class TestLoadProvidersDuplicateIds:
             },
         )
 
-        with pytest.raises(ProviderConfigError) as exc_info:
+        with pytest.raises(ProviderConfigError):
             load_providers(repo_root=tmp_path)
 
 

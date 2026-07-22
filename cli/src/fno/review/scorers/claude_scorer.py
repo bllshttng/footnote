@@ -313,8 +313,8 @@ def claude_scorer_batch(findings: list["Finding"], *, timeout: int = 120) -> lis
         scores = json.loads(_strip_fences(raw))
     except (json.JSONDecodeError, TypeError):
         print(
-            f"claude_scorer_batch: inner JSON parse failed; "
-            f"falling back to per-finding scoring",
+            "claude_scorer_batch: inner JSON parse failed; "
+            "falling back to per-finding scoring",
             file=sys.stderr,
         )
         return _per_finding_fallback(findings, timeout=timeout)

@@ -35,6 +35,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Literal, Optional
 
+from fno import paths
+from fno.harness_identity import canonical_handle, sync_harness_aliases
+
 # registry.status is a projection of state.status (LD10), so it can be ANY
 # AgentStatus variant. The daemon writes "live" on spawn and "exited" on child
 # exit (retained until rm), and reconcile writes "orphaned". The earlier
@@ -97,9 +100,6 @@ HARNESS_SESSION_ID_FIELDS = {
     "opencode": "harness_session_id",
 }
 
-from fno import paths
-from fno.harness_identity import canonical_handle, sync_harness_aliases
-
 # The registry's legacy per-harness session-id keys (x-ec59). Distinct from the
 # manifest's map (which uses claude_session_id): the registry's claude identity
 # lives in claude_session_uuid. Passed to the shared sync_harness_aliases rule so
@@ -134,7 +134,10 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # back-fills `harness_session_id`, at load (the accept-on-read pattern) and the
 # key dies there. A pre-v10 reader must reject a v10 store rather than mis-read
 # a harness-only row.
-SCHEMA_VERSION = 10
+# v11 (US9): additive crown fields (crown_level/crown_scope/crown_grantor).
+# asdict emits them as null on every written row, so a pre-v11 reader must
+# reject the store rather than TypeError on the unknown keys.
+SCHEMA_VERSION = 11
 
 
 class RegistryVersionError(RuntimeError):
@@ -278,6 +281,20 @@ class AgentEntry:
     # Gated by the v7 schema bump so a pre-v7 reader rejects instead of
     # silently dropping a stored verdict.
     screen_state: Optional[dict] = None
+    # Crown fields (US9, KFAD squad court): who holds an orchestrator crown and
+    # at what altitude. STAMPED BY THE SPAWN PATH, never self-declared - a
+    # session cannot write a crown onto its own row; the grantor
+    # (`crown_grantor`, the spawning session, or "human" for a direct human
+    # spawn) is captured ambiently, the same provenance discipline as
+    # harness-stamped mail identity. Crown liveness == this row's liveness (no
+    # separate lifecycle). Rust's RegistryEntry mirrors all three as
+    # additive-optional passthrough, so the daemon preserves them on write-back
+    # (a Python-only field is dropped when the daemon re-serializes the row);
+    # gated by the v11 schema bump so a pre-v11 reader rejects instead of
+    # silently dropping a stored crown.
+    crown_level: Optional[int] = None
+    crown_scope: Optional[str] = None
+    crown_grantor: Optional[str] = None
 
     @property
     def session_id(self) -> Optional[str]:
@@ -298,6 +315,16 @@ class AgentEntry:
         # `short_id` is a str defaulting to "" (never None); normalize the
         # empty transport key to None so callers keep their `is None` checks.
         return (getattr(self, field_name) or None) if field_name else None
+
+    @property
+    def crown_label(self) -> Optional[str]:
+        """Compact crown descriptor for display (``"L1 epic-x"``), or ``None``
+        when this row holds no crown. The single formatter both ``fno whoami``
+        and ``fno agents list``/``top`` render from, so the two cannot drift.
+        Excluded from ``asdict`` (a ``@property``), so it never persists."""
+        if self.crown_level is None:
+            return None
+        return f"L{self.crown_level} {self.crown_scope or '?'}"
 
 
 # ---------------------------------------------------------------------------

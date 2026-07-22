@@ -29,7 +29,6 @@ def graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(gc, "_graph_path", lambda: g)
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
     monkeypatch.setattr(gs, "GRAPH_MD", tmp_path / "graph.md")
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     for marker in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
         monkeypatch.delenv(marker, raising=False)
     # An origin so the persisted node is eligible (source_session_id populated).

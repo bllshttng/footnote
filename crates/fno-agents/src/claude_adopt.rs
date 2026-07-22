@@ -76,6 +76,9 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         exited_at: None,
         mux: None,
         screen_state: None,
+        crown_level: None,
+        crown_scope: None,
+        crown_grantor: None,
         legacy_claude_short_id: None,
     }
 }

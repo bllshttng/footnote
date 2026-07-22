@@ -209,6 +209,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # writes an idle roster row (register_existing_session). Pure Python, no Rust
     # client port, so it must never auto-route to the daemon.
     "register",
+    # US10: the crown promotion verb (`fno agents crown`). Pure Python
+    # (grantor-class provenance + registry RMW via update_registry); no Rust
+    # client port, so it must never auto-route to the daemon.
+    "crown",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs

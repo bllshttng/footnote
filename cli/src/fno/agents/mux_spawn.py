@@ -79,6 +79,9 @@ class MuxSpawnResult:
     pane_id: int
     child_pid: Optional[int]
     session_uuid: Optional[str]
+    # Claude's 8-hex jobId (``session_uuid[:8]``), the addressable mail handle;
+    # "" for providers whose transport key is not short_id (US8).
+    short_id: str = ""
 
 
 def _fno_bin() -> str:
@@ -612,7 +615,7 @@ def resolve_provenance(
     # caller supplied slug+plan would export FNO_NODE=<slug>, and the ambient
     # origin-capture consumer matches ids exactly - so a slug-driven spawn would
     # silently file its nodes with no origin at all.
-    from fno.graph._constants import has_node_id_prefix
+    from fno.graph._constants import has_node_id_prefix, is_wellformed_node_id
 
     if slug is None or plan is None or not has_node_id_prefix(node):
         try:
@@ -626,10 +629,26 @@ def resolve_provenance(
                     if plan is None:
                         plan = rec.get("plan_path") or ""
                     break
-        except Exception:
-            # A missing/corrupt graph must not block the spawn; degrade to the
-            # node id alone rather than raising in the pane path.
-            pass
+        except Exception as e:
+            # A graph read failure must not block the spawn -- but it must not
+            # degrade a SLUG into FNO_NODE=<slug> either. The origin-capture
+            # consumer matches ids exactly and would drop a slug as an unknown
+            # node, blaming a bad id for what was a read failure. Keep `node`
+            # only when it is a STRICTLY well-formed id (hex suffix); the liberal
+            # has_node_id_prefix admits a title-derived slug like `x-marks-the-
+            # spot`, which would leak right back into FNO_NODE. An absent-but-
+            # well-formed id is still dropped downstream by the capture side's
+            # known-ids check, so strict-here is safe. Never re-raise: the pane
+            # path degrades. Log under FNO_DEBUG so a missing-origin node is
+            # traceable to the read failure rather than being silently invisible.
+            if not is_wellformed_node_id(node):
+                if os.environ.get("FNO_DEBUG"):
+                    print(
+                        f"resolve_provenance: graph read failed ({type(e).__name__}); "
+                        f"dropping unresolved node '{node}' from provenance",
+                        file=sys.stderr,
+                    )
+                node = None
     prov = {"FNO_NODE": node, "FNO_SLUG": slug or "", "FNO_PLAN": plan or ""}
     return {k: v for k, v in prov.items() if v}
 
@@ -699,6 +718,8 @@ def dispatch_spawn_pane(
     session: Optional[str] = None,
     squad: Optional[str] = None,
     split: Optional[str] = None,
+    crown_level: Optional[int] = None,
+    crown_scope: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
     account_env: Optional[dict[str, str]] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
@@ -864,6 +885,25 @@ def dispatch_spawn_pane(
                     reason="no unique opencode session for this cwd after spawn",
                 )
 
+        # Claude addresses a pane by its 8-hex jobId (the first block of the
+        # session UUID). The row does NOT store it in short_id - that field is
+        # the worker/bg transport slot, and a mux row must hold exactly one live
+        # ref (validate_single_live_ref). The jobId resolves back to this row via
+        # resolve_agent's derived_short rule (harness_session_id[:8]), so the
+        # receipt can hand the king a usable mail handle without touching the row
+        # (US8). Empty for providers that resume off harness_session_id.
+        short_id_val = (
+            session_uuid[:8] if provider == "claude" and session_uuid else ""
+        )
+
+        # Crown stamp (US9): the grantor is the spawning session (the parent edge
+        # captured above), or "human" for a direct human spawn with no session
+        # env - never a caller-supplied value. Only stamped when a crown was
+        # actually requested (crown_level is not None).
+        crown_grantor_val = (
+            (spawned_by_session or "human") if crown_level is not None else None
+        )
+
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
             # Claim check, inside the registry write lock so it is atomic with
             # the stamp. Two panes racing in one cwd can each see the SAME lone
@@ -887,6 +927,9 @@ def dispatch_spawn_pane(
                     spawned_by_session=spawned_by_session,
                     spawned_by_harness=spawned_by_harness,
                     spawned_by_cwd=spawned_by_cwd,
+                    crown_level=crown_level,
+                    crown_scope=crown_scope,
+                    crown_grantor=crown_grantor_val,
                 )
             )
             return rows
@@ -900,4 +943,5 @@ def dispatch_spawn_pane(
         pane_id=pane_id,
         child_pid=child_pid,
         session_uuid=session_uuid,
+        short_id=short_id_val,
     )

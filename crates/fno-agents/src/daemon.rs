@@ -1404,6 +1404,9 @@ fn build_claude_stream_entry(
         exited_at: None,
         mux: None,
         screen_state: None,
+        crown_level: None,
+        crown_scope: None,
+        crown_grantor: None,
     }
 }
 
@@ -4284,6 +4287,9 @@ mod tests {
             exited_at: exited_at.map(str::to_string),
             mux: None,
             screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
         }
     }
 
@@ -4392,6 +4398,9 @@ mod tests {
                 exited_at: None,
                 mux: None,
                 screen_state: None,
+                crown_level: None,
+                crown_scope: None,
+                crown_grantor: None,
             });
         })
         .unwrap();
@@ -4459,6 +4468,9 @@ mod tests {
                 exited_at: None,
                 mux: None,
                 screen_state: None,
+                crown_level: None,
+                crown_scope: None,
+                crown_grantor: None,
             });
         })
         .unwrap();
@@ -4571,6 +4583,9 @@ mod tests {
                 exited_at: None,
                 mux: None,
                 screen_state: None,
+                crown_level: None,
+                crown_scope: None,
+                crown_grantor: None,
             });
         })
         .unwrap();
@@ -4687,6 +4702,9 @@ mod tests {
                 exited_at: None,
                 mux: None,
                 screen_state: None,
+                crown_level: None,
+                crown_scope: None,
+                crown_grantor: None,
             });
         })
         .unwrap();
@@ -4774,6 +4792,9 @@ mod tests {
             exited_at: None,
             mux: None,
             screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
         });
         assert_eq!(derive_short_id("worker-A", &reg), "workerA1");
     }
@@ -4809,6 +4830,9 @@ mod tests {
             exited_at: None,
             mux: None,
             screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
         }
     }
 
@@ -5613,6 +5637,9 @@ done
                 exited_at: None,
                 mux: None,
                 screen_state: None,
+                crown_level: None,
+                crown_scope: None,
+                crown_grantor: None,
             });
         })
         .unwrap();

@@ -69,7 +69,14 @@ use std::path::{Path, PathBuf};
 // per-provider key backfills `harness_session_id`, at load (accept-on-read); those
 // keys are `skip_serializing` so they never round-trip. A pre-v10 reader must reject
 // a v10 store rather than mis-read a harness-only row. Accepted set widens to 1..=10.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 10;
+//
+// v11 (US9) adds the crown fields (`crown_level`/`crown_scope`/`crown_grantor`),
+// mirrored here as additive-optional passthrough so the daemon preserves a
+// spawn-stamped crown across a read-modify-write (a Python-only field would be
+// dropped when the daemon re-serializes the row). Python's asdict emits them on
+// every written row, so a pre-v11 reader must reject a v11 store rather than
+// TypeError on the unknown keys. Accepted set widens to 1..=11.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 11;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -481,6 +488,20 @@ pub struct RegistryEntry {
     /// `screen_state: Optional[dict]` (X3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_state: Option<ScreenStateReport>,
+    /// Crown fields (US9, v11): who holds an orchestrator crown and at what
+    /// altitude. The Python spawn path is the sole writer (grantor-stamped,
+    /// never self-declared); the daemon only custodies them so a spawn-stamped
+    /// crown round-trips losslessly across a read-modify-write - the same X3
+    /// passthrough treatment as `inside_leg`/`screen_state`. Skip-when-`None`
+    /// keeps a Rust-authored uncrowned row slim; Python's `asdict` always emits
+    /// the keys, so a crowned Python row round-trips fine. Crown liveness ==
+    /// this row's liveness (no separate lifecycle).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crown_level: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crown_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crown_grantor: Option<String>,
     /// v9 backfill-only (x-1b1e): the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into
@@ -1167,6 +1188,9 @@ mod tests {
             exited_at: None,
             mux: None,
             screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
             legacy_claude_short_id: None,
         }
     }
@@ -1886,15 +1910,15 @@ mod tests {
     #[test]
     fn load_registry_rejects_unsupported_schema_version() {
         // Codex P2 (ab-a171ceb2): the typed daemon read path must reject a version
-        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v10, or - for an old daemon -
-        // a v9 it cannot interpret), while v1..=v9 still read.
+        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v12, or - for an old daemon -
+        // a version it cannot interpret), while v1..=current still read.
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":11,"agents":[]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":12,"agents":[]}"#).unwrap();
         match load_registry(&path) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 11);
+                assert_eq!(found, 12);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),

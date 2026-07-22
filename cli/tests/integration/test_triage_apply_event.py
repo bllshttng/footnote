@@ -28,7 +28,6 @@ def tmp_graph(tmp_path, monkeypatch):
 
     for mod in (gc, gs):
         monkeypatch.setattr(mod, "GRAPH_JSON", g, raising=False)
-        monkeypatch.setattr(mod, "GRAPH_LOCK_FILE", tmp_path / "graph.lock", raising=False)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md", raising=False)
     monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json", raising=False)
     return g

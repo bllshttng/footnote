@@ -111,7 +111,7 @@ def codemap(
     # descriptor when os.fdopen() itself raises before its `with` clause
     # takes ownership. NamedTemporaryFile binds the fd to the context
     # manager from the start (Gemini review MEDIUM, PR #267).
-    tmp_path = out_path.parent / f".__codemap_tmp_init__"
+    tmp_path = out_path.parent / ".__codemap_tmp_init__"
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",

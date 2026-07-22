@@ -83,7 +83,48 @@ def drain_inbox(
     return out
 
 
+# Actions that CONSUME the thread (mark it read); a consumed message's envelope
+# id is recorded so a later bounded-duplicate delivery is deduped. Left-unread
+# actions (question wake-signal, clarification) and failures are NOT recorded, so
+# a deliberately re-surfaced thread is never dropped and a failure can retry.
+_CONSUMED_ACTIONS = frozenset({"ignored", "created_node", "memory_written", "dismissed"})
+
+
 def drain_thread(repo_root: Path, project: str, h: ThreadHandle) -> DrainResult:
+    """Dispatch one thread, deduped by its ``<fno_mail id="...">`` (US2).
+
+    A duplicate delivery of an already-consumed message (same id, a different
+    thread file) is dropped exactly once. A message with no id is un-dedupable
+    and processed normally.
+    """
+    from fno.inbox.drain_dedup import already_seen, dedup_key, mark_seen
+
+    # read_unread_threads returns a lightweight handle (messages unpopulated), so
+    # read the rendered thread file for the <fno_mail id="..."> envelope.
+    try:
+        body = h.path.read_text(encoding="utf-8")
+    except OSError:
+        body = ""
+    key = dedup_key(body)
+    if key and already_seen(project, key):
+        try:
+            mark_thread_read(h.path)  # consume the duplicate file
+        except (OSError, ValueError, TimeoutError):
+            pass
+        return DrainResult(
+            thread_id=h.thread_id,
+            kind=h.kind,
+            action="deduped",
+            thread_path=str(h.path),
+        )
+
+    result = _dispatch_thread(repo_root, project, h)
+    if key and result.action in _CONSUMED_ACTIONS:
+        mark_seen(project, key)
+    return result
+
+
+def _dispatch_thread(repo_root: Path, project: str, h: ThreadHandle) -> DrainResult:
     """Dispatch one thread to its handler, keyed by ``h.kind``."""
     if h.kind == Kind.HEADS_UP.value:
         return _handle_heads_up(repo_root, project, h)

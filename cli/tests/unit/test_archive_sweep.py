@@ -102,10 +102,8 @@ def _route(tmp_path, monkeypatch) -> tuple[Path, Path]:
     g.write_text('{"entries": []}\n')
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
-    monkeypatch.setattr(gc, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
-    monkeypatch.setattr(gs, "GRAPH_LOCK_FILE", tmp_path / "graph.lock")
     # Route paths.graph_archive_json (used by cmd_get read-through) to the temp.
     import fno.paths as p
     monkeypatch.setattr(p, "graph_json", lambda: g)

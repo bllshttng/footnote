@@ -9,7 +9,6 @@ Import: from fno.paths_testing import use_tmpdir
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 

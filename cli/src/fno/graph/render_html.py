@@ -21,7 +21,6 @@ import zlib
 from collections import Counter
 from pathlib import Path
 
-from fno.graph._constants import GRAPH_HTML
 from fno.graph.render import (
     KANBAN_COLUMNS,
     UNSCOPED_LABEL,
@@ -160,12 +159,10 @@ def _canonicalize_plan_path(plan_path: str | None, vault: str | None = None) -> 
                 return stripped
     # Worktree-rooted path: pick the LAST top-level dir occurrence.
     best_idx = -1
-    best_marker = ""
     for marker in _VAULT_TOPLEVEL_DIRS:
         idx = p.rfind(f"/{marker}")
         if idx > best_idx:
             best_idx = idx
-            best_marker = marker
     if best_idx != -1:
         return p[best_idx + 1:]  # skip the leading slash; keep marker
     return None

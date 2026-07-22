@@ -24,7 +24,18 @@ def _rss_mb(pid: Optional[int]) -> Optional[int]:
         return None
 
 
-def _rows(workers: list[LiveWorker]) -> list[dict]:
+def _crown_map() -> dict[str, str]:
+    """name -> crown_label for crowned registry rows (US9). Best-effort: a read
+    failure degrades to no crowns rather than breaking the process view."""
+    try:
+        from fno.agents.registry import load_registry
+
+        return {e.name: e.crown_label for e in load_registry() if e.crown_label}
+    except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
+        return {}
+
+
+def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     rows = []
     for w in workers:
         rows.append(
@@ -36,6 +47,7 @@ def _rows(workers: list[LiveWorker]) -> list[dict]:
                 "pid": w.pid,
                 "rss_mb": _rss_mb(w.pid),
                 "status": w.status,
+                "crown": crowns.get(w.name),  # US9: null when uncrowned
             }
         )
     # Heaviest first: the row the operator is looking for when RAM is tight.
@@ -46,7 +58,7 @@ def _rows(workers: list[LiveWorker]) -> list[dict]:
 def render_top(as_json: bool = False) -> str:
     """Render the union table (or its JSON mirror — same rows, LD: parity)."""
     c = census()
-    rows = _rows(c.workers)
+    rows = _rows(c.workers, _crown_map())
     if as_json:
         return json.dumps(
             {"workers": rows, "slot_claims": c.slot_claims, "warnings": c.warnings},
@@ -60,8 +72,10 @@ def render_top(as_json: bool = False) -> str:
     if not rows:
         out.append("no live workers")
     for r in rows:
+        # US9: mark a crowned worker in the name cell (ASCII, alignment-safe).
+        name_cell = r["name"] + (f" [{r['crown']}]" if r["crown"] else "")
         out.append(
-            f"{r['source']:<7} {r['name']:<24} {r['provider']:<9} "
+            f"{r['source']:<7} {name_cell:<24} {r['provider']:<9} "
             f"{r['substrate']:<10} {r['pid'] or '-':>7} "
             f"{r['rss_mb'] if r['rss_mb'] is not None else '-':>7} {r['status']}"
         )

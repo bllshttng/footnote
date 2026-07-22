@@ -56,7 +56,6 @@ This module is callable both as a library (``main_async`` /
 from __future__ import annotations
 
 import asyncio
-import errno
 import json
 import logging
 import os

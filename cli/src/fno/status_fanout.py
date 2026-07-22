@@ -33,6 +33,7 @@ import typer
 
 from fno import paths
 from fno.config import StatusFanoutConfig, StatusSinkConfig
+from fno.env_file import read_var_from_env_file
 from fno.plan._stamp import _atomic_write as _atomic_write_plan
 from fno.plan.locking import plan_doc_lock
 
@@ -417,6 +418,10 @@ class _TickLock:
 _BACKOFF = (1.0, 3.0)
 _MAX_RETRY_AFTER = 30.0  # cap a server's Retry-After so one sink can't wedge a tick
 
+# Sent on every webhook POST: Discord blocks the stdlib default `Python-urllib`
+# UA, so we always send an explicit one (see _post_json).
+_USER_AGENT = "fno-status-fanout/1.0"
+
 
 def _sleep(seconds: float) -> None:
     import time
@@ -441,7 +446,10 @@ def _post_json(url: str, body: dict[str, Any], timeout: float) -> _HttpResult:
     try:
         req = urllib.request.Request(
             url, data=data, method="POST",
-            headers={"Content-Type": "application/json"},
+            # Discord's webhook API 403s the stdlib default `Python-urllib/x.y`
+            # User-Agent (anti-abuse); an explicit UA is required or every send
+            # short-circuits forever. Any descriptive string passes.
+            headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             code = resp.getcode()
@@ -495,16 +503,28 @@ def _deliver(url: str, body: dict[str, Any], fanout: StatusFanoutConfig) -> "tup
     return SHORT_CIRCUIT, f"exhausted retries ({reason})"
 
 
+def _secrets_env_path() -> Path:
+    # ponytail: the state dir's .env (default ~/.fno/.env); add
+    # config.status_fanout.secrets_file only if a deployment needs it elsewhere.
+    return paths.state_dir() / ".env"
+
+
 def _resolve_url(sink: StatusSinkConfig) -> "tuple[Optional[str], Optional[str]]":
     """Resolve a webhook URL from ``url`` or ``url_env``. Returns (url, error);
-    a missing env secret is short-circuit-worthy (fixable), not a hard drop."""
+    a missing env secret is short-circuit-worthy (fixable), not a hard drop.
+
+    ``url_env`` resolves from the process env first, then ``~/.fno/.env`` - the
+    daemon shells the tick with its own env, which never saw the operator's
+    ``export``, so a file fallback is what makes an unattended ``url_env`` sink
+    deliver (x-0128). Process env wins so an exported value is unchanged."""
     if sink.url:
         return sink.url, None
     if sink.url_env:
-        val = os.environ.get(sink.url_env)
+        val = os.environ.get(sink.url_env) or read_var_from_env_file(
+            str(_secrets_env_path()), sink.url_env)
         if val:
             return val, None
-        return None, f"url_env {sink.url_env} unset"
+        return None, f"url_env {sink.url_env} unset (checked process env and ~/.fno/.env)"
     return None, "no url configured"
 
 

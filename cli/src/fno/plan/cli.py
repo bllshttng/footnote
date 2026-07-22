@@ -150,7 +150,7 @@ def brief(
     ),
 ) -> None:
     """Generate a focused task brief from a single-doc plan file."""
-    from fno.plan._doc import load_plan, FrontmatterError, ParseError
+    from fno.plan._doc import load_plan, FrontmatterError
     from fno.plan.brief import build_brief, BriefError, BriefParseError
 
     # Resolve path relative to repo root when not absolute.

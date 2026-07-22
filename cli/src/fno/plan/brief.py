@@ -22,15 +22,14 @@ Exit-code translation (at the CLI boundary):
 """
 from __future__ import annotations
 
-import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from fno.plan._doc import PlanDoc, FrontmatterError, ParseError
+from fno.plan._doc import PlanDoc
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +81,7 @@ def parse_execution_strategy(yaml_text: str) -> dict[str, Any]:
         if mark is not None:
             line = mark.line
         raise BriefParseError(
-            f"Execution Strategy YAML is malformed"
+            "Execution Strategy YAML is malformed"
             + (f" at line {line + 1}" if line is not None else "")
             + f": {exc}"
         ) from exc
@@ -538,7 +537,7 @@ class BriefResult:
 
         lines.append("### Verify Command")
         lines.append("")
-        lines.append(f"```")
+        lines.append("```")
         lines.append(self.verify_command)
         lines.append("```")
         lines.append("")

@@ -159,6 +159,11 @@ def test_dispatch_send_happy_path_live_claude(
     assert "FYI built the thing" in injected
     # Directed send -> the recipient's short id is stamped as the envelope `to`.
     assert 'to="abcd1234"' in injected, f"missing directed `to`: {injected[:80]!r}"
+    # US1 / Locked Decision 8: the registered-agent live path carries the SAME
+    # minted id as the receipt, so the recipient can reply --to it and a
+    # bounded-duplicate is dedupable (codex P1 - _deliver_live is the 2nd choke
+    # point, not just _name_lane_send).
+    assert f'id="{result.msg_id}"' in injected, f"missing envelope id: {injected[:100]!r}"
 
     # Bus demotion: a hosted delivery is NOT also written to the durable store.
     from fno.inbox.store import read_all_threads

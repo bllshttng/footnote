@@ -333,7 +333,6 @@ class TestNoSwapBack:
         path even if foo recovers. Flap is structurally prevented."""
         from fno.adapters.providers.failover import (
             FailoverController,
-            SwapDecision,
         )
         from fno.adapters.providers.error_taxonomy import normalize
 

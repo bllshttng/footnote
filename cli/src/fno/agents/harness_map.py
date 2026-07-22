@@ -332,6 +332,15 @@ def resolve_dispatch(
         chosen_verb = verb.strip()
         if not chosen_verb:
             raise DispatchResolveError("explicit dispatch verb must not be empty")
+        # A plugin-qualified verb (`/fno:target`) canonicalizes to its bare form
+        # (`/target`) before the allowlist check. The allowlist and the stored
+        # command are canonical; the per-harness command_surface re-adds the
+        # `/fno:` prefix at render (opencode) or leaves it bare (claude/agy). So a
+        # court that follows the "every dispatched verb is plugin-qualified"
+        # contract can set `--dispatch-verb /fno:target` without tripping the
+        # bare-only allowlist and breaking the encode-before-exit tail (US7 review).
+        if chosen_verb.startswith("/fno:"):
+            chosen_verb = "/" + chosen_verb[len("/fno:"):]
         allowed = list(cfg.get("allowed_verbs") or _DEFAULT_ALLOWED_VERBS)
         if chosen_verb not in allowed:
             raise DispatchResolveError(

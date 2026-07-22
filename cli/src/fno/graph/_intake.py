@@ -7,22 +7,19 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Literal, Optional, TypedDict, Union
 
 from fno.graph._constants import (
-    LEDGER_JSON, PRIORITY_ORDER, GRAPH_JSON,
-    is_wellformed_node_id, mint_node_id, _rank_band,
+    LEDGER_JSON, PRIORITY_ORDER, is_wellformed_node_id, mint_node_id, _rank_band,
 )
 from fno import paths as _paths
 from fno.graph.depends import (
     _collect_frontmatter_depends,
     _resolve_depends_on,
     _derive_title,
-    _parse_frontmatter,
 )
 
 

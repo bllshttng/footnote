@@ -31,7 +31,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
 
 from fno.adapters.providers.error_taxonomy import (
     NormalizedError,
@@ -41,7 +40,6 @@ from fno.adapters.providers.loader import (
     _extract_providers_block,
     _read_parsed,
     atomic_mutate_settings,
-    load_providers,
 )
 from fno.adapters.providers.runtime_state import (
     reset_provider_health,
@@ -310,8 +308,8 @@ def _write_blocked_reason(target_state_path: Path, reason: str) -> bool:
     fm_head = text[:end_idx]
     fm_lines = fm_head.split("\n")
     replaced = False
-    for i, l in enumerate(fm_lines):
-        if l.startswith("blocked_reason:"):
+    for i, ln in enumerate(fm_lines):
+        if ln.startswith("blocked_reason:"):
             fm_lines[i] = line
             replaced = True
             break

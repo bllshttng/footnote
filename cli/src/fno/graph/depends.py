@@ -15,7 +15,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Literal, Optional, TypedDict, Union
+from typing import TypedDict, Union
 
 from fno.graph._constants import has_node_id_prefix
 

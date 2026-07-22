@@ -53,6 +53,18 @@ def serialize_entry(entry: AgentEntry, live_status: Optional[str]) -> dict:
         "status": entry.status,
         "live_status": live_status,
         "log_path": entry.log_path,
+        # Crown (US9): a compact "L1 epic-x" descriptor + the raw fields, so a
+        # minion can resolve who to escalate to and a second live crown over the
+        # same scope is detectable. null for an uncrowned row.
+        "crown": entry.crown_label,
+        "crown_level": entry.crown_level,
+        "crown_scope": entry.crown_scope,
+        "crown_grantor": entry.crown_grantor,
+        # The mux hosting ref ({session, pane_id}) for a pane-hosted row, else
+        # null. Exposed so a caller can address the pane - e.g. close a handed-off
+        # teammate with `fno mux pane kill <session>:<pane_id>` (a mux row's
+        # short_id is empty, so `fno agents stop` refuses it).
+        "mux": entry.mux,
     }
 
 
@@ -199,9 +211,14 @@ def render_table(
         live = row.get("live_status") or "-"
         last_msg = _relative_time(row.get("last_message_at"))
         cwd = _collapse_home(row.get("cwd") or "")
+        # Mark a crowned row (US9) with a compact ASCII marker in the name cell -
+        # ASCII, not an emoji, so the column-width math (len-based) stays aligned.
+        name = row.get("name") or "-"
+        if row.get("crown"):
+            name = f"{name} [{row['crown']}]"
         display_rows.append(
             {
-                "name": row.get("name") or "-",
+                "name": name,
                 "provider": row.get("provider") or "-",
                 "status": row.get("status") or "-",
                 "live": live,
