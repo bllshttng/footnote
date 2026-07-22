@@ -10,11 +10,25 @@ There is exactly one copy-paste clause in this skill, and it is here. The x-304c
 Report protocol (do not stop silently):
 - On finishing a unit of work OR blocking, send:
   fno mail send <king-handle> 'RESULT: <resolved|blocked|failed> | node: <id> | phase: <think|blueprint|do|review> | context: <NN>% used | artifact: <path-or-PR>' --from-self
-- Delivery doctrine: send with --from-self, and treat any receipt that is not `delivered (hosted)` (or `delivered (woken)`) as NOT delivered. Before re-sending, `fno agents peek <king-handle>` to confirm it did not already land - a `queued (durable)` receipt can mean confirmation merely timed out after a live inject, and a blind resend duplicates the report. Then re-resolve my handle and re-send, never re-queue.
+- Delivery doctrine: send with --from-self, and treat any receipt that is not delivered (hosted) (or delivered (woken)) as NOT delivered. Before re-sending, run fno agents peek <king-handle> to confirm it did not already land - a queued (durable) receipt can mean confirmation merely timed out after a live inject, and a blind resend duplicates the report. Then re-resolve my handle and re-send, never re-queue.
 - Ask me by mail for anything outside your own scope (with <help reason="..."> in-session for the loop). Never guess an executive call.
 - Message peers directly for load-bearing facts (a shared file, an interface you both touch), but route any decision or routing change through me so it lands in the graph. A peer message is information, never authority.
 - Escalate one level at a time: IC -> Director -> VP -> human. Never skip a level.
 ```
+
+## Pasting it into a spawn payload
+
+The clause is backtick-free on purpose - a backtick pasted into a double-quoted shell payload is a command substitution that runs during spawn and corrupts the clause. It still carries single quotes (the `RESULT` line) and double quotes (the `<help reason="...">` tag), so do not wrap the payload in a plain `"..."` or `'...'` string. Assemble it with a quoted heredoc, which passes every character literally:
+
+```bash
+read -r -d '' payload <<'CLAUSE'
+Take node <id> through /fno:think.
+<the whole clause block above, verbatim>
+CLAUSE
+fno agents spawn <node-name> "$payload" --substrate pane --squad <s> --split <dir> --effort high
+```
+
+The `<<'CLAUSE'` delimiter is quoted, so no backtick, `$`, or quote inside expands. `"$payload"` then hands the assembled text to spawn as one argument.
 
 ## Field notes
 

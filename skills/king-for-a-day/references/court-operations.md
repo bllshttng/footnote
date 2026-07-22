@@ -64,10 +64,14 @@ Two states that are **not** death and must never be treated as such:
 
 **Spawn a teammate for a node (with the minion clause):**
 
+Assemble the payload with a quoted heredoc so the clause's backticks, `$`, and quotes pass through literally (a plain double-quoted payload runs the clause's backticks as command substitution during spawn):
+
 ```bash
-fno agents spawn node-x-b3a8 "Take node x-b3a8 through /fno:think. \
-<minion clause - paste verbatim from references/minion-clause.md>" \
-  --substrate pane --squad epic-squad --split right --effort high
+read -r -d '' payload <<'CLAUSE'
+Take node x-b3a8 through /fno:think.
+<minion clause - paste verbatim from references/minion-clause.md>
+CLAUSE
+fno agents spawn node-x-b3a8 "$payload" --substrate pane --squad epic-squad --split right --effort high
 ```
 
 The `<minion clause>` is the canonical block in [minion-clause.md](minion-clause.md), not something you compose here - that is the whole point of the template. Capture the teammate's mail handle from the spawn receipt's `short_id` (a claude pane now carries its 8-hex jobId there).
