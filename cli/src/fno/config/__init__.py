@@ -1218,6 +1218,12 @@ class AgentsBlock(BaseModel):
     # opened. Spawned workers register at spawn regardless of this knob. Flip to
     # true if your workflow is many hand-started sessions cross-talking.
     auto_register_sessions: bool = False
+    # US10: authorize `fno agents crown` from an UNATTENDED session that holds no
+    # superset crown (the beastmode pattern - a standing, level-0-equivalent human
+    # grant). DEFAULT OFF: normally an in-place crown needs a live superset-king or
+    # an attended human. This knob only authorizes the grant PATH; it never bypasses
+    # the refusals (self-grant, second live crown over one scope) or the scope check.
+    crown_config_grant: bool = False
     # Dead-row GC grace window in SECONDS (x-b1aa). A finished agent-view row
     # stays visible this long after the daemon GC first observes its process gone,
     # before it is reaped. Default 3600 (1h). The Rust daemon + `fno agents reap`

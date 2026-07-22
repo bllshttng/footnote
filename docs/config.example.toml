@@ -197,6 +197,8 @@ max_iterations = 40
 confirm = "auto"
 # Auto-join every hand-started session to the roster at SessionStart (default false = opt-in via /fno-me). Spawned workers register regardless.
 auto_register_sessions = false
+# Authorize `fno agents crown` from an unattended session with no superset crown (a standing, level-0-equivalent human grant; DEFAULT OFF). Authorizes the grant path only - never bypasses the self-grant / one-live-crown-per-scope refusals.
+crown_config_grant = false
 # Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600).
 dead_row_grace = 3600
 # Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).
