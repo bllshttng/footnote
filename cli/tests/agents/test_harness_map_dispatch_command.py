@@ -66,6 +66,22 @@ def test_explicit_command_wins_over_config_and_builtin():
     assert out["command"] == "$fno:custom x-abcd"
 
 
+def test_qualified_dispatch_verb_canonicalizes_before_the_allowlist():
+    # US7 review: the court contract sets `--dispatch-verb /fno:target` (every
+    # dispatched verb is plugin-qualified). The bare-only allowlist must not
+    # refuse it - it canonicalizes to `/target`, then renders per-harness.
+    out = resolve_dispatch(harness="claude", node_id="x-abcd", verb="/fno:target")
+    assert out["command"] == "/target x-abcd"
+    # opencode's surface re-adds the /fno: prefix at render.
+    out_oc = resolve_dispatch(harness="opencode", node_id="x-abcd", verb="/fno:target")
+    assert out_oc["command"] == "/fno:target x-abcd"
+    # /fno:think canonicalizes the same way.
+    out_think = resolve_dispatch(harness="claude", node_id="x-abcd", verb="/fno:think")
+    assert out_think["command"] == "/think x-abcd"
+    # a bare verb still works unchanged.
+    assert resolve_dispatch(harness="claude", node_id="x-abcd", verb="/target")["command"] == "/target x-abcd"
+
+
 def test_template_without_id_is_rejected():
     with pytest.raises(DispatchResolveError):
         resolve_dispatch(harness="claude", node_id="x-abcd", command="no placeholder here")

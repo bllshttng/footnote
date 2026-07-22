@@ -1192,6 +1192,9 @@ fn dispatch_create(
         exited_at: None,
         mux: None,
         screen_state: None,
+        crown_level: None,
+        crown_scope: None,
+        crown_grantor: None,
     };
 
     match update_registry(registry_path, |reg| {
