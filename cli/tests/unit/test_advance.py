@@ -1784,3 +1784,67 @@ def test_selection_guards_dead_ancestor_via_field_not_status():
     assert adv.selection_guards(child, by_sup, now) == "dead-ancestor:p"
     by_def = {"c": child, "p": {"id": "p", "deferred_at": "2026-01-01T00:00:00+00:00"}}
     assert adv.selection_guards(child, by_def, now) == "dead-ancestor:p"
+
+
+# ---------------------------------------------------------------------------
+# x-d1f4: dispatch resolves the brief via autobrief (not the raw field)
+# ---------------------------------------------------------------------------
+
+def _capture_brief(monkeypatch):
+    """Replace _spawn_worker with a capture; return the mutable capture dict."""
+    cap = {}
+
+    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
+        cap["brief"] = kwargs.get("brief")
+        return "deadbeef"
+
+    monkeypatch.setattr(adv, "_spawn_worker", spawn)
+    return cap
+
+
+def test_wiring_details_synthesize_into_brief(iso, monkeypatch):
+    """AC1-HP + AC9-FR at the seam: a node with details (no dispatch_brief) is
+    dispatched with a synthesized brief, and the event records the tag."""
+    node = {
+        "id": "ab-2222aaaa", "title": "next", "project": "fno",
+        "_resolved_cwd": "/tmp/x",
+        "details": "exponential backoff on the dispatch path " * 3,
+    }
+    monkeypatch.setattr(adv, "_next_node", lambda project: node)
+    cap = _capture_brief(monkeypatch)
+
+    res = adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    assert res.decision == "dispatched"
+    assert cap["brief"] is not None and "exponential backoff" in cap["brief"]
+    ev = _events(iso)[0]["data"]
+    assert ev["brief"] == "synth-details"
+
+
+def test_wiring_no_context_emits_brief_none(iso, monkeypatch):
+    """AC9-FR: a node with nothing to synthesize dispatches brief-less, tag=none."""
+    node = {"id": "ab-2222aaaa", "title": "next", "project": "fno",
+            "_resolved_cwd": "/tmp/x"}
+    monkeypatch.setattr(adv, "_next_node", lambda project: node)
+    cap = _capture_brief(monkeypatch)
+
+    res = adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    assert res.decision == "dispatched"
+    assert cap["brief"] is None
+    assert _events(iso)[0]["data"]["brief"] == "none"
+
+
+def test_wiring_explicit_brief_passes_through(iso, monkeypatch):
+    """AC10-FR: an explicit dispatch_brief still rides verbatim, tag=explicit."""
+    node = {"id": "ab-2222aaaa", "title": "next", "project": "fno",
+            "_resolved_cwd": "/tmp/x", "dispatch_brief": "HAND SET BRIEF",
+            "details": "ignored"}
+    monkeypatch.setattr(adv, "_next_node", lambda project: node)
+    cap = _capture_brief(monkeypatch)
+
+    res = adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    assert res.decision == "dispatched"
+    assert cap["brief"] == "HAND SET BRIEF"
+    assert _events(iso)[0]["data"]["brief"] == "explicit"
