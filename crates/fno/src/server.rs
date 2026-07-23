@@ -39,8 +39,9 @@ use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
     BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
     Frame, LayoutScope, LayoutSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
-    PanePlacement, PaneTarget, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout,
-    SquadMeta, TabInfo, TabLayout, TabMeta, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    PanePlacement, PaneTarget, ProtoError, ServerMsg, SlotBinding, SlotOutcome, SlotResult,
+    SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta, TabSel, WaitOutcome, MAX_SQUAD_NAME,
+    MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
@@ -9090,9 +9091,26 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
     }
 }
 
+async fn write_reliable<W>(w: &mut W, msg: &ServerMsg, dirty: &DirtyMap) -> Result<bool, ProtoError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let is_bye = matches!(msg, ServerMsg::Bye { .. });
+    if is_bye {
+        let mut pending: Vec<(u64, Frame)> = dirty.lock().unwrap().drain().collect();
+        pending.sort_unstable_by_key(|(pane_id, _)| *pane_id);
+        for (pane_id, frame) in pending {
+            write_msg(w, &ServerMsg::Frame { pane_id, frame }).await?;
+        }
+    }
+    write_msg(w, msg).await?;
+    Ok(is_bye)
+}
+
 /// The per-client writer: reliable messages FIRST (biased select - a Layout
-/// is never stuck behind a frame burst), then the droppable dirty map. A
-/// write failure drops THIS client only (AC4-ERR generalized).
+/// is never stuck behind a frame burst), then the droppable dirty map. `Bye`
+/// is the exception: it flushes the final dirty frames before ending the
+/// stream. A write failure drops THIS client only (AC4-ERR generalized).
 async fn client_writer(
     mut w: OwnedWriteHalf,
     mut reliable_rx: mpsc::Receiver<ServerMsg>,
@@ -9106,13 +9124,13 @@ async fn client_writer(
             biased;
             msg = reliable_rx.recv() => {
                 let Some(msg) = msg else { break }; // deregistered by the core
-                let is_bye = matches!(msg, ServerMsg::Bye { .. });
-                if write_msg(&mut w, &msg).await.is_err() {
-                    let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                    break;
-                }
-                if is_bye {
-                    break;
+                match write_reliable(&mut w, &msg, &dirty).await {
+                    Ok(true) => break,
+                    Ok(false) => {}
+                    Err(_) => {
+                        let _ = core_tx.send(CoreMsg::Gone(id)).await;
+                        break;
+                    }
                 }
             }
             _ = notify.notified() => {
@@ -9125,13 +9143,13 @@ async fn client_writer(
                     // biased select only prioritizes at the select point -
                     // not while an arm is running.
                     while let Ok(msg) = reliable_rx.try_recv() {
-                        let is_bye = matches!(msg, ServerMsg::Bye { .. });
-                        if write_msg(&mut w, &msg).await.is_err() {
-                            let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                            return;
-                        }
-                        if is_bye {
-                            return;
+                        match write_reliable(&mut w, &msg, &dirty).await {
+                            Ok(true) => return,
+                            Ok(false) => {}
+                            Err(_) => {
+                                let _ = core_tx.send(CoreMsg::Gone(id)).await;
+                                return;
+                            }
                         }
                     }
                     let next = {
@@ -15334,6 +15352,49 @@ mod tests {
         );
         assert_eq!(core.clients.len(), 1);
         assert!(core.clients[0].passive, "the (0,0) client is passive");
+    }
+
+    #[test]
+    fn bye_flushes_the_final_dirty_frame_first() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (mut writer, mut reader) = tokio::io::duplex(4096);
+                let dirty: DirtyMap = Arc::default();
+                let frame = Frame {
+                    rows: 1,
+                    cols: 1,
+                    cells: vec![crate::proto::Cell::default()],
+                    cursor_row: 0,
+                    cursor_col: 0,
+                    cursor_visible: true,
+                    scroll_offset: 0,
+                };
+                dirty.lock().unwrap().insert(7, frame.clone());
+                assert!(write_reliable(
+                    &mut writer,
+                    &ServerMsg::Bye {
+                        reason: "done".into(),
+                    },
+                    &dirty,
+                )
+                .await
+                .unwrap());
+
+                assert_eq!(
+                    read_msg::<_, ServerMsg>(&mut reader).await.unwrap(),
+                    ServerMsg::Frame { pane_id: 7, frame }
+                );
+                assert_eq!(
+                    read_msg::<_, ServerMsg>(&mut reader).await.unwrap(),
+                    ServerMsg::Bye {
+                        reason: "done".into()
+                    }
+                );
+                assert!(dirty.lock().unwrap().is_empty());
+            });
     }
 
     #[test]
