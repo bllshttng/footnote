@@ -4578,10 +4578,7 @@ def dispatch_send(
 
                 family1_state = _registered_family1_state(existing)
                 family1_live = family1_state in {"working", "watching", "your-move"}
-                attempt_live = family1_live or (
-                    family1_state == "unknown" and existing.status == "live"
-                )
-                if attempt_live and _deliver_live(
+                if family1_live and _deliver_live(
                     existing, message, from_name, mail_ctx
                 ):
                     delivery = "hosted"
@@ -4596,7 +4593,7 @@ def dispatch_send(
                     # accepted tradeoffs of the live-inject-first design (node
                     # x-1f23). A live peer that fell through gets a demotion notice.
                     _write_durable()
-                    if attempt_live:
+                    if family1_live:
                         demotion_notice = (
                             f"live delivery failed for {name!r}; message queued durable ({msg_id})"
                         )
