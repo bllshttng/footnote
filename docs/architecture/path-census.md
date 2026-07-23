@@ -4,6 +4,7 @@ This is the living manifest for the path-consolidation epic.
 Every consolidation PR closes the rows it retires or deletes by recording its PR number in the final column.
 A PR that adds a second path to a censused operation must add a row with a justification before adding the path.
 `OPEN` means the row remains work for a later child; `TBD` is replaced with this PR number when this PR opens.
+Rows marked `OPEN` below are intentionally not deleted when the repository still has production callers; their call sites are recorded so a later migration can close them safely.
 
 ## Census 1: post-merge ritual
 
@@ -42,6 +43,12 @@ A PR that adds a second path to a censused operation must add a row with a justi
 | 5 | Python megawalk walker + `ClaudeCodeDriver` | `megawalk_drivers/claude_code.py:53` | DELETE | TBD |
 | 6 | `adapters/*.spawn_worker` | `adapters/claude_code.py:28`, `adapters/codex.py:90` | RETIRE after live callers migrate | OPEN |
 | 7 | One-shot `claude -p` LLM-as-a-function | `inbox/triage.py:304` and three sites | OUT OF SCOPE | — |
+| 8 | Gemini provider adapter paths | `agents/dispatch.py:1022-1281`, `agents/providers/gemini.py` | RETIRE after dispatch and registry migration | OPEN |
+
+The adapter and Gemini rows remain open because the current tree has live callers that contradict the source census's registry-only/dead-path premise.
+`runtime/cli.py:145` invokes `get_adapter(...).spawn_worker`, and `review/runners/claude_runner.py:43,140` invokes `ClaudeCodeAdapter.spawn_worker` on the production review path.
+Gemini dispatch remains wired through `dispatch.py:1871,2244,3139-3179`, with provider and lifecycle coverage in `cli/tests/agents/test_dispatch_gemini.py`, `test_dispatch_gemini_lifecycle.py`, and `test_provider_gemini.py`.
+Deleting either layer before those callers migrate would violate the pure-deletion and zero-behavior-risk invariants.
 
 Leg 6 reachability trace (2026-07-23): `loop_target.rs:420-427` dispatches `--driver megawalk` to `loop_megawalk::run`; `loop_megawalk.rs:1153-1155` constructs `ShelloutDispatcher`; `loop_dispatch.rs:250-272` implements the live dispatcher.
 The dispatcher is reachable, so this PR does not partially delete it or `scripts/lib/driver-claude-code.sh`; the row remains `RETIRE (migration needed)` for the later driver cutover.
