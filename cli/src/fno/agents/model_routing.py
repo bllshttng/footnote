@@ -390,11 +390,16 @@ def materialize_route_settings(route_env: Mapping[str, str]) -> str:
     import hashlib
     import json
     import os
-    from pathlib import Path
+
+    from fno import paths
 
     payload = json.dumps({"env": dict(route_env)}, sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-    base = Path.home() / ".fno" / "route-settings"
+    # Route through fno.paths (config-driven ~/.fno) rather than a bare
+    # Path.home() -- the check-no-hardcoded-paths gate forbids the literal, and
+    # the settings file should follow a config state_dir override like every
+    # other sidecar.
+    base = paths.state_dir() / "route-settings"
     base.mkdir(parents=True, exist_ok=True)
     path = base / f"{digest}.json"
     if not path.exists():
