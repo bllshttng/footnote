@@ -655,12 +655,27 @@ def test_us2_codex_rollout_surfaces_live_session(tmp_path):
     assert s.cwd == "/Users/x/proj"
 
 
-def test_us2_codex_stale_rollout_not_surfaced(tmp_path):
+def test_us2_codex_old_watching_rollout_still_surfaces(tmp_path):
     codex = tmp_path / "codex"
-    _write_codex_rollout(
+    rollout = _write_codex_rollout(
         codex, session_id="019f48e1-dead", cwd="/x", mtime_age=10_000.0,
     )
-    assert _run_codex(tmp_path, codex) == []
+    with rollout.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "<watching pr=7>"}],
+            },
+        }) + "\n")
+    stale = time.time() - 10_000.0
+    os.utime(rollout, (stale, stale))
+
+    sessions = _run_codex(tmp_path, codex)
+
+    assert [s.session_id for s in sessions] == ["019f48e1-dead"]
+    assert sessions[0].truth_state == "watching"
+    assert sessions[0].is_alive is True
 
 
 def test_loaded_daemon_thread_does_not_override_stalled_transcript(tmp_path, monkeypatch):
@@ -1213,13 +1228,15 @@ def test_us6_opencode_session_surfaces_live(tmp_path):
     assert s.pid == 0  # no OS handle, mirroring the codex lane
 
 
-def test_us6_opencode_stale_session_not_surfaced(tmp_path):
-    """AC-EDGE: outside the recency window it is not live."""
+def test_us6_opencode_stale_session_is_enumerated_for_family1(tmp_path):
+    """Age is classification evidence, never an enumeration exclusion."""
     storage = tmp_path / "opencode"
     _write_opencode_session(
         storage, session_id="ses_dead", cwd="/x", mtime_age=10_000.0
     )
-    assert _run_opencode(tmp_path, storage) == []
+    sessions = _run_opencode(tmp_path, storage)
+    assert [s.session_id for s in sessions] == ["ses_dead"]
+    assert sessions[0].truth_state == "unknown"
 
 
 def test_us6_opencode_fresh_messages_keep_stale_info_live(tmp_path):
@@ -1278,9 +1295,8 @@ def test_us6_opencode_streaming_turn_stays_live_via_part_mtime(tmp_path):
     assert [s.session_id for s in _run_opencode(tmp_path, storage)] == [sid]
 
 
-def test_us6_opencode_deep_scan_is_bounded_to_recent_sessions(tmp_path):
-    """The deeper scan must not run for a store full of old sessions, so a
-    session far outside the slack band stays dead even with fresh parts."""
+def test_us6_opencode_old_session_with_fresh_part_reaches_family1(tmp_path):
+    """Enumeration cannot hide a content signal written after stale metadata."""
     storage = tmp_path / "opencode"
     sid = "ses_ancient"
     _write_opencode_session(
@@ -1290,7 +1306,9 @@ def test_us6_opencode_deep_scan_is_bounded_to_recent_sessions(tmp_path):
     pdir.mkdir(parents=True)
     (pdir / "prt_000.json").write_text('{"type":"text","text":"x"}', encoding="utf-8")
     _touch(pdir, 5.0)
-    assert _run_opencode(tmp_path, storage) == []
+    sessions = _run_opencode(tmp_path, storage)
+    assert [s.session_id for s in sessions] == [sid]
+    assert sessions[0].truth_state == "working"
 
 
 def test_us6_opencode_dedups_and_honors_exclusions(tmp_path):
@@ -1366,8 +1384,10 @@ def test_opencode_db_surfaces_live_session(tmp_path):
     )
     sessions = _run_opencode(tmp_path, storage)
     assert [(s.session_id, s.cwd, s.agent) for s in sessions] == [
-        ("ses_live", "/Users/x/proj", "opencode")
+        ("ses_live", "/Users/x/proj", "opencode"),
+        ("ses_stale", "/Users/x/old", "opencode"),
     ]
+    assert [s.truth_state for s in sessions] == ["unknown", "unknown"]
 
 
 def test_opencode_db_wins_over_legacy_tree(tmp_path):

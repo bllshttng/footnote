@@ -4322,6 +4322,29 @@ def _deliver_live(
     return _mail_inject_claude(recipient, wrapped)
 
 
+def _registered_family1_state(entry: "AgentEntry") -> str:
+    """Classify a registered recipient without trusting its stored lifecycle."""
+    from types import SimpleNamespace
+
+    from fno.agents.session_truth import resolve_session_truth
+
+    session_id = (
+        entry.harness_session_id
+        or entry.cc_session_id
+        or entry.session_id
+        or entry.short_id
+    )
+    known = SimpleNamespace(
+        agent=entry.harness,
+        session_id=session_id,
+        cwd=entry.cwd,
+    )
+    result = resolve_session_truth(
+        entry.name, resolve=lambda _handle: (known, [])
+    )
+    return str(result.get("state") or "unknown")
+
+
 def dispatch_send(
     name: str,
     message: str,
@@ -4553,7 +4576,9 @@ def dispatch_send(
                 delivery = "durable"
                 demotion_notice: Optional[str] = None
 
-                if existing.status == "live" and _deliver_live(
+                family1_state = _registered_family1_state(existing)
+                family1_live = family1_state in {"working", "watching", "your-move"}
+                if family1_live and _deliver_live(
                     existing, message, from_name, mail_ctx
                 ):
                     delivery = "hosted"
@@ -4568,7 +4593,7 @@ def dispatch_send(
                     # accepted tradeoffs of the live-inject-first design (node
                     # x-1f23). A live peer that fell through gets a demotion notice.
                     _write_durable()
-                    if existing.status == "live":
+                    if family1_live:
                         demotion_notice = (
                             f"live delivery failed for {name!r}; message queued durable ({msg_id})"
                         )

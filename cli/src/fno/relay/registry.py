@@ -251,6 +251,7 @@ def index(
     discovery refreshes ``status``/``cwd`` for everything else. Non-claude workers
     are keyed by ``short_id`` so they never clash with a claude session uuid."""
     merged: dict[str, RegistryEntry] = {}
+    live_discovered_ids: set[str] = set()
     if include_discovered:
         for s in discover_live_sessions():
             if not getattr(s, "is_alive", True):
@@ -265,6 +266,23 @@ def index(
                 name=s.handle,
                 transcript_path=transcript_path_for(s.session_id),
             )
+            live_discovered_ids.add(s.session_id)
         merged.update(_live_agents_workers())  # cross-harness peers (codex/gemini/...)
-    merged.update(load(path))  # persisted peers win
+    from types import SimpleNamespace
+
+    from fno.agents.session_truth import resolve_session_truth
+
+    # Persistence preserves an inject handle; it never proves the peer is live.
+    # Only family 1 may promote a stored row into the routable index.
+    for sid, entry in load(path).items():
+        known = SimpleNamespace(
+            agent=entry.provider,
+            session_id=sid,
+            cwd=entry.cwd or "",
+        )
+        truth_state = "working" if sid in live_discovered_ids else resolve_session_truth(
+            entry.name or sid, resolve=lambda _handle: (known, [])
+        ).get("state")
+        if truth_state in {"working", "watching", "your-move"}:
+            merged[sid] = entry  # live persisted peers carry the real PTY handle
     return merged

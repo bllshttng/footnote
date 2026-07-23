@@ -30,6 +30,13 @@ def _bypass_a2a_confirm(monkeypatch):
     downgrade auto->observed under pytest's no-TTY). The confirm itself is
     covered in test_a2a_confirm.py."""
     monkeypatch.setenv("FNO_A2A_NO_CONFIRM", "1")
+    from fno.agents import dispatch as dispatch_mod
+
+    # This suite isolates transport delivery after liveness has admitted the
+    # recipient. Family-1 routing decisions have their own send tests.
+    monkeypatch.setattr(
+        dispatch_mod, "_registered_family1_state", lambda _entry: "working"
+    )
 
 
 # ---------------------------------------------------------------------------

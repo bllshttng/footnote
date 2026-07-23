@@ -22,7 +22,7 @@ use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // ===========================================================================
 // Constants (verbatim from providers/claude.py + _claude_session_registry.py)
@@ -99,15 +99,73 @@ impl OrphanReason {
 }
 
 pub fn family1_truth_state(handle: &str) -> Option<String> {
-    let output = std::process::Command::new("fno")
+    let mut command = std::process::Command::new("fno");
+    command
         .args(["agents", "truth", handle, "--json"])
-        .env("FNO_AGENTS_RUNTIME", "python")
-        .output();
-    output.ok().and_then(|out| {
-        serde_json::from_slice::<serde_json::Value>(&out.stdout)
-            .ok()
-            .and_then(|value| value.get("state")?.as_str().map(str::to_owned))
-    })
+        .env("FNO_AGENTS_RUNTIME", "python");
+    family1_truth_state_with_command(command, Duration::from_secs(3))
+}
+
+fn family1_truth_state_with_command(
+    mut command: std::process::Command,
+    timeout: Duration,
+) -> Option<String> {
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("WARN: family-1 truth probe failed to start: {error}");
+            return None;
+        }
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("WARN: family-1 truth probe timed out");
+                return None;
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("WARN: family-1 truth probe wait failed: {error}");
+                return None;
+            }
+        }
+    }
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("WARN: family-1 truth probe output failed: {error}");
+            return None;
+        }
+    };
+    if !output.status.success() {
+        eprintln!(
+            "WARN: family-1 truth probe exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        return None;
+    }
+    let state = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .ok()
+        .and_then(|value| value.get("state")?.as_str().map(str::to_owned));
+    match state.as_deref() {
+        Some("done" | "watching" | "your-move" | "working" | "stalled" | "unknown") => state,
+        _ => {
+            eprintln!("WARN: family-1 truth probe returned malformed output");
+            None
+        }
+    }
 }
 
 fn family1_orphan_reason(handle: &str, confirmed: OrphanReason) -> OrphanReason {
@@ -3752,5 +3810,31 @@ mod tests {
             }
             other => panic!("expected routing gap, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn family1_truth_subprocess_is_bounded_and_validated() {
+        let mut valid = std::process::Command::new("sh");
+        valid.args(["-c", "printf '{\"state\":\"watching\"}'"]);
+        assert_eq!(
+            family1_truth_state_with_command(valid, Duration::from_secs(1)).as_deref(),
+            Some("watching")
+        );
+
+        let mut invalid = std::process::Command::new("sh");
+        invalid.args(["-c", "printf '{\"state\":\"invented\"}'"]);
+        assert_eq!(
+            family1_truth_state_with_command(invalid, Duration::from_secs(1)),
+            None
+        );
+
+        let mut hung = std::process::Command::new("sh");
+        hung.args(["-c", "sleep 5"]);
+        let started = Instant::now();
+        assert_eq!(
+            family1_truth_state_with_command(hung, Duration::from_millis(50)),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

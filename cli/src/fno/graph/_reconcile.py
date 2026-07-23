@@ -1426,7 +1426,7 @@ def dispatch_post_merge_ritual(
 
             warm_sid = resolve_warm_session(source_session_id, source_harness)
             origin_dead = warm_sid is None and session_death_confirmed(
-                source_session_id, source_harness
+                source_session_id, source_harness, source_cwd
             )
             if warm_sid is not None:
                 _inject = warm_inject if warm_inject is not None else inject_pr_merged

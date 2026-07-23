@@ -127,6 +127,21 @@ def test_persisted_peer_wins_session_id_clash(tmp_path, monkeypatch):
     assert idx["dup"].inject_handle == "pty:owned"  # persisted handle survives
 
 
+def test_stalled_persisted_peer_is_not_routable(tmp_path, monkeypatch):
+    path = tmp_path / "registry.json"
+    reg.register(_peer(sid="stale", handle="pty:owned"), path=path)
+    monkeypatch.setattr(reg, "discover_live_sessions", lambda: [])
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda *_args, **_kwargs: {"state": "stalled"},
+    )
+
+    assert "stale" not in reg.index(path=path)
+
+
 # ---------------------------------------------------------------------------
 # G4 / x-3f34: the cross-harness bridge -- live non-claude interactive agents
 # workers surfaced as routable relay peers (keyed by short_id, worker:<id> handle).

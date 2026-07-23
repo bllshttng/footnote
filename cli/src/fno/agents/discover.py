@@ -51,7 +51,7 @@ SESSIONS_DIR_ENV = "FNO_CLAUDE_SESSIONS_DIR"
 # ``.md`` exports into ``~/.claude/sessions``), so the sidecar scan finds zero.
 # The canonical store is the transcript jsonl at
 # ``~/.claude/projects/<cwd-enc>/<session-id>.jsonl``. Test/operator seam +
-# recency window mirror the sidecar seam above.
+# store-location and age-threshold test seams mirror the sidecar seam above.
 PROJECTS_DIR_ENV = "FNO_CLAUDE_PROJECTS_DIR"
 RECENCY_SECONDS_ENV = "FNO_CLAUDE_SESSION_RECENCY_SECONDS"
 _DEFAULT_RECENCY_SECONDS = 600.0
@@ -234,19 +234,19 @@ def _discover_from_codex(
     exclude_session_ids: Iterable[str] = (),
     now: Optional[float] = None,
 ) -> list[dict]:
-    """Discover live codex sessions from the rollout store (US2).
+    """Enumerate codex sessions from the rollout store (US2).
 
-    A rollout whose mtime is inside the recency window is treated as live (codex
-    has no live-PID sidecar, so liveness leans on mtime — a false positive is
-    benign: the message waits durably on the bus). Rows are shaped like the
-    claude loops' so the shared dedup/alias pipeline consumes them unchanged;
-    ``pid`` is 0 (no OS handle) and ``agent`` is ``codex``.
+    Mtime is not an enumeration predicate: an old final assistant turn can still
+    be ``watching`` or ``your-move``. Family 1 classifies every candidate after
+    enumeration. Rows are shaped like the claude loops' so the shared
+    dedup/alias pipeline consumes them unchanged; ``pid`` is 0 (no OS handle)
+    and ``agent`` is ``codex``.
 
-    ponytail: full rglob + mtime filter. Runs at send-time (interactive
+    ponytail: full rglob + mtime ordering. Runs at send-time (interactive
     resolution), not in the hot drain path, so O(rollouts) stats is acceptable;
     prune to recent date-dirs by mtime if a heavy codex user's send drags.
     """
-    cutoff = (now if now is not None else time.time()) - recency_seconds
+    del recency_seconds, now  # retained for call compatibility; family 1 owns age
     exclude_sids = {s for s in (exclude_session_ids or ()) if s}
     rows: list[dict] = []
     seen: set[str] = set()
@@ -257,8 +257,7 @@ def _discover_from_codex(
                 mt = path.stat().st_mtime
             except OSError:
                 continue  # vanished mid-scan: skip, never abort the whole scan
-            if mt >= cutoff:
-                dated.append((mt, path))
+            dated.append((mt, path))
     except OSError:
         return rows
     for _mt, path in sorted(dated, key=lambda t: t[0], reverse=True):
@@ -348,21 +347,19 @@ def _discover_from_opencode_db(
     exclude_session_ids: Iterable[str] = (),
     now: Optional[float] = None,
 ) -> list[dict]:
-    """Discover live opencode sessions from the SQLite store.
+    """Enumerate opencode sessions from the SQLite store.
 
-    ``session.time_updated`` is an explicit activity timestamp opencode
-    maintains itself, so this needs none of the mtime inference the legacy tree
-    forced. Timestamps are milliseconds.
+    ``session.time_updated`` remains useful to family 1, but cannot exclude a
+    session before its content-aware verdict runs. Timestamps are milliseconds.
     """
-    cutoff_ms = ((now if now is not None else time.time()) - recency_seconds) * 1000.0
+    del recency_seconds, now  # retained for call compatibility; family 1 owns age
     exclude_sids = {s for s in (exclude_session_ids or ()) if s}
     rows: list[dict] = []
     seen: set[str] = set()
     for sid, directory, _updated in opencode_query(
         db_path,
         "SELECT id, directory, time_updated FROM session "
-        "WHERE time_updated >= ? ORDER BY time_updated DESC, id DESC",
-        (cutoff_ms,),
+        "ORDER BY time_updated DESC, id DESC",
     ):
         if not isinstance(sid, str) or not sid or sid in seen or sid in exclude_sids:
             continue
@@ -457,7 +454,7 @@ def _discover_from_opencode(
     exclude_session_ids: Iterable[str] = (),
     now: Optional[float] = None,
 ) -> list[dict]:
-    """Discover live opencode sessions from the storage tree.
+    """Enumerate opencode sessions from the storage tree.
 
     opencode splits a session across three sibling trees rather than one
     transcript file: ``session/<projectID>/<ses_id>.json`` (info, cwd under
@@ -466,9 +463,8 @@ def _discover_from_opencode(
     against a live 1.0.223 install; the nesting and the ``directory`` key are
     both easy to guess wrong.
 
-    Liveness is mtime-only, like the codex lane: opencode publishes no live-PID
-    sidecar. ``_opencode_activity_mtime`` owns the signal, including why the two
-    cheap timestamps are not enough on their own.
+    ``_opencode_activity_mtime`` supplies stable ordering and the deep-scan
+    optimization. It never excludes a candidate; family 1 owns the verdict.
 
     Rows are shaped like the codex lane's so the shared dedup/alias pipeline
     consumes them unchanged.
@@ -478,8 +474,8 @@ def _discover_from_opencode(
     sessions recent enough to still be mid-turn. Prune by project dir if a heavy
     opencode user's send drags.
     """
-    cutoff = (now if now is not None else time.time()) - recency_seconds
-    deep_cutoff = cutoff - _OPENCODE_LONG_TURN_SLACK_SECONDS
+    reference = now if now is not None else time.time()
+    deep_cutoff = reference - recency_seconds - _OPENCODE_LONG_TURN_SLACK_SECONDS
     exclude_sids = {s for s in (exclude_session_ids or ()) if s}
     msg_root = storage_dir / "message"
     part_root = storage_dir / "part"
@@ -489,7 +485,7 @@ def _discover_from_opencode(
     try:
         for path in (storage_dir / "session").glob("*/*.json"):
             mt = _opencode_activity_mtime(path, msg_root, part_root, deep_cutoff)
-            if mt is not None and mt >= cutoff:
+            if mt is not None:
                 dated.append((mt, path))
     except OSError:
         return rows

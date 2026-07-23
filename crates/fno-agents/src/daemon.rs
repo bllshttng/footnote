@@ -2585,14 +2585,14 @@ where
 
     // Reject an invalid --status up front so a typo fails fast with exit 13
     // instead of silently returning zero rows + exit 0 (Codex P2 on PR #361).
-    // Mirrors Python's AgentStatusFilter enum (live | orphaned), which Typer
+    // Mirrors Python's AgentStatusFilter enum, which Typer
     // rejects at parse time.
     if let Some(ref st) = filter_status {
-        if st != "live" && st != "orphaned" {
+        if st != "live" && st != "orphaned" && st != "unknown" {
             return Response::err(
                 req.id,
                 ErrorCode::InvalidStatus,
-                format!("invalid --status '{st}' (expected: live | orphaned)"),
+                format!("invalid --status '{st}' (expected: live | orphaned | unknown)"),
             );
         }
     }
@@ -2614,7 +2614,14 @@ where
         .entries
         .iter()
         .map(|e| {
-            let truth = truth_fn(&e.name);
+            let truth_handle = if !e.short_id.is_empty() {
+                e.short_id.clone()
+            } else if let Some(session_id) = e.harness_session_id.as_deref() {
+                format!("session-{}", session_id.chars().take(8).collect::<String>())
+            } else {
+                e.name.clone()
+            };
+            let truth = truth_fn(&truth_handle);
             (e, rendered_status_from_truth(truth.as_deref()))
         })
         .collect();
@@ -5679,6 +5686,24 @@ done
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0]["status"], "live");
 
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn list_queries_family1_by_session_identity_not_custom_name() {
+        let home = short_home("listidentity");
+        seed_stream_row(&home, "custom-worker-name", "abc12345");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let seen = std::cell::RefCell::new(Vec::new());
+
+        let response = handle_list_with_truth(&ctx, &req, |handle| {
+            seen.borrow_mut().push(handle.to_string());
+            Some("working".into())
+        });
+
+        assert!(response.result().is_some());
+        assert_eq!(seen.into_inner(), vec!["abc12345"]);
         std::fs::remove_dir_all(home.root()).ok();
     }
 

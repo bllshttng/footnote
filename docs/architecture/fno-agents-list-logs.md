@@ -132,7 +132,8 @@ The JSON-when-non-TTY default aligns with the orchestrator-first audience: a pip
 
 ## Drift defenses
 
-The CLI's `AgentStatusFilter` Typer enum (allowed values for `--status`) mirrors `registry.KNOWN_STATUSES` exactly. An import-time assertion in `cli.py` makes the two definitions unable to drift silently: adding a new status to the registry without updating the enum crashes `fno` at startup with an actionable message.
+The CLI's `AgentStatusFilter` Typer enum exposes the family-1 read verdicts `live`, `orphaned`, and `unknown`.
+It intentionally does not mirror `registry.KNOWN_STATUSES`: stored lifecycle metadata and rendered transcript liveness answer different questions.
 
 The `KNOWN_LIVE_STATUSES` allowlist in `providers/claude.py` catches the orthogonal drift case — claude renaming `"Working"` to `"working"` or shipping a new sentinel like `"Reflecting"`. The value still passes through (we don't fail closed on an unknown enum from an external CLI), but a forensic warning lands on stderr so operators see the change rather than getting silently-stale table values.
 

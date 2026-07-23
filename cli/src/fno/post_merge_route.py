@@ -60,28 +60,33 @@ def _live_codex_registry_entry(session_id: str):
     return next((e for e in matches if getattr(e, "mux", None)), matches[0])
 
 
-def _family1_state(session_id: str, entry=None) -> str:
+def _family1_state(session_id: str, entry=None, source_cwd: Optional[str] = None) -> str:
     """Return transcript truth for an origin candidate; never infer from status."""
     from types import SimpleNamespace
 
+    from fno.agents.discover import default_projects_dir
     from fno.agents.session_truth import resolve_session_truth
 
-    if entry is None:
+    if entry is None and not source_cwd:
         result = resolve_session_truth(session_id)
     else:
         known = SimpleNamespace(
             agent=getattr(entry, "harness", "claude"),
             session_id=session_id,
-            cwd=getattr(entry, "cwd", "") or "",
+            cwd=(getattr(entry, "cwd", "") if entry is not None else source_cwd) or "",
         )
         result = resolve_session_truth(
-            session_id, resolve=lambda _handle: (known, [])
+            session_id,
+            resolve=lambda _handle: (known, []),
+            projects_root=default_projects_dir(),
         )
     return str(result.get("state") or "unknown")
 
 
 def session_death_confirmed(
-    source_session_id: Optional[str], source_harness: Optional[str] = None
+    source_session_id: Optional[str],
+    source_harness: Optional[str] = None,
+    source_cwd: Optional[str] = None,
 ) -> bool:
     """True only for an explicit family-1 ``done`` or ``stalled`` verdict."""
     sid = (source_session_id or "").strip()
@@ -89,7 +94,7 @@ def session_death_confirmed(
         return False
     harness = (source_harness or "claude").strip().lower()
     entry = _live_codex_registry_entry(sid) if harness == "codex" else None
-    return _family1_state(sid, entry) in {"done", "stalled"}
+    return _family1_state(sid, entry, source_cwd) in {"done", "stalled"}
 
 
 def resolve_warm_session(
