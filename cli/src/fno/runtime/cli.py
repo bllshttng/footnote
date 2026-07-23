@@ -117,61 +117,6 @@ def worktree_cmd(
 
 
 # ---------------------------------------------------------------------------
-# spawn
-# ---------------------------------------------------------------------------
-
-@cli.command(name="spawn")
-def spawn_cmd(
-    ctx: typer.Context,
-    prompt: str = typer.Option(..., "--prompt", help="prompt to pass to the spawned worker"),
-    adapter: str = typer.Option("claude-code", "--adapter", help="adapter name"),
-    workers_file: Optional[Path] = typer.Option(
-        None,
-        "--workers-file",
-        help="path to workers.jsonl (default: .fno/workers.jsonl)",
-    ),
-    json_flag: bool = typer.Option(False, "--json", "-J", help="output JSON"),
-) -> None:
-    """Spawn a worker agent for a given prompt."""
-    from fno.adapters import get_adapter
-    from fno.runtime.registry import register_worker
-
-    try:
-        adp = get_adapter(adapter)
-    except ValueError as exc:
-        typer.echo(json.dumps({"error": str(exc)}))
-        raise typer.Exit(code=1) from exc
-
-    spawn_result = adp.spawn_worker(prompt=prompt)
-
-    action = spawn_result.get("action")
-
-    # In-session: return sentinel, do NOT register
-    if action == "skill_dispatch_required":
-        typer.echo(json.dumps(spawn_result))
-        raise typer.Exit(code=0)
-
-    # Failure: emit envelope, surface non-zero exit so operators see the failure
-    # instead of silently registering a never-spawned (or already-dead) worker.
-    if action == "spawn_failed":
-        typer.echo(json.dumps(spawn_result))
-        raise typer.Exit(code=1)
-
-    # External success: register the worker
-    _pid = spawn_result.get("pid")
-    register_worker(
-        worker_id=spawn_result["worker_id"],
-        task=prompt,
-        campaign="",
-        pid=_pid if isinstance(_pid, int) else None,
-        workers_file=workers_file,
-    )
-
-    typer.echo(json.dumps(spawn_result))
-    raise typer.Exit(code=0)
-
-
-# ---------------------------------------------------------------------------
 # register-worker
 # ---------------------------------------------------------------------------
 

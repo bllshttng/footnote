@@ -1,7 +1,7 @@
 """Claude Code runner for the review orchestrator.
 
-Dispatches a single review agent through ``ClaudeCodeAdapter.spawn_worker``
-and parses the structured ``::finding severity file line message::`` stdout
+Dispatches a single review agent through the canonical fno agents spawn
+one-shot seam and parses the structured finding stdout protocol
 protocol into ``Finding`` instances.
 
 This module provides two entry points:
@@ -38,9 +38,9 @@ import asyncio
 import logging
 import re
 import threading
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
-from fno.adapters.claude_code import ClaudeCodeAdapter
 from fno.review.orchestrator import Finding, WorkerOutcome
 
 log = logging.getLogger(__name__)
@@ -95,19 +95,19 @@ def run_via_claude_code(
     diff_context: str,
     *,
     timeout: float = DEFAULT_TIMEOUT,
-    adapter: ClaudeCodeAdapter | None = None,
+    dispatch: Callable[..., Any] | None = None,
     worker_pids: list[int] | None = None,
     json_findings: bool = False,
 ) -> WorkerOutcome:
-    """Invoke a single review agent via ClaudeCodeAdapter.spawn_worker.
+    """Invoke a single review agent via the canonical one-shot dispatcher.
 
     Args:
         agent: Agent name (used to label findings and the outcome).
         prompt: Full composed prompt text for the agent.
         diff_context: Diff text appended to the prompt context.
         timeout: Wall-clock seconds before giving up. Defaults to 600.
-        adapter: Optional adapter instance; a fresh one is created when
-            not supplied (useful for tests that patch the class).
+        dispatch: Optional dispatch callable; production resolves the
+            canonical dispatcher lazily.
         worker_pids: Optional list to append the spawned worker's PID to.
             When provided and the spawn result contains a ``pid`` key,
             the PID is appended so the SIGINT handler can reap it.
@@ -123,13 +123,15 @@ def run_via_claude_code(
     Returns:
         A ``WorkerOutcome`` in every code path. Never raises.
     """
-    if adapter is None:
-        adapter = ClaudeCodeAdapter()
+    if dispatch is None:
+        from fno.agents.dispatch import dispatch_spawn
+
+        dispatch = dispatch_spawn
 
     import time as _time
     started = _time.monotonic()
 
-    # We need a timeout mechanism for the blocking spawn_worker call.
+    # We need a timeout mechanism for the blocking dispatcher call.
     # Use a thread + event to implement the timeout without requiring
     # the caller to be in an async context.
     result_holder: dict[str, Any] = {}
@@ -137,9 +139,20 @@ def run_via_claude_code(
 
     def _call() -> None:
         try:
-            result_holder["value"] = adapter.spawn_worker(
-                prompt=f"{prompt}\n\n---\nDIFF CONTEXT:\n{diff_context}"
+            result = dispatch(
+                name=f"review-{agent}",
+                message=f"{prompt}\n\n---\nDIFF CONTEXT:\n{diff_context}",
+                provider="claude",
+                cwd=Path.cwd(),
+                headless=True,
+                once=True,
+                timeout=max(1, int(timeout)),
+                from_name="fno-review",
             )
+            result_holder["value"] = {
+                "action": "spawned",
+                "stdout": getattr(result, "reply", "") or "",
+            }
         except BaseException as e:
             exc_holder["value"] = e
 
@@ -150,17 +163,9 @@ def run_via_claude_code(
     elapsed = _time.monotonic() - started
 
     if thread.is_alive():
-        # Timed out - thread is stuck in spawn_worker (e.g. blocking I/O).
-        # We can't SIGTERM the stuck child here: spawn_worker hasn't yet
-        # returned, so this worker's PID is not in worker_pids yet - every
-        # entry in that list belongs to a healthy sibling. Killing them
-        # would defeat parallel execution. The outer SIGINT handler
-        # (orchestrator._reap_workers) reaps on Ctrl-C; at normal exit,
-        # daemon threads + their subprocesses are cleaned up by the
-        # kernel when the parent exits.
+        # Timed out - the dispatcher is still blocked in a provider call.
         log.warning(
-            "run_via_claude_code: timeout after %.1fs for agent %s (worker subprocess "
-            "may continue until parent exits or ClaudeCodeAdapter exposes mid-call pid)",
+            "run_via_claude_code: timeout after %.1fs for agent %s",
             timeout,
             agent,
         )
@@ -257,7 +262,7 @@ def run_via_claude_code(
 def make_async_runner(
     *,
     timeout: float = DEFAULT_TIMEOUT,
-    adapter: ClaudeCodeAdapter | None = None,
+    adapter: Any | None = None,
     worker_pids: list[int] | None = None,
     json_findings: bool = False,
 ):
@@ -269,7 +274,7 @@ def make_async_runner(
 
     Args:
         timeout: Per-worker timeout in seconds.
-        adapter: Optional ClaudeCodeAdapter instance.
+        adapter: Optional dispatch callable retained as the injection seam.
         worker_pids: Optional list to receive spawned worker PIDs for
             SIGINT reaping. Threaded through to ``run_via_claude_code``.
         json_findings: GATE (ab-6c8f4c61). False (default) keeps the legacy
@@ -283,7 +288,7 @@ def make_async_runner(
             prompt,
             diff_context,
             timeout=timeout,
-            adapter=adapter,
+            dispatch=adapter,
             worker_pids=worker_pids,
             json_findings=json_findings,
         )
