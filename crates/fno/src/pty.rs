@@ -34,6 +34,35 @@ use std::sync::Mutex;
 /// every later spawn into a second failure.
 static FORK_LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(test)]
+struct TestHome(PathBuf);
+
+#[cfg(test)]
+impl TestHome {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "fno-pty-test-home-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create isolated PTY test HOME");
+        Self(dir)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestHome {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_HOME: TestHome = TestHome::new();
+}
+
 fn fork_guard() -> std::sync::MutexGuard<'static, ()> {
     FORK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -267,6 +296,11 @@ fn base_command(
     pane_id: u64,
 ) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(program);
+    #[cfg(test)]
+    TEST_HOME.with(|home| {
+        cmd.env("HOME", &home.0);
+        cmd.env("USERPROFILE", &home.0);
+    });
     cmd.env("TERM", "xterm-256color");
     cmd.env("FNO_SESSION", session);
     cmd.env("FNO_PANE", pane_id.to_string());

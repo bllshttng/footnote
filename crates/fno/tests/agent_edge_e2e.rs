@@ -24,10 +24,10 @@ fn agents_home(scratch: &Scratch) -> PathBuf {
 }
 
 fn pane(scratch: &Scratch, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_fno"))
+    scratch
+        .command()
         .args(["mux", "pane"])
         .args(args)
-        .env("FNO_MUX_DIR", &scratch.0)
         .env("FNO_AGENTS_HOME", agents_home(scratch))
         .env("SHELL", "/bin/sh")
         .output()
@@ -39,10 +39,7 @@ fn stdout(out: &Output) -> String {
 }
 
 fn kill_server(scratch: &Scratch) {
-    let _ = Command::new(env!("CARGO_BIN_EXE_fno"))
-        .args(["mux", "kill-server"])
-        .env("FNO_MUX_DIR", &scratch.0)
-        .output();
+    let _ = scratch.command().args(["mux", "kill-server"]).output();
 }
 
 /// Write the registry file the reader parses. Minimal rows: the reader is
@@ -264,10 +261,10 @@ fn agent_edge_watch_only_rows_match_squad_by_cwd_else_catch_all() {
 
 /// `fno mux block pipe ...` against the same hermetic session (x-fe8f).
 fn block(scratch: &Scratch, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_fno"))
+    scratch
+        .command()
         .args(["mux", "block"])
         .args(args)
-        .env("FNO_MUX_DIR", &scratch.0)
         .env("FNO_AGENTS_HOME", agents_home(scratch))
         .env("SHELL", "/bin/sh")
         .output()

@@ -381,11 +381,7 @@ fn persistence_zero_client_session_survives_and_resyncs_fully() {
     std::thread::sleep(Duration::from_millis(800));
 
     // Persistence is visible, not spooky (AC6-UI).
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fno"))
-        .args(["mux", "ls"])
-        .env("FNO_MUX_DIR", &scratch.0)
-        .output()
-        .unwrap();
+    let out = scratch.command().args(["mux", "ls"]).output().unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(

@@ -59,8 +59,15 @@ fn spawn_server(sock: &Path, shell: &str) -> Server {
     // after the last child exits (no Bye) - a machine with saved squads fails; a
     // clean CI home hides it.
     let iso = sock.parent().unwrap_or_else(|| Path::new("."));
+    let home = iso.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    cmd.env("HOME", &home);
+    cmd.env("USERPROFILE", &home);
+    cmd.env("FNO_MUX_DIR", iso);
     cmd.env("FNO_AGENTS_HOME", iso.join("iso-agents"));
     cmd.env("FNO_CLAUDE_DAEMON_DIR", iso.join("iso-daemon"));
+    cmd.env("FNO_GRAPH_JSON", iso.join("iso-graph.json"));
+    cmd.env("FNO_CLAIMS_ROOT", &home);
     cmd.env(
         "FNO_GLOBAL_SETTINGS_PATH",
         iso.join("iso-cfg").join("settings.json"),

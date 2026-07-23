@@ -14,10 +14,10 @@ use std::time::{Duration, Instant};
 
 /// Run `fno mux pane <args...>` against `scratch`'s session, headless.
 fn pane(scratch: &Scratch, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_fno"))
+    scratch
+        .command()
         .args(["mux", "pane"])
         .args(args)
-        .env("FNO_MUX_DIR", &scratch.0)
         .env("SHELL", "/bin/sh")
         .output()
         .expect("fno binary runs")
@@ -30,10 +30,7 @@ fn stdout(out: &Output) -> String {
 /// Shut the session's server down (best effort) so a detached server never
 /// outlives the test.
 fn kill_server(scratch: &Scratch) {
-    let _ = Command::new(env!("CARGO_BIN_EXE_fno"))
-        .args(["mux", "kill-server"])
-        .env("FNO_MUX_DIR", &scratch.0)
-        .output();
+    let _ = scratch.command().args(["mux", "kill-server"]).output();
 }
 
 /// Poll `pane ls --json` until it reports the empty listing (the session has

@@ -16,7 +16,6 @@ use common::{spawn_server, Scratch};
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// Poll `child` until it exits or `secs` elapse. Returns the exit status if it
@@ -129,10 +128,10 @@ fn prod_persists() {
     // test env - and assert it is still alive well past a would-be grace.
     let scratch = Scratch::new("prod_persists");
     let sock = scratch.0.join("work.sock");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fno"))
+    let mut child = scratch
+        .command()
         .args(["--server"])
         .arg(&sock)
-        .env("FNO_MUX_DIR", &scratch.0)
         .env_remove("FNO_E2E")
         .env("FNO_IDLE_EXIT_GRACE_MS", "500")
         .stdin(std::process::Stdio::null())
@@ -166,7 +165,8 @@ fn autospawn_reaped() {
     let sock = scratch.0.join("work.sock");
     let dir = scratch.0.to_str().unwrap();
 
-    let run = Command::new(env!("CARGO_BIN_EXE_fno"))
+    let run = scratch
+        .command()
         .args([
             "mux",
             "pane",
@@ -180,8 +180,6 @@ fn autospawn_reaped() {
             "-c",
             "sleep 300",
         ])
-        .env("FNO_MUX_DIR", &scratch.0)
-        .env("FNO_E2E", "1")
         .env("FNO_IDLE_EXIT_GRACE_MS", "800")
         .env("SHELL", "/bin/sh")
         .output()

@@ -41,7 +41,56 @@ impl Scratch {
         let dir = std::env::temp_dir().join(format!("fno-e2e-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("home")).unwrap();
         Scratch(dir)
+    }
+
+    /// A real `fno` subprocess rooted entirely inside this scratch. The mux
+    /// socket, HOME fallbacks, registry, graph, claims, provider rosters, and
+    /// global config all stay out of the developer's live `~/.fno`.
+    #[allow(dead_code)]
+    pub fn command(&self) -> std::process::Command {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_fno"));
+        self.isolate_command(&mut cmd);
+        cmd
+    }
+
+    #[allow(dead_code)]
+    pub fn isolate_command(&self, cmd: &mut std::process::Command) {
+        let home = self.0.join("home");
+        cmd.env_remove("FNO_SESSION")
+            .env_remove("FNO_PANE")
+            .env_remove("FNO_PANE_EPOCH")
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("FNO_MUX_DIR", &self.0)
+            .env("FNO_AGENTS_HOME", self.0.join("iso-agents"))
+            .env("FNO_CLAUDE_DAEMON_DIR", self.0.join("iso-daemon"))
+            .env("FNO_GRAPH_JSON", self.0.join("iso-graph.json"))
+            .env("FNO_CLAIMS_ROOT", &home)
+            .env(
+                "FNO_GLOBAL_SETTINGS_PATH",
+                self.0.join("iso-cfg").join("settings.json"),
+            )
+            .env("FNO_E2E", "1");
+    }
+
+    fn isolate_pty_command(&self, cmd: &mut CommandBuilder) {
+        let home = self.0.join("home");
+        cmd.env_remove("FNO_PANE");
+        cmd.env_remove("FNO_PANE_EPOCH");
+        cmd.env("HOME", &home);
+        cmd.env("USERPROFILE", &home);
+        cmd.env("FNO_MUX_DIR", &self.0);
+        cmd.env("FNO_AGENTS_HOME", self.0.join("iso-agents"));
+        cmd.env("FNO_CLAUDE_DAEMON_DIR", self.0.join("iso-daemon"));
+        cmd.env("FNO_GRAPH_JSON", self.0.join("iso-graph.json"));
+        cmd.env("FNO_CLAIMS_ROOT", &home);
+        cmd.env(
+            "FNO_GLOBAL_SETTINGS_PATH",
+            self.0.join("iso-cfg").join("settings.json"),
+        );
+        cmd.env("FNO_E2E", "1");
     }
 
     /// The session socket the client will use under `FNO_MUX_DIR`.
@@ -55,6 +104,10 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
+        // ClientHarness autospawns a setsid server the harness has no Child
+        // handle for. Shut it down over its isolated socket before deleting
+        // the directory; FNO_E2E's idle exit remains the crash/abort backstop.
+        let _ = self.command().args(["mux", "kill-server"]).output();
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -114,12 +167,12 @@ impl ClientHarness {
         for a in args {
             cmd.arg(a);
         }
+        scratch.isolate_pty_command(&mut cmd);
         // Hermetic launch: if the suite itself runs inside a mux session
         // (FNO_SESSION set), the spawned client would self-exit with "already
         // inside mux session" and every e2e write would EIO. Clear it so the
         // harness client always behaves as a fresh top-level launch.
         cmd.env_remove("FNO_SESSION");
-        cmd.env("FNO_MUX_DIR", &scratch.0);
         cmd.env("SHELL", "/bin/sh");
         cmd.env("TERM", "xterm-256color");
         // A bare, predictable prompt so screen assertions are stable.
@@ -127,26 +180,6 @@ impl ClientHarness {
         // Reap any server this client autospawns (x-4e30): spawn_server
         // inherits the env (no env_clear), so the marker reaches the
         // setsid'd, harness-untracked server and it self-exits within grace.
-        cmd.env("FNO_E2E", "1");
-        // Same hermetic isolation as spawn_server: the autospawned server reads
-        // the agent registry + claude-daemon roster from empty scratch subdirs,
-        // so it neither sees the developer's live agents nor writes events to the
-        // real ~/.fno. Overridable via `envs` below.
-        cmd.env("FNO_AGENTS_HOME", scratch.0.join("iso-agents"));
-        cmd.env("FNO_CLAUDE_DAEMON_DIR", scratch.0.join("iso-daemon"));
-        // Isolate the backlog graph too (spawn_server already does this). Without
-        // it, the client's autospawned server resolves FNO_GRAPH_JSON to the real
-        // ~/.fno/graph.json and derives mission/backlog squads from whatever is in
-        // flight on the machine; those synthetic squads race into the layout and
-        // flake the screen-exact reattach assertions (a phantom `│ <squad>` segment
-        // in the status line). A clean CI $HOME hides the leak; a dev box with a
-        // live mission does not.
-        cmd.env("FNO_GRAPH_JSON", scratch.0.join("iso-graph.json"));
-        // See spawn_server: neutralize isolated-account roster discovery too.
-        cmd.env(
-            "FNO_GLOBAL_SETTINGS_PATH",
-            scratch.0.join("iso-cfg").join("settings.json"),
-        );
         for (k, v) in envs {
             cmd.env(k, v);
         }
@@ -356,8 +389,14 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
     // clean CI home hides the leak). A caller that needs a real registry (e.g.
     // agent_edge_e2e) overrides via `envs`, applied after.
     let iso = sock.parent().unwrap_or_else(|| Path::new("."));
+    let home = iso.join("home");
+    let _ = std::fs::create_dir_all(&home);
+    cmd.env("HOME", &home);
+    cmd.env("USERPROFILE", &home);
+    cmd.env("FNO_MUX_DIR", iso);
     cmd.env("FNO_AGENTS_HOME", iso.join("iso-agents"));
     cmd.env("FNO_CLAUDE_DAEMON_DIR", iso.join("iso-daemon"));
+    cmd.env("FNO_CLAIMS_ROOT", &home);
     // Same leak, one reader over: the backlog reader resolves FNO_GRAPH_JSON >
     // $HOME/.fno/graph.json, so without this the server derives Backlog cards AND
     // mission squads from the DEVELOPER'S real graph. An active mission adds a
