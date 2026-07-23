@@ -36,6 +36,10 @@ scripts/generate-skill-bundles.sh :: bundle
 scripts/lint/check-skill-bundles-fresh.sh :: bundle check
 scripts/lint/no-cross-skill-runtime-calls.sh :: bundle lint
 
+# fno lint flock-pattern - repository linting script remains clone-only and
+# degrades with an actionable error when the script is unavailable.
+scripts/lint-flock-pattern.sh :: lint flock-pattern
+
 # fno pr {merge,verify,rebase} - INTERNALIZED (ab-d4c98550). The four pr-*.sh
 # were ported to in-package Python (fno/pr/_merge.py, _verify.py, _rebase.py)
 # shelling to gh/git, so these verbs run from a bare pip install with no
@@ -45,3 +49,11 @@ scripts/lint/no-cross-skill-runtime-calls.sh :: bundle lint
 # fno worktree {status,cleanup,archive} - git worktree lifecycle bookkeeping
 # over the repo's worktree-lifecycle script.
 scripts/lib/worktree-lifecycle.sh :: worktree status
+
+# fno lint stale-skill-refs - the stale-skill-reference audit gate; operates on
+# the repo's skills/ source tree (re-homed from `fno consolidation audit`, x-71b6).
+scripts/ci/check-no-stale-skill-refs.sh :: lint stale-skill-refs
+
+# fno lint flock-pattern - lints the repo's own source for open-coded agent
+# flock + registry re-read patterns; only meaningful in a clone.
+scripts/lint-flock-pattern.sh :: lint flock-pattern

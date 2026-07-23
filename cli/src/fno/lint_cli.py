@@ -39,9 +39,6 @@ SPAWN_SHAPE_ALLOWLIST = frozenset(
         "cli/src/fno/pr_watch/_dispatch.py",
         "cli/src/fno/review/scorers/claude_scorer.py",
         "cli/src/fno/skill_diff/synthesize.py",
-        # Shell-form hit surfaced by the .sh scan; live memory-pass path,
-        # census-tracked migration work (spawn census, open row).
-        "scripts/memory/post-merge-pass.sh",
     }
 )
 _SPAWN_SHAPE_RE = re.compile(
