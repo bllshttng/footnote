@@ -166,6 +166,7 @@ def _build_argv(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    settings_path: Optional[str] = None,
 ) -> list[str]:
     """Render the argv list for ``claude --bg``.
 
@@ -190,6 +191,11 @@ def _build_argv(
     byte-for-byte.
     """
     argv = ["claude", "--bg", "--name", name]
+    # x-6de8: a routed bg session's serving process is forked by the daemon
+    # without the per-spawn ANTHROPIC_* env; --settings is read by the session
+    # process itself and survives that fork, so the route actually applies.
+    if settings_path:
+        argv += ["--settings", settings_path]
     # x-dfa4: exact passthrough to claude's own --permission-mode; the caller
     # resolves --yolo -> bypassPermissions before this point. Kept identical to
     # the Rust build_argv (cross-runtime parity). Empty/None = unchanged argv.
@@ -220,9 +226,19 @@ def headless_create(
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
+    route_env: Optional[Mapping[str, str]] = None,
 ) -> ProviderResult:
     """Run a one-shot ``claude -p`` without creating a background session."""
     argv = ["claude", "-p"]
+    # x-6de8: apply an explicit --route via --settings, same as bg_create. A
+    # direct `claude -p` subprocess would inherit route env too, but --settings
+    # keeps the two lanes identical and is the mechanism that survives the bg
+    # daemon fork, so the route behaves the same whichever substrate the caller
+    # picked.
+    if route_env:
+        from fno.agents.model_routing import materialize_route_settings
+
+        argv += ["--settings", materialize_route_settings(route_env)]
     if permission_mode:
         argv += ["--permission-mode", permission_mode]
     else:
@@ -320,6 +336,13 @@ def bg_create(
     """
     msg_bytes = message.encode("utf-8")
     use_stdin = len(msg_bytes) > _ARGV_OVERFLOW_THRESHOLD
+    # x-6de8: a routed bg session loses its ANTHROPIC_* env across the daemon
+    # fork; write it to a --settings file the session process reads itself.
+    settings_path: Optional[str] = None
+    if route_env:
+        from fno.agents.model_routing import materialize_route_settings
+
+        settings_path = materialize_route_settings(route_env)
     argv = _build_argv(
         name=name,
         message=message,
@@ -332,6 +355,7 @@ def bg_create(
         agent=agent,
         tools=tools,
         deny_tools=deny_tools,
+        settings_path=settings_path,
     )
 
     # Inject FNO_AGENT_* env vars so nested `fno agents ask` calls

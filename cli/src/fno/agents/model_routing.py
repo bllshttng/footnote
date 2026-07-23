@@ -376,6 +376,36 @@ def resolve_explicit_route(
     )
 
 
+def materialize_route_settings(route_env: Mapping[str, str]) -> str:
+    """Write ``route_env`` as a claude ``--settings`` JSON and return its path.
+
+    A ``claude --bg`` session's serving process is forked by the claude daemon
+    with the DAEMON's env, so per-spawn ``ANTHROPIC_*`` route env is dropped
+    before the first model request and the session wedges on the primary model
+    (x-6de8). A settings file is read by the session process itself, so it
+    survives that fork where an env overlay cannot. Content-addressed and
+    ``0600`` (it carries ``ANTHROPIC_AUTH_TOKEN``): identical routes reuse one
+    file rather than accumulating per spawn.
+    """
+    import hashlib
+    import json
+    import os
+    from pathlib import Path
+
+    payload = json.dumps({"env": dict(route_env)}, sort_keys=True)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    base = Path.home() / ".fno" / "route-settings"
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / f"{digest}.json"
+    if not path.exists():
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, payload.encode("utf-8"))
+        finally:
+            os.close(fd)
+    return str(path)
+
+
 # Default codex wire protocol for a third-party OpenAI-compatible endpoint
 # (z.ai's paas/v4 speaks Chat Completions). Codex's own default is "responses"
 # (OpenAI's API); a routed third-party provider almost always wants "chat".

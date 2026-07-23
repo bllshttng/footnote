@@ -1896,6 +1896,7 @@ def dispatch_spawn(
                                 tools=tools,
                                 deny_tools=deny_tools,
                                 account_env=account_env,
+                                route_env=route_env,
                             )
                         except claude_mod.ProviderSubprocessError as exc:
                             _emit_ev(

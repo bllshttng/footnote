@@ -191,3 +191,127 @@ def test_bg_create_route_env_wins_over_role(
     assert env["ANTHROPIC_MODEL"] == "glm-5.2"
     # The stale parent Anthropic key is popped so it can't override the route.
     assert "ANTHROPIC_API_KEY" not in env
+
+
+# ---------------------------------------------------------------------------
+# x-6de8: routed spawn applies its route via a --settings file (survives the
+# daemon fork that drops per-spawn env), on both bg and headless.
+# ---------------------------------------------------------------------------
+
+
+def test_materialize_route_settings_is_0600_and_content_addressed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import os
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from fno.agents.model_routing import materialize_route_settings
+
+    env = {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic", "ANTHROPIC_AUTH_TOKEN": "t"}
+    p1 = materialize_route_settings(env)
+    p2 = materialize_route_settings(dict(env))  # same content -> same file
+    assert p1 == p2
+    assert oct(os.stat(p1).st_mode & 0o777) == "0o600"
+    assert json.load(open(p1))["env"] == env
+
+
+def test_bg_create_routed_spawn_passes_settings_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_tmp_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    from fno.agents.providers import claude as claude_mod
+
+    seen: Dict[str, Any] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen["argv"] = argv
+        from subprocess import CompletedProcess
+
+        return CompletedProcess(argv, 0, stdout="backgrounded \xb7 abcd1234 \xb7 ok\n", stderr="")
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    claude_mod.bg_create(
+        name="w",
+        message="hi",
+        cwd=tmp_path,
+        route_env={"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic", "ANTHROPIC_AUTH_TOKEN": "t"},
+    )
+    argv = seen["argv"]
+    assert "--settings" in argv
+    assert argv[argv.index("--settings") + 1].endswith(".json")
+
+
+def test_headless_create_routed_spawn_passes_settings_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from fno.agents.providers import claude as claude_mod
+
+    seen: Dict[str, Any] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen["argv"] = argv
+        from subprocess import CompletedProcess
+
+        return CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    claude_mod.headless_create(
+        message="hi",
+        cwd=tmp_path,
+        route_env={"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic", "ANTHROPIC_AUTH_TOKEN": "t"},
+    )
+    assert "--settings" in seen["argv"]
+
+
+def test_route_allowed_on_headless(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fno.agents import dispatch, spawn_gate
+
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    captured: Dict[str, Any] = {}
+
+    def fake_dispatch_spawn(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return dispatch.SpawnResult(kind="created", name=kwargs["name"], provider="claude", short_id="a")
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch_spawn)
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "w1", "hi", "--provider", "claude", "-H", "--route", "zai,glm-5.2"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["route_env"]["ANTHROPIC_AUTH_TOKEN"] == "zk-live"
+
+
+def test_provider_zai_alias_and_bare_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fno.agents import dispatch, spawn_gate
+
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    captured: Dict[str, Any] = {}
+
+    def fake_dispatch_spawn(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return dispatch.SpawnResult(kind="created", name=kwargs["name"], provider="claude", short_id="a")
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch_spawn)
+    from fno.agents.cli import agents_app
+
+    # `--provider zai` expands to claude + default 1M GLM model.
+    result = runner.invoke(agents_app, ["spawn", "w1", "hi", "--provider", "zai", "-H"])
+    assert result.exit_code == 0, result.output
+    assert captured["provider"] == "claude"
+    assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
+
+    # Bare `--route zai` expands the same way.
+    captured.clear()
+    result = runner.invoke(
+        agents_app, ["spawn", "w2", "hi", "--provider", "claude", "-H", "--route", "zai"]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2[1m]"

@@ -769,6 +769,16 @@ def cmd_spawn(
         else None
     )
 
+    # `--provider zai` is shorthand for a claude worker routed to zai's default
+    # GLM model: rewrite to the explicit claude + --route lane BEFORE provider
+    # resolution (which would reject the unknown provider name), so routing has
+    # one mechanism rather than a second provider identity. An explicit --route
+    # still wins over the default model.
+    if provider == "zai":
+        provider = "claude"
+        if route is None:
+            route = "zai/glm-5.2[1m]"
+
     # --provider is optional: resolve it (explicit > invoking harness > claude)
     # and reject an empty --model before anything spawns. `provider` is a
     # concrete string from here down; the provider-name set is validated
@@ -931,15 +941,25 @@ def cmd_spawn(
     # for --route is a hard refusal, not the role lane's silent fallback.
     route_env: dict[str, str] | None = None
     if route is not None:
-        if provider != "claude" or substrate != "bg":
+        # A routed claude worker applies its route via a --settings file
+        # (x-6de8), which the bg and headless lanes both honor; pane is not a
+        # routed lane. `-H`/`--once` are headless spellings.
+        headless_route = once or substrate == "headless"
+        if provider != "claude" or not (substrate == "bg" or headless_route):
             print(
-                "--route is claude + --substrate bg only (the delivery-dispatch "
-                f"lane); got provider {provider!r} substrate {substrate!r}.",
+                "--route is claude on --substrate bg or headless only; "
+                f"got provider {provider!r} substrate {substrate!r}.",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
         from fno.agents.model_routing import _parse_target, resolve_explicit_route
 
+        # Bare `--route zai` means zai's default 1M-context GLM model, so the
+        # common case needs no model token. Other bare providers still require
+        # an explicit `provider,model` (falls through to _parse_target's
+        # refusal below).
+        if "/" not in route and "," not in route and route.strip().lower() == "zai":
+            route = "zai/glm-5.2[1m]"
         parsed = _parse_target(route)
         if parsed is None:
             print(
