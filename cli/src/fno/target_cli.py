@@ -372,7 +372,11 @@ def _retro_dispatch_preflight(
 
     from fno.graph.maintain import is_retro_triage_node, parse_retro_trailer
 
-    if not is_retro_triage_node(node):
+    if (
+        node.get("completed_at")
+        or node.get("superseded_by")
+        or not is_retro_triage_node(node)
+    ):
         return
     parsed = parse_retro_trailer(node.get("details"))
     if parsed is None:

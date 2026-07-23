@@ -118,6 +118,16 @@ def test_retro_dispatch_preflight_non_retro_makes_no_probe(monkeypatch):
     assert calls == []
 
 
+def test_retro_dispatch_preflight_closed_node_is_a_noop(tmp_path):
+    node = _retro_dispatch_node(tmp_path)
+    node["completed_at"] = "2026-07-23T00:00:00Z"
+    calls = []
+    target_cli._retro_dispatch_preflight(
+        node, gh_runner=lambda args: calls.append(args)
+    )
+    assert calls == []
+
+
 def test_retro_dispatch_preflight_source_pr_none_warns_each_skipped_tier(
     tmp_path, capsys
 ):
