@@ -119,22 +119,22 @@ def test_composed_prompt_does_not_start_with_dashes(monkeypatch) -> None:
     prompts = load_prompts()
     diff_context = "diff --git a/foo b/foo\n+x\n"
 
-    # Capture the prompt passed to the canonical dispatch seam.
+    # Capture the prompt passed to spawn_worker.
     captured: dict[str, str] = {}
 
-    class _StubDispatch:
-        def __call__(self, **kwargs: object) -> object:
-            captured["prompt"] = str(kwargs["message"])
-            return type("Reply", (), {"reply": ""})()
+    class _StubAdapter:
+        def spawn_worker(self, *, prompt: str, **_kwargs: object) -> dict[str, object]:
+            captured["prompt"] = prompt
+            return {"stdout": "", "pid": 1234}
 
-    dispatch = _StubDispatch()
+    adapter = _StubAdapter()
     # Run one agent through the runner; we only care about the argv shape.
     name = next(iter(prompts))
     claude_runner.run_via_claude_code(
         name,
         prompts[name],
         diff_context,
-        dispatch=dispatch,
+        adapter=adapter,  # type: ignore[arg-type]
     )
 
     composed = captured["prompt"]

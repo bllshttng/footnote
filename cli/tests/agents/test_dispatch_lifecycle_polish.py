@@ -1,6 +1,7 @@
 """Tests for the US4-gemini lifecycle-polish handoff items.
 
-Three independent fixes bundled into one PR:
+Three independent fixes bundled into one PR (handoff backlog node
+``ab-f1ab5a29``):
 
 1. ``stop_agent`` flips registry status to ``"orphaned"`` on successful
    ``claude stop`` so the Phase 8 TUI doesn't keep the row coloured
@@ -262,6 +263,11 @@ def test_stamp_status_callable_monotonic_under_serialized_writes(
             "codex_session_id",
             "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         ),
+        (
+            "gemini",
+            "gemini_session_id",
+            "11111111-2222-3333-4444-555555555555",
+        ),
     ],
 )
 def test_concurrent_reconcile_and_ask_preserves_both_fields(
@@ -333,6 +339,16 @@ def test_concurrent_reconcile_and_ask_preserves_both_fields(
             return set()
 
         monkeypatch.setattr(codex_mod, "load_known_session_ids", fake_load_known)
+
+    else:  # gemini
+        from fno.agents.providers import gemini as gemini_mod
+
+        def fake_reachable(sid, cwd):
+            probe_started.set()
+            apply_may_proceed.wait(timeout=5.0)
+            return False  # not reachable -> orphaned
+
+        monkeypatch.setattr(gemini_mod, "gemini_session_reachable", fake_reachable)
 
     errors: list[Exception] = []
 

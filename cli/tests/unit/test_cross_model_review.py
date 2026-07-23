@@ -48,16 +48,16 @@ class _RecordingDispatch:
         return [c["provider"] for c in self.calls]
 
 
-class _FakeClaudeDispatch:
-    """Fake canonical Claude dispatch: returns a canned reply."""
+class _FakeClaudeAdapter:
+    """Fake ClaudeCodeAdapter: returns canned stdout (JSON for json_findings)."""
 
     def __init__(self, stdout: str = "[]") -> None:
         self.stdout = stdout
         self.calls = 0
 
-    def __call__(self, **_kwargs: object) -> object:
+    def spawn_worker(self, prompt: str) -> dict:
         self.calls += 1
-        return SpawnResult(kind="once", name="claude", provider="claude", short_id="sess", reply=self.stdout)
+        return {"stdout": self.stdout}
 
 
 def _run(runner, agent: str, prompt: str = "p", diff: str = "d"):
@@ -69,7 +69,7 @@ def _run(runner, agent: str, prompt: str = "p", diff: str = "d"):
 
 def test_ac1_default_subset_routes_correctness_to_codex() -> None:
     dispatch = _RecordingDispatch(reply='[{"severity": "high", "message": "x"}]')
-    adapter = _FakeClaudeDispatch("[]")
+    adapter = _FakeClaudeAdapter("[]")
     runner, prompts, provider_set = build_review_runner(
         agent_providers={},
         cross_model_enabled=True,
@@ -105,7 +105,7 @@ def test_ac1_default_subset_routes_correctness_to_codex() -> None:
 
 def test_ac2_operator_map_pins_gemini() -> None:
     dispatch = _RecordingDispatch(reply="[]")
-    adapter = _FakeClaudeDispatch("[]")
+    adapter = _FakeClaudeAdapter("[]")
     runner, prompts, provider_set = build_review_runner(
         agent_providers={"ux_flow_tester": "gemini", "type_design_analyzer": "gemini"},
         cross_model_enabled=False,  # engaged via the explicit map
@@ -132,7 +132,7 @@ def test_ac2_operator_map_pins_gemini() -> None:
 
 def test_ac3_prose_reply_is_terminal_soft_fail() -> None:
     dispatch = _RecordingDispatch(reply="looks good, no issues!")
-    adapter = _FakeClaudeDispatch("[]")
+    adapter = _FakeClaudeAdapter("[]")
     runner, _, _ = build_review_runner(
         agent_providers={"code_reviewer": "gemini"},
         cross_model_enabled=False,
@@ -160,7 +160,7 @@ def test_ac3_prose_reply_is_terminal_soft_fail() -> None:
 
 def test_ac4_single_provider_degrades_to_claude() -> None:
     dispatch = _RecordingDispatch()
-    adapter = _FakeClaudeDispatch("[]")
+    adapter = _FakeClaudeAdapter("[]")
     runner, prompts, provider_set = build_review_runner(
         agent_providers={},
         cross_model_enabled=True,
@@ -184,7 +184,7 @@ def test_ac4_single_provider_degrades_to_claude() -> None:
 
 def test_ac5_lockout_falls_through_to_claude() -> None:
     dispatch = _RecordingDispatch(raises=DispatchAskError("locked out", exit_code=13))
-    adapter = _FakeClaudeDispatch("[]")
+    adapter = _FakeClaudeAdapter("[]")
     runner, _, _ = build_review_runner(
         agent_providers={"code_reviewer": "codex"},
         cross_model_enabled=False,
@@ -230,7 +230,7 @@ def test_ac6_prompts_carry_json_contract_and_forbid_interactive() -> None:
 
 def test_ac6_attribution_present_on_every_outcome() -> None:
     dispatch = _RecordingDispatch(reply="[]")
-    adapter = _FakeClaudeDispatch("[]")
+    adapter = _FakeClaudeAdapter("[]")
     runner, _, _ = build_review_runner(
         agent_providers={},
         cross_model_enabled=True,

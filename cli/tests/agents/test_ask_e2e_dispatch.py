@@ -96,6 +96,25 @@ def _install_fake_codex(bin_dir: Path) -> None:
     path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+# Shared fake gemini: emits ONE JSON blob (the exact contract from
+# crates/fno-agents/tests/gemini_ask_parity.rs). Ignores args, so the same
+# binary serves create and `--resume` followups for both dispatch paths.
+_FAKE_GEMINI_SCRIPT = r"""#!/bin/sh
+if [ -n "$FAKE_GEMINI_EXIT" ] && [ "$FAKE_GEMINI_EXIT" != "0" ]; then
+  exit "$FAKE_GEMINI_EXIT"
+fi
+printf '{"session_id":"%s","response":"%s","stats":{}}' "${FAKE_GEMINI_SESSION_ID:-}" "${FAKE_GEMINI_REPLY:-}"
+"""
+
+
+def _install_fake_gemini(bin_dir: Path) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    path = bin_dir / "gemini"
+    path.write_text(_FAKE_GEMINI_SCRIPT, encoding="utf-8")
+    mode = path.stat().st_mode
+    path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
 # Per-provider fixture: (installer, env vars to set FAKE_*_SESSION_ID / _REPLY).
 # Keyed so the followup matrix below stays a single parametrized test.
 _PROVIDER_FAKES = {

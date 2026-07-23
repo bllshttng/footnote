@@ -2,14 +2,14 @@
 
 Phase 03 ships the orchestrator skeleton with synchronous prompt
 loading and a fail-closed runner interface. The full parallel
-canonical agent dispatch plus the Haiku confidence scorer are
+``spawn_worker`` dispatch plus the Haiku confidence scorer are
 follow-up work (see :mod:`fno.review.confidence_scorer`).
 
 The surface here is deliberately stable so Phase 04 can wire
 ``ab review`` into the loop without waiting for the full async
 implementation. ``orchestrate_review`` currently runs workers via a
 pluggable ``WorkerRunner`` callable so tests and the eventual
-the Claude review runner and canonical dispatch share one code path.
+``ClaudeCodeAdapter`` dispatch share one code path.
 """
 
 from __future__ import annotations
@@ -178,8 +178,9 @@ WorkerRunner = Callable[[str, str, str], WorkerOutcome]
 
 Signature: ``(agent_name, prompt_text, diff_context) -> WorkerOutcome``.
 The orchestrator cares only that it can call this once per agent and
-receive a structured outcome. The real implementation uses the canonical
-Claude one-shot dispatch; tests supply a lambda that returns canned findings.
+receive a structured outcome. The real implementation will dispatch
+``claude -p <composed-prompt>`` via ClaudeCodeAdapter; tests supply a
+lambda that returns canned findings.
 """
 
 
