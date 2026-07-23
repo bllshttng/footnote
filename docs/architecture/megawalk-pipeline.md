@@ -241,7 +241,7 @@ process_pending_merges (auto_merge_gate; stale-approval pinning to head SHA)
 exit when futures empty AND no remaining selectable nodes
 ```
 
-Per-node `_drive_node` invokes the host helper (`run_host_step`) which subprocesses `fno loop` and round-trips exit-42 via the Driver protocol (claude-code, hermes, openclaw, fallback).
+Per-node driving is now owned by the Rust unified-loop runtime (`fno-agents loop run --driver megawalk`); the retired Python host helper (`run_host_step` subprocessing `fno loop` and round-tripping exit-42 via the `megawalk_drivers/` Driver protocol) was deleted as dead code (see the Hardening Primitives table below and `docs/architecture/unified-loop.md`).
 
 ### Hardening Primitives
 
