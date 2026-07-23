@@ -493,7 +493,10 @@ else
   # there (empty/torn receipts still fail - the cardinal guard remains intact).
   case "$SUBSTRATE" in
     bg|headless) short_id_shape='^[0-9a-f]{8}$' ;;
-    *)           short_id_shape='^[A-Za-z0-9_-]{1,40}$' ;;
+    # 64, not 40: the pane handle is the derived agent name (<verb>-<node-id>-<slug>),
+    # which normalize builds up to ~50 chars (verb + id + a 32-char slug). A 40-cap
+    # rejected a real long-slug codex pane launch as FAILED (name 43 > 40).
+    *)           short_id_shape='^[A-Za-z0-9_-]{1,64}$' ;;
   esac
   if [[ ! "$short_id" =~ $short_id_shape ]]; then
     fail "no valid short-id receipt ($VERB JSON .short_id empty/malformed for substrate '${SUBSTRATE:-pane}'): $(sanitize "${spawn_out:-$spawn_err}")"

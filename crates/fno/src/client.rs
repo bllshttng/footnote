@@ -2802,7 +2802,38 @@ impl View {
         } else if cr + 1 == a_rows {
             Dir::Down
         } else {
-            return None;
+            // Interior cell: instead of going dark (the old `return None`),
+            // resolve to the nearest edge of the pane UNDER the pointer, so the
+            // destination band tracks the pointer live rather than only waking
+            // at the content-area rim (x-aa95 shipped rim-only; a relocation
+            // gave no preview until the pointer was dragged all the way to an
+            // outer edge). Keyed off THIS pane's own centre so it stays
+            // predictable: the pointer's dominant offset from centre picks the
+            // axis, its sign the side. A dead-centre tie resolves horizontal,
+            // matching the corner tie-break above. Rim/seam cells never reach
+            // here (handled above and by `drop_zone_at`'s seam check), so their
+            // semantics and every rim test are unchanged.
+            let rect = self.pane_rect(target)?;
+            let (lx, ly) = (
+                cc.saturating_sub(rect.x) as i32,
+                cr.saturating_sub(rect.y) as i32,
+            );
+            let (cols, rows) = (rect.cols as i32, rect.rows as i32);
+            // Compare |nx-0.5| vs |ny-0.5| without floats: cross-multiply the
+            // half-cell-centred offsets by the opposite dimension.
+            let hx = 2 * lx + 1 - cols; // <0 left half, >0 right half
+            let hy = 2 * ly + 1 - rows; // <0 top half,  >0 bottom half
+            if hx.abs() * rows >= hy.abs() * cols {
+                if hx < 0 {
+                    Dir::Left
+                } else {
+                    Dir::Right
+                }
+            } else if hy < 0 {
+                Dir::Up
+            } else {
+                Dir::Down
+            }
         };
         Some(DropZone { target, dir })
     }
@@ -22065,6 +22096,38 @@ mod tests {
             lit > baseline,
             "right rim lit nothing (lit={lit} baseline={baseline})"
         );
+    }
+
+    #[test]
+    fn an_interior_cell_tracks_the_nearest_pane_edge() {
+        // The fix for "no preview until I drag to the rim": a cell in a pane's
+        // interior (NOT on the content-area rim) now resolves to the nearest
+        // edge of the pane under the pointer, so the destination band tracks
+        // the pointer live. Pane 10 is 35x29 at the layout origin.
+        let view = two_pane_view();
+        let (pw, tb) = (view.panel_w(), TAB_BAR_ROWS);
+        // (cr, cc) within pane 10, none on the area rim (cr!=0/28, cc!=0/71).
+        for (cr, cc, want) in [
+            (20u16, 17u16, Dir::Down), // lower-centre -> below
+            (5, 17, Dir::Up),          // upper-centre -> above
+            (14, 30, Dir::Right),      // right of centre -> beside (right)
+            (14, 4, Dir::Left),        // left of centre  -> beside (left)
+        ] {
+            let z = view
+                .edge_zone_at(tb + cr, pw + cc)
+                .unwrap_or_else(|| panic!("interior ({cr},{cc}) went dark"));
+            assert_eq!(z.target, 10, "interior ({cr},{cc}) targets its own pane");
+            assert_eq!(z.dir, want, "interior ({cr},{cc}) resolved oddly");
+        }
+
+        // The user's exact gesture: dragging pane 11 over pane 10's lower
+        // middle lights a Down zone BEFORE the pointer reaches the bottom rim
+        // (cr=20, not 28), which is precisely what rim-only zones never did.
+        let mut view = two_pane_view();
+        view.begin_pane_drag(11, Instant::now());
+        assert!(view.pane_drag_to(tb + 20, pw + 17, Instant::now()));
+        let zone = view.pane_drag.and_then(|d| d.zone).expect("interior lit");
+        assert_eq!((zone.target, zone.dir), (10, Dir::Down));
     }
 
     #[test]
