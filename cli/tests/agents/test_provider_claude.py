@@ -449,3 +449,43 @@ def test_headless_create_scrubs_inherited_auth(tmp_path: Path, monkeypatch) -> N
     assert env["CLAUDE_CONFIG_DIR"] == "/x/.claude-alt"
     assert "ANTHROPIC_API_KEY" not in env
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+
+def test_headless_create_routed_scrubs_ambient_creds(tmp_path: Path, monkeypatch) -> None:
+    """x-6de8 codex P1: a routed headless spawn must scrub ambient
+    ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN (claude prefers an env credential
+    over the --settings file), else it authenticates with the primary account
+    instead of the routed provider. Mirrors bg_create's scrub."""
+    from fno.agents.providers import claude as claude_mod
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-parent")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-parent")
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["env"] = kwargs.get("env")
+        captured["argv"] = argv
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(
+        message="hi",
+        cwd=cwd,
+        route_env={
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": "zk-routed",
+        },
+    )
+    env = captured["env"]
+    assert env is not None, "route_env must build a scrubbed spawn env"
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "zk-routed"
+    assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert "--settings" in captured["argv"]

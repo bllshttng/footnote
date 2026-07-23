@@ -250,18 +250,26 @@ def headless_create(
     # x-b6e2: Tier-3 passthrough, same order as the Rust headless builder.
     argv += _tier3_tokens(add_dir, agent, tools, deny_tools)
     argv.append(message or "hello")
-    # Per-spawn account overlay (x-d012): a one-shot `claude -p` inherits the
-    # parent env, so without this an --account headless spawn would silently
-    # drop CLAUDE_CONFIG_DIR and bill the operator's current account. Scrub
-    # inherited auth vars first (an ambient token would override the account).
+    # A one-shot `claude -p` inherits the parent env, so an ambient
+    # ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN would override BOTH a per-spawn
+    # account overlay (x-d012) AND a routed --settings token (x-6de8, codex P1):
+    # claude prefers an env credential over the settings file, so a routed
+    # headless spawn from a logged-in shell would authenticate with the primary
+    # Claude account instead of the selected provider (routing failure / wrong
+    # billing). Scrub inherited auth vars whenever we route or pin an account, and
+    # apply the route env too (belt-and-suspenders with --settings, matching
+    # bg_create). Without either overlay, inherit the parent env untouched.
     spawn_env: Optional[dict[str, str]] = None
-    if account_env:
+    if account_env or route_env:
         from fno.agents.account_env import SCRUB_AUTH_VARS
 
         spawn_env = dict(os.environ)
         for _k in SCRUB_AUTH_VARS:
             spawn_env.pop(_k, None)
-        spawn_env.update(account_env)
+        if route_env:
+            spawn_env.update(route_env)
+        if account_env:
+            spawn_env.update(account_env)
     started = time.monotonic()
     # Pass env ONLY when set: no --account must inherit the parent env by
     # omitting the kwarg entirely (byte-identical to a bare subprocess.run).
