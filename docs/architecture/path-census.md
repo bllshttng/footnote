@@ -23,14 +23,14 @@ Rows marked `OPEN` below are intentionally not deleted when the repository still
 | # | Path | Entry | Disposition | Closing PR |
 |---|---|---|---|---|
 | 1 | `fno backlog groom` pipeline | `cli/src/fno/backlog/groom.py:239-365` | KEEP, canonical | — |
-| 2 | `scripts/nightly-groom.sh` | whole file, execs the verb | DELETE | TBD |
+| 2 | `scripts/nightly-groom.sh` | whole file, execs the verb | DELETE | #573 |
 | 3 | `fno backlog triage health` | `graph/cli.py` | KEEP, separate metrics verb | — |
 
 ## Census 3: post-merge addendum
 
 | # | Path | Entry | Disposition | Closing PR |
 |---|---|---|---|---|
-| 1 | `scripts/post-merge/watch.sh` launchd fire point | `watch.sh:71` | DELETE | TBD |
+| 1 | `scripts/post-merge/watch.sh` launchd fire point | `watch.sh:71` | DELETE | #573 |
 
 ## Census 4: worker/agent spawn
 
@@ -41,9 +41,9 @@ Rows marked `OPEN` below are intentionally not deleted when the repository still
 | 3 | `scripts/post-merge/watch.sh` hand-assembled `claude --print` | `watch.sh:71` | DELETE | #573 |
 | 4 | Rust `ShelloutDispatcher` -> `driver-claude-code.sh` | `crates/fno-agents/src/loop_megawalk.rs:1208` | RETIRE, migration needed after reachability trace | OPEN |
 | 5 | Python megawalk walker + `ClaudeCodeDriver` | `megawalk_drivers/claude_code.py:53` | DELETE | #573 |
-| 6 | Claude/Codex adapter worker spawns | `adapters/{claude_code,codex}.py` | RETIRE after live callers migrate (see below) | OPEN |
+| 6 | Claude/Codex adapter worker spawns | `adapters/{claude_code,codex}.py` | DELETE; review caller migrated to canonical dispatch | #573 |
 | 7 | One-shot `claude -p` LLM-as-a-function | `inbox/triage.py:304` and three sites | OUT OF SCOPE | — |
-| 8 | Gemini provider adapter paths | `agents/dispatch.py` Gemini create/follow-up/reconcile paths, `agents/providers/gemini.py` | DELETE; Rust keeps its native provider path and harness-map refusal | TBD |
+| 8 | Gemini provider adapter paths | `agents/dispatch.py` Gemini create/follow-up/reconcile paths, `agents/providers/gemini.py` | DELETE; Rust keeps its native provider path and harness-map refusal | #573 |
 | 9 | Shell-form `claude -p` in the memory pass | `scripts/memory/post-merge-pass.sh:12` | RETIRE through canonical spawn (surfaced by the lint's shell-form scan) | OPEN |
 
 The Claude/Codex adapter row was closed after its live review caller migrated to canonical one-shot dispatch.
