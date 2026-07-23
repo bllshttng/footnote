@@ -481,24 +481,6 @@ def test_skill_reads_fresh_proposals_and_reports_the_mechanical_line():
     assert "groom-digest" not in text, "the digest is retired; the skill must not resurrect it"
 
 
-def test_the_old_nightly_script_is_a_shim_that_defers():
-    # AC2-HP: one surface owns grooming. The shim must hand off, not re-sequence
-    # the legs itself, and must never resurrect the retired digest.
-    script = Path(__file__).resolve().parents[3] / "scripts" / "nightly-groom.sh"
-    text = script.read_text()
-
-    assert "DEPRECATED" in text
-    assert "exec" in text and "backlog groom" in text
-    assert "groom-digest" not in text
-
-    # Comments may still explain what moved; the executable body must not do it.
-    body = "\n".join(
-        line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")
-    )
-    for retired in ("archive", "reconcile", "maintain", "relatedness", "DIGEST"):
-        assert retired not in body, f"the shim must not still run {retired!r} itself"
-
-
 def test_every_mechanical_leg_exists_on_the_real_cli():
     """Bind the leg table to the actual commands.
 
@@ -609,21 +591,6 @@ def test_scheduled_run_works_from_a_repo_not_home(tmp_path, monkeypatch):
     xml = (tmp_path / f"{G.GROOM_LABEL}.plist").read_text()
 
     assert "<key>WorkingDirectory</key>\n  <string>/repo/footnote</string>" in xml
-
-
-def test_shim_translates_the_old_dry_run_short_flag():
-    """The old script's -n meant dry-run; the verb's short flag is -N.
-
-    Passing -n through unchanged would turn a preview into a mutating run.
-    """
-    import subprocess as sp
-
-    script = Path(__file__).resolve().parents[3] / "scripts" / "nightly-groom.sh"
-    proc = sp.run(
-        ["bash", str(script), "-n"],
-        capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "FNO": "echo"},
-    )
-    assert "backlog groom --dry-run" in proc.stdout, proc.stdout
 
 
 # ── refresh onto a new binary (fno update tail) ─────────────────────────────

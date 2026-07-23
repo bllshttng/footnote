@@ -20,15 +20,8 @@ def get_adapter(name: str) -> RuntimeAdapter:
     return _REGISTRY[name]()
 
 
-# Register built-in adapters
-from fno.adapters.claude_code import ClaudeCodeAdapter  # noqa: E402
-
-_register("claude-code", ClaudeCodeAdapter)
-
-from fno.adapters.codex import CodexCliAdapter  # noqa: E402
-
-_register("codex", CodexCliAdapter)
-
+# Register the surviving adapter. Worker spawning routes through the canonical
+# ``fno agents spawn`` dispatch seam rather than adapter-local subprocess code.
 from fno.adapters.hermes import HermesCliAdapter  # noqa: E402
 
 _register("hermes", HermesCliAdapter)

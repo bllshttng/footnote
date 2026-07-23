@@ -32,6 +32,36 @@ import typer
 _LABEL = "sh.fno.pr-watcher"
 _PLIST_FILENAME = f"{_LABEL}.plist"
 _LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
+# Per-repo watchers from the retired scripts/post-merge/ path. Their target
+# script is deleted, so a loaded job would fail under launchd forever.
+_LEGACY_POSTMERGE_GLOB = "com.fno.postmerge*.plist"
+
+
+def retire_legacy_postmerge_agents(launch_agents_dir: Path) -> list[str]:
+    """Bootout + remove retired per-repo post-merge watcher plists.
+
+    Best-effort and idempotent, never raises: called on every global-watcher
+    install/activate so an operator who once loaded the per-repo watcher does
+    not keep a launchd job firing a deleted script. Returns receipt lines.
+    """
+    receipts: list[str] = []
+    for plist in sorted(launch_agents_dir.glob(_LEGACY_POSTMERGE_GLOB)):
+        label = plist.stem
+        try:
+            subprocess.run(
+                ["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            pass  # bootout of an unloaded job fails; removal below still applies
+        try:
+            plist.unlink()
+            receipts.append(f"retired legacy post-merge watcher: {label}")
+        except OSError as exc:
+            receipts.append(f"could not remove legacy watcher plist {plist}: {exc}")
+    return receipts
 
 _PLIST_TEMPLATE = """\
 <?xml version="1.0" encoding="UTF-8"?>
@@ -452,10 +482,11 @@ def install(
     else:
         typer.echo(f"To activate: launchctl bootstrap gui/$(id -u) {plist_path}")
 
+    for receipt in retire_legacy_postmerge_agents(launch_agents_dir):
+        typer.echo(receipt)
     typer.echo(
-        "Note: any per-repo scripts/post-merge/ watcher can now be retired "
-        "(run scripts/post-merge/uninstall.sh in each repo).  Double-fire is "
-        "safe via the idempotency marker, so migration is advisory."
+        "The canonical pr-watch daemon now owns merge detection; no per-repo "
+        "watcher install is needed."
     )
 
 
@@ -479,6 +510,7 @@ def ensure_activated(
     leaves config enabled so ``fno doctor`` flags the dead watcher (AC1-ERR).
     """
     plist_path = launch_agents_dir / _PLIST_FILENAME
+    retire_legacy_postmerge_agents(launch_agents_dir)
 
     if _launchctl_is_loaded():
         return "already-running"

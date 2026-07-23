@@ -1,4 +1,4 @@
-"""Tests for the lifted ReachabilityProbeError base class (US4-gemini Wave 1.1).
+"""Tests for the lifted ReachabilityProbeError base class.
 
 Coverage targets the invariants in the design doc:
 
@@ -14,8 +14,6 @@ Coverage targets the invariants in the design doc:
 from __future__ import annotations
 
 import pickle
-from pathlib import Path
-
 import pytest
 
 from fno.agents.providers.base import ReachabilityProbeError
@@ -23,8 +21,8 @@ from fno.agents.providers.base import ReachabilityProbeError
 
 def test_base_class_has_provider_and_reason_attributes() -> None:
     """AC1-HP: the base class records both fields from its kw-only init."""
-    err = ReachabilityProbeError(provider="gemini", reason="EACCES")
-    assert err.provider == "gemini"
+    err = ReachabilityProbeError(provider="codex", reason="EACCES")
+    assert err.provider == "codex"
     assert err.reason == "EACCES"
 
 
@@ -48,7 +46,7 @@ def test_base_class_is_runtime_error_subclass() -> None:
 def test_base_class_requires_keyword_arguments() -> None:
     """Locked Decision 3: provider + reason are kw-only; no positional shape."""
     with pytest.raises(TypeError):
-        ReachabilityProbeError("gemini", "EACCES")  # type: ignore[misc]
+        ReachabilityProbeError("codex", "EACCES")  # type: ignore[misc]
 
 
 def test_base_class_provider_is_non_optional() -> None:
@@ -65,10 +63,10 @@ def test_base_class_reason_is_non_optional() -> None:
 
 def test_base_class_pickle_round_trip() -> None:
     """AC1-EDGE: pickle.dumps/loads survives the kw-only init signature."""
-    err = ReachabilityProbeError(provider="gemini", reason="EACCES")
+    err = ReachabilityProbeError(provider="codex", reason="EACCES")
     restored = pickle.loads(pickle.dumps(err))
     assert isinstance(restored, ReachabilityProbeError)
-    assert restored.provider == "gemini"
+    assert restored.provider == "codex"
     assert restored.reason == "EACCES"
     assert str(restored) == str(err)
 
@@ -104,7 +102,7 @@ def test_portability_third_provider_uses_base_directly() -> None:
         assert caught.provider == "opencode"
 
 
-@pytest.mark.parametrize("provider", ["claude", "codex", "gemini"])
+@pytest.mark.parametrize("provider", ["claude", "codex"])
 def test_provider_reachability_probes_raise_shared_base_class(
     provider: str,
     tmp_path,
@@ -131,17 +129,6 @@ def test_provider_reachability_probes_raise_shared_base_class(
 
         def probe():
             return codex_mod.load_known_session_ids(session_index_path=unreadable_index)
-    else:
-        from fno.agents.providers import gemini as gemini_mod
-
-        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
-
-        def probe():
-            return gemini_mod.gemini_session_reachable(
-                "aaaaaaaa-1111-2222-3333-444444444444",
-                tmp_path / "project",
-            )
-
     with pytest.raises(ReachabilityProbeError) as exc_info:
         probe()
 

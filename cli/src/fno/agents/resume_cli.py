@@ -14,9 +14,7 @@ Provider resume substrates (Locked Decision #6):
   exec-source picker filter via direct UUID argument).
 - ``claude`` → ``claude attach <short_id>`` (reuses the existing
   attach surface).
-- ``gemini`` → ``gemini --session <gemini_session_id>``  (TBD at
-  implementation time; if gemini lacks a native resume verb, exit 14
-  with a stderr "not supported by this CLI version" message).
+- ``gemini`` → ``gemini --resume <gemini_session_id>``.
 
 Exit codes:
 - 0   — success (only reachable via ``--print-command``; on direct
@@ -74,17 +72,13 @@ def _build_resume_argv(provider: str, session_id: str) -> Optional[list[str]]:
         # Spec: reuse fno's attach surface. claude's attach is
         # `claude attach <short_id>`.
         return ["claude", "attach", session_id]
-    if provider == "gemini":
-        # Match providers/gemini.resume() which uses --resume <uuid>
-        # (per the gemini CLI's actual resume flag — confirmed against
-        # gemini.resume's own argv in this repo). Codex review caught
-        # the earlier `--session` form was wrong.
-        return ["gemini", "--resume", session_id]
     if provider == "opencode":
         # Bare `opencode --session <id>` is the interactive TUI attach (the
         # `codex resume <id>` precedent). The Rust provider's headless
         # `opencode run ... --session <id>` argv is a separate lane.
         return ["opencode", "--session", session_id]
+    if provider == "gemini":
+        return ["gemini", "--resume", session_id]
     return None
 
 

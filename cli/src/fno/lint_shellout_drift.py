@@ -72,7 +72,9 @@ SCAN_REL = "cli/src/fno"
 ALLOWLIST_REL = "scripts/lint/.clone-only-scripts.txt"
 
 # In-repo-only modules excluded from the scan (see module docstring). Repo-relative.
-SCAN_EXCLUDE: Set[str] = {"cli/src/fno/evals/runner.py"}
+SCAN_EXCLUDE: Set[str] = {
+    "cli/src/fno/evals/runner.py",
+}
 
 _SUBPROCESS_FUNCS = {"run", "Popen", "call", "check_call", "check_output"}
 _SHELLS = {"bash", "sh"}

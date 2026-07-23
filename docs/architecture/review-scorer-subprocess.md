@@ -8,7 +8,7 @@ The scorer lives in `cli/src/fno/review/scorers/claude_scorer.py` and shells out
 
 A direct `anthropic.Anthropic()` SDK call would be simpler code, but would require users to set `ANTHROPIC_API_KEY` as a separate environment variable on top of the Claude Code OAuth credentials they already have. Every user who runs `fno review` has Claude Code installed (that's how the review agents themselves get spawned), so the OAuth path in `~/.claude/.credentials.json` / macOS Keychain is always present. Adding a parallel credential requirement for one small task was poor UX.
 
-Using `claude -p` for the scorer also matches the existing `ClaudeCodeAdapter.spawn_worker` pattern for the review panel itself, so there is one code path to reason about for "talk to Claude".
+Using `claude -p` for the scorer follows the canonical `fno agents spawn` dispatch seam used by the review panel, so there is one code path to reason about for "talk to Claude".
 
 ## Batching to amortize spawn cost
 

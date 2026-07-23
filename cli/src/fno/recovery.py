@@ -404,11 +404,10 @@ def _safe_read_state(jobs_dir):
 # This wires the already-built+tested failover engine
 # (``adapters/providers/error_taxonomy`` + ``failover.FailoverController``) into
 # the recovery watchdog - the ONLY live autonomous loop in production. The design
-# named an in-loop megawalk path as primary, but that path (``megawalk_drivers``,
-# ``DriverWithFallback``, ``map_*_error``) has zero production call sites and
-# footnote's real autonomous loop (Rust ``loop run`` + ``claude --bg`` +
-# stop-hook) has no synchronous Python point that catches a 429. So the watchdog
-# is the sole integration point and the in-loop "primary" is N/A. (cv-59ef0909)
+# named an in-loop megawalk path as primary, but that path had zero production
+# call sites and footnote's real autonomous loop (Rust ``loop run`` +
+# ``claude --bg`` + stop-hook) has no synchronous Python point that catches a
+# 429. So the watchdog is the sole integration point. (cv-59ef0909)
 # ---------------------------------------------------------------------------
 
 def classify_session_error(output_result: Optional[str]):

@@ -96,35 +96,12 @@ def _install_fake_codex(bin_dir: Path) -> None:
     path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-# Shared fake gemini: emits ONE JSON blob (the exact contract from
-# crates/fno-agents/tests/gemini_ask_parity.rs). Ignores args, so the same
-# binary serves create and `--resume` followups for both dispatch paths.
-_FAKE_GEMINI_SCRIPT = r"""#!/bin/sh
-if [ -n "$FAKE_GEMINI_EXIT" ] && [ "$FAKE_GEMINI_EXIT" != "0" ]; then
-  exit "$FAKE_GEMINI_EXIT"
-fi
-printf '{"session_id":"%s","response":"%s","stats":{}}' "${FAKE_GEMINI_SESSION_ID:-}" "${FAKE_GEMINI_REPLY:-}"
-"""
-
-
-def _install_fake_gemini(bin_dir: Path) -> None:
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    path = bin_dir / "gemini"
-    path.write_text(_FAKE_GEMINI_SCRIPT, encoding="utf-8")
-    mode = path.stat().st_mode
-    path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-
 # Per-provider fixture: (installer, env vars to set FAKE_*_SESSION_ID / _REPLY).
 # Keyed so the followup matrix below stays a single parametrized test.
 _PROVIDER_FAKES = {
     "codex": (
         _install_fake_codex,
         lambda sid, reply: {"FAKE_CODEX_SESSION_ID": sid, "FAKE_CODEX_REPLY": reply},
-    ),
-    "gemini": (
-        _install_fake_gemini,
-        lambda sid, reply: {"FAKE_GEMINI_SESSION_ID": sid, "FAKE_GEMINI_REPLY": reply},
     ),
 }
 
@@ -142,13 +119,12 @@ _REPLY = "hello from fake codex"
 
 
 @requires_rust
-@pytest.mark.parametrize("provider", ["codex", "gemini"])
+@pytest.mark.parametrize("provider", ["codex"])
 def test_spawn_once_python_vs_rust_parity(provider, tmp_path: Path, monkeypatch) -> None:
     """A `spawn --once` (the de-overloaded home of the old ask-create
     exchange, Task 1.3) produces the same stdout + exit code regardless of
     whether the dispatch runs through Python (`dispatch_spawn`) or the Rust
-    client (`fno-agents spawn --provider <p> --once`), for codex AND gemini
-    (sigma-review gap Q2: gemini previously had no one-shot parity pin)."""
+    client (`fno-agents spawn --provider <p> --once`) for codex."""
     install_fake, env_for = _PROVIDER_FAKES[provider]
     bin_dir = tmp_path / "bin"
     install_fake(bin_dir)
@@ -393,9 +369,8 @@ def test_codex_spawn_once_fake_provider_exit_propagates(tmp_path: Path, monkeypa
 # Followup differential, parametrized across providers (cv-1314d0e7).
 #
 # The existing tests cover CREATE + failure propagation. cv-1314d0e7 noted the
-# followup-library parity lives in codex_ask_parity.rs / gemini_ask_parity.rs
-# but not at the CLI boundary. This matrix closes that gap and also gives gemini
-# its first CLI-level e2e coverage after the unconditional flip (ab-73da4ac2):
+# followup-library parity lives in codex_ask_parity.rs but not at the CLI
+# boundary. This matrix closes that gap at the CLI level:
 # a follow-up ask (no `--provider`, resolved from the registry a prior create
 # wrote) reaches the same fake provider with the same reply + exit on both the
 # Python dispatch and the Rust client.
@@ -403,10 +378,10 @@ def test_codex_spawn_once_fake_provider_exit_propagates(tmp_path: Path, monkeypa
 
 
 @requires_rust
-@pytest.mark.parametrize("provider", ["codex", "gemini"])
+@pytest.mark.parametrize("provider", ["codex"])
 def test_ask_followup_python_vs_rust_parity(provider, tmp_path: Path, monkeypatch) -> None:
     """A follow-up ask produces the same stdout + exit on the Python dispatch and
-    the Rust client, for codex AND gemini. The agent is seeded via the retained
+    the Rust client for codex. The agent is seeded via the retained
     create machinery (Task 1.3: ask never creates), and the Rust side reads the
     Python-written registry row - exactly the production shape, where both
     runtimes share one registry. Follow-ups pass no `--provider` so the
@@ -431,17 +406,13 @@ def test_ask_followup_python_vs_rust_parity(provider, tmp_path: Path, monkeypatc
     monkeypatch.setenv("PATH", fake_path)
 
     from fno import paths
-    from fno.agents.dispatch import (
-        _codex_create_path,
-        _gemini_create_path,
-        dispatch_ask,
-    )
+    from fno.agents.dispatch import _codex_create_path, dispatch_ask
 
     class _Lock:
         def detach(self) -> None:
             pass
 
-    create_helper = _codex_create_path if provider == "codex" else _gemini_create_path
+    create_helper = _codex_create_path
     for k, v in env_for(_SESSION_ID, create_reply).items():
         monkeypatch.setenv(k, v)
     create_helper(
@@ -462,8 +433,7 @@ def test_ask_followup_python_vs_rust_parity(provider, tmp_path: Path, monkeypatc
     # --- Rust path: separate home seeded by COPYING the Python-written
     # registry (cross-language read is the production contract; both runtimes
     # share ~/.fno/agents/registry.json). Run from the same cwd so the
-    # followup honors the registry-pinned cwd (gemini/codex resume is
-    # cwd-pinned).
+    # followup honors the registry-pinned cwd.
     rs_home = tmp_path / "rs-home"
     rs_home.mkdir()
     shutil.copy(paths.agents_registry_path(), rs_home / "registry.json")

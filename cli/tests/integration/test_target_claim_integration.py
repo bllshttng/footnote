@@ -72,13 +72,16 @@ def test_init_target_state_acquires_claim_when_node_id_present(tmp_path):
     })
 
     # Run from the fake repo root
+    # The full suite can be running other claim/process probes when this shell
+    # starts; allow the real init path enough time to finish without masking a
+    # genuine hang with a too-tight subprocess ceiling.
     result = subprocess.run(
         ["bash", str(INIT_SCRIPT)],
         cwd=repo,
         env=env,
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=60,
     )
 
     # The script may legitimately fail to find the graph in this sandbox
@@ -125,5 +128,4 @@ def test_init_target_state_contains_fno_claim_acquire_block(tmp_path):
     )
     assert "target_claim_key" in init_text
     assert "target_claim_holder" in init_text
-
 

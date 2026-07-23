@@ -64,7 +64,6 @@ def test_is_provider_available_returns_bool(monkeypatch) -> None:
     monkeypatch.setenv("PATH", "/nonexistent/path")
     assert is_provider_available("claude") is False
     assert is_provider_available("codex") is False
-    assert is_provider_available("gemini") is False
 
 
 def test_is_provider_available_finds_real_binary(tmp_path: Path, monkeypatch) -> None:
@@ -95,7 +94,7 @@ def test_available_providers_returns_dict(monkeypatch) -> None:
 
     monkeypatch.setenv("PATH", "/nonexistent")
     result = available_providers()
-    assert set(result.keys()) == {"claude", "codex", "gemini"}
+    assert set(result.keys()) == {"claude", "codex"}
     assert all(v is False for v in result.values())
 
 
@@ -145,20 +144,6 @@ def test_select_provider_rejects_mismatch_on_follow_up(tmp_path: Path, monkeypat
     assert "codex" in msg  # requested
 
 
-def test_select_provider_accepts_matching_request(tmp_path: Path, monkeypatch) -> None:
-    """Passing the same provider as recorded is fine — no mismatch error."""
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.dispatch import select_provider
-    from fno.agents.registry import AgentEntry, write_registry
-
-    write_registry(
-        [AgentEntry(name="match", harness="gemini", cwd="/tmp", log_path="/tmp/m.log")]
-    )
-
-    chosen = select_provider(name="match", requested_provider="gemini")
-    assert chosen == "gemini"
-
-
 def test_select_provider_requires_provider_for_new_agent(tmp_path: Path, monkeypatch) -> None:
     """A first-time ask with no requested_provider has nothing to select — raise ValueError."""
     use_tmpdir(monkeypatch, tmp_path)
@@ -166,6 +151,41 @@ def test_select_provider_requires_provider_for_new_agent(tmp_path: Path, monkeyp
 
     with pytest.raises(ValueError, match="provider is required for new agent"):
         select_provider(name="brand-new", requested_provider=None)
+
+
+def test_reconcile_warns_and_skips_retired_gemini_row(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A legacy Gemini registry row remains readable but is not probed."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.dispatch import reconcile_agents
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry(
+        [
+            AgentEntry(
+                name="legacy-gemini",
+                harness="gemini",
+                cwd="/tmp",
+                log_path="/tmp/gemini.log",
+                harness_session_id="legacy-session",
+                status="live",
+            )
+        ]
+    )
+
+    result = reconcile_agents()
+
+    assert result.scanned == 1
+    assert result.errors == [
+        {
+            "name": "legacy-gemini",
+            "provider": "gemini",
+            "id": "legacy-session",
+            "reason": "retired-provider",
+        }
+    ]
+    assert "retired provider 'gemini'" in capsys.readouterr().err
 
 
 def test_select_provider_rejects_unknown_provider(tmp_path: Path, monkeypatch) -> None:

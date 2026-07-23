@@ -280,7 +280,7 @@ pub enum GeminiAskError {
 
 impl GeminiAskError {
     /// Python-compatible exit code for this error (see `dispatch.py`'s
-    /// `_gemini_create_path` / `_gemini_followup_path` failure->exit map).
+    /// the native Rust dispatch failure->exit map.
     pub fn exit_code(&self) -> i32 {
         match self {
             GeminiAskError::NotFound => 14,
@@ -736,7 +736,7 @@ impl AskOutcome {
 
 /// Orchestrate one gemini `ask`: validate, lock, decide create-vs-resume,
 /// stamp the registry, emit events, and return stdout/stderr/exit_code.
-/// Byte-parity with `dispatch.py`'s `_gemini_create_path` / `_gemini_followup_path`.
+/// Native Rust create/resume dispatch for the retired Python adapter's provider.
 pub fn dispatch_gemini_ask(
     home: &AgentsHome,
     name: &str,
@@ -1210,7 +1210,7 @@ fn dispatch_resume(
             };
             let exit_code = e.exit_code();
             // Failure events on the followup path omit `provider` (parity with
-            // gemini.py's `_gemini_followup_path` emits).
+            // the native Rust follow-up path emits).
             emit_event(
                 events,
                 "agent_followup_failed",

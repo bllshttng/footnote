@@ -16,7 +16,7 @@ Entry schema per key::
 Key format: ``"{repo_slug}#{pr_number}"`` (globally unique across repos).
 Fall back to ``str(pr_number)`` when slug is None.
 
-Baseline discipline (mirrors watch.sh):
+Baseline discipline:
     A PR with NO existing entry is first-seen.  The caller (tick) records
     current state WITHOUT firing.  Fire only on a later OBSERVED TRANSITION.
     A corrupt/missing store resets to empty, and tick re-baselines all

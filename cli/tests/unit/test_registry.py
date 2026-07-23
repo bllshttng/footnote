@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import multiprocessing
-import os
 import threading
 import time
 import uuid
@@ -114,68 +113,6 @@ def test_ac2_hp_register_worker_multiple_appends(tmp_path):
 
     lines = workers_file.read_text().strip().splitlines()
     assert len(lines) == 3
-
-
-# ---------------------------------------------------------------------------
-# spawn subcommand tests
-# ---------------------------------------------------------------------------
-
-def test_ac1_hp_spawn_in_session_returns_skill_dispatch(monkeypatch, tmp_path):
-    """spawn in-session returns skill_dispatch_required without registering worker."""
-    monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-abc123")
-    workers_file = tmp_path / "workers.jsonl"
-
-    result = runner.invoke(
-        app,
-        [
-            "runtime", "spawn",
-            "--prompt", "do something",
-            "--adapter", "claude-code",
-            "--workers-file", str(workers_file),
-            "--json",
-        ],
-    )
-
-    assert result.exit_code == 0, f"Output: {result.output}"
-    data = json.loads(result.output)
-    assert data["action"] == "skill_dispatch_required"
-    # Must NOT have registered a worker
-    assert not workers_file.exists()
-
-
-def test_ac1_hp_spawn_external_registers_worker(monkeypatch, tmp_path):
-    """spawn external spawns subprocess and registers worker in workers.jsonl."""
-    monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)
-    workers_file = tmp_path / "workers.jsonl"
-
-    fake_proc = MagicMock()
-    fake_proc.pid = 54321
-    fake_proc.poll.return_value = None  # simulate still-running process
-
-    with patch("subprocess.Popen", return_value=fake_proc):
-        result = runner.invoke(
-            app,
-            [
-                "runtime", "spawn",
-                "--prompt", "build feature Y",
-                "--adapter", "claude-code",
-                "--workers-file", str(workers_file),
-                "--json",
-            ],
-        )
-
-    assert result.exit_code == 0, f"Output: {result.output}"
-    data = json.loads(result.output)
-    assert "worker_id" in data
-    assert data["pid"] == 54321
-
-    # Worker must be registered
-    assert workers_file.exists()
-    lines = workers_file.read_text().strip().splitlines()
-    assert len(lines) == 1
-    entry = json.loads(lines[0])
-    assert entry["worker_id"] == data["worker_id"]
-    assert entry["status"] == "started"
 
 
 # ---------------------------------------------------------------------------

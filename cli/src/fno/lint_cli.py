@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional, cast
@@ -20,6 +21,92 @@ app = typer.Typer(help="Repository lint checks", no_args_is_help=True)
 # deliberate act that must fit under these caps.
 MENU_CAP_TOP_LEVEL = 10
 MENU_CAP_SUB_APP = 12
+
+
+# Single-line argv shapes that are intentionally still owned by a provider or
+# a legacy one-shot seam. New session spawns belong behind dispatch_spawn; a
+# contributor adding a new shape must either migrate it or add the exact file
+# here in the same change. This is deliberately a narrow grep-style guard, not
+# an AST claim: multi-line assembly is documented coverage debt.
+SPAWN_SHAPE_ALLOWLIST = frozenset(
+    {
+        "cli/src/fno/agents/dispatch.py",
+        "cli/src/fno/agents/providers/claude.py",
+        "cli/src/fno/agents/providers/codex.py",
+        "cli/src/fno/graph/maintain.py",
+        "cli/src/fno/graph/triage.py",
+        "cli/src/fno/inbox/triage.py",
+        "cli/src/fno/pr_watch/_dispatch.py",
+        "cli/src/fno/review/scorers/claude_scorer.py",
+        "cli/src/fno/skill_diff/synthesize.py",
+    }
+)
+_SPAWN_SHAPE_RE = re.compile(
+    r"\[\s*['\"](?:claude|codex)['\"]"
+    r"(?:\s*,\s*[^,\]]+)*"
+    r"\s*,\s*['\"](?:--print|--bg|-p|--exec)['\"]"
+)
+# Shell-form single-line launches (`claude --bg "$prompt"`); .sh files only,
+# where the argv-list form above can never appear.
+_SHELL_SPAWN_RE = re.compile(r"\bclaude\s+(?:--print|--bg|-p)\b|\bcodex\s+(?:--exec|exec)\b")
+_SOURCE_SUFFIXES = frozenset({".py", ".sh"})
+
+
+def _spawn_shape_files(repo_root: Path) -> list[Path]:
+    """Return production source files covered by the narrow spawn-shape scan."""
+    roots = [repo_root / "cli" / "src" / "fno", repo_root / "scripts"]
+    files: list[Path] = []
+    for root in roots:
+        if root.is_dir():
+            files.extend(
+                p
+                for p in root.rglob("*")
+                if p.is_file()
+                and p.suffix in _SOURCE_SUFFIXES
+                and "tests" not in p.parts
+            )
+    return sorted(files)
+
+
+def _spawn_shape_violations(repo_root: Path) -> list[str]:
+    violations: list[str] = []
+    for path in _spawn_shape_files(repo_root):
+        rel = path.relative_to(repo_root).as_posix()
+        if rel in SPAWN_SHAPE_ALLOWLIST:
+            continue
+        for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            match = _SPAWN_SHAPE_RE.search(line)
+            if match is None and path.suffix == ".sh":
+                match = _SHELL_SPAWN_RE.search(line)
+            if match is not None:
+                violations.append(
+                    f"{rel}:{line_no}: hand-assembled session spawn shape "
+                    f"{match.group(0)!r}"
+                )
+    return violations
+
+
+@app.command("spawn-paths")
+def spawn_paths() -> None:
+    """Reject new single-line hand-assembled Claude/Codex session argv shapes.
+
+    The allowlist is intentionally explicit and lives next to this lint. The
+    scan does not claim to catch multi-line argv assembly; those sites remain
+    census-backed migration work until they move behind ``dispatch_spawn``.
+    """
+    violations = _spawn_shape_violations(_repo_root())
+    if violations:
+        typer.echo("spawn-paths: violations:", err=True)
+        for violation in violations:
+            typer.echo(f"  {violation}", err=True)
+        typer.echo(
+            "\nFix: route session launches through fno agents spawn / "
+            "dispatch_spawn, or add the exact source file to "
+            "SPAWN_SHAPE_ALLOWLIST in cli/src/fno/lint_cli.py with a census-backed reason.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    typer.echo("spawn-paths: ok")
 
 
 def _visible_command_names(group: click.Group) -> list[str]:

@@ -80,7 +80,7 @@ def _isolate_spawn_uuid_capture(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
-    """Guard the claude/codex/gemini subprocess seams so a test that reaches the
+    """Guard the claude/codex subprocess seams so a test that reaches the
     Python dispatch path cannot exec a *real* provider binary and spawn a live
     session (e.g. an immortal ``claude --bg``).
 
@@ -92,7 +92,7 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
     generalizing PR #415, which fixed two such tests one at a time).
 
     The discriminator is *which* binary runs, not whether a subprocess runs at
-    all: the safe pattern installs a fake claude/codex/gemini on a tmp-isolated
+    all: the safe pattern installs a fake claude/codex on a tmp-isolated
     PATH (``install_fake_*`` + ``monkeypatch.setenv("PATH", bin_dir)``) and lets
     the real seam exec the fake. This wrapper resolves the command's executable
     and raises only when it points at a binary OUTSIDE the pytest tmp tree (i.e.
@@ -102,7 +102,7 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
     this in-process patch.
     """
     # Real-provider smoke tests (@pytest.mark.smoke, e.g.
-    # test_gemini_integration_smoke / test_codex_integration_smoke, run nightly
+    # test_codex_integration_smoke, run nightly
     # by provider-smoke.yml) intentionally exec the real binary; never guard
     # those (codex P2 review). Per-PR CI excludes `-m smoke`, so this only
     # matters for the nightly real-provider run.
@@ -114,13 +114,12 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
 
     from fno.agents.providers import claude as _claude
     from fno.agents.providers import codex as _codex
-    from fno.agents.providers import gemini as _gemini
 
     # Use pytest's session basetemp (which honors a custom --basetemp) rather
     # than tempfile.gettempdir(), so the "is this a tmp-isolated fake?" check
-    # stays correct under a non-default temp root (gemini review).
+    # stays correct under a non-default temp root.
     tmp_root = str(tmp_path_factory.getbasetemp().resolve())
-    provider_bins = {"claude", "codex", "gemini"}
+    provider_bins = {"claude", "codex"}
 
     def _is_real_provider_exec(cmd) -> bool:
         argv0 = cmd[0] if isinstance(cmd, (list, tuple)) and cmd else cmd
@@ -141,7 +140,7 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
                 raise AssertionError(
                     f"live provider exec blocked under pytest: a test reached a real "
                     f"provider binary ({name!r}). Install a fake on a tmp-isolated PATH "
-                    "(install_fake_claude/codex/gemini + monkeypatch.setenv PATH), stub "
+                    "(install_fake_claude/codex + monkeypatch.setenv PATH), stub "
                     "the seam (_subprocess_run/_subprocess_popen), or assert routing "
                     "without executing dispatch."
                 )
@@ -151,4 +150,3 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
 
     monkeypatch.setattr(_claude, "_subprocess_run", _guard(_claude._subprocess_run))
     monkeypatch.setattr(_codex, "_subprocess_popen", _guard(_codex._subprocess_popen))
-    monkeypatch.setattr(_gemini, "_subprocess_popen", _guard(_gemini._subprocess_popen))

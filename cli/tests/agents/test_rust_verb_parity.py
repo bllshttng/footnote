@@ -233,6 +233,37 @@ def test_resume_print_command_parity(tmp_path) -> None:
 
 
 @requires_rust
+def test_resume_gemini_print_command_parity(tmp_path) -> None:
+    from fno.agents import resume_cli
+
+    entries = [
+        {
+            "name": "gm",
+            "short_id": "gm",
+            "harness": "gemini",
+            "cwd": "/tmp/proj",
+            "project_root": "/tmp/proj",
+            "log_path": "/tmp/proj/l.jsonl",
+            "harness_session_id": "gem-session-1",
+            "status": "live",
+            "created_at": "2026-05-26T09:00:00Z",
+        }
+    ]
+    agents = tmp_path / "agents"
+    _seed_registry(agents, entries)
+
+    def loader():
+        return [SimpleNamespace(**e) for e in entries]
+
+    py = resume_cli.resume_logic(
+        name="gm", print_command=True, registry_loader=loader
+    )
+    rust = _run_rust(["resume", "gm", "--print-command"], agents)
+    assert rust.stdout == py.output == "cd /tmp/proj && exec gemini --resume gem-session-1\n"
+    assert rust.returncode == py.exit_code == 0
+
+
+@requires_rust
 def test_resume_resolves_by_short_and_full_id_parity(tmp_path) -> None:
     """x-1b1e AC1-UI / AC2-HP: `resume` reaches the same row by name, by the
     derived 8-hex prefix of its session id, and by the full session id - the
@@ -281,7 +312,7 @@ def test_resume_error_parity(tmp_path, name, expected_exit) -> None:
 
     entries = [
         {"name": "no-cwd", "harness": "codex", "cwd": "", "log_path": "/x/l", "harness_session_id": "u", "short_id": "a", "project_root": "/x", "status": "live", "created_at": "t"},
-        {"name": "no-sid", "harness": "gemini", "cwd": "/tmp/x", "log_path": "/x/l", "short_id": "b", "project_root": "/x", "status": "live", "created_at": "t"},
+        {"name": "no-sid", "harness": "codex", "cwd": "/tmp/x", "log_path": "/x/l", "short_id": "b", "project_root": "/x", "status": "live", "created_at": "t"},
     ]
     agents = tmp_path / "agents"
     _seed_registry(agents, entries)
