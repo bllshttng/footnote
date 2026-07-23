@@ -2850,6 +2850,7 @@ def reconcile_agents(
                 )
 
     for entry in entries:
+        new_status: AgentStatus
         if entry.harness == "gemini":
             sys.stderr.write(
                 f"WARN: agent {entry.name!r} references retired provider 'gemini'; "
