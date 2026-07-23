@@ -1712,6 +1712,21 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             ));
         }
     }
+    // Deprecation-note parity with cmd_spawn (codex P2): on the installed binary a
+    // non-pane spawn reaches this parser directly and never hits cmd_spawn's
+    // TTY-gated note, so emit it here too when the alias is used alone on `spawn`.
+    // Verb-gated (--provider is a legitimate hint on `ask`, not a harness alias)
+    // and TTY-gated so it never pollutes a machine-consumed stream.
+    if verb == "spawn"
+        && harness_val.is_none()
+        && provider_alias_val.is_some()
+        && std::io::stderr().is_terminal()
+    {
+        eprintln!(
+            "note: --provider/-p is deprecated for the harness axis; use --harness/-H \
+             (the CLI-binary vocabulary shared with the rest of fno)"
+        );
+    }
     if let Some(v) = harness_val.or(provider_alias_val) {
         params.insert("provider".into(), Value::String(v));
     }
