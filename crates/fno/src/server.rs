@@ -1973,6 +1973,25 @@ impl Core {
         }
     }
 
+    /// Defensive backstop for a lost/delayed PTY-reader exit notification.
+    /// The normal exit_rx path is immediate; this scan makes the pane registry
+    /// converge on OS child truth even if that one channel edge is missed.
+    fn reap_dead_children(&mut self) -> Flow {
+        let dead: Vec<u64> = self
+            .panes
+            .iter()
+            .filter_map(|(&pid, entry)| (!entry.pty.is_child_alive()).then_some(pid))
+            .collect();
+        for pid in dead {
+            let ctx = self.member_ctx(pid);
+            self.reconcile_member_close(ctx, true);
+            if self.close_pane(pid) == Flow::Shutdown {
+                return Flow::Shutdown;
+            }
+        }
+        Flow::Continue
+    }
+
     /// Refresh a pane's output watch after a burst, but only while a
     /// `PaneWait` is actually subscribed - `frame_text` is O(grid), so an
     /// unwatched pane pays nothing (the common case).
@@ -8194,6 +8213,11 @@ async fn serve(
     );
     let mut idle_count_rx = client_count_rx.clone();
     let mut idle_deadline = tokio::time::Instant::now() + idle_grace;
+    let mut pane_reap_tick = tokio::time::interval(Duration::from_secs(1));
+    pane_reap_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // `interval`'s first tick is immediate; consume it so the first scan lands
+    // after one interval instead of duplicating startup's known-live state.
+    pane_reap_tick.tick().await;
 
     // x-0296 diagnostics: which panes' output the CORE LOOP has seen. Pairs
     // with the pty reader thread's own first-chunk line to split "shell never
@@ -8248,6 +8272,12 @@ async fn serve(
                 core.reconcile_member_close(ctx, true);
                 if core.close_pane(pid) == Flow::Shutdown {
                     e2e_log(format_args!("last pane gone; shutting down"));
+                    break Flow::Shutdown;
+                }
+            }
+            _ = pane_reap_tick.tick() => {
+                if core.reap_dead_children() == Flow::Shutdown {
+                    e2e_log(format_args!("last dead pane reaped; shutting down"));
                     break Flow::Shutdown;
                 }
             }
@@ -14872,6 +14902,43 @@ mod tests {
         core.next_pane_id = 2;
         core.next_squad_id = 8;
         core
+    }
+
+    #[test]
+    fn defensive_reaper_sweeps_a_dead_child_without_an_exit_event() {
+        let mut core = empty_core();
+        core.shells = vec!["/bin/sh".into()];
+        let pane = core.spawn_pane(24, 80, "/tmp").expect("shell pane");
+        core.session.add_squad(
+            1,
+            vec!["/tmp".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(pane),
+                focus: pane,
+            },
+        );
+        let child = core.panes[&pane].pty.child_pid().expect("child pid");
+        // SAFETY: the pid came from this test's child and SIGKILL is followed
+        // by bounded liveness polling before any assertion continues.
+        assert_eq!(
+            unsafe { libc::kill(child as libc::pid_t, libc::SIGKILL) },
+            0
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while core.panes[&pane].pty.is_child_alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !core.panes[&pane].pty.is_child_alive(),
+            "child never exited"
+        );
+
+        assert!(matches!(core.reap_dead_children(), Flow::Shutdown));
+        assert!(core.panes.is_empty(), "dead pane registry entry survived");
+        assert!(core.session.squads.is_empty(), "dead pane tree survived");
     }
 
     #[test]
