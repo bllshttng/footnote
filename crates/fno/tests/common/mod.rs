@@ -134,6 +134,14 @@ impl ClientHarness {
         // real ~/.fno. Overridable via `envs` below.
         cmd.env("FNO_AGENTS_HOME", scratch.0.join("iso-agents"));
         cmd.env("FNO_CLAUDE_DAEMON_DIR", scratch.0.join("iso-daemon"));
+        // Isolate the backlog graph too (spawn_server already does this). Without
+        // it, the client's autospawned server resolves FNO_GRAPH_JSON to the real
+        // ~/.fno/graph.json and derives mission/backlog squads from whatever is in
+        // flight on the machine; those synthetic squads race into the layout and
+        // flake the screen-exact reattach assertions (a phantom `│ <squad>` segment
+        // in the status line). A clean CI $HOME hides the leak; a dev box with a
+        // live mission does not.
+        cmd.env("FNO_GRAPH_JSON", scratch.0.join("iso-graph.json"));
         // See spawn_server: neutralize isolated-account roster discovery too.
         cmd.env(
             "FNO_GLOBAL_SETTINGS_PATH",
