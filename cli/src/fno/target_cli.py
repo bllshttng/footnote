@@ -26,8 +26,9 @@ import shutil
 import socket
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import typer
 
@@ -185,6 +186,330 @@ def _resolve_plan_for_blast(plan_path: Optional[str], input_: Optional[str]) -> 
     except Exception:
         return None
     return None
+
+
+_TARGET_NODE_TOKEN_RE = re.compile(r"^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$", re.IGNORECASE)
+_SOURCE_PR_URL_RE = re.compile(
+    r"https?://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)(?:[#?\s)]|$)",
+    re.IGNORECASE,
+)
+_GH_PREFLIGHT_TIMEOUT_S = 30.0
+
+
+def _resolve_dispatch_node(
+    input_: Optional[str], plan_path: Optional[str]
+) -> Optional[dict]:
+    """Resolve only an exact node/plan reference for the retro gate.
+
+    Free-text target inputs return ``None`` without reading GitHub. Exact
+    matching keeps ordinary target init behavior cheap and avoids title/fuzzy
+    guesses at the claim boundary.
+    """
+    tokens = (input_ or "").split()
+    node_tokens = {tok.lower() for tok in tokens if _TARGET_NODE_TOKEN_RE.fullmatch(tok)}
+    try:
+        from fno.graph.load import load_graph
+        from fno.paths import graph_json
+
+        graph = load_graph(graph_json())
+    except Exception:  # noqa: BLE001 - the dispatch gate is fail-open
+        return None
+    if not isinstance(graph, list):
+        return None
+    entries = [entry for entry in graph if isinstance(entry, dict)]
+
+    if node_tokens:
+        matches = [
+            entry
+            for entry in entries
+            if str(entry.get("id", "")).lower() in node_tokens
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    if not plan_path:
+        return None
+    try:
+        wanted = Path(plan_path).expanduser().resolve()
+    except OSError:
+        return None
+    matches = []
+    for entry in entries:
+        candidate = entry.get("plan_path")
+        if not isinstance(candidate, str) or not candidate:
+            continue
+        try:
+            if Path(candidate).expanduser().resolve() == wanted:
+                matches.append(entry)
+        except OSError:
+            continue
+    return matches[0] if len(matches) == 1 else None
+
+
+def _source_pr_repo(node: dict, source_pr: int) -> Optional[str]:
+    """Extract the source PR repo from the retro node's canonical permalink."""
+    from fno.graph._reconcile import repo_slug_from_url
+
+    values = [node.get("source_pr_url"), node.get("pr_url"), node.get("details")]
+    for value in values:
+        match = _SOURCE_PR_URL_RE.search(str(value or ""))
+        if match and int(match.group(3)) == source_pr:
+            url = match.group(0).rstrip("#? )\t\r\n")
+            return repo_slug_from_url(url)
+    return None
+
+
+def _evidence_region_files(node: dict) -> list[str]:
+    """Read file paths from an enriched ``git:merged-region:<path>`` packet."""
+    paths: list[str] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            items = value.get("items")
+            if items is not None:
+                visit(items)
+            for key, child in value.items():
+                if isinstance(key, str) and key.startswith("git:merged-region:"):
+                    path = key.removeprefix("git:merged-region:").strip()
+                    if path and path not in paths:
+                        paths.append(path)
+                elif key != "items":
+                    visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    for key in ("evidence", "validity_evidence", "evidence_packet"):
+        visit(node.get(key))
+    return paths
+
+
+def _fetch_dispatch_region_file(
+    node: dict, source_pr: int, finding_hash: str, repo: str
+) -> Optional[str]:
+    """Best-effort live enrichment for nodes whose packet is not persisted."""
+    root = node.get("cwd")
+    if not isinstance(root, str) or not os.path.isdir(root):
+        return None
+    try:
+        from fno.graph.cli import _fetch_retro_comment, _read_merged_region
+
+        comment = _fetch_retro_comment(
+            source_pr, finding_hash, root, repo=repo
+        )
+        if not comment:
+            return None
+        path = comment.get("path")
+        if not isinstance(path, str) or not path:
+            return None
+        line = comment.get("line") or comment.get("original_line")
+        if not _read_merged_region(root, path, line):
+            return None
+        return path
+    except Exception:  # noqa: BLE001 - Tier 2 is advisory and fail-open
+        return None
+
+
+GhRunner = Callable[[list[str]], tuple[int, str, str]]
+
+
+def _default_preflight_gh_runner(args: list[str]) -> tuple[int, str, str]:
+    try:
+        proc = subprocess.run(
+            ["gh", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_GH_PREFLIGHT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 127, "", str(exc)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _preflight_gh_json(
+    args: list[str], runner: GhRunner
+) -> Any:
+    rc, out, err = runner(args)
+    if rc != 0:
+        raise RuntimeError(err.strip()[:160] or f"gh exited {rc}")
+    try:
+        return json.loads(out) if out.strip() else None
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise RuntimeError(f"invalid JSON: {exc}") from exc
+
+
+def _parse_github_time(value: object) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _force_supersede_dispatch_node(node_id: str, reason: str) -> bool:
+    proc = subprocess.run(
+        ["fno", "backlog", "done", node_id, "--force", "--reason", reason],
+        check=False,
+    )
+    return proc.returncode == 0
+
+
+def _retro_dispatch_preflight(
+    node: Optional[dict],
+    *,
+    beastmode: bool = False,
+    unattended: bool = False,
+    scan_fn: Optional[Callable[..., list]] = None,
+    gh_runner: Optional[GhRunner] = None,
+    supersede_fn: Optional[Callable[[str, str], bool]] = None,
+) -> None:
+    """Run the two-tier retro dedup probe before target init claims a node."""
+    if not node:
+        return
+
+    from fno.graph.maintain import is_retro_triage_node, parse_retro_trailer
+
+    if (
+        node.get("completed_at")
+        or node.get("superseded_by")
+        or not is_retro_triage_node(node)
+    ):
+        return
+    parsed = parse_retro_trailer(node.get("details"))
+    if parsed is None:
+        return
+    source_pr, finding_hash = parsed
+    if source_pr is None:
+        typer.echo(
+            "WARN target init: Tier 1 skipped (retro node has source_pr=None); proceeding.",
+            err=True,
+        )
+        typer.echo(
+            "WARN target init: Tier 2 skipped (retro node has no source PR); proceeding.",
+            err=True,
+        )
+        return
+
+    repo = _source_pr_repo(node, source_pr)
+    if not repo:
+        typer.echo(
+            f"WARN target init: Tier 1 skipped (source PR #{source_pr} repo is unavailable); proceeding.",
+            err=True,
+        )
+        typer.echo(
+            "WARN target init: Tier 2 skipped (source PR repo is unavailable); proceeding.",
+            err=True,
+        )
+        return
+
+    from fno.retro.reconcile_findings import scan_addressed_findings
+
+    scan = scan_fn or scan_addressed_findings
+    scan_warnings: list[str] = []
+    try:
+        addressed = scan(
+            [node], include_planned=True, warnings=scan_warnings
+        )
+    except Exception as exc:  # noqa: BLE001 - never close on uncertainty
+        addressed = []
+        scan_warnings.append(str(exc))
+
+    if addressed:
+        finding = addressed[0]
+        reason = (
+            f"retro finding addressed on source PR #{source_pr} ({finding.signal}); "
+            "target dispatch preflight"
+        )
+        typer.echo(
+            f"WARN target init: refusing {node.get('id')} - finding already addressed "
+            f"on source PR #{source_pr} ({finding.signal}); superseding node.",
+            err=True,
+        )
+        close = supersede_fn or _force_supersede_dispatch_node
+        if not close(str(node.get("id")), reason):
+            typer.echo(
+                f"WARN target init: could not supersede {node.get('id')}; refusing dispatch.",
+                err=True,
+            )
+        raise typer.Exit(code=3)
+    if scan_warnings:
+        typer.echo(
+            f"WARN target init: Tier 1 skipped (source PR #{source_pr} state unavailable); proceeding.",
+            err=True,
+        )
+
+    files = _evidence_region_files(node)
+    if not files:
+        live_file = _fetch_dispatch_region_file(node, source_pr, finding_hash, repo)
+        if live_file:
+            files = [live_file]
+    if not files:
+        typer.echo(
+            "WARN target init: Tier 2 skipped (enriched merged-file-region unavailable); proceeding.",
+            err=True,
+        )
+        return
+
+    runner = gh_runner or _default_preflight_gh_runner
+    try:
+        source = _preflight_gh_json(
+            ["pr", "view", str(source_pr), "--repo", repo, "--json", "mergedAt"],
+            runner,
+        )
+        source_merged = _parse_github_time(
+            source.get("mergedAt") if isinstance(source, dict) else None
+        )
+        if source_merged is None:
+            raise RuntimeError("source PR has no parseable mergedAt")
+        merged = _preflight_gh_json(
+            [
+                "pr", "list", "--repo", repo, "--state", "merged", "--limit", "100",
+                "--json", "number,title,mergedAt,files",
+            ],
+            runner,
+        )
+        if not isinstance(merged, list):
+            raise RuntimeError("merged PR list was not an array")
+    except Exception as exc:  # noqa: BLE001 - Tier 2 is advisory
+        typer.echo(
+            f"WARN target init: Tier 2 skipped (sibling PR probe failed: {exc}); proceeding.",
+            err=True,
+        )
+        return
+
+    finding_files = {path.lstrip("./") for path in files}
+    overlaps: list[tuple[int, str, list[str]]] = []
+    for pr in merged:
+        if not isinstance(pr, dict):
+            continue
+        merged_at = _parse_github_time(pr.get("mergedAt"))
+        if merged_at is None or merged_at <= source_merged:
+            continue
+        changed = []
+        for item in pr.get("files") or []:
+            path = item.get("path") if isinstance(item, dict) else item
+            if isinstance(path, str) and path.lstrip("./") in finding_files:
+                changed.append(path)
+        if changed and isinstance(pr.get("number"), int):
+            overlaps.append((pr["number"], str(pr.get("title") or ""), changed))
+
+    if not overlaps:
+        return
+    for number, title, changed in overlaps:
+        typer.echo(
+            f"WARN target init: Tier 2 sibling PR #{number} {title!r} overlaps "
+            f"finding files: {', '.join(changed)}.",
+            err=True,
+        )
+
+    # Tier 2 is deliberately advisory: overlap is best-effort sibling evidence,
+    # never a dispatch gate or a reason to mutate the backlog node.
+    typer.echo(
+        "WARN target init: Tier 2 overlap is advisory; proceeding with dispatch.",
+        err=True,
+    )
 
 
 @target_app.command("blast-check")
@@ -373,6 +698,19 @@ def init(
     except DispatchFlagError as exc:
         typer.echo(f"fno target init: {exc}", err=True)
         raise typer.Exit(code=2)
+
+    # Retro-triaged nodes get a dispatch-time dedup check before the shell
+    # bootstrap acquires the node claim. Ordinary target inputs return early;
+    # probe failures remain fail-open toward dispatch.
+    _retro_dispatch_preflight(
+        _resolve_dispatch_node(input_, plan_path),
+        beastmode=beastmode,
+        unattended=bool(
+            os.environ.get("TARGET_UNATTENDED")
+            or os.environ.get("FNO_AGENT_SELF")
+            or os.environ.get("FNO_BG")
+        ),
+    )
 
     # Blast-radius modulation (x-518f): a deterministic blast read on the plan's
     # File Ownership Map can raise ceremony to an M floor (high blast) or drop to
