@@ -154,7 +154,6 @@ cli/src/fno/doctor.py
 cli/src/fno/graph/cli.py
 cli/src/fno/graph/maintain.py
 cli/src/fno/inbox/drain.py
-cli/src/fno/megawalk_drivers/__init__.py
 cli/src/fno/observer/isolation.py
 cli/src/fno/paths.py
 cli/src/fno/provenance/resolver.py
