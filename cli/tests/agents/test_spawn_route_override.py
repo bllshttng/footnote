@@ -292,44 +292,33 @@ def test_route_allowed_on_headless(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["route_env"]["ANTHROPIC_AUTH_TOKEN"] == "zk-live"
 
 
-def test_provider_zai_alias_and_bare_route(monkeypatch: pytest.MonkeyPatch) -> None:
-    from fno.agents import dispatch, spawn_gate
+# ---------------------------------------------------------------------------
+# Harness axis: --harness/-H canonical, --provider/-p the older spelling.
+# A model VENDOR is never a harness value -- that axis is --route.
+# ---------------------------------------------------------------------------
+
+
+def test_vendor_name_is_not_a_harness_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`zai` is a model vendor, not a CLI binary. It must be refused on the harness
+    axis (through every spelling) rather than silently rewritten into a routed
+    claude worker -- routing has exactly one surface, `--route`."""
+    from fno.agents import spawn_gate
 
     monkeypatch.setenv("ZAI_API_KEY", "zk-live")
     monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
-    captured: Dict[str, Any] = {}
-
-    def fake_dispatch_spawn(**kwargs: Any) -> Any:
-        captured.update(kwargs)
-        return dispatch.SpawnResult(kind="created", name=kwargs["name"], provider="claude", short_id="a")
-
-    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch_spawn)
     from fno.agents.cli import agents_app
 
-    # `--provider zai` expands to claude + default 1M GLM model.
-    result = runner.invoke(agents_app, ["spawn", "w1", "hi", "--provider", "zai", "--headless"])
-    assert result.exit_code == 0, result.output
-    assert captured["provider"] == "claude"
-    assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
-
-    # Bare `--route zai` expands the same way.
-    captured.clear()
-    result = runner.invoke(
-        agents_app, ["spawn", "w2", "hi", "--provider", "claude", "--headless", "--route", "zai"]
-    )
-    assert result.exit_code == 0, result.output
-    assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
+    for flag in ("--harness", "-H", "--provider", "-p"):
+        result = runner.invoke(agents_app, ["spawn", "w", "hi", flag, "zai", "--headless"])
+        assert result.exit_code == 2, f"{flag}: {result.output}"
 
 
-# ---------------------------------------------------------------------------
-# x-6de8 harness axis: --harness/-H canonical, --provider/-p deprecated alias
-# ---------------------------------------------------------------------------
-
-
-def test_zai_shorthand_honors_all_headless_spellings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """x-6de8 codex P2: --once/-o must reach the headless one-shot lane for zai,
-    not be stolen by the pane->bg default (which left once=True + provider=claude
-    and made dispatch reject the combo). All three headless spellings converge."""
+def test_routed_once_reaches_the_headless_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--once` is the pre-substrate spelling of headless, but Python leaves it on
+    the pane default. Without converging it a routed one-shot reaches dispatch as
+    claude+once+not-headless and dies on the "claude peers are persistent bg
+    threads" refusal, so assert BOTH flags: a pure once==True check passes even
+    when the real dispatch would reject the spawn."""
     from fno.agents import dispatch, spawn_gate
 
     monkeypatch.setenv("ZAI_API_KEY", "zk-live")
@@ -345,82 +334,33 @@ def test_zai_shorthand_honors_all_headless_spellings(monkeypatch: pytest.MonkeyP
 
     for flag in ("--once", "-o", "--headless"):
         captured.clear()
-        result = runner.invoke(agents_app, ["spawn", "w", "hi", "--harness", "zai", flag])
+        result = runner.invoke(
+            agents_app,
+            ["spawn", "w", "hi", "--harness", "claude", "--route", "zai,glm-5.2", flag],
+        )
         assert result.exit_code == 0, f"{flag}: {result.output}"
-        # dispatch refuses claude+once unless headless is ALSO True (dispatch.py
-        # `provider == "claude" and once and not headless`), so asserting both is
-        # what catches a --once spelling that only sets once. A pure once==True
-        # check passes even when the real dispatch would reject the spawn.
         assert captured["once"] is True, f"{flag} should reach the one-shot lane"
         assert captured["headless"] is True, f"{flag} must set headless for claude+once"
-        assert captured["provider"] == "claude"
-        assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
-
-    # Bare zai (no one-shot flag) still defaults to the attachable bg thread.
-    captured.clear()
-    result = runner.invoke(agents_app, ["spawn", "w", "hi", "--harness", "zai"])
-    assert result.exit_code == 0, result.output
-    assert captured.get("once") is not True
-
-    # An explicit --route one-shot converges on the same headless lane (not just
-    # the zai shorthand): the guard passes on headless_route, so substrate must
-    # become headless or dispatch refuses claude+once (codex P2, finding 6).
-    captured.clear()
-    result = runner.invoke(
-        agents_app, ["spawn", "w", "hi", "--harness", "claude", "--route", "zai", "--once"]
-    )
-    assert result.exit_code == 0, result.output
-    assert captured["once"] is True and captured["headless"] is True
 
 
-def test_zai_explicit_pane_substrate_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """codex P2 (finding 7): the zai shorthand must NOT silently rewrite an
-    explicit --substrate pane to bg. Routing never reaches the pane path
-    (dispatch_spawn_pane takes no route_env), so a routed pane is refused."""
-    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+def test_bare_route_vendor_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare `--route zai` names no model. It is refused rather than expanded from
+    a hardcoded default: the vendor/model pair is the caller's choice."""
     from fno.agents import spawn_gate
 
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
     monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "w", "hi", "--harness", "zai", "--substrate", "pane"]
+        agents_app, ["spawn", "w", "hi", "--harness", "claude", "--headless", "--route", "zai"]
     )
     assert result.exit_code == 2, result.output
-    assert "bg" in result.output.lower()  # steers to a routing-capable lane
+    assert "provider,model" in result.output
 
 
-def test_harness_zai_shorthand_matches_provider_zai(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The zai vendor shorthand fires through the canonical --harness spelling too."""
-    from fno.agents import dispatch, spawn_gate
-    from fno.agents.rust_runtime import _is_route_provider_spawn
-
-    # The Python-only detector recognizes zai via every spelling of the axis.
-    assert _is_route_provider_spawn("spawn", ["spawn", "w", "--harness", "zai"])
-    assert _is_route_provider_spawn("spawn", ["spawn", "w", "-H", "zai"])
-    assert _is_route_provider_spawn("spawn", ["spawn", "w", "--harness=zai"])
-
-    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
-    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
-    captured: Dict[str, Any] = {}
-
-    def fake_dispatch_spawn(**kwargs: Any) -> Any:
-        captured.update(kwargs)
-        return dispatch.SpawnResult(kind="created", name=kwargs["name"], provider="claude", short_id="a")
-
-    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch_spawn)
-    from fno.agents.cli import agents_app
-
-    result = runner.invoke(agents_app, ["spawn", "w1", "hi", "--harness", "zai", "--headless"])
-    assert result.exit_code == 0, result.output
-    assert captured["provider"] == "claude"
-    assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
-
-
-def test_provider_alias_functions_and_stays_quiet_off_tty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--provider/-p still selects the harness (deprecated alias), and the
-    human-only deprecation note never pollutes a non-tty stream (the note is
-    gated on stderr.isatty(), which is False under CliRunner and in any pipe)."""
+def test_provider_is_the_older_spelling_of_harness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--provider/-p and --harness/-H name one axis: the CLI binary."""
     from fno.agents import dispatch, spawn_gate
 
     monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
@@ -436,14 +376,12 @@ def test_provider_alias_functions_and_stays_quiet_off_tty(monkeypatch: pytest.Mo
     result = runner.invoke(agents_app, ["spawn", "w1", "hi", "--provider", "codex", "--headless"])
     assert result.exit_code == 0, result.output
     assert captured["provider"] == "codex"
-    assert "deprecated" not in result.output  # quiet on the non-tty test stream
 
     # The canonical --harness spelling threads the same provider.
     captured.clear()
     clean = runner.invoke(agents_app, ["spawn", "w2", "hi", "--harness", "codex", "--headless"])
     assert clean.exit_code == 0, clean.output
     assert captured["provider"] == "codex"
-    assert "deprecated" not in clean.output
 
 
 def test_harness_provider_conflict_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:

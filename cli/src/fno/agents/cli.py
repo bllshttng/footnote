@@ -455,7 +455,6 @@ def cmd_crown(
 
 @agents_app.command("spawn")
 def cmd_spawn(
-    ctx: typer.Context,
     name: str = typer.Argument(
         "",
         help="Agent name (optional; an adjective-noun slug is minted when omitted).",
@@ -469,9 +468,9 @@ def cmd_spawn(
             "The CLI binary to launch: claude | codex | gemini | opencode | agy "
             "(optional). This is the canonical spelling of the axis, aligning "
             "spawn with the --harness vocabulary used everywhere else in fno. "
-            "Defaults to the invoking harness, then claude. Wins over the "
-            "deprecated --provider/-p. NOTE: -H no longer means headless (x-6de8); "
-            "for a one-shot use --substrate headless / --headless / --once."
+            "Defaults to the invoking harness, then claude. NOTE: -H no longer "
+            "means headless; for a one-shot use --substrate headless / "
+            "--headless / --once."
         ),
     ),
     provider: str | None = typer.Option(
@@ -479,9 +478,8 @@ def cmd_spawn(
         "--provider",
         "-p",
         help=(
-            "DEPRECATED alias for --harness/-H (the CLI binary): claude | codex | "
-            "gemini. Still works and prints a one-line note; --harness wins if "
-            "both are given with the same value (a conflict exits 2)."
+            "Older spelling of --harness/-H (the CLI binary): claude | codex | "
+            "gemini. --harness wins; passing both with different values exits 2."
         ),
     ),
     once: bool = typer.Option(
@@ -783,60 +781,20 @@ def cmd_spawn(
         else None
     )
 
-    # Harness axis (x-6de8): --harness/-H is the canonical CLI-binary selector;
-    # --provider/-p is the deprecated alias. Collapse the two into the single
-    # `provider` variable the rest of this path already threads. --harness wins;
-    # a genuine conflict (both given, different values) fails closed; a lone
-    # --provider still works but prints a one-line migration note.
+    # Harness axis: --harness/-H is the canonical CLI-binary selector, --provider/-p
+    # the older spelling of the same axis. Collapse the two into the single
+    # `provider` variable the rest of this path already threads. Both write one
+    # axis, so a mismatched pair is genuinely ambiguous and fails closed rather
+    # than letting argument order decide which harness launches.
     if harness is not None and provider is not None and harness.strip() != provider.strip():
         print(
             f"--harness {harness!r} conflicts with --provider {provider!r}; pass one "
-            "(--provider is the deprecated alias for --harness/-H)",
+            "(they are two spellings of the same CLI-binary axis)",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
     if harness is not None:
         provider = harness
-    elif provider is not None and sys.stderr.isatty():
-        # Human-only deprecation note: gate on a tty so it never pollutes a
-        # machine-consumed stream. The spawn receipt is on stdout, but a caller
-        # doing `spawn ... 2>&1 | jq` merges stderr in -- isatty is False there
-        # (and in CliRunner), so the note shows on a real terminal only.
-        print(
-            "note: --provider/-p is deprecated for the harness axis; use "
-            "--harness/-H (the CLI-binary vocabulary shared with the rest of fno)",
-            file=sys.stderr,
-        )
-
-    # `--provider zai` / `--harness zai` is shorthand for a claude worker routed to
-    # zai's default GLM model: rewrite to the explicit claude + --route lane BEFORE
-    # provider resolution (which would reject the unknown provider name), so routing
-    # has one mechanism rather than a second provider identity. An explicit --route
-    # still wins over the default model.
-    if provider == "zai":
-        provider = "claude"
-        if route is None:
-            route = "zai/glm-5.2[1m]"
-        # Default the shorthand to the attachable bg thread -- but ONLY when the
-        # caller gave no explicit substrate and no one-shot flag. An explicit
-        # --substrate pane must NOT be silently rewritten to bg (codex P2, finding
-        # 7): it falls through to the shared route guard below, which refuses a
-        # routed pane. The one-shot spellings are handled by the normalization next.
-        from click.core import ParameterSource
-
-        substrate_explicit = (
-            ctx.get_parameter_source("substrate") != ParameterSource.DEFAULT
-        )
-        if substrate == "pane" and not substrate_explicit and not once and not headless:
-            substrate = "bg"
-
-    # A routed one-shot (--once/-o OR --headless) must land on the HEADLESS
-    # substrate: the guard below passes on `headless_route` (once or headless), but
-    # dispatch derives headless from `substrate == "headless"` and refuses
-    # claude+once unless headless is True. Converting here makes all three one-shot
-    # spellings reach dispatch with once=True AND headless=True (codex P2, 3/4/6).
-    if route is not None and (once or headless) and substrate == "pane":
-        substrate = "headless"
 
     # --provider is optional: resolve it (explicit > invoking harness > claude)
     # and reject an empty --model before anything spawns. `provider` is a
@@ -861,6 +819,14 @@ def cmd_spawn(
     # wins over an explicit --substrate so `--headless` always resolves to the
     # one-shot lane. (The -H short moved to --harness in x-6de8.)
     if headless:
+        substrate = "headless"
+    # `--once` is the pre-substrate spelling of headless (the Rust client maps it to
+    # --substrate headless; the spawn gate counts it as headless) but Python leaves
+    # it on the pane default. That only bites the routed lane, where the substrate
+    # decides whether the route is materialized at all: without this a routed
+    # `--once` reaches dispatch as claude+once+not-headless and dies on the
+    # "claude peers are persistent bg threads" refusal.
+    if once and route is not None and substrate == "pane":
         substrate = "headless"
     if substrate not in ("pane", "bg", "headless"):
         print(
@@ -1000,11 +966,11 @@ def cmd_spawn(
     # for --route is a hard refusal, not the role lane's silent fallback.
     route_env: dict[str, str] | None = None
     if route is not None:
-        # A routed claude worker applies its route via a --settings file
-        # (x-6de8), which the bg and headless lanes both honor; pane is not a
-        # routed lane. `-H`/`--once` are headless spellings.
-        headless_route = once or substrate == "headless"
-        if provider != "claude" or not (substrate == "bg" or headless_route):
+        # A routed claude worker applies its route via a --settings file, which the
+        # bg and headless lanes both honor; pane is not a routed lane
+        # (dispatch_spawn_pane takes no route_env, so a routed pane would silently
+        # run the primary model).
+        if provider != "claude" or substrate not in ("bg", "headless"):
             print(
                 "--route is claude on --substrate bg or headless only; "
                 f"got provider {provider!r} substrate {substrate!r}.",
@@ -1013,12 +979,6 @@ def cmd_spawn(
             raise typer.Exit(code=2)
         from fno.agents.model_routing import _parse_target, resolve_explicit_route
 
-        # Bare `--route zai` means zai's default 1M-context GLM model, so the
-        # common case needs no model token. Other bare providers still require
-        # an explicit `provider,model` (falls through to _parse_target's
-        # refusal below).
-        if "/" not in route and "," not in route and route.strip().lower() == "zai":
-            route = "zai/glm-5.2[1m]"
         parsed = _parse_target(route)
         if parsed is None:
             print(

@@ -1467,9 +1467,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         normalized.push(tok.clone());
     }
 
-    // x-6de8: the harness axis has a canonical spelling (--harness/-H) and a
-    // deprecated alias (--provider/-p). Track them separately so a conflicting
-    // pair fails closed (matching Python cmd_spawn) instead of the param map's
+    // x-6de8: the harness axis has a canonical spelling (--harness/-H) and an
+    // older one (--provider/-p). Track them separately so a mismatched pair fails
+    // closed (matching Python cmd_spawn) instead of the param map's
     // last-write-wins silently launching under the wrong harness.
     let mut harness_val: Option<String> = None;
     let mut provider_alias_val: Option<String> = None;
@@ -1478,10 +1478,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         match a.as_str() {
             // --harness/-H is the canonical CLI-binary axis (aligns spawn with the
             // --harness vocabulary used everywhere else in fno); --provider/-p is
-            // the deprecated alias. Kept in separate slots and reconciled after
-            // the loop so a conflict fails closed. -H no longer means headless
-            // (that is --substrate headless / --headless / --once now); freeing
-            // the letter is the x-6de8 surface redesign.
+            // the older spelling of it. Kept in separate slots and reconciled
+            // after the loop so a mismatched pair fails closed. -H no longer means
+            // headless (that is --substrate headless / --headless / --once now).
             "--harness" | "-H" => {
                 harness_val = Some(it.next().ok_or("--harness needs a value")?);
             }
@@ -1700,32 +1699,17 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         }
     }
 
-    // Reconcile the harness axis (x-6de8): --harness/-H wins over the deprecated
-    // --provider/-p; both present with different values is a hard error, matching
-    // the Python cmd_spawn conflict guard and the documented contract. This runs
-    // on the installed-Rust non-pane lane, which never re-execs Python cmd_spawn.
+    // Reconcile the harness axis: --harness/-H wins over the older --provider/-p
+    // spelling; both present with different values is a hard error, matching the
+    // Python cmd_spawn conflict guard. This runs on the installed-Rust non-pane
+    // lane, which never re-execs Python cmd_spawn.
     if let (Some(h), Some(p)) = (&harness_val, &provider_alias_val) {
         if h != p {
             return Err(format!(
                 "--harness {h:?} conflicts with --provider {p:?}; pass one \
-                 (--provider is the deprecated alias for --harness/-H)"
+                 (they are two spellings of the same CLI-binary axis)"
             ));
         }
-    }
-    // Deprecation-note parity with cmd_spawn (codex P2): on the installed binary a
-    // non-pane spawn reaches this parser directly and never hits cmd_spawn's
-    // TTY-gated note, so emit it here too when the alias is used alone on `spawn`.
-    // Verb-gated (--provider is a legitimate hint on `ask`, not a harness alias)
-    // and TTY-gated so it never pollutes a machine-consumed stream.
-    if verb == "spawn"
-        && harness_val.is_none()
-        && provider_alias_val.is_some()
-        && std::io::stderr().is_terminal()
-    {
-        eprintln!(
-            "note: --provider/-p is deprecated for the harness axis; use --harness/-H \
-             (the CLI-binary vocabulary shared with the rest of fno)"
-        );
     }
     if let Some(v) = harness_val.or(provider_alias_val) {
         params.insert("provider".into(), Value::String(v));
@@ -3470,7 +3454,7 @@ mod tests {
     #[test]
     fn spawn_harness_flag_sets_provider() {
         // x-6de8: --harness/-H is the canonical CLI-binary axis; --provider/-p is
-        // the deprecated alias. All four spell the same `provider` param, and -H
+        // the older spelling of it. All four spell the same `provider` param, and -H
         // now takes a VALUE (harness name) rather than meaning headless.
         for flag in ["--harness", "-H", "--provider", "-p"] {
             let args = vec!["wk".to_string(), flag.to_string(), "codex".to_string()];

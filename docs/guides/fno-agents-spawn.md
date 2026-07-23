@@ -18,12 +18,21 @@ fno agents spawn worker --harness codex "review this diff"   # canonical
 fno agents spawn worker -H codex "review this diff"          # short form
 ```
 
-`--provider` / `-p` is a **deprecated alias** for `--harness` on `spawn`; it still works and prints a one-line note on a terminal. Passing both with different values exits 2.
+`--provider` / `-p` is the older spelling of the same axis and still works. Passing both with different values exits 2.
 
-Two things to know about `-H`:
+`-H` now takes a **harness value** (`-H codex`). It used to be a boolean shortcut for headless; that meaning moved. For a one-shot worker use `--substrate headless`, `--headless`, or `--once` / `-o`.
 
-- `-H` now takes a **harness value** (`-H codex`). It used to be a boolean shortcut for headless; that meaning moved. For a one-shot worker use `--substrate headless`, `--headless`, or `--once` / `-o`.
-- The `zai` vendor shorthand rides this axis: `--harness zai` (or `--provider zai`) expands to a claude worker routed to GLM, exactly like `--route zai/glm-5.2[1m]`. The vendor/model route itself lives in `--route`.
+The harness axis names a CLI binary only. Which model vendor that binary talks to is a separate axis, `--route` (below): a vendor name such as `zai` is never a `--harness` value.
+
+## Routing a worker to another vendor (`--route`)
+
+`--route <vendor>,<model>` points a claude worker at a different model endpoint, e.g. `--route zai,glm-5.2`. The vendor must be a known `model_routing.providers` record with a resolvable key; an unknown, non-anthropic-compatible, or keyless vendor is refused before anything spawns, so the node stays dispatchable.
+
+```bash
+fno agents spawn glm-worker "review this diff" --substrate bg --route zai,glm-5.2
+```
+
+`--route` is claude-only and reaches the `bg` and `headless` substrates only. The route is applied by writing a `0600` claude `--settings` file and passing `--settings <path>`: a `claude --bg` session's serving process is forked by the claude daemon, which drops per-spawn `ANTHROPIC_*` env before the first model request, and a settings file is read by the session process itself so it survives that fork. `pane` is not a routed lane and is refused rather than silently running the primary model.
 
 ## Persistent claude peer (plain spawn)
 
