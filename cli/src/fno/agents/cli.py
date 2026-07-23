@@ -817,8 +817,11 @@ def cmd_spawn(
         if route is None:
             route = "zai/glm-5.2[1m]"
         # zai is an attachable bg thread, not a pane or a headless one-shot:
-        # default the default-pane case to bg. `-H` still opts into headless.
-        if substrate == "pane" and not headless:
+        # default the default-pane case to bg. A one-shot request keeps the
+        # headless lane -- honor BOTH spellings (`--headless` and `--once`/`-o`),
+        # else `--once` would be rewritten to bg here yet still carry once=True and
+        # dispatch would reject the claude+once combination (x-6de8 codex P2).
+        if substrate == "pane" and not headless and not once:
             substrate = "bg"
 
     # --provider is optional: resolve it (explicit > invoking harness > claude)

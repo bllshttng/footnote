@@ -322,6 +322,38 @@ def test_provider_zai_alias_and_bare_route(monkeypatch: pytest.MonkeyPatch) -> N
 # ---------------------------------------------------------------------------
 
 
+def test_zai_shorthand_honors_all_headless_spellings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """x-6de8 codex P2: --once/-o must reach the headless one-shot lane for zai,
+    not be stolen by the pane->bg default (which left once=True + provider=claude
+    and made dispatch reject the combo). All three headless spellings converge."""
+    from fno.agents import dispatch, spawn_gate
+
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    captured: Dict[str, Any] = {}
+
+    def fake_dispatch_spawn(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return dispatch.SpawnResult(kind="created", name=kwargs["name"], provider="claude", short_id="a")
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch_spawn)
+    from fno.agents.cli import agents_app
+
+    for flag in ("--once", "-o", "--headless"):
+        captured.clear()
+        result = runner.invoke(agents_app, ["spawn", "w", "hi", "--harness", "zai", flag])
+        assert result.exit_code == 0, f"{flag}: {result.output}"
+        assert captured["once"] is True, f"{flag} should reach the headless one-shot lane"
+        assert captured["provider"] == "claude"
+        assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
+
+    # Bare zai (no one-shot flag) still defaults to the attachable bg thread.
+    captured.clear()
+    result = runner.invoke(agents_app, ["spawn", "w", "hi", "--harness", "zai"])
+    assert result.exit_code == 0, result.output
+    assert captured.get("once") is not True
+
+
 def test_harness_zai_shorthand_matches_provider_zai(monkeypatch: pytest.MonkeyPatch) -> None:
     """The zai vendor shorthand fires through the canonical --harness spelling too."""
     from fno.agents import dispatch, spawn_gate
