@@ -3636,7 +3636,18 @@ impl View {
         // (x-96e8) instead re-points the cursor at the moved squad's new row so
         // it visually follows the workspace; the follow persists across repeated
         // presses until a non-reorder key clears sel_follow.
-        if self.selector.is_some() {
+        if self.sel_hover_armed {
+            // (x-8d3e) A hover-armed selection follows the PHYSICAL pointer, which
+            // has not moved across a scrape tick. Keep it at its screen coordinate
+            // (hover_row's index) or clear it - never identity-reanchor it onto
+            // another screen row, or the highlight and hover-routed verb keys would
+            // land where a click (resolved by chrome_hit at the unchanged pointer)
+            // does not (codex #570). The next pointer Move re-hit-tests.
+            self.selector = self
+                .hover_row
+                .filter(|&j| self.selector_anchor(j) == Some(j));
+            self.sel_hover_armed = self.selector.is_some();
+        } else if self.selector.is_some() {
             let anchored = match self.sel_follow.and_then(|sq| self.squad_row(sq)) {
                 Some(row) => Some(row),
                 // Identity first when a status re-sort could have moved the row
@@ -3878,12 +3889,16 @@ impl View {
     }
 
     /// (x-8d3e) The one write point for [`View::selector`] and its `sel_protect`
-    /// cache. Reads the row at `idx` from the current build to cache the protected
-    /// squad (never recurses - the build reads the PRIOR cache). If that changes
+    /// cache. Caches the protected squad from the row at `idx` in the current
+    /// build (never recurses - the build reads the PRIOR cache). If that changes
     /// the protected squad the rows reflow, so it re-locates the target by
-    /// identity, keeping `selector` valid against the new build. Hover callers
-    /// re-hit-test the pointer themselves (see `on_hover`); the `sel_hover_armed`
-    /// sync here covers the pointer-less `set_layout` reflow path.
+    /// identity, keeping the KEYBOARD cursor on the row it was on.
+    ///
+    /// A HOVER-armed selection is exempt from both: the physical pointer is its
+    /// anchor (see `on_hover`), so it never drives protect - the pointed row is
+    /// always a within-budget, visible row that needs no expanding, and expanding
+    /// would reflow the rows out from under the pointer - and never
+    /// identity-reanchors (on_hover re-hit-tests the pointer instead).
     fn set_selector(&mut self, idx: Option<usize>) {
         match idx {
             None => {
@@ -3891,44 +3906,33 @@ impl View {
                 self.sel_protect = None;
             }
             Some(i) => {
-                // `i` is valid against the current build: the caller computed it
-                // there, and that build reads the still-current `sel_protect` for
-                // its protect.
                 let rows = self.display_rows();
                 let target = rows.get(i).map(row_key);
-                // Protect the squad of the selected IDLE row (an attention row is
-                // never folded, so it needs no protection); everything else clears.
                 let new_protect = match rows.get(i) {
-                    Some(DisplayRow::Agent(a)) if is_idle_row(a) => a.squad,
+                    Some(DisplayRow::Agent(a)) if !self.sel_hover_armed && is_idle_row(a) => {
+                        a.squad
+                    }
                     _ => None,
                 };
                 drop(rows);
                 self.selector = Some(i);
                 if new_protect != self.sel_protect {
-                    // The protected squad changed, so the row set reflows. Re-find
-                    // the target by identity in the reflowed build; a vanished or
-                    // inert target falls back to the anchor.
                     self.sel_protect = new_protect;
-                    self.selector = match target {
-                        Some(t) if t != RowKey::Other => self
-                            .display_rows()
-                            .iter()
-                            .position(|r| row_key(r) == t)
-                            .or_else(|| self.selector_anchor(i)),
-                        _ => self.selector_anchor(i),
-                    };
+                    // The protected squad changed, so the rows reflow. The keyboard
+                    // cursor re-finds its row by identity; a hover selection is
+                    // re-hit-tested against the pointer by on_hover, so leave it.
+                    if !self.sel_hover_armed {
+                        self.selector = match target {
+                            Some(t) if t != RowKey::Other => self
+                                .display_rows()
+                                .iter()
+                                .position(|r| row_key(r) == t)
+                                .or_else(|| self.selector_anchor(i)),
+                            _ => self.selector_anchor(i),
+                        };
+                    }
                 }
             }
-        }
-        // (x-8d3e) A hover-armed selector shares the pointer's highlight, so any
-        // re-anchor that moves it - here from on_hover, or from a scrape tick
-        // through set_layout - must drag hover_row along, or the two diverge and
-        // the UI paints a second highlight and routes hover verbs to the relocated
-        // row (codex #570). Only when the selector lands on a row: a cleared
-        // selector leaves hover_row on the pointer's own (possibly inert) row so
-        // the highlight still follows the pointer.
-        if self.sel_hover_armed && self.selector.is_some() {
-            self.hover_row = self.selector;
         }
     }
 
@@ -14346,22 +14350,34 @@ mod tests {
         );
     }
 
-    // x-8d3e regression (codex P2 on #570): a hover-armed selection tracks the
-    // PHYSICAL pointer, not an identity-followed row. When the pointer moves off
-    // an idle row to a row below the expanded squad, the squad folds and the rows
-    // under the pointer shift; the selection re-hit-tests to the row now under the
-    // pointer - the same row a click at those coordinates resolves to via
-    // chrome_hit - so highlight, verb routing, and clicks never disagree.
+    // x-8d3e regression (codex P2 on #570): protect is the KEYBOARD cursor's
+    // guarantee only. A hover-armed selection tracks the physical pointer and must
+    // NOT expand the squad - the pointed row is already within budget and visible,
+    // and expanding would reflow rows out from under the pointer, desyncing the
+    // highlight from where a click (resolved by chrome_hit) lands.
     #[test]
-    fn hover_selection_tracks_the_physical_pointer_across_reflow() {
+    fn hover_does_not_expand_the_squad_and_tracks_the_pointer() {
         let dir = isolate_view_store("cap-hover");
         let mut agents = vec![sv_agent(1, "w", Some(AgentBadge::Working), false)];
         for i in 0..12 {
             agents.push(sv_agent(1, &format!("idle{i}"), None, false));
         }
         let mut view = view_with_agents(agents);
-        // Hover onto a visible idle row -> arm + protect squad 1 (it expands).
-        // Screen row maps 1:1 to the display index at offset 0.
+        // A KEYBOARD selection (not hover-armed) of an idle row expands the squad.
+        let idle0 = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "idle0"))
+            .unwrap();
+        view.set_selector(Some(idle0));
+        assert_eq!(
+            rendered(&view, "idle"),
+            12,
+            "keyboard select expands (AC2-FR)"
+        );
+        // Clear it and HOVER the same row instead: armed, but the squad stays
+        // capped and the selection is the row physically under the pointer.
+        view.set_selector(None);
         let idle0 = view
             .display_rows()
             .iter()
@@ -14371,87 +14387,62 @@ mod tests {
         assert!(view.sel_hover_armed, "the pointer armed the selector");
         assert_eq!(
             rendered(&view, "idle"),
-            12,
-            "hovering the idle row expanded it"
-        );
-        // Now hover onto the create-workspace footer, below the overflow. Leaving
-        // the idle row folds squad 1, so the rows under this screen coordinate
-        // shift up.
-        let footer_row = view
-            .display_rows()
-            .iter()
-            .position(|r| matches!(r, DisplayRow::NewSquad))
-            .unwrap() as u16;
-        view.on_hover(footer_row, 2, Instant::now());
-        assert_eq!(
-            rendered(&view, "idle"),
             7,
-            "the squad folded when the cursor left"
+            "hover does NOT expand the squad"
         );
-        // The selection is the actionable row physically under the pointer - the
-        // same row a click at these coordinates hits - never the footer stranded
-        // at its stale expanded index.
         let under = view
-            .sideline_row_at(footer_row, 2)
+            .sideline_row_at(idle0 as u16, 2)
             .filter(|&j| view.selector_anchor(j) == Some(j));
-        assert_eq!(
-            view.hover_row,
-            view.sideline_row_at(footer_row, 2),
-            "highlight follows the physical pointer"
-        );
         assert_eq!(
             view.selector, under,
             "selection == the actionable row under the pointer (matches a click)"
+        );
+        assert_eq!(
+            view.hover_row,
+            view.sideline_row_at(idle0 as u16, 2),
+            "highlight follows the physical pointer"
         );
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // x-8d3e regression (codex P2 on #570): the hover-sync must hold on the
-    // scrape-tick path too. A hover-armed selector on an expanded overflow row,
-    // when a layout tick promotes that agent to non-idle, folds the squad and
-    // re-anchors the selector via set_layout -> set_selector; hover_row must
-    // track it, not keep the stale expanded-catalog index.
+    // x-8d3e regression (codex P2 on #570): a hover-armed selection follows the
+    // physical pointer, so a scrape tick that reorders rows under a still pointer
+    // must keep it at its SCREEN coordinate, never identity-reanchor it to the
+    // moved row - a click at the unchanged pointer would hit whatever now sits at
+    // that coordinate.
     #[test]
-    fn set_layout_reanchor_keeps_hover_row_aligned() {
-        let dir = isolate_view_store("cap-layout-hover");
-        let mut agents = vec![sv_agent(1, "w", Some(AgentBadge::Working), false)];
-        for i in 0..12 {
-            agents.push(sv_agent(1, &format!("idle{i}"), None, false));
-        }
-        let mut view = view_with_agents(agents);
-        // Expand the squad by hovering an idle row, then hover onto an overflow
-        // row (idle11) that exists only because of that expansion.
-        let idle0 = view
+    fn hover_selection_holds_its_screen_row_across_a_reorder() {
+        let dir = isolate_view_store("hover-reorder");
+        let mut view = view_with_agents(vec![
+            sv_agent(1, "a", Some(AgentBadge::Working), false),
+            sv_agent(1, "b", Some(AgentBadge::Working), false),
+        ]);
+        let a_at = view
             .display_rows()
             .iter()
-            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "idle0"))
+            .position(|r| matches!(r, DisplayRow::Agent(x) if x.name == "a"))
             .unwrap();
-        view.on_hover(idle0 as u16, 2, Instant::now());
-        let idle11 = view
-            .display_rows()
-            .iter()
-            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "idle11"))
-            .unwrap();
-        view.on_hover(idle11 as u16, 2, Instant::now());
-        assert!(view.sel_hover_armed, "armed on the overflow row");
-        assert_eq!(
-            view.hover_row, view.selector,
-            "armed: hover_row tracks selector"
+        view.on_hover(a_at as u16, 2, Instant::now());
+        assert!(view.sel_hover_armed, "armed on 'a'");
+        assert!(
+            matches!(view.display_rows().get(view.selector.unwrap()), Some(DisplayRow::Agent(x)) if x.name == "a"),
+            "selection starts on 'a'"
         );
-        let sel_before = view.selector.unwrap();
-        // A scrape tick promotes idle11 (agents[12]) to non-idle: the squad folds
-        // and idle11's row moves up. set_layout re-anchors; hover_row must follow.
+        // A scrape tick swaps the order so 'b' now occupies 'a''s old screen row.
+        // The pointer has not moved, so the selection stays at that coordinate -
+        // now 'b' - not following 'a' by identity.
         let mut next = view.layout.clone();
-        next.agents[12].badge = Some(AgentBadge::Working);
+        next.agents.swap(0, 1);
         view.set_layout(next);
         assert_eq!(
-            view.hover_row, view.selector,
-            "hover_row tracks the re-anchored selector after a layout tick"
+            view.selector,
+            Some(a_at),
+            "selection stays at the pointer's screen coordinate"
         );
         assert!(
-            view.selector.unwrap() < sel_before,
-            "the fold moved the selected row up"
+            matches!(view.display_rows().get(a_at), Some(DisplayRow::Agent(x)) if x.name == "b"),
+            "a click at the pointer now hits 'b', matching the selection"
         );
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);
