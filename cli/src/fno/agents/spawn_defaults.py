@@ -92,8 +92,8 @@ _SUBSTRATES = ("pane", "bg", "headless")
 _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
     {
         "--role", "--resume", "-r", "--add-dir", "--agent", "--tools",
-        "--deny-tools", "--squad", "-s", "--split", "-x", "--node", "--slug",
-        "--plan",
+        "--deny-tools", "--workspace", "--squad", "-s", "--split", "-x",
+        "--node", "--slug", "--plan",
     }
 )
 
