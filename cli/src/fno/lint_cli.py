@@ -42,7 +42,9 @@ SPAWN_SHAPE_ALLOWLIST = frozenset(
     }
 )
 _SPAWN_SHAPE_RE = re.compile(
-    r"\[\s*['\"](?:claude|codex)['\"]\s*,\s*['\"](?:--print|--bg|-p|--exec)['\"]"
+    r"\[\s*['\"](?:claude|codex)['\"]"
+    r"(?:\s*,\s*[^,\]]+)*"
+    r"\s*,\s*['\"](?:--print|--bg|-p|--exec)['\"]"
 )
 # Shell-form single-line launches (`claude --bg "$prompt"`); .sh files only,
 # where the argv-list form above can never appear.

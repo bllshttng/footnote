@@ -113,6 +113,22 @@ def test_spawn_paths_lint_rejects_non_allowlisted_session_shape(tmp_path: Path) 
     assert "--print" in violations[0]
 
 
+def test_spawn_paths_lint_rejects_spawn_flag_after_other_options(tmp_path: Path) -> None:
+    source = tmp_path / "cli" / "src" / "fno" / "new_spawn.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        'cmd = ["claude", "--model", "sonnet", "--print", "prompt"]\n',
+        encoding="utf-8",
+    )
+
+    from fno.lint_cli import _spawn_shape_violations
+
+    violations = _spawn_shape_violations(tmp_path)
+    assert len(violations) == 1
+    assert "new_spawn.py:1" in violations[0]
+    assert "--print" in violations[0]
+
+
 def test_spawn_paths_lint_allows_named_provider_file(tmp_path: Path) -> None:
     source = tmp_path / "cli" / "src" / "fno" / "agents" / "providers" / "claude.py"
     source.parent.mkdir(parents=True)
