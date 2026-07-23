@@ -343,7 +343,12 @@ def test_zai_shorthand_honors_all_headless_spellings(monkeypatch: pytest.MonkeyP
         captured.clear()
         result = runner.invoke(agents_app, ["spawn", "w", "hi", "--harness", "zai", flag])
         assert result.exit_code == 0, f"{flag}: {result.output}"
-        assert captured["once"] is True, f"{flag} should reach the headless one-shot lane"
+        # dispatch refuses claude+once unless headless is ALSO True (dispatch.py
+        # `provider == "claude" and once and not headless`), so asserting both is
+        # what catches a --once spelling that only sets once. A pure once==True
+        # check passes even when the real dispatch would reject the spawn.
+        assert captured["once"] is True, f"{flag} should reach the one-shot lane"
+        assert captured["headless"] is True, f"{flag} must set headless for claude+once"
         assert captured["provider"] == "claude"
         assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
 

@@ -816,13 +816,16 @@ def cmd_spawn(
         provider = "claude"
         if route is None:
             route = "zai/glm-5.2[1m]"
-        # zai is an attachable bg thread, not a pane or a headless one-shot:
-        # default the default-pane case to bg. A one-shot request keeps the
-        # headless lane -- honor BOTH spellings (`--headless` and `--once`/`-o`),
-        # else `--once` would be rewritten to bg here yet still carry once=True and
-        # dispatch would reject the claude+once combination (x-6de8 codex P2).
-        if substrate == "pane" and not headless and not once:
-            substrate = "bg"
+        # Resolve the default substrate for the zai shorthand. A one-shot request
+        # (--headless OR --once/-o) must land on the HEADLESS substrate, not merely
+        # dodge the bg default: dispatch passes headless as `substrate ==
+        # "headless"` and refuses claude+once unless headless is True (the bare
+        # claude+once combo is intentionally rejected). Converting here makes all
+        # three advertised one-shot spellings converge on the routed headless lane
+        # (x-6de8 codex P2). With no one-shot flag, zai defaults to the attachable
+        # bg thread rather than a pane.
+        if substrate == "pane":
+            substrate = "headless" if (once or headless) else "bg"
 
     # --provider is optional: resolve it (explicit > invoking harness > claude)
     # and reject an empty --model before anything spawns. `provider` is a
