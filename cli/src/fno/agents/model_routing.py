@@ -403,11 +403,19 @@ def materialize_route_settings(route_env: Mapping[str, str]) -> str:
     base.mkdir(parents=True, exist_ok=True)
     path = base / f"{digest}.json"
     if not path.exists():
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Publish atomically: two agents on the same route resolve to this same
+        # content-addressed path, and a bare O_CREAT makes the file visible before
+        # its write finishes -- a racing spawn could hand claude an empty/partial
+        # settings file. Write a pid-unique temp then os.replace (atomic on the
+        # same fs); content-addressing means racing writers write identical bytes,
+        # so a last-writer-wins rename is still correct.
+        tmp = base / f".{digest}.{os.getpid()}.tmp"
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             os.write(fd, payload.encode("utf-8"))
         finally:
             os.close(fd)
+        os.replace(str(tmp), str(path))
     return str(path)
 
 
