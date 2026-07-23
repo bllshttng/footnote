@@ -615,10 +615,7 @@ def test_reconcile_backfill_empty_when_id_already_present(tmp_path: Path, monkey
 def test_reconcile_json_shape_round_trips_gemini_error(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """AC3-UI: result lists are JSON-friendly. Post-#316 (Wave 3.3),
-    gemini agents are PROBED rather than skipped — a malformed session
-    id ("some-id" doesn't match the gemini UUID short-prefix layout)
-    routes to errors with a gemini-probe-failed reason."""
+    """AC3-UI: a legacy Gemini row is JSON-safe and explicitly skipped."""
     use_tmpdir(monkeypatch, tmp_path)
     _seed_registry(
         dict(
@@ -632,10 +629,9 @@ def test_reconcile_json_shape_round_trips_gemini_error(
 
     result = dispatch.reconcile_agents()
     assert result.scanned == 1
-    # Probe rejects on too-short UUID; reachability inconclusive -> errors.
     assert len(result.errors) == 1
     assert result.errors[0]["provider"] == "gemini"
-    assert "gemini-probe-failed" in result.errors[0]["reason"]
+    assert result.errors[0]["reason"] == "retired-provider"
     # Round-trips through json without error.
     payload = {
         "scanned": result.scanned,
@@ -1208,13 +1204,11 @@ def test_reconcile_codex_index_stat_permission_does_not_abort(
     codex_entry = next(e for e in load_registry() if e.name == "worker-codex")
     assert codex_entry.status == "live"
 
-    # Non-codex agents (gemini here) still classified normally. Wave 3.3
-    # post-#316: gemini is probed via its cwd-pinned chats dir. "g-1" is
-    # too short to match the 8-hex prefix layout, so the probe raises
-    # ReachabilityProbeError and gemini lands in `errors` (not `skipped`).
+    # Legacy Gemini rows are retained for read compatibility but their
+    # retired adapter is not probed.
     gemini_errors = [e for e in result.errors if e["provider"] == "gemini"]
     assert len(gemini_errors) == 1
-    assert "gemini-probe-failed" in gemini_errors[0]["reason"]
+    assert gemini_errors[0]["reason"] == "retired-provider"
 
     err = capsys.readouterr().err
     assert "codex session index path unreadable" in err

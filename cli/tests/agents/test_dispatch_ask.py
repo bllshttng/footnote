@@ -996,7 +996,7 @@ def test_dispatch_ask_followup_orphan_marks_status(tmp_path: Path, monkeypatch) 
 
 
 def test_dispatch_ask_followup_provider_mismatch(tmp_path: Path, monkeypatch) -> None:
-    """AC2-ERR: --provider gemini on a claude agent → exit 2 via select_provider."""
+    """AC2-ERR: a retired provider is rejected before follow-up dispatch."""
     use_tmpdir(monkeypatch, tmp_path)
     _install_fake(tmp_path, monkeypatch)
     _seed_followup_target(tmp_path)
@@ -1012,7 +1012,7 @@ def test_dispatch_ask_followup_provider_mismatch(tmp_path: Path, monkeypatch) ->
             timeout=10,
         )
     assert exc_info.value.exit_code == 2
-    assert "refusing to follow-up as provider=gemini" in str(exc_info.value)
+    assert "unknown provider 'gemini'" in str(exc_info.value)
 
 
 def test_dispatch_ask_followup_poll_timeout(tmp_path: Path, monkeypatch) -> None:

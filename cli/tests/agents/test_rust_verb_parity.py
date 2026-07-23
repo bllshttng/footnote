@@ -281,7 +281,7 @@ def test_resume_error_parity(tmp_path, name, expected_exit) -> None:
 
     entries = [
         {"name": "no-cwd", "harness": "codex", "cwd": "", "log_path": "/x/l", "harness_session_id": "u", "short_id": "a", "project_root": "/x", "status": "live", "created_at": "t"},
-        {"name": "no-sid", "harness": "gemini", "cwd": "/tmp/x", "log_path": "/x/l", "short_id": "b", "project_root": "/x", "status": "live", "created_at": "t"},
+        {"name": "no-sid", "harness": "codex", "cwd": "/tmp/x", "log_path": "/x/l", "short_id": "b", "project_root": "/x", "status": "live", "created_at": "t"},
     ]
     agents = tmp_path / "agents"
     _seed_registry(agents, entries)
