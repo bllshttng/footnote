@@ -17,8 +17,8 @@ US1 surface (this module):
   update_registry + events. Returns the parsed short-id on success.
 
 The actual subprocess invocation per provider lives in
-``fno.agents.providers.{claude,codex,gemini}``. US1 ships the claude
-adapter; codex / gemini land in US4.
+``fno.agents.providers.{claude,codex}``. Gemini is a legacy readable identity,
+not a maintained Python dispatch provider.
 """
 
 from __future__ import annotations
@@ -1019,277 +1019,6 @@ def _codex_followup_path(
     )
 
 
-def _gemini_output_path(name: str) -> Path:
-    """Tee target for the gemini provider's JSON+stderr stream.
-
-    Same shape as ``_codex_output_path`` so ``fno agents logs <name>``
-    sees a uniform layout regardless of provider.
-    """
-    return paths.state_dir() / "agents" / name / "output.jsonl"
-
-
-def _gemini_create_path(
-    *,
-    name: str,
-    message: str,
-    cwd: Path,
-    from_name: str,
-    yolo: bool,
-    timeout_sec: float,
-    lock_handle,
-) -> DispatchAskResult:
-    """Spawn a new gemini agent under the per-agent flock.
-
-    Mirror of ``_codex_create_path``. Failure-to-exit-code map:
-
-    - gemini not on PATH                 -> 14 (caller checked earlier)
-    - missing session_id in JSON output  -> 11 (GeminiParseError)
-    - non-zero exit / sigkill escalation -> exit code from provider
-    - wall-clock timeout                 -> 15 (GeminiTimeoutError)
-    - registry write failure post-create -> 12 (with cleanup hint)
-    """
-    from fno.agents.providers import gemini as gemini_mod
-
-    output_path = _gemini_output_path(name)
-
-    try:
-        result = gemini_mod.create(
-            cwd=cwd,
-            prompt=message,
-            from_name=from_name,
-            yolo=yolo,
-            output_path=output_path,
-            timeout=timeout_sec,
-            agent_self=name,
-        )
-    except gemini_mod.GeminiTimeoutError as exc:
-        events.emit(
-            "agent_ask_failed",
-            stage="gemini-timeout",
-            name=name,
-            provider="gemini",
-            timeout_sec=exc.timeout_sec,
-        )
-        raise DispatchAskError(
-            f"gemini create timed out after {exc.timeout_sec}s",
-            exit_code=15,
-        ) from exc
-    except gemini_mod.GeminiParseError as exc:
-        events.emit(
-            "agent_ask_failed",
-            stage="gemini-parse",
-            name=name,
-            provider="gemini",
-            raw_head=exc.raw_head,
-        )
-        raise DispatchAskError(
-            f"gemini output parse failed: {exc} (see {output_path} for full bytes)",
-            exit_code=11,
-        ) from exc
-    except gemini_mod.GeminiInvocationError as exc:
-        events.emit(
-            "agent_ask_failed",
-            stage="gemini-subprocess",
-            name=name,
-            provider="gemini",
-            returncode=exc.exit_code,
-        )
-        raise DispatchAskError(
-            f"gemini exited {exc.exit_code} (see {output_path} for details)",
-            exit_code=exc.exit_code if exc.exit_code != 0 else 1,
-        ) from exc
-
-    session_id = result.session_id
-    assert session_id is not None  # gemini.create raises GeminiParseError otherwise
-
-    new_entry = AgentEntry(
-        name=name,
-        cwd=str(cwd),
-        log_path=str(output_path),
-        harness="gemini",
-        harness_session_id=session_id,
-    )
-
-    try:
-        update_registry(lambda entries: entries + [new_entry])
-    except (OSError, RegistryVersionError) as exc:
-        events.emit(
-            "agent_ask_failed",
-            stage="registry-write",
-            name=name,
-            provider="gemini",
-            gemini_session_id=session_id,
-        )
-        lock_handle.detach()
-        raise DispatchAskError(
-            f"registry write failed: {exc}. "
-            f"orphaned gemini session: gemini sessions persist on disk; "
-            f"clean up via 'gemini --delete-session <index>' if desired "
-            f"(--list-sessions to find the index)",
-            exit_code=12,
-        ) from exc
-
-    _emit_ev(
-        "agent_ask_done",
-        stage="dispatch",
-        name=name,
-        provider="gemini",
-        gemini_session_id=session_id,
-        duration_ms=result.duration_ms,
-        yolo=yolo,
-    )
-    # gemini's create path RETURNS the reply on stdout — same routing as
-    # codex (DispatchAskResult.kind="followup" so the CLI prints the
-    # reply verbatim without a banner).
-    return DispatchAskResult(
-        kind="followup",
-        short_id=session_id,
-        reply=result.last_msg,
-        duration_ms=result.duration_ms,
-    )
-
-
-def _gemini_followup_path(
-    *,
-    name: str,
-    message: str,
-    from_name: str,
-    existing: AgentEntry,
-    yolo: bool,
-    timeout_sec: float,
-    lock_handle,
-) -> DispatchAskResult:
-    """Resume an existing gemini session via ``gemini --resume <uuid>``.
-
-    Invariants mirror the codex followup contract:
-
-    - cwd is taken from the registry's recorded ``existing.cwd`` (Wave 2.0
-      OQ1: gemini sessions are cwd-pinned; resume from a different cwd
-      fails with "Invalid session identifier").
-    - gemini_session_id is preserved (never re-minted).
-    - last_message_at is bumped only on success.
-    """
-    from fno.agents.providers import gemini as gemini_mod
-
-    session_id = existing.harness_session_id
-    if not session_id:
-        raise DispatchAskError(
-            f"registry entry {name!r} has no harness_session_id; cannot follow "
-            f"up. Remove with 'fno agents rm {name}' and recreate.",
-            exit_code=11,
-        )
-
-    _emit_ev(
-        "agent_followup_started",
-        name=name,
-        provider="gemini",
-        gemini_session_id=session_id,
-        yolo=yolo,
-    )
-
-    if not existing.log_path:
-        raise DispatchAskError(
-            f"registry entry {name!r} has empty log_path; run 'fno agents rm {name}' and recreate.",
-            exit_code=11,
-        )
-    if not existing.cwd:
-        raise DispatchAskError(
-            f"registry entry {name!r} has empty cwd; "
-            f"gemini sessions are cwd-pinned and resume cannot proceed. "
-            f"Run 'fno agents rm {name}' and recreate.",
-            exit_code=11,
-        )
-    output_path = Path(existing.log_path)
-    registered_cwd = Path(existing.cwd)
-
-    try:
-        result = gemini_mod.resume(
-            session_id=session_id,
-            cwd=registered_cwd,
-            prompt=message,
-            from_name=from_name,
-            yolo=yolo,
-            output_path=output_path,
-            timeout=timeout_sec,
-        )
-    except gemini_mod.GeminiTimeoutError as exc:
-        events.emit(
-            "agent_followup_failed",
-            stage="gemini-timeout",
-            name=name,
-            gemini_session_id=session_id,
-            timeout_sec=exc.timeout_sec,
-        )
-        raise DispatchAskError(
-            f"gemini follow-up timed out after {exc.timeout_sec}s",
-            exit_code=15,
-        ) from exc
-    except gemini_mod.GeminiParseError as exc:
-        events.emit(
-            "agent_followup_failed",
-            stage="gemini-parse",
-            name=name,
-            gemini_session_id=session_id,
-            raw_head=exc.raw_head,
-        )
-        raise DispatchAskError(
-            f"gemini output parse failed: {exc} (see {output_path} for full bytes)",
-            exit_code=11,
-        ) from exc
-    except gemini_mod.GeminiInvocationError as exc:
-        events.emit(
-            "agent_followup_failed",
-            stage="gemini-subprocess",
-            name=name,
-            gemini_session_id=session_id,
-            returncode=exc.exit_code,
-        )
-        raise DispatchAskError(
-            f"gemini resume exited {exc.exit_code} (see {output_path} for details). "
-            f"If the session was deleted (e.g. 'gemini --delete-session'), "
-            f"run 'fno agents rm {name}' then re-ask.",
-            exit_code=exc.exit_code if exc.exit_code != 0 else 1,
-        ) from exc
-
-    # Bump last_message_at via the callable form so the timestamp is
-    # generated INSIDE the registry-wide flock (monotonic per atomic
-    # write under concurrent followup).
-    try:
-        update_registry(
-            _stamp_status(name, status="live", last_message_at=_utc_now_iso),
-        )
-    except (OSError, RegistryVersionError) as exc:
-        events.emit(
-            "agent_followup_failed",
-            stage="registry-write",
-            name=name,
-            gemini_session_id=session_id,
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        lock_handle.detach()
-        raise DispatchAskError(
-            f"registry write failed: {exc}. NOTE: message was already delivered; do not retry.",
-            exit_code=12,
-        ) from exc
-
-    _emit_ev(
-        "agent_followup_done",
-        stage="followup",
-        name=name,
-        provider="gemini",
-        gemini_session_id=session_id,
-        reply_chars=len(result.last_msg or ""),
-        yolo=yolo,
-    )
-    return DispatchAskResult(
-        kind="followup",
-        short_id=session_id,
-        reply=result.last_msg or "",
-        duration_ms=result.duration_ms,
-    )
-
-
 def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Capture the spawning session's ambient identity from environment variables.
 
@@ -1705,7 +1434,7 @@ def dispatch_ask(
     Returns:
         :class:`DispatchAskResult` with ``kind == "followup"`` only.
         (``kind == "create"`` is returned by ``_claude_create_path`` /
-        ``_codex_create_path`` / ``_gemini_create_path`` when called
+        ``_codex_create_path`` when called
         from the ``spawn`` verb; ``dispatch_ask`` itself never returns
         ``kind == "create"``.)
 
@@ -1869,18 +1598,10 @@ def dispatch_ask(
                             lock_handle=lock_handle,
                         )
                     if existing.harness == "gemini":
-                        return _gemini_followup_path(
-                            name=name,
-                            message=message,
-                            from_name=from_name,
-                            existing=existing,
-                            yolo=yolo,
-                            timeout_sec=(
-                                float(timeout)
-                                if timeout is not None
-                                else _DEFAULT_FOLLOWUP_TIMEOUT_SEC
-                            ),
-                            lock_handle=lock_handle,
+                        raise DispatchAskError(
+                            "provider 'gemini' is retired; route this work to agy "
+                            "or a maintained claude/codex provider",
+                            exit_code=2,
                         )
                     raise DispatchAskError(
                         f"follow-up for provider {existing.harness!r} is not implemented",
@@ -1915,7 +1636,7 @@ class SpawnResult:
     - ``"created"`` -- persistent peer (claude plain spawn). ``short_id``
       is the provider's id; ``reply`` is None. The CLI emits the compact
       JSON receipt on stdout.
-    - ``"once"`` -- ephemeral one-shot (codex/gemini --once). ``reply``
+    - ``"once"`` -- ephemeral one-shot (codex --once). ``reply``
       carries the exchange output; ``short_id`` is the session/short id.
       The CLI prints ``reply`` verbatim on stdout and the teardown receipt
       on stderr.
@@ -2043,11 +1764,11 @@ def dispatch_spawn(
        b. Dispatch by (provider, once):
           - claude + once=True           -> exit 2 (refused)
           - claude + once=False          -> ``_claude_create_path``; return compact JSON
-          - codex/gemini + once=False    -> exit 13 (PTY daemon required)
+          - codex + once=False           -> exit 13 (PTY daemon required)
           - codex + once=True            -> ``_codex_create_path``; teardown after
-          - gemini + once=True           -> ``_gemini_create_path``; teardown after
+          - gemini                       -> refused as a retired provider
 
-    Teardown (--once codex/gemini):
+    Teardown (--once codex):
     - On success: remove the registry row created by the helper.
     - On teardown failure: loud stderr warning, row stays, exit 0 still.
     - On create failure: nonzero exit, no registry row (helpers only write
@@ -2081,8 +1802,8 @@ def dispatch_spawn(
             exit_code=2,
         )
 
-    # 3b. codex/gemini plain spawn (no --once) in Python fallback -> exit 13.
-    if provider in ("codex", "gemini") and not once:
+    # 3b. codex plain spawn (no --once) in Python fallback -> exit 13.
+    if provider == "codex" and not once:
         raise DispatchAskError(
             f"plain spawn for provider {provider!r} requires the fno-agents daemon "
             f"(Rust runtime); use --once for an ephemeral one-shot, or install the "
@@ -2223,7 +1944,7 @@ def dispatch_spawn(
                         short_id=created.short_id,
                     )
 
-                # 4c. codex/gemini --once: create + exchange + teardown.
+                # 4c. codex --once: create + exchange + teardown.
                 if provider == "codex":
                     create_result = _codex_create_path(
                         name=name,
@@ -2240,17 +1961,10 @@ def dispatch_spawn(
                         add_dir=add_dir,
                     )
                 else:
-                    # gemini --once
-                    create_result = _gemini_create_path(
-                        name=name,
-                        message=message or "hello",
-                        cwd=cwd,
-                        from_name=from_name,
-                        yolo=yolo,
-                        timeout_sec=(
-                            float(timeout) if timeout is not None else _DEFAULT_FOLLOWUP_TIMEOUT_SEC
-                        ),
-                        lock_handle=lock_handle,
+                    raise DispatchAskError(
+                        "provider 'gemini' is retired; route this work to agy "
+                        "or a maintained claude/codex provider",
+                        exit_code=2,
                     )
 
                 session_or_short_id = create_result.short_id
@@ -3024,8 +2738,8 @@ def reconcile_agents(
       reachability. Missing index → skip with an ``errors`` entry, leave
       status untouched (AC3-EDGE: fresh install must NOT trigger false
       orphan flags).
-    - **gemini**: skipped with ``reason=us4-gemini-not-shipped`` until
-      US4-gemini lands (Locked Decision 11).
+    - **gemini**: legacy registry rows are warned and skipped because the
+      Python provider adapter is retired; new work routes to agy.
 
     Emits ``reconcile_done`` once at the end with the aggregate counts.
     """
@@ -3137,70 +2851,19 @@ def reconcile_agents(
 
     for entry in entries:
         if entry.harness == "gemini":
-            # Wave 3.3: gemini reachability via the cwd-pinned chats dir
-            # at ~/.gemini/tmp/<cwd-basename>/chats/session-*-<short>.jsonl
-            # (Wave 2.0 layout discovery).
-            if not entry.harness_session_id:
-                events.emit(
-                    "agent_inconsistent",
-                    name=entry.name,
-                    provider="gemini",
-                )
-                errors.append(
-                    {
-                        "name": entry.name,
-                        "provider": "gemini",
-                        "id": None,
-                        "reason": "missing-gemini-session-id",
-                    }
-                )
-                continue
-            if not entry.cwd:
-                # Defensive: gemini sessions are cwd-pinned (Wave 2.0 OQ1).
-                # An entry without a cwd cannot be probed deterministically.
-                events.emit(
-                    "agent_inconsistent",
-                    name=entry.name,
-                    provider="gemini",
-                )
-                errors.append(
-                    {
-                        "name": entry.name,
-                        "provider": "gemini",
-                        "id": entry.harness_session_id,
-                        "reason": "missing-gemini-cwd",
-                    }
-                )
-                continue
-
-            from fno.agents.providers import gemini as gemini_mod
-
-            try:
-                reachable = gemini_mod.gemini_session_reachable(
-                    entry.harness_session_id, Path(entry.cwd)
-                )
-            except ReachabilityProbeError as exc:
-                # Tri-state inconclusive (AC8-FR): preserve status, route
-                # to errors. Mirrors the codex / claude treatments — a
-                # PermissionError on ~/.gemini/tmp/ or a missing chats
-                # dir does NOT mass-flip every gemini agent to orphaned.
-                events.emit(
-                    "agent_inconsistent",
-                    name=entry.name,
-                    provider="gemini",
-                    reason=exc.reason,
-                )
-                errors.append(
-                    {
-                        "name": entry.name,
-                        "provider": "gemini",
-                        "id": entry.harness_session_id,
-                        "reason": f"gemini-probe-failed: {exc.reason}",
-                    }
-                )
-                continue
-            new_status: AgentStatus = "live" if reachable else "orphaned"
-
+            sys.stderr.write(
+                f"WARN: agent {entry.name!r} references retired provider 'gemini'; "
+                "skipping reachability probe (route new work to agy)\n"
+            )
+            errors.append(
+                {
+                    "name": entry.name,
+                    "provider": "gemini",
+                    "id": entry.harness_session_id,
+                    "reason": "retired-provider",
+                }
+            )
+            continue
         elif entry.harness == "codex":
             if codex_index_state != "ready":
                 # AC3-EDGE: cannot probe codex reachability; report as

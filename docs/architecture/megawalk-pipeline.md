@@ -253,7 +253,7 @@ Per-node `_drive_node` invokes the host helper (`run_host_step`) which subproces
 | PID lock (`_acquire_pid_lock`) | megawalk.py | Prevents concurrent walker processes; reclaims stale locks |
 | Stale-approval pinning | `_check_review_approval` | Approves only if PR head SHA matches the approved review SHA |
 | GH rate-limit shared state | `_parse_gh_rate_limit_headers` | Throttles when `X-RateLimit-Remaining` < 50 |
-| Driver protocol fallback | `megawalk_drivers/fallback.py` | Wraps an inner driver; chains through declared fallbacks on rate limit/quota |
+| Driver protocol fallback | removed | The Python driver tier (`megawalk_drivers/`) was deleted as dead code; the Rust unified-loop runtime owns driver dispatch (see `docs/architecture/path-census.md`, spawn census) |
 
 ### Graceful Pause + Resume
 

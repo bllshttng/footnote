@@ -40,11 +40,17 @@ SPAWN_SHAPE_ALLOWLIST = frozenset(
         "cli/src/fno/pr_watch/_dispatch.py",
         "cli/src/fno/review/scorers/claude_scorer.py",
         "cli/src/fno/skill_diff/synthesize.py",
+        # Shell-form hit surfaced by the .sh scan; live memory-pass path,
+        # census-tracked migration work (spawn census, open row).
+        "scripts/memory/post-merge-pass.sh",
     }
 )
 _SPAWN_SHAPE_RE = re.compile(
     r"\[\s*['\"](?:claude|codex)['\"]\s*,\s*['\"](?:--print|--bg|-p|--exec)['\"]"
 )
+# Shell-form single-line launches (`claude --bg "$prompt"`); .sh files only,
+# where the argv-list form above can never appear.
+_SHELL_SPAWN_RE = re.compile(r"\bclaude\s+(?:--print|--bg|-p)\b|\bcodex\s+(?:--exec|exec)\b")
 _SOURCE_SUFFIXES = frozenset({".py", ".sh"})
 
 
@@ -71,10 +77,13 @@ def _spawn_shape_violations(repo_root: Path) -> list[str]:
         if rel in SPAWN_SHAPE_ALLOWLIST:
             continue
         for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if _SPAWN_SHAPE_RE.search(line):
+            match = _SPAWN_SHAPE_RE.search(line)
+            if match is None and path.suffix == ".sh":
+                match = _SHELL_SPAWN_RE.search(line)
+            if match is not None:
                 violations.append(
                     f"{rel}:{line_no}: hand-assembled session spawn shape "
-                    f"{_SPAWN_SHAPE_RE.search(line).group(0)!r}"
+                    f"{match.group(0)!r}"
                 )
     return violations
 

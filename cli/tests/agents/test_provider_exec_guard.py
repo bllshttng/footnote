@@ -13,7 +13,6 @@ import pytest
 
 from fno.agents.providers import claude as _claude
 from fno.agents.providers import codex as _codex
-from fno.agents.providers import gemini as _gemini
 
 
 @pytest.mark.parametrize(
@@ -21,7 +20,6 @@ from fno.agents.providers import gemini as _gemini
     [
         (_claude, "_subprocess_run"),
         (_codex, "_subprocess_popen"),
-        (_gemini, "_subprocess_popen"),
     ],
 )
 def test_guard_blocks_unisolated_provider_exec(module, attr, tmp_path, monkeypatch):
@@ -30,7 +28,7 @@ def test_guard_blocks_unisolated_provider_exec(module, attr, tmp_path, monkeypat
     # PATH = an empty tmp dir: no fake claude/codex/gemini is reachable.
     monkeypatch.setenv("PATH", str(tmp_path))
     seam = getattr(module, attr)  # the autouse-patched guard wrapper
-    name = "claude" if module is _claude else ("codex" if module is _codex else "gemini")
+    name = "claude" if module is _claude else "codex"
     with pytest.raises(AssertionError, match="live provider exec blocked"):
         seam([name, "--bg", "--name", "leaktest", "hi"])
 

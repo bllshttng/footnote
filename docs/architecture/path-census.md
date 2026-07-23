@@ -38,12 +38,13 @@ Rows marked `OPEN` below are intentionally not deleted when the repository still
 |---|---|---|---|---|
 | 1 | `fno agents spawn` / `dispatch_spawn` | `agents/dispatch.py:2011`, `agents/cli.py:486` | KEEP, canonical | — |
 | 2 | pr-watch `fire_skill` hand-assembled `claude --print` | `pr_watch/_dispatch.py:143,216` | RETIRE through canonical spawn | OPEN |
-| 3 | `scripts/post-merge/watch.sh` hand-assembled `claude --print` | `watch.sh:71` | DELETE | TBD |
+| 3 | `scripts/post-merge/watch.sh` hand-assembled `claude --print` | `watch.sh:71` | DELETE | #573 |
 | 4 | Rust `ShelloutDispatcher` -> `driver-claude-code.sh` | `crates/fno-agents/src/loop_megawalk.rs:1208` | RETIRE, migration needed after reachability trace | OPEN |
-| 5 | Python megawalk walker + `ClaudeCodeDriver` | `megawalk_drivers/claude_code.py:53` | DELETE | TBD |
-| 6 | Claude/Codex adapter worker spawns | `cli/src/fno/adapters/{claude_code,codex}.py` | DELETE; callers use canonical one-shot dispatch | TBD |
+| 5 | Python megawalk walker + `ClaudeCodeDriver` | `megawalk_drivers/claude_code.py:53` | DELETE | #573 |
+| 6 | Claude/Codex adapter worker spawns | `adapters/{claude_code,codex}.py` | RETIRE after live callers migrate (see below) | OPEN |
 | 7 | One-shot `claude -p` LLM-as-a-function | `inbox/triage.py:304` and three sites | OUT OF SCOPE | — |
 | 8 | Gemini provider adapter paths | `agents/dispatch.py:1022-1281`, `agents/providers/gemini.py` | RETIRE after dispatch and registry migration | OPEN |
+| 9 | Shell-form `claude -p` in the memory pass | `scripts/memory/post-merge-pass.sh:12` | RETIRE through canonical spawn (surfaced by the lint's shell-form scan) | OPEN |
 
 The adapter and Gemini rows remain open because the current tree has live callers that contradict the source census's registry-only/dead-path premise.
 `runtime/cli.py:145` invokes `get_adapter(...).spawn_worker`, and `review/runners/claude_runner.py:43,140` invokes `ClaudeCodeAdapter.spawn_worker` on the production review path.
@@ -113,9 +114,9 @@ The dispatcher is reachable, so this PR does not partially delete it or `scripts
 
 | # | Path | Entry | Disposition | Closing PR |
 |---|---|---|---|---|
-| 1 | Pre-claim launch window | x-b44e | FIX: claim before observable work + visibility barrier | OPEN |
-| 2 | No fixed-on-main check at filing | x-8d3e | FIX: record and check finding anchor | OPEN |
-| 3 | No still-broken probe at dispatch | x-8d3e | FIX: pre-spawn anchor probe and closure | OPEN |
+| 1 | Pre-claim launch window | twin worker launched before either claim was visible (observed 2026-07-22) | FIX: claim before observable work + visibility barrier | OPEN |
+| 2 | No fixed-on-main check at filing | retro-triage minted a node for a finding already fixed on main in parallel (observed 2026-07-23) | FIX: record and check finding anchor | OPEN |
+| 3 | No still-broken probe at dispatch | a worker spent nine review rounds on a mechanism main had deleted | FIX: pre-spawn anchor probe and closure | OPEN |
 
 ### Leg 6 reachability evidence (2026-07-23)
 
