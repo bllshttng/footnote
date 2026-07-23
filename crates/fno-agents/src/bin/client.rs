@@ -217,7 +217,7 @@ async fn run(args: Vec<String>) -> i32 {
     // `needs` (x-feec): read-only needs-me-queue fold over events.jsonl +
     // ledger.json across ALL sessions, emitting review_wedged / budget_stop
     // items. Never touches the daemon; exits 0 on empty. The mux client shells
-    // this off-loop when the leader+a overlay opens.
+    // this off-loop when the prefix+a overlay opens.
     if verb == "needs" {
         return fno_agents::needs::run_needs(&args[1..], &AgentsHome::from_env()).await;
     }
@@ -730,12 +730,14 @@ fn validate_spawn_placement(params: &Value, substrate: &str) -> Result<(), Strin
     let split = params.get("split").and_then(Value::as_str);
 
     if squad.is_some_and(|name| name.trim().is_empty()) {
-        return Err("--squad/-s needs a nonblank squad name".into());
+        return Err("--workspace/-s needs a nonblank workspace name".into());
     }
     if (squad.is_some() || split.is_some()) && substrate != "pane" {
-        return Err("--squad/-s and --split/-x apply only to --substrate pane \
+        return Err(
+            "--workspace/-s and --split/-x apply only to --substrate pane \
              (bg/headless have no pane geometry)"
-            .into());
+                .into(),
+        );
     }
     if split.is_some_and(|direction| !matches!(direction, "left" | "right" | "up" | "down")) {
         return Err(format!(
@@ -1421,6 +1423,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--model",
         "--mode",
         "--substrate",
+        "--workspace",
         "--squad",
         "--split",
         "--permission-mode",
@@ -1469,8 +1472,8 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--provider" | "-p" => {
                 params.insert("provider".into(), str_arg(&mut it, "--provider")?);
             }
-            "--squad" | "-s" => {
-                params.insert("squad".into(), str_arg(&mut it, "-s/--squad")?);
+            "--workspace" | "--squad" | "-s" => {
+                params.insert("squad".into(), str_arg(&mut it, "-s/--workspace")?);
             }
             "--split" | "-x" => {
                 params.insert("split".into(), str_arg(&mut it, "-x/--split")?);
@@ -2941,9 +2944,11 @@ mod tests {
         let params = serde_json::json!({"squad": "reviews"});
         assert_eq!(
             validate_spawn_placement(&params, "bg"),
-            Err("--squad/-s and --split/-x apply only to --substrate pane \
+            Err(
+                "--workspace/-s and --split/-x apply only to --substrate pane \
                  (bg/headless have no pane geometry)"
-                .to_string())
+                    .to_string()
+            )
         );
     }
 

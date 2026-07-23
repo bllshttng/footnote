@@ -53,6 +53,23 @@ def test_ac2_edge_lone_bg_positional_is_substrate_and_name_autogens():
     assert "-" in out[1]
 
 
+def test_workspace_value_flag_not_misread_as_name_or_substrate():
+    # Codex P2 (x-8317 US2): --workspace is a value flag, so its value is never
+    # the agent name (a nameless spawn still mints a slug), and a substrate-shaped
+    # workspace name is not rewritten into --substrate.
+    out = _norm(["spawn", "--workspace", "review"])
+    assert out[0] == "spawn"
+    assert "-" in out[1] and out[1] not in ("--workspace", "review")  # slug minted
+    i = out.index("--workspace")
+    assert out[i + 1] == "review"  # value preserved, not consumed as the name
+
+    out2 = _norm(["spawn", "--workspace", "bg"])
+    assert "--substrate" not in out2  # not rewritten to a substrate token
+    j = out2.index("--workspace")
+    assert out2[j + 1] == "bg"
+    assert "-" in out2[1] and out2[1] not in ("--workspace", "bg")
+
+
 def test_autogen_avoids_registry_collision():
     rng = random.Random(0)
     first = normalize_spawn_args(["spawn"], existing_names=set(), rng=random.Random(0))[1]

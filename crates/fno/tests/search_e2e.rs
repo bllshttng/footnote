@@ -1,4 +1,4 @@
-//! In-scrollback search e2e (x-e780, proto v12): the full leader+/ loop scripted
+//! In-scrollback search e2e (x-e780, proto v12): the full prefix+/ loop scripted
 //! through the socket seam - two fake wire clients co-viewing one pane against
 //! the real headless server. Asserts the shared jump + highlight reaches the
 //! co-viewer, the counter reaches the initiator ONLY, n/N walk, no-match is a

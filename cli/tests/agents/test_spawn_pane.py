@@ -744,7 +744,7 @@ def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatc
         ["spawn", "peer", "--provider", "claude", "--substrate", "bg", "-x", "left"],
     )
     assert res.exit_code == 2, res.output
-    assert "--squad/-s and --split/-x apply only to --substrate pane" in res.output
+    assert "--workspace/-s and --split/-x apply only to --substrate pane" in res.output
 
 
 def test_cmd_spawn_rejects_bad_split_value(tmp_path: Path, monkeypatch) -> None:
@@ -773,12 +773,13 @@ def test_cmd_spawn_rejects_blank_squad_before_dispatch(tmp_path: Path, monkeypat
         ["spawn", "peer", "--provider", "claude", "-s", ""],
     )
     assert res.exit_code == 2, res.output
-    assert "--squad/-s needs a nonblank squad name" in res.output
+    assert "--workspace/-s needs a nonblank workspace name" in res.output
 
 
 @pytest.mark.parametrize(
     "placement_args",
     [
+        ["--workspace", "review", "--split", "right"],
         ["--squad", "review", "--split", "right"],
         ["-s", "review", "-x", "right"],
     ],

@@ -1,4 +1,4 @@
-//! The client-side leader-key layer: a pure, stateful scanner over raw stdin
+//! The client-side prefix-key layer: a pure, stateful scanner over raw stdin
 //! bytes producing forward-chunks and mux events.
 //!
 //! Interpretation is CLIENT-side by design (Locked Decision 5): the server
@@ -6,23 +6,23 @@
 //! machine so it is exhaustively unit-testable, including escape sequences
 //! split across reads (raw-mode stdin arrives in arbitrary chunks).
 //!
-//! Table (leader = Ctrl-b, tmux-compatible where a binding exists):
+//! Table (prefix = Ctrl-b, tmux-compatible where a binding exists):
 //! `%`/`"` split H/V · `h j k l` + arrows focus · `H J K L` + Ctrl-arrows
 //! resize · Shift-arrows move the pane · `x` close pane · `c` new tab ·
 //! `n`/`p` cycle tabs · `1`-`9`
 //! select tab · `&` close tab · `w` panel selector · `b` toggle sideline ·
 //! `s` toggle status row · `?` key-table overlay · `d` detach · `[`/`]` jump
 //! prev/next command block · `v` select block · `y` copy selection · `r` rerun
-//! block (x-38c4) · `,` rename tab (x-c150) · leader-leader = one literal
-//! leader byte · `<`/`>` reorder the active tab (x-0333). Leader + anything
+//! block (x-38c4) · `,` rename tab (x-c150) · prefix-prefix = one literal
+//! prefix byte · `<`/`>` reorder the active tab (x-0333). Prefix + anything
 //! unmapped is swallowed with BEL - a chord typo must never leak half a chord
 //! into the pane (AC2-UI's never-leak guarantee).
 //!
-//! Detach is leader+d ONLY (Phase 3 Locked 11): the Phase 1/2 raw-0x1C
+//! Detach is prefix+d ONLY (Phase 3 Locked 11): the Phase 1/2 raw-0x1C
 //! match is gone, so Ctrl-\ forwards to the pane and SIGQUIT works again.
 //!
 //! Bracketed-paste passthrough (US5): `ESC[200~` puts the scanner in a
-//! verbatim state where every byte - leader bytes, Ctrl-\, everything -
+//! verbatim state where every byte - prefix bytes, Ctrl-\, everything -
 //! forwards untouched until `ESC[201~`; both markers forward too. Marker
 //! matching is a rolling index that survives read boundaries (AC5-ERR), and
 //! bytes are never held back: a marker prefix that fizzles was already
@@ -31,18 +31,18 @@
 //! disabled until the close marker or reconnect - input keeps forwarding
 //! verbatim and EOF/terminal-close still detaches, so the state machine can
 //! disable chords at worst, never brick input (AC5-FR). Unbracketed paste
-//! can still trigger leader chords - the tmux-class residual (Locked 11).
+//! can still trigger prefix chords - the tmux-class residual (Locked 11).
 
 use std::time::{Duration, Instant};
 
 use crate::proto::{BlockDir, Command};
 use crate::tree::Dir;
 
-/// The leader byte: Ctrl-b (0x02).
-pub const LEADER: u8 = 0x02;
+/// The prefix byte: Ctrl-b (0x02).
+pub const PREFIX: u8 = 0x02;
 
 /// After a resize chord fires, bare resize keys (`H/J/K/L`) keep resizing for
-/// this long without re-pressing leader (tmux `bind -r` / `repeat-time`, 500ms
+/// this long without re-pressing prefix (tmux `bind -r` / `repeat-time`, 500ms
 /// default). Each accepted repeat extends the window, so holding the key -
 /// which the terminal auto-repeats far faster than 500ms - keeps resizing until
 /// a genuine pause. Locked 2: this literal lives here and nowhere else.
@@ -58,63 +58,63 @@ const PASTE_CLOSE: &[u8] = b"\x1b[201~";
 pub enum Event {
     Forward(Vec<u8>),
     Cmd(Command),
-    /// Leader+digit: select the Nth tab of the viewed squad. The scanner
+    /// Prefix+digit: select the Nth tab of the viewed squad. The scanner
     /// only knows the index; the client resolves it to a stable `TabId`
     /// against its last `Layout` (v3: `SelectTab` names ids, not indices).
     SelectTabIdx(usize),
     Detach,
-    /// Open the sideline selector (leader+w). Selector-mode keys are
+    /// Open the sideline selector (prefix+w). Selector-mode keys are
     /// interpreted by the client's view layer, not here.
     OpenSelector,
-    /// Open the answer overlay (leader+a, x-c929). Overlay-mode keys (a digit
+    /// Open the answer overlay (prefix+a, x-c929). Overlay-mode keys (a digit
     /// answers, `n`/`N` cycle the blocked queue, Enter focuses, Esc closes) are
     /// interpreted by the client's view layer, not here (like OpenSelector).
     OpenAnswers,
-    /// Show/hide the sideline (leader+b).
+    /// Show/hide the sideline (prefix+b).
     TogglePanel,
     /// (x-b186) Cycle the sideline density slim -> regular -> extended
-    /// (leader+B). Orthogonal to [`Event::TogglePanel`]: this changes how much
+    /// (prefix+B). Orthogonal to [`Event::TogglePanel`]: this changes how much
     /// each row shows, that changes whether the panel renders at all.
     CycleDensity,
     /// (x-b186) Toggle the extended table's order between by-squad and
-    /// by-status (leader+o). Inert in the other densities, which render no
+    /// by-status (prefix+o). Inert in the other densities, which render no
     /// table - but the preference still persists, so the choice survives a
     /// round trip through slim.
     ToggleAgentSort,
-    /// Show/hide the status row (leader+s). Client-local (US4, AC4-FR).
+    /// Show/hide the status row (prefix+s). Client-local (US4, AC4-FR).
     ToggleStatus,
-    /// Show the full key-table overlay (leader+?). The next keypress
+    /// Show the full key-table overlay (prefix+?). The next keypress
     /// dismisses it (US4, AC4-EDGE).
     ShowKeys,
     /// Jump the focused pane's shared scroll to the prev/next command block
-    /// (leader+`[` / leader+`]`, x-38c4). The client resolves the focused pane.
+    /// (prefix+`[` / prefix+`]`, x-38c4). The client resolves the focused pane.
     BlockJump(BlockDir),
-    /// Move the focused pane's block selection (leader+v walks older, x-38c4).
+    /// Move the focused pane's block selection (prefix+v walks older, x-38c4).
     BlockSelect(BlockDir),
-    /// Rerun the focused pane's selected block command (leader+r, x-38c4).
+    /// Rerun the focused pane's selected block command (prefix+r, x-38c4).
     BlockRerun,
-    /// Dispatch the next ready backlog node into a new pane (leader+g, "grab
+    /// Dispatch the next ready backlog node into a new pane (prefix+g, "grab
     /// work", x-6f77). The server shells the Python porcelain; no-work /
     /// lanes-full comes back as a one-line notice.
     DispatchNext,
-    /// Open in-scrollback search on the focused pane (leader+/, x-e780). The
+    /// Open in-scrollback search on the focused pane (prefix+/, x-e780). The
     /// client enters a local typing mode; the query and n/N/Esc are interpreted
     /// by the client's view layer, not here (like OpenSelector / OpenAnswers).
     SearchOpen,
-    /// Open the session navigator (leader+f, x-653d): a global goto picker over
+    /// Open the session navigator (prefix+f, x-653d): a global goto picker over
     /// a flat catalog of every squad/tab/agent/card. The client owns the typing
     /// mode (text filter, Tab state filter, Ctrl-n/p cursor, Enter goto); the
     /// chord only opens it (like SearchOpen).
     OpenNav,
-    /// Open the rename-tab name overlay for the active tab (leader+,, tmux
+    /// Open the rename-tab name overlay for the active tab (prefix+,, tmux
     /// `rename-window` convention, x-c150). The client owns the typing mode
     /// and resolves the active tab's stable id; the chord only opens it.
     OpenRename,
-    /// Reorder the active tab one slot within its squad (leader+`<`/`>`,
+    /// Reorder the active tab one slot within its squad (prefix+`<`/`>`,
     /// x-0333). The client resolves the active tab's stable id before sending.
     ReorderTab(i32),
     /// Cycle the ACTIVE squad's sideline section one step through
-    /// expanded -> live-only -> collapsed (leader+z, x-975a). The client owns
+    /// expanded -> live-only -> collapsed (prefix+z, x-975a). The client owns
     /// the state and resolves the active squad; the chord only fires the step.
     CycleSection,
     /// Swallowed unmapped chord: the client sounds BEL.
@@ -126,11 +126,11 @@ enum State {
     /// Bytes forward; `usize` is the rolling PASTE_OPEN match index (how
     /// many marker bytes the forwarded tail already matches).
     Normal(usize),
-    /// Saw the leader; the next key (or escape sequence) is a chord.
-    Leader,
-    /// Accumulating an escape sequence after the leader (arrows / Ctrl-arrows
+    /// Saw the prefix; the next key (or escape sequence) is a chord.
+    Prefix,
+    /// Accumulating an escape sequence after the prefix (arrows / Ctrl-arrows
     /// / Shift-arrows / a paste-open marker), possibly split across reads.
-    LeaderEsc(Vec<u8>),
+    PrefixEsc(Vec<u8>),
     /// Inside a bracketed paste: everything forwards verbatim; `usize` is
     /// the rolling PASTE_CLOSE match index.
     Paste(usize),
@@ -181,17 +181,17 @@ impl Scanner {
         for &b in bytes {
             match std::mem::replace(&mut self.state, State::Normal(0)) {
                 State::Normal(open_idx) => {
-                    if b == LEADER {
-                        // Leader disarms first, then chords normally (Locked 5);
-                        // a leader+resize re-arms at its emission site below.
+                    if b == PREFIX {
+                        // Prefix disarms first, then chords normally (Locked 5);
+                        // a prefix+resize re-arms at its emission site below.
                         self.repeat_until = None;
                         flush(&mut plain, &mut out);
-                        self.state = State::Leader;
+                        self.state = State::Prefix;
                     } else if let (true, Event::Cmd(Command::ResizeDir(dir))) =
                         (self.repeat_armed(now), chord(b))
                     {
                         // Bare resize key inside an open window: repeat the
-                        // resize and extend the window (no leader needed).
+                        // resize and extend the window (no prefix needed).
                         flush(&mut plain, &mut out);
                         out.push(Event::Cmd(Command::ResizeDir(dir)));
                         self.repeat_until = Some(now + REPEAT_WINDOW);
@@ -211,7 +211,7 @@ impl Scanner {
                     }
                 }
                 State::Paste(close_idx) => {
-                    // Verbatim passthrough: leader bytes, 0x1C, everything
+                    // Verbatim passthrough: prefix bytes, 0x1C, everything
                     // (AC5-HP). Only the close marker changes state.
                     plain.push(b);
                     let idx = roll(close_idx, b, PASTE_CLOSE);
@@ -221,16 +221,16 @@ impl Scanner {
                         State::Paste(idx)
                     };
                 }
-                State::Leader => {
+                State::Prefix => {
                     if b == 0x1b {
-                        self.state = State::LeaderEsc(vec![0x1b]);
+                        self.state = State::PrefixEsc(vec![0x1b]);
                     } else {
                         let ev = chord(b);
                         self.arm_if_resize(&ev, now);
                         out.push(ev);
                     }
                 }
-                State::LeaderEsc(mut seq) => {
+                State::PrefixEsc(mut seq) => {
                     seq.push(b);
                     if seq == PASTE_OPEN {
                         // AC5-EDGE: a paste-open lands while a chord is
@@ -244,14 +244,14 @@ impl Scanner {
                     } else if PASTE_OPEN.starts_with(&seq) {
                         // Still ambiguous between a chord and a marker: keep
                         // accumulating (split-across-reads safe).
-                        self.state = State::LeaderEsc(seq);
+                        self.state = State::PrefixEsc(seq);
                     } else {
                         match esc_chord(&seq) {
                             EscScan::Complete(ev) => {
                                 self.arm_if_resize(&ev, now);
                                 out.push(ev);
                             }
-                            EscScan::Partial => self.state = State::LeaderEsc(seq),
+                            EscScan::Partial => self.state = State::PrefixEsc(seq),
                             EscScan::Invalid => out.push(Event::Bell),
                         }
                     }
@@ -262,10 +262,10 @@ impl Scanner {
         out
     }
 
-    /// A leader chord is mid-flight (US4): the client arms the which-key
+    /// A prefix chord is mid-flight (US4): the client arms the which-key
     /// hint timer while this holds and clears the hint when it stops.
-    pub fn leader_pending(&self) -> bool {
-        matches!(self.state, State::Leader | State::LeaderEsc(_))
+    pub fn prefix_pending(&self) -> bool {
+        matches!(self.state, State::Prefix | State::PrefixEsc(_))
     }
 
     /// True while a resize repeat window is open at `now`.
@@ -306,7 +306,7 @@ fn flush(plain: &mut Vec<u8>, out: &mut Vec<Event>) {
     }
 }
 
-/// Which help-modal section a leader chord belongs to (x-8ccf). Declaration
+/// Which help-modal section a prefix chord belongs to (x-8ccf). Declaration
 /// order is the render order the which-key modal groups by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeySection {
@@ -314,7 +314,7 @@ pub enum KeySection {
     Navigation,
     WorkspacesTabs,
     Panes,
-    /// (x-f300) Bare keys the sideline handles on the SELECTED row - no leader.
+    /// (x-f300) Bare keys the sideline handles on the SELECTED row - no prefix.
     /// They are not chords, so they carry no [`KeyBinding`]; the modal shows them
     /// through [`meta_rows`] purely as reference, which is why removing a dead
     /// row was undiscoverable before.
@@ -334,12 +334,12 @@ impl KeySection {
     }
 }
 
-/// One leader-chord binding: the single source of truth shared by the chord
+/// One prefix-chord binding: the single source of truth shared by the chord
 /// dispatcher ([`chord`]) and the which-key modal renderer (x-8ccf, Locked 3).
 /// Help that reads THIS cannot drift from what the dispatcher runs; the parity
 /// test (`bindings_are_the_chord_table`) fails loudly if the two disagree.
 pub struct KeyBinding {
-    /// The post-leader byte. `disp` is how it prints (`%`, `hjkl`, `[`).
+    /// The post-prefix byte. `disp` is how it prints (`%`, `hjkl`, `[`).
     pub key: u8,
     pub disp: &'static str,
     pub event: Event,
@@ -348,7 +348,7 @@ pub struct KeyBinding {
     pub label: &'static str,
 }
 
-/// The authoritative leader-chord table. `chord()` looks a byte up here; the
+/// The authoritative prefix-chord table. `chord()` looks a byte up here; the
 /// modal renders these rows. The two `1-9` (select tab) and `C-b C-b` (literal)
 /// chords are structural specials handled directly in `chord()` and shown by
 /// [`meta_rows`], so they are deliberately absent here.
@@ -484,7 +484,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 
 /// Display-only pseudo-bindings the modal shows but `chord()` handles as
 /// structural specials (not simple byte lookups): the digit tab-select range
-/// and the leader-leader literal. Kept beside [`key_bindings`] so the modal's
+/// and the prefix-prefix literal. Kept beside [`key_bindings`] so the modal's
 /// row set stays complete without polluting the executable table.
 pub fn meta_rows() -> &'static [(&'static str, &'static str, KeySection)] {
     &[
@@ -506,10 +506,10 @@ pub fn meta_rows() -> &'static [(&'static str, &'static str, KeySection)] {
     ]
 }
 
-/// The single-byte chord table. LEADER (literal) and the digit range are
+/// The single-byte chord table. PREFIX (literal) and the digit range are
 /// structural specials; every other byte is resolved from [`key_bindings`], the
 /// same table the which-key modal renders, so dispatch and help cannot diverge.
-/// Resolve a post-leader byte to its [`Event`] as if the leader were held - the
+/// Resolve a post-prefix byte to its [`Event`] as if the prefix were held - the
 /// which-key modal's execution path (x-8ccf US3): a keypress in the modal runs
 /// EXACTLY what `prefix+<key>` runs, because both go through this one table.
 /// `Event::Bell` means the byte is unbound (the modal dismisses on it).
@@ -519,7 +519,7 @@ pub fn resolve_chord(byte: u8) -> Event {
 
 fn chord(b: u8) -> Event {
     match b {
-        LEADER => Event::Forward(vec![LEADER]), // leader-leader = literal
+        PREFIX => Event::Forward(vec![PREFIX]), // prefix-prefix = literal
         b'1'..=b'9' => Event::SelectTabIdx((b - b'1') as usize),
         _ => key_bindings()
             .into_iter()
@@ -537,7 +537,7 @@ enum EscScan {
 
 /// Arrows (`ESC [ A..D` -> focus), Ctrl-arrows (`ESC [ 1 ; 5 A..D` -> resize)
 /// and Shift-arrows (`ESC [ 1 ; 2 A..D` -> move the pane, x-aa95) after the
-/// leader. Anything that stops matching every prefix is swallowed as one Bell.
+/// prefix. Anything that stops matching every prefix is swallowed as one Bell.
 /// (The paste-open marker is peeled off by the caller before this runs.)
 ///
 /// Shift-arrow rather than shifted `HJKL`, which the resize binds already own:
@@ -633,9 +633,9 @@ mod tests {
     }
 
     #[test]
-    fn client_keys_leader_chords_map_and_never_leak() {
+    fn client_keys_prefix_chords_map_and_never_leak() {
         let events = scan_all(&[b"a\x02%b"]);
-        // 'a' forwards, leader+% commands, 'b' forwards - the chord bytes
+        // 'a' forwards, prefix+% commands, 'b' forwards - the chord bytes
         // themselves never reach the pane.
         assert_eq!(
             events,
@@ -664,7 +664,7 @@ mod tests {
         assert_eq!(scan_all(&[b"\x02?"]), vec![Event::ShowKeys]);
         assert_eq!(scan_all(&[b"\x02d"]), vec![Event::Detach]);
         assert_eq!(scan_all(&[b"\x02g"]), vec![Event::DispatchNext]);
-        // leader+/ opens in-scrollback search (x-e780); the `/` never leaks.
+        // prefix+/ opens in-scrollback search (x-e780); the `/` never leaks.
         let searched = scan_all(&[b"a\x02/b"]);
         assert_eq!(
             searched,
@@ -674,8 +674,8 @@ mod tests {
                 Event::Forward(b"b".to_vec()),
             ]
         );
-        // leader+f opens the session navigator (x-653d); the `f` never leaks,
-        // and leader+g stays "grab work" (DispatchNext, unchanged).
+        // prefix+f opens the session navigator (x-653d); the `f` never leaks,
+        // and prefix+g stays "grab work" (DispatchNext, unchanged).
         assert_eq!(
             scan_all(&[b"a\x02fb"]),
             vec![
@@ -736,21 +736,21 @@ mod tests {
     }
 
     #[test]
-    fn client_keys_leader_pending_tracks_chord_in_flight() {
+    fn client_keys_prefix_pending_tracks_chord_in_flight() {
         // US4: the which-key timer arms exactly while a chord is mid-flight.
         let now = Instant::now();
         let mut s = Scanner::default();
         s.scan(b"plain", now);
-        assert!(!s.leader_pending());
+        assert!(!s.prefix_pending());
         s.scan(b"\x02", now);
-        assert!(s.leader_pending(), "bare leader held");
-        s.scan(b"\x1b[", now); // partial leader-escape still pending
-        assert!(s.leader_pending(), "split escape chord still pending");
+        assert!(s.prefix_pending(), "bare prefix held");
+        s.scan(b"\x1b[", now); // partial prefix-escape still pending
+        assert!(s.prefix_pending(), "split escape chord still pending");
         s.scan(b"C", now); // resolves to FocusDir(Right)
-        assert!(!s.leader_pending(), "resolution clears pending");
+        assert!(!s.prefix_pending(), "resolution clears pending");
         // A paste never reads as a pending chord.
         s.scan(b"\x1b[200~\x02", now);
-        assert!(!s.leader_pending());
+        assert!(!s.prefix_pending());
     }
 
     #[test]
@@ -781,7 +781,7 @@ mod tests {
     fn client_keys_block_chord_bytes_are_verbatim_inside_a_paste() {
         // AC-EDGE (Change 3): a `[` / `]` arriving inside a bracketed paste is
         // pane content, not a chord - it forwards verbatim (same invariant the
-        // existing table tests assert for leader bytes).
+        // existing table tests assert for prefix bytes).
         let mut input = Vec::new();
         input.extend_from_slice(PASTE_OPEN);
         input.extend_from_slice(b"arr[0] = x\x02[\x02]");
@@ -791,12 +791,12 @@ mod tests {
     }
 
     #[test]
-    fn client_keys_leader_leader_sends_one_literal_leader() {
-        assert_eq!(scan_all(&[b"\x02\x02"]), vec![Event::Forward(vec![LEADER])]);
+    fn client_keys_prefix_prefix_sends_one_literal_prefix() {
+        assert_eq!(scan_all(&[b"\x02\x02"]), vec![Event::Forward(vec![PREFIX])]);
     }
 
     #[test]
-    fn client_keys_leader_unmapped_swallows_with_bell() {
+    fn client_keys_prefix_unmapped_swallows_with_bell() {
         // The 'q' must NOT be forwarded - swallow + BEL.
         assert_eq!(scan_all(&[b"\x02q"]), vec![Event::Bell]);
     }
@@ -820,9 +820,9 @@ mod tests {
                 "chord({:?}) diverged from its key_bindings() row",
                 kb.key as char
             );
-            // The digit range and LEADER are structural specials, never table rows.
+            // The digit range and PREFIX are structural specials, never table rows.
             assert!(
-                !(b'1'..=b'9').contains(&kb.key) && kb.key != LEADER,
+                !(b'1'..=b'9').contains(&kb.key) && kb.key != PREFIX,
                 "structural special {:?} must not appear in key_bindings()",
                 kb.key as char
             );
@@ -831,7 +831,7 @@ mod tests {
 
     #[test]
     fn client_keys_arrows_and_ctrl_arrows_split_across_reads() {
-        // A leader+arrow chord arriving one byte per read still lands.
+        // A prefix+arrow chord arriving one byte per read still lands.
         assert_eq!(
             scan_all(&[b"\x02", b"\x1b", b"[", b"C"]),
             vec![Event::Cmd(Command::FocusDir(Dir::Right))]
@@ -841,7 +841,7 @@ mod tests {
             scan_all(&[b"\x02\x1b[1;", b"5A"]),
             vec![Event::Cmd(Command::ResizeDir(Dir::Up))]
         );
-        // A non-arrow escape after leader is swallowed as one Bell.
+        // A non-arrow escape after prefix is swallowed as one Bell.
         assert_eq!(scan_all(&[b"\x02\x1b[Z"]), vec![Event::Bell]);
     }
 
@@ -858,8 +858,8 @@ mod tests {
     }
 
     #[test]
-    fn client_keys_paste_passes_leader_and_ctrl_backslash_verbatim() {
-        // AC5-HP: everything between the markers - leader bytes, 0x1C -
+    fn client_keys_paste_passes_prefix_and_ctrl_backslash_verbatim() {
+        // AC5-HP: everything between the markers - prefix bytes, 0x1C -
         // forwards untouched, markers included; no chord, no detach.
         let mut input = Vec::new();
         input.extend_from_slice(PASTE_OPEN);
@@ -874,7 +874,7 @@ mod tests {
         // AC5-ERR: the whole paste arrives one byte per read.
         let mut input = Vec::new();
         input.extend_from_slice(PASTE_OPEN);
-        input.extend_from_slice(b"\x02"); // leader inside the paste
+        input.extend_from_slice(b"\x02"); // prefix inside the paste
         input.extend_from_slice(PASTE_CLOSE);
         let chunks: Vec<&[u8]> = input.chunks(1).collect();
         let events = scan_all(&chunks);
@@ -889,10 +889,10 @@ mod tests {
     }
 
     #[test]
-    fn client_keys_paste_open_during_pending_leader_bells_then_pastes() {
-        // AC5-EDGE: leader pressed, then a paste-open arrives - the dangling
+    fn client_keys_paste_open_during_pending_prefix_bells_then_pastes() {
+        // AC5-EDGE: prefix pressed, then a paste-open arrives - the dangling
         // chord dies with one BEL, the marker forwards, paste mode engages
-        // (the leader byte inside the paste is inert).
+        // (the prefix byte inside the paste is inert).
         let mut input = Vec::new();
         input.extend_from_slice(b"\x02");
         input.extend_from_slice(PASTE_OPEN);
@@ -908,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn client_keys_unterminated_paste_keeps_forwarding_leader_inert() {
+    fn client_keys_unterminated_paste_keeps_forwarding_prefix_inert() {
         // AC5-FR: no close marker ever arrives. Bytes keep forwarding
         // verbatim (chords disabled, input never bricked).
         let now = Instant::now();
@@ -919,7 +919,7 @@ mod tests {
         assert_eq!(
             s.scan(b"\x02d more", now),
             vec![Event::Forward(b"\x02d more".to_vec())],
-            "leader stays inert until 201~ or reconnect"
+            "prefix stays inert until 201~ or reconnect"
         );
     }
 
@@ -938,15 +938,15 @@ mod tests {
     const RESIZE_R: Event = Event::Cmd(Command::ResizeDir(Dir::Right));
 
     #[test]
-    fn repeat_window_holds_resize_without_leader() {
-        // AC1-HP: leader+L arms the window; bare L keeps resizing, each repeat
-        // extending it. One leader chord + N bare keys -> N+1 Resize events.
+    fn repeat_window_holds_resize_without_prefix() {
+        // AC1-HP: prefix+L arms the window; bare L keeps resizing, each repeat
+        // extending it. One prefix chord + N bare keys -> N+1 Resize events.
         let mut s = Scanner::default();
         let t0 = Instant::now();
         assert_eq!(
             s.scan(b"\x02L", t0),
             vec![RESIZE_R],
-            "leader+L resizes + arms"
+            "prefix+L resizes + arms"
         );
         // Three bare L within the window, 30ms apart (terminal auto-repeat rate).
         let mut t = t0;
@@ -1028,18 +1028,18 @@ mod tests {
     }
 
     #[test]
-    fn repeat_window_leader_disarms_then_chords_normally() {
-        // Invariant: leader inside the window disarms first, then the chord runs
-        // as usual - a leader+resize re-arms; a leader+other does not.
+    fn repeat_window_prefix_disarms_then_chords_normally() {
+        // Invariant: prefix inside the window disarms first, then the chord runs
+        // as usual - a prefix+resize re-arms; a prefix+other does not.
         let mut s = Scanner::default();
         let t0 = Instant::now();
         s.scan(b"\x02L", t0); // arm
         assert_eq!(
             s.scan(b"\x02%", t0 + Duration::from_millis(100)),
             vec![Event::Cmd(Command::SplitH)],
-            "leader+% still splits inside the window"
+            "prefix+% still splits inside the window"
         );
-        // leader+% is not a resize, so the window is now closed: bare L forwards.
+        // prefix+% is not a resize, so the window is now closed: bare L forwards.
         assert_eq!(
             s.scan(b"L", t0 + Duration::from_millis(130)),
             vec![Event::Forward(b"L".to_vec())]
@@ -1055,7 +1055,7 @@ mod tests {
         assert_eq!(
             s.scan(b"\x02\x1b[1;5C", t0),
             vec![RESIZE_R],
-            "leader+Ctrl-Right resizes right"
+            "prefix+Ctrl-Right resizes right"
         );
         assert_eq!(
             s.scan(b"L", t0 + Duration::from_millis(40)),
@@ -1069,7 +1069,7 @@ mod tests {
         // Today's behavior byte-for-byte when no resize has fired: a bare L is
         // just pane input. (scan_all uses a fixed clock and never resizes first.)
         assert_eq!(scan_all(&[b"L"]), vec![Event::Forward(b"L".to_vec())]);
-        // A focus chord (leader+l) must NOT arm a resize window.
+        // A focus chord (prefix+l) must NOT arm a resize window.
         let mut s = Scanner::default();
         let t0 = Instant::now();
         s.scan(b"\x02l", t0);

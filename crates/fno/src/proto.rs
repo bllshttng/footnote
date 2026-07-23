@@ -88,12 +88,12 @@ fn default_true() -> bool {
 /// argv, so the client status row shows `⚑ <node>` config-free. `None` for an
 /// ad-hoc pane.
 ///
-/// v11 (work-queue dispatch, x-6f77): a new `DispatchNext` client verb (leader+g
+/// v11 (work-queue dispatch, x-6f77): a new `DispatchNext` client verb (prefix+g
 /// "grab work") AND `Layout` gains `backlog: Vec<BacklogCard>` (the sideline
 /// work-queue lane) - both wire-shape changes, so the shared counter bumps once.
 ///
 /// v12 (in-scrollback search, x-e780): `ClientMsg::{SearchOpen, SearchStep,
-/// SearchClear}` (leader+/ free-text find over a pane's server-side vt history)
+/// SearchClear}` (prefix+/ free-text find over a pane's server-side vt history)
 /// and the initiator-only reply `ServerMsg::SearchResult { pane_id, total,
 /// current }`. `SearchStep` reuses [`BlockDir`] (`Prev` = older match, `Next` =
 /// newer). Only match counts + coordinates cross the wire; the 10k-line history
@@ -109,7 +109,7 @@ fn default_true() -> bool {
 /// a clicked work-queue card (the confirm path).
 /// v16: `Command::NewSquad { name, origin }` - explicit named-workspace
 /// creation (the `+` sideline footer, x-9e5e).
-/// v17: `Command::RenameTab { tab, name }` - explicit tab rename (leader+,,
+/// v17: `Command::RenameTab { tab, name }` - explicit tab rename (prefix+,,
 /// x-c150); a blank name clears the rename back to the derived label.
 /// v18: `BacklogCard.{pane_id, attach_id, where_hint}` - publish-time routes
 /// so an in-flight work-queue card focuses/attaches/locates its live session
@@ -303,7 +303,7 @@ pub enum ClientMsg {
     Resize { rows: u16, cols: u16 },
     /// Clean detach: the client is leaving; the server keeps the PTYs.
     Detach,
-    /// A layout/tab/squad command from the client's leader-key layer
+    /// A layout/tab/squad command from the client's prefix-key layer
     /// (keys.rs). Reliable; a refused command comes back as a one-line
     /// notice, never a dropped connection.
     Command(Command),
@@ -344,13 +344,13 @@ pub enum ClientMsg {
     /// no blocks replies with a `Notice` and no scroll change.
     BlockJump { pane: u64, dir: BlockDir },
     /// (v8) Move the block-scoped selection to `dir`'s adjacent block (the whole
-    /// command + output span), so the existing copy chain (leader+y) yanks it.
+    /// command + output span), so the existing copy chain (prefix+y) yanks it.
     BlockSelect { pane: u64, dir: BlockDir },
     /// (v8) Re-send the selected (else newest) block's command line to the pane
     /// PTY. Refused unless the pane is known-idle - a rerun injected into a busy
     /// agent corrupts its composer (false-ready is the forbidden direction).
     BlockRerun { pane: u64 },
-    /// (v11, x-6f77) "Grab work" (leader+g): dispatch the next ready backlog
+    /// (v11, x-6f77) "Grab work" (prefix+g): dispatch the next ready backlog
     /// node into a new pane in this session. Server-wide (no pane field): the
     /// server shells the Python porcelain off the core loop, and the outcome
     /// (no ready work / lanes full / failure) returns as a one-line `Notice`.
@@ -376,7 +376,7 @@ pub enum ClientMsg {
         keystroke: Vec<u8>,
     },
     /// (v12, x-e780) Open/refresh a free-text search over the pane's server-side
-    /// vt history (leader+/): scan case-insensitively, jump the shared scroll to
+    /// vt history (prefix+/): scan case-insensitively, jump the shared scroll to
     /// the initial match, highlight it via the v7 `SELECTED` broadcast, and store
     /// the match list as a per-pane snapshot. An empty `query` clears (never a
     /// scan that matches every row). The reply is one [`ServerMsg::SearchResult`]
@@ -962,7 +962,7 @@ pub enum AgentBadge {
     Done,
 }
 
-/// Layout mutations the client can request. Interpreted (leader-key table)
+/// Layout mutations the client can request. Interpreted (prefix-key table)
 /// client-side; executed on the server's core loop, which owns the tree.
 /// `SelectTab` names a stable [`TabMeta::id`] from the last `Layout`'s
 /// catalog; `SelectSquad` names a squad id from the same catalog - the
@@ -1049,7 +1049,7 @@ pub enum Command {
     CloseTab,
     SelectSquad(u64),
     /// (v8) Copy the focused pane's current selection over the keyboard (the
-    /// block-select -> leader+y composition; the mouse path copies on release).
+    /// block-select -> prefix+y composition; the mouse path copies on release).
     /// A no-op `Notice` when nothing is selected.
     CopySelection,
     /// (v13) Focus a pane by id, wherever it lives: the server scans every
@@ -1092,7 +1092,7 @@ pub enum Command {
     /// `DispatchNext` porcelain (`fno dispatch one`) pinned to `--node`, so the
     /// lane cap, the same-node claim race (a node claimed between click and Enter
     /// bounces `already-dispatching`), and the "read-only observer refused"
-    /// guarantee all hold exactly as leader+g. Value over `DispatchNext`: the
+    /// guarantee all hold exactly as prefix+g. Value over `DispatchNext`: the
     /// operator picks WHICH card, not just "next".
     /// (v31, x-c914) `account` rides the same session-local active-account
     /// passthrough as `DispatchNext`; `None` = the default account.

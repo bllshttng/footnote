@@ -8,7 +8,7 @@
 //! emulates VT (Locked Decision 3): rects and grids both come from the
 //! server, which is what makes reattach exact.
 //!
-//! Input goes through the leader-key scanner (`keys.rs`): bare bytes forward
+//! Input goes through the prefix-key scanner (`keys.rs`): bare bytes forward
 //! verbatim on the reliable channel (AC2-UI), chords become `Command`s.
 //! Caret expansion, sideline visibility, and the selector are CLIENT-LOCAL
 //! view state - never on the wire (Locked Decision 15).
@@ -193,8 +193,8 @@ const MIN_ROWS_FOR_STATUS: u16 = TAB_BAR_ROWS + STATUS_ROWS + 5;
 /// panel is wide enough (see [`View::footer_menu_range`]).
 const FOOTER_NEW_LABEL: &str = "+ new workspace";
 const FOOTER_MENU: &str = "☰ menu";
-/// How long a pending leader chord waits before the which-key hint paints
-/// (US4, AC4-HP). `leader+?` shows the full table instantly instead.
+/// How long a pending prefix chord waits before the which-key hint paints
+/// (US4, AC4-HP). `prefix+?` shows the full table instantly instead.
 const HINT_DELAY: Duration = Duration::from_millis(400);
 /// Transient notice lifetime on the tab bar.
 const NOTICE_TTL: Duration = Duration::from_secs(3);
@@ -676,14 +676,14 @@ struct View {
     /// (x-b186) Extended-table row order, persisted alongside the density.
     /// Inert in the other two densities (they render no table).
     agent_sort: AgentSort,
-    /// Manual status-row toggle (leader+s). Client-local and deliberately
+    /// Manual status-row toggle (prefix+s). Client-local and deliberately
     /// unpersisted: a reattach resets to on (AC4-FR).
     status_on: bool,
-    /// The which-key hint line is painted over the bottom row (leader held
+    /// The which-key hint line is painted over the bottom row (prefix held
     /// past [`HINT_DELAY`]); any chord resolution clears it (AC4-HP).
     hint: bool,
-    /// The which-key keybinds modal (leader+?, x-8ccf US3): a centered popup
-    /// built from the leader-chord table. While open, a bound key executes
+    /// The which-key keybinds modal (prefix+?, x-8ccf US3): a centered popup
+    /// built from the prefix-chord table. While open, a bound key executes
     /// through the SAME dispatch as a direct chord (which-key); arrows/pgup
     /// scroll+select, Enter runs the selected row, Esc/unbound closes. `None`
     /// when closed. Replaces the old static top-left key-table poster.
@@ -728,7 +728,7 @@ struct View {
     /// tail into the pane (gemini medium).
     sel_esc: Vec<u8>,
     /// (x-f331) The [`View::selector`] was armed by a pointer resting in the
-    /// panel, not by an explicit `leader+w`. Pointer-in-panel arms the selector
+    /// panel, not by an explicit `prefix+w`. Pointer-in-panel arms the selector
     /// so `x`/`X`/`r`/`space` act on the pointed-at row (one regime, closes the
     /// old PTY leak where a bare `x` fell through to the focused pane). A
     /// hover-arm is motion-fresh: only the action-verb set acts on it, and the
@@ -759,7 +759,7 @@ struct View {
     /// deep stdin handler.
     needs_want: bool,
     /// (x-feec) A fold shell-out is running; bounds concurrent folds to one so
-    /// mashing leader+a on a stale cache cannot spawn a pile of children (P2-5).
+    /// mashing prefix+a on a stale cache cannot spawn a pile of children (P2-5).
     needs_inflight: bool,
     /// (x-feec) Generation token, bumped on every open/close so a fold result
     /// landing after the overlay closed or re-opened is discarded (AC6-FR).
@@ -768,7 +768,7 @@ struct View {
     /// an absence; the next keypress dismisses it (like [`View::overlay`]).
     digest: Option<Vec<String>>,
     notice: Option<(String, Instant)>,
-    /// (v12, x-e780) Active in-scrollback search (leader+/), when open. While
+    /// (v12, x-e780) Active in-scrollback search (prefix+/), when open. While
     /// `Some`, stdin diverts to [`search_keys`] and the bottom chrome shows the
     /// input line / counter. Client-local: opening never sends a message and
     /// never reserves a row (no Resize -> no reflow -> no dropped highlight).
@@ -829,7 +829,7 @@ struct View {
     /// [`View::search_esc`]).
     create_esc: Vec<u8>,
     /// (x-c150; widened x-96e8) The pending rename buffer: `(target captured at
-    /// open, typed name)`, `Some` while the `leader+,` (tab) or selector `r`
+    /// open, typed name)`, `Some` while the `prefix+,` (tab) or selector `r`
     /// (squad) overlay is open. Keys divert to [`rename_keys`]. Enter on an
     /// EMPTY buffer still sends (blank = clear back to the derived label),
     /// unlike `create`.
@@ -871,7 +871,7 @@ struct View {
     /// visually follows the moved workspace. Cleared by any non-reorder key or a
     /// selector close.
     sel_follow: Option<u64>,
-    /// (x-653d) The session-navigator overlay (leader+f): a global goto picker
+    /// (x-653d) The session-navigator overlay (prefix+f): a global goto picker
     /// over a flat catalog of every squad/tab/agent/card, filtered by typed text
     /// AND by agent state. `Some` while open; stdin diverts to [`nav_keys`].
     /// Client-local like `search` - opening never sends a message and reserves
@@ -899,7 +899,7 @@ struct View {
     /// so an arrow key mid-type never leaks a param byte into the buffer.
     peek_input_esc: Vec<u8>,
     /// (x-c914) The session-local active claude account: every mux-initiated
-    /// worker spawn (leader+g `DispatchNext`, a targeted `DispatchNode`)
+    /// worker spawn (prefix+g `DispatchNext`, a targeted `DispatchNode`)
     /// appends `--account <id>` while `Some`. Client-local ephemera like
     /// `nav`/`peek` - dropped on exit, never persisted, never touches a
     /// credential slot (Locked Decisions 1-2). Toggled via the Connections
@@ -1053,7 +1053,7 @@ struct PeekView {
 }
 
 /// (x-8ccf US3) The which-key keybinds modal: a centered [`Popup`] built from
-/// the single-source leader-chord table, plus the [`Event`] each selectable row
+/// the single-source prefix-chord table, plus the [`Event`] each selectable row
 /// runs (`None` for headers, rules, and display-only meta rows). Keeping the
 /// events beside the popup lets Enter/click on the SELECTED row dispatch through
 /// the exact path a typed chord would, so help can never advertise an action it
@@ -1198,6 +1198,9 @@ enum MenuAction {
     /// Remove EVERY exited row in the target section (x-f300). The section comes
     /// from [`MenuTarget::Section`], so this stays payload-free and `Copy`.
     ClearDead,
+    /// Open the rename overlay for a workspace section header - menu parity with
+    /// selector `r` (x-96e8). Only built for a section carrying a squad id.
+    Rename,
 }
 
 /// Build the per-state row menu for the agent at `display_rows()` index `i`,
@@ -1348,11 +1351,11 @@ fn remove_dead(a: &AgentRow) -> Command {
 /// bulk verb server-side, which the single-process `ReapAgents` already models.
 const CLEAR_DEAD_MAX: usize = 25;
 
-/// (x-f300) The section-header context menu: the bulk counterpart to the row
-/// menu's single Remove. `dead` is the count the label advertises AND the number
-/// the commit will run, so the two can never disagree. Caller guarantees
-/// `dead > 0` - a section with nothing to clear gets a Notice, not a menu whose
-/// only entry no-ops.
+/// (x-f300) The section-header context menu. A workspace section (`squad`
+/// present) offers `Rename` - menu parity with selector `r`. `Clear dead` is
+/// added only when `dead > 0`; its label count is both what it advertises AND
+/// what the commit runs, so the two can never disagree. The caller guarantees
+/// at least one of {renamable, `dead > 0`} holds, so the menu is never empty.
 fn build_section_menu(
     key: SectionKey,
     label: String,
@@ -1360,19 +1363,28 @@ fn build_section_menu(
     dead: usize,
     anchor: Anchor,
 ) -> RowMenu {
-    let rows = vec![
-        PopupRow::Header(label.clone()),
-        PopupRow::Rule,
-        PopupRow::Entry {
+    let mut rows = vec![PopupRow::Header(label.clone()), PopupRow::Rule];
+    let mut actions: Vec<MenuAction> = Vec::new();
+    if squad.is_some() {
+        rows.push(PopupRow::Entry {
+            glyph: "✎".into(),
+            label: "Rename".into(),
+            hint: String::new(),
+        });
+        actions.push(MenuAction::Rename);
+    }
+    if dead > 0 {
+        rows.push(PopupRow::Entry {
             glyph: "✕".into(),
             label: format!("Clear dead ({dead})"),
             hint: String::new(),
-        },
-    ];
+        });
+        actions.push(MenuAction::ClearDead);
+    }
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Section { key, label, squad },
-        actions: vec![MenuAction::ClearDead],
+        actions,
     }
 }
 
@@ -1861,7 +1873,7 @@ impl View {
     /// overlay-clearing discipline as [`View::open_create`]: the confirm wins
     /// the stdin routing, so a selector left open behind it would swallow the
     /// keystrokes that follow the confirm's resolution (sigma review x-260a -
-    /// reachable by mouse-clicking a card while leader+w is open).
+    /// reachable by mouse-clicking a card while prefix+w is open).
     fn open_confirm(&mut self, action: ConfirmAction) {
         self.selector = None;
         self.sel_hover_armed = false;
@@ -2014,7 +2026,7 @@ impl View {
         self.peek_input_esc.clear();
     }
 
-    /// Open the which-key keybinds modal (leader+?, x-8ccf US3). Clears peek like
+    /// Open the which-key keybinds modal (prefix+?, x-8ccf US3). Clears peek like
     /// every other overlay open so a mouse-driven open never leaves peek on top.
     fn open_keys_modal(&mut self) {
         self.clear_peek();
@@ -2194,7 +2206,10 @@ impl View {
                 // `section_dead_rows` refused as ambiguous - it never claims
                 // there are no dead rows when the truth is we won't guess which.
                 let dead = self.section_dead_rows(&key, squad).len();
-                if dead == 0 {
+                // A workspace section always has a menu (it can be renamed). A
+                // non-workspace header (Elsewhere/Mission) with nothing to clear
+                // says so rather than opening a one-entry no-op menu.
+                if dead == 0 && squad.is_none() {
                     self.set_notice(format!("no dead rows in {label}"));
                     return false;
                 }
@@ -3185,7 +3200,7 @@ impl View {
     }
 
     /// What acting on sideline display row `i` does - the single resolver both
-    /// a mouse click ([`View::chrome_hit`]) and the leader+w selector's Enter
+    /// a mouse click ([`View::chrome_hit`]) and the prefix+w selector's Enter
     /// route through (x-260a), so the two inputs can never diverge. `None` only
     /// for an out-of-range index or an inert [`DisplayRow::Header`].
     fn row_action(&self, i: usize) -> Option<ChromeHit> {
@@ -3248,9 +3263,9 @@ impl View {
     /// ([`View::nav_rows`], x-653d). A method (not a free fn like [`agent_hit`])
     /// because the Ready confirm needs the term-height guard.
     ///
-    /// Only a READY card starts a session (x-a496) - the same nodes leader+g
+    /// Only a READY card starts a session (x-a496) - the same nodes prefix+g
     /// picks - and only behind a one-keypress confirm (too costly for a stray
-    /// tap). A blocked/in-flight card is work leader+g never selects, so it says
+    /// tap). A blocked/in-flight card is work prefix+g never selects, so it says
     /// why or routes to the running session (x-54fa, priority pane > attach >
     /// notice) rather than opening the confirm.
     fn card_hit(&self, c: &BacklogCard) -> ChromeHit {
@@ -3492,7 +3507,7 @@ impl View {
         // (x-f331) Pointer-in-panel ARMS the selector to the hovered actionable
         // row - one regime, so x/X/r/space act on the row under the pointer and
         // a bare verb no longer leaks into the focused pane. Only touch a free or
-        // already-hover-armed selector; an explicit leader+w selector keeps
+        // already-hover-armed selector; an explicit prefix+w selector keeps
         // keyboard control. Off an actionable row (a spacer, header label, or the
         // pane), a hover-arm disarms, so a pointer parked off the rows never holds
         // the keys. `selector_anchor(i) == Some(i)` is true only when i itself is
@@ -4569,7 +4584,7 @@ impl View {
         }
     }
 
-    /// The bottom chrome line (US4). While a leader chord is pending past
+    /// The bottom chrome line (US4). While a prefix chord is pending past
     /// [`HINT_DELAY`] it is the which-key hint (painted over whatever the row
     /// held - even with the status row toggled off, discoverability does not
     /// die with the toggle; tmux's message-line behavior). Otherwise it is
@@ -4932,7 +4947,7 @@ impl View {
             return spans;
         };
         spans.push(TabSpan {
-            text: format!(" {} ", s.name),
+            text: format!(" {} ", brand_label(&s.name)),
             flags: cell_flags::BOLD,
             fg: Color::Default,
             hit: None,
@@ -5066,7 +5081,7 @@ impl View {
     /// squad's agent rows, then the `+ new workspace` footer, a catch-all
     /// section for agents matched to no squad, and the work-queue lane. The
     /// ONE row enumeration (x-260a): painting, hover, mouse hit-testing, and
-    /// the leader+w selector all index into it.
+    /// the prefix+w selector all index into it.
     /// The sideline's rows for the CURRENT density - the one enumeration every
     /// consumer indexes into (x-260a: painting, hover, hit-test, and the
     /// selector share this index space in all three densities).
@@ -5146,7 +5161,7 @@ impl View {
         // (AC2-FR). Resolve that agent's name from an UNCAPPED build - reading
         // `selected_agent_name()` here would call `display_rows()` and recurse
         // back into this builder. Only when a selector is actually open (the
-        // transient leader+w nav mode) do we pay the extra build; the steady
+        // transient prefix+w nav mode) do we pay the extra build; the steady
         // paint keeps its single pass.
         let protect = match self.selector {
             Some(i) => match self.build_tree_rows(None, false).get(i) {
@@ -6283,7 +6298,7 @@ impl NeedRow {
 /// the footer states the drop count. Matches the sideline card cap.
 const NEEDS_CAP: usize = 40;
 /// Re-open cache: a fold younger than this is reused instantly (mashing
-/// `leader+a` never re-shells - Perspective B).
+/// `prefix+a` never re-shells - Perspective B).
 const NEEDS_CACHE_TTL: Duration = Duration::from_secs(5);
 /// Default fold window: the last 24h (the fold also windows server-side).
 const NEEDS_WINDOW_SECS: u64 = 24 * 60 * 60;
@@ -6389,6 +6404,17 @@ const TAB_LABEL_W: usize = 14;
 /// `{ordinal}:{name}` with the name truncated to [`TAB_LABEL_W`] chars. The
 /// ordinal stays visible in every span because the `1-9 select tab` keys
 /// key off it (Locked 5).
+/// The mux's home workspace surfaces the bare brand `fno` in the tab strip
+/// (x-597f: derived from the cwd basename); render it bracketed as `f[no]`.
+/// Any other workspace name passes through unchanged.
+fn brand_label(name: &str) -> String {
+    if name == "fno" {
+        "f[no]".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 fn tab_label_text(name: &str, i: usize, named: bool) -> String {
     let ordinal = (i + 1).to_string();
     // Collapse (x-0f9d AC7, x-c150): a name equal to its own ordinal renders as
@@ -7184,7 +7210,7 @@ async fn attach_and_run(
         }
     });
 
-    // Raw stdin -> channel; scanned by the leader layer below.
+    // Raw stdin -> channel; scanned by the prefix layer below.
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
     std::thread::Builder::new()
         .name("fno-mux-stdin".into())
@@ -7215,10 +7241,10 @@ async fn attach_and_run(
     }
     let mut compositor = Compositor::new();
     let mut scanner = Scanner::default();
-    // When the pending leader chord started, for the which-key hint timer
+    // When the pending prefix chord started, for the which-key hint timer
     // (US4). Client-local; the scanner state is the single source of truth
     // for WHETHER a chord is pending, this only remembers SINCE WHEN.
-    let mut leader_since: Option<Instant> = None;
+    let mut prefix_since: Option<Instant> = None;
     // Carries a partial SGR mouse report split across reads (mouse.rs).
     let mut mouse_carry: Vec<u8> = Vec::new();
     // Clipboard delivery runs on a blocking thread and reports its outcome back
@@ -7319,7 +7345,7 @@ async fn attach_and_run(
         let hint_deadline = if view.hint {
             None
         } else {
-            leader_since.map(|t| t + HINT_DELAY)
+            prefix_since.map(|t| t + HINT_DELAY)
         };
         // Focus-follows-mouse settle (x-a496): a pending hover target commits at
         // its landing time + the debounce, re-armed each loop from the latest
@@ -7506,10 +7532,10 @@ async fn attach_and_run(
                             // arms the timer once; anything else clears both
                             // (resolving or abandoning clears the hint,
                             // AC4-HP).
-                            if scanner.leader_pending() {
-                                leader_since.get_or_insert_with(Instant::now);
+                            if scanner.prefix_pending() {
+                                prefix_since.get_or_insert_with(Instant::now);
                             } else {
-                                leader_since = None;
+                                prefix_since = None;
                                 view.hint = false;
                             }
                             if let Err(e) = compositor.draw(&view.compose()) {
@@ -7780,7 +7806,7 @@ enum StdinFlow {
 
 /// Route one stdin chunk: the selector consumes keys while open (AC6-FR
 /// validates against the CURRENT layout before sending); otherwise the
-/// leader scanner splits it into forwards and commands.
+/// prefix scanner splits it into forwards and commands.
 async fn handle_stdin(
     view: &mut View,
     scanner: &mut Scanner,
@@ -8255,7 +8281,7 @@ async fn handle_stdin(
     Ok(StdinFlow::Continue)
 }
 
-/// One of three control-flow outcomes of dispatching a leader event: fall
+/// One of three control-flow outcomes of dispatching a prefix event: fall
 /// through to the next event, stop consuming this chunk (a chord that opens a
 /// typing mode must not leak the chunk's trailing bytes into a pane), or detach.
 enum DispatchFlow {
@@ -8264,7 +8290,7 @@ enum DispatchFlow {
     Detach,
 }
 
-/// Dispatch one resolved leader [`Event`] to the wire / view state - the single
+/// Dispatch one resolved prefix [`Event`] to the wire / view state - the single
 /// executor the key-scan loop and the which-key modal both call (x-8ccf Locked
 /// 3), so a modal-executed chord runs the IDENTICAL path as a directly-typed one
 /// (no parallel keymap to drift).
@@ -8349,7 +8375,7 @@ async fn dispatch_event(
                 .is_some_and(|t| t.elapsed() < NEEDS_CACHE_TTL);
             if fresh {
                 // Re-open within the cache TTL: reuse the last fold instantly
-                // (Perspective B - mashing leader+a never re-shells).
+                // (Perspective B - mashing prefix+a never re-shells).
                 view.needs_degraded = false;
             } else {
                 // Stale/first open: live-only until the refresh lands.
@@ -8851,7 +8877,7 @@ async fn keys_modal_keys(
 /// Run the modal's selected row (Enter/click) through the shared dispatch, then
 /// close - a header/meta row with no chord BELs and stays open (nothing ran, so
 /// the "execute always closes" invariant is not tripped). Returns the dispatch
-/// flow so a detach chord (leader+d) run from the modal actually detaches.
+/// flow so a detach chord (prefix+d) run from the modal actually detaches.
 async fn keys_modal_execute_selected(
     view: &mut View,
     scanner: &mut Scanner,
@@ -8957,10 +8983,22 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("backlog verb send failed: {e}"))?;
             return Ok(());
         }
-        // (x-f300) The section menu's only action, resolved against the section
-        // rather than a single row.
+        // (x-f300) The section menu's clear-dead action, resolved against the
+        // section rather than a single row.
         (MenuTarget::Section { key, label, squad }, MenuAction::ClearDead) => {
             return clear_dead_confirm(view, key, label, squad);
+        }
+        // A workspace section's Rename opens the same overlay as selector `r`
+        // (x-96e8). The id is the section's squad, so a non-workspace header
+        // (`squad: None`) can never reach it - it falls to the refuse arm below.
+        (
+            MenuTarget::Section {
+                squad: Some(id), ..
+            },
+            MenuAction::Rename,
+        ) => {
+            view.open_rename(RenameTarget::Squad(id));
+            return Ok(());
         }
         // A menu is built for exactly one target kind, so a crossed pair can only
         // come from a bug; refuse rather than guess at a target.
@@ -9052,6 +9090,9 @@ async fn execute_row_menu_action(
         // target ever reaches a Backlog verb. Kept as a visible refusal rather
         // than a silent no-op, so a future miswiring says something.
         MenuAction::Backlog(_) => view.set_notice("action does not apply to an agent".into()),
+        // Unreachable: Rename is built only for a workspace section, which
+        // returns above. Visible refusal over a silent no-op.
+        MenuAction::Rename => view.set_notice("action does not apply to an agent".into()),
         MenuAction::Stop | MenuAction::Remove => {
             // A confirm owns the bottom row; a too-short terminal refuses rather
             // than arm an invisible prompt (matching the selector's stop/reap).
@@ -9497,7 +9538,7 @@ async fn fetch_peek(
 /// row (fresh seq, stale bodies dropped by the seq guard); Esc/q closes back to
 /// the selector with its cursor synced to the peeked row (AC2-UI). Digit answers
 /// (US3) and attach (US4) are added by later stories; until then those keys are
-/// swallowed - no key in peek mode ever reaches a pane (the leader-layer
+/// swallowed - no key in peek mode ever reaches a pane (the prefix-layer
 /// invariant). The catalog is re-read per key so a scrape tick that removed the
 /// peeked row re-anchors or closes (never a panic on a dropped index).
 /// (x-84d7) Route keys to the Connections modal. Pure state changes run through
@@ -9711,7 +9752,7 @@ async fn peek_keys(
                     view.selector = Some(cursor);
                 }
             }
-            // Everything else is swallowed - never a pane leak (leader-layer
+            // Everything else is swallowed - never a pane leak (prefix-layer
             // invariant). h (left-arrow) has no peek action.
             _ => {}
         }
@@ -9807,7 +9848,7 @@ async fn peek_input_keys(
 /// a tab row `m` opens the move-to-squad picker. A refusal (Notice/BEL) keeps
 /// the selector open; Esc/q closes. Rows and cursor are re-read per key so a
 /// close mid-chunk swallows the remainder instead of resurrecting the selector.
-/// Detach is leader+d from NORMAL mode only (Locked 11): close the selector.
+/// Detach is prefix+d from NORMAL mode only (Locked 11): close the selector.
 async fn selector_keys(
     view: &mut View,
     bytes: &[u8],
@@ -9840,7 +9881,7 @@ async fn selector_keys(
                     _ => None,
                 };
                 // `l`/`h` stay the EXPLICIT open/close pair (x-975a keeps the
-                // tri-state cycle on the header click and leader+z); `l` from
+                // tri-state cycle on the header click and prefix+z); `l` from
                 // live-only opens back to the full section.
                 if let Some(key) = squad.and_then(|sq| squad_key(&view.layout, sq)) {
                     let next = if k == b'l' {
@@ -9870,7 +9911,7 @@ async fn selector_keys(
             }
             b'r' => {
                 // Rename the squad at the cursor (x-96e8). Tab/other rows have
-                // no squad rename here (leader+, renames a tab), so they notice.
+                // no squad rename here (prefix+, renames a tab), so they notice.
                 let squad = match view.display_rows().get(cur) {
                     Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
                     _ => None,
@@ -11645,6 +11686,28 @@ mod tests {
     }
 
     #[test]
+    fn tab_strip_renders_the_fno_brand_bracketed() {
+        // US4/AC3-HP: the mux's home workspace surfaces the bare brand in the
+        // tab strip's leading label - render `f[no]`, not `fno`. Other names
+        // pass through untouched.
+        assert_eq!(brand_label("fno"), "f[no]");
+        assert_eq!(brand_label("footnote"), "footnote");
+        let mut view = two_pane_view();
+        let active = view.layout.active_squad;
+        view.layout
+            .squads
+            .iter_mut()
+            .find(|s| s.id == active)
+            .expect("active squad")
+            .name = "fno".into();
+        let spans = view.tab_bar_spans();
+        assert_eq!(
+            spans[0].text, " f[no] ",
+            "the leading brand label is bracketed"
+        );
+    }
+
+    #[test]
     fn active_blocked_tab_keeps_accent_and_inverse_in_composed_cells() {
         // Domain pitfall + AC2-HP under selection: the ACTIVE (INVERSE) tab whose
         // pane is Blocked must keep the amber fg on every composed cell, so the
@@ -13162,7 +13225,7 @@ mod tests {
 
     #[test]
     fn hover_arm_does_not_clobber_an_explicit_selector() {
-        // (x-f331) An explicit leader+w selector (sel_hover_armed=false) keeps
+        // (x-f331) An explicit prefix+w selector (sel_hover_armed=false) keeps
         // keyboard control: a stray hover does not demote it to a motion-fresh arm
         // that j/k would disarm.
         let mut view = two_pane_view();
@@ -13286,7 +13349,7 @@ mod tests {
     #[test]
     fn chrome_hit_non_ready_card_is_notice_not_confirm() {
         // A blocked/in-flight card is NOT dispatchable (codex peer review): the
-        // click is a local notice, never a Confirm that would start work leader+g
+        // click is a local notice, never a Confirm that would start work prefix+g
         // would skip. Two cards under the work-queue header.
         let mut view = two_pane_view();
         let card = |id: &str, state| BacklogCard {
@@ -14994,7 +15057,7 @@ mod tests {
 
     #[test]
     fn client_compose_keys_modal_renders_the_which_key_reference() {
-        // x-8ccf US3: leader+? opens the centered which-key modal (replacing the
+        // x-8ccf US3: prefix+? opens the centered which-key modal (replacing the
         // top-left poster) built from the single-source binding table.
         let mut view = two_pane_view();
         view.term = (40, 80);
@@ -15265,13 +15328,16 @@ mod tests {
 
     #[test]
     fn row_menu_opens_only_on_menu_bearing_rows() {
-        // (x-f300) A squad row now opens the SECTION menu when it holds dead
-        // rows - but `unified_rows_view` has none, so the refusal here is the
-        // no-dead path (asserted by name below), not "headers never open".
+        // A workspace header is always menu-bearing now (US3: it offers Rename),
+        // even in `unified_rows_view`, which has no dead rows to clear.
         let mut v = unified_rows_view();
         let hdr = squad_header_at(&v, 1);
-        assert!(!v.open_row_menu(hdr, Anchor::Center));
-        assert!(v.row_menu.is_none());
+        assert!(v.open_row_menu(hdr, Anchor::Center));
+        assert_eq!(
+            v.row_menu.as_ref().unwrap().actions,
+            vec![super::MenuAction::Rename]
+        );
+        v.row_menu = None;
         // A truly menu-less row (the dim subline) refuses with no notice at all.
         // A FOREIGN cwd is what makes display_rows emit the Sub line, so the
         // fixture has to opt in - `.expect` rather than `if let`, so a fixture
@@ -15313,10 +15379,13 @@ mod tests {
     async fn arm_clear_dead(v: &mut View, squad: u64) {
         let hdr = squad_header_at(v, squad);
         assert!(v.open_row_menu(hdr, Anchor::Center), "section menu opens");
-        assert_eq!(
-            v.row_menu.as_ref().unwrap().actions,
-            vec![super::MenuAction::ClearDead]
-        );
+        // Rename now leads the workspace menu, so explicitly select Clear dead.
+        let m = v.row_menu.as_mut().unwrap();
+        m.popup.sel = m
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::ClearDead)
+            .expect("clear-dead entry present");
         let mut buf: Vec<u8> = Vec::new();
         row_menu_execute_selected(v, &mut buf).await.unwrap();
         assert!(buf.is_empty(), "the menu entry only arms the confirm");
@@ -15349,15 +15418,61 @@ mod tests {
     }
 
     #[test]
-    fn clear_dead_refuses_a_section_with_no_dead_rows() {
-        // The menu never renders an entry that would no-op: a fully-live section
-        // gets a notice instead of a one-entry menu (AC-EDGE).
-        let mut v = view_with_agents(vec![]);
-        v.layout.agents = vec![lifecycle_row("live-a", false, false)];
-        let hdr = squad_header_at(&v, 1);
+    fn nonworkspace_section_with_no_dead_rows_gets_a_notice() {
+        // The menu never renders a no-op entry: a NON-workspace band (Elsewhere)
+        // with nothing to clear and nothing to rename gets a notice, not a
+        // one-entry menu (AC-EDGE). A workspace section always opens (Rename).
+        let orphan_live = {
+            let mut r = lifecycle_row("stray-live", false, false);
+            r.squad = Some(99); // no such squad -> Elsewhere band
+            r
+        };
+        let mut v = view_with_agents(vec![orphan_live]);
+        let hdr = v
+            .display_rows()
+            .iter()
+            .position(
+                |r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::Elsewhere),
+            )
+            .expect("elsewhere band");
         assert!(!v.open_row_menu(hdr, Anchor::Center));
         assert!(v.row_menu.is_none());
         assert!(v.notice.is_some(), "and says why");
+    }
+
+    #[tokio::test]
+    async fn workspace_section_menu_offers_rename() {
+        // US3: a workspace section header offers Rename (menu parity with
+        // selector `r`), even with no dead rows to clear.
+        let mut v = view_with_agents(vec![]);
+        v.layout.agents = vec![lifecycle_row("live-a", false, false)];
+        let hdr = squad_header_at(&v, 1);
+        assert!(v.open_row_menu(hdr, Anchor::Center), "workspace menu opens");
+        assert_eq!(
+            v.row_menu.as_ref().unwrap().actions,
+            vec![super::MenuAction::Rename],
+            "no dead rows -> Rename only"
+        );
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "opening the overlay sends nothing");
+        assert_eq!(
+            v.rename.map(|(t, _)| t),
+            Some(RenameTarget::Squad(1)),
+            "opens the rename overlay for this workspace"
+        );
+    }
+
+    #[test]
+    fn workspace_section_menu_offers_rename_then_clear_dead() {
+        // With dead rows present the workspace menu offers BOTH, Rename first.
+        let mut v = view_with_dead_interleaved();
+        let hdr = squad_header_at(&v, 1);
+        assert!(v.open_row_menu(hdr, Anchor::Center));
+        assert_eq!(
+            v.row_menu.as_ref().unwrap().actions,
+            vec![super::MenuAction::Rename, super::MenuAction::ClearDead]
+        );
     }
 
     #[tokio::test]
@@ -15647,7 +15762,7 @@ mod tests {
             if matches!(r, PopupRow::Entry { glyph, .. } if glyph == "X") {
                 assert!(
                     modal.row_events[i].is_none(),
-                    "a bare sideline key is not a leader chord"
+                    "a bare sideline key is not a prefix chord"
                 );
             }
         }
@@ -18232,7 +18347,7 @@ mod tests {
     #[test]
     fn display_rows_footer_keeps_empty_session_actionable() {
         // AC3-EDGE: zero squads/agents/cards still yields the footer, so
-        // leader+w always has a row to open on and Enter opens the create
+        // prefix+w always has a row to open on and Enter opens the create
         // overlay.
         let v = View::new(
             (30, 100),
@@ -18553,7 +18668,7 @@ mod tests {
         assert!(buf.is_empty(), "navigation sends nothing");
     }
 
-    // ---- x-653d: session navigator (leader+f) ----
+    // ---- x-653d: session navigator (prefix+f) ----
 
     #[test]
     fn nav_rows_lists_every_squads_tabs_ignoring_expand() {
@@ -20883,7 +20998,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn leader_reorder_sends_the_active_tab_id_and_delta() {
+    async fn prefix_reorder_sends_the_active_tab_id_and_delta() {
         let mut v = two_pane_view();
         let mut scanner = Scanner::default();
         let mut carry = Vec::new();
@@ -20913,8 +21028,8 @@ mod tests {
     #[tokio::test]
     async fn keys_modal_executed_resize_arms_the_repeat_window() {
         // codex P2 parity: a resize run from the which-key modal arms the repeat
-        // window, so a following bare H repeats without leader - exactly as a
-        // typed leader+H would (the scanner never saw the modal keystroke).
+        // window, so a following bare H repeats without prefix - exactly as a
+        // typed prefix+H would (the scanner never saw the modal keystroke).
         let mut v = two_pane_view();
         v.term = (40, 80);
         let mut scanner = Scanner::default();
@@ -20947,7 +21062,7 @@ mod tests {
         let mut scanner = Scanner::default();
         let mut carry = Vec::new();
         let mut buf: Vec<u8> = Vec::new();
-        // Arm via a typed leader+H.
+        // Arm via a typed prefix+H.
         handle_stdin(&mut v, &mut scanner, &mut carry, b"\x02H", &mut buf)
             .await
             .unwrap();

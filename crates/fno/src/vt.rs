@@ -104,7 +104,7 @@ pub struct Pane {
     /// command line is byte-captured (not grid-scraped, which x-122e retired) for
     /// rerun. `None` outside that window.
     pending_cmd: Option<PendingCmd>,
-    /// The block seq the keyboard block-selection walk (leader+v) rests on.
+    /// The block seq the keyboard block-selection walk (prefix+v) rests on.
     /// Cleared whenever the selection itself clears.
     selected_block: Option<u64>,
     /// (v12, x-e780) The active in-scrollback search, or `None`. Each step
@@ -502,7 +502,7 @@ impl Pane {
 
     /// Move the block-scoped selection to the `dir`-adjacent block (the whole
     /// command + output span) and bring it into view, so the existing copy chain
-    /// (leader+y) yanks it. First press (no current block) selects the newest;
+    /// (prefix+y) yanks it. First press (no current block) selects the newest;
     /// repeated presses walk. Returns the now-selected block's seq, or `None`
     /// when the pane has no retained blocks.
     pub fn block_select(&mut self, dir: BlockDir) -> Option<u64> {
@@ -2427,7 +2427,7 @@ mod tests {
             other => panic!("expected Moved, got {other:?}"),
         }
 
-        // The copy chain extracts a full turn (leader+y path).
+        // The copy chain extracts a full turn (prefix+y path).
         pane.selection_clear();
         assert_eq!(pane.block_select(BlockDir::Prev), Some(2));
         let sel = pane.selection_text().unwrap_or_default();

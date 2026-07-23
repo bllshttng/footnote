@@ -691,12 +691,18 @@ def cmd_spawn(
     ),
     squad: str | None = typer.Option(
         None,
-        "--squad",
+        "--workspace",
         "-s",
         help=(
-            "Pane placement (x-3e38): send the new pane to a squad by its visible "
-            "workspace name instead of the cwd-derived default. --substrate pane only."
+            "Pane placement (x-3e38): send the new pane to a workspace by its visible "
+            "name instead of the cwd-derived default. --substrate pane only."
         ),
+    ),
+    squad_compat: str | None = typer.Option(
+        None,
+        "--squad",
+        hidden=True,
+        help="Deprecated alias for --workspace.",
     ),
     split: str | None = typer.Option(
         None,
@@ -770,6 +776,9 @@ def cmd_spawn(
     Plain spawn for codex/gemini (no --once) requires the fno-agents daemon
     (Rust runtime); this Python path exits 13 with guidance.
     """
+    # --squad is a hidden back-compat alias for --workspace (US2); --workspace wins.
+    squad = squad if squad is not None else squad_compat
+
     from fno.agents.dispatch import DispatchAskError, SpawnResult, dispatch_spawn
     from fno.agents.provider_resolve import (
         DispatchFlagError,
@@ -893,11 +902,11 @@ def cmd_spawn(
     # refused fail-closed before any spawn (mirrors the tier-3 guard shape above).
     placement_requested = squad is not None or split is not None
     if squad is not None and not squad.strip():
-        print("--squad/-s needs a nonblank squad name", file=sys.stderr)
+        print("--workspace/-s needs a nonblank workspace name", file=sys.stderr)
         raise typer.Exit(code=2)
     if placement_requested and (substrate != "pane" or once):
         print(
-            "--squad/-s and --split/-x apply only to --substrate pane (bg/headless have "
+            "--workspace/-s and --split/-x apply only to --substrate pane (bg/headless have "
             "no pane geometry)",
             file=sys.stderr,
         )
