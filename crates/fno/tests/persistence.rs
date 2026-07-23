@@ -118,6 +118,7 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
     let scratch = Scratch::new("altscreen");
     let mut h = ClientHarness::spawn(&scratch);
     h.wait_prompt(15);
+    h.wait_input_ready(15);
     // Enter alt screen, clear, home, draw a marker; cat holds the program
     // "open" in the foreground exactly like an editor session.
     h.type_bytes(b"printf '\\033[?1049h\\033[2J\\033[HALT-SCREEN-HELD'; cat\r");

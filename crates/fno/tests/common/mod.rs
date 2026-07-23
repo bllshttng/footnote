@@ -241,6 +241,29 @@ impl ClientHarness {
         self.writer.flush().unwrap();
     }
 
+    /// Prove the client's input loop is accepting bytes, not merely that the
+    /// server's initial prompt has rendered. Cold CI launches can expose the
+    /// prompt before the client reaches its input select; retrying this
+    /// idempotent shell round-trip closes that one-way readiness race.
+    pub fn wait_input_ready(&mut self, secs: u64) {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < deadline {
+            self.type_bytes(b"printf 'fno-input-ready\\n'\r");
+            let attempt = (Instant::now() + Duration::from_millis(500)).min(deadline);
+            while Instant::now() < attempt {
+                if self
+                    .screen()
+                    .lines()
+                    .any(|line| line.trim() == "fno-input-ready")
+                {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        panic!("client input never became ready\n{}", self.diagnostics());
+    }
+
     /// Feed anything new from the client into the emulator, return the screen.
     pub fn screen(&mut self) -> String {
         let out = self.output.lock().unwrap();
