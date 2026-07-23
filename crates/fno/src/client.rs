@@ -3532,6 +3532,14 @@ impl View {
             {
                 Some(i) => {
                     self.set_selector(Some(i));
+                    // (x-8d3e) set_selector may re-anchor to a new index when the
+                    // pointed row changes the protected squad and the catalog
+                    // reflows. A resting pointer emits no follow-up Move, so keep
+                    // the hover-armed invariant `hover_row == selector` here -
+                    // otherwise the two diverge, painting a second highlight and
+                    // routing verb keys to the relocated selector, not the row
+                    // under the pointer (codex #570).
+                    self.hover_row = self.selector;
                     self.sel_hover_armed = true;
                 }
                 None if self.sel_hover_armed => {
@@ -5316,6 +5324,7 @@ impl View {
                 if apply_cap && hidden > 0 {
                     out.push(DisplayRow::IdleFold {
                         key: key.clone(),
+                        squad: s.id,
                         hidden,
                         expanded: show_all_idle,
                     });
@@ -5970,6 +5979,11 @@ enum DisplayRow<'a> {
     /// on it. Folded it paints `+N idle`; expanded it paints `- fewer`.
     IdleFold {
         key: SectionKey,
+        /// (x-8d3e) The runtime squad id. `key` is a `SectionKey::Squad` derived
+        /// from the canonical cwd, which two live squads may share, so it is NOT
+        /// a unique row identity; the squad id is, and `row_key` keys on it so a
+        /// post-reflow re-anchor cannot jump to another workspace's fold row.
+        squad: u64,
         hidden: usize,
         expanded: bool,
     },
@@ -6139,7 +6153,7 @@ enum RowKey {
     },
     Squad(u64, Option<usize>),
     Card(String),
-    Idle(SectionKey),
+    Idle(u64),
     NewSquad,
     Other,
 }
@@ -6154,7 +6168,7 @@ fn row_key(drow: &DisplayRow) -> RowKey {
         },
         DisplayRow::Sel(s) => RowKey::Squad(s.squad, s.tab),
         DisplayRow::Card(c) => RowKey::Card(c.id.clone()),
-        DisplayRow::IdleFold { key, .. } => RowKey::Idle(key.clone()),
+        DisplayRow::IdleFold { squad, .. } => RowKey::Idle(*squad),
         DisplayRow::NewSquad => RowKey::NewSquad,
         DisplayRow::Header { .. }
         | DisplayRow::Sub(_)
@@ -14295,6 +14309,82 @@ mod tests {
             row_key(&DisplayRow::Agent(&watch_a)) != row_key(&DisplayRow::Agent(&watch_b)),
             "same name, different attach_id -> distinct row keys"
         );
+    }
+
+    // x-8d3e regression (codex P2 on #570): `SectionKey::Squad` is cwd-derived
+    // and two live squads may share a cwd, so their fold rows carry the same
+    // `key`. The RowKey must key on the runtime squad id, or a post-reflow
+    // re-anchor jumps the cursor to the other workspace's fold row.
+    #[test]
+    fn row_key_disambiguates_idle_folds_by_squad() {
+        let key = SectionKey::Squad("/same/cwd".into());
+        let fold_a = DisplayRow::IdleFold {
+            key: key.clone(),
+            squad: 1,
+            hidden: 3,
+            expanded: false,
+        };
+        let fold_b = DisplayRow::IdleFold {
+            key,
+            squad: 2,
+            hidden: 3,
+            expanded: false,
+        };
+        assert!(
+            row_key(&fold_a) != row_key(&fold_b),
+            "same cwd SectionKey, different squad -> distinct fold keys"
+        );
+    }
+
+    // x-8d3e regression (codex P2 on #570): when a hover-armed selector protects
+    // an idle row and the pointer moves to a row below the expanded squad, the
+    // reflow re-anchors `selector` by identity - so `hover_row` must track it, or
+    // a resting pointer paints two highlights and routes verb keys to the wrong
+    // row.
+    #[test]
+    fn hover_reanchor_keeps_hover_row_and_selector_aligned() {
+        let dir = isolate_view_store("cap-hover");
+        let mut agents = vec![sv_agent(1, "w", Some(AgentBadge::Working), false)];
+        for i in 0..12 {
+            agents.push(sv_agent(1, &format!("idle{i}"), None, false));
+        }
+        let mut view = view_with_agents(agents);
+        // Hover onto a visible idle row -> arm + protect squad 1 (it expands).
+        // Screen row maps 1:1 to the display index at offset 0.
+        let idle0 = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "idle0"))
+            .unwrap();
+        view.on_hover(idle0 as u16, 2, Instant::now());
+        assert!(view.sel_hover_armed, "the pointer armed the selector");
+        assert_eq!(
+            rendered(&view, "idle"),
+            12,
+            "hovering the idle row expanded it"
+        );
+        // Now hover onto the create-workspace footer, below the overflow.
+        let footer_expanded = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::NewSquad))
+            .unwrap();
+        view.on_hover(footer_expanded as u16, 2, Instant::now());
+        // Leaving the idle row folds squad 1 and re-anchors the selector to the
+        // footer's new (lower) index; hover_row must follow it.
+        assert_eq!(
+            view.hover_row, view.selector,
+            "hover_row stays aligned with the re-anchored selector"
+        );
+        assert!(
+            matches!(
+                view.display_rows().get(view.selector.unwrap()),
+                Some(DisplayRow::NewSquad)
+            ),
+            "both point at the footer, not a stale row"
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // AC1-UI (x-c5ee): a click / selector Enter on the fold row toggles idle -
