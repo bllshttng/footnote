@@ -188,6 +188,16 @@ out="$(STUB_MUX=1 STUB_MUX_NAME=someone-else STUB_MUX_PROVIDER=codex \
   run --name paneM --provider codex --message 'Implement x')"
 ok 'pane identity mismatch -> failed' "$(field "$out")" 'failed'
 
+# Regression: a long derived name (<verb>-<node-id>-<slug>) must still launch.
+# The pane short_id shape once capped at 40 chars, so a 43-char name like
+# `spawn-x-7624-dedup-check-before-target-disp` was reported FAILED on a real
+# codex pane launch. The name here is 43 chars.
+LONGNAME='spawn-x-7624-dedup-check-before-target-disp'
+out="$(STUB_MUX=1 STUB_MUX_NAME="$LONGNAME" STUB_MUX_PROVIDER=codex STUB_MUX_SESSION=main \
+  run --name "$LONGNAME" --provider codex --message 'Implement x')"
+ok  'pane long name -> launched'      "$(field "$out")" 'launched'
+has 'pane long name short_id'         "$out" "short_id=$LONGNAME"
+
 # --- summary -----------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
