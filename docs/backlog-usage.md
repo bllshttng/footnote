@@ -232,8 +232,7 @@ Non-macOS gets a cron line instead; the verb itself is scheduler-agnostic:
 0 2 * * * fno backlog groom
 ```
 
-Two notes on what this replaced.
-`scripts/nightly-groom.sh` is a deprecation shim that execs this verb and will be deleted next release.
+This replaces the former `scripts/nightly-groom.sh` compatibility shim.
 `~/.fno/groom-digest.md` is retired - nothing writes or reads it, and you can delete it.
 The worker re-derives its proposals by running read-only `fno backlog maintain` at pass start, so there is no intermediate file left to go stale.
 
