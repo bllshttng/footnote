@@ -506,6 +506,26 @@ def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
+def _is_route_provider_spawn(verb: str, args: Sequence[str]) -> bool:
+    """True for a ``spawn`` whose ``--provider``/``-p`` names a route-only
+    provider the Rust client does not know (``zai``). ``cmd_spawn`` rewrites it
+    into the claude + ``--route`` lane, so it is Python-only exactly like a
+    ``--route``-bearing spawn; otherwise the binary rejects the unknown provider
+    name before Python can translate it (x-6de8)."""
+    if verb != "spawn":
+        return False
+    pre = _args_before_argv(args)
+    for i, a in enumerate(pre):
+        val: str | None = None
+        if a in ("--provider", "-p") and i + 1 < len(pre):
+            val = pre[i + 1]
+        elif a.startswith("--provider="):
+            val = a.split("=", 1)[1]
+        if val is not None and val.strip().lower() == "zai":
+            return True
+    return False
+
+
 def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--node``/``--slug``/``--plan`` (x-84a8).
 
@@ -740,6 +760,7 @@ def make_agents_group_cls() -> type:
                 py_spawn = (
                     _is_role_bearing_spawn(verb, args)
                     or _is_route_bearing_spawn(verb, args)
+                    or _is_route_provider_spawn(verb, args)
                     or _is_pane_substrate_spawn(verb, args)
                     or _is_provenance_bearing_spawn(verb, args)
                     or _is_resume_bearing_spawn(verb, args)

@@ -778,6 +778,10 @@ def cmd_spawn(
         provider = "claude"
         if route is None:
             route = "zai/glm-5.2[1m]"
+        # zai is an attachable bg thread, not a pane or a headless one-shot:
+        # default the default-pane case to bg. `-H` still opts into headless.
+        if substrate == "pane" and not headless:
+            substrate = "bg"
 
     # --provider is optional: resolve it (explicit > invoking harness > claude)
     # and reject an empty --model before anything spawns. `provider` is a
