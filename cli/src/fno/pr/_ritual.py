@@ -46,7 +46,9 @@ import typer
 
 from fno._subprocess_util import fno_py_cmd
 from fno.config import load_settings_for_repo
+from fno.graph.store import read_graph
 from fno.pr._proc import Result, ToolMissing, run as _run
+from fno.pr._sync_canonical import _origin_slug
 
 # Cross-runner mutex (Step 0.5): a global TTL claim so an attended `/fno:pr
 # merged` and an auto-dispatched worker cannot run the destructive middle
@@ -61,6 +63,10 @@ _CLAIM_TTL = "15m"
 _ADVANCE_TIMEOUT_S = 180.0
 # Per-leg default bound so a single hung verb cannot wedge the whole ritual.
 _LEG_TIMEOUT_S = 120.0
+# Headless judgment worker: reads the merged diff + updates the backlog, which
+# routinely exceeds a minute. Passed to `fno agents spawn --timeout` and matched
+# by the outer subprocess bound so the worker is not killed early (codex P2).
+_JUDGMENT_TIMEOUT_S = 600.0
 
 _OK = "ok"
 _SKIPPED = "skipped"
@@ -465,12 +471,24 @@ class Ritual:
             self._emit("judgment", _FAILED, f"spawn-failed; {inputs}")
 
     def _spawn_judgment(self, deferred: int, files: int, lines: int) -> bool:
-        """ONE headless one-shot carrying only the two judgment steps."""
+        """ONE headless one-shot carrying only the two judgment steps.
+
+        ``agents spawn`` takes ``[name] [message]`` as positionals, so the
+        prompt is the MESSAGE (second positional) and a short valid name comes
+        first - passing the long prompt as the sole positional made it the
+        agent NAME, which spawn validation rejects (>64 chars, contains '/'),
+        silently breaking every autonomous judgment leg (codex P1). The headless
+        worker reads a diff and updates the backlog, which routinely exceeds a
+        minute, so it gets spawn's own ``--timeout`` and the outer bound matches
+        it rather than killing the worker early (codex P2).
+        """
         prompt = self._judgment_prompt(deferred, files, lines)
         argv = [*fno_py_cmd(), "agents", "spawn", "--substrate", "headless",
-                "-c", str(self.canon), prompt]
+                "--timeout", str(int(_JUDGMENT_TIMEOUT_S)),
+                "-c", str(self.canon),
+                f"judgment-pr-{self.ctx.pr}", prompt]
         try:
-            r = self.runner(argv, timeout=60.0)
+            r = self.runner(argv, timeout=_JUDGMENT_TIMEOUT_S + 60.0)
         except (ToolMissing, subprocess.SubprocessError):
             return False
         return r.ok
@@ -494,8 +512,42 @@ class Ritual:
 
     # -- row reap ----------------------------------------------------------
 
+    def _recover_node_for_pr(self) -> list[str]:
+        """Graph-derived node id(s) for this PR when reconcile closed nothing.
+
+        The dominant path closes + stamps the node at the ship gate, so
+        ``backlog reconcile`` no-ops and ``.closed[]`` is empty. Recover the
+        PR's node from the graph (repo-scoped ``pr_number`` + ``pr_url`` match)
+        so the row reap still finds it - the replaced bash Step 2 did this scan
+        inline (codex P2).
+        """
+        slug = _origin_slug(self.canon, self.runner) if self.ctx.canon else None
+        if not slug:
+            return []
+        try:
+            entries = read_graph()
+        except Exception:  # noqa: BLE001 - unreadable graph degrades to no recovery
+            return []
+        needle = f"/{slug.lower()}/pull/"
+        out: list[str] = []
+        for e in entries:
+            if not isinstance(e, dict) or e.get("pr_number") != self.ctx.pr:
+                continue
+            if needle not in str(e.get("pr_url") or "").lower():
+                continue
+            nid = e.get("id")
+            if nid and nid not in out:
+                out.append(nid)
+        return out
+
     def leg_reap_rows(self) -> None:
         """Step 8a: reap the merged node's lingering build-worker rows."""
+        if not self.ctx.node_ids:
+            # Dominant path: the ship gate already closed the node, so
+            # reconcile's .closed[] was empty. Recover it from the graph
+            # (repo-scoped pr_number match) so the row reap still runs -
+            # mirroring the replaced bash Step 2 scan (codex P2).
+            self.ctx.node_ids = self._recover_node_for_pr()
         if not self.ctx.node_ids:
             self._emit("reap-rows", _SKIPPED, "no closed node ids"); return
         reap_on = _truthy(getattr(self.ctx.pm, "self_reap", False))
@@ -607,6 +659,11 @@ class Ritual:
         if not self.ctx.pm:
             self._emit("config", _FAILED, "post_merge config unreadable (not a repo / bad config)")
             return 1
+        if not _truthy(getattr(self.ctx.pm, "enabled", True)):
+            # config.post_merge.enabled is the ritual's off switch; a repo that
+            # sets it false must not acquire the mutex or run any leg (codex P1).
+            self._emit("config", _SKIPPED, "post_merge.enabled is false; ritual disabled")
+            return 0
         if not self.acquire_mutex():
             return 0  # another runner owns it
         try:

@@ -251,18 +251,26 @@ def test_judgment_autonomous_empty_skips(tmp_path, capsys):
     assert not any(c[1] == "agents" and "spawn" in c for c in runner.calls if len(c) > 1)
 
 
-def test_judgment_autonomous_nonempty_spawns_headless(tmp_path, capsys):
+def test_judgment_autonomous_nonempty_spawns_headless(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
     runner = FakeRunner(diff_files=14, additions=300, deletions=20)
     r = _bare(tmp_path, runner, autonomous=True, parking_lot="internal/x/parking-lot.md")
     r.leg_judgment()
     out = capsys.readouterr().out
     assert "step=judgment status=ok" in out
     assert "spawned headless" in out
-    # exactly one headless spawn, substrate=headless (never bg)
     spawns = [c for c in runner.calls if len(c) > 1 and c[1] == "agents" and "spawn" in c]
     assert len(spawns) == 1
-    assert "--substrate" in spawns[0] and "headless" in spawns[0]
-    assert "bg" not in spawns[0]
+    argv = spawns[0]
+    assert "--substrate" in argv and "headless" in argv[argv.index("--substrate") + 1]
+    assert "bg" not in argv
+    # codex P1: the prompt is the MESSAGE (last positional), with a short valid
+    # NAME before it. Passing the prompt as the sole positional made it the name,
+    # which spawn rejects (>64 chars, '/').
+    assert argv[-1].startswith("Post-merge judgment")   # the prompt = message
+    assert argv[-2] == "judgment-pr-7" and len(argv[-2]) <= 64  # name
+    # codex P2: the worker gets its own --timeout, not a 60s outer kill.
+    assert "--timeout" in argv
 
 
 def test_judgment_attended_defers_to_skill(tmp_path, capsys):
@@ -273,6 +281,53 @@ def test_judgment_attended_defers_to_skill(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "deferred-to-skill" in out
     assert not any(len(c) > 1 and c[1] == "agents" and "spawn" in c for c in runner.calls)
+
+
+# --- codex review fixes: enabled gate + node recovery --------------------
+
+def test_run_skips_when_post_merge_disabled(tmp_path, capsys, monkeypatch):
+    # codex P1: config.post_merge.enabled=false must not acquire the mutex or
+    # run any leg. The replaced bash exited 0 without mutations; the verb must too.
+    monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["true"])
+    runner = FakeRunner()
+    r = _bare(tmp_path, runner)
+    r.ctx.pm = SimpleNamespace(enabled=False, sync_command=None,
+                               self_reap=False, parking_lot_path=None)
+    rc = r.run()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "post_merge.enabled is false" in out
+    assert "step=reconcile" not in out  # no leg ran
+    assert not any(len(c) > 1 and c[1] == "claim" and "acquire" in c
+                   for c in runner.calls)  # mutex never acquired
+
+
+def test_recover_node_for_pr_scopes_by_repo(tmp_path, monkeypatch):
+    # codex P2: when reconcile closed nothing (dominant ship-gate path),
+    # recover the PR's node from the graph, scoped by origin slug + pr_url so a
+    # foreign repo sharing a pr_number is never reaped.
+    monkeypatch.setattr(_ritual, "_origin_slug", lambda canon, runner: "owner/repo")
+    monkeypatch.setattr(_ritual, "read_graph", lambda: [
+        {"id": "fno-abc1", "pr_number": 7, "pr_url": "https://github.com/owner/repo/pull/7"},
+        {"id": "fno-forei", "pr_number": 7, "pr_url": "https://github.com/other/repo/pull/7"},
+        {"id": "fno-other", "pr_number": 99, "pr_url": "https://github.com/owner/repo/pull/99"},
+    ])
+    r = _bare(tmp_path, FakeRunner(), pr=7)
+    assert r._recover_node_for_pr() == ["fno-abc1"]
+
+
+def test_reap_rows_recovers_node_when_reconcile_closed_nothing(tmp_path, monkeypatch, capsys):
+    # codex P2 end-to-end: empty node_ids + graph has the PR's node -> recovery
+    # fills node_ids -> reap proceeds instead of skipping.
+    monkeypatch.setattr(_ritual, "_origin_slug", lambda canon, runner: "owner/repo")
+    monkeypatch.setattr(_ritual, "read_graph", lambda: [
+        {"id": "fno-abc1", "pr_number": 7, "pr_url": "https://github.com/owner/repo/pull/7"}])
+    runner = FakeRunner(agent_rows=[{"name": "target-fno-abc1-build", "status": "dead"}])
+    r = _bare(tmp_path, runner, pr=7)  # node_ids empty (reconcile closed nothing)
+    r.leg_reap_rows()
+    out = capsys.readouterr().out
+    assert "step=reap-rows" in out
+    assert "no closed node ids" not in out  # recovered, not skipped
 
 
 # --- AC1/AC5: archive leg (found / inside-worktree / missing script) ----
