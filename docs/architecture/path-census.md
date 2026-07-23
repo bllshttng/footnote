@@ -43,6 +43,9 @@ A PR that adds a second path to a censused operation must add a row with a justi
 | 6 | `adapters/*.spawn_worker` | `adapters/claude_code.py:28`, `adapters/codex.py:90` | RETIRE after live callers migrate | OPEN |
 | 7 | One-shot `claude -p` LLM-as-a-function | `inbox/triage.py:304` and three sites | OUT OF SCOPE | — |
 
+Leg 6 reachability trace (2026-07-23): `loop_target.rs:420-427` dispatches `--driver megawalk` to `loop_megawalk::run`; `loop_megawalk.rs:1153-1155` constructs `ShelloutDispatcher`; `loop_dispatch.rs:250-272` implements the live dispatcher.
+The dispatcher is reachable, so this PR does not partially delete it or `scripts/lib/driver-claude-code.sh`; the row remains `RETIRE (migration needed)` for the later driver cutover.
+
 ## Census 5: session liveness / observation
 
 | # | Path | Entry | Disposition | Closing PR |
