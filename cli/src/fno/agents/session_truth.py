@@ -223,7 +223,7 @@ def resolve_session_truth(
 def _default_resolve(handle: str):
     from fno.agents.discover import resolve_or_suggest
 
-    return resolve_or_suggest(handle)
+    return resolve_or_suggest(handle, require_alive=False)
 
 
 _EVIDENCE = {

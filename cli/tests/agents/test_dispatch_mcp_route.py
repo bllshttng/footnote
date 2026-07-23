@@ -222,6 +222,39 @@ def test_ac1_err_mcp_send_failure_demotes_to_socket(tmp_path: Path, monkeypatch)
     assert done_events[0]["backend"] == "socket_after_mcp_demote"
 
 
+def test_mcp_truth_routing_gap_never_stamps_orphaned(tmp_path: Path, monkeypatch) -> None:
+    """Family-1 inconclusive means delivery failed, not that the worker died."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_mcp_agent()
+
+    from fno.agents.dispatch import DispatchAskError, dispatch_ask
+    from fno.agents.providers import claude as claude_mod
+    from fno.agents.registry import load_registry
+
+    def raise_routing_gap():
+        raise claude_mod.ProviderOrphanError(
+            reason="truth-live-inject-failed", short_id="abc12345"
+        )
+
+    capture: dict = {}
+    _install_fake_provider_layer(
+        monkeypatch,
+        probe_result=True,
+        mcp_send_result=raise_routing_gap,
+        socket_send_result="should-not-run",
+        capture=capture,
+    )
+
+    with pytest.raises(DispatchAskError) as exc_info:
+        dispatch_ask(
+            name="mcp-worker", message="hi", provider="claude",
+            cwd=tmp_path, timeout=30,
+        )
+
+    assert exc_info.value.exit_code == 13
+    assert load_registry()[0].status == "live"
+
+
 # ---------------------------------------------------------------------
 # AC3-HP — probe inconclusive -> demote with mcp_channel_disconnected
 # ---------------------------------------------------------------------

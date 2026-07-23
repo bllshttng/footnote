@@ -514,11 +514,6 @@ def _discover_from_opencode(
     return rows
 
 
-# Terminal AgentStatus values (mirrors registry.AgentStatus): a row in one of
-# these is dead, so it must not surface as a live discovery result.
-_DEAD_REGISTRY_STATUSES = frozenset({"orphaned", "failed", "exited", "permanent_dead"})
-
-
 def _discover_from_roster(*, exclude_session_ids: Iterable[str] = ()) -> list[dict]:
     """Live claude sessions from the daemon roster (US1, x-605c).
 
@@ -565,11 +560,8 @@ def _discover_from_registry(
         harness = getattr(e, "harness", None)
         if harness not in HARNESS_SESSION_ID_FIELDS:
             continue
-        # A dead/orphaned row must never resolve as a live recipient: mail would
-        # queue to a handle nobody drains, and doctor's dead-letter check (which
-        # reads this discovery) would count it live and miss the strand.
-        if getattr(e, "status", None) in _DEAD_REGISTRY_STATUSES:
-            continue
+        # Registry status is enumeration metadata, not a liveness verdict.
+        # Family-1 transcript truth below decides whether callers may route.
         if harness == "claude":
             # session_id keeps the full uuid for dedup/canonical identity, but
             # short_id MUST be the authoritative jobId -- the stored short and
@@ -602,7 +594,7 @@ def _discover_from_registry(
 
 @dataclass
 class DiscoveredSession:
-    """One live, host-local Claude Code session surfaced in the lane."""
+    """One host-local session candidate with its family-1 truth verdict."""
 
     session_id: str
     short_id: str  # hex handle (jobId), the addressable id
@@ -612,6 +604,11 @@ class DiscoveredSession:
     project: Optional[str]
     status: Optional[str]  # registry status: idle/busy/waiting
     agent: str = "claude"
+    truth_state: str = "unknown"
+
+    @property
+    def is_alive(self) -> bool:
+        return self.truth_state in {"working", "watching", "your-move"}
 
     def to_row(self) -> dict:
         """Canonical dict shape for the JSON/table renderers."""
@@ -732,16 +729,16 @@ def _live_claude_procs(psutil_mod) -> list[tuple[int, str]]:
     return out
 
 
-def _newest_recent_transcript(pdir: Path, cutoff: float) -> Optional[str]:
-    """Return the session_id of the newest non-stale transcript in ``pdir``.
+def _newest_transcript(pdir: Path) -> Optional[str]:
+    """Return the newest transcript identity in ``pdir``.
 
     Only the dir's top-level ``*.jsonl`` are transcripts (UUID subdirs are
     ``tool-results``). A ``.sync-conflict-`` copy is skipped — the marker is an
     infix (``<sid>.sync-conflict-<ts>.jsonl``), so a substring test. ``None`` if
-    the dir is absent or holds no transcript fresh enough to look live.
+    the dir is absent or holds no transcript.
     """
     best_sid: Optional[str] = None
-    best_mt = cutoff
+    best_mt = float("-inf")
     try:
         entries = list(os.scandir(pdir))
     except OSError:
@@ -764,29 +761,23 @@ def _discover_from_projects(
     projects_dir: Path,
     *,
     psutil_mod,
-    recency_seconds: float,
     exclude_session_ids: Iterable[str] = (),
-    now: Optional[float] = None,
 ) -> list[dict]:
     """Fallback discovery from the canonical transcript store (x-a1d5).
 
     The ``<pid>.json`` sidecar is gone, so liveness comes from a running
-    ``claude`` process (the plan's primary signal): each live process' cwd maps
-    to a projects subdir, and the newest non-stale ``*.jsonl`` there is its live
-    transcript (the session_id == filename). cwd comes from the process; pid is
-    real. Returns candidate dicts shaped like the sidecar loop's rows so the
-    shared dedup/alias pipeline consumes them unchanged.
+    ``claude`` process: each live process' cwd maps to a projects subdir, and the
+    newest ``*.jsonl`` there identifies its candidate session. cwd comes from
+    the process; pid is real. Family 1 classifies that transcript later; this
+    enumerator never interprets transcript age as a liveness verdict.
 
     ``exclude_session_ids`` drops sessions already adopted into the fno registry
     (matched on full session_id, since a transcript row's short_id is the uuid
     prefix, not the registry's hex handle) so the lane stays "live but unadopted".
 
     ponytail: one row per live cwd — two sessions sharing a cwd collapse to the
-    newest transcript (rare; the sidecar lane handled per-pid). The mtime window
-    only rejects a process whose transcript has gone quiet, so a real pid plus a
-    fresh transcript is the liveness proof.
+    newest transcript (rare; the sidecar lane handled per-pid).
     """
-    cutoff = (now if now is not None else time.time()) - recency_seconds
     exclude_sids = {s for s in (exclude_session_ids or ()) if s}
     rows: list[dict] = []
     seen_cwd: set[str] = set()
@@ -796,7 +787,7 @@ def _discover_from_projects(
         seen_cwd.add(cwd)
         sid = None
         for name in _candidate_dir_names(cwd):
-            sid = _newest_recent_transcript(projects_dir / name, cutoff)
+            sid = _newest_transcript(projects_dir / name)
             if sid:
                 break
         if not sid or sid in exclude_sids:
@@ -812,63 +803,6 @@ def _discover_from_projects(
             }
         )
     return rows
-
-
-def _create_time_epoch(pid: int, psutil_mod) -> Optional[float]:
-    """OS-reported process create time in epoch seconds, or None if dead.
-
-    None means the PID is not running here (or we cannot inspect it) — treat
-    as not-live, mirroring the claim system's reuse-safe liveness.
-    """
-    try:
-        return float(psutil_mod.Process(pid).create_time())
-    except Exception:
-        # psutil.NoSuchProcess / AccessDenied / any inspection failure — a
-        # process we cannot validate is one we will not claim is live.
-        return None
-
-
-def _ctime_matches(create_time: float, proc_start: str) -> bool:
-    """True iff a process create time matches the registry ``procStart`` string.
-
-    ``procStart`` is a ctime-format string written by Claude Code from the same
-    OS create time, so a ctime-string match proves the PID was not reused since
-    the file was written — without epoch parsing. Verified on 2.1.169, CC
-    renders it in **UTC** (e.g. ``"Tue Jun  9 18:54:16 2026"`` for an 11:54
-    PDT start), so we compare against the UTC rendering (``asctime(gmtime)``)
-    AND the local rendering (``ctime``) to stay correct whichever clock a CC
-    build uses. A +/-1s window absorbs sub-second rounding; whitespace is
-    collapsed so single- vs double-space day padding never causes a miss.
-
-    Accepting both renderings does not weaken reuse detection: a reused PID's
-    new create time differs from the old ``procStart`` by far more than 1s in
-    either timezone, so neither rendering would spuriously match.
-    """
-    want = " ".join(proc_start.split())
-    if not want:
-        return False
-    for delta in (0.0, -1.0, 1.0):
-        t = create_time + delta
-        for rendered in (time.asctime(time.gmtime(t)), time.ctime(t)):
-            if " ".join(rendered.split()) == want:
-                return True
-    return False
-
-
-def _is_live(pid: int, proc_start: str, psutil_mod) -> bool:
-    """Reuse-safe liveness: PID running here AND create-time matches procStart.
-
-    When ``procStart`` is absent (rare; present on every probed 2.1.169 file)
-    a running PID is accepted — the reuse guard simply cannot run, and the
-    alternative (dropping a genuinely-live session) is worse than the
-    vanishingly-small reuse window with no recorded create time.
-    """
-    create_time = _create_time_epoch(pid, psutil_mod)
-    if create_time is None:
-        return False
-    if not proc_start:
-        return True
-    return _ctime_matches(create_time, proc_start)
 
 
 # --------------------------------------------------------------------------
@@ -1111,6 +1045,8 @@ def resolve_or_suggest(
     registry_path: Optional[Path] = None,
     project_resolver: Optional[Callable[[str], Optional[str]]] = None,
     psutil_mod=None,
+    truth_fn: Optional[Callable[[DiscoveredSession], dict]] = None,
+    require_alive: bool = True,
 ) -> tuple[Optional[DiscoveredSession], list[str]]:
     """Resolve a send handle to a live session, or suggest the closest ones (US2).
 
@@ -1131,7 +1067,10 @@ def resolve_or_suggest(
         registry_path=registry_path,
         project_resolver=project_resolver,
         psutil_mod=psutil_mod,
+        truth_fn=truth_fn,
     )
+    if require_alive:
+        sessions = [s for s in sessions if s.is_alive]
     retired = bool(handle and LEGACY_HANDLE_RE.fullmatch(handle))
     # An address is the friendly <project>-<short8> alias, the bare hex short-id,
     # or a stored row name. The retired <harness>-<short8> form is NOT accepted:
@@ -1594,17 +1533,17 @@ def discover_live_sessions(
     exclude_session_ids: Iterable[str] = (),
     project_resolver: Optional[Callable[[str], Optional[str]]] = None,
     psutil_mod=None,
+    truth_fn: Optional[Callable[[DiscoveredSession], dict]] = None,
 ) -> list[DiscoveredSession]:
-    """Return live, host-local Claude Code sessions, deduped + aliased.
+    """Enumerate host-local session candidates and attach family-1 truth.
 
-    Reads the ``<pid>.json`` sidecar registry first; when that yields zero live
-    sessions (the sidecar is absent or repurposed, x-a1d5) it falls back to the
-    canonical transcript store at ``~/.claude/projects``. The fallback is
-    zero-effect on a host with a working sidecar, so adopted/sidecar behavior is
-    byte-for-byte unchanged there.
+    Unions candidates from sidecars, canonical transcript stores, daemon
+    rosters, and the fno registry. None of those enumeration signals can prove
+    death; every candidate receives a family-1 transcript verdict afterward.
 
     ``exclude_short_ids`` drops sessions already present in the fno registry so
-    the discovered lane means "live but not adopted" (no double-listing).
+    the discovered lane does not double-list adopted sessions. Callers route
+    only candidates whose :attr:`DiscoveredSession.is_alive` is true.
     ``projects_dir`` / ``project_resolver`` / ``psutil_mod`` are test seams.
     """
     sdir = sessions_dir or default_sessions_dir()
@@ -1629,9 +1568,6 @@ def discover_live_sessions(
                 pid = int(f.stem)
             except ValueError:
                 continue
-        proc_start = data.get("procStart") or ""
-        if not _is_live(pid, str(proc_start), psu):
-            continue
         short_id = data.get("jobId") or data.get("name") or session_id[:8]
         short_id = str(short_id)
         if short_id in exclude:
@@ -1648,21 +1584,19 @@ def discover_live_sessions(
             }
         )
 
-    # Fallback to the canonical transcript store only when the sidecar found
-    # nothing live (x-a1d5). Gating on empty keeps sidecar hosts unchanged and
-    # matches the bug: a repurposed sessions dir -> zero rows -> read projects/.
-    if not candidates:
-        pdir = projects_dir or default_projects_dir()
-        project_rows = _discover_from_projects(
-            pdir,
-            psutil_mod=psu,
-            recency_seconds=_recency_seconds(),
-            exclude_session_ids=excluded_session_ids,
-        )
-        for r in project_rows:
-            if r["short_id"] in exclude:
-                continue
-            candidates.append(r)
+    # Union the canonical transcript-store lane even when sidecar candidates
+    # exist. A stale sidecar is enumeration metadata now; it must not suppress a
+    # separate projects-only live session on the same host.
+    pdir = projects_dir or default_projects_dir()
+    project_rows = _discover_from_projects(
+        pdir,
+        psutil_mod=psu,
+        exclude_session_ids=excluded_session_ids,
+    )
+    for r in project_rows:
+        if r["short_id"] in exclude:
+            continue
+        candidates.append(r)
 
     # Daemon-loaded Codex threads are the primary candidate source: loaded
     # presence is age-free, while turn/start remains the delivery authority.
@@ -1758,6 +1692,19 @@ def discover_live_sessions(
         )
         for r in live
     ]
+    if truth_fn is None:
+        from fno.agents.session_truth import resolve_session_truth
+
+        def truth_fn(session: DiscoveredSession) -> dict:
+            return resolve_session_truth(
+                session.handle,
+                resolve=lambda _handle: (session, []),
+                projects_root=projects_dir,
+                codex_sessions_dir=codex_sessions_dir,
+                opencode_storage_dir=opencode_storage_dir,
+            )
+    for session in sessions:
+        session.truth_state = str(truth_fn(session).get("state") or "unknown")
     # Stable render order: by handle.
     sessions.sort(key=lambda s: s.handle)
     return sessions

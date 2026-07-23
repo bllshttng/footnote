@@ -2538,7 +2538,22 @@ fn reap_zombies() {
     }
 }
 
+fn rendered_status_from_truth(truth: Option<&str>) -> &'static str {
+    match truth {
+        Some("working" | "watching" | "your-move") => "live",
+        Some("done" | "stalled") => "orphaned",
+        _ => "unknown",
+    }
+}
+
 fn handle_list(ctx: &Ctx, req: &Request) -> Response {
+    handle_list_with_truth(ctx, req, crate::claude_ask::family1_truth_state)
+}
+
+fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
+where
+    F: Fn(&str) -> Option<String>,
+{
     let all = req
         .params
         .get("all")
@@ -2595,10 +2610,17 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
     let filter_cwd_norm = filter_cwd.as_deref().map(&norm_path);
 
     let registry = state::load_registry(&ctx.home.registry_json()).unwrap_or_default();
-    let entries: Vec<Value> = registry
+    let classified: Vec<_> = registry
         .entries
         .iter()
-        .filter(|e| {
+        .map(|e| {
+            let truth = truth_fn(&e.name);
+            (e, rendered_status_from_truth(truth.as_deref()))
+        })
+        .collect();
+    let entries: Vec<Value> = classified
+        .into_iter()
+        .filter(|(e, rendered_status)| {
             // Legacy all/project_root filter
             if !all {
                 if let Some(ref p) = cwd_project {
@@ -2619,26 +2641,21 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
                 }
             }
             if let Some(ref st) = filter_status {
-                if format!("{:?}", e.status).to_lowercase() != st.to_lowercase() {
+                if rendered_status != &st.as_str() {
                     return false;
                 }
             }
             true
         })
-        .map(|e| {
+        .map(|(e, rendered_status)| {
             // Task 3.1: return the full serialize_entry 10-key shape matching Python.
             // Fields present in RegistryEntry are mapped directly; fields absent from
             // the Rust registry are emitted as null with a NOTE citing the carveout.
             //
-            // DECIDED cv-eeaad75d: live_status is always null. The daemon does NOT
-            // replicate Python list's per-row `claude agents --json` live_status
-            // augmentation, and will not: under the replace architecture (the
-            // daemon is the sole agents backend; cv-d28b266a, docs/distribution.md)
-            // PTY-worker/registry `status` IS the canonical liveness signal. A
-            // `claude agents` shellout would both contradict that and be
-            // impossible to do consistently here (the daemon does not PTY-manage
-            // claude; ClaudeProvider.as_pty() is None). The field is kept (null)
-            // to preserve the serialize_entry parity shape for JSON consumers.
+            // live_status remains null because the daemon does not duplicate the
+            // harness supervisor view. `status`, however, is the family-1
+            // transcript verdict attached above; stored registry status is only
+            // lifecycle metadata and cannot prove read-side liveness or death.
             //
             // session_id: Python uses the provider-specific resume id (short_id
             // for claude since v9, codex_session_id for codex, gemini_session_id
@@ -2676,8 +2693,8 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
                 "cwd": e.cwd,
                 "created_at": e.created_at,
                 "last_message_at": e.last_message_at,
-                "status": format!("{:?}", e.status).to_lowercase(),
-                "live_status": null,  // DECIDED cv-eeaad75d: not replicated (see NOTE above)
+                "status": rendered_status,
+                "live_status": null,
                 // Architecture C (plan ab-70faa65b): additive keys, never removing
                 // live_status (Locked #4 back-compat). `pid` is the worker pid for
                 // a PTY agent, null for a one-shot ask (no managed process). The
@@ -5643,6 +5660,26 @@ done
             });
         })
         .unwrap();
+    }
+
+    #[test]
+    fn list_renders_family1_truth_instead_of_stored_registry_status() {
+        let home = short_home("listtruth");
+        seed_stream_row(&home, "worker-list", "abc12345");
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries[0].status = AgentStatus::Orphaned;
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handle| Some("working".into()));
+        let result = response.result().unwrap();
+        let agents = result["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["status"], "live");
+
+        std::fs::remove_dir_all(home.root()).ok();
     }
 
     /// Start a real stream worker (fake emitter child) on `home.worker_sock(id)`

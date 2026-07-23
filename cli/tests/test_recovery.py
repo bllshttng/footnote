@@ -30,13 +30,18 @@ class TestClassify:
     def test_needs_input_never_nudged_even_when_stale(self):
         # AC2-EDGE: a needs-input session is waiting on a human, not stalled.
         old = _iso(_now() - timedelta(hours=1))
-        assert recovery.classify("needs-input", old, _now(), 300) == recovery.SKIP_NEEDS_INPUT
+        assert recovery.classify(
+            "needs-input", old, _now(), 300,
+            truth_state="your-move", truth_age_s=3600,
+        ) == recovery.SKIP_NEEDS_INPUT
 
     @pytest.mark.parametrize("state", ["done", "completed", "failed"])
     def test_terminal_states_skipped(self, state):
         # AC3-EDGE: a clean terminal is never re-nudged.
         old = _iso(_now() - timedelta(hours=1))
-        assert recovery.classify(state, old, _now(), 300) == recovery.SKIP_TERMINAL
+        assert recovery.classify(
+            state, old, _now(), 300, truth_state="done", truth_age_s=3600,
+        ) == recovery.SKIP_TERMINAL
 
     def test_past_promise_does_not_force_skip(self):
         # codex P2: a <promise> is only the model's completion claim; loop-check
@@ -44,35 +49,69 @@ class TestClassify:
         # is still a nudge target regardless of any past promise — "done" is the
         # terminal job state, not a transcript promise. (No promise input exists.)
         stale = _iso(_now() - timedelta(seconds=600))
-        assert recovery.classify("running", stale, _now(), 300) == recovery.NUDGE
+        assert recovery.classify(
+            "running", stale, _now(), 300, truth_state="stalled", truth_age_s=600,
+        ) == recovery.NUDGE
 
     def test_naive_now_does_not_raise(self):
         # gemini medium: a timezone-naive now must not raise on subtraction.
         stale = _iso(_now() - timedelta(seconds=600))
         naive_now = _now().replace(tzinfo=None)
-        assert recovery.classify("running", stale, naive_now, 300) == recovery.NUDGE
+        assert recovery.classify(
+            "running", stale, naive_now, 300,
+            truth_state="stalled", truth_age_s=600,
+        ) == recovery.NUDGE
 
     def test_running_and_fresh_is_not_stale(self):
         fresh = _iso(_now() - timedelta(seconds=30))
-        assert recovery.classify("running", fresh, _now(), 300) == recovery.NOT_STALE
+        assert recovery.classify(
+            "running", fresh, _now(), 300, truth_state="working", truth_age_s=30,
+        ) == recovery.NOT_STALE
 
     def test_running_and_stale_nudges(self):
         # AC1-HP: idle past the threshold, work incomplete -> nudge.
         stale = _iso(_now() - timedelta(seconds=600))
-        assert recovery.classify("running", stale, _now(), 300) == recovery.NUDGE
+        assert recovery.classify(
+            "running", stale, _now(), 300, truth_state="working", truth_age_s=600,
+        ) == recovery.NUDGE
 
     def test_empty_or_unknown_state_stale_nudges(self):
         # A clean connection-close leaves state at the last value (often "running"
         # or empty); freshness is what distinguishes wedged from working.
         stale = _iso(_now() - timedelta(seconds=600))
-        assert recovery.classify("", stale, _now(), 300) == recovery.NUDGE
+        assert recovery.classify(
+            "", stale, _now(), 300, truth_state="stalled", truth_age_s=600,
+        ) == recovery.NUDGE
 
     def test_missing_updated_at_is_conservative(self):
         # Can't prove idleness -> do not nudge.
-        assert recovery.classify("running", None, _now(), 300) == recovery.NOT_STALE
+        assert recovery.classify(
+            "running", None, _now(), 300, truth_state="unknown", truth_age_s=None,
+        ) == recovery.NOT_STALE
 
     def test_unparseable_updated_at_is_conservative(self):
-        assert recovery.classify("running", "not-a-date", _now(), 300) == recovery.NOT_STALE
+        assert recovery.classify(
+            "running", "not-a-date", _now(), 300,
+            truth_state="unknown", truth_age_s=None,
+        ) == recovery.NOT_STALE
+
+    def test_frozen_terminal_state_cannot_override_family1_working(self):
+        assert (
+            recovery.classify(
+                "done", "2020-01-01T00:00:00Z", _now(), 300,
+                truth_state="working", truth_age_s=30,
+            )
+            == recovery.NOT_STALE
+        )
+
+    def test_family1_stalled_drives_recovery_even_when_state_json_is_fresh(self):
+        assert (
+            recovery.classify(
+                "running", _iso(_now()), _now(), 300,
+                truth_state="stalled", truth_age_s=600,
+            )
+            == recovery.NUDGE
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +190,14 @@ class _Harness:
     def liveness(self, sock):
         return self._sock_live
 
+    def truth(self, _candidate):
+        if self._state == "needs-input":
+            return {"state": "your-move", "last_activity_age_s": 600}
+        if self._state in {"done", "completed", "failed"}:
+            return {"state": "done", "last_activity_age_s": 600}
+        age = int((_now() - datetime.fromisoformat(self._updated.replace("Z", "+00:00"))).total_seconds())
+        return {"state": "stalled" if age >= 300 else "working", "last_activity_age_s": age}
+
     def send(self, sock, content, from_name):
         self.sends.append((sock, content))
 
@@ -167,7 +214,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts=counts,
             emit=h.emit, read_state_fn=h.read_state,
-            liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
         )
         assert len(h.sends) == 1
         assert h.sends[0][1] == recovery.CONTINUE_MESSAGE
@@ -181,7 +228,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
         )
         assert h.sends == []
         assert h.event_types() == ["recovery_skipped"]
@@ -196,7 +243,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
         )
         assert h.sends == []
         assert h.events == []
@@ -210,7 +257,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts=counts,
             emit=h.emit, read_state_fn=h.read_state,
-            liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
         )
         assert h.sends == []
         assert h.event_types() == ["recovery_capped"]
@@ -227,7 +274,7 @@ class TestSweep:
                 candidates=[_stale_candidate(tmp_path)],
                 counts=counts,
                 emit=h.emit, read_state_fn=h.read_state,
-                liveness_fn=h.liveness, send_fn=h.send,
+                truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
             )
         assert h.event_types().count("recovery_capped") == 1
 
@@ -240,7 +287,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
         )
         assert h.sends == []
         assert h.event_types() == ["recovery_skipped"]
@@ -259,7 +306,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            liveness_fn=h.liveness, send_fn=boom,
+            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=boom,
         )
         assert "recovery_skipped" in h.event_types()
 
@@ -322,7 +369,7 @@ class TestRunRecoverySweep:
             registry_load=lambda: entries,
             locate_fn=lambda sid: live.get(sid),
             read_state_fn=h.read_state,
-            liveness_fn=h.liveness,
+            truth_fn=h.truth, liveness_fn=h.liveness,
             send_fn=h.send,
             load_counts_fn=lambda: {},
             save_counts_fn=lambda c: saved.update(c),
@@ -347,7 +394,7 @@ class TestRunRecoverySweep:
             registry_load=lambda: entries,
             locate_fn=lambda sid: live.get(sid),
             read_state_fn=h.read_state,
-            liveness_fn=h.liveness,
+            truth_fn=h.truth, liveness_fn=h.liveness,
             send_fn=h.send,
             load_counts_fn=lambda: dict(prior),
             save_counts_fn=lambda c: saved.update(c),
@@ -411,7 +458,7 @@ class TestFailoverSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
             failover_fn=h.failover,
         )
 
@@ -448,7 +495,7 @@ class TestFailoverSweep:
             ],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
             failover_fn=h.failover,
         )
         assert len(h.failover_calls) == 1            # only the first swaps
@@ -515,7 +562,7 @@ class TestFailoverSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
             # failover_fn omitted
         )
         assert h.failover_calls == []

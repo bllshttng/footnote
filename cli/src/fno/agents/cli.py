@@ -1597,6 +1597,7 @@ def cmd_discovered_json(
             for s in discover_mod.discover_live_sessions(
                 exclude_short_ids=exclude, exclude_session_ids=exclude_sids
             )
+            if s.is_alive
         ]
         if provider:
             rows = [r for r in rows if r.get("agent") == provider]

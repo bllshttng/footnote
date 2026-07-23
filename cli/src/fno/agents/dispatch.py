@@ -433,7 +433,10 @@ def _followup_path(
                 # x-c393: same provably-live guard as the socket path below --
                 # a recent inside_leg report means a routing gap, not a death,
                 # so skip the orphan stamp and report it as a routing gap.
-                if _inside_leg_is_recent(_current_inside_leg(name), time.time()):
+                truth_routing_gap = orphan_exc.reason == "truth-live-inject-failed"
+                if truth_routing_gap or _inside_leg_is_recent(
+                    _current_inside_leg(name), time.time()
+                ):
                     events.emit(
                         "agent_followup_failed",
                         stage="routing-gap",
@@ -535,9 +538,11 @@ def _followup_path(
             # delivery failed on a session that IS live in the daemon roster --
             # also a routing gap, never a death, so it takes the same no-stamp
             # branch (AC6-FR: a roster-live session is never stamped orphaned).
-            if exc.reason == "roster-live-inject-failed" or _inside_leg_is_recent(
-                _current_inside_leg(name), time.time()
-            ):
+            truth_routing_gap = exc.reason in {
+                "roster-live-inject-failed",
+                "truth-live-inject-failed",
+            }
+            if truth_routing_gap or _inside_leg_is_recent(_current_inside_leg(name), time.time()):
                 events.emit(
                     "agent_followup_failed",
                     stage="routing-gap",

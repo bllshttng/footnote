@@ -8,10 +8,7 @@ wiring, exit codes, TTY behavior, and the AC3-ERR allowed-values list.
 from __future__ import annotations
 
 import json
-import subprocess
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -171,7 +168,16 @@ def test_list_filter_by_status_orphaned(
         ]
     )
 
+    from fno.agents import session_truth
     from fno.agents.cli import agents_app
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda handle, **_kwargs: {
+            "state": "stalled" if handle == "dead" else "working"
+        },
+    )
 
     result = runner.invoke(agents_app, ["list", "--status", "orphaned", "--json"])
 

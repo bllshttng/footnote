@@ -229,7 +229,7 @@ def _write_codex_rollout(codex_dir, *, session_id, cwd):
 
 
 def _isolate_codex_discovery(monkeypatch, tmp_path, *, session_id):
-    from fno.agents import discover
+    from fno.agents import discover, session_truth
 
     codex_dir = tmp_path / "codex"
     _write_codex_rollout(codex_dir, session_id=session_id, cwd="/Users/x/proj")
@@ -238,6 +238,11 @@ def _isolate_codex_discovery(monkeypatch, tmp_path, *, session_id):
     monkeypatch.setenv(discover.SESSIONS_DIR_ENV, str(empty))
     monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(empty))
     monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(codex_dir))
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda *_args, **_kwargs: {"state": "working", "last_activity_age_s": 1},
+    )
 
 
 def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeypatch, tmp_path):
@@ -513,7 +518,7 @@ def test_us7b_rostered_but_paneless_entry_falls_to_durable(
 def _isolate_claude_roster(monkeypatch, tmp_path, *, session_id):
     """Only the daemon roster resolves: empty disk sources + a fixture roster
     holding one rostered claude bg worker (no pid-sidecar)."""
-    from fno.agents import discover
+    from fno.agents import discover, session_truth
 
     empty = tmp_path / "empty"
     empty.mkdir(exist_ok=True)
@@ -529,6 +534,11 @@ def _isolate_claude_roster(monkeypatch, tmp_path, *, session_id):
         encoding="utf-8",
     )
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda *_args, **_kwargs: {"state": "working", "last_activity_age_s": 1},
+    )
 
 
 def test_us3_rostered_claude_inject_miss_falls_to_drainable_floor(

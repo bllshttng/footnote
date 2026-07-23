@@ -8,9 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-import fno.graph._reconcile as _reconcile
 from fno.graph._reconcile import (
     dispatch_post_merge_ritual,
     origin_transcript_exists,
@@ -80,9 +77,31 @@ class _Spawn:
 
 
 def _dead_origin(monkeypatch):
-    """Force resolve_warm_session -> None so the origin reads as dead."""
+    """Force an explicit family-1 death verdict for the origin."""
     import fno.post_merge_route as route
     monkeypatch.setattr(route, "resolve_warm_session", lambda *a, **k: None)
+    monkeypatch.setattr(route, "session_death_confirmed", lambda *a, **k: True)
+
+
+def test_unknown_origin_never_direct_finalizes(tmp_path, monkeypatch):
+    cwd, projects = _mk_origin(tmp_path, "sid-unknown")
+    _point_projects(monkeypatch, projects)
+    import fno.post_merge_route as route
+
+    monkeypatch.setattr(route, "resolve_warm_session", lambda *a, **k: None)
+    monkeypatch.setattr(route, "session_death_confirmed", lambda *a, **k: False)
+    finalized: list = []
+    spawn = _Spawn()
+
+    res = dispatch_post_merge_ritual(
+        6, dedup_key="shaUnknown", auto_run=True, canonical_root=tmp_path,
+        spawn=spawn, source_session_id="sid-unknown", source_harness="claude",
+        source_cwd=cwd, finalize_origin=lambda *a: finalized.append(1) or True,
+    )
+
+    assert res.outcome == "dispatched"
+    assert finalized == []
+    assert spawn.calls == [(6, str(tmp_path))]
 
 
 def test_dead_origin_direct_finalizes_then_runs_ritual_cold(tmp_path, monkeypatch):

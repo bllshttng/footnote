@@ -38,6 +38,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal, Mapping, Optional
 
 from fno.agents.providers._claude_session_registry import (
@@ -59,6 +60,7 @@ OrphanReason = Literal[
     "socket-null",
     "liveness-failed",
     "roster-live-inject-failed",
+    "truth-live-inject-failed",
 ]
 
 # Locked Decision 6: 8 lowercase hex chars after "backgrounded · ".
@@ -513,12 +515,9 @@ class ProviderOrphanError(RuntimeError):
     ``reason`` is one of ``"not-found"`` (no sessions/<pid>.json entry
     matches the short-id), ``"socket-null"`` (matched entry has
     ``messagingSocketPath: null``; session is suspended),
-    ``"liveness-failed"`` (matched entry's socket exists but the 250 ms
-    connect probe failed), or ``"roster-live-inject-failed"`` (x-2681: the
-    session is live in the daemon roster but the control.sock fallback inject
-    did not confirm -- a delivery failure, NOT a dead session, so the dispatch
-    layer must NOT stamp it orphaned). The dispatch layer maps this to exit
-    code 13.
+    ``"liveness-failed"`` (socket miss confirmed by transcript truth), or a
+    ``*-live-inject-failed`` routing gap that must never stamp the row orphaned.
+    The dispatch layer maps every reason to exit code 13.
     """
 
     def __init__(self, *, reason: OrphanReason, short_id: str, detail: str = "") -> None:
@@ -650,6 +649,21 @@ def liveness_probe(sock_path: str) -> bool:
             pass
 
 
+def _session_truth_state(short_id: str, cwd: Path) -> str:
+    """Family-1 verdict for a known Claude transcript; never raises."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    session_id = resolve_session_uuid(short_id)
+    if not session_id:
+        return str(resolve_session_truth(short_id).get("state") or "unknown")
+    session = SimpleNamespace(
+        agent="claude", session_id=session_id, cwd=str(cwd), short_id=short_id
+    )
+    return str(resolve_session_truth(
+        short_id, resolve=lambda _handle: (session, [])
+    ).get("state") or "unknown")
+
+
 def wait_for_reply(
     jobs_dir: Path,
     baseline_updated_at: Optional[str],
@@ -724,13 +738,9 @@ def ask_followup(
     the session is not reachable, :class:`ProviderSocketError` on send
     failure, and :class:`ProviderTimeoutError` on poll timeout.
 
-    ``cwd`` is currently unused — the messaging socket needs no cwd
-    inheritance — but is part of the signature for parity with
-    :func:`bg_create` and future use by codex/gemini follow-up. The
-    parameter is intentionally retained.
+    ``cwd`` lets the family-1 transcript resolver survive EnterWorktree even
+    when the socket registry points at the launch directory.
     """
-    del cwd  # parity placeholder
-
     locator: Optional[SessionLocator] = locate_session(claude_short_id)
     if locator is None:
         # Distinguish socket-null (suspended) from not-found by re-reading
@@ -739,8 +749,7 @@ def ask_followup(
         reason = _classify_orphan_reason(claude_short_id)
         # x-2681: a socket-null session that is live in the daemon roster is
         # reachable over the daemon control.sock even though the BG8 messaging
-        # socket is down. Fall back to that vehicle before orphaning. not-found
-        # is genuinely dead and never falls back (Locked Decision 5).
+        # socket is down. Fall back to that vehicle before transcript truth.
         if reason == "socket-null" and roster_live(claude_short_id):
             return _ask_via_control_sock(
                 claude_short_id,
@@ -750,6 +759,8 @@ def ask_followup(
                 jobs_dir=jobs_dir,
                 poll_interval=poll_interval,
             )
+        if _session_truth_state(claude_short_id, cwd) not in {"done", "stalled"}:
+            reason = "truth-live-inject-failed"
         raise ProviderOrphanError(reason=reason, short_id=claude_short_id)
 
     if not liveness_probe(locator.messaging_socket_path):
@@ -762,6 +773,12 @@ def ask_followup(
                 timeout,
                 jobs_dir=jobs_dir,
                 poll_interval=poll_interval,
+            )
+        if _session_truth_state(claude_short_id, cwd) not in {"done", "stalled"}:
+            raise ProviderOrphanError(
+                reason="truth-live-inject-failed",
+                short_id=claude_short_id,
+                detail=locator.messaging_socket_path,
             )
         raise ProviderOrphanError(
             reason="liveness-failed",
@@ -1459,14 +1476,13 @@ def ask_followup_via_mcp(
             mid-call). The dispatcher should fall back to socket.
         ProviderTimeoutError: poll timeout exceeded.
 
-    ``cwd`` is unused (parity with :func:`ask_followup`).
+    ``cwd`` locates family-1 transcript truth when reply-poll setup fails.
     ``mcp_channel_id``, when provided, is the AgentEntry's stored id;
     it currently equals ``claude_short_id`` (see module-level design
     note above). The parameter is accepted explicitly so callers
     surface the agent's persistent id at the call site even though
     the sidecar routes by session id today.
     """
-    del cwd  # parity placeholder
     routing_key = mcp_channel_id or claude_short_id
 
     # Decouple from the messagingSocketPath socket (Task 1.1): the MCP transport
@@ -1482,6 +1498,8 @@ def ask_followup_via_mcp(
         target_jobs_dir = _jobs_dir_for(claude_short_id)
         if not target_jobs_dir.exists():
             reason = _classify_orphan_reason(claude_short_id)
+            if _session_truth_state(claude_short_id, cwd) not in {"done", "stalled"}:
+                reason = "truth-live-inject-failed"
             raise ProviderOrphanError(reason=reason, short_id=claude_short_id)
     baseline_updated_at: Optional[str] = None
     timeline_offset = 0

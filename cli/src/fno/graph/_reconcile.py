@@ -1418,10 +1418,16 @@ def dispatch_post_merge_ritual(
         # (AC1-EDGE). A warm-route exception leaves this False -> straight to cold.
         origin_dead = False
         try:
-            from fno.post_merge_route import inject_pr_merged, resolve_warm_session
+            from fno.post_merge_route import (
+                inject_pr_merged,
+                resolve_warm_session,
+                session_death_confirmed,
+            )
 
             warm_sid = resolve_warm_session(source_session_id, source_harness)
-            origin_dead = warm_sid is None
+            origin_dead = warm_sid is None and session_death_confirmed(
+                source_session_id, source_harness
+            )
             if warm_sid is not None:
                 _inject = warm_inject if warm_inject is not None else inject_pr_merged
                 delivered, reason = _inject(warm_sid, pr_number, source_harness)

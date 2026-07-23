@@ -6,11 +6,11 @@ Architecture/Registry section makes persistence the fix).
 
 Two sources, two durability models:
 
-- **Discovered claude sessions.** Read live from ``~/.claude/sessions/<pid>.json``
-  via :func:`fno.agents.discover.discover_live_sessions` (already robust to the
+- **Discovered claude sessions.** Enumerated from local session stores via
+  :func:`fno.agents.discover.discover_live_sessions` and classified by family 1
   7000-entry / ``.sync-conflict-*`` / mid-write reality). These are NOT persisted
-  here: pid-liveness is the live truth, and persisting a dead session row is the
-  exact cmux/herdr flaw inverted. They re-derive from disk on every read, so they
+  here: family-1 transcript truth is the live verdict. They re-derive from disk
+  on every read, so they
   "survive restarts" for free.
 - **footnote-owned relay peers.** A peer the daemon spawns as interactive claude
   (E4.1) is the routable participant, but nothing else on disk records it. THIS is
@@ -205,11 +205,28 @@ def _live_agents_workers() -> dict[str, RegistryEntry]:
             continue  # ONLY an explicit interactive PTY worker serves worker.submit;
             # a missing host_mode is the exec/one-shot default in the agents registry,
             # not an interactive relay target (codex P2 on PR #89)
-        if e.get("status") not in (None, "live"):
-            continue  # a dead worker holds no live PTY
         short_id = e.get("short_id")
         if not isinstance(short_id, str) or not _AGENT_SHORT_ID_RE.match(short_id):
             continue  # short_id is a socket path segment -- must be safe
+        from types import SimpleNamespace
+
+        from fno.agents.session_truth import resolve_session_truth
+
+        transcript_id = (
+            e.get("harness_session_id")
+            or e.get("session_id")
+            or short_id
+        )
+        known = SimpleNamespace(
+            agent=provider,
+            session_id=transcript_id,
+            cwd=e.get("cwd") or "",
+        )
+        truth = resolve_session_truth(
+            short_id, resolve=lambda _handle: (known, [])
+        )
+        if truth.get("state") not in {"working", "watching", "your-move"}:
+            continue
         pid = e.get("pid")
         out[short_id] = RegistryEntry(
             session_id=short_id,
@@ -236,6 +253,8 @@ def index(
     merged: dict[str, RegistryEntry] = {}
     if include_discovered:
         for s in discover_live_sessions():
+            if not getattr(s, "is_alive", True):
+                continue
             merged[s.session_id] = RegistryEntry(
                 session_id=s.session_id,
                 provider=s.agent,

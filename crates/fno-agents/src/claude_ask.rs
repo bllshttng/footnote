@@ -80,6 +80,9 @@ pub enum OrphanReason {
     /// fallback inject did not confirm -- a delivery failure, NOT a dead
     /// session, so the orchestration layer must NOT stamp it orphaned.
     RosterLiveInjectFailed,
+    /// The delivery probe missed, but family-1 transcript truth did not confirm
+    /// a terminal session. This is a routing gap, never an orphan stamp.
+    TruthLiveInjectFailed,
 }
 
 impl OrphanReason {
@@ -90,7 +93,27 @@ impl OrphanReason {
             OrphanReason::NotFound => "not-found",
             OrphanReason::LivenessFailed => "liveness-failed",
             OrphanReason::RosterLiveInjectFailed => "roster-live-inject-failed",
+            OrphanReason::TruthLiveInjectFailed => "truth-live-inject-failed",
         }
+    }
+}
+
+pub fn family1_truth_state(handle: &str) -> Option<String> {
+    let output = std::process::Command::new("fno")
+        .args(["agents", "truth", handle, "--json"])
+        .env("FNO_AGENTS_RUNTIME", "python")
+        .output();
+    output.ok().and_then(|out| {
+        serde_json::from_slice::<serde_json::Value>(&out.stdout)
+            .ok()
+            .and_then(|value| value.get("state")?.as_str().map(str::to_owned))
+    })
+}
+
+fn family1_orphan_reason(handle: &str, confirmed: OrphanReason) -> OrphanReason {
+    match family1_truth_state(handle).as_deref() {
+        Some("done" | "stalled") => confirmed,
+        _ => OrphanReason::TruthLiveInjectFailed,
     }
 }
 
@@ -1339,7 +1362,7 @@ pub fn ask_followup(
             let reason = classify_orphan_reason(home, claude_short_id);
             // x-2681: a socket-null session that is live in the daemon roster is
             // reachable over the daemon control.sock. Fall back before orphaning.
-            // not-found is genuinely dead and never falls back (Locked Decision 5).
+            // A miss falls through to family-1 transcript truth before orphaning.
             if reason == OrphanReason::SocketNull && roster_live(home, claude_short_id) {
                 let jd = jobs_dir_override
                     .map(|p| p.to_path_buf())
@@ -1354,7 +1377,7 @@ pub fn ask_followup(
                 );
             }
             return Err(AskError::Orphan {
-                reason,
+                reason: family1_orphan_reason(claude_short_id, reason),
                 short_id: claude_short_id.to_string(),
             });
         }
@@ -1376,7 +1399,7 @@ pub fn ask_followup(
             );
         }
         return Err(AskError::Orphan {
-            reason: OrphanReason::LivenessFailed,
+            reason: family1_orphan_reason(claude_short_id, OrphanReason::LivenessFailed),
             short_id: claude_short_id.to_string(),
         });
     }
@@ -2258,12 +2281,15 @@ fn followup(
             // a routing gap, never a death, so it takes the same no-stamp branch
             // as a recent inside-leg report (a roster-live session is never
             // stamped orphaned).
-            let roster_live_gap = reason == OrphanReason::RosterLiveInjectFailed;
+            let routing_gap = matches!(
+                reason,
+                OrphanReason::RosterLiveInjectFailed | OrphanReason::TruthLiveInjectFailed
+            );
             let mut provably_live = false;
             let mut stamp_warning = String::new();
             if let Err(e) = update_registry(registry_path, |reg| {
                 if let Some(en) = reg.find_mut(name) {
-                    if roster_live_gap || is_provably_live_report(en.inside_leg.as_ref(), now) {
+                    if routing_gap || is_provably_live_report(en.inside_leg.as_ref(), now) {
                         provably_live = true;
                     } else {
                         en.status = AgentStatus::Orphaned;
@@ -2334,6 +2360,10 @@ fn followup(
                 OrphanReason::RosterLiveInjectFailed => format!(
                     ". Inspect with 'fno agents logs {}' or remove via 'fno agents rm {}'",
                     name, name
+                ),
+                OrphanReason::TruthLiveInjectFailed => format!(
+                    ". Inspect with 'fno agents logs {}' before removing",
+                    name
                 ),
             };
             let suspended = if reason == OrphanReason::SocketNull {
@@ -3549,7 +3579,9 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            AskError::Orphan { reason, .. } => assert_eq!(reason, OrphanReason::SocketNull),
+            AskError::Orphan { reason, .. } => {
+                assert_eq!(reason, OrphanReason::TruthLiveInjectFailed)
+            }
             other => panic!("expected orphan, got {:?}", other),
         }
     }
@@ -3572,7 +3604,7 @@ mod tests {
         assert!(matches!(
             err,
             AskError::Orphan {
-                reason: OrphanReason::NotFound,
+                reason: OrphanReason::TruthLiveInjectFailed,
                 ..
             }
         ));
@@ -3605,7 +3637,7 @@ mod tests {
         assert!(matches!(
             err,
             AskError::Orphan {
-                reason: OrphanReason::LivenessFailed,
+                reason: OrphanReason::TruthLiveInjectFailed,
                 ..
             }
         ));
@@ -3698,8 +3730,8 @@ mod tests {
 
     #[test]
     fn ask_followup_not_found_never_falls_back_even_if_rostered() {
-        // No session file -> not-found. Even with a matching roster entry,
-        // not-found is genuinely dead and never falls back (Locked Decision 5).
+        // No session file and no transcript verdict is inconclusive, even when
+        // a same-short roster entry exists.
         let home = tmpdir();
         fs::create_dir_all(home.join(".claude").join("sessions")).unwrap();
         write_roster(&home, "abcd1234-1111-2222-3333-444455556666");
@@ -3715,8 +3747,10 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            AskError::Orphan { reason, .. } => assert_eq!(reason, OrphanReason::NotFound),
-            other => panic!("expected not-found orphan, got {:?}", other),
+            AskError::Orphan { reason, .. } => {
+                assert_eq!(reason, OrphanReason::TruthLiveInjectFailed)
+            }
+            other => panic!("expected routing gap, got {:?}", other),
         }
     }
 }
