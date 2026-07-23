@@ -27,27 +27,63 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-// A per-thread store-path override for tests, so a store-touching test never
-// mutates the process-global environment (a `set_var` there would race any
-// concurrent `getenv` in a sibling test - a real data race). Cargo runs each
-// test on its own thread, so a thread-local gives every test full isolation
-// with no lock. Set via `set_test_path`; cleared on scope exit.
+// A per-thread store path for tests, so a store-touching test never mutates the
+// process-global environment (a `set_var` there would race any concurrent
+// `getenv` in a sibling test - a real data race). Cargo runs each test on its
+// own thread, so a thread-local gives every test full isolation with no lock.
+// An explicit path may be installed for assertions; otherwise the test gets a
+// unique temp path which is removed when its worker thread exits.
+#[cfg(test)]
+struct TestPath {
+    explicit: Option<PathBuf>,
+    fallback_dir: PathBuf,
+}
+
+#[cfg(test)]
+impl TestPath {
+    fn new() -> Self {
+        let fallback_dir = std::env::temp_dir().join(format!(
+            "fno-squadstore-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&fallback_dir);
+        Self {
+            explicit: None,
+            fallback_dir,
+        }
+    }
+
+    fn path(&self) -> PathBuf {
+        self.explicit
+            .clone()
+            .unwrap_or_else(|| self.fallback_dir.join("squads.json"))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.fallback_dir);
+    }
+}
+
 #[cfg(test)]
 thread_local! {
-    static TEST_PATH: std::cell::RefCell<Option<PathBuf>> =
-        const { std::cell::RefCell::new(None) };
+    static TEST_PATH: std::cell::RefCell<TestPath> =
+        std::cell::RefCell::new(TestPath::new());
 }
 
 /// Point this thread's store at `dir/squads.json` (test-only).
 #[cfg(test)]
 pub(crate) fn set_test_path(dir: &std::path::Path) {
-    TEST_PATH.with(|c| *c.borrow_mut() = Some(dir.join("squads.json")));
+    TEST_PATH.with(|c| c.borrow_mut().explicit = Some(dir.join("squads.json")));
 }
 
 /// Clear this thread's store override (test-only).
 #[cfg(test)]
 pub(crate) fn clear_test_path() {
-    TEST_PATH.with(|c| *c.borrow_mut() = None);
+    TEST_PATH.with(|c| c.borrow_mut().explicit = None);
 }
 
 /// The only store schema this build understands. An unknown version is treated
@@ -207,15 +243,16 @@ pub struct Loaded {
 /// `$HOME/.fno/squads.json`. Machine-global because a squad spans repos.
 pub fn squads_path() -> PathBuf {
     #[cfg(test)]
-    if let Some(p) = TEST_PATH.with(|c| c.borrow().clone()) {
-        return p;
-    }
+    return TEST_PATH.with(|c| c.borrow().path());
+    #[cfg(not(test))]
     if let Some(v) = std::env::var_os("FNO_AGENTS_HOME") {
         return PathBuf::from(v).join("squads.json");
     }
+    #[cfg(not(test))]
     let base = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
+    #[cfg(not(test))]
     base.join(".fno").join("squads.json")
 }
 
@@ -708,6 +745,18 @@ mod tests {
             tombstone: false,
             tab_name: None,
         }
+    }
+
+    #[test]
+    fn default_test_store_never_targets_the_user_home() {
+        super::clear_test_path();
+        let path = squads_path();
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
+        assert!(
+            !path.starts_with(&home),
+            "an unscoped unit test must not persist mux squads under HOME: {}",
+            path.display()
+        );
     }
 
     #[test]

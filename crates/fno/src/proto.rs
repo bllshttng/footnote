@@ -1978,16 +1978,49 @@ pub fn read_msg_sync<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T, Proto
 // Socket lifecycle
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
+struct TestMuxDir(PathBuf);
+
+#[cfg(test)]
+impl TestMuxDir {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "fno-mux-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        Self(dir)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestMuxDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_MUX_DIR: TestMuxDir = TestMuxDir::new();
+}
+
 /// The mux socket directory: `$FNO_MUX_DIR` when set (tests point this at a
 /// tempdir), else `~/.fno/mux`.
 pub fn mux_dir() -> PathBuf {
+    #[cfg(test)]
+    return TEST_MUX_DIR.with(|dir| dir.0.clone());
+    #[cfg(not(test))]
     if let Some(dir) = std::env::var_os("FNO_MUX_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(dir);
     }
+    #[cfg(not(test))]
     let home = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
+    #[cfg(not(test))]
     home.join(".fno").join("mux")
 }
 

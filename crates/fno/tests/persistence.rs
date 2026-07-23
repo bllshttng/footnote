@@ -118,6 +118,7 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
     let scratch = Scratch::new("altscreen");
     let mut h = ClientHarness::spawn(&scratch);
     h.wait_prompt(15);
+    h.wait_input_ready(15);
     // Enter alt screen, clear, home, draw a marker; cat holds the program
     // "open" in the foreground exactly like an editor session.
     h.type_bytes(b"printf '\\033[?1049h\\033[2J\\033[HALT-SCREEN-HELD'; cat\r");
@@ -381,11 +382,7 @@ fn persistence_zero_client_session_survives_and_resyncs_fully() {
     std::thread::sleep(Duration::from_millis(800));
 
     // Persistence is visible, not spooky (AC6-UI).
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fno"))
-        .args(["mux", "ls"])
-        .env("FNO_MUX_DIR", &scratch.0)
-        .output()
-        .unwrap();
+    let out = scratch.command().args(["mux", "ls"]).output().unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(

@@ -15,7 +15,8 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Serializes every PTY fork in this process.
 ///
@@ -33,6 +34,35 @@ use std::sync::Mutex;
 /// Poison is recovered rather than propagated: one panicking spawn must not turn
 /// every later spawn into a second failure.
 static FORK_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+struct TestHome(PathBuf);
+
+#[cfg(test)]
+impl TestHome {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "fno-pty-test-home-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create isolated PTY test HOME");
+        Self(dir)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestHome {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_HOME: TestHome = TestHome::new();
+}
 
 fn fork_guard() -> std::sync::MutexGuard<'static, ()> {
     FORK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -88,6 +118,7 @@ pub struct PtyShell {
     // (fail-closed, same policy as input-after-exit) - never unbounded memory.
     input_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+    reader_done: Arc<AtomicBool>,
     // Shell-integration rc temp dir, held purely for cleanup (RAII): dropped
     // when the pane closes / the server exits. `None` for non-shell / off panes.
     _shell_rc: Option<ShellRc>,
@@ -216,15 +247,30 @@ impl PtyShell {
             .map_err(|e| PtyError::Resize(e.to_string()))
     }
 
-    /// True while the child has not exited. Errs toward "alive" on any
-    /// uncertainty (same rationale as the fno-agents seed: the consumer uses
-    /// this to gate cleanup, and a false "exited" is the dangerous answer).
+    /// True while the child has not exited. A poisoned lock still owns a valid
+    /// child handle, so recover it. An OS inspection error remains fail-safe
+    /// ("alive") but is reported instead of silently defeating the reaper.
     pub fn is_child_alive(&self) -> bool {
-        let mut child = match self.child.lock() {
-            Ok(c) => c,
-            Err(_) => return true,
-        };
-        !matches!(child.try_wait(), Ok(Some(_)))
+        let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        match child.try_wait() {
+            Ok(Some(_)) => false,
+            Ok(None) => true,
+            Err(e) => {
+                eprintln!(
+                    "fno mux: cannot inspect pane child {:?}; retaining pane: {e}",
+                    child.process_id()
+                );
+                true
+            }
+        }
+    }
+
+    /// True only after the child is dead and the PTY reader has enqueued every
+    /// final output chunk. The acquire pairs with the reader's release store,
+    /// letting the server snapshot safe reaper candidates before draining its
+    /// output channel and closing panes.
+    pub fn is_reap_ready(&self) -> bool {
+        self.reader_done.load(Ordering::Acquire) && !self.is_child_alive()
     }
 
     /// Kill and reap the child (explicit ClosePane / CloseTab). Idempotent:
@@ -267,6 +313,11 @@ fn base_command(
     pane_id: u64,
 ) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(program);
+    #[cfg(test)]
+    TEST_HOME.with(|home| {
+        cmd.env("HOME", &home.0);
+        cmd.env("USERPROFILE", &home.0);
+    });
     cmd.env("TERM", "xterm-256color");
     cmd.env("FNO_SESSION", session);
     cmd.env("FNO_PANE", pane_id.to_string());
@@ -424,12 +475,14 @@ fn wire(
         .master
         .try_clone_reader()
         .map_err(|e| PtyError::Reader(e.to_string()))?;
-    spawn_reader(reader, pane_id, out_tx, exit_tx)?;
+    let reader_done = Arc::new(AtomicBool::new(false));
+    spawn_reader(reader, pane_id, out_tx, exit_tx, Arc::clone(&reader_done))?;
     let input_tx = spawn_writer(writer)?;
     Ok(PtyShell {
         master: pair.master,
         input_tx,
         child: Mutex::new(child),
+        reader_done,
         _shell_rc: shell_rc,
     })
 }
@@ -471,6 +524,7 @@ fn spawn_reader(
     pane_id: u64,
     out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
+    reader_done: Arc<AtomicBool>,
 ) -> Result<(), PtyError> {
     std::thread::Builder::new()
         .name("fno-mux-pty-reader".into())
@@ -478,6 +532,7 @@ fn spawn_reader(
             // x-0296 diagnostics: the first chunk logged from THIS std thread
             // proves the child spoke even when the tokio runtime is wedged.
             let e2e = std::env::var_os("FNO_E2E").is_some();
+            let drop_exit = e2e && std::env::var_os("FNO_E2E_DROP_PTY_EXIT").is_some();
             let mut first = true;
             let mut buf = [0u8; 8192];
             loop {
@@ -486,6 +541,15 @@ fn spawn_reader(
                     Ok(n) => {
                         if e2e && std::mem::take(&mut first) {
                             eprintln!("fno mux e2e: pty reader pane {pane_id}: first {n} bytes");
+                        }
+                        if e2e {
+                            let delay_ms = std::env::var("FNO_E2E_PTY_OUTPUT_DELAY_MS")
+                                .ok()
+                                .and_then(|value| value.parse::<u64>().ok())
+                                .unwrap_or(0);
+                            if delay_ms > 0 {
+                                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                            }
                         }
                         // blocking_send backpressures the reader (and thus the
                         // child) when the core loop lags; never unbounded.
@@ -503,7 +567,12 @@ fn spawn_reader(
                     }
                 }
             }
-            let _ = exit_tx.blocking_send(pane_id);
+            reader_done.store(true, Ordering::Release);
+            if drop_exit {
+                eprintln!("fno mux e2e: deliberately dropped exit for pane {pane_id}");
+            } else {
+                let _ = exit_tx.blocking_send(pane_id);
+            }
         })
         .map_err(|e| PtyError::Reader(format!("reader thread spawn failed: {e}")))?;
     Ok(())

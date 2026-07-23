@@ -206,14 +206,17 @@ impl WedgedServer {
                 0,
                 "bind() failed"
             );
-            // Smallest possible accept queue, and never call accept().
-            assert_eq!(libc::listen(fd, 0), 0, "listen() failed");
+            // Use an explicit one-slot queue and never call accept(). A zero
+            // backlog has platform-specific/default semantics on macOS and
+            // can admit connections until the process hits EMFILE instead of
+            // creating the bounded wedge this fixture needs.
+            assert_eq!(libc::listen(fd, 1), 0, "listen() failed");
             fd
         };
         // Saturate the queue: connects succeed (kernel-queued) until full,
         // then the next connect either times out (Linux blocks) or is refused
         // (macOS). Either is the wedge - record which so the tests can assert
-        // the platform-honest outcome. A backlog of 0 saturates within a
+        // the platform-honest outcome. A backlog of 1 saturates within a
         // couple of connects; 256 is far more headroom than any real kernel
         // needs, so exhausting it means the fixture's assumption broke and the
         // test MUST fail (not silently skip).

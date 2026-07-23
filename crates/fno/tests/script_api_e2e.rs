@@ -9,15 +9,15 @@ use common::Scratch;
 
 use std::io::Read;
 use std::os::unix::net::UnixListener;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{Duration, Instant};
 
 /// Run `fno mux pane <args...>` against `scratch`'s session, headless.
 fn pane(scratch: &Scratch, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_fno"))
+    scratch
+        .command()
         .args(["mux", "pane"])
         .args(args)
-        .env("FNO_MUX_DIR", &scratch.0)
         .env("SHELL", "/bin/sh")
         .output()
         .expect("fno binary runs")
@@ -30,10 +30,7 @@ fn stdout(out: &Output) -> String {
 /// Shut the session's server down (best effort) so a detached server never
 /// outlives the test.
 fn kill_server(scratch: &Scratch) {
-    let _ = Command::new(env!("CARGO_BIN_EXE_fno"))
-        .args(["mux", "kill-server"])
-        .env("FNO_MUX_DIR", &scratch.0)
-        .output();
+    let _ = scratch.command().args(["mux", "kill-server"]).output();
 }
 
 /// Poll `pane ls --json` until it reports the empty listing (the session has
@@ -334,19 +331,19 @@ fn script_api_concurrent_runs_land_three_panes_in_one_squad() {
     // become three panes in one squad - no false dedup at the mux layer (dedup
     // lives in the spawn front half, not here) - and the concurrent
     // self-spawn race converges on one server (AC1-EDGE).
-    let scratch = Scratch::new("script_concurrent");
+    let scratch = std::sync::Arc::new(Scratch::new("script_concurrent"));
     let dir = scratch.0.to_str().unwrap().to_string();
 
     let handles: Vec<_> = (0..3)
         .map(|_| {
-            let mux_dir = scratch.0.clone();
+            let scratch = std::sync::Arc::clone(&scratch);
             let cwd = dir.clone();
             std::thread::spawn(move || {
-                Command::new(env!("CARGO_BIN_EXE_fno"))
+                scratch
+                    .command()
                     .args([
                         "mux", "pane", "run", "--cwd", &cwd, "--", "/bin/sh", "-c", "sleep 30",
                     ])
-                    .env("FNO_MUX_DIR", &mux_dir)
                     .env("SHELL", "/bin/sh")
                     .output()
                     .expect("fno runs")
@@ -381,18 +378,6 @@ fn script_api_concurrent_runs_land_three_panes_in_one_squad() {
     kill_server(&scratch);
 }
 
-/// Kill the detached server a test spawned on scope exit, so a panicking
-/// assertion cannot leak the server and its background process.
-struct KillServerOnDrop(std::path::PathBuf);
-impl Drop for KillServerOnDrop {
-    fn drop(&mut self) {
-        let _ = Command::new(env!("CARGO_BIN_EXE_fno"))
-            .args(["mux", "kill-server"])
-            .env("FNO_MUX_DIR", &self.0)
-            .output();
-    }
-}
-
 #[test]
 fn script_api_pane_run_self_spawns_into_nonexistent_mux_dir() {
     // Regression: pane run's self-spawn path opens the server log
@@ -412,18 +397,47 @@ fn script_api_pane_run_self_spawns_into_nonexistent_mux_dir() {
         "precondition: mux dir must not exist yet"
     );
 
-    let run = Command::new(env!("CARGO_BIN_EXE_fno"))
+    let run = scratch
+        .command()
         .args(["mux", "pane", "run", "--", "/bin/sh", "-c", "sleep 30"])
-        .env("FNO_MUX_DIR", &mux_dir)
         .env("SHELL", "/bin/sh")
         .output()
         .expect("fno binary runs");
-    // Reap the spawned server on any exit path, including a failing assertion.
-    let _killer = KillServerOnDrop(mux_dir.clone());
     assert!(
         run.status.success(),
         "self-spawn into a nonexistent mux dir must succeed; stderr: {:?}",
         String::from_utf8_lossy(&run.stderr)
     );
     assert!(mux_dir.exists(), "connect_or_spawn must create the mux dir");
+}
+
+#[test]
+fn defensive_reaper_sweeps_a_pane_when_its_exit_notification_is_lost() {
+    let scratch = Scratch::new("reaper_tick");
+    let run = scratch
+        .command()
+        .args(["mux", "pane", "run", "--", "/bin/sh", "-c", "sleep 0.2"])
+        .env("FNO_E2E_DROP_PTY_EXIT", "1")
+        .env("SHELL", "/bin/sh")
+        .output()
+        .expect("fno binary runs");
+    assert!(
+        run.status.success(),
+        "pane run must start the isolated server: {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while scratch.main_sock().exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !scratch.main_sock().exists(),
+        "the periodic reaper must remove the last dead pane and shut down the server"
+    );
+    let log = std::fs::read_to_string(scratch.0.join("main.log")).unwrap_or_default();
+    assert!(
+        log.contains("deliberately dropped exit") && log.contains("last dead pane reaped"),
+        "the test must exercise the lost-exit timer path; log: {log}"
+    );
 }
