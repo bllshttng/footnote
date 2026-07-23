@@ -455,6 +455,7 @@ def cmd_crown(
 
 @agents_app.command("spawn")
 def cmd_spawn(
+    ctx: typer.Context,
     name: str = typer.Argument(
         "",
         help="Agent name (optional; an adjective-noun slug is minted when omitted).",
@@ -816,16 +817,26 @@ def cmd_spawn(
         provider = "claude"
         if route is None:
             route = "zai/glm-5.2[1m]"
-        # Resolve the default substrate for the zai shorthand. A one-shot request
-        # (--headless OR --once/-o) must land on the HEADLESS substrate, not merely
-        # dodge the bg default: dispatch passes headless as `substrate ==
-        # "headless"` and refuses claude+once unless headless is True (the bare
-        # claude+once combo is intentionally rejected). Converting here makes all
-        # three advertised one-shot spellings converge on the routed headless lane
-        # (x-6de8 codex P2). With no one-shot flag, zai defaults to the attachable
-        # bg thread rather than a pane.
-        if substrate == "pane":
-            substrate = "headless" if (once or headless) else "bg"
+        # Default the shorthand to the attachable bg thread -- but ONLY when the
+        # caller gave no explicit substrate and no one-shot flag. An explicit
+        # --substrate pane must NOT be silently rewritten to bg (codex P2, finding
+        # 7): it falls through to the shared route guard below, which refuses a
+        # routed pane. The one-shot spellings are handled by the normalization next.
+        from click.core import ParameterSource
+
+        substrate_explicit = (
+            ctx.get_parameter_source("substrate") != ParameterSource.DEFAULT
+        )
+        if substrate == "pane" and not substrate_explicit and not once and not headless:
+            substrate = "bg"
+
+    # A routed one-shot (--once/-o OR --headless) must land on the HEADLESS
+    # substrate: the guard below passes on `headless_route` (once or headless), but
+    # dispatch derives headless from `substrate == "headless"` and refuses
+    # claude+once unless headless is True. Converting here makes all three one-shot
+    # spellings reach dispatch with once=True AND headless=True (codex P2, 3/4/6).
+    if route is not None and (once or headless) and substrate == "pane":
+        substrate = "headless"
 
     # --provider is optional: resolve it (explicit > invoking harness > claude)
     # and reject an empty --model before anything spawns. `provider` is a

@@ -214,6 +214,10 @@ def test_materialize_route_settings_is_0600_and_content_addressed(
     assert p1 == p2
     assert oct(os.stat(p1).st_mode & 0o777) == "0o600"
     assert json.load(open(p1))["env"] == env
+    # codex P2 (finding 8): published atomically via a temp + os.replace, so a
+    # racing reader never sees a partial file and no .tmp sidecar is left behind.
+    leftovers = list(Path(p1).parent.glob(".*.tmp"))
+    assert leftovers == [], f"temp files not cleaned up: {leftovers}"
 
 
 def test_bg_create_routed_spawn_passes_settings_flag(
@@ -357,6 +361,33 @@ def test_zai_shorthand_honors_all_headless_spellings(monkeypatch: pytest.MonkeyP
     result = runner.invoke(agents_app, ["spawn", "w", "hi", "--harness", "zai"])
     assert result.exit_code == 0, result.output
     assert captured.get("once") is not True
+
+    # An explicit --route one-shot converges on the same headless lane (not just
+    # the zai shorthand): the guard passes on headless_route, so substrate must
+    # become headless or dispatch refuses claude+once (codex P2, finding 6).
+    captured.clear()
+    result = runner.invoke(
+        agents_app, ["spawn", "w", "hi", "--harness", "claude", "--route", "zai", "--once"]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["once"] is True and captured["headless"] is True
+
+
+def test_zai_explicit_pane_substrate_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """codex P2 (finding 7): the zai shorthand must NOT silently rewrite an
+    explicit --substrate pane to bg. Routing never reaches the pane path
+    (dispatch_spawn_pane takes no route_env), so a routed pane is refused."""
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    from fno.agents import spawn_gate
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app, ["spawn", "w", "hi", "--harness", "zai", "--substrate", "pane"]
+    )
+    assert result.exit_code == 2, result.output
+    assert "bg" in result.output.lower()  # steers to a routing-capable lane
 
 
 def test_harness_zai_shorthand_matches_provider_zai(monkeypatch: pytest.MonkeyPatch) -> None:
