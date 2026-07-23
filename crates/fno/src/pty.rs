@@ -15,7 +15,8 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Serializes every PTY fork in this process.
 ///
@@ -117,6 +118,7 @@ pub struct PtyShell {
     // (fail-closed, same policy as input-after-exit) - never unbounded memory.
     input_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+    reader_done: Arc<AtomicBool>,
     // Shell-integration rc temp dir, held purely for cleanup (RAII): dropped
     // when the pane closes / the server exits. `None` for non-shell / off panes.
     _shell_rc: Option<ShellRc>,
@@ -261,6 +263,14 @@ impl PtyShell {
                 true
             }
         }
+    }
+
+    /// True only after the child is dead and the PTY reader has enqueued every
+    /// final output chunk. The acquire pairs with the reader's release store,
+    /// letting the server snapshot safe reaper candidates before draining its
+    /// output channel and closing panes.
+    pub fn is_reap_ready(&self) -> bool {
+        self.reader_done.load(Ordering::Acquire) && !self.is_child_alive()
     }
 
     /// Kill and reap the child (explicit ClosePane / CloseTab). Idempotent:
@@ -465,12 +475,14 @@ fn wire(
         .master
         .try_clone_reader()
         .map_err(|e| PtyError::Reader(e.to_string()))?;
-    spawn_reader(reader, pane_id, out_tx, exit_tx)?;
+    let reader_done = Arc::new(AtomicBool::new(false));
+    spawn_reader(reader, pane_id, out_tx, exit_tx, Arc::clone(&reader_done))?;
     let input_tx = spawn_writer(writer)?;
     Ok(PtyShell {
         master: pair.master,
         input_tx,
         child: Mutex::new(child),
+        reader_done,
         _shell_rc: shell_rc,
     })
 }
@@ -512,6 +524,7 @@ fn spawn_reader(
     pane_id: u64,
     out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
+    reader_done: Arc<AtomicBool>,
 ) -> Result<(), PtyError> {
     std::thread::Builder::new()
         .name("fno-mux-pty-reader".into())
@@ -529,6 +542,15 @@ fn spawn_reader(
                         if e2e && std::mem::take(&mut first) {
                             eprintln!("fno mux e2e: pty reader pane {pane_id}: first {n} bytes");
                         }
+                        if e2e {
+                            let delay_ms = std::env::var("FNO_E2E_PTY_OUTPUT_DELAY_MS")
+                                .ok()
+                                .and_then(|value| value.parse::<u64>().ok())
+                                .unwrap_or(0);
+                            if delay_ms > 0 {
+                                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                            }
+                        }
                         // blocking_send backpressures the reader (and thus the
                         // child) when the core loop lags; never unbounded.
                         if out_tx.blocking_send((pane_id, buf[..n].to_vec())).is_err() {
@@ -545,6 +567,7 @@ fn spawn_reader(
                     }
                 }
             }
+            reader_done.store(true, Ordering::Release);
             if drop_exit {
                 eprintln!("fno mux e2e: deliberately dropped exit for pane {pane_id}");
             } else {

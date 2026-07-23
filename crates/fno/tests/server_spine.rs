@@ -4,6 +4,7 @@
 //! protocol via the sync codec.
 
 use std::io::ErrorKind;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -45,6 +46,10 @@ impl Drop for Server {
 }
 
 fn spawn_server(sock: &Path, shell: &str) -> Server {
+    spawn_server_with_env(sock, shell, &[])
+}
+
+fn spawn_server_with_env(sock: &Path, shell: &str, env: &[(&str, &str)]) -> Server {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fno"));
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("FNO_") {
@@ -77,6 +82,9 @@ fn spawn_server(sock: &Path, shell: &str) -> Server {
         "FNO_GLOBAL_SETTINGS_PATH",
         iso.join("iso-cfg").join("settings.json"),
     );
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
     Server(cmd.spawn().unwrap())
 }
 
@@ -243,6 +251,51 @@ fn server_spine_exited_child_ends_the_session_with_bye() {
             panic!("server did not exit after the session ended");
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn server_spine_dead_child_waits_for_delayed_pty_output_before_bye() {
+    let scratch = Scratch::new("reader-drain");
+    let shell = scratch.0.join("emit-and-exit");
+    std::fs::write(&shell, "#!/bin/sh\nprintf reader-drained\n").unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut server = spawn_server_with_env(
+        &scratch.sock(),
+        shell.to_str().unwrap(),
+        &[("FNO_E2E", "1"), ("FNO_E2E_PTY_OUTPUT_DELAY_MS", "2500")],
+    );
+    let mut stream = attach(&scratch.sock(), 24, 80);
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        server.0.try_wait().unwrap().is_none(),
+        "dead-child reaper closed the pane before its PTY reader drained"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut saw_output = false;
+    loop {
+        match read_msg_sync::<_, ServerMsg>(&mut stream) {
+            Ok(ServerMsg::Frame { frame, .. }) => {
+                saw_output |= frame_text(&frame).contains("reader-drained");
+            }
+            Ok(ServerMsg::Bye { .. }) => {
+                assert!(saw_output, "Bye arrived before the final PTY output");
+                break;
+            }
+            Ok(_) => {}
+            Err(fno::proto::ProtoError::Io(e))
+                if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
+            Err(e) => panic!("expected final output then Bye, got error: {e}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "server did not deliver final PTY output and exit"
+        );
     }
 }
 

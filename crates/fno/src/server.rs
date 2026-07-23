@@ -1973,15 +1973,18 @@ impl Core {
         }
     }
 
-    /// Defensive backstop for a lost/delayed PTY-reader exit notification.
-    /// The normal exit_rx path is immediate; this scan makes the pane registry
-    /// converge on OS child truth even if that one channel edge is missed.
-    fn reap_dead_children(&mut self) -> Flow {
-        let dead: Vec<u64> = self
-            .panes
+    /// Snapshot panes whose children and PTY readers have both finished.
+    /// Every candidate's final output is already enqueued, so the caller can
+    /// drain the shared output channel before closing this exact set.
+    fn dead_children_ready_to_reap(&self) -> Vec<u64> {
+        self.panes
             .iter()
-            .filter_map(|(&pid, entry)| (!entry.pty.is_child_alive()).then_some(pid))
-            .collect();
+            .filter_map(|(&pid, entry)| entry.pty.is_reap_ready().then_some(pid))
+            .collect()
+    }
+
+    /// Defensive backstop for a lost PTY-reader exit notification.
+    fn reap_dead_children(&mut self, dead: Vec<u64>) -> Flow {
         for pid in dead {
             let ctx = self.member_ctx(pid);
             self.reconcile_member_close(ctx, true);
@@ -7830,6 +7833,45 @@ async fn run_wait(
     let _ = reply.send(ServerMsg::WaitDone { outcome });
 }
 
+fn drain_pty_output(
+    core: &mut Core,
+    out_rx: &mut mpsc::Receiver<(u64, Vec<u8>)>,
+    first: Option<(u64, Vec<u8>)>,
+    e2e_first_out: &mut HashSet<u64>,
+) -> bool {
+    let mut drained = false;
+    let mut touched = HashSet::new();
+    {
+        let mut feed = |pid: u64, bytes: Vec<u8>| {
+            drained = true;
+            if e2e_first_out.insert(pid) {
+                e2e_log(format_args!(
+                    "core loop: first output from pane {pid} ({} bytes)",
+                    bytes.len()
+                ));
+            }
+            if let Some(entry) = core.panes.get_mut(&pid) {
+                entry.vt.feed(&bytes);
+                touched.insert(pid);
+            }
+        };
+        if let Some((pid, bytes)) = first {
+            feed(pid, bytes);
+        }
+        while let Ok((pid, bytes)) = out_rx.try_recv() {
+            feed(pid, bytes);
+        }
+    }
+    for pid in touched {
+        core.broadcast_pane(pid);
+        core.note_pane_output(pid);
+    }
+    if drained {
+        core.sync_focused_modes();
+    }
+    drained
+}
+
 async fn serve(
     listener: std::os::unix::net::UnixListener,
     socket: &Path,
@@ -8227,45 +8269,31 @@ async fn serve(
     let flow = loop {
         tokio::select! {
             chunk = out_rx.recv() => {
+                // out_tx lives in Core, so recv never yields None.
+                let Some((pid, bytes)) = chunk else { break Flow::Shutdown };
+                drain_pty_output(
+                    &mut core,
+                    &mut out_rx,
+                    Some((pid, bytes)),
+                    &mut e2e_first_out,
+                );
                 // Pane output is a liveness signal (x-4e30): re-arm the idle
                 // reaper so a working client-less script session never reaps.
-                // Gated on the marker so a high-throughput prod pane pays no
-                // Instant::now() per chunk (gemini review).
                 if idle_exit_e2e {
                     idle_deadline = tokio::time::Instant::now() + idle_grace;
                 }
-                // out_tx lives in Core, so recv never yields None.
-                let Some((pid, bytes)) = chunk else { break Flow::Shutdown };
-                if e2e_first_out.insert(pid) {
-                    e2e_log(format_args!(
-                        "core loop: first output from pane {pid} ({} bytes)",
-                        bytes.len()
-                    ));
-                }
-                let mut touched = HashSet::new();
-                if let Some(entry) = core.panes.get_mut(&pid) {
-                    entry.vt.feed(&bytes);
-                    touched.insert(pid);
-                }
-                // Coalesce whatever is already queued, per pane, into one
-                // frame each (a flooding pane costs one snapshot per burst).
-                while let Ok((p2, b2)) = out_rx.try_recv() {
-                    if let Some(entry) = core.panes.get_mut(&p2) {
-                        entry.vt.feed(&b2);
-                        touched.insert(p2);
-                    }
-                }
-                for pid in touched {
-                    core.broadcast_pane(pid);
-                    // Refresh any PaneWait watcher on this pane (no-op unless
-                    // one is subscribed).
-                    core.note_pane_output(pid);
-                }
-                core.sync_focused_modes();
             }
             exited = exit_rx.recv() => {
                 let Some(pid) = exited else { break Flow::Shutdown };
                 e2e_log(format_args!("pane {pid} child exited"));
+                // The reader sends this only after enqueuing every output
+                // chunk. Drain that channel before removing the pane so final
+                // bytes cannot lose a select race between separate receivers.
+                if drain_pty_output(&mut core, &mut out_rx, None, &mut e2e_first_out)
+                    && idle_exit_e2e
+                {
+                    idle_deadline = tokio::time::Instant::now() + idle_grace;
+                }
                 // A worker that died on its own (churn) tombstones its member
                 // BEFORE the reap clears the mapping (AC4-EDGE).
                 let ctx = core.member_ctx(pid);
@@ -8276,7 +8304,18 @@ async fn serve(
                 }
             }
             _ = pane_reap_tick.tick() => {
-                if core.reap_dead_children() == Flow::Shutdown {
+                // Snapshot first: reader completion guarantees all output for
+                // these panes was enqueued before this point. Drain it, then
+                // close exactly the snapshot even if another reader finishes
+                // concurrently.
+                let dead = core.dead_children_ready_to_reap();
+                if !dead.is_empty()
+                    && drain_pty_output(&mut core, &mut out_rx, None, &mut e2e_first_out)
+                    && idle_exit_e2e
+                {
+                    idle_deadline = tokio::time::Instant::now() + idle_grace;
+                }
+                if core.reap_dead_children(dead) == Flow::Shutdown {
                     e2e_log(format_args!("last dead pane reaped; shutting down"));
                     break Flow::Shutdown;
                 }
@@ -14928,15 +14967,16 @@ mod tests {
             0
         );
         let deadline = Instant::now() + Duration::from_secs(5);
-        while core.panes[&pane].pty.is_child_alive() && Instant::now() < deadline {
+        while !core.panes[&pane].pty.is_reap_ready() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(
-            !core.panes[&pane].pty.is_child_alive(),
-            "child never exited"
+            core.panes[&pane].pty.is_reap_ready(),
+            "child or PTY reader never exited"
         );
 
-        assert!(matches!(core.reap_dead_children(), Flow::Shutdown));
+        let dead = core.dead_children_ready_to_reap();
+        assert!(matches!(core.reap_dead_children(dead), Flow::Shutdown));
         assert!(core.panes.is_empty(), "dead pane registry entry survived");
         assert!(core.session.squads.is_empty(), "dead pane tree survived");
     }
