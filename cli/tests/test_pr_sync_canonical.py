@@ -254,3 +254,28 @@ def test_claim_key_is_canonical_wide_not_per_sha(tmp_path, monkeypatch):
     assert len(keys) == 2
     assert keys[0] == keys[1], "different SHAs must contend for the same lock"
     assert "a" * 40 not in keys[0] and "b" * 40 not in keys[1]
+
+
+# --- x-adf9: _default_shell_runner detaches daemons + is bounded ---------
+
+def test_default_shell_runner_closes_child_pipes(tmp_path, capsys):
+    # x-adf9: a `fno restart` in sync_command detaches a daemon that inherits
+    # the runner's stdout and never closes it, wedging subprocess.run on wait.
+    # Redirecting to DEVNULL means the child's output never reaches the parent
+    # (and a detached child cannot hold the parent's pipe open).
+    from fno.pr._sync_canonical import _default_shell_runner
+
+    rc = _default_shell_runner("echo LEAKED_MARKER_XADF9", str(tmp_path))
+    assert rc == 0
+    assert "LEAKED_MARKER_XADF9" not in capsys.readouterr().out
+
+
+def test_default_shell_runner_is_bounded(tmp_path, capsys, monkeypatch):
+    # x-adf9 backstop: a stuck sync_command returns 124 at the bound instead of
+    # wedging the ritual forever.
+    import fno.pr._sync_canonical as mod
+
+    monkeypatch.setattr(mod, "_SYNC_COMMAND_TIMEOUT_S", 1.0)
+    rc = mod._default_shell_runner("sleep 30", str(tmp_path))
+    assert rc == 124
+    assert "timed out" in capsys.readouterr().err.lower()
