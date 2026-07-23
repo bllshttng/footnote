@@ -46,6 +46,11 @@ impl Drop for Server {
 
 fn spawn_server(sock: &Path, shell: &str) -> Server {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fno"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("FNO_") {
+            cmd.env_remove(key);
+        }
+    }
     cmd.args(["--server"])
         .arg(sock)
         .env("SHELL", shell)

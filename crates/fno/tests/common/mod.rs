@@ -394,6 +394,11 @@ impl Drop for ServerProc {
 #[allow(dead_code)]
 pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_fno"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("FNO_") {
+            cmd.env_remove(key);
+        }
+    }
     cmd.args(["--server"])
         .arg(sock)
         .stdin(std::process::Stdio::null())
