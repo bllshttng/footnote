@@ -71,12 +71,6 @@ uv build'
 bash tests/lib/test_infer_has_ui.sh
 bash tests/lib/test_resolve_plan_executor.sh'
     step "config global-precedence harness (ab-5d6c3d47)" "." 'bash tests/lib/test_config_global_precedence.sh'
-    # The post-merge ritual's Step 2 scan + Step 8a reap moved out of bash and
-    # into `fno pr ritual` (cli/src/fno/pr/_ritual.py); their behavioral ACs
-    # (origin-slug forms, repo scoping, dedup, stop-before-rm, status!=live)
-    # now live in cli/tests/unit/test_pr_ritual.py and run in the self-test job.
-    # test_watch.sh stays a shell harness. 77 is its own "skipped, no jq" code.
-    step "post-merge watch harness" "." 'bash tests/post-merge/test_watch.sh || { rc=$?; [ "$rc" = 77 ] && echo "skipped: test_watch.sh (missing jq)" || exit "$rc"; }'
     step "cost-accuracy harness (ab-c0f92987)" "." 'uv run --project cli python tests/lib/test_cost_tracker_pricing.py
 uv run --project cli python tests/metrics/test_session_cost_dedup.py
 uv run --project cli python tests/metrics/test_backfill_cost_recompute.py

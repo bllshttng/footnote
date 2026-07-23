@@ -453,9 +453,8 @@ def install(
         typer.echo(f"To activate: launchctl bootstrap gui/$(id -u) {plist_path}")
 
     typer.echo(
-        "Note: any per-repo scripts/post-merge/ watcher can now be retired "
-        "(run scripts/post-merge/uninstall.sh in each repo).  Double-fire is "
-        "safe via the idempotency marker, so migration is advisory."
+        "The canonical pr-watch daemon now owns merge detection; no per-repo "
+        "watcher install is needed."
     )
 
 

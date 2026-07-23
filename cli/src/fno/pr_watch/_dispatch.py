@@ -153,9 +153,8 @@ def fire_skill(
 ) -> DispatchResult:
     """Fire a headless ``claude --print`` for one PR and return the result.
 
-    The command shape mirrors ``watch.sh``'s ``cd repo && claude --print ...``
-    with ``--output-format json`` so we can detect ``is_error:true`` even
-    when the exit code is 0.
+    The command runs in the repository with ``--output-format json`` so we can
+    detect ``is_error:true`` even when the exit code is 0.
 
     A test seam (``PR_WATCH_FIRE_CMD`` env var, or the *env_seam* parameter)
     replaces the ``claude`` binary with an arbitrary command string for unit
