@@ -263,6 +263,37 @@ def test_codex_rollout_scan_skips_unstatable_file(tmp_path):
     assert _codex_rollout_path("sid", tmp_path) == good
 
 
+def test_codex_rollout_exact_filename_avoids_history_meta_reads(
+    tmp_path, monkeypatch
+):
+    from fno.agents import discover
+
+    day = tmp_path / "2026" / "07" / "23"
+    day.mkdir(parents=True)
+    for index in range(25):
+        sid = f"session-{index:02d}"
+        (day / f"rollout-2026-07-23T00-00-{index:02d}-{sid}.jsonl").write_text(
+            json.dumps({"type": "session_meta", "payload": {"id": sid, "cwd": "/x"}})
+            + "\n",
+            encoding="utf-8",
+        )
+
+    real_meta = discover._codex_meta
+    reads = []
+
+    def counting_meta(path):
+        reads.append(path)
+        return real_meta(path)
+
+    monkeypatch.setattr(discover, "_codex_meta", counting_meta)
+
+    found = _codex_rollout_path("session-00", tmp_path)
+
+    assert found is not None
+    assert found.name.endswith("session-00.jsonl")
+    assert len(reads) == 1
+
+
 def test_peek_status_stream_dual_envelope(tmp_path):
     """AC3-EDGE: both {type,data} and {kind,..flat} status events render; a
     neither-shape record is skipped (fast-path stays present, not partial)."""

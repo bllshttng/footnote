@@ -150,12 +150,24 @@ def _codex_rollout_path(
 ) -> Optional[Path]:
     """Locate the codex rollout whose ``session_meta`` id matches ``session_id``.
 
-    Re-uses discover's rollout scan + meta parse (single source of truth for the
-    codex layout) rather than threading a path through the dedup pipeline.
+    Current Codex filenames end with the session id, so exact-id lookup avoids
+    opening every historical rollout. Verify the embedded metadata before
+    trusting that filename, then retain the store-wide scan as compatibility
+    fallback for older or nonstandard layouts.
     """
     from fno.agents.discover import _codex_meta, default_codex_sessions_dir
 
     root = codex_sessions_dir or default_codex_sessions_dir()
+
+    try:
+        exact = list(root.rglob(f"rollout-*{session_id}.jsonl"))
+    except OSError:
+        exact = []
+    for path in exact:
+        meta = _codex_meta(path)
+        if meta is not None and meta[0] == session_id:
+            return path
+
     dated: list[tuple[float, Path]] = []
     try:
         for path in root.rglob("rollout-*.jsonl"):

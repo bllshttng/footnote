@@ -719,13 +719,68 @@ def test_resolver_only_discovery_does_not_classify_every_candidate(
         codex_sessions_dir=codex,
         name_map_path=tmp_path / ".fno" / "session-names.json",
         psutil_mod=_FakePsutil(alive={}),
-        project_resolver=lambda _cwd: None,
+        project_resolver=lambda _cwd: pytest.fail("project metadata was resolved"),
         truth_fn=lambda _session: pytest.fail("candidate was classified"),
         require_alive=False,
     )
 
     assert match is not None
     assert match.session_id == "019f48e1-target"
+
+
+def test_resolver_only_full_session_id_uses_bare_fast_path(tmp_path):
+    codex = tmp_path / "codex"
+    session_id = "019f48e1-target-full-session-id"
+    _write_codex_rollout(codex, session_id=session_id, cwd="/x")
+
+    match, _suggestions = discover.resolve_or_suggest(
+        session_id,
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=lambda _cwd: pytest.fail("project metadata was resolved"),
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.session_id == session_id
+
+
+def test_resolver_only_registered_id_skips_transcript_store_scan(
+    tmp_path, monkeypatch
+):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="registered-codex",
+                harness="codex",
+                harness_session_id="019f48e1-registered",
+                cwd="/x",
+                log_path="/tmp/codex.log",
+            )
+        ],
+        path=registry,
+    )
+    monkeypatch.setattr(
+        discover,
+        "_discover_from_codex",
+        lambda *_args, **_kwargs: pytest.fail("transcript store was scanned"),
+    )
+
+    match, _suggestions = discover.resolve_or_suggest(
+        "019f48e1",
+        registry_path=registry,
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.session_id == "019f48e1-registered"
+    assert match.agent == "codex"
 
 
 @pytest.mark.parametrize(

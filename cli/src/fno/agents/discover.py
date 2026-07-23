@@ -1062,17 +1062,58 @@ def resolve_or_suggest(
     """
     from fno.harness_identity import LEGACY_HANDLE_RE, canonical_handle
 
+    if not require_alive:
+        registry_matches = [
+            row
+            for row in _discover_from_registry(registry_path)
+            if handle
+            and handle
+            in {
+                row["session_id"],
+                row["short_id"],
+                canonical_handle(row["session_id"]),
+            }
+        ]
+        if len(registry_matches) == 1:
+            row = registry_matches[0]
+            return DiscoveredSession(
+                session_id=row["session_id"],
+                short_id=row["short_id"],
+                handle=row["short_id"],
+                pid=row["pid"],
+                cwd=row["cwd"],
+                project=None,
+                status=row["status"],
+                agent=row["agent"],
+            ), []
+
+    discovery_kwargs = {
+        "sessions_dir": sessions_dir,
+        "projects_dir": projects_dir,
+        "codex_sessions_dir": codex_sessions_dir,
+        "opencode_storage_dir": opencode_storage_dir,
+        "name_map_path": name_map_path,
+        "registry_path": registry_path,
+        "project_resolver": project_resolver,
+        "psutil_mod": psutil_mod,
+        "truth_fn": truth_fn,
+        "classify_truth": require_alive,
+    }
+    if not require_alive:
+        bare_sessions = discover_live_sessions(
+            **discovery_kwargs,
+            resolve_metadata=False,
+        )
+        for session in bare_sessions:
+            if handle and handle in {
+                session.session_id,
+                session.short_id,
+                canonical_handle(session.session_id),
+            }:
+                return session, []
+
     sessions = discover_live_sessions(
-        sessions_dir=sessions_dir,
-        projects_dir=projects_dir,
-        codex_sessions_dir=codex_sessions_dir,
-        opencode_storage_dir=opencode_storage_dir,
-        name_map_path=name_map_path,
-        registry_path=registry_path,
-        project_resolver=project_resolver,
-        psutil_mod=psutil_mod,
-        truth_fn=truth_fn,
-        classify_truth=require_alive,
+        **discovery_kwargs,
     )
     if require_alive:
         sessions = [s for s in sessions if s.is_alive]
@@ -1540,6 +1581,7 @@ def discover_live_sessions(
     psutil_mod=None,
     truth_fn: Optional[Callable[[DiscoveredSession], dict]] = None,
     classify_truth: bool = True,
+    resolve_metadata: bool = True,
 ) -> list[DiscoveredSession]:
     """Enumerate host-local session candidates and attach family-1 truth.
 
@@ -1547,7 +1589,8 @@ def discover_live_sessions(
     rosters, and the fno registry. None of those enumeration signals can prove
     death. ``classify_truth=False`` is the resolver-only lane: it returns
     candidates without recursively classifying them so one requested truth
-    lookup reads only that session's tail.
+    lookup reads only that session's tail. ``resolve_metadata=False`` also
+    skips project and alias work for exact bare-id resolution.
 
     ``exclude_short_ids`` drops sessions already present in the fno registry so
     the discovered lane does not double-list adopted sessions. Callers route
@@ -1685,10 +1728,12 @@ def discover_live_sessions(
                 existing["transcript_path"] = r["transcript_path"]
     live = list(by_sid.values())
 
-    for r in live:
-        r["project"] = resolver(r["cwd"]) if r["cwd"] else None
-
-    aliases = _resolve_aliases(live, name_map_path or default_name_map_path())
+    if resolve_metadata:
+        for r in live:
+            r["project"] = resolver(r["cwd"]) if r["cwd"] else None
+        aliases = _resolve_aliases(live, name_map_path or default_name_map_path())
+    else:
+        aliases = {}
 
     sessions = [
         DiscoveredSession(
