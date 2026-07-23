@@ -359,9 +359,11 @@ class Ritual:
         try:
             r = self._sh(argv)
         except subprocess.TimeoutExpired:
-            self._emit("reconcile", _FAILED, "timeout"); return
+            self._emit("reconcile", _FAILED, "timeout")
+            return
         except (ToolMissing, subprocess.SubprocessError) as exc:
-            self._emit("reconcile", _FAILED, f"spawn-error: {exc}"); return
+            self._emit("reconcile", _FAILED, f"spawn-error: {exc}")
+            return
         if r.ok:
             try:
                 obj = json.loads(r.stdout or "{}")
@@ -412,19 +414,23 @@ class Ritual:
         try:
             meta = self._gh(["pr", "view", str(self.ctx.pr), "--json", "headRefName"])
         except (ToolMissing, subprocess.SubprocessError) as exc:
-            self._emit("archive", _SKIPPED, f"gh-error: {exc}"); return
+            self._emit("archive", _SKIPPED, f"gh-error: {exc}")
+            return
         if not meta.ok:
-            self._emit("archive", _SKIPPED, "gh-unavailable"); return
+            self._emit("archive", _SKIPPED, "gh-unavailable")
+            return
         try:
             obj = json.loads(meta.stdout or "{}")
         except json.JSONDecodeError:
             obj = {}
         branch = obj.get("headRefName") or ""
         if not branch:
-            self._emit("archive", _SKIPPED, "no-branch"); return
+            self._emit("archive", _SKIPPED, "no-branch")
+            return
         wt = self._find_worktree(branch)
         if not wt:
-            self._emit("archive", _SKIPPED, f"no worktree for {branch}"); return
+            self._emit("archive", _SKIPPED, f"no worktree for {branch}")
+            return
         if Path(wt).resolve() == self.cwd.resolve():
             # Never self-remove; the standing sweep reaps it from canonical.
             self._emit("archive", _SKIPPED,
@@ -432,14 +438,17 @@ class Ritual:
             return
         script = self.canon / "scripts" / "setup" / "archive-worktree.sh"
         if not script.exists():
-            self._emit("archive", _SKIPPED, "archive-worktree.sh missing"); return
+            self._emit("archive", _SKIPPED, "archive-worktree.sh missing")
+            return
         try:
             r = self.runner(["bash", str(script), str(wt), "--yes"],
                             cwd=str(self.canon), timeout=120.0)
         except subprocess.TimeoutExpired:
-            self._emit("archive", _FAILED, "timeout"); return
+            self._emit("archive", _FAILED, "timeout")
+            return
         except (ToolMissing, subprocess.SubprocessError) as exc:
-            self._emit("archive", _FAILED, f"spawn-error: {exc}"); return
+            self._emit("archive", _FAILED, f"spawn-error: {exc}")
+            return
         self._emit("archive", _OK if r.ok else _FAILED,
                    "archived" if r.ok else f"exit={r.returncode} (worktree left in place)")
 
@@ -622,11 +631,13 @@ class Ritual:
             # mirroring the replaced bash Step 2 scan (codex P2).
             self.ctx.node_ids = self._recover_node_for_pr()
         if not self.ctx.node_ids:
-            self._emit("reap-rows", _SKIPPED, "no closed node ids"); return
+            self._emit("reap-rows", _SKIPPED, "no closed node ids")
+            return
         reap_on = _truthy(getattr(self.ctx.pm, "self_reap", False))
         rows = self._dead_target_rows()
         if not rows:
-            self._emit("reap-rows", _OK, "no lingering rows"); return
+            self._emit("reap-rows", _OK, "no lingering rows")
+            return
         if not reap_on:
             cmds = "; ".join(f"fno agents stop {n} && fno agents rm {n}" for n in rows)
             self._emit("reap-rows", _OK,
@@ -689,7 +700,9 @@ class Ritual:
             proc = subprocess.Popen([*fno_py_cmd(), *argv], cwd=str(self.canon),
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         except FileNotFoundError as exc:
-            self._emit(step, _FAILED, f"spawn-error: {exc}"); return
+            self._emit(step, _FAILED, f"spawn-error: {exc}")
+            return
+        assert proc.stdout is not None  # PIPE was requested above
         fd = proc.stdout.fileno()
         deadline = time.monotonic() + timeout
         progress = 0

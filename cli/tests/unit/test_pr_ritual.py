@@ -8,10 +8,8 @@ real-git worktree path for x-fb99.
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 
 from fno.pr import _ritual
 from fno.pr._proc import Result
@@ -134,7 +132,7 @@ def test_leg_skill_diff_calls_real_verb(tmp_path, capsys):
     r.leg_skill_diff()
     sub = _argv_sub(runner.calls, "skill-diff")
     assert sub is not None and "reconcile" in sub
-    rec = [l for l in capsys.readouterr().out.splitlines() if l.startswith("step=skill-diff")]
+    rec = [line for line in capsys.readouterr().out.splitlines() if line.startswith("step=skill-diff")]
     assert rec and "status=ok" in rec[0]
 
 
@@ -153,7 +151,7 @@ def test_sync_canonical_skipped_when_unconfigured(tmp_path, capsys):
     runner = FakeRunner()
     r = _bare(tmp_path, runner)  # pm.sync_command = None
     r.leg_sync_canonical()
-    rec = [l for l in capsys.readouterr().out.splitlines() if l.startswith("step=sync-canonical")]
+    rec = [line for line in capsys.readouterr().out.splitlines() if line.startswith("step=sync-canonical")]
     assert rec and "status=skipped" in rec[0] and "not configured" in rec[0]
 
 
@@ -406,9 +404,11 @@ def test_reap_stop_precedes_rm_when_self_reap_on(tmp_path, capsys):
         def __call__(self, argv, *, cwd=None, timeout=None):
             self.calls.append(list(argv))
             if len(argv) > 1 and argv[1] == "agents" and "stop" in argv:
-                self.order.append(("stop", argv[-1])); return Result(0, "", "")
+                self.order.append(("stop", argv[-1]))
+                return Result(0, "", "")
             if len(argv) > 1 and argv[1] == "agents" and "rm" in argv:
-                self.order.append(("rm", argv[-1])); return Result(0, "", "")
+                self.order.append(("rm", argv[-1]))
+                return Result(0, "", "")
             return FakeRunner.__call__(self, argv, cwd=cwd, timeout=timeout)
 
     runner = _Rec()
@@ -470,7 +470,8 @@ def test_archive_runs_script_when_worktree_found(tmp_path, capsys, monkeypatch):
     # AC1-HP: a found worktree for the merged branch is archived.
     runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner)
-    wt = tmp_path / "wt"; wt.mkdir()
+    wt = tmp_path / "wt"
+    wt.mkdir()
     (tmp_path / "scripts" / "setup").mkdir(parents=True)
     (tmp_path / "scripts" / "setup" / "archive-worktree.sh").write_text("#!/bin/sh\nexit 0\n")
     monkeypatch.setattr(r, "_find_worktree", lambda branch: str(wt))
