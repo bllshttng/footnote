@@ -678,6 +678,75 @@ def test_us2_codex_old_watching_rollout_still_surfaces(tmp_path):
     assert sessions[0].is_alive is True
 
 
+def test_codex_truth_reuses_discovered_rollout_path(tmp_path, monkeypatch):
+    """One discovery scan serves tail content and mtime classification."""
+    codex = tmp_path / "codex"
+    rollout = _write_codex_rollout(
+        codex, session_id="019f48e1-direct", cwd="/x", mtime_age=10_000.0
+    )
+    with rollout.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "<watching pr=7>"}],
+            },
+        }) + "\n")
+    from fno.agents import peek
+
+    monkeypatch.setattr(
+        peek,
+        "_codex_rollout_path",
+        lambda *_args, **_kwargs: pytest.fail("rollout store was rescanned"),
+    )
+
+    sessions = _run_codex(tmp_path, codex)
+
+    assert sessions[0].truth_state == "watching"
+    assert sessions[0].transcript_path == str(rollout)
+
+
+def test_resolver_only_discovery_does_not_classify_every_candidate(
+    tmp_path, monkeypatch
+):
+    codex = tmp_path / "codex"
+    _write_codex_rollout(codex, session_id="019f48e1-target", cwd="/x")
+
+    match, _suggestions = discover.resolve_or_suggest(
+        "019f48e1",
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=lambda _cwd: None,
+        truth_fn=lambda _session: pytest.fail("candidate was classified"),
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.session_id == "019f48e1-target"
+
+
+@pytest.mark.parametrize(
+    "truth_state,expected",
+    [("working", "live"), ("done", "orphaned"), ("unknown", "unknown")],
+)
+def test_discovered_row_status_projects_family1_truth(truth_state, expected):
+    session = discover.DiscoveredSession(
+        session_id="feedface",
+        short_id="feedface",
+        handle="feedface",
+        pid=0,
+        cwd="/tmp",
+        project=None,
+        status="busy",
+        truth_state=truth_state,
+    )
+
+    assert session.to_row()["status"] == expected
+
+
 def test_loaded_daemon_thread_does_not_override_stalled_transcript(tmp_path, monkeypatch):
     codex = tmp_path / "codex"
     sid = "019f4d0c-1111-2222-3333-444444444444"

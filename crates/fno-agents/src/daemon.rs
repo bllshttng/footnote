@@ -2547,6 +2547,11 @@ fn rendered_status_from_truth(truth: Option<&str>) -> &'static str {
 }
 
 fn registry_truth_handle(entry: &RegistryEntry) -> String {
+    if entry.harness_name() != "claude" {
+        if let Some(session_id) = entry.harness_session_id.as_deref() {
+            return session_id.chars().take(8).collect();
+        }
+    }
     if !entry.short_id.is_empty() {
         entry.short_id.clone()
     } else if let Some(session_id) = entry.harness_session_id.as_deref() {
@@ -5738,12 +5743,38 @@ done
     }
 
     #[test]
+    fn list_queries_non_claude_row_by_transcript_identity() {
+        let home = short_home("listnonclaude");
+        seed_stream_row(&home, "custom-worker-name", "transport");
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries[0].harness = Some("codex".into());
+            registry.entries[0].harness_session_id =
+                Some("019f8ff2-1111-2222-3333-444444444444".into());
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let seen = std::cell::RefCell::new(Vec::new());
+
+        let response = handle_list_with_truth(&ctx, &req, |handle| {
+            seen.borrow_mut().push(handle.to_string());
+            Some("working".into())
+        });
+
+        assert!(response.result().is_some());
+        assert_eq!(seen.into_inner(), vec!["019f8ff2"]);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
     fn list_applies_cheap_filters_before_family1_subprocesses() {
         let home = short_home("listprefilter");
         seed_stream_row(&home, "claude-worker", "aaaaaaaa");
         seed_stream_row(&home, "codex-worker", "bbbbbbbb");
         state::update_registry(&home.registry_json(), |registry| {
             registry.entries[1].harness = Some("codex".into());
+            registry.entries[1].harness_session_id =
+                Some("bbbbbbbb-1111-2222-3333-444444444444".into());
         })
         .unwrap();
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));

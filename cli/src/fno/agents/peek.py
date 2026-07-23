@@ -384,6 +384,7 @@ def recent_records(
     projects_root: Optional[Path] = None,
     codex_sessions_dir: Optional[Path] = None,
     opencode_storage_dir: Optional[Path] = None,
+    transcript_path: Optional[Path] = None,
 ) -> list[Record]:
     """The per-harness reader seam (Locked Decision 3).
 
@@ -404,7 +405,7 @@ def recent_records(
             Path(rt.transcript_path), n, _parse_claude_record
         )
     if agent == "codex":
-        path = _codex_rollout_path(session_id, codex_sessions_dir)
+        path = transcript_path or _codex_rollout_path(session_id, codex_sessions_dir)
         if path is None:
             return []
         return _records_from_jsonl(path, n, _parse_codex_record)

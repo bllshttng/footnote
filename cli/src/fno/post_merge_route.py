@@ -60,7 +60,12 @@ def _live_codex_registry_entry(session_id: str):
     return next((e for e in matches if getattr(e, "mux", None)), matches[0])
 
 
-def _family1_state(session_id: str, entry=None, source_cwd: Optional[str] = None) -> str:
+def _family1_state(
+    session_id: str,
+    entry=None,
+    source_cwd: Optional[str] = None,
+    source_harness: str = "claude",
+) -> str:
     """Return transcript truth for an origin candidate; never infer from status."""
     from types import SimpleNamespace
 
@@ -71,7 +76,11 @@ def _family1_state(session_id: str, entry=None, source_cwd: Optional[str] = None
         result = resolve_session_truth(session_id)
     else:
         known = SimpleNamespace(
-            agent=getattr(entry, "harness", "claude"),
+            agent=(
+                getattr(entry, "harness", None)
+                if entry is not None
+                else source_harness
+            ),
             session_id=session_id,
             cwd=(getattr(entry, "cwd", "") if entry is not None else source_cwd) or "",
         )
@@ -94,7 +103,7 @@ def session_death_confirmed(
         return False
     harness = (source_harness or "claude").strip().lower()
     entry = _live_codex_registry_entry(sid) if harness == "codex" else None
-    return _family1_state(sid, entry, source_cwd) in {"done", "stalled"}
+    return _family1_state(sid, entry, source_cwd, harness) in {"done", "stalled"}
 
 
 def resolve_warm_session(

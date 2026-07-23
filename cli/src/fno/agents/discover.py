@@ -276,6 +276,7 @@ def _discover_from_codex(
                 "cwd": cwd,
                 "status": None,
                 "agent": "codex",
+                "transcript_path": str(path),
             }
         )
     return rows
@@ -601,6 +602,7 @@ class DiscoveredSession:
     status: Optional[str]  # registry status: idle/busy/waiting
     agent: str = "claude"
     truth_state: str = "unknown"
+    transcript_path: Optional[str] = None
 
     @property
     def is_alive(self) -> bool:
@@ -615,7 +617,13 @@ class DiscoveredSession:
             "pid": self.pid,
             "cwd": self.cwd,
             "project": self.project,
-            "status": self.status,
+            "status": (
+                "live"
+                if self.is_alive
+                else "orphaned"
+                if self.truth_state in {"done", "stalled"}
+                else "unknown"
+            ),
             "agent": self.agent,
         }
 
@@ -1064,6 +1072,7 @@ def resolve_or_suggest(
         project_resolver=project_resolver,
         psutil_mod=psutil_mod,
         truth_fn=truth_fn,
+        classify_truth=require_alive,
     )
     if require_alive:
         sessions = [s for s in sessions if s.is_alive]
@@ -1530,12 +1539,15 @@ def discover_live_sessions(
     project_resolver: Optional[Callable[[str], Optional[str]]] = None,
     psutil_mod=None,
     truth_fn: Optional[Callable[[DiscoveredSession], dict]] = None,
+    classify_truth: bool = True,
 ) -> list[DiscoveredSession]:
     """Enumerate host-local session candidates and attach family-1 truth.
 
     Unions candidates from sidecars, canonical transcript stores, daemon
     rosters, and the fno registry. None of those enumeration signals can prove
-    death; every candidate receives a family-1 transcript verdict afterward.
+    death. ``classify_truth=False`` is the resolver-only lane: it returns
+    candidates without recursively classifying them so one requested truth
+    lookup reads only that session's tail.
 
     ``exclude_short_ids`` drops sessions already present in the fno registry so
     the discovered lane does not double-list adopted sessions. Callers route
@@ -1666,8 +1678,11 @@ def discover_live_sessions(
     by_sid: dict[str, dict] = {}
     for r in candidates:
         existing = by_sid.setdefault(r["session_id"], r)
-        if existing is not r and not existing.get("cwd") and r.get("cwd"):
-            existing["cwd"] = r["cwd"]
+        if existing is not r:
+            if not existing.get("cwd") and r.get("cwd"):
+                existing["cwd"] = r["cwd"]
+            if not existing.get("transcript_path") and r.get("transcript_path"):
+                existing["transcript_path"] = r["transcript_path"]
     live = list(by_sid.values())
 
     for r in live:
@@ -1685,9 +1700,13 @@ def discover_live_sessions(
             project=r.get("project"),
             status=r["status"],
             agent=r["agent"],
+            transcript_path=r.get("transcript_path"),
         )
         for r in live
     ]
+    if not classify_truth:
+        sessions.sort(key=lambda s: s.handle)
+        return sessions
     if truth_fn is None:
         from fno.agents.session_truth import resolve_session_truth
 

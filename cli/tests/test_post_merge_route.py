@@ -177,6 +177,22 @@ class TestCodexWarmRoute:
         _patch_truth(monkeypatch, "unknown")
         assert session_death_confirmed("cx-123", "codex") is False
 
+    def test_transcript_only_codex_death_uses_codex_reader(self, monkeypatch):
+        _patch_registry(monkeypatch, [])
+        from fno.agents import session_truth
+
+        seen = {}
+
+        def fake_truth(_handle, **kwargs):
+            session, _suggestions = kwargs["resolve"](_handle)
+            seen["agent"] = session.agent
+            return {"state": "done"}
+
+        monkeypatch.setattr(session_truth, "resolve_session_truth", fake_truth)
+
+        assert session_death_confirmed("cx-123", "codex", "/repo") is True
+        assert seen["agent"] == "codex"
+
     def test_resolve_gemini_always_cold(self, monkeypatch):
         # No live-inject vehicle yet (US9): gemini cold-paths regardless.
         _patch_registry(monkeypatch, [_FakeEntry("gemini", "gm-1", "live")])
