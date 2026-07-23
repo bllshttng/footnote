@@ -10,11 +10,10 @@ Live shellout is exercised in providers test + integration smoke.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
-from fno.agents.read import ListResult, list_agents
+from fno.agents.read import list_agents
 from fno.agents.registry import AgentEntry, write_registry
 from fno.paths_testing import use_tmpdir
 
@@ -433,4 +432,31 @@ def test_discovered_rows_honor_provider_filter(
         ]
     )
     result = list_agents(provider=provider, json_out=True)
+    assert _discovered_agents(result.output) == expected
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        (None, ["claude"]),
+        ("live", ["claude"]),
+        ("orphaned", []),
+        ("unknown", []),
+    ],
+)
+def test_discovered_live_rows_honor_status_filter(
+    tmp_path,
+    monkeypatch,
+    _patch_claude_agents_json,
+    _patch_discovery,
+    status,
+    expected,
+):
+    use_tmpdir(monkeypatch, tmp_path)
+    _patch_claude_agents_json([])
+    write_registry([], path=tmp_path / "registry.json")
+    _patch_discovery([_Discovered("claude", "aaaa1111")])
+
+    result = list_agents(status=status, json_out=True)
+
     assert _discovered_agents(result.output) == expected

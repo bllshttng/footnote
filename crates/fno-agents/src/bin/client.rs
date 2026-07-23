@@ -1965,6 +1965,7 @@ fn format_success(
                 fetch_discovered_sessions(
                     filters.get("cwd").and_then(|v| v.as_str()),
                     filters.get("provider").and_then(|v| v.as_str()),
+                    filters.get("status").and_then(|v| v.as_str()),
                 )
             } else {
                 Vec::new()
@@ -2050,8 +2051,13 @@ fn render_list_json(agents: &Value, filters_applied: &Value, discovered: &[Value
 fn fetch_discovered_sessions(
     cwd_filter: Option<&str>,
     provider_filter: Option<&str>,
+    status_filter: Option<&str>,
 ) -> Vec<Value> {
     use std::process::Command;
+
+    if matches!(status_filter, Some(status) if status != "live") {
+        return Vec::new();
+    }
 
     let mut cmd = Command::new("fno");
     cmd.args(["agents", "discovered-json"]);
@@ -3640,6 +3646,12 @@ mod tests {
         let (_method, params) = build_request("list", &args).unwrap();
         assert_eq!(params["cwd"], Value::String("/tmp/myproject".to_string()));
         assert_eq!(params["provider"], Value::String("codex".to_string()));
+    }
+
+    #[test]
+    fn discovered_live_lane_is_empty_for_non_live_status_filters() {
+        assert!(fetch_discovered_sessions(None, None, Some("orphaned")).is_empty());
+        assert!(fetch_discovered_sessions(None, None, Some("unknown")).is_empty());
     }
 
     /// AC1-HP: --json is NOT forwarded to daemon params (it is a client-side rendering flag)

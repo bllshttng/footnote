@@ -2546,6 +2546,16 @@ fn rendered_status_from_truth(truth: Option<&str>) -> &'static str {
     }
 }
 
+fn registry_truth_handle(entry: &RegistryEntry) -> String {
+    if !entry.short_id.is_empty() {
+        entry.short_id.clone()
+    } else if let Some(session_id) = entry.harness_session_id.as_deref() {
+        session_id.chars().take(8).collect()
+    } else {
+        entry.name.clone()
+    }
+}
+
 fn handle_list(ctx: &Ctx, req: &Request) -> Response {
     handle_list_with_truth(ctx, req, crate::claude_ask::family1_truth_state)
 }
@@ -2613,22 +2623,7 @@ where
     let classified: Vec<_> = registry
         .entries
         .iter()
-        .map(|e| {
-            let truth_handle = if !e.short_id.is_empty() {
-                e.short_id.clone()
-            } else if let Some(session_id) = e.harness_session_id.as_deref() {
-                format!("session-{}", session_id.chars().take(8).collect::<String>())
-            } else {
-                e.name.clone()
-            };
-            let truth = truth_fn(&truth_handle);
-            (e, rendered_status_from_truth(truth.as_deref()))
-        })
-        .collect();
-    let entries: Vec<Value> = classified
-        .into_iter()
-        .filter(|(e, rendered_status)| {
-            // Legacy all/project_root filter
+        .filter(|e| {
             if !all {
                 if let Some(ref p) = cwd_project {
                     if &e.project_root != p {
@@ -2636,7 +2631,6 @@ where
                     }
                 }
             }
-            // Task 3.1 filters: cwd, provider, status (matching Python list_agents order)
             if let Some(ref cwd) = filter_cwd_norm {
                 if &norm_path(&e.cwd) != cwd {
                     return false;
@@ -2647,6 +2641,17 @@ where
                     return false;
                 }
             }
+            true
+        })
+        .map(|e| {
+            let truth_handle = registry_truth_handle(e);
+            let truth = truth_fn(&truth_handle);
+            (e, rendered_status_from_truth(truth.as_deref()))
+        })
+        .collect();
+    let entries: Vec<Value> = classified
+        .into_iter()
+        .filter(|(_e, rendered_status)| {
             if let Some(ref st) = filter_status {
                 if rendered_status != &st.as_str() {
                     return false;
@@ -5704,6 +5709,54 @@ done
 
         assert!(response.result().is_some());
         assert_eq!(seen.into_inner(), vec!["abc12345"]);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn list_queries_pidless_row_by_bare_canonical_handle() {
+        let home = short_home("listpidless");
+        seed_stream_row(&home, "custom-worker-name", "unused");
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries[0].short_id.clear();
+            registry.entries[0].harness = Some("codex".into());
+            registry.entries[0].harness_session_id =
+                Some("019f8ff2-1111-2222-3333-444444444444".into());
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let seen = std::cell::RefCell::new(Vec::new());
+
+        let response = handle_list_with_truth(&ctx, &req, |handle| {
+            seen.borrow_mut().push(handle.to_string());
+            Some("working".into())
+        });
+
+        assert!(response.result().is_some());
+        assert_eq!(seen.into_inner(), vec!["019f8ff2"]);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn list_applies_cheap_filters_before_family1_subprocesses() {
+        let home = short_home("listprefilter");
+        seed_stream_row(&home, "claude-worker", "aaaaaaaa");
+        seed_stream_row(&home, "codex-worker", "bbbbbbbb");
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries[1].harness = Some("codex".into());
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"provider": "codex"}));
+        let seen = std::cell::RefCell::new(Vec::new());
+
+        let response = handle_list_with_truth(&ctx, &req, |handle| {
+            seen.borrow_mut().push(handle.to_string());
+            Some("working".into())
+        });
+
+        assert!(response.result().is_some());
+        assert_eq!(seen.into_inner(), vec!["bbbbbbbb"]);
         std::fs::remove_dir_all(home.root()).ok();
     }
 

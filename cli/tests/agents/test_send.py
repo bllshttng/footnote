@@ -374,7 +374,7 @@ def test_dispatch_send_stale_orphaned_status_uses_live_family1(
     assert result.delivery == "hosted"
 
 
-@pytest.mark.parametrize("state", ["done", "stalled", "unknown"])
+@pytest.mark.parametrize("state", ["done", "stalled"])
 def test_dispatch_send_nonlive_family1_never_attempts_live_delivery(
     tmp_path: Path, monkeypatch, state: str
 ) -> None:
@@ -396,6 +396,29 @@ def test_dispatch_send_nonlive_family1_never_attempts_live_delivery(
 
     assert result.delivery == "durable"
     assert attempts == []
+
+
+def test_dispatch_send_unknown_family1_still_attempts_recorded_live_transport(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(
+        dispatch_mod, "_registered_family1_state", lambda _entry: "unknown"
+    )
+    attempts: list = []
+    monkeypatch.setattr(
+        dispatch_mod, "_deliver_live", lambda *a, **k: attempts.append(a) or True
+    )
+
+    result = dispatch_mod.dispatch_send(
+        name="red", message="ping", provider=None, cwd=tmp_path
+    )
+
+    assert result.delivery == "hosted"
+    assert len(attempts) == 1
 
 
 def test_cmd_send_queued_stdout_format(tmp_path: Path, monkeypatch, runner: CliRunner) -> None:

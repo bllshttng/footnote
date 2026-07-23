@@ -79,7 +79,7 @@ def classify(
 ) -> str:
     """Classify from family-1 transcript truth; state.json is phase metadata."""
     del updated_at, now
-    if truth_state == "your-move" or (truth_state == "unknown" and state == "needs-input"):
+    if state == "needs-input" or truth_state == "your-move":
         return SKIP_NEEDS_INPUT
     if truth_state == "done":
         return SKIP_TERMINAL

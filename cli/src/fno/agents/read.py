@@ -182,6 +182,8 @@ def list_agents(
             for sess in sessions:
                 if not getattr(sess, "is_alive", True):
                     continue
+                if status is not None and status != "live":
+                    continue
                 # Filter by the row's own harness rather than gating the whole
                 # lane on it. The old gate ran discovery only for claude, so
                 # `--provider claude` listed every discovered codex/opencode

@@ -35,6 +35,13 @@ class TestClassify:
             truth_state="your-move", truth_age_s=3600,
         ) == recovery.SKIP_NEEDS_INPUT
 
+    def test_needs_input_phase_survives_stalled_transcript_truth(self):
+        old = _iso(_now() - timedelta(hours=3))
+        assert recovery.classify(
+            "needs-input", old, _now(), 300,
+            truth_state="stalled", truth_age_s=7201,
+        ) == recovery.SKIP_NEEDS_INPUT
+
     @pytest.mark.parametrize("state", ["done", "completed", "failed"])
     def test_terminal_states_skipped(self, state):
         # AC3-EDGE: a clean terminal is never re-nudged.
