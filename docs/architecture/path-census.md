@@ -43,13 +43,11 @@ Rows marked `OPEN` below are intentionally not deleted when the repository still
 | 5 | Python megawalk walker + `ClaudeCodeDriver` | `megawalk_drivers/claude_code.py:53` | DELETE | #573 |
 | 6 | Claude/Codex adapter worker spawns | `adapters/{claude_code,codex}.py` | RETIRE after live callers migrate (see below) | OPEN |
 | 7 | One-shot `claude -p` LLM-as-a-function | `inbox/triage.py:304` and three sites | OUT OF SCOPE | — |
-| 8 | Gemini provider adapter paths | `agents/dispatch.py:1022-1281`, `agents/providers/gemini.py` | RETIRE after dispatch and registry migration | OPEN |
+| 8 | Gemini provider adapter paths | `agents/dispatch.py` Gemini create/follow-up/reconcile paths, `agents/providers/gemini.py` | DELETE; Rust keeps its native provider path and harness-map refusal | TBD |
 | 9 | Shell-form `claude -p` in the memory pass | `scripts/memory/post-merge-pass.sh:12` | RETIRE through canonical spawn (surfaced by the lint's shell-form scan) | OPEN |
 
-The adapter and Gemini rows remain open because the current tree has live callers that contradict the source census's registry-only/dead-path premise.
-`runtime/cli.py:145` invokes `get_adapter(...).spawn_worker`, and `review/runners/claude_runner.py:43,140` invokes `ClaudeCodeAdapter.spawn_worker` on the production review path.
-Gemini dispatch remains wired through `dispatch.py:1871,2244,3139-3179`, with provider and lifecycle coverage in `cli/tests/agents/test_dispatch_gemini.py`, `test_dispatch_gemini_lifecycle.py`, and `test_provider_gemini.py`.
-Deleting either layer before those callers migrate would violate the pure-deletion and zero-behavior-risk invariants.
+The Claude/Codex adapter row was closed after its live review caller migrated to canonical one-shot dispatch.
+The Gemini row is closed by removing the Python adapter and its dispatch-only tests while retaining readable legacy registry identities, pane support, and the harness-map refusal pointing at agy.
 
 Leg 6 reachability trace (2026-07-23): `loop_target.rs:420-427` dispatches `--driver megawalk` to `loop_megawalk::run`; `loop_megawalk.rs:1153-1155` constructs `ShelloutDispatcher`; `loop_dispatch.rs:250-272` implements the live dispatcher.
 The dispatcher is reachable, so this PR does not partially delete it or `scripts/lib/driver-claude-code.sh`; the row remains `RETIRE (migration needed)` for the later driver cutover.

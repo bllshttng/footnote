@@ -28,7 +28,6 @@ from typer.testing import CliRunner
 from fno.paths_testing import use_tmpdir
 from fno.agents import events as events_mod
 from fno.agents.providers import codex as codex_mod
-from fno.agents.providers import gemini as gemini_mod
 from fno.agents.providers.codex import (
     CodexInvocationError,
     CodexResult,
@@ -71,7 +70,7 @@ def _write_existing_entry(name: str, provider: str, session_id: str) -> None:
             harness=provider,
             cwd="/tmp",
             log_path="/tmp/a.log",
-            harness_session_id=session_id if provider in ("codex", "gemini") else None,
+            harness_session_id=session_id if provider == "codex" else None,
             short_id=session_id if provider == "claude" else "",
         )
     ])
@@ -90,18 +89,6 @@ def workdir(tmp_path, monkeypatch):
     bin_dir.mkdir()
     (bin_dir / "codex").write_text("#!/bin/sh\necho fake\n", encoding="utf-8")
     (bin_dir / "codex").chmod(0o755)
-    monkeypatch.setenv("PATH", str(bin_dir))
-    return tmp_path
-
-
-@pytest.fixture
-def workdir_gemini(tmp_path, monkeypatch):
-    """Isolated fno home with gemini marked available on PATH."""
-    use_tmpdir(monkeypatch, tmp_path)
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    (bin_dir / "gemini").write_text("#!/bin/sh\necho fake\n", encoding="utf-8")
-    (bin_dir / "gemini").chmod(0o755)
     monkeypatch.setenv("PATH", str(bin_dir))
     return tmp_path
 

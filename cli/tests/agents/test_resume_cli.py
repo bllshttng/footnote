@@ -257,31 +257,6 @@ def test_unsupported_provider_exits_13_not_14() -> None:
     assert "not supported" in res.stderr
 
 
-def test_gemini_argv_uses_resume_flag_not_session() -> None:
-    """Codex P1 round 2: gemini resume builds `gemini --resume <id>` (NOT --session).
-
-    The earlier `--session` form didn't match providers/gemini.resume's
-    actual argv, so the resume verb would fail at gemini's CLI parser.
-    """
-    from fno.agents.resume_cli import resume_logic
-
-    entry = _FakeAgentEntry(
-        name="alpha", harness="gemini",
-        cwd="/cwd",
-        harness_session_id="00000000-1111-2222-3333-444444444444",
-    )
-    res = resume_logic(
-        name="alpha",
-        print_command=True,
-        registry_loader=lambda: [entry],
-        path_checker=_allow_all_path,
-        execvp=_no_exec,
-    )
-    assert res.exit_code == 0
-    assert res.exec_argv == ["gemini", "--resume", "00000000-1111-2222-3333-444444444444"]
-    assert "--session" not in res.output
-
-
 def test_opencode_argv_attaches_the_tui_by_session() -> None:
     """AC2-HP: opencode resume builds `opencode --session <ses_id>`.
 
