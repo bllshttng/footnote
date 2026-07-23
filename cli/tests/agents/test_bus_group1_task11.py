@@ -38,7 +38,7 @@ def _write_existing_entry(name: str, provider: str, short_id: str) -> None:
             cwd="/tmp",
             log_path="/tmp/a.log",
             short_id=short_id if provider == "claude" else "",
-            harness_session_id=short_id if provider in ("codex", "gemini") else None,
+            harness_session_id=short_id if provider == "codex" else None,
         )
     ])
 
@@ -127,7 +127,6 @@ def test_unknown_agent_name_no_provider_subprocess(tmp_path: Path, monkeypatch) 
 
     from fno.agents.providers import claude as claude_mod
     from fno.agents.providers import codex as codex_mod
-    from fno.agents.providers import gemini as gemini_mod
 
     def _record_claude(*args, **kwargs):
         invocations.append("claude.bg_create")

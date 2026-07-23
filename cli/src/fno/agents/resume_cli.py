@@ -74,6 +74,12 @@ def _build_resume_argv(provider: str, session_id: str) -> Optional[list[str]]:
         # Spec: reuse fno's attach surface. claude's attach is
         # `claude attach <short_id>`.
         return ["claude", "attach", session_id]
+    if provider == "gemini":
+        # Match providers/gemini.resume() which uses --resume <uuid>
+        # (per the gemini CLI's actual resume flag — confirmed against
+        # gemini.resume's own argv in this repo). Codex review caught
+        # the earlier `--session` form was wrong.
+        return ["gemini", "--resume", session_id]
     if provider == "opencode":
         # Bare `opencode --session <id>` is the interactive TUI attach (the
         # `codex resume <id>` precedent). The Rust provider's headless
