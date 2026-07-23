@@ -7013,7 +7013,13 @@ _RETRO_REGION_MAX_BYTES = 1200
 _RETRO_HUNK_MAX_BYTES = 400
 
 
-def _fetch_retro_comment(source_pr: int, finding_hash: str, root: str) -> Optional[dict]:
+def _fetch_retro_comment(
+    source_pr: int,
+    finding_hash: str,
+    root: str,
+    *,
+    repo: Optional[str] = None,
+) -> Optional[dict]:
     """Fetch PR ``source_pr``'s inline comments (resolved from ``root``) and return
     the one whose body hash-joins ``finding_hash``, or ``None`` on any failure.
 
@@ -7026,7 +7032,11 @@ def _fetch_retro_comment(source_pr: int, finding_hash: str, root: str) -> Option
 
     from fno.retro.dedup import content_hash  # function-local: no graph->retro cycle
 
-    path = f"repos/:owner/:repo/pulls/{source_pr}/comments"
+    path = (
+        f"repos/{repo}/pulls/{source_pr}/comments"
+        if repo
+        else f"repos/:owner/:repo/pulls/{source_pr}/comments"
+    )
     try:
         proc = subprocess.run(
             ["gh", "api", path, "--paginate", "--slurp"],

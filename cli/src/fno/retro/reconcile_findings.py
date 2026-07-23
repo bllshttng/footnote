@@ -50,7 +50,7 @@ def _node_is_open(node: dict) -> bool:
     return not node.get("completed_at") and not node.get("superseded_by")
 
 
-def retro_targets(entries: list) -> list:
+def _retro_targets(entries: list, *, include_planned: bool = False) -> list:
     """``(node_id, pr_number, comment_id, repo, pr_url)`` for open retro nodes.
 
     A node qualifies only when it carries BOTH a retro-triage trailer (proof it
@@ -72,7 +72,7 @@ def retro_targets(entries: list) -> list:
         nid = node.get("id")
         if not isinstance(nid, str) or not _node_is_open(node):
             continue
-        if node.get("plan_path"):
+        if node.get("plan_path") and not include_planned:
             continue  # designed/being-built: real work, never heuristic-close
         details = str(node.get("details") or "")
         trailer = _TRAILER_RE.search(details)
@@ -90,15 +90,30 @@ def retro_targets(entries: list) -> list:
     return out
 
 
+def retro_targets(entries: list) -> list:
+    """Return untouched retro nodes eligible for the background sweep.
+
+    Dispatch-time callers use :func:`scan_addressed_findings` with
+    ``include_planned=True`` so a design-bound node is checked without changing
+    the sweep's conservative plan-path filter.
+    """
+    return _retro_targets(entries)
+
+
 def scan_addressed_findings(
     entries: list,
     *,
+    include_planned: bool = False,
     thread_state_fetcher: Optional[Callable] = None,
     comments_fetcher: Optional[Callable] = None,
     commit_dates_fetcher: Optional[Callable] = None,
     warnings: Optional[list] = None,
 ) -> list[AddressedFinding]:
     """Open retro nodes whose finding the source PR now shows as addressed.
+
+    ``include_planned`` is reserved for the target-init dispatch gate. The
+    background reconcile sweep keeps its default conservative behavior and
+    skips nodes with a linked plan.
 
     Groups nodes by ``(repo, pr)`` so each PR is fetched once, then reuses the
     harvest addressed-detection: a comment in a resolved/outdated thread, or a
@@ -112,7 +127,9 @@ def scan_addressed_findings(
     warnings = warnings if warnings is not None else []
 
     by_pr: dict = {}
-    for nid, pr_number, comment_id, repo, _pr_url in retro_targets(entries):
+    for nid, pr_number, comment_id, repo, _pr_url in _retro_targets(
+        entries, include_planned=include_planned
+    ):
         by_pr.setdefault((repo, pr_number), []).append((nid, comment_id))
 
     found: list[AddressedFinding] = []

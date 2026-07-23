@@ -129,6 +129,16 @@ def test_designed_node_with_plan_path_is_never_swept():
     assert retro_targets([node]) == []
 
 
+def test_dispatch_scan_can_include_design_bound_node():
+    node = retro_node("ab-dispatch", 555, "1000")
+    node["plan_path"] = "internal/fno/plans/thing.md"
+    fetchers = _fetchers(
+        threads_by_pr={555: [{"is_resolved": True, "comment_ids": ["1000"]}]}
+    )
+    found = scan_addressed_findings([node], include_planned=True, **fetchers)
+    assert [finding.node_id for finding in found] == ["ab-dispatch"]
+
+
 def test_targets_group_by_pr_and_extract_repo():
     entries = [retro_node("ab-a", 555, "1"), retro_node("ab-b", 555, "2"), retro_node("ab-c", 42, "3")]
     targets = retro_targets(entries)
