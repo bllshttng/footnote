@@ -43,6 +43,11 @@ _SYNC_CLAIM_TTL_MS = 30 * 60 * 1000
 # would wedge the daemon this feature exists to work around. `timeout(1)` is
 # absent on stock macOS, so the bound is _proc.run's own, never a shell wrapper.
 _CATCHUP_PROBE_TIMEOUT_S = 30.0
+# Bound sync_command itself (x-adf9): a trailing `fno restart` detaches a
+# daemon; the closed pipes detach it cleanly, and this timeout is the backstop
+# for a genuinely stuck command. Generous (pull + update + restart can be slow)
+# and well inside the 30m single-flight claim TTL.
+_SYNC_COMMAND_TIMEOUT_S = 600.0
 # gh page size. The window filter is what actually bounds the sweep; this only
 # caps the wire payload for a very busy week.
 _CATCHUP_GH_LIMIT = 50
@@ -577,8 +582,34 @@ def _default_gh_json(args: list[str], cwd: Optional[str]) -> dict[str, Any]:
 
 
 def _default_shell_runner(command: str, cwd: str) -> int:
-    """Run ``command`` via a login shell in ``cwd``, streaming to the terminal."""
+    """Run ``command`` via a login shell in ``cwd``; return its exit code.
+
+    Pipes are redirected to DEVNULL and the run is bounded by a timeout
+    (x-adf9): a ``sync_command`` ending in ``fno restart`` detaches a daemon
+    that otherwise INHERITS this process's stdout/stderr and never closes them,
+    so a bare ``subprocess.run`` blocks on ``wait()`` forever (the pipe never
+    EOFs). Closing the inheritance detaches the daemon cleanly; the timeout is
+    the backstop for a genuinely stuck command. ``sync_command``'s own output
+    is discarded - only its exit code is load-bearing (the surrounding echoes
+    in ``run_sync_canonical`` still reach the caller for the receipt).
+    """
     import subprocess
 
-    proc = subprocess.run(["bash", "-lc", command], cwd=cwd)
+    try:
+        proc = subprocess.run(
+            ["bash", "-lc", command],
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_SYNC_COMMAND_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        typer.echo(
+            f"post-merge sync: sync_command timed out after {int(_SYNC_COMMAND_TIMEOUT_S)}s; "
+            "marker withheld, will retry",
+            err=True,
+        )
+        return 124
     return proc.returncode
