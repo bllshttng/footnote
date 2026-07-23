@@ -209,9 +209,7 @@ def test_retro_dispatch_preflight_tier2_scopes_and_warns_on_overlap(tmp_path, ca
     assert all(args[args.index("--repo") + 1] == "o/r" for args in calls)
 
 
-def test_retro_dispatch_preflight_attended_overlap_choice_can_supersede(
-    tmp_path,
-):
+def test_retro_dispatch_preflight_attended_overlap_is_advisory_only(tmp_path):
     node = _retro_dispatch_node(
         tmp_path, evidence={"git:merged-region:cli/src/fno/target_cli.py": "region"}
     )
@@ -227,16 +225,13 @@ def test_retro_dispatch_preflight_attended_overlap_choice_can_supersede(
             "files": [{"path": "cli/src/fno/target_cli.py"}],
         }]), ""
 
-    with pytest.raises(typer.Exit) as exc:
-        target_cli._retro_dispatch_preflight(
-            node,
-            scan_fn=lambda entries, **kwargs: [],
-            gh_runner=gh,
-            confirm_fn=lambda *args, **kwargs: False,
-            supersede_fn=lambda node_id, reason: closed.append(node_id) or True,
-        )
-    assert exc.value.exit_code == 3
-    assert closed == ["x-retro"]
+    target_cli._retro_dispatch_preflight(
+        node,
+        scan_fn=lambda entries, **kwargs: [],
+        gh_runner=gh,
+        supersede_fn=lambda node_id, reason: closed.append(node_id) or True,
+    )
+    assert closed == []
 
 
 def test_target_init_size_sets_target_size_env(monkeypatch, tmp_path):

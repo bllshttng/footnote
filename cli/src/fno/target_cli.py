@@ -364,7 +364,6 @@ def _retro_dispatch_preflight(
     scan_fn: Optional[Callable[..., list]] = None,
     gh_runner: Optional[GhRunner] = None,
     supersede_fn: Optional[Callable[[str, str], bool]] = None,
-    confirm_fn: Optional[Callable[..., bool]] = None,
 ) -> None:
     """Run the two-tier retro dedup probe before target init claims a node."""
     if not node:
@@ -505,27 +504,12 @@ def _retro_dispatch_preflight(
             err=True,
         )
 
-    if beastmode or unattended:
-        typer.echo(
-            "WARN target init: Tier 2 overlap is advisory; proceeding with dispatch.",
-            err=True,
-        )
-        return
-
-    confirm = confirm_fn or typer.confirm
-    if confirm("Dispatch anyway? [y/N]", default=False):
-        return
-    reason = (
-        f"retro finding overlaps merged sibling PR(s) after source PR #{source_pr}; "
-        "operator chose supersede at target dispatch"
+    # Tier 2 is deliberately advisory: overlap is best-effort sibling evidence,
+    # never a dispatch gate or a reason to mutate the backlog node.
+    typer.echo(
+        "WARN target init: Tier 2 overlap is advisory; proceeding with dispatch.",
+        err=True,
     )
-    close = supersede_fn or _force_supersede_dispatch_node
-    if not close(str(node.get("id")), reason):
-        typer.echo(
-            f"WARN target init: could not supersede {node.get('id')}; refusing dispatch.",
-            err=True,
-        )
-    raise typer.Exit(code=3)
 
 
 @target_app.command("blast-check")
