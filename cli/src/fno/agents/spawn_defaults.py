@@ -594,7 +594,7 @@ def inject_spawn_defaults(
             from_config.append(("effort", effort_rung))  # type: ignore[arg-type]
         else:
             # Config-sourced effort degrades open on BOTH a no-surface provider
-            # AND a value the resolved provider can't map (e.g. codex + "xhigh"):
+            # AND a value the resolved provider can't map (e.g. codex + "max"):
             # an ambient default must never hard-fail a bare spawn. An explicit
             # --effort keeps x-a0e0's fail-closed exit 2 (has_effort short-circuits
             # this whole branch).

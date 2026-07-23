@@ -41,6 +41,7 @@ def _no_harness_markers(monkeypatch):
     [
         ("claude", "high", ["--effort", "high"]),
         ("codex", "medium", ["-c", "model_reasoning_effort=medium"]),
+        ("codex", "xhigh", ["-c", "model_reasoning_effort=xhigh"]),
         ("opencode", "max", []),
     ],
 )
@@ -50,7 +51,7 @@ def test_effort_mapping_accepts_native_values(provider, value, expected):
 
 @pytest.mark.parametrize(
     "provider,value",
-    [("codex", "xhigh"), ("claude", "minimal"), ("gemini", "high"), ("agy", "low"), ("claude", "")],
+    [("codex", "max"), ("claude", "minimal"), ("gemini", "high"), ("agy", "low"), ("claude", "")],
 )
 def test_effort_mapping_fails_closed(provider, value):
     with pytest.raises(DispatchAskError) as exc:
@@ -260,7 +261,7 @@ def test_cli_rejects_unmappable_effort_before_spawn(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "worker", "hi", "--provider", "codex", "--effort", "xhigh"],
+        ["spawn", "worker", "hi", "--provider", "codex", "--effort", "max"],
     )
     assert result.exit_code == 2
     assert "codex supports" in result.output

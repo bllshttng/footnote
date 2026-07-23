@@ -111,13 +111,13 @@ def test_effort_injected_for_surface_provider():
 
 
 def test_config_effort_unmappable_for_provider_degrades_open():
-    # codex has an effort surface but does NOT support "xhigh"; a config-sourced
+    # codex has an effort surface but does NOT support "max"; a config-sourced
     # value must skip + notice, never hard-fail the bare spawn.
     err = io.StringIO()
-    out = _inject(["spawn", "w"], err=err, provider="codex", effort="xhigh")
+    out = _inject(["spawn", "w"], err=err, provider="codex", effort="max")
     assert "--effort" not in out
     assert "effort skipped" in err.getvalue()
-    assert "xhigh" in err.getvalue()
+    assert "max" in err.getvalue()
 
 
 def test_config_effort_unknown_value_degrades_open():
