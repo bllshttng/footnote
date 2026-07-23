@@ -74,7 +74,7 @@ def _default_spawn(
         "--timeout", str(timeout_s),
     ]
     if provider:
-        cmd += ["--provider", provider]
+        cmd += ["--harness", provider]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 30)
     except FileNotFoundError:

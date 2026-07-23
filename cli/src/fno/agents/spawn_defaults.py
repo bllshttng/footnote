@@ -12,7 +12,7 @@ Fields resolve independently, with ONE exception: the `model` default is provide
 scoped. A bare scalar `model` with no `provider` is scoped to the harness it was
 written for - the config `provider`, else the builtin default (claude), NOT the
 ambient harness (whose shape the model may not match). A spawn that resolves to a
-DIFFERENT harness (an explicit `-p codex`, OR a codex-ambient session, over a
+DIFFERENT harness (an explicit `-H codex`, OR a codex-ambient session, over a
 claude-shaped `model`) leaves the model to that harness rather than forcing an
 incompatible one. An explicit `-m/--model` always wins. Scope is the operator-
 initiated spawn surface only; autonomous dispatch computes its own routing and
@@ -31,17 +31,17 @@ from typing import IO, Callable, List, Mapping, Optional, Sequence, Set, Tuple
 # typer exposes on the spawn verb.
 _VALUE_FLAGS = frozenset(
     {
-        "--provider", "-p", "--harness", "-H", "--model", "-m", "--effort",
+        "--provider", "-P", "--harness", "-H", "--model", "-m", "--effort",
         "--from", "--cwd", "-c",
         "--message", "--session-id", "--cc-session-id", "--channel-id", "--status",
         "--from-name", "--timeout", "-t", "--mode", "--substrate", "--permission-mode",
     }
 )
 
-# --harness/-H is the canonical CLI-binary axis; --provider/-p the deprecated
-# alias (x-6de8). Both feed the same provider-aware default scan. -H was
-# reassigned FROM headless (which is now --headless/--once/--substrate headless).
-_PROVIDER_FLAGS = ("--provider", "-p", "--harness", "-H")
+# The harness axis (the CLI binary) is --harness/-H only: --provider/-P names the
+# model VENDOR, a different axis that never picks a binary, so it must not feed
+# the provider-aware default scan.
+_PROVIDER_FLAGS = ("--harness", "-H")
 _MODEL_FLAGS = ("--model", "-m")
 _EFFORT_FLAGS = ("--effort",)
 
@@ -102,9 +102,9 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
 )
 
 # Tokens that pin the substrate explicitly (a positional substrate word conflicts
-# with any of these -> exit 2). `--headless` and `-o/--once` mean headless; `-H`
-# was reassigned to --harness (x-6de8), so it is a value flag, not a substrate pin.
-_EXPLICIT_SUBSTRATE_BOOLS = ("--headless", "-o", "--once")
+# with any of these -> exit 2). `--headless`/`-p` and `-o/--once` mean headless;
+# `-H` selects the harness and `-P` the vendor, so both are value flags here.
+_EXPLICIT_SUBSTRATE_BOOLS = ("--headless", "-p", "-o", "--once")
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _SHORT_ID_RE = re.compile(r"^[0-9a-f]{8}$")
@@ -535,7 +535,7 @@ def inject_spawn_defaults(
                 file=err,
             )
             raise SystemExit(2)
-        inject += ["--provider", cfg_provider]
+        inject += ["--harness", cfg_provider]
         from_config.append(("provider", provider_rung))  # type: ignore[arg-type]
 
     if cfg_model and not has_model:

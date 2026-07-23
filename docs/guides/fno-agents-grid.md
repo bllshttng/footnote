@@ -83,20 +83,20 @@ Very large fleets are soft-capped at 32 panes (set `FNO_GRID_MAX_PANES` to raise
 
 The grid watches **daemon-managed PTY workers**. The way you start an agent decides whether the grid can see it:
 
-- **`fno agents spawn <name> --provider codex "<task>"`** creates a daemon PTY worker. The grid **can** watch it, while it works.
+- **`fno agents spawn <name> --harness codex "<task>"`** creates a daemon PTY worker. The grid **can** watch it, while it works.
 - **`fno agents ask <name> ...`** runs codex as a detached subprocess writing JSONL to a file. The grid **cannot** watch it (there is no PTY worker behind it), even though codex is actively running.
 
 So to see live output in a pane:
 
 ```bash
 # Tab 1: spawn a daemon PTY worker WITH a task (so it stays alive while working):
-fno agents spawn pr-review --provider codex "explore this repo and write a detailed review"
+fno agents spawn pr-review --harness codex "explore this repo and write a detailed review"
 
 # Tab 2: watch it live:
 fno agents grid pr-review
 ```
 
-The pane streams codex's raw `--json` output while the task runs, then shows `exited` when it finishes. A bare `fno agents spawn x --provider codex` with no task runs `codex exec ""`, has nothing to do, and exits immediately, so always give a spawned codex agent a task if you want to watch it.
+The pane streams codex's raw `--json` output while the task runs, then shows `exited` when it finishes. A bare `fno agents spawn x --harness codex` with no task runs `codex exec ""`, has nothing to do, and exits immediately, so always give a spawned codex agent a task if you want to watch it.
 
 ## Reading the pane labels
 

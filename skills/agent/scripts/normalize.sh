@@ -5,7 +5,7 @@
 # so a typed `fno agents spawn ...` may split on bad quotes or never execute.
 # This helper takes the natural-language payload, normalizes it,
 # and emits the exact fields the agents SKILL.md needs to build a genuine
-# `fno agents spawn|host <name> "<message>" --provider <p>` launch. It does NOT spawn
+# `fno agents spawn|host <name> "<message>" --harness <h>` launch. It does NOT spawn
 # anything (that is spawn.sh, after the SKILL.md confirm gate) and has no
 # side effects beyond a read-only provider lookup.
 #
@@ -13,7 +13,7 @@
 # config-driven provider fallback, which degrades to `claude` if fno is absent).
 #
 # Usage:
-#   normalize.sh --input "<raw payload>" [--name <n>] [--provider <p>] [--allow-merge|--no-merge]
+#   normalize.sh --input "<raw payload>" [--name <n>] [--harness <h>] [--allow-merge|--no-merge]
 #
 # --allow-merge / --no-merge: per-run merge posture (x-4391). Neither => posture
 #   from config.dispatch.auto_merge (default false = no-merge; fno absent => false).
@@ -43,7 +43,7 @@ set -uo pipefail
 export LC_ALL=C
 
 # Mirrors the Rust KNOWN_PROVIDERS source of truth (crates/fno-agents provider.rs):
-# the set `fno agents spawn --provider` accepts. Widen both together. (hermes /
+# the set `fno agents spawn --harness` accepts. Widen both together. (hermes /
 # openclaw are megawalk drivers, a different axis, not spawn providers.)
 VALID_PROVIDERS="claude codex gemini agy opencode"
 
@@ -103,7 +103,7 @@ while [[ $# -gt 0 ]]; do
   case "$tok" in
     --input)          INPUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -n|--name)        NAME="${2:-}"; NAME_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
-    --provider)       PROVIDER="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    --harness|--provider) PROVIDER="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --model)          MODEL="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --effort)         EFFORT="${2:-}"; EFFORT_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;

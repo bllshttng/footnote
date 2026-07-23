@@ -265,7 +265,7 @@ the real node.
   Codex, and Gemini; NO `/target`, NO `no-merge`. See the `handoff` section.
 - **passthrough** (leading `/`): the explicit command, normalized per harness for
   ANY footnote verb (x-a5e4) - `/verb` verbatim on claude/agy, `/fno:verb` on
-  opencode, `$fno:verb` on codex (so `/agent spawn /blueprint -p codex` runs the
+  opencode, `$fno:verb` on codex (so `/agent spawn /blueprint -H codex` runs the
   real skill). gemini is deprecated and refused (route to claude/codex/opencode/agy).
 
 #### 1b. RESOLVE (id-free entry modes -> a concrete node id) (ab-f82e8083)
@@ -705,7 +705,7 @@ STOP without stopping the worker.
    that the helper or `fno agents` command actually captured. "No receipt" is
    FAILED. This is the cardinal guard.
 2. **claude stays on the subscription lane.** claude spawns via
-   `fno agents spawn --provider claude` (-> client-side `claude --bg --name`).
+   `fno agents spawn --harness claude` (-> client-side `claude --bg --name`).
    NEVER `-p` / `--bare`, and NEVER route claude through `host`.
 3. **The spawn confirm posture is `config.agents.confirm` (default `auto`), via
    `confirm-decision.sh`.** Auto-skip is node-id-only and caveat-free; a caveat

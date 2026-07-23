@@ -923,7 +923,7 @@ pub fn dispatch_codex_ask(
             );
             AskOutcome::err(
                 format!(
-                    "unknown agent {}; spawn it first: fno agents spawn {} -p <provider>",
+                    "unknown agent {}; spawn it first: fno agents spawn {} --harness <harness>",
                     crate::claude_ask::py_repr(name),
                     name
                 ),

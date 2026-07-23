@@ -301,7 +301,7 @@ def test_spawn_seam_injects_config_defaults(monkeypatch) -> None:
     assert result.exit_code == 0
     argv = captured[0]
     assert argv[0] == "spawn"
-    assert "--provider" in argv and argv[argv.index("--provider") + 1] == "codex"
+    assert "--harness" in argv and argv[argv.index("--harness") + 1] == "codex"
     assert "--model" in argv and argv[argv.index("--model") + 1] == "gpt-5.6-sol"
     # positionals still resolvable after the injected flags
     assert argv[-2:] == ["worker-A", "hi"] or "worker-A" in argv
@@ -886,17 +886,17 @@ def test_plain_spawn_stays_python_bg_spawn_auto_routes(monkeypatch, tmp_path) ->
 
     # Plain spawn: stays Python (the pane back half). It will fail inside the
     # Python dispatch (no mux in this test env), but must never exec the binary.
-    CliRunner().invoke(app, ["agents", "spawn", "worker", "--provider", "claude"])
+    CliRunner().invoke(app, ["agents", "spawn", "worker", "--harness", "claude"])
     assert captured == [], "a pane-substrate spawn must not route to the binary"
 
     # bg substrate: still the binary's lane.
     result = CliRunner().invoke(
         app,
-        ["agents", "spawn", "worker", "--provider", "claude", "--substrate", "bg"],
+        ["agents", "spawn", "worker", "--harness", "claude", "--substrate", "bg"],
     )
     assert result.exit_code == 99
     assert captured == [
-        ["spawn", "worker", "--provider", "claude", "--substrate", "bg"]
+        ["spawn", "worker", "--harness", "claude", "--substrate", "bg"]
     ]
 
 
@@ -906,7 +906,7 @@ def test_is_role_bearing_spawn_predicate() -> None:
     # x-f76e: -r is NO LONGER a role alias (it means --resume now); role is
     # long-form only, and a bare -r is resume-bearing, not role-bearing.
     assert not rr._is_role_bearing_spawn("spawn", ["spawn", "w", "-r", "tidy"])
-    assert not rr._is_role_bearing_spawn("spawn", ["spawn", "w", "--provider", "claude"])
+    assert not rr._is_role_bearing_spawn("spawn", ["spawn", "w", "--harness", "claude"])
     assert not rr._is_role_bearing_spawn("ask", ["ask", "--role", "tidy"])
 
 

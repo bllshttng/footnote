@@ -249,7 +249,7 @@ def test_cli_threads_effort_to_pane_dispatch(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "worker", "hi", "--provider", "claude", "--effort", "high"],
+        ["spawn", "worker", "hi", "--harness", "claude", "--effort", "high"],
     )
     assert result.exit_code == 0, result.output
     assert received["effort"] == "high"
@@ -261,7 +261,7 @@ def test_cli_rejects_unmappable_effort_before_spawn(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "worker", "hi", "--provider", "codex", "--effort", "max"],
+        ["spawn", "worker", "hi", "--harness", "codex", "--effort", "max"],
     )
     assert result.exit_code == 2
     assert "codex supports" in result.output
@@ -296,7 +296,7 @@ def test_cli_threads_effort_to_bg_dispatch(runner, monkeypatch):
             "spawn",
             "worker",
             "hi",
-            "--provider",
+            "--harness",
             "claude",
             "--substrate",
             "bg",

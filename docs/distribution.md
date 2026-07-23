@@ -79,7 +79,7 @@ selects the runtime explicitly:
 | `python` | force the Python dispatch; never touch the binary |
 
 ```bash
-fno agents spawn worker-A --provider codex             # Rust by default when installed
+fno agents spawn worker-A --harness codex             # Rust by default when installed
 fno agents list --json                                 # Rust: render_json shape; table on a TTY
 fno agents stop worker-A                               # Rust: prints "stopped: worker-A (<short_id>)"
 fno agents ask worker-A "hello" --provider codex       # Python (ask stays on Python — see below)

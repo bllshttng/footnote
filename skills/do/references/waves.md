@@ -175,7 +175,7 @@ executed here. Resolve the session project (plan frontmatter `project:`, or the
 target-state node's `project`) and compare it to each `wave.project`:
 
 - **local** (`wave.project` empty or == session project): execute normally.
-- **foreign + unblocked node**: spawn `fno agents spawn --provider claude --cwd
+- **foreign + unblocked node**: spawn `fno agents spawn --harness claude --cwd
   <root> "target-<node>" "/target <node>"`, mark the wave DELEGATED in STATE.md,
   continue this session's own waves. Never `cd` into the foreign repo.
 - **foreign + blocked node**: do NOT spawn (a worker would refuse on the blocked

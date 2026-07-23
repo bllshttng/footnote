@@ -67,7 +67,7 @@ def test_route_missing_key_refused_before_gate(monkeypatch: pytest.MonkeyPatch) 
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg",
+        ["spawn", "w1", "hi", "--harness", "claude", "--substrate", "bg",
          "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 2, result.output
@@ -95,7 +95,7 @@ def test_route_unknown_provider_refused(monkeypatch: pytest.MonkeyPatch) -> None
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg",
+        ["spawn", "w1", "hi", "--harness", "claude", "--substrate", "bg",
          "--route", "nope,glm-5.2"],
     )
     assert result.exit_code == 2, result.output
@@ -107,7 +107,7 @@ def test_route_rejected_on_pane_substrate(monkeypatch: pytest.MonkeyPatch) -> No
     # Default substrate is pane; --route is claude+bg only.
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude", "--route", "zai,glm-5.2"],
+        ["spawn", "w1", "hi", "--harness", "claude", "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 2, result.output
     assert "bg" in result.output.lower()
@@ -139,7 +139,7 @@ def test_route_threads_resolved_env_to_dispatch(
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg",
+        ["spawn", "w1", "hi", "--harness", "claude", "--substrate", "bg",
          "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 0, result.output
@@ -286,7 +286,7 @@ def test_route_allowed_on_headless(monkeypatch: pytest.MonkeyPatch) -> None:
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude", "--headless", "--route", "zai,glm-5.2"],
+        ["spawn", "w1", "hi", "--harness", "claude", "--headless", "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 0, result.output
     assert captured["route_env"]["ANTHROPIC_AUTH_TOKEN"] == "zk-live"
@@ -373,7 +373,7 @@ def test_provider_is_the_older_spelling_of_harness(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch_spawn)
     from fno.agents.cli import agents_app
 
-    result = runner.invoke(agents_app, ["spawn", "w1", "hi", "--provider", "codex", "--headless"])
+    result = runner.invoke(agents_app, ["spawn", "w1", "hi", "--harness", "codex", "--headless"])
     assert result.exit_code == 0, result.output
     assert captured["provider"] == "codex"
 
@@ -384,22 +384,87 @@ def test_provider_is_the_older_spelling_of_harness(monkeypatch: pytest.MonkeyPat
     assert captured["provider"] == "codex"
 
 
-def test_harness_provider_conflict_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_harness_name_on_the_provider_axis_is_refused_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--provider claude` used to select the CLI binary. Now that --provider is
+    the model-vendor axis it must refuse a harness name and NAME the fix, rather
+    than launching a worker with a nonsense route."""
     from fno.agents import spawn_gate
 
     monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
     from fno.agents.cli import agents_app
 
+    for h in ("claude", "codex", "gemini", "opencode", "agy"):
+        result = runner.invoke(agents_app, ["spawn", "w1", "hi", "--provider", h])
+        assert result.exit_code == 2, f"{h}: {result.output}"
+        assert f"{h} is a harness, not a provider" in result.output
+        assert f"use --harness {h}" in result.output
+
+
+def test_provider_and_model_build_the_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--provider + --model is the decomposed spelling of --route vendor,model.
+    The model rides the route, NOT a `claude --model` token: handing the claude
+    CLI a vendor model id would make it resolve a model it does not have."""
+    from fno.agents import dispatch, spawn_gate
+
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    captured: Dict[str, Any] = {}
+
+    def fake_dispatch_spawn(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return dispatch.SpawnResult(kind="created", name=kwargs["name"], provider="claude", short_id="a")
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch_spawn)
+    from fno.agents.cli import agents_app
+
     result = runner.invoke(
-        agents_app, ["spawn", "w1", "hi", "--harness", "codex", "--provider", "claude"]
+        agents_app,
+        ["spawn", "w1", "hi", "--substrate", "bg", "--provider", "zai", "--model", "glm-5.2"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2"
+    assert captured["route_env"]["ANTHROPIC_AUTH_TOKEN"] == "zk-live"
+    assert captured["model"] is None
+    assert captured["provider"] == "claude"
+
+
+def test_provider_without_model_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fno.agents import spawn_gate
+
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["spawn", "w1", "hi", "--substrate", "bg", "--provider", "zai"])
+    assert result.exit_code == 2, result.output
+    assert "--model" in result.output
+
+
+def test_provider_and_route_together_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two spellings of one route; taking both would silently drop one."""
+    from fno.agents import spawn_gate
+
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "w1", "hi", "--substrate", "bg", "--provider", "zai",
+         "--model", "glm-5.2", "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 2, result.output
-    assert "conflicts with --provider" in result.output
+    assert "two spellings" in result.output
 
-    # Same value on both is not a conflict (harness wins); no conflict message,
-    # whatever the downstream codex-headless path decides to do.
-    ok = runner.invoke(
-        agents_app,
-        ["spawn", "w2", "hi", "--harness", "codex", "--provider", "codex", "--headless"],
-    )
-    assert "conflicts with --provider" not in ok.output, ok.output
+
+def test_provider_bearing_spawn_stays_python_side() -> None:
+    """Routing is materialized only in the Python spawn path, so the front door
+    must keep a --provider spawn there; the Rust client would launch it on the
+    primary model."""
+    from fno.agents.rust_runtime import _is_route_bearing_spawn
+
+    for args in (["spawn", "w", "--provider", "zai"], ["spawn", "w", "-P", "zai"],
+                 ["spawn", "w", "--provider=zai"]):
+        assert _is_route_bearing_spawn("spawn", args), args

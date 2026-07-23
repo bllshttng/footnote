@@ -701,7 +701,7 @@ pub fn maybe_run_agy_ask(home: &AgentsHome, params: &serde_json::Value, name: &s
     }
     eprintln!(
         "fno-agents: agy does not support stateful 'ask' resume (plain-text output, no session id); \
-         use 'fno agents spawn --provider agy --once <name> -m <prompt>' for a one-shot."
+         use 'fno agents spawn --harness agy --once <name> --message <prompt>' for a one-shot."
     );
     Some(2)
 }

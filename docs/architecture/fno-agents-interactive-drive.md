@@ -21,7 +21,7 @@ Both are thin front-doors that call the spawn IPC (`agent.spawn`) with `host_mod
 
 | Verb | Form | Meaning |
 |---|---|---|
-| `host` | `fno agents host <name> --provider codex\|gemini ["<task>"]` | Fresh interactive host. Empty task = bare interactive session. |
+| `host` | `fno agents host <name> --harness codex\|gemini ["<task>"]` | Fresh interactive host. Empty task = bare interactive session. |
 | `promote` | `fno agents promote <name> --from <uuid>` | Resume an existing session into a drivable TUI. The daemon **infers the provider from the source row**, so `--provider` is not required. `--from` accepts the `=`equals form. |
 
 ### Data flow (promote, the headline path)

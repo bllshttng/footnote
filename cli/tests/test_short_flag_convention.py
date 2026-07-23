@@ -62,8 +62,15 @@ PRE_EXISTING_SHORTS: dict[str, tuple[str, str]] = {
     "-o": ("--output", "codemap_cli/cli.py"),
 }
 
-#: Uppercase pre-existing shorts outside the global register: still exclusive.
-EXCLUSIVE_PRE_EXISTING: dict[str, str] = {"-I": "--ideas"}
+#: Uppercase shorts outside the global register: still exclusive, i.e. the letter
+#: maps to exactly one long codebase-wide. ``-H``/``-P`` are the spawn axis pair:
+#: uppercase because the lowercase letters mean something else there (``-h`` is
+#: help, ``-p`` is headless, mirroring the harnesses' own one-shot short).
+EXCLUSIVE_PRE_EXISTING: dict[str, str] = {
+    "-I": "--ideas",
+    "-H": "--harness",
+    "-P": "--provider",
+}
 
 #: Phase 2 (US2, ab-e893ba6e): the per-command lowercase map from the design
 #: table. Key: (file suffix, enclosing function). Value: long -> short pairs

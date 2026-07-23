@@ -124,7 +124,7 @@ def _revive_orphans(
         # bg is what --resume implies; naming it is belt-and-suspenders.
         cmd = [
             fno, "agents", "spawn", name,
-            "--provider", "claude", "--substrate", "bg", "--resume", str(session),
+            "--harness", "claude", "--substrate", "bg", "--resume", str(session),
         ]
         if row.get("cwd"):
             cmd += ["--cwd", str(row["cwd"])]

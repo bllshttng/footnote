@@ -67,7 +67,7 @@ def test_ac6_hp_node_driven_spawn_exports_fno_node(
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude",
+        ["spawn", "w1", "hi", "--harness", "claude",
          "--substrate", substrate, "--node", "x-aaaa"],
     )
     assert result.exit_code == 0, result.output
@@ -88,7 +88,7 @@ def test_export_does_not_outlive_the_dispatch(spawned_env: Dict[str, Any]) -> No
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude",
+        ["spawn", "w1", "hi", "--harness", "claude",
          "--substrate", "bg", "--node", "x-aaaa"],
     )
     assert result.exit_code == 0, result.output
@@ -106,7 +106,7 @@ def test_ac6_hp_nodeless_spawn_exports_no_key(spawned_env: Dict[str, Any]) -> No
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg"],
+        ["spawn", "w1", "hi", "--harness", "claude", "--substrate", "bg"],
     )
     assert result.exit_code == 0, result.output
     assert "FNO_NODE" not in spawned_env["env"]
@@ -137,7 +137,7 @@ def test_provenance_keys_are_set_or_cleared_as_a_group(
     monkeypatch.setenv("FNO_PLAN", "/parent/plan.md")
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude",
+        ["spawn", "w1", "hi", "--harness", "claude",
          "--substrate", "bg", "--node", "x-aaaa"],
     )
     assert result.exit_code == 0, result.output

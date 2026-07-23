@@ -354,7 +354,7 @@ async fn run(args: Vec<String>) -> i32 {
                     ],
                 );
                 eprintln!(
-                    "unknown agent {}; spawn it first: fno agents spawn {} -p <provider>",
+                    "unknown agent {}; spawn it first: fno agents spawn {} --harness <harness>",
                     py_repr(&agent_name),
                     agent_name
                 );
@@ -378,7 +378,7 @@ async fn run(args: Vec<String>) -> i32 {
         }
         // Agy `ask` is intercepted client-side (Phase C): agy is plain-text with
         // no session id, so a stateful resume is unsupported — this surfaces a
-        // clear error directing the caller to `spawn --provider agy --once`.
+        // clear error directing the caller to `spawn --harness agy --once`.
         if let Some(code) = maybe_run_agy_ask(&home, &params, &agent_name) {
             return code;
         }
@@ -388,7 +388,7 @@ async fn run(args: Vec<String>) -> i32 {
         // directly, rather than the generic "provider required for new
         // agent" text an existing opencode row would otherwise hit below
         // (that text is both wrong - the agent already exists - and a dead
-        // end, since retrying with --provider opencode reproduces it).
+        // end, since retrying with --harness opencode reproduces it).
         if let Some(code) = maybe_run_opencode_ask(&home, &params, &agent_name) {
             return code;
         }
@@ -1467,25 +1467,32 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         normalized.push(tok.clone());
     }
 
-    // x-6de8: the harness axis has a canonical spelling (--harness/-H) and an
-    // older one (--provider/-p). Track them separately so a mismatched pair fails
-    // closed (matching Python cmd_spawn) instead of the param map's
-    // last-write-wins silently launching under the wrong harness.
+    // x-6de8: three orthogonal axes. --harness/-H names the CLI binary,
+    // --provider/-P the model VENDOR, --model the model at that vendor. The vendor
+    // is held aside so a harness name typed there fails closed after the loop
+    // (the historical confusion) rather than launching the wrong binary.
     let mut harness_val: Option<String> = None;
-    let mut provider_alias_val: Option<String> = None;
+    let mut vendor_val: Option<String> = None;
     let mut it = normalized.into_iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
-            // --harness/-H is the canonical CLI-binary axis (aligns spawn with the
-            // --harness vocabulary used everywhere else in fno); --provider/-p is
-            // the older spelling of it. Kept in separate slots and reconciled
-            // after the loop so a mismatched pair fails closed. -H no longer means
-            // headless (that is --substrate headless / --headless / --once now).
+            // --harness/-H is the CLI-binary axis, the --harness vocabulary the
+            // rest of fno uses. -H no longer means headless (that is
+            // --substrate headless / --headless / -p / --once now).
             "--harness" | "-H" => {
                 harness_val = Some(it.next().ok_or("--harness needs a value")?);
             }
-            "--provider" | "-p" => {
-                provider_alias_val = Some(it.next().ok_or("--provider needs a value")?);
+            // --provider/-P is the model-vendor axis. Capital P: -p is headless,
+            // mirroring the harnesses' own one-shot short.
+            "--provider" | "-P" => {
+                vendor_val = Some(it.next().ok_or("--provider needs a value")?);
+            }
+            // Only `spawn` splits the two axes. Elsewhere (`ask`, `host`, ...)
+            // -p is still the provider short it has always been, so the letter
+            // means headless on spawn and provider everywhere else. This arm must
+            // precede the headless one, which also matches "-p".
+            "-p" if verb != "spawn" => {
+                params.insert("provider".into(), str_arg(&mut it, "--provider")?);
             }
             "--workspace" | "--squad" | "-s" => {
                 params.insert("squad".into(), str_arg(&mut it, "-s/--workspace")?);
@@ -1654,11 +1661,11 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                     .entry("substrate")
                     .or_insert_with(|| Value::String("headless".into()));
             }
-            "--headless" => {
+            "--headless" | "-p" => {
                 // Ergonomic front for --substrate headless (x-c772). Same routing
-                // key as --once; explicit --substrate already present wins. The
-                // `-H` short was reassigned to --harness (x-6de8): headless keeps
-                // the long form, --once/-o, and --substrate headless.
+                // key as --once; explicit --substrate already present wins. `-p`
+                // mirrors the harnesses' own one-shot short; the vendor axis took
+                // the capital -P so this letter could mean what it means in claude.
                 params
                     .entry("substrate")
                     .or_insert_with(|| Value::String("headless".into()));
@@ -1699,19 +1706,33 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         }
     }
 
-    // Reconcile the harness axis: --harness/-H wins over the older --provider/-p
-    // spelling; both present with different values is a hard error, matching the
-    // Python cmd_spawn conflict guard. This runs on the installed-Rust non-pane
-    // lane, which never re-execs Python cmd_spawn.
-    if let (Some(h), Some(p)) = (&harness_val, &provider_alias_val) {
-        if h != p {
+    // On `spawn` the two flags are different axes: --harness is the CLI binary,
+    // --provider the model vendor. Everywhere else --provider is still the harness
+    // hint it has always been, so only spawn splits them.
+    if let Some(v) = vendor_val {
+        let v = v.trim().to_string();
+        if verb == "spawn" {
+            // A harness name on the vendor axis is refused BY NAME. This lane
+            // never re-execs Python cmd_spawn, so without this a `--provider
+            // claude` reaches the daemon as a vendor it cannot resolve.
+            if KNOWN_PROVIDERS.contains(&v.as_str()) || v == "agy" || v == "opencode" {
+                return Err(format!(
+                    "{v} is a harness, not a provider; use --harness {v}"
+                ));
+            }
+            // The vendor axis only means anything alongside a materialized route,
+            // and routing lives in the Python spawn path (the front door keeps
+            // every --provider spawn there). Reaching here means the binary was
+            // driven directly: say what to run instead of failing downstream.
             return Err(format!(
-                "--harness {h:?} conflicts with --provider {p:?}; pass one \
-                 (they are two spellings of the same CLI-binary axis)"
+                "--provider {v} names a model vendor; routing is applied by the fno \
+                 CLI (`fno agents spawn ... --provider {v} --model <m>`), not by \
+                 fno-agents directly"
             ));
         }
+        params.insert("provider".into(), Value::String(v));
     }
-    if let Some(v) = harness_val.or(provider_alias_val) {
+    if let Some(v) = harness_val {
         params.insert("provider".into(), Value::String(v));
     }
 
@@ -2097,7 +2118,7 @@ fn fetch_discovered_sessions(
         cmd.args(["--cwd", c]);
     }
     // Without this the rendered surface disagrees with the Python one:
-    // `--provider claude` would list every discovered codex/opencode session.
+    // `--harness claude` would list every discovered codex/opencode session.
     // An empty value is "no filter" on the Python side, so forwarding it would
     // make the two runtimes disagree again in the other direction.
     if let Some(p) = provider_filter.filter(|p| !p.is_empty()) {
@@ -2379,7 +2400,7 @@ fn verb_usage(verb: &str) -> Option<&'static str> {
 
 /// True when `--help`/`-h` appears in the verb's OWN options, i.e. before an
 /// `--argv`/`--` payload boundary. A `--help` after that boundary belongs to a
-/// spawned command's argv (e.g. `spawn wk --provider codex --argv -- tool
+/// spawned command's argv (e.g. `spawn wk --harness codex --argv -- tool
 /// --help`) and must not be captured as our per-verb help request
 /// (ab-351427cb review: gemini HIGH / codex P2).
 fn is_help_request(opts: &[String]) -> bool {
@@ -2573,7 +2594,7 @@ mod tests {
         // --help inside a spawn/host argv payload -> NOT a help request.
         assert!(!is_help_request(&s(&[
             "wk",
-            "--provider",
+            "--harness",
             "codex",
             "--argv",
             "--",
@@ -2586,7 +2607,7 @@ mod tests {
         assert!(!is_help_request(&s(&["wk", "--", "--help"])));
 
         // No help flag at all.
-        assert!(!is_help_request(&s(&["wk", "--provider", "codex"])));
+        assert!(!is_help_request(&s(&["wk", "--harness", "codex"])));
     }
 
     // -----------------------------------------------------------------------
@@ -2926,7 +2947,7 @@ mod tests {
     }
 
     /// codex P2 (PR #73): `--model` must reach the request, else
-    /// `spawn --provider agy --once --model <name>` fails with "unknown flag"
+    /// `spawn --harness agy --once --model <name>` fails with "unknown flag"
     /// before dispatch_agy_once sees it. Both space- and equals-form parse.
     #[test]
     fn spawn_forwards_model_flag() {
@@ -2934,7 +2955,7 @@ mod tests {
             "spawn",
             &[
                 "wk".to_string(),
-                "--provider".to_string(),
+                "--harness".to_string(),
                 "agy".to_string(),
                 "--once".to_string(),
                 "--model".to_string(),
@@ -2998,7 +3019,7 @@ mod tests {
             "spawn",
             &[
                 "wk".to_string(),
-                "--provider".to_string(),
+                "--harness".to_string(),
                 "claude".to_string(),
                 "--substrate".to_string(),
                 "bg".to_string(),
@@ -3071,7 +3092,7 @@ mod tests {
             "spawn",
             &[
                 "wk".to_string(),
-                "--provider".to_string(),
+                "--harness".to_string(),
                 "codex".to_string(),
                 "--substrate".to_string(),
                 "headless".to_string(),
@@ -3110,7 +3131,7 @@ mod tests {
             &[
                 "myagent".to_string(),
                 "hi".to_string(),
-                "--provider".to_string(),
+                "--harness".to_string(),
                 "claude".to_string(),
                 "--cwd".to_string(),
                 "/repo".to_string(),
@@ -3152,7 +3173,7 @@ mod tests {
     fn spawn_gate_flags_parse() {
         let args = vec![
             "w1".to_string(),
-            "--provider".to_string(),
+            "--harness".to_string(),
             "claude".to_string(),
             "--substrate".to_string(),
             "bg".to_string(),
@@ -3171,7 +3192,7 @@ mod tests {
         // build the request without error (the daemon resolves argv from the provider).
         let args = vec![
             "myagent".to_string(),
-            "--provider".to_string(),
+            "--harness".to_string(),
             "codex".to_string(),
         ];
         let result = build_request("spawn", &args);
@@ -3298,7 +3319,7 @@ mod tests {
         for provider in ["codex", "gemini", "agy"] {
             let args = vec![
                 "wk".to_string(),
-                "--provider".to_string(),
+                "--harness".to_string(),
                 provider.to_string(),
             ];
             let (method, params) = build_request("spawn", &args).unwrap();
@@ -3316,7 +3337,7 @@ mod tests {
         // claude default -> PTY lane (mode=interactive) + a minted session id.
         let args = vec![
             "wk".to_string(),
-            "--provider".to_string(),
+            "--harness".to_string(),
             "claude".to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
@@ -3333,7 +3354,7 @@ mod tests {
         for provider in ["claude", "codex", "gemini", "agy"] {
             let args = vec![
                 "wk".to_string(),
-                "--provider".to_string(),
+                "--harness".to_string(),
                 provider.to_string(),
                 "--once".to_string(),
             ];
@@ -3360,7 +3381,7 @@ mod tests {
         // x-3ab8 owned-PTY behavior is the strictly-additive default).
         let args = vec![
             "wk".to_string(),
-            "--provider".to_string(),
+            "--harness".to_string(),
             "claude".to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
@@ -3372,7 +3393,7 @@ mod tests {
         // Explicit --substrate pane is identical (interactive defaults applied).
         let args = vec![
             "wk".to_string(),
-            "--provider".to_string(),
+            "--harness".to_string(),
             "claude".to_string(),
             "--substrate".to_string(),
             "pane".to_string(),
@@ -3388,7 +3409,7 @@ mod tests {
         for sub in ["bg", "headless"] {
             let args = vec![
                 "wk".to_string(),
-                "--provider".to_string(),
+                "--harness".to_string(),
                 "claude".to_string(),
                 "--substrate".to_string(),
                 sub.to_string(),
@@ -3404,7 +3425,7 @@ mod tests {
     fn spawn_substrate_rejects_unknown_value() {
         let args = vec![
             "wk".to_string(),
-            "--provider".to_string(),
+            "--harness".to_string(),
             "claude".to_string(),
             "--substrate".to_string(),
             "detached".to_string(),
@@ -3418,7 +3439,7 @@ mod tests {
         // --substrate set explicitly is not clobbered by a trailing --once.
         let args = vec![
             "wk".to_string(),
-            "--provider".to_string(),
+            "--harness".to_string(),
             "claude".to_string(),
             "--substrate".to_string(),
             "bg".to_string(),
@@ -3436,7 +3457,7 @@ mod tests {
             for provider in ["claude", "codex", "gemini", "agy"] {
                 let args = vec![
                     "wk".to_string(),
-                    "--provider".to_string(),
+                    "--harness".to_string(),
                     provider.to_string(),
                     flag.to_string(),
                 ];
@@ -3453,10 +3474,9 @@ mod tests {
 
     #[test]
     fn spawn_harness_flag_sets_provider() {
-        // x-6de8: --harness/-H is the canonical CLI-binary axis; --provider/-p is
-        // the older spelling of it. All four spell the same `provider` param, and -H
-        // now takes a VALUE (harness name) rather than meaning headless.
-        for flag in ["--harness", "-H", "--provider", "-p"] {
+        // x-6de8: --harness/-H is the CLI-binary axis. -H takes a VALUE (harness
+        // name) rather than meaning headless.
+        for flag in ["--harness", "-H"] {
             let args = vec!["wk".to_string(), flag.to_string(), "codex".to_string()];
             let (_m, params) = build_request("spawn", &args).unwrap();
             assert_eq!(
@@ -3473,31 +3493,67 @@ mod tests {
     }
 
     #[test]
-    fn spawn_conflicting_harness_and_provider_is_rejected() {
-        // x-6de8 codex P1: on the installed-Rust non-pane lane (which never
-        // re-execs Python cmd_spawn), a canonical/alias mismatch must fail closed
-        // rather than silently last-write-wins under the wrong harness.
+    fn spawn_p_short_is_headless_not_provider() {
+        // x-6de8: -p mirrors the harnesses' own one-shot short. It takes NO value,
+        // so a stray `-p codex` must leave `codex` a positional rather than
+        // silently selecting a harness.
+        let args = vec!["wk".to_string(), "-p".to_string()];
+        let (_m, params) = build_request("spawn", &args).unwrap();
+        assert_eq!(
+            params.get("substrate").and_then(|v| v.as_str()),
+            Some("headless")
+        );
+        assert!(
+            params.get("provider").is_none(),
+            "-p must not set a harness"
+        );
+
+        // Off `spawn`, -p is still the provider short it has always been.
+        let ask = vec![
+            "wk".to_string(),
+            "hi".to_string(),
+            "-p".to_string(),
+            "codex".to_string(),
+        ];
+        let (_m, params) = build_request("ask", &ask).unwrap();
+        assert_eq!(
+            params.get("provider").and_then(|v| v.as_str()),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn spawn_harness_name_on_the_provider_axis_is_rejected() {
+        // x-6de8: --provider is the model-VENDOR axis. This lane never re-execs
+        // Python cmd_spawn, so a harness name typed there must be refused BY NAME
+        // here too, or it reaches the daemon as a vendor it cannot resolve.
+        for h in ["claude", "codex", "gemini", "opencode", "agy"] {
+            let args = vec!["wk".to_string(), "--provider".to_string(), h.to_string()];
+            let err = build_request("spawn", &args).unwrap_err();
+            assert!(
+                err.contains(&format!("{h} is a harness, not a provider")),
+                "got: {err}"
+            );
+            assert!(err.contains(&format!("use --harness {h}")), "got: {err}");
+        }
+
+        // A real vendor names the routed lane, which only the fno CLI materializes.
         let args = vec![
             "wk".to_string(),
-            "--harness".to_string(),
-            "codex".to_string(),
             "--provider".to_string(),
-            "claude".to_string(),
-            "--substrate".to_string(),
-            "headless".to_string(),
+            "zai".to_string(),
         ];
         let err = build_request("spawn", &args).unwrap_err();
-        assert!(err.contains("conflicts with --provider"), "got: {err}");
+        assert!(err.contains("names a model vendor"), "got: {err}");
 
-        // Same value on both is not a conflict; harness wins, provider set.
-        let ok = vec![
+        // Off `spawn` the flag is unchanged: still the harness hint.
+        let ask = vec![
             "wk".to_string(),
-            "--harness".to_string(),
-            "codex".to_string(),
+            "hi".to_string(),
             "--provider".to_string(),
             "codex".to_string(),
         ];
-        let (_m, params) = build_request("spawn", &ok).unwrap();
+        let (_m, params) = build_request("ask", &ask).unwrap();
         assert_eq!(
             params.get("provider").and_then(|v| v.as_str()),
             Some("codex")
@@ -3510,7 +3566,7 @@ mod tests {
         for flag in ["--model", "-m"] {
             let args = vec![
                 "wk".to_string(),
-                "--provider".to_string(),
+                "--harness".to_string(),
                 "claude".to_string(),
                 "--substrate".to_string(),
                 "bg".to_string(),
@@ -3531,7 +3587,7 @@ mod tests {
         // An explicit --substrate is not clobbered by a trailing --headless.
         let args = vec![
             "wk".to_string(),
-            "--provider".to_string(),
+            "--harness".to_string(),
             "claude".to_string(),
             "--substrate".to_string(),
             "bg".to_string(),
@@ -3549,7 +3605,7 @@ mod tests {
         // canonical unhosted CLI (opencode joined the roster at x-51f6).
         let args = vec![
             "wk".to_string(),
-            "--provider".to_string(),
+            "--harness".to_string(),
             "aider".to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
@@ -3685,7 +3741,7 @@ mod tests {
             "spawn",
             &[
                 "w".into(),
-                "--provider".into(),
+                "--harness".into(),
                 "claude".into(),
                 "--fresh".into(),
             ],
@@ -3724,7 +3780,7 @@ mod tests {
         let args = vec![
             "--cwd".to_string(),
             "/tmp/myproject".to_string(),
-            "--provider".to_string(),
+            "--harness".to_string(),
             "codex".to_string(),
         ];
         let (_method, params) = build_request("list", &args).unwrap();

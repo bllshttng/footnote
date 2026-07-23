@@ -1592,7 +1592,7 @@ def _spawn_post_merge_worker(pr_number: int, cwd: str) -> str:
     # that always reaches the detached worker's LLM (env need not propagate).
     cmd = [
         *_subprocess_util.fno_py_cmd(), "agents", "spawn",
-        "--provider", "claude", "--substrate", "bg", "--model", model, "--cwd", cwd,
+        "--harness", "claude", "--substrate", "bg", "--model", model, "--cwd", cwd,
         name, f"/fno:pr merged {pr_number} autonomous",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)

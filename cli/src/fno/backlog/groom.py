@@ -212,7 +212,7 @@ def _spawn_groom_worker(brief: str, cwd: str, model: str, day: str) -> str:
 
     cmd = [
         *_subprocess_util.fno_py_cmd(), "agents", "spawn",
-        "--provider", "claude", "--substrate", "headless",
+        "--harness", "claude", "--substrate", "headless",
         "--model", model, "--cwd", cwd,
         "--timeout", str(_WORKER_TIMEOUT_S),
         f"groom-{day}", brief,

@@ -1864,7 +1864,7 @@ pub fn dispatch_claude_ask(
             );
             AskOutcome::err(
                 format!(
-                    "unknown agent {}; spawn it first: fno agents spawn {} -p <provider>",
+                    "unknown agent {}; spawn it first: fno agents spawn {} --harness <harness>",
                     py_repr(name),
                     name
                 ),

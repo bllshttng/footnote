@@ -97,7 +97,7 @@ The other two failure labels mean exactly what they say:
 
 ### Why codex agents are short-lived
 
-`codex exec` is codex's one-shot mode: it runs the message to completion and exits. A daemon worker spawned with no task (`fno agents spawn x --provider codex`) runs `codex exec ""`, has nothing to do, and exits immediately. A worker spawned *with* a task stays alive only while it processes that task, then exits. So a codex agent is grid-watchable only during the window it is actively working, and the natural "resume" handle is the rollout UUID (`codex resume <uuid>`), not a persistent fno PTY. The grid's PTY-attach model fits interactive sessions (an idle prompt waiting for input) better than it fits a one-shot `codex exec`.
+`codex exec` is codex's one-shot mode: it runs the message to completion and exits. A daemon worker spawned with no task (`fno agents spawn x --harness codex`) runs `codex exec ""`, has nothing to do, and exits immediately. A worker spawned *with* a task stays alive only while it processes that task, then exits. So a codex agent is grid-watchable only during the window it is actively working, and the natural "resume" handle is the rollout UUID (`codex resume <uuid>`), not a persistent fno PTY. The grid's PTY-attach model fits interactive sessions (an idle prompt waiting for input) better than it fits a one-shot `codex exec`.
 
 ## How to actually watch a working agent
 
@@ -105,7 +105,7 @@ Use `spawn` (daemon PTY worker), not `ask` (detached subprocess), and give it a 
 
 ```bash
 # Tab 1 - daemon-managed PTY worker, grid-watchable, with a task:
-fno agents spawn pr-review --provider codex "explore the repo and write a detailed review"
+fno agents spawn pr-review --harness codex "explore the repo and write a detailed review"
 
 # Tab 2 - watch it live while it works:
 fno agents grid pr-review

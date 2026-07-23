@@ -47,7 +47,7 @@ def test_ac3_bare_spawn_inherits_provider_and_model():
     # AC3-HP: bare spawn inherits both fields.
     out = _inject(["spawn", "w", "hi"], provider="codex", model="gpt-5.6-sol")
     assert out[0] == "spawn"
-    assert "--provider" in out and out[out.index("--provider") + 1] == "codex"
+    assert "--harness" in out and out[out.index("--harness") + 1] == "codex"
     assert "--model" in out and out[out.index("--model") + 1] == "gpt-5.6-sol"
     # positionals preserved after the injected flags
     assert out[-2:] == ["w", "hi"]
@@ -60,13 +60,13 @@ def test_config_model_skipped_when_resolved_provider_differs():
     # 400 after the round-trip). explicit --model stays the supported override.
     err = io.StringIO()
     out = _inject(
-        ["spawn", "-p", "claude", "w", "hi"],
+        ["spawn", "-H", "claude", "w", "hi"],
         err=err,
         provider="codex",
         model="gpt-5.6-sol",
     )
-    assert out.count("--provider") == 0  # no config provider injected
-    assert "-p" in out  # the explicit flag survives
+    assert out.count("--harness") == 0  # no config harness injected (-H is explicit)
+    assert "-H" in out  # the explicit flag survives
     assert out.count("--model") == 0  # codex model not forced onto claude
     msg = err.getvalue()
     assert "gpt-5.6-sol" in msg and "codex" in msg and "claude" in msg
@@ -99,7 +99,7 @@ def test_ac5_visibility_notice():
 def test_ac6_effort_degrades_open_on_gemini():
     # AC6-ERR: config effort on a no-surface provider -> skip + notice, no flag.
     err = io.StringIO()
-    out = _inject(["spawn", "-p", "gemini", "w"], err=err, effort="high")
+    out = _inject(["spawn", "-H", "gemini", "w"], err=err, effort="high")
     assert "--effort" not in out  # not injected
     assert "effort skipped" in err.getvalue()
     assert "gemini" in err.getvalue()
@@ -131,7 +131,7 @@ def test_config_effort_unknown_value_degrades_open():
 def test_explicit_effort_never_overridden():
     # An explicit --effort is left alone (x-a0e0 fail-closed owns it downstream).
     err = io.StringIO()
-    out = _inject(["spawn", "-p", "gemini", "--effort", "high", "w"], err=err, effort="low")
+    out = _inject(["spawn", "-H", "gemini", "--effort", "high", "w"], err=err, effort="low")
     assert out.count("--effort") == 1
     assert "low" not in out
     assert "effort skipped" not in err.getvalue()  # config path never ran
@@ -173,7 +173,7 @@ def test_help_never_errors_under_bad_config():
 def test_help_after_argv_still_injects():
     # A --help inside the --argv payload is not a help request for spawn itself.
     out = _inject(["spawn", "w", "--argv", "tool", "--help"], provider="codex")
-    assert "--provider" in out and out.index("--provider") < out.index("--argv")
+    assert "--harness" in out and out.index("--harness") < out.index("--argv")
 
 
 def test_ac2_hp_codex_spawn_does_not_inherit_claude_model():
@@ -182,7 +182,7 @@ def test_ac2_hp_codex_spawn_does_not_inherit_claude_model():
     # stderr line names the config model, its implied provider, and the resolved
     # one. env={} => resolve_dispatch_provider infers claude as the implied.
     err = io.StringIO()
-    out = _inject(["spawn", "-p", "codex", "w"], err=err, env={}, model="opus")
+    out = _inject(["spawn", "-H", "codex", "w"], err=err, env={}, model="opus")
     assert out.count("--model") == 0  # no --model opus injected
     assert "opus" not in out
     msg = err.getvalue()
@@ -200,7 +200,7 @@ def test_ac5_fr_provider_resolution_failure_degrades_open(monkeypatch):
     monkeypatch.setattr(pr, "resolve_dispatch_provider", _boom)
     err = io.StringIO()
     # provider unset so the model branch must call resolve_dispatch_provider.
-    out = _inject(["spawn", "-p", "codex", "w"], err=err, env={}, model="opus")
+    out = _inject(["spawn", "-H", "codex", "w"], err=err, env={}, model="opus")
     assert out.count("--model") == 0  # nothing injected
     assert out[-1] == "w"  # spawn not aborted; positional preserved
     assert "resolution" in err.getvalue().lower() or "leaving" in err.getvalue().lower()
@@ -297,7 +297,7 @@ def test_ac4_err_incompatible_config_substrate_degrades_open():
     # bg on a codex-resolved spawn: no --substrate injected, warning names it.
     err = io.StringIO()
     out = _inject(
-        ["spawn", "-p", "codex", "w", "/think x"], err=err,
+        ["spawn", "-H", "codex", "w", "/think x"], err=err,
         profiles={"think": {"substrate": "bg"}},
     )
     assert "--substrate" not in out
@@ -336,7 +336,7 @@ def test_ac6_edge_verb_not_first_token_no_profile():
         profiles={"target": {"model": "opus"}},
     )
     assert "--model" not in out  # target profile never fired
-    assert "--provider" in out  # defaults still applied
+    assert "--harness" in out  # defaults still applied
 
 
 def test_ac6_edge_absolute_path_never_matches():
@@ -405,7 +405,7 @@ def test_permission_mode_skipped_on_nonclaude_headless():
     # hardcodes its own bypass and exits 2); the config value degrades open.
     err = io.StringIO()
     out = _inject(
-        ["spawn", "-p", "codex", "--headless", "w", "/target x"], err=err,
+        ["spawn", "-H", "codex", "--headless", "w", "/target x"], err=err,
         profiles={"target": {"permission_mode": "yolo"}},
     )
     assert "--permission-mode" not in out
@@ -415,7 +415,7 @@ def test_permission_mode_skipped_on_nonclaude_headless():
 def test_permission_mode_ok_on_nonclaude_pane():
     # The pane lane maps every provider, so codex+pane honors a mapped value.
     out = _inject(
-        ["spawn", "-p", "codex", "w", "/target x", "pane"],
+        ["spawn", "-H", "codex", "w", "/target x", "pane"],
         profiles={"target": {"permission_mode": "yolo"}},
     )
     assert out[out.index("--permission-mode") + 1] == "yolo"
@@ -426,7 +426,7 @@ def test_permission_mode_injected_on_bare_nonclaude_spawn_pane_default():
     # autonomous headless default), which maps codex permission modes - so the
     # configured value must be injected, not skipped as incompatible.
     out = _inject(
-        ["spawn", "-p", "codex", "w", "/target x"],
+        ["spawn", "-H", "codex", "w", "/target x"],
         profiles={"target": {"permission_mode": "yolo"}},
     )
     assert out[out.index("--permission-mode") + 1] == "yolo"
@@ -443,15 +443,20 @@ def test_explicit_yolo_suppresses_config_permission_mode():
         assert "--permission-mode" not in out, flag
 
 
-def test_harness_flag_feeds_the_provider_aware_default_scan():
-    """--harness/-H is the canonical spelling of the axis --provider/-p names, so
-    the provider-aware default scan must resolve through either one; otherwise a
-    `-H codex` spawn would silently take a claude-shaped ambient default."""
-    for flag in ("--harness", "-H", "--provider", "-p"):
+def test_only_harness_flags_feed_the_provider_aware_default_scan():
+    """The default scan resolves the HARNESS, so only --harness/-H may feed it.
+    --provider names the model vendor: reading it as a harness would make an
+    ambient claude-only default (bg) skip itself on a routed claude spawn."""
+    for flag in ("--harness", "-H"):
         out = _inject(["spawn", "w", "hi", flag, "codex"], substrate="bg")
-        # bg is claude-only, so a codex spawn degrades open (warn, skip) whichever
-        # spelling named the harness.
+        # bg is claude-only, so a codex spawn degrades open (warn, skip).
         assert "--substrate" not in out, f"{flag}: bg must not be injected for codex"
+
+    # --provider zai leaves the harness unresolved (claude by default), so the
+    # claude-only bg default still applies.
+    out = _inject(["spawn", "w", "hi", "--provider", "zai", "--model", "glm-5.2"],
+                  substrate="bg")
+    assert out[out.index("--substrate") + 1] == "bg"
 
     out = _inject(["spawn", "w", "hi", "--harness", "claude"], substrate="pane")
     assert out[out.index("--substrate") + 1] == "pane"

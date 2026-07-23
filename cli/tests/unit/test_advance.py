@@ -375,7 +375,7 @@ def test_spawn_worker_argv_with_cwd(monkeypatch):
 
     assert sid == "abc12345"
     cmd = captured["cmd"]
-    assert cmd[:5] == ["fno-py", "agents", "spawn", "--provider", "claude"]
+    assert cmd[:5] == ["fno-py", "agents", "spawn", "--harness", "claude"]
     assert "--cwd" in cmd and "/work/dir" in cmd
     assert "--fresh" not in cmd
     assert cmd[-2] == "target-ab-2222aaaa"
@@ -395,7 +395,7 @@ def test_spawn_worker_threads_model_and_provider(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker("ab-2222aaaa", "/w", model="glm-4.7", provider="codex")
     cmd = captured["cmd"]
-    assert cmd[cmd.index("--provider") + 1] == "codex"
+    assert cmd[cmd.index("--harness") + 1] == "codex"
     assert cmd[cmd.index("--model") + 1] == "glm-4.7"
 
 
@@ -410,7 +410,7 @@ def test_spawn_worker_default_provider_claude(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker("ab-2222aaaa", "/w")
     cmd = captured["cmd"]
-    assert cmd[cmd.index("--provider") + 1] == "claude"
+    assert cmd[cmd.index("--harness") + 1] == "claude"
     assert "--model" not in cmd
 
 
@@ -482,7 +482,7 @@ def test_spawn_worker_verb_normalizes_codex_headless(monkeypatch):
     )
     cmd = captured["cmd"]
     assert cmd[cmd.index("--substrate") + 1] == "headless"
-    assert cmd[cmd.index("--provider") + 1] == "codex-acct"
+    assert cmd[cmd.index("--harness") + 1] == "codex-acct"
     assert cmd[-1] == "$fno:think ab-2222aaaa"
 
 
@@ -1200,8 +1200,8 @@ def test_spawn_worker_passes_substrate_bg(monkeypatch):
     assert sid == "abc12345"  # receipt parse unchanged
     cmd = captured["cmd"]
     assert "--substrate" in cmd and cmd[cmd.index("--substrate") + 1] == "bg"
-    i = cmd.index("--provider")
-    assert cmd[i : i + 4] == ["--provider", "claude", "--substrate", "bg"]
+    i = cmd.index("--harness")
+    assert cmd[i : i + 4] == ["--harness", "claude", "--substrate", "bg"]
 
 
 def test_spawn_worker_reconcile_keeps_substrate_bg(monkeypatch):
@@ -1213,8 +1213,8 @@ def test_spawn_worker_reconcile_keeps_substrate_bg(monkeypatch):
     )
     assert sid == "abc12345"
     cmd = captured["cmd"]
-    i = cmd.index("--provider")
-    assert cmd[i : i + 4] == ["--provider", "claude", "--substrate", "bg"]
+    i = cmd.index("--harness")
+    assert cmd[i : i + 4] == ["--harness", "claude", "--substrate", "bg"]
     assert any("--reconcile /tmp/m.md ab-2222aaaa" in tok for tok in cmd)
 
 

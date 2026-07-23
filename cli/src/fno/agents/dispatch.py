@@ -1503,7 +1503,7 @@ def dispatch_ask(
                 )
                 raise DispatchAskError(
                     f"unknown agent {name!r}; spawn it first: "
-                    f"fno agents spawn {name} -p <provider>",
+                    f"fno agents spawn {name} --harness <harness>",
                     exit_code=UNKNOWN_AGENT_EXIT_CODE,
                 )
 
@@ -4442,7 +4442,7 @@ def dispatch_send(
                 )
                 raise DispatchAskError(
                     f"unknown agent {name!r}; spawn it first: "
-                    f"fno agents spawn {name} -p <provider>",
+                    f"fno agents spawn {name} --harness <harness>",
                     exit_code=UNKNOWN_AGENT_EXIT_CODE,
                 )
 

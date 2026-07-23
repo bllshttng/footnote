@@ -10,16 +10,16 @@ footnote can launch a worker agent on Claude, Codex, or Gemini and coordinate wi
 ## Spawn a peer
 
 ```bash
-fno agents spawn reviewer "review the diff on this branch" -p codex
+fno agents spawn reviewer "review the diff on this branch" -H codex
 ```
 
-`spawn <name> "<initial message>" -p <provider>` creates a named, persistent peer and hands it the first message. A Claude peer runs as a `claude --bg` thread; a Codex or Gemini peer runs as a PTY-backed worker under the `fno-agents` daemon. You get back one JSON receipt line carrying the peer's `short_id`:
+`spawn <name> "<initial message>" -H <harness>` creates a named, persistent peer and hands it the first message. A Claude peer runs as a `claude --bg` thread; a Codex or Gemini peer runs as a PTY-backed worker under the `fno-agents` daemon. You get back one JSON receipt line carrying the peer's `short_id`:
 
 ```json
 {"name": "reviewer", "short_id": "7c5dcf5d", "provider": "codex", "status": "live"}
 ```
 
-Pipe it: `fno agents spawn w1 "task" -p claude | jq -r .short_id`.
+Pipe it: `fno agents spawn w1 "task" -H claude | jq -r .short_id`.
 
 ## Message a peer that exists
 
@@ -34,7 +34,7 @@ fno agents ask reviewer "what did you find?"
 When you just want one answer from another model and no lingering peer, spawn an ephemeral worker:
 
 ```bash
-fno agents spawn q "summarize the failing tests" -p codex --once
+fno agents spawn q "summarize the failing tests" -H codex --once
 ```
 
 `--once` (Codex and Gemini) creates the worker, exchanges one round, and tears it down. The model's reply is stdout (the deliverable); the teardown receipt rides stderr; no registry row survives. `--once` with Claude is refused, because Claude peers are persistent background threads; use a plain `spawn` there.

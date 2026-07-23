@@ -650,7 +650,7 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
 
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--provider", "claude",
+        ["spawn", "peer", "--harness", "claude",
          "--node", "x-84a8", "--slug", "s", "--plan", "p.md"],
     )
     assert res.exit_code == 0, res.output
@@ -743,7 +743,7 @@ def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatc
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--provider", "claude", "--substrate", "bg", "-x", "left"],
+        ["spawn", "peer", "--harness", "claude", "--substrate", "bg", "-x", "left"],
     )
     assert res.exit_code == 2, res.output
     assert "--workspace/-s and --split/-x apply only to --substrate pane" in res.output
@@ -758,7 +758,7 @@ def test_cmd_spawn_rejects_bad_split_value(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--provider", "claude", "-x", "diagonal"],
+        ["spawn", "peer", "--harness", "claude", "-x", "diagonal"],
     )
     assert res.exit_code == 2, res.output
     assert "left, right, up, or down" in res.output
@@ -772,7 +772,7 @@ def test_cmd_spawn_rejects_blank_squad_before_dispatch(tmp_path: Path, monkeypat
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--provider", "claude", "-s", ""],
+        ["spawn", "peer", "--harness", "claude", "-s", ""],
     )
     assert res.exit_code == 2, res.output
     assert "--workspace/-s needs a nonblank workspace name" in res.output
@@ -813,7 +813,7 @@ def test_cmd_spawn_pane_threads_placement_to_dispatch(
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--provider", "claude", *placement_args],
+        ["spawn", "peer", "--harness", "claude", *placement_args],
     )
     assert res.exit_code == 0, res.output
     assert captured["squad"] == "review"

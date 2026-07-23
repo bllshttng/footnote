@@ -130,7 +130,7 @@ def test_spawn_once_codex_happy_path(workdir, fake_codex_create_once, monkeypatc
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "tmp1", "-p", "codex", "--once", "summarize X"],
+        ["spawn", "tmp1", "-H", "codex", "--once", "summarize X"],
         catch_exceptions=False,
     )
 
@@ -163,7 +163,7 @@ def test_spawn_once_create_failure_no_registry_entry(workdir, monkeypatch) -> No
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "tmp2", "-p", "codex", "--once", "hello"],
+        ["spawn", "tmp2", "-H", "codex", "--once", "hello"],
     )
 
     assert result.exit_code != 0, (
@@ -187,7 +187,7 @@ def test_spawn_once_receipt_format(workdir, fake_codex_create_once) -> None:
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "myagent", "-p", "codex", "--once", "do something"],
+        ["spawn", "myagent", "-H", "codex", "--once", "do something"],
         catch_exceptions=False,
     )
 
@@ -211,7 +211,7 @@ def test_spawn_collision_refuses(workdir) -> None:
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "existing-agent", "-p", "codex", "--once", "hello"],
+        ["spawn", "existing-agent", "-H", "codex", "--once", "hello"],
     )
 
     assert result.exit_code == 2, (
@@ -256,7 +256,7 @@ def test_spawn_once_teardown_failure(workdir, fake_codex_create_once, monkeypatc
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "teardown-victim", "-p", "codex", "--once", "hello"],
+        ["spawn", "teardown-victim", "-H", "codex", "--once", "hello"],
         catch_exceptions=False,
     )
 
@@ -288,7 +288,7 @@ def test_spawn_claude_plain(workdir_claude) -> None:
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "myagent-c", "-p", "claude", "hello", "--substrate", "bg"],
+        ["spawn", "myagent-c", "-H", "claude", "hello", "--substrate", "bg"],
         catch_exceptions=False,
     )
 
@@ -335,7 +335,7 @@ def test_spawn_claude_receipt_surfaces_moved_cwd(workdir_claude, monkeypatch) ->
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "moved-c", "-p", "claude", "hello", "--substrate", "bg"],
+        ["spawn", "moved-c", "-H", "claude", "hello", "--substrate", "bg"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -361,7 +361,7 @@ def test_spawn_claude_receipt_cwd_json_encoded(workdir_claude, monkeypatch) -> N
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "bs-c", "-p", "claude", "hello", "--substrate", "bg"],
+        ["spawn", "bs-c", "-H", "claude", "hello", "--substrate", "bg"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -382,7 +382,7 @@ def test_spawn_claude_once_refused(workdir_claude) -> None:
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "cagent", "-p", "claude", "--once", "hello"],
+        ["spawn", "cagent", "-H", "claude", "--once", "hello"],
     )
 
     assert result.exit_code == 2, (
@@ -407,7 +407,7 @@ def test_spawn_codex_plain_no_once_refused(workdir, monkeypatch) -> None:
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "ptagent", "-p", "codex", "hello", "--substrate", "bg"],
+        ["spawn", "ptagent", "-H", "codex", "hello", "--substrate", "bg"],
     )
 
     assert result.exit_code == 13, (
@@ -429,7 +429,7 @@ def test_spawn_unknown_provider_exits_2(workdir) -> None:
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["spawn", "fooagent", "-p", "foo", "hello"],
+        ["spawn", "fooagent", "--harness", "foo", "hello"],
     )
 
     assert result.exit_code == 2, (

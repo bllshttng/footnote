@@ -2,7 +2,7 @@
 
 > Creation moved to `fno agents spawn` - see [fno-agents-spawn.md](fno-agents-spawn.md).
 
-`fno agents ask <name> "<message>"` messages an EXISTING agent: it delivers the message to the running session and prints the recipient's reply on stdout. An unknown name errors with exit 16 ("spawn it first") - creation moved to `fno agents spawn` in the cross-agent bus epic (Group 1): `fno agents spawn <name> "<initial-prompt>" --provider claude` creates the `claude --bg` session and prints a compact JSON receipt carrying the supervisor's 8-hex `short_id`.
+`fno agents ask <name> "<message>"` messages an EXISTING agent: it delivers the message to the running session and prints the recipient's reply on stdout. An unknown name errors with exit 16 ("spawn it first") - creation moved to `fno agents spawn` in the cross-agent bus epic (Group 1): `fno agents spawn <name> "<initial-prompt>" --harness claude` creates the `claude --bg` session and prints a compact JSON receipt carrying the supervisor's 8-hex `short_id`.
 
 Use this guide when you have an orchestrator (script, LLM session, CI job) that needs to hand work to a long-running Claude agent and read back the response without managing the session id, socket, or attach lifecycle yourself.
 
@@ -10,7 +10,7 @@ Use this guide when you have an orchestrator (script, LLM session, CI job) that 
 
 - `fno` CLI installed (`uv tool install /path/to/footnote/cli` or via the footnote plugin postinstall).
 - `claude` CLI 2.1.143+ on `$PATH`, signed in.
-- A Claude `--bg` session created via an earlier `fno agents spawn <name> "<initial-prompt>" --provider claude`.
+- A Claude `--bg` session created via an earlier `fno agents spawn <name> "<initial-prompt>" --harness claude`.
 
 ## Send a follow-up
 

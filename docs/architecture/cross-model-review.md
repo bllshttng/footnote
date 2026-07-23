@@ -49,7 +49,7 @@ A provider lockout discovered at dispatch time (the pinned provider is rate-limi
 ## Dispatch + the JSON findings contract
 
 - **claude** agents run through the existing `claude_runner` (`claude -p`, bg short-id + poll).
-- **codex / gemini** agents run through `agents_spawn_runner`, which dispatches a one-shot `fno agents spawn --provider <p> --once` and reads the model's reply text directly (codex/gemini one-shot returns the reply synchronously, not a short-id).
+- **codex / gemini** agents run through `agents_spawn_runner`, which dispatches a one-shot `fno agents spawn --harness <p> --once` and reads the model's reply text directly (codex/gemini one-shot returns the reply synchronously, not a short-id).
 
 Both runners converge on one strict-JSON findings parser (`findings_parser.parse_findings_json`) so the confidence scorer and report builder stay provider-agnostic. Every agent prompt gets a JSON-contract addendum appended **at dispatch time** demanding a single JSON array of `{severity, message, file?, line?}` objects and forbidding interactive/clarifying questions (the agents run headless). The six bundled prompt files in `review/prompts/` are never modified, which is what keeps the cross-model-OFF path byte-for-byte unchanged: the JSON contract and the claude_runner JSON switch both activate only behind the opt-in gate.
 

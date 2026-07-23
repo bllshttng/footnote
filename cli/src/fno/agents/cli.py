@@ -466,20 +466,20 @@ def cmd_spawn(
         "-H",
         help=(
             "The CLI binary to launch: claude | codex | gemini | opencode | agy "
-            "(optional). This is the canonical spelling of the axis, aligning "
-            "spawn with the --harness vocabulary used everywhere else in fno. "
-            "Defaults to the invoking harness, then claude. NOTE: -H no longer "
-            "means headless; for a one-shot use --substrate headless / "
+            "(optional). Defaults to the invoking harness, then claude. NOTE: -H "
+            "no longer means headless; for a one-shot use --substrate headless / "
             "--headless / --once."
         ),
     ),
-    provider: str | None = typer.Option(
+    vendor: str | None = typer.Option(
         None,
         "--provider",
-        "-p",
+        "-P",
         help=(
-            "Older spelling of --harness/-H (the CLI binary): claude | codex | "
-            "gemini. --harness wins; passing both with different values exits 2."
+            "The model VENDOR the harness talks to: zai, or any "
+            "model_routing.providers name. Pairs with --model to name the route "
+            "(--provider zai --model glm-5.2 == --route zai,glm-5.2). This is NOT "
+            "the CLI binary -- that is --harness/-H. Capital -P: -p is headless."
         ),
     ),
     once: bool = typer.Option(
@@ -505,10 +505,12 @@ def cmd_spawn(
     headless: bool = typer.Option(
         False,
         "--headless",
+        "-p",
         help=(
-            "Shortcut for --substrate headless: a one-shot (-p/--exec) worker. "
-            "Wins over --substrate; equivalent to --once/-o. (The -H short was "
-            "reassigned to --harness in x-6de8; use --headless or --once here.)"
+            "Shortcut for --substrate headless: a one-shot worker. Wins over "
+            "--substrate; equivalent to --once/-o. `-p` mirrors the harnesses' own "
+            "one-shot short (claude -p / codex exec); the vendor axis takes the "
+            "capital -P to keep the letter free for it."
         ),
     ),
     cwd: str | None = typer.Option(
@@ -781,20 +783,41 @@ def cmd_spawn(
         else None
     )
 
-    # Harness axis: --harness/-H is the canonical CLI-binary selector, --provider/-p
-    # the older spelling of the same axis. Collapse the two into the single
-    # `provider` variable the rest of this path already threads. Both write one
-    # axis, so a mismatched pair is genuinely ambiguous and fails closed rather
-    # than letting argument order decide which harness launches.
-    if harness is not None and provider is not None and harness.strip() != provider.strip():
-        print(
-            f"--harness {harness!r} conflicts with --provider {provider!r}; pass one "
-            "(they are two spellings of the same CLI-binary axis)",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if harness is not None:
-        provider = harness
+    # Three orthogonal axes: --harness names the CLI binary, --provider the model
+    # vendor that binary talks to, --model the model at that vendor. `provider` is
+    # the local name for the HARNESS axis all the way down -- it is the
+    # dispatch_spawn kwarg and the receipt key every consumer parses, so the wire
+    # name outranks the tidier local one.
+    provider = harness
+    if vendor is not None:
+        vendor = vendor.strip()
+        # The historical confusion, refused by name rather than silently launching
+        # the wrong thing: `--provider claude` used to select the CLI binary.
+        from fno.agents.providers import READABLE_PROVIDERS
+
+        if vendor in READABLE_PROVIDERS:
+            print(
+                f"{vendor} is a harness, not a provider; use --harness {vendor}",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if route is not None:
+            print(
+                "--provider/--model and --route are two spellings of one route; pass one",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if not model:
+            print(
+                f"--provider {vendor!r} names a vendor, not a model; add --model "
+                "(the vendor's own model id, e.g. --model glm-5.2)",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        # The model belongs to the route from here: it reaches the worker as the
+        # routed ANTHROPIC_MODEL, never as a `claude --model` token (which would
+        # hand the claude CLI a vendor model id it cannot resolve).
+        route, model = f"{vendor}/{model}", None
 
     # --provider is optional: resolve it (explicit > invoking harness > claude)
     # and reject an empty --model before anything spawns. `provider` is a
@@ -1433,7 +1456,7 @@ def cmd_ask(
     """Send a message to a registered agent (follow-up only).
 
     ``ask`` requires the agent to already exist. Unknown names exit 16
-    with a hint pointing at ``fno agents spawn <name> -p <provider>``.
+    with a hint pointing at ``fno agents spawn <name> --harness <harness>``.
     Use ``spawn`` / ``host`` for initial agent creation.
 
     Project mode (``ask --to-project <X> <message>``) resolves over the

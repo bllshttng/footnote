@@ -93,7 +93,7 @@ def run_verifier(prompt: str, cwd: Path, session_id: str, timeout: int = SPAWN_T
     out = subprocess.run(
         [
             "fno", "agents", "spawn", name, prompt,
-            "--provider", "claude",
+            "--harness", "claude",
             "--substrate", "headless",
             "--model", "haiku",
             "--cwd", str(cwd),

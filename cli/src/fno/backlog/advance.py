@@ -726,7 +726,7 @@ def _spawn_worker(
 
     cmd = [
         *_subprocess_util.fno_py_cmd(),
-        "agents", "spawn", "--provider", prov, "--substrate", substrate,
+        "agents", "spawn", "--harness", prov, "--substrate", substrate,
     ]
     if node_cwd:
         cmd += ["--cwd", node_cwd]

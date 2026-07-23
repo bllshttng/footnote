@@ -96,7 +96,7 @@ def test_spawn_explicit_provider_still_wins(monkeypatch, runner):
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "w1", "hi", "--node", "x-test", "--provider", "gemini"]
+        agents_app, ["spawn", "w1", "hi", "--node", "x-test", "--harness", "gemini"]
     )
     assert result.exit_code == 0, result.output
     assert received["provider"] == "gemini"

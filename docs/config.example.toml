@@ -219,7 +219,7 @@ auto = true
 turn_ceiling = 6
 
 [agents.defaults]
-# Default provider for bare `fno agents spawn` / `/agent spawn` (claude/codex/gemini/agy/opencode); an explicit -p flag wins, empty = unset (harness inference then claude). Validated at the spawn seam.
+# Default provider for bare `fno agents spawn` / `/agent spawn` (claude/codex/gemini/agy/opencode); an explicit -H flag wins, empty = unset (harness inference then claude). Validated at the spawn seam.
 provider = ""
 # Default model for bare spawns, forwarded as --model but provider-scoped: an unbound model (no agents.defaults.provider) is scoped to the builtin default provider (claude), NOT the ambient harness, so a spawn resolving to a different provider (e.g. a codex-ambient session, or an explicit -p codex) leaves the model to that harness rather than forcing an incompatible one that 400s after the round-trip. Bind agents.defaults.provider (or set a per-provider model) to apply a model under a non-claude harness. An explicit -m flag always wins; empty = unset (provider default). Passthrough (provider CLIs own model names).
 model = ""

@@ -76,7 +76,7 @@ It runs the whole loop with or without you watching, and prints the PR URL when 
 **Loop harnesses together.** Spawn an agent on another provider and work alongside it:
 
 ```
-fno agents spawn reviewer "review the diff" -p codex   # a Codex agent on this repo
+fno agents spawn reviewer "review the diff" -H codex   # a Codex agent on this repo
 fno agents ask reviewer "what did you find?"            # message it; it works on its own
 ```
 

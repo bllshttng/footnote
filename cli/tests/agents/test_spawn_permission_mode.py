@@ -151,7 +151,7 @@ def test_mutual_exclusion_yolo_and_permission_mode(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude", "--yolo",
+        ["spawn", "w1", "hi", "--harness", "claude", "--yolo",
          "--permission-mode", "plan"],
     )
     assert result.exit_code == 2
@@ -169,7 +169,7 @@ def test_permission_mode_reaches_pane_dispatch(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude",
+        ["spawn", "w1", "hi", "--harness", "claude",
          "--permission-mode", "acceptEdits"],
     )
     assert result.exit_code == 0, result.output
@@ -184,7 +184,7 @@ def test_permission_mode_reaches_pane_dispatch(runner, monkeypatch):
         # explicit non-bg substrate: a bare --resume now IMPLIES bg (x-f76e),
         # so the guard is exercised by pinning a non-bg lane explicitly.
         ["--substrate", "pane"],
-        ["--substrate", "bg", "--provider", "codex"],  # bg but non-claude
+        ["--substrate", "bg", "--harness", "codex"],  # bg but non-claude
     ],
 )
 def test_resume_requires_claude_bg(runner, monkeypatch, extra_args):
@@ -211,7 +211,7 @@ def test_bg_permission_mode_non_claude_fails_closed(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "codex", "--substrate", "headless",
+        ["spawn", "w1", "hi", "--harness", "codex", "--substrate", "headless",
          "--permission-mode", "acceptEdits"],
     )
     assert result.exit_code == 2
@@ -242,7 +242,7 @@ def test_bg_permission_mode_claude_honored_via_python(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg",
+        ["spawn", "w1", "hi", "--harness", "claude", "--substrate", "bg",
          "--permission-mode", "acceptEdits"],
     )
     assert result.exit_code == 0, result.output
@@ -271,7 +271,7 @@ def test_bg_yolo_receipt_names_bypass_via_python(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg", "--yolo"],
+        ["spawn", "w1", "hi", "--harness", "claude", "--substrate", "bg", "--yolo"],
     )
     assert result.exit_code == 0, result.output
     assert json.loads(result.output.splitlines()[0])["permission_mode"] == "bypassPermissions"
@@ -390,7 +390,7 @@ def test_spawn_sh_forwards_permission_mode(tmp_path):
     env = dict(os.environ)
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
     res = _sp.run(
-        ["bash", str(script), "--name", "w1", "--provider", "claude",
+        ["bash", str(script), "--name", "w1", "--harness", "claude",
          "--message", "hi", "--permission-mode", "acceptEdits"],
         capture_output=True, text=True, env=env, timeout=30, cwd=str(tmp_path),
     )

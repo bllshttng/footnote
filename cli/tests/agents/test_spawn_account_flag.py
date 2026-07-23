@@ -100,7 +100,7 @@ def test_account_non_claude_provider_refused(monkeypatch, runner):
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "w1", "hi", "--provider", "codex", "--account", "x"]
+        agents_app, ["spawn", "w1", "hi", "--harness", "codex", "--account", "x"]
     )
     assert result.exit_code == 2
     assert "claude-only" in result.output
