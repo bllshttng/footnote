@@ -1,1116 +1,246 @@
 
 # Post-merge ritual
 
-Collapses the ritual you re-paste after every self-merge into one verb,
-resolving the per-project path/name/cwd from settings so nothing is pasted:
+The ~90% of this ritual that is pure CLI orchestration now runs as ONE idempotent
+hidden verb: `fno pr ritual <pr>`. This body runs that verb, reads its receipts,
+and does only the **judgment residue** itself - the parts that need a human (or a
+headless LLM leg) reading the merged diff.
 
-1. **Completion stamp** - close the backlog node + stamp the plan.
-2. **Prose follow-ups** - write todos / next-steps to this repo's vault
-   `parking-lot.md` (LLM judgment over the merged diff).
-3. **Triage** - file anything worth doing now as backlog nodes.
-4. **Backfill slot** - present any data backfill the landed PR enables (declared
-   in-build as a `kind:backfill` carve-out) and offer to run it with warm
-   context, or file it as a node.
-5. **Handoff slot** - offer to generate a handoff before the session closes.
+1. **Mechanical core** - `fno pr ritual <n>` closes the node, harvests the retro,
+   advances auto-continue, closes the skill-diff loop, syncs the canonical
+   checkout, archives the worktree, and reaps dead agent-view rows. One run, one
+   receipt block, never a swallowed failure.
+2. **Judgment residue** (this body) - triage this PR's deferral-born nodes, and
+   write parking-lot prose / file triage nodes from the merged diff.
 
-Steps 1 and the mechanical half of 3 already exist as `fno` verbs
-(`backlog reconcile`, `retro run`, `backlog idea`); this skill orchestrates
-them and adds the judgment parts (step 2, "what is worth triaging", and the
-warm-context backfill/handoff slots).
-
-> **No Step-0 quiesce needed (post-wedge).** The original design (epic
-> ab-77091d48) opened with a "quiesce the owning target session" step that
-> flipped a `status: IN_PROGRESS` manifest to `COMPLETE` and wrote
-> `.target-completed`. The control-plane wedge (ab-d0337fbc) deleted that status
-> model: the `target-state.md` manifest is now immutable with no status field,
-> and `fno-agents loop-check` already auto-resolves a session whose PR is merged
-> + green + reviewed (a late `DonePRGreen`; a legacy `status:` manifest
-> allow-exits immediately). The post-ship window is already quiesced by the
-> loop-check verb, so this ritual never fights the hook and there is nothing to
-> flip. Group 3 of that epic therefore ships the backfill carve-out kind and the
-> backfill/handoff slots only; the quiesce step is obsolete (ab-4a1a4fea).
-
-> **The prose queue is separate from the message bus.** This skill writes to a
-> per-project **vault markdown file** at `internal/<area>/backlog/parking-lot.md`
-> (a human reading queue of prose next-steps). That is NOT the cross-project
-> message bus `fno mail` (`config.paths.inbox_dir`, thread-per-file). This
-> skill never touches `fno mail`.
+The verb replaced a 1117-line bash ritual whose snippets carried a proven
+zsh/ugrep silent-misfire class (x-f47f: `${VAR:+...}` word-splitting,
+empty-alternation grep). Python builds each argv explicitly, so that whole class
+is structurally gone and every leg's failure is loud - there is no `|| true`
+anywhere in the verb.
 
 ## Prerequisites
 
-- The PR is already merged (this runs *after* merge, by hand or from the
-  Phase 2 watcher).
-- The repo's `.fno/config.toml` sets `config.post_merge.parking_lot_path`.
-  Without it the skill fails loud (see Step 1). It never guesses a path,
-  because the vault-area name does not equal the project name
-  (`example-pipeline -> internal/etl/backlog/parking-lot.md`).
-  Check this up front - before a merge - with `fno config doctor --post-merge`
-  (the `/target` preflight also warns when it is unset, and `fno setup post-merge`
-  scaffolds it).
+- The PR is already merged (this runs *after* merge, by hand or from a watcher).
+- `.fno/config.toml` sets `config.post_merge.parking_lot_path`. Check before a
+  merge with `fno config doctor --post-merge`; scaffold it with
+  `fno setup post-merge`. Without it the verb's judgment leg reports
+  `parking_lot=unset` and prose is skipped (never guessed).
 - `gh` is authenticated for reading the merged diff.
 
-## Autonomous mode (dispatched runs: no operator present)
+## Autonomous mode (no operator present)
 
-Merge-detection dispatches this ritual as a background worker with **no human
-to prompt** (`_spawn_post_merge_worker`, pr_watch, and `scripts/post-merge/watch.sh`
-all pass an `autonomous` token on the invocation; a manual headless run sets
-`POST_MERGE_NONINTERACTIVE=1` or runs under `claude --print`). An interactive
-`--bg` worker that reaches a prompt slot **hangs forever** - the exact x-47be v1
-stall this mode fixes.
+Merge-detection dispatches this ritual as a background worker with no human to
+prompt (the watcher passes an `autonomous` token; a manual headless run sets
+`POST_MERGE_NONINTERACTIVE=1`). In that mode:
 
-**In autonomous mode you MUST NOT call `AskUserQuestion` (or any interactive
-prompt) at any slot.** Take the no-operator branch everywhere and self-end after
-Step 7:
+- Run `fno pr ritual <n> --autonomous` (the flag also turns on under
+  `POST_MERGE_NONINTERACTIVE=1`).
+- The verb spawns the judgment leg itself as ONE headless one-shot
+  (`fno agents spawn --substrate headless`) when its inputs are non-empty, never
+  a `claude --bg` thread (epic Locked Decision 9).
+- **Never call `AskUserQuestion`** in autonomous mode. Every judgment slot below
+  has a no-prompt branch; self-end after the report.
 
-- **Backfill slot (Step 4b)** -> file a node, never run it.
-- **Handoff slot (Step 6b)** -> skip silently.
-- **Keep-going follow-up dispatch (Step 3, x-3360)** -> the autonomous
-  keep-going engine is what makes this loop generate the *next* unit of work
-  instead of only closing the merged one. It runs inside `fno retro run
-  --keep-going` (Step 3): after the surviving carve-outs are filed as nodes, it
-  classifies each and dispatches under a shared per-day firehose ceiling
-  (`config.think_spawn.daily_cap`, counted across every autonomous dispatch):
-  a deferred carve-out (design unclear) -> `fno think dispatch`; an oos-bug
-  carve-out (scoped, design clear) -> a bg `/target <node> no-merge`; anything
-  else -> the filed node only. When the ceiling is hit, remaining follow-ups
-  stay filed as backlog nodes (never dropped) and one cap line is printed. It is
-  a no-op unless `config.keep_going.enabled` is armed, so you never hand-spawn a
-  think/target yourself here - the verb owns it, deterministically and
-  ceiling-bounded.
-- **Self-end** after the Step-7 report: finish the turn, do not wait for input.
-  Each dispatched worker is the next loop iteration; nothing stays resident.
+## Step 1: Resolve the PR
 
-Detect the mode once at the top: autonomous when an `autonomous` argument token
-is present, `POST_MERGE_NONINTERACTIVE=1` is set, or there is no interactive
-operator. Everything below is unchanged for an attended manual `/fno:pr merged <n>`.
+If a PR number was passed, use it. Otherwise the verb auto-resolves the most
+recently merged PR for this repo (no argument needed).
 
-## Step 0: Resolve the PR
-
-If a PR number was passed as the argument, use it (ignore a trailing
-`autonomous` mode token - it is not the PR). Otherwise find the most recently
-merged PR for this repo:
+## Step 2: Run the mechanical core
 
 ```bash
-# Strip the optional `autonomous` mode token, then take the PR number.
-AUTONOMOUS=0
-ARGS=("$@")
-for a in "${ARGS[@]}"; do [[ "$a" == "autonomous" ]] && AUTONOMOUS=1; done
-[[ "${POST_MERGE_NONINTERACTIVE:-0}" == "1" ]] && AUTONOMOUS=1
-PR=""
-for a in "${ARGS[@]}"; do [[ "$a" =~ ^[0-9]+$ ]] && { PR="$a"; break; }; done
-if [[ -z "$PR" ]]; then
-  PR="$(gh pr list --state merged --json number,mergedAt \
-          --limit 1 --jq 'sort_by(.mergedAt) | last | .number')"
-fi
-[[ -n "$PR" && "$PR" != "null" ]] || { echo "post-merge: no merged PR found; pass a PR number."; exit 0; }
+fno pr ritual <pr>            # attended: you do the judgment below
+fno pr ritual <pr> --autonomous   # autonomous: verb spawns the judgment leg
 ```
 
-## Step 0.5: First-action reservation (dedup mutex)
+The verb prints one receipt line per leg, then exits non-zero if any leg failed:
 
-Before ANY mutating step, reserve this PR's ritual with a global TTL claim so a
-second runner (an attended `/fno:pr merged` racing the auto-dispatched
-`pr-merged-<N>` worker) cannot execute the destructive middle (Steps 2-4)
-concurrently. This is the ritual's FIRST action once the PR is known - it is
-pure bash/CLI (no prompt), so it behaves identically in attended and
-autonomous/headless modes.
+```
+step=mutex status=ok detail=acquired
+step=reconcile status=ok detail=closed=1
+step=plan-reconcile status=ok detail=...
+step=session-add status=ok detail=...
+step=retro status=ok detail=...
+step=advance status=ok detail=exit=0 (3 progress lines)
+step=skill-diff status=ok detail=...
+step=sync-canonical status=skipped detail=not configured
+step=archive status=ok detail=archived
+step=judgment status=ok detail=deferred-to-skill (attended); deferred=2 files=14 lines=320 parking_lot=set bar=above
+step=reap-rows status=ok detail=no lingering rows
+```
+
+**Read the receipts.** Each `status=failed` names a real failure (exit code +
+tail line); the verb exits non-zero so a partial run is never readable as
+success. A re-run is resume-safe: completed legs no-op, failed legs retry, no
+leg double-applies (reconcile/retro/advance/sync/skill-diff each dedup on their
+own markers and claims).
+
+The verb absorbed four prior ritual bugs (each verified by a test in
+`cli/tests/`): **x-c4ff** (only real verbs are called - `skill-diff reconcile`,
+`pr sync-canonical` both exist; no dangling references), **x-fb99**
+(`parking_lot_path` resolved against the canonical root, never a worktree cwd),
+**x-adf9** (canonical-sync pipes closed + timeouted so a trailing `fno restart`
+daemon cannot wedge it), **x-0d66** (the advance leg bounded + streamed).
+
+## Step 3: Judgment residue (attended only)
+
+The verb prints a `step=judgment` line carrying its computed inputs, e.g.
+`deferred=2 files=14 lines=320 parking_lot=set bar=above`. In an attended run it
+defers the judgment to this body (`deferred-to-skill`). Do both steps below.
+
+In autonomous mode (`--autonomous`) the verb already spawned the judgment leg as
+a headless one-shot - skip this section and go to Step 4.
+
+### 3a. Warm-window triage of this PR's deferral-born nodes
+
+`deferred=N` in the judgment line is the count of this PR's open deferral-born
+nodes (the ones `/pr create` filed from this PR's "Out of scope" section). If
+`N=0`, skip. Otherwise list and decide each:
 
 ```bash
-# Runner-unique, stable-per-runner holder: unique per session (the attended
-# run and the dispatched worker each have their own) yet identical across this
-# session's many short-lived bash sub-invocations, so Step 8 recomputes the
-# SAME string to release. A shared-constant holder would read as an idempotent
-# re-acquire and silently defeat the mutex - keep it session-keyed.
-#
-# `fno claim session-pid` now resolves the durable pid of any harness session
-# (claude/codex/gemini/opencode/agy), so on those it returns the harness pid;
-# it exits 0 with EMPTY stdout only for plain-shell (no harness ancestor). Guard
-# on EMPTINESS, not exit code - an empty suffix would collapse both racing
-# runners to the SAME holder and silently defeat the mutex in exactly the
-# autonomous modes this protects. `$$` is process-unique, so the plain-shell
-# fallback still gives distinct runners distinct holders.
-_SID="${CLAUDE_CODE_SESSION_ID:-}"
-[[ -n "$_SID" ]] || _SID="$(fno claim session-pid 2>/dev/null || true)"
-[[ -n "$_SID" ]] || _SID="$$"
-HOLDER="postmerge:pr-${PR}:${_SID}"
-
-# `reconcile:` routes to the GLOBAL claims root (~/.fno/claims), so the two
-# racing runners - which run from different cwds - see each other's claim.
-# --ttl 15m: the default acquire resolution anchors this claim to the durable
-# harness session pid (claude/codex/gemini/opencode/agy), so on a harness the
-# claim reads live for the whole run; the TTL is the backstop for plain-shell
-# (no durable pid) and for a crash. 15m bounds a run that finishes in 1-3 min.
-if fno claim acquire reconcile:pr-${PR} --holder "$HOLDER" --ttl 15m; then
-  :   # won the race - we own the ritual
-else
-  rc=$?
-  if [[ "$rc" == "1" ]]; then
-    echo "post-merge: PR #${PR} ritual already claimed by another runner; it will complete the ritual. Exiting."
-    exit 0
-  fi
-  # Any other non-zero (transient corrupt/gone-away, validation) - FAIL OPEN.
-  # A claims-subsystem hiccup must not wedge the ritual; the Step-5 marker is
-  # the backstop, and a simultaneous double-failure (the only double-fire
-  # re-open) is vanishingly rare.
-  echo "post-merge: reservation claim errored (exit $rc); proceeding without it (marker guard backstops)." >&2
-fi
-
-# Belt-and-braces: covers a cold re-run whose prior completed ritual's claim TTL
-# has since expired. If this PR's parking-lot marker already exists there is
-# nothing left to do - release our fresh claim and exit BEFORE any mutation.
-# Best-effort resolve here (Step 1 does the fail-loud version); an unresolvable
-# config/path just skips the shortcut and lets Step 1/Step 5 handle it.
-#
-# Resolve against the CANONICAL root, never the worktree (same reason as Step 1):
-# a lane worktree may carry a stale per-worktree parking_lot_path override and/or
-# a real `internal/` dir, either of which would point this marker check at a
-# lane-local file. cd'ing into CANON_ROOT strips the override and joins onto the
-# real vault, so the belt-and-braces sees the SAME file Step 6 writes.
-_RR="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-# --git-common-dir may be relative (bare `.git` / `../..`); resolve to absolute
-# via cd/pwd rather than the git>=2.31-only --path-format=absolute, so this works
-# on every git version. Empty (not a git dir) falls back to the worktree root.
-_GCD="$(git rev-parse --git-common-dir 2>/dev/null || true)"
-if [ -n "$_GCD" ]; then case "$_GCD" in /*) ;; *) _GCD="$(cd "$_GCD" 2>/dev/null && pwd)" ;; esac; fi
-_CR="${_GCD:+$(dirname "$_GCD")}"
-[[ -n "$_CR" ]] || _CR="$_RR"
-_PLREL="$( (cd "$_CR" && fno config get config.post_merge.parking_lot_path) 2>/dev/null || echo "")"
-if [[ -n "$_CR" && -n "$_PLREL" ]] && \
-   bash "${CLAUDE_PLUGIN_ROOT:-$_CR}/skills/pr/scripts/inbox-has-pr.sh" "$_CR/$_PLREL" "$PR" 2>/dev/null; then
-  echo "post-merge: PR #${PR} already recorded (marker present) - releasing claim and exiting."
-  fno claim release reconcile:pr-${PR} --holder "$HOLDER" 2>/dev/null || true
-  exit 0
-fi
+fno backlog find 'deferred from PR #<n>'
 ```
 
-## Step 1: Resolve per-project context (FAIL LOUD, never guess)
+For each open node, offer a one-touch decision (in autonomous mode: log each as
+`undecided` and continue - no regression over today):
+
+- **promote** -> `fno backlog rank <id> --top`
+- **keep** as filed -> no-op
+- **defer** explicitly -> `fno backlog defer <id>`
+- **supersede** -> `fno backlog supersede <id> --by <other-id>`, or
+  `fno backlog done <id>` if moot.
+
+### 3b. Read the merged diff and apply judgment
 
 ```bash
-REPO_ROOT="$(git rev-parse --show-toplevel)" || { echo "post-merge: not in a git repo." >&2; exit 1; }
-
-# Anchor the ritual on the CANONICAL checkout, never the worktree it may run
-# from. A parallel-mode lane worktree can carry a per-worktree
-# `post_merge.parking_lot_path` override (a stale x-cbce seed) and/or a real
-# `internal/` dir instead of the canonical symlink; either would strand the
-# durable parking-lot write in a lane-local file that archive-worktree.sh
-# deletes (x-071c). Reading config from CANON_ROOT strips the local override (the
-# canonical checkout has no config.local.toml layer to apply) and joining onto
-# CANON_ROOT hits the real vault. In a non-worktree checkout CANON_ROOT ==
-# REPO_ROOT and behavior is byte-identical to before. `--git-common-dir` can
-# return a RELATIVE path (a bare `.git` from a plain checkout, or `../..`-style
-# from a worktree); `--path-format=absolute` is git >= 2.31 only, so resolve to
-# absolute with cd/pwd instead - that works on every git version. If it fails to
-# resolve, fall back to REPO_ROOT (a very old git in a plain checkout, where
-# CANON_ROOT == REPO_ROOT anyway).
-GCD="$(git rev-parse --git-common-dir 2>/dev/null || true)"
-if [ -n "$GCD" ]; then case "$GCD" in /*) ;; *) GCD="$(cd "$GCD" 2>/dev/null && pwd)" ;; esac; fi
-CANON_ROOT="${GCD:+$(dirname "$GCD")}"
-[[ -n "$CANON_ROOT" ]] || CANON_ROOT="$REPO_ROOT"
-
-# Read config WITHOUT masking a read failure as "unset". `fno config get`
-# prints an empty line for a known-but-unset key (clean exit 0); it exits
-# NON-ZERO only when fno is missing/too old or config.toml fails to
-# validate. Those are NOT "not opted in" - fail loud with the real reason
-# instead of misreporting them as an unset path. Each read runs in a `cd
-# "$CANON_ROOT"` subshell so the override is stripped at resolution time.
-PM_ERR="$(mktemp)"
-if ! ENABLED="$( (cd "$CANON_ROOT" && fno config get config.post_merge.enabled) 2>"$PM_ERR")"; then
-  echo "post-merge: 'fno config get config.post_merge.enabled' failed (fno missing/too old, or config.toml invalid):" >&2
-  cat "$PM_ERR" >&2; rm -f "$PM_ERR"; exit 1
-fi
-if ! PARKING_LOT_REL="$( (cd "$CANON_ROOT" && fno config get config.post_merge.parking_lot_path) 2>"$PM_ERR")"; then
-  echo "post-merge: 'fno config get config.post_merge.parking_lot_path' failed (fno missing/too old, or config.toml invalid):" >&2
-  cat "$PM_ERR" >&2; rm -f "$PM_ERR"; exit 1
-fi
-rm -f "$PM_ERR"
-
-if [[ "$ENABLED" == "False" || "$ENABLED" == "false" ]]; then
-  echo "post-merge: disabled for this repo (config.post_merge.enabled: false). Nothing to do."
-  exit 0
-fi
-
-if [[ -z "$PARKING_LOT_REL" ]]; then
-  echo "post-merge: config.post_merge.parking_lot_path is unset for this repo." >&2
-  echo "Set it in .fno/config.toml, e.g.:" >&2
-  echo "  config:" >&2
-  echo "    post_merge:" >&2
-  echo "      parking_lot_path: internal/<area>/backlog/parking-lot.md   # repo-relative" >&2
-  exit 1   # FAIL LOUD - do not write to any queue
-fi
-
-# Defense-in-depth path guard. The schema validator already rejects absolute
-# and '..' paths, but a stale installed fno (older schema) might not, so
-# backstop here before joining onto the repo root.
-case "$PARKING_LOT_REL" in
-  /*|~*) echo "post-merge: parking_lot_path must be repo-relative (no leading / or ~); got: $PARKING_LOT_REL" >&2; exit 1 ;;
-esac
-case "/$PARKING_LOT_REL/" in
-  */../*) echo "post-merge: parking_lot_path must not contain a '..' segment; got: $PARKING_LOT_REL" >&2; exit 1 ;;
-esac
-
-PARKING_LOT_PATH="$CANON_ROOT/$PARKING_LOT_REL"
-# Two project ids, because attribution and auto-continue want opposite things:
-#
-# PROJECT (canonical): the REAL project a follow-up node belongs to. `backlog
-# idea` files new nodes under it, so a follow-up filed from a parallel-mode lane
-# worktree lands in the shared backlog instead of orphaning under the lane's
-# ephemeral `<base>-<node>` project.id. Read from CANON_ROOT (the canonical
-# config has no lane override). In a non-lane checkout this equals the lane read.
-PROJECT="$( (cd "$CANON_ROOT" && fno config get config.project.id) 2>/dev/null || echo "")"   # canonical base id; backlog idea auto-detects when empty
-#
-# LANE_PROJECT (current cwd): in a parallel-mode lane worktree this is the lane's
-# ephemeral project.id (worktree-local; x-071c kept project.id in the allowlist).
-# It is load-bearing ONLY for Step 3b's `fno backlog advance --project`: the
-# ephemeral id makes nested auto-continue find no same-project `next`, so the
-# top-level dispatcher stays the sole `max_lanes` authority. Anchoring auto-
-# continue on the canonical id would let each merged lane chain a successor
-# outside the dispatcher and blow the lane cap. In a non-lane checkout
-# LANE_PROJECT == PROJECT, so behavior there is unchanged.
-LANE_PROJECT="$(fno config get config.project.id 2>/dev/null || echo "")"   # lane (worktree-local) id; auto-continue neuter only
+gh pr diff "<n>"
+gh pr view "<n>" --json title,body,mergedAt
 ```
 
-An empty `$PARKING_LOT_REL` here means the key is genuinely unset (the read
-succeeded), so it is the "not opted in" signal - **stop and print the
-actionable message above; do not write prose.** A read *failure* already
-exited non-zero above with the real cause, so the two cases never collapse
-into the same path.
-
-## Failure discipline (applies to every command in Steps 2-6)
-
-Every command in this ritual belongs to exactly one of three classes. The
-classification is the point: a step that fails must never be *readable* as a
-step that had nothing to do.
-
-- **Probe - may fail silent.** A read-only lookup whose degrade path is
-  documented: `gh pr view` metadata, a config read with a default, a claim
-  release (the TTL reaps it). `2>/dev/null || true` is legal here ONLY when the
-  branch that follows handles the empty result and prints why.
-- **Best-effort mutation - non-fatal, never invisible.** `reconcile`,
-  `retro run`, `session add`, `capture add`, `backlog idea`, `advance`,
-  `sync-canonical`, `skill-diff`, `worktree archive`. A bare `|| true` is
-  BANNED here (CI enforces it: `scripts/ci/check-skill-snippets.sh`). The
-  uniform pattern is:
-
-  ```bash
-  # The accumulator MUST be a FILE, not a shell array. Each fenced block below
-  # runs as its own invocation and only the working directory survives between
-  # them, so a `FAILURES=()` array would be re-created empty in every block and
-  # Step 7 would report `none` on a failed run - the exact invisible no-op this
-  # discipline exists to kill. Recompute this path in any block that needs it.
-  FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-
-  <verb> || { echo "post-merge: <verb> failed" >&2; echo "<verb>" >> "$FAILURES_FILE"; }
-  ```
-
-- **Fatal - fail loud, exit non-zero.** Per-project context resolution (Step 1)
-  and anything whose absence invalidates the whole run.
-
-Step 7 then prints exactly one `Failures:` line, `Failures: none` included. The
-line being unconditional is what makes silence distinguishable from success: a
-report *missing* the line means the accumulator was skipped, which is itself a
-detectable failure. In the headless watcher path a non-empty accumulator also
-exits non-zero so the watcher logs it (see "Headless invocation").
-
-Step 2b's swallowed `|| true` was a best-effort mutation misfiled as a probe;
-under this discipline its "No such option" rejection would have surfaced as
-`Failures: backlog session add` instead of a silently skipped stamp (x-f47f).
-
-A *designed skip* is not a failure: a verb that warns and exits 0 because it
-refuses to guess (an ambiguous PR->node match, a backfill slot with no owning
-session) stays OUT of `$FAILURES_FILE`. Only a non-zero exit goes in.
-
-## Step 2: Completion stamp
-
-Close the backlog node whose PR merged outside the ship gate and stamp its
-plan. If you know the node id, scope it; otherwise sweep:
-
-```bash
-# The Step 7 accumulator. A FILE, because shell state does not survive between
-# fenced blocks (see "Failure discipline" above). Truncated here, before the
-# first mutation, so a re-run reports only its own failures.
-FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-: > "$FAILURES_FILE"
-
-# Capture the ids reconcile closed into NODE_IDS (Step 8a reaps each closed
-# node's build-worker row). --json runs the same mutations; only the output
-# shape changes, so the failure flag still reads reconcile's own exit code.
-RECONCILE_ERR="$(mktemp)"
-if ! RECONCILE_JSON="$(fno backlog reconcile --json 2>"$RECONCILE_ERR")"; then
-  echo "post-merge: reconcile FAILED - record in report" >&2
-  cat "$RECONCILE_ERR" >&2
-  echo "backlog reconcile" >> "$FAILURES_FILE";
-fi
-rm -f "$RECONCILE_ERR"
-NODE_IDS="$(printf '%s' "$RECONCILE_JSON" | jq -r '.closed[]?.node_id // empty' 2>/dev/null | tr '\n' ' ')"
-# On the dominant /target ship-gate path the node is closed+stamped BEFORE this
-# ritual runs, so reconcile no-ops and .closed[] is empty. Union in the node the
-# PR already maps to (read-only pr_number scan of the graph) so Step 8a still
-# reaps its build-worker row. Deduped so the out-of-gate case reaps once.
-GJ="$(python3 -c 'from fno.paths import graph_json; print(graph_json())' 2>/dev/null || echo "$HOME/.fno/graph.json")"
-# graph.json is CROSS-PROJECT and a pr_number is unique only WITHIN a repo, so
-# the match must be scoped to this checkout's origin. An unscoped union put a
-# foreign repo's node in NODE_IDS, and Step 8a under `self_reap` would stop+rm
-# that repo's build-worker row - the reap loop's non-live skip bounds the damage
-# but never scopes it, because a finished foreign row is exactly a non-live row.
-# git remote FIRST: it needs no network and no auth, so an offline or
-# unauthenticated run still scopes the scan instead of skipping it wholesale.
-# The HOST must be exactly github.com once the scheme, any user@, and any :port
-# are stripped - a substring match would accept notgithub.com and
-# gitlab.com/mirrors/github.com/o/r, handing back a confident `o/r` that
-# suppresses the gh fallback and can admit a foreign node. Lowercased because
-# the host is case-insensitive and the jq comparison downcases both sides.
-ORIGIN_SLUG="$(git remote get-url origin 2>/dev/null | tr 'A-Z' 'a-z' \
-  | sed -e 's#^[a-z][a-z0-9+.-]*://##' -e 's#^[^/@]*@##' \
-  | sed -n 's#^github\.com\(:[0-9][0-9]*\)\{0,1\}[:/]\(.*\)$#\2#p' \
-  | sed -e 's#/\{1,\}$##' -e 's#\.git$##')"
-# owner/repo exactly: anything deeper is a path we do not understand, and
-# guessing is how a foreign node gets in.
-case "$ORIGIN_SLUG" in
-  */*/*) ORIGIN_SLUG="" ;;
-  ?*/?*) : ;;
-  *) ORIGIN_SLUG="" ;;
-esac
-if [ -z "$ORIGIN_SLUG" ]; then
-  ORIGIN_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
-fi
-if [ -n "$ORIGIN_SLUG" ]; then
-  # `contains` not `test`: a slug may carry regex metacharacters (org/repo.js).
-  # The surrounding /.../pull/ anchors keep a superstring slug from matching.
-  # `strings` not `//`: a hand-edited graph can hold a non-string pr_url, and
-  # ascii_downcase on one aborts the WHOLE program, silently dropping every
-  # legitimate node after it. A url-less node is dropped too - a bare pr_number
-  # names no repo and PR numbers collide across repos, so matching one by cwd
-  # was a guess. Writers now pair pr_url with every pr_number and
-  # `fno backlog maintain` reports whatever it could not backfill, so the drop
-  # here is silent on purpose: it costs one unreaped build-worker row, and the
-  # maintain leg is where an operator sees the anomaly.
-  SCAN_ERR="$(mktemp)"
-  if ! PR_NODES="$(jq -r --argjson pr "$PR" --arg slug "$ORIGIN_SLUG" '
-      .entries[]?
-      | select(.pr_number == $pr)
-      | select(((.pr_url | strings) // "") | ascii_downcase | contains("/" + ($slug | ascii_downcase) + "/pull/"))
-      | .id' "$GJ" 2>"$SCAN_ERR")"; then
-    echo "post-merge: graph pr_number scan FAILED - no graph-derived id reaped" >&2
-    cat "$SCAN_ERR" >&2
-    echo "graph pr_number scan" >> "$FAILURES_FILE"
-  fi
-  rm -f "$SCAN_ERR"
-  # read-loop, not `for PR_NODE in $PR_NODES`: zsh does not word-split a scalar
-  # expansion, so the for-loop form collapses every id into one multiline string
-  # and the dedup below silently never matches.
-  while IFS= read -r PR_NODE; do
-    [ -n "$PR_NODE" ] || continue
-    case " $NODE_IDS " in *" $PR_NODE "*) : ;; *) NODE_IDS="${NODE_IDS}${NODE_IDS:+ }$PR_NODE" ;; esac
-  done <<EOF
-$PR_NODES
-EOF
-else
-  echo "post-merge: origin slug unresolved (no git remote, gh down?); graph pr_number union SKIPPED - reconcile-closed ids still reaped" >&2
-fi
-# full sweep above, or scope it: fno backlog reconcile --node ab-XXXXXXXX --json
-```
-
-`reconcile` is idempotent and a no-op when nothing drifted. If the PR maps to
-no node, that is fine (reconcile closes nothing, exit 0, `NODE_IDS` empty) -
-continue. A non-zero exit is a genuine failure (e.g. corrupt graph.json): keep
-going so the inbox prose still lands, but flag it in the report.
-
-### Step 2a: Reconcile plan-frontmatter status (x-f34f)
-
-Beside `backlog reconcile`, project any canonical-but-stale plan frontmatter
-status from graph truth (the x-76ea class: a plan left `design` while its node
-merged to `done`). Idempotent, best-effort, never blocks the ritual.
-
-```bash
-# Recompute: each fenced block is a fresh invocation and inherits no state.
-FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-fno plan reconcile-status --apply \
-  || { echo "post-merge: plan reconcile-status failed" >&2; echo "plan reconcile-status" >> "$FAILURES_FILE"; }
-```
-
-### Step 2b: Stamp ship provenance (post-merge takeover, x-b6e4)
-
-A post-merge session that runs this ritual is a distinct ship-phase contributor
-from the one that opened the PR. Append a `ship` lifecycle entry for **the node
-this specific `$PR` maps to** - NOT the whole `NODE_IDS` sweep, which may include
-unrelated nodes the unscoped reconcile closed in the same pass. `--pr` resolves
-exactly one same-repo PR-linked node and warns+skips on zero or multiple
-(Locked Decision 9: never fan out):
-
-```bash
-# Recompute: each fenced block is a fresh invocation and inherits no state.
-FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-fno backlog session add --pr-number "$PR" --phase ship \
-  || { echo "post-merge: backlog session add failed" >&2; echo "backlog session add" >> "$FAILURES_FILE"; }
-```
-
-The verb resolves THIS repo's slug itself (git origin, then `gh`), so the
-snippet carries no conditional expansion - the previous
-`${REPO_SLUG:+--repo "$REPO_SLUG"}` form word-split under bash but not under
-zsh, where the CLI received one joined argument, rejected it, and the trailing
-`|| true` swallowed the rejection (x-f47f). Scoping matters because `pr_number`
-is not unique across repos in the cross-project graph (x-d5f9); an unresolvable
-slug degrades to the bare number, which is a safe skip, never a wrong stamp.
-
-Harness + session id default from the ambient identity; idempotent (this exact
-session's `ship` entry is added once). A no-match or ambiguous PR is a *designed
-skip*, so the verb warns and exits 0 - it does not enter `$FAILURES_FILE`. A non-zero
-exit here is a real failure (missing identity, unwritable graph) and must show
-up on the Step 7 `Failures:` line.
-
-## Step 3: Mechanical triage harvest
-
-```bash
-# In autonomous mode add --keep-going so the keep-going engine (x-3360)
-# classifies surviving carve-outs and dispatches follow-up /think or /target work
-# under the firehose ceiling. A no-op unless config.keep_going.enabled is armed.
-FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-# Branch, do not build an argv array: under bash 3.2 + set -u a plain
-# "${arr[@]}" on an empty array errors, and the guarded "${arr[@]+...}" form
-# that fixes THAT passes one EMPTY argument under zsh (measured: bash argc 2,
-# zsh argc 3), which `fno retro run` then rejects as a stray positional.
-if [[ "$AUTONOMOUS" == "1" ]]; then
-  fno retro run --pr-number "$PR" --keep-going \
-    || { echo "post-merge: retro run FAILED" >&2; echo "retro run" >> "$FAILURES_FILE"; }
-else
-  fno retro run --pr-number "$PR" \
-    || { echo "post-merge: retro run FAILED" >&2; echo "retro run" >> "$FAILURES_FILE"; }
-fi
-# Processes any retro/.triage-pending sentinels AND explicitly harvests this
-# PR's carve-outs. The bare `retro run` only fires when a sentinel exists; a
-# manual merge with no node<->PR link drops none, so its carve-outs (now stored
-# under the canonical root, surviving worktree archival) would never be
-# harvested. `--pr "$PR"` closes that gap. If several sessions are in flight,
-# scope it with `--session <sid>` so only this PR's carve-outs are harvested.
-```
-
-## Step 3b: Auto-continue (merge-triggered next dispatch)
-
-Now that the node is closed (Step 2) and its retro is harvested (Step 3),
-hand the merge event to the shared auto-continue verb so the next now-unblocked
-node auto-builds without a manual "kick off the next group?" prompt:
-
-```bash
-# Recompute: each fenced block is a fresh invocation and inherits no state.
-FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-fno backlog advance --closed "$NODE_ID" --project "$LANE_PROJECT" \
-  || { echo "post-merge: auto-continue advance returned non-zero (non-fatal)" >&2
-       echo "backlog advance" >> "$FAILURES_FILE"; }
-```
-
-This is **opt-in and non-fatal**. `advance` gates on `config.auto_continue`
-itself (a no-op `advance_skipped{disabled}` when off, the default), honors a
-live `walker:<root>` (skips during a megawalk), and dedups via the
-`dispatch:<id>` reservation - so calling it here AND from Step 2's `reconcile`
-for the same merge dispatches the successor at most once (AC1-FR). Pass
-`--closed "$NODE_ID"` only if a node id was resolved for this PR; otherwise drop
-the flag (advance reads `fno backlog next` regardless - the flag is just
-race-ordering provenance). `$NODE_ID` is optional; if the skill never resolved
-one, run `fno backlog advance --project "$LANE_PROJECT"` (the lane id, so a lane's
-nested auto-continue stays neutered).
-
-The reconcile in Step 2 already fires advance for a node it closes; this
-explicit call covers the case where the node was already closed before
-`/pr merged` ran (reconcile then no-ops, so the successor would otherwise never
-be dispatched).
-
-## Step 3c: Skill-diff eval-after-merge (close the loop)
-
-If the merged PR is a skill-diff proposer PR, re-score the merged skill against
-the exact corpus items its diff targeted and emit the `skill_diff_eval_closed`
-receipt (the before/after delta). Call it unconditionally - the verb self-guards
-(a plain "not a known proposer PR" no-op for any ordinary PR) and dedups on the
-receipt, so this is safe for every merge and idempotent on a re-run:
-
-```bash
-# Recompute: each fenced block is a fresh invocation and inherits no state.
-FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-fno skill-diff reconcile --pr-number "$PR" \
-  || { echo "post-merge: skill-diff eval-after-merge returned non-zero (non-fatal)" >&2
-       echo "skill-diff reconcile" >> "$FAILURES_FILE"; }
-```
-
-This is the **merge-triggered fast path** (fast feedback on the just-merged
-diff). The periodic proposer tick's bare `fno skill-diff reconcile` full sweep is
-the backstop for a missed merge-trigger; both key idempotency on the
-`skill_diff_eval_closed` receipt, so firing both dispatches at most one re-eval
-per PR. Non-fatal: a re-eval failure leaves the PR detectable as un-closed for
-the next tick and never blocks the rest of the ritual.
-
-## Step 3d: Canonical sync (bring the local env up to the merged HEAD)
-
-Sync the CANONICAL checkout + installed tooling to the merged HEAD so the local
-env is never left stale after a merge (the manual `git checkout main && git pull
-&& fno update && fno restart` becomes a ritual step). Opt-in and self-deduping:
-
-```bash
-# Recompute: each fenced block is a fresh invocation and inherits no state.
-FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-fno pr sync-canonical --pr-number "$PR" \
-  || { echo "post-merge: canonical sync returned non-zero (non-fatal)" >&2
-       echo "pr sync-canonical" >> "$FAILURES_FILE"; }
-```
-
-**Opt-in, non-fatal, exactly-once.** A no-op unless `config.post_merge.sync_command`
-is set (prints `not configured` and exits 0). It ALWAYS targets the canonical
-checkout even when this ritual runs from a worktree (a worktree cannot
-`git checkout main` without hijacking its branch). It gates on
-`config.post_merge.sync_paths` (a docs-only merge skips the sync) and dedups on a
-`.fno/post-merge-synced/<merge-sha>` marker, so running it here AND from a
-merge-detection auto-dispatch for the same merge runs `sync_command` at most
-once. A failure withholds the marker (visible retry next reconcile) and never
-blocks the rest of the ritual.
-
-## Step 3e: Warm-window triage of this PR's deferral-born nodes
-
-The merge lands inside the 3-day window where deferral returns actually happen,
-so this is the cheapest moment to decide the fate of the nodes W1's `/pr create`
-step filed from this PR's "Out of scope" section. Each such node carries
-`deferred from PR:` in its details and (when the ship session knew its node)
-`parent: $NODE_ID`. Collect them by provenance:
-
-```bash
-BORN_JSON="$(fno backlog find 'deferred from PR' -J 2>/dev/null || echo '[]')"
-```
-
-Do NOT scope this by `--project`: `/pr create` files each born node with
-`--parent "$NODE_ID"` but NO explicit project, so its project is whatever the
-ship session's cwd auto-detected - the canonical id from a normal worktree, but
-the ephemeral lane id from a parallel-mode lane. A `--project` narrowing would
-silently miss the lane-born nodes. Provenance + the `parent == "$NODE_ID"` filter
-below is the real (project-agnostic) scope. Do NOT add `-s idea` either: a
-deferral-born node may have already been triaged or moved before the merge
-landed, and those are exactly the ones warm-window triage should still surface.
-
-Keep only the rows that belong to THIS PR: `parent == "$NODE_ID"` when `$NODE_ID`
-is set, else those whose `details` name this PR's branch. If the filtered set is
-empty, **skip this step silently** - most PRs defer nothing (Boundary: zero
-deferral-born nodes is a no-op).
-
-**Attended** (an operator is present, `$AUTONOMOUS != 1`): present each node once
-as `<id> <title>` and offer a one-touch decision, running the chosen `fno backlog`
-verb:
-- **promote** -> `fno backlog rank <id> --top` (float it to run next), optionally with `fno backlog reprioritize <id> -p p1`;
-- **keep** as filed -> no-op;
-- **defer** explicitly -> `fno backlog defer <id>`;
-- **supersede** (already covered / obsolete) -> `fno backlog supersede <id> --by <other-id>`, or `fno backlog done <id>` if it is moot.
-
-**Unattended** (`$AUTONOMOUS == 1`): do NOT prompt. Log each node as `undecided`
-in the report (Step 7) and continue - undecided is exactly today's status quo, no
-regression.
-
-Non-fatal and skippable: a query failure or an unresolved choice records the node
-as undecided and never blocks the ritual's remaining steps.
-
-## Step 4: Best-effort worktree archive
-
-After the mechanical triage steps complete, archive the feature's worktree so
-Conductor-managed trees (`~/conductor/workspaces/<repo>/<name>`) do not linger
-forever. This step is best-effort: any failure leaves the worktree in place and
-continues the ritual.
-
-```bash
-# Resolve the feature's worktree by matching the merged branch against all
-# known worktrees in the canonical checkout.
-# NR==1 (the first --porcelain line is always the main worktree) and reads to
-# EOF rather than `awk ... exit`, which would close the pipe early and SIGPIPE
-# `git worktree list` under `set -euo pipefail` (the bug PR #519 fixed in the
-# archive script). The skill bash runs without pipefail so it is not fatal here,
-# but keep it drain-safe for defense-in-depth.
-CANONICAL_ROOT="$(git worktree list --porcelain | awk 'NR==1 {sub(/^worktree /, ""); print}')"
-# One `gh pr view` for branch + repo. The repo guard (Locked #5) is belt-and-
-# braces: gh already resolves per-repo, but a hand-passed cross-repo PR number
-# must never match a local branch. Compare the PR's owner/repo (from its URL)
-# against this canonical's origin; a mismatch skips resolution entirely.
-PR_META="$(gh pr view "$PR" --json headRefName,url 2>/dev/null || true)"
-BRANCH_NAME=""; PR_NWO=""
-# `select(. != null and . != "")` not `// empty`: jq's `//` treats "" as truthy.
-if [[ -n "$PR_META" ]]; then
-  BRANCH_NAME="$(printf '%s' "$PR_META" | jq -r '.headRefName | select(. != null and . != "")' 2>/dev/null)"
-  PR_NWO="$(printf '%s' "$PR_META" | jq -r '.url | select(. != null and . != "")' 2>/dev/null | sed -E 's#^https?://[^/]+/([^/]+/[^/]+)/pull/.*#\1#')"
-fi
-# origin -> owner/repo. Normalize all three remote forms (scp git@host:o/r,
-# ssh://git@host/o/r, https://host/o/r), else an ssh:// origin would leave the
-# scheme in ORIGIN_NWO and the guard would reject every same-repo PR as foreign.
-ORIGIN_NWO="$(git -C "$CANONICAL_ROOT" remote get-url origin 2>/dev/null | sed -E 's#^(git@[^:]+:|ssh://[^/]+/|https?://[^/]+/)##; s#\.git$##')"
-WORKTREE_PATH=""
-
-# Nested so every outcome (foreign-repo, no-match, inside, missing-script,
-# archived, kept) reports on exactly one line - never two, never silent.
-if [[ -z "$PR_META" ]]; then
-  echo "post-merge: could not fetch PR #$PR metadata (gh unavailable?) - worktree prune skipped."
-elif [[ -n "$PR_NWO" && -n "$ORIGIN_NWO" && "$PR_NWO" != "$ORIGIN_NWO" ]]; then
-  echo "post-merge: PR #$PR is $PR_NWO, not this repo ($ORIGIN_NWO) - worktree prune skipped."
-else
-  if [[ -n "$BRANCH_NAME" && "$BRANCH_NAME" != "null" ]]; then
-    while IFS= read -r wt_path; do
-      wt_branch="$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-      if [[ "$wt_branch" == "$BRANCH_NAME" && "$wt_path" != "$CANONICAL_ROOT" ]]; then
-        WORKTREE_PATH="$wt_path"
-        break
-      fi
-    done < <(git worktree list --porcelain | awk '/^worktree / {sub(/^worktree /, ""); print}' | tail -n +2)
-  fi
-
-  if [[ -z "$WORKTREE_PATH" ]]; then
-    echo "post-merge: no worktree found for branch $BRANCH_NAME - skipped (merged from canonical or already removed)."
-  elif [[ "$(cd "$WORKTREE_PATH" 2>/dev/null && pwd)" == "$(pwd)" ]]; then
-    # Running inside the worktree to archive: removing our own cwd would break
-    # the session. Defer to the standing merged-worktree sweep, run FROM CANONICAL
-    # - the sweep skips its own cwd's worktree (worktree-lifecycle.sh MAIN_DIR),
-    # so run from inside this worktree it would skip the very one to reap. The
-    # merged-branch predicate makes it a sweep candidate; no marker is needed.
-    echo "post-merge: prune deferred: ritual is running inside $WORKTREE_PATH; run 'cd \"$CANONICAL_ROOT\" && fno worktree cleanup --merged --apply' from canonical to reap it."
-  elif [[ ! -f "$CANONICAL_ROOT/scripts/setup/archive-worktree.sh" ]]; then
-    echo "post-merge: archive-worktree.sh not found at $CANONICAL_ROOT/scripts/setup/ - skipped."
-  else
-    echo "post-merge: archiving worktree $WORKTREE_PATH ..."
-    if ! bash "$CANONICAL_ROOT/scripts/setup/archive-worktree.sh" "$WORKTREE_PATH" --yes 2>&1; then
-      echo "post-merge: worktree archive returned non-zero (checks failed or remove failed) - skipped (worktree left in place)."
-      echo "    To archive manually: bash scripts/setup/archive-worktree.sh $WORKTREE_PATH --yes"
-      echo "worktree archive" >> "${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-    fi
-  fi
-fi
-```
-
-Guard rules:
-- **Never use `--force`**. Strict checks (clean tree, no unpushed commits, no live target session) stay ON so a partially-dirty worktree is never silently destroyed.
-- **Never archive the canonical checkout** - the script already refuses, but we also never pass the canonical root as the target.
-- **Session inside the worktree** - never self-remove; print the deferral naming `cd <canonical> && fno worktree cleanup --merged --apply` (the sweep must run from canonical - it skips its own cwd's worktree) and continue.
-- **Foreign-repo PR** - a PR whose owner/repo is not this canonical's origin skips resolution; local worktrees are never considered.
-- **Missing archive script** - older checkouts may not have it; skip silently.
-- **Any exit non-zero from the script** - surface verbatim, mark step "skipped (checks failed)", and continue. This step never blocks the rest of the ritual.
-
-## Step 4b: Backfill slot (warm-context data backfills the PR enables)
-
-A data backfill the just-landed PR makes possible is declared during the build
-as a carve-out: `fno carveout add --kind backfill --need "<precondition>" "<what
-+ command>"`. The generic retro harvest skips `kind:backfill` (Step 3 never
-consumes them), so they SURVIVE here for this slot to handle.
-
-**Scope to THIS PR's session(s) first.** The canonical ledger may hold backfills
-from several concurrent target sessions; this slot must only handle the ones the
-merged PR's build session declared, never another PR's (consuming/filing those
-under the wrong PR/project). The verb does the `ledger.json` join itself:
-
-```bash
-# Recompute: each fenced block is a fresh invocation and inherits no state.
-FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-BACKFILLS="$(fno carveout list --kind backfill --pr-number "$PR" --json)" \
-  || { echo "post-merge: carveout list failed" >&2; echo "carveout list" >> "$FAILURES_FILE"; }
-```
-
-One JSON object: `{pr_number, sessions_resolved, reason, consumable, carveouts}`.
-This replaced a jq pipeline whose `grep -vxE 'null|'` filter ugrep rejects
-outright (x-f47f); that made an unreadable ledger, an unresolvable repo, and a
-genuine no-match all produce the same empty variable, so a PR with a real ledger
-entry silently took the read-only branch. Now each has a distinct `reason`.
-
-Branch on `consumable`, and NEVER on an empty variable:
-
-- **`consumable: true`** - `sessions_resolved` owns this PR. Handle each entry in
-  `carveouts` as below, then `resolve` it.
-- **`consumable: false`** - print `reason` verbatim (e.g. `no ledger entry for
-  PR #480`), list the carve-outs read-only, and `resolve` NOTHING. Consuming
-  another PR's backfill under this one is the failure this branch prevents.
-
-Each entry in `carveouts` is one carve-out
-(`{id, need, description, priority, session_id, ...}`).
-**This slot NEVER auto-runs a backfill on mere detection** (a backfill that lands
-via two paths - operator-run AND this slot - would double-apply):
-
-- **Interactive (you can ask the operator).** Present the `description` (the what
-  + command) and its `--need` precondition, then ask whether to run it now with
-  warm context. On **yes**, confirm the precondition holds (e.g. the migration is
-  applied), run the command, report the outcome. On **no**, file a node (below).
-- **Autonomous / headless** (the `autonomous` token, `claude --print`,
-  `--dangerously-skip-permissions`, `POST_MERGE_NONINTERACTIVE=1`, or no operator
-  to ask): do NOT run anything and do NOT prompt; file a node so the warm-context
-  offer is not lost.
-- **File a node (declined or headless).** Never silently drop it:
-
-  ```bash
-  fno backlog idea "backfill: <concise title>" \
-    --details "Enabled by PR #$PR. Precondition: <need>. Command: <description>." \
-    --priority "<carve-out priority or p2>" \
-    --project "$PROJECT" --cwd "$CANON_ROOT" \
-    || { echo "post-merge: backfill backlog idea FAILED" >&2; echo "backlog idea (backfill)" >> "$FAILURES_FILE"; }
-  ```
-
-Once a backfill is handled (run OR filed as a node), remove it from the ledger so
-a later `/pr merged` never re-offers it - but ONLY in the session-scoped branch
-(in the read-only fallback, leave it for the owning PR's `/pr merged`):
-
-```bash
-# Recompute: each fenced block is a fresh invocation and inherits no state.
-FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-fno carveout resolve <cv-id> \
-  || { echo "post-merge: carveout resolve failed for <cv-id>" >&2
-       echo "carveout resolve" >> "$FAILURES_FILE"; }
-```
-
-**Idempotency / interrupt-safety.** This slot runs BEFORE the Step-5 marker guard
-so it executes on every invocation, including a re-run after an interrupt. A
-backfill is consumed (`resolve`) ONLY once handled; an unhandled one survives in
-the ledger and is re-offered next run. A carve-out with an empty `description` is
-presented as "(no command)" and offered skip/file only - never executed as an
-empty string.
-
-## Step 5: Idempotency check
-
-Before writing prose, ask whether this PR's section already exists:
-
-```bash
-SKILL_DIR="${CLAUDE_PLUGIN_ROOT:-$REPO_ROOT}/skills/pr"
-if bash "$SKILL_DIR/scripts/inbox-has-pr.sh" "$PARKING_LOT_PATH" "$PR"; then
-  echo "post-merge: parking-lot already has a section for PR #$PR - skipping prose (idempotent)."
-  # reconcile + retro run above are already idempotent, so a re-run is a full no-op.
-  exit 0
-fi
-```
-
-(The helper exits 0 when the `<!-- post-merge:pr-<N> -->` marker is already
-present, 1 when it is safe to write.)
-
-## Step 6: Read the merged diff and apply judgment
-
-```bash
-gh pr diff "$PR"                 # or: git show <merge_sha>
-gh pr view "$PR" --json title,body,mergedAt
-```
-
-Read the diff. Decide two things:
-
-**(a) Follow-ups -> `$PARKING_LOT_PATH`.** Two kinds land here; always append, never
-overwrite.
-
-*Narrative (prose timeline).* Append a dated section keyed by the PR number for
-idempotency. The marker comment on the first line is what Step 5 detects:
+The judgment line's `bar=above|below` (files/lines vs the parking-lot bar) tells
+you whether prose is warranted; read the diff regardless and decide with judgment.
+
+**(a) Parking-lot prose -> `$PARKING_LOT_PATH`.** `parking_lot=set` means the
+verb resolved the canonical parking-lot file (resolve it yourself the same way if
+needed: repo-relative path under the canonical root, never the worktree). Append
+a dated section keyed by the PR number - the `<!-- post-merge:pr-<N> -->` marker
+on the first line is the idempotency guard (a re-run is a full no-op):
 
 ```markdown
 
 <!-- post-merge:pr-123 -->
-## Post-merge follow-ups - PR #123 (2026-05-30)
+## Post-merge follow-ups - PR #123 (2026-07-23)
 
-_<pr title>, merged 2026-05-30. Written by /fno:pr merged._
+_<pr title>, merged 2026-07-23. Written by /fno:pr merged._
 
 - A thing to keep an eye on now that this shipped.
 - [ ] a decision/sign-off only the maintainer can make #jc
 ```
 
-**Write the section with an append-only shell redirect, never an Edit-tool
-read-modify-write.** Compose the section in a temp file, then
-`cat "$TMP" >> "$PARKING_LOT_PATH"` (or `printf '%s' "$section" >> "$PARKING_LOT_PATH"`).
-O_APPEND is what makes the shared canonical file safe without a new lock:
-same-PR concurrency is already excluded by the Step 0.5 `reconcile:pr-<N>` mutex,
-and two rituals for *different* PRs each do one atomic append, so at worst their
-self-contained sections interleave in order - never a lost write. An Edit-tool
-read-modify-write, by contrast, reads a stale snapshot and clobbers a concurrent
-append; do not regress it to one. (bg sessions block heredocs, so use `printf`/`cat`,
-not `cat <<EOF`.)
+Write the section with an **append-only redirect** (`printf '%s' "$section" >> "$PARKING_LOT_PATH"`),
+never an Edit-tool read-modify-write. O_APPEND is what makes the shared file
+safe without a lock: same-PR concurrency is already excluded by the verb's mutex
+claim, and two rituals for different PRs each do one atomic append.
 
 Keep the narrative to genuine context: a thing to watch, plus `#jc` items only
-the maintainer can do (a decision, a sign-off, a manual setup) - per your repo's
-maintainer-todo convention. Implementation work does NOT get `#jc`.
+the maintainer can do (a decision, a sign-off, a manual setup). Implementation
+work does NOT get `#jc`.
 
-*Actionable capture-tier items (typed, deduped).* For each small follow-on the
-diff implies that is below a full node (a deferred edge case, a tidy-up), emit a
-TYPED `fu-*` line via `fno backlog capture add` instead of a freeform bullet, so it
-is visible to `fno backlog capture list --by-type` / `tidy` and is never re-filed
-as a duplicate:
+For each small follow-on below a full node, emit a TYPED `fu-*` line instead of a
+freeform bullet so it is deduped and visible to `fno backlog capture list`:
 
 ```bash
-# Recompute: each fenced block is a fresh invocation and inherits no state.
-FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-( cd "$CANON_ROOT" && fno backlog capture add "<concise title>" \
-  --source "PR#$PR" \
-  --why "<one line: what the diff deferred>" \
-  --where "<file/area, optional>" \
-  --priority p2 ) \
-  || { echo "post-merge: capture add FAILED for '<title>'" >&2; echo "backlog capture add" >> "$FAILURES_FILE"; }
+( cd "$(git rev-parse --git-common-dir | xargs dirname)" \
+  && fno backlog capture add "<concise title>" --source "PR#<n>" \
+     --why "<one line>" --where "<file/area>" --priority p2 )
 ```
 
-`capture add` has no `--cwd`, so run it in a `cd "$CANON_ROOT"` subshell (like the
-config reads): it resolves its target file from cwd, and only from CANON_ROOT does
-it strip any lane-local override and land in the same canonical file this
-narrative is written to. That keeps the typed item reachable by
-`fno backlog capture list --by-type` /
-`tidy` / `promote` / `dismiss`, not just written somewhere they cannot see. It
-runs a dedup pre-check: if an open item already covers the same (title + where)
-it returns the existing id and mints nothing (JSON `"deduped": true`), so a
-re-fire never duplicates an item. Supply `--where` whenever two distinct
-follow-ups could share a title: with no `--where` the dedup key is the normalized
-title alone, so a generic title can absorb an unrelated item. Node-worthy work
-still goes to (b).
-
-**(b) Triage-worthy work -> backlog nodes.** For each item worth doing now,
-file a node in the correct project (same judgment you apply by hand):
+**(b) Triage-worthy work -> backlog nodes.** For each item worth doing now, file a
+node in the canonical project:
 
 ```bash
-# Recompute: each fenced block is a fresh invocation and inherits no state.
-FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-fno backlog idea "<concise title>" \
-  --details "<why; references PR #$PR>" \
-  --priority p2 \
-  --project "$PROJECT" \
-  --cwd "$CANON_ROOT" \
-  || { echo "post-merge: backlog idea FAILED for '<title>'" >&2; echo "backlog idea" >> "$FAILURES_FILE"; }
+fno backlog idea "<concise title>" --details "<why; references PR #<n>>" \
+  --priority p2 --project "<project>" --cwd "<canonical-root>"
 ```
 
-**`fno backlog idea` does NOT dedupe** - it appends a fresh node every call.
-The ONLY idempotency barrier is the Step 5 marker guard, which short-circuits
-the entire run (prose AND triage) for a PR already processed. So never run
-Step 6 if Step 5 reported the section already exists; that guard, not
-`backlog idea`, is what prevents duplicate nodes on a re-fire.
+`fno backlog idea` does NOT dedupe - the per-PR marker is the sole barrier
+against duplicate triage nodes on a re-fire, so never run 3b if the marker already
+exists.
 
-### Filing rule: route by provenance (x-f47f)
+### Filing rule: route by provenance
 
-The per-PR marker is the right idempotency scope for **diff-derived** findings -
-a diff is processed exactly once, so (a) and (b) above are correct as written.
-It is the WRONG scope for **environment failures** (a ritual step itself
-breaking), because the same broken verb re-fires on every merge and each merge
-is a fresh PR with a fresh marker. That is how one `fno plan reconcile-status`
-crash accumulated four backlog nodes.
+The per-PR marker is the right idempotency scope for **diff-derived** findings
+(the diff is processed once). It is the WRONG scope for **environment failures**
+(a ritual leg itself breaking re-fires on every merge with a fresh marker).
 
-- **Diff-derived** (a follow-up the merged PR's content implies) -> `capture add`
-  for below-node items, `backlog idea` for node-worthy work, as above. Run
-  `fno backlog find` first (the search-first rule).
-- **Environment failure** (any line in `$FAILURES_FILE`) -> **NEVER `backlog idea`.**
-  It gets the Step 7 `Failures:` line plus exactly one deduped capture item with
-  a mechanically derived key:
+- **Diff-derived** -> `capture add` (below-node) or `backlog idea` (node-worthy),
+  as above. Run `fno backlog find` first (search-before-idea, no dupes).
+- **Environment failure** (any `status=failed` receipt line) -> NEVER
+  `backlog idea`. Emit one deduped capture item keyed on the failing leg name:
 
   ```bash
-  # cd to CANON_ROOT for the same reason as (a): capture add resolves its target
-  # file from cwd, so a lane-local override would hide the item from dedup.
-  ( cd "$CANON_ROOT" && fno backlog capture add "ritual failure: <verb>" \
-      --where "<verb>" --source "PR#$PR" --why "<one line: the stderr tail>" ) \
-    || echo "post-merge: capture add failed for ritual failure: <verb>" >&2
+  ( cd "<canonical-root>" && fno backlog capture add "ritual failure: <step>" \
+      --where "<step>" --source "PR#<n>" --why "<the receipt detail>" )
   ```
 
-  The dedup key is (title + where), and BOTH come from the failing verb name,
-  never from your phrasing - so the Nth ritual hitting the same broken verb
-  returns the existing `fu-*` id (`deduped: true`) instead of minting another
-  clone. `--why` is required and carries the error text; it is outside the key,
-  so a differing message never splits the item. `<verb>` must be non-empty -
-  never file a bare `ritual failure: ` with a blank key.
+  The dedup key is (title + where), both from the failing step name - so the Nth
+  ritual hitting the same broken leg returns the existing `fu-*` id instead of
+  minting a clone. Promotion to a node happens once at triage via
+  `capture promote`.
 
-  Two root causes behind one verb name collapse onto one item. That is the
-  intended trade (one signal per broken verb, recurrence visible on the item,
-  root-cause split happens at triage). Do NOT "fix" it by folding the error text
-  into the key - that resurrects per-phrasing duplicates, which is the bug.
+### 3c. Handoff slot (offer before close)
 
-  Promotion to a real node happens once, at triage, via `capture promote`, by
-  someone who can see the recurrence count.
+- **Attended.** Offer to generate a handoff (the `handoff` skill) covering what
+  merged and open threads. On yes, invoke it; on no, skip.
+- **Autonomous.** Skip silently - the parking-lot prose already captured the
+  durable context.
 
-`backlog idea` stays append-only by design: fuzzy dedup at the node tier would
-silently swallow legitimately distinct nodes. Dedup belongs in the intake
-(capture) tier, which already has it.
+Advisory: a skipped or failed handoff never changes the merge outcome.
 
-## Step 6b: Handoff slot (offer a handoff before close)
+## Step 4: Report
 
-Before the session closes, offer to capture a handoff so end-of-session knowledge
-is a prompted step, not something the operator must remember.
+Summarize in one block: PR number, the verb's receipts (node closed / no node,
+retro harvested, sync/archive outcome), parking-lot section written or skipped,
+nodes/capture-items filed, and any handoff.
 
-- **Interactive.** Offer to generate a handoff document (the `handoff` skill)
-  covering what merged and any open threads. On yes, invoke it; on no, skip.
-- **Autonomous / headless.** Skip silently (never prompt) - there is no operator,
-  and the Step-6 prose follow-ups already captured the durable context.
-
-Advisory and best-effort: a skipped or failed handoff never changes the merge
-outcome or the rest of the ritual.
-
-## Step 7: Report
-
-Summarize what happened in one block: PR number, node closed (or "no node"),
-retro items harvested, inbox section written (or skipped-idempotent), the
-ids/titles of any backlog nodes filed, and the backfill slot outcome (ran /
-filed-as-node <id> / none declared).
-
-**The report MUST carry exactly one `Failures:` line, always.** Not "when
-something failed" - always, including the literal `Failures: none` on a clean
-run. That is what makes a partial run unreadable as a clean success: the line's
-*absence* means the accumulator was skipped, which is itself detectable, whereas
-a report that simply omits failures is indistinguishable from one that had none.
+**Carry exactly one `Failures:` line, always** - including the literal
+`Failures: none` on a clean run. Derive it from the verb's `status=failed`
+receipt lines (a partial run must never read as clean):
 
 ```bash
-# Recompute the path: this block is a fresh invocation and inherits no state.
-FAILURES_FILE="${TMPDIR:-/tmp}/fno-post-merge-failures-$PR"
-if [[ -s "$FAILURES_FILE" ]]; then
-  # One line, comma-separated, in execution order. Never split across lines.
-  printf 'Failures: %s\n' "$(paste -sd, - < "$FAILURES_FILE" | sed 's/,/, /g')"
-else
-  echo "Failures: none"
-fi
+# From the verb's stdout, the failed steps (empty -> none).
+FAILS="<comma-separated failed step= lines, or 'none'>"
+printf 'Failures: %s\n' "$FAILS"
 ```
 
-In the headless watcher path, exit non-zero when `$FAILURES_FILE` is non-empty
-so the watcher logs it.
+In the headless watcher path, exit non-zero when any leg failed so the watcher
+logs it.
 
-Then file the environment failures - **and only as capture items** (Step 6's
-provenance rule below): for each line in `$FAILURES_FILE`, one deduped
-`fno backlog capture add "ritual failure: <verb>" --where "<verb>"`. Never a
-`backlog idea` node.
-
-## Step 8a: Reap the original build worker's agent-view row
-
-The `/target` build that shipped this PR left its own `target-<node>-<slug>` row
-in `fno agents list`. The daemon retires that worker's *process* after ~1h idle,
-but the *row* lingers until then, so the agent view accumulates one dead
-`target-*` row per merge. This reaps it, gated behind the same
-`config.post_merge.self_reap` opt-in that governs Step 8's self-clean.
-
-Run this BEFORE Step 8: the build worker is a *different* session with its own
-row, so it can be reaped while this ritual is still alive to report it; Step 8's
-self-clean can tear down the ritual's own session, so it must run last.
-
-```bash
-# NODE_IDS: the node id(s) reconcile closed for this PR (from Step 2). Empty
-# when the PR mapped to no node -> the whole step is skipped. Best-effort:
-# every failure is logged and stepped past, never fatal.
-if [[ -n "${NODE_IDS:-}" ]]; then
-  # Same coercer as Step 8: default OFF; only an explicit affirmative auto-reaps.
-  SELF_REAP="$(fno config get config.post_merge.self_reap 2>/dev/null || true)"
-  REAP_ON=0
-  case "$(printf '%s' "$SELF_REAP" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
-    true|1|yes|on) REAP_ON=1 ;;
-  esac
-
-  for NODE in $NODE_IDS; do
-    # Resolve by the purpose-built name convention target-<node>-<slug>. NOT by
-    # node claim: a finished worker has already released its node:<id> claim, so
-    # only the row and its name survive. Skip `status == "live"` rows - a node id
-    # can be re-used by a fresh re-dispatch or a G4 de-stub, and killing an
-    # actively running worker would be data loss.
-    ROWS="$(fno agents list --json 2>/dev/null \
-      | jq -r --arg n "target-${NODE}-" \
-          '.agents[]? | select(.name | startswith($n))
-                      | select(.status != "live")
-                      | .name' 2>/dev/null || true)"
-    [[ -z "$ROWS" ]] && continue   # no lingering row -> skip silently
-
-    while IFS= read -r ROW; do
-      [[ -z "$ROW" ]] && continue
-      if [[ "$REAP_ON" == "1" ]]; then
-        echo "post-merge: reaping build worker row $ROW (node $NODE)."
-        # STOP before RM - `claude rm` on a live agent orphans its supervisor.
-        fno agents stop "$ROW" 2>&1 || echo "post-merge: 'fno agents stop $ROW' non-zero (continuing)."
-        fno agents rm   "$ROW" 2>&1 || echo "post-merge: 'fno agents rm $ROW' non-zero - clear it manually."
-      else
-        echo "post-merge: build worker row $ROW (node $NODE) still in 'fno agents list'. Clear when ready:"
-        echo "    fno agents stop $ROW && fno agents rm $ROW"
-      fi
-    done <<< "$ROWS"
-  done
-fi
-```
-
-**Why reuse `self_reap` (no new flag).** Reaping a finished merged build worker's
-row is the same action class, risk profile, and default-off caution as Step 8's
-self-clean - a second config field would mean a registry FIELD_META entry + docs
-regen for zero added expressiveness.
-
-## Step 8: Self-clean (agent-view row)
-
-A background `/fno:pr merged` worker leaves a finished row in `claude agents`:
-the daemon retires the *process* after ~1h idle, but the *row* lingers until
-reaped, so the agent view accumulates one dead row per merge. This step lets the
-worker clear its own row.
-
-Release our reservation now that the durable Step-6 marker is written - it is
-the barrier for any later re-run, so the claim's job is done. Best-effort and
-non-fatal: release matches on our own holder, so it drops only our claim and
-never a successor's TTL-expired re-acquire. Skipping it just lets the claim
-linger to TTL expiry.
-
-```bash
-# Recompute the SAME holder Step 0.5 used (guard on emptiness, not exit code).
-_SID="${CLAUDE_CODE_SESSION_ID:-}"
-[[ -n "$_SID" ]] || _SID="$(fno claim session-pid 2>/dev/null || true)"
-[[ -n "$_SID" ]] || _SID="$$"
-HOLDER="postmerge:pr-${PR}:${_SID}"
-fno claim release reconcile:pr-${PR} --holder "$HOLDER" 2>/dev/null \
-  || echo "post-merge: reservation release skipped (already gone / holder mismatch); TTL will reap." >&2
-```
-
-Run LAST, after the Step-7 report is already emitted - the report must reach the
-operator before the session can tear itself down:
-
-```bash
-# Only a daemon-managed background session has a row to reap. Interactive runs
-# and the headless `claude --print` watcher have no CLAUDE_JOB_DIR / no
-# agent-view row, so they skip this silently.
-if [[ -n "${CLAUDE_JOB_DIR:-}" ]]; then
-  JOB_ID="$(basename "$CLAUDE_JOB_DIR")"
-  # Default OFF. A malformed/absent value - or an installed fno too old to know
-  # the key - reads empty and is treated as off; only an explicit affirmative
-  # auto-reaps. (Mirrors the config.post_merge.self_reap coercer.)
-  SELF_REAP="$(fno config get config.post_merge.self_reap 2>/dev/null || true)"
-  case "$(printf '%s' "$SELF_REAP" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
-    true|1|yes|on)
-      echo "post-merge: self_reap on - removing this worker's agent-view row ($JOB_ID)."
-      # Best-effort. Step 4 already archived the conductor worktree; `claude rm`
-      # only removes a Claude-created `.claude/worktrees/` tree and KEEPS any
-      # tree with uncommitted changes (printing its path), so this never loses
-      # work. The call may tear down the session mid-command - fine, the report
-      # is already delivered.
-      claude rm "$JOB_ID" 2>&1 \
-        || echo "post-merge: 'claude rm $JOB_ID' returned non-zero (row left in place) - clear it manually."
-      ;;
-    *)
-      echo "post-merge: ritual complete. This worker's row will linger in 'claude agents'."
-      echo "    Clear it when ready (removes the row; keeps the transcript + any dirty worktree):"
-      echo "    claude rm $JOB_ID"
-      echo "    (Set config.post_merge.self_reap: true to auto-clear finished /fno:pr merged workers.)"
-      ;;
-  esac
-fi
-```
-
-**Why opt-in (default off).** Auto-removing an agent-view row is the same action
-that, applied indiscriminately to every finished session, sweeps up threads the
-operator was still using. Scoped to a finished `/fno:pr merged` worker the risk
-is far lower - its PR is merged and the ritual is done - but the default stays
-print-the-command so rows clear on the operator's cadence. Flip
-`config.post_merge.self_reap: true` once trusted.
+Then file the environment failures as deduped capture items only (3b's provenance
+rule), never as `backlog idea` nodes.
 
 ## Edge cases
 
-- **PR maps to no backlog node** - `reconcile` closes nothing; still write the
-  inbox section and triage. Not an error.
-- **Cross-project / multiple nodes** - `reconcile` handles per node; write one
-  inbox section per repo (this skill operates on the current repo's cwd).
-- **Re-run for the same PR** - Step 5's marker guard short-circuits the PROSE
-  and TRIAGE (Step 6) before any `backlog idea` fires. `reconcile` and
-  `retro run` are independently idempotent; `backlog idea` is NOT, so the
-  marker guard is the sole barrier against duplicate triage nodes - do not
-  bypass it. The Step-4b backfill slot runs BEFORE the marker guard, so it is
-  NOT short-circuited: it re-offers any backfill still surviving in the ledger
-  (one already handled was `resolve`-d away, so it does not re-appear).
-- **Backfill carve-out with no command** - present it as "(no command)" and
-  offer skip/file only; never execute an empty string (Step 4b).
-- **Cold catch-up (old merge)** - safe; the section marker still guards dupes.
-- **Self-reap on a re-run** - Step 5's marker guard `exit 0`s before Step 8, so a
-  re-run never re-reaps. That is fine: the first run already removed the row (if
-  `self_reap` was on), and a re-run that short-circuits has no new row to clear.
-
-## Headless invocation
-
-Phase 2's per-repo watcher fires this skill headlessly after a web-button or
-`gh pr merge` merge:
-
-```bash
-claude --print --dangerously-skip-permissions "/fno:pr merged <pr>"
-```
-
-So every step must be non-interactive and safe to re-run. Never prompt; on
-missing config, fail loud (Step 1) and exit non-zero so the watcher logs it. In
-this path the Step-4b backfill slot files each backfill as a backlog node (it
-never runs one), and the Step-6b handoff slot is skipped. The Step-8 self-clean
-also no-ops: `claude --print` has no `CLAUDE_JOB_DIR` / agent-view row to reap.
+- **PR maps to no node** - `reconcile` closes nothing; still do 3b. Not an error.
+- **Re-run for the same PR** - the verb's legs are individually idempotent, and
+  the `<!-- post-merge:pr-<N> -->` marker guards the judgment prose/triage. Do
+  not re-run 3b if the marker already exists.
+- **Empty diff (merge commit with no file changes)** - the verb reports
+  `bar=below`; treat as below the parking-lot bar, never an error.
+- **Run from inside the merged PR's own worktree** - the archive leg defers to
+  `fno worktree cleanup --merged --apply` (run from canonical); it never
+  self-removes.
 
 ## See also
 
-- Design + locked decisions: `internal/fno/design/2026-05-30-auto-post-merge-ritual.md`
-- Post-ship-window design (backfill/handoff slots, dropped Step-0 quiesce): `internal/fno/plans/2026-06-02-target-post-ship-phase.md`
-- Reused verbs: `fno backlog reconcile`, `fno retro run`, `fno backlog idea`, `fno carveout list`, `fno carveout resolve`.
+- The verb: `fno pr ritual` (`cli/src/fno/pr/_ritual.py`) and its command in
+  `cli/src/fno/pr/cli.py`.
+- Plan + locked decisions:
+  `internal/fno/plans/20260723-post-merge-mechanical-core-x-bbde.md`.
+- Design + locked decisions (original ritual):
+  `internal/fno/design/2026-05-30-auto-post-merge-ritual.md`.
+- Reused verbs: `fno backlog reconcile`, `fno retro run`, `fno backlog advance`,
+  `fno skill-diff reconcile`, `fno pr sync-canonical`, `fno backlog find`,
+  `fno backlog capture add`, `fno carveout`, `fno agents spawn`.
 - The cross-project message bus (different thing): `skills/mail/SKILL.md`.

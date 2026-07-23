@@ -12,6 +12,8 @@ dependency. Each module preserves the bash exit-code / output contract.
 from __future__ import annotations
 
 import enum
+import os
+from typing import Optional
 
 import typer
 
@@ -141,4 +143,35 @@ def rebase(ctx: typer.Context) -> None:
     from fno.pr import _rebase
 
     rc = _rebase.run_rebase(list(ctx.args))
+    raise typer.Exit(code=rc)
+
+
+@pr_app.command(
+    "ritual",
+    hidden=True,
+    help=(
+        "Mechanical core of the post-merge ritual (x-bbde). Runs the CLI-only "
+        "steps as one idempotent sequence, printing a per-leg receipt line "
+        "(step=<name> status=<ok|skipped|failed> detail=...). Non-zero if any "
+        "leg failed; no leg is swallowed. The judgment residue (deferral triage "
+        "+ parking-lot prose) is done inline by an attended caller, or spawned "
+        "as one headless one-shot under --autonomous (never bg). Hidden: the "
+        "`fno pr merged` skill is the attended front door."
+    ),
+)
+def ritual(
+    pr_number: Optional[int] = typer.Argument(
+        None, help="Merged PR number; omitted -> most recently merged PR for this repo."
+    ),
+    autonomous: bool = typer.Option(
+        False, "--autonomous",
+        help="No operator present: spawn the judgment leg as one headless one-shot "
+             "when its inputs are non-empty. Mirrors the POST_MERGE_NONINTERACTIVE=1 env.",
+    ),
+) -> None:
+    from fno.pr import _ritual
+
+    if os.environ.get("POST_MERGE_NONINTERACTIVE", "") == "1":
+        autonomous = True
+    rc = _ritual.run_ritual(pr_number, autonomous)
     raise typer.Exit(code=rc)
