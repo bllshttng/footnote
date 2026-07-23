@@ -1467,17 +1467,26 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         normalized.push(tok.clone());
     }
 
+    // x-6de8: the harness axis has a canonical spelling (--harness/-H) and a
+    // deprecated alias (--provider/-p). Track them separately so a conflicting
+    // pair fails closed (matching Python cmd_spawn) instead of the param map's
+    // last-write-wins silently launching under the wrong harness.
+    let mut harness_val: Option<String> = None;
+    let mut provider_alias_val: Option<String> = None;
     let mut it = normalized.into_iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
             // --harness/-H is the canonical CLI-binary axis (aligns spawn with the
             // --harness vocabulary used everywhere else in fno); --provider/-p is
-            // the deprecated alias. Both write the same `provider` param the
-            // daemon reads. -H no longer means headless (that is --substrate
-            // headless / --headless / --once now); freeing the letter is the
-            // x-6de8 surface redesign.
-            "--harness" | "-H" | "--provider" | "-p" => {
-                params.insert("provider".into(), str_arg(&mut it, "--harness/--provider")?);
+            // the deprecated alias. Kept in separate slots and reconciled after
+            // the loop so a conflict fails closed. -H no longer means headless
+            // (that is --substrate headless / --headless / --once now); freeing
+            // the letter is the x-6de8 surface redesign.
+            "--harness" | "-H" => {
+                harness_val = Some(it.next().ok_or("--harness needs a value")?);
+            }
+            "--provider" | "-p" => {
+                provider_alias_val = Some(it.next().ok_or("--provider needs a value")?);
             }
             "--workspace" | "--squad" | "-s" => {
                 params.insert("squad".into(), str_arg(&mut it, "-s/--workspace")?);
@@ -1689,6 +1698,22 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             _ => positional.push(a),
         }
+    }
+
+    // Reconcile the harness axis (x-6de8): --harness/-H wins over the deprecated
+    // --provider/-p; both present with different values is a hard error, matching
+    // the Python cmd_spawn conflict guard and the documented contract. This runs
+    // on the installed-Rust non-pane lane, which never re-execs Python cmd_spawn.
+    if let (Some(h), Some(p)) = (&harness_val, &provider_alias_val) {
+        if h != p {
+            return Err(format!(
+                "--harness {h:?} conflicts with --provider {p:?}; pass one \
+                 (--provider is the deprecated alias for --harness/-H)"
+            ));
+        }
+    }
+    if let Some(v) = harness_val.or(provider_alias_val) {
+        params.insert("provider".into(), Value::String(v));
     }
 
     if let Some(av) = argv {
@@ -3446,6 +3471,38 @@ mod tests {
                 "{flag}: no headless substrate side effect"
             );
         }
+    }
+
+    #[test]
+    fn spawn_conflicting_harness_and_provider_is_rejected() {
+        // x-6de8 codex P1: on the installed-Rust non-pane lane (which never
+        // re-execs Python cmd_spawn), a canonical/alias mismatch must fail closed
+        // rather than silently last-write-wins under the wrong harness.
+        let args = vec![
+            "wk".to_string(),
+            "--harness".to_string(),
+            "codex".to_string(),
+            "--provider".to_string(),
+            "claude".to_string(),
+            "--substrate".to_string(),
+            "headless".to_string(),
+        ];
+        let err = build_request("spawn", &args).unwrap_err();
+        assert!(err.contains("conflicts with --provider"), "got: {err}");
+
+        // Same value on both is not a conflict; harness wins, provider set.
+        let ok = vec![
+            "wk".to_string(),
+            "--harness".to_string(),
+            "codex".to_string(),
+            "--provider".to_string(),
+            "codex".to_string(),
+        ];
+        let (_m, params) = build_request("spawn", &ok).unwrap();
+        assert_eq!(
+            params.get("provider").and_then(|v| v.as_str()),
+            Some("codex")
+        );
     }
 
     #[test]
