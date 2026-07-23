@@ -2547,15 +2547,11 @@ fn rendered_status_from_truth(truth: Option<&str>) -> &'static str {
 }
 
 fn registry_truth_handle(entry: &RegistryEntry) -> String {
-    if entry.harness_name() != "claude" {
-        if let Some(session_id) = entry.harness_session_id.as_deref() {
-            return session_id.chars().take(8).collect();
-        }
+    if let Some(session_id) = entry.harness_session_id.as_deref() {
+        return session_id.to_string();
     }
     if !entry.short_id.is_empty() {
         entry.short_id.clone()
-    } else if let Some(session_id) = entry.harness_session_id.as_deref() {
-        session_id.chars().take(8).collect()
     } else {
         entry.name.clone()
     }
@@ -5713,7 +5709,7 @@ done
         });
 
         assert!(response.result().is_some());
-        assert_eq!(seen.into_inner(), vec!["abc12345"]);
+        assert_eq!(seen.into_inner(), vec!["uuid-abc12345"]);
         std::fs::remove_dir_all(home.root()).ok();
     }
 
@@ -5738,7 +5734,10 @@ done
         });
 
         assert!(response.result().is_some());
-        assert_eq!(seen.into_inner(), vec!["019f8ff2"]);
+        assert_eq!(
+            seen.into_inner(),
+            vec!["019f8ff2-1111-2222-3333-444444444444"]
+        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 
@@ -5762,7 +5761,10 @@ done
         });
 
         assert!(response.result().is_some());
-        assert_eq!(seen.into_inner(), vec!["019f8ff2"]);
+        assert_eq!(
+            seen.into_inner(),
+            vec!["019f8ff2-1111-2222-3333-444444444444"]
+        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 
@@ -5787,7 +5789,10 @@ done
         });
 
         assert!(response.result().is_some());
-        assert_eq!(seen.into_inner(), vec!["bbbbbbbb"]);
+        assert_eq!(
+            seen.into_inner(),
+            vec!["bbbbbbbb-1111-2222-3333-444444444444"]
+        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 

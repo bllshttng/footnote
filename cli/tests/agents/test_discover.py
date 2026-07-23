@@ -773,7 +773,7 @@ def test_resolver_only_registered_id_skips_transcript_store_scan(
     )
 
     match, _suggestions = discover.resolve_or_suggest(
-        "019f48e1",
+        "019f48e1-registered",
         registry_path=registry,
         require_alive=False,
     )
@@ -781,6 +781,94 @@ def test_resolver_only_registered_id_skips_transcript_store_scan(
     assert match is not None
     assert match.session_id == "019f48e1-registered"
     assert match.agent == "codex"
+
+
+def test_resolver_only_registered_claude_carries_exact_transcript(tmp_path):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    session_id = "c655c326-1111-2222-3333-444455556666"
+    write_registry(
+        [
+            AgentEntry(
+                name="registered-claude",
+                harness="claude",
+                harness_session_id=session_id,
+                short_id="c655c326",
+                cwd="/repo/one",
+                log_path="/tmp/claude.log",
+            )
+        ],
+        path=registry,
+    )
+    transcript = _write_transcript(
+        tmp_path / "projects", cwd="/repo/one", session_id=session_id
+    )
+
+    match, _suggestions = discover.resolve_or_suggest(
+        session_id,
+        registry_path=registry,
+        projects_dir=tmp_path / "projects",
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.transcript_path == str(transcript)
+
+
+def test_resolver_only_full_claude_id_needs_no_registry(tmp_path):
+    session_id = "c655c326-1111-2222-3333-444455556666"
+    transcript = _write_transcript(
+        tmp_path / "projects", cwd="/repo/one", session_id=session_id
+    )
+
+    match, _suggestions = discover.resolve_or_suggest(
+        session_id,
+        registry_path=tmp_path / "missing-registry.json",
+        projects_dir=tmp_path / "projects",
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.agent == "claude"
+    assert match.transcript_path == str(transcript)
+
+
+def test_resolver_only_short_collision_checks_every_store(tmp_path):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="registered-codex",
+                harness="codex",
+                harness_session_id="deadbeef-registry",
+                cwd="/registry",
+                log_path="/tmp/codex.log",
+            )
+        ],
+        path=registry,
+    )
+    codex = tmp_path / "codex"
+    _write_codex_rollout(
+        codex, session_id="deadbeef-transcript", cwd="/transcript"
+    )
+
+    match, suggestions = discover.resolve_or_suggest(
+        "deadbeef",
+        registry_path=registry,
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=lambda _cwd: None,
+        require_alive=False,
+    )
+
+    assert match is None
+    assert suggestions == ["deadbeef-registry", "deadbeef-transcript"]
 
 
 @pytest.mark.parametrize(

@@ -104,7 +104,7 @@ def _transcript_age_s(
     ``(session_id, time_created)``), so an opencode session can go ``stalled``
     like any other. None only when nothing resolves."""
     try:
-        if agent == "codex" and transcript_path is not None:
+        if agent in {"claude", "codex"} and transcript_path is not None:
             mtime = transcript_path.stat().st_mtime
         else:
             from fno.provenance.resolver import resolve_transcript

@@ -41,7 +41,10 @@ chmod +x "$tmp/bin/claude"
 
 CLAUDE_UUID=c655c326-1111-2222-3333-444455556666
 TWIN_UUID=c655c326-9999-8888-7777-666655554444
-printf '{"type":"summary"}\n{"type":"user","cwd":"/repo/one"}\n' \
+printf '%s\n%s\n%s\n' \
+  '{"type":"summary"}' \
+  '{"type":"user","cwd":"/repo/one"}' \
+  '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"<promise>done</promise>"}]}}' \
   > "$tmp/projects/-repo-one/$CLAUDE_UUID.jsonl"
 
 export HOME="$tmp/home"
@@ -163,7 +166,11 @@ err=$("$BIN" logs c655c326 2>&1); rc=$?
 grep -q "no agent matching" <<<"$err" || fail "empty-object heal did not degrade: $err"
 
 rm -f "$REGISTRY"
-stub_fno "echo '[setup] path migration complete'; echo '$ROW'; exit 0"
+stub_fno "case \"\$*\" in
+  *'agents truth'*) echo '{\"state\":\"done\"}' ;;
+  *) echo '[setup] path migration complete'; echo '$ROW' ;;
+esac
+exit 0"
 out=$("$BIN" resume c655c326 --print-command 2>&1); rc=$?
 [[ $rc -eq 0 ]] || fail "banner ahead of the row broke the parse (exit $rc): $out"
 grep -q -- "--resume $CLAUDE_UUID" <<<"$out" || fail "banner case lost the row: $out"

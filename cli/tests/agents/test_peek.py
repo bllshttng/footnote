@@ -294,6 +294,26 @@ def test_codex_rollout_exact_filename_avoids_history_meta_reads(
     assert len(reads) == 1
 
 
+def test_codex_rollout_exact_filename_prefers_newest_duplicate(tmp_path):
+    paths = []
+    for year, mtime in (("2025", 1000), ("2026", 2000)):
+        day = tmp_path / year / "07" / "23"
+        day.mkdir(parents=True)
+        path = day / f"rollout-{year}-07-23T00-00-00-duplicate-session.jsonl"
+        path.write_text(
+            json.dumps({
+                "type": "session_meta",
+                "payload": {"id": "duplicate-session", "cwd": "/x"},
+            })
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(path, (mtime, mtime))
+        paths.append(path)
+
+    assert _codex_rollout_path("duplicate-session", tmp_path) == paths[1]
+
+
 def test_peek_status_stream_dual_envelope(tmp_path):
     """AC3-EDGE: both {type,data} and {kind,..flat} status events render; a
     neither-shape record is skipped (fast-path stays present, not partial)."""

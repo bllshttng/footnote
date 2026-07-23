@@ -1309,7 +1309,7 @@ where
     let truth_state = if socket_live || short_id.is_empty() {
         None
     } else {
-        truth_fn(short_id)
+        truth_fn(uuid)
     };
     let live = socket_live
         || matches!(
@@ -1411,7 +1411,7 @@ where
     if socket_live {
         return None;
     }
-    if !matches!(truth_fn(short_id).as_deref(), Some("done" | "stalled")) {
+    if !matches!(truth_fn(uuid).as_deref(), Some("done" | "stalled")) {
         return None;
     }
     Some(format!(

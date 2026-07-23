@@ -159,11 +159,16 @@ def _codex_rollout_path(
 
     root = codex_sessions_dir or default_codex_sessions_dir()
 
+    exact: list[tuple[float, Path]] = []
     try:
-        exact = list(root.rglob(f"rollout-*{session_id}.jsonl"))
+        for path in root.rglob(f"rollout-*{session_id}.jsonl"):
+            try:
+                exact.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
     except OSError:
-        exact = []
-    for path in exact:
+        pass
+    for _mtime, path in sorted(exact, key=lambda item: item[0], reverse=True):
         meta = _codex_meta(path)
         if meta is not None and meta[0] == session_id:
             return path
@@ -406,6 +411,10 @@ def recent_records(
     command turns that into a legible exit-1, distinct from the exit-13 miss).
     """
     if agent == "claude":
+        if transcript_path is not None:
+            return _records_from_jsonl(
+                transcript_path, n, _parse_claude_record
+            )
         from fno.provenance.resolver import resolve_transcript
 
         rt = resolve_transcript(

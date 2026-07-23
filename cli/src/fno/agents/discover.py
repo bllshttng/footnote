@@ -1066,16 +1066,21 @@ def resolve_or_suggest(
         registry_matches = [
             row
             for row in _discover_from_registry(registry_path)
-            if handle
-            and handle
-            in {
-                row["session_id"],
-                row["short_id"],
-                canonical_handle(row["session_id"]),
-            }
+            if handle and handle == row["session_id"]
         ]
         if len(registry_matches) == 1:
             row = registry_matches[0]
+            transcript_path = None
+            if row["agent"] == "claude":
+                try:
+                    transcript_path = next(
+                        (projects_dir or default_projects_dir()).glob(
+                            f"*/{row['session_id']}.jsonl"
+                        ),
+                        None,
+                    )
+                except OSError:
+                    pass
             return DiscoveredSession(
                 session_id=row["session_id"],
                 short_id=row["short_id"],
@@ -1085,7 +1090,32 @@ def resolve_or_suggest(
                 project=None,
                 status=row["status"],
                 agent=row["agent"],
+                transcript_path=(
+                    str(transcript_path) if transcript_path is not None else None
+                ),
             ), []
+
+        if handle and len(handle) > 8:
+            try:
+                claude_matches = list(
+                    (projects_dir or default_projects_dir()).glob(
+                        f"*/{handle}.jsonl"
+                    )
+                )
+            except OSError:
+                claude_matches = []
+            if len(claude_matches) == 1:
+                return DiscoveredSession(
+                    session_id=handle,
+                    short_id=canonical_handle(handle),
+                    handle=canonical_handle(handle),
+                    pid=0,
+                    cwd="",
+                    project=None,
+                    status=None,
+                    agent="claude",
+                    transcript_path=str(claude_matches[0]),
+                ), []
 
     discovery_kwargs = {
         "sessions_dir": sessions_dir,
@@ -1104,13 +1134,21 @@ def resolve_or_suggest(
             **discovery_kwargs,
             resolve_metadata=False,
         )
-        for session in bare_sessions:
-            if handle and handle in {
+        bare_exact = [
+            session
+            for session in bare_sessions
+            if handle
+            and handle
+            in {
                 session.session_id,
                 session.short_id,
                 canonical_handle(session.session_id),
-            }:
-                return session, []
+            }
+        ]
+        if len(bare_exact) == 1:
+            return bare_exact[0], []
+        if len(bare_exact) > 1:
+            return None, sorted(session.session_id for session in bare_exact)
 
     sessions = discover_live_sessions(
         **discovery_kwargs,
@@ -1123,13 +1161,21 @@ def resolve_or_suggest(
     # nothing generates it any more, so a caller still passing one is a bug, and
     # translating it silently would hide the bug forever.
     if not retired:
-        for s in sessions:
-            if handle and (
+        exact = [
+            s
+            for s in sessions
+            if handle
+            and (
                 s.handle == handle
+                or s.session_id == handle
                 or s.short_id == handle
                 or canonical_handle(s.session_id) == handle
-            ):
-                return s, []
+            )
+        ]
+        if len(exact) == 1:
+            return exact[0], []
+        if len(exact) > 1:
+            return None, sorted(s.session_id for s in exact)
     import difflib
 
     candidates: list[str] = []
