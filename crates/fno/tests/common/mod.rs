@@ -58,10 +58,12 @@ impl Scratch {
     #[allow(dead_code)]
     pub fn isolate_command(&self, cmd: &mut std::process::Command) {
         let home = self.0.join("home");
-        cmd.env_remove("FNO_SESSION")
-            .env_remove("FNO_PANE")
-            .env_remove("FNO_PANE_EPOCH")
-            .env("HOME", &home)
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("FNO_") {
+                cmd.env_remove(key);
+            }
+        }
+        cmd.env("HOME", &home)
             .env("USERPROFILE", &home)
             .env("FNO_MUX_DIR", &self.0)
             .env("FNO_AGENTS_HOME", self.0.join("iso-agents"))
@@ -77,8 +79,11 @@ impl Scratch {
 
     fn isolate_pty_command(&self, cmd: &mut CommandBuilder) {
         let home = self.0.join("home");
-        cmd.env_remove("FNO_PANE");
-        cmd.env_remove("FNO_PANE_EPOCH");
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("FNO_") {
+                cmd.env_remove(key);
+            }
+        }
         cmd.env("HOME", &home);
         cmd.env("USERPROFILE", &home);
         cmd.env("FNO_MUX_DIR", &self.0);
@@ -107,7 +112,28 @@ impl Drop for Scratch {
         // ClientHarness autospawns a setsid server the harness has no Child
         // handle for. Shut it down over its isolated socket before deleting
         // the directory; FNO_E2E's idle exit remains the crash/abort backstop.
-        let _ = self.command().args(["mux", "kill-server"]).output();
+        let sock = self.main_sock();
+        if sock.exists() {
+            match self.command().args(["mux", "kill-server"]).output() {
+                Ok(out) if out.status.success() && !sock.exists() => {}
+                Ok(out) => {
+                    eprintln!(
+                        "fno mux e2e: retaining {} after kill-server failed (status {}; stderr: {})",
+                        self.0.display(),
+                        out.status,
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    );
+                    return;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "fno mux e2e: retaining {} after kill-server could not run: {e}",
+                        self.0.display()
+                    );
+                    return;
+                }
+            }
+        }
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }

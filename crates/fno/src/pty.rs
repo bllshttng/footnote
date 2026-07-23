@@ -245,15 +245,22 @@ impl PtyShell {
             .map_err(|e| PtyError::Resize(e.to_string()))
     }
 
-    /// True while the child has not exited. Errs toward "alive" on any
-    /// uncertainty (same rationale as the fno-agents seed: the consumer uses
-    /// this to gate cleanup, and a false "exited" is the dangerous answer).
+    /// True while the child has not exited. A poisoned lock still owns a valid
+    /// child handle, so recover it. An OS inspection error remains fail-safe
+    /// ("alive") but is reported instead of silently defeating the reaper.
     pub fn is_child_alive(&self) -> bool {
-        let mut child = match self.child.lock() {
-            Ok(c) => c,
-            Err(_) => return true,
-        };
-        !matches!(child.try_wait(), Ok(Some(_)))
+        let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        match child.try_wait() {
+            Ok(Some(_)) => false,
+            Ok(None) => true,
+            Err(e) => {
+                eprintln!(
+                    "fno mux: cannot inspect pane child {:?}; retaining pane: {e}",
+                    child.process_id()
+                );
+                true
+            }
+        }
     }
 
     /// Kill and reap the child (explicit ClosePane / CloseTab). Idempotent:
@@ -512,6 +519,7 @@ fn spawn_reader(
             // x-0296 diagnostics: the first chunk logged from THIS std thread
             // proves the child spoke even when the tokio runtime is wedged.
             let e2e = std::env::var_os("FNO_E2E").is_some();
+            let drop_exit = e2e && std::env::var_os("FNO_E2E_DROP_PTY_EXIT").is_some();
             let mut first = true;
             let mut buf = [0u8; 8192];
             loop {
@@ -537,7 +545,11 @@ fn spawn_reader(
                     }
                 }
             }
-            let _ = exit_tx.blocking_send(pane_id);
+            if drop_exit {
+                eprintln!("fno mux e2e: deliberately dropped exit for pane {pane_id}");
+            } else {
+                let _ = exit_tx.blocking_send(pane_id);
+            }
         })
         .map_err(|e| PtyError::Reader(format!("reader thread spawn failed: {e}")))?;
     Ok(())
