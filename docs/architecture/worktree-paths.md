@@ -37,11 +37,11 @@ Flat wins on operator ergonomics; the prefix carries the provenance.
 ## Layers
 
 ```
-   adapter callers (ClaudeCodeAdapter / CodexCliAdapter / ...)
+   canonical dispatch/runtime callers
                 │
                 ▼
    fno.adapters._shared.create_worktree
-   (CLI-agnostic primitive used by every adapter)
+   (CLI-agnostic primitive used by active runtime callers)
                 │
                 ▼
    fno.worktree_paths   <-- single source of truth
