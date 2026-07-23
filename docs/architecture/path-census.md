@@ -41,7 +41,7 @@ Rows marked `OPEN` below are intentionally not deleted when the repository still
 | 3 | `scripts/post-merge/watch.sh` hand-assembled `claude --print` | `watch.sh:71` | DELETE | TBD |
 | 4 | Rust `ShelloutDispatcher` -> `driver-claude-code.sh` | `crates/fno-agents/src/loop_megawalk.rs:1208` | RETIRE, migration needed after reachability trace | OPEN |
 | 5 | Python megawalk walker + `ClaudeCodeDriver` | `megawalk_drivers/claude_code.py:53` | DELETE | TBD |
-| 6 | `adapters/*.spawn_worker` | `adapters/claude_code.py:28`, `adapters/codex.py:90` | RETIRE after live callers migrate | OPEN |
+| 6 | Claude/Codex adapter worker spawns | `cli/src/fno/adapters/{claude_code,codex}.py` | DELETE; callers use canonical one-shot dispatch | TBD |
 | 7 | One-shot `claude -p` LLM-as-a-function | `inbox/triage.py:304` and three sites | OUT OF SCOPE | — |
 | 8 | Gemini provider adapter paths | `agents/dispatch.py:1022-1281`, `agents/providers/gemini.py` | RETIRE after dispatch and registry migration | OPEN |
 

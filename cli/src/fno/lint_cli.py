@@ -34,8 +34,6 @@ SPAWN_SHAPE_ALLOWLIST = frozenset(
         "cli/src/fno/agents/providers/claude.py",
         "cli/src/fno/agents/providers/codex.py",
         "cli/src/fno/agents/providers/gemini.py",
-        "cli/src/fno/adapters/claude_code.py",
-        "cli/src/fno/adapters/codex.py",
         "cli/src/fno/graph/maintain.py",
         "cli/src/fno/graph/triage.py",
         "cli/src/fno/inbox/triage.py",
