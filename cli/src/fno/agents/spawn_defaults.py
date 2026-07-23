@@ -395,6 +395,15 @@ def _substrate_compatible(substrate: str, provider: str) -> bool:
     never injected to fail at the spawn parser (both exit 2 there otherwise)."""
     if substrate not in _SUBSTRATES:
         return False
+    # `zai` is the routed-claude shorthand: routing is materialized only for the
+    # bg/headless lanes (dispatch_spawn_pane takes no route_env). An ambient
+    # `pane` default must NOT be injected onto a zai spawn -- once on the argv it
+    # is indistinguishable from a user-typed flag, so it would defeat the
+    # shorthand's bg default and trip the routed-pane refusal, making
+    # `spawn --harness zai` unusable under a configured pane default (x-6de8).
+    # Degrade open here; cmd_spawn then applies the bg default itself.
+    if provider == "zai":
+        return substrate in ("bg", "headless")
     if substrate != "bg":
         return True
     try:
@@ -631,6 +640,11 @@ def inject_spawn_defaults(
                 reason = "provider resolution failed"
             elif cfg_substrate not in _SUBSTRATES:
                 reason = f"unknown substrate (valid: {', '.join(_SUBSTRATES)})"
+            elif prov == "zai":
+                reason = (
+                    f"routed zai reaches only bg/headless, not {cfg_substrate!r}; "
+                    "defaulting to bg"
+                )
             else:
                 reason = f"{prov} does not support substrate {cfg_substrate!r} (bg is claude-only)"
             print(

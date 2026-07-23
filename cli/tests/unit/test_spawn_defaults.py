@@ -441,3 +441,25 @@ def test_explicit_yolo_suppresses_config_permission_mode():
             profiles={"target": {"permission_mode": "bypassPermissions"}},
         )
         assert "--permission-mode" not in out, flag
+
+
+def test_zai_shorthand_ignores_ambient_pane_substrate_default():
+    """x-6de8 codex P2: an ambient `pane` default must NOT be injected onto the
+    zai routed shorthand. Once on the argv it is indistinguishable from a
+    user-typed flag, so it would defeat the shorthand's bg default and trip the
+    routed-pane refusal -- making `spawn --harness zai` unusable for anyone with
+    agents.defaults.substrate = "pane"."""
+    for flag in ("--harness", "-H", "--provider"):
+        err = io.StringIO()
+        out = _inject(["spawn", "w", "hi", flag, "zai"], err=err, substrate="pane")
+        assert "--substrate" not in out, f"{flag}: pane must not be injected"
+        assert "routed zai reaches only bg/headless" in err.getvalue()
+
+    # bg / headless ARE routable, so those config defaults still inject.
+    for routable in ("bg", "headless"):
+        out = _inject(["spawn", "w", "hi", "--harness", "zai"], substrate=routable)
+        assert out[out.index("--substrate") + 1] == routable
+
+    # A non-routed harness still takes the ambient pane default (unchanged).
+    out = _inject(["spawn", "w", "hi", "--harness", "claude"], substrate="pane")
+    assert out[out.index("--substrate") + 1] == "pane"
