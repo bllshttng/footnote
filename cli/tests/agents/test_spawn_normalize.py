@@ -157,8 +157,15 @@ def test_substrate_given_twice_exits_2():
 
 def test_headless_flag_plus_trailing_substrate_token_exits_2():
     with pytest.raises(SystemExit) as e:
-        _norm(["spawn", "foo", "-H", "bg"])
+        _norm(["spawn", "foo", "--headless", "bg"])
     assert e.value.code == 2
+
+
+def test_harness_short_H_consumes_value_not_a_substrate_pin():
+    # x-6de8: -H is now --harness (a value flag), so `-H codex` consumes `codex`
+    # and does NOT pin headless; the trailing `bg` is then the substrate word.
+    out = _norm(["spawn", "foo", "-H", "codex", "bg"])
+    assert out == ["spawn", "foo", "-H", "codex", "--substrate", "bg"]
 
 
 # --- non-substrate trailing positional stays a message ------------------------

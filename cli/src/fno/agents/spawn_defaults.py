@@ -31,13 +31,17 @@ from typing import IO, Callable, List, Mapping, Optional, Sequence, Set, Tuple
 # typer exposes on the spawn verb.
 _VALUE_FLAGS = frozenset(
     {
-        "--provider", "-p", "--model", "-m", "--effort", "--from", "--cwd", "-c",
+        "--provider", "-p", "--harness", "-H", "--model", "-m", "--effort",
+        "--from", "--cwd", "-c",
         "--message", "--session-id", "--cc-session-id", "--channel-id", "--status",
         "--from-name", "--timeout", "-t", "--mode", "--substrate", "--permission-mode",
     }
 )
 
-_PROVIDER_FLAGS = ("--provider", "-p")
+# --harness/-H is the canonical CLI-binary axis; --provider/-p the deprecated
+# alias (x-6de8). Both feed the same provider-aware default scan. -H was
+# reassigned FROM headless (which is now --headless/--once/--substrate headless).
+_PROVIDER_FLAGS = ("--provider", "-p", "--harness", "-H")
 _MODEL_FLAGS = ("--model", "-m")
 _EFFORT_FLAGS = ("--effort",)
 
@@ -98,8 +102,9 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
 )
 
 # Tokens that pin the substrate explicitly (a positional substrate word conflicts
-# with any of these -> exit 2). `-H/--headless` and `-o/--once` both mean headless.
-_EXPLICIT_SUBSTRATE_BOOLS = ("-H", "--headless", "-o", "--once")
+# with any of these -> exit 2). `--headless` and `-o/--once` mean headless; `-H`
+# was reassigned to --harness (x-6de8), so it is a value flag, not a substrate pin.
+_EXPLICIT_SUBSTRATE_BOOLS = ("--headless", "-o", "--once")
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _SHORT_ID_RE = re.compile(r"^[0-9a-f]{8}$")

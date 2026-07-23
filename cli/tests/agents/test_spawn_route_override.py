@@ -282,7 +282,7 @@ def test_route_allowed_on_headless(monkeypatch: pytest.MonkeyPatch) -> None:
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude", "-H", "--route", "zai,glm-5.2"],
+        ["spawn", "w1", "hi", "--provider", "claude", "--headless", "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 0, result.output
     assert captured["route_env"]["ANTHROPIC_AUTH_TOKEN"] == "zk-live"
@@ -303,7 +303,7 @@ def test_provider_zai_alias_and_bare_route(monkeypatch: pytest.MonkeyPatch) -> N
     from fno.agents.cli import agents_app
 
     # `--provider zai` expands to claude + default 1M GLM model.
-    result = runner.invoke(agents_app, ["spawn", "w1", "hi", "--provider", "zai", "-H"])
+    result = runner.invoke(agents_app, ["spawn", "w1", "hi", "--provider", "zai", "--headless"])
     assert result.exit_code == 0, result.output
     assert captured["provider"] == "claude"
     assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
@@ -311,7 +311,89 @@ def test_provider_zai_alias_and_bare_route(monkeypatch: pytest.MonkeyPatch) -> N
     # Bare `--route zai` expands the same way.
     captured.clear()
     result = runner.invoke(
-        agents_app, ["spawn", "w2", "hi", "--provider", "claude", "-H", "--route", "zai"]
+        agents_app, ["spawn", "w2", "hi", "--provider", "claude", "--headless", "--route", "zai"]
     )
     assert result.exit_code == 0, result.output
     assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
+
+
+# ---------------------------------------------------------------------------
+# x-6de8 harness axis: --harness/-H canonical, --provider/-p deprecated alias
+# ---------------------------------------------------------------------------
+
+
+def test_harness_zai_shorthand_matches_provider_zai(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The zai vendor shorthand fires through the canonical --harness spelling too."""
+    from fno.agents import dispatch, spawn_gate
+    from fno.agents.rust_runtime import _is_route_provider_spawn
+
+    # The Python-only detector recognizes zai via every spelling of the axis.
+    assert _is_route_provider_spawn("spawn", ["spawn", "w", "--harness", "zai"])
+    assert _is_route_provider_spawn("spawn", ["spawn", "w", "-H", "zai"])
+    assert _is_route_provider_spawn("spawn", ["spawn", "w", "--harness=zai"])
+
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    captured: Dict[str, Any] = {}
+
+    def fake_dispatch_spawn(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return dispatch.SpawnResult(kind="created", name=kwargs["name"], provider="claude", short_id="a")
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch_spawn)
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["spawn", "w1", "hi", "--harness", "zai", "--headless"])
+    assert result.exit_code == 0, result.output
+    assert captured["provider"] == "claude"
+    assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
+
+
+def test_provider_alias_functions_and_stays_quiet_off_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--provider/-p still selects the harness (deprecated alias), and the
+    human-only deprecation note never pollutes a non-tty stream (the note is
+    gated on stderr.isatty(), which is False under CliRunner and in any pipe)."""
+    from fno.agents import dispatch, spawn_gate
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    captured: Dict[str, Any] = {}
+
+    def fake_dispatch_spawn(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return dispatch.SpawnResult(kind="created", name=kwargs["name"], provider="codex", short_id="a")
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch_spawn)
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["spawn", "w1", "hi", "--provider", "codex", "--headless"])
+    assert result.exit_code == 0, result.output
+    assert captured["provider"] == "codex"
+    assert "deprecated" not in result.output  # quiet on the non-tty test stream
+
+    # The canonical --harness spelling threads the same provider.
+    captured.clear()
+    clean = runner.invoke(agents_app, ["spawn", "w2", "hi", "--harness", "codex", "--headless"])
+    assert clean.exit_code == 0, clean.output
+    assert captured["provider"] == "codex"
+    assert "deprecated" not in clean.output
+
+
+def test_harness_provider_conflict_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fno.agents import spawn_gate
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app, ["spawn", "w1", "hi", "--harness", "codex", "--provider", "claude"]
+    )
+    assert result.exit_code == 2, result.output
+    assert "conflicts with --provider" in result.output
+
+    # Same value on both is not a conflict (harness wins); no conflict message,
+    # whatever the downstream codex-headless path decides to do.
+    ok = runner.invoke(
+        agents_app,
+        ["spawn", "w2", "hi", "--harness", "codex", "--provider", "codex", "--headless"],
+    )
+    assert "conflicts with --provider" not in ok.output, ok.output

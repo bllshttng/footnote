@@ -425,13 +425,11 @@ def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
     for a in it:
         if a == "--argv":
             break
-        if a in ("--once", "-o"):
-            # The pre-substrate spelling of headless: a one-shot, never a pane.
-            return False
-        if a in ("--headless", "-H"):
-            # Ergonomic shortcut for --substrate headless (x-c772): one-shot,
-            # never a pane. Must be honored here or a `-H` spawn would route to
-            # the pane back half.
+        if a in ("--once", "-o", "--headless"):
+            # The headless spellings (--once/-o and --headless): a one-shot,
+            # never a pane. Must be honored here or a headless spawn would route
+            # to the pane back half. `-H` is NOT here anymore: it was reassigned
+            # to --harness (x-6de8), a value flag that does not pick the lane.
             return False
         if a == "--substrate":
             substrate = next(it, "")
@@ -507,19 +505,22 @@ def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
 
 
 def _is_route_provider_spawn(verb: str, args: Sequence[str]) -> bool:
-    """True for a ``spawn`` whose ``--provider``/``-p`` names a route-only
-    provider the Rust client does not know (``zai``). ``cmd_spawn`` rewrites it
-    into the claude + ``--route`` lane, so it is Python-only exactly like a
-    ``--route``-bearing spawn; otherwise the binary rejects the unknown provider
-    name before Python can translate it (x-6de8)."""
+    """True for a ``spawn`` whose harness axis names a route-only provider the
+    Rust client does not know (``zai``). ``cmd_spawn`` rewrites it into the claude
+    + ``--route`` lane, so it is Python-only exactly like a ``--route``-bearing
+    spawn; otherwise the binary rejects the unknown name before Python can
+    translate it (x-6de8). Scans all four spellings of the axis: the canonical
+    ``--harness``/``-H`` and the deprecated alias ``--provider``/``-p``."""
     if verb != "spawn":
         return False
     pre = _args_before_argv(args)
+    space_flags = ("--provider", "-p", "--harness", "-H")
+    eq_prefixes = ("--provider=", "--harness=")
     for i, a in enumerate(pre):
         val: str | None = None
-        if a in ("--provider", "-p") and i + 1 < len(pre):
+        if a in space_flags and i + 1 < len(pre):
             val = pre[i + 1]
-        elif a.startswith("--provider="):
+        elif a.startswith(eq_prefixes):
             val = a.split("=", 1)[1]
         if val is not None and val.strip().lower() == "zai":
             return True

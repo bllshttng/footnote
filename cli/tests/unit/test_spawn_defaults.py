@@ -405,7 +405,7 @@ def test_permission_mode_skipped_on_nonclaude_headless():
     # hardcodes its own bypass and exits 2); the config value degrades open.
     err = io.StringIO()
     out = _inject(
-        ["spawn", "-p", "codex", "-H", "w", "/target x"], err=err,
+        ["spawn", "-p", "codex", "--headless", "w", "/target x"], err=err,
         profiles={"target": {"permission_mode": "yolo"}},
     )
     assert "--permission-mode" not in out

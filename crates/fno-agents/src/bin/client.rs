@@ -1411,6 +1411,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
     // handle both syntaxes uniformly.
     const VALUE_FLAGS: &[&str] = &[
         "--provider",
+        "--harness",
         "--from",
         "--cwd",
         "--message",
@@ -1469,8 +1470,14 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
     let mut it = normalized.into_iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--provider" | "-p" => {
-                params.insert("provider".into(), str_arg(&mut it, "--provider")?);
+            // --harness/-H is the canonical CLI-binary axis (aligns spawn with the
+            // --harness vocabulary used everywhere else in fno); --provider/-p is
+            // the deprecated alias. Both write the same `provider` param the
+            // daemon reads. -H no longer means headless (that is --substrate
+            // headless / --headless / --once now); freeing the letter is the
+            // x-6de8 surface redesign.
+            "--harness" | "-H" | "--provider" | "-p" => {
+                params.insert("provider".into(), str_arg(&mut it, "--harness/--provider")?);
             }
             "--workspace" | "--squad" | "-s" => {
                 params.insert("squad".into(), str_arg(&mut it, "-s/--workspace")?);
@@ -1639,11 +1646,11 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                     .entry("substrate")
                     .or_insert_with(|| Value::String("headless".into()));
             }
-            "--headless" | "-H" => {
-                // Ergonomic front for --substrate headless (x-c772). Mobile:
-                // one hyphen, no `--substrate` to type (`--` autocorrects to an
-                // em-dash on iOS). Same routing key as --once; explicit
-                // --substrate already present wins.
+            "--headless" => {
+                // Ergonomic front for --substrate headless (x-c772). Same routing
+                // key as --once; explicit --substrate already present wins. The
+                // `-H` short was reassigned to --harness (x-6de8): headless keeps
+                // the long form, --once/-o, and --substrate headless.
                 params
                     .entry("substrate")
                     .or_insert_with(|| Value::String("headless".into()));
@@ -3399,9 +3406,9 @@ mod tests {
 
     #[test]
     fn spawn_headless_flag_aliases_to_substrate_headless() {
-        // x-c772: --headless and -H are the mobile-friendly front for
-        // --substrate headless (identical to --once), for every provider.
-        for flag in ["--headless", "-H"] {
+        // x-c772: --headless is the front for --substrate headless (identical to
+        // --once), for every provider. `-H` was reassigned to --harness (x-6de8).
+        for flag in ["--headless", "--once", "-o"] {
             for provider in ["claude", "codex", "gemini", "agy"] {
                 let args = vec![
                     "wk".to_string(),
@@ -3417,6 +3424,27 @@ mod tests {
                 );
                 assert!(params.get("host_mode").is_none(), "{flag}: no host_mode");
             }
+        }
+    }
+
+    #[test]
+    fn spawn_harness_flag_sets_provider() {
+        // x-6de8: --harness/-H is the canonical CLI-binary axis; --provider/-p is
+        // the deprecated alias. All four spell the same `provider` param, and -H
+        // now takes a VALUE (harness name) rather than meaning headless.
+        for flag in ["--harness", "-H", "--provider", "-p"] {
+            let args = vec!["wk".to_string(), flag.to_string(), "codex".to_string()];
+            let (_m, params) = build_request("spawn", &args).unwrap();
+            assert_eq!(
+                params.get("provider").and_then(|v| v.as_str()),
+                Some("codex"),
+                "{flag} sets provider"
+            );
+            // -H carries a value now, so it must NOT default the substrate to headless.
+            assert!(
+                params.get("substrate").is_none(),
+                "{flag}: no headless substrate side effect"
+            );
         }
     }
 
@@ -3444,14 +3472,14 @@ mod tests {
 
     #[test]
     fn spawn_explicit_substrate_wins_over_headless_flag() {
-        // An explicit --substrate is not clobbered by a trailing -H.
+        // An explicit --substrate is not clobbered by a trailing --headless.
         let args = vec![
             "wk".to_string(),
             "--provider".to_string(),
             "claude".to_string(),
             "--substrate".to_string(),
             "bg".to_string(),
-            "-H".to_string(),
+            "--headless".to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
         assert_eq!(params["substrate"], "bg");

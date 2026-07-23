@@ -543,9 +543,11 @@ def test_routing_pane_substrate_spawn_stays_python() -> None:
     assert not _is_pane_substrate_spawn(
         "spawn", ["spawn", "p", "--substrate=headless"]
     )
-    # x-c772: --headless / -H is the headless shortcut -> never a pane.
+    # x-c772: --headless / --once is the headless shortcut -> never a pane. `-H`
+    # was reassigned to --harness (x-6de8), so `-H codex` is a default-pane spawn.
     assert not _is_pane_substrate_spawn("spawn", ["spawn", "p", "--headless"])
-    assert not _is_pane_substrate_spawn("spawn", ["spawn", "p", "-H"])
+    assert not _is_pane_substrate_spawn("spawn", ["spawn", "p", "--once"])
+    assert _is_pane_substrate_spawn("spawn", ["spawn", "p", "-H", "codex"])
     assert not _is_pane_substrate_spawn("ask", ["ask", "peer", "hi"])
     # The scan stops at --argv: payload tokens cannot masquerade as our flag.
     assert _is_pane_substrate_spawn(
@@ -686,7 +688,7 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
 
     runner = CliRunner()
-    result = runner.invoke(agents_cli.agents_app, ["spawn", "peer", "--provider", "claude"])
+    result = runner.invoke(agents_cli.agents_app, ["spawn", "peer", "--harness", "claude"])
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.output.strip().splitlines()[-1])
     assert receipt == {

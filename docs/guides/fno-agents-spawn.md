@@ -9,6 +9,22 @@ Use this guide when an orchestrator (script, LLM session, CI job) needs to launc
 - `fno` CLI installed; the compiled `fno-agents` binary for the default (Rust) runtime, or `FNO_AGENTS_RUNTIME=python` for the fallback.
 - The provider CLI (`claude` / `codex` / `gemini`) on `$PATH`, signed in.
 
+## Selecting the harness (`--harness` / `-H`)
+
+The CLI binary to launch is the **harness** axis: `claude | codex | gemini | opencode | agy`. Spell it `--harness` (short `-H`), the same vocabulary used everywhere else in fno (`fno dispatch`, `fno worktree`, `fno graph`). Omit it to default to the invoking harness, then `claude`.
+
+```bash
+fno agents spawn worker --harness codex "review this diff"   # canonical
+fno agents spawn worker -H codex "review this diff"          # short form
+```
+
+`--provider` / `-p` is a **deprecated alias** for `--harness` on `spawn`; it still works and prints a one-line note on a terminal. Passing both with different values exits 2.
+
+Two things to know about `-H`:
+
+- `-H` now takes a **harness value** (`-H codex`). It used to be a boolean shortcut for headless; that meaning moved. For a one-shot worker use `--substrate headless`, `--headless`, or `--once` / `-o`.
+- The `zai` vendor shorthand rides this axis: `--harness zai` (or `--provider zai`) expands to a claude worker routed to GLM, exactly like `--route zai/glm-5.2[1m]`. The vendor/model route itself lives in `--route`.
+
 ## Persistent claude peer (plain spawn)
 
 ```bash

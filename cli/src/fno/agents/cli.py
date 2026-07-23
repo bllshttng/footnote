@@ -460,13 +460,27 @@ def cmd_spawn(
         help="Agent name (optional; an adjective-noun slug is minted when omitted).",
     ),
     message: str = typer.Argument("", help="Initial message (optional; empty string if omitted)."),
+    harness: str | None = typer.Option(
+        None,
+        "--harness",
+        "-H",
+        help=(
+            "The CLI binary to launch: claude | codex | gemini | opencode | agy "
+            "(optional). This is the canonical spelling of the axis, aligning "
+            "spawn with the --harness vocabulary used everywhere else in fno. "
+            "Defaults to the invoking harness, then claude. Wins over the "
+            "deprecated --provider/-p. NOTE: -H no longer means headless (x-6de8); "
+            "for a one-shot use --substrate headless / --headless / --once."
+        ),
+    ),
     provider: str | None = typer.Option(
         None,
         "--provider",
         "-p",
         help=(
-            "claude | codex | gemini (optional). Defaults to the invoking "
-            "harness, then claude. An explicit value wins."
+            "DEPRECATED alias for --harness/-H (the CLI binary): claude | codex | "
+            "gemini. Still works and prints a one-line note; --harness wins if "
+            "both are given with the same value (a conflict exits 2)."
         ),
     ),
     once: bool = typer.Option(
@@ -492,11 +506,10 @@ def cmd_spawn(
     headless: bool = typer.Option(
         False,
         "--headless",
-        "-H",
         help=(
             "Shortcut for --substrate headless: a one-shot (-p/--exec) worker. "
-            "Mobile-friendly (no '--substrate' to type; -H is one hyphen). "
-            "Wins over --substrate; equivalent to the legacy --once/-o."
+            "Wins over --substrate; equivalent to --once/-o. (The -H short was "
+            "reassigned to --harness in x-6de8; use --headless or --once here.)"
         ),
     ),
     cwd: str | None = typer.Option(
@@ -769,10 +782,35 @@ def cmd_spawn(
         else None
     )
 
-    # `--provider zai` is shorthand for a claude worker routed to zai's default
-    # GLM model: rewrite to the explicit claude + --route lane BEFORE provider
-    # resolution (which would reject the unknown provider name), so routing has
-    # one mechanism rather than a second provider identity. An explicit --route
+    # Harness axis (x-6de8): --harness/-H is the canonical CLI-binary selector;
+    # --provider/-p is the deprecated alias. Collapse the two into the single
+    # `provider` variable the rest of this path already threads. --harness wins;
+    # a genuine conflict (both given, different values) fails closed; a lone
+    # --provider still works but prints a one-line migration note.
+    if harness is not None and provider is not None and harness.strip() != provider.strip():
+        print(
+            f"--harness {harness!r} conflicts with --provider {provider!r}; pass one "
+            "(--provider is the deprecated alias for --harness/-H)",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    if harness is not None:
+        provider = harness
+    elif provider is not None and sys.stderr.isatty():
+        # Human-only deprecation note: gate on a tty so it never pollutes a
+        # machine-consumed stream. The spawn receipt is on stdout, but a caller
+        # doing `spawn ... 2>&1 | jq` merges stderr in -- isatty is False there
+        # (and in CliRunner), so the note shows on a real terminal only.
+        print(
+            "note: --provider/-p is deprecated for the harness axis; use "
+            "--harness/-H (the CLI-binary vocabulary shared with the rest of fno)",
+            file=sys.stderr,
+        )
+
+    # `--provider zai` / `--harness zai` is shorthand for a claude worker routed to
+    # zai's default GLM model: rewrite to the explicit claude + --route lane BEFORE
+    # provider resolution (which would reject the unknown provider name), so routing
+    # has one mechanism rather than a second provider identity. An explicit --route
     # still wins over the default model.
     if provider == "zai":
         provider = "claude"
@@ -802,9 +840,9 @@ def cmd_spawn(
     # spawns out of the binary route), `bg`/`headless` keep their existing
     # lanes. Validate to parity with the Rust client (exit 2 on a bad value);
     # headless still maps onto the `once` lever.
-    # --headless / -H is the ergonomic shortcut for --substrate headless (x-c772,
-    # mobile: no '--substrate' to type). It wins over an explicit --substrate so
-    # `-H` alone always resolves to the one-shot lane.
+    # --headless is the ergonomic shortcut for --substrate headless (x-c772). It
+    # wins over an explicit --substrate so `--headless` always resolves to the
+    # one-shot lane. (The -H short moved to --harness in x-6de8.)
     if headless:
         substrate = "headless"
     if substrate not in ("pane", "bg", "headless"):
