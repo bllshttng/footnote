@@ -3315,6 +3315,20 @@ def _worktree_local_override(local_raw: dict[str, object]) -> dict[str, object]:
     return override
 
 
+def _layer_worktree_local_override(
+    raw: dict[str, object], config_dir: Path
+) -> dict[str, object]:
+    """Apply the real, allowlisted worktree-local config beside ``config.toml``."""
+    local_path = config_dir / "config.local.toml"
+    if not local_path.is_file() or local_path.is_symlink():
+        return raw
+    local_parsed, ok = _load_raw(local_path)
+    if not ok:
+        return raw
+    override = _worktree_local_override(local_parsed)
+    return _deep_merge(raw, override) if override else raw
+
+
 def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
     """Bridge legacy key locations onto their canonical modeled paths (US3).
 
@@ -3446,23 +3460,11 @@ def load_settings() -> SettingsModel:
     for _path, parsed in reversed(layers):
         raw = _deep_merge(raw, _alias_legacy_keys(parsed))
 
-    # Per-worktree local override (x-cbce). Layer an optional real (non-symlinked)
-    # config.local.toml, sitting in the same .fno/ as the primary config.toml,
-    # on top of the merged config - but ONLY for WORKTREE_LOCAL_KEYS. This is the
-    # one file setup-worktree.sh never symlinks, so sibling worktrees can diverge
-    # on parking_lot_path / project.id while everything else stays shared via the
-    # symlinked config.toml. Absent (or symlinked) file => no-op, behavior
-    # unchanged. A symlinked local file is skipped: it would defeat the whole
-    # point (re-sharing the collision-prone keys across worktrees).
+    # Per-worktree local override (x-cbce). A real, non-symlinked local file is
+    # layered only for the allowlisted collision keys.
     candidates = _candidate_paths()
     if candidates:
-        local_path = candidates[0].parent / "config.local.toml"
-        if local_path.is_file() and not local_path.is_symlink():
-            local_parsed, ok = _load_raw(local_path)
-            if ok:
-                override = _worktree_local_override(local_parsed)
-                if override:
-                    raw = _deep_merge(raw, override)
+        raw = _layer_worktree_local_override(raw, candidates[0].parent)
 
     # _loaded_from records the PRIMARY (highest-priority) file present, for
     # `fno config doctor` and paths.config_file(). With layering there is no
@@ -3519,7 +3521,8 @@ def load_settings_for_repo(repo_root: Path) -> SettingsModel:
     candidate PR's repository, without polluting the process-level cache.
 
     Merge order (highest to lowest priority):
-      <repo_root>/.fno/config.toml -> ~/.fno/config.toml -> built-in defaults.
+      worktree config.local.toml -> <repo_root>/.fno/config.toml ->
+      ~/.fno/config.toml -> built-in defaults.
     """
     layers: list[tuple[Path, dict[str, object]]] = []
 
@@ -3538,6 +3541,7 @@ def load_settings_for_repo(repo_root: Path) -> SettingsModel:
     raw: dict[str, object] = {}
     for _path, parsed in reversed(layers):
         raw = _deep_merge(raw, _alias_legacy_keys(parsed))
+    raw = _layer_worktree_local_override(raw, Path(repo_root) / ".fno")
     return SettingsModel.model_validate(raw)
 
 

@@ -77,6 +77,22 @@ def test_absent_local_file_is_noop(tmp_path, monkeypatch):
     assert s.project.id == "shared-project"
 
 
+def test_uncached_repo_loader_applies_worktree_local_override(tmp_path, monkeypatch):
+    """Explicit repo loads must preserve the lane-local project identity."""
+    d = _fno_dir(tmp_path)
+    (d / "config.toml").write_text(SHARED, encoding="utf-8")
+    (d / "config.local.toml").write_text(
+        '[project]\nid = "lane-project"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", os.devnull)
+
+    from fno.config import load_settings_for_repo
+
+    settings = load_settings_for_repo(tmp_path)
+    assert settings.project.id == "lane-project"
+    assert settings.post_merge.parking_lot_path == "shared/parking-lot.md"
+
+
 def test_non_allowlisted_key_ignored_with_one_warning(tmp_path, monkeypatch, caplog):
     # Local file mixes the allowlisted key (project.id) with a non-allowlisted
     # one. Only the allowlisted key applies; the other is dropped with one warning.
