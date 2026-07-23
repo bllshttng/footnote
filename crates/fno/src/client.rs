@@ -4947,7 +4947,7 @@ impl View {
             return spans;
         };
         spans.push(TabSpan {
-            text: format!(" {} ", s.name),
+            text: format!(" {} ", brand_label(&s.name)),
             flags: cell_flags::BOLD,
             fg: Color::Default,
             hit: None,
@@ -6404,6 +6404,17 @@ const TAB_LABEL_W: usize = 14;
 /// `{ordinal}:{name}` with the name truncated to [`TAB_LABEL_W`] chars. The
 /// ordinal stays visible in every span because the `1-9 select tab` keys
 /// key off it (Locked 5).
+/// The mux's home workspace surfaces the bare brand `fno` in the tab strip
+/// (x-597f: derived from the cwd basename); render it bracketed as `f[no]`.
+/// Any other workspace name passes through unchanged.
+fn brand_label(name: &str) -> String {
+    if name == "fno" {
+        "f[no]".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 fn tab_label_text(name: &str, i: usize, named: bool) -> String {
     let ordinal = (i + 1).to_string();
     // Collapse (x-0f9d AC7, x-c150): a name equal to its own ordinal renders as
@@ -11667,6 +11678,25 @@ mod tests {
         // byte-identical to a pre-feature stateless tab.
         assert_eq!(spans[2].text, "[2]");
         assert_eq!(spans[2].fg, Color::Default);
+    }
+
+    #[test]
+    fn tab_strip_renders_the_fno_brand_bracketed() {
+        // US4/AC3-HP: the mux's home workspace surfaces the bare brand in the
+        // tab strip's leading label - render `f[no]`, not `fno`. Other names
+        // pass through untouched.
+        assert_eq!(brand_label("fno"), "f[no]");
+        assert_eq!(brand_label("footnote"), "footnote");
+        let mut view = two_pane_view();
+        let active = view.layout.active_squad;
+        view.layout
+            .squads
+            .iter_mut()
+            .find(|s| s.id == active)
+            .expect("active squad")
+            .name = "fno".into();
+        let spans = view.tab_bar_spans();
+        assert_eq!(spans[0].text, " f[no] ", "the leading brand label is bracketed");
     }
 
     #[test]
