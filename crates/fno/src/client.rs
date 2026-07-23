@@ -5156,27 +5156,20 @@ impl View {
         out
     }
 
+    // (x-c5ee) The sideline tree, with the top-K idle cap applied. A PURE
+    // function of state: a squad shows its idle overflow only when the operator
+    // toggled its `+N idle` row open (`idle_expanded`). No per-frame,
+    // selector-driven force-expand - that needs to know which row the selector
+    // rests on, but the selector is an index INTO this very output, so any
+    // attempt to resolve it here is circular: resolving against a rebuilt
+    // (capped or uncapped) enumeration mis-identifies the row once a fold sits
+    // above the cursor, and navigating onto a newly exposed overflow row then
+    // collapses under the next render (codex P1/P2 on #566/#568). The invariant
+    // that actually matters - the cursor never rests on a folded row - holds for
+    // free: folded rows are absent from this list, so selector navigation only
+    // ever lands on rendered rows. Overflow is reached by the fold row's own
+    // Enter/click toggle, which persists in `idle_expanded`.
     fn tree_rows(&self) -> Vec<DisplayRow<'_>> {
-        // (x-c5ee) The idle cap must never fold the row the selector rests on
-        // (AC2-FR). Resolve that agent's name from an UNCAPPED build - reading
-        // `selected_agent_name()` here would call `display_rows()` and recurse
-        // back into this builder. Only when a selector is actually open (the
-        // transient prefix+w nav mode) do we pay the extra build; the steady
-        // paint keeps its single pass.
-        let protect = match self.selector {
-            Some(i) => match self.build_tree_rows(None, false).get(i) {
-                Some(DisplayRow::Agent(a)) => Some(a.name.clone()),
-                _ => None,
-            },
-            None => None,
-        };
-        self.build_tree_rows(protect.as_deref(), true)
-    }
-
-    /// Build the sideline tree. `apply_cap` gates the top-K idle cap (x-c5ee);
-    /// `protect`, when set, is the selected agent's name whose squad must render
-    /// its idle rows in full so the cursor never lands on a folded row.
-    fn build_tree_rows(&self, protect: Option<&str>, apply_cap: bool) -> Vec<DisplayRow<'_>> {
         let mut out = Vec::new();
         // (x-cd67 US3) Section spacing only with more than one workspace: a
         // single squad has no groups to separate (US3 verify: absent with 1
@@ -5231,16 +5224,9 @@ impl View {
                 let idle_total = squad_agents.iter().filter(|&a| is_idle_row(a)).count();
                 let idle_budget = SQUAD_ROW_CAP.saturating_sub(attention);
                 let hidden = idle_total.saturating_sub(idle_budget);
-                // A squad shows all its idle rows when the cap is off, when the
-                // operator toggled it open, or when the selector rests on one of
-                // its idle rows (AC2-FR: never fold the selected row).
-                let show_all_idle = !apply_cap
-                    || self.idle_expanded.contains(&key)
-                    || protect.is_some_and(|n| {
-                        squad_agents
-                            .iter()
-                            .any(|&a| is_idle_row(a) && a.name.as_str() == n)
-                    });
+                // A squad shows all its idle rows only when the operator toggled
+                // its fold open (persisted for the session in `idle_expanded`).
+                let show_all_idle = self.idle_expanded.contains(&key);
                 let mut idle_shown = 0usize;
                 for &a in &squad_agents {
                     if is_idle_row(a) && !show_all_idle {
@@ -5261,7 +5247,7 @@ impl View {
                 // Emit the fold row whenever there is idle overflow: `+N idle`
                 // when folded, `- fewer` when shown (so the expansion reverses
                 // from the same spot). No row when nothing overflows (no `+0`).
-                if apply_cap && hidden > 0 {
+                if hidden > 0 {
                     out.push(DisplayRow::IdleFold {
                         key: key.clone(),
                         hidden,
@@ -13999,8 +13985,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // AC2-FR (x-c5ee): the selected idle agent is never folded - its squad
-    // renders idle-expanded and the selector stays on that agent.
+    // AC2-FR (x-c5ee): the selected idle agent is never folded. The selector
+    // only ever rests on a RENDERED row (folded rows are absent from the list
+    // navigation walks), so a selected idle agent is within budget and unfolded
+    // by construction - no per-frame force-expand needed.
     #[test]
     fn selected_idle_agent_is_never_folded() {
         let dir = isolate_view_store("cap-sel");
@@ -14009,20 +13997,75 @@ mod tests {
             agents.push(sv_agent(1, &format!("idle{i}"), None, false));
         }
         let mut view = view_with_agents(agents);
-        // Uncapped order: Sel(0), w(1), idle0(2)..idle11(13). Rest on idle11,
-        // which the cap would otherwise fold.
-        view.selector = Some(13);
+        // Capped order (budget 8 - 1 = 7): Sel(0), w(1), idle0(2)..idle6(8),
+        // IdleFold(9). The selector can only land on a rendered row, so idle0 at
+        // index 2 is within budget and therefore never folded.
+        view.selector = Some(2);
+        assert!(
+            matches!(view.display_rows().get(2), Some(DisplayRow::Agent(a)) if a.name == "idle0"),
+            "the selector rests on a rendered idle row (idle0), never a folded one"
+        );
+        assert_eq!(
+            rendered(&view, "idle"),
+            7,
+            "the within-budget idle rows render"
+        );
+        assert_eq!(
+            idle_fold(&view),
+            Some((5, false)),
+            "the overflow still folds; reaching it is the fold row's toggle"
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Regression (x-c5ee, codex P1/P2 on #566/#568): the render is a pure
+    // function of state, so resting the selector ON the `+N idle` fold row never
+    // perturbs it. The earlier per-frame force-expand resolved the selector index
+    // against a rebuilt enumeration, which mis-identified the row (fold moved /
+    // Enter reported no action) and could collapse a walked-into overflow row.
+    #[test]
+    fn selector_on_fold_row_leaves_it_actionable_and_in_place() {
+        let dir = isolate_view_store("cap-foldsel");
+        let agents: Vec<AgentRow> = (0..12)
+            .map(|i| sv_agent(1, &format!("idle{i}"), None, false))
+            .collect();
+        let mut view = view_with_agents(agents);
+        // Budget 8, 12 idle -> 8 shown, IdleFold at index 9 (Sel(0), idle0..7 at
+        // 1..8, fold at 9).
+        let fold_i = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::IdleFold { .. }))
+            .expect("a fold row");
+        view.selector = Some(fold_i);
+        // The fold row stays put (not replaced by a mis-protected agent)...
+        assert!(
+            matches!(
+                view.display_rows().get(fold_i),
+                Some(DisplayRow::IdleFold { .. })
+            ),
+            "the fold row is still at the selector index"
+        );
+        // ...still shows +4 idle (protection did not force-expand the squad)...
+        assert_eq!(
+            idle_fold(&view),
+            Some((4, false)),
+            "fold unchanged, still folded"
+        );
+        // ...and Enter on it toggles idle rather than reporting no action.
+        assert!(matches!(
+            view.row_action(fold_i),
+            Some(ChromeHit::ToggleIdle(SectionKey::Squad(_)))
+        ));
+        // Toggling it open reveals the whole idle roster (persisted), and it is
+        // stable across re-render - the intended way to walk the overflow.
+        view.toggle_idle(SectionKey::Squad("/code/footnote".into()));
+        assert_eq!(rendered(&view, "idle"), 12, "toggling reveals all idle");
         assert_eq!(
             rendered(&view, "idle"),
             12,
-            "the squad renders idle-expanded so the selected agent is visible"
-        );
-        assert!(
-            matches!(
-                view.display_rows().get(13),
-                Some(DisplayRow::Agent(a)) if a.name == "idle11"
-            ),
-            "the selector still rests on that agent"
+            "and it is stable across re-render"
         );
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);
