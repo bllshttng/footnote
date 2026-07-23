@@ -306,24 +306,147 @@ def test_recover_node_for_pr_scopes_by_repo(tmp_path, monkeypatch):
     # codex P2: when reconcile closed nothing (dominant ship-gate path),
     # recover the PR's node from the graph, scoped by origin slug + pr_url so a
     # foreign repo sharing a pr_number is never reaped.
-    monkeypatch.setattr(_ritual, "_origin_slug", lambda canon, runner: "owner/repo")
+    r = _bare(tmp_path, FakeRunner(), pr=7)
+    monkeypatch.setattr(r, "_resolve_origin_slug", lambda: "owner/repo")
     monkeypatch.setattr(_ritual, "read_graph", lambda: [
         {"id": "fno-abc1", "pr_number": 7, "pr_url": "https://github.com/owner/repo/pull/7"},
         {"id": "fno-forei", "pr_number": 7, "pr_url": "https://github.com/other/repo/pull/7"},
         {"id": "fno-other", "pr_number": 99, "pr_url": "https://github.com/owner/repo/pull/99"},
     ])
-    r = _bare(tmp_path, FakeRunner(), pr=7)
     assert r._recover_node_for_pr() == ["fno-abc1"]
+
+
+# --- scan ACs (ported from tests/post-merge/test_reap_build_worker.sh) ----
+
+def test_origin_slug_resolves_every_remote_form():
+    # AC9b: every GitHub remote form (scp, https, ssh, git://, port, creds,
+    # case, trailing /) resolves to owner/repo.
+    forms = ["git@github.com:o/r.git", "https://github.com/o/r",
+             "ssh://git@github.com/o/r.git", "git://github.com/o/r",
+             "https://GitHub.com/O/R.git", "ssh://git@github.com:22/o/r.git",
+             "https://user:tok@github.com/o/r.git", "https://github.com/o/r.git/"]
+    assert all(_ritual._parse_origin_slug(u) == "o/r" for u in forms)
+
+
+def test_origin_slug_rejects_lookalike_hosts():
+    # AC9c: a lookalike domain or a github.com path segment yields no slug (a
+    # substring match would admit a foreign repo's node).
+    look = ["https://notgithub.com/o/r.git",
+            "https://gitlab.com/mirrors/github.com/o/r.git",
+            "/tmp/github.com/o/r.git", "https://github.com.evil.test/o/r.git"]
+    assert all(_ritual._parse_origin_slug(u) is None for u in look)
+    assert _ritual._parse_origin_slug("git@gitlab.com:mirror/x.git") is None
+
+
+def test_scan_nodes_acs():
+    # AC1: pr_number match -> unioned. AC2c: two same-repo matches -> both.
+    entries = [
+        {"id": "x-1234", "pr_number": 292, "pr_url": "https://github.com/o/r/pull/292"},
+        {"id": "x-5678", "pr_number": 292, "pr_url": "https://github.com/o/r/pull/292"}]
+    assert set(_ritual._scan_nodes(entries, 292, "o/r")) == {"x-1234", "x-5678"}
+    # AC4: a same-numbered PR in a FOREIGN repo is excluded.
+    entries = [{"id": "x-mine", "pr_number": 292, "pr_url": "https://github.com/o/r/pull/292"},
+               {"id": "x-theirs", "pr_number": 292, "pr_url": "https://github.com/other/repo/pull/292"}]
+    assert _ritual._scan_nodes(entries, 292, "o/r") == ["x-mine"]
+    # AC5: a superstring slug is excluded; a case-differing slug still matches.
+    entries = [{"id": "x-super", "pr_number": 292, "pr_url": "https://github.com/o/r-extra/pull/292"},
+               {"id": "x-upper", "pr_number": 292, "pr_url": "https://github.com/O/R/pull/292"}]
+    assert _ritual._scan_nodes(entries, 292, "o/r") == ["x-upper"]
+    # AC6: a url-less node is never matched. AC7: a corrupt non-string pr_url is
+    # skipped, not fatal to the scan.
+    entries = [{"id": "x-here", "pr_number": 292},
+               {"id": "x-corrupt", "pr_number": 292, "pr_url": {"not": "a string"}},
+               {"id": "x-good", "pr_number": 292, "pr_url": "https://github.com/o/r/pull/292"}]
+    assert _ritual._scan_nodes(entries, 292, "o/r") == ["x-good"]
+    # AC3: no matching pr_number -> empty.
+    assert _ritual._scan_nodes(entries, 999, "o/r") == []
+    # No slug -> empty (AC8: the union is skipped wholesale).
+    assert _ritual._scan_nodes(entries, 292, None) == []
+
+
+def test_recover_skips_when_no_origin_slug(tmp_path, monkeypatch):
+    # AC8: an unresolvable origin yields no graph recovery (reconcile-closed ids
+    # are unaffected).
+    r = _bare(tmp_path, FakeRunner(), pr=7)
+    monkeypatch.setattr(r, "_resolve_origin_slug", lambda: None)
+    monkeypatch.setattr(_ritual, "read_graph", lambda: [
+        {"id": "x-1234", "pr_number": 7, "pr_url": "https://github.com/o/r/pull/7"}])
+    assert r._recover_node_for_pr() == []
+
+
+def test_recover_falls_through_to_gh(tmp_path, monkeypatch):
+    # AC9: a non-GitHub git origin (a mirror) falls through to the gh fallback.
+
+    class _GhFallback(FakeRunner):
+        def __call__(self, argv, *, cwd=None, timeout=None):
+            self.calls.append(list(argv))
+            if argv[:1] == ["git"] and "get-url" in argv:
+                return Result(0, "git@gitlab.com:mirror/x.git\n", "")
+            if argv[:1] == ["gh"] and "repo" in argv:
+                return Result(0, "o/r\n", "")
+            return FakeRunner.__call__(self, argv, cwd=cwd, timeout=timeout)
+
+    runner = _GhFallback()
+    r = _bare(tmp_path, runner, pr=7)
+    monkeypatch.setattr(_ritual, "read_graph", lambda: [
+        {"id": "x-1234", "pr_number": 7, "pr_url": "https://github.com/o/r/pull/7"}])
+    assert r._recover_node_for_pr() == ["x-1234"]
+
+
+# --- reap ACs (ported US1/US2/US3 from the shell harness) ----------------
+
+def test_reap_stop_precedes_rm_when_self_reap_on(tmp_path, capsys):
+    # US1: self_reap on, finished row -> stop THEN rm, naming the row.
+
+    class _Rec(FakeRunner):
+        def __init__(self):
+            super().__init__(agent_rows=[{"name": "target-x-1234-slug", "status": "orphaned"}])
+            self.order = []
+
+        def __call__(self, argv, *, cwd=None, timeout=None):
+            self.calls.append(list(argv))
+            if len(argv) > 1 and argv[1] == "agents" and "stop" in argv:
+                self.order.append(("stop", argv[-1])); return Result(0, "", "")
+            if len(argv) > 1 and argv[1] == "agents" and "rm" in argv:
+                self.order.append(("rm", argv[-1])); return Result(0, "", "")
+            return FakeRunner.__call__(self, argv, cwd=cwd, timeout=timeout)
+
+    runner = _Rec()
+    r = _bare(tmp_path, runner, node_ids=["x-1234"])
+    r.ctx.pm = SimpleNamespace(sync_command=None, self_reap=True, parking_lot_path=None)
+    r.leg_reap_rows()
+    assert runner.order == [("stop", "target-x-1234-slug"), ("rm", "target-x-1234-slug")]
+
+
+def test_reap_self_reap_off_removes_nothing_prints_manual_cmd(tmp_path, capsys):
+    # US2: self_reap off -> no stop/rm calls; the receipt carries the manual cmd.
+    runner = FakeRunner(agent_rows=[{"name": "target-x-1234-slug", "status": "orphaned"}])
+    r = _bare(tmp_path, runner, node_ids=["x-1234"])
+    r.ctx.pm = SimpleNamespace(sync_command=None, self_reap=False, parking_lot_path=None)
+    r.leg_reap_rows()
+    out = capsys.readouterr().out
+    assert not any(len(c) > 1 and c[1] == "agents" and ("stop" in c or "rm" in c)
+                   for c in runner.calls)
+    assert "fno agents stop target-x-1234-slug && fno agents rm target-x-1234-slug" in out
+
+
+def test_reap_live_row_untouched(tmp_path, capsys):
+    # US3c: a status=live row is never reaped (the guard that prevents data loss).
+    runner = FakeRunner(agent_rows=[{"name": "target-x-1234-live", "status": "live"}])
+    r = _bare(tmp_path, runner, node_ids=["x-1234"])
+    r.ctx.pm = SimpleNamespace(sync_command=None, self_reap=True, parking_lot_path=None)
+    r.leg_reap_rows()
+    assert not any(len(c) > 1 and c[1] == "agents" and ("stop" in c or "rm" in c)
+                   for c in runner.calls)
 
 
 def test_reap_rows_recovers_node_when_reconcile_closed_nothing(tmp_path, monkeypatch, capsys):
     # codex P2 end-to-end: empty node_ids + graph has the PR's node -> recovery
     # fills node_ids -> reap proceeds instead of skipping.
-    monkeypatch.setattr(_ritual, "_origin_slug", lambda canon, runner: "owner/repo")
+    r = _bare(tmp_path, FakeRunner(agent_rows=[]), pr=7)
+    monkeypatch.setattr(r, "_resolve_origin_slug", lambda: "owner/repo")
     monkeypatch.setattr(_ritual, "read_graph", lambda: [
         {"id": "fno-abc1", "pr_number": 7, "pr_url": "https://github.com/owner/repo/pull/7"}])
-    runner = FakeRunner(agent_rows=[{"name": "target-fno-abc1-build", "status": "dead"}])
-    r = _bare(tmp_path, runner, pr=7)  # node_ids empty (reconcile closed nothing)
     r.leg_reap_rows()
     out = capsys.readouterr().out
     assert "step=reap-rows" in out

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,7 +49,6 @@ from fno._subprocess_util import fno_py_cmd
 from fno.config import load_settings_for_repo
 from fno.graph.store import read_graph
 from fno.pr._proc import Result, ToolMissing, run as _run
-from fno.pr._sync_canonical import _origin_slug
 
 # Cross-runner mutex (Step 0.5): a global TTL claim so an attended `/fno:pr
 # merged` and an auto-dispatched worker cannot run the destructive middle
@@ -130,6 +130,62 @@ def _canonical_root(cwd: Path) -> Optional[Path]:
             return p.parent
     top = _git_text(["rev-parse", "--show-toplevel"], cwd)
     return Path(top) if top else None
+
+
+# Anchored so a lookalike host or a github.com path segment cannot match: the
+# scheme and user@ are optional, then `github.com` must be the host (optionally
+# :port), then : or / . This is the exact semantics of the bash scan it replaces
+# (AC9b resolves every GitHub remote form; AC9c rejects every lookalike).
+_ORIGIN_SLUG_RE = re.compile(
+    r"^(?:[a-z][a-z0-9+.-]*://)?"
+    r"(?:[^/@]*@)?"
+    r"github\.com(?::[0-9]+)?[:/]"
+    r"(.+)$"
+)
+
+
+def _parse_origin_slug(url: str) -> Optional[str]:
+    """``owner/repo`` from a GitHub remote URL, or None for a non-GitHub origin.
+
+    Ported verbatim from the post-merge scan's bash sed: lowercase, strip an
+    optional scheme and user@, require ``github.com`` as the host, take the
+    path, strip trailing ``/`` and a trailing ``.git``, and require exactly
+    ``owner/repo`` (a deeper path is rejected rather than guessed).
+    """
+    m = _ORIGIN_SLUG_RE.match((url or "").strip().lower())
+    if not m:
+        return None
+    rest = m.group(1).rstrip("/")
+    if rest.endswith(".git"):
+        rest = rest[:-4]
+    if rest.count("/") != 1:
+        return None
+    owner, repo = rest.split("/")
+    return rest if owner and repo else None
+
+
+def _scan_nodes(entries, pr: int, slug: Optional[str]) -> list[str]:
+    """Graph-derived node ids whose pr_url matches this PR's repo.
+
+    Repo-scoped because pr_number is unique only within a repo (cross-project
+    graph): a foreign repo sharing the number is excluded. A url-less or
+    non-string pr_url is skipped, never fatal (a corrupt entry cannot drop the
+    legitimate nodes after it). Pure so the harness ACs test it directly.
+    """
+    if not slug:
+        return []
+    needle = f"/{slug.lower()}/pull/"
+    out: list[str] = []
+    for e in entries or []:
+        if not isinstance(e, dict) or e.get("pr_number") != pr:
+            continue
+        url = e.get("pr_url")
+        if not isinstance(url, str) or needle not in url.lower():
+            continue
+        nid = e.get("id")
+        if nid and nid not in out:
+            out.append(nid)
+    return out
 
 
 def _session_holder() -> str:
@@ -512,33 +568,50 @@ class Ritual:
 
     # -- row reap ----------------------------------------------------------
 
+    def _resolve_origin_slug(self) -> Optional[str]:
+        """``owner/repo`` for this checkout: git remote first, then gh fallback.
+
+        git remote needs no network, so an offline run still scopes the scan
+        instead of skipping it. gh covers a checkout whose GitHub remote is not
+        named ``origin``. An unresolvable slug skips the union wholesale (under-
+        reaping is recoverable; reaping another repo's row is not).
+        """
+        try:
+            r = self.runner(["git", "remote", "get-url", "origin"],
+                            cwd=str(self.canon), timeout=15.0)
+            if r.ok:
+                slug = _parse_origin_slug(r.stdout.strip())
+                if slug:
+                    return slug
+        except (ToolMissing, subprocess.SubprocessError):
+            pass
+        try:
+            r = self.runner(["gh", "repo", "view", "--json", "nameWithOwner",
+                             "-q", ".nameWithOwner"], cwd=str(self.canon), timeout=30.0)
+            if r.ok:
+                s = r.stdout.strip().lower()
+                if s.count("/") == 1 and all(p for p in s.split("/")):
+                    return s
+        except (ToolMissing, subprocess.SubprocessError):
+            pass
+        return None
+
     def _recover_node_for_pr(self) -> list[str]:
         """Graph-derived node id(s) for this PR when reconcile closed nothing.
 
         The dominant path closes + stamps the node at the ship gate, so
         ``backlog reconcile`` no-ops and ``.closed[]`` is empty. Recover the
-        PR's node from the graph (repo-scoped ``pr_number`` + ``pr_url`` match)
-        so the row reap still finds it - the replaced bash Step 2 did this scan
-        inline (codex P2).
+        PR's node from the graph (repo-scoped) so the row reap still finds it -
+        the replaced bash Step 2 did this scan inline (codex P2).
         """
-        slug = _origin_slug(self.canon, self.runner) if self.ctx.canon else None
+        slug = self._resolve_origin_slug()
         if not slug:
             return []
         try:
             entries = read_graph()
         except Exception:  # noqa: BLE001 - unreadable graph degrades to no recovery
             return []
-        needle = f"/{slug.lower()}/pull/"
-        out: list[str] = []
-        for e in entries:
-            if not isinstance(e, dict) or e.get("pr_number") != self.ctx.pr:
-                continue
-            if needle not in str(e.get("pr_url") or "").lower():
-                continue
-            nid = e.get("id")
-            if nid and nid not in out:
-                out.append(nid)
-        return out
+        return _scan_nodes(entries, self.ctx.pr, slug)
 
     def leg_reap_rows(self) -> None:
         """Step 8a: reap the merged node's lingering build-worker rows."""
@@ -555,9 +628,11 @@ class Ritual:
         if not rows:
             self._emit("reap-rows", _OK, "no lingering rows"); return
         if not reap_on:
+            cmds = "; ".join(f"fno agents stop {n} && fno agents rm {n}" for n in rows)
             self._emit("reap-rows", _OK,
-                       f"{len(rows)} row(s) linger; self_reap off - clear manually")
+                       f"{len(rows)} row(s) linger; self_reap off - clear: {cmds}")
             return
+        # STOP before RM - `agents rm` on a live agent orphans its supervisor.
         removed = 0
         for name in rows:
             try:
