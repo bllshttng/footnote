@@ -250,7 +250,11 @@ class Ritual:
         self.cwd = Path(cwd)
         canon = _canonical_root(self.cwd)
         settings = load_settings_for_repo(canon) if canon else None
-        cfg = getattr(settings, "config", None)
+        # SettingsModel exposes post_merge/project directly - there is no
+        # `.config` wrapper attribute, so the old `getattr(settings, "config")`
+        # was always None and the config leg failed on every run (x-bbde verb
+        # shipped non-functional). The model IS the config root.
+        cfg = settings
         pm = getattr(cfg, "post_merge", None) if cfg else None
         project = getattr(getattr(cfg, "project", None), "id", "") or "" if cfg else ""
         lane_settings = None
@@ -258,7 +262,7 @@ class Ritual:
             lane_settings = load_settings_for_repo(self.cwd)
         except Exception:  # noqa: BLE001 - a worktree with no config degrades to canon read
             lane_settings = settings
-        lane_cfg = getattr(lane_settings, "config", None) if lane_settings else cfg
+        lane_cfg = lane_settings if lane_settings else cfg
         lane_project = getattr(getattr(lane_cfg, "project", None), "id", "") or "" if lane_cfg else ""
         self.ctx = _Ctx(
             pr=0,

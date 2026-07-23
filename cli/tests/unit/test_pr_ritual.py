@@ -517,3 +517,18 @@ def test_mutex_released_on_success(tmp_path):
     assert not r.ctx.owns_claim
     # a release call was made
     assert any(len(c) > 1 and c[1] == "claim" and "release" in c for c in runner.calls)
+
+
+def test_config_leg_reads_post_merge_off_settings_model(tmp_path, monkeypatch):
+    # Regression (x-bbde verb shipped non-functional): SettingsModel exposes
+    # post_merge / project DIRECTLY - there is no `.config` wrapper attribute.
+    # The old `getattr(settings, "config")` was always None, so ctx.pm was
+    # always None and the config leg failed on leg 1 for EVERY repo. This
+    # exercises the real __init__ config load (the _bare helper bypasses it).
+    pm = SimpleNamespace(parking_lot_path=None, enabled=True)
+    model = SimpleNamespace(post_merge=pm, project=SimpleNamespace(id="fno"))
+    monkeypatch.setattr(_ritual, "load_settings_for_repo", lambda p: model)
+    monkeypatch.setattr(_ritual, "_canonical_root", lambda cwd: tmp_path)
+    r = _ritual.Ritual(pr=7, autonomous=False, cwd=tmp_path, runner=FakeRunner())
+    assert r.ctx.pm is pm  # NOT None - the config leg would falsely fail otherwise
+    assert r.ctx.project == "fno"
