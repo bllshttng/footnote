@@ -73,6 +73,11 @@ DEFAULT_SECONDARY_MODEL = "glm-5.2"
 # (drift-guarded by test_config_defaults_match_module_constants).
 DEFAULT_ZAI_HAIKU_MODEL = "glm-4.5-air"
 
+# Where a key lands when the operator keeps secrets out of the shell env; the
+# built-in fallback keeps env-file keys working for the zero-config zai lane
+# (config-defined providers already opt in per-record via api_key_file).
+DEFAULT_API_KEY_FILE = "~/.fno/.env"
+
 # Built-in providers so a bare key (e.g. ZAI_API_KEY) routes with zero config.
 # A config.model_routing.providers entry of the same name overrides per-field.
 _DEFAULT_PROVIDERS: dict[str, dict[str, Optional[str]]] = {
@@ -80,7 +85,7 @@ _DEFAULT_PROVIDERS: dict[str, dict[str, Optional[str]]] = {
         "protocol": "anthropic",
         "base_url": DEFAULT_ZAI_BASE_URL,
         "api_key_env": "ZAI_API_KEY",
-        "api_key_file": None,
+        "api_key_file": DEFAULT_API_KEY_FILE,
         "haiku_model": DEFAULT_ZAI_HAIKU_MODEL,
     },
 }
