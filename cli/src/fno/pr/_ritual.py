@@ -132,6 +132,12 @@ def _canonical_root(cwd: Path) -> Optional[Path]:
     return Path(top) if top else None
 
 
+def _worktree_root(cwd: Path) -> Path:
+    """Resolve the checkout containing ``cwd`` for worktree-local config."""
+    top = _git_text(["rev-parse", "--show-toplevel"], cwd)
+    return Path(top).resolve() if top else Path(cwd).resolve()
+
+
 # Anchored so a lookalike host or a github.com path segment cannot match: the
 # scheme and user@ are optional, then `github.com` must be the host (optionally
 # :port), then : or / . This is the exact semantics of the bash scan it replaces
@@ -259,7 +265,7 @@ class Ritual:
         project = getattr(getattr(cfg, "project", None), "id", "") or "" if cfg else ""
         lane_settings = None
         try:
-            lane_settings = load_settings_for_repo(self.cwd)
+            lane_settings = load_settings_for_repo(_worktree_root(self.cwd))
         except Exception:  # noqa: BLE001 - a worktree with no config degrades to canon read
             lane_settings = settings
         lane_cfg = lane_settings if lane_settings else cfg

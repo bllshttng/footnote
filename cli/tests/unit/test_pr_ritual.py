@@ -532,3 +532,25 @@ def test_config_leg_reads_post_merge_off_settings_model(tmp_path, monkeypatch):
     r = _ritual.Ritual(pr=7, autonomous=False, cwd=tmp_path, runner=FakeRunner())
     assert r.ctx.pm is pm  # NOT None - the config leg would falsely fail otherwise
     assert r.ctx.project == "fno"
+
+
+def test_lane_project_reads_worktree_local_override(tmp_path, monkeypatch):
+    canonical = tmp_path / "canonical"
+    lane = tmp_path / "lane"
+    for root in (canonical, lane):
+        (root / ".fno").mkdir(parents=True)
+        (root / ".fno" / "config.toml").write_text(
+            '[post_merge]\nenabled = true\n[project]\nid = "fno"\n',
+            encoding="utf-8",
+        )
+    (lane / ".fno" / "config.local.toml").write_text(
+        '[project]\nid = "fno-lane-node"\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(_ritual, "_canonical_root", lambda cwd: canonical)
+    monkeypatch.setattr(_ritual, "_worktree_root", lambda cwd: lane)
+    monkeypatch.setattr(_ritual, "_session_holder", lambda: "postmerge:test")
+
+    r = _ritual.Ritual(pr=7, autonomous=False, cwd=lane, runner=FakeRunner())
+
+    assert r.ctx.project == "fno"
+    assert r.ctx.lane_project == "fno-lane-node"
