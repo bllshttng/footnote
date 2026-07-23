@@ -8991,7 +8991,12 @@ async fn execute_row_menu_action(
         // A workspace section's Rename opens the same overlay as selector `r`
         // (x-96e8). The id is the section's squad, so a non-workspace header
         // (`squad: None`) can never reach it - it falls to the refuse arm below.
-        (MenuTarget::Section { squad: Some(id), .. }, MenuAction::Rename) => {
+        (
+            MenuTarget::Section {
+                squad: Some(id), ..
+            },
+            MenuAction::Rename,
+        ) => {
             view.open_rename(RenameTarget::Squad(id));
             return Ok(());
         }
@@ -11696,7 +11701,10 @@ mod tests {
             .expect("active squad")
             .name = "fno".into();
         let spans = view.tab_bar_spans();
-        assert_eq!(spans[0].text, " f[no] ", "the leading brand label is bracketed");
+        assert_eq!(
+            spans[0].text, " f[no] ",
+            "the leading brand label is bracketed"
+        );
     }
 
     #[test]

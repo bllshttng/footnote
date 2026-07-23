@@ -733,9 +733,11 @@ fn validate_spawn_placement(params: &Value, substrate: &str) -> Result<(), Strin
         return Err("--workspace/-s needs a nonblank workspace name".into());
     }
     if (squad.is_some() || split.is_some()) && substrate != "pane" {
-        return Err("--workspace/-s and --split/-x apply only to --substrate pane \
+        return Err(
+            "--workspace/-s and --split/-x apply only to --substrate pane \
              (bg/headless have no pane geometry)"
-            .into());
+                .into(),
+        );
     }
     if split.is_some_and(|direction| !matches!(direction, "left" | "right" | "up" | "down")) {
         return Err(format!(
@@ -2942,9 +2944,11 @@ mod tests {
         let params = serde_json::json!({"squad": "reviews"});
         assert_eq!(
             validate_spawn_placement(&params, "bg"),
-            Err("--workspace/-s and --split/-x apply only to --substrate pane \
+            Err(
+                "--workspace/-s and --split/-x apply only to --substrate pane \
                  (bg/headless have no pane geometry)"
-                .to_string())
+                    .to_string()
+            )
         );
     }
 

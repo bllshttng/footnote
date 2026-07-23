@@ -3303,7 +3303,13 @@ mod tests {
         ));
         // --workspace is an alias for --squad (US2): same PaneTarget.
         let ws = parse_pane_args(&os(&[
-            "run", "--workspace", "review", "--split", "up", "--", "echo",
+            "run",
+            "--workspace",
+            "review",
+            "--split",
+            "up",
+            "--",
+            "echo",
         ]))
         .unwrap();
         assert!(matches!(
