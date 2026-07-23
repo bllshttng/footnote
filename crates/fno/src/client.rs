@@ -3531,16 +3531,16 @@ impl View {
                 .filter(|&i| self.selector_anchor(i) == Some(i))
             {
                 Some(i) => {
-                    self.set_selector(Some(i));
-                    // (x-8d3e) set_selector may re-anchor to a new index when the
-                    // pointed row changes the protected squad and the catalog
-                    // reflows. A resting pointer emits no follow-up Move, so keep
-                    // the hover-armed invariant `hover_row == selector` here -
-                    // otherwise the two diverge, painting a second highlight and
-                    // routing verb keys to the relocated selector, not the row
-                    // under the pointer (codex #570).
-                    self.hover_row = self.selector;
+                    // Arm BEFORE set_selector so the setter's hover-sync fires on
+                    // this first arm too: set_selector may re-anchor to a new
+                    // index when the pointed row changes the protected squad and
+                    // the catalog reflows, and a resting pointer emits no
+                    // follow-up Move to re-hit-test. The setter keeps
+                    // `hover_row == selector` on every reflow path (here and a
+                    // layout tick), so the two never diverge into a second
+                    // highlight or route verb keys to a relocated row (codex #570).
                     self.sel_hover_armed = true;
+                    self.set_selector(Some(i));
                 }
                 None if self.sel_hover_armed => {
                     self.set_selector(None);
@@ -3885,37 +3885,51 @@ impl View {
     /// painted rows agree (a following Enter / lifecycle key must act on the row
     /// the cursor is actually on).
     fn set_selector(&mut self, idx: Option<usize>) {
-        let Some(i) = idx else {
-            self.selector = None;
-            self.sel_protect = None;
-            return;
-        };
-        // `i` is valid against the current build: the caller computed it there,
-        // and that build reads the still-current `sel_protect` for its protect.
-        let rows = self.display_rows();
-        let target = rows.get(i).map(row_key);
-        // Protect the squad of the selected IDLE row (an attention row is never
-        // folded, so it needs no protection); everything else clears it.
-        let new_protect = match rows.get(i) {
-            Some(DisplayRow::Agent(a)) if is_idle_row(a) => a.squad,
-            _ => None,
-        };
-        drop(rows);
-        self.selector = Some(i);
-        if new_protect == self.sel_protect {
-            return; // protected squad unchanged -> no reflow -> `i` stays valid
+        match idx {
+            None => {
+                self.selector = None;
+                self.sel_protect = None;
+            }
+            Some(i) => {
+                // `i` is valid against the current build: the caller computed it
+                // there, and that build reads the still-current `sel_protect` for
+                // its protect.
+                let rows = self.display_rows();
+                let target = rows.get(i).map(row_key);
+                // Protect the squad of the selected IDLE row (an attention row is
+                // never folded, so it needs no protection); everything else clears.
+                let new_protect = match rows.get(i) {
+                    Some(DisplayRow::Agent(a)) if is_idle_row(a) => a.squad,
+                    _ => None,
+                };
+                drop(rows);
+                self.selector = Some(i);
+                if new_protect != self.sel_protect {
+                    // The protected squad changed, so the row set reflows. Re-find
+                    // the target by identity in the reflowed build; a vanished or
+                    // inert target falls back to the anchor.
+                    self.sel_protect = new_protect;
+                    self.selector = match target {
+                        Some(t) if t != RowKey::Other => self
+                            .display_rows()
+                            .iter()
+                            .position(|r| row_key(r) == t)
+                            .or_else(|| self.selector_anchor(i)),
+                        _ => self.selector_anchor(i),
+                    };
+                }
+            }
         }
-        self.sel_protect = new_protect;
-        // The protected squad changed. Re-find the target by identity in the
-        // reflowed build; a vanished or inert target falls back to the anchor.
-        self.selector = match target {
-            Some(t) if t != RowKey::Other => self
-                .display_rows()
-                .iter()
-                .position(|r| row_key(r) == t)
-                .or_else(|| self.selector_anchor(i)),
-            _ => self.selector_anchor(i),
-        };
+        // (x-8d3e) A hover-armed selector shares the pointer's highlight, so any
+        // re-anchor that moves it - here from on_hover, or from a scrape tick
+        // through set_layout - must drag hover_row along, or the two diverge and
+        // the UI paints a second highlight and routes hover verbs to the relocated
+        // row (codex #570). Only when the selector lands on a row: a cleared
+        // selector leaves hover_row on the pointer's own (possibly inert) row so
+        // the highlight still follows the pointer.
+        if self.sel_hover_armed && self.selector.is_some() {
+            self.hover_row = self.selector;
+        }
     }
 
     /// Put the selector back on `held` after the row set changed under it.
@@ -14382,6 +14396,56 @@ mod tests {
                 Some(DisplayRow::NewSquad)
             ),
             "both point at the footer, not a stale row"
+        );
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // x-8d3e regression (codex P2 on #570): the hover-sync must hold on the
+    // scrape-tick path too. A hover-armed selector on an expanded overflow row,
+    // when a layout tick promotes that agent to non-idle, folds the squad and
+    // re-anchors the selector via set_layout -> set_selector; hover_row must
+    // track it, not keep the stale expanded-catalog index.
+    #[test]
+    fn set_layout_reanchor_keeps_hover_row_aligned() {
+        let dir = isolate_view_store("cap-layout-hover");
+        let mut agents = vec![sv_agent(1, "w", Some(AgentBadge::Working), false)];
+        for i in 0..12 {
+            agents.push(sv_agent(1, &format!("idle{i}"), None, false));
+        }
+        let mut view = view_with_agents(agents);
+        // Expand the squad by hovering an idle row, then hover onto an overflow
+        // row (idle11) that exists only because of that expansion.
+        let idle0 = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "idle0"))
+            .unwrap();
+        view.on_hover(idle0 as u16, 2, Instant::now());
+        let idle11 = view
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "idle11"))
+            .unwrap();
+        view.on_hover(idle11 as u16, 2, Instant::now());
+        assert!(view.sel_hover_armed, "armed on the overflow row");
+        assert_eq!(
+            view.hover_row, view.selector,
+            "armed: hover_row tracks selector"
+        );
+        let sel_before = view.selector.unwrap();
+        // A scrape tick promotes idle11 (agents[12]) to non-idle: the squad folds
+        // and idle11's row moves up. set_layout re-anchors; hover_row must follow.
+        let mut next = view.layout.clone();
+        next.agents[12].badge = Some(AgentBadge::Working);
+        view.set_layout(next);
+        assert_eq!(
+            view.hover_row, view.selector,
+            "hover_row tracks the re-anchored selector after a layout tick"
+        );
+        assert!(
+            view.selector.unwrap() < sel_before,
+            "the fold moved the selected row up"
         );
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);
