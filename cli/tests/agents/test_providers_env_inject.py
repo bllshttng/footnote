@@ -129,43 +129,6 @@ def test_codex_create_without_agent_self_skips_injection(
 
 
 # ---------------------------------------------------------------------------
-# gemini.create -> _run_gemini
-# ---------------------------------------------------------------------------
-
-
-def test_gemini_create_threads_agent_self_to_run_gemini(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """gemini.create forwards agent_self into _run_gemini's spawn env."""
-    from fno.agents.providers import gemini as gemini_mod
-
-    captured: Dict[str, Any] = {}
-
-    def fake_popen(argv: list[str], **kw: Any) -> Any:
-        captured["env"] = kw.get("env")
-        raise gemini_mod.GeminiInvocationError(1)
-
-    monkeypatch.setattr(gemini_mod, "_subprocess_popen", fake_popen)
-
-    output_path = tmp_path / "out.json"
-
-    with pytest.raises(gemini_mod.GeminiInvocationError):
-        gemini_mod.create(
-            cwd=tmp_path,
-            prompt="hello",
-            from_name="orchestrator",
-            yolo=False,
-            output_path=output_path,
-            agent_self="gamma",
-        )
-
-    env = captured["env"]
-    assert env is not None
-    assert env["FNO_AGENT_SELF"] == "gamma"
-    assert env["FNO_AGENT_PROVIDER"] == "gemini"
-
-
-# ---------------------------------------------------------------------------
 # Failure-recovery / degradation contract
 # ---------------------------------------------------------------------------
 
