@@ -103,7 +103,7 @@ pub fn family1_truth_state(handle: &str) -> Option<String> {
     command
         .args(["agents", "truth", handle, "--json"])
         .env("FNO_AGENTS_RUNTIME", "python");
-    family1_truth_state_with_command(command, Duration::from_secs(3))
+    family1_truth_state_with_command(command, Duration::from_secs(5))
 }
 
 fn family1_truth_state_with_command(

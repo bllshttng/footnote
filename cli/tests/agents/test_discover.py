@@ -834,6 +834,72 @@ def test_resolver_only_full_claude_id_needs_no_registry(tmp_path):
     assert match.transcript_path == str(transcript)
 
 
+def test_resolver_only_registered_claude_prefers_conversational_copy(tmp_path):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    session_id = "c655c326-1111-2222-3333-444455556666"
+    write_registry(
+        [
+            AgentEntry(
+                name="registered-claude",
+                harness="claude",
+                harness_session_id=session_id,
+                short_id="c655c326",
+                cwd="/repo/one",
+                log_path="/tmp/claude.log",
+            )
+        ],
+        path=registry,
+    )
+    projects = tmp_path / "projects"
+    stub = projects / "-a-stub" / f"{session_id}.jsonl"
+    real = projects / "-z-real" / f"{session_id}.jsonl"
+    stub.parent.mkdir(parents=True)
+    real.parent.mkdir(parents=True)
+    stub.write_text(json.dumps({"type": "summary"}) + "\n", encoding="utf-8")
+    real.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "still working"}],
+            },
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+
+    match, _suggestions = discover.resolve_or_suggest(
+        session_id,
+        registry_path=registry,
+        projects_dir=projects,
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.transcript_path == str(real)
+
+
+def test_resolver_only_full_claude_id_does_not_expand_glob_tokens(tmp_path):
+    projects = tmp_path / "projects"
+    _write_transcript(
+        projects,
+        cwd="/repo/one",
+        session_id="c655c326-1111-2222-3333-444455556666",
+    )
+
+    match, suggestions = discover.resolve_or_suggest(
+        "????????-????-????-????-????????????",
+        registry_path=tmp_path / "missing-registry.json",
+        projects_dir=projects,
+        require_alive=False,
+    )
+
+    assert match is None
+    assert suggestions == []
+
+
 def test_resolver_only_short_collision_checks_every_store(tmp_path):
     from fno.agents.registry import AgentEntry, write_registry
 

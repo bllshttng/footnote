@@ -35,6 +35,10 @@ from fno import paths
 # (iCloud) and ``<uuid>-*.md`` transcripts that must never be parsed
 # (AC1-EDGE). ``^\d+\.json$`` admits only the real pid files.
 _PID_FILE_RE = re.compile(r"^\d+\.json$")
+_CLAUDE_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 # The hex handle is the addressable id (== jobId == CC's ``name`` default,
 # verified present on 2.1.169). The friendly alias is UX layered on top.
@@ -1062,6 +1066,21 @@ def resolve_or_suggest(
     """
     from fno.harness_identity import LEGACY_HANDLE_RE, canonical_handle
 
+    def claude_transcript_path(session_id: str, cwd: str) -> Optional[str]:
+        if not _CLAUDE_UUID_RE.fullmatch(session_id):
+            return None
+        from fno.provenance.resolver import resolve_transcript
+
+        resolved = resolve_transcript(
+            "claude",
+            session_id,
+            cwd or "/",
+            projects_root=projects_dir or default_projects_dir(),
+        )
+        if not resolved.resolved or resolved.ambiguous:
+            return None
+        return resolved.transcript_path
+
     if not require_alive:
         registry_matches = [
             row
@@ -1070,17 +1089,11 @@ def resolve_or_suggest(
         ]
         if len(registry_matches) == 1:
             row = registry_matches[0]
-            transcript_path = None
-            if row["agent"] == "claude":
-                try:
-                    transcript_path = next(
-                        (projects_dir or default_projects_dir()).glob(
-                            f"*/{row['session_id']}.jsonl"
-                        ),
-                        None,
-                    )
-                except OSError:
-                    pass
+            transcript_path = (
+                claude_transcript_path(row["session_id"], row["cwd"])
+                if row["agent"] == "claude"
+                else None
+            )
             return DiscoveredSession(
                 session_id=row["session_id"],
                 short_id=row["short_id"],
@@ -1091,20 +1104,13 @@ def resolve_or_suggest(
                 status=row["status"],
                 agent=row["agent"],
                 transcript_path=(
-                    str(transcript_path) if transcript_path is not None else None
+                    transcript_path if transcript_path is not None else None
                 ),
             ), []
 
-        if handle and len(handle) > 8:
-            try:
-                claude_matches = list(
-                    (projects_dir or default_projects_dir()).glob(
-                        f"*/{handle}.jsonl"
-                    )
-                )
-            except OSError:
-                claude_matches = []
-            if len(claude_matches) == 1:
+        if handle:
+            transcript_path = claude_transcript_path(handle, "")
+            if transcript_path is not None:
                 return DiscoveredSession(
                     session_id=handle,
                     short_id=canonical_handle(handle),
@@ -1114,7 +1120,7 @@ def resolve_or_suggest(
                     project=None,
                     status=None,
                     agent="claude",
-                    transcript_path=str(claude_matches[0]),
+                    transcript_path=transcript_path,
                 ), []
 
     discovery_kwargs = {
