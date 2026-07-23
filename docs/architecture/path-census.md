@@ -109,3 +109,8 @@ The dispatcher is reachable, so this PR does not partially delete it or `scripts
 | 1 | Pre-claim launch window | x-b44e | FIX: claim before observable work + visibility barrier | OPEN |
 | 2 | No fixed-on-main check at filing | x-8d3e | FIX: record and check finding anchor | OPEN |
 | 3 | No still-broken probe at dispatch | x-8d3e | FIX: pre-spawn anchor probe and closure | OPEN |
+
+### Leg 6 reachability evidence (2026-07-23)
+
+The Rust dispatcher is reachable: `crates/fno-agents/src/loop_target.rs:420-427` routes `--driver megawalk` to `crate::loop_megawalk::run`, `loop_megawalk.rs:1153-1155` constructs `ShelloutDispatcher`, and `loop_dispatch.rs:250-272` implements its live `Dispatcher` path.
+This leg therefore records `RETIRE (migration needed)` and deletes neither `ShelloutDispatcher` nor `scripts/lib/driver-claude-code.sh`.
