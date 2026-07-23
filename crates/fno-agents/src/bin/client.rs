@@ -902,7 +902,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         if let Some(value) = effort {
             let allowed = match provider {
                 "claude" => &["low", "medium", "high", "xhigh", "max"][..],
-                "codex" => &["minimal", "low", "medium", "high"][..],
+                "codex" => &["minimal", "low", "medium", "high", "xhigh"][..],
                 _ => {
                     eprintln!(
                         "provider {} has no reasoning-effort surface; omit --effort",
