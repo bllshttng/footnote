@@ -1175,6 +1175,42 @@ def _codex_session_meta(session_id: str) -> Optional[dict[str, Any]]:
     return payload
 
 
+def _codex_project_assignment(
+    session_id: str,
+    cwd: Path,
+    canonical: Path,
+    *,
+    codex_home: Optional[Path] = None,
+) -> bool:
+    """True iff Desktop maps this exact thread/cwd to the canonical project.
+
+    The assignment overlay is read-only, strict, and fail-closed. It is the
+    only local evidence that Desktop, rather than an external Git allocator,
+    owns the worktree and will roll the chat up under the canonical project.
+    Footnote never creates, repairs, or writes this private app state.
+    """
+    home = (
+        codex_home
+        or Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    ).resolve()
+    try:
+        state = json.loads((home / ".codex-global-state.json").read_text())
+        assignment = state["thread-project-assignments"][session_id]
+        if assignment.get("projectKind") != "local":
+            return False
+        if Path(str(assignment.get("cwd") or "")).resolve() != cwd.resolve():
+            return False
+        project = state["local-projects"][assignment["projectId"]]
+        roots = project.get("rootPaths")
+        if not isinstance(roots, list):
+            return False
+        return canonical.resolve() in {
+            Path(str(root)).expanduser().resolve() for root in roots
+        }
+    except (KeyError, OSError, TypeError, ValueError, UnicodeDecodeError):
+        return False
+
+
 def _codex_desktop_handoff_policy(repo_root: Path) -> Optional[Any]:
     """Resolved policy iff this is a canonical Codex Desktop Local chat."""
     from fno.harness_identity import resolve_harness_identity
@@ -1191,6 +1227,16 @@ def _codex_desktop_handoff_policy(repo_root: Path) -> Optional[Any]:
         return None
     if recorded_cwd != repo_root.resolve():
         return None
+    if not _codex_project_assignment(
+        identity.session_id, repo_root, repo_root
+    ):
+        typer.echo(
+            "fno target start: Codex Desktop origin is confirmed, but this "
+            "thread has no verified assignment to the canonical project; "
+            "refusing external fallback because it would split Remote roll-up.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     try:
         from fno.worktree_paths import resolve_worktree_policy
 
@@ -1295,6 +1341,10 @@ def _codex_native_repo(cwd: Path) -> Optional[Path]:
         return None
     if recorded_cwd != canonical:
         return None
+    if not _codex_project_assignment(
+        identity.session_id, resolved, canonical
+    ):
+        return None
     registered = _git_out(canonical, "worktree", "list", "--porcelain")
     if not registered:
         return None
@@ -1325,6 +1375,17 @@ def _prepare_codex_native_branch(cwd: Path, node: str) -> str:
     base = _remote_base_ref(cwd, fetch=True)
     current = _git_out(cwd, "branch", "--show-current") or ""
     if current == branch:
+        manifest = cwd / ".fno" / "target-state.md"
+        if not (manifest.exists() and not manifest.is_symlink()):
+            head_sha = _git_out(cwd, "rev-parse", "HEAD")
+            base_sha = _git_out(cwd, "rev-parse", base)
+            if not head_sha or not base_sha or head_sha != base_sha:
+                typer.echo(
+                    f"fno target start: {branch} has no target manifest and HEAD "
+                    f"does not equal refreshed {base}; refusing an unproven resume.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
         return _base_receipt(cwd, base)
     if current:
         typer.echo(
@@ -1393,6 +1454,32 @@ def _start_codex_native(
     if manifest.exists() and not manifest.is_symlink():
         manifest_node = _manifest_node_id(manifest)
         requested_graph_node = _find_node(node)
+        if requested_graph_node is None:
+            try:
+                manifest_text = manifest.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                manifest_text = ""
+            explicitly_unclaimed = bool(
+                re.search(
+                    r"^graph_node_id\s*:\s*(?:null|['\"]?['\"]?)\s*$",
+                    manifest_text,
+                    re.MULTILINE,
+                )
+            )
+            if manifest_node is not None or not explicitly_unclaimed:
+                typer.echo(
+                    f"fno target start: {manifest} does not contain a valid "
+                    "unclaimed free-text target manifest; refusing native resume.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            typer.echo(
+                f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  "
+                "node=unclaimed"
+            )
+            if beastmode:
+                _warn_if_authority_not_granted(cwd)
+            return
         if requested_graph_node is not None and manifest_node != node:
             typer.echo(
                 f"fno target start: {manifest} does not record the requested node "
@@ -1749,7 +1836,7 @@ def start(
         if holder is not None:
             _print_foreign_holder_park(node, holder, repo_root)
             raise typer.Exit(code=1)
-        native_base = _remote_base_ref(repo_root)
+        native_base = _remote_base_ref(repo_root, fetch=True)
         _request_codex_native_handoff(
             repo_root,
             node,

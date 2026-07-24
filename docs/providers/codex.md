@@ -35,7 +35,8 @@ The retry verifies Desktop rollout identity, the `$CODEX_HOME/worktrees` boundar
 
 This same-thread handoff is load-bearing for Remote Control project roll-up.
 Codex Desktop records the managed chat against the canonical project while each chat retains a distinct worktree and branch, so concurrent Footnote chats remain isolated but appear under the same Footnote project in Desktop and mobile Remote.
-Footnote never writes the private Desktop project-assignment state and never asks its external allocator to create a directory under `$CODEX_HOME/worktrees`.
+Footnote reads the current thread's Desktop project assignment only as a strict ownership proof: the assigned cwd must equal the native worktree and the assigned local project's root must equal the canonical repository.
+It fails closed on a missing or changed schema, never writes the private assignment state, and never asks its external allocator to create a directory under `$CODEX_HOME/worktrees`.
 
 Codex TUI, headless, and other substrates that cannot perform the Desktop handoff degrade to an honest external worktree under `~/.fno/worktrees`.
 That degraded native fallback deliberately ignores `config.paths.worktrees_base`; an explicitly configured `worktree.policy = "external"` still honors the configured allocator.
