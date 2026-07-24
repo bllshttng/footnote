@@ -448,6 +448,49 @@ def _node_is_done(node: str) -> bool:
     return False
 
 
+def mission_complete(candidate: "Candidate") -> Optional[bool]:
+    """Did this worker's MISSION finish, per the node's external artifacts?
+
+    Family 1 (transcript truth) answers "is the stream terminal"; a ``<promise>``
+    makes it ``done`` whether or not anything shipped. This is the family-2 half
+    the recovery gate needs: the graph artifact that only a real completion
+    leaves behind. Claim state deliberately plays no part - claims are
+    PID-anchored, so a finished worker and an abandoned one both read stale.
+
+    Returns None (unverifiable) for an unresolvable mission or any read failure;
+    the caller treats None as "keep today's suppression" (fail closed).
+    """
+    node_id = kind = None
+    if candidate.cwd:
+        # Manifest first: only a /target session writes one, and the runtime
+        # wrote it, so unlike the worker name it cannot drift from the mission.
+        node_id, kind = _node_id_from_worktree(candidate.cwd), "target"
+    if not node_id:
+        from fno.agents.truth_status import parse_worker_mission
+
+        parsed = parse_worker_mission(candidate.name)
+        if parsed is None:
+            return None
+        node_id, kind = parsed
+
+    try:
+        from fno.graph.load import load_graph
+
+        entry = next((e for e in load_graph() if e.get("id") == node_id), None)
+    except Exception:  # noqa: BLE001 - a probe must never crash the sweep
+        return None
+    if entry is None:
+        return None
+    if entry.get("status") == "done":
+        return True
+    if kind == "think":
+        # spawn_think's contract: a design pass with no linked plan_path failed.
+        return bool(str(entry.get("plan_path") or "").strip())
+    # A PR existing is the completion floor - red CI and pending bots are
+    # pr_watch's and /fno:pr check's beat, not the watchdog's (Locked Decision 4).
+    return bool(entry.get("pr_number") or entry.get("pr_url"))
+
+
 def _release_lane_slot(node: str, cwd: str) -> None:
     """Free a dead lane's parallel-lane slot (parallel mode x-42d5, G4).
 

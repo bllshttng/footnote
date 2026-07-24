@@ -913,6 +913,91 @@ class TestNodeIsDone:
         assert recovery._node_is_done("x-370f") is False
 
 
+class TestMissionComplete:
+    """x-5583: the family-2 artifact probe behind the terminal-suppression gate."""
+
+    def _patch_graph(self, monkeypatch, entries):
+        from fno.graph import load as gl
+        monkeypatch.setattr(gl, "load_graph", lambda *a, **k: entries)
+
+    def _cand(self, name=None, cwd=None):
+        return recovery.Candidate(short_id="s1", sock_path="/s", jobs_dir=None,
+                                  cwd=cwd, name=name)
+
+    def _worktree(self, tmp_path, node):
+        fno_dir = tmp_path / ".fno"
+        fno_dir.mkdir()
+        (fno_dir / "target-state.md").write_text(
+            f"graph_node_id: {node}\n", encoding="utf-8")
+        return str(tmp_path)
+
+    # -- resolution order -------------------------------------------------
+    def test_manifest_wins_over_name(self, monkeypatch, tmp_path):
+        # A non-standard name that WOULD parse to nothing still resolves via the
+        # manifest, and a manifest hit is always a target mission.
+        self._patch_graph(monkeypatch, [{"id": "x-1111", "plan_path": "/p.md"}])
+        cand = self._cand(name="tgt-x-9999-liveness",
+                          cwd=self._worktree(tmp_path, "x-1111"))
+        # plan_path alone never completes a target mission (AC5).
+        assert recovery.mission_complete(cand) is False
+
+    def test_name_fallback_when_no_manifest(self, monkeypatch, tmp_path):
+        self._patch_graph(monkeypatch, [{"id": "x-2222", "plan_path": "/p.md"}])
+        assert recovery.mission_complete(
+            self._cand(name="think-x-2222-bar", cwd=str(tmp_path))) is True
+
+    def test_unresolvable_mission_is_none(self, monkeypatch, tmp_path):
+        # AC7: no node id in the name and no manifest -> unverifiable.
+        self._patch_graph(monkeypatch, [{"id": "x-1111", "status": "ready"}])
+        assert recovery.mission_complete(
+            self._cand(name="relay-worker", cwd=str(tmp_path))) is None
+        assert recovery.mission_complete(self._cand()) is None
+
+    # -- target missions --------------------------------------------------
+    @pytest.mark.parametrize("entry,expected", [
+        ({"id": "x-1111", "status": "done"}, True),
+        ({"id": "x-1111", "status": "ready", "pr_number": 42}, True),
+        ({"id": "x-1111", "status": "ready", "pr_url": "https://gh/pr/42"}, True),
+        ({"id": "x-1111", "status": "ready"}, False),
+        # AC5: a blueprinted-but-unshipped target node is NOT complete.
+        ({"id": "x-1111", "status": "ready", "plan_path": "/p.md"}, False),
+    ])
+    def test_target_artifacts(self, monkeypatch, entry, expected):
+        self._patch_graph(monkeypatch, [entry])
+        assert recovery.mission_complete(
+            self._cand(name="target-x-1111-foo")) is expected
+
+    # -- think missions ---------------------------------------------------
+    @pytest.mark.parametrize("entry,expected", [
+        ({"id": "x-2222", "plan_path": "/plans/d.md"}, True),
+        ({"id": "x-2222", "status": "done"}, True),
+        ({"id": "x-2222", "plan_path": ""}, False),
+        ({"id": "x-2222", "plan_path": "   "}, False),  # whitespace is no artifact
+        ({"id": "x-2222", "plan_path": None}, False),
+        ({"id": "x-2222"}, False),
+    ])
+    def test_think_artifacts(self, monkeypatch, entry, expected):
+        self._patch_graph(monkeypatch, [entry])
+        assert recovery.mission_complete(
+            self._cand(name="think-x-2222-bar")) is expected
+
+    # -- failure paths (AC3) ----------------------------------------------
+    def test_absent_node_is_unverifiable_not_incomplete(self, monkeypatch):
+        self._patch_graph(monkeypatch, [{"id": "x-other", "status": "ready"}])
+        assert recovery.mission_complete(
+            self._cand(name="target-x-1111-foo")) is None
+
+    def test_graph_error_degrades_to_none(self, monkeypatch):
+        from fno.graph import load as gl
+
+        def boom(*a, **k):
+            raise RuntimeError("corrupt graph")
+
+        monkeypatch.setattr(gl, "load_graph", boom)
+        assert recovery.mission_complete(
+            self._cand(name="target-x-1111-foo")) is None
+
+
 class TestRedispatch:
     """x-370f residual 1: failover respawn frees the dead session's claim via
     ``fno claim force-release`` before spawning, skips an already-done node, and
