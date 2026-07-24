@@ -28,6 +28,10 @@ def _isolate(monkeypatch: pytest.MonkeyPatch):
     """No explicit config; no FNO_REPO_ROOT pin; global candidate disabled."""
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
+    # The canonical candidate is the whole subject here, and preflight's
+    # hermetic runner exports FNO_NO_CANONICAL_CONFIG=1 to drop it - so without
+    # this the suite is red under preflight and green everywhere else.
+    monkeypatch.delenv("FNO_NO_CANONICAL_CONFIG", raising=False)
     # /dev/null is not a regular file, so the per-user global candidate never
     # satisfies the load (documented test-isolation hook on _global_settings_path).
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
