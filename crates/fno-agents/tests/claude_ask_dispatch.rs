@@ -322,7 +322,7 @@ fn followup_socket_reply_stamps_live_and_emits() {
 }
 
 #[test]
-fn followup_orphan_socket_null_exit_13_stamps_orphaned() {
+fn followup_socket_null_without_truth_exit_13_preserves_status() {
     let home = AgentsHome::at(tmpdir("orph-home"));
     let claude_root = tmpdir("orph-claude");
     let ch = ClaudeHome::at(&claude_root);
@@ -349,11 +349,20 @@ fn followup_orphan_socket_null_exit_13_stamps_orphaned() {
         &[],
     );
     assert_eq!(out.exit_code, 13);
-    assert!(out.stderr.contains("suspended"), "{}", out.stderr);
+    assert!(
+        out.stderr.contains("truth-live-inject-failed"),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("live but not currently routable"),
+        "{}",
+        out.stderr
+    );
 
-    // status stamped orphaned in the registry.
     let reg = fs::read_to_string(home.registry_json()).unwrap();
-    assert!(reg.contains("\"orphaned\""), "{}", reg);
+    assert!(reg.contains("\"status\": \"live\""), "{}", reg);
+    assert!(!reg.contains("\"orphaned\""), "{}", reg);
 }
 
 /// Short, collision-free AF_UNIX path under /tmp (macOS sun_path is ~104 chars,

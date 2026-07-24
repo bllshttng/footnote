@@ -350,7 +350,7 @@ def test_dispatch_ask_existing_name_routes_to_followup(tmp_path: Path, monkeypat
     assert exc_info.value.exit_code == 13
     msg = str(exc_info.value)
     assert "already-there" in msg
-    assert "not running" in msg
+    assert "live but not currently routable" in msg
 
 
 def test_dispatch_ask_new_agent_requires_provider(

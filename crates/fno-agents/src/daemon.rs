@@ -2538,7 +2538,33 @@ fn reap_zombies() {
     }
 }
 
+fn rendered_status_from_truth(truth: Option<&str>) -> &'static str {
+    match truth {
+        Some("working" | "watching" | "your-move") => "live",
+        Some("done" | "stalled") => "orphaned",
+        _ => "unknown",
+    }
+}
+
+fn registry_truth_handle(entry: &RegistryEntry) -> String {
+    if let Some(session_id) = entry.harness_session_id.as_deref() {
+        return session_id.to_string();
+    }
+    if !entry.short_id.is_empty() {
+        entry.short_id.clone()
+    } else {
+        entry.name.clone()
+    }
+}
+
 fn handle_list(ctx: &Ctx, req: &Request) -> Response {
+    handle_list_with_truth(ctx, req, crate::claude_ask::family1_truth_state)
+}
+
+fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
+where
+    F: Fn(&str) -> Option<String>,
+{
     let all = req
         .params
         .get("all")
@@ -2570,14 +2596,14 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
 
     // Reject an invalid --status up front so a typo fails fast with exit 13
     // instead of silently returning zero rows + exit 0 (Codex P2 on PR #361).
-    // Mirrors Python's AgentStatusFilter enum (live | orphaned), which Typer
+    // Mirrors Python's AgentStatusFilter enum, which Typer
     // rejects at parse time.
     if let Some(ref st) = filter_status {
-        if st != "live" && st != "orphaned" {
+        if st != "live" && st != "orphaned" && st != "unknown" {
             return Response::err(
                 req.id,
                 ErrorCode::InvalidStatus,
-                format!("invalid --status '{st}' (expected: live | orphaned)"),
+                format!("invalid --status '{st}' (expected: live | orphaned | unknown)"),
             );
         }
     }
@@ -2595,11 +2621,10 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
     let filter_cwd_norm = filter_cwd.as_deref().map(&norm_path);
 
     let registry = state::load_registry(&ctx.home.registry_json()).unwrap_or_default();
-    let entries: Vec<Value> = registry
+    let classified: Vec<_> = registry
         .entries
         .iter()
         .filter(|e| {
-            // Legacy all/project_root filter
             if !all {
                 if let Some(ref p) = cwd_project {
                     if &e.project_root != p {
@@ -2607,7 +2632,6 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
                     }
                 }
             }
-            // Task 3.1 filters: cwd, provider, status (matching Python list_agents order)
             if let Some(ref cwd) = filter_cwd_norm {
                 if &norm_path(&e.cwd) != cwd {
                     return false;
@@ -2618,27 +2642,33 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
                     return false;
                 }
             }
+            true
+        })
+        .map(|e| {
+            let truth_handle = registry_truth_handle(e);
+            let truth = truth_fn(&truth_handle);
+            (e, rendered_status_from_truth(truth.as_deref()))
+        })
+        .collect();
+    let entries: Vec<Value> = classified
+        .into_iter()
+        .filter(|(_e, rendered_status)| {
             if let Some(ref st) = filter_status {
-                if format!("{:?}", e.status).to_lowercase() != st.to_lowercase() {
+                if rendered_status != &st.as_str() {
                     return false;
                 }
             }
             true
         })
-        .map(|e| {
+        .map(|(e, rendered_status)| {
             // Task 3.1: return the full serialize_entry 10-key shape matching Python.
             // Fields present in RegistryEntry are mapped directly; fields absent from
             // the Rust registry are emitted as null with a NOTE citing the carveout.
             //
-            // DECIDED cv-eeaad75d: live_status is always null. The daemon does NOT
-            // replicate Python list's per-row `claude agents --json` live_status
-            // augmentation, and will not: under the replace architecture (the
-            // daemon is the sole agents backend; cv-d28b266a, docs/distribution.md)
-            // PTY-worker/registry `status` IS the canonical liveness signal. A
-            // `claude agents` shellout would both contradict that and be
-            // impossible to do consistently here (the daemon does not PTY-manage
-            // claude; ClaudeProvider.as_pty() is None). The field is kept (null)
-            // to preserve the serialize_entry parity shape for JSON consumers.
+            // live_status remains null because the daemon does not duplicate the
+            // harness supervisor view. `status`, however, is the family-1
+            // transcript verdict attached above; stored registry status is only
+            // lifecycle metadata and cannot prove read-side liveness or death.
             //
             // session_id: Python uses the provider-specific resume id (short_id
             // for claude since v9, codex_session_id for codex, gemini_session_id
@@ -2676,8 +2706,8 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
                 "cwd": e.cwd,
                 "created_at": e.created_at,
                 "last_message_at": e.last_message_at,
-                "status": format!("{:?}", e.status).to_lowercase(),
-                "live_status": null,  // DECIDED cv-eeaad75d: not replicated (see NOTE above)
+                "status": rendered_status,
+                "live_status": null,
                 // Architecture C (plan ab-70faa65b): additive keys, never removing
                 // live_status (Locked #4 back-compat). `pid` is the worker pid for
                 // a PTY agent, null for a one-shot ask (no managed process). The
@@ -5643,6 +5673,127 @@ done
             });
         })
         .unwrap();
+    }
+
+    #[test]
+    fn list_renders_family1_truth_instead_of_stored_registry_status() {
+        let home = short_home("listtruth");
+        seed_stream_row(&home, "worker-list", "abc12345");
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries[0].status = AgentStatus::Orphaned;
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handle| Some("working".into()));
+        let result = response.result().unwrap();
+        let agents = result["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["status"], "live");
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn list_queries_family1_by_session_identity_not_custom_name() {
+        let home = short_home("listidentity");
+        seed_stream_row(&home, "custom-worker-name", "abc12345");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let seen = std::cell::RefCell::new(Vec::new());
+
+        let response = handle_list_with_truth(&ctx, &req, |handle| {
+            seen.borrow_mut().push(handle.to_string());
+            Some("working".into())
+        });
+
+        assert!(response.result().is_some());
+        assert_eq!(seen.into_inner(), vec!["uuid-abc12345"]);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn list_queries_pidless_row_by_bare_canonical_handle() {
+        let home = short_home("listpidless");
+        seed_stream_row(&home, "custom-worker-name", "unused");
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries[0].short_id.clear();
+            registry.entries[0].harness = Some("codex".into());
+            registry.entries[0].harness_session_id =
+                Some("019f8ff2-1111-2222-3333-444444444444".into());
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let seen = std::cell::RefCell::new(Vec::new());
+
+        let response = handle_list_with_truth(&ctx, &req, |handle| {
+            seen.borrow_mut().push(handle.to_string());
+            Some("working".into())
+        });
+
+        assert!(response.result().is_some());
+        assert_eq!(
+            seen.into_inner(),
+            vec!["019f8ff2-1111-2222-3333-444444444444"]
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn list_queries_non_claude_row_by_transcript_identity() {
+        let home = short_home("listnonclaude");
+        seed_stream_row(&home, "custom-worker-name", "transport");
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries[0].harness = Some("codex".into());
+            registry.entries[0].harness_session_id =
+                Some("019f8ff2-1111-2222-3333-444444444444".into());
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let seen = std::cell::RefCell::new(Vec::new());
+
+        let response = handle_list_with_truth(&ctx, &req, |handle| {
+            seen.borrow_mut().push(handle.to_string());
+            Some("working".into())
+        });
+
+        assert!(response.result().is_some());
+        assert_eq!(
+            seen.into_inner(),
+            vec!["019f8ff2-1111-2222-3333-444444444444"]
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn list_applies_cheap_filters_before_family1_subprocesses() {
+        let home = short_home("listprefilter");
+        seed_stream_row(&home, "claude-worker", "aaaaaaaa");
+        seed_stream_row(&home, "codex-worker", "bbbbbbbb");
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries[1].harness = Some("codex".into());
+            registry.entries[1].harness_session_id =
+                Some("bbbbbbbb-1111-2222-3333-444444444444".into());
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"provider": "codex"}));
+        let seen = std::cell::RefCell::new(Vec::new());
+
+        let response = handle_list_with_truth(&ctx, &req, |handle| {
+            seen.borrow_mut().push(handle.to_string());
+            Some("working".into())
+        });
+
+        assert!(response.result().is_some());
+        assert_eq!(
+            seen.into_inner(),
+            vec!["bbbbbbbb-1111-2222-3333-444444444444"]
+        );
+        std::fs::remove_dir_all(home.root()).ok();
     }
 
     /// Start a real stream worker (fake emitter child) on `home.worker_sock(id)`

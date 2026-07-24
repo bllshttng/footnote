@@ -34,6 +34,9 @@ def _no_real_mail_inject(monkeypatch):
     monkeypatch.setattr(
         dispatch_mod, "_mail_inject_claude", lambda recipient, text: False
     )
+    monkeypatch.setattr(
+        dispatch_mod, "_registered_family1_state", lambda _entry: "working"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +349,53 @@ def test_dispatch_send_offline_peer_queued(tmp_path: Path, monkeypatch) -> None:
     assert result.msg_id.startswith("msg-")
 
 
+def test_dispatch_send_stale_orphaned_status_uses_live_family1(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry([
+        AgentEntry(
+            name="red", harness="claude", cwd="/tmp", log_path="/tmp/red.log",
+            short_id="abcd1234", status="orphaned",
+        )
+    ])
+    monkeypatch.setattr(
+        dispatch_mod, "_registered_family1_state", lambda _entry: "watching"
+    )
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *a, **k: True)
+
+    result = dispatch_mod.dispatch_send(
+        name="red", message="ping", provider=None, cwd=tmp_path
+    )
+
+    assert result.delivery == "hosted"
+
+
+@pytest.mark.parametrize("state", ["done", "stalled", "unknown"])
+def test_dispatch_send_nonlive_family1_never_attempts_live_delivery(
+    tmp_path: Path, monkeypatch, state: str
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(
+        dispatch_mod, "_registered_family1_state", lambda _entry: state
+    )
+    attempts: list = []
+    monkeypatch.setattr(
+        dispatch_mod, "_deliver_live", lambda *a, **k: attempts.append(a) or True
+    )
+
+    result = dispatch_mod.dispatch_send(
+        name="red", message="ping", provider=None, cwd=tmp_path
+    )
+
+    assert result.delivery == "durable"
+    assert attempts == []
 def test_cmd_send_queued_stdout_format(tmp_path: Path, monkeypatch, runner: CliRunner) -> None:
     """AC3-UI (CLI): durable path stdout is 'msg-<id> queued (durable)\\n'."""
     use_tmpdir(monkeypatch, tmp_path)

@@ -5,12 +5,17 @@ from dataclasses import dataclass
 
 import pytest
 
-from fno.post_merge_route import inject_pr_merged, resolve_warm_session
+from fno.post_merge_route import (
+    inject_pr_merged,
+    resolve_warm_session,
+    session_death_confirmed,
+)
 
 
 @dataclass
 class _Sess:
     session_id: str
+    is_alive: bool = True
 
 
 def _patch_live(monkeypatch, sessions):
@@ -31,6 +36,11 @@ class TestResolveWarmSession:
         _patch_live(monkeypatch, [_Sess("aaaa-bbbb")])
         monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         assert resolve_warm_session("gone-gone") is None
+
+    def test_family1_stalled_session_takes_cold_path(self, monkeypatch):
+        _patch_live(monkeypatch, [_Sess("stalled-id", is_alive=False)])
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        assert resolve_warm_session("stalled-id") is None
 
     @pytest.mark.parametrize("empty", [None, "", "   "])
     def test_missing_id_is_none(self, monkeypatch, empty):
@@ -128,6 +138,16 @@ def _patch_registry(monkeypatch, entries):
     monkeypatch.setattr(reg, "load_registry", lambda *a, **k: entries)
 
 
+def _patch_truth(monkeypatch, state):
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda *_args, **_kwargs: {"state": state},
+    )
+
+
 class TestCodexWarmRoute:
     """x-c4dd: codex-shipped nodes warm-route to their live registered panel via
     the shared _deliver_live vehicle, injecting the RAW command (mail=None)."""
@@ -135,6 +155,7 @@ class TestCodexWarmRoute:
     def test_resolve_codex_live_registered_panel(self, monkeypatch):
         monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         _patch_registry(monkeypatch, [_FakeEntry("codex", "cx-123", "live")])
+        _patch_truth(monkeypatch, "working")
         assert resolve_warm_session("cx-123", "codex") == "cx-123"
 
     def test_resolve_codex_no_panel_is_none(self, monkeypatch):
@@ -143,7 +164,34 @@ class TestCodexWarmRoute:
 
     def test_resolve_codex_exited_panel_is_none(self, monkeypatch):
         _patch_registry(monkeypatch, [_FakeEntry("codex", "cx-123", "exited")])
+        _patch_truth(monkeypatch, "done")
         assert resolve_warm_session("cx-123", "codex") is None
+
+    def test_resolve_codex_stale_orphaned_row_when_family1_is_live(self, monkeypatch):
+        _patch_registry(monkeypatch, [_FakeEntry("codex", "cx-123", "orphaned")])
+        _patch_truth(monkeypatch, "working")
+        assert resolve_warm_session("cx-123", "codex") == "cx-123"
+
+    def test_unknown_family1_never_confirms_death(self, monkeypatch):
+        _patch_registry(monkeypatch, [_FakeEntry("codex", "cx-123", "orphaned")])
+        _patch_truth(monkeypatch, "unknown")
+        assert session_death_confirmed("cx-123", "codex") is False
+
+    def test_transcript_only_codex_death_uses_codex_reader(self, monkeypatch):
+        _patch_registry(monkeypatch, [])
+        from fno.agents import session_truth
+
+        seen = {}
+
+        def fake_truth(_handle, **kwargs):
+            session, _suggestions = kwargs["resolve"](_handle)
+            seen["agent"] = session.agent
+            return {"state": "done"}
+
+        monkeypatch.setattr(session_truth, "resolve_session_truth", fake_truth)
+
+        assert session_death_confirmed("cx-123", "codex", "/repo") is True
+        assert seen["agent"] == "codex"
 
     def test_resolve_gemini_always_cold(self, monkeypatch):
         # No live-inject vehicle yet (US9): gemini cold-paths regardless.
@@ -193,6 +241,7 @@ class TestCodexWarmRoute:
             mux={"session": "m", "pane_id": 1},
         )
         _patch_registry(monkeypatch, [pane])
+        _patch_truth(monkeypatch, "working")
         assert resolve_warm_session("cx-p", "codex") == "cx-p"
 
     def test_inject_prefers_transport_bearing_pane_row(self, monkeypatch):

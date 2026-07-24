@@ -139,24 +139,32 @@ def test_ac1_edge_strict_pattern_and_sync_conflicts(tmp_path, monkeypatch):
     assert [s.short_id for s in sessions] == ["real1234"]
 
 
-def test_ac1_fr_vanished_or_dead_pid_not_live(tmp_path, monkeypatch):
-    """AC1-FR: a session whose PID is no longer running is dropped, not phantom."""
+def test_dead_pid_is_enumerated_but_family1_decides_routing(tmp_path, monkeypatch):
+    """A stale process sidecar remains an identity candidate, never a verdict."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
     _write_session(sdir, 401, session_id="uuid-dead", job_id="dead0000",
                    cwd="/Users/x/code/proj")
     # 401 is NOT in the alive map -> dead.
     sessions = _run(sdir, {}, tmp_path)
-    assert sessions == []
+    assert [s.short_id for s in sessions] == ["dead0000"]
+    assert sessions[0].is_alive is False
+    resolved, _ = discover.resolve_or_suggest(
+        "dead0000", sessions_dir=sdir,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil({}), project_resolver=lambda _cwd: None,
+        truth_fn=lambda _session: {"state": "working"},
+    )
+    assert resolved is not None
     # And a live one alongside survives.
     ct2 = _write_session(sdir, 402, session_id="uuid-live", job_id="live0000",
                          cwd="/Users/x/code/proj")
     sessions = _run(sdir, {402: ct2}, tmp_path)
-    assert [s.short_id for s in sessions] == ["live0000"]
+    assert [s.short_id for s in sessions] == ["dead0000", "live0000"]
 
 
 def test_pid_reuse_rejected_by_proc_start_mismatch(tmp_path, monkeypatch):
-    """A reused PID (create-time mismatch) is not shown live (reuse guard)."""
+    """A reused PID remains only an unclassified enumeration candidate."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
     # File records procStart for an OLD create time; the PID is alive now but
@@ -166,7 +174,8 @@ def test_pid_reuse_rejected_by_proc_start_mismatch(tmp_path, monkeypatch):
                    cwd="/Users/x/code/proj", proc_start=time.ctime(old_ct))
     new_ct = time.time() - 5  # different process now holds pid 501
     sessions = _run(sdir, {501: new_ct}, tmp_path)
-    assert sessions == []
+    assert [s.short_id for s in sessions] == ["reuse000"]
+    assert sessions[0].is_alive is False
 
 
 def test_utc_proc_start_matches_live(tmp_path, monkeypatch):
@@ -225,9 +234,8 @@ def test_exclude_registered_short_ids(tmp_path, monkeypatch):
     assert [s.short_id for s in sessions] == ["free0001"]
 
 
-def test_ac1_edge2_alias_stable_and_retires_dead(tmp_path, monkeypatch):
-    """AC1-EDGE2: alias is stable across calls; a dead session retires its alias
-    on the next scan that still sees a live session."""
+def test_ac1_edge2_alias_stable_and_pid_miss_does_not_retire(tmp_path, monkeypatch):
+    """A process miss cannot retire identity without family-1 death."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
     name_map = tmp_path / ".fno" / "session-names.json"
@@ -247,10 +255,10 @@ def test_ac1_edge2_alias_stable_and_retires_dead(tmp_path, monkeypatch):
     # Same sessions, second call -> identical alias (stable).
     second = {s.short_id: s.handle for s in run({901: ct1, 902: ct2})}
     assert second["keep0001"] == first["keep0001"]
-    # 901 exits while 902 stays live -> 901's alias retired from the map.
+    # A PID miss alone preserves both identities.
     run({902: ct2})
     stored = json.loads(name_map.read_text(encoding="utf-8"))
-    assert "uuid-keep" not in stored
+    assert "uuid-keep" in stored
     assert "uuid-stay" in stored
 
 
@@ -271,8 +279,8 @@ def test_empty_scan_preserves_alias_map(tmp_path, monkeypatch):
 
     run({911: ct})
     before = name_map.read_text(encoding="utf-8")
-    # All sessions appear dead this scan -> map left intact, not wiped.
-    assert run({}) == []
+    # A PID-empty scan yields unclassified candidates and leaves aliases intact.
+    assert all(not session.is_alive for session in run({}))
     assert name_map.read_text(encoding="utf-8") == before
 
 
@@ -283,7 +291,17 @@ def _resolve(handle, sdir, alive, tmp_path):
         name_map_path=tmp_path / ".fno" / "session-names.json",
         psutil_mod=_FakePsutil(alive),
         project_resolver=lambda c: "proj",
+        truth_fn=lambda _session: {"state": "working"},
     )
+
+
+def test_unclassified_discovered_session_is_not_alive():
+    session = discover.DiscoveredSession(
+        session_id="feedface", short_id="feedface", handle="feedface",
+        pid=0, cwd="/tmp", project=None, status=None,
+    )
+    assert session.truth_state == "unknown"
+    assert session.is_alive is False
 
 
 def test_us2_resolve_by_hex_and_alias(tmp_path, monkeypatch):
@@ -465,8 +483,8 @@ def test_x_a1d5_session_id_from_newest_transcript_not_argv(tmp_path, monkeypatch
     assert [s.session_id for s in sessions] == ["real-transcript-id"]
 
 
-def test_x_a1d5_sidecar_present_skips_fallback(tmp_path, monkeypatch):
-    """AC4: a working sidecar means the projects fallback is never consulted."""
+def test_x_a1d5_sidecar_and_projects_candidates_are_unioned(tmp_path, monkeypatch):
+    """A stale sidecar candidate cannot hide a projects-only live session."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
     ct = _write_session(sdir, 770, session_id="uuid-sidecar", job_id="side0001",
@@ -483,17 +501,19 @@ def test_x_a1d5_sidecar_present_skips_fallback(tmp_path, monkeypatch):
         ),
         project_resolver=lambda c: None,
     )
-    assert [s.short_id for s in sessions] == ["side0001"]
+    assert {s.short_id for s in sessions} == {"side0001", "ghost-si"}
 
 
 def test_x_a1d5_stale_transcript_not_surfaced(tmp_path, monkeypatch):
-    """A live proc whose transcript went quiet past the window is dropped."""
+    """Transcript age alone is neither discovery exclusion nor proof of death."""
     use_tmpdir(monkeypatch, tmp_path)
     projects = tmp_path / "projects"
     _write_transcript(projects, cwd="/Users/x/code/proj", session_id="stale-sid",
                       mtime_age=discover._DEFAULT_RECENCY_SECONDS + 120)
     procs = [_claude_proc(4242, "/Users/x/code/proj")]
-    assert _run_projects(tmp_path, projects, procs) == []
+    sessions = _run_projects(tmp_path, projects, procs)
+    assert [s.session_id for s in sessions] == ["stale-sid"]
+    assert sessions[0].truth_state == "unknown"
 
 
 def test_x_a1d5_noise_ignored(tmp_path, monkeypatch):
@@ -550,6 +570,7 @@ def test_x_a1d5_resolve_adopts_projects_session(tmp_path, monkeypatch):
         name_map_path=tmp_path / ".fno" / "session-names.json",
         psutil_mod=_FakeProcsPsutil(procs={4242: (["claude"], "/Users/x/code/proj")}),
         project_resolver=lambda c: None,
+        truth_fn=lambda _session: {"state": "working"},
     )
     assert match is not None
     assert match.session_id == sid
@@ -634,18 +655,323 @@ def test_us2_codex_rollout_surfaces_live_session(tmp_path):
     assert s.cwd == "/Users/x/proj"
 
 
-def test_us2_codex_stale_rollout_not_surfaced(tmp_path):
+def test_us2_codex_old_watching_rollout_still_surfaces(tmp_path):
     codex = tmp_path / "codex"
-    _write_codex_rollout(
+    rollout = _write_codex_rollout(
         codex, session_id="019f48e1-dead", cwd="/x", mtime_age=10_000.0,
     )
-    assert _run_codex(tmp_path, codex) == []
+    with rollout.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "<watching pr=7>"}],
+            },
+        }) + "\n")
+    stale = time.time() - 10_000.0
+    os.utime(rollout, (stale, stale))
+
+    sessions = _run_codex(tmp_path, codex)
+
+    assert [s.session_id for s in sessions] == ["019f48e1-dead"]
+    assert sessions[0].truth_state == "watching"
+    assert sessions[0].is_alive is True
 
 
-def test_loaded_daemon_thread_resolves_with_stale_rollout(tmp_path, monkeypatch):
+def test_codex_truth_reuses_discovered_rollout_path(tmp_path, monkeypatch):
+    """One discovery scan serves tail content and mtime classification."""
+    codex = tmp_path / "codex"
+    rollout = _write_codex_rollout(
+        codex, session_id="019f48e1-direct", cwd="/x", mtime_age=10_000.0
+    )
+    with rollout.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "<watching pr=7>"}],
+            },
+        }) + "\n")
+    from fno.agents import peek
+
+    monkeypatch.setattr(
+        peek,
+        "_codex_rollout_path",
+        lambda *_args, **_kwargs: pytest.fail("rollout store was rescanned"),
+    )
+
+    sessions = _run_codex(tmp_path, codex)
+
+    assert sessions[0].truth_state == "watching"
+    assert sessions[0].transcript_path == str(rollout)
+
+
+def test_resolver_only_discovery_does_not_classify_every_candidate(
+    tmp_path, monkeypatch
+):
+    codex = tmp_path / "codex"
+    _write_codex_rollout(codex, session_id="019f48e1-target", cwd="/x")
+
+    match, _suggestions = discover.resolve_or_suggest(
+        "019f48e1",
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=lambda _cwd: pytest.fail("project metadata was resolved"),
+        truth_fn=lambda _session: pytest.fail("candidate was classified"),
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.session_id == "019f48e1-target"
+
+
+def test_resolver_only_full_session_id_uses_bare_fast_path(tmp_path):
+    codex = tmp_path / "codex"
+    session_id = "019f48e1-target-full-session-id"
+    _write_codex_rollout(codex, session_id=session_id, cwd="/x")
+
+    match, _suggestions = discover.resolve_or_suggest(
+        session_id,
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=lambda _cwd: pytest.fail("project metadata was resolved"),
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.session_id == session_id
+
+
+def test_resolver_only_registered_id_skips_transcript_store_scan(
+    tmp_path, monkeypatch
+):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="registered-codex",
+                harness="codex",
+                harness_session_id="019f48e1-registered",
+                cwd="/x",
+                log_path="/tmp/codex.log",
+            )
+        ],
+        path=registry,
+    )
+    monkeypatch.setattr(
+        discover,
+        "_discover_from_codex",
+        lambda *_args, **_kwargs: pytest.fail("transcript store was scanned"),
+    )
+
+    match, _suggestions = discover.resolve_or_suggest(
+        "019f48e1-registered",
+        registry_path=registry,
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.session_id == "019f48e1-registered"
+    assert match.agent == "codex"
+
+
+def test_resolver_only_registered_claude_carries_exact_transcript(tmp_path):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    session_id = "c655c326-1111-2222-3333-444455556666"
+    write_registry(
+        [
+            AgentEntry(
+                name="registered-claude",
+                harness="claude",
+                harness_session_id=session_id,
+                short_id="c655c326",
+                cwd="/repo/one",
+                log_path="/tmp/claude.log",
+            )
+        ],
+        path=registry,
+    )
+    transcript = _write_transcript(
+        tmp_path / "projects", cwd="/repo/one", session_id=session_id
+    )
+
+    match, _suggestions = discover.resolve_or_suggest(
+        session_id,
+        registry_path=registry,
+        projects_dir=tmp_path / "projects",
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.transcript_path == str(transcript)
+
+
+def test_resolver_only_full_claude_id_needs_no_registry(tmp_path):
+    session_id = "c655c326-1111-2222-3333-444455556666"
+    transcript = _write_transcript(
+        tmp_path / "projects", cwd="/repo/one", session_id=session_id
+    )
+
+    match, _suggestions = discover.resolve_or_suggest(
+        session_id,
+        registry_path=tmp_path / "missing-registry.json",
+        projects_dir=tmp_path / "projects",
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.agent == "claude"
+    assert match.transcript_path == str(transcript)
+
+
+def test_resolver_only_registered_claude_prefers_conversational_copy(tmp_path):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    session_id = "c655c326-1111-2222-3333-444455556666"
+    write_registry(
+        [
+            AgentEntry(
+                name="registered-claude",
+                harness="claude",
+                harness_session_id=session_id,
+                short_id="c655c326",
+                cwd="/repo/one",
+                log_path="/tmp/claude.log",
+            )
+        ],
+        path=registry,
+    )
+    projects = tmp_path / "projects"
+    stub = projects / "-a-stub" / f"{session_id}.jsonl"
+    real = projects / "-z-real" / f"{session_id}.jsonl"
+    stub.parent.mkdir(parents=True)
+    real.parent.mkdir(parents=True)
+    stub.write_text(json.dumps({"type": "summary"}) + "\n", encoding="utf-8")
+    real.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "still working"}],
+            },
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+
+    match, _suggestions = discover.resolve_or_suggest(
+        session_id,
+        registry_path=registry,
+        projects_dir=projects,
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.transcript_path == str(real)
+
+
+def test_resolver_only_full_claude_id_does_not_expand_glob_tokens(tmp_path):
+    projects = tmp_path / "projects"
+    _write_transcript(
+        projects,
+        cwd="/repo/one",
+        session_id="c655c326-1111-2222-3333-444455556666",
+    )
+
+    match, suggestions = discover.resolve_or_suggest(
+        "????????-????-????-????-????????????",
+        registry_path=tmp_path / "missing-registry.json",
+        projects_dir=projects,
+        require_alive=False,
+    )
+
+    assert match is None
+    assert suggestions == []
+
+
+def test_resolver_only_short_collision_checks_every_store(tmp_path):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="registered-codex",
+                harness="codex",
+                harness_session_id="deadbeef-registry",
+                cwd="/registry",
+                log_path="/tmp/codex.log",
+            )
+        ],
+        path=registry,
+    )
+    codex = tmp_path / "codex"
+    _write_codex_rollout(
+        codex, session_id="deadbeef-transcript", cwd="/transcript"
+    )
+
+    match, suggestions = discover.resolve_or_suggest(
+        "deadbeef",
+        registry_path=registry,
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=lambda _cwd: None,
+        require_alive=False,
+    )
+
+    assert match is None
+    assert suggestions == ["deadbeef-registry", "deadbeef-transcript"]
+
+
+@pytest.mark.parametrize(
+    "truth_state,expected",
+    [("working", "live"), ("done", "orphaned"), ("unknown", "unknown")],
+)
+def test_discovered_row_status_projects_family1_truth(truth_state, expected):
+    session = discover.DiscoveredSession(
+        session_id="feedface",
+        short_id="feedface",
+        handle="feedface",
+        pid=0,
+        cwd="/tmp",
+        project=None,
+        status="busy",
+        truth_state=truth_state,
+    )
+
+    assert session.to_row()["status"] == expected
+
+
+def test_loaded_daemon_thread_does_not_override_stalled_transcript(tmp_path, monkeypatch):
     codex = tmp_path / "codex"
     sid = "019f4d0c-1111-2222-3333-444444444444"
-    _write_codex_rollout(codex, session_id=sid, cwd="/old/repo", mtime_age=10_000.0)
+    rollout = _write_codex_rollout(
+        codex, session_id=sid, cwd="/old/repo", mtime_age=10_000.0
+    )
+    with rollout.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "still working"}],
+            },
+        }) + "\n")
+    stale = time.time() - 10_000.0
+    os.utime(rollout, (stale, stale))
     monkeypatch.setattr(
         discover,
         "_discover_from_codex_daemon",
@@ -671,9 +997,7 @@ def test_loaded_daemon_thread_resolves_with_stale_rollout(tmp_path, monkeypatch)
         project_resolver=lambda c: None,
     )
 
-    assert resolved is not None
-    assert resolved.session_id == sid
-    assert resolved.cwd == "/live/repo"
+    assert resolved is None
 
 
 def test_daemon_row_is_enriched_by_recent_rollout(tmp_path, monkeypatch):
@@ -781,6 +1105,7 @@ def test_us3_resolve_bare_short_id_across_harnesses(tmp_path):
         name_map_path=tmp_path / ".fno" / "session-names.json",
         psutil_mod=_FakePsutil(alive={}),
         project_resolver=lambda c: None,
+        truth_fn=lambda _session: {"state": "working"},
     )
     resolved, _ = discover.resolve_or_suggest("019f48e1", **seams)
     assert resolved is not None
@@ -873,6 +1198,7 @@ def _empty_seams(tmp_path: Path) -> dict:
         name_map_path=tmp_path / ".fno" / "session-names.json",
         psutil_mod=_FakePsutil({}),
         project_resolver=lambda c: None,
+        truth_fn=lambda _session: {"state": "working"},
     )
 
 
@@ -1045,6 +1371,34 @@ def test_us2_registry_dead_status_rows_excluded(tmp_path, monkeypatch):
     assert resolved is None
 
 
+def test_registry_orphaned_status_cannot_hide_family1_live_session(tmp_path, monkeypatch):
+    """A stale registry verdict yields to transcript truth on every read caller."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    sid = "feedface-1111-2222-3333-444444444444"
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="x-live", harness="claude", cwd="/x", log_path="/tmp/live.log",
+                short_id="feedface", harness_session_id=sid, status="orphaned",
+            )
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+
+    resolved, _ = discover.resolve_or_suggest(
+        "feedface",
+        registry_path=reg,
+        **_empty_seams(tmp_path),
+    )
+
+    assert resolved is not None
+    assert resolved.truth_state == "working"
+
+
 def test_us2_registry_short_id_is_jobid_not_uuid_prefix(tmp_path, monkeypatch):
     """codex review: short_id must be the authoritative jobId,
     not the uuid's first 8 hex, when the two differ."""
@@ -1152,13 +1506,15 @@ def test_us6_opencode_session_surfaces_live(tmp_path):
     assert s.pid == 0  # no OS handle, mirroring the codex lane
 
 
-def test_us6_opencode_stale_session_not_surfaced(tmp_path):
-    """AC-EDGE: outside the recency window it is not live."""
+def test_us6_opencode_stale_session_is_enumerated_for_family1(tmp_path):
+    """Age is classification evidence, never an enumeration exclusion."""
     storage = tmp_path / "opencode"
     _write_opencode_session(
         storage, session_id="ses_dead", cwd="/x", mtime_age=10_000.0
     )
-    assert _run_opencode(tmp_path, storage) == []
+    sessions = _run_opencode(tmp_path, storage)
+    assert [s.session_id for s in sessions] == ["ses_dead"]
+    assert sessions[0].truth_state == "unknown"
 
 
 def test_us6_opencode_fresh_messages_keep_stale_info_live(tmp_path):
@@ -1217,9 +1573,8 @@ def test_us6_opencode_streaming_turn_stays_live_via_part_mtime(tmp_path):
     assert [s.session_id for s in _run_opencode(tmp_path, storage)] == [sid]
 
 
-def test_us6_opencode_deep_scan_is_bounded_to_recent_sessions(tmp_path):
-    """The deeper scan must not run for a store full of old sessions, so a
-    session far outside the slack band stays dead even with fresh parts."""
+def test_us6_opencode_old_session_with_fresh_part_reaches_family1(tmp_path):
+    """Enumeration cannot hide a content signal written after stale metadata."""
     storage = tmp_path / "opencode"
     sid = "ses_ancient"
     _write_opencode_session(
@@ -1229,7 +1584,9 @@ def test_us6_opencode_deep_scan_is_bounded_to_recent_sessions(tmp_path):
     pdir.mkdir(parents=True)
     (pdir / "prt_000.json").write_text('{"type":"text","text":"x"}', encoding="utf-8")
     _touch(pdir, 5.0)
-    assert _run_opencode(tmp_path, storage) == []
+    sessions = _run_opencode(tmp_path, storage)
+    assert [s.session_id for s in sessions] == [sid]
+    assert sessions[0].truth_state == "working"
 
 
 def test_us6_opencode_dedups_and_honors_exclusions(tmp_path):
@@ -1305,8 +1662,10 @@ def test_opencode_db_surfaces_live_session(tmp_path):
     )
     sessions = _run_opencode(tmp_path, storage)
     assert [(s.session_id, s.cwd, s.agent) for s in sessions] == [
-        ("ses_live", "/Users/x/proj", "opencode")
+        ("ses_live", "/Users/x/proj", "opencode"),
+        ("ses_stale", "/Users/x/old", "opencode"),
     ]
+    assert [s.truth_state for s in sessions] == ["unknown", "unknown"]
 
 
 def test_opencode_db_wins_over_legacy_tree(tmp_path):

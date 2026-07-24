@@ -45,40 +45,11 @@ agents_app.add_typer(_mcp_app, name="mcp", hidden=True)
 
 
 class AgentStatusFilter(str, enum.Enum):
-    """Enum of registry status values accepted by ``list --status``.
+    """Rendered family-1 liveness values accepted by ``list --status``."""
 
-    Mirrors :data:`fno.agents.registry.KNOWN_STATUSES` exactly so
-    Typer rejects unknown values at parse time with an allowed-values
-    list (AC3-ERR). registry.status is a projection of state.status, so
-    this is the full snake_case AgentStatus vocabulary (mirrors the Rust
-    ``AgentStatus`` enum). The import-time assertion below converts that
-    invariant into mechanical enforcement so the two definitions cannot
-    drift.
-    """
-
-    spawning = "spawning"
-    ready = "ready"
-    idle = "idle"
-    busy = "busy"
     live = "live"
-    restarting = "restarting"
     orphaned = "orphaned"
-    failed = "failed"
-    exited = "exited"
-    permanent_dead = "permanent_dead"
-
-
-# Defense against silent drift: KNOWN_STATUSES is the registry's truth
-# and AgentStatusFilter is the CLI's mirror. If a future schema bump
-# adds a status without updating the enum, this assertion crashes at
-# import time with an actionable message rather than letting the CLI
-# silently reject filters that the registry now accepts.
-from fno.agents.registry import KNOWN_STATUSES as _KNOWN_STATUSES  # noqa: E402
-
-assert {member.value for member in AgentStatusFilter} == set(_KNOWN_STATUSES), (
-    "AgentStatusFilter is out of sync with registry.KNOWN_STATUSES; "
-    "update both when adding a new agent status."
-)
+    unknown = "unknown"
 
 
 def _resolve_dispatch_workdir(cwd: str | None, fresh: bool, here: bool) -> Path:
@@ -1516,7 +1487,7 @@ def cmd_list(
         None, "--provider", help="Filter by provider (claude | codex | gemini)."
     ),
     status: AgentStatusFilter = typer.Option(
-        None, "--status", help="Filter by registry status (live | orphaned)."
+        None, "--status", help="Filter by liveness (live | orphaned | unknown)."
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit JSON regardless of TTY."),
     discovered: bool = typer.Option(
@@ -1597,6 +1568,7 @@ def cmd_discovered_json(
             for s in discover_mod.discover_live_sessions(
                 exclude_short_ids=exclude, exclude_session_ids=exclude_sids
             )
+            if s.is_alive
         ]
         if provider:
             rows = [r for r in rows if r.get("agent") == provider]

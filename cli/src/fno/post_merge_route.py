@@ -33,16 +33,8 @@ def _current_session_ids() -> set[str]:
     return {v for k in _SELF_SESSION_ENV_VARS if (v := (os.environ.get(k) or "").strip())}
 
 
-def _entry_is_live(entry) -> bool:
-    """A registry row is reachable when its status is a live-ish projection.
-    ``status`` may be an ``AgentStatus`` enum or a raw string; normalize both."""
-    status = getattr(entry, "status", "")
-    val = getattr(status, "value", status)
-    return str(val).lower() in {"live", "idle", "busy", "ready"}
-
-
 def _live_codex_registry_entry(session_id: str):
-    """A live codex registry row addressable as ``session_id``, PREFERRING one
+    """A codex registry candidate addressable as ``session_id``, preferring one
     that carries a live transport (``mux``), or ``None``.
 
     v10 (x-880e): every codex row records its id in the canonical
@@ -59,7 +51,6 @@ def _live_codex_registry_entry(session_id: str):
             e
             for e in load_registry()
             if getattr(e, "harness", None) == "codex"
-            and _entry_is_live(e)
             and session_id == getattr(e, "harness_session_id", None)
         ]
     except Exception:
@@ -67,6 +58,52 @@ def _live_codex_registry_entry(session_id: str):
     if not matches:
         return None
     return next((e for e in matches if getattr(e, "mux", None)), matches[0])
+
+
+def _family1_state(
+    session_id: str,
+    entry=None,
+    source_cwd: Optional[str] = None,
+    source_harness: str = "claude",
+) -> str:
+    """Return transcript truth for an origin candidate; never infer from status."""
+    from types import SimpleNamespace
+
+    from fno.agents.discover import default_projects_dir
+    from fno.agents.session_truth import resolve_session_truth
+
+    if entry is None and not source_cwd:
+        result = resolve_session_truth(session_id)
+    else:
+        known = SimpleNamespace(
+            agent=(
+                getattr(entry, "harness", None)
+                if entry is not None
+                else source_harness
+            ),
+            session_id=session_id,
+            cwd=(getattr(entry, "cwd", "") if entry is not None else source_cwd) or "",
+        )
+        result = resolve_session_truth(
+            session_id,
+            resolve=lambda _handle: (known, []),
+            projects_root=default_projects_dir(),
+        )
+    return str(result.get("state") or "unknown")
+
+
+def session_death_confirmed(
+    source_session_id: Optional[str],
+    source_harness: Optional[str] = None,
+    source_cwd: Optional[str] = None,
+) -> bool:
+    """True only for an explicit family-1 ``done`` or ``stalled`` verdict."""
+    sid = (source_session_id or "").strip()
+    if not sid:
+        return False
+    harness = (source_harness or "claude").strip().lower()
+    entry = _live_codex_registry_entry(sid) if harness == "codex" else None
+    return _family1_state(sid, entry, source_cwd, harness) in {"done", "stalled"}
 
 
 def resolve_warm_session(
@@ -93,13 +130,17 @@ def resolve_warm_session(
             from fno.agents.discover import discover_live_sessions
 
             for s in discover_live_sessions():
-                if s.session_id == sid:
+                if getattr(s, "is_alive", True) and s.session_id == sid:
                     return sid
         except Exception:
             return None
         return None
     if harness == "codex":
-        return sid if _live_codex_registry_entry(sid) is not None else None
+        entry = _live_codex_registry_entry(sid)
+        if entry is None:
+            return None
+        state = _family1_state(sid, entry)
+        return sid if state in {"working", "watching", "your-move"} else None
     # gemini / unknown harness: no live-inject vehicle yet -> cold path.
     return None
 

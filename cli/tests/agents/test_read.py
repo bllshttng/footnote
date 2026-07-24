@@ -10,11 +10,10 @@ Live shellout is exercised in providers test + integration smoke.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
-from fno.agents.read import ListResult, list_agents
+from fno.agents.read import list_agents
 from fno.agents.registry import AgentEntry, write_registry
 from fno.paths_testing import use_tmpdir
 
@@ -181,6 +180,15 @@ def test_list_agents_filter_by_status(
         ]
     )
     _patch_claude_agents_json({"abc12345": {"live_status": "Working"}})
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda handle, **_kwargs: {
+            "state": "done" if handle == "dead" else "working"
+        },
+    )
 
     result = list_agents(status="orphaned", json_out=True, tty=True)
     parsed = json.loads(result.output)
@@ -316,6 +324,53 @@ def test_list_agents_does_not_mutate_registry(
     assert before == after
 
 
+def test_list_agents_family1_truth_overrides_stale_orphaned_render(
+    tmp_path, monkeypatch, _patch_claude_agents_json
+):
+    """A pid-less row with a fresh transcript must not render as dead."""
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            _codex(
+                name="live-codex",
+                status="orphaned",
+                pid=None,
+                harness_session_id="019f8ff2-1111-2222-3333-444444444444",
+            )
+        ]
+    )
+    _patch_claude_agents_json({})
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda *_args, **_kwargs: {"state": "working", "last_activity_age_s": 1},
+    )
+
+    row = json.loads(list_agents(json_out=True, tty=True).output)["agents"][0]
+    assert row["status"] == "live"
+
+
+def test_list_agents_unknown_truth_never_inherits_registry_death(
+    tmp_path, monkeypatch, _patch_claude_agents_json
+):
+    """Registry metadata cannot fill an inconclusive family-1 verdict."""
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry([_codex(name="uncertain", status="orphaned", pid=None)])
+    _patch_claude_agents_json({})
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda *_args, **_kwargs: {"state": "unknown", "reason": "no-records"},
+    )
+
+    row = json.loads(list_agents(json_out=True, tty=True).output)["agents"][0]
+    assert row["status"] == "unknown"
+
+
 # --------------------------------------------------------------------------
 # Discovered-lane provider filter
 # --------------------------------------------------------------------------
@@ -377,4 +432,31 @@ def test_discovered_rows_honor_provider_filter(
         ]
     )
     result = list_agents(provider=provider, json_out=True)
+    assert _discovered_agents(result.output) == expected
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        (None, ["claude"]),
+        ("live", ["claude"]),
+        ("orphaned", []),
+        ("unknown", []),
+    ],
+)
+def test_discovered_live_rows_honor_status_filter(
+    tmp_path,
+    monkeypatch,
+    _patch_claude_agents_json,
+    _patch_discovery,
+    status,
+    expected,
+):
+    use_tmpdir(monkeypatch, tmp_path)
+    _patch_claude_agents_json([])
+    write_registry([], path=tmp_path / "registry.json")
+    _patch_discovery([_Discovered("claude", "aaaa1111")])
+
+    result = list_agents(status=status, json_out=True)
+
     assert _discovered_agents(result.output) == expected

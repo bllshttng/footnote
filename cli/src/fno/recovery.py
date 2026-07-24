@@ -23,16 +23,8 @@ Design notes (the load-bearing parts):
   Under-coverage (a footnote bg session missing from the registry) is the SAFE
   failure: we never nudge an arbitrary CC session, we just might miss one.
 
-- **The predicate leans on freshness, not process-idle.** A clean
-  connection-close leaves ``state.json`` frozen at its last value (often
-  ``running``), indistinguishable from a busy session except that a busy
-  session keeps *updating* ``state.json``. So ``classify`` nudges only when the
-  state is non-terminal, not ``needs-input``, no ``<promise>`` is present, and
-  ``updatedAt`` is staler than the idle threshold. Caveat: a session mid-way
-  through a single long tool call (a multi-minute build/test) is busy but emits
-  no turn events, so its ``state.json`` also freezes; the idle threshold
-  default (15 min) is set above the longest expected single-tool runtime so
-  such a session is not mistaken for wedged.
+- **Transcript truth owns liveness.** ``session_truth`` supplies the content-aware
+  activity state and age; frozen ``state.json`` remains phase metadata only.
 
 - **Reuse over re-implement.** The socket write is the shipped
   ``providers.claude.send_to_session`` (the same BG8 inject used by ``fno
@@ -65,10 +57,6 @@ SKIP_NEEDS_INPUT = "skip-needs-input"
 SKIP_TERMINAL = "skip-terminal"
 NOT_STALE = "not-stale"
 
-# States that mean "finished, never re-nudge". ``needs-input`` is handled
-# separately (it emits a skipped event; the others are silent).
-_TERMINAL = frozenset({"done", "completed", "failed"})
-
 # The resume nudge. "keep going" is the exact text that resumed the motivating
 # repro (b78039cc, a human typed it); the agent re-enters its turn loop on any
 # user message, so the proven text is the lazy-correct choice.
@@ -85,58 +73,23 @@ def classify(
     updated_at: Optional[str],
     now: datetime,
     idle_threshold_s: int,
+    *,
+    truth_state: str,
+    truth_age_s: Optional[float],
 ) -> str:
-    """Decide what to do with one footnote-launched bg session.
-
-    Returns one of :data:`NUDGE`, :data:`SKIP_NEEDS_INPUT`,
-    :data:`SKIP_TERMINAL`, :data:`NOT_STALE`.
-
-    Order matters: terminal / needs-input are checked before staleness so a
-    done-or-waiting session is never nudged regardless of how stale its
-    ``state.json`` is. Only a non-terminal, non-waiting session whose
-    ``updatedAt`` is older than the threshold is a nudge target. A missing or
-    unparseable ``updatedAt`` is treated conservatively as not-stale (we cannot
-    prove idleness, so we do not nudge).
-
-    "Done" is read from the CC job ``state`` (``done``/``completed``/``failed``),
-    NOT from a ``<promise>`` in the transcript: a target ``<promise>`` is only
-    the model's *claim* of completion. loop-check's done-reads can reject it and
-    the session keeps going, so a past promise does not mean the work shipped —
-    a session that emitted ``<promise>`` and was then blocked is still working
-    and must remain recoverable. The terminal job state is the real authority,
-    and it is reached only when the session actually exited cleanly.
-    """
-    if state == "needs-input":
+    """Classify from family-1 transcript truth; state.json is phase metadata."""
+    del updated_at, now
+    if state == "needs-input" or truth_state == "your-move":
         return SKIP_NEEDS_INPUT
-    if state in _TERMINAL:
+    if truth_state == "done":
         return SKIP_TERMINAL
-    age = _age_seconds(updated_at, now)
-    if age is None or age < idle_threshold_s:
+    if truth_state in {"unknown", "watching"}:
+        return NOT_STALE
+    if truth_state == "stalled":
+        return NUDGE
+    if truth_age_s is None or truth_age_s < idle_threshold_s:
         return NOT_STALE
     return NUDGE
-
-
-def _age_seconds(updated_at: Optional[str], now: datetime) -> Optional[float]:
-    """Seconds since ``updated_at`` (ISO8601), or None if absent/unparseable.
-
-    Both operands are normalized to timezone-aware UTC before subtracting so a
-    naive ``now`` (or a naive ``updatedAt``) never raises a mixed-aware/naive
-    ``TypeError``.
-    """
-    if not isinstance(updated_at, str) or not updated_at.strip():
-        return None
-    raw = updated_at.strip()
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(raw)
-    except (ValueError, TypeError):
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    return (now - dt).total_seconds()
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +110,8 @@ class Candidate:
     # supply them.
     cwd: Optional[str] = None
     name: Optional[str] = None
+    session_id: Optional[str] = None
+    agent: str = "claude"
 
 
 @dataclass
@@ -204,6 +159,8 @@ def iter_candidates(registry_entries: Iterable, locate_fn: Callable) -> list[Can
         out.append(Candidate(
             short_id=short_id, sock_path=sock, jobs_dir=jobs_dir,
             cwd=getattr(entry, "cwd", None), name=getattr(entry, "name", None),
+            session_id=(getattr(entry, "harness_session_id", None)
+                        or getattr(entry, "cc_session_id", None) or short_id),
         ))
     return out
 
@@ -230,6 +187,7 @@ def recovery_sweep(
     counts: dict,
     emit: Callable[[str, dict], None],
     read_state_fn: Callable,
+    truth_fn: Callable[[Candidate], dict],
     liveness_fn: Callable[[str], bool],
     send_fn: Callable[[str, str, str], None],
     failover_fn: Optional[Callable[["Candidate", object], str]] = None,
@@ -264,7 +222,12 @@ def recovery_sweep(
     rotated = False  # one provider rotation per tick (P2: global active mutation)
     for c in candidates:
         snap = read_state_fn(c.jobs_dir)
-        decision = classify(snap.state, snap.updated_at, now, cfg.idle_threshold_seconds)
+        truth = truth_fn(c)
+        decision = classify(
+            snap.state, snap.updated_at, now, cfg.idle_threshold_seconds,
+            truth_state=str(truth.get("state") or "unknown"),
+            truth_age_s=truth.get("last_activity_age_s"),
+        )
 
         if decision == SKIP_NEEDS_INPUT:
             emit("recovery_skipped", {"short_id": c.short_id, "reason": "needs-input"})
@@ -378,12 +341,7 @@ def save_counts(counts: dict) -> None:
 
 
 def _safe_read_state(jobs_dir):
-    """Read state.json, degrading a read error to a conservative empty view.
-
-    An unreadable/mid-write state.json yields ``("", None)`` which classify
-    treats as not-stale, so a transient read failure never causes a spurious
-    nudge; the next tick retries.
-    """
+    """Read optional phase/error metadata; transcript truth owns liveness."""
     from fno.agents.providers._claude_session_registry import read_state_json
 
     try:
@@ -935,6 +893,7 @@ def run_recovery_sweep(
     registry_load: Optional[Callable] = None,
     locate_fn: Optional[Callable] = None,
     read_state_fn: Optional[Callable] = None,
+    truth_fn: Optional[Callable[[Candidate], dict]] = None,
     liveness_fn: Optional[Callable] = None,
     send_fn: Optional[Callable] = None,
     load_counts_fn: Optional[Callable] = None,
@@ -967,6 +926,14 @@ def run_recovery_sweep(
 
         send_fn = send_to_session
     read_state_fn = read_state_fn or _safe_read_state
+    if truth_fn is None:
+        from fno.agents.session_truth import resolve_session_truth
+
+        def truth_fn(candidate: Candidate) -> dict:
+            return resolve_session_truth(
+                candidate.name or candidate.short_id,
+                resolve=lambda _handle: (candidate, []),
+            )
     load_counts_fn = load_counts_fn or load_counts
     save_counts_fn = save_counts_fn or save_counts
     # Default-on in production: the failover branch activates whenever a stale
@@ -984,6 +951,7 @@ def run_recovery_sweep(
         now, cfg,
         candidates=candidates, counts=counts, emit=emit,
         read_state_fn=read_state_fn,
+        truth_fn=truth_fn,
         liveness_fn=liveness_fn, send_fn=send_fn,
         failover_fn=failover_fn,
     )

@@ -93,6 +93,7 @@ def _transcript_age_s(
     projects_root: Optional[Path],
     codex_sessions_dir: Optional[Path],
     now_s: Optional[float],
+    transcript_path: Optional[Path] = None,
 ) -> Optional[float]:
     """Seconds since the session's newest activity, or None if unknowable.
 
@@ -102,24 +103,30 @@ def _transcript_age_s(
     the session's newest message timestamp instead (the store already indexes
     ``(session_id, time_created)``), so an opencode session can go ``stalled``
     like any other. None only when nothing resolves."""
-    from fno.provenance.resolver import resolve_transcript
-
     try:
-        rt = resolve_transcript(
-            agent,
-            session_id,
-            cwd,
-            projects_root=projects_root,
-            codex_sessions_dir=codex_sessions_dir,
-        )
-        if not rt.resolved or not rt.transcript_path:
-            return None
-        if rt.kind == "opencode-db":
-            mtime = _opencode_activity_epoch(session_id, Path(rt.transcript_path))
-            if mtime is None:
-                return None
+        if agent in {"claude", "codex"} and transcript_path is not None:
+            mtime = transcript_path.stat().st_mtime
         else:
-            mtime = Path(rt.transcript_path).stat().st_mtime
+            from fno.provenance.resolver import resolve_transcript
+
+            rt = resolve_transcript(
+                agent,
+                session_id,
+                cwd,
+                projects_root=projects_root,
+                codex_sessions_dir=codex_sessions_dir,
+            )
+            if not rt.resolved or not rt.transcript_path:
+                return None
+            if rt.kind == "opencode-db":
+                activity_mtime = _opencode_activity_epoch(
+                    session_id, Path(rt.transcript_path)
+                )
+                if activity_mtime is None:
+                    return None
+                mtime = activity_mtime
+            else:
+                mtime = Path(rt.transcript_path).stat().st_mtime
     except Exception:  # noqa: BLE001 — any read failure -> age unknown (working)
         return None
     now = now_s if now_s is not None else time.time()
@@ -189,6 +196,8 @@ def resolve_session_truth(
     agent = getattr(session, "agent", "claude") or "claude"
     sid = getattr(session, "session_id", "") or ""
     cwd = getattr(session, "cwd", "") or ""
+    raw_transcript_path = getattr(session, "transcript_path", None)
+    transcript_path = Path(raw_transcript_path) if raw_transcript_path else None
 
     try:
         records = recent_records(
@@ -199,6 +208,7 @@ def resolve_session_truth(
             projects_root=projects_root,
             codex_sessions_dir=codex_sessions_dir,
             opencode_storage_dir=opencode_storage_dir,
+            transcript_path=transcript_path,
         )
     except Exception:  # noqa: BLE001 — unsupported/unreadable harness -> unknown
         records = []
@@ -208,7 +218,15 @@ def resolve_session_truth(
     # Classify the LAST turn, not the last assistant turn: a trailing user turn
     # must clear a stale assistant promise/question (see classify_tail).
     last = records[-1]
-    age = _transcript_age_s(agent, sid, cwd, projects_root, codex_sessions_dir, now_s)
+    age = _transcript_age_s(
+        agent,
+        sid,
+        cwd,
+        projects_root,
+        codex_sessions_dir,
+        now_s,
+        transcript_path,
+    )
     state = classify_tail(last.role, last.text, age, stalled_after_s=stalled_after_s)
     return {
         "handle": handle,
@@ -223,7 +241,7 @@ def resolve_session_truth(
 def _default_resolve(handle: str):
     from fno.agents.discover import resolve_or_suggest
 
-    return resolve_or_suggest(handle)
+    return resolve_or_suggest(handle, require_alive=False)
 
 
 _EVIDENCE = {

@@ -22,7 +22,7 @@ use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // ===========================================================================
 // Constants (verbatim from providers/claude.py + _claude_session_registry.py)
@@ -80,6 +80,9 @@ pub enum OrphanReason {
     /// fallback inject did not confirm -- a delivery failure, NOT a dead
     /// session, so the orchestration layer must NOT stamp it orphaned.
     RosterLiveInjectFailed,
+    /// The delivery probe missed, but family-1 transcript truth did not confirm
+    /// a terminal session. This is a routing gap, never an orphan stamp.
+    TruthLiveInjectFailed,
 }
 
 impl OrphanReason {
@@ -90,7 +93,85 @@ impl OrphanReason {
             OrphanReason::NotFound => "not-found",
             OrphanReason::LivenessFailed => "liveness-failed",
             OrphanReason::RosterLiveInjectFailed => "roster-live-inject-failed",
+            OrphanReason::TruthLiveInjectFailed => "truth-live-inject-failed",
         }
+    }
+}
+
+pub fn family1_truth_state(handle: &str) -> Option<String> {
+    let mut command = std::process::Command::new("fno");
+    command
+        .args(["agents", "truth", handle, "--json"])
+        .env("FNO_AGENTS_RUNTIME", "python");
+    family1_truth_state_with_command(command, Duration::from_secs(5))
+}
+
+fn family1_truth_state_with_command(
+    mut command: std::process::Command,
+    timeout: Duration,
+) -> Option<String> {
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("WARN: family-1 truth probe failed to start: {error}");
+            return None;
+        }
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("WARN: family-1 truth probe timed out");
+                return None;
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("WARN: family-1 truth probe wait failed: {error}");
+                return None;
+            }
+        }
+    }
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("WARN: family-1 truth probe output failed: {error}");
+            return None;
+        }
+    };
+    if !output.status.success() {
+        eprintln!(
+            "WARN: family-1 truth probe exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        return None;
+    }
+    let state = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .ok()
+        .and_then(|value| value.get("state")?.as_str().map(str::to_owned));
+    match state.as_deref() {
+        Some("done" | "watching" | "your-move" | "working" | "stalled" | "unknown") => state,
+        _ => {
+            eprintln!("WARN: family-1 truth probe returned malformed output");
+            None
+        }
+    }
+}
+
+fn family1_orphan_reason(handle: &str, confirmed: OrphanReason) -> OrphanReason {
+    match family1_truth_state(handle).as_deref() {
+        Some("done" | "stalled") => confirmed,
+        _ => OrphanReason::TruthLiveInjectFailed,
     }
 }
 
@@ -1339,7 +1420,7 @@ pub fn ask_followup(
             let reason = classify_orphan_reason(home, claude_short_id);
             // x-2681: a socket-null session that is live in the daemon roster is
             // reachable over the daemon control.sock. Fall back before orphaning.
-            // not-found is genuinely dead and never falls back (Locked Decision 5).
+            // A miss falls through to family-1 transcript truth before orphaning.
             if reason == OrphanReason::SocketNull && roster_live(home, claude_short_id) {
                 let jd = jobs_dir_override
                     .map(|p| p.to_path_buf())
@@ -1354,7 +1435,7 @@ pub fn ask_followup(
                 );
             }
             return Err(AskError::Orphan {
-                reason,
+                reason: family1_orphan_reason(claude_short_id, reason),
                 short_id: claude_short_id.to_string(),
             });
         }
@@ -1376,7 +1457,7 @@ pub fn ask_followup(
             );
         }
         return Err(AskError::Orphan {
-            reason: OrphanReason::LivenessFailed,
+            reason: family1_orphan_reason(claude_short_id, OrphanReason::LivenessFailed),
             short_id: claude_short_id.to_string(),
         });
     }
@@ -2258,12 +2339,15 @@ fn followup(
             // a routing gap, never a death, so it takes the same no-stamp branch
             // as a recent inside-leg report (a roster-live session is never
             // stamped orphaned).
-            let roster_live_gap = reason == OrphanReason::RosterLiveInjectFailed;
+            let routing_gap = matches!(
+                reason,
+                OrphanReason::RosterLiveInjectFailed | OrphanReason::TruthLiveInjectFailed
+            );
             let mut provably_live = false;
             let mut stamp_warning = String::new();
             if let Err(e) = update_registry(registry_path, |reg| {
                 if let Some(en) = reg.find_mut(name) {
-                    if roster_live_gap || is_provably_live_report(en.inside_leg.as_ref(), now) {
+                    if routing_gap || is_provably_live_report(en.inside_leg.as_ref(), now) {
                         provably_live = true;
                     } else {
                         en.status = AgentStatus::Orphaned;
@@ -2334,6 +2418,10 @@ fn followup(
                 OrphanReason::RosterLiveInjectFailed => format!(
                     ". Inspect with 'fno agents logs {}' or remove via 'fno agents rm {}'",
                     name, name
+                ),
+                OrphanReason::TruthLiveInjectFailed => format!(
+                    ". Inspect with 'fno agents logs {}' before removing",
+                    name
                 ),
             };
             let suspended = if reason == OrphanReason::SocketNull {
@@ -3549,7 +3637,9 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            AskError::Orphan { reason, .. } => assert_eq!(reason, OrphanReason::SocketNull),
+            AskError::Orphan { reason, .. } => {
+                assert_eq!(reason, OrphanReason::TruthLiveInjectFailed)
+            }
             other => panic!("expected orphan, got {:?}", other),
         }
     }
@@ -3572,7 +3662,7 @@ mod tests {
         assert!(matches!(
             err,
             AskError::Orphan {
-                reason: OrphanReason::NotFound,
+                reason: OrphanReason::TruthLiveInjectFailed,
                 ..
             }
         ));
@@ -3605,7 +3695,7 @@ mod tests {
         assert!(matches!(
             err,
             AskError::Orphan {
-                reason: OrphanReason::LivenessFailed,
+                reason: OrphanReason::TruthLiveInjectFailed,
                 ..
             }
         ));
@@ -3698,8 +3788,8 @@ mod tests {
 
     #[test]
     fn ask_followup_not_found_never_falls_back_even_if_rostered() {
-        // No session file -> not-found. Even with a matching roster entry,
-        // not-found is genuinely dead and never falls back (Locked Decision 5).
+        // No session file and no transcript verdict is inconclusive, even when
+        // a same-short roster entry exists.
         let home = tmpdir();
         fs::create_dir_all(home.join(".claude").join("sessions")).unwrap();
         write_roster(&home, "abcd1234-1111-2222-3333-444455556666");
@@ -3715,8 +3805,36 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            AskError::Orphan { reason, .. } => assert_eq!(reason, OrphanReason::NotFound),
-            other => panic!("expected not-found orphan, got {:?}", other),
+            AskError::Orphan { reason, .. } => {
+                assert_eq!(reason, OrphanReason::TruthLiveInjectFailed)
+            }
+            other => panic!("expected routing gap, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn family1_truth_subprocess_is_bounded_and_validated() {
+        let mut valid = std::process::Command::new("sh");
+        valid.args(["-c", "printf '{\"state\":\"watching\"}'"]);
+        assert_eq!(
+            family1_truth_state_with_command(valid, Duration::from_secs(1)).as_deref(),
+            Some("watching")
+        );
+
+        let mut invalid = std::process::Command::new("sh");
+        invalid.args(["-c", "printf '{\"state\":\"invented\"}'"]);
+        assert_eq!(
+            family1_truth_state_with_command(invalid, Duration::from_secs(1)),
+            None
+        );
+
+        let mut hung = std::process::Command::new("sh");
+        hung.args(["-c", "sleep 5"]);
+        let started = Instant::now();
+        assert_eq!(
+            family1_truth_state_with_command(hung, Duration::from_millis(50)),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

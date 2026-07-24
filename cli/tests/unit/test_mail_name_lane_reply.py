@@ -84,6 +84,13 @@ def _isolate_claude_roster(monkeypatch, tmp_path, *, session_id):
         encoding="utf-8",
     )
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda *_args, **_kwargs: {"state": "working", "last_activity_age_s": 1},
+    )
 
 
 def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(

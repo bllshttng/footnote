@@ -8,10 +8,7 @@ wiring, exit codes, TTY behavior, and the AC3-ERR allowed-values list.
 from __future__ import annotations
 
 import json
-import subprocess
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -171,7 +168,16 @@ def test_list_filter_by_status_orphaned(
         ]
     )
 
+    from fno.agents import session_truth
     from fno.agents.cli import agents_app
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda handle, **_kwargs: {
+            "state": "stalled" if handle == "dead" else "working"
+        },
+    )
 
     result = runner.invoke(agents_app, ["list", "--status", "orphaned", "--json"])
 
@@ -390,15 +396,7 @@ def test_logs_claude_entry_missing_short_id_exits_1(tmp_path, monkeypatch, runne
     assert "short id" in result.output.lower() or "short_id" in result.output.lower()
 
 
-def test_agent_status_filter_in_sync_with_known_statuses():
-    """The cli.py import-time assertion has already run; this test guards the symmetry.
-
-    If KNOWN_STATUSES gains a value without AgentStatusFilter following,
-    cli.py fails to import and this test (along with everything else)
-    breaks. Asserting the symmetry from a unit test makes the failure
-    mode obvious in pytest output.
-    """
+def test_agent_status_filter_is_the_rendered_family1_vocabulary():
     from fno.agents.cli import AgentStatusFilter
-    from fno.agents.registry import KNOWN_STATUSES
 
-    assert {m.value for m in AgentStatusFilter} == set(KNOWN_STATUSES)
+    assert {m.value for m in AgentStatusFilter} == {"live", "orphaned", "unknown"}

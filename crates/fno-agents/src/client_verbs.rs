@@ -19,7 +19,7 @@
 //!   lines are already compact, so each matching line is emitted verbatim to
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
-use crate::claude_ask::{liveness_probe, locate_session, ClaudeHome};
+use crate::claude_ask::{family1_truth_state, liveness_probe, locate_session, ClaudeHome};
 use crate::paths::AgentsHome;
 use crate::state::REGISTRY_SCHEMA_VERSION;
 use serde::Serialize;
@@ -1283,6 +1283,18 @@ fn claude_resume_argv(
     entry: &Value,
     name: &str,
 ) -> Result<(Vec<String>, Option<String>), i32> {
+    claude_resume_argv_with_truth(claude_home, entry, name, family1_truth_state)
+}
+
+fn claude_resume_argv_with_truth<F>(
+    claude_home: &ClaudeHome,
+    entry: &Value,
+    name: &str,
+    truth_fn: F,
+) -> Result<(Vec<String>, Option<String>), i32>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
     let uuid = entry
         .get("claude_session_uuid")
@@ -1290,10 +1302,21 @@ fn claude_resume_argv(
         .unwrap_or("")
         .trim();
 
-    let live = !short_id.is_empty()
+    let socket_live = !short_id.is_empty()
         && locate_session(claude_home, short_id)
             .map(|loc| liveness_probe(&loc.messaging_socket_path))
             .unwrap_or(false);
+    let truth_state = if socket_live || short_id.is_empty() {
+        None
+    } else {
+        truth_fn(uuid)
+    };
+    let live = socket_live
+        || matches!(
+            truth_state.as_deref(),
+            Some("working" | "watching" | "your-move")
+        );
+    let dead = matches!(truth_state.as_deref(), Some("done" | "stalled"));
 
     if live {
         eprintln!("fno agents resume: {name} is live - attaching");
@@ -1301,16 +1324,21 @@ fn claude_resume_argv(
             vec!["claude".into(), "attach".into(), short_id.into()],
             None,
         ))
-    } else if is_uuid_shaped(uuid) {
+    } else if dead && is_uuid_shaped(uuid) {
         eprintln!("fno agents resume: {name} has exited - resuming in your terminal");
         Ok((
             vec!["claude".into(), "--resume".into(), uuid.into()],
             Some(uuid.to_string()),
         ))
-    } else {
+    } else if dead {
         eprintln!(
             "fno agents resume: {} has no claude session recorded; nothing to resume.",
             py_repr_str(name)
+        );
+        Err(13)
+    } else {
+        eprintln!(
+            "fno agents resume: {name} liveness is inconclusive; refusing to open a second writer. Run 'fno agents truth {short_id}'."
         );
         Err(13)
     }
@@ -1356,6 +1384,18 @@ fn acquire_resume_session_claim(uuid: &str, root: Option<&Path>) -> Result<(), (
 /// point at - never print an unusable command). Probes reality (locate_session +
 /// socket), never the registry `status` field, matching the resume smart verb.
 fn claude_attach_pointer(claude_home: &ClaudeHome, entry: &Value, name: &str) -> Option<String> {
+    claude_attach_pointer_with_truth(claude_home, entry, name, family1_truth_state)
+}
+
+fn claude_attach_pointer_with_truth<F>(
+    claude_home: &ClaudeHome,
+    entry: &Value,
+    name: &str,
+    truth_fn: F,
+) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
     let uuid = entry
         .get("claude_session_uuid")
@@ -1365,10 +1405,13 @@ fn claude_attach_pointer(claude_home: &ClaudeHome, entry: &Value, name: &str) ->
     if short_id.is_empty() || !is_uuid_shaped(uuid) {
         return None;
     }
-    let live = locate_session(claude_home, short_id)
+    let socket_live = locate_session(claude_home, short_id)
         .map(|loc| liveness_probe(&loc.messaging_socket_path))
         .unwrap_or(false);
-    if live {
+    if socket_live {
+        return None;
+    }
+    if !matches!(truth_fn(uuid).as_deref(), Some("done" | "stalled")) {
         return None;
     }
     Some(format!(
@@ -2984,7 +3027,7 @@ mod tests {
             "short_id": "7c5dcf5d", "claude_session_uuid": uuid,
         });
         assert_eq!(
-            claude_resume_argv(&ch, &entry, "w").unwrap(),
+            claude_resume_argv_with_truth(&ch, &entry, "w", |_| Some("done".into())).unwrap(),
             (
                 vec!["claude".to_string(), "--resume".into(), uuid.into()],
                 Some(uuid.to_string()), // dead-arm carries the uuid to claim
@@ -2995,7 +3038,10 @@ mod tests {
         let entry_no_uuid = serde_json::json!({
             "name": "w", "provider": "claude", "short_id": "7c5dcf5d",
         });
-        assert_eq!(claude_resume_argv(&ch, &entry_no_uuid, "w"), Err(13));
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry_no_uuid, "w", |_| Some("done".into())),
+            Err(13)
+        );
 
         // Live supervisor (socket answers) beats a stale "exited" registry ->
         // `claude attach <short_id>`, no --resume (AC1-EDGE).
@@ -3014,10 +3060,31 @@ mod tests {
         .unwrap();
         let ch2 = ClaudeHome::at(home2.path());
         assert_eq!(
-            claude_resume_argv(&ch2, &entry, "w").unwrap(),
+            claude_resume_argv_with_truth(&ch2, &entry, "w", |_| None).unwrap(),
             (
                 vec!["claude".to_string(), "attach".into(), "7c5dcf5d".into()],
                 None, // live attach arm claims nothing
+            )
+        );
+    }
+
+    #[test]
+    fn claude_resume_socket_miss_requires_family1_death() {
+        let home = cv_tmpdir();
+        let ch = ClaudeHome::at(home.path());
+        let entry = serde_json::json!({
+            "name": "w", "provider": "claude", "short_id": "7c5dcf5d",
+            "claude_session_uuid": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+        });
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry, "w", |_| None),
+            Err(13)
+        );
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry, "w", |_| Some("working".into())).unwrap(),
+            (
+                vec!["claude".into(), "attach".into(), "7c5dcf5d".into()],
+                None
             )
         );
     }
@@ -3061,7 +3128,8 @@ mod tests {
             "name": "w", "provider": "claude",
             "short_id": "7c5dcf5d", "claude_session_uuid": uuid,
         });
-        let msg = claude_attach_pointer(&ch_dead, &entry, "w").expect("dead row -> pointer");
+        let msg = claude_attach_pointer_with_truth(&ch_dead, &entry, "w", |_| Some("done".into()))
+            .expect("dead row -> pointer");
         assert!(msg.contains("fno agents resume w"));
         assert!(msg.contains(&format!("--resume {uuid} --substrate bg")));
 
@@ -3069,7 +3137,10 @@ mod tests {
         let no_uuid = serde_json::json!({
             "name": "w", "provider": "claude", "short_id": "7c5dcf5d",
         });
-        assert_eq!(claude_attach_pointer(&ch_dead, &no_uuid, "w"), None);
+        assert_eq!(
+            claude_attach_pointer_with_truth(&ch_dead, &no_uuid, "w", |_| Some("done".into())),
+            None
+        );
 
         // Live supervisor -> no pointer (fall through to a real attach).
         let live_home = cv_tmpdir();
@@ -3086,7 +3157,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            claude_attach_pointer(&ClaudeHome::at(live_home.path()), &entry, "w"),
+            claude_attach_pointer_with_truth(
+                &ClaudeHome::at(live_home.path()),
+                &entry,
+                "w",
+                |_| None
+            ),
+            None
+        );
+        assert_eq!(
+            claude_attach_pointer_with_truth(&ch_dead, &entry, "w", |_| None),
             None
         );
     }

@@ -137,8 +137,8 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
         .find(|a| a["name"] == "stale-ask")
         .expect("stale-ask row present");
     assert_eq!(
-        row["status"], "exited",
-        "a finished ask must settle to exited on cold-start reconcile"
+        row["status"], "unknown",
+        "rendered liveness must not inherit the stored lifecycle status"
     );
     // Resumability (session_id) is independent of liveness (status) -- AC3-EDGE.
     assert_eq!(row["session_id"], "resume-uuid-xyz");
@@ -201,8 +201,16 @@ async fn startup_reconcile_failure_degrades_to_serving() {
         .iter()
         .find(|a| a["name"] == "kept-live")
         .expect("row present");
-    // Last-recorded status preserved: a failed sweep applies no change.
-    assert_eq!(row["status"], "live", "failed sweep must not mutate status");
+    assert_eq!(
+        row["status"], "unknown",
+        "rendered liveness must not inherit the stored lifecycle status"
+    );
+    let reg = state::load_registry(&home.registry_json()).unwrap();
+    assert_eq!(
+        reg.find("kept-live").unwrap().status,
+        fno_agents::AgentStatus::Live,
+        "failed sweep must not mutate stored status"
+    );
 
     let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
     assert!(

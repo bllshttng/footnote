@@ -150,12 +150,29 @@ def _codex_rollout_path(
 ) -> Optional[Path]:
     """Locate the codex rollout whose ``session_meta`` id matches ``session_id``.
 
-    Re-uses discover's rollout scan + meta parse (single source of truth for the
-    codex layout) rather than threading a path through the dedup pipeline.
+    Current Codex filenames end with the session id, so exact-id lookup avoids
+    opening every historical rollout. Verify the embedded metadata before
+    trusting that filename, then retain the store-wide scan as compatibility
+    fallback for older or nonstandard layouts.
     """
     from fno.agents.discover import _codex_meta, default_codex_sessions_dir
 
     root = codex_sessions_dir or default_codex_sessions_dir()
+
+    exact: list[tuple[float, Path]] = []
+    try:
+        for path in root.rglob(f"rollout-*{session_id}.jsonl"):
+            try:
+                exact.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+    except OSError:
+        pass
+    for _mtime, path in sorted(exact, key=lambda item: item[0], reverse=True):
+        meta = _codex_meta(path)
+        if meta is not None and meta[0] == session_id:
+            return path
+
     dated: list[tuple[float, Path]] = []
     try:
         for path in root.rglob("rollout-*.jsonl"):
@@ -384,6 +401,7 @@ def recent_records(
     projects_root: Optional[Path] = None,
     codex_sessions_dir: Optional[Path] = None,
     opencode_storage_dir: Optional[Path] = None,
+    transcript_path: Optional[Path] = None,
 ) -> list[Record]:
     """The per-harness reader seam (Locked Decision 3).
 
@@ -393,6 +411,10 @@ def recent_records(
     command turns that into a legible exit-1, distinct from the exit-13 miss).
     """
     if agent == "claude":
+        if transcript_path is not None:
+            return _records_from_jsonl(
+                transcript_path, n, _parse_claude_record
+            )
         from fno.provenance.resolver import resolve_transcript
 
         rt = resolve_transcript(
@@ -404,7 +426,7 @@ def recent_records(
             Path(rt.transcript_path), n, _parse_claude_record
         )
     if agent == "codex":
-        path = _codex_rollout_path(session_id, codex_sessions_dir)
+        path = transcript_path or _codex_rollout_path(session_id, codex_sessions_dir)
         if path is None:
             return []
         return _records_from_jsonl(path, n, _parse_codex_record)

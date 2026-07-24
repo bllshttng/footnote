@@ -119,6 +119,21 @@ def test_resolve_done_from_promise(tmp_path):
     assert result["state"] == "done"
 
 
+def test_default_resolver_can_read_stalled_session(monkeypatch):
+    """Truth itself must resolve rows that live-routing correctly excludes."""
+    from fno.agents import discover, session_truth
+
+    seen = {}
+
+    def fake(handle, **kwargs):
+        seen.update(kwargs)
+        return None, []
+
+    monkeypatch.setattr(discover, "resolve_or_suggest", fake)
+    session_truth._default_resolve("deadbeef")
+    assert seen["require_alive"] is False
+
+
 def test_resolve_user_turn_after_promise_is_working(tmp_path):
     """P2 fix: assistant emits <promise>, then the operator sends a new task.
     The last turn is the user's, so the worker owes the next move -> working,

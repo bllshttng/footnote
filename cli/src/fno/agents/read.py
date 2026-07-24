@@ -4,15 +4,16 @@ Locked Decision 5 — list and logs never mutate the registry, never flip
 ``status`` based on inferred live state, never emit events. Status
 mutations belong to dedicated write verbs (stop, rm, future reconcile).
 
-Locked Decision 6 — registry ``status`` (fno's view, ``live | orphaned``)
-and ``live_status`` (claude's supervisor view, ``Working | Needs input |
-Idle | null``) are separate axes. Both appear in the JSON shape.
+Locked Decision 6 — rendered ``status`` (registry status corrected read-only
+by family-1 truth) and ``live_status`` (claude's supervisor view, ``Working |
+Needs input | Idle | null``) are separate axes. Both appear in the JSON shape.
 """
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 from fno.agents import format as fmt
@@ -92,8 +93,6 @@ def list_agents(
                 continue
         if provider is not None and entry.harness != provider:
             continue
-        if status is not None and entry.status != status:
-            continue
         filtered.append(entry)
 
     warnings: list[str] = []
@@ -121,6 +120,21 @@ def list_agents(
 
     rows: list[dict] = []
     for entry in filtered:
+        from fno.agents import session_truth
+
+        sid = entry.harness_session_id or entry.cc_session_id or entry.session_id
+        known = SimpleNamespace(agent=entry.harness, session_id=sid, cwd=entry.cwd)
+        truth = session_truth.resolve_session_truth(
+            entry.name, resolve=lambda _handle: (known, [])
+        )
+        truth_state = truth.get("state")
+        rendered_status = "unknown"
+        if truth_state in {"working", "watching", "your-move"}:
+            rendered_status = "live"
+        elif truth_state in {"done", "stalled"}:
+            rendered_status = "orphaned"
+        if status is not None and rendered_status != status:
+            continue
         live_status: Optional[str] = None
         if entry.harness == "claude" and entry.short_id:
             live_status = (live_map.get(entry.short_id) or {}).get(
@@ -137,7 +151,9 @@ def list_agents(
                 rendered = truth_status.render_truth_status(truth)
                 if rendered is not None:
                     live_status = rendered
-        rows.append(fmt.serialize_entry(entry, live_status=live_status))
+        row = fmt.serialize_entry(entry, live_status=live_status)
+        row["status"] = rendered_status
+        rows.append(row)
 
     # P1 (ab-098967b4): the discovered-live-sessions lane. Best-effort
     # augmentation over Claude Code's on-disk session registry; it must never
@@ -164,6 +180,10 @@ def list_agents(
                 exclude_session_ids=registered_session_ids,
             )
             for sess in sessions:
+                if not getattr(sess, "is_alive", True):
+                    continue
+                if status is not None and status != "live":
+                    continue
                 # Filter by the row's own harness rather than gating the whole
                 # lane on it. The old gate ran discovery only for claude, so
                 # `--provider claude` listed every discovered codex/opencode

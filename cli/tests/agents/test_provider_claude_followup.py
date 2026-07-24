@@ -22,6 +22,7 @@ import tempfile
 import threading
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -502,13 +503,15 @@ def test_ask_followup_happy_path(tmp_path: Path, monkeypatch) -> None:
     assert result_holder["reply"] == "validation added"
 
 
-def test_ask_followup_orphan_when_session_missing(tmp_path: Path, monkeypatch) -> None:
+def test_ask_followup_missing_session_without_truth_is_inconclusive(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.providers import claude as claude_mod
     from fno.agents.providers.claude import (
         ProviderOrphanError,
         ask_followup,
     )
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(claude_mod, "_session_truth_state", lambda *_args: "unknown")
     (tmp_path / ".claude" / "sessions").mkdir(parents=True, exist_ok=True)
 
     with pytest.raises(ProviderOrphanError) as exc_info:
@@ -520,17 +523,18 @@ def test_ask_followup_orphan_when_session_missing(tmp_path: Path, monkeypatch) -
             timeout=1.0,
             poll_interval=0.05,
         )
-    assert exc_info.value.reason == "not-found"
+    assert exc_info.value.reason == "truth-live-inject-failed"
 
 
-def test_ask_followup_orphan_when_socket_null(tmp_path: Path, monkeypatch) -> None:
-    """Session matches but messagingSocketPath=null -> orphan with reason=socket-null."""
+def test_ask_followup_socket_null_without_truth_is_inconclusive(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.providers import claude as claude_mod
     from fno.agents.providers.claude import (
         ProviderOrphanError,
         ask_followup,
     )
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(claude_mod, "_session_truth_state", lambda *_args: "unknown")
     sessions = tmp_path / ".claude" / "sessions"
     sessions.mkdir(parents=True, exist_ok=True)
     (sessions / "20.json").write_text(
@@ -551,17 +555,19 @@ def test_ask_followup_orphan_when_socket_null(tmp_path: Path, monkeypatch) -> No
             timeout=1.0,
             poll_interval=0.05,
         )
-    assert exc_info.value.reason == "socket-null"
+    assert exc_info.value.reason == "truth-live-inject-failed"
 
 
 def test_ask_followup_orphan_when_liveness_fails(tmp_path: Path, monkeypatch) -> None:
     """Session entry has socket path that doesn't connect -> orphan with reason=liveness-failed."""
+    from fno.agents.providers import claude as claude_mod
     from fno.agents.providers.claude import (
         ProviderOrphanError,
         ask_followup,
     )
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(claude_mod, "_session_truth_state", lambda *_args: "stalled")
     short_id = "deadbef0"
     bogus_sock = str(tmp_path / "no-server.sock")
     _setup_session_file(tmp_path, pid=33, short_id=short_id, sock_path=bogus_sock)
@@ -576,6 +582,55 @@ def test_ask_followup_orphan_when_liveness_fails(tmp_path: Path, monkeypatch) ->
             poll_interval=0.05,
         )
     assert exc_info.value.reason == "liveness-failed"
+
+
+def test_ask_followup_socket_miss_is_not_death_when_family1_is_live(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The fast socket probe may reject delivery, never a live transcript."""
+    from fno.agents.providers import claude as claude_mod
+
+    locator = SimpleNamespace(
+        messaging_socket_path=str(tmp_path / "missing.sock"),
+        jobs_dir=tmp_path,
+    )
+    monkeypatch.setattr(claude_mod, "locate_session", lambda _sid: locator)
+    monkeypatch.setattr(claude_mod, "liveness_probe", lambda _sock: False)
+    monkeypatch.setattr(claude_mod, "roster_live", lambda _sid: False)
+    monkeypatch.setattr(
+        claude_mod,
+        "_session_truth_state",
+        lambda _sid, _cwd: "working",
+        raising=False,
+    )
+
+    with pytest.raises(claude_mod.ProviderOrphanError) as exc_info:
+        claude_mod.ask_followup(
+            "feedface", "hello", tmp_path, "tester", timeout=0.1
+        )
+
+    assert exc_info.value.reason == "truth-live-inject-failed"
+
+
+def test_session_truth_state_uses_full_session_uuid(tmp_path: Path, monkeypatch) -> None:
+    """The job ID addresses delivery; transcript truth keys on the full UUID."""
+    from fno.agents import session_truth
+    from fno.agents.providers import claude as claude_mod
+
+    full_id = "feedface-1111-2222-3333-444444444444"
+    seen = {}
+    monkeypatch.setattr(claude_mod, "resolve_session_uuid", lambda _sid: full_id)
+
+    def fake_truth(_handle, *, resolve, **_kwargs):
+        session, suggestions = resolve("feedface")
+        seen["session_id"] = session.session_id
+        assert suggestions == []
+        return {"state": "done"}
+
+    monkeypatch.setattr(session_truth, "resolve_session_truth", fake_truth)
+
+    assert claude_mod._session_truth_state("feedface", tmp_path) == "done"
+    assert seen["session_id"] == full_id
 
 
 # ---------------------------------------------------------------------------
@@ -632,18 +687,18 @@ def test_ask_followup_via_mcp_polls_jobs_dir_without_a_session_file(
     assert sent["routing_key"] == short_id  # routed by short-id, no socket lookup
 
 
-def test_ask_followup_via_mcp_orphans_when_jobs_dir_absent(
+def test_ask_followup_via_mcp_jobs_miss_defers_to_family1(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A genuinely-nonexistent session (no jobs-dir => never ran / typo) still
-    raises ProviderOrphanError so a bad id fails fast instead of polling
-    forever."""
+    """A missing reply-poll directory is not itself a death verdict."""
+    from fno.agents.providers import claude as claude_mod
     from fno.agents.providers.claude import ProviderOrphanError, ask_followup_via_mcp
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(claude_mod, "_session_truth_state", lambda *_args: "unknown")
     (tmp_path / ".claude" / "jobs").mkdir(parents=True)  # no per-job dir
 
-    with pytest.raises(ProviderOrphanError):
+    with pytest.raises(ProviderOrphanError) as exc_info:
         ask_followup_via_mcp(
             claude_short_id="ffffffff",
             message="ping",
@@ -652,6 +707,7 @@ def test_ask_followup_via_mcp_orphans_when_jobs_dir_absent(
             timeout=1.0,
             poll_interval=0.05,
         )
+    assert exc_info.value.reason == "truth-live-inject-failed"
 
 
 # ---------------------------------------------------------------------------
@@ -746,15 +802,16 @@ def test_ask_followup_control_sock_fallback_not_delivered_raises_distinct_reason
     assert exc_info.value.reason == "roster-live-inject-failed"
 
 
-def test_ask_followup_socket_null_not_in_roster_stays_orphan(
+def test_ask_followup_socket_null_without_transcript_is_inconclusive(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """AC3-ERR: socket-null AND absent from the roster -> today's socket-null
-    orphan, and NO control.sock inject is attempted."""
+    """Socket-null is a routing miss when family 1 cannot prove death."""
     import fno.agents.dispatch as dispatch_mod
+    from fno.agents.providers import claude as claude_mod
     from fno.agents.providers.claude import ProviderOrphanError, ask_followup
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(claude_mod, "_session_truth_state", lambda *_args: "unknown")
     short_id = "abc12345"
     _write_socket_null_session(tmp_path, short_id)  # no roster.json written
 
@@ -771,19 +828,20 @@ def test_ask_followup_socket_null_not_in_roster_stays_orphan(
             claude_short_id=short_id, message="m", cwd=Path("/tmp"),
             from_name="peer", timeout=1.0, poll_interval=0.05,
         )
-    assert exc_info.value.reason == "socket-null"
-    assert calls["n"] == 0, "dead-in-roster session must not attempt control.sock"
+    assert exc_info.value.reason == "truth-live-inject-failed"
+    assert calls["n"] == 0
 
 
-def test_ask_followup_not_found_never_falls_back_even_if_rostered(
+def test_ask_followup_not_found_without_transcript_is_inconclusive(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """Locked Decision 5: not-found is genuinely dead and never falls back,
-    even if a same-short session happens to sit in the roster."""
+    """A registry miss is not a death verdict when family 1 is inconclusive."""
     import fno.agents.dispatch as dispatch_mod
+    from fno.agents.providers import claude as claude_mod
     from fno.agents.providers.claude import ProviderOrphanError, ask_followup
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(claude_mod, "_session_truth_state", lambda *_args: "unknown")
     (tmp_path / ".claude" / "sessions").mkdir(parents=True, exist_ok=True)  # no match
     _write_roster(tmp_path, _FB_UUID)
 
@@ -798,5 +856,5 @@ def test_ask_followup_not_found_never_falls_back_even_if_rostered(
             claude_short_id="abc12345", message="m", cwd=Path("/tmp"),
             from_name="peer", timeout=1.0, poll_interval=0.05,
         )
-    assert exc_info.value.reason == "not-found"
+    assert exc_info.value.reason == "truth-live-inject-failed"
     assert calls["n"] == 0

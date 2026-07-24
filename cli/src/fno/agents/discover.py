@@ -35,6 +35,10 @@ from fno import paths
 # (iCloud) and ``<uuid>-*.md`` transcripts that must never be parsed
 # (AC1-EDGE). ``^\d+\.json$`` admits only the real pid files.
 _PID_FILE_RE = re.compile(r"^\d+\.json$")
+_CLAUDE_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 # The hex handle is the addressable id (== jobId == CC's ``name`` default,
 # verified present on 2.1.169). The friendly alias is UX layered on top.
@@ -51,7 +55,7 @@ SESSIONS_DIR_ENV = "FNO_CLAUDE_SESSIONS_DIR"
 # ``.md`` exports into ``~/.claude/sessions``), so the sidecar scan finds zero.
 # The canonical store is the transcript jsonl at
 # ``~/.claude/projects/<cwd-enc>/<session-id>.jsonl``. Test/operator seam +
-# recency window mirror the sidecar seam above.
+# store-location and age-threshold test seams mirror the sidecar seam above.
 PROJECTS_DIR_ENV = "FNO_CLAUDE_PROJECTS_DIR"
 RECENCY_SECONDS_ENV = "FNO_CLAUDE_SESSION_RECENCY_SECONDS"
 _DEFAULT_RECENCY_SECONDS = 600.0
@@ -234,19 +238,19 @@ def _discover_from_codex(
     exclude_session_ids: Iterable[str] = (),
     now: Optional[float] = None,
 ) -> list[dict]:
-    """Discover live codex sessions from the rollout store (US2).
+    """Enumerate codex sessions from the rollout store (US2).
 
-    A rollout whose mtime is inside the recency window is treated as live (codex
-    has no live-PID sidecar, so liveness leans on mtime — a false positive is
-    benign: the message waits durably on the bus). Rows are shaped like the
-    claude loops' so the shared dedup/alias pipeline consumes them unchanged;
-    ``pid`` is 0 (no OS handle) and ``agent`` is ``codex``.
+    Mtime is not an enumeration predicate: an old final assistant turn can still
+    be ``watching`` or ``your-move``. Family 1 classifies every candidate after
+    enumeration. Rows are shaped like the claude loops' so the shared
+    dedup/alias pipeline consumes them unchanged; ``pid`` is 0 (no OS handle)
+    and ``agent`` is ``codex``.
 
-    ponytail: full rglob + mtime filter. Runs at send-time (interactive
+    ponytail: full rglob + mtime ordering. Runs at send-time (interactive
     resolution), not in the hot drain path, so O(rollouts) stats is acceptable;
     prune to recent date-dirs by mtime if a heavy codex user's send drags.
     """
-    cutoff = (now if now is not None else time.time()) - recency_seconds
+    del recency_seconds, now  # retained for call compatibility; family 1 owns age
     exclude_sids = {s for s in (exclude_session_ids or ()) if s}
     rows: list[dict] = []
     seen: set[str] = set()
@@ -257,8 +261,7 @@ def _discover_from_codex(
                 mt = path.stat().st_mtime
             except OSError:
                 continue  # vanished mid-scan: skip, never abort the whole scan
-            if mt >= cutoff:
-                dated.append((mt, path))
+            dated.append((mt, path))
     except OSError:
         return rows
     for _mt, path in sorted(dated, key=lambda t: t[0], reverse=True):
@@ -277,6 +280,7 @@ def _discover_from_codex(
                 "cwd": cwd,
                 "status": None,
                 "agent": "codex",
+                "transcript_path": str(path),
             }
         )
     return rows
@@ -348,21 +352,19 @@ def _discover_from_opencode_db(
     exclude_session_ids: Iterable[str] = (),
     now: Optional[float] = None,
 ) -> list[dict]:
-    """Discover live opencode sessions from the SQLite store.
+    """Enumerate opencode sessions from the SQLite store.
 
-    ``session.time_updated`` is an explicit activity timestamp opencode
-    maintains itself, so this needs none of the mtime inference the legacy tree
-    forced. Timestamps are milliseconds.
+    ``session.time_updated`` remains useful to family 1, but cannot exclude a
+    session before its content-aware verdict runs. Timestamps are milliseconds.
     """
-    cutoff_ms = ((now if now is not None else time.time()) - recency_seconds) * 1000.0
+    del recency_seconds, now  # retained for call compatibility; family 1 owns age
     exclude_sids = {s for s in (exclude_session_ids or ()) if s}
     rows: list[dict] = []
     seen: set[str] = set()
     for sid, directory, _updated in opencode_query(
         db_path,
         "SELECT id, directory, time_updated FROM session "
-        "WHERE time_updated >= ? ORDER BY time_updated DESC, id DESC",
-        (cutoff_ms,),
+        "ORDER BY time_updated DESC, id DESC",
     ):
         if not isinstance(sid, str) or not sid or sid in seen or sid in exclude_sids:
             continue
@@ -457,7 +459,7 @@ def _discover_from_opencode(
     exclude_session_ids: Iterable[str] = (),
     now: Optional[float] = None,
 ) -> list[dict]:
-    """Discover live opencode sessions from the storage tree.
+    """Enumerate opencode sessions from the storage tree.
 
     opencode splits a session across three sibling trees rather than one
     transcript file: ``session/<projectID>/<ses_id>.json`` (info, cwd under
@@ -466,9 +468,8 @@ def _discover_from_opencode(
     against a live 1.0.223 install; the nesting and the ``directory`` key are
     both easy to guess wrong.
 
-    Liveness is mtime-only, like the codex lane: opencode publishes no live-PID
-    sidecar. ``_opencode_activity_mtime`` owns the signal, including why the two
-    cheap timestamps are not enough on their own.
+    ``_opencode_activity_mtime`` supplies stable ordering and the deep-scan
+    optimization. It never excludes a candidate; family 1 owns the verdict.
 
     Rows are shaped like the codex lane's so the shared dedup/alias pipeline
     consumes them unchanged.
@@ -478,8 +479,8 @@ def _discover_from_opencode(
     sessions recent enough to still be mid-turn. Prune by project dir if a heavy
     opencode user's send drags.
     """
-    cutoff = (now if now is not None else time.time()) - recency_seconds
-    deep_cutoff = cutoff - _OPENCODE_LONG_TURN_SLACK_SECONDS
+    reference = now if now is not None else time.time()
+    deep_cutoff = reference - recency_seconds - _OPENCODE_LONG_TURN_SLACK_SECONDS
     exclude_sids = {s for s in (exclude_session_ids or ()) if s}
     msg_root = storage_dir / "message"
     part_root = storage_dir / "part"
@@ -489,7 +490,7 @@ def _discover_from_opencode(
     try:
         for path in (storage_dir / "session").glob("*/*.json"):
             mt = _opencode_activity_mtime(path, msg_root, part_root, deep_cutoff)
-            if mt is not None and mt >= cutoff:
+            if mt is not None:
                 dated.append((mt, path))
     except OSError:
         return rows
@@ -512,11 +513,6 @@ def _discover_from_opencode(
             }
         )
     return rows
-
-
-# Terminal AgentStatus values (mirrors registry.AgentStatus): a row in one of
-# these is dead, so it must not surface as a live discovery result.
-_DEAD_REGISTRY_STATUSES = frozenset({"orphaned", "failed", "exited", "permanent_dead"})
 
 
 def _discover_from_roster(*, exclude_session_ids: Iterable[str] = ()) -> list[dict]:
@@ -565,11 +561,8 @@ def _discover_from_registry(
         harness = getattr(e, "harness", None)
         if harness not in HARNESS_SESSION_ID_FIELDS:
             continue
-        # A dead/orphaned row must never resolve as a live recipient: mail would
-        # queue to a handle nobody drains, and doctor's dead-letter check (which
-        # reads this discovery) would count it live and miss the strand.
-        if getattr(e, "status", None) in _DEAD_REGISTRY_STATUSES:
-            continue
+        # Registry status is enumeration metadata, not a liveness verdict.
+        # Family-1 transcript truth below decides whether callers may route.
         if harness == "claude":
             # session_id keeps the full uuid for dedup/canonical identity, but
             # short_id MUST be the authoritative jobId -- the stored short and
@@ -602,7 +595,7 @@ def _discover_from_registry(
 
 @dataclass
 class DiscoveredSession:
-    """One live, host-local Claude Code session surfaced in the lane."""
+    """One host-local session candidate with its family-1 truth verdict."""
 
     session_id: str
     short_id: str  # hex handle (jobId), the addressable id
@@ -612,6 +605,12 @@ class DiscoveredSession:
     project: Optional[str]
     status: Optional[str]  # registry status: idle/busy/waiting
     agent: str = "claude"
+    truth_state: str = "unknown"
+    transcript_path: Optional[str] = None
+
+    @property
+    def is_alive(self) -> bool:
+        return self.truth_state in {"working", "watching", "your-move"}
 
     def to_row(self) -> dict:
         """Canonical dict shape for the JSON/table renderers."""
@@ -622,7 +621,13 @@ class DiscoveredSession:
             "pid": self.pid,
             "cwd": self.cwd,
             "project": self.project,
-            "status": self.status,
+            "status": (
+                "live"
+                if self.is_alive
+                else "orphaned"
+                if self.truth_state in {"done", "stalled"}
+                else "unknown"
+            ),
             "agent": self.agent,
         }
 
@@ -732,16 +737,16 @@ def _live_claude_procs(psutil_mod) -> list[tuple[int, str]]:
     return out
 
 
-def _newest_recent_transcript(pdir: Path, cutoff: float) -> Optional[str]:
-    """Return the session_id of the newest non-stale transcript in ``pdir``.
+def _newest_transcript(pdir: Path) -> Optional[str]:
+    """Return the newest transcript identity in ``pdir``.
 
     Only the dir's top-level ``*.jsonl`` are transcripts (UUID subdirs are
     ``tool-results``). A ``.sync-conflict-`` copy is skipped — the marker is an
     infix (``<sid>.sync-conflict-<ts>.jsonl``), so a substring test. ``None`` if
-    the dir is absent or holds no transcript fresh enough to look live.
+    the dir is absent or holds no transcript.
     """
     best_sid: Optional[str] = None
-    best_mt = cutoff
+    best_mt = float("-inf")
     try:
         entries = list(os.scandir(pdir))
     except OSError:
@@ -764,29 +769,23 @@ def _discover_from_projects(
     projects_dir: Path,
     *,
     psutil_mod,
-    recency_seconds: float,
     exclude_session_ids: Iterable[str] = (),
-    now: Optional[float] = None,
 ) -> list[dict]:
     """Fallback discovery from the canonical transcript store (x-a1d5).
 
     The ``<pid>.json`` sidecar is gone, so liveness comes from a running
-    ``claude`` process (the plan's primary signal): each live process' cwd maps
-    to a projects subdir, and the newest non-stale ``*.jsonl`` there is its live
-    transcript (the session_id == filename). cwd comes from the process; pid is
-    real. Returns candidate dicts shaped like the sidecar loop's rows so the
-    shared dedup/alias pipeline consumes them unchanged.
+    ``claude`` process: each live process' cwd maps to a projects subdir, and the
+    newest ``*.jsonl`` there identifies its candidate session. cwd comes from
+    the process; pid is real. Family 1 classifies that transcript later; this
+    enumerator never interprets transcript age as a liveness verdict.
 
     ``exclude_session_ids`` drops sessions already adopted into the fno registry
     (matched on full session_id, since a transcript row's short_id is the uuid
     prefix, not the registry's hex handle) so the lane stays "live but unadopted".
 
     ponytail: one row per live cwd — two sessions sharing a cwd collapse to the
-    newest transcript (rare; the sidecar lane handled per-pid). The mtime window
-    only rejects a process whose transcript has gone quiet, so a real pid plus a
-    fresh transcript is the liveness proof.
+    newest transcript (rare; the sidecar lane handled per-pid).
     """
-    cutoff = (now if now is not None else time.time()) - recency_seconds
     exclude_sids = {s for s in (exclude_session_ids or ()) if s}
     rows: list[dict] = []
     seen_cwd: set[str] = set()
@@ -796,7 +795,7 @@ def _discover_from_projects(
         seen_cwd.add(cwd)
         sid = None
         for name in _candidate_dir_names(cwd):
-            sid = _newest_recent_transcript(projects_dir / name, cutoff)
+            sid = _newest_transcript(projects_dir / name)
             if sid:
                 break
         if not sid or sid in exclude_sids:
@@ -812,63 +811,6 @@ def _discover_from_projects(
             }
         )
     return rows
-
-
-def _create_time_epoch(pid: int, psutil_mod) -> Optional[float]:
-    """OS-reported process create time in epoch seconds, or None if dead.
-
-    None means the PID is not running here (or we cannot inspect it) — treat
-    as not-live, mirroring the claim system's reuse-safe liveness.
-    """
-    try:
-        return float(psutil_mod.Process(pid).create_time())
-    except Exception:
-        # psutil.NoSuchProcess / AccessDenied / any inspection failure — a
-        # process we cannot validate is one we will not claim is live.
-        return None
-
-
-def _ctime_matches(create_time: float, proc_start: str) -> bool:
-    """True iff a process create time matches the registry ``procStart`` string.
-
-    ``procStart`` is a ctime-format string written by Claude Code from the same
-    OS create time, so a ctime-string match proves the PID was not reused since
-    the file was written — without epoch parsing. Verified on 2.1.169, CC
-    renders it in **UTC** (e.g. ``"Tue Jun  9 18:54:16 2026"`` for an 11:54
-    PDT start), so we compare against the UTC rendering (``asctime(gmtime)``)
-    AND the local rendering (``ctime``) to stay correct whichever clock a CC
-    build uses. A +/-1s window absorbs sub-second rounding; whitespace is
-    collapsed so single- vs double-space day padding never causes a miss.
-
-    Accepting both renderings does not weaken reuse detection: a reused PID's
-    new create time differs from the old ``procStart`` by far more than 1s in
-    either timezone, so neither rendering would spuriously match.
-    """
-    want = " ".join(proc_start.split())
-    if not want:
-        return False
-    for delta in (0.0, -1.0, 1.0):
-        t = create_time + delta
-        for rendered in (time.asctime(time.gmtime(t)), time.ctime(t)):
-            if " ".join(rendered.split()) == want:
-                return True
-    return False
-
-
-def _is_live(pid: int, proc_start: str, psutil_mod) -> bool:
-    """Reuse-safe liveness: PID running here AND create-time matches procStart.
-
-    When ``procStart`` is absent (rare; present on every probed 2.1.169 file)
-    a running PID is accepted — the reuse guard simply cannot run, and the
-    alternative (dropping a genuinely-live session) is worse than the
-    vanishingly-small reuse window with no recorded create time.
-    """
-    create_time = _create_time_epoch(pid, psutil_mod)
-    if create_time is None:
-        return False
-    if not proc_start:
-        return True
-    return _ctime_matches(create_time, proc_start)
 
 
 # --------------------------------------------------------------------------
@@ -1111,6 +1053,8 @@ def resolve_or_suggest(
     registry_path: Optional[Path] = None,
     project_resolver: Optional[Callable[[str], Optional[str]]] = None,
     psutil_mod=None,
+    truth_fn: Optional[Callable[[DiscoveredSession], dict]] = None,
+    require_alive: bool = True,
 ) -> tuple[Optional[DiscoveredSession], list[str]]:
     """Resolve a send handle to a live session, or suggest the closest ones (US2).
 
@@ -1122,29 +1066,122 @@ def resolve_or_suggest(
     """
     from fno.harness_identity import LEGACY_HANDLE_RE, canonical_handle
 
+    def claude_transcript_path(session_id: str, cwd: str) -> Optional[str]:
+        if not _CLAUDE_UUID_RE.fullmatch(session_id):
+            return None
+        from fno.provenance.resolver import resolve_transcript
+
+        resolved = resolve_transcript(
+            "claude",
+            session_id,
+            cwd or "/",
+            projects_root=projects_dir or default_projects_dir(),
+        )
+        if not resolved.resolved or resolved.ambiguous:
+            return None
+        return resolved.transcript_path
+
+    if not require_alive:
+        registry_matches = [
+            row
+            for row in _discover_from_registry(registry_path)
+            if handle and handle == row["session_id"]
+        ]
+        if len(registry_matches) == 1:
+            row = registry_matches[0]
+            transcript_path = (
+                claude_transcript_path(row["session_id"], row["cwd"])
+                if row["agent"] == "claude"
+                else None
+            )
+            return DiscoveredSession(
+                session_id=row["session_id"],
+                short_id=row["short_id"],
+                handle=row["short_id"],
+                pid=row["pid"],
+                cwd=row["cwd"],
+                project=None,
+                status=row["status"],
+                agent=row["agent"],
+                transcript_path=(
+                    transcript_path if transcript_path is not None else None
+                ),
+            ), []
+
+        if handle:
+            transcript_path = claude_transcript_path(handle, "")
+            if transcript_path is not None:
+                return DiscoveredSession(
+                    session_id=handle,
+                    short_id=canonical_handle(handle),
+                    handle=canonical_handle(handle),
+                    pid=0,
+                    cwd="",
+                    project=None,
+                    status=None,
+                    agent="claude",
+                    transcript_path=transcript_path,
+                ), []
+
+    discovery_kwargs = {
+        "sessions_dir": sessions_dir,
+        "projects_dir": projects_dir,
+        "codex_sessions_dir": codex_sessions_dir,
+        "opencode_storage_dir": opencode_storage_dir,
+        "name_map_path": name_map_path,
+        "registry_path": registry_path,
+        "project_resolver": project_resolver,
+        "psutil_mod": psutil_mod,
+        "truth_fn": truth_fn,
+        "classify_truth": require_alive,
+    }
+    if not require_alive:
+        bare_sessions = discover_live_sessions(
+            **discovery_kwargs,
+            resolve_metadata=False,
+        )
+        bare_exact = [
+            session
+            for session in bare_sessions
+            if handle
+            and handle
+            in {
+                session.session_id,
+                session.short_id,
+                canonical_handle(session.session_id),
+            }
+        ]
+        if len(bare_exact) == 1:
+            return bare_exact[0], []
+        if len(bare_exact) > 1:
+            return None, sorted(session.session_id for session in bare_exact)
+
     sessions = discover_live_sessions(
-        sessions_dir=sessions_dir,
-        projects_dir=projects_dir,
-        codex_sessions_dir=codex_sessions_dir,
-        opencode_storage_dir=opencode_storage_dir,
-        name_map_path=name_map_path,
-        registry_path=registry_path,
-        project_resolver=project_resolver,
-        psutil_mod=psutil_mod,
+        **discovery_kwargs,
     )
+    if require_alive:
+        sessions = [s for s in sessions if s.is_alive]
     retired = bool(handle and LEGACY_HANDLE_RE.fullmatch(handle))
     # An address is the friendly <project>-<short8> alias, the bare hex short-id,
     # or a stored row name. The retired <harness>-<short8> form is NOT accepted:
     # nothing generates it any more, so a caller still passing one is a bug, and
     # translating it silently would hide the bug forever.
     if not retired:
-        for s in sessions:
-            if handle and (
+        exact = [
+            s
+            for s in sessions
+            if handle
+            and (
                 s.handle == handle
+                or s.session_id == handle
                 or s.short_id == handle
                 or canonical_handle(s.session_id) == handle
-            ):
-                return s, []
+            )
+        ]
+        if len(exact) == 1:
+            return exact[0], []
+        if len(exact) > 1:
+            return None, sorted(s.session_id for s in exact)
     import difflib
 
     candidates: list[str] = []
@@ -1594,17 +1631,22 @@ def discover_live_sessions(
     exclude_session_ids: Iterable[str] = (),
     project_resolver: Optional[Callable[[str], Optional[str]]] = None,
     psutil_mod=None,
+    truth_fn: Optional[Callable[[DiscoveredSession], dict]] = None,
+    classify_truth: bool = True,
+    resolve_metadata: bool = True,
 ) -> list[DiscoveredSession]:
-    """Return live, host-local Claude Code sessions, deduped + aliased.
+    """Enumerate host-local session candidates and attach family-1 truth.
 
-    Reads the ``<pid>.json`` sidecar registry first; when that yields zero live
-    sessions (the sidecar is absent or repurposed, x-a1d5) it falls back to the
-    canonical transcript store at ``~/.claude/projects``. The fallback is
-    zero-effect on a host with a working sidecar, so adopted/sidecar behavior is
-    byte-for-byte unchanged there.
+    Unions candidates from sidecars, canonical transcript stores, daemon
+    rosters, and the fno registry. None of those enumeration signals can prove
+    death. ``classify_truth=False`` is the resolver-only lane: it returns
+    candidates without recursively classifying them so one requested truth
+    lookup reads only that session's tail. ``resolve_metadata=False`` also
+    skips project and alias work for exact bare-id resolution.
 
     ``exclude_short_ids`` drops sessions already present in the fno registry so
-    the discovered lane means "live but not adopted" (no double-listing).
+    the discovered lane does not double-list adopted sessions. Callers route
+    only candidates whose :attr:`DiscoveredSession.is_alive` is true.
     ``projects_dir`` / ``project_resolver`` / ``psutil_mod`` are test seams.
     """
     sdir = sessions_dir or default_sessions_dir()
@@ -1629,9 +1671,6 @@ def discover_live_sessions(
                 pid = int(f.stem)
             except ValueError:
                 continue
-        proc_start = data.get("procStart") or ""
-        if not _is_live(pid, str(proc_start), psu):
-            continue
         short_id = data.get("jobId") or data.get("name") or session_id[:8]
         short_id = str(short_id)
         if short_id in exclude:
@@ -1648,21 +1687,19 @@ def discover_live_sessions(
             }
         )
 
-    # Fallback to the canonical transcript store only when the sidecar found
-    # nothing live (x-a1d5). Gating on empty keeps sidecar hosts unchanged and
-    # matches the bug: a repurposed sessions dir -> zero rows -> read projects/.
-    if not candidates:
-        pdir = projects_dir or default_projects_dir()
-        project_rows = _discover_from_projects(
-            pdir,
-            psutil_mod=psu,
-            recency_seconds=_recency_seconds(),
-            exclude_session_ids=excluded_session_ids,
-        )
-        for r in project_rows:
-            if r["short_id"] in exclude:
-                continue
-            candidates.append(r)
+    # Union the canonical transcript-store lane even when sidecar candidates
+    # exist. A stale sidecar is enumeration metadata now; it must not suppress a
+    # separate projects-only live session on the same host.
+    pdir = projects_dir or default_projects_dir()
+    project_rows = _discover_from_projects(
+        pdir,
+        psutil_mod=psu,
+        exclude_session_ids=excluded_session_ids,
+    )
+    for r in project_rows:
+        if r["short_id"] in exclude:
+            continue
+        candidates.append(r)
 
     # Daemon-loaded Codex threads are the primary candidate source: loaded
     # presence is age-free, while turn/start remains the delivery authority.
@@ -1736,14 +1773,19 @@ def discover_live_sessions(
     by_sid: dict[str, dict] = {}
     for r in candidates:
         existing = by_sid.setdefault(r["session_id"], r)
-        if existing is not r and not existing.get("cwd") and r.get("cwd"):
-            existing["cwd"] = r["cwd"]
+        if existing is not r:
+            if not existing.get("cwd") and r.get("cwd"):
+                existing["cwd"] = r["cwd"]
+            if not existing.get("transcript_path") and r.get("transcript_path"):
+                existing["transcript_path"] = r["transcript_path"]
     live = list(by_sid.values())
 
-    for r in live:
-        r["project"] = resolver(r["cwd"]) if r["cwd"] else None
-
-    aliases = _resolve_aliases(live, name_map_path or default_name_map_path())
+    if resolve_metadata:
+        for r in live:
+            r["project"] = resolver(r["cwd"]) if r["cwd"] else None
+        aliases = _resolve_aliases(live, name_map_path or default_name_map_path())
+    else:
+        aliases = {}
 
     sessions = [
         DiscoveredSession(
@@ -1755,9 +1797,26 @@ def discover_live_sessions(
             project=r.get("project"),
             status=r["status"],
             agent=r["agent"],
+            transcript_path=r.get("transcript_path"),
         )
         for r in live
     ]
+    if not classify_truth:
+        sessions.sort(key=lambda s: s.handle)
+        return sessions
+    if truth_fn is None:
+        from fno.agents.session_truth import resolve_session_truth
+
+        def truth_fn(session: DiscoveredSession) -> dict:
+            return resolve_session_truth(
+                session.handle,
+                resolve=lambda _handle: (session, []),
+                projects_root=projects_dir,
+                codex_sessions_dir=codex_sessions_dir,
+                opencode_storage_dir=opencode_storage_dir,
+            )
+    for session in sessions:
+        session.truth_state = str(truth_fn(session).get("state") or "unknown")
     # Stable render order: by handle.
     sessions.sort(key=lambda s: s.handle)
     return sessions

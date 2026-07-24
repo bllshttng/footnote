@@ -64,12 +64,24 @@ def test_index_folds_discovered_claude_sessions(tmp_path, monkeypatch):
         DiscoveredSession(
             session_id="live-1", short_id="dead", handle="alice",
             pid=99, cwd="/tmp/a", project="fno", status="busy", agent="claude",
+            truth_state="working",
         )
     ])
     idx = reg.index(path=tmp_path / "registry.json")
     assert idx["live-1"].provider == "claude"
     assert idx["live-1"].inject_handle is None  # hand-started: not footnote-owned
     assert idx["live-1"].status == "busy"
+
+
+def test_index_excludes_family1_stalled_discovery(tmp_path, monkeypatch):
+    monkeypatch.setattr(reg, "discover_live_sessions", lambda: [
+        DiscoveredSession(
+            session_id="stalled-1", short_id="dead", handle="alice",
+            pid=99, cwd="/tmp/a", project="fno", status="live", agent="claude",
+            truth_state="stalled",
+        )
+    ])
+    assert "stalled-1" not in reg.index(path=tmp_path / "registry.json")
 
 
 def test_transcript_path_round_trips(tmp_path):
@@ -93,7 +105,8 @@ def test_transcript_path_for_globs_by_session_id(tmp_path):
 def test_index_populates_transcript_path(tmp_path, monkeypatch):
     monkeypatch.setattr(reg, "discover_live_sessions", lambda: [
         DiscoveredSession(session_id="live-1", short_id="d", handle="a",
-                          pid=9, cwd="/t", project=None, status="idle", agent="claude")
+                          pid=9, cwd="/t", project=None, status="idle", agent="claude",
+                          truth_state="working")
     ])
     monkeypatch.setattr(reg, "transcript_path_for", lambda sid, **k: f"/tx/{sid}.jsonl")
     idx = reg.index(path=tmp_path / "registry.json")
@@ -107,10 +120,26 @@ def test_persisted_peer_wins_session_id_clash(tmp_path, monkeypatch):
         DiscoveredSession(
             session_id="dup", short_id="x", handle="ghost",
             pid=1, cwd="/x", project=None, status="idle", agent="claude",
+            truth_state="working",
         )
     ])
     idx = reg.index(path=path)
     assert idx["dup"].inject_handle == "pty:owned"  # persisted handle survives
+
+
+def test_stalled_persisted_peer_is_not_routable(tmp_path, monkeypatch):
+    path = tmp_path / "registry.json"
+    reg.register(_peer(sid="stale", handle="pty:owned"), path=path)
+    monkeypatch.setattr(reg, "discover_live_sessions", lambda: [])
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda *_args, **_kwargs: {"state": "stalled"},
+    )
+
+    assert "stale" not in reg.index(path=path)
 
 
 # ---------------------------------------------------------------------------
@@ -127,10 +156,21 @@ def _no_discovery(monkeypatch):
     monkeypatch.setattr(reg, "discover_live_sessions", lambda: [])
 
 
+def _patch_worker_truth(monkeypatch, state_fn=lambda _handle: "working"):
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda handle, **_kwargs: {"state": state_fn(handle)},
+    )
+
+
 def test_index_surfaces_live_codex_worker(tmp_path, monkeypatch):
     # A live interactive codex worker becomes an addressable relay peer keyed by its
     # short_id, with a worker:<short_id> inject handle the daemon routes through.
     _no_discovery(monkeypatch)
+    _patch_worker_truth(monkeypatch)
     monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / "agents"))
     _write_agents_registry(tmp_path / "agents", [
         {"short_id": "phasesta", "provider": "codex", "host_mode": "interactive",
@@ -149,6 +189,7 @@ def test_index_bridge_is_provider_generic(tmp_path, monkeypatch):
     # AC4-FR: the bridge is not codex-specific -- a gemini (or any non-claude)
     # interactive worker surfaces the same way, with ZERO bridge code per harness.
     _no_discovery(monkeypatch)
+    _patch_worker_truth(monkeypatch)
     monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / "agents"))
     _write_agents_registry(tmp_path / "agents", [
         {"short_id": "gemwork1", "provider": "gemini", "host_mode": "interactive",
@@ -163,6 +204,7 @@ def test_index_bridge_is_provider_generic(tmp_path, monkeypatch):
 
 def test_index_bridge_skips_claude_dead_exec_and_unsafe(tmp_path, monkeypatch):
     _no_discovery(monkeypatch)
+    _patch_worker_truth(monkeypatch, lambda handle: "done" if handle == "deadw" else "working")
     monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / "agents"))
     _write_agents_registry(tmp_path / "agents", [
         # claude rides the discover lane, not this bridge
@@ -182,12 +224,31 @@ def test_index_bridge_skips_claude_dead_exec_and_unsafe(tmp_path, monkeypatch):
     assert set(idx) == {"okw"}
 
 
+def test_index_bridge_family1_overrides_stale_orphaned_status(tmp_path, monkeypatch):
+    _no_discovery(monkeypatch)
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / "agents"))
+    _write_agents_registry(tmp_path / "agents", [
+        {"short_id": "livecodx", "harness_session_id": "019f-live",
+         "provider": "codex", "host_mode": "interactive",
+         "status": "orphaned", "cwd": "/tmp", "name": "worker"},
+    ])
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth, "resolve_session_truth",
+        lambda *_args, **_kwargs: {"state": "working"},
+    )
+
+    assert "livecodx" in reg.index(path=tmp_path / "registry.json")
+
+
 def test_index_bridge_tolerates_missing_or_corrupt_agents_registry(tmp_path, monkeypatch):
     # A missing / corrupt agents registry must never deny lookup -- the bridge yields
     # nothing and the discovered/persisted sources still populate the index.
     monkeypatch.setattr(reg, "discover_live_sessions", lambda: [
         DiscoveredSession(session_id="live-1", short_id="d", handle="a", pid=9,
-                          cwd="/t", project=None, status="idle", agent="claude"),
+                          cwd="/t", project=None, status="idle", agent="claude",
+                          truth_state="working"),
     ])
     monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / "agents"))  # no registry.json written
     idx = reg.index(path=tmp_path / "registry.json")
