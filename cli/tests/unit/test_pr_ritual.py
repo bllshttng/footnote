@@ -302,6 +302,10 @@ def test_judgment_spawn_forwards_configured_model(tmp_path, capsys, monkeypatch)
     r.leg_judgment()
     argv = [c for c in runner.calls if len(c) > 1 and c[1] == "agents" and "spawn" in c][0]
     assert argv[argv.index("--model") + 1] == PostMergeBlock().model
+    # The model is a claude id, and an explicit --model bypasses the
+    # provider-scoping that would drop it: unpinned, a codex-ambient session
+    # hands the claude id to codex and 400s after the round-trip.
+    assert argv[argv.index("--harness") + 1] == "claude"
     # NOT --role: `post-merge` is in DEFAULT_ROUTED_ROLES and would auto-route
     # this leg to the weaker secondary provider - the opposite of the intent.
     assert "--role" not in argv

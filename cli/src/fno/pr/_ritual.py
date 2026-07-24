@@ -566,9 +566,13 @@ class Ritual:
         # Un-routed site: no --role, so config.post_merge.model IS the model.
         # Deliberately NOT `--role post-merge` - that role auto-routes to the
         # secondary provider, and this leg renders a judgment.
+        # --harness pins the binary WITH the model (the groom worker's pairing):
+        # the value is a claude model id, and an explicit --model bypasses the
+        # provider-scoping that would otherwise drop it, so a codex-ambient
+        # session would hand the claude id to codex and 400.
         model = getattr(self.ctx.pm, "model", None)
         if model:
-            argv += ["--model", model]
+            argv += ["--harness", "claude", "--model", model]
         argv += ["--name", f"judgment-pr-{self.ctx.pr}", prompt]
         try:
             r = self.runner(argv, timeout=_JUDGMENT_TIMEOUT_S + 60.0)
