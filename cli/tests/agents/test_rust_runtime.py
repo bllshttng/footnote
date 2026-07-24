@@ -219,12 +219,12 @@ def test_route_forwards_verb_and_args(monkeypatch, tmp_path) -> None:
 
     with pytest.raises(SystemExit) as exc:
         rr.route_to_rust(
-            ["ask", "worker-A", "hello", "--provider", "codex"],
+            ["ask", "worker-A", "hello", "--harness", "codex"],
             _exec=fake_exec,
             _resolve=lambda: binary,
         )
     assert exc.value.code == 0
-    assert calls == [(str(binary), [str(binary), "ask", "worker-A", "hello", "--provider", "codex"])]
+    assert calls == [(str(binary), [str(binary), "ask", "worker-A", "hello", "--harness", "codex"])]
 
 
 def test_route_missing_binary_exits_127(capsys) -> None:
@@ -267,9 +267,9 @@ def test_agents_group_execs_when_opted_in(monkeypatch) -> None:
 
     monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
-    result = CliRunner().invoke(app, ["agents", "ask", "worker-A", "hi", "--provider", "codex"])
+    result = CliRunner().invoke(app, ["agents", "ask", "worker-A", "hi", "--harness", "codex"])
     assert result.exit_code == 0
-    assert captured == [["ask", "worker-A", "hi", "--provider", "codex"]]
+    assert captured == [["ask", "worker-A", "hi", "--harness", "codex"]]
 
 
 def test_spawn_seam_injects_config_defaults(monkeypatch) -> None:
@@ -607,7 +607,7 @@ def test_harness_markers_match_client_rs() -> None:
 
 @pytest.mark.parametrize("provider", ["claude", "codex", "gemini"])
 def test_ask_auto_routes_for_every_provider(monkeypatch, tmp_path, provider) -> None:
-    """`fno agents ask <name> <msg> --provider <p>` routes to the installed Rust
+    """`fno agents ask <name> <msg> --harness <p>` routes to the installed Rust
     binary under the default auto runtime for claude, codex, AND gemini — the
     unconditional flip; gemini no longer stays on Python."""
     from fno.cli import app
@@ -622,13 +622,13 @@ def test_ask_auto_routes_for_every_provider(monkeypatch, tmp_path, provider) -> 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
     monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
-    result = CliRunner().invoke(app, ["agents", "ask", "newagent", "hi", "--provider", provider])
+    result = CliRunner().invoke(app, ["agents", "ask", "newagent", "hi", "--harness", provider])
     assert result.exit_code == 99
-    assert captured == [(["ask", "newagent", "hi", "--provider", provider], binary)]
+    assert captured == [(["ask", "newagent", "hi", "--harness", provider], binary)]
 
 
 def test_ask_routes_to_rust_without_provider_flag(monkeypatch, tmp_path) -> None:
-    """A bare `ask <name> <msg>` (no `--provider`) also auto-routes: make_context
+    """A bare `ask <name> <msg>` (no `--harness`) also auto-routes: make_context
     no longer resolves the provider itself; the Rust client decides create vs
     resume and, when unresolvable, surfaces Python's exit-2 error itself."""
     from fno.cli import app
@@ -669,7 +669,7 @@ def test_ask_falls_back_to_python_without_installed_binary(monkeypatch) -> None:
     monkeypatch.setattr(rr, "resolve_installed_binary", lambda: None)
     monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
     monkeypatch.setattr(dispatch_mod, "dispatch_ask", fake_dispatch_ask)
-    CliRunner().invoke(app, ["agents", "ask", "newagent", "hi", "--provider", "gemini"])
+    CliRunner().invoke(app, ["agents", "ask", "newagent", "hi", "--harness", "gemini"])
     assert called == []
     assert [d["name"] for d in dispatched] == ["newagent"]
 
@@ -697,7 +697,7 @@ def test_python_mode_forces_python_for_ask(monkeypatch, tmp_path, provider) -> N
     monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
     monkeypatch.setattr(dispatch_mod, "dispatch_ask", fake_dispatch_ask)
-    CliRunner().invoke(app, ["agents", "ask", "any", "hi", "--provider", provider])
+    CliRunner().invoke(app, ["agents", "ask", "any", "hi", "--harness", provider])
     assert called == [], f"=python must keep ask on Python for {provider}; got: {called}"
     assert [d["name"] for d in dispatched] == ["any"], (
         f"=python must reach the Python dispatch for {provider}; got: {dispatched}"

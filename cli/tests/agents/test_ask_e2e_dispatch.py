@@ -224,7 +224,7 @@ def test_ask_unknown_agent_python_vs_rust_parity(tmp_path: Path, monkeypatch) ->
     rs_home = tmp_path / "rs-home"
     rs_home.mkdir()
     completed = subprocess.run(
-        [str(RUST_BIN), "ask", "ghost-agent", "hi", "--provider", "codex"],
+        [str(RUST_BIN), "ask", "ghost-agent", "hi", "--harness", "codex"],
         env={**os.environ, "FNO_AGENTS_HOME": str(rs_home)},
         capture_output=True,
         text=True,
@@ -371,7 +371,7 @@ def test_codex_spawn_once_fake_provider_exit_propagates(tmp_path: Path, monkeypa
 # The existing tests cover CREATE + failure propagation. cv-1314d0e7 noted the
 # followup-library parity lives in codex_ask_parity.rs but not at the CLI
 # boundary. This matrix closes that gap at the CLI level:
-# a follow-up ask (no `--provider`, resolved from the registry a prior create
+# a follow-up ask (no `--harness`, resolved from the registry a prior create
 # wrote) reaches the same fake provider with the same reply + exit on both the
 # Python dispatch and the Rust client.
 # --------------------------------------------------------------------------- #
@@ -384,7 +384,7 @@ def test_ask_followup_python_vs_rust_parity(provider, tmp_path: Path, monkeypatc
     the Rust client for codex. The agent is seeded via the retained
     create machinery (Task 1.3: ask never creates), and the Rust side reads the
     Python-written registry row - exactly the production shape, where both
-    runtimes share one registry. Follow-ups pass no `--provider` so the
+    runtimes share one registry. Follow-ups pass no `--harness` so the
     provider is resolved from the registry row."""
     import shutil
 

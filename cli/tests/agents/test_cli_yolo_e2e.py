@@ -53,7 +53,7 @@ def test_ask_yolo_flag_reaches_dispatch_ask(monkeypatch, runner: CliRunner) -> N
         agents_app,
         [
             "ask", "worker", "msg",
-            "--provider", "codex",
+            "--harness", "codex",
             "--yolo",
         ],
     )
@@ -71,7 +71,7 @@ def test_ask_without_yolo_defaults_false(monkeypatch, runner: CliRunner) -> None
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["ask", "worker", "msg", "--provider", "codex"]
+        agents_app, ["ask", "worker", "msg", "--harness", "codex"]
     )
 
     assert result.exit_code == 0, result.output
@@ -89,7 +89,7 @@ def test_ask_yolo_with_other_options_still_passes(
         agents_app,
         [
             "ask", "worker", "msg",
-            "--provider", "codex",
+            "--harness", "codex",
             "--yolo",
             "--from-name", "smoke-test",
         ],

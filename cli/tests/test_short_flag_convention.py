@@ -101,7 +101,7 @@ PHASE2_LOWERCASE_MAP: dict[tuple[str, str], dict[str, str]] = {
     # extracted into the dedicated `fno mail` namespace); its lowercase shorts
     # moved with it (-k --kind, -b --body, plus the pre-existing -p/-c).
     ("mail/cli.py", "cmd_send"): {
-        "--kind": "-k", "--body": "-b", "--provider": "-p", "--cwd": "-c",
+        "--kind": "-k", "--body": "-b", "--harness": "-H", "--cwd": "-c",
     },
     ("providers/cli.py", "add_provider"): {
         "--cli": "-c", "--auth": "-a", "--scope": "-s", "--priority": "-p",
@@ -311,10 +311,10 @@ def test_exclusive_pre_existing_uppercase(decls: list[Decl]) -> None:
 # --------------------------------------------------------------------------- #
 
 def test_agents_ask_has_phone_shorts(decls: list[Decl]) -> None:
-    """AC1: `agents ask` declares -p/-c/-t for provider/cwd/timeout (Python side)."""
+    """AC1: `agents ask` declares -H/-c/-t for harness/cwd/timeout (Python side)."""
     ask = {d.long: d.shorts for d in decls if d.file.endswith("agents/cli.py") and d.func == "cmd_ask"}
     assert ask, "could not find cmd_ask options in agents/cli.py"
-    expected = {"--provider": "-p", "--cwd": "-c", "--timeout": "-t"}
+    expected = {"--harness": "-H", "--cwd": "-c", "--timeout": "-t"}
     for long, short in expected.items():
         assert long in ask, f"agents ask is missing {long}"
         assert short in ask[long], f"agents ask {long} must carry {short}, has {ask[long]}"

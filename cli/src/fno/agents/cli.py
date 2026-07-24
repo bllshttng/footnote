@@ -1395,8 +1395,18 @@ def cmd_spawn_guard(
 def cmd_ask(
     name: str | None = typer.Argument(None, help="Agent name. Omit when using --to-project."),
     message: str | None = typer.Argument(None, help="Message to send."),
-    provider: str | None = typer.Option(
-        None, "--provider", "-p", help="claude | codex | gemini (required on first ask)."
+    harness: str | None = typer.Option(
+        None,
+        "--harness",
+        "-H",
+        help="The CLI binary to talk to: claude | codex | gemini (required on first ask).",
+    ),
+    _provider_tombstone: str | None = typer.Option(
+        None,
+        "--provider",
+        hidden=True,
+        help="Retired: the harness axis is --harness/-H; a model vendor routes "
+        "only at spawn. Removed at 0.4.0.",
     ),
     cwd: str | None = typer.Option(
         None, "--cwd", "-c", help="Working directory for the agent subprocess."
@@ -1479,6 +1489,9 @@ def cmd_ask(
         dispatch_ask,
         resolve_to_project,
     )
+    from fno._flag_aliases import refuse_retired_provider
+
+    refuse_retired_provider(_provider_tombstone)
 
     # ask is a follow-up to an existing session and never launches in workdir, so
     # it stays in the caller cwd (here=True): never the canonical default nor the
@@ -1529,7 +1542,7 @@ def cmd_ask(
         result = dispatch_ask(
             name=name,
             message=message,
-            provider=provider,
+            provider=harness,
             cwd=workdir,
             timeout=timeout,
             from_name=from_name,
@@ -1550,8 +1563,14 @@ def cmd_ask(
 @agents_app.command("list")
 def cmd_list(
     cwd: str = typer.Option(None, "--cwd", help="Filter by working directory."),
-    provider: str = typer.Option(
-        None, "--provider", help="Filter by provider (claude | codex | gemini)."
+    harness: str = typer.Option(
+        None, "--harness", help="Filter by harness (claude | codex | gemini)."
+    ),
+    _provider_tombstone: str = typer.Option(
+        None,
+        "--provider",
+        hidden=True,
+        help="Retired: filter by --harness. Removed at 0.4.0.",
     ),
     status: AgentStatusFilter = typer.Option(
         None, "--status", help="Filter by liveness (live | orphaned | unknown)."
@@ -1574,13 +1593,16 @@ def cmd_list(
     ``--no-discovered`` to skip the registry scan.
     """
     from fno.agents.read import list_agents
+    from fno._flag_aliases import refuse_retired_provider
+
+    refuse_retired_provider(_provider_tombstone)
 
     status_value: str | None = status.value if status is not None else None
     is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
 
     result = list_agents(
         cwd=cwd,
-        provider=provider,
+        provider=harness,
         status=status_value,
         json_out=json_out,
         tty=is_tty,
@@ -1600,8 +1622,14 @@ def cmd_list(
 @agents_app.command("discovered-json", hidden=True)
 def cmd_discovered_json(
     cwd: str = typer.Option(None, "--cwd", help="Filter discovered rows by cwd."),
-    provider: str = typer.Option(
-        None, "--provider", help="Filter discovered rows by harness."
+    harness: str = typer.Option(
+        None, "--harness", help="Filter discovered rows by harness."
+    ),
+    _provider_tombstone: str = typer.Option(
+        None,
+        "--provider",
+        hidden=True,
+        help="Retired: filter by --harness. Removed at 0.4.0.",
     ),
 ) -> None:
     """Internal: emit the discovered-live-sessions lane as JSON.
@@ -1613,6 +1641,10 @@ def cmd_discovered_json(
     lane and exits 0 so ``agents list`` is never broken by discovery.
     """
     import json as _json
+
+    from fno._flag_aliases import refuse_retired_provider
+
+    refuse_retired_provider(_provider_tombstone)
 
     out: dict = {"discovered_sessions": []}
     try:
@@ -1637,8 +1669,8 @@ def cmd_discovered_json(
             )
             if s.is_alive
         ]
-        if provider:
-            rows = [r for r in rows if r.get("agent") == provider]
+        if harness:
+            rows = [r for r in rows if r.get("agent") == harness]
         if cwd:
             try:
                 resolved = str(_Path(cwd).resolve())

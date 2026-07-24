@@ -35,7 +35,7 @@ def test_cmd_ask_prints_short_id_only_on_success(
     workdir.mkdir()
     result = runner.invoke(
         agents_app,
-        ["ask", "demo", "hi", "--provider", "claude", "--cwd", str(workdir)],
+        ["ask", "demo", "hi", "--harness", "claude", "--cwd", str(workdir)],
     )
 
     assert result.exit_code == UNKNOWN_AGENT_EXIT_CODE, result.output
@@ -47,7 +47,7 @@ def test_cmd_ask_prints_short_id_only_on_success(
 def test_cmd_ask_short_flags_behave_like_long(
     tmp_path: Path, monkeypatch, runner: CliRunner
 ) -> None:
-    """ab-3ff64151 AC1/AC4 (Python path): `ask -p <provider> -c <cwd>` parses correctly
+    """ab-3ff64151 AC1/AC4 (Python path): `ask -H <harness> -c <cwd>` parses correctly
     (both long and short flags reach dispatch_ask). Unknown agent -> exit 16 with both forms.
     Pins that the short flags are wired correctly even though the result is now exit 16."""
     use_tmpdir(monkeypatch, tmp_path)
@@ -63,13 +63,50 @@ def test_cmd_ask_short_flags_behave_like_long(
     workdir.mkdir()
     result = runner.invoke(
         agents_app,
-        ["ask", "demo", "hi", "-p", "claude", "-c", str(workdir)],
+        ["ask", "demo", "hi", "-H", "claude", "-c", str(workdir)],
     )
 
     # Short flags parsed correctly; unknown agent -> exit 16 (not "unknown option")
     assert result.exit_code == UNKNOWN_AGENT_EXIT_CODE, (result.stdout or "") + (result.stderr or "")
     combined = (result.stderr or "") + (result.stdout or "")
     assert "unknown agent" in combined
+
+
+def test_cmd_ask_provider_tombstone_teaches_and_exits_2(
+    tmp_path: Path, monkeypatch, runner: CliRunner
+) -> None:
+    """x-bab1 AC3 (Python path): the retired --provider spelling is a hidden
+    tombstone that exits 2 with the axis map; it never reaches dispatch."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app, ["ask", "demo", "hi", "--provider", "claude"]
+    )
+    assert result.exit_code == 2, (result.stdout or "") + (result.stderr or "")
+    err = (result.stderr or "") + (result.stdout or "")
+    assert "split at the axis rename" in err
+    assert "--harness/-H" in err
+    assert "0.4.0" in err
+
+
+def test_cmd_ask_off_spawn_minus_p_is_unknown(
+    tmp_path: Path, monkeypatch, runner: CliRunner
+) -> None:
+    """x-bab1 AC6 (Python path): -p is no longer ask's harness short; Typer
+    rejects it as an unknown option (loud), never binding it to a harness."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app, ["ask", "demo", "hi", "-p", "claude"]
+    )
+    assert result.exit_code != 0
+    err = (result.stderr or "") + (result.stdout or "")
+    # Click/Typer's unknown-option surface names the flag it did not recognize.
+    assert "-p" in err or "no such option" in err.lower()
 
 
 def test_cmd_ask_surfaces_provider_required(
@@ -105,7 +142,7 @@ def test_cmd_ask_surfaces_claude_not_on_path(
     from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
 
     result = runner.invoke(
-        agents_app, ["ask", "y", "hi", "--provider", "claude"]
+        agents_app, ["ask", "y", "hi", "--harness", "claude"]
     )
 
     assert result.exit_code == UNKNOWN_AGENT_EXIT_CODE
@@ -132,7 +169,7 @@ def test_cmd_ask_surfaces_subprocess_stderr_verbatim(
     from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
 
     result = runner.invoke(
-        agents_app, ["ask", "n", "hi", "--provider", "claude"]
+        agents_app, ["ask", "n", "hi", "--harness", "claude"]
     )
 
     # Unknown agent fires before subprocess; exit 16 not 1
@@ -161,7 +198,7 @@ def test_cmd_ask_rejects_from_name_with_xml_unsafe_chars(
     for bad in ['bad"name', "ang<le", "and&", "ang>le"]:
         result = runner.invoke(
             agents_app,
-            ["ask", "agent-x", "msg", "--provider", "claude",
+            ["ask", "agent-x", "msg", "--harness", "claude",
              "--from-name", bad],
         )
         assert result.exit_code == 2, f"{bad!r} did not exit 2"
@@ -184,7 +221,7 @@ def test_cmd_ask_rejects_from_name_too_long(
     long_name = "a" * 129
     result = runner.invoke(
         agents_app,
-        ["ask", "agent-x", "msg", "--provider", "claude",
+        ["ask", "agent-x", "msg", "--harness", "claude",
          "--from-name", long_name],
     )
     assert result.exit_code == 2
@@ -218,7 +255,7 @@ def test_cmd_ask_from_name_default_is_fno(
     runner = CliRunner()
     result = runner.invoke(
         cli_mod.agents_app,
-        ["ask", "agent-x", "msg", "--provider", "claude"],
+        ["ask", "agent-x", "msg", "--harness", "claude"],
     )
     assert result.exit_code == 0, result.output
     assert captured["from_name"] == "fno"
@@ -250,7 +287,7 @@ def test_cmd_ask_from_name_custom_value_passes_through(
     runner = CliRunner()
     result = runner.invoke(
         cli_mod.agents_app,
-        ["ask", "agent-x", "msg", "--provider", "claude",
+        ["ask", "agent-x", "msg", "--harness", "claude",
          "--from-name", "orchestrator-main"],
     )
     assert result.exit_code == 0, result.output
