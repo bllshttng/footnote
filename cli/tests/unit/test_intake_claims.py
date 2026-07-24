@@ -89,7 +89,8 @@ def fixture_graph(tmp_path: Path):
     graph_file.write_text(json.dumps({"entries": entries}) + "\n")
 
     with patch("fno.graph.cli._graph_path", return_value=graph_file), \
-         patch("fno.graph._intake._git_repo_root", return_value=str(tmp_path)):
+         patch("fno.graph._intake._git_repo_root", return_value=str(tmp_path)), \
+         patch("fno.paths.graph_archive_json", return_value=tmp_path / "graph-archive.json"):
         yield graph_file
 
 
@@ -738,3 +739,51 @@ def test_idea_path_survives_scorer_failure_exit_zero(tmp_path, monkeypatch):
     # any single warning line) and that it is the only one.
     assert "post-file dedup check skipped" in result.output
     assert result.output.count("warning:") == 1
+
+
+def test_warn_similar_nodes_includes_archived_nodes(monkeypatch, tmp_path, capsys):
+    # codex P2: a shipped-and-archived node is the answer to a duplicate filing,
+    # but once `archive --apply` moves it to graph-archive.json the working graph
+    # alone no longer sees it. The dedup scan must read the archive too.
+    archive = tmp_path / "graph-archive.json"
+    archive.write_text(
+        json.dumps({"entries": [
+            _node("arch1", title="dedup gate for backlog filings", status="done", pr_number=99),
+        ]})
+        + "\n"
+    )
+    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: archive)
+    # Working graph is empty; the only candidate lives in the archive.
+    new = _node("new", title="dedup gate for backlog node filings", status="idea")
+    _warn_similar_nodes(new, [], intake_hint=False)
+    err = capsys.readouterr().err
+    assert "dedup:" in err
+    assert "arch1" in err
+    assert "done" in err
+    assert "PR#99" in err
+
+
+def test_new_birth_path_warns_on_near_duplicate(tmp_path, monkeypatch):
+    # codex P2: `fno new` is a reachable plan-less birth path with its own
+    # mutator; it must run the same dedup net as idea/add/intake.
+    from typer.testing import CliRunner
+    from fno.graph.cli import cli
+    import fno.graph._constants as gc
+
+    g = tmp_path / "graph.json"
+    g.write_text(
+        json.dumps({"entries": [
+            _node("ab-d0ne5678", title="Already shipped feature", status="done"),
+        ]})
+        + "\n"
+    )
+    monkeypatch.setattr(gc, "GRAPH_JSON", g)
+    # Isolate from the real archive so only the working-graph candidate is seen.
+    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: tmp_path / "no-archive.json")
+    result = CliRunner().invoke(
+        cli, ["new", "Already shipped feature refactor", "--unscoped", "--force-domain"],
+    )
+    assert result.exit_code == 0, result.output
+    # CliRunner mixes stderr into output; the receipt names the done candidate.
+    assert "dedup:" in result.output
+    assert "ab-d0ne5678" in result.output

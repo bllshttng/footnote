@@ -890,11 +890,16 @@ def _warn_similar_nodes(
     this helper only formats what it returns.
     """
     from fno.graph.relatedness import similar_nodes
+    from fno.graph.store import entries_with_archive
 
-    candidates = similar_nodes(node, entries)
+    # Score against the working graph AND archived (shipped) nodes: an archived
+    # done node is the answer to a duplicate filing, and the working graph alone
+    # misses it (codex P2). Best-effort; an unreadable archive degrades silently.
+    scoring_entries = entries_with_archive(entries)
+    candidates = similar_nodes(node, scoring_entries)
     if not candidates:
         return
-    by_id = {e.get("id"): e for e in entries if isinstance(e, dict)}
+    by_id = {e.get("id"): e for e in scoring_entries if isinstance(e, dict)}
     new_id = node.get("id")
     lines = [f"dedup: {len(candidates)} similar existing node(s) for {new_id}:"]
     for cid, score, _reason in candidates:

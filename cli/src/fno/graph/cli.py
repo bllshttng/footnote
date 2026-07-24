@@ -384,32 +384,6 @@ def _child_note(child: dict, events: list[dict], worker: Optional[str]) -> str:
     return "-"
 
 
-def _entries_with_archive(entries: list) -> list:
-    """``entries`` plus archived nodes, working graph winning on id.
-
-    Best-effort and read-only: an unreadable archive degrades to the working
-    graph rather than failing a read verb.
-    """
-    from fno.paths import graph_archive_json
-
-    try:
-        archive_path = graph_archive_json()
-        if not archive_path.exists():
-            return entries
-        from fno.graph.store import read_graph
-
-        live = {e.get("id") for e in entries if isinstance(e, dict)}
-        return [
-            *entries,
-            *(
-                a for a in read_graph(archive_path)
-                if isinstance(a, dict) and a.get("id") not in live
-            ),
-        ]
-    except (OSError, ValueError):
-        return entries
-
-
 def _scope_growth_line(growth) -> str:
     """One line: the growth figure with its coverage, or why it is withheld.
 
@@ -497,6 +471,7 @@ def cmd_epic_status(
         })
 
     from fno.graph.rollup import scope_growth
+    from fno.graph.store import entries_with_archive
 
     # Read through the archive for the METRIC only (the same read-only fallback
     # `get` uses). Without it a swept child stops counting and the epic's
@@ -504,7 +479,7 @@ def cmd_epic_status(
     # quietly changes with unrelated maintenance is the failure this metric is
     # supposed to be immune to. The children table above stays working-graph
     # only, as it was before.
-    growth = scope_growth(_entries_with_archive(entries), epic_id)
+    growth = scope_growth(entries_with_archive(entries), epic_id)
 
     if json_mode(ctx):
         typer.echo(json.dumps({
@@ -8326,6 +8301,22 @@ def cmd_new(
         return es
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    # Filing-time dedup net (plan x-6ac7): `fno new` is a reachable plan-less
+    # birth path with its own mutator, so it gets the same post-write warn as
+    # idea/add/intake (codex P2). Non-fatal; this verb's stdout is the bare id,
+    # not JSON, so the stderr receipt cannot corrupt a machine-readable payload.
+    if new_id_holder[0] is not None:
+        try:
+            from fno.graph._intake import _find_node, _warn_similar_nodes
+
+            post_entries = read_graph(_graph_path())
+            node = _find_node(post_entries, new_id_holder[0] or "")
+            if node is not None:
+                _warn_similar_nodes(node, post_entries, intake_hint=False)
+        except Exception as e:  # noqa: BLE001 - dedup never breaks a filing
+            sys.stderr.write(f"warning: post-file dedup check skipped: {e}\n")
+
     typer.echo(new_id_holder[0])
 
 
