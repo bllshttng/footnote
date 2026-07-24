@@ -52,9 +52,11 @@ add_violation() {
 # "no added: line" and "added: line with no parseable date" report differently.
 ENTRY_COUNT=0
 STALE_DATES=""
+TITLES=""
 while IFS=$'\t' read -r title has_grad has_added date; do
   [[ -z "$title" ]] && continue
   ENTRY_COUNT=$((ENTRY_COUNT + 1))
+  TITLES+="${title}"$'\n'
   [[ "$has_grad" != "1" ]] && add_violation "entry '${title}' is missing a 'graduates-to:' field"
   if [[ "$has_added" != "1" ]]; then
     add_violation "entry '${title}' is missing an 'added:' field"
@@ -84,6 +86,32 @@ done < <(
 
 if (( ENTRY_COUNT > MAX_ENTRIES )); then
   add_violation "${ENTRY_COUNT} entries exceed the ${MAX_ENTRIES}-entry cap; evict or graduate one in this PR"
+fi
+
+# Graduated-verb check: a title naming a shipped `fno` verb as the trap is by
+# definition un-graduated, because the verb IS the carrier its `graduates-to:`
+# is waiting for. This is the loop that produced the "`fno test` can report a
+# false green" entry - written the day after the verb that fixed it, then read
+# at every SessionStart as a reason to distrust it. Titles only: a body may
+# cite a verb as a specimen without claiming it is the trap.
+#
+# The verb list is read from the CLI's lazy registry rather than by running
+# `fno`, so the gate stays hermetic and works on a checkout with nothing
+# installed. A consumer repo shipping this gate without the CLI skips it.
+REGISTRY="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/cli/src/fno/cli.py"
+if [[ -n "$TITLES" && -f "$REGISTRY" ]]; then
+  SHIPPED_VERBS=$(sed -n 's/^[[:space:]]*"\([a-z][a-z0-9-]*\)":[[:space:]]*(.*/\1/p' "$REGISTRY")
+  while IFS= read -r title; do
+    [[ -z "$title" ]] && continue
+    # Backticks are decoration around the verb, not part of it.
+    probe="${title//\`/}"
+    while IFS= read -r verb; do
+      [[ -z "$verb" ]] && continue
+      if printf '%s\n' "$SHIPPED_VERBS" | grep -qxF "$verb"; then
+        add_violation "entry '${title}' names the shipped verb 'fno ${verb}'; a shipped verb is the carrier that graduates its entry, so evict the entry and let the verb (plus its --help) teach"
+      fi
+    done < <(printf '%s\n' "$probe" | grep -oE '(^|[^a-zA-Z])fno +[a-z][a-z0-9-]*' | sed -E 's/.*fno +//')
+  done <<< "$TITLES"
 fi
 
 # Staleness: one python3 pass over the collected dates (portable date math).

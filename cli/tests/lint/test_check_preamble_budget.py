@@ -151,7 +151,7 @@ def test_missing_fixed_root_fails_loud(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "AGENTS.md" in result.stderr
-    assert " / 38000 bytes" not in result.stdout
+    assert f" / {CEILING_BYTES} bytes" not in result.stdout
 
 
 def test_empty_rules_glob_is_legal(tmp_path: Path) -> None:
@@ -416,4 +416,4 @@ def test_doctor_resolves_the_worktree_from_a_subdirectory() -> None:
 
     assert line is not None
     assert line.startswith("preamble: ")
-    assert " / 38000 B (" in line
+    assert f" / {CEILING_BYTES} B (" in line
