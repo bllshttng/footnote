@@ -475,10 +475,22 @@ SESSION_ID=$(grep -E "^[[:space:]]*session_id:" "$STATE_DIR/target-state.md" 2>/
 _CANON_ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")"
 MEMORY_DIR="${HOME}/.claude/projects/$(printf '%s' "$_CANON_ROOT" | sed 's|/|-|g')/memory"
 
+CANDIDATE='<JSON for this candidate>'
 bash "${CLAUDE_PLUGIN_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/scripts/memory/write-memory-entry.sh" \
     --memory-dir "$MEMORY_DIR" \
     --session-id "$SESSION_ID" \
-    --candidate '<JSON for this candidate>'
+    --candidate "$CANDIDATE"
+
+# Dual-emit a load-bearing PROJECT lesson (oss-fix-not-memory discriminator: a
+# stranger cloning the repo would need it) to the corpus staging file, so it
+# reaches the AGENTS.md pitfalls corpus on the next promotion PR instead of
+# private memory codex cannot read. Warns + exits 0 on failure - never blocks
+# the merge or the review cycle.
+bash "${CLAUDE_PLUGIN_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/scripts/memory/append-lesson-candidate.sh" \
+    --session-id "$SESSION_ID" \
+    --candidate "$CANDIDATE"
+# Appends one line to ~/.fno/lesson-candidates.jsonl (home-keyed, worktree-
+# independent). Promotion into AGENTS.md is a reviewed PR, never automatic.
 ```
 
 If the pass script exits non-zero or no candidates pass the bar, continue silently.

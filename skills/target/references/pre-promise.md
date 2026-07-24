@@ -201,6 +201,18 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/memory/write-memory-entry.sh" \
   --session-id "$SESSION_ID" \
   --candidate "$CANDIDATE"
 # exit 0 = wrote/updated; exit 2 = dedup (fine, no action needed); exit 1 = real error
+
+# Dual-emit: when the candidate clears the oss-fix-not-memory discriminator (a
+# load-bearing how-footnote-works lesson - "would a stranger cloning the repo
+# need this?" - NOT session continuity), also stage it for the AGENTS.md
+# pitfalls corpus. Private memory is unreadable by codex and empty for worktree
+# workers; the corpus is the delivery channel that reaches every harness.
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/memory/append-lesson-candidate.sh" \
+  --session-id "$SESSION_ID" \
+  --candidate "$CANDIDATE"
+# Appends one line to ~/.fno/lesson-candidates.jsonl (home-keyed, worktree-
+# independent). Warns + exits 0 on any failure - never blocks the memory write
+# or <promise>. Promotion into AGENTS.md is a reviewed PR, never automatic.
 ```
 
 Use `"type": "feedback"` for corrections and surprises; `"type": "project"` for decisions, strategy, and validated architecture choices.
