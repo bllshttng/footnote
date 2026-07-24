@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
-from fno.mutex import steal_if_stale
+from fno.mutex import acquire_dir_mutex, release_dir_mutex
 from fno.pr._proc import ToolMissing, run
 
 # Required-check states that count as "not failing" (jq parity).
@@ -102,31 +102,17 @@ class _Lock:
         self.dir = target + ".lock.d"
         self.timeout = timeout
         self.steal = steal
-        self.held = False
+        self.token: str | None = None
 
     def acquire(self) -> bool:
         os.makedirs(os.path.dirname(self.dir) or ".", exist_ok=True)
-        waited = 0
-        while True:
-            try:
-                os.mkdir(self.dir)
-                self.held = True
-                return True
-            except FileExistsError:
-                if self.steal and steal_if_stale(Path(self.dir)):
-                    continue
-                if waited >= self.timeout:
-                    return False
-                time.sleep(1)
-                waited += 1
+        self.token = acquire_dir_mutex(Path(self.dir), self.timeout, steal=self.steal, poll_s=1)
+        return self.token is not None
 
     def release(self) -> None:
-        if self.held:
-            try:
-                os.rmdir(self.dir)
-            except OSError:
-                pass
-            self.held = False
+        if self.token is not None:
+            release_dir_mutex(Path(self.dir), self.token)
+            self.token = None
 
 
 def _emit_audit(

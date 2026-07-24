@@ -46,7 +46,7 @@ from .io import (
 )
 from .staleness import classify, now_ms
 from ..harness_identity import resolve_harness_identity
-from ..mutex import steal_if_stale
+from ..mutex import _stamp_owner, release_dir_mutex, steal_if_stale
 from .types import (
     MAX_ENCODED_FILENAME_BYTES,
     MAX_KEY_LENGTH,
@@ -233,9 +233,11 @@ def acquire_claim(
     if not _existing_is_live(existing):
         recovery_lock = path.with_name(path.name + ".recovery.d")
         acquired_lock = False
+        recovery_token = ""
         try:
             try:
                 recovery_lock.mkdir(parents=True)
+                recovery_token = _stamp_owner(recovery_lock)
                 acquired_lock = True
             except FileExistsError:
                 # Another worker is doing recovery -- or died holding the mutex.
@@ -327,10 +329,7 @@ def acquire_claim(
             return new_claim
         finally:
             if acquired_lock:
-                try:
-                    recovery_lock.rmdir()
-                except OSError:
-                    pass
+                release_dir_mutex(recovery_lock, recovery_token)
 
     # Live and not us => block.
     raise ClaimHeldByOther(

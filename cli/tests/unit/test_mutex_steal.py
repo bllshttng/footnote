@@ -26,7 +26,7 @@ from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.staleness import now_ms
 from fno.claims.types import Claim
 from fno.events import append_event, mission_started
-from fno.mutex import STALE_MUTEX_STEAL_S, steal_if_stale
+from fno.mutex import STALE_MUTEX_STEAL_S, acquire_dir_mutex, release_dir_mutex, steal_if_stale
 
 HOLDER_A = "target-session:sid-a"
 HOLDER_B = "target-session:sid-b"
@@ -192,24 +192,27 @@ class TestStealHelper:
         assert leftovers == [], f"reaped symlink left behind: {leftovers}"
 
     def test_AC3_EDGE_a_live_lock_swapped_in_is_not_stolen(self, tmp_path, monkeypatch):
-        """The rename is atomic per path, not per inode.
+        """The rename is atomic per path, not per token.
 
-        A waiter can be descheduled after reading the age, another stealer win,
-        and a fresh holder acquire at the same path. Renaming then moves a LIVE
-        lock using the corpse's age, letting both callers in. The inode read
-        before the rename is what makes that detectable.
+        A waiter can be descheduled after reading the age and owner token,
+        another stealer win, and a fresh holder acquire at the same path
+        (stamping its own owner token). Renaming then moves a LIVE lock using
+        the corpse's age; the owner-token mismatch is what detects it and puts
+        the live lock back.
         """
         lock = tmp_path / "a.lock.d"
         lock.mkdir()
+        (lock / "owner").write_text("corpse-token")
         _age(lock, STALE_MUTEX_STEAL_S + 60)
 
         real_rename = os.rename
 
         def swap_then_rename(src, dst):
             # Stand in for the race: the corpse is replaced by a fresh holder
-            # between our age read and our rename.
+            # (with its own owner token) between our age read and our rename.
             os.rmdir(src)
             os.mkdir(src)
+            (src / "owner").write_text("fresh-token")
             return real_rename(src, dst)
 
         monkeypatch.setattr(mutex.os, "rename", swap_then_rename)
@@ -218,27 +221,23 @@ class TestStealHelper:
         assert lock.is_dir(), "the live lock was not restored"
 
     def test_AC3_EDGE_identity_survives_inode_reuse(self, tmp_path):
-        """Linux hands a new directory the inode just freed by the old one.
+        """Identity is by owner token, independent of inode.
 
-        So (st_ino, st_dev) compares EQUAL across a corpse-for-live swap and
-        cannot carry identity on its own. This pins the mtime half, which is
-        what actually separates them, on every platform rather than only where
-        the allocator happens to reuse.
+        Linux hands a new directory the inode just freed by the old one, so an
+        inode compare could not tell a corpse from a fresh live lock that reused
+        it. The owner token carries identity without caring about the inode: a
+        reaped dir matches on token, and a swapped-in fresh lock (different
+        token) does not.
         """
         lock = tmp_path / "a.lock.d"
         lock.mkdir()
-        corpse = lock.lstat()
+        (lock / "owner").write_text("corpse-token")
 
-        os.rmdir(lock)
-        lock.mkdir()  # a fresh holder at the same path
-        fresh = lock.lstat()
+        assert mutex._same_owner(lock, "corpse-token") is True
 
-        if (fresh.st_ino, fresh.st_dev) == (corpse.st_ino, corpse.st_dev):
-            assert not mutex._is_same_lock(lock, corpse), (
-                "inode was reused and identity did not notice: a live lock "
-                "would be stolen using the corpse's age"
-            )
-        assert mutex._is_same_lock(lock, fresh)
+        # A fresh holder swapped in stamps its own token: not the same lock.
+        (lock / "owner").write_text("fresh-token")
+        assert mutex._same_owner(lock, "corpse-token") is False
 
     def test_AC2_ERR_fresh_dangling_symlink_is_waited_on(self, tmp_path):
         """The same path, still fresh, must fall through to the wait loop."""
@@ -323,6 +322,38 @@ class TestEventsMutex:
 
         steals = [r for r in caplog.records if "stole stale mutex" in r.message]
         assert len(steals) == 1, f"expected exactly one winner, got {len(steals)}"
+        assert not lock.exists()
+
+    def test_AC2_EDGE_release_after_steal_leaves_new_holder_intact(self, tmp_path):
+        """AC2: a holder whose lock was stolen mid-write must not delete the new
+        holder's lock on release.
+
+        This is the wrongful-delete vector the owner token exists to close.
+        Before the token, release rmdir'd by path and could remove a different
+        holder's live lock, cascading into lock timeouts under load. Release now
+        verifies ownership and leaves a mismatched dir intact; the new holder's
+        subsequent release still succeeds.
+        """
+        lock = tmp_path / "events.jsonl.lock.d"
+
+        # Victim acquires, then is suspended past the steal threshold.
+        victim_token = acquire_dir_mutex(lock, 5)
+        assert victim_token is not None
+        _age(lock, STALE_MUTEX_STEAL_S + 60)
+
+        # A stealer reaps the corpse, then a new holder acquires at the path.
+        assert steal_if_stale(lock) is True
+        assert not lock.exists()
+        new_token = acquire_dir_mutex(lock, 5)
+        assert new_token is not None
+        assert new_token != victim_token
+
+        # Victim resumes and releases: the new holder's lock must survive.
+        release_dir_mutex(lock, victim_token)
+        assert lock.exists(), "victim's release deleted the new holder's lock"
+
+        # The new holder releases cleanly (token matches -> rmtree).
+        release_dir_mutex(lock, new_token)
         assert not lock.exists()
 
 

@@ -26,13 +26,12 @@ from __future__ import annotations
 import datetime as _dt
 import json as _json
 import re as _re
-import time as _time
 from pathlib import Path
 from typing import Any
 
 import yaml as _yaml
 
-from ..mutex import steal_if_stale
+from ..mutex import acquire_dir_mutex, release_dir_mutex
 from .verify_child_promise import verify_child_promise
 
 
@@ -653,26 +652,15 @@ def append_event(
     events_path.parent.mkdir(parents=True, exist_ok=True)
 
     lock_dir = events_path.parent / (events_path.name + ".lock.d")
-    deadline = _time.monotonic() + lock_timeout_seconds
-    while True:
-        try:
-            lock_dir.mkdir()
-            break
-        except FileExistsError:
-            if steal_if_stale(lock_dir):
-                continue
-            if _time.monotonic() >= deadline:
-                raise TimeoutError(f"events.jsonl lock timeout: {lock_dir}")
-            _time.sleep(0.1)
+    token = acquire_dir_mutex(lock_dir, lock_timeout_seconds)
+    if token is None:
+        raise TimeoutError(f"events.jsonl lock timeout: {lock_dir}")
 
     try:
         with events_path.open("a", encoding="utf-8") as fh:
             fh.write(_json.dumps(event, separators=(",", ":")) + "\n")
     finally:
-        try:
-            lock_dir.rmdir()
-        except OSError:
-            pass
+        release_dir_mutex(lock_dir, token)
 
 
 __all__ = [
