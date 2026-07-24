@@ -254,27 +254,42 @@ def test_claude_is_installed_false_on_malformed_json(tmp_path, monkeypatch):
     assert I._claude_is_installed(run) is False
 
 
-# --- codex: marketplace-add is not a full install (no false success) --------
+# --- codex: wizard delegates to the verified release convergence ------------
 
-def test_codex_install_reports_manual_not_installed():
-    run = _FakeRun([("marketplace add", 0, "", "")])
+def test_codex_install_reports_verified_install(monkeypatch):
+    from fno.setup.codex_plugin import ConvergenceResult
+
+    monkeypatch.setattr(
+        "fno.setup.codex_plugin.converge",
+        lambda **_kwargs: ConvergenceResult(
+            "release", "installed", "fno@footnote", "0.3.0"
+        ),
+    )
+    run = _FakeRun([])
     res = I._codex_install(run)
-    # marketplace registration succeeded, but the plugin still needs a manual
-    # finish, so this must NOT read as installed.
-    assert res.status == "manual" and not res.ok
-    assert "plugin browser" in res.note
+    assert res.status == "installed" and res.ok
+    assert "fno@footnote 0.3.0" in res.note
 
 
-def test_codex_install_failed_on_nonzero_marketplace_add():
-    run = _FakeRun([("marketplace add", 1, "", "no such marketplace")])
+def test_codex_install_failed_on_convergence_error(monkeypatch):
+    from fno.setup.codex_plugin import CodexPluginError
+
+    def fail(**_kwargs):
+        raise CodexPluginError("marketplace-add", "no such marketplace")
+
+    monkeypatch.setattr("fno.setup.codex_plugin.converge", fail)
+    run = _FakeRun([])
     res = I._codex_install(run)
     assert res.status == "failed" and not res.ok
+    assert "marketplace-add" in res.note
 
 
-def test_codex_is_installed_never_claims_installed_from_marketplace():
-    # a listed marketplace is not proof the plugin is wired up
-    run = _FakeRun([("marketplace list", 0, "footnote", "")])
-    assert I._codex_is_installed(run) is False
+def test_codex_is_installed_requires_fresh_verified_payload(monkeypatch):
+    monkeypatch.setattr(
+        "fno.setup.codex_plugin.inspect_freshness",
+        lambda **_kwargs: {"status": "fresh"},
+    )
+    assert I._codex_is_installed(_FakeRun([])) is True
 
 
 def test_manual_result_echoes_a_finish_step_not_installed():

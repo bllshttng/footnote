@@ -25,8 +25,8 @@ from typing import Callable, Optional
 _MARKETPLACE = "bllshttng/footnote"
 _REPO_URL = "https://github.com/bllshttng/footnote"
 
-# A subprocess runner: takes an argv list (and an optional timeout) and returns
-# a CompletedProcess. `...` keeps the optional timeout kwarg in the contract.
+# A subprocess runner: takes an argv list plus subprocess options and returns a
+# CompletedProcess. `...` keeps the optional kwargs in the contract.
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
@@ -57,7 +57,9 @@ class IntegrationAdapter:
     install: Callable[[], IntegrationResult]
 
 
-def _run(cmd: list[str], timeout: int = 120) -> "subprocess.CompletedProcess[str]":
+def _run(
+    cmd: list[str], timeout: int = 120, cwd: Path | None = None
+) -> "subprocess.CompletedProcess[str]":
     """Run a command, capturing output, never raising.
 
     A vanished binary / timeout / OS error becomes a returncode-1 result so
@@ -72,6 +74,7 @@ def _run(cmd: list[str], timeout: int = 120) -> "subprocess.CompletedProcess[str
             errors="replace",  # non-UTF-8 installer output must not raise
             timeout=timeout,
             check=False,
+            cwd=cwd,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr=str(exc))
@@ -168,31 +171,25 @@ def _gemini_install(run: Runner) -> IntegrationResult:
 # --- codex ------------------------------------------------------------------
 
 def _codex_is_installed(run: Runner) -> bool:
-    # `codex plugin marketplace add` only registers a marketplace SOURCE; the
-    # plugin is installed separately (from Codex's plugin browser). A listed
-    # marketplace is therefore NOT proof the integration is wired up, and codex
-    # has no verified non-interactive installed-plugin query. So we never claim
-    # codex is installed: the step is re-offered each run, and re-running the
-    # (idempotent) marketplace add is harmless.
-    return False
+    from fno.setup.codex_plugin import inspect_freshness
+
+    return inspect_freshness(runner=run).get("status") == "fresh"
 
 
 def _codex_install(run: Runner) -> IntegrationResult:
     label = "Codex CLI"
-    # The only verified non-interactive step is registering the marketplace
-    # source; the actual plugin install is done from Codex's plugin browser
-    # (developers.openai.com/codex/plugins). So we register the source and report
-    # a MANUAL finish - never "installed", which would be a false success.
-    res = run(["codex", "plugin", "marketplace", "add", _MARKETPLACE])
-    if res.returncode == 0:
-        return IntegrationResult(
-            "codex",
-            label,
-            "manual",
-            note="marketplace registered; install the footnote plugin from "
-            "Codex's plugin browser to finish",
-        )
-    return IntegrationResult("codex", label, "failed", note=_tail(res.stderr))
+    from fno.setup.codex_plugin import CodexPluginError, converge
+
+    try:
+        result = converge(channel="release", runner=run)
+    except CodexPluginError as exc:
+        return IntegrationResult("codex", label, "failed", note=str(exc))
+    return IntegrationResult(
+        "codex",
+        label,
+        "already-installed" if result.action == "no-op" else "installed",
+        note=f"{result.plugin_id} {result.version}; start a new Codex session",
+    )
 
 
 # --- opencode ---------------------------------------------------------------

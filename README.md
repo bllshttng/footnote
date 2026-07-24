@@ -18,7 +18,7 @@ Really, I built this to ship my own projects faster. One of them became a busine
 Claude Code:   /plugin marketplace add bllshttng/footnote
                /plugin install fno@footnote
 Gemini CLI:    gemini extensions install https://github.com/bllshttng/footnote
-Codex CLI:     codex plugin marketplace add bllshttng/footnote   # then enable
+Codex CLI:     fno setup codex-plugin --channel release
 ```
 
 Then configure with `/fno:setup` and point it at a feature:
