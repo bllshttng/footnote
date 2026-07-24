@@ -405,11 +405,13 @@ impl ProviderWithPty for ClaudeInteractiveProvider {
 pub struct CodexProvider;
 
 pub fn normalize_codex_command(message: &str) -> String {
-    let message = message.trim();
-    if let Some(verb) = message.strip_prefix("/fno:") {
+    let command = message.trim();
+    if let Some(verb) = command.strip_prefix("/fno:") {
         format!("$fno:{verb}")
-    } else if let Some(verb) = message.strip_prefix('/') {
+    } else if let Some(verb) = command.strip_prefix('/') {
         format!("$fno:{verb}")
+    } else if command.starts_with("$fno:") {
+        command.to_string()
     } else {
         message.to_string()
     }
@@ -1364,6 +1366,11 @@ mod tests {
                 .last()
                 .map(String::as_str),
             Some("$fno:target x-81ad")
+        );
+
+        assert_eq!(
+            normalize_codex_command("  review this\n  code  "),
+            "  review this\n  code  "
         );
     }
 
