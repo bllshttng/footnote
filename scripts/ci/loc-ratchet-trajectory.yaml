@@ -33,6 +33,10 @@ entries:
     branch: feature/x-43b3
     delta: 15
     reason: 'mail_escalation overlay (x-43b3): +15 in scripts/lib/events-validate.sh, the reason-enum check mirroring the Python validator and the six existing per-type enum blocks (mission_complete, gate_escape, review_attestation, post_merge_dispatch_receipt, ...). Required for bash-validator parity (US1): a bad reason must fail loud in both languages, not land silently. Every other file in the PR (schema.yaml, the Python builder/validator, mail/cli.py, registry.py, register_session.py, needs.rs, client.rs, tests) is OFF the ratchet manifest. The block follows the established one-per-enum-event pattern and cannot shrink without dropping the parity the plan locks.'
+    pr: 593
+    branch: feature/x-eea5
+    delta: 19
+    reason: 'node-claim TTL refresh tick (x-a7ab 1.4): +19 in hooks/target-stop-hook.sh, the only on-manifest file this PR touches (the whole delta is one block). On every non-terminal allow the stop-hook reads target_claim_{key,holder,ttl} from the manifest and calls `fno claim refresh` with --ttl so a long-running loop never silently expires its node-claim TTL and frees the node for a twin dispatcher (the silent-expiry duplicate-worker specimen). It is the deliverable and cannot be net-zero: a periodic refresh IS the mechanism, and it must ride the loop boundary (the stop-hook tick) rather than a new daemon. It is best-effort and non-blocking (any failure is logged and swallowed, never changing the completion decision), skipped on terminal allows, and always passes --ttl so the 2h window is preserved rather than shrunk to MIN_TTL_MS. The TTL/refresh/expiry semantics, the successor re-acquisition, the spawn-guard visibility barrier, the wake ladder, the incarnation fence, and the filing anchor check all live OFF the manifest (cli/src/fno/ + cli/tests/). No new gate or loop authority: the stop-hook already runs loop-check on every tick; this adds one idempotent refresh beside it.'
   - date: 2026-07-20
     pr: 518
     branch: feature/x-1c7b
