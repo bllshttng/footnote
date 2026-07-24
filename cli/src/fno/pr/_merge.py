@@ -668,6 +668,20 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     except Exception as _exc:  # noqa: BLE001 - a fence-CODE crash fails OPEN (proceed + log); the helper already fail-closes on an unreadable claims dir (AC4-FR)
         _blocked, _fence_reason = False, ""
         sys.stderr.write(f"incarnation-fence: check crashed ({_exc}); proceeding\n")
+        # F4: a fail-open bypass must not read as a clean merge to stdout-JSON
+        # automation. Emit a gate_escape (reason=other, the documented catch-all)
+        # so retro/audit rank the skipped fence as autonomy debt. Telemetry only.
+        try:
+            from fno.events.gate_escape import emit_gate_escape
+
+            emit_gate_escape(
+                "other",
+                pr=pr_number,
+                detail=f"incarnation-fence check crashed ({type(_exc).__name__}: {_exc}); merge proceeded fail-open",
+                cwd=repo,
+            )
+        except Exception:  # noqa: BLE001 - telemetry never blocks the merge
+            pass
     if _blocked:
         _emit(pr_number, "blocked", _fence_reason, "none", err=True)
         return 2
