@@ -224,6 +224,25 @@ if [[ -n "$TERMINATION_REASON" ]]; then
     fi
 fi
 
+# ── 11. Live-tick: refresh this session's node claim so a long-running loop ──
+# never silently expires its TTL and frees the node for a twin (x-a7ab 1.4).
+# Best-effort, non-blocking: any failure (no claim, holder mismatch after a
+# supervisor respawn, stale manifest snapshot, fno absent) is logged and ignored
+# - it can never change the completion decision. Skipped on a TERMINAL allow: a
+# session that is done must not extend a claim it is about to release. --ttl is
+# always passed (default 2h) so refresh keeps the original window rather than
+# shrinking it to MIN_TTL_MS.
+if [[ -z "$TERMINATION_REASON" && -f "$STATE_FILE" ]]; then
+    _TC_KEY="$(sed -n 's/^target_claim_key:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null | head -1)"
+    _TC_HOLDER="$(sed -n 's/^target_claim_holder:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null | head -1)"
+    _TC_TTL="$(sed -n 's/^target_claim_ttl:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null | head -1)"
+    if [[ "$_TC_KEY" == node:* && -n "$_TC_HOLDER" ]]; then
+        FNO_CLAIMS_ROOT="$HOME" fno claim refresh "$_TC_KEY" \
+            --holder "$_TC_HOLDER" --ttl "${_TC_TTL:-2h}" \
+            >/dev/null 2>>"${REPO_ROOT}/.fno/loop-check.stderr.log" || true
+    fi
+fi
+
 # allow (includes DonePRGreen, DoneAdvisory, NoWork, Budget, NoProgress, etc.)
 echo "target stop-hook: $MESSAGE" >&2
 exit 0
