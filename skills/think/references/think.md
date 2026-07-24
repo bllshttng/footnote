@@ -723,6 +723,15 @@ Stamp the resolved type into the doc's frontmatter as `deliverable_type: feature
 An **epic** additionally stamps `scope: epic` - that second key is `/blueprint`'s auto-group trigger; without it an epic silently collapses into the single-PR lean mutation, shipping a multi-wave epic as one PR.
 Stamp both keys on every epic doc.
 
+**`sources:` provenance (from Step 7b).** Stamp a `sources:` list in the saved
+doc's frontmatter naming every artifact Step 7b actually read - the AGENTS.md
+`## Pitfalls corpus (capped)` section (by heading), each synthesis doc path, and
+any other source consulted. List ONLY artifacts you genuinely read: a `sources:`
+entry naming a file the session never opened is a fabricated citation, which the
+Step 8b reviewer flags. Omit the key entirely when 7b read nothing beyond the
+node and codemap - an empty `sources:` list reads as "nothing was checked" and is
+worse than the key's absence. `/blueprint` transcribes `sources:` verbatim.
+
 **The required sections scale to `deliverable_type`.** The uniform 12-section
 contract manufactured filler on non-feature work (an investigation verdict was
 forced to fabricate AC-UI and UI-state sections). Include a section only where
@@ -893,6 +902,11 @@ After saving the design document, spawn a Haiku reviewer subagent to critique it
      heading with no story content under it is a finding on `feature`, `bug`, AND
      `epic` - `/blueprint` silently degrades to one empty "implement feature" task
      otherwise. This is a reviewer-prompt line, not a parser change.
+   - **Fabricated-citation check (new):** every entry in the doc's `sources:`
+     frontmatter must name an artifact the session actually read in Step 7b (the
+     corpus section, a synthesis doc, a cited doc). A `sources:` entry pointing at
+     a file that was never opened is a finding - remove it, or actually read the
+     file before approval. (AC8-FR.)
    - **AC adequacy attack (new):** for each AC in the doc, try to name one
      concrete implementation or input that satisfies the AC as written while
      violating the design's intent - a wrong-but-passing implementation, a
