@@ -526,6 +526,22 @@ def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
+def _is_output_format_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
+    """Keep the internal Claude JSON-envelope flag on the Python spawn path.
+
+    The Rust client does not parse ``--output-format``. PR-watch uses this
+    internal option to preserve ``claude -p``'s result envelope across the
+    canonical headless spawn, so auto-routing it to Rust would reject the flag
+    before any worker starts.
+    """
+    if verb != "spawn":
+        return False
+    return any(
+        a == "--output-format" or a.startswith("--output-format=")
+        for a in _args_before_argv(args)
+    )
+
+
 def route_to_rust(
     args: Sequence[str],
     *,
@@ -744,6 +760,7 @@ def make_agents_group_cls() -> type:
                     or _is_pane_substrate_spawn(verb, args)
                     or _is_provenance_bearing_spawn(verb, args)
                     or _is_resume_bearing_spawn(verb, args)
+                    or _is_output_format_bearing_spawn(verb, args)
                 )
                 if mode == "rust" and not py_spawn:
                     route_to_rust(list(args))  # execs; does not return

@@ -12,6 +12,10 @@ from typing import Any, Optional
 _REAL_RUN = subprocess.run
 
 
+class LLMCallRefused(RuntimeError):
+    """A real model call was refused by the test/CI safety boundary."""
+
+
 def llm_call(
     prompt: str,
     *,
@@ -35,7 +39,9 @@ def llm_call(
     in_pytest = os.environ.get("PYTEST_CURRENT_TEST") is not None
     in_ci = os.environ.get("CI", "").lower() in ("true", "1", "yes")
     if not stub and run is _REAL_RUN and (in_pytest or in_ci):
-        raise RuntimeError("FNO_LLM_STUB not configured; refusing real claude -p in tests")
+        raise LLMCallRefused(
+            "FNO_LLM_STUB not configured; refusing real claude -p in tests"
+        )
 
     if stub:
         cmd = [stub]

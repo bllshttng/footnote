@@ -776,6 +776,12 @@ def cmd_spawn(
             "to claude --disallowedTools; other providers reject it (fail-closed)."
         ),
     ),
+    output_format: str | None = typer.Option(
+        None,
+        "--output-format",
+        hidden=True,
+        help="Internal headless Claude output format; only 'json' is supported.",
+    ),
     squad: str | None = typer.Option(
         None,
         "--workspace",
@@ -1322,6 +1328,7 @@ def cmd_spawn(
                 tools=tools,
                 deny_tools=deny_tools,
                 headless=substrate == "headless",
+                output_format=output_format,
                 resume_session_id=resume,
                 account_env=account_env,
             )

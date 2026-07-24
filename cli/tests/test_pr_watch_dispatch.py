@@ -250,6 +250,7 @@ class TestFireSkill:
         assert "agents" in captured["cmd"] and "spawn" in captured["cmd"]
         assert captured["cmd"][captured["cmd"].index("--substrate") + 1] == "headless"
         assert captured["cmd"][captured["cmd"].index("--harness") + 1] == "claude"
+        assert captured["cmd"][captured["cmd"].index("--output-format") + 1] == "json"
         assert "check" in cmd_str
         assert "7" in cmd_str
         # `autonomous` is merged-only; check must not carry it.

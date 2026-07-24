@@ -14,9 +14,8 @@ internal/fno/plans/2026-04-22-cli-review-claude-scorer.md:
 from __future__ import annotations
 
 import json
-import os
 import subprocess
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -150,6 +149,16 @@ class TestClaudeScorerSingle:
             assert claude_scorer(_make_finding()) == 0
         assert capsys.readouterr().err
 
+    def test_test_environment_refusal_returns_zero(
+        self, monkeypatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """The shared no-real-LLM guard remains a scorer fallback, not an escape."""
+        from fno.review.scorers.claude_scorer import claude_scorer
+
+        monkeypatch.delenv("FNO_LLM_STUB", raising=False)
+        assert claude_scorer(_make_finding()) == 0
+        assert "refusing real claude" in capsys.readouterr().err
+
     def test_invokes_claude_p_with_haiku_model(self) -> None:
         """Command must include `claude -p` and pin the Haiku model."""
         from fno.review.scorers.claude_scorer import claude_scorer
@@ -179,6 +188,17 @@ class TestClaudeScorerBatch:
         with patch("subprocess.run") as mock_run:
             assert claude_scorer_batch([]) == []
         mock_run.assert_not_called()
+
+    def test_test_environment_refusal_returns_zeros(
+        self, monkeypatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """The shared guard preserves the batch scorer's non-throwing contract."""
+        from fno.review.scorers.claude_scorer import claude_scorer_batch
+
+        monkeypatch.delenv("FNO_LLM_STUB", raising=False)
+        findings = [_make_finding("a"), _make_finding("b")]
+        assert claude_scorer_batch(findings) == [0, 0]
+        assert "refusing real claude" in capsys.readouterr().err
 
     def test_batch_happy_path_preserves_order(self) -> None:
         from fno.review.scorers.claude_scorer import claude_scorer_batch

@@ -404,17 +404,17 @@ impl ProviderWithPty for ClaudeInteractiveProvider {
 /// `cli/tests/agents/fixtures/codex-jsonl-sample.jsonl`.
 pub struct CodexProvider;
 
-impl CodexProvider {
-    fn normalize_command(message: &str) -> String {
-        if let Some(verb) = message.strip_prefix("/fno:") {
-            format!("$fno:{verb}")
-        } else if let Some(verb) = message.strip_prefix('/') {
-            format!("$fno:{verb}")
-        } else {
-            message.to_string()
-        }
+pub fn normalize_codex_command(message: &str) -> String {
+    if let Some(verb) = message.strip_prefix("/fno:") {
+        format!("$fno:{verb}")
+    } else if let Some(verb) = message.strip_prefix('/') {
+        format!("$fno:{verb}")
+    } else {
+        message.to_string()
     }
+}
 
+impl CodexProvider {
     fn sandbox_create(yolo: bool) -> Vec<String> {
         // codex.py::sandbox_flag (LD5/LD6): mutually exclusive; never both.
         if yolo {
@@ -456,7 +456,7 @@ impl Provider for CodexProvider {
             argv.push("-c".into());
             argv.push(format!("model_reasoning_effort={effort}"));
         }
-        argv.push(Self::normalize_command(&ctx.message));
+        argv.push(normalize_codex_command(&ctx.message));
         argv
     }
 
@@ -470,7 +470,7 @@ impl Provider for CodexProvider {
             "--skip-git-repo-check".into(),
         ];
         argv.extend(Self::sandbox_resume(ctx.yolo));
-        argv.push(Self::normalize_command(&ctx.message));
+        argv.push(normalize_codex_command(&ctx.message));
         argv
     }
 

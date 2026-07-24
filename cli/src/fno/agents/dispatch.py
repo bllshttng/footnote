@@ -39,7 +39,7 @@ from typing import Any, Callable, Iterator, Literal, Mapping, Optional
 from fno import paths
 from fno.agents import events
 from fno.agents.context import EventContext, build_context
-from fno.agents.harness_map import normalize_command
+from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.providers import KNOWN_PROVIDERS
 from fno.agents.providers.base import ProviderResult, ReachabilityProbeError
@@ -1756,6 +1756,7 @@ def dispatch_spawn(
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
     headless: bool = False,
+    output_format: Optional[str] = None,
     resume_session_id: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
 ) -> SpawnResult:
@@ -1802,8 +1803,19 @@ def dispatch_spawn(
 
     effective_message: Optional[str] = None
     if message.strip().startswith(("/", "$fno:")):
-        message = normalize_command(message, provider)
+        try:
+            message = normalize_command(message, provider)
+        except DispatchResolveError as exc:
+            raise DispatchAskError(str(exc), exit_code=2) from exc
         effective_message = message
+
+    if output_format is not None and (
+        provider != "claude" or not headless or output_format != "json"
+    ):
+        raise DispatchAskError(
+            "--output-format supports only 'json' on claude headless spawns",
+            exit_code=2,
+        )
 
     if provider == "claude" and (role is not None or route_env):
         from fno.agents.model_routing import (
@@ -1915,6 +1927,7 @@ def dispatch_spawn(
                                 agent=agent,
                                 tools=tools,
                                 deny_tools=deny_tools,
+                                output_format=output_format,
                                 account_env=account_env,
                                 route_env=route_env,
                             )

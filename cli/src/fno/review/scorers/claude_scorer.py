@@ -22,7 +22,7 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING
 
-from fno.llm import llm_call
+from fno.llm import LLMCallRefused, llm_call
 
 if TYPE_CHECKING:
     from fno.review.orchestrator import Finding
@@ -135,6 +135,9 @@ def claude_scorer(finding: "Finding", *, timeout: int = 60) -> int:
         return 0
     except OSError as exc:
         print(f"claude_scorer: subprocess error for {ctx}: {exc}", file=sys.stderr)
+        return 0
+    except LLMCallRefused as exc:
+        print(f"claude_scorer: {exc} for {ctx}", file=sys.stderr)
         return 0
 
     if result.returncode != 0:
@@ -280,6 +283,9 @@ def claude_scorer_batch(findings: list["Finding"], *, timeout: int = 120) -> lis
             )
             return _per_finding_fallback(findings, timeout=timeout)
         print(f"claude_scorer_batch: subprocess error: {exc}", file=sys.stderr)
+        return [0] * len(findings)
+    except LLMCallRefused as exc:
+        print(f"claude_scorer_batch: {exc}; returning zeros", file=sys.stderr)
         return [0] * len(findings)
 
     if result.returncode != 0:

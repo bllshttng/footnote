@@ -365,6 +365,20 @@ def test_build_pane_argv_normalizes_direct_slash_commands(tmp_path: Path) -> Non
     )[-1] == "/fno:target x-81ad"
 
 
+def test_gemini_direct_slash_spawn_refuses_cleanly(tmp_path: Path, monkeypatch) -> None:
+    """Deprecated harness refusal stays inside the public dispatch error type."""
+    from fno.agents.dispatch import DispatchAskError
+
+    with pytest.raises(DispatchAskError, match="successor 'agy'") as exc_info:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            provider="gemini",
+            message="/fno:target x-81ad",
+        )
+    assert exc_info.value.exit_code == 2
+
+
 def test_build_pane_argv_forwards_model(tmp_path: Path) -> None:
     # x-c772: an explicit --model reaches every pane provider's TUI flag
     # (opencode included, now that it is spawnable). Exact passthrough; opencode
@@ -679,28 +693,22 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
 
 
 def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
-    """The CLI receipt is one JSON line, a superset of the daemon-spawn shape
-    ({"name","short_id","provider","status"}) plus the mux fields."""
+    """The public CLI launches and reports the same translated pane payload."""
     from typer.testing import CliRunner
 
     import fno.agents.cli as agents_cli
-    from fno.agents.mux_spawn import MuxSpawnResult
-
-    def fake_dispatch(**kwargs):
-        return MuxSpawnResult(
-            name=kwargs["name"],
-            provider=kwargs["provider"],
-            session="main",
-            pane_id=9,
-            child_pid=111,
-            session_uuid="u-1",
-            effective_message="$fno:target x-81ad",
-        )
-
     import fno.agents.mux_spawn as mux_spawn
 
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
+    use_tmpdir(monkeypatch, tmp_path)
+    fake_runner = FakeRunner(run_stdout="9\n")
+    real_dispatch = mux_spawn.dispatch_spawn_pane
+
+    def dispatch_with_fake_mux(**kwargs):
+        return real_dispatch(**kwargs, runner=fake_runner)
+
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", dispatch_with_fake_mux)
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setenv("FNO_SESSION", "main")
     # x-85fe: pin canonical == caller so this node-less spawn does NOT move to
     # the canonical root (AC1-EDGE no-op) -- the receipt/redirect note would
     # otherwise drift when run from a linked worktree. This test checks the pane
@@ -724,6 +732,8 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
         "pane_id": 9,
         "effective_message": "$fno:target x-81ad",
     }
+    pane_run = next(call for call in fake_runner.calls if call[1:4] == ["mux", "pane", "run"])
+    assert "$fno:target x-81ad" in pane_run
 
 
 # ---------------------------------------------------------------------------

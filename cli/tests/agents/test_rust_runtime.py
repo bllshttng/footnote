@@ -867,6 +867,35 @@ def test_role_bearing_spawn_not_routed_in_forced_rust_mode(monkeypatch, tmp_path
     assert called == []
 
 
+def test_output_format_spawn_not_routed_to_installed_rust(monkeypatch, tmp_path) -> None:
+    """PR-watch's JSON-envelope spawn stays on the Python-owned provider path."""
+    from fno.cli import app
+
+    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    called: list = []
+    monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
+    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "agents",
+            "spawn",
+            "--substrate",
+            "headless",
+            "--harness",
+            "claude",
+            "--output-format",
+            "json",
+            "--help",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert called == []
+
+
 def test_plain_spawn_stays_python_bg_spawn_auto_routes(monkeypatch, tmp_path) -> None:
     """4a-G2 routing: a plain spawn (default = pane substrate) is Python-owned
     (the mux back half) and must NOT route to the binary; a --substrate bg
@@ -922,6 +951,21 @@ def test_is_resume_bearing_spawn_predicate() -> None:
     assert not rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--role", "tidy"])
     # A --resume flag on a non-spawn verb never matches (resume is its own verb).
     assert not rr._is_resume_bearing_spawn("ask", ["ask", "w", "--resume", uuid])
+
+
+def test_is_output_format_bearing_spawn_predicate() -> None:
+    assert rr._is_output_format_bearing_spawn(
+        "spawn", ["spawn", "w", "--substrate", "headless", "--output-format", "json"]
+    )
+    assert rr._is_output_format_bearing_spawn(
+        "spawn", ["spawn", "w", "--output-format=json"]
+    )
+    assert not rr._is_output_format_bearing_spawn(
+        "spawn", ["spawn", "w", "--argv", "--", "tool", "--output-format", "json"]
+    )
+    assert not rr._is_output_format_bearing_spawn(
+        "ask", ["ask", "w", "--output-format", "json"]
+    )
 
 
 def test_routing_predicates_stop_at_argv_boundary() -> None:

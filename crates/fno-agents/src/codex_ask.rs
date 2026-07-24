@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 
 use crate::claude_ask::emit_event;
 use crate::paths::AgentsHome;
+use crate::provider::normalize_codex_command;
 use crate::state::{load_registry, update_registry};
 use crate::AgentStatus;
 
@@ -720,7 +721,8 @@ pub fn codex_create(
     reasoning_effort: Option<&str>,
     add_dir: Option<&str>,
 ) -> Result<CodexResult, CodexAskError> {
-    let full_prompt = inject_from_name(prompt, from_name);
+    let effective_prompt = normalize_codex_command(prompt);
+    let full_prompt = inject_from_name(&effective_prompt, from_name);
     // ab-994222ee: the create/exec path is the autonomous headless lane. codex
     // exec is treated as possibly-blocking, so default to no-prompt
     // (--dangerously-bypass-approvals-and-sandbox); config.agents.codex.headless_yolo=false opts back in.
@@ -743,7 +745,8 @@ pub fn codex_resume(
     output_path: &Path,
     timeout: Option<Duration>,
 ) -> Result<CodexResult, CodexAskError> {
-    let full_prompt = inject_from_name(prompt, from_name);
+    let effective_prompt = normalize_codex_command(prompt);
+    let full_prompt = inject_from_name(&effective_prompt, from_name);
     // ab-994222ee: a resumed autonomous worker is the same headless risk class.
     let eff = crate::agents_config::effective_yolo(
         yolo,

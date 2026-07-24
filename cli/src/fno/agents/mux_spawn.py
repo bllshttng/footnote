@@ -41,7 +41,7 @@ from fno.agents.dispatch import (
     _capture_parent_edge,
     validate_spawn_name,
 )
-from fno.agents.harness_map import normalize_command
+from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import hold_agent_lock
 from fno.agents.registry import (
     AgentEntry,
@@ -771,7 +771,10 @@ def dispatch_spawn_pane(
 
     effective_message: Optional[str] = None
     if message.strip().startswith(("/", "$fno:")):
-        message = normalize_command(message, provider)
+        try:
+            message = normalize_command(message, provider)
+        except DispatchResolveError as exc:
+            raise DispatchAskError(str(exc), exit_code=2) from exc
         effective_message = message
 
     session = resolve_mux_session(session)

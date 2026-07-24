@@ -136,6 +136,8 @@ def fire_skill(
             str(repo_dir),
             "--name",
             f"pr-check-{pr_number}",
+            "--output-format",
+            "json",
         ]
         if model:
             cmd += ["--model", model]
