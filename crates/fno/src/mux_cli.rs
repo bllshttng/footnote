@@ -1047,6 +1047,68 @@ fn socket_dir_check() -> Check {
     }
 }
 
+/// The squad-store orphan verdict (x-a572 US3), pure so the ok/warn/Na rendering
+/// is unit-testable without a store. `total` is the persisted squad count;
+/// `orphan` is how many the prune predicate would reap (unnamed, every origin
+/// gone, no live member). Read-only: doctor detects and names the remedy, it
+/// never prunes (Locked Decision 1).
+fn squad_store_verdict(total: usize, orphan: usize) -> Check {
+    if total == 0 {
+        Check {
+            name: "squad store".into(),
+            verdict: Verdict::Na,
+            detail: "no squads persisted".into(),
+            remedy: None,
+        }
+    } else if orphan == 0 {
+        Check {
+            name: "squad store".into(),
+            verdict: Verdict::Ok,
+            detail: format!("{total} squad(s), none orphaned"),
+            remedy: None,
+        }
+    } else {
+        Check {
+            name: "squad store".into(),
+            verdict: Verdict::Warn,
+            detail: format!("{orphan} orphaned squad(s) (no surviving origin, no live member)"),
+            remedy: Some("fno mux squad prune".into()),
+        }
+    }
+}
+
+/// `fno mux doctor`'s squad-store check: count how many persisted squads the
+/// prune predicate would reap. Read-only (load + registry/roster reads, no pane
+/// probe, no mutation). An unreadable registry means the count is unknown, so
+/// the check warns and points at the prune verb (which is fail-safe regardless).
+fn squad_store_check() -> Check {
+    let loaded = crate::squad_store::load();
+    let total = loaded.squads.len();
+    if total == 0 {
+        return squad_store_verdict(0, 0);
+    }
+    let Some(live) = live_set_or_unknown() else {
+        return Check {
+            name: "squad store".into(),
+            verdict: Verdict::Warn,
+            detail: "agent registry unreadable; orphan count unknown".into(),
+            remedy: Some("fno mux squad prune".into()),
+        };
+    };
+    let origin_exists = |p: &str| std::path::Path::new(p).exists();
+    let orphan = loaded
+        .squads
+        .iter()
+        .filter(|sq| {
+            matches!(
+                crate::squad_store::prune_decision(sq, false, Some(&live), &[], &origin_exists),
+                crate::squad_store::PruneDecision::Prune
+            )
+        })
+        .count();
+    squad_store_verdict(total, orphan)
+}
+
 /// Run every check. The fs/net/env reads live here; the verdict logic each one
 /// calls is pure and unit-tested.
 fn gather_checks() -> Vec<Check> {
@@ -1070,6 +1132,7 @@ fn gather_checks() -> Vec<Check> {
         &std::env::var("COLORTERM").unwrap_or_default(),
     ));
     checks.push(clipboard_check(crate::clipboard::available_tool()));
+    checks.push(squad_store_check());
     checks
 }
 
@@ -3767,6 +3830,31 @@ mod tests {
         let c = session_check("main", VersionVerdict::Skew(msg.into()));
         assert_eq!(c.verdict, Verdict::Fail);
         assert!(c.detail.contains("v7") && c.detail.contains("v6"));
+    }
+
+    #[test]
+    fn squad_store_verdict_empty_is_na() {
+        let c = squad_store_verdict(0, 0);
+        assert_eq!(c.verdict, Verdict::Na);
+        assert_eq!(c.name, "squad store");
+        assert!(c.remedy.is_none());
+    }
+
+    #[test]
+    fn squad_store_verdict_clean_is_ok() {
+        let c = squad_store_verdict(7, 0);
+        assert_eq!(c.verdict, Verdict::Ok);
+        assert!(c.detail.contains("7 squad(s), none orphaned"));
+    }
+
+    #[test]
+    fn squad_store_verdict_orphans_warn_with_prune_remedy() {
+        // AC3-UI: N>0 prunable -> warn naming the count + the prune remedy; a
+        // Warn never flips doctor's exit non-zero (only Fail does).
+        let c = squad_store_verdict(137, 124);
+        assert_eq!(c.verdict, Verdict::Warn);
+        assert!(c.detail.contains("124 orphaned"));
+        assert_eq!(c.remedy.as_deref(), Some("fno mux squad prune"));
     }
 
     #[test]

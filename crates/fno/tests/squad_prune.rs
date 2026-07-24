@@ -152,3 +152,26 @@ fn prune_refuses_from_a_build_tree_binary_without_agents_home() {
         "the refusal names the remedy: {stderr}"
     );
 }
+
+#[test]
+fn doctor_reports_orphaned_squads_with_the_prune_remedy() {
+    // AC3-UI: doctor's squad-store check renders a warn (exit stays 0) naming the
+    // orphan count and the prune remedy. Read-only - it never prunes.
+    let s = Scratch::new("doctor", ORPHAN_NAMED_SURVIVING);
+    let out = fno()
+        .args(["mux", "doctor"])
+        .env_clear()
+        .env("HOME", &s.dir)
+        .env("FNO_AGENTS_HOME", &s.dir)
+        .env("FNO_MUX_DIR", s.dir.join("mux"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "doctor exited non-zero (a warn stays 0): {stderr}\n{stdout}");
+    assert!(stdout.contains("squad store"), "doctor runs the squad-store check: {stdout}");
+    assert!(stdout.contains("orphaned"), "the orphan count is a warn: {stdout}");
+    assert!(stdout.contains("fno mux squad prune"), "the remedy points at prune: {stdout}");
+    // The orphan was only DETECTED, not removed - doctor is read-only.
+    assert!(s.store().contains("orphan"), "doctor did not mutate the store");
+}
