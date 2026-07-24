@@ -18,10 +18,10 @@ import os
 import re
 import socket
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 
-def resolve_fence_session_uuid(cwd: Optional[Path] = None) -> Optional[str]:
+def resolve_fence_session_uuid(cwd: Optional[Union[str, Path]] = None) -> Optional[str]:
     """The session uuid to fence on, from TARGET_SESSION_ID, the active target
     manifest's ``session_id``, or CLAUDE_CODE_SESSION_ID. None when no identity
     is resolvable (the fence is then a no-op - invisible)."""

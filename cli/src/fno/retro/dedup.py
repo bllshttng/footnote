@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from hashlib import blake2b
-from typing import Iterable
+from typing import Any, Iterable
 
 from fno.retro.types import Candidate
 
@@ -102,7 +102,7 @@ def dedup_candidates(
     return kept, skipped
 
 
-def anchor_verdict(candidate: Candidate, scan_fn: object) -> str:
+def anchor_verdict(candidate: Candidate, scan_fn: Any) -> str:
     """Filing-time anchor verdict (x-a7ab 1.1): is this finding's code still
     broken, or already addressed (fixed-on-main)?
 

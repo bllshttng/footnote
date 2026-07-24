@@ -1469,7 +1469,7 @@ def start(
         # because start short-circuited here without re-acquiring the claim).
         verdict, claim_info = _classify_node_claim(node)
         if verdict == "foreign_live":
-            _print_foreign_holder_park(node, claim_info, wt_path)
+            _print_foreign_holder_park(node, claim_info or {}, wt_path)
             raise typer.Exit(code=1)
         # In-place (policy=never) manifests live in the SHARED canonical .fno, so
         # unlike a per-node worktree this one may belong to a DIFFERENT node - the
@@ -1507,7 +1507,7 @@ def start(
         # verdict in {dead_predecessor, free}: a successor inheriting a
         # predecessor's worktree, or a stale-free claim. Re-acquire under this
         # session so the lockfile names a live, recognizable holder.
-        holder = _reacquire_node_claim(node, wt_path, claim_info)
+        _reacquire_node_claim(node, wt_path, claim_info)
         prior = (
             f"prior holder {claim_info.get('holder', '?')} "
             f"(state={claim_info.get('state', '?')})"
