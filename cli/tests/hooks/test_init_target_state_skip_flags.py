@@ -88,7 +88,11 @@ def _run_init_script(tmpdir: Path, extra_env: dict[str, str]) -> subprocess.Comp
         env=env,
         capture_output=True,
         text=True,
-        timeout=30,
+        # The script runs in ~5s standalone, but this helper fires 8 times across
+        # the module and a full-suite run contends enough to blow a 30s ceiling -
+        # which surfaced as a flake failing a DIFFERENT profile each run. The
+        # bound is a hang guard, not a perf assertion, so give it real headroom.
+        timeout=180,
     )
     return proc
 
