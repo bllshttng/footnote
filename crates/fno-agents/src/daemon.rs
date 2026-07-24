@@ -443,9 +443,59 @@ fn global_events_path(home: &AgentsHome) -> PathBuf {
         .join("events.jsonl")
 }
 
-fn dispatch_has_termination(home: &AgentsHome, entry: &RegistryEntry) -> bool {
-    let Some(session_id) = entry.harness_session_id.as_deref() else {
-        return false;
+#[derive(Debug, PartialEq, Eq)]
+enum DispatchTermination {
+    Found(String),
+    Absent(Option<String>),
+    Unknown(String),
+}
+
+fn dispatch_target_session_id(
+    entry: &RegistryEntry,
+    node_id: &str,
+) -> Result<Option<String>, String> {
+    let manifest = PathBuf::from(&entry.cwd).join(".fno/target-state.md");
+    let content = match std::fs::read_to_string(&manifest) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("read {}: {err}", manifest.display())),
+    };
+    let parsed = crate::loop_target::parse_target_manifest(&content)
+        .ok_or_else(|| format!("parse target session from {}", manifest.display()))?;
+    if parsed.input != node_id {
+        return Err(format!(
+            "target manifest {} belongs to input {}, not registry node {node_id}",
+            manifest.display(),
+            parsed.input
+        ));
+    }
+    if let (Some(row_session), Some(manifest_session)) = (
+        entry.harness_session_id.as_deref(),
+        parsed.harness_session_id.as_deref(),
+    ) {
+        if row_session != manifest_session {
+            return Err(format!(
+                "target manifest {} harness session {manifest_session} does not match registry {row_session}",
+                manifest.display()
+            ));
+        }
+    }
+    Ok(Some(parsed.session_id))
+}
+
+fn dispatch_termination(
+    home: &AgentsHome,
+    entry: &RegistryEntry,
+    node_id: &str,
+) -> DispatchTermination {
+    let session_id = match dispatch_target_session_id(entry, node_id) {
+        Ok(session_id) => session_id,
+        Err(err) => return DispatchTermination::Unknown(err),
+    };
+    let Some(session_id) = session_id else {
+        // A worker that wedged before target init has no manifest and therefore
+        // cannot have emitted a target-loop termination.
+        return DispatchTermination::Absent(None);
     };
     let journal = crate::loop_runtime::Journal::new(
         crate::loop_runtime::ProjectJournalPath(
@@ -453,11 +503,54 @@ fn dispatch_has_termination(home: &AgentsHome, entry: &RegistryEntry) -> bool {
         ),
         crate::loop_runtime::GlobalJournalPath(global_events_path(home)),
     );
-    journal
-        .find_termination(session_id)
-        .ok()
-        .flatten()
-        .is_some()
+    match journal.find_termination_strict(&session_id) {
+        Ok(Some(_)) => DispatchTermination::Found(session_id),
+        Ok(None) => DispatchTermination::Absent(Some(session_id)),
+        Err(err) => DispatchTermination::Unknown(err.to_string()),
+    }
+}
+
+fn record_dead_dispatch(
+    home: &AgentsHome,
+    entry: &RegistryEntry,
+    node_id: &str,
+    target_session_id: Option<&str>,
+) -> Result<(), String> {
+    // This global stream is the failure-streak authority. Python consumes the
+    // agents-home parent even when config.state_dir differs, so a successful
+    // write is durable and visible; a failed write restores the row for retry.
+    EventEmitter::new(global_events_path(home), "daemon")
+        .emit(
+            "node_failed",
+            &json!({
+                "unit_id": node_id,
+                "session_id": target_session_id.unwrap_or(&entry.short_id),
+                "iteration": 0,
+                "exit_code": 1,
+                "short_id": entry.short_id,
+                "reason": "agent-row-reaped-no-termination",
+            }),
+        )
+        .map_err(|err| err.to_string())
+}
+
+fn restore_unaccounted_row(home: &AgentsHome, entry: &RegistryEntry) -> Result<(), String> {
+    let mut restored = false;
+    state::update_registry(&home.registry_json(), |registry| {
+        if !registry.entries.iter().any(|row| row.name == entry.name) {
+            registry.entries.push(entry.clone());
+            restored = true;
+        }
+    })
+    .map_err(|err| err.to_string())?;
+    if restored {
+        Ok(())
+    } else {
+        Err(format!(
+            "could not restore {}: a replacement row now owns that name",
+            entry.name
+        ))
+    }
 }
 
 /// Dead-row garbage collection sweep (x-b1aa). Removes terminal, past-grace,
@@ -596,9 +689,54 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
             for e in &registry.entries {
                 if reaped_names.contains(&e.name) {
                     let node_id = dispatch_node_id(&e.name);
-                    let termination_event = node_id
-                        .as_ref()
-                        .is_some_and(|_| dispatch_has_termination(home, e));
+                    let mut target_session_id = None;
+                    let mut termination_event = false;
+                    let mut accounted = true;
+                    if let Some(node_id) = node_id.as_deref() {
+                        match dispatch_termination(home, e, node_id) {
+                            DispatchTermination::Found(session_id) => {
+                                target_session_id = Some(session_id);
+                                termination_event = true;
+                            }
+                            DispatchTermination::Absent(session_id) => {
+                                target_session_id = session_id;
+                                if let Err(err) = record_dead_dispatch(
+                                    home,
+                                    e,
+                                    node_id,
+                                    target_session_id.as_deref(),
+                                ) {
+                                    accounted = false;
+                                    let restore = restore_unaccounted_row(home, e);
+                                    let _ = emitter.emit(
+                                        "daemon_recovery_error",
+                                        &json!({
+                                            "op": "record_dead_dispatch",
+                                            "short_id": e.short_id,
+                                            "error": err,
+                                            "restore_error": restore.err(),
+                                        }),
+                                    );
+                                }
+                            }
+                            DispatchTermination::Unknown(err) => {
+                                accounted = false;
+                                let restore = restore_unaccounted_row(home, e);
+                                let _ = emitter.emit(
+                                    "daemon_recovery_error",
+                                    &json!({
+                                        "op": "observe_dead_dispatch_termination",
+                                        "short_id": e.short_id,
+                                        "error": err,
+                                        "restore_error": restore.err(),
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                    if !accounted {
+                        continue;
+                    }
                     let _ = emitter.emit_fields(
                         "agent_row_reaped",
                         json_obj(&[
@@ -610,40 +748,11 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
                             ),
                             (
                                 "session_id",
-                                e.harness_session_id
-                                    .clone()
-                                    .map_or(Value::Null, Value::String),
+                                target_session_id.map_or(Value::Null, Value::String),
                             ),
                             ("termination_event", Value::Bool(termination_event)),
                         ]),
                     );
-                    if let Some(node_id) = node_id.filter(|_| !termination_event) {
-                        let failures = EventEmitter::new(global_events_path(home), "daemon");
-                        let session_id = e
-                            .harness_session_id
-                            .clone()
-                            .unwrap_or_else(|| e.short_id.clone());
-                        if let Err(err) = failures.emit(
-                            "node_failed",
-                            &json!({
-                                "unit_id": node_id,
-                                "session_id": session_id,
-                                "iteration": 0,
-                                "exit_code": 1,
-                                "short_id": e.short_id,
-                                "reason": "agent-row-reaped-no-termination",
-                            }),
-                        ) {
-                            let _ = emitter.emit(
-                                "daemon_recovery_error",
-                                &json!({
-                                    "op": "record_dead_dispatch",
-                                    "short_id": e.short_id,
-                                    "error": err.to_string(),
-                                }),
-                            );
-                        }
-                    }
                     summary.reaped.push(if e.short_id.is_empty() {
                         e.name.clone()
                     } else {
@@ -4490,37 +4599,50 @@ mod tests {
         let home = AgentsHome::at(sandbox.root().join("agents"));
         home.ensure_root().unwrap();
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let repo = home.root().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        assert!(std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&repo)
-            .status()
-            .unwrap()
-            .success());
+        let dead_repo = home.root().join("dead-repo");
+        let done_repo = home.root().join("done-repo");
+        for repo in [&dead_repo, &done_repo] {
+            std::fs::create_dir_all(repo.join(".fno")).unwrap();
+            assert!(std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(repo)
+                .status()
+                .unwrap()
+                .success());
+        }
 
-        let dead_session = "dead0001-1111-2222-3333-444455556666";
-        let done_session = "done0002-1111-2222-3333-444455556666";
+        let dead_session = "target-run-dead";
+        let done_session = "target-run-done";
+        std::fs::write(
+            dead_repo.join(".fno/target-state.md"),
+            format!("---\nfno_id: {dead_session}\ninput: x-a35a\nplan_path: \"\"\n---\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            done_repo.join(".fno/target-state.md"),
+            format!("---\nfno_id: {done_session}\ninput: x-b44e\nplan_path: \"\"\n---\n"),
+        )
+        .unwrap();
         state::update_registry(&home.registry_json(), |r| {
             let mut dead = bg_claude_row("target-x-a35a-route-atomicity", "dead0001");
             dead.status = AgentStatus::Exited;
-            dead.cwd = repo.to_string_lossy().into_owned();
+            dead.cwd = dead_repo.to_string_lossy().into_owned();
             dead.exited_at = Some("2020-01-01T00:00:00Z".into());
-            dead.harness_session_id = Some(dead_session.into());
+            dead.harness_session_id = Some("harness-dead-uuid".into());
             r.entries.push(dead);
 
             let mut done = bg_claude_row("target-x-b44e-finished", "done0002");
             done.status = AgentStatus::Exited;
-            done.cwd = repo.to_string_lossy().into_owned();
+            done.cwd = done_repo.to_string_lossy().into_owned();
             done.exited_at = Some("2020-01-01T00:00:00Z".into());
-            done.harness_session_id = Some(done_session.into());
+            done.harness_session_id = Some("harness-done-uuid".into());
             r.entries.push(done);
         })
         .unwrap();
 
         let global_events = home.root().parent().unwrap().join("events.jsonl");
         std::fs::write(
-            &global_events,
+            done_repo.join(".fno/events.jsonl.1"),
             format!(
                 "{{\"ts\":\"2026-07-24T00:00:00Z\",\"type\":\"termination\",\"source\":\"loop\",\"data\":{{\"session_id\":\"{done_session}\",\"reason\":\"DonePRGreen\",\"message\":\"done\"}}}}\n"
             ),
@@ -4557,6 +4679,88 @@ mod tests {
             failures[0]["data"]["reason"],
             "agent-row-reaped-no-termination"
         );
+    }
+
+    #[test]
+    fn gc_sweep_restores_row_when_termination_evidence_is_unknown() {
+        let sandbox = tmp_home("gc-unknown-termination");
+        let home = AgentsHome::at(sandbox.root().join("agents"));
+        home.ensure_root().unwrap();
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let repo = home.root().join("repo");
+        std::fs::create_dir_all(repo.join(".fno")).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(
+            repo.join(".fno/target-state.md"),
+            "---\nfno_id: reused-run\ninput: x-other\nplan_path: \"\"\n---\n",
+        )
+        .unwrap();
+        state::update_registry(&home.registry_json(), |registry| {
+            let mut row = bg_claude_row("target-x-a35a-route-atomicity", "dead0001");
+            row.status = AgentStatus::Exited;
+            row.cwd = repo.to_string_lossy().into_owned();
+            row.exited_at = Some("2020-01-01T00:00:00Z".into());
+            registry.entries.push(row);
+        })
+        .unwrap();
+
+        let summary = gc_sweep(&home, &emitter, Duration::from_secs(0));
+
+        assert!(summary.reaped.is_empty());
+        let registry = state::load_registry(&home.registry_json()).unwrap();
+        assert!(registry
+            .entries
+            .iter()
+            .any(|row| row.name == "target-x-a35a-route-atomicity"));
+        let events = read_events(&home);
+        assert!(events.iter().any(|event| {
+            event["type"] == "daemon_recovery_error"
+                && event["data"]["op"] == "observe_dead_dispatch_termination"
+        }));
+    }
+
+    #[test]
+    fn gc_sweep_restores_row_when_dead_dispatch_receipt_cannot_persist() {
+        let sandbox = tmp_home("gc-dead-dispatch-write-failure");
+        let home = AgentsHome::at(sandbox.root().join("agents"));
+        home.ensure_root().unwrap();
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let repo = home.root().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        state::update_registry(&home.registry_json(), |registry| {
+            let mut row = bg_claude_row("target-x-a35a-route-atomicity", "dead0001");
+            row.status = AgentStatus::Exited;
+            row.cwd = repo.to_string_lossy().into_owned();
+            row.exited_at = Some("2020-01-01T00:00:00Z".into());
+            registry.entries.push(row);
+        })
+        .unwrap();
+        std::fs::create_dir_all(global_events_path(&home)).unwrap();
+
+        let summary = gc_sweep(&home, &emitter, Duration::from_secs(0));
+
+        assert!(summary.reaped.is_empty());
+        let registry = state::load_registry(&home.registry_json()).unwrap();
+        assert!(registry
+            .entries
+            .iter()
+            .any(|row| row.name == "target-x-a35a-route-atomicity"));
+        let events = read_events(&home);
+        assert!(events.iter().any(|event| {
+            event["type"] == "daemon_recovery_error"
+                && event["data"]["op"] == "record_dead_dispatch"
+        }));
     }
 
     #[test]

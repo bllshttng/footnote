@@ -14,6 +14,7 @@ Acceptance criteria mapped:
   AC1-FR   on dispatchable the reservation is held by --holder (caller releases)
   AC2-EDGE a racing dispatcher (different holder) gets already-running
 """
+
 from __future__ import annotations
 
 import json
@@ -138,10 +139,13 @@ def test_suspect_claim_already_running_no_reservation(claims_tmp):
 
     res = _invoke("x-9999", "--holder", "dispatch-node:333", "--json")
     assert res.exit_code == 0
-    obj = json.loads(res.output)
+    # x-5c08 deliberately emits a loud contested-claim warning on stderr; the
+    # JSON stdout contract remains one parseable object for shell callers.
+    obj = json.loads(res.stdout)
     assert obj["verdict"] == "already-running"
     assert obj["reason"] == "suspect-claim"
     assert obj["holder"] == "target-session:respawned"
+    assert "WARNING: dispatch blocked for x-9999" in res.stderr
     # No reservation was taken - the node stays for the live worker.
     assert claim_status("dispatch:x-9999")["state"] == "free"
 
@@ -192,6 +196,134 @@ def test_no_reserve_live_claim_still_already_running(claims_tmp):
     res = _invoke("x-2222", "--holder", "h", "--no-reserve", "--json")
     assert res.exit_code == 0
     assert json.loads(res.output)["verdict"] == "already-running"
+
+
+def test_dead_failure_limit_refuses_spawn_guard_path(claims_tmp, monkeypatch: pytest.MonkeyPatch):
+    """The shell dispatch choke consumes the family-2 failure-limit decision."""
+    from fno.config import SettingsModel
+    from fno.graph import failure
+
+    settings = SettingsModel(active_backlog={"failure_limit": 2})
+    monkeypatch.setattr("fno.config.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        failure,
+        "read_events",
+        lambda *_a, **_k: [
+            {"type": "node_failed", "data": {"unit_id": "x-dead"}},
+            {"type": "node_failed", "data": {"unit_id": "x-dead"}},
+        ],
+    )
+    monkeypatch.setattr(
+        "fno.target_cli._classify_node_claim",
+        lambda _node: ("free", None),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "fno.agents.truth_status.resolve_truth_status",
+        lambda *_a, **_k: {"state": "unknown"},
+    )
+    monkeypatch.setattr(
+        "fno.backlog.advance.subprocess.run",
+        lambda *_a, **_k: type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+    )
+    monkeypatch.setattr("fno.agents.events.emit", lambda *_a, **_k: None)
+    monkeypatch.setattr("fno.notify._impl.send_notification", lambda *_a, **_k: (0, ""))
+
+    res = _invoke("x-dead", "--holder", "dispatch-node:me", "--json")
+
+    assert res.exit_code == 0
+    obj = json.loads(res.output)
+    assert obj["verdict"] == "refused"
+    assert obj["reason"] == "auto-deferred"
+    assert claim_status("dispatch:x-dead")["state"] == "free"
+
+
+def test_direct_node_spawn_crosses_shared_guard_before_spawn(
+    claims_tmp, monkeypatch: pytest.MonkeyPatch
+):
+    """A direct `fno agents spawn --node` cannot bypass the shell guard."""
+    import fno.agents.cli as cli_mod
+    from fno.agents import mux_spawn, spawn_gate
+
+    monkeypatch.setattr(
+        cli_mod,
+        "_spawn_guard_decision",
+        lambda *_a, **_k: (
+            {
+                "verdict": "refused",
+                "reason": "auto-deferred",
+                "holder": "target-session:prior",
+            },
+            0,
+        ),
+    )
+    monkeypatch.setattr(
+        mux_spawn,
+        "resolve_provenance",
+        lambda *_a, **_k: {"FNO_NODE": "x-dead"},
+    )
+    monkeypatch.setattr(
+        spawn_gate,
+        "run_gate",
+        lambda *_a, **_k: pytest.fail("guard refusal must precede the spawn gate"),
+    )
+
+    res = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "dead-worker", "--node", "x-dead", "--here", "work"],
+    )
+
+    assert res.exit_code == 2
+    assert "reason=auto-deferred" in res.output
+    assert "no worker launched" in res.output
+
+
+def test_direct_node_spawn_failure_releases_shared_reservation(
+    claims_tmp, monkeypatch: pytest.MonkeyPatch
+):
+    """A substrate failure leaves a node immediately re-dispatchable."""
+    import fno.agents.cli as cli_mod
+    from fno.agents import mux_spawn, spawn_gate
+    from fno.agents.dispatch import DispatchAskError
+
+    monkeypatch.setattr(
+        cli_mod,
+        "_spawn_guard_decision",
+        lambda *_a, **_k: (
+            {
+                "verdict": "dispatchable",
+                "reservation_key": "dispatch:x-fail",
+                "reservation_holder": "spawn-cli:test",
+            },
+            0,
+        ),
+    )
+    monkeypatch.setattr(
+        mux_spawn,
+        "resolve_provenance",
+        lambda *_a, **_k: {"FNO_NODE": "x-fail"},
+    )
+    monkeypatch.setattr(
+        spawn_gate, "run_gate", lambda *_a, **_k: type("G", (), {"release": lambda self: None})()
+    )
+    monkeypatch.setattr(
+        mux_spawn,
+        "dispatch_spawn_pane",
+        lambda **_k: (_ for _ in ()).throw(DispatchAskError("mux failed", exit_code=7)),
+    )
+    released: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "fno.claims.core.release_claim",
+        lambda key, holder, **_k: released.append((key, holder)),
+    )
+
+    res = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "failed-worker", "--node", "x-fail", "--here", "work"],
+    )
+
+    assert res.exit_code == 7
+    assert released == [("dispatch:x-fail", "spawn-cli:test")]
 
 
 # --- AC1-ERR: a crashing probe fails closed ----------------------------------

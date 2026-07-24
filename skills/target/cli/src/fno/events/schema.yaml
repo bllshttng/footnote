@@ -1340,7 +1340,7 @@ event_types:
           type: integer
 
   - name: agent_row_reaped
-    description: "A terminal, past-grace, clean agent-view row was removed from the registry by the dead-row GC sweep or `fno agents reap` (x-b1aa). Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
+    description: "A terminal, past-grace, clean agent-view row was removed from the registry by the dead-row GC sweep or `fno agents reap` (x-b1aa). For a convention-named target/reconcile worker, node_id plus termination_event make a pre-claim death durable; no-termination reaps also emit node_failed for failure-streak accounting (x-5c08). Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
     sources: [daemon]
     data:
       required: []
@@ -1349,6 +1349,12 @@ event_types:
           type: string
         name:
           type: string
+        node_id:
+          type: [string, "null"]
+        session_id:
+          type: [string, "null"]
+        termination_event:
+          type: boolean
 
   - name: bg_worker_terminal_stopped
     description: "A fire-and-forget `claude --bg` /target|/think worker that finalize marked terminal was `claude stop`ped by the daemon terminal-stop sweep, so its slot frees instead of parking at an idle prompt forever (x-fcbf)."
@@ -1630,6 +1636,30 @@ event_types:
           description: "Human-readable termination message."
     consumers: [operator, megawalk]
 
+  - name: mail_escalation
+    description: "Send-time human escalation for mail that needs a human now: a --kind question (unconditional, Locked Decision 7) or a live-miss to an operator-attended recipient (declared at registration). Surfaces in the needs-me mux overlay so a human at the mux sees the nudge even when the OS notification was missed, debounced, or unavailable. Emitted from the shared escalation helper under the same per-(sender,recipient) debounce as the notifier; one event per non-debounced escalation."
+    sources: [target]
+    data:
+      required: [reason, sender, recipient, summary]
+      properties:
+        reason:
+          type: string
+          enum: [question, attended-miss]
+          description: "'question' = a --kind question send (unconditional escalation, never autonomous-answered); 'attended-miss' = a send to an operator-attended session that fell to the durable floor (live-miss only)."
+        sender:
+          type: string
+          description: "Sender handle/project of the escalated mail."
+        recipient:
+          type: string
+          description: "Recipient the escalation is about (canonical handle or project)."
+        summary:
+          type: string
+          description: "First line of the mail body, truncated at emit so the overlay row stays bounded."
+        msg_id:
+          type: string
+          description: "Optional. The mail message id (msg-<id>) when the escalation site has it, for overlay-to-thread correlation."
+    consumers: [operator]
+
   - name: loop_check_gh_error
     description: "Emitted when a gh read fails during a loop-check fire. The fire returns block so the loop retries; this event is the forensic trail."
     sources: [hook]
@@ -1735,8 +1765,8 @@ event_types:
     consumers: [operator, megawalk]
 
   - name: node_failed
-    description: "Synthesized by the per-unit watchdog when a dispatched session exits without a TerminationReason event. Group-2 walk policy counts these toward the consecutive-failure pause."
-    sources: [loop]
+    description: "Synthesized when a dispatched session exits without a TerminationReason event: either immediately by the per-unit watchdog, or when dead-row GC reaps a convention-named target/reconcile worker that never terminated (x-5c08). Group-2 walk and dispatcher policy count both toward the same consecutive-failure streak."
+    sources: [loop, daemon]
     data:
       required: [session_id, unit_id, iteration, exit_code]
       properties:
@@ -1752,6 +1782,12 @@ event_types:
         exit_code:
           type: integer
           description: "Exit code returned by the session. When the process died by signal N rather than a clean exit, this field carries 128+N (the shell convention: e.g. SIGTERM=15 -> 143, SIGKILL=9 -> 137)."
+        short_id:
+          type: string
+          description: "Daemon worker short id when the failure was reconstructed from dead-row GC."
+        reason:
+          type: string
+          description: "Machine-readable reconstruction reason when the failure came from a later lifecycle seam."
     consumers: [operator, megawalk]
 
   - name: walk_paused
@@ -2019,6 +2055,46 @@ event_types:
         harness_to:
           type: string
           description: "The failover provider's harness (cli), when it differs from claude (a cross-harness failover, e.g. codex). Empty/omitted for a same-harness account switch."
+    consumers: [operator]
+
+  - name: dispatch_claim_observed
+    description: "Emitted at the shared target-dispatch claim seam after the family-2 claim classifier and truth-status probe agree on what occupies the node. Stale/suspect observations are also printed and notified so a successor is never minted or blocked silently (x-5c08)."
+    sources: [backlog]
+    data:
+      required: [node_id, claim_verdict, holder, truth_status, action]
+      properties:
+        node_id:
+          type: string
+        claim_verdict:
+          type: string
+          enum: [ours, foreign_live, dead_predecessor, free]
+        claim_state:
+          type: [string, "null"]
+        holder:
+          type: string
+        truth_status:
+          type: string
+          enum: [working, waiting, suspect, stalled, unknown]
+        action:
+          type: string
+          enum: [blocked, redispatch, dispatch, auto-deferred, defer-failed]
+    consumers: [operator]
+
+  - name: dispatch_dead_failure_limit
+    description: "Emitted before the shared target-dispatch seam refuses another worker because the node's durable failure streak reached active_backlog.failure_limit. A successful refusal auto-defers the node with a visible reason; a failed defer still blocks birth (x-5c08)."
+    sources: [backlog]
+    data:
+      required: [node_id, consecutive_failures, failure_limit, action]
+      properties:
+        node_id:
+          type: string
+        consecutive_failures:
+          type: integer
+        failure_limit:
+          type: integer
+        action:
+          type: string
+          enum: [auto-deferred, defer-failed]
     consumers: [operator]
 
   - name: quota_deferred

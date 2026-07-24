@@ -14,6 +14,7 @@ worker's own ``fno target start`` claims ``node:<id>`` and re-anchors the slot t
 its lifecycle (target_cli._maybe_reconcile_lane_slot) - identical to the daemon
 ``dispatch-lanes`` path, so the slot frees when the worker ends.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,7 +27,6 @@ import typer
 from fno.agents.mux_spawn import dispatch_spawn_pane, resolve_provenance
 from fno.backlog.advance import (
     _DISPATCH_TTL_MS,
-    _claim_is_live,
     _claims_root_for,
     _next_node,
     _worker_agent_name,
@@ -35,9 +35,7 @@ from fno.claims import ClaimHeldByOther, acquire_claim, release_claim
 from fno.claims.lanes import acquire_lane_slot, release_lane_slot
 from fno.config import load_settings
 
-dispatch_app = typer.Typer(
-    no_args_is_help=True, help="Dispatch ready work into mux panes."
-)
+dispatch_app = typer.Typer(no_args_is_help=True, help="Dispatch ready work into mux panes.")
 
 
 @dispatch_app.callback()
@@ -259,7 +257,9 @@ def _dispatch_one(
 
         decision = evaluate_quota_defer(_resolve_provider_id() or "", priority=priority)
         if decision is not None:
-            _emit_quota_deferred(node_id, decision.provider_id, decision.state.value, decision.retry_at)
+            _emit_quota_deferred(
+                node_id, decision.provider_id, decision.state.value, decision.retry_at
+            )
             return {
                 "outcome": "quota-deferred",
                 "node": node_id,
@@ -277,17 +277,26 @@ def _dispatch_one(
     #    would share ONE (idempotent) lane slot and the loser's spawn-failure
     #    would free the winner's live slot, defeating the cap. Only the winner of
     #    the O_EXCL reservation proceeds; the loser reports already-dispatching.
-    if _claim_is_live(f"node:{node_id}", cwd) or _claim_is_live(
-        f"dispatch:{node_id}"
-    ):
-        return {"outcome": "already-dispatching", "node": node_id, "slug": slug or ""}
+    from fno.backlog.advance import _node_dispatch_block_reason
+
+    block_reason = _node_dispatch_block_reason(node_id, cwd)
+    if block_reason:
+        outcome = "already-dispatching" if block_reason == "already-claimed" else block_reason
+        return {
+            "outcome": outcome,
+            "node": node_id,
+            "slug": slug or "",
+        }
     dispatch_key = f"dispatch:{node_id}"
     dispatch_holder = f"dispatch-one:{os.getpid()}"
     dispatch_root = _claims_root_for(dispatch_key)
     try:
         acquire_claim(
-            dispatch_key, dispatch_holder,
-            ttl_ms=_DISPATCH_TTL_MS, reason=f"mux dispatch for {node_id}", root=dispatch_root,
+            dispatch_key,
+            dispatch_holder,
+            ttl_ms=_DISPATCH_TTL_MS,
+            reason=f"mux dispatch for {node_id}",
+            root=dispatch_root,
         )
     except ClaimHeldByOther:
         return {"outcome": "already-dispatching", "node": node_id, "slug": slug or ""}

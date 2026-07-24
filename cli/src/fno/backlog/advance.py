@@ -33,6 +33,7 @@ already-being-worked. The spawned worker acquires ``node:<id>`` cleanly on its
 own ``fno target init`` (free at that point); the reservation then expires by
 TTL once the worker owns the node.
 """
+
 from __future__ import annotations
 
 import json
@@ -149,6 +150,27 @@ class AdvanceResult:
                 f"invalid AdvanceResult (decision, event): "
                 f"({self.decision!r}, {self.event!r})"
             )
+
+
+@dataclass(frozen=True)
+class DispatchClaimObservation:
+    """Structured family-2 decision shared by every node-dispatch caller."""
+
+    verdict: str
+    claim_state: Optional[str]
+    holder: str
+    truth_status: str
+    action: str
+
+    @property
+    def blocks_dispatch(self) -> bool:
+        return self.action in ("blocked", "auto-deferred", "defer-failed")
+
+    @property
+    def refusal_reason(self) -> Optional[str]:
+        if self.action == "blocked":
+            return "already-claimed"
+        return self.action if self.blocks_dispatch else None
 
 
 # The discriminator `fno agents spawn` prints on a name collision (exit 2). Kept
@@ -636,22 +658,30 @@ def _refuse_repeated_dead_dispatch(
     try:
         from fno.config import load_settings, load_settings_for_repo
 
-        settings_obj = (
-            load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
-        )
+        settings_obj = load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
     except Exception:
         settings_obj = None
     try:
-        failure_limit = int(settings_obj.active_backlog.failure_limit)
+        failure_limit = (
+            int(settings_obj.active_backlog.failure_limit)
+            if settings_obj is not None
+            else 3
+        )
     except Exception:
         failure_limit = 3
-    streak = failure.consecutive_failures(node_id, failure.read_events())
+    project_events = Path(node_cwd) / ".fno" / "events.jsonl" if node_cwd else None
+    events = failure.read_events()
+    if project_events is not None and project_events.exists():
+        events = failure.merge_event_histories(
+            events,
+            failure.read_events(project_events),
+        )
+    streak = failure.consecutive_failures(node_id, events)
     if streak < failure_limit:
         return None
 
     reason = (
-        f"auto-failure: {streak} consecutive dead dispatches "
-        "(worker reaped without termination)"
+        f"auto-failure: {streak} consecutive dead dispatches (worker reaped without termination)"
     )
     proc = subprocess.run(
         [*_subprocess_util.fno_py_cmd(), "backlog", "defer", node_id, "--reason", reason],
@@ -1125,8 +1155,9 @@ def dispatch_lanes(
                 release_lane_slot(_nid, root=claims_root)
             except Exception as exc:  # noqa: BLE001
                 _LOG.warning(
-                    "dispatch_lanes: slot release failed for %s (%s); "
-                    "slot lingers to TTL", _nid, exc,
+                    "dispatch_lanes: slot release failed for %s (%s); slot lingers to TTL",
+                    _nid,
+                    exc,
                 )
             receipts.append({"node_id": _nid, "status": "skipped", "error": reason})
 
@@ -1136,10 +1167,9 @@ def dispatch_lanes(
         # path would see the node as ready+unclaimed and double-launch it. Guard
         # with the SAME dispatch:<id> reservation advance() uses (global-rooted,
         # TTL bridge) so the two dispatchers dedup against each other.
-        if _claim_is_live(f"node:{node_id}", str(canonical)) or _claim_is_live(
-            f"dispatch:{node_id}"
-        ):
-            _skip("already-claimed")
+        block_reason = _node_dispatch_block_reason(node_id, str(canonical))
+        if block_reason:
+            _skip(block_reason)
             continue
         dispatch_key = f"dispatch:{node_id}"
         dispatch_holder = f"advance:{os.getpid()}"
@@ -1175,7 +1205,9 @@ def dispatch_lanes(
                 _seed_lane_local_settings(worktree, node_id, base_pid)
             _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
             short_id = _spawn_worker(
-                node_id, str(worktree), slug,
+                node_id,
+                str(worktree),
+                slug,
                 model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
                 provider=eff_provider,
                 verb=node.get("dispatch_verb"),
@@ -1241,8 +1273,14 @@ def _walker_key() -> str:
     return f"walker:{resolve_canonical_repo_root()}"
 
 
-def _observe_node_claim(node_id: str, node_cwd: Optional[str] = None) -> bool:
-    """Family-2 pre-dispatch verdict; loud for stale/suspect ownership."""
+def _observe_node_claim(
+    node_id: str,
+    node_cwd: Optional[str] = None,
+    *,
+    enforce_failure_limit: bool = True,
+    emit: bool = True,
+) -> DispatchClaimObservation:
+    """Family-2 pre-dispatch verdict shared by Python and shell routes."""
     try:
         from fno.target_cli import _classify_node_claim
 
@@ -1259,29 +1297,34 @@ def _observe_node_claim(node_id: str, node_cwd: Optional[str] = None) -> bool:
     claim_state = info.get("state")
     holder = info.get("holder") or "unknown"
     occupied = verdict in ("ours", "foreign_live")
-    dead_action = None if occupied else _refuse_repeated_dead_dispatch(node_id, node_cwd)
+    dead_action = (
+        None
+        if occupied or not enforce_failure_limit
+        else _refuse_repeated_dead_dispatch(node_id, node_cwd)
+    )
     action = (
         "blocked"
-        if occupied or dead_action == "defer-failed"
-        else "auto-deferred"
-        if dead_action
+        if occupied
+        else dead_action
+        if dead_action is not None
         else "redispatch"
         if verdict == "dead_predecessor"
         else "dispatch"
     )
 
-    from fno.agents import events as agent_events
+    if emit:
+        from fno.agents import events as agent_events
 
-    agent_events.emit(
-        EVENT_CLAIM_OBSERVED,
-        node_id=node_id,
-        claim_verdict=verdict,
-        claim_state=claim_state,
-        holder=holder,
-        truth_status=truth,
-        action=action,
-    )
-    if claim_state in ("stale", "suspect"):
+        agent_events.emit(
+            EVENT_CLAIM_OBSERVED,
+            node_id=node_id,
+            claim_verdict=verdict,
+            claim_state=claim_state,
+            holder=holder,
+            truth_status=truth,
+            action=action,
+        )
+    if emit and claim_state in ("stale", "suspect"):
         message = (
             f"dispatch {action} for {node_id}: node claim is {claim_state}, "
             f"prior holder={holder}, truth_status={truth}"
@@ -1290,7 +1333,23 @@ def _observe_node_claim(node_id: str, node_cwd: Optional[str] = None) -> bool:
         from fno.notify._impl import send_notification
 
         send_notification("footnote: contested node dispatch", message)
-    return occupied or dead_action is not None
+    return DispatchClaimObservation(
+        verdict=verdict,
+        claim_state=claim_state,
+        holder=holder,
+        truth_status=truth,
+        action=action,
+    )
+
+
+def _node_dispatch_block_reason(node_id: str, node_cwd: Optional[str] = None) -> Optional[str]:
+    """One pre-birth decision for node ownership plus boot reservation."""
+    observation = _observe_node_claim(node_id, node_cwd)
+    if observation.blocks_dispatch:
+        return observation.refusal_reason
+    if _claim_is_live(f"dispatch:{node_id}"):
+        return "already-claimed"
+    return None
 
 
 def _claim_is_live(key: str, node_cwd: Optional[str] = None) -> bool:
@@ -1298,7 +1357,7 @@ def _claim_is_live(key: str, node_cwd: Optional[str] = None) -> bool:
     # selection. suspect = TTL-unexpired, dead pid (respawned worker); the TTL
     # still protects the slot, so selection must skip it, never steal.
     if key.startswith("node:"):
-        return _observe_node_claim(key.removeprefix("node:"), node_cwd)
+        return _observe_node_claim(key.removeprefix("node:"), node_cwd).blocks_dispatch
 
     from fno.claims.core import claim_status
 
@@ -1462,14 +1521,18 @@ def advance(
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
-        return AdvanceResult("skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail)
+        return AdvanceResult(
+            "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail
+        )
 
     def failed(node_id: str, error: str) -> AdvanceResult:
         data = {"node_id": node_id, "error": error[:200]}
         if closed_node_id:
             data["closed_node_id"] = closed_node_id
         _emit(EVENT_FAILED, data, ev_path)
-        return AdvanceResult("failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error)
+        return AdvanceResult(
+            "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
+        )
 
     # 1. Armed?
     if not auto_continue_enabled(project=project, project_root=project_root):
@@ -1494,10 +1557,9 @@ def advance(
     #    bridge token still covers the boot window). Either way, skip - this
     #    liveness check (not just the O_EXCL acquire below) is what dedups a
     #    same-process re-run AND a peer whose reservation already exists.
-    if _claim_is_live(f"node:{node_id}", node_cwd) or _claim_is_live(
-        f"dispatch:{node_id}"
-    ):
-        return skip("already-claimed", node_id=node_id)
+    block_reason = _node_dispatch_block_reason(node_id, node_cwd)
+    if block_reason:
+        return skip(block_reason, node_id=node_id)
 
     # 4b. Quota-aware defer (x-5d3e). advance IS an autonomous path, so it may
     #     defer when the resolved provider has no headroom and defer_dispatch is
@@ -1517,9 +1579,7 @@ def advance(
         # (eff_provider = provider arg -> node pin -> active default), so the
         # quota decision evaluates the provider the worker will actually run on,
         # not a mismatched active record (x-5d3e review).
-        provider_id = (
-            provider or node.get("provider") or load_providers().active or ""
-        )
+        provider_id = provider or node.get("provider") or load_providers().active or ""
         decision = evaluate_quota_defer(provider_id, priority=node.get("priority"))
     except Exception:  # noqa: BLE001 - a quota read must never wedge advance
         decision = None
@@ -1532,13 +1592,8 @@ def advance(
         # to today's quota-deferred skip. Selection is pinned here; the worker never
         # re-switches. The dispatch_failover receipt is emitted at the spawn below so
         # it only lands when a worker is actually launched.
-        has_pin = bool(
-            (provider or "").strip() or str(node.get("provider") or "").strip()
-        )
-        selected = (
-            None if has_pin
-            else _select_exhaustion_failover(node_cwd, decision.provider_id)
-        )
+        has_pin = bool((provider or "").strip() or str(node.get("provider") or "").strip())
+        selected = None if has_pin else _select_exhaustion_failover(node_cwd, decision.provider_id)
         if selected is None:
             return skip(
                 "quota-deferred",
@@ -1593,7 +1648,9 @@ def advance(
             eff_provider = provider if provider is not None else node.get("provider")
         _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
         short_id = _spawn_worker(
-            node_id, node_cwd, node.get("slug") or node.get("title"),
+            node_id,
+            node_cwd,
+            node.get("slug") or node.get("title"),
             model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
             provider=eff_provider,
             harness=failover_harness,
@@ -1623,14 +1680,14 @@ def advance(
     )
     if verbose:
         print(
-            f"advance: dispatched {node_id} -> target worker {short_id} "
-            f"(brief={_brief_tag})",
+            f"advance: dispatched {node_id} -> target worker {short_id} (brief={_brief_tag})",
             file=sys.stderr,
         )
     # Wake the active-backlog drain daemon (node x-c070): a successor may now be
     # unblocked. Best-effort; the poll floor is the guarantee.
     try:
         from fno.active_backlog import touch_nudge
+
         touch_nudge()
     except Exception:
         pass
@@ -1819,11 +1876,15 @@ def _converge_one(
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
-        return AdvanceResult("skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail)
+        return AdvanceResult(
+            "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail
+        )
 
     def failed(error: str) -> AdvanceResult:
         _emit(EVENT_FAILED, _tag({"node_id": node_id, "error": error[:200]}), ev_path)
-        return AdvanceResult("failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error)
+        return AdvanceResult(
+            "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
+        )
 
     # The spawned worker runs in the target repo, not this one. If that project
     # already has a live walker, let it claim the node - spawning here would launch
@@ -1836,10 +1897,9 @@ def _converge_one(
     # makes epic-advance idempotent (AC1-EDGE): a re-run finds the first pass's workers
     # holding node:<id> and dispatches nothing, WITHOUT depending on the 3-min
     # dispatch TTL still being live.
-    if _claim_is_live(f"node:{node_id}", root) or _claim_is_live(
-        f"dispatch:{node_id}"
-    ):
-        return skip("already-claimed")
+    block_reason = _node_dispatch_block_reason(node_id, root)
+    if block_reason:
+        return skip(block_reason)
 
     from fno.claims.core import ClaimHeldByOther, acquire_claim
 
@@ -1865,7 +1925,9 @@ def _converge_one(
         eff_provider = provider if provider is not None else node_meta.get("provider")
         _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node_meta)
         short_id = _spawn_worker(
-            node_id, root, slug,
+            node_id,
+            root,
+            slug,
             model=_route_resolve.node_model(node_meta, explicit=model, provider=eff_provider),
             provider=eff_provider,
             verb=node_meta.get("dispatch_verb"),
@@ -1880,13 +1942,15 @@ def _converge_one(
 
     _emit(
         EVENT_DISPATCHED,
-        _tag({
-            "node_id": node_id,
-            "short_id": short_id,
-            "agent_name": _worker_agent_name(node_id, slug),
-            "cross_project": cross_project,
-            "brief": _brief_tag,
-        }),
+        _tag(
+            {
+                "node_id": node_id,
+                "short_id": short_id,
+                "agent_name": _worker_agent_name(node_id, slug),
+                "cross_project": cross_project,
+                "brief": _brief_tag,
+            }
+        ),
         ev_path,
     )
     if verbose:

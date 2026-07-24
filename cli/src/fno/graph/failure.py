@@ -28,6 +28,7 @@ Failure / reset classification:
 * ignore   -> everything else, including ``node_closed{close=refused}`` (a
               dispatch refusal, not a work failure): never counts, never resets.
 """
+
 from __future__ import annotations
 
 import json
@@ -54,11 +55,9 @@ def events_path() -> Path:
     ``agents.events.emit``; a literal ``~/.fno`` is rejected by the
     no-hardcoded-paths CI guard). The default ``state_dir`` is ``~/.fno``,
     which is exactly where the Rust walker mirrors its loop events, so reader and
-    producer coincide on every default install. NOTE: the Rust walker *hardcodes*
-    its global mirror to ``$HOME/.fno`` (loop_target.rs) and does not honor
-    a customized ``config.state_dir``; under that non-default config the two
-    diverge. Closing that gap is a Rust-side follow-up (make the walker honor
-    ``state_dir``), out of scope here per Locked Decision #3 (walker untouched).
+    producer coincide on every default install. ``read_events()`` also consumes
+    the Rust agents-home mirror when it differs, so a custom ``state_dir`` or
+    ``FNO_AGENTS_HOME`` cannot split the failure writer from this reader.
     Resolved at call time so the conftest ``$HOME`` redirect is honored in tests.
     """
     from fno import paths
@@ -66,30 +65,62 @@ def events_path() -> Path:
     return paths.state_dir() / "events.jsonl"
 
 
+def _default_event_paths() -> list[Path]:
+    from fno import paths
+
+    configured = events_path()
+    rust_mirror = paths.agents_home_dir().parent / "events.jsonl"
+    return list(dict.fromkeys((configured, rust_mirror)))
+
+
+def merge_event_histories(*histories: Iterable[dict]) -> list[dict]:
+    """Union mirrored histories by occurrence count and timestamp order."""
+    merged: list[tuple[int, dict]] = []
+    max_counts: dict[str, int] = {}
+    for history in histories:
+        local_counts: dict[str, int] = {}
+        for rec in history:
+            key = json.dumps(rec, sort_keys=True, separators=(",", ":"))
+            local_counts[key] = local_counts.get(key, 0) + 1
+            if local_counts[key] > max_counts.get(key, 0):
+                merged.append((len(merged), rec))
+        for key, count in local_counts.items():
+            max_counts[key] = max(max_counts.get(key, 0), count)
+    merged.sort(key=lambda item: (str(item[1].get("ts") or ""), item[0]))
+    return [rec for _, rec in merged]
+
+
 def read_events(path: Optional[Path] = None) -> list[dict]:
-    """Read raw event envelopes from the JSONL log, skipping malformed lines.
+    """Read raw event envelopes across retained rotation, oldest first.
 
     Streams the file line by line so peak memory stays constant as the
-    append-only log grows. A truncated / non-JSON line is skipped and never
-    raises (AC2-ERR); an absent file yields an empty list (Boundaries).
+    append-only log grows. The Rust emitter keeps one ``.1`` generation; reading
+    it before the active file preserves consecutive failure/reset order across
+    rotation. A truncated / non-JSON line is skipped and never raises
+    (AC2-ERR); absent files yield an empty list (Boundaries).
     """
-    target = path if path is not None else events_path()
-    out: list[dict] = []
-    try:
-        with target.open(encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue  # truncated / non-JSON line: skip, never abort
-                if isinstance(rec, dict):
-                    out.append(rec)
-    except OSError:
-        return out
-    return out
+    targets = [path] if path is not None else _default_event_paths()
+    histories: list[list[dict]] = []
+    for target in targets:
+        out: list[dict] = []
+        rotated = target.with_name(target.name + ".1")
+        for source in (rotated, target):
+            try:
+                with source.open(encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+                        if isinstance(rec, dict):
+                            out.append(rec)
+            except OSError:
+                continue
+        histories.append(out)
+    return merge_event_histories(*histories)
 
 
 @dataclass(frozen=True)

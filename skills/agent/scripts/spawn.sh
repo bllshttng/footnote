@@ -56,21 +56,7 @@ AGENT=""               # x-b6e2: forwarded as --agent to the spawn verb
 TOOLS=""               # x-b6e2: forwarded as --tools to the spawn verb
 DENY_TOOLS=""          # x-b6e2: forwarded as --deny-tools to the spawn verb
 
-# Dispatcher reservation state (Guard 2). Initialized up-front so fail() can
-# reference it safely under set -u even before the reservation is acquired.
-RES_KEY=""
-RES_HOLDER="dispatch-skill:$$"
-RES_HELD=0
-release_reservation() {
-  [[ "$RES_HELD" -eq 1 && -n "$RES_KEY" ]] \
-    && fno claim release "$RES_KEY" --holder "$RES_HOLDER" >/dev/null 2>&1
-  RES_HELD=0
-  return 0
-}
-
-# fail() is only reached on non-launch paths, so always release any reservation
-# we hold (keeps the node re-dispatchable). A successful launch never calls fail.
-fail() { release_reservation; printf 'result=failed reason="%s"\n' "$1"; exit 1; }
+fail() { printf 'result=failed reason="%s"\n' "$1"; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -157,24 +143,20 @@ fi
 
 sanitize() { printf '%s' "$1" | tr '\n\r' '  ' | sed 's/"/'"'"'/g' | cut -c1-300; }
 
-# ---- Guards 1+2 via the shared spawn-guard verb (x-73cc) -----------------
-# The race-critical node:<id> claim probe (Guard 1) + create-only dispatch:<id>
-# reservation (Guard 2) live in `fno agents spawn-guard` so this path and the
-# /target bg path (skills/target/scripts/dispatch-node.sh) can never drift on
-# the part that matters. Only a NODE dispatch is guarded; a free-text seed /
-# handoff launch (no --node) skips the guard exactly as before. The verb does
-# Guard 1 then Guard 2 in one process: a `dispatchable` verdict means it has
-# acquired dispatch:<node> for $RES_HOLDER (released on every non-launch path
-# via fail(); left to TTL-expire on a launch). Fail CLOSED: a stale `fno`
-# without the verb (or any non-clean/unparseable verdict) refuses to launch.
+# ---- Read-only early receipt; cmd_spawn owns the real guard (x-5c08) ------
+# Preserve /agent's self-handoff and contested-worker receipts without taking a
+# reservation here. The actual `fno agents spawn --node` below reruns the same
+# family-2 decision with side effects and reserves dispatch:<node> at the one
+# birth choke point immediately before substrate fan-out.
 if [[ -n "$NODE" ]]; then
-  RES_KEY="dispatch:$NODE"
+  guard_cwd_args=()
+  [[ -n "$CWD" ]] && guard_cwd_args=("--cwd" "$CWD")
   # Pin to the Python runtime: spawn-guard is a Python-only verb, so an operator
   # with FNO_AGENTS_RUNTIME=rust exported would otherwise route it to the Rust
   # binary (which lacks it -> 127 -> fail-closed, breaking node dispatch). The
   # inline override is scoped to this call only; the real spawn below routes
   # normally (codex P2 parity with dispatch-node.sh).
-  guard_out="$(FNO_AGENTS_RUNTIME=python fno agents spawn-guard "$NODE" --holder "$RES_HOLDER" --ttl 3m --json 2>/dev/null)"; guard_rc=$?
+  guard_out="$(FNO_AGENTS_RUNTIME=python fno agents spawn-guard "$NODE" --holder "dispatch-skill-probe:$$" --no-reserve --json ${guard_cwd_args[@]+"${guard_cwd_args[@]}"} 2>/dev/null)"; guard_rc=$?
   guard_json="$(printf '%s\n' "$guard_out" | grep -F '"verdict"' | head -1)"
   verdict="$(printf '%s' "$guard_json" | jq -r '.verdict // empty' 2>/dev/null)"
   case "$verdict" in
@@ -197,23 +179,21 @@ if [[ -n "$NODE" ]]; then
         else
           printf 'result=already-running name=%s reason="live worker holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
         fi
+      elif [[ "$reason" == "suspect-claim" ]]; then
+        holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
+        printf 'result=already-running name=%s reason="suspect worker claim holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
       else
-        case "$reason" in
-          reservation-held|duplicate-claim)
-            # x-a7ab 1.2 / x-b44e: a peer dispatcher won the visibility barrier
-            # or already holds the dispatch:<id> reservation. Exactly one worker
-            # launches; the loser's receipt carries skipped: duplicate-claim so a
-            # loop/human sees the dedup, not a generic already-running.
-            printf 'result=already-running name=%s reason="skipped: duplicate-claim (peer dispatcher holds %s)"\n' "$NAME" "$RES_KEY" ;;
-          *)
-            printf 'result=already-running name=%s reason="a peer dispatcher holds %s (racing launch)"\n' "$NAME" "$RES_KEY" ;;
-        esac
+        printf 'result=already-running name=%s reason="family-2 guard blocked node:%s"\n' "$NAME" "$NODE"
       fi
       exit 0 ;;
     corrupted)
       fail "node:$NODE claim is corrupted; force-release or repair before dispatching" ;;
+    refused)
+      reason="$(printf '%s' "$guard_json" | jq -r '.reason // "dispatch-refused"' 2>/dev/null)"
+      holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
+      fail "$reason by family-2 guard for node:$NODE (prior holder=$holder); no worker launched" ;;
     dispatchable)
-      RES_HELD=1 ;;
+      : ;;
     *)
       # verdict=error, OR empty/unparseable (a stale fno WITHOUT the verb prints
       # Typer "No such command" + exits non-zero; or a probe crash): fail CLOSED.
@@ -250,7 +230,6 @@ case "$existing_status" in
     fno agents rm "$NAME" >/dev/null 2>&1 || true ;;  # dead -> clear, then spawn fresh
   *)
     # live|ready|idle|busy|spawning|restarting|<unknown> -> worker present.
-    release_reservation
     printf 'result=already-running name=%s reason="an agent named %s exists (status=%s)"\n' "$NAME" "$NAME" "$existing_status"
     exit 0 ;;
 esac
@@ -434,6 +413,20 @@ spawn_out="$(fno "${cmd[@]}" 2>"$err_file")"; spawn_rc=$?
 spawn_err="$(cat "$err_file" 2>/dev/null)"; rm -f "$err_file"
 
 if [[ "$spawn_rc" -ne 0 ]]; then
+  if [[ -n "$NODE" ]] && printf '%s' "$spawn_err" | grep -qF "node dispatch refused:"; then
+    guard_reason="$(printf '%s' "$spawn_err" | sed -n 's/.* reason=\([^ ;]*\).*/\1/p;q')"
+    case "$guard_reason" in
+      live-claim|suspect-claim)
+        printf 'result=already-running name=%s action=%s reason="shared family-2 guard refused node:%s; no worker launched"\n' "$NAME" "$guard_reason" "$NODE"
+        exit 0 ;;
+      reservation-held|duplicate-claim)
+        printf 'result=already-running name=%s action=duplicate-claim reason="skipped: duplicate-claim (peer dispatcher holds dispatch:%s); no worker launched"\n' "$NAME" "$NODE"
+        exit 0 ;;
+      auto-deferred|defer-failed)
+        printf 'result=failed name=%s action=%s reason="shared family-2 guard refused node:%s; no worker launched"\n' "$NAME" "$guard_reason" "$NODE"
+        exit 1 ;;
+    esac
+  fi
   fail "dispatch failed (rc=$spawn_rc): $(sanitize "${spawn_err:-$spawn_out}")"
 fi
 

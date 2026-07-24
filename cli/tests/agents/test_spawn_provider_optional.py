@@ -32,6 +32,7 @@ def _stub_pane_path(monkeypatch) -> dict:
     runs without a real mux; return the kwargs dispatch_spawn_pane received."""
     received: dict = {}
 
+    from fno.agents import cli as agents_cli
     from fno.agents import mux_spawn, spawn_gate
 
     class _Gate:
@@ -41,8 +42,15 @@ def _stub_pane_path(monkeypatch) -> dict:
     def fake_run_gate(*a, **k):
         return _Gate()
 
-    def fake_resolve_provenance(*a, **k):
-        return None
+    def fake_resolve_provenance(node, *_a, **_k):
+        return {"FNO_NODE": node} if node else {}
+
+    def fake_spawn_guard(node_id, holder, **_kwargs):
+        return {
+            "verdict": "dispatchable",
+            "reservation_key": f"dispatch:{node_id}",
+            "reservation_holder": holder,
+        }, 0
 
     def fake_dispatch_spawn_pane(**kwargs):
         received.update(kwargs)
@@ -59,6 +67,7 @@ def _stub_pane_path(monkeypatch) -> dict:
     monkeypatch.setattr(spawn_gate, "run_gate", fake_run_gate)
     monkeypatch.setattr(mux_spawn, "resolve_provenance", fake_resolve_provenance)
     monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch_spawn_pane)
+    monkeypatch.setattr(agents_cli, "_spawn_guard_decision", fake_spawn_guard)
     return received
 
 

@@ -411,12 +411,11 @@ for id in "${NODES[@]}"; do
     fi
   fi
 
-  # ---- Guards 1+2 via the shared spawn-guard verb (x-73cc) ----
-  # The race-critical node:<id> claim probe (Guard 1) + create-only dispatch:<id>
-  # reservation (Guard 2) live in `fno agents spawn-guard` so this path and
-  # /agent spawn (spawn.sh) can never drift on the part that matters. A dry-run,
-  # or a node whose status is `claimed` (the recovery-park policy below), uses
-  # --no-reserve so NO reservation is taken; a real ready dispatch reserves.
+  # ---- Read-only early receipt; cmd_spawn owns the real guard (x-5c08) ----
+  # Dry-run and legacy claimed-node parking need a verdict before the spawn
+  # branch. A real ready dispatch passes --node to `fno agents spawn`, whose one
+  # birth choke point reruns this family-2 decision with side effects and takes
+  # dispatch:<id>; no reservation is taken on this shell rung.
   # Fail CLOSED: a stale `fno` without the verb (or any non-clean/unparseable
   # verdict) leaves the node `ready` and launches nothing.
   # spawn-guard is a Python-only verb (no Rust client impl). Pin the call to the
@@ -427,10 +426,13 @@ for id in "${NODES[@]}"; do
   # inline override is scoped to this command; the real `fno agents spawn` below
   # routes normally. The default (unset) runtime already keeps spawn-guard Python.
   res_key="dispatch:$id"; res_holder="dispatch-node:$$"
+  node_guard_cwd="$(printf '%s' "$node_json" | jq -r '._resolved_cwd // .cwd // empty' 2>/dev/null)"
+  guard_cwd_args=()
+  [[ -n "$node_guard_cwd" ]] && guard_cwd_args=("--cwd" "$node_guard_cwd")
   if [[ "$DRY_RUN" -eq 1 || "$status" == "claimed" ]]; then
-    guard_out="$(FNO_AGENTS_RUNTIME=python fno agents spawn-guard "$id" --holder "$res_holder" --no-reserve --json 2>/dev/null)"; guard_rc=$?
+    guard_out="$(FNO_AGENTS_RUNTIME=python fno agents spawn-guard "$id" --holder "$res_holder" --no-reserve --json ${guard_cwd_args[@]+"${guard_cwd_args[@]}"} 2>/dev/null)"; guard_rc=$?
   else
-    guard_out="$(FNO_AGENTS_RUNTIME=python fno agents spawn-guard "$id" --holder "$res_holder" --ttl 3m --json 2>/dev/null)"; guard_rc=$?
+    guard_out='{"verdict":"dispatchable"}'; guard_rc=0
   fi
   # grep the JSON object line first (defense in depth vs any stderr/banner that
   # could leak onto stdout), then parse the verdict.
@@ -467,6 +469,12 @@ for id in "${NODES[@]}"; do
       echo "failed $id reason=\"node:$id claim is corrupted; force-release or repair before dispatching\""
       n_failed=$((n_failed + 1))
       continue ;;
+    refused)
+      reason="$(printf '%s' "$guard_json" | jq -r '.reason // "dispatch-refused"' 2>/dev/null)"
+      holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
+      echo "skipped $id reason=\"$reason by family-2 guard (prior holder=$holder); no worker launched\""
+      n_skipped=$((n_skipped + 1))
+      continue ;;
     dispatchable)
       if [[ "$status" == "claimed" ]]; then
         # status: claimed but node:<id> claim not live. Do NOT auto-recover via
@@ -479,10 +487,9 @@ for id in "${NODES[@]}"; do
         n_parked=$((n_parked + 1))
         continue
       fi
-      # status == ready AND claim free/stale: dispatchable (stale => recovery,
-      # the worker's atomic init-acquire reclaims a dead holder). In the
-      # reserving branch dispatch:$id is now held by $res_holder; it is released
-      # on any spawn-failure path below and left to TTL-expire on a launch.
+      # status == ready reaches the real shared guard inside cmd_spawn. A stale
+      # predecessor is reclaimed there; a failure limit or racing reservation
+      # refuses before substrate fan-out.
       : ;;
     *)
       # verdict=error, OR empty/unparseable (a stale fno WITHOUT the verb prints
@@ -669,7 +676,7 @@ for id in "${NODES[@]}"; do
   # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
   launch_cwd="${node_cwd:-$(pwd)}"
   if [[ -n "$node_cwd" ]]; then
-    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$node_cwd" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$node_cwd" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
     wt=""
     # DISPATCH_PROVIDER is the RESOLVED harness (.harness from dispatch resolve),
@@ -690,20 +697,54 @@ for id in "${NODES[@]}"; do
         _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
         [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
       fi
-      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$wt" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$wt" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
     else
-      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --fresh "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --fresh "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       # --fresh lands the worker in canonical main; report that real path (not a
       # space-containing label) so the cwd= field stays machine-parseable.
       launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
     fi
   else
-    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   fi
   spawn_err="$(cat "$spawn_err_file" 2>/dev/null)"; rm -f "$spawn_err_file"
   if [[ "$spawn_rc" -ne 0 ]]; then
-    # Surface the failure; release the reservation so the node is re-dispatchable.
+    # The shared cmd_spawn guard reports a machine prefix before any substrate
+    # launches. Preserve its exact family-2 outcome in this caller's receipt.
+    if printf '%s' "$spawn_err" | grep -qF "node dispatch refused:"; then
+      guard_verdict="$(printf '%s' "$spawn_err" | sed -n 's/.* verdict=\([^ ]*\).*/\1/p;q')"
+      guard_reason="$(printf '%s' "$spawn_err" | sed -n 's/.* reason=\([^ ;]*\).*/\1/p;q')"
+      case "$guard_reason" in
+        live-claim)
+          echo "already-running $id reason=\"$guard_reason by shared family-2 guard; no worker launched\""
+          n_already=$((n_already + 1))
+          continue ;;
+        reservation-held|duplicate-claim)
+          echo "already-running $id reason=\"skipped: duplicate-claim (peer dispatcher holds dispatch:$id); no worker launched\""
+          n_already=$((n_already + 1))
+          continue ;;
+        suspect-claim)
+          echo "skipped-contested $id reason=\"suspect-claim by shared family-2 guard; no worker launched\""
+          n_skipped=$((n_skipped + 1))
+          continue ;;
+        auto-deferred)
+          echo "skipped $id reason=\"auto-deferred by shared family-2 guard; no worker launched\""
+          n_skipped=$((n_skipped + 1))
+          continue ;;
+        defer-failed)
+          echo "failed $id reason=\"defer-failed by shared family-2 guard; no worker launched\""
+          n_failed=$((n_failed + 1))
+          continue ;;
+      esac
+      if [[ "$guard_verdict" == "corrupted" ]]; then
+        echo "failed $id reason=\"node:$id claim is corrupted; force-release or repair before dispatching\""
+        n_failed=$((n_failed + 1))
+        continue
+      fi
+    fi
+    # Surface the failure. cmd_spawn owns and releases the reservation on every
+    # pre-launch or spawn error, so this legacy-holder release is a safe no-op.
     # A name collision (exit 2, "already exists") means a worker beat us in the
     # registry-check window: report already-running, not failed.
     fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true

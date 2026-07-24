@@ -17,6 +17,7 @@ Claim isolation: every test routes claims under a tmp FNO_CLAIMS_ROOT +
 FNO_REPO_ROOT and uses advance's OWN key/root helpers so the test writes claims
 exactly where advance reads them.
 """
+
 from __future__ import annotations
 
 import json
@@ -147,6 +148,17 @@ def test_dispatch_reservation_held(iso, monkeypatch):
     res = adv.advance(project="fno", events_path=iso)
 
     assert res.decision == "skipped" and res.reason == "already-claimed"
+
+
+@pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
+def test_advance_preserves_family2_refusal_reason(iso, monkeypatch, reason):
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *_a: reason)
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *_a, **_k: pytest.fail("must not spawn"))
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "skipped" and res.reason == reason
 
 
 @pytest.mark.parametrize(
@@ -688,9 +700,7 @@ def test_predispatch_refuses_birth_when_auto_defer_write_fails(monkeypatch, caps
         "fno.agents.events.emit",
         lambda kind, **data: emitted.append((kind, data)),
     )
-    monkeypatch.setattr(
-        "fno.notify._impl.send_notification", lambda *_a, **_k: (0, "")
-    )
+    monkeypatch.setattr("fno.notify._impl.send_notification", lambda *_a, **_k: (0, ""))
     monkeypatch.setattr(
         "fno.target_cli._classify_node_claim",
         lambda _node: ("free", None),
@@ -705,7 +715,7 @@ def test_predispatch_refuses_birth_when_auto_defer_write_fails(monkeypatch, caps
     assert emitted[0][0] == "dispatch_dead_failure_limit"
     assert emitted[0][1]["action"] == "defer-failed"
     assert emitted[1][0] == "dispatch_claim_observed"
-    assert emitted[1][1]["action"] == "blocked"
+    assert emitted[1][1]["action"] == "defer-failed"
     assert "refusing another worker" in capsys.readouterr().err
 
 
@@ -934,7 +944,10 @@ def test_next_node_skips_get_when_already_resolved(monkeypatch):
 
 
 _DEP = {
-    "id": "ab-3333bbbb", "project": "web", "slug": "frontend-bit", "cwd": "/raw/web",
+    "id": "ab-3333bbbb",
+    "project": "web",
+    "slug": "frontend-bit",
+    "cwd": "/raw/web",
     "cross_project": True,  # closed node is project "etl"; _direct_dependents tags this
 }
 
@@ -1032,6 +1045,20 @@ def test_dependents_already_claimed_skips(iso, monkeypatch):
     assert results[0].decision == "skipped" and results[0].reason == "already-claimed"
 
 
+@pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
+def test_dependents_preserve_family2_refusal_reason(iso, monkeypatch, reason):
+    monkeypatch.setattr(adv, "_direct_dependents", lambda *_a: [_DEP])
+    _map_project(monkeypatch, {"web": "/mapped/web"})
+    monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *_a: reason)
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *_a, **_k: pytest.fail("must not spawn"))
+
+    results = adv.advance_dependents(
+        closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
+    )
+
+    assert results[0].decision == "skipped" and results[0].reason == reason
+
+
 def test_dependents_idempotent_double_call(iso, monkeypatch):
     """Concurrency: the same merge observed twice dispatches the dependent once
     (dispatch:<id> TTL reservation survives the first call)."""
@@ -1075,7 +1102,10 @@ def test_dependents_spawn_failure_releases_reservation(iso, monkeypatch):
 # ---------------------------------------------------------------------------
 
 _SAME_DEP = {
-    "id": "ab-4444cccc", "project": "fno", "slug": "e4-3-leaf", "cwd": "/repo/fno",
+    "id": "ab-4444cccc",
+    "project": "fno",
+    "slug": "e4-3-leaf",
+    "cwd": "/repo/fno",
     "cross_project": False,  # _direct_dependents tags a same-project dep this way
 }
 
@@ -1969,6 +1999,7 @@ def test_selection_guards_dead_ancestor_via_field_not_status():
 # ---------------------------------------------------------------------------
 # x-d1f4: dispatch resolves the brief via autobrief (not the raw field)
 # ---------------------------------------------------------------------------
+
 
 def _capture_brief(monkeypatch):
     """Replace _spawn_worker with a capture; return the mutable capture dict."""

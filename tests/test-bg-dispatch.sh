@@ -105,6 +105,24 @@ case "$sub $verb" in
   "agents rm")
     printf 'rm %s\n' "${3:-}" >> "$S/rm.log"; echo "removed ${3:-}" ;;
   "agents spawn")
+    spawn_node=""; _prev=""
+    for a in "$@"; do
+      [[ "$_prev" == "--node" ]] && spawn_node="$a"
+      _prev="$a"
+    done
+    spawn_claim="$(cat "$S/claim_$spawn_node" 2>/dev/null || echo free)"
+    if [[ -n "$spawn_node" && "$spawn_claim" == "corrupted" ]]; then
+      echo "node dispatch refused: node=$spawn_node verdict=corrupted reason=claim-corrupted; no worker launched" >&2
+      exit 2
+    fi
+    if [[ -n "$spawn_node" && -f "$S/claim_err" ]]; then
+      echo "node dispatch refused: node=$spawn_node verdict=error reason=claim-probe-error; no worker launched" >&2
+      exit 3
+    fi
+    if [[ -n "$spawn_node" && -f "$S/reserve_held" ]]; then
+      echo "node dispatch refused: node=$spawn_node verdict=already-running reason=reservation-held; no worker launched" >&2
+      exit 2
+    fi
     printf '%s\n' "$*" >> "$S/ask.log"
     [[ -f "$S/ask.fail" ]] && { echo "daemon down: connection refused" >&2; exit 1; }
     # ask_collision models a racing worker: spawn refuses an existing name with
@@ -441,7 +459,7 @@ echo "--- review-hardening (sigma-review findings) ---"
 #      collapse to "free" and let a second worker launch over a live claim) ----
 reset_mock; set_status ab-aaaa1111 ready; : > "$MOCKSTATE/claim_err"
 out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
-echo "$out" | grep -q "^failed ab-aaaa1111 reason=\"claim probe failed" && [[ "$(ask_count)" -eq 0 ]] \
+echo "$out" | grep -q "^failed ab-aaaa1111 reason=.*claim-probe-error" && [[ "$(ask_count)" -eq 0 ]] \
   && pass "guard: claim-probe error fails closed (no dispatch over a possibly-live claim)" \
   || fail "guard: claim-probe error not fail-closed: $out (asks=$(ask_count))"
 

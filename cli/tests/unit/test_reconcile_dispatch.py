@@ -7,6 +7,7 @@ Claim isolation mirrors test_advance: claims route under a tmp FNO_CLAIMS_ROOT +
 FNO_REPO_ROOT, and the dependent's manifest lives under tmp_path/.fno so
 `_dep_root` (cwd fallback) resolves there with no settings dependency.
 """
+
 from __future__ import annotations
 
 import json
@@ -30,7 +31,7 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _events(p: Path) -> list[dict]:
     if not p.exists():
         return []
-    return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
 
 
 def _dep(tmp_path: Path, node_id="x-dep"):
@@ -52,6 +53,7 @@ def _patch_spawn(monkeypatch):
 
 
 # ---- router: dispatch / pending / skip ----
+
 
 def test_unreconciled_manifest_dispatches_reconcile(iso, tmp_path, monkeypatch):
     # AC4-HP: a contract dependent with an unreconciled manifest gets a
@@ -181,7 +183,21 @@ def test_live_node_claim_dedups(iso, tmp_path, monkeypatch):
     assert calls == []
 
 
+@pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
+def test_reconcile_preserves_family2_refusal_reason(iso, tmp_path, monkeypatch, reason):
+    sm.write("x-dep", [], tmp_path, contract_test="true")
+    _patch_deps(monkeypatch, [_dep(tmp_path)])
+    calls = _patch_spawn(monkeypatch)
+    monkeypatch.setattr("fno.backlog.advance._node_dispatch_block_reason", lambda *_a: reason)
+
+    res = rd.dispatch_reconcile_for_blocker(closed_node_id="x-blk", events_path=iso)
+
+    assert res[0].decision == "skipped" and res[0].reason == reason
+    assert calls == []
+
+
 # ---- exactly-once across triggers ----
+
 
 def test_second_trigger_does_not_redispatch(iso, tmp_path, monkeypatch):
     # AC: the same blocker observed twice dispatches the reconcile once (the
@@ -196,6 +212,7 @@ def test_second_trigger_does_not_redispatch(iso, tmp_path, monkeypatch):
 
 
 # ---- fire_pending_reconcile (the manifest-write re-fire) ----
+
 
 def test_fire_pending_reconcile_dispatches_and_releases(iso, tmp_path, monkeypatch):
     # AC8: a pending sentinel + a now-written manifest fires the reconcile and

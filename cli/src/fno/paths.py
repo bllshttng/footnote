@@ -795,6 +795,20 @@ def agents_registry_path() -> Path:
     return state_dir() / "agents" / "registry.json"
 
 
+def agents_home_dir() -> Path:
+    """Return the Rust agents runtime home, honoring ``FNO_AGENTS_HOME``.
+
+    The Rust daemon deliberately defaults independently of ``config.state_dir``
+    to the process-global ``$HOME/.fno/agents`` tree. Readers that consume its
+    mirrored events must use the same resolver instead of assuming the Python
+    registry path and the Rust runtime home always coincide.
+    """
+    override = os.environ.get("FNO_AGENTS_HOME")
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / ".fno" / "agents").resolve()
+
+
 def inbox_dir(project_root: Optional[Path] = None) -> Path:
     """Return the inbox directory.
 

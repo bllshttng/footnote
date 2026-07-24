@@ -2077,7 +2077,7 @@ event_types:
           enum: [working, waiting, suspect, stalled, unknown]
         action:
           type: string
-          enum: [blocked, redispatch, dispatch, auto-deferred]
+          enum: [blocked, redispatch, dispatch, auto-deferred, defer-failed]
     consumers: [operator]
 
   - name: dispatch_dead_failure_limit

@@ -12,8 +12,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import NoReturn
-
 import typer
 
 from fno.agents.rust_runtime import make_agents_group_cls
@@ -50,6 +48,105 @@ class AgentStatusFilter(str, enum.Enum):
     live = "live"
     orphaned = "orphaned"
     unknown = "unknown"
+
+
+def _spawn_guard_decision(
+    node_id: str,
+    holder: str,
+    *,
+    ttl: str = "3m",
+    no_reserve: bool = False,
+    cwd: str | None = None,
+) -> tuple[dict[str, str], int]:
+    """Return the shared family-2 pre-birth verdict without rendering it."""
+    from fno.claims.cli import _parse_ttl
+    from fno.claims.core import ClaimHeldByOther, acquire_claim, claim_status
+    from fno.claims.io import claims_root_for
+
+    node_key = f"node:{node_id}"
+    res_key = f"dispatch:{node_id}"
+
+    try:
+        info = claim_status(node_key, root=claims_root_for(node_key))
+    except Exception as exc:  # pragma: no cover - claim_status never raises today
+        return {
+            "verdict": "error",
+            "detail": f"claim probe failed ({exc}); not dispatching to avoid a double-launch",
+        }, 3
+    state = info.get("state")
+    if not state:
+        return {
+            "verdict": "error",
+            "detail": "claim status returned no parseable state; not dispatching",
+        }, 3
+    if state == "corrupted":
+        return {
+            "verdict": "corrupted",
+            "detail": (
+                f"node:{node_id} claim is corrupted; force-release or repair before dispatching"
+            ),
+        }, 0
+
+    from fno.backlog.advance import _observe_node_claim
+
+    observation = _observe_node_claim(
+        node_id,
+        cwd,
+        enforce_failure_limit=not no_reserve,
+        emit=not no_reserve,
+    )
+    common = {
+        "holder": observation.holder,
+        "truth_status": observation.truth_status,
+    }
+    if observation.action in ("auto-deferred", "defer-failed"):
+        return {
+            "verdict": "refused",
+            "reason": observation.action,
+            **common,
+        }, 0
+    if observation.blocks_dispatch:
+        return {
+            "verdict": "already-running",
+            "reason": "suspect-claim" if state == "suspect" else "live-claim",
+            **common,
+        }, 0
+    if no_reserve:
+        return {"verdict": "dispatchable"}, 0
+
+    try:
+        acquire_claim(
+            res_key,
+            holder,
+            reason=f"bg-dispatch reservation for {node_id}",
+            ttl_ms=_parse_ttl(ttl),
+            root=claims_root_for(res_key),
+        )
+    except ClaimHeldByOther:
+        return {"verdict": "already-running", "reason": "reservation-held"}, 0
+    except Exception as exc:
+        return {
+            "verdict": "error",
+            "detail": f"could not acquire dispatch reservation {res_key} ({exc})",
+        }, 3
+    # x-a7ab visibility barrier: the acquisition is not authoritative until the
+    # exact holder is observable on disk. A peer that won a visibility-lagged
+    # race launches; this caller returns the durable duplicate receipt.
+    try:
+        post = claim_status(res_key, root=claims_root_for(res_key))
+    except Exception:  # pragma: no cover - claim_status never raises today
+        post = {}
+    if post.get("holder") != holder:
+        return {
+            "verdict": "already-running",
+            "reason": "duplicate-claim",
+            "holder": post.get("holder") or "unknown",
+        }, 0
+    return {
+        "verdict": "dispatchable",
+        "reservation_key": res_key,
+        "reservation_holder": holder,
+    }, 0
 
 
 def _resolve_dispatch_workdir(cwd: str | None, fresh: bool, here: bool) -> Path:
@@ -782,11 +879,7 @@ def cmd_spawn(
     # redirect note. An explicit --cwd (incl. -P/node-resolved) is the caller's
     # own choice and never surfaces -- gate on `not cwd` so the receipt stays
     # byte-identical for explicit-cwd and stay-put spawns (AC1-EDGE).
-    _moved_cwd = (
-        str(workdir)
-        if not cwd and workdir != Path(os.getcwd()).resolve()
-        else None
-    )
+    _moved_cwd = str(workdir) if not cwd and workdir != Path(os.getcwd()).resolve() else None
 
     # Three orthogonal axes: --harness names the CLI binary, --provider the model
     # vendor that binary talks to, --model the model at that vendor. `provider` is
@@ -1008,15 +1101,12 @@ def cmd_spawn(
         parsed = _parse_target(route)
         if parsed is None:
             print(
-                f"--route must be 'provider,model' with a non-empty model token; "
-                f"got {route!r}",
+                f"--route must be 'provider,model' with a non-empty model token; got {route!r}",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
         notes: list[str] = []
-        route_env = resolve_explicit_route(
-            parsed[0], parsed[1], notice=notes.append
-        )
+        route_env = resolve_explicit_route(parsed[0], parsed[1], notice=notes.append)
         if not route_env:
             reason = "; ".join(notes) or "provider unknown, non-anthropic, or keyless"
             print(
@@ -1026,26 +1116,26 @@ def cmd_spawn(
             )
             raise typer.Exit(code=2)
 
-    # Resolve a role once before pane/bg/headless fan out so every substrate
-    # receives the same endpoint, auth, and model mapping.
-    if route is None and role is not None and provider == "claude":
-        from fno.agents.model_routing import resolve_route
-
-        route_env = resolve_route(role, notice=lambda note: print(note, file=sys.stderr))
-
-    # Provider rotation stamps the selected account in FNO_*; a managed OAuth
-    # account shares the default Claude slot and cannot compose atomically with
-    # a separate role/route endpoint. Refuse before the spawn gate.
-    if route_env and os.environ.get("FNO_PROVIDER_AUTH", "").strip().lower() == "managed":
-        overlay_id = os.environ.get("FNO_PROVIDER_ID", "").strip() or "unknown"
-        intent = f"routed role {role!r}" if role is not None else f"route {route!r}"
-        print(
-            f"refusing {intent} over managed OAuth provider {overlay_id!r}: "
-            "endpoint, auth, and model must be selected as one provider route; "
-            "no worker launched.",
-            file=sys.stderr,
+    # Resolve/validate the route once before pane/bg/headless fan out. The same
+    # helper is called by the in-process spawn APIs, so bypassing the CLI cannot
+    # recreate a managed-OAuth half-composition.
+    if provider == "claude" and (role is not None or route_env):
+        from fno.agents.model_routing import (
+            RouteCompositionError,
+            resolve_spawn_route,
         )
-        raise typer.Exit(code=2)
+
+        intent = f"routed role {role!r}" if role is not None else f"route {route!r}"
+        try:
+            route_env = resolve_spawn_route(
+                role,
+                route_env,
+                intent=intent,
+                notice=lambda note: print(note, file=sys.stderr),
+            )
+        except RouteCompositionError as exc:
+            print(str(exc), file=sys.stderr)
+            raise typer.Exit(code=2) from exc
 
     # Per-spawn account overlay (x-d012). Resolve + FAIL CLOSED here, BEFORE the
     # gate, like --route: a refusal spawns nothing, takes no gate slot, and
@@ -1058,6 +1148,45 @@ def cmd_spawn(
         overlay = resolve_account_overlay_or_exit(account)
         account_env = overlay.env if overlay else None
 
+    # Resolve node provenance once for every substrate. A node-bearing spawn is
+    # itself a dispatcher route, so it must cross the same family-2 decision and
+    # dispatch reservation as advance, reconcile, and the shell entry points.
+    from fno.agents.mux_spawn import resolve_provenance
+
+    prov_env = resolve_provenance(node, slug, plan)
+    node_reservation: tuple[str, str] | None = None
+    if node is not None:
+        guarded_node = prov_env.get("FNO_NODE")
+        if not guarded_node:
+            print(
+                f"refusing unresolved --node {node!r}: cannot run the shared "
+                "family-2 dispatch guard; no worker launched",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        guard_holder = f"spawn-cli:{os.getpid()}"
+        guard, guard_exit = _spawn_guard_decision(
+            guarded_node,
+            guard_holder,
+            cwd=str(workdir),
+        )
+        if guard.get("verdict") != "dispatchable":
+            guard_reason = (
+                guard.get("detail") or guard.get("reason") or guard.get("verdict") or "unknown"
+            )
+            prior = f" prior_holder={guard['holder']}" if guard.get("holder") else ""
+            print(
+                f"node dispatch refused: node={guarded_node} "
+                f"verdict={guard.get('verdict')} reason={guard_reason}{prior}; "
+                "no worker launched",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=guard_exit or 2)
+        node_reservation = (
+            guard["reservation_key"],
+            guard["reservation_holder"],
+        )
+
     # Spawn gate (x-c5cc): cap + RAM floor at the top of the primitive, before
     # the substrate fan-out. This Python gate is the SOLE gate on every path
     # that reaches cmd_spawn (the front door execs the binary for bg/headless,
@@ -1066,12 +1195,21 @@ def cmd_spawn(
     # pre-substrate spelling of a headless one-shot, so it gates as headless.
     from fno.agents.spawn_gate import run_gate
 
-    gate = run_gate(
-        name,
-        "headless" if (once or substrate == "headless") else substrate,
-        force=force,
-        no_wait=no_wait,
-    )
+    try:
+        gate = run_gate(
+            name,
+            "headless" if (once or substrate == "headless") else substrate,
+            force=force,
+            no_wait=no_wait,
+        )
+    except BaseException:
+        if node_reservation is not None:
+            from fno.claims.core import release_claim
+            from fno.claims.io import claims_root_for
+
+            key, holder = node_reservation
+            release_claim(key, holder, root=claims_root_for(key))
+        raise
 
     # Prior values of the provenance keys the bg/headless arm exports below, so
     # the finally can put the process env back.
@@ -1079,9 +1217,10 @@ def cmd_spawn(
 
     # `--once` is the pre-substrate spelling of headless (the Rust client maps
     # it to --substrate headless): it always means a one-shot, never a pane.
+    spawn_succeeded = False
     try:
         if substrate == "pane" and not once:
-            from fno.agents.mux_spawn import dispatch_spawn_pane, resolve_provenance
+            from fno.agents.mux_spawn import dispatch_spawn_pane
 
             try:
                 pane_result = dispatch_spawn_pane(
@@ -1102,13 +1241,14 @@ def cmd_spawn(
                     split=split,
                     crown_level=crown_level,
                     crown_scope=crown_scope,
-                    provenance=resolve_provenance(node, slug, plan),
+                    provenance=prov_env,
                     account_env=account_env,
                     route_env=route_env,
                 )
             except DispatchAskError as exc:
                 print(str(exc), file=sys.stderr)
                 raise typer.Exit(code=exc.exit_code) from exc
+            spawn_succeeded = True
             # Compact one-line receipt, superset of the daemon-spawn receipt shape
             # ({"name","short_id","provider","status"}) so line-parsing consumers
             # keep working. short_id carries claude's 8-hex jobId so the caller can
@@ -1152,9 +1292,8 @@ def cmd_spawn(
         # FNO_NODE. Restored in the finally, so the child inherits during the
         # dispatch call and an in-process caller spawning twice cannot leak the
         # first spawn's node into the second.
-        from fno.agents.mux_spawn import PROVENANCE_KEYS, resolve_provenance
+        from fno.agents.mux_spawn import PROVENANCE_KEYS
 
-        prov_env = resolve_provenance(node, slug, plan)
         prov_prev.update({k: os.environ.get(k) for k in PROVENANCE_KEYS})
         for _k in PROVENANCE_KEYS:
             os.environ.pop(_k, None)
@@ -1183,6 +1322,9 @@ def cmd_spawn(
                 resume_session_id=resume,
                 account_env=account_env,
             )
+            spawn_succeeded = result.kind == "created" or bool(
+                result.reply and result.reply.strip()
+            )
         except DispatchAskError as exc:
             print(str(exc), file=sys.stderr)
             raise typer.Exit(code=exc.exit_code) from exc
@@ -1190,6 +1332,12 @@ def cmd_spawn(
         # Release the gate's claims once the dispatch result exists (or the
         # spawn failed): registry/roster rows carry the count from here.
         gate.release()
+        if node_reservation is not None and not spawn_succeeded:
+            from fno.claims.core import release_claim
+            from fno.claims.io import claims_root_for
+
+            key, holder = node_reservation
+            release_claim(key, holder, root=claims_root_for(key))
         for _k, _v in prov_prev.items():
             if _v is None:
                 os.environ.pop(_k, None)
@@ -1218,19 +1366,15 @@ def cmd_spawn(
         # valid JSON for receipt consumers (review); it matches Rust's
         # json_string_ascii byte-for-byte. LAST field so an unmoved receipt is
         # byte-identical.
-        cwd_field = (
-            f", \"cwd\": {json.dumps(_moved_cwd)}"
-            if _moved_cwd is not None
-            else ""
-        )
+        cwd_field = f', "cwd": {json.dumps(_moved_cwd)}' if _moved_cwd is not None else ""
         # x-d012: name the pinned account. Only when set, so a non-account bg
         # receipt stays byte-identical to the Rust client's (which never emits
         # it - an --account spawn always re-execs into this Python path).
-        account_field = f", \"account\": {json.dumps(account)}" if account else ""
+        account_field = f', "account": {json.dumps(account)}' if account else ""
         receipt = (
             f'{{"name": "{safe_name}", "short_id": "{result.short_id}", '
             f'"provider": "{result.provider}", "status": "live"'
-            f'{perm_field}{cwd_field}{account_field}}}'
+            f"{perm_field}{cwd_field}{account_field}}}"
         )
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()
@@ -1271,6 +1415,11 @@ def cmd_spawn_guard(
             "read-only verdict."
         ),
     ),
+    cwd: str | None = typer.Option(
+        None,
+        "--cwd",
+        help="Node project root for project-local failure policy and defer.",
+    ),
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit the verdict as a JSON object."
     ),
@@ -1285,7 +1434,7 @@ def cmd_spawn_guard(
     dispatchable (x-73cc).
 
     Emits ONE verdict on stdout (a ``verdict=<v> key=value`` line, or a ``--json``
-    object) in ``{dispatchable, already-running, corrupted, error}``:
+    object) in ``{dispatchable, already-running, refused, corrupted, error}``:
 
     \b
     - dispatchable    node free/stale. On a reserving call ``dispatch:<id>`` is
@@ -1297,6 +1446,8 @@ def cmd_spawn_guard(
                       a respawned worker - the caller maps this to skipped-contested,
                       x-ba4b), OR a racing dispatcher already holds ``dispatch:<id>``
                       (reason=reservation-held). No reservation acquired.
+    - refused        the durable dead-dispatch limit blocked another birth
+                      (reason=auto-deferred|defer-failed). No reservation acquired.
     - corrupted       the ``node:<id>`` claim is corrupted; launch nothing.
     - error           the claim probe failed or the reservation could not be
                       acquired (fail-closed); launch nothing.
@@ -1306,127 +1457,25 @@ def cmd_spawn_guard(
     so a stale ``fno`` without this verb (Typer "No such command") also fails
     closed in the caller.
     """
-    from fno.claims.cli import _parse_ttl
-    from fno.claims.core import ClaimHeldByOther, acquire_claim, claim_status
-
-    def _root_for(key: str):
-        # Delegate to the shared routing rule (fno.claims.io.claims_root_for):
-        # node:/dispatch:/reconcile: (global-id kinds) live in the global root,
-        # so spawn-guard dedups dispatch:<id> against advance/reconcile across
-        # repos; repo-local keys keep the cwd/env default.
-        from fno.claims.io import claims_root_for
-
-        return claims_root_for(key)
-
-    node_key = f"node:{node_id}"
-    res_key = f"dispatch:{node_id}"
-
-    def _emit(verdict: str, *, exit_code: int = 0, **fields: "str | None") -> "NoReturn":
-        obj: dict[str, str] = {"verdict": verdict}
-        for k, v in fields.items():
-            if v is not None:
-                obj[k] = v
-        if json_output:
-            line = json.dumps(obj)
-        else:
-            parts = [f"verdict={verdict}"]
-            for k, v in fields.items():
-                if v is None:
-                    continue
-                # detail is free text (spaces/punctuation) -> quote it; the rest
-                # are barewords the callers split on whitespace.
-                parts.append(f'{k}="{v}"' if k == "detail" else f"{k}={v}")
-            line = " ".join(parts)
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
-        raise typer.Exit(code=exit_code)
-
-    # ---- Guard 1: node-claim probe (fail CLOSED on any probe failure) -------
-    # claim_status is documented to never raise, but a crashing probe must never
-    # collapse to "free" and double-launch, so wrap defensively.
-    try:
-        info = claim_status(node_key, root=_root_for(node_key))
-    except Exception as exc:  # pragma: no cover - claim_status never raises today
-        _emit(
-            "error",
-            exit_code=3,
-            detail=(f"claim probe failed ({exc}); not dispatching to avoid a double-launch"),
-        )
-    state = info.get("state")
-    if not state:
-        _emit(
-            "error",
-            exit_code=3,
-            detail="claim status returned no parseable state; not dispatching",
-        )
-    if state == "live":
-        _emit("already-running", reason="live-claim", holder=info.get("holder") or "unknown")
-    if state == "suspect":
-        # x-ba4b: TTL-unexpired, dead pid (respawned worker). The TTL still
-        # protects the slot, so dispatch must skip-not-steal. The caller maps
-        # reason=suspect-claim to a `skipped-contested` outcome and advances.
-        _emit(
-            "already-running",
-            reason="suspect-claim",
-            holder=info.get("holder") or "unknown",
-        )
-    if state == "corrupted":
-        _emit(
-            "corrupted",
-            detail=(
-                f"node:{node_id} claim is corrupted; force-release or repair before dispatching"
-            ),
-        )
-    # state in {free, stale} -> a dispatchable candidate. stale = dead holder; the
-    # worker's atomic init-acquire reclaims it (recovery-via-redispatch preserved).
-
-    if no_reserve:
-        _emit("dispatchable")
-
-    # ---- Guard 2: dispatcher reservation (closes the boot-window race) ------
-    # A short-TTL create-only dispatch:<id> claim serializes two dispatchers with
-    # DIFFERENT worker names that both passed Guard 1 before either spawned. A
-    # racing peer gets held-by-other -> already-running; the caller releases on a
-    # spawn failure and lets it TTL-expire on success.
-    try:
-        acquire_claim(
-            res_key,
-            holder,
-            reason=f"bg-dispatch reservation for {node_id}",
-            ttl_ms=_parse_ttl(ttl),
-            root=_root_for(res_key),
-        )
-    except ClaimHeldByOther:
-        _emit("already-running", reason="reservation-held")
-    except Exception as exc:
-        # Any other failure - a malformed --ttl (ValueError from _parse_ttl),
-        # a claim validation/corruption/gone-away, or a filesystem error
-        # (OSError/PermissionError) - fails CLOSED as verdict=error rather than
-        # tracing out, so the caller still refuses to launch (gemini review).
-        _emit(
-            "error",
-            exit_code=3,
-            detail=f"could not acquire dispatch reservation {res_key} ({exc})",
-        )
-    # Visibility barrier (x-a7ab 1.2 / x-b44e): re-read dispatch:<id> AFTER the
-    # acquire to confirm THIS holder is the one on disk before launching. The
-    # create-only acquire already serializes two callers, but a peer whose
-    # exclusive create won a visibility-lagged race (or an FS where O_EXCL is
-    # not fully atomic across the acquire + launch) surfaces as a different
-    # holder here; that peer launches, this dispatcher skips with duplicate-
-    # claim so exactly one worker is born. Acquisition-before-observable-work
-    # is now a re-verified fact, not an assumption.
-    try:
-        post = claim_status(res_key, root=_root_for(res_key))
-    except Exception:  # pragma: no cover - claim_status never raises today
-        post = {}
-    if post.get("holder") != holder:
-        _emit(
-            "already-running",
-            reason="duplicate-claim",
-            holder=post.get("holder") or "unknown",
-        )
-    _emit("dispatchable", reservation_key=res_key, reservation_holder=holder)
+    obj, exit_code = _spawn_guard_decision(
+        node_id,
+        holder,
+        ttl=ttl,
+        no_reserve=no_reserve,
+        cwd=cwd,
+    )
+    if json_output:
+        line = json.dumps(obj)
+    else:
+        parts = [f"verdict={obj['verdict']}"]
+        for key, value in obj.items():
+            if key == "verdict":
+                continue
+            parts.append(f'{key}="{value}"' if key == "detail" else f"{key}={value}")
+        line = " ".join(parts)
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+    raise typer.Exit(code=exit_code)
 
 
 @agents_app.command("ask", hidden=True)

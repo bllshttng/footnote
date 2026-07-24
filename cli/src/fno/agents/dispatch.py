@@ -1798,6 +1798,21 @@ def dispatch_spawn(
     except ValueError as exc:
         raise DispatchAskError(str(exc), exit_code=2) from exc
 
+    if provider == "claude" and (role is not None or route_env):
+        from fno.agents.model_routing import (
+            RouteCompositionError,
+            resolve_spawn_route,
+        )
+
+        try:
+            route_env = resolve_spawn_route(
+                role,
+                route_env,
+                notice=lambda note: print(note, file=sys.stderr),
+            )
+        except RouteCompositionError as exc:
+            raise DispatchAskError(str(exc), exit_code=2) from exc
+
     # 3a. claude + --once -> refused immediately (before acquiring the lock,
     # since there is no state to protect).
     if provider == "claude" and once and not headless:
@@ -1842,9 +1857,7 @@ def dispatch_spawn(
             # uuid) instead of refused. Every other same-name case stays
             # fail-closed (live row, uuid mismatch, no --resume).
             existing = next((e for e in entries if e.name == name), None)
-            revive = existing is not None and _is_revival(
-                existing, provider, resume_session_id
-            )
+            revive = existing is not None and _is_revival(existing, provider, resume_session_id)
             if existing is not None and not revive:
                 raise DispatchAskError(
                     f"agent {name!r} already exists; "

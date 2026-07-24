@@ -4,6 +4,7 @@ The provider boundary (bg_create) is covered by test_provider_role_routing.py;
 these guards pin the wiring above it so a future refactor cannot silently drop
 the ``role`` kwarg between the CLI flag and the claude create path.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -75,6 +76,102 @@ def test_dispatch_spawn_defaults_role_to_none(
     )
     # Regression guard: the default spawn passes role=None (today's behavior).
     assert captured["role"] is None
+
+
+def test_direct_dispatch_spawn_refuses_managed_role_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-process spawn API cannot bypass atomic route composition."""
+    _setup_tmp_home(tmp_path, monkeypatch)
+
+    from fno.agents import model_routing
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+
+    monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
+    monkeypatch.setenv("FNO_PROVIDER_ID", "makers")
+    monkeypatch.setattr(
+        model_routing,
+        "resolve_route",
+        lambda *_a, **_k: {
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": "secret",
+            "ANTHROPIC_MODEL": "glm-5.2",
+        },
+    )
+
+    with pytest.raises(DispatchAskError, match="managed OAuth provider 'makers'"):
+        dispatch_spawn(
+            name="direct-route",
+            message="work",
+            provider="claude",
+            cwd=tmp_path,
+            role="tidy",
+        )
+
+
+def test_direct_pane_spawn_refuses_managed_route_before_mux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The direct pane API crosses the same composition refusal."""
+    _setup_tmp_home(tmp_path, monkeypatch)
+
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
+    monkeypatch.setenv("FNO_PROVIDER_ID", "makers")
+
+    def unexpected_runner(*_a: Any, **_k: Any) -> Any:
+        pytest.fail("managed route must refuse before mux spawn")
+
+    with pytest.raises(DispatchAskError, match="managed OAuth provider 'makers'"):
+        dispatch_spawn_pane(
+            name="direct-pane-route",
+            message="work",
+            provider="claude",
+            cwd=tmp_path,
+            role="tidy",
+            route_env={
+                "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "secret",
+                "ANTHROPIC_MODEL": "glm-5.2",
+            },
+            runner=unexpected_runner,
+        )
+
+
+@pytest.mark.parametrize("adapter", ["bg_create", "headless_create"])
+def test_direct_claude_adapter_refuses_managed_route_before_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: str
+) -> None:
+    """Even a direct provider-adapter call crosses the composition refusal."""
+    _setup_tmp_home(tmp_path, monkeypatch)
+
+    from fno.agents.model_routing import RouteCompositionError
+    from fno.agents.providers import claude
+
+    monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
+    monkeypatch.setenv("FNO_PROVIDER_ID", "makers")
+    monkeypatch.setattr(
+        claude,
+        "_subprocess_run",
+        lambda *_a, **_k: pytest.fail("refusal must precede the claude subprocess"),
+    )
+    route = {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "secret",
+        "ANTHROPIC_MODEL": "glm-5.2",
+    }
+    kwargs: dict[str, Any] = {
+        "message": "work",
+        "cwd": tmp_path,
+        "route_env": route,
+    }
+    if adapter == "bg_create":
+        kwargs["name"] = "direct-bg"
+
+    with pytest.raises(RouteCompositionError, match="managed OAuth provider 'makers'"):
+        getattr(claude, adapter)(**kwargs)
 
 
 class _Gate:

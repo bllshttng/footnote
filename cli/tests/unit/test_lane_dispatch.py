@@ -11,11 +11,11 @@ isolated `tmp_path` claims root, so the lane slots are genuinely held and the
 release path is exercised. `_ensure_lane_worktree` / `_spawn_worker` are
 monkeypatched (no real git / spawn).
 """
+
 from __future__ import annotations
 
-from pathlib import Path
-
 import tomllib
+import pytest
 
 from fno.backlog import advance
 from fno.claims.lanes import active_lane_count, find_lane_slot
@@ -196,6 +196,18 @@ def test_dispatch_reservation_skips_node_already_being_dispatched(tmp_path, monk
     # n-a's lane slot returned to the pool; only the good lane keeps one.
     assert find_lane_slot("n-a", root=tmp_path / "claims") is None
     assert active_lane_count(root=tmp_path / "claims") == 1
+
+
+@pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
+def test_lane_receipt_preserves_family2_refusal_reason(tmp_path, monkeypatch, reason):
+    ready = _nodes(("n-a", "code"))
+    calls = _wire(monkeypatch, tmp_path, ready)
+    monkeypatch.setattr(advance, "_node_dispatch_block_reason", lambda *_a: reason)
+
+    receipts = advance.dispatch_lanes(1, project_root=tmp_path, claims_root=tmp_path / "claims")
+
+    assert receipts == [{"node_id": "n-a", "status": "skipped", "error": reason}]
+    assert calls["spawns"] == []
 
 
 def test_seed_heals_symlinked_fno_before_writing(tmp_path):
