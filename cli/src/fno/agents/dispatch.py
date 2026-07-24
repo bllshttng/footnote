@@ -4078,6 +4078,28 @@ def _respawn_claude_session(short_id: str) -> int:
     return proc.returncode
 
 
+def _lineage_seed_prefix(root_uuid: str) -> str:
+    """The one-line lineage marker prefixed to a fork's seed prompt (x-eea5 1.2).
+
+    Carries the ROOT uuid durably in the transcript so the fork's own fence can
+    resolve its lineage. A registry field was the plan's first choice but is
+    NON-durable: the Rust daemon re-serializes registry rows and silently drops
+    Python-only fields (state.rs:75), so it would be a lying field - the exact
+    anti-pattern this node removes. The transcript is outside that loop.
+
+    ``root_uuid`` is the uuid the fork resumed from. The common mail-wake case
+    forks from the original, so the immediate parent IS the root; a fork-of-fork
+    carries its immediate parent (a documented tail; deep chains would need root
+    resolution across transcripts).
+    """
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    short_root = (root_uuid or "")[:8]
+    return (
+        f"[lineage: forked from {short_root} at {ts}; "
+        f"you are the claim-holding incarnation of {short_root}]"
+    )
+
+
 def wake_and_deliver(
     session_uuid: str, wrapped: str, *, cwd: Optional[Path] = None
 ) -> tuple[bool, str]:
@@ -4147,7 +4169,7 @@ def wake_and_deliver(
     try:
         result = dispatch_spawn(
             name=f"{_WAKE_NAME_PREFIX}{session_uuid[:8]}",
-            message=wrapped,
+            message=_lineage_seed_prefix(session_uuid) + "\n" + wrapped,
             provider="claude",
             cwd=cwd or Path.cwd(),
             resume_session_id=session_uuid,
@@ -4167,6 +4189,13 @@ def wake_and_deliver(
         return False, f"spawn-error-{type(exc).__name__}"
 
     short = getattr(result, "short_id", None) or getattr(result, "name", "") or "unknown"
+    # Rung 3 forked a new incarnation (x-eea5 1.2): make it loud. The receipt
+    # names both the new handle and the old lineage, and the seed prompt above
+    # carried the lineage prefix. A fork is never silent.
+    print(
+        f"forked new incarnation {short} from lineage {session_uuid[:8]}",
+        file=sys.stderr,
+    )
     return True, short
 
 

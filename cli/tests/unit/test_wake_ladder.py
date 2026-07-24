@@ -104,3 +104,55 @@ def test_fork_refusal_tokens_unchanged(monkeypatch):
     monkeypatch.setattr(dispatch, "dispatch_spawn", raise11)
     ok, reason = wake_and_deliver("uuid-full", "wake")
     assert ok is False and reason == "writer-possibly-live"
+
+
+# fork rung gate (x-eea5 1.2): lineage prefix + loud receipt ----------------- #
+def test_fork_seed_carries_lineage_prefix(monkeypatch):
+    # AC2-HP: a fork's seed prompt carries the lineage prefix naming the root.
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: None)
+    seeded = {}
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **k: seeded.update(k) or SimpleNamespace(short_id="new12345"),
+    )
+    wake_and_deliver("abcdef0123456789", "do the thing")
+    msg = seeded["message"]
+    assert msg.startswith("[lineage: forked from abcdef01 ")
+    assert "do the thing" in msg  # original prompt preserved after the prefix
+
+
+def test_fork_receipt_is_loud(monkeypatch, capsys):
+    # AC2-HP: the fork receipt names both the new handle and the old lineage.
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: None)
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **k: SimpleNamespace(short_id="new12345"),
+    )
+    wake_and_deliver("abcdef0123456789", "do the thing")
+    err = capsys.readouterr().err
+    assert "forked new incarnation new12345 from lineage abcdef01" in err
+
+
+def test_revive_does_not_prefix_or_fork(monkeypatch):
+    # Rung 2 revives in place: the inject gets the plain prompt (no lineage
+    # prefix - identity is preserved, there is no fork), and dispatch_spawn
+    # is never called.
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
+    monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
+    injected = {}
+    monkeypatch.setattr(
+        dispatch,
+        "_mail_inject_claude",
+        lambda u, t: injected.update(text=t) or True,
+    )
+    spawned = []
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **k: spawned.append(k) or SimpleNamespace(short_id="FORK"),
+    )
+    ok, detail = wake_and_deliver("abcdef0123456789", "do the thing")
+    assert ok is True and spawned == []
+    assert injected["text"] == "do the thing"  # no lineage prefix on a revive
