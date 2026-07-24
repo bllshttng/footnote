@@ -799,6 +799,29 @@ def _launch_agent_failures() -> dict[str, Any]:
     return {"applicable": True, "dead": dead}
 
 
+def _preamble_budget_line(repo_root: Optional[Path] = None) -> Optional[str]:
+    """Return the gate's quiet report, or None when it is absent or unrunnable."""
+    root = repo_root or Path.cwd()
+    gate = root / "scripts" / "ci" / "check-preamble-budget.sh"
+    if not gate.is_file():
+        return None
+    try:
+        proc = subprocess.Popen(
+            ["bash", str(gate), "--quiet", str(root)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        stdout, _ = proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return None
+    except OSError:
+        return None
+    return next((line for line in stdout.splitlines() if line.startswith("preamble:")), None)
+
+
 # ---------------------------------------------------------------------------
 # Verdict
 # ---------------------------------------------------------------------------
@@ -1707,6 +1730,10 @@ def doctor_command(
         _emit_human(result, src, rust, err=True, cargo_present=cargo_bin_present)
     else:
         _emit_human(result, src, rust, err=False, cargo_present=cargo_bin_present)
+        if not fix:
+            preamble_line = _preamble_budget_line()
+            if preamble_line is not None:
+                typer.echo(preamble_line)
 
     # Report BEFORE delegating: `fno update` execs/replaces this process.
     if fix:

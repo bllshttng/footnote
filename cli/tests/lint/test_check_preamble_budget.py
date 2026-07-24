@@ -130,3 +130,10 @@ def test_breach_teaches_trade_before_raise(tmp_path: Path) -> None:
     assert "CLAUDE.md 7000" in result.stderr
     assert "tok/turn" in result.stderr
     assert result.stderr.index("Trade:") < result.stderr.index("Raise CEILING_BYTES")
+
+
+def test_doctor_report_is_silent_when_gate_is_absent(tmp_path: Path) -> None:
+    """AC7-FR: consumer checkouts without the gate remain a normal case."""
+    from fno import doctor
+
+    assert doctor._preamble_budget_line(tmp_path) is None
