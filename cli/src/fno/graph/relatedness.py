@@ -34,6 +34,12 @@ _MIN_SCORE = 0.15
 _DOMAIN_BONUS = 0.10
 _EPIC_BONUS = 0.25
 
+# Filing-time dedup floor: above this an existing node is surfaced as a likely
+# duplicate when a new node is born. Evidence-based (plan x-6ac7 Overview):
+# real specimen duplicates score 0.568 and 0.447, the epic-sibling noise pair
+# sits at 0.234, and the floor is 0/1558 false positives on the live graph.
+_DEDUP_MIN_SCORE = 0.30
+
 
 class NoMapError(Exception):
     """The relatedness sidecar does not exist / could not be read.
@@ -67,8 +73,20 @@ def _epic_key(e: Entry) -> Optional[str]:
     return None
 
 
-def _score(a: Entry, b: Entry, ta: frozenset[str], tb: frozenset[str]) -> tuple[float, str]:
-    """Combined relatedness score for a pair + a one-line reason. 0 => drop."""
+def _score(
+    a: Entry,
+    b: Entry,
+    ta: frozenset[str],
+    tb: frozenset[str],
+    *,
+    include_epic: bool = True,
+) -> tuple[float, str]:
+    """Combined relatedness score for a pair + a one-line reason. 0 => drop.
+
+    ``include_epic`` drops the epic-parent bonus: dedup scoring calls with it
+    False, because two children of one epic are related, not duplicates, and the
+    +0.25 bonus would push an epic-sibling pair past the dedup threshold.
+    """
     reasons: list[str] = []
     combined = 0.0
 
@@ -85,10 +103,11 @@ def _score(a: Entry, b: Entry, ta: frozenset[str], tb: frozenset[str]) -> tuple[
         combined += _DOMAIN_BONUS
         reasons.append(f"shared domain '{da}'")
 
-    ea, eb = _epic_key(a), _epic_key(b)
-    if ea is not None and ea == eb:
-        combined += _EPIC_BONUS
-        reasons.append(f"same epic ({ea})")
+    if include_epic:
+        ea, eb = _epic_key(a), _epic_key(b)
+        if ea is not None and ea == eb:
+            combined += _EPIC_BONUS
+            reasons.append(f"same epic ({ea})")
 
     if combined < _MIN_SCORE:
         return 0.0, ""
@@ -122,6 +141,38 @@ def epic_candidates(
             continue
         score, reason = _score(entry, e, ta, _tokens(e))
         if score > 0.0:
+            scored.append((eid, score, reason))
+    scored.sort(key=lambda r: (-r[1], r[0]))
+    return scored[:k]
+
+
+def similar_nodes(
+    entry: Entry, entries: list[Entry], k: int = 3
+) -> list[tuple[str, float, str]]:
+    """Score ``entry`` against every live node for filing-time dedup, top-K.
+
+    The dedup twin of ``epic_candidates``: same ``_score`` substrate, narrowed
+    to duplicate detection at node birth. Three differences from rollup
+    scoring: every non-superseded node is a candidate (not just epics - a
+    shipped ``done`` node is the answer to a duplicate filing), the epic bonus
+    is excluded (siblings under one epic are related, not duplicates), and the
+    floor is the dedup threshold ``_DEDUP_MIN_SCORE`` instead of ``_MIN_SCORE``.
+    Ties break on id for reproducibility. The just-born node's own id is
+    excluded so a filing never warns about itself.
+    """
+    ta = _tokens(entry)
+    nid = entry.get("id")
+    scored: list[tuple[str, float, str]] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        eid = e.get("id")
+        if not isinstance(eid, str) or eid == nid:
+            continue
+        if e.get("status") == "superseded":
+            continue
+        score, reason = _score(entry, e, ta, _tokens(e), include_epic=False)
+        if score >= _DEDUP_MIN_SCORE:
             scored.append((eid, score, reason))
     scored.sort(key=lambda r: (-r[1], r[0]))
     return scored[:k]
