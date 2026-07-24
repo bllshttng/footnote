@@ -1,0 +1,33 @@
+name: pitfalls
+
+# check-pitfalls.sh gates the `## Pitfalls corpus (capped)` section of AGENTS.md:
+# fails on an 11th entry (context-cost cap), a missing graduates-to/added field,
+# or an entry older than 60 days. The corpus is injected at every SessionStart
+# on every harness, so the cap is a per-session context budget, not style.
+on:
+  push:
+    branches: [main]
+    paths: &pitfalls_paths
+      - AGENTS.md
+      - scripts/ci/check-pitfalls.sh
+      - .github/workflows/pitfalls.yml
+  pull_request:
+    paths: *pitfalls_paths
+
+concurrency:
+  group: pitfalls-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check-pitfalls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pitfalls corpus cap / fields / staleness
+        run: bash scripts/ci/check-pitfalls.sh

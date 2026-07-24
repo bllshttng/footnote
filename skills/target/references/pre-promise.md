@@ -201,6 +201,20 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/memory/write-memory-entry.sh" \
   --session-id "$SESSION_ID" \
   --candidate "$CANDIDATE"
 # exit 0 = wrote/updated; exit 2 = dedup (fine, no action needed); exit 1 = real error
+
+# Dual-emit ONLY for project-lesson candidates (type: project - a load-bearing
+# how-footnote-works lesson a stranger cloning the repo would need, NOT session
+# continuity). The type field is the discriminator (see "What qualifies").
+# Private memory is unreadable by codex and empty for worktree workers; the
+# corpus is the delivery channel that reaches every harness.
+if jq -e '.type == "project"' <<<"$CANDIDATE" >/dev/null 2>&1; then
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/memory/append-lesson-candidate.sh" \
+    --session-id "$SESSION_ID" \
+    --candidate "$CANDIDATE"
+  # Appends one line to ~/.fno/lesson-candidates.jsonl (home-keyed, worktree-
+  # independent). Warns + exits 0 on any failure - never blocks the memory write
+  # or <promise>. Promotion into AGENTS.md is a reviewed PR, never automatic.
+fi
 ```
 
 Use `"type": "feedback"` for corrections and surprises; `"type": "project"` for decisions, strategy, and validated architecture choices.

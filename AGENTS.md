@@ -16,6 +16,48 @@ Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical so
 7. **Reproduce before you fix.** Reproduce a bug end-to-end on the real user path before editing; the repro is also the proof the fix landed. When a UI is in the loop, exercise it and be picky (see #4).
 8. **Quality outweighs cost.** Weight quality, simplicity, robustness, and maintainability over effort-now. Never overrides #2.
 
+## Pitfalls corpus (capped)
+
+Hard-won traps a fresh agent re-hits because they are not yet a lint, guard, or refusal message. Inlined here (not a linked `.claude/rules/` file) because AGENTS.md is the one channel proven to reach every harness at session start: codex sees this inlined body but does not receive linked rule bodies, which auto-discover on Claude only. This is also the delivery target for the memory pass's lesson-candidate dual-emit, replacing the private-memory drain that codex cannot read and worktree workers never receive.
+
+**Cap: 10 active entries (context-cost budget).** AGENTS.md is injected at every SessionStart on every harness, so every entry is paid on every session start on every lane. Do not raise it; an entry too large to fit its budget graduates to a lint. `scripts/ci/check-pitfalls.sh` fails CI on an 11th entry, a missing field, or an entry older than 60 days.
+
+**Format:** one `###` block each. Imperative trap (1-3 sentences, this IS the budget), `specimens:` as bare file:line / PR refs, `graduates-to:` the lint/guard/refusal that lets it leave, `added:` YYYY-MM-DD. When a `graduates-to:` guard lands, remove the entry in the same PR that adds the guard (the guard is now the carrier, per principle 3's durability ladder).
+
+AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read to prove this corpus reached its harness; a lane that cannot has lost the delivery claim for it: `kdc-delivery-sentinel-1932`.
+
+### A guard placed on one of N reachable paths is decorative
+
+Before trusting a guard, enumerate every path a caller can reach (in-process test, exec'd binary, skill layer, direct CLI, spawned worker); a guard on only one reads as protection and ships green while the other paths stay broken. Behavior that lives only in skill prose is the same defect, since a direct CLI call or a non-Claude worker skips the skill layer and the rule never runs.
+
+- specimens: `crates/fno/src/squad_store.rs:36` (`#[cfg(test)]` isolation protects in-process tests; the exec'd binary is `cfg(not(test))` and writes the live squads file, 124 orphaned squads with no surviving origin), `cli/tests/unit/test_pr_ritual.py` (`_bare()` constructs `Ritual` bypassing `__init__`, so the one wrong line shipped non-functional and green, PR #575 fixed by #577), `skills/agent/scripts/normalize.sh` (`--yolo` and slash-verb translation skipped by a direct `fno agents spawn`).
+- graduates-to: the path-uniqueness lint that treats N reachable implementations of one operation as a CI failure, not a review catch.
+- added: 2026-07-23
+
+### Orienter output, claim snapshots, and liveness probes have all lied
+
+Footnote's receipt lines, manifest snapshots, process argv, and liveness probes have each been caught lying about a live session; only the live lockfile and the transcript told the truth at every point. `fno target start` can print `plan: none` while a plan is bound, `node=already-claimed` while the claim is free, and `base=origin/main` while the branch is stale. Verify the load-bearing lines against source: `fno backlog get <id>` for status and plan, `fno claim status node:<id>` for the holder, `git rev-list --count HEAD..origin/main` for the real base, and the transcript mtime for liveness.
+
+- specimens: `skills/target/SKILL.md` "Gotchas" (the receipt-can-lie cluster, and the rule that manifest claim fields are an init-time snapshot, not ownership truth).
+- graduates-to: the receipt-truth contract (init auto-first-fills `plan_path`, prints the live claim holder, verifies the base) and transcript-keyed session liveness.
+- added: 2026-07-23
+
+### `fno test` can report a false green
+
+The rtk tee wrapper and a wrong-import worktree can both mask a real failure as a pass, and bare `pytest` in a worktree imports the wrong `fno`. When a test's exit code is load-bearing, redirect output to a file and read `$?` directly; never trust piped output (`cmd | tail` overwrites the real exit code).
+
+- specimens: this repo runs two test trees and the root `tests/*.sh` are invisible to `pytest`; the pitfalls lint's own test in this change redirects to a file and asserts the exit code for exactly this reason.
+- graduates-to: a preflight/CI guard that fails on any exit code read through a tee or pipe.
+- added: 2026-07-23
+
+### Judgment delegated to a subprocess on a truncated context produces junk
+
+A subprocess seeing only a tail of structured signals makes wrong calls with full confidence; the deprecated distill path saw a 50-line tail and produced junk, which is why it was removed for cause. Keep all judgment (candidate selection, promotion, review) on full-context main threads; delegate only mechanical work to subprocesses.
+
+- specimens: `docs/architecture/memory-system.md:77` (why Haiku distillation was deprecated for cause).
+- graduates-to: a check that refuses to route a judgment call to a headless or bg subprocess.
+- added: 2026-07-23
+
 ## Repository
 
 ```
