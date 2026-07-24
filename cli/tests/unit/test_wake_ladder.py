@@ -18,8 +18,16 @@ def _entry(status, *, short="abc12345", name="wk-abc12345", sid="uuid-full"):
     )
 
 
+def _allow_rung2_claim(monkeypatch):
+    """Stub the rung-2 single-writer guard so the revive path runs without touching
+    the real claims substrate (F5)."""
+    monkeypatch.setattr(dispatch, "_acquire_rung2_guard", lambda u, s: "revive:test")
+    monkeypatch.setattr(dispatch, "_release_rung2_guard", lambda u, h: None)
+
+
 def test_roster_exited_revives_in_place(monkeypatch):
     # AC1-HP: a rostered-exited session revives via respawn + re-inject, never forks.
+    _allow_rung2_claim(monkeypatch)
     monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
     monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
     monkeypatch.setattr(dispatch, "_mail_inject_claude", lambda u, t: True)
@@ -50,6 +58,7 @@ def test_unrostered_falls_through_to_fork(monkeypatch):
 
 
 def test_respawn_failure_falls_through_to_fork(monkeypatch):
+    _allow_rung2_claim(monkeypatch)
     monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
     monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 1)  # non-zero
     spawned = []
@@ -63,6 +72,7 @@ def test_respawn_failure_falls_through_to_fork(monkeypatch):
 
 
 def test_respawn_ok_inject_miss_falls_through(monkeypatch):
+    _allow_rung2_claim(monkeypatch)
     monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
     monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
     monkeypatch.setattr(dispatch, "_mail_inject_claude", lambda u, t: False)
@@ -139,6 +149,7 @@ def test_revive_does_not_prefix_or_fork(monkeypatch):
     # Rung 2 revives in place: the inject gets the plain prompt (no lineage
     # prefix - identity is preserved, there is no fork), and dispatch_spawn
     # is never called.
+    _allow_rung2_claim(monkeypatch)
     monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
     monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
     injected = {}
@@ -156,3 +167,22 @@ def test_revive_does_not_prefix_or_fork(monkeypatch):
     ok, detail = wake_and_deliver("abcdef0123456789", "do the thing")
     assert ok is True and spawned == []
     assert injected["text"] == "do the thing"  # no lineage prefix on a revive
+
+
+def test_rung2_claim_held_falls_through_to_fork(monkeypatch):
+    # F5: a concurrent wake holds session:<uuid>; this caller must NOT respawn+
+    # inject (double delivery) but fall through to the fork rung, which claims/pins.
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
+    monkeypatch.setattr(dispatch, "_acquire_rung2_guard", lambda u, s: None)  # held by other
+    respawned = []
+    monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: respawned.append(s) or 0)
+    spawned = []
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **k: spawned.append(k) or SimpleNamespace(short_id="FORK"),
+    )
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+    assert ok is True and detail == "FORK"
+    assert respawned == []  # never respawned: the guard was held
+    assert spawned and spawned[0]["resume_session_id"] == "uuid-full"
