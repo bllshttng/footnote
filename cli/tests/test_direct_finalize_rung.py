@@ -2,16 +2,30 @@
 
 The finalize invocation is injected via the ``finalize_origin`` seam so no real
 ``fno-agents finalize`` fires; ``resolve_warm_session`` is stubbed so liveness is
-deterministic. A separate slow-marked smoke test exercises the REAL binary.
+deterministic. The cold ritual verb is injected via ``run_verb`` so no real
+``fno pr ritual`` subprocess fires. A separate slow-marked smoke test exercises
+the REAL binary.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from fno.graph._reconcile import (
+import pytest
+
+from fno.post_merge_route import (
+    ColdRitualResult,
     dispatch_post_merge_ritual,
     origin_transcript_exists,
 )
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_receipts(monkeypatch):
+    """Keep the receipt log hermetic: dispatch appends to the global events log
+    by default; redirect to a no-op so tests do not pollute ~/.fno/events.jsonl."""
+    import fno.post_merge_route as pmr
+
+    monkeypatch.setattr(pmr, "emit_receipt", lambda *a, **k: True)
 
 
 # --- US4: origin_transcript_exists probe ----------------------------------
@@ -66,14 +80,15 @@ def test_probe_false_for_non_claude_harness(tmp_path, monkeypatch):
 
 # --- US5: the direct-finalize middle rung ---------------------------------
 
-class _Spawn:
-    def __init__(self, short_id="cold1"):
-        self.short_id = short_id
+class _Verb:
+    """A cold-path verb-runner seam: records (pr, cwd), returns ok."""
+
+    def __init__(self):
         self.calls: list = []
 
     def __call__(self, pr_number, cwd):
         self.calls.append((pr_number, cwd))
-        return self.short_id
+        return ColdRitualResult(ok=True, tail="ok")
 
 
 def _dead_origin(monkeypatch):
@@ -91,17 +106,17 @@ def test_unknown_origin_never_direct_finalizes(tmp_path, monkeypatch):
     monkeypatch.setattr(route, "resolve_warm_session", lambda *a, **k: None)
     monkeypatch.setattr(route, "session_death_confirmed", lambda *a, **k: False)
     finalized: list = []
-    spawn = _Spawn()
+    verb = _Verb()
 
     res = dispatch_post_merge_ritual(
         6, dedup_key="shaUnknown", auto_run=True, canonical_root=tmp_path,
-        spawn=spawn, source_session_id="sid-unknown", source_harness="claude",
+        run_verb=verb, source_session_id="sid-unknown", source_harness="claude",
         source_cwd=cwd, finalize_origin=lambda *a: finalized.append(1) or True,
     )
 
     assert res.outcome == "dispatched"
     assert finalized == []
-    assert spawn.calls == [(6, str(tmp_path))]
+    assert verb.calls == [(6, str(tmp_path))]
 
 
 def test_transcript_only_dead_origin_direct_finalizes_without_truth_stub(
@@ -125,7 +140,7 @@ def test_transcript_only_dead_origin_direct_finalizes_without_truth_stub(
         dedup_key="shaTranscriptDead",
         auto_run=True,
         canonical_root=tmp_path,
-        spawn=_Spawn(),
+        run_verb=_Verb(),
         source_session_id="sid-transcript-dead",
         source_harness="claude",
         source_cwd=cwd,
@@ -137,8 +152,8 @@ def test_transcript_only_dead_origin_direct_finalizes_without_truth_stub(
 
 
 def test_dead_origin_direct_finalizes_then_runs_ritual_cold(tmp_path, monkeypatch):
-    # Finalize writes the ledger row, THEN falls through to the cold spawn so
-    # the post-merge ritual (retro/parking-lot/canonical-sync) still runs.
+    # Finalize writes the ledger row, THEN falls through to the cold verb so the
+    # post-merge ritual (retro/parking-lot/canonical-sync) still runs.
     cwd, projects = _mk_origin(tmp_path, "sid-live")
     _point_projects(monkeypatch, projects)
     _dead_origin(monkeypatch)
@@ -149,14 +164,14 @@ def test_dead_origin_direct_finalizes_then_runs_ritual_cold(tmp_path, monkeypatc
         seam_calls.append((source_cwd, transcript, harness))
         return True
 
-    spawn = _Spawn()
+    verb = _Verb()
     res = dispatch_post_merge_ritual(
         7, dedup_key="shaF", auto_run=True, canonical_root=tmp_path,
-        spawn=spawn, source_session_id="sid-live", source_harness="claude",
+        run_verb=verb, source_session_id="sid-live", source_harness="claude",
         source_cwd=cwd, finalize_origin=_fin,
     )
     assert res.outcome == "finalized-origin"  # ledger came from direct finalize
-    assert spawn.calls == [(7, str(tmp_path))]  # ritual STILL dispatched cold
+    assert verb.calls == [(7, str(tmp_path))]  # ritual STILL ran cold
     assert len(seam_calls) == 1
     assert seam_calls[0][0] == cwd and seam_calls[0][2] == "claude"
     assert seam_calls[0][1].endswith("sid-live.jsonl")
@@ -168,14 +183,14 @@ def test_finalize_nonzero_degrades_to_cold(tmp_path, monkeypatch):
     _point_projects(monkeypatch, projects)
     _dead_origin(monkeypatch)
 
-    spawn = _Spawn(short_id="coldX")
+    verb = _Verb()
     res = dispatch_post_merge_ritual(
         8, dedup_key="shaG", auto_run=True, canonical_root=tmp_path,
-        spawn=spawn, source_session_id="sid-fail", source_harness="claude",
+        run_verb=verb, source_session_id="sid-fail", source_harness="claude",
         source_cwd=cwd, finalize_origin=lambda *a: False,  # non-zero
     )
     assert res.outcome == "dispatched"  # AC2-ERR: degrade, never raise
-    assert spawn.calls == [(8, str(tmp_path))]
+    assert verb.calls == [(8, str(tmp_path))]
     assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaG").exists()
 
 
@@ -185,15 +200,15 @@ def test_missing_manifest_falls_to_cold(tmp_path, monkeypatch):
     _dead_origin(monkeypatch)
 
     called: list = []
-    spawn = _Spawn()
+    verb = _Verb()
     res = dispatch_post_merge_ritual(
         9, dedup_key="shaH", auto_run=True, canonical_root=tmp_path,
-        spawn=spawn, source_session_id="sid-nomani", source_harness="claude",
+        run_verb=verb, source_session_id="sid-nomani", source_harness="claude",
         source_cwd=cwd, finalize_origin=lambda *a: called.append(1) or True,
     )
     assert res.outcome == "dispatched"  # probe False -> rung skipped
     assert called == []  # finalize never invoked
-    assert spawn.calls == [(9, str(tmp_path))]
+    assert verb.calls == [(9, str(tmp_path))]
 
 
 def test_live_origin_never_direct_finalized(tmp_path, monkeypatch):
@@ -206,7 +221,7 @@ def test_live_origin_never_direct_finalized(tmp_path, monkeypatch):
     fin_called: list = []
     res = dispatch_post_merge_ritual(
         10, dedup_key="shaI", auto_run=True, canonical_root=tmp_path,
-        spawn=_Spawn(), source_session_id="sid-alive", source_harness="claude",
+        run_verb=_Verb(), source_session_id="sid-alive", source_harness="claude",
         source_cwd=cwd,
         warm_inject=lambda *a: (True, "delivered"),
         finalize_origin=lambda *a: fin_called.append(1) or True,

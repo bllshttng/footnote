@@ -122,8 +122,9 @@ FIELD_META: dict[str, Meta] = {
     ),
     "post_merge.auto_run": Meta(
         "advanced",
-        "Let merge-detection auto-dispatch the /fno:pr merged ritual for a "
-        "newly-merged PR (opt-in; default off).",
+        "Let the pr-watch daemon (the sole merge detector) run `fno pr ritual "
+        "<pr> --autonomous` for a newly-merged PR (opt-in; default off). "
+        "Reconcile no longer dispatches a ritual.",
     ),
     "post_merge.catchup_window_days": Meta(
         "advanced",

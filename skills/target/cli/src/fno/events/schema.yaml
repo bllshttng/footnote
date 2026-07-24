@@ -2180,7 +2180,7 @@ event_types:
     consumers: [operator]
 
   - name: pr_watch_dispatched
-    description: "PR-state watcher successfully fired a headless claude skill for one PR (either /fno:pr merged or /fno:pr check)."
+    description: "PR-state watcher handed one PR off successfully: 'review' fires the headless /fno:pr check skill; 'merge' routes the post-merge ritual (warm inject or a direct `fno pr ritual` run -- NOT a headless claude skill). Per-merge attribution lives in post_merge_dispatch_receipt."
     sources: [daemon]
     data:
       required: [kind, pr]
@@ -2188,10 +2188,65 @@ event_types:
         kind:
           type: string
           enum: [review, merge]
-          description: "Which skill was fired: 'review' for /fno:pr check, 'merge' for /fno:pr merged."
+          description: "Which hand-off succeeded: 'review' for the /fno:pr check skill fire, 'merge' for the post-merge ritual dispatch."
         pr:
           type: integer
           description: "GitHub PR number."
+        route:
+          type: string
+          enum: [warm, cold]
+          description: "Merge dispatches only: whether the ritual was injected into a live session ('warm') or run directly by the daemon ('cold')."
+
+  - name: post_merge_dispatch_receipt
+    description: "One lifecycle record for a post-merge ritual hand-off attempt. Reserved BEFORE any injection or ritual run, then accepted/failed/deferred after. Attribution and correlation only -- route selection never reads it, so it is not a dedup guard."
+    sources: [daemon]
+    data:
+      required: [dispatch_id, attempt_id, phase, pr, detector, route, outcome]
+      properties:
+        dispatch_id:
+          type: string
+          description: "Deterministic correlation key: the sanitized mergeCommit.oid, or the repo-scoped 'pr-<n>' fallback when GitHub omits the SHA. Crash retries share it."
+        attempt_id:
+          type: string
+          description: "Unique key for one reserve/action/result attempt. A retry after a crash gets a new attempt_id under the same dispatch_id."
+        phase:
+          type: string
+          enum: [reserved, accepted, failed, deferred]
+          description: "Lifecycle position: 'reserved' precedes the action; the rest record its result."
+        pr:
+          type: integer
+          description: "GitHub PR number."
+        node_id:
+          type: string
+          description: "Backlog node the merged PR belongs to, when known."
+        repo_slug:
+          type: string
+          description: "owner/repo of the merged PR, when known."
+        detector:
+          type: string
+          description: "Which detector observed the merge. 'pr-watch' is the sole detector after the cutover."
+        route:
+          type: string
+          enum: [warm, cold, defer]
+          description: "The single decision function's verdict for this attempt."
+        delivering_session_id:
+          type: string
+          description: "The session that SHIPPED the PR (latest pre-dispatch phase=ship provenance). Omitted when the node carries none."
+        delivering_harness:
+          type: string
+          description: "Harness of the shipping session."
+        borrowed_session_id:
+          type: string
+          description: "The live session the ritual was injected into. Warm routes only; often differs from the shipping session."
+        borrowed_harness:
+          type: string
+          description: "Harness of the borrowed session."
+        outcome:
+          type: string
+          description: "delivered | queued | completed | failed | pending, or the defer reason (e.g. auto-run-disabled)."
+        detail:
+          type: string
+          description: "Bounded diagnostic: the warm miss reason or the ritual receipt tail."
 
   - name: pr_watch_skipped
     description: "PR-state watcher skipped a candidate PR this tick without firing (no local checkout, or a live node/walker claim owns it)."

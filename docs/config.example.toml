@@ -123,7 +123,7 @@ self_reap = false
 # sync_command = <unset>   # optional; no default
 # Repo-relative fnmatch globs gating the canonical sync (empty = always run; e.g. `["cli/**", "crates/**"]` skips a docs-only merge).
 sync_paths = []
-# Let merge-detection auto-dispatch the /fno:pr merged ritual for a newly-merged PR (opt-in; default off).
+# Let the pr-watch daemon (the sole merge detector) run `fno pr ritual <pr> --autonomous` for a newly-merged PR (opt-in; default off). Reconcile no longer dispatches a ritual.
 auto_run = false
 # How far back the canonical-sync catch-up sweep looks for merges with no sync marker (default 3 days). Bounds the sweep so a fresh clone never re-syncs all history.
 catchup_window_days = 3
