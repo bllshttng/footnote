@@ -728,10 +728,12 @@ def test_successor_foreign_live_refuses(monkeypatch, tmp_path):
 
 
 def test_successor_ghost_node_refuses(monkeypatch, tmp_path):
-    # A node no longer in the graph is never re-acquired (no claim for a ghost).
+    # A node the manifest references but that is no longer in the graph is never
+    # re-acquired (no claim for a ghost).
     wt = tmp_path / "wt"
     wt.mkdir()
     _wire_happy(monkeypatch, wt, manifest_exists=True)
+    (wt / ".fno" / "target-state.md").write_text("session_id: x\ngraph_node_id: x-ghost\n")
     monkeypatch.setattr(
         target_cli, "_classify_node_claim", lambda n: ("dead_predecessor", {"state": "stale"})
     )
@@ -742,6 +744,42 @@ def test_successor_ghost_node_refuses(monkeypatch, tmp_path):
     assert result.exit_code == 1
     assert "not in the backlog graph" in result.output
     assert acq == []
+
+
+def test_free_text_rerun_not_treated_as_ghost(monkeypatch, tmp_path):
+    # F7: a free-text/plan-only session (no graph_node_id) rerun is NOT a ghost -
+    # it re-acquires and proceeds even though _find_node would return None.
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _wire_happy(monkeypatch, wt, manifest_exists=True)  # manifest: session_id only
+    monkeypatch.setattr(
+        target_cli, "_classify_node_claim", lambda n: ("dead_predecessor", {"state": "stale"})
+    )
+    monkeypatch.setattr(target_cli, "_find_node", lambda n: None)  # would look ghostly
+    acq = []
+    monkeypatch.setattr("fno.claims.core.acquire_claim", lambda *a, **k: acq.append(a[0]))
+    result = runner.invoke(target_app, ["start", "some feature text"])
+    assert result.exit_code == 0, result.output
+    assert "node=reacquired" in result.output
+    assert "not in the backlog graph" not in result.output
+    assert acq
+
+
+def test_reacquire_fails_closed_on_corrupt_claim(monkeypatch):
+    # F6: a corrupt prior claim (ClaimCorrupted) exits cleanly instead of
+    # tracebacking (the write can fail even when the read said "free").
+    from fno.claims.core import ClaimCorrupted
+
+    monkeypatch.setattr(target_cli, "_successor_claim_holder", lambda: "target-session:ME")
+    monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: 1)
+
+    def raise_corrupt(*a, **k):
+        raise ClaimCorrupted("corrupt prior claim")
+
+    monkeypatch.setattr("fno.claims.core.acquire_claim", raise_corrupt)
+    with pytest.raises(typer.Exit) as exc:
+        target_cli._reacquire_node_claim("N", Path("/wt"), {"state": "stale"})
+    assert exc.value.exit_code == 1
 
 
 def test_successor_free_claim_reacquires(monkeypatch, tmp_path):

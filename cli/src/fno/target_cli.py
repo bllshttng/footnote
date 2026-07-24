@@ -1303,7 +1303,7 @@ def _reacquire_node_claim(
     under its recovery mutex; a live-other race raises ``ClaimHeldByOther``
     (already filtered by the classifier, so this is a defensive backstop that
     parks loudly). Returns the holder now owning the claim."""
-    from fno.claims.core import acquire_claim, ClaimHeldByOther
+    from fno.claims.core import acquire_claim, ClaimCorrupted, ClaimHeldByOther
     from fno.claims.io import claims_root_for
     from fno.claims.session_pid import resolve_session_pid
 
@@ -1327,6 +1327,19 @@ def _reacquire_node_claim(
             node_id,
             {"holder": exc.holder, "pid": exc.pid, "host": exc.host},
             wt_path,
+        )
+        raise typer.Exit(code=1)
+    except (ClaimCorrupted, OSError) as exc:
+        # F6: a corrupt prior claim or an unreadable/unwritable claims dir is an
+        # unverifiable single-writer state. Fail closed with a clean refusal
+        # rather than a traceback - the classifier's "never wedges start" promise
+        # held only for the read; the write can still fail. Mirrors the fence.
+        typer.echo(
+            f"fno target start: cannot re-acquire {key}: "
+            f"{type(exc).__name__}: {exc}. The claim state is unreadable or "
+            f"corrupt; refusing to risk a duplicate claim. Clear it "
+            f"(fno claim force-release {key}) and retry.",
+            err=True,
         )
         raise typer.Exit(code=1)
     return holder
@@ -1487,11 +1500,14 @@ def start(
                 )
                 raise typer.Exit(code=1)
         # Ghost node: the manifest references a node no longer in the graph
-        # (superseded / removed). Never re-acquire a claim for a ghost.
-        if _find_node(node) is None:
+        # (superseded / removed). Never re-acquire a claim for a ghost. A
+        # free-text/plan-only session (graph_node_id null) has no node by design
+        # and is NOT a ghost - skip so a valid rerun proceeds (F7).
+        _manifest_node = _manifest_node_id(manifest)
+        if _manifest_node is not None and _find_node(_manifest_node) is None:
             typer.echo(
-                f"fno target start: node {node} is not in the backlog graph "
-                f"(superseded or removed); refusing to re-acquire its claim. "
+                f"fno target start: node {_manifest_node} is not in the backlog "
+                f"graph (superseded or removed); refusing to re-acquire its claim. "
                 f"Cancel the stale session (fno target cancel) or pick a live node.",
                 err=True,
             )
