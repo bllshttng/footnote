@@ -4038,6 +4038,46 @@ def _mail_inject_claude(recipient: str, text: str) -> bool:
         return False
 
 
+# Rung-2 (x-eea5 1.1) probe budget: a revived session needs a moment to bind its
+# control.sock before the rung-1 inject probe can land. Two short attempts bound
+# the wait; a miss falls through to the fork rung, which still delivers the mail.
+_RESPAWN_REINJECT_ATTEMPTS = 2
+_RESPAWN_REINJECT_DELAY_S = 1.0
+
+
+def _roster_entry_for_session(session_uuid: str) -> Optional["AgentEntry"]:
+    """The registry row whose ``harness_session_id`` is ``session_uuid``, or None.
+
+    Best-effort: an unreadable/missing registry returns None so rung 2 degrades
+    cleanly to the fork rung rather than blocking mail on registry state.
+    """
+    try:
+        for entry in load_registry():
+            if getattr(entry, "harness_session_id", None) == session_uuid:
+                return entry
+    except (OSError, RegistryVersionError):
+        return None
+    return None
+
+
+def _respawn_claude_session(short_id: str) -> int:
+    """Shell the public ``claude respawn <shortid>`` verb - the identity-
+    PRESERVING revival (same uuid, one roster row), the opposite of the
+    identity-breaking ``--bg --resume`` fork. Returns the honest subprocess exit
+    code; claude absent or a timeout return non-zero so the caller falls through.
+    """
+    try:
+        proc = subprocess.run(
+            ["claude", "respawn", short_id],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 127
+    return proc.returncode
+
+
 def wake_and_deliver(
     session_uuid: str, wrapped: str, *, cwd: Optional[Path] = None
 ) -> tuple[bool, str]:
@@ -4082,6 +4122,27 @@ def wake_and_deliver(
     """
     if not session_uuid:
         return False, "no-session-uuid"
+
+    # Rung 2 (x-eea5 1.1): an exited-but-rostered session revives IN PLACE via
+    # `claude respawn <shortid>` (identity-preserving: same uuid, one roster
+    # row), then the rung-1 inject probe re-runs against the revived session.
+    # A respawn miss (claude absent, non-zero) or an inject that still does not
+    # land in the probe budget falls through to the fork rung (rung 3) so the
+    # mail is never dropped. The x-7fef single-writer claim still guards rung 3.
+    entry = _roster_entry_for_session(session_uuid)
+    if entry is not None and getattr(entry, "status", None) == "exited":
+        short = (
+            getattr(entry, "short_id", None)
+            or getattr(entry, "name", "")
+            or session_uuid[:8]
+        )
+        if _respawn_claude_session(short) == 0:
+            for _attempt in range(_RESPAWN_REINJECT_ATTEMPTS):
+                if _mail_inject_claude(session_uuid, wrapped):
+                    return True, short  # revived in place: no new uuid, no new row
+                time.sleep(_RESPAWN_REINJECT_DELAY_S)
+        # respawn failed or the revived session did not accept the inject within
+        # the probe budget -> fall through to the fork rung.
 
     try:
         result = dispatch_spawn(
