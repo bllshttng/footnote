@@ -219,6 +219,8 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
     help=(
         "Run the Python suite (or `fno test rust ...` for the crates) with the "
         "real exit code, rtk bypassed, and PYTHONPATH pinned to the worktree. "
+        "Use this, never a bare `pytest` in a worktree: that imports the "
+        "canonical fno, lets rtk re-wrap the run, and masks the exit code. "
         "Full output goes to .fno/last-test.log; the transcript gets PASS or "
         "the failing tail. --stream restores full inherited-stdio output."
     ),

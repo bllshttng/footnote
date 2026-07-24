@@ -4,6 +4,7 @@ Verbs:
     merge  - merge a PR with the fno-canonical guards (-> _merge.py)
     verify - audit an external PR gate, merged|reviews (-> _verify.py)
     rebase - two-phase rebase with conflict delegation (-> _rebase.py)
+    logs   - tail the failing CI job, spool the rest (-> _logs.py)
 
 The four ``scripts/lib/pr-*.sh`` were ported to in-package Python shelling to
 gh/git, so these verbs run from a bare ``pip install fno`` with no repo-root
@@ -87,6 +88,42 @@ def status(pr_number: int = typer.Argument(..., help="GitHub PR number")) -> Non
         rc = _status.run_status(str(pr_number))
     except ToolMissing as exc:
         typer.echo(f"fno pr status: {exc.tool} not found on PATH", err=True)
+        rc = 127
+    raise typer.Exit(code=rc)
+
+
+@pr_app.command(
+    "logs",
+    help=(
+        "Why did CI fail: spool the failing job's log to .fno/last-ci.log and "
+        "print its last 40 lines. Omit <pr> to read the current branch. "
+        "--job picks among several failures, --lines resizes the tail, --full "
+        "dumps the whole log. Exit 0 green (nothing fetched), 1 red, 2 pending, "
+        "3 no checks, 4 fetch error, 127 gh-missing."
+    ),
+)
+def logs(
+    pr_number: Optional[int] = typer.Argument(
+        None, help="GitHub PR number; omitted -> the PR for the current branch."
+    ),
+    job: Optional[str] = typer.Option(
+        None, "--job", help="Failing check to tail (exact name, else substring)."
+    ),
+    lines: int = typer.Option(40, "--lines", help="Tail length."),
+    full: bool = typer.Option(False, "--full", help="Print the whole log, not a tail."),
+) -> None:
+    from fno.pr import _logs
+    from fno.pr._proc import ToolMissing
+
+    try:
+        rc = _logs.run_logs(
+            str(pr_number) if pr_number is not None else None,
+            job=job,
+            lines=lines,
+            full=full,
+        )
+    except ToolMissing as exc:
+        typer.echo(f"fno pr logs: {exc.tool} not found on PATH", err=True)
         rc = 127
     raise typer.Exit(code=rc)
 

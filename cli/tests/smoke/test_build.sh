@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)/cli"
+
+# Every assertion below inspects the INSTALLED wheel via `import fno` in the
+# throwaway venv, so an inherited PYTHONPATH pointing at src/ silently redirects
+# all of them to the source tree. preflight.sh exports exactly that, which is
+# why this file has twice reported a wheel defect that only existed in its own
+# environment. It cuts both ways: src/fno/events/schema.yaml exists, so the
+# schema assertions would PASS from source even if the wheel shipped nothing.
+unset PYTHONPATH
 uv sync --quiet
 uv build --quiet
 ls dist/*.whl >/dev/null
