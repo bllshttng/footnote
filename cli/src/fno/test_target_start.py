@@ -293,7 +293,10 @@ def test_desktop_canonical_start_refuses_without_project_assignment(
 
     assert result.exit_code == 1
     assert "no verified assignment" in result.output
-    assert calls == []
+    assert all(
+        "ensure" not in call[0][0] and "init" not in call[0][0]
+        for call in calls
+    )
 
 
 def _git_ok(cwd: Path, *args: str) -> str:
@@ -495,9 +498,16 @@ def test_native_codex_retry_initializes_in_app_owned_worktree(monkeypatch, tmp_p
     def fake_run(args, **kwargs):
         if "init" in args:
             init_calls.append((list(args), kwargs.get("cwd")))
+            (native / ".fno").mkdir()
+            (native / ".fno" / "target-state.md").write_text(
+                "graph_node_id: x-0b3f\n"
+            )
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        target_cli, "_classify_node_claim", lambda node: ("ours", {"state": "live"})
+    )
 
     result = runner.invoke(target_app, ["start", "x-0b3f"])
 
@@ -508,6 +518,80 @@ def test_native_codex_retry_initializes_in_app_owned_worktree(monkeypatch, tmp_p
     assert setup_calls == [(canonical, native)]
     assert len(init_calls) == 1
     assert init_calls[0][1] == str(native)
+
+
+def test_native_codex_initial_free_text_receipt_is_unclaimed(
+    monkeypatch, tmp_path, capsys
+):
+    canonical = tmp_path / "canonical"
+    native = tmp_path / "native"
+    canonical.mkdir()
+    native.mkdir()
+    monkeypatch.setattr(
+        target_cli, "_prepare_codex_native_branch", lambda cwd, node: "origin/main@abc"
+    )
+    monkeypatch.setattr(
+        "fno.worktree._run_setup_worktree_hook", lambda repo, wt: (0, "")
+    )
+    monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_node_model",
+        lambda node, explicit=None, provider=None: (None, "provider-default"),
+    )
+
+    def fake_run(args, **kwargs):
+        (native / ".fno").mkdir()
+        (native / ".fno" / "target-state.md").write_text("graph_node_id: null\n")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+
+    target_cli._start_codex_native(
+        canonical=canonical,
+        cwd=native,
+        node="some feature text",
+        plan_path=None,
+        size=None,
+        model=None,
+        harness=None,
+        beastmode=False,
+    )
+
+    assert "node=unclaimed" in capsys.readouterr().out
+
+
+def test_desktop_explicit_external_policy_skips_assignment_proof(
+    monkeypatch, tmp_path
+):
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-desktop")
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_session_meta",
+        lambda session_id: {
+            "id": session_id,
+            "cwd": str(canonical),
+            "originator": "Codex Desktop",
+        },
+    )
+    monkeypatch.setattr(
+        "fno.worktree_paths.resolve_worktree_policy",
+        lambda repo, harness: SimpleNamespace(
+            policy="external",
+            requested_policy="external",
+            degraded=False,
+            project="footnote",
+        ),
+    )
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_project_assignment",
+        lambda *args: pytest.fail("explicit external policy needs no app assignment"),
+    )
+
+    assert target_cli._codex_desktop_handoff_policy(canonical) is None
 
 
 def test_unverified_codex_worktree_refuses_instead_of_noop(monkeypatch, tmp_path):

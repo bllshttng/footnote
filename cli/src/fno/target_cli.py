@@ -1227,6 +1227,15 @@ def _codex_desktop_handoff_policy(repo_root: Path) -> Optional[Any]:
         return None
     if recorded_cwd != repo_root.resolve():
         return None
+    try:
+        from fno.worktree_paths import resolve_worktree_policy
+
+        policy = resolve_worktree_policy(repo_root, "codex")
+    except Exception:  # noqa: BLE001 - an unreadable policy must not claim native
+        return None
+    requested = getattr(policy, "requested_policy", policy.policy)
+    if requested != "harness-native":
+        return None
     if not _codex_project_assignment(
         identity.session_id, repo_root, repo_root
     ):
@@ -1237,14 +1246,7 @@ def _codex_desktop_handoff_policy(repo_root: Path) -> Optional[Any]:
             err=True,
         )
         raise typer.Exit(code=1)
-    try:
-        from fno.worktree_paths import resolve_worktree_policy
-
-        policy = resolve_worktree_policy(repo_root, "codex")
-    except Exception:  # noqa: BLE001 - an unreadable policy must not claim native
-        return None
-    requested = getattr(policy, "requested_policy", policy.policy)
-    return policy if requested == "harness-native" else None
+    return policy
 
 
 def _remote_base_ref(cwd: Path, *, fetch: bool = False) -> str:
@@ -1459,13 +1461,7 @@ def _start_codex_native(
                 manifest_text = manifest.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 manifest_text = ""
-            explicitly_unclaimed = bool(
-                re.search(
-                    r"^graph_node_id\s*:\s*(?:null|['\"]?['\"]?)\s*$",
-                    manifest_text,
-                    re.MULTILINE,
-                )
-            )
+            explicitly_unclaimed = _manifest_is_explicitly_unclaimed(manifest_text)
             if manifest_node is not None or not explicitly_unclaimed:
                 typer.echo(
                     f"fno target start: {manifest} does not contain a valid "
@@ -1534,10 +1530,41 @@ def _start_codex_native(
             err=True,
         )
         raise typer.Exit(code=init.returncode)
+    created_node = _manifest_node_id(manifest)
+    if created_node is None:
+        try:
+            manifest_text = manifest.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            manifest_text = ""
+        if not _manifest_is_explicitly_unclaimed(manifest_text):
+            typer.echo(
+                f"fno target start: target init exited successfully but {manifest} "
+                "does not contain valid claim provenance; refusing success receipt.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        claim_state = "unclaimed"
+    else:
+        if created_node != node:
+            typer.echo(
+                f"fno target start: target init recorded node {created_node}, not "
+                f"{node}; refusing success receipt.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        verdict, info = _classify_node_claim(created_node)
+        if verdict != "ours":
+            typer.echo(
+                f"fno target start: target init did not leave this thread owning "
+                f"node:{created_node} (claim={verdict}); refusing success receipt.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        claim_state = "claimed"
     model_note = f"  model={resolved_model} ({source})" if resolved_model else ""
     typer.echo(
         f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  "
-        f"node=claimed{model_note}"
+        f"node={claim_state}{model_note}"
     )
 
 
@@ -1552,6 +1579,16 @@ def _manifest_node_id(manifest: Path) -> Optional[str]:
         return None
     val = m.group(1).strip().strip("\"'")
     return None if (not val or val == "null") else val
+
+
+def _manifest_is_explicitly_unclaimed(text: str) -> bool:
+    return bool(
+        re.search(
+            r"^graph_node_id\s*:\s*(?:null|''|\"\")\s*$",
+            text,
+            re.MULTILINE,
+        )
+    )
 
 
 def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
