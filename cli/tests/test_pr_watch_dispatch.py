@@ -9,13 +9,10 @@ filesystem-global writes.  Temporary directories replace ~/.fno.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
-import tempfile
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Literal, Optional
-from unittest.mock import MagicMock, call, patch
+from typing import Optional
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -156,7 +153,7 @@ class TestWatermarkStore:
 
     def test_missing_repo_slug_fallback_key(self, tmp_path):
         """AC-EDGE: None repo_slug falls back to str(pr_number) as the key."""
-        from fno.pr_watch._state import WatermarkStore, make_watermark_key
+        from fno.pr_watch._state import make_watermark_key
 
         key = make_watermark_key(repo_slug=None, pr_number=99)
         assert key == "99"
@@ -249,6 +246,10 @@ class TestFireSkill:
 
         fire_skill("check", 7, tmp_path, runner=stub_runner)
         cmd_str = " ".join(str(c) for c in captured["cmd"])
+        assert captured["cmd"][:3] != ["claude", "--print", "--output-format"]
+        assert "agents" in captured["cmd"] and "spawn" in captured["cmd"]
+        assert captured["cmd"][captured["cmd"].index("--substrate") + 1] == "headless"
+        assert captured["cmd"][captured["cmd"].index("--harness") + 1] == "claude"
         assert "check" in cmd_str
         assert "7" in cmd_str
         # `autonomous` is merged-only; check must not carry it.
@@ -1294,7 +1295,6 @@ class TestDispatchEntryGuards:
     def test_non_dict_entry_is_treated_as_none_re_baselines(self, tmp_path):
         """AC-gemini-medium _dispatch:352: a non-dict store entry -> treated as None (re-baseline)."""
         from fno.pr_watch._dispatch import tick
-        from fno.pr_watch._state import WatermarkStore
 
         store_path = tmp_path / "state.json"
         # Write a corrupt entry: value is a string, not a dict

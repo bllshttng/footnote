@@ -17,7 +17,6 @@ stay function-local so the graph/pr_watch import graphs pick up nothing new.
 """
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 import uuid
@@ -25,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Tuple
 
-from fno.harness_identity import HARNESS_SESSION_MARKERS
+from fno.harness_identity import current_session_ids
 
 # The injected turn: the SAME mechanical verb the cold path runs as a subprocess
 # (Locked Decision 11). Warm and cold execute one identical bounded command and
@@ -34,18 +33,6 @@ from fno.harness_identity import HARNESS_SESSION_MARKERS
 # so a borrowed live session cannot re-derive the ritual unbounded (the PR #575
 # -> #577 failure mode this closes).
 WARM_PROMPT = "fno pr ritual {pr} --autonomous"
-
-# The self-inject guard follows the same shared precedence used to stamp node
-# provenance, plus the legacy Claude marker for compatibility.
-_SELF_SESSION_ENV_VARS = tuple(marker for marker, _ in HARNESS_SESSION_MARKERS) + (
-    "CLAUDE_SESSION_ID",
-)
-
-
-def _current_session_ids() -> set[str]:
-    """The running session's own id(s) from the ambient env (non-empty only)."""
-    return {v for k in _SELF_SESSION_ENV_VARS if (v := (os.environ.get(k) or "").strip())}
-
 
 def _live_codex_registry_entry(session_id: str):
     """A codex registry candidate addressable as ``session_id``, preferring one
@@ -136,7 +123,7 @@ def resolve_warm_session(
     sid = (source_session_id or "").strip()
     if not sid:
         return None
-    if sid in _current_session_ids():
+    if sid in current_session_ids():
         return None
     harness = (source_harness or "claude").strip().lower()
     if harness == "claude":

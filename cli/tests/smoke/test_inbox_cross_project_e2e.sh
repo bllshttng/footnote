@@ -44,7 +44,7 @@ echo '{"_lock_version": 1, "entries": []}' > "$FAKE_HOME/.fno/graph.json"
 
 run_fno() {
   FNO_INBOX_ROOT="$INBOX_ROOT" HOME="$FAKE_HOME" \
-    FNO_INBOX_TRIAGE_STUB="$STUB" \
+    FNO_LLM_STUB="$STUB" \
     uv run --project "$CLI_DIR" fno-py "$@"
 }
 

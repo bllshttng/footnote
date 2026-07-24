@@ -346,6 +346,25 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
     assert "run" not in opencode and "--session-id" not in opencode
 
 
+def test_build_pane_argv_normalizes_direct_slash_commands(tmp_path: Path) -> None:
+    """Direct ``fno agents spawn`` calls bypass resolve_dispatch.
+
+    The pane argv builder is therefore a load-bearing normalization choke point,
+    including for the advertised plugin-qualified command spelling.
+    """
+    from fno.agents.mux_spawn import build_pane_argv
+
+    assert build_pane_argv(
+        "codex", "/fno:target x-81ad", tmp_path, False, None
+    )[-1] == "$fno:target x-81ad"
+    assert build_pane_argv(
+        "opencode", "/fno:target x-81ad", tmp_path, False, None
+    )[2] == "/fno:target x-81ad"
+    assert build_pane_argv(
+        "claude", "/fno:target x-81ad", tmp_path, False, "uuid"
+    )[-1] == "/fno:target x-81ad"
+
+
 def test_build_pane_argv_forwards_model(tmp_path: Path) -> None:
     # x-c772: an explicit --model reaches every pane provider's TUI flag
     # (opencode included, now that it is spawnable). Exact passthrough; opencode
@@ -675,6 +694,7 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
             pane_id=9,
             child_pid=111,
             session_uuid="u-1",
+            effective_message="$fno:target x-81ad",
         )
 
     import fno.agents.mux_spawn as mux_spawn
@@ -688,17 +708,21 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
 
     runner = CliRunner()
-    result = runner.invoke(agents_cli.agents_app, ["spawn", "--name", "peer", "--harness", "claude"])
+    result = runner.invoke(
+        agents_cli.agents_app,
+        ["spawn", "--name", "peer", "--harness", "codex", "/fno:target x-81ad"],
+    )
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.output.strip().splitlines()[-1])
     assert receipt == {
         "name": "peer",
         "short_id": "",
-        "provider": "claude",
+        "provider": "codex",
         "provider_source": "explicit",  # dispatch-provider provenance
         "status": "live",
         "mux_session": "main",
         "pane_id": 9,
+        "effective_message": "$fno:target x-81ad",
     }
 
 

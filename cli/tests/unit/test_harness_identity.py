@@ -9,6 +9,8 @@ from fno.harness_identity import (
     HarnessIdentity,
     LEGACY_HANDLE_RE,
     canonical_handle,
+    current_session_id,
+    current_session_ids,
     resolve_harness_identity,
 )
 
@@ -50,6 +52,18 @@ def test_whitespace_markers_are_skipped_in_precedence_order():
 
 def test_no_marker_returns_empty_identity():
     assert resolve_harness_identity({}) == HarnessIdentity(None, None)
+
+
+def test_current_session_helpers_share_precedence_and_legacy_fallback():
+    env = {
+        "CODEX_THREAD_ID": " thread ",
+        "CLAUDE_CODE_SESSION_ID": "claude",
+        "CLAUDE_SESSION_ID": "legacy",
+    }
+    assert current_session_id(env) == "thread"
+    assert current_session_ids(env) == {"thread", "claude", "legacy"}
+    assert current_session_id({"CLAUDE_SESSION_ID": " legacy "}) == "legacy"
+    assert current_session_ids({}) == set()
 
 
 def test_ac1_hp_canonical_handle_is_bare_first8():

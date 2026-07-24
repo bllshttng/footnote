@@ -405,6 +405,16 @@ impl ProviderWithPty for ClaudeInteractiveProvider {
 pub struct CodexProvider;
 
 impl CodexProvider {
+    fn normalize_command(message: &str) -> String {
+        if let Some(verb) = message.strip_prefix("/fno:") {
+            format!("$fno:{verb}")
+        } else if let Some(verb) = message.strip_prefix('/') {
+            format!("$fno:{verb}")
+        } else {
+            message.to_string()
+        }
+    }
+
     fn sandbox_create(yolo: bool) -> Vec<String> {
         // codex.py::sandbox_flag (LD5/LD6): mutually exclusive; never both.
         if yolo {
@@ -446,7 +456,7 @@ impl Provider for CodexProvider {
             argv.push("-c".into());
             argv.push(format!("model_reasoning_effort={effort}"));
         }
-        argv.push(ctx.message.clone());
+        argv.push(Self::normalize_command(&ctx.message));
         argv
     }
 
@@ -460,7 +470,7 @@ impl Provider for CodexProvider {
             "--skip-git-repo-check".into(),
         ];
         argv.extend(Self::sandbox_resume(ctx.yolo));
-        argv.push(ctx.message.clone());
+        argv.push(Self::normalize_command(&ctx.message));
         argv
     }
 
@@ -1326,6 +1336,34 @@ mod tests {
         assert!(argv
             .windows(2)
             .any(|w| w == ["-c", "model_reasoning_effort=high"]));
+    }
+
+    #[test]
+    fn codex_create_and_resume_normalize_direct_slash_commands() {
+        let mut create = create_ctx();
+        create.message = "/fno:target x-81ad".into();
+        assert_eq!(
+            CodexProvider
+                .create_argv(&create)
+                .last()
+                .map(String::as_str),
+            Some("$fno:target x-81ad")
+        );
+
+        let resume = ResumeContext {
+            session_id: "uuid-1".into(),
+            message: "/fno:target x-81ad".into(),
+            cwd: PathBuf::from("/x"),
+            from_name: None,
+            yolo: false,
+        };
+        assert_eq!(
+            CodexProvider
+                .resume_argv(&resume)
+                .last()
+                .map(String::as_str),
+            Some("$fno:target x-81ad")
+        );
     }
 
     #[test]

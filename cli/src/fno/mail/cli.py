@@ -907,7 +907,9 @@ class UnreachableTokenError(Exception):
 
 def _is_self_send(recipient: Optional[str]) -> bool:
     """True when the sender is addressing its own session."""
-    own = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    from fno.harness_identity import current_session_id
+
+    own = current_session_id() or ""
     if not own or not recipient:
         return False
     from fno.harness_identity import canonical_handle

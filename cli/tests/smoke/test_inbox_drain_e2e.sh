@@ -49,7 +49,7 @@ FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py mail send \
 
 # Drain (triage stub stands in for the LLM; graph writes land in $WORK/.fno).
 DRAIN_JSON=$(FNO_INBOX_ROOT="$INBOX_ROOT" \
-  FNO_INBOX_TRIAGE_STUB="$STUB" \
+  FNO_LLM_STUB="$STUB" \
   uv run --project "$CLI_DIR" fno-py mail drain --from "$PROJECT" --json --max 10)
 
 # 3 results, 3 distinct actions.

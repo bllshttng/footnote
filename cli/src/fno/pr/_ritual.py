@@ -200,7 +200,9 @@ def _session_holder() -> str:
     A shared constant would read as an idempotent re-acquire and silently
     defeat the mutex; session-keyed holders keep two racing runners distinct.
     """
-    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    from fno.harness_identity import current_session_id
+
+    sid = current_session_id() or ""
     if not sid:
         try:
             r = _run([*fno_py_cmd(), "claim", "session-pid"], timeout=10.0)

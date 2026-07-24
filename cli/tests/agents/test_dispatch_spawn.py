@@ -20,19 +20,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
 
 from fno.paths_testing import use_tmpdir
-from fno.agents import events as events_mod
 from fno.agents.providers import codex as codex_mod
 from fno.agents.providers.codex import (
     CodexInvocationError,
     CodexResult,
-    CodexTimeoutError,
-    NoSessionIdError,
 )
 from fno.agents.registry import (
     AgentEntry,
@@ -147,6 +144,22 @@ def test_spawn_once_codex_happy_path(workdir, fake_codex_create_once, monkeypatc
     )
 
 
+def test_spawn_once_codex_normalizes_direct_plugin_command(
+    workdir, fake_codex_create_once
+) -> None:
+    """The Python headless fallback is a direct-spawn choke point too."""
+    from fno.agents.cli import agents_app
+
+    result = _make_runner().invoke(
+        agents_app,
+        ["spawn", "--name", "tmp-skill", "-H", "codex", "--once", "/fno:target x-81ad"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert fake_codex_create_once.call_args.kwargs["prompt"] == "$fno:target x-81ad"
+
+
 # ---------------------------------------------------------------------------
 # AC2-ERR: provider create fails -> no registry entry, nonzero exit
 # ---------------------------------------------------------------------------
@@ -247,7 +260,6 @@ def test_spawn_once_teardown_failure(workdir, fake_codex_create_once, monkeypatc
         call_count[0] += 1
         if call_count[0] > 1:
             # Second call is the teardown removal - make it fail
-            from fno.agents.registry import RegistryVersionError
             raise OSError("simulated teardown failure")
         return original_update(updater)
 
@@ -319,6 +331,24 @@ def test_spawn_claude_plain(workdir_claude) -> None:
     assert entry is not None, "registry row must exist after claude spawn"
     assert entry.harness == "claude"
     assert entry.short_id == receipt["short_id"]
+
+
+def test_spawn_claude_command_receipt_names_effective_message(workdir_claude) -> None:
+    """A healthy receipt must reveal whether a skill payload stayed dispatched."""
+    from fno.agents.cli import agents_app
+
+    result = _make_runner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "command-c", "-H", "claude",
+            "/fno:pr check 7", "--substrate", "bg",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output.splitlines()[0])
+    assert receipt["effective_message"] == "/fno:pr check 7"
 
 
 def test_spawn_claude_receipt_surfaces_moved_cwd(workdir_claude, monkeypatch) -> None:

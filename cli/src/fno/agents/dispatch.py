@@ -39,6 +39,7 @@ from typing import Any, Callable, Iterator, Literal, Mapping, Optional
 from fno import paths
 from fno.agents import events
 from fno.agents.context import EventContext, build_context
+from fno.agents.harness_map import normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.providers import KNOWN_PROVIDERS
 from fno.agents.providers.base import ProviderResult, ReachabilityProbeError
@@ -1652,6 +1653,7 @@ class SpawnResult:
     provider: str
     short_id: str
     reply: Optional[str] = None
+    effective_message: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Convert the prose contract into a runtime trip-wire (sigma-review
@@ -1798,6 +1800,11 @@ def dispatch_spawn(
     except ValueError as exc:
         raise DispatchAskError(str(exc), exit_code=2) from exc
 
+    effective_message: Optional[str] = None
+    if message.strip().startswith(("/", "$fno:")):
+        message = normalize_command(message, provider)
+        effective_message = message
+
     if provider == "claude" and (role is not None or route_env):
         from fno.agents.model_routing import (
             RouteCompositionError,
@@ -1934,6 +1941,7 @@ def dispatch_spawn(
                             provider="claude",
                             short_id="",
                             reply=result.stdout,
+                            effective_message=effective_message,
                         )
                     created = _claude_create_path(
                         name=name,
@@ -1961,6 +1969,7 @@ def dispatch_spawn(
                         name=name,
                         provider="claude",
                         short_id=created.short_id,
+                        effective_message=effective_message,
                     )
 
                 # 4c. codex --once: create + exchange + teardown.
@@ -2011,6 +2020,7 @@ def dispatch_spawn(
                     provider=provider,
                     short_id=session_or_short_id,
                     reply=create_result.reply,
+                    effective_message=effective_message,
                 )
             finally:
                 _DISPATCH_CTX.reset(ctx_token)

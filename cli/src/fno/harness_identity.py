@@ -17,6 +17,10 @@ HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
     ("GEMINI_SESSION_ID", "gemini"),
 )
 
+LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
+    ("CLAUDE_SESSION_ID", "claude"),
+)
+
 
 # The mailbox handle is the bare first-8 of the session id - the same prefix that
 # already keys resume/attach/peek/transcripts/registry, so a session has ONE
@@ -112,3 +116,26 @@ def resolve_harness_identity(
         if session_id:
             return HarnessIdentity(session_id=session_id, harness=harness)
     return HarnessIdentity(session_id=None, harness=None)
+
+
+def current_session_id(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
+    """Return the canonical ambient session id, with legacy Claude fallback."""
+    environ = os.environ if env is None else env
+    identity = resolve_harness_identity(environ)
+    if identity.session_id:
+        return identity.session_id
+    for marker, _ in LEGACY_HARNESS_SESSION_MARKERS:
+        session_id = (environ.get(marker) or "").strip()
+        if session_id:
+            return session_id
+    return None
+
+
+def current_session_ids(env: Optional[Mapping[str, str]] = None) -> set[str]:
+    """Return every nonblank canonical or legacy ambient session id."""
+    environ = os.environ if env is None else env
+    return {
+        session_id
+        for marker, _ in (*HARNESS_SESSION_MARKERS, *LEGACY_HARNESS_SESSION_MARKERS)
+        if (session_id := (environ.get(marker) or "").strip())
+    }

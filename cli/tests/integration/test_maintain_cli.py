@@ -166,7 +166,6 @@ def test_maintain_cli_judgment_legs_propose_only(tmp_graph):
             _node("ab-dup02", title="same  idea!", created_at=old),
         ],
     )
-    before = _read(tmp_graph)
     # Even WITH --apply, dedup + drain must not mutate.
     result = _invoke(["--apply", "--json"])
     assert result.exit_code == 0, result.output
@@ -484,7 +483,7 @@ def validity_env(tmp_path, monkeypatch):
         "  for pk in ctx['packets']]}))\n"
     )
     stub.chmod(0o755)
-    monkeypatch.setenv("FNO_VALIDITY_STUB", str(stub))
+    monkeypatch.setenv("FNO_LLM_STUB", str(stub))
     return deck_root
 
 
@@ -521,7 +520,7 @@ def test_validity_ac2_err_analyzer_failure_degraded_deck(tmp_graph, tmp_path, mo
     boom = tmp_path / "boom.sh"
     boom.write_text("#!/usr/bin/env bash\nexit 1\n")
     boom.chmod(0o755)
-    monkeypatch.setenv("FNO_VALIDITY_STUB", str(boom))
+    monkeypatch.setenv("FNO_LLM_STUB", str(boom))
     _seed(tmp_graph, [_old_idea(f"ab-d{i}", 90 + i) for i in range(3)])
     r = _invoke([])
     assert r.exit_code == 0, r.output

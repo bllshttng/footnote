@@ -1,7 +1,7 @@
 """Inbox triage seam: LLM-backed decision on heads-up threads.
 
-Shells out to ``claude -p`` (or an ``FNO_INBOX_TRIAGE_STUB`` test script).
-Refuses to call the real LLM in pytest or CI when no stub is configured.
+Uses the shared one-shot LLM boundary and refuses a real model under pytest/CI
+when the shared test seam is absent.
 
 Public API:
     TriageSettings      - configuration dataclass
@@ -13,7 +13,6 @@ Public API:
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -24,6 +23,7 @@ from typing import Literal, Optional
 import yaml
 
 from fno import _subprocess_util
+from fno.llm import llm_call
 from fno.inbox.store import (
     ThreadHandle,
     resolve_project,
@@ -301,33 +301,6 @@ def _log_triage_error(thread_id: str, reason: str, errors_path: Path) -> None:
 # Subprocess runner
 # ---------------------------------------------------------------------------
 
-def _build_claude_cmd(schema: dict, settings: TriageSettings) -> list[str]:
-    """Build the real ``claude -p`` argv for a triage call.
-
-    ``--bare`` skips Claude Code's normal auth precedence: per the authentication
-    docs it reads ONLY ``ANTHROPIC_API_KEY`` or an ``apiKeyHelper`` - never the
-    keychain OAuth credential or ``CLAUDE_CODE_OAUTH_TOKEN``. On a
-    subscription-OAuth machine with no API key, ``--bare`` returns
-    "Not logged in" and silently strands the drain. (Inbox triage shipped with
-    ``--bare`` hardcoded, so it never worked under subscription auth.) Pass
-    ``--bare`` ONLY when an API key is present - the one mode where it can
-    authenticate - and otherwise use plain ``claude -p``, which honors the full
-    auth precedence (OAuth included). ``--bare`` only saves a little startup
-    time; it is not worth losing auth for a triage call.
-    """
-    cmd = ["claude", "-p"]
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        cmd.append("--bare")
-    cmd += [
-        "--output-format", "json",
-        "--json-schema", json.dumps(schema),
-        "--append-system-prompt", "You are a triage agent. Respond with JSON only.",
-    ]
-    if settings.model:
-        cmd.extend(["--model", settings.model])
-    return cmd
-
-
 def _raise_on_claude_error(stdout: str) -> None:
     """Fail loud when claude's JSON envelope reports an error.
 
@@ -356,29 +329,15 @@ def _raise_on_claude_error(stdout: str) -> None:
 
 
 def _run_claude_p(prompt: str, schema: dict, settings: TriageSettings) -> str:
-    """Run claude -p (or stub) with prompt on stdin. Return stdout string."""
-    stub_path = os.environ.get("FNO_INBOX_TRIAGE_STUB")
-
-    in_pytest = os.environ.get("PYTEST_CURRENT_TEST") is not None
-    in_ci = os.environ.get("CI", "").lower() in ("true", "1", "yes")
-    if not stub_path and (in_pytest or in_ci):
-        raise RuntimeError(
-            "FNO_INBOX_TRIAGE_STUB not configured; "
-            "refusing to call real claude -p in tests"
-        )
-
-    if stub_path:
-        cmd = [stub_path]
-    else:
-        cmd = _build_claude_cmd(schema, settings)
-
-    result = subprocess.run(
-        cmd,
-        input=prompt,
-        capture_output=True,
-        text=True,
+    """Run the shared one-shot LLM boundary and return its stdout."""
+    result = llm_call(
+        prompt,
+        schema=schema,
+        system_prompt="You are a triage agent. Respond with JSON only.",
+        model=settings.model,
         timeout=settings.timeout_sec,
         check=True,
+        bare_when_api_key=True,
     )
     _raise_on_claude_error(result.stdout)
     return result.stdout
