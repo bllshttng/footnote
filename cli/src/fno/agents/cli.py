@@ -994,10 +994,8 @@ def cmd_spawn(
     # for --route is a hard refusal, not the role lane's silent fallback.
     route_env: dict[str, str] | None = None
     if route is not None:
-        # A routed claude worker applies its route via a --settings file, which the
-        # bg and headless lanes both honor; pane is not a routed lane
-        # (dispatch_spawn_pane takes no route_env, so a routed pane would silently
-        # run the primary model).
+        # Explicit routes remain limited to the bg/headless contract; role routing
+        # is the pane-capable path.
         if provider != "claude" or substrate not in ("bg", "headless"):
             print(
                 "--route is claude on --substrate bg or headless only; "
@@ -1027,6 +1025,27 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+
+    # Resolve a role once before pane/bg/headless fan out so every substrate
+    # receives the same endpoint, auth, and model mapping.
+    if route is None and role is not None and provider == "claude":
+        from fno.agents.model_routing import resolve_route
+
+        route_env = resolve_route(role, notice=lambda note: print(note, file=sys.stderr))
+
+    # Provider rotation stamps the selected account in FNO_*; a managed OAuth
+    # account shares the default Claude slot and cannot compose atomically with
+    # a separate role/route endpoint. Refuse before the spawn gate.
+    if route_env and os.environ.get("FNO_PROVIDER_AUTH", "").strip().lower() == "managed":
+        overlay_id = os.environ.get("FNO_PROVIDER_ID", "").strip() or "unknown"
+        intent = f"routed role {role!r}" if role is not None else f"route {route!r}"
+        print(
+            f"refusing {intent} over managed OAuth provider {overlay_id!r}: "
+            "endpoint, auth, and model must be selected as one provider route; "
+            "no worker launched.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
 
     # Per-spawn account overlay (x-d012). Resolve + FAIL CLOSED here, BEFORE the
     # gate, like --route: a refusal spawns nothing, takes no gate slot, and
@@ -1085,6 +1104,7 @@ def cmd_spawn(
                     crown_scope=crown_scope,
                     provenance=resolve_provenance(node, slug, plan),
                     account_env=account_env,
+                    route_env=route_env,
                 )
             except DispatchAskError as exc:
                 print(str(exc), file=sys.stderr)

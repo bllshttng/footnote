@@ -535,6 +535,7 @@ def _mesh_env_wrapper(
     argv: list[str],
     provenance: Optional[dict[str, str]] = None,
     account_env: Optional[dict[str, str]] = None,
+    route_env: Optional[dict[str, str]] = None,
 ) -> list[str]:
     """Prefix ``argv`` with ``env(1)`` carrying the mesh identity the daemon
     worker used to set on its PTY child (worker.rs), plus any role-routing env
@@ -551,10 +552,12 @@ def _mesh_env_wrapper(
     if provider == "claude":
         # Worker parity: transcripts must persist for resume/adoption.
         pairs.append("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1")
-    if role:
-        from fno.agents.model_routing import resolve_route
+    if role or route_env:
+        route = route_env
+        if route is None:
+            from fno.agents.model_routing import resolve_route
 
-        route = resolve_route(role)
+            route = resolve_route(role)
         if route:
             # Scrub the parent's Anthropic creds so the routed AUTH_TOKEN wins:
             # a lingering API key or subscription OAuth token would otherwise
@@ -722,6 +725,7 @@ def dispatch_spawn_pane(
     crown_scope: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
     account_env: Optional[dict[str, str]] = None,
+    route_env: Optional[dict[str, str]] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
 ) -> MuxSpawnResult:
     """Spawn ``name`` as a mux-hosted agent pane (AC1-HP).
@@ -782,7 +786,7 @@ def dispatch_spawn_pane(
     from fno.agents.spawn_gate import qos_wrap
 
     wrapped = _mesh_env_wrapper(
-        name, provider, role, qos_wrap(argv), provenance, account_env
+        name, provider, role, qos_wrap(argv), provenance, account_env, route_env
     )
 
     registry_path = paths.agents_registry_path()
