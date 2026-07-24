@@ -144,6 +144,32 @@ def test_merge_immediate_exit_0(enabled, monkeypatch, capsys, tmp_path):
     assert "invoker" not in obj
 
 
+def test_fence_crash_failopen_emits_gate_escape(enabled, monkeypatch, capsys, tmp_path):
+    """F4: a fence-CODE crash fails open (merge proceeds) but must not read as a
+    clean merge - a gate_escape is emitted so retro/audit see the skipped fence."""
+    _write_manifest(tmp_path, "session_id: s1\nauto_merge_approved: true\n")
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    def boom(uuid, **k):
+        raise RuntimeError("fence boom")
+
+    monkeypatch.setattr("fno.claims.incarnation.incarnation_fence_blocks", boom)
+    emitted = []
+    monkeypatch.setattr(
+        "fno.events.gate_escape.emit_gate_escape",
+        lambda *a, **k: emitted.append((a, k)),
+    )
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0  # fail-open proceeded
+    assert _last_json(capsys)["outcome"] == "merged"
+    assert emitted, "a fence-crash fail-open must emit gate_escape"
+    args, kwargs = emitted[0]
+    assert args[0] == "other"
+    assert "incarnation-fence" in (kwargs.get("detail") or "")
+    assert kwargs.get("pr") == 42
+
+
 def _write_manifest(tmp_path, body: str) -> None:
     (tmp_path / ".fno").mkdir(exist_ok=True)
     (tmp_path / ".fno" / "target-state.md").write_text(body, encoding="utf-8")
