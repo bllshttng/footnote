@@ -69,7 +69,7 @@ def _default_spawn(
     """
     name = f"eval-{os.getpid()}-{int(time.time())}"
     cmd = [
-        "fno", "agents", "spawn", name, prompt,
+        "fno", "agents", "spawn", "--name", name, prompt,
         "--substrate", "headless", "--cwd", str(workdir),
         "--timeout", str(timeout_s),
     ]

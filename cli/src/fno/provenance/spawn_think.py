@@ -751,7 +751,7 @@ def _spawn_think_worker(
             mode = ""
     if mode:
         cmd += ["--permission-mode", mode]
-    cmd += [agent_name, prompt]
+    cmd += ["--name", agent_name, prompt]
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:

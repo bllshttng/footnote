@@ -186,7 +186,7 @@ def _spawn_target_worker(node_id: str, cwd: Optional[str]) -> bool:
         cmd += ["--cwd", cwd]
     else:
         cmd += ["--fresh"]
-    cmd += [name, f"/target {node_id} no-merge"]
+    cmd += ["--name", name, f"/target {node_id} no-merge"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     except Exception as exc:  # noqa: BLE001 - spawn failure is never fatal

@@ -754,7 +754,7 @@ def _spawn_worker(
     # (parity); the receipt omits permission_mode, so the posture stays inspectable.
     if mode and resolved.get("harness") == "claude":
         cmd += ["--permission-mode", mode]
-    cmd += [agent_name, target_cmd]
+    cmd += ["--name", agent_name, target_cmd]
 
     # The brief (US3) rides the spawn subprocess env as TARGET_BRIEF (never the
     # command line), mirroring dispatch-node.sh's `export TARGET_BRIEF`. A failover

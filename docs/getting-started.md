@@ -137,14 +137,14 @@ The PR has a lifecycle, and there's a verb for each step. Full walkthrough: [the
 footnote can spawn a worker on another provider and coordinate with it over a message bus. Quickstart: [the agents guide](guides/agents-quickstart.md).
 
 ```bash
-fno agents spawn reviewer "review the diff on this branch" -H codex   # spawn a Codex peer
+fno agents spawn "review the diff on this branch" --name reviewer -H codex   # spawn a Codex peer
 fno agents ask reviewer "what did you find?"                          # message it; it works on its own
 ```
 
 For a one-off question to another model without keeping a peer around, spawn an ephemeral worker:
 
 ```bash
-fno agents spawn q "summarize the failing tests" -H codex --once      # reply prints to stdout, then it tears down
+fno agents spawn "summarize the failing tests" --name q -H codex --once      # reply prints to stdout, then it tears down
 ```
 
 Each agent runs its own loop; Claude, Codex, and Gemini, one project.

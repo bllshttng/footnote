@@ -173,7 +173,7 @@ def test_spawn_once_python_vs_rust_parity(provider, tmp_path: Path, monkeypatch)
         **env_for(_SESSION_ID, _REPLY),
     }
     completed = subprocess.run(
-        [str(RUST_BIN), "spawn", "parity-agent", "hi", "--harness", provider, "--once"],
+        [str(RUST_BIN), "spawn", "--name", "parity-agent", "hi", "--harness", provider, "--once"],
         env=env,
         capture_output=True,
         text=True,
@@ -274,7 +274,7 @@ def test_codex_ask_short_flags_match_long_through_rust_binary(
         return subprocess.run(
             # Task 1.3: ask never creates, so the create exchange the shorts
             # must reach now lives on `spawn --once` (-o is the --once short).
-            [str(RUST_BIN), "spawn", "parity-agent", "hi", *flags],
+            [str(RUST_BIN), "spawn", "--name", "parity-agent", "--name", "hi", *flags],
             env=env,
             capture_output=True,
             text=True,
@@ -352,7 +352,7 @@ def test_codex_spawn_once_fake_provider_exit_propagates(tmp_path: Path, monkeypa
     env.pop("FAKE_CODEX_REPLY", None)
 
     completed = subprocess.run(
-        [str(RUST_BIN), "spawn", "parity-agent", "hi", "--harness", "codex", "--once"],
+        [str(RUST_BIN), "spawn", "--name", "parity-agent", "hi", "--harness", "codex", "--once"],
         env=env,
         capture_output=True,
         text=True,

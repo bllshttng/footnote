@@ -455,11 +455,16 @@ def cmd_crown(
 
 @agents_app.command("spawn")
 def cmd_spawn(
-    name: str = typer.Argument(
+    message: str = typer.Argument("", help="The prompt to seed the worker with."),
+    name: str = typer.Option(
         "",
-        help="Agent name (optional; an adjective-noun slug is minted when omitted).",
+        "--name",
+        help=(
+            "Agent name (optional; an adjective-noun slug is minted when omitted). "
+            "A name is a handle you rarely care about, so it moved off the "
+            "positional: the one positional is the prompt."
+        ),
     ),
-    message: str = typer.Argument("", help="Initial message (optional; empty string if omitted)."),
     harness: str | None = typer.Option(
         None,
         "--harness",

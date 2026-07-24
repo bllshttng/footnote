@@ -123,7 +123,7 @@ def _revive_orphans(
         # rejects - every revive would fail in such an environment. --substrate
         # bg is what --resume implies; naming it is belt-and-suspenders.
         cmd = [
-            fno, "agents", "spawn", name,
+            fno, "agents", "spawn", "--name", name,
             "--harness", "claude", "--substrate", "bg", "--resume", str(session),
         ]
         if row.get("cwd"):

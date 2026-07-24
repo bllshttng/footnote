@@ -66,7 +66,7 @@ STATUS=$(fno backlog get "$WAVE_NODE" --field status)
 case "$STATUS" in
   ready)
     # SPAWN into the foreign project. --cwd (never -P); subscription lane (never -p/--bare).
-    fno agents spawn --harness claude --cwd "$ROOT" "target-$WAVE_NODE" "/target $WAVE_NODE"
+    fno agents spawn --harness claude --cwd "$ROOT" --name "target-$WAVE_NODE" "/target $WAVE_NODE"
     echo "do: spawned target-$WAVE_NODE --cwd $ROOT"   # receipt (AC3-UI)
     # mark the wave DELEGATED in STATE.md; continue the session's own waves
     ;;

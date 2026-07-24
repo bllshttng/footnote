@@ -1536,7 +1536,7 @@ async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String
     }
 }
 
-/// (x-9c5f) Shell `fno agents spawn <name> --resume <uuid> --substrate bg`
+/// (x-9c5f) Shell `fno agents spawn --name <n> --resume <uuid> --substrate bg`
 /// off-loop for the peek `r` respawn: a longer 60s bound (a bg spawn creates a
 /// thread; 20s is too tight). Success -> `respawned <name>`; failure -> the
 /// first stderr line. The 1s registry poll owns the row flipping live; this
@@ -1552,16 +1552,18 @@ async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String
 /// pre-existing default, correct for a canonical/default-account worker).
 async fn run_respawn(name: &str, uuid: &str, cwd: &str, account: Option<&str>) -> String {
     const RESPAWN_TIMEOUT: Duration = Duration::from_secs(60);
-    // Pin `--provider claude`: respawn is definitionally a claude revival (the
+    // Pin `--harness claude`: respawn is definitionally a claude revival (the
     // uuid is carried only for claude rows), but `fno agents spawn` otherwise
-    // infers the provider from the invoking harness, so a mux server running
-    // under a non-claude context would infer the wrong provider and fail the
-    // claude-only `--resume` guard.
+    // infers the harness from the invoking one, so a mux server running under a
+    // non-claude context would infer the wrong harness and fail the claude-only
+    // `--resume` guard. The name rides `--name`: the single positional is the
+    // prompt now, and a revival seeds none.
     let mut args: Vec<&str> = vec![
         "agents",
         "spawn",
+        "--name",
         name,
-        "--provider",
+        "--harness",
         "claude",
         "--resume",
         uuid,
@@ -3928,7 +3930,7 @@ impl Core {
         });
     }
 
-    /// (x-9c5f) Shell `fno agents spawn <name> --resume <uuid> --substrate bg`
+    /// (x-9c5f) Shell `fno agents spawn --name <n> --resume <uuid> --substrate bg`
     /// OFF the core loop: the advisory outcome routes back as a `DispatchResult`
     /// notice; the 1s registry poll owns the row flipping live. `uuid` was
     /// shape-validated by the caller.

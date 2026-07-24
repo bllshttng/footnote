@@ -296,7 +296,7 @@ def test_spawn_seam_injects_config_defaults(monkeypatch) -> None:
     monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
     result = CliRunner().invoke(
-        app, ["agents", "spawn", "worker-A", "hi", "--substrate", "bg"]
+        app, ["agents", "spawn", "--name", "worker-A", "hi", "--substrate", "bg"]
     )
     assert result.exit_code == 0
     argv = captured[0]
@@ -916,7 +916,7 @@ def test_is_resume_bearing_spawn_predicate() -> None:
     # predicate matches both spellings.
     uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"
     assert rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--resume", uuid])
-    assert rr._is_resume_bearing_spawn("spawn", ["spawn", "w", f"--resume={uuid}"])
+    assert rr._is_resume_bearing_spawn("spawn", ["spawn", "--name", "w", f"--resume={uuid}"])
     assert rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "-r", "6501096a"])
     assert not rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--substrate", "bg"])
     assert not rr._is_resume_bearing_spawn("spawn", ["spawn", "w", "--role", "tidy"])

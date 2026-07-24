@@ -1593,7 +1593,7 @@ def _spawn_post_merge_worker(pr_number: int, cwd: str) -> str:
     cmd = [
         *_subprocess_util.fno_py_cmd(), "agents", "spawn",
         "--harness", "claude", "--substrate", "bg", "--model", model, "--cwd", cwd,
-        name, f"/fno:pr merged {pr_number} autonomous",
+        "--name", name, f"/fno:pr merged {pr_number} autonomous",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:

@@ -61,7 +61,7 @@ A pass makes judgment calls (which wave, what to park, what to supersede) and th
 Grooming stays on a small model because it is daily and levers-only; a reign is rare and bounded, so the cost argument does not apply to it.
 
 ```bash
-fno agents spawn king-<epic> "<brief>" --effort high --model <your frontier model> --crown level=<N>,scope=<epic>
+fno agents spawn --name king-<epic> "<brief>" --effort high --model <your frontier model> --crown level=<N>,scope=<epic>
 ```
 
 What a reign actually requires is a frontier-class model at high reasoning effort, in a session that can run many steps.
@@ -105,7 +105,7 @@ Reach for these by need, not by reflex; most passes touch only the first group.
 `fno backlog epic status <epic>` · `get` · `update --add-blocker/--blocked-by/--plan-path/--dispatch-verb/--dispatch-brief` · `rank` · `defer -R` / `undefer` · `advance --epic`
 
 **Dispatch.**
-`fno agents spawn <name> "<payload>" --model <m> --substrate pane|bg|headless` starts a worker.
+`fno agents spawn --name <n> "<payload>" --model <m> --substrate pane|bg|headless` starts a worker.
 The payload decides what it does: free text is a verbatim **seed** (it opens a session, it does NOT build), a resolved node id is a **build**, a leading `/verb` is **passthrough**, and `--handoff <doc>` hands an in-flight thread to a fresh context.
 `fno backlog advance --epic <id>` is the graph-driven fan-out and needs `config.auto_continue.enabled`.
 
@@ -232,7 +232,7 @@ Use `fno plan path` for the canonical filename.
 Note what these two verbs do and do not do.
 They change *how* a dispatcher launches a node it has already selected; they do not make it selectable.
 A plan-less node is not selected by any autonomous path, so setting `--dispatch-verb` on one arms nothing by itself.
-Autonomous selection is not the only route: naming a node is itself the consent, so a plan-less node gets its think pass from an attended `/think <id>` or an explicit `fno agents spawn <name> "/think <id>"`.
+Autonomous selection is not the only route: naming a node is itself the consent, so a plan-less node gets its think pass from an attended `/think <id>` or an explicit `fno agents spawn --name <n> "/think <id>"`.
 Set the dispatch verb anyway when you file the node, so the routing is already correct on the day it does become selectable.
 
 ### 4. Kick off
@@ -278,7 +278,7 @@ read -r -d '' payload <<'CLAUSE' || true   # read -d '' exits 1 at EOF; absorb i
 Take node <id> through <phase verb: /fno:think, /fno:blueprint, or /fno:target>.
 <minion clause - paste verbatim from references/minion-clause.md>
 CLAUSE
-fno agents spawn <node-name> "$payload" --substrate pane --squad <own-squad> --split <dir> --effort <e>
+fno agents spawn --name <node-name> "$payload" --substrate pane --squad <own-squad> --split <dir> --effort <e>
 ```
 
 - **Squad.** Pass your own squad explicitly when you know its name (a mission squad is named for the epic; the crowning brief should state it). Omitted, placement resolves to the caller's owner squad - usually yours, but explicit `--squad` removes the dependence on where a human's focus happens to sit.

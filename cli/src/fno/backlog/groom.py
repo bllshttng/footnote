@@ -215,7 +215,7 @@ def _spawn_groom_worker(brief: str, cwd: str, model: str, day: str) -> str:
         "--harness", "claude", "--substrate", "headless",
         "--model", model, "--cwd", cwd,
         "--timeout", str(_WORKER_TIMEOUT_S),
-        f"groom-{day}", brief,
+        "--name", f"groom-{day}", brief,
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_SPAWN_TIMEOUT_S)
     if proc.returncode != 0:

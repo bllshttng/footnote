@@ -608,7 +608,7 @@ for id in "${NODES[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --harness $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${squad_hint}${role_hint}${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${perm_hint}$agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --harness $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${squad_hint}${role_hint}${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${perm_hint}--name $agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -665,7 +665,7 @@ for id in "${NODES[@]}"; do
   # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
   launch_cwd="${node_cwd:-$(pwd)}"
   if [[ -n "$node_cwd" ]]; then
-    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$node_cwd" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$node_cwd" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
     wt=""
     # DISPATCH_PROVIDER is the RESOLVED harness (.harness from dispatch resolve),
@@ -686,16 +686,16 @@ for id in "${NODES[@]}"; do
         _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
         [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
       fi
-      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$wt" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --cwd "$wt" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
     else
-      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --fresh "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --fresh "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       # --fresh lands the worker in canonical main; report that real path (not a
       # space-containing label) so the cwd= field stays machine-parseable.
       launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
     fi
   else
-    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   fi
   spawn_err="$(cat "$spawn_err_file" 2>/dev/null)"; rm -f "$spawn_err_file"
   if [[ "$spawn_rc" -ne 0 ]]; then

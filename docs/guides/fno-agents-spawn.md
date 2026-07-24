@@ -1,6 +1,6 @@
 # How-to: create a peer agent with `fno agents spawn`
 
-`fno agents spawn <name> ["<initial message>"] --harness <h>` creates a new peer agent. It is the creation half of the de-overloaded verb pair from the cross-agent message bus epic: **`spawn` creates, `ask` messages**. An `ask` to a name that does not exist errors with exit 16 ("spawn it first") instead of silently creating - see [fno-agents-ask-followup.md](fno-agents-ask-followup.md) for the messaging half.
+`fno agents spawn "<prompt>" [--name <n>] [--harness <h>]` creates a new peer agent. The single positional is the prompt; the agent name is minted unless `--name` supplies one. It is the creation half of the de-overloaded verb pair from the cross-agent message bus epic: **`spawn` creates, `ask` messages**. An `ask` to a name that does not exist errors with exit 16 ("spawn it first") instead of silently creating - see [fno-agents-ask-followup.md](fno-agents-ask-followup.md) for the messaging half.
 
 Use this guide when an orchestrator (script, LLM session, CI job) needs to launch a worker agent and capture a machine-parseable receipt.
 
@@ -20,9 +20,9 @@ A spawn picks three independent things. Confusing them is the mistake this surfa
 | **model** | `--model` | `-m` | `opus`, `glm-5.2[1m]`, ... | The **model**, at whichever vendor is in play. |
 
 ```bash
-fno agents spawn worker "review this diff" --harness codex          # binary only
-fno agents spawn worker "review this diff" --model opus             # harness-native model
-fno agents spawn w bg "review this diff" --provider zai --model glm-5.2   # routed
+fno agents spawn "review this diff" --name worker --harness codex          # binary only
+fno agents spawn "review this diff" --name worker --model opus             # harness-native model
+fno agents spawn "review this diff" bg --provider zai --model glm-5.2     # routed
 ```
 
 `--harness` defaults to the invoking harness, then `claude`. `--provider` + `--model` together name a **route** and are the decomposed spelling of `--route <vendor>,<model>`; passing both spellings exits 2, and `--provider` without `--model` exits 2 (a vendor is not a model).
@@ -36,7 +36,7 @@ Two shorts moved to make room. `-H` takes a harness value; it used to mean headl
 `--provider <vendor> --model <m>` (or the single-string `--route <vendor>,<m>`) points a claude worker at a different model endpoint. The vendor must be a known `model_routing.providers` record with a resolvable key; an unknown, non-anthropic-compatible, or keyless vendor is refused before anything spawns, so the node stays dispatchable.
 
 ```bash
-fno agents spawn glm-worker "review this diff" --substrate bg --provider zai --model glm-5.2
+fno agents spawn "review this diff" --name glm-worker --substrate bg --provider zai --model glm-5.2
 ```
 
 Routing is claude-only and reaches the `bg` and `headless` substrates only. The route is applied by writing a `0600` claude `--settings` file and passing `--settings <path>`: a `claude --bg` session's serving process is forked by the claude daemon, which drops per-spawn `ANTHROPIC_*` env before the first model request, and a settings file is read by the session process itself so it survives that fork. `pane` is not a routed lane and is refused rather than silently running the primary model.
@@ -44,7 +44,7 @@ Routing is claude-only and reaches the `bg` and `headless` substrates only. The 
 ## Persistent claude peer (plain spawn)
 
 ```bash
-fno agents spawn frontend-worker "/target no-merge" --harness claude
+fno agents spawn "/target no-merge" --name frontend-worker --harness claude
 ```
 
 This shells `claude --bg --name frontend-worker <message>` (the subscription lane - never `-p`/`--bare`, which would move billing to the API-credit pool and strip hooks). The peer persists; follow up later with `fno agents ask frontend-worker "..."`.
@@ -55,7 +55,7 @@ stdout is exactly one compact JSON receipt line:
 {"name": "frontend-worker", "short_id": "7c5dcf5d", "provider": "claude", "status": "live"}
 ```
 
-Pipe it: `fno agents spawn w1 "task" -H claude | jq -r .short_id`.
+Pipe it: `fno agents spawn "task" --name w1 -H claude | jq -r .short_id`.
 
 ## Persistent codex/gemini peer (daemon PTY)
 
@@ -66,7 +66,7 @@ Plain `spawn` for codex/gemini creates a PTY-backed hosted worker under the `fno
 Pane-hosted agents can join an existing mux workspace and tile beside its focused pane:
 
 ```bash
-fno agents spawn reviewer "review the current diff" \
+fno agents spawn "review the current diff" --name reviewer \
   -H codex -s reviews -x right
 ```
 
@@ -80,8 +80,8 @@ The lower-level equivalent avoids option punctuation entirely: `fno mux pane run
 the provider default.
 
 ```bash
-fno agents spawn planner "analyze the migration" --harness claude --effort high
-fno agents spawn verifier "check the invariants" --harness codex --effort medium
+fno agents spawn "analyze the migration" --name planner --harness claude --effort high
+fno agents spawn "check the invariants" --name verifier --harness codex --effort medium
 ```
 
 The accepted user-facing vocabulary is `minimal`, `low`, `medium`, `high`,
@@ -102,7 +102,7 @@ own variant toggle behavior.
 ## Ephemeral one-shot (`--once` / `-o`, codex and gemini)
 
 ```bash
-fno agents spawn tmp1 "summarize the failing tests" -H codex --once
+fno agents spawn "summarize the failing tests" --name tmp1 -H codex --once
 ```
 
 Create, exchange, tear down: stdout is the model's reply verbatim (the deliverable); the teardown receipt rides stderr (`once: tmp1 (codex/<session-id>) torn down`); no registry row survives. This is the explicit home of what `ask`-on-a-new-name used to do implicitly for codex/gemini.
@@ -116,7 +116,7 @@ Create, exchange, tear down: stdout is the model's reply verbatim (the deliverab
 By default a spawned worker inherits the caller's working directory. When the caller sits inside a git worktree that leaks the worktree into the worker, and a `/target`-class worker started there fights other sessions over the shared `.fno/` session state (manifest, claims, STATE), because a worktree's `.fno/` is symlinked back to canonical. `--fresh` resolves the worker's cwd to the **canonical main checkout** (the parent of `git rev-parse --git-common-dir`) regardless of where the caller runs:
 
 ```bash
-fno agents spawn w1 "/target ab-1234abcd" -H claude --fresh
+fno agents spawn "/target ab-1234abcd" --name w1 -H claude --fresh
 ```
 
 Precedence is `--cwd` > `--fresh` > caller cwd. An explicit `--cwd` always wins; `--here` (alias `--in-place`) opts back out of `--fresh` and keeps the caller cwd. `--fresh` is a no-op when the caller is already at canonical, and falls back to the caller cwd (the safe side) when resolution is ambiguous: a bare or `--separate-git-dir` checkout, or no `git` on `$PATH`. A real redirect prints one stderr line so it is never silent.

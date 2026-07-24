@@ -67,7 +67,7 @@ def test_spawn_without_provider_defaults_to_claude(monkeypatch, runner):
     received = _stub_pane_path(monkeypatch)
     from fno.agents.cli import agents_app
 
-    result = runner.invoke(agents_app, ["spawn", "w1", "hello", "--node", "x-test"])
+    result = runner.invoke(agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test"])
 
     assert result.exit_code == 0, result.output
     assert received["provider"] == "claude"
@@ -82,7 +82,7 @@ def test_spawn_infers_claude_from_harness(monkeypatch, runner):
     received = _stub_pane_path(monkeypatch)
     from fno.agents.cli import agents_app
 
-    result = runner.invoke(agents_app, ["spawn", "w1", "hello", "--node", "x-test"])
+    result = runner.invoke(agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test"])
 
     assert result.exit_code == 0, result.output
     assert received["provider"] == "claude"
@@ -96,7 +96,7 @@ def test_spawn_explicit_provider_still_wins(monkeypatch, runner):
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "w1", "hi", "--node", "x-test", "--harness", "gemini"]
+        agents_app, ["spawn", "--name", "w1", "hi", "--node", "x-test", "--harness", "gemini"]
     )
     assert result.exit_code == 0, result.output
     assert received["provider"] == "gemini"
@@ -108,7 +108,7 @@ def test_spawn_empty_model_rejected(monkeypatch, runner):
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "w1", "hi", "--node", "x-test", "--model", ""]
+        agents_app, ["spawn", "--name", "w1", "hi", "--node", "x-test", "--model", ""]
     )
     assert result.exit_code == 2
     assert called == {}

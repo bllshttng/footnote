@@ -813,7 +813,7 @@ def test_cmd_spawn_pane_threads_placement_to_dispatch(
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--harness", "claude", *placement_args],
+        ["spawn", "--name", "peer", "--harness", "claude", *placement_args],
     )
     assert res.exit_code == 0, res.output
     assert captured["squad"] == "review"

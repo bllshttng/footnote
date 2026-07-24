@@ -830,7 +830,7 @@ def _default_spawn(name: str, prompt: str, *, cwd: Path, timeout: int) -> "tuple
     try:
         p = subprocess.run(
             [
-                "fno", "agents", "spawn", name, prompt,
+                "fno", "agents", "spawn", "--name", name, prompt,
                 "--harness", "claude",
                 "--substrate", "headless",
                 "--model", "fable",

@@ -97,7 +97,12 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
     {
         "--role", "--resume", "-r", "--add-dir", "--agent", "--tools",
         "--deny-tools", "--workspace", "--squad", "-s", "--split", "-x",
-        "--node", "--slug", "--plan",
+        "--node", "--slug", "--plan", "--name",
+        # x-6de8: --route/--account/--crown were absent, so their VALUES read as
+        # positionals: a nameless `spawn --route zai,glm-5.2` registered an agent
+        # named "zai,glm-5.2". Kept in lockstep with cmd_spawn's value options
+        # (test_spawn_value_flags_cover_every_value_option pins the two together).
+        "--route", "--account", "--crown",
     }
 )
 
@@ -210,7 +215,8 @@ def normalize_spawn_args(
     2. ``-r`` is the short flag for ``--resume``; its value may be a full uuid or
        an 8-hex short-id (resolved to the uuid; unresolvable/malformed -> exit 2).
        ``--resume`` with no substrate defaults the substrate to ``bg``.
-    3. A spawn with no NAME positional gets an autogen ``adjective-noun`` slug.
+    3. The single positional is the MESSAGE; the name rides ``--name`` and is
+       minted (``adjective-noun``) when omitted. A second positional -> exit 2.
 
     Non-``spawn`` verbs and ``spawn --help`` pass through unchanged. Read-only
     (registry names, session resolver); writes no state.
@@ -304,11 +310,25 @@ def normalize_spawn_args(
             toks += ["--substrate", "bg"]
             print("fno agents spawn: substrate: bg (implied by --resume)", file=err)
 
-    # Pass 3: autogen name when no NAME positional remains.
-    if not _positional_indices(toks):
+    # Pass 3: the NAME axis. `spawn` takes ONE positional and it is the MESSAGE;
+    # the agent name is a handle the caller rarely picks, so it is minted unless
+    # --name says otherwise. Canonicalize to `--name <n> <message>` so both
+    # parsers read the same shape. A second positional is refused rather than
+    # guessed at: under the old `<name> <message>` grammar it would silently
+    # register an agent named after the prompt.
+    if not any(t == "--name" or t.startswith("--name=") for t in toks):
         names = existing_names if existing_names is not None else _read_registry_names()
         slug = _mint_slug(names, rng if rng is not None else random.Random(), err)
-        toks.insert(0, slug)
+        toks = ["--name", slug, *toks]
+    extra = _positional_indices(toks)
+    if len(extra) > 1:
+        print(
+            "fno agents spawn: takes one positional (the prompt); got "
+            f"{len(extra)} ({', '.join(repr(toks[i]) for i in extra)}). The agent "
+            "name moved to --name, so pass `--name <n> \"<prompt>\"`.",
+            file=err,
+        )
+        raise SystemExit(2)
 
     return ["spawn", *toks, *payload]
 

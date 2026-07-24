@@ -386,7 +386,7 @@ maybe_auto_worktree   # self-gating: no-op unless code payload + main checkout
 # client, not this script, translates to `claude -p`). --yolo is appended only
 # when the user explicitly passed it (normalize.sh strips it for claude). A bare interactive
 # host omits the message positional (a valid idle session). The cmd array
-# always carries at least `agents <verb> --harness <h> <name>`, so
+# always carries at least `agents <verb> --harness <h> --name <n>`, so
 # "${cmd[@]}" is never an empty expansion (bash 3.2 set -u safe).
 #
 # stdout and stderr are captured SEPARATELY (via a temp file) so the receipt
@@ -414,7 +414,7 @@ cmd=(agents "$VERB" --harness "$PROVIDER")
 # provenance (the verb resolves slug/plan from the graph). Ad-hoc spawns have no
 # --node and export nothing new. Harmless on bg/headless (the verb ignores it).
 [[ -n "$NODE" ]] && cmd+=(--node "$NODE")
-cmd+=("$NAME")
+cmd+=(--name "$NAME")
 [[ -n "$MESSAGE" ]] && cmd+=("$MESSAGE")
 
 err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/agents-spawn-$$.err")"

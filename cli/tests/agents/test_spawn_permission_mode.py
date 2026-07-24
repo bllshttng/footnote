@@ -151,7 +151,7 @@ def test_mutual_exclusion_yolo_and_permission_mode(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--harness", "claude", "--yolo",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--yolo",
          "--permission-mode", "plan"],
     )
     assert result.exit_code == 2
@@ -169,7 +169,7 @@ def test_permission_mode_reaches_pane_dispatch(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--harness", "claude",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude",
          "--permission-mode", "acceptEdits"],
     )
     assert result.exit_code == 0, result.output
@@ -196,7 +196,7 @@ def test_resume_requires_claude_bg(runner, monkeypatch, extra_args):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--resume",
+        ["spawn", "--name", "w1", "--name", "hi", "--resume",
          "6501096a-1111-2222-3333-444455556666", *extra_args],
     )
     assert result.exit_code == 2
@@ -211,7 +211,7 @@ def test_bg_permission_mode_non_claude_fails_closed(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--harness", "codex", "--substrate", "headless",
+        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--substrate", "headless",
          "--permission-mode", "acceptEdits"],
     )
     assert result.exit_code == 2
@@ -242,7 +242,7 @@ def test_bg_permission_mode_claude_honored_via_python(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
          "--permission-mode", "acceptEdits"],
     )
     assert result.exit_code == 0, result.output
@@ -271,7 +271,7 @@ def test_bg_yolo_receipt_names_bypass_via_python(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--harness", "claude", "--substrate", "bg", "--yolo"],
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg", "--yolo"],
     )
     assert result.exit_code == 0, result.output
     assert json.loads(result.output.splitlines()[0])["permission_mode"] == "bypassPermissions"

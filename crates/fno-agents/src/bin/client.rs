@@ -1185,11 +1185,11 @@ fn retired_verb_pointer(verb: &str) -> Option<&'static str> {
         ),
         "host" => Some(
             "fno agents host was retired at G4: spawn a mux-hosted agent pane with \
-             `fno agents spawn <name> --substrate pane`.",
+             `fno agents spawn --name <n> --substrate pane`.",
         ),
         "promote" => Some(
             "fno agents promote was retired at G4: the mux hosts agent panes; spawn one with \
-             `fno agents spawn <name> --substrate pane`.",
+             `fno agents spawn --name <n> --substrate pane`.",
         ),
         _ => None,
     }
@@ -1415,6 +1415,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--from",
         "--cwd",
         "--message",
+        "--name",
         "--session-id",
         "--cc-session-id",
         "--channel-id",
@@ -1511,6 +1512,13 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "--message" => {
                 params.insert("message".into(), str_arg(&mut it, "--message")?);
+            }
+            // x-6de8: the agent name rides a flag, so the single positional can be
+            // the prompt. The seam normalizer mints one when the caller omits it,
+            // so a spawn reaching here normally carries --name; the positional
+            // fallback below keeps a direct `fno-agents spawn <name>` working.
+            "--name" => {
+                params.insert("name".into(), str_arg(&mut it, "--name")?);
             }
             "--session-id" => {
                 params.insert("session_id".into(), str_arg(&mut it, "--session-id")?);
@@ -1745,11 +1753,21 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
 
     let method = match verb {
         "spawn" => {
-            let name = positional.first().ok_or("spawn needs a <name>")?;
-            params.insert("name".into(), Value::String(name.clone()));
-            // Remaining positionals after name form the message if not flagged.
-            if !params.contains_key("message") && positional.len() > 1 {
-                params.insert("message".into(), Value::String(positional[1..].join(" ")));
+            // With --name the whole positional tail is the message; without it the
+            // first positional is still the name (a direct `fno-agents spawn`
+            // bypasses the seam normalizer that would have minted one).
+            let msg_from = if params.contains_key("name") {
+                0
+            } else {
+                let name = positional.first().ok_or("spawn needs a <name> or --name")?;
+                params.insert("name".into(), Value::String(name.clone()));
+                1
+            };
+            if !params.contains_key("message") && positional.len() > msg_from {
+                params.insert(
+                    "message".into(),
+                    Value::String(positional[msg_from..].join(" ")),
+                );
             }
             // x-3ab8/x-2c27: spawn defaults to an owned interactive pane (the
             // `pane` substrate) for PTY-capable providers. Only `pane` gets the

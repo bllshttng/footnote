@@ -112,7 +112,7 @@ def test_spawn_resume_revives_in_place(workdir_claude, monkeypatch) -> None:
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "rev-agent", "-H", "claude", "--resume", DEAD_UUID,
+        ["spawn", "--name", "rev-agent", "-H", "claude", "--resume", DEAD_UUID,
          "--substrate", "bg", "hi"],
         catch_exceptions=False,
     )
@@ -135,7 +135,7 @@ def test_spawn_resume_uuid_mismatch_is_collision(workdir_claude, monkeypatch) ->
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "rev-agent", "-H", "claude", "--resume", OTHER_UUID,
+        ["spawn", "--name", "rev-agent", "-H", "claude", "--resume", OTHER_UUID,
          "--substrate", "bg", "hi"],
         catch_exceptions=False,
     )
@@ -155,7 +155,7 @@ def test_spawn_same_name_no_resume_is_collision(workdir_claude, monkeypatch) -> 
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "rev-agent", "-H", "claude", "--substrate", "bg", "hi"],
+        ["spawn", "--name", "rev-agent", "-H", "claude", "--substrate", "bg", "hi"],
         catch_exceptions=False,
     )
     assert result.exit_code == 2, result.output
@@ -183,7 +183,7 @@ def test_spawn_resume_refused_when_session_claim_held(
 
     result = CliRunner().invoke(
         agents_app,
-        ["spawn", "rev-agent", "-H", "claude", "--resume", DEAD_UUID,
+        ["spawn", "--name", "rev-agent", "-H", "claude", "--resume", DEAD_UUID,
          "--substrate", "bg", "hi"],
         catch_exceptions=False,
     )
@@ -258,7 +258,7 @@ def _spawn_resume() -> object:
 
     return CliRunner().invoke(
         agents_app,
-        ["spawn", "rev-agent", "-H", "claude", "--resume", DEAD_UUID,
+        ["spawn", "--name", "rev-agent", "-H", "claude", "--resume", DEAD_UUID,
          "--substrate", "bg", "hi"],
         catch_exceptions=False,
     )

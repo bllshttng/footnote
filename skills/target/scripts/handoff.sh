@@ -559,7 +559,7 @@ _ASK_OUT=""
 # to a temp file, NOT 2>&1: a stderr warning must never pollute the JSON
 # receipt parse below (house rule; gemini review PR #457).
 _ASK_ERR_FILE="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/handoff-spawn-$$.err")"
-_ASK_OUT="$(fno agents spawn --harness claude --cwd "$PWD" "$CHILD_NAME" "$CHILD_CMD" 2>"$_ASK_ERR_FILE")" || _ASK_RC=$?
+_ASK_OUT="$(fno agents spawn --harness claude --cwd "$PWD" --name "$CHILD_NAME" "$CHILD_CMD" 2>"$_ASK_ERR_FILE")" || _ASK_RC=$?
 _ASK_ERR="$(cat "$_ASK_ERR_FILE" 2>/dev/null)"; rm -f "$_ASK_ERR_FILE"
 
 # Parse short_id from the clean-stdout JSON receipt line (grep first as

@@ -92,7 +92,7 @@ def run_verifier(prompt: str, cwd: Path, session_id: str, timeout: int = SPAWN_T
     name = f"verifier-advise-{session_id[:12] or 'adhoc'}"
     out = subprocess.run(
         [
-            "fno", "agents", "spawn", name, prompt,
+            "fno", "agents", "spawn", "--name", name, prompt,
             "--harness", "claude",
             "--substrate", "headless",
             "--model", "haiku",
