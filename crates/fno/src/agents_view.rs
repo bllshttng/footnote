@@ -165,6 +165,33 @@ pub fn isolated_roster_paths() -> Vec<(String, PathBuf)> {
         .collect()
 }
 
+/// (x-ed59) The registered worker name for `short_id`, scanned across the
+/// default and isolated-account rosters. The durable source restore uses when
+/// the in-memory `agents` catalog is empty at cold restart (rosters are readable
+/// then, the same way `isolated_attach_ctx` reads them). `None` when no roster
+/// worker matches (an ad-hoc attach, or one not yet flushed to disk) - the caller
+/// then titles from the `claude` command basename, exactly as before.
+pub fn registered_name_for(short_id: &str) -> Option<String> {
+    let scan = |raw: &str| {
+        parse_roster(raw)
+            .and_then(|ws| ws.into_iter().find(|w| w.short_id == short_id))
+            .map(|w| w.name)
+    };
+    if let Ok(raw) = std::fs::read_to_string(roster_path()) {
+        if let Some(name) = scan(&raw) {
+            return Some(name);
+        }
+    }
+    for (_account, path) in isolated_roster_paths() {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Some(name) = scan(&raw) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
 /// (x-c914) The isolated `config_dir` for one account, or `None` for a managed
 /// / unknown account. Used to route a cross-account `claude attach|stop|rm` to
 /// the right daemon via `CLAUDE_CONFIG_DIR` (codex P1) - a default-account row
