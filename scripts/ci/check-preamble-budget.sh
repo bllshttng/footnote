@@ -69,6 +69,7 @@ for path in "${FILES[@]}"; do
     exit 1
   }
   bytes=$(LC_ALL=C wc -c < "$path")
+  bytes=$((bytes))
   TOTAL_BYTES=$((TOTAL_BYTES + bytes))
   RECORDS+="${bytes}"$'\t'"${relative}"$'\n'
 done
