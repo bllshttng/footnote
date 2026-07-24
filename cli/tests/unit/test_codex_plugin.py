@@ -15,7 +15,9 @@ from fno.setup.codex_plugin import (
     CodexPluginError,
     ConvergenceResult,
     converge,
+    inspect_freshness,
     parse_state,
+    plugin_payload_digest,
 )
 
 
@@ -119,9 +121,7 @@ def test_release_convergence_removes_dev_then_installs_and_verifies(tmp_path: Pa
             assert json.loads(marker.read_text(encoding="utf-8"))["channel"] == "release"
             plugins.clear()
             return _cp(argv, {"removed": True})
-        if argv == [
-            "codex", "plugin", "marketplace", "add", "bllshttng/footnote", "--json"
-        ]:
+        if argv == ["codex", "plugin", "marketplace", "add", "bllshttng/footnote", "--json"]:
             marketplaces.append(
                 {
                     "name": "footnote",
@@ -132,9 +132,7 @@ def test_release_convergence_removes_dev_then_installs_and_verifies(tmp_path: Pa
                 }
             )
             return _cp(argv, {"name": "footnote"})
-        if argv == [
-            "codex", "plugin", "marketplace", "upgrade", "footnote", "--json"
-        ]:
+        if argv == ["codex", "plugin", "marketplace", "upgrade", "footnote", "--json"]:
             return _cp(argv, {"upgraded": True})
         if argv == ["codex", "plugin", "add", "fno@footnote", "--json"]:
             plugins.append(
@@ -247,9 +245,7 @@ def test_dev_convergence_switches_from_release_and_writes_requested_marker(
             return _cp(argv, {"installed": plugins, "available": []})
         if argv == ["codex", "plugin", "remove", RELEASE_PLUGIN_ID, "--json"]:
             marker = json.loads(
-                (codex_home / "footnote" / "plugin-channel.json").read_text(
-                    encoding="utf-8"
-                )
+                (codex_home / "footnote" / "plugin-channel.json").read_text(encoding="utf-8")
             )
             assert marker == {
                 "channel": "dev",
@@ -329,9 +325,7 @@ def test_dev_refresh_replaces_same_version_cache_without_release_sync(tmp_path: 
             "source": str(dev_marketplace),
         },
     }
-    plugins = [
-        _plugin(DEV_PLUGIN_ID, source=str(dev_marketplace), source_type="local")
-    ]
+    plugins = [_plugin(DEV_PLUGIN_ID, source=str(dev_marketplace), source_type="local")]
     calls: list[list[str]] = []
 
     def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -347,9 +341,7 @@ def test_dev_refresh_replaces_same_version_cache_without_release_sync(tmp_path: 
         if argv == ["codex", "plugin", "add", DEV_PLUGIN_ID, "--json"]:
             cached_payload.parent.mkdir(parents=True)
             cached_payload.write_bytes(source_payload.read_bytes())
-            plugins.append(
-                _plugin(DEV_PLUGIN_ID, source=str(dev_marketplace), source_type="local")
-            )
+            plugins.append(_plugin(DEV_PLUGIN_ID, source=str(dev_marketplace), source_type="local"))
             return _cp(argv, {"pluginId": DEV_PLUGIN_ID})
         return _cp(argv, {}, rc=1, err=f"unexpected {argv}")
 
@@ -431,6 +423,129 @@ def test_dev_convergence_is_source_aware_noop_and_records_authority(
         "marketplace": DEV_MARKETPLACE,
         "source": str(dev_marketplace),
     }
+
+
+def test_freshness_detects_same_version_payload_drift(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    dev_marketplace = _dev_marketplace(source)
+    home = tmp_path / "codex-home"
+    (home / "footnote").mkdir(parents=True)
+    (home / "footnote" / "plugin-channel.json").write_text(
+        json.dumps(
+            {
+                "channel": "dev",
+                "marketplace": DEV_MARKETPLACE,
+                "source": str(dev_marketplace),
+            }
+        ),
+        encoding="utf-8",
+    )
+    source_payload = source / "skills" / "target" / "SKILL.md"
+    source_payload.parent.mkdir(parents=True)
+    source_payload.write_text("new source\n", encoding="utf-8")
+    cache = home / "plugins" / "cache" / DEV_MARKETPLACE / "fno" / "0.3.0"
+    (cache / ".codex-plugin").mkdir(parents=True)
+    shutil.copy2(
+        source / ".codex-plugin" / "plugin.json",
+        cache / ".codex-plugin" / "plugin.json",
+    )
+    cached_payload = cache / "skills" / "target" / "SKILL.md"
+    cached_payload.parent.mkdir(parents=True)
+    cached_payload.write_text("old cache\n", encoding="utf-8")
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv == ["codex", "plugin", "marketplace", "list", "--json"]:
+            return _cp(
+                argv,
+                {
+                    "marketplaces": [
+                        {
+                            "name": DEV_MARKETPLACE,
+                            "marketplaceSource": {
+                                "sourceType": "local",
+                                "source": str(dev_marketplace),
+                            },
+                        }
+                    ]
+                },
+            )
+        return _cp(
+            argv,
+            {
+                "installed": [
+                    _plugin(
+                        DEV_PLUGIN_ID,
+                        source=str(dev_marketplace),
+                        source_type="local",
+                    )
+                ],
+                "available": [],
+            },
+        )
+
+    report = inspect_freshness(runner=runner, codex_home=home, source_root=source)
+    assert report["status"] == "stale"
+    assert report["issue"] == "payload-drift"
+    assert report["source_version"] == report["cache_version"] == "0.3.0"
+    assert report["source_digest"] != report["cache_digest"]
+    assert report["remedy"] == "fno setup codex-plugin --channel dev --refresh"
+
+
+def test_freshness_refuses_conflicting_channels_before_digest(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    dev_marketplace = _dev_marketplace(source)
+    home = tmp_path / "codex-home"
+    (home / "footnote").mkdir(parents=True)
+    (home / "footnote" / "plugin-channel.json").write_text(
+        json.dumps(
+            {
+                "channel": "dev",
+                "marketplace": DEV_MARKETPLACE,
+                "source": str(dev_marketplace),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "marketplace" in argv:
+            return _cp(argv, {"marketplaces": []})
+        return _cp(
+            argv,
+            {
+                "installed": [
+                    _plugin(
+                        DEV_PLUGIN_ID,
+                        source=str(dev_marketplace),
+                        source_type="local",
+                    ),
+                    _plugin(
+                        RELEASE_PLUGIN_ID,
+                        source="bllshttng/footnote",
+                        source_type="git",
+                    ),
+                ],
+                "available": [],
+            },
+        )
+
+    report = inspect_freshness(runner=runner, codex_home=home, source_root=source)
+    assert report["status"] == "conflict"
+    assert report["issue"] == "simultaneous-channels"
+    assert "source_digest" not in report
+
+
+def test_payload_digest_is_stable_and_ignores_non_plugin_files(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    payload = source / "hooks" / "session-start.sh"
+    payload.parent.mkdir(parents=True)
+    payload.write_text("plugin payload\n", encoding="utf-8")
+    first = plugin_payload_digest(source)
+    (source / "tests").mkdir()
+    (source / "tests" / "noise.txt").write_text("ignored\n", encoding="utf-8")
+    assert plugin_payload_digest(source) == first
+    payload.write_text("changed payload\n", encoding="utf-8")
+    assert plugin_payload_digest(source) != first
 
 
 def test_external_failure_is_named_and_bounded(tmp_path: Path) -> None:

@@ -1,7 +1,9 @@
 """Deterministic Codex plugin channel convergence."""
+
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -28,6 +30,7 @@ class Marketplace:
     name: str
     source_type: str
     source: str
+    root: str
 
 
 @dataclass(frozen=True)
@@ -97,7 +100,7 @@ def parse_state(marketplaces_json: str, plugins_json: str) -> CodexState:
         if not isinstance(name, str) or not name:
             raise CodexPluginError("marketplace-list", "marketplace missing name")
         source_type, source = _source(item.get("marketplaceSource"))
-        marketplaces.append(Marketplace(name, source_type, source))
+        marketplaces.append(Marketplace(name, source_type, source, str(item.get("root", ""))))
 
     plugins: list[Plugin] = []
     for row in plugin_rows:
@@ -186,9 +189,7 @@ def _same_local_source(source_type: str, source: str, expected: Path) -> bool:
         return False
 
 
-def _write_marker(
-    home: Path, *, channel: str, marketplace: str, source: str
-) -> Path:
+def _write_marker(home: Path, *, channel: str, marketplace: str, source: str) -> Path:
     owned = home / "footnote"
     owned.mkdir(parents=True, exist_ok=True)
     marker = owned / "plugin-channel.json"
@@ -239,6 +240,141 @@ def _manifest_version(source_root: Path) -> str:
     return version
 
 
+def plugin_payload_digest(plugin_root: Path) -> str:
+    """Hash only files Codex can load from the Footnote plugin payload."""
+    candidates = [plugin_root / ".codex-plugin" / "plugin.json"]
+    for relative in ("skills", "hooks", ".codex/agents"):
+        base = plugin_root / relative
+        if base.is_dir():
+            candidates.extend(path for path in base.rglob("*") if path.is_file())
+    digest = hashlib.sha256()
+    for path in sorted(candidates, key=lambda item: item.relative_to(plugin_root).as_posix()):
+        relative = path.relative_to(plugin_root).as_posix().encode()
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            raise CodexPluginError("plugin-digest", str(exc)) from exc
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest()
+
+
+def inspect_freshness(
+    *,
+    runner: Runner = _default_runner,
+    codex_home: Path | None = None,
+    source_root: Path | None = None,
+) -> dict[str, object]:
+    """Return an advisory plugin verdict independent of CLI freshness."""
+    home = resolve_codex_home(codex_home)
+    marker_path = home / "footnote" / "plugin-channel.json"
+    remedy_channel = "dev"
+    try:
+        marker = _object(
+            json.loads(marker_path.read_text(encoding="utf-8")), "desired-channel-marker"
+        )
+        channel = marker.get("channel")
+        if channel not in {"release", "dev"}:
+            raise CodexPluginError("desired-channel-marker", "missing or unsupported channel")
+        remedy_channel = str(channel)
+        expected_marketplace = RELEASE_MARKETPLACE if channel == "release" else DEV_MARKETPLACE
+        expected_plugin = RELEASE_PLUGIN_ID if channel == "release" else DEV_PLUGIN_ID
+        expected_source = RELEASE_SOURCE if channel == "release" else str(marker.get("source", ""))
+        if marker.get("marketplace") != expected_marketplace or not expected_source:
+            raise CodexPluginError(
+                "desired-channel-marker", "channel contract does not match marker"
+            )
+        state = _collect(runner)
+    except FileNotFoundError:
+        return {
+            "status": "unknown",
+            "issue": "desired-channel-missing",
+            "remedy": "fno setup codex-plugin --channel release",
+        }
+    except (OSError, ValueError, TypeError, CodexPluginError) as exc:
+        detail = str(exc)
+        return {
+            "status": "unknown",
+            "issue": "state-unreadable",
+            "detail": detail[-_OUTPUT_LIMIT:],
+            "remedy": f"fno setup codex-plugin --channel {remedy_channel} --refresh",
+        }
+
+    installed = [p for p in state.plugins if p.installed and p.plugin_id.startswith("fno@")]
+    enabled = [p for p in installed if p.enabled]
+    base: dict[str, object] = {
+        "channel": channel,
+        "marketplace": expected_marketplace,
+        "marketplace_source": expected_source,
+        "installed_plugin_ids": [p.plugin_id for p in installed],
+        "enabled_plugin_ids": [p.plugin_id for p in enabled],
+        "remedy": f"fno setup codex-plugin --channel {channel} --refresh",
+    }
+    if len(enabled) > 1:
+        return {**base, "status": "conflict", "issue": "simultaneous-channels"}
+    if not enabled:
+        return {**base, "status": "missing", "issue": "plugin-missing"}
+    selected = enabled[0]
+    if selected.plugin_id != expected_plugin or selected.marketplace_name != expected_marketplace:
+        return {**base, "status": "wrong-channel", "issue": "wrong-channel"}
+
+    marketplace = next(
+        (item for item in state.marketplaces if item.name == expected_marketplace), None
+    )
+    source_ok = (
+        _same_release_source(selected.source_type, selected.marketplace_source)
+        if channel == "release"
+        else _same_local_source(
+            selected.source_type, selected.marketplace_source, Path(expected_source)
+        )
+    )
+    marketplace_ok = marketplace is not None and (
+        _same_release_source(marketplace.source_type, marketplace.source)
+        if channel == "release"
+        else _same_local_source(marketplace.source_type, marketplace.source, Path(expected_source))
+    )
+    if not source_ok or not marketplace_ok:
+        return {**base, "status": "stale", "issue": "wrong-marketplace-source"}
+
+    canonical = source_root or _canonical_source_root()
+    if channel == "release" and marketplace is not None and marketplace.root:
+        canonical = Path(marketplace.root)
+    try:
+        source_version = _manifest_version(canonical)
+    except CodexPluginError as exc:
+        return {**base, "status": "unknown", "issue": "source-unreadable", "detail": str(exc)}
+    cache_version = selected.version
+    cache = home / "plugins" / "cache" / expected_marketplace / "fno" / cache_version
+    version_fields = {"source_version": source_version, "cache_version": cache_version}
+    if source_version != cache_version:
+        return {**base, **version_fields, "status": "stale", "issue": "version-mismatch"}
+    if not cache.is_dir():
+        return {**base, **version_fields, "status": "missing", "issue": "cache-missing"}
+    try:
+        source_digest = plugin_payload_digest(canonical)
+        cache_digest = plugin_payload_digest(cache)
+    except CodexPluginError as exc:
+        return {
+            **base,
+            **version_fields,
+            "status": "unknown",
+            "issue": "digest-unreadable",
+            "detail": str(exc),
+        }
+    digest_fields = {"source_digest": source_digest, "cache_digest": cache_digest}
+    if source_digest != cache_digest:
+        return {
+            **base,
+            **version_fields,
+            **digest_fields,
+            "status": "stale",
+            "issue": "payload-drift",
+        }
+    return {**base, **version_fields, **digest_fields, "status": "fresh", "issue": None}
+
+
 def converge(
     *,
     channel: str,
@@ -287,12 +423,10 @@ def converge(
             selected is not None
             and selected.installed
             and selected.enabled
+            and selected.marketplace_name == marketplace_name
             and source_matches(selected.source_type, selected.marketplace_source)
         )
-        only_selected = (
-            len(footnote_plugins) == 1
-            and footnote_plugins[0].plugin_id == plugin_id
-        )
+        only_selected = len(footnote_plugins) == 1 and footnote_plugins[0].plugin_id == plugin_id
         _write_marker(
             home,
             channel=channel,
@@ -362,6 +496,7 @@ def converge(
         if (
             len(enabled) != 1
             or enabled[0].plugin_id != plugin_id
+            or enabled[0].marketplace_name != marketplace_name
             or not source_matches(enabled[0].source_type, enabled[0].marketplace_source)
         ):
             found = ", ".join(plugin.plugin_id for plugin in enabled) or "none"
