@@ -28,11 +28,14 @@ Three layers, each more authoritative than the last:
    values exit non-zero. Use this for repair operations against past
    dangling nodes.
 
-3. **Title-similarity safety net** - `_warn_similar_idea_titles` runs
-   on the append path (no claim declared) and emits a stderr warning
-   when an existing idea-state node has a title within 0.7 difflib ratio
-   of the new plan. The warning suggests `--claims` so the author can
-   re-run and consolidate.
+3. **Filing-time dedup net** - `_warn_similar_nodes` runs on every
+   node-birth path (idea/add, single intake, multi-intake) and emits a
+   stderr `dedup:` receipt naming up to three existing nodes that resemble
+   the new one. It scores token-Jaccard via `relatedness.similar_nodes`
+   across all live states (a shipped `done` node is the answer to a
+   duplicate filing), at a 0.30 floor. For an idea-state top candidate the
+   receipt suggests `--claims` so the author can re-file and consolidate.
+   Warn-only - it never blocks a filing.
 
 ## Authoring
 
@@ -107,7 +110,7 @@ plan path is the new source of truth for execution.
 ## See also
 
 - `skills/blueprint/SKILL.md` - "Plan Claims Ingestion" section
-- `cli/src/fno/graph/_intake.py` - `_resolve_claim`, `_warn_similar_idea_titles`
+- `cli/src/fno/graph/_intake.py` - `_resolve_claim`, `_warn_similar_nodes`
 - `scripts/lib/parse-claims-arg.sh` - bash classifier
 - `docs/architecture/graph-collision-detection.md` - sister mechanism
   for plan-vs-plan file overlap detection
