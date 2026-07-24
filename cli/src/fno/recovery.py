@@ -480,18 +480,27 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
     the caller treats None as "keep today's suppression" (fail closed).
     """
     try:
-        node_id = kind = None
-        if candidate.cwd:
-            # Manifest first: only a /target session writes one, and the runtime
-            # wrote it, so unlike the worker name it cannot drift from the mission.
-            node_id, kind = _node_id_from_worktree(candidate.cwd), "target"
-        if not node_id:
-            from fno.agents.truth_status import parse_worker_mission
+        from fno.agents.truth_status import parse_worker_mission
 
-            parsed = parse_worker_mission(candidate.name)
-            if parsed is None:
-                return None
+        parsed = parse_worker_mission(candidate.name)
+        # Manifest first: the runtime wrote it, so unlike a worker name (a mere
+        # convention - `tgt-x-4175-liveness` ships) it cannot drift. The one
+        # exception is a positively think-named worker: it writes no manifest of
+        # its own but spawns with --cwd on the node's canonical root, where an
+        # unrelated /target session's manifest can sit. Reading that would
+        # answer about the wrong node, so its name is the only signal that is
+        # about THIS worker.
+        manifest_node = (
+            _node_id_from_worktree(candidate.cwd)
+            if candidate.cwd and (parsed is None or parsed[1] != "think")
+            else None
+        )
+        if manifest_node:
+            node_id, kind = manifest_node, "target"
+        elif parsed is not None:
             node_id, kind = parsed
+        else:
+            return None
 
         from fno.graph.load import load_graph
 

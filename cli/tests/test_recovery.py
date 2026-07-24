@@ -1053,6 +1053,19 @@ class TestMissionComplete:
         assert recovery.mission_complete(
             self._cand(name="think-x-2222-bar", cwd=str(tmp_path))) is True
 
+    def test_think_name_ignores_a_foreign_manifest(self, monkeypatch, tmp_path):
+        # spawn_think dispatches with --cwd on the node's CANONICAL root, where
+        # an unrelated /target session's manifest can sit; a think worker writes
+        # none of its own. Reading that manifest would answer about x-1111 and
+        # nudge a design pass that actually finished.
+        self._patch_graph(monkeypatch, [
+            {"id": "x-1111", "status": "ready"},           # foreign, incomplete
+            {"id": "x-2222", "plan_path": "/plans/d.md"},  # ours, complete
+        ])
+        cand = self._cand(name="think-x-2222-bar",
+                          cwd=self._worktree(tmp_path, "x-1111"))
+        assert recovery.mission_complete(cand) is True
+
     def test_unresolvable_mission_is_none(self, monkeypatch, tmp_path):
         # AC7: no node id in the name and no manifest -> unverifiable.
         self._patch_graph(monkeypatch, [{"id": "x-1111", "status": "ready"}])
