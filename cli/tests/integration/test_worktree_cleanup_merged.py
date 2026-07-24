@@ -16,6 +16,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LIFECYCLE_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-lifecycle.sh"
+LIFECYCLE_COMPAT_SRC = REPO_ROOT / "scripts" / "worktree-lifecycle.sh"
 ARCHIVE_SRC = REPO_ROOT / "scripts" / "setup" / "archive-worktree.sh"
 
 
@@ -53,6 +54,7 @@ def repo(tmp_path: Path) -> Path:
     (canon / "scripts" / "lib").mkdir(parents=True)
     (canon / "scripts" / "setup").mkdir(parents=True)
     shutil.copy2(LIFECYCLE_SRC, canon / "scripts" / "lib" / "worktree-lifecycle.sh")
+    shutil.copy2(LIFECYCLE_COMPAT_SRC, canon / "scripts" / "worktree-lifecycle.sh")
     shutil.copy2(ARCHIVE_SRC, canon / "scripts" / "setup" / "archive-worktree.sh")
     return canon
 
@@ -67,6 +69,14 @@ def _sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
 
 def _age_sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
     script = canon / "scripts" / "lib" / "worktree-lifecycle.sh"
+    return subprocess.run(
+        ["bash", str(script), "cleanup", "--older-than", "0d", *flags],
+        cwd=str(canon), capture_output=True, text=True,
+    )
+
+
+def _compat_age_sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
+    script = canon / "scripts" / "worktree-lifecycle.sh"
     return subprocess.run(
         ["bash", str(script), "cleanup", "--older-than", "0d", *flags],
         cwd=str(canon), capture_output=True, text=True,
@@ -309,6 +319,22 @@ def test_age_sweep_keeps_codex_app_owned_worktree(
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
     r = _age_sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert f"SKIP: {wt} (app-owned Codex worktree)" in r.stdout
+    assert wt.exists()
+
+
+def test_compat_age_sweep_delegates_app_owned_guard(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    codex_home = tmp_path / ".codex"
+    wt = codex_home / "worktrees" / "thread-d" / repo.name
+    wt.parent.mkdir(parents=True)
+    _git(repo, "worktree", "add", "--detach", str(wt), "main")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    r = _compat_age_sweep(repo)
 
     assert r.returncode == 0, r.stderr
     assert f"SKIP: {wt} (app-owned Codex worktree)" in r.stdout
