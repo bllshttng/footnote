@@ -65,6 +65,15 @@ pub enum MailInjectProvider {
     Codex,
 }
 
+/// Axis-rename tombstone (x-bab1): the harness axis was `--provider`, now
+/// `--harness/-H`. A model vendor routes only at spawn. Mirrors the Python
+/// `_flag_aliases.PROVIDER_AXIS_TOMBSTONE` (kept in lockstep). Removed at 0.4.0.
+const PROVIDER_AXIS_TOMBSTONE: &str = concat!(
+    "--provider was split at the axis rename: the CLI binary is --harness/-H; ",
+    "a model vendor is only routable at spawn ",
+    "(`fno agents spawn --provider <vendor> --model <m>`). Removed at 0.4.0.",
+);
+
 /// Parsed `mail-inject` flags. The turn TEXT is read from STDIN (sidesteps the
 /// argv size limit for envelopes up to the 1 MiB send cap); everything else is a
 /// flag.
@@ -95,18 +104,19 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                         .to_string(),
                 );
             }
-            "--provider" => {
+            "--harness" | "-H" => {
                 provider = match it.next().map(String::as_str) {
                     Some("claude") => MailInjectProvider::Claude,
                     Some("codex") => MailInjectProvider::Codex,
                     _ => {
                         return Err((
                             2,
-                            "mail-inject: --provider must be claude or codex".to_string(),
+                            "mail-inject: --harness must be claude or codex".to_string(),
                         ))
                     }
                 };
             }
+            "--provider" => return Err((2, PROVIDER_AXIS_TOMBSTONE.to_string())),
             "--attempts" => {
                 attempts = it.next().and_then(|v| v.parse().ok()).ok_or((
                     2,
@@ -309,7 +319,7 @@ pub fn deliver_via_control_sock(
 }
 
 /// Run `mail-inject`. Reads the turn TEXT from STDIN and delivers it to the
-/// target harness (`--provider claude` over `control.sock`, default; `codex`
+/// target harness (`--harness claude` over `control.sock`, default; `codex`
 /// over the app-server daemon, US8); emits the single JSON outcome line Python
 /// parses. Every `not-delivered` reason is a clean signal for Python to write
 /// the durable fallback. The claude delivery stays sync ([`deliver_via_control_sock`]);
@@ -517,17 +527,33 @@ mod tests {
     }
 
     #[test]
-    fn parse_args_provider_defaults_claude_and_accepts_codex() {
+    fn parse_args_harness_defaults_claude_and_accepts_codex() {
         let d = parse_args(&argv(&["--session", "x"])).unwrap();
         assert_eq!(d.provider, MailInjectProvider::Claude);
-        let c = parse_args(&argv(&["--session", "x", "--provider", "codex"])).unwrap();
+        let c = parse_args(&argv(&["--session", "x", "--harness", "codex"])).unwrap();
         assert_eq!(c.provider, MailInjectProvider::Codex);
-        // Unknown provider is a usage error.
+        // -H is the harness short flag.
+        let h = parse_args(&argv(&["--session", "x", "-H", "codex"])).unwrap();
+        assert_eq!(h.provider, MailInjectProvider::Codex);
+        // Unknown harness is a usage error.
         assert_eq!(
-            parse_args(&argv(&["--session", "x", "--provider", "gemini"]))
+            parse_args(&argv(&["--session", "x", "--harness", "gemini"]))
                 .unwrap_err()
                 .0,
             2
+        );
+    }
+
+    #[test]
+    fn parse_args_provider_is_the_axis_rename_tombstone() {
+        // --provider was the harness axis; it now exits 2 with the axis map
+        // (x-bab1), regardless of value. Reverting the tombstone arm makes this
+        // test fail (AC6).
+        let err = parse_args(&argv(&["--session", "x", "--provider", "codex"])).unwrap_err();
+        assert_eq!(err.0, 2);
+        assert!(
+            err.1.contains("--harness/-H"),
+            "tombstone points at --harness: {err:?}"
         );
     }
 
