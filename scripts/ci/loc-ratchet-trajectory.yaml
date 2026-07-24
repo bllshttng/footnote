@@ -33,6 +33,7 @@ entries:
     branch: feature/x-43b3
     delta: 15
     reason: 'mail_escalation overlay (x-43b3): +15 in scripts/lib/events-validate.sh, the reason-enum check mirroring the Python validator and the six existing per-type enum blocks (mission_complete, gate_escape, review_attestation, post_merge_dispatch_receipt, ...). Required for bash-validator parity (US1): a bad reason must fail loud in both languages, not land silently. Every other file in the PR (schema.yaml, the Python builder/validator, mail/cli.py, registry.py, register_session.py, needs.rs, client.rs, tests) is OFF the ratchet manifest. The block follows the established one-per-enum-event pattern and cannot shrink without dropping the parity the plan locks.'
+  - date: 2026-07-24
     pr: 593
     branch: feature/x-eea5
     delta: 19
