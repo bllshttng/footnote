@@ -29,6 +29,11 @@ baseline:
 
 entries:
   - date: 2026-07-24
+    pr: null
+    branch: feature/x-0b3f
+    delta: 24
+    reason: 'Codex-owned worktree cleanup fence (x-0b3f): +24 in scripts/lib/worktree-lifecycle.sh, the only ratchet-scoped production file this feature changes. The guard resolves CODEX_HOME (defaulting to ~/.codex), classifies every registered worktree below its worktrees/ directory as app-owned, and makes both merged-worktree and age-based cleanup skip those paths while reporting the skipped count. This is the ownership boundary that prevents Footnote janitors from deleting a Codex Desktop worktree behind its chat; the app remains the sole lifecycle owner and archive-chat remains the supported deletion path. The legacy scripts/worktree-lifecycle.sh implementation is simultaneously collapsed to a compatibility wrapper, but that deletion is outside the ratchet manifest because only scripts/lib/ is scoped. The substantive native handoff, project-assignment verification, target claim and resume logic, unsupported-substrate fallback, and their tests live under cli/ and tests/, also outside the manifest. The 24-line borrow is therefore exactly the shared cleanup refusal required for safe native ownership, with cumulative control-plane LOC still 2758 lines below baseline.'
+  - date: 2026-07-24
     pr: 591
     branch: feature/x-43b3
     delta: 15
