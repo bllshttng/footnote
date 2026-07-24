@@ -1564,7 +1564,7 @@ def cmd_ask(
 def cmd_list(
     cwd: str = typer.Option(None, "--cwd", help="Filter by working directory."),
     harness: str = typer.Option(
-        None, "--harness", help="Filter by harness (claude | codex | gemini)."
+        None, "--harness", "-H", help="Filter by harness (claude | codex | gemini)."
     ),
     _provider_tombstone: str = typer.Option(
         None,

@@ -2150,7 +2150,7 @@ fn fetch_discovered_sessions(
     // An empty value is "no filter" on the Python side, so forwarding it would
     // make the two runtimes disagree again in the other direction.
     if let Some(p) = provider_filter.filter(|p| !p.is_empty()) {
-        cmd.args(["--provider", p]);
+        cmd.args(["--harness", p]);
     }
     let output = match cmd.output() {
         Ok(o) if o.status.success() => o.stdout,
