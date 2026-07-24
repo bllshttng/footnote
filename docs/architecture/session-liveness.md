@@ -32,6 +32,7 @@ So the recovery watchdog's `SKIP_TERMINAL` (`recovery.classify`) does not suppre
 It also reads the mission's external artifacts in the graph via `recovery.mission_complete`: for a `/target` mission, node `status: done` or a PR ref; for a `/think` design pass, a linked non-empty `plan_path`.
 Only positive evidence of an *unfinished* mission relaxes the skip, and the candidate then falls through to the normal staleness gate, so a fresh promise mid-finalize is never nudged.
 Claim state is deliberately not the authority here: claims are PID-anchored, so a finished worker and an abandoned one both read `suspect`/`stale`, and design-pass workers hold no node claim at all.
+Which node a worker is on resolves from its manifest first, since the runtime wrote it and a worker name is only a convention; the exception is a `think-` named worker, which writes no manifest but runs with `--cwd` on the node's canonical root, where an unrelated `/target` session's manifest can sit.
 Every probe failure (unreadable graph, unresolvable node, node-less thread) returns `None` and keeps the family-1 verdict, so the gate can only ever relax a `done`, never manufacture one.
 
 ## Mail boundary
