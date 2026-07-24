@@ -70,18 +70,54 @@ def test_stale_holder_proceeds(monkeypatch):
     assert incarnation_fence_blocks("uuid1") == (False, "")
 
 
+def test_corrupted_claim_fails_closed(monkeypatch):
+    # F3: claim_status returns state="corrupted" (no raise) for a malformed claim
+    # file. An unverifiable single-writer state must fail closed, not read clear.
+    _wire(monkeypatch, {"state": "corrupted", "error": "bad json"})
+    blocked, reason = incarnation_fence_blocks("uuid1")
+    assert blocked
+    assert "corrupt" in reason.lower()
+
+
 def test_resolve_uuid_from_env(monkeypatch):
-    monkeypatch.setenv("TARGET_SESSION_ID", "env-uuid")
+    # F1: the fence keys on the TRANSCRIPT uuid (CLAUDE_CODE_SESSION_ID), not the
+    # target run id (TARGET_SESSION_ID); the single-writer claim is held under the
+    # transcript uuid, so the run id would read a nonexistent key as clear.
+    monkeypatch.setenv("TARGET_SESSION_ID", "run-id")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "transcript-uuid")
+    assert resolve_fence_session_uuid() == "transcript-uuid"
+
+
+def test_target_session_id_is_not_the_fence_key(monkeypatch, tmp_path):
+    # F1: TARGET_SESSION_ID is the target run id, not the claim key. With no
+    # transcript uuid resolvable the fence is invisible (None), never the run id.
+    monkeypatch.setenv("TARGET_SESSION_ID", "run-id")
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
-    assert resolve_fence_session_uuid() == "env-uuid"
+    assert resolve_fence_session_uuid(tmp_path) is None
 
 
 def test_resolve_uuid_from_manifest(tmp_path, monkeypatch):
+    # F1: the manifest's transcript uuid (claude_session_id / harness_session_id)
+    # is the claim key, not the run-id `session_id` field.
     monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     (tmp_path / ".fno").mkdir()
-    (tmp_path / ".fno" / "target-state.md").write_text('session_id: "man-uuid"\n')
-    assert resolve_fence_session_uuid(tmp_path) == "man-uuid"
+    (tmp_path / ".fno" / "target-state.md").write_text(
+        'session_id: "run-uuid"\n'
+        'claude_session_id: "transcript-uuid"\n'
+        'harness_session_id: "transcript-uuid"\n'
+    )
+    assert resolve_fence_session_uuid(tmp_path) == "transcript-uuid"
+
+
+def test_resolve_manifest_run_id_only_is_none(tmp_path, monkeypatch):
+    # F1: a manifest carrying only the run-id session_id yields None; the run id
+    # is never the fence key.
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    (tmp_path / ".fno").mkdir()
+    (tmp_path / ".fno" / "target-state.md").write_text('session_id: "run-uuid"\n')
+    assert resolve_fence_session_uuid(tmp_path) is None
 
 
 def test_verb_blocked_exits_nonzero(monkeypatch):

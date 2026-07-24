@@ -22,22 +22,31 @@ from typing import Optional, Tuple, Union
 
 
 def resolve_fence_session_uuid(cwd: Optional[Union[str, Path]] = None) -> Optional[str]:
-    """The session uuid to fence on, from TARGET_SESSION_ID, the active target
-    manifest's ``session_id``, or CLAUDE_CODE_SESSION_ID. None when no identity
-    is resolvable (the fence is then a no-op - invisible)."""
-    for env_var in ("TARGET_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
-        val = os.environ.get(env_var)
-        if val:
-            return val
+    """The TRANSCRIPT uuid the single-writer ``session:<uuid>`` claim is held
+    under - NOT the target run id.
+
+    The claim is keyed on the harness/transcript uuid
+    (``acquire_session_writer_claim`` uses the resumed transcript uuid).
+    ``TARGET_SESSION_ID`` and the manifest's ``session_id`` field are the target
+    RUN id, a different identity; fencing on them reads a nonexistent key as
+    clear and silently fails to fence. Resolve the transcript uuid:
+    ``CLAUDE_CODE_SESSION_ID``, then the manifest's ``harness_session_id``
+    (canonical) or ``claude_session_id`` (legacy). None when no transcript
+    identity is resolvable (the fence is then a no-op - invisible)."""
+    val = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if val:
+        return val
     manifest = (Path(cwd) if cwd else Path.cwd()) / ".fno" / "target-state.md"
     try:
         text = manifest.read_text(encoding="utf-8")
     except OSError:
         return None
-    m = re.search(r"^session_id\s*:\s*(.+)$", text, re.MULTILINE)
-    if m:
-        val = m.group(1).strip().strip("\"'")
-        return val or None
+    for field in ("harness_session_id", "claude_session_id"):
+        m = re.search(rf"^{field}\s*:\s*(.+)$", text, re.MULTILINE)
+        if m:
+            val = m.group(1).strip().strip("\"'")
+            if val:
+                return val
     return None
 
 
@@ -77,6 +86,11 @@ def incarnation_fence_blocks(
     except Exception:  # noqa: BLE001 - unreadable single-writer state -> fail closed
         return True, f"incarnation-fence: claims directory unreadable for {key}"
     state = info.get("state")
+    if state == "corrupted":
+        # claim_status reports a malformed claim file as state="corrupted" without
+        # raising; an unverifiable single-writer state fails closed, matching the
+        # unreadable-dir arm below.
+        return True, f"incarnation-fence: {key} claim file corrupted (unverifiable single-writer state)"
     if state not in ("live", "suspect"):
         return False, ""  # free / stale / dead -> no live contender
     own_pid, own_host = _own_session_pid_host()
