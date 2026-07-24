@@ -68,14 +68,14 @@ out="$(STUB_VERDICT='{"verdict":"dispatchable","reservation_key":"dispatch:'"$NO
   run --name w1 --provider claude --message '/target x' --node "$NODE")"
 ok 'dispatchable -> launched' "$(field "$out")" 'launched'
 has 'dispatchable short_id' "$out" 'short_id=deadbeef'
-has 'dispatchable did spawn' "$(calllog)" 'agents spawn --provider'
+has 'dispatchable did spawn' "$(calllog)" 'agents spawn --harness'
 
 # --- live-claim already-running -> NO spawn, holder surfaced -----------------
 out="$(STUB_VERDICT='{"verdict":"already-running","reason":"live-claim","holder":"target-session:owner"}' \
   run --name w2 --provider claude --message '/target x' --node "$NODE")"
 ok 'live-claim -> already-running' "$(field "$out")" 'already-running'
 has 'live-claim holder text' "$out" 'live worker holds node:x-7777 (target-session:owner)'
-no  'live-claim did NOT spawn' "$(calllog)" 'agents spawn --provider'
+no  'live-claim did NOT spawn' "$(calllog)" 'agents spawn --harness'
 
 # --- self-handoff: live claim is the CALLER's own -> guide, do NOT spawn ------
 # --self matches .holder: distinct receipt routing to the sanctioned handoff.
@@ -85,28 +85,28 @@ out="$(STUB_VERDICT='{"verdict":"already-running","reason":"live-claim","holder"
   run --name w2h --provider claude --message '/target x' --node "$NODE" --self 'target-session:owner')"
 ok  'self-handoff -> self-handoff receipt' "$(field "$out")" 'self-handoff'
 has 'self-handoff routes to sanctioned path' "$out" 'fno backlog unclaim'
-no  'self-handoff did NOT spawn' "$(calllog)" 'agents spawn --provider'
+no  'self-handoff did NOT spawn' "$(calllog)" 'agents spawn --harness'
 no  'self-handoff did NOT release the node claim' "$(calllog)" 'claim release'
 
 # --- self-handoff with a DIFFERENT holder -> still refuse (foreign) -----------
 out="$(STUB_VERDICT='{"verdict":"already-running","reason":"live-claim","holder":"target-session:someone-else"}' \
   run --name w2f --provider claude --message '/target x' --node "$NODE" --self 'target-session:owner')"
 ok  'foreign holder + --self -> still already-running' "$(field "$out")" 'already-running'
-no  'foreign holder did NOT spawn' "$(calllog)" 'agents spawn --provider'
+no  'foreign holder did NOT spawn' "$(calllog)" 'agents spawn --harness'
 
 # --- reservation-held already-running -> NO spawn ----------------------------
 out="$(STUB_VERDICT='{"verdict":"already-running","reason":"reservation-held"}' \
   run --name w3 --provider claude --message '/target x' --node "$NODE")"
 ok 'reservation-held -> already-running' "$(field "$out")" 'already-running'
 has 'reservation-held text' "$out" 'a peer dispatcher holds dispatch:x-7777 (racing launch)'
-no  'reservation-held did NOT spawn' "$(calllog)" 'agents spawn --provider'
+no  'reservation-held did NOT spawn' "$(calllog)" 'agents spawn --harness'
 
 # --- corrupted -> failed, NO spawn -------------------------------------------
 out="$(STUB_VERDICT='{"verdict":"corrupted","detail":"node:'"$NODE"' claim is corrupted; force-release or repair before dispatching"}' \
   run --name w4 --provider claude --message '/target x' --node "$NODE")"
 ok 'corrupted -> failed' "$(field "$out")" 'failed'
 has 'corrupted reason' "$out" 'claim is corrupted; force-release or repair'
-no  'corrupted did NOT spawn' "$(calllog)" 'agents spawn --provider'
+no  'corrupted did NOT spawn' "$(calllog)" 'agents spawn --harness'
 
 # --- stale fno WITHOUT the verb -> fail CLOSED, NO spawn ----------------------
 # empty stdout + non-zero rc (Typer "No such command" goes to stderr, suppressed).
@@ -114,7 +114,7 @@ out="$(STUB_VERDICT='' STUB_VERDICT_RC=2 \
   run --name w5 --provider claude --message '/target x' --node "$NODE")"
 ok 'verb-absent -> failed (fail-closed)' "$(field "$out")" 'failed'
 has 'verb-absent reason' "$out" 'spawn-guard unavailable'
-no  'verb-absent did NOT spawn' "$(calllog)" 'agents spawn --provider'
+no  'verb-absent did NOT spawn' "$(calllog)" 'agents spawn --harness'
 
 # --- spawn-guard returns dispatchable but the launch FAILS -> release + failed
 out="$(STUB_VERDICT='{"verdict":"dispatchable","reservation_key":"dispatch:'"$NODE"'","reservation_holder":"dispatch-skill:1"}' \

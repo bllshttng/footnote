@@ -130,7 +130,7 @@ The lazy loader defers the import until the user actually runs `fno agents ...`,
 > **Group 1 (cross-agent bus epic):** creation moved off `ask`.
 > `fno agents ask` now messages EXISTING agents only (unknown name -> exit 16,
 > "spawn it first"); the create machinery below is reached via
-> `fno agents spawn --provider claude` (`dispatch_spawn` in `dispatch.py`),
+> `fno agents spawn --harness claude` (`dispatch_spawn` in `dispatch.py`),
 > and the codex/gemini one-shot create lineage via `spawn --once`.
 
 The `claude` provider's create path is the reference dispatch flow every other provider mirrors.

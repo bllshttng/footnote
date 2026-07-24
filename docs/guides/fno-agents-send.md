@@ -7,7 +7,7 @@ Use this guide when a script or LLM session needs to hand off work to a peer wit
 ## Prerequisites
 
 - `fno` CLI installed; the compiled `fno-agents` binary on `$PATH` for codex/gemini hosted delivery.
-- The target agent already registered via `fno agents spawn <name> --provider <p>` - see [fno-agents-spawn.md](fno-agents-spawn.md).
+- The target agent already registered via `fno agents spawn "<prompt>" --name <n> --harness <h>` - see [fno-agents-spawn.md](fno-agents-spawn.md).
 
 ## Basic send
 
@@ -73,7 +73,7 @@ Send resolves delivery in order:
 |---|---|---|
 | Body exceeds 1 MiB | 2 | `message body exceeds maximum size (1 MiB); got N bytes` |
 | Name/message/from-name fails validation | 2 | validation message |
-| Unknown agent | 16 | `unknown agent '<name>'; spawn it first: fno agents spawn <name> -p <provider>` |
+| Unknown agent | 16 | `unknown agent '<name>'; spawn it first: fno agents spawn --name <n> --harness <harness>` |
 | Provider mismatch | 2 | mismatch description |
 | Registry read error | 12 | `registry read failed: ...` |
 | Lock timeout (another send/ask holds the per-agent flock) | 11 | `timed out waiting for agent '<name>' lock (timeout=Ns)` |

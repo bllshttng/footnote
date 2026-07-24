@@ -249,10 +249,10 @@ fn ask_unknown_name_stderr_byte_parity() {
 
     let out = dispatch_claude_ask(&home, &ch, "myagent", "msg", "fno", &cwd, false, None, &[]);
 
-    // Python: f"unknown agent {name!r}; spawn it first: fno agents spawn {name} -p <provider>"
+    // Python: f"unknown agent {name!r}; spawn it first: fno agents spawn {name} --harness <harness>"
     // Rust must match this exactly (py_repr wraps in single quotes).
     let expected =
-        "unknown agent 'myagent'; spawn it first: fno agents spawn myagent -p <provider>\n";
+        "unknown agent 'myagent'; spawn it first: fno agents spawn myagent --harness <harness>\n";
     assert_eq!(
         out.stderr, expected,
         "stderr must be byte-for-byte parity with Python"
@@ -765,14 +765,7 @@ fn client_spawn_once_claude_is_headless_p_lane_not_bg() {
     }
 
     let out = std::process::Command::new(&bin)
-        .args([
-            "spawn",
-            "myagent",
-            "hello",
-            "--provider",
-            "claude",
-            "--once",
-        ])
+        .args(["spawn", "myagent", "hello", "--harness", "claude", "--once"])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
         .env("FNO_AGENTS_HOME", &home_dir)
@@ -829,7 +822,7 @@ fn client_spawn_headless_claude_honors_timeout() {
             "spawn",
             "wk",
             "hello",
-            "--provider",
+            "--harness",
             "claude",
             "--substrate",
             "headless",
@@ -860,7 +853,7 @@ fn client_spawn_headless_claude_honors_timeout() {
     );
 }
 
-/// x-2c27: `bg` is claude-only. `--substrate bg --provider codex` must hard-error
+/// x-2c27: `bg` is claude-only. `--substrate bg --harness codex` must hard-error
 /// (exit 2) pointing to headless, never silently fall to another substrate.
 #[test]
 fn client_spawn_substrate_bg_codex_hard_errors() {
@@ -876,7 +869,7 @@ fn client_spawn_substrate_bg_codex_hard_errors() {
             "spawn",
             "myagent",
             "hello",
-            "--provider",
+            "--harness",
             "codex",
             "--substrate",
             "bg",
@@ -917,7 +910,7 @@ fn client_spawn_permission_mode_codex_headless_fails_closed() {
             "spawn",
             "myagent",
             "hi",
-            "--provider",
+            "--harness",
             "codex",
             "--substrate",
             "headless",
@@ -954,7 +947,7 @@ fn client_spawn_permission_mode_and_yolo_mutually_exclusive() {
             "spawn",
             "myagent",
             "hi",
-            "--provider",
+            "--harness",
             "claude",
             "--substrate",
             "bg",
@@ -976,7 +969,7 @@ fn client_spawn_permission_mode_and_yolo_mutually_exclusive() {
 }
 
 /// x-567d: opencode headless is now WIRED (was exit-2 "not wired", x-51f6).
-/// `--substrate headless --provider opencode` invokes the `opencode run`
+/// `--substrate headless --harness opencode` invokes the `opencode run`
 /// one-shot. With no `opencode` on PATH the dispatch surfaces "binary not
 /// found" (exit 13) — the proof it reached run_opencode instead of the retired
 /// refusal — never exit 2. PATH is isolated so the assertion is deterministic
@@ -996,7 +989,7 @@ fn client_spawn_substrate_headless_opencode_is_wired() {
             "spawn",
             "myagent",
             "hello",
-            "--provider",
+            "--harness",
             "opencode",
             "--substrate",
             "headless",
@@ -1021,7 +1014,7 @@ fn client_spawn_substrate_headless_opencode_is_wired() {
     );
 }
 
-/// x-567d: `--substrate bg --provider opencode` still hard-errors (bg is
+/// x-567d: `--substrate bg --harness opencode` still hard-errors (bg is
 /// claude-only) but now points at `--substrate headless` (the generic bg arm)
 /// - opencode's headless one-shot is wired, so that advice is no longer the
 /// dead end the x-51f6 special-case pane arm guarded against.
@@ -1041,7 +1034,7 @@ fn client_spawn_substrate_bg_opencode_hard_errors_pointing_to_headless() {
             "spawn",
             "myagent",
             "hello",
-            "--provider",
+            "--harness",
             "opencode",
             "--substrate",
             "bg",
@@ -1175,7 +1168,7 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
             "spawn",
             "hp-agent",
             "hello there",
-            "--provider",
+            "--harness",
             "claude",
             "--substrate",
             "bg",
@@ -1228,7 +1221,7 @@ fn client_host_retired_prints_mux_pointer() {
     seed_registry(&home, "host-collide", "codex");
 
     let out = std::process::Command::new(&bin)
-        .args(["host", "host-collide", "--provider", "codex"])
+        .args(["host", "host-collide", "--harness", "codex"])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
         .env("FNO_AGENTS_HOME", &home_dir)

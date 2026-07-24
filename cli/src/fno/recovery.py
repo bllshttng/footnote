@@ -552,8 +552,9 @@ def _redispatch(candidate: "Candidate", *, pre_spawn: Optional[Callable[[], bool
         # active in settings.yaml, so the kind is what spawn needs. no-merge: an
         # autonomous worker lands a PR for review, never auto-merges.
         proc = subprocess.run(
-            [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--provider", "claude",
-             "--substrate", "bg", "--cwd", cwd, agent, f"/target no-merge {node}"],
+            [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--harness", "claude",
+             "--substrate", "bg", "--cwd", cwd, "--name", agent,
+             f"/target no-merge {node}"],
             cwd=cwd, capture_output=True, timeout=60, check=False,
         )
         if proc.returncode != 0:
@@ -753,11 +754,11 @@ def _respawn_bg_resume(
             return False
         if pre_spawn is not None and not pre_spawn():
             return False
-        argv = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--provider", "claude",
+        argv = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--harness", "claude",
                 "--substrate", "bg", "--resume", session_uuid]
         if cwd:
             argv += ["--cwd", cwd]
-        argv += [agent, CONTINUE_MESSAGE]
+        argv += ["--name", agent, CONTINUE_MESSAGE]
         proc = subprocess.run(argv, cwd=cwd, capture_output=True, timeout=60, check=False)
         return proc.returncode == 0
     except (OSError, subprocess.SubprocessError):

@@ -189,14 +189,15 @@ echo "US5 - targeted bg-dispatch (dispatch-node.sh)"
 echo "=============================================="
 
 # ---- AC5-HP: single ready node launches via fno agents spawn, no --bare/-p ----
+# (-p is fno's headless short now, but a bg dispatch must never carry it either.)
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
 out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
 echo "$out" | grep -q "^launched ab-aaaa1111 name=target-ab-aaaa1111 session=deadbeef01" \
   && pass "AC5-HP: ready node launched with stable target-<full-id> name + session" \
   || fail "AC5-HP: expected launched line, got: $out"
-grep -q -- "--provider claude" "$MOCKSTATE/ask.log" \
-  && pass "AC5-HP: dispatch used fno agents spawn --provider claude" \
-  || fail "AC5-HP: ask.log missing --provider claude"
+grep -q -- "--harness claude" "$MOCKSTATE/ask.log" \
+  && pass "AC5-HP: dispatch used fno agents spawn --harness claude" \
+  || fail "AC5-HP: ask.log missing --harness claude"
 if grep -Eq -- "(^| )(--bare|-p)( |$)" "$MOCKSTATE/ask.log"; then
   fail "AC5-HP: FORBIDDEN --bare/-p reached the dispatch (must be subscription lane)"
 else
@@ -596,16 +597,16 @@ echo "$out" | grep -q "^already-running ab-aaaa1111 reason=\"a peer dispatcher h
   || fail "codex-P1: reservation race not closed: $out (asks=$(ask_count))"
 
 # ---- x-567d AC1-EDGE: a non-bg harness resolves to headless with a loud note,
-#      spawning --provider <h> --substrate headless (not the claude bg lane) ----
+#      spawning --harness <h> --substrate headless (not the claude bg lane) ----
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
 echo "codex/headless" > "$MOCKSTATE/resolve_pair"
 out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
 echo "$out" | grep -q "note: harness 'codex' has no bg substrate; dispatching via headless" \
   && pass "x-567d AC1-EDGE: non-bg harness prints the loud headless-fallback note" \
   || fail "x-567d AC1-EDGE: missing fallback note: $out"
-echo "$out" | grep -q -- "--provider codex --substrate headless" \
-  && pass "x-567d AC1-EDGE: dispatch resolves --provider codex --substrate headless" \
-  || fail "x-567d AC1-EDGE: wrong provider/substrate: $out"
+echo "$out" | grep -q -- "--harness codex --substrate headless" \
+  && pass "x-567d AC1-EDGE: dispatch resolves --harness codex --substrate headless" \
+  || fail "x-567d AC1-EDGE: wrong harness/substrate: $out"
 # codex gets its NATIVE skill invocation, not a literal claude /target (P1 #1).
 echo "$out" | grep -qF "'\$fno:target no-merge ab-aaaa1111'" \
   && pass "x-567d P1: codex worker gets the native \$fno:target invocation" \

@@ -455,18 +455,36 @@ def cmd_crown(
 
 @agents_app.command("spawn")
 def cmd_spawn(
-    name: str = typer.Argument(
+    message: str = typer.Argument("", help="The prompt to seed the worker with."),
+    name: str = typer.Option(
         "",
-        help="Agent name (optional; an adjective-noun slug is minted when omitted).",
+        "--name",
+        help=(
+            "Agent name (optional; an adjective-noun slug is minted when omitted). "
+            "A name is a handle you rarely care about, so it moved off the "
+            "positional: the one positional is the prompt."
+        ),
     ),
-    message: str = typer.Argument("", help="Initial message (optional; empty string if omitted)."),
-    provider: str | None = typer.Option(
+    harness: str | None = typer.Option(
+        None,
+        "--harness",
+        "-H",
+        help=(
+            "The CLI binary to launch: claude | codex | gemini | opencode | agy "
+            "(optional). Defaults to the invoking harness, then claude. NOTE: -H "
+            "no longer means headless; for a one-shot use --substrate headless / "
+            "--headless / --once."
+        ),
+    ),
+    vendor: str | None = typer.Option(
         None,
         "--provider",
-        "-p",
+        "-P",
         help=(
-            "claude | codex | gemini (optional). Defaults to the invoking "
-            "harness, then claude. An explicit value wins."
+            "The model VENDOR the harness talks to: zai, or any "
+            "model_routing.providers name. Pairs with --model to name the route "
+            "(--provider zai --model glm-5.2 == --route zai,glm-5.2). This is NOT "
+            "the CLI binary -- that is --harness/-H. Capital -P: -p is headless."
         ),
     ),
     once: bool = typer.Option(
@@ -492,11 +510,12 @@ def cmd_spawn(
     headless: bool = typer.Option(
         False,
         "--headless",
-        "-H",
+        "-p",
         help=(
-            "Shortcut for --substrate headless: a one-shot (-p/--exec) worker. "
-            "Mobile-friendly (no '--substrate' to type; -H is one hyphen). "
-            "Wins over --substrate; equivalent to the legacy --once/-o."
+            "Shortcut for --substrate headless: a one-shot worker. Wins over "
+            "--substrate; equivalent to --once/-o. `-p` mirrors the harnesses' own "
+            "one-shot short (claude -p / codex exec); the vendor axis takes the "
+            "capital -P to keep the letter free for it."
         ),
     ),
     cwd: str | None = typer.Option(
@@ -769,6 +788,42 @@ def cmd_spawn(
         else None
     )
 
+    # Three orthogonal axes: --harness names the CLI binary, --provider the model
+    # vendor that binary talks to, --model the model at that vendor. `provider` is
+    # the local name for the HARNESS axis all the way down -- it is the
+    # dispatch_spawn kwarg and the receipt key every consumer parses, so the wire
+    # name outranks the tidier local one.
+    provider = harness
+    if vendor is not None:
+        vendor = vendor.strip()
+        # The historical confusion, refused by name rather than silently launching
+        # the wrong thing: `--provider claude` used to select the CLI binary.
+        from fno.agents.providers import READABLE_PROVIDERS
+
+        if vendor in READABLE_PROVIDERS:
+            print(
+                f"{vendor} is a harness, not a provider; use --harness {vendor}",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if route is not None:
+            print(
+                "--provider/--model and --route are two spellings of one route; pass one",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if not model:
+            print(
+                f"--provider {vendor!r} names a vendor, not a model; add --model "
+                "(the vendor's own model id, e.g. --model glm-5.2)",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        # The model belongs to the route from here: it reaches the worker as the
+        # routed ANTHROPIC_MODEL, never as a `claude --model` token (which would
+        # hand the claude CLI a vendor model id it cannot resolve).
+        route, model = f"{vendor}/{model}", None
+
     # --provider is optional: resolve it (explicit > invoking harness > claude)
     # and reject an empty --model before anything spawns. `provider` is a
     # concrete string from here down; the provider-name set is validated
@@ -788,10 +843,18 @@ def cmd_spawn(
     # spawns out of the binary route), `bg`/`headless` keep their existing
     # lanes. Validate to parity with the Rust client (exit 2 on a bad value);
     # headless still maps onto the `once` lever.
-    # --headless / -H is the ergonomic shortcut for --substrate headless (x-c772,
-    # mobile: no '--substrate' to type). It wins over an explicit --substrate so
-    # `-H` alone always resolves to the one-shot lane.
+    # --headless is the ergonomic shortcut for --substrate headless (x-c772). It
+    # wins over an explicit --substrate so `--headless` always resolves to the
+    # one-shot lane. (The -H short moved to --harness in x-6de8.)
     if headless:
+        substrate = "headless"
+    # `--once` is the pre-substrate spelling of headless (the Rust client maps it to
+    # --substrate headless; the spawn gate counts it as headless) but Python leaves
+    # it on the pane default. That only bites the routed lane, where the substrate
+    # decides whether the route is materialized at all: without this a routed
+    # `--once` reaches dispatch as claude+once+not-headless and dies on the
+    # "claude peers are persistent bg threads" refusal.
+    if once and route is not None and substrate == "pane":
         substrate = "headless"
     if substrate not in ("pane", "bg", "headless"):
         print(
@@ -931,10 +994,14 @@ def cmd_spawn(
     # for --route is a hard refusal, not the role lane's silent fallback.
     route_env: dict[str, str] | None = None
     if route is not None:
-        if provider != "claude" or substrate != "bg":
+        # A routed claude worker applies its route via a --settings file, which the
+        # bg and headless lanes both honor; pane is not a routed lane
+        # (dispatch_spawn_pane takes no route_env, so a routed pane would silently
+        # run the primary model).
+        if provider != "claude" or substrate not in ("bg", "headless"):
             print(
-                "--route is claude + --substrate bg only (the delivery-dispatch "
-                f"lane); got provider {provider!r} substrate {substrate!r}.",
+                "--route is claude on --substrate bg or headless only; "
+                f"got provider {provider!r} substrate {substrate!r}.",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
@@ -1394,7 +1461,7 @@ def cmd_ask(
     """Send a message to a registered agent (follow-up only).
 
     ``ask`` requires the agent to already exist. Unknown names exit 16
-    with a hint pointing at ``fno agents spawn <name> -p <provider>``.
+    with a hint pointing at ``fno agents spawn <name> --harness <harness>``.
     Use ``spawn`` / ``host`` for initial agent creation.
 
     Project mode (``ask --to-project <X> <message>``) resolves over the

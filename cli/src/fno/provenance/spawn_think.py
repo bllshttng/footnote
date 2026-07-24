@@ -727,7 +727,7 @@ def _spawn_think_worker(
     # flag overriding it rides through and fails loud downstream if the substrate
     # cannot host it, rather than being silently dropped.
     prov = (provider or "").strip() or "claude"
-    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--provider", prov, "--substrate", "bg"]
+    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--harness", prov, "--substrate", "bg"]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
@@ -751,7 +751,7 @@ def _spawn_think_worker(
             mode = ""
     if mode:
         cmd += ["--permission-mode", mode]
-    cmd += [agent_name, prompt]
+    cmd += ["--name", agent_name, prompt]
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:

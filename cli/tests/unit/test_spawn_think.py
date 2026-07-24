@@ -676,7 +676,7 @@ def test_spawn_worker_default_provider_claude_no_model(monkeypatch):
     cap = _capture_spawn_cmd(monkeypatch)
     st._spawn_think_worker("x-1", "prompt", None, "slug")
     cmd = cap["cmd"]
-    assert "--provider" in cmd and cmd[cmd.index("--provider") + 1] == "claude"
+    assert "--harness" in cmd and cmd[cmd.index("--harness") + 1] == "claude"
     assert "--model" not in cmd
 
 
@@ -721,7 +721,7 @@ def test_codex_ambient_pointer_keeps_default_worker_provider_claude(
     assert res.decision == "spawned"
     assert seen["pointer"] == ("codex", "codex-thread-123", "/tmp/codex-live")
     cmd = seen["cmd"]
-    assert cmd[cmd.index("--provider") + 1] == "claude"
+    assert cmd[cmd.index("--harness") + 1] == "claude"
     assert cmd[cmd.index("--substrate") + 1] == "bg"
 
 
@@ -731,7 +731,7 @@ def test_spawn_worker_threads_model_and_provider(monkeypatch):
     st._spawn_think_worker("x-1", "prompt", None, "slug",
                            model="glm-4.7", provider="codex")
     cmd = cap["cmd"]
-    assert cmd[cmd.index("--provider") + 1] == "codex"
+    assert cmd[cmd.index("--harness") + 1] == "codex"
     assert cmd[cmd.index("--model") + 1] == "glm-4.7"
 
 

@@ -203,19 +203,21 @@ Run the genuine one-shot via your **Bash tool** (never instruct the user to type
 it). Name is positional, message is the trailing positional, reply is on stdout:
 
 ```bash
-fno agents spawn --provider "$PROVIDER" -H -t 300 "peer-$TARGET" "$(cat "$BRIEF")"
+fno agents spawn --harness "$PROVIDER" --headless -t 300 --name "peer-$TARGET" "$(cat "$BRIEF")"
 ```
 
-- `-H` (`--headless`) makes it a synchronous create -> exchange -> teardown
-  one-shot; it blocks until the model answers, then prints the review to stdout
-  and exits. It is the mobile-friendly alias for the legacy `--once`/`-o` (one
-  hyphen, no `--substrate headless` to type); all three resolve to the headless
-  lane.
+- `--harness "$PROVIDER"` (short `-H`) selects the CLI binary (codex/gemini). It
+  is the canonical spelling of the axis; the old `--provider`/`-p` still works but
+  is deprecated. NOTE: `-H` now carries the harness value, not headless.
+- `--headless` makes it a synchronous create -> exchange -> teardown one-shot; it
+  blocks until the model answers, then prints the review to stdout and exits. It is
+  the alias for `--once`/`-o` (no `--substrate headless` to type); all three resolve
+  to the headless lane.
 - `"$(cat "$BRIEF")"` passes the brief as one already-expanded argument - the file
   content is not re-parsed by the shell, so any characters inside are safe.
 - `-t 300` bounds the model run. Give the Bash call itself a generous timeout
   (e.g. 360000 ms) so the tool does not cut the review off early.
-- `peer-$TARGET` is a throwaway name (`-H` tears the agent down); derive it
+- `--name peer-$TARGET` is a throwaway handle (`--headless` tears the agent down); derive it
   from the target, e.g. `peer-pr657` or `peer-fix-ratios`.
 
 ### 3b. GENERATE (routed claude -> GLM) - claude CLI as transport (x-ef41)

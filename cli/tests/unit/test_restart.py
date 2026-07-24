@@ -242,8 +242,8 @@ def test_restart_mux_revives_orphaned_claude_workers(monkeypatch) -> None:
     assert result.exit_code == 0
     assert ["/cargo/bin/fno", "agents", "reconcile"] in calls
     assert [
-        "/cargo/bin/fno", "agents", "spawn", "worker1",
-        "--provider", "claude", "--substrate", "bg", "--resume", "uuid-1", "--cwd", "/w1",
+        "/cargo/bin/fno", "agents", "spawn", "--name", "worker1",
+        "--harness", "claude", "--substrate", "bg", "--resume", "uuid-1", "--cwd", "/w1",
     ] in calls
     assert not any("spawn" in c and "bgw" in c for c in calls), "survivor must not be respawned"
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])

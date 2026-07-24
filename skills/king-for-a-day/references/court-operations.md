@@ -12,7 +12,7 @@ The pane layer owns placement, lifecycle, and I/O; fno stays the authority for i
 
 | Duty | Verb | Notes |
 |---|---|---|
-| **Place** a teammate near the king | `fno agents spawn <name> "<payload>" --substrate pane --squad <s> --split <dir>` | Splits the target squad's active tab; min-size refusal falls back to a same-squad tab. Read the receipt for which one landed. |
+| **Place** a teammate near the king | `fno agents spawn --name <n> "<payload>" --substrate pane --squad <s> --split <dir>` | Splits the target squad's active tab; min-size refusal falls back to a same-squad tab. Read the receipt for which one landed. |
 | **Inject** the next phase into a live session | `fno mail send <handle> "<ruling + /fno:verb>" --from-self` | A direct send to a live pane injects as a notification it acts on this turn. Receipt-gated - see delivery truth below. Auto-wrapped in the `<fno_mail>` envelope; a raw pane-layer prompt is not - see the envelope rule below. |
 | **Wait** on lifecycle | `fno agents top` + `fno agents peek <handle>` per heartbeat | Push-first (the teammate's report mail); this is the backstop sweep. `top` = who is alive; `peek` = is a quiet pane done/blocked/dead. `fno-agents needs --json` is a separate loop-wedge signal, not pane completion. |
 | **Read / triage** | `fno agents peek <handle>` | Read-only. Full-screen agents render in the alternate screen, so scrolled-off rows are unrecoverable - reads are triage, results live in artifacts and the graph. |
@@ -32,8 +32,8 @@ Every agent-to-agent payload carries the `<fno_mail>` envelope - king to teammat
 
 | Job | Verb |
 |---|---|
-| Spawn a teammate pane | `fno agents spawn <name> "<payload>" --substrate pane --squad <s> --split <dir> --effort <e>` |
-| Anoint a sub-king at spawn | `fno agents spawn <name> "<payload>" --substrate pane --crown level=<N>,scope=<scope>` |
+| Spawn a teammate pane | `fno agents spawn --name <n> "<payload>" --substrate pane --squad <s> --split <dir> --effort <e>` |
+| Anoint a sub-king at spawn | `fno agents spawn --name <n> "<payload>" --substrate pane --crown level=<N>,scope=<scope>` |
 | Coronate a running session in place | `fno agents crown <handle> --scope <scope> [--level N]` (scope = epic/project/node id; level 0..2) |
 | Read your own crown | `fno whoami` (prints a `crown:` line when your row holds one) |
 | Message a live teammate | `fno mail send <handle> "<msg>" --from-self` |
@@ -71,7 +71,7 @@ read -r -d '' payload <<'CLAUSE' || true   # read -d '' exits 1 at EOF; absorb i
 Take node x-b3a8 through /fno:think.
 <minion clause - paste verbatim from references/minion-clause.md>
 CLAUSE
-fno agents spawn node-x-b3a8 "$payload" --substrate pane --squad epic-squad --split right --effort high
+fno agents spawn --name node-x-b3a8 "$payload" --substrate pane --squad epic-squad --split right --effort high
 ```
 
 The `<minion clause>` is the canonical block in [minion-clause.md](minion-clause.md), not something you compose here - that is the whole point of the template. Capture the teammate's mail handle from the spawn receipt's `short_id` (a claude pane now carries its 8-hex jobId there).
@@ -94,7 +94,7 @@ read -r -d '' payload <<'CLAUSE' || true
 Continue node x-b3a8 at /fno:blueprint. Prior /think artifact: <path>.
 <minion clause - paste verbatim from references/minion-clause.md>
 CLAUSE
-fno agents spawn node-x-b3a8-g2 "$payload" \
+fno agents spawn --name node-x-b3a8-g2 "$payload" \
   --substrate pane --squad epic-squad --split down --effort high
 # ...only after the successor's session header prints, close the predecessor
 # PANE (a mux row -> fno mux pane kill, not fno agents stop). Its <session>:<pane_id>

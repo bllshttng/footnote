@@ -25,7 +25,7 @@ read -r -d '' payload <<'CLAUSE' || true
 Take node <id> through /fno:think.
 <the whole clause block above, verbatim>
 CLAUSE
-fno agents spawn <node-name> "$payload" --substrate pane --squad <s> --split <dir> --effort high
+fno agents spawn --name <node-name> "$payload" --substrate pane --squad <s> --split <dir> --effort high
 ```
 
 The `<<'CLAUSE'` delimiter is quoted, so no backtick, `$`, or quote inside expands. `"$payload"` then hands the assembled text to spawn as one argument. The `|| true` is required: `read -d ''` returns exit 1 at EOF (it found no NUL terminator), which would abort the whole recipe under `set -e` before spawn ever runs.

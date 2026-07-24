@@ -965,7 +965,7 @@ class TestRedispatch:
         assert "node:x-370f" in calls[fr]      # exact claim key
         assert "-R" in calls[fr]               # required audit reason supplied
         spawn_cmd = calls[spawn]
-        assert "--provider" in spawn_cmd and "claude" in spawn_cmd
+        assert "--harness" in spawn_cmd and "claude" in spawn_cmd
         assert "--substrate" in spawn_cmd and "bg" in spawn_cmd
         assert "--cwd" in spawn_cmd and "/wt/x-370f" in spawn_cmd
 

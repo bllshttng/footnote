@@ -14,7 +14,7 @@ What each provider fundamentally is, from fno's point of view:
 |---|---|---|---|---|---|
 | Substrates | pane, **bg**, headless | pane, headless | pane, headless | pane, headless | pane only |
 | Detached-thread lane (`--substrate bg`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | no |
-| Headless one-shot (`--substrate headless` / `-H`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | **no** (refuses, pointing to pane) |
+| Headless one-shot (`--substrate headless` / `--headless` / `-p` / `--once`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | **no** (refuses, pointing to pane) |
 | Session id recorded | `claude_short_id` (jobId) + `claude_session_uuid` (full transcript UUID) | `codex_session_id` | `gemini_session_id` | **none** (stateless: plain-text output, no parseable ID) | `harness_session_id` (the `ses_` id, captured at spawn) |
 | Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | no | `resume` |
 | Revive a **dead** session | `spawn --resume <uuid>` (bg lane) | no | no | no | no |
@@ -26,14 +26,15 @@ The pane substrate (the default) is the great equalizer: all five providers can 
 
 | Verb | claude | codex | gemini | agy | opencode | What it does |
 |------|:---:|:---:|:---:|:---:|:---:|---|
-| `spawn <name> [msg]` | yes | yes | yes | yes | yes | Create + register a worker. Default substrate `pane` (mux-hosted PTY). |
+| `spawn "<prompt>"` | yes | yes | yes | yes | yes | Create + register a worker. Default substrate `pane` (mux-hosted PTY). |
 | `spawn --substrate bg` | yes | no | no | no | no | Persistent detached `claude --bg` thread. Hard error on any other provider, pointing to `headless`. |
-| `spawn --substrate headless` / `-H` / `--once` | yes | yes | yes | yes | no | One-shot: create + exchange + teardown. stdout is the provider reply. |
+| `spawn --substrate headless` / `--headless` / `-p` / `--once` | yes | yes | yes | yes | no | One-shot: create + exchange + teardown. stdout is the provider reply. `-p` mirrors the harnesses' own one-shot short; `-H` is NOT a headless spelling, it selects the harness. |
+| `spawn --harness <h>` / `-H <h>` | selector | selector | selector | selector | selector | Canonical CLI-binary selector (`claude\|codex\|gemini\|opencode\|agy`); the `--harness` vocabulary the rest of fno uses. A model VENDOR (`zai`, ...) is never a harness value; that is `--provider`/`-P`, a separate axis. Reassigned from headless: `-H` now takes a harness value, not a one-shot toggle. |
 | `spawn --resume <uuid>` | yes (bg only) | no | no | no | no | **Revive a dead session**: mints a fresh detached bg thread seeded from the persisted transcript UUID, re-registers the row. Requires `--substrate bg` and provider claude. **Runtime caveat:** the `--resume` flag is wired only on the Python `cmd_spawn` path, so on an installed binary (default `auto`/`rust` runtime) the spawn auto-routes to the Rust client, which does not parse it; run it under `FNO_AGENTS_RUNTIME=python` until the flag joins the Python-only auto-route set. |
 | `spawn --model <m>` | pane+bg+headless | pane+headless | pane+headless | pane+headless | pane | Exact passthrough to the provider CLI. Every provider honors it on pane; the one-shot lanes forward it too (`codex exec --model`, `gemini --model`, `agy`, `claude -p --model`). |
 | `spawn --permission-mode <m>` | pane+bg+headless | pane | pane | pane | pane | Mapped approval mode (`claude -p`/`--bg` take it directly). Non-claude bg/headless lanes hardcode their own bypass form, so the flag is refused there (fail-closed, never silently dropped). Mutually exclusive with `--yolo`. |
 
-Retired creation verbs (each prints a pointer and exits non-zero, never a silent success): `host` and `promote` are gone - agent panes live in the mux now; use `fno agents spawn <name> --substrate pane`.
+Retired creation verbs (each prints a pointer and exits non-zero, never a silent success): `host` and `promote` are gone - agent panes live in the mux now; use `fno agents spawn --name <n> --substrate pane`.
 
 ## Verbs: talking to and observing workers
 
@@ -115,7 +116,7 @@ You rarely type these by hand - hooks and drivers do - but they live under `fno 
 |---|---|
 | `grid` | The mux. Open `fno mux`; script panes with `fno mux pane ls\|read\|run\|send\|wait\|kill`. |
 | `drive` | `fno mux pane send <pane> ...`, or type into the pane in `fno mux`. |
-| `host` | `fno agents spawn <name> --substrate pane`. |
+| `host` | `fno agents spawn --name <n> --substrate pane`. |
 | `promote` | Same - the mux hosts agent panes now. |
 | `send` / `inbox` / `ack` | The `fno mail` namespace (`fno mail send`, `fno mail inbox`, ...). |
 

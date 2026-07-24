@@ -72,7 +72,7 @@ def test_bg_spawn_gates_as_bg_and_receipt_is_byte_identical(
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg"],
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg"],
     )
     assert result.exit_code == 0, result.output
     assert calls == [
@@ -99,7 +99,7 @@ def test_once_maps_to_headless_for_the_gate(runner, gate_calls, monkeypatch):
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "w1", "hi", "--provider", "codex", "--once"]
+        agents_app, ["spawn", "--name", "w1", "hi", "--harness", "codex", "--once"]
     )
     assert result.exit_code == 0, result.output
     assert calls[0]["substrate"] == "headless"
@@ -123,7 +123,7 @@ def test_gate_refusal_propagates_exit_code(runner, monkeypatch):
     result = runner.invoke(
         agents_app,
         [
-            "spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg",
+            "spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
             "--no-wait",
         ],
     )
@@ -139,7 +139,7 @@ def test_force_and_no_wait_flags_reach_the_gate(runner, gate_calls, monkeypatch)
     result = runner.invoke(
         agents_app,
         [
-            "spawn", "w1", "hi", "--provider", "claude", "--substrate", "bg",
+            "spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
             "--force", "--no-wait",
         ],
     )
@@ -168,7 +168,7 @@ def test_pane_spawn_gates_as_pane_and_releases_on_success(
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "w1", "hi", "--provider", "claude"]
+        agents_app, ["spawn", "--name", "w1", "hi", "--harness", "claude"]
     )
     assert result.exit_code == 0, result.output
     assert calls[0]["substrate"] == "pane"

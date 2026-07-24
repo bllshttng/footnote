@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # spawn.sh - the honest-receipt core of /fno:agent (spawn verb).
 #
-# Runs the GENUINE `fno agents spawn|host <name> "<message>" --provider <p>`
+# Runs the GENUINE `fno agents spawn|host <name> "<message>" --harness <h>`
 # launch and reports ONLY a real captured receipt (short-id or one-shot reply). This is the cardinal guard (AC5-FR):
 # the motivating session was a non-execution that *looked* like a command and
 # was reported as success. Here the success/FAILED decision is deterministic
@@ -15,7 +15,7 @@
 # Self-contained skill script. External deps: bash + `fno` (agents, claim) + jq.
 #
 # Usage:
-#   spawn.sh --name <n> --provider <p> --message "<msg>" [--node <ab-XXXX>] [--cwd <dir>]
+#   spawn.sh --name <n> --harness <h> --message "<msg>" [--node <ab-XXXX>] [--cwd <dir>]
 #
 # Outcome (one line on stdout; NEVER silent, NEVER a fabricated uuid):
 #   result=launched short_id=<hex> name=<n> hint="fno agents logs <hex>" trace="fno agents trace <n>"
@@ -75,7 +75,9 @@ fail() { release_reservation; printf 'result=failed reason="%s"\n' "$1"; exit 1;
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --name)         NAME="${2:-}"; shift 2 ;;
-    --provider)     PROVIDER="${2:-}"; shift 2 ;;
+    # --harness is the fno-CLI name for this axis (the binary to launch);
+    # --provider is the older spelling this script shipped with.
+    --harness|--provider) PROVIDER="${2:-}"; shift 2 ;;
     --message)      MESSAGE="${2:-}"; shift 2 ;;
     --node)         NODE="${2:-}"; shift 2 ;;
     --self)         SELF="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
@@ -341,7 +343,7 @@ maybe_auto_worktree() {
   # which also retires the stale-base phantom-deletion bug here.)
   # $PROVIDER is already a harness kind - VALID_PROVIDERS (claude|codex|gemini|agy|
   # opencode, mirroring the Rust KNOWN_PROVIDERS) IS the harness set; glm/z.ai is a
-  # model route layered on --provider claude, and ccm/ccr are claude account config
+  # model route layered on --harness claude, and ccm/ccr are claude account config
   # dirs, so neither reaches here as a bareword provider. Forward it directly as
   # --harness: ensure lands a claude payload harness-native at <repo>/.claude/
   # worktrees/, degrades any non-claude (or unexpected) harness to the external base.
@@ -384,14 +386,14 @@ maybe_auto_worktree   # self-gating: no-op unless code payload + main checkout
 # client, not this script, translates to `claude -p`). --yolo is appended only
 # when the user explicitly passed it (normalize.sh strips it for claude). A bare interactive
 # host omits the message positional (a valid idle session). The cmd array
-# always carries at least `agents <verb> --provider <p> <name>`, so
+# always carries at least `agents <verb> --harness <h> --name <n>`, so
 # "${cmd[@]}" is never an empty expansion (bash 3.2 set -u safe).
 #
 # stdout and stderr are captured SEPARATELY (via a temp file) so the receipt
 # parse only ever sees stdout: a stderr warning (incl. the --once teardown
 # receipt) can never be mistaken for a short-id, and the failure reason still
 # carries the real stderr.
-cmd=(agents "$VERB" --provider "$PROVIDER")
+cmd=(agents "$VERB" --harness "$PROVIDER")
 [[ -n "$CWD" ]] && cmd+=(--cwd "$CWD")
 [[ "$FRESH" -eq 1 ]] && cmd+=(--fresh)
 [[ "$HERE" -eq 1 ]] && cmd+=(--here)
@@ -412,7 +414,7 @@ cmd=(agents "$VERB" --provider "$PROVIDER")
 # provenance (the verb resolves slug/plan from the graph). Ad-hoc spawns have no
 # --node and export nothing new. Harmless on bg/headless (the verb ignores it).
 [[ -n "$NODE" ]] && cmd+=(--node "$NODE")
-cmd+=("$NAME")
+cmd+=(--name "$NAME")
 [[ -n "$MESSAGE" ]] && cmd+=("$MESSAGE")
 
 err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/agents-spawn-$$.err")"

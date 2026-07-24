@@ -12,7 +12,7 @@ Fields resolve independently, with ONE exception: the `model` default is provide
 scoped. A bare scalar `model` with no `provider` is scoped to the harness it was
 written for - the config `provider`, else the builtin default (claude), NOT the
 ambient harness (whose shape the model may not match). A spawn that resolves to a
-DIFFERENT harness (an explicit `-p codex`, OR a codex-ambient session, over a
+DIFFERENT harness (an explicit `-H codex`, OR a codex-ambient session, over a
 claude-shaped `model`) leaves the model to that harness rather than forcing an
 incompatible one. An explicit `-m/--model` always wins. Scope is the operator-
 initiated spawn surface only; autonomous dispatch computes its own routing and
@@ -31,13 +31,17 @@ from typing import IO, Callable, List, Mapping, Optional, Sequence, Set, Tuple
 # typer exposes on the spawn verb.
 _VALUE_FLAGS = frozenset(
     {
-        "--provider", "-p", "--model", "-m", "--effort", "--from", "--cwd", "-c",
+        "--provider", "-P", "--harness", "-H", "--model", "-m", "--effort",
+        "--from", "--cwd", "-c",
         "--message", "--session-id", "--cc-session-id", "--channel-id", "--status",
         "--from-name", "--timeout", "-t", "--mode", "--substrate", "--permission-mode",
     }
 )
 
-_PROVIDER_FLAGS = ("--provider", "-p")
+# The harness axis (the CLI binary) is --harness/-H only: --provider/-P names the
+# model VENDOR, a different axis that never picks a binary, so it must not feed
+# the provider-aware default scan.
+_PROVIDER_FLAGS = ("--harness", "-H")
 _MODEL_FLAGS = ("--model", "-m")
 _EFFORT_FLAGS = ("--effort",)
 
@@ -93,13 +97,19 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
     {
         "--role", "--resume", "-r", "--add-dir", "--agent", "--tools",
         "--deny-tools", "--workspace", "--squad", "-s", "--split", "-x",
-        "--node", "--slug", "--plan",
+        "--node", "--slug", "--plan", "--name",
+        # x-6de8: --route/--account/--crown were absent, so their VALUES read as
+        # positionals: a nameless `spawn --route zai,glm-5.2` registered an agent
+        # named "zai,glm-5.2". Kept in lockstep with cmd_spawn's value options
+        # (test_spawn_value_flags_cover_every_value_option pins the two together).
+        "--route", "--account", "--crown",
     }
 )
 
 # Tokens that pin the substrate explicitly (a positional substrate word conflicts
-# with any of these -> exit 2). `-H/--headless` and `-o/--once` both mean headless.
-_EXPLICIT_SUBSTRATE_BOOLS = ("-H", "--headless", "-o", "--once")
+# with any of these -> exit 2). `--headless`/`-p` and `-o/--once` mean headless;
+# `-H` selects the harness and `-P` the vendor, so both are value flags here.
+_EXPLICIT_SUBSTRATE_BOOLS = ("--headless", "-p", "-o", "--once")
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _SHORT_ID_RE = re.compile(r"^[0-9a-f]{8}$")
@@ -205,7 +215,8 @@ def normalize_spawn_args(
     2. ``-r`` is the short flag for ``--resume``; its value may be a full uuid or
        an 8-hex short-id (resolved to the uuid; unresolvable/malformed -> exit 2).
        ``--resume`` with no substrate defaults the substrate to ``bg``.
-    3. A spawn with no NAME positional gets an autogen ``adjective-noun`` slug.
+    3. The single positional is the MESSAGE; the name rides ``--name`` and is
+       minted (``adjective-noun``) when omitted. A second positional -> exit 2.
 
     Non-``spawn`` verbs and ``spawn --help`` pass through unchanged. Read-only
     (registry names, session resolver); writes no state.
@@ -299,11 +310,25 @@ def normalize_spawn_args(
             toks += ["--substrate", "bg"]
             print("fno agents spawn: substrate: bg (implied by --resume)", file=err)
 
-    # Pass 3: autogen name when no NAME positional remains.
-    if not _positional_indices(toks):
+    # Pass 3: the NAME axis. `spawn` takes ONE positional and it is the MESSAGE;
+    # the agent name is a handle the caller rarely picks, so it is minted unless
+    # --name says otherwise. Canonicalize to `--name <n> <message>` so both
+    # parsers read the same shape. A second positional is refused rather than
+    # guessed at: under the old `<name> <message>` grammar it would silently
+    # register an agent named after the prompt.
+    if not any(t == "--name" or t.startswith("--name=") for t in toks):
         names = existing_names if existing_names is not None else _read_registry_names()
         slug = _mint_slug(names, rng if rng is not None else random.Random(), err)
-        toks.insert(0, slug)
+        toks = ["--name", slug, *toks]
+    extra = _positional_indices(toks)
+    if len(extra) > 1:
+        print(
+            "fno agents spawn: takes one positional (the prompt); got "
+            f"{len(extra)} ({', '.join(repr(toks[i]) for i in extra)}). The agent "
+            "name moved to --name, so pass `--name <n> \"<prompt>\"`.",
+            file=err,
+        )
+        raise SystemExit(2)
 
     return ["spawn", *toks, *payload]
 
@@ -332,8 +357,8 @@ _PROFILE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 def _seed_of(toks: Sequence[str]) -> Optional[str]:
-    """The MESSAGE seed: the ``--message`` value, else the 2nd positional (the
-    first is NAME). Stops at the ``--argv`` payload boundary."""
+    """The MESSAGE seed: the ``--message`` value, else the sole positional (the
+    name rides ``--name``). Stops at the ``--argv`` payload boundary."""
     i = 0
     while i < len(toks):
         t = toks[i]
@@ -345,7 +370,7 @@ def _seed_of(toks: Sequence[str]) -> Optional[str]:
             return t.split("=", 1)[1]
         i += 1
     pos = _positional_indices(toks)
-    return toks[pos[1]] if len(pos) >= 2 else None
+    return toks[pos[0]] if pos else None
 
 
 def _profile_key(seed: Optional[str]) -> Optional[str]:
@@ -530,7 +555,7 @@ def inject_spawn_defaults(
                 file=err,
             )
             raise SystemExit(2)
-        inject += ["--provider", cfg_provider]
+        inject += ["--harness", cfg_provider]
         from_config.append(("provider", provider_rung))  # type: ignore[arg-type]
 
     if cfg_model and not has_model:
@@ -594,7 +619,7 @@ def inject_spawn_defaults(
             from_config.append(("effort", effort_rung))  # type: ignore[arg-type]
         else:
             # Config-sourced effort degrades open on BOTH a no-surface provider
-            # AND a value the resolved provider can't map (e.g. codex + "xhigh"):
+            # AND a value the resolved provider can't map (e.g. codex + "max"):
             # an ambient default must never hard-fail a bare spawn. An explicit
             # --effort keeps x-a0e0's fail-closed exit 2 (has_effort short-circuits
             # this whole branch).
@@ -610,7 +635,7 @@ def inject_spawn_defaults(
             )
 
     # Substrate (x-3d5b): inject when no explicit substrate is pinned (flag,
-    # positional token, -H/-o, or resume-implied bg - all visible post-normalize).
+    # positional token, --headless/-o, or resume-implied bg - all post-normalize).
     # A config-sourced value that is unknown, or incompatible with the resolved
     # provider, degrades open (warn, skip) rather than failing at the spawn parser.
     explicit_substrate = _has_explicit_substrate(out[1:])

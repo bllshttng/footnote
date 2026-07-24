@@ -513,6 +513,20 @@ def test_config_defaults_match_module_constants() -> None:
     assert mr.DEFAULT_SECONDARY_MODEL == "glm-5.2"
     assert mr._DEFAULT_PROVIDERS["zai"]["haiku_model"] == mr.DEFAULT_ZAI_HAIKU_MODEL
     assert mr.DEFAULT_ZAI_HAIKU_MODEL == "glm-4.5-air"
+    assert mr._DEFAULT_PROVIDERS["zai"]["api_key_file"] == mr.DEFAULT_API_KEY_FILE
+    assert mr.DEFAULT_API_KEY_FILE == "~/.fno/.env"
+
+
+def test_builtin_zai_key_falls_back_to_env_file(tmp_path, monkeypatch) -> None:
+    # A key living only in ~/.fno/.env (not the process env) must satisfy the
+    # built-in zai lane - the file rung the anthropic-protocol lanes lacked.
+    env_file = tmp_path / ".env"
+    env_file.write_text("ZAI_API_KEY=sk-test-not-a-real-key\n", encoding="utf-8")
+    provider = dict(mr._DEFAULT_PROVIDERS["zai"], api_key_file=str(env_file))
+    assert mr._resolve_key(provider, env={}) == "sk-test-not-a-real-key"
+    satisfying, checked = mr.key_source(provider, env={})
+    assert satisfying == str(env_file)
+    assert checked == ["ZAI_API_KEY", str(env_file)]
 
 
 # ---------------------------------------------------------------------------

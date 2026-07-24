@@ -181,12 +181,12 @@ def _spawn_target_worker(node_id: str, cwd: Optional[str]) -> bool:
     """
     name = f"keepgo-{_name_slug(node_id) or node_id}"[:64].rstrip("-")
     cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn",
-           "--provider", "claude", "--substrate", "bg"]
+           "--harness", "claude", "--substrate", "bg"]
     if cwd:
         cmd += ["--cwd", cwd]
     else:
         cmd += ["--fresh"]
-    cmd += [name, f"/target {node_id} no-merge"]
+    cmd += ["--name", name, f"/target {node_id} no-merge"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     except Exception as exc:  # noqa: BLE001 - spawn failure is never fatal

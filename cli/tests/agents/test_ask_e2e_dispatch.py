@@ -124,7 +124,7 @@ def test_spawn_once_python_vs_rust_parity(provider, tmp_path: Path, monkeypatch)
     """A `spawn --once` (the de-overloaded home of the old ask-create
     exchange, Task 1.3) produces the same stdout + exit code regardless of
     whether the dispatch runs through Python (`dispatch_spawn`) or the Rust
-    client (`fno-agents spawn --provider <p> --once`) for codex."""
+    client (`fno-agents spawn --harness <h> --once`) for codex."""
     install_fake, env_for = _PROVIDER_FAKES[provider]
     bin_dir = tmp_path / "bin"
     install_fake(bin_dir)
@@ -173,7 +173,7 @@ def test_spawn_once_python_vs_rust_parity(provider, tmp_path: Path, monkeypatch)
         **env_for(_SESSION_ID, _REPLY),
     }
     completed = subprocess.run(
-        [str(RUST_BIN), "spawn", "parity-agent", "hi", "--provider", provider, "--once"],
+        [str(RUST_BIN), "spawn", "--name", "parity-agent", "hi", "--harness", provider, "--once"],
         env=env,
         capture_output=True,
         text=True,
@@ -274,16 +274,16 @@ def test_codex_ask_short_flags_match_long_through_rust_binary(
         return subprocess.run(
             # Task 1.3: ask never creates, so the create exchange the shorts
             # must reach now lives on `spawn --once` (-o is the --once short).
-            [str(RUST_BIN), "spawn", "parity-agent", "hi", *flags],
+            [str(RUST_BIN), "spawn", "--name", "parity-agent", "--name", "hi", *flags],
             env=env,
             capture_output=True,
             text=True,
             timeout=30,
         )
 
-    short = _run(["-p", "codex", "-c", str(cwd), "-t", "10", "-o"], tmp_path / "short-home")
+    short = _run(["-H", "codex", "-c", str(cwd), "-t", "10", "-o"], tmp_path / "short-home")
     long = _run(
-        ["--provider", "codex", "--cwd", str(cwd), "--timeout", "10", "--once"],
+        ["--harness", "codex", "--cwd", str(cwd), "--timeout", "10", "--once"],
         tmp_path / "long-home",
     )
 
@@ -352,7 +352,7 @@ def test_codex_spawn_once_fake_provider_exit_propagates(tmp_path: Path, monkeypa
     env.pop("FAKE_CODEX_REPLY", None)
 
     completed = subprocess.run(
-        [str(RUST_BIN), "spawn", "parity-agent", "hi", "--provider", "codex", "--once"],
+        [str(RUST_BIN), "spawn", "--name", "parity-agent", "hi", "--harness", "codex", "--once"],
         env=env,
         capture_output=True,
         text=True,

@@ -287,8 +287,8 @@ RUST_ONLY_ADVERTISED: frozenset[str] = frozenset({"status"})
 RETIRED_VERB_POINTERS: dict[str, str] = {
     "grid": "agent panes now live in the mux. Open `fno mux`, or script panes with `fno mux pane ls|read|run|send|wait|kill`.",
     "drive": "drive an agent pane in the mux. Use `fno mux pane send <pane> ...`, or open `fno mux` and type into the pane.",
-    "host": "spawn a mux-hosted agent pane with `fno agents spawn <name> --substrate pane`.",
-    "promote": "the mux hosts agent panes; spawn one with `fno agents spawn <name> --substrate pane`.",
+    "host": "spawn a mux-hosted agent pane with `fno agents spawn --name <n> --substrate pane`.",
+    "promote": "the mux hosts agent panes; spawn one with `fno agents spawn --name <n> --substrate pane`.",
 }
 
 
@@ -425,13 +425,11 @@ def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
     for a in it:
         if a == "--argv":
             break
-        if a in ("--once", "-o"):
-            # The pre-substrate spelling of headless: a one-shot, never a pane.
-            return False
-        if a in ("--headless", "-H"):
-            # Ergonomic shortcut for --substrate headless (x-c772): one-shot,
-            # never a pane. Must be honored here or a `-H` spawn would route to
-            # the pane back half.
+        if a in ("--once", "-o", "--headless", "-p"):
+            # The headless spellings (--once/-o and --headless/-p): a one-shot,
+            # never a pane. Must be honored here or a headless spawn would route
+            # to the pane back half. `-H` (harness) and `-P` (vendor) are NOT
+            # here: they are value flags that do not pick the lane.
             return False
         if a == "--substrate":
             substrate = next(it, "")
@@ -492,17 +490,20 @@ def _is_resume_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
 
 
 def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
-    """True for a ``spawn`` carrying ``--route`` (x-b0b4).
+    """True for a ``spawn`` carrying ``--route`` (x-b0b4) or its decomposed
+    spelling ``--provider``/``-P`` (the model-vendor axis, which ``cmd_spawn``
+    folds into the same route with ``--model``).
 
-    The explicit per-dispatch ``--route provider,model`` override is parsed only
-    by the Python spawn path (``cmd_spawn`` resolves + fail-closes it via
-    ``resolve_explicit_route``). The Rust client does not know ``--route``, so a
-    ``spawn ... --route <p,m>`` auto-routed to the binary would exit ``unknown
-    flag: --route`` - identical registration to ``--role``."""
+    Routing is parsed only by the Python spawn path (``cmd_spawn`` resolves +
+    fail-closes it via ``resolve_explicit_route``). The Rust client does not
+    materialize a route, so a routed spawn auto-routed to the binary would either
+    exit ``unknown flag: --route`` or silently launch on the primary model."""
     if verb != "spawn":
         return False
     return any(
-        a == "--route" or a.startswith("--route=") for a in _args_before_argv(args)
+        a in ("--route", "--provider", "-P")
+        or a.startswith(("--route=", "--provider="))
+        for a in _args_before_argv(args)
     )
 
 

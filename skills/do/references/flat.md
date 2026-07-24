@@ -64,7 +64,7 @@ log WARN to stderr and are skipped.
 If a numbered change would edit a file **outside this session's project repo
 root**, STOP — do NOT `cd` into the other repo and edit it. Surface that work as
 a backlog node and spawn a worker into its project
-(`fno agents spawn --provider claude --cwd <root> "target-<node>" "/target <node>"`),
+(`fno agents spawn --harness claude --cwd <root> --name "target-<node>" "/target <node>"`),
 or, if no node exists yet, report it so the user can `/blueprint` it. See
 [session-project-invariant.md](session-project-invariant.md).
 

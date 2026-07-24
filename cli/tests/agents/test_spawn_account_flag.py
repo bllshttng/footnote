@@ -65,7 +65,7 @@ def test_account_overlay_threads_to_pane_and_receipt(monkeypatch, runner):
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "w1", "hi", "--account", "readyrule", "--here"]
+        agents_app, ["spawn", "--name", "w1", "hi", "--account", "readyrule", "--here"]
     )
     assert result.exit_code == 0, result.output
     assert received["account_env"] == {"CLAUDE_CONFIG_DIR": "/x/.claude"}
@@ -88,7 +88,7 @@ def test_account_refusal_fails_closed(monkeypatch, runner):
 
     from fno.agents.cli import agents_app
 
-    result = runner.invoke(agents_app, ["spawn", "w1", "hi", "--account", "nope"])
+    result = runner.invoke(agents_app, ["spawn", "--name", "w1", "hi", "--account", "nope"])
     assert result.exit_code == 2
     assert "not a registered provider" in result.output
     assert received == {}  # never reached the pane dispatch
@@ -100,7 +100,7 @@ def test_account_non_claude_provider_refused(monkeypatch, runner):
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "w1", "hi", "--provider", "codex", "--account", "x"]
+        agents_app, ["spawn", "--name", "w1", "hi", "--harness", "codex", "--account", "x"]
     )
     assert result.exit_code == 2
     assert "claude-only" in result.output
@@ -114,7 +114,7 @@ def test_account_plus_route_refused(monkeypatch, runner):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "w1", "hi", "--account", "readyrule", "--substrate", "bg",
+        ["spawn", "--name", "w1", "hi", "--account", "readyrule", "--substrate", "bg",
          "--route", "zai,glm-5.2"],
     )
     assert result.exit_code == 2
@@ -128,7 +128,7 @@ def test_account_plus_role_refused(monkeypatch, runner):
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "w1", "hi", "--account", "readyrule", "--role", "tidy"]
+        agents_app, ["spawn", "--name", "w1", "hi", "--account", "readyrule", "--role", "tidy"]
     )
     assert result.exit_code == 2
     assert "cannot combine with --role" in result.output

@@ -410,8 +410,8 @@ reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json beadfeed gemini)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name tgt-x --provider gemini --message "Implement ab-deadbeef" --node ab-deadbeef --mode exec)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=beadfeed"* ]] \
-   && grep -q -- "--provider gemini" "$SPAWN_LOG"; then
-  pass "AC1-EDGE gemini exec -> same spawn path + JSON receipt (--provider gemini)"
+   && grep -q -- "--harness gemini" "$SPAWN_LOG"; then
+  pass "AC1-EDGE gemini exec -> same spawn path + JSON receipt (--harness gemini)"
 else
   fail "AC1-EDGE gemini parity: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
 fi
@@ -422,7 +422,7 @@ handoff_seed='Read /tmp/handoff.md and continue from where it left off. GUARDRAI
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json handoff1 codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name handoff-doc --provider codex --payload-mode handoff --message "$handoff_seed" --mode exec)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=handoff1"* ]] \
-   && [[ "$OUT" == *"mode=spawn"* ]] && grep -q -- "spawn --provider codex" "$SPAWN_LOG" \
+   && [[ "$OUT" == *"mode=spawn"* ]] && grep -q -- "spawn --harness codex" "$SPAWN_LOG" \
    && grep -qF -- "$handoff_seed" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
    && ! grep -q -- "--once" "$SPAWN_LOG"; then
   pass "ab-ca822421: codex handoff -> autonomous spawn with seed verbatim"
@@ -458,7 +458,7 @@ reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json handoff2 gemini)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name handoff-doc-gemini --provider gemini --payload-mode handoff --message "$handoff_seed" --mode exec)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=handoff2"* ]] \
-   && [[ "$OUT" == *"mode=spawn"* ]] && grep -q -- "spawn --provider gemini" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
+   && [[ "$OUT" == *"mode=spawn"* ]] && grep -q -- "spawn --harness gemini" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
    && ! grep -q -- "--once" "$SPAWN_LOG"; then
   pass "ab-ca822421: gemini handoff -> autonomous spawn parity"
 else
@@ -471,7 +471,7 @@ seed_msg='Compare the retry designs and wait for my follow-up.'
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json discuss1 codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name discuss-retries --provider codex --payload-mode seed --message "$seed_msg" --mode exec)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=discuss1"* ]] \
-   && [[ "$OUT" == *"mode=seed"* ]] && grep -q -- "spawn --provider codex" "$SPAWN_LOG" \
+   && [[ "$OUT" == *"mode=seed"* ]] && grep -q -- "spawn --harness codex" "$SPAWN_LOG" \
    && grep -qF -- "$seed_msg" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
    && ! grep -q -- "--once" "$SPAWN_LOG"; then
   pass "seed codex -> seeded interactive pane (mode=seed)"
@@ -483,7 +483,7 @@ reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json discuss2 gemini)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name discuss-retries-gemini --provider gemini --payload-mode seed --message "$seed_msg" --mode exec)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"mode=seed"* ]] \
-   && grep -q -- "spawn --provider gemini" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
+   && grep -q -- "spawn --harness gemini" "$SPAWN_LOG" && ! grep -q -- "agents host" "$SPAWN_LOG" \
    && ! grep -q -- "--once" "$SPAWN_LOG"; then
   pass "seed gemini -> seeded interactive pane parity (mode=seed)"
 else
@@ -499,7 +499,7 @@ OUT="$(MOCK_SPAWN_OUT="$(spawn_json a1b2c3d4 codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_
        run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode interactive)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=a1b2c3d4"* ]] \
    && [[ "$OUT" == *"mode=interactive"* ]] && [[ "$OUT" == *"fno agents grid tgt-x"* ]] \
-   && grep -q "host --provider codex" "$SPAWN_LOG" && [[ ! -s "$ASK_LOG" ]]; then
+   && grep -q "host --harness codex" "$SPAWN_LOG" && [[ ! -s "$ASK_LOG" ]]; then
   pass "AC2-HP -i -> host launched (mode=interactive + grid handle), ask not called"
 else
   fail "AC2-HP host route: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
@@ -531,7 +531,7 @@ reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json ba5eba11 codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name tgt-bare --provider codex --mode interactive)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=ba5eba11"* ]] \
-   && grep -q "host --provider codex" "$SPAWN_LOG"; then
+   && grep -q "host --harness codex" "$SPAWN_LOG"; then
   pass "AC2-EDGE bare interactive host (empty message) -> launched, not a validation error"
 else
   fail "AC2-EDGE bare host: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
@@ -575,7 +575,7 @@ fi
 reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json feedface codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode interactive --yolo)"
-if [[ "$OUT" == *"result=launched"* ]] && grep -q "host --provider codex" "$SPAWN_LOG" \
+if [[ "$OUT" == *"result=launched"* ]] && grep -q "host --harness codex" "$SPAWN_LOG" \
    && grep -q -- "--yolo" "$SPAWN_LOG"; then
   pass "AC3 --yolo appended to host argv too"
 else
@@ -595,7 +595,7 @@ reset_log
 OUT="$(MOCK_SPAWN_OUT=$'Bubble sort is O(n^2) worst/average case,\nO(n) best case on a pre-sorted input.\n' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name tgt-q --provider codex --substrate headless --message "what is bubble sort" --mode exec)"
 if [[ "$OUT" == *"result=replied"* ]] && [[ "$OUT" == *"Bubble sort is O(n^2)"* ]] \
-   && [[ "$OUT" != *"short_id="* ]] && grep -q -- "spawn --provider codex" "$SPAWN_LOG" \
+   && [[ "$OUT" != *"short_id="* ]] && grep -q -- "spawn --harness codex" "$SPAWN_LOG" \
    && grep -q -- "--substrate headless" "$SPAWN_LOG" && [[ ! -s "$ASK_LOG" ]]; then
   pass "AC4-HP codex headless -> reply receipt, no short-id, ask not called"
 else
@@ -607,7 +607,7 @@ reset_log
 OUT="$(MOCK_SPAWN_OUT=$'The retry loop converges after K dry rounds.\n' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name tgt-q --provider gemini --substrate headless --message "how does retry converge" --mode exec)"
 if [[ "$OUT" == *"result=replied"* ]] && [[ "$OUT" == *"converges after K dry rounds"* ]] \
-   && grep -q -- "spawn --provider gemini" "$SPAWN_LOG" && grep -q -- "--substrate headless" "$SPAWN_LOG"; then
+   && grep -q -- "spawn --harness gemini" "$SPAWN_LOG" && grep -q -- "--substrate headless" "$SPAWN_LOG"; then
   pass "gemini headless -> reply receipt parity"
 else
   fail "gemini ask reply: $OUT"
@@ -650,7 +650,7 @@ reset_log
 OUT="$(MOCK_SPAWN_OUT=$'Bubble sort is a comparison sort.\n' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name tgt-q --provider claude --substrate headless --message "what is bubble sort" --mode exec)"
 if [[ "$OUT" == *"result=replied"* ]] && [[ "$OUT" == *"Bubble sort is a comparison sort"* ]] \
-   && [[ "$OUT" != *"short_id="* ]] && grep -q -- "spawn --provider claude" "$SPAWN_LOG" \
+   && [[ "$OUT" != *"short_id="* ]] && grep -q -- "spawn --harness claude" "$SPAWN_LOG" \
    && grep -q -- "--substrate headless" "$SPAWN_LOG" && [[ ! -s "$ASK_LOG" ]]; then
   pass "claude headless -> claude -p reply receipt (shares the reply lane)"
 else

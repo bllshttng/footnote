@@ -250,7 +250,7 @@ def tier3_pane_tokens(
 _EFFORT_SUPERSET = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
 _EFFORT_ALLOWED = {
     "claude": frozenset({"low", "medium", "high", "xhigh", "max"}),
-    "codex": frozenset({"minimal", "low", "medium", "high"}),
+    "codex": frozenset({"minimal", "low", "medium", "high", "xhigh"}),
     "opencode": _EFFORT_SUPERSET,
 }
 

@@ -353,7 +353,7 @@ key is absent or `$ROUTING` is `{}`):
   (never the user) so the reply returns in-context:
 
   ```bash
-  fno agents spawn --provider "$PROVIDER" --once -t 300 "sigma-$AGENT" "$(cat "$BRIEF")"
+  fno agents spawn --harness "$PROVIDER" --once -t 300 --name "sigma-$AGENT" "$(cat "$BRIEF")"
   ```
 
   Judge by exit code + emptiness only: exit 0 + non-empty stdout -> fold those
