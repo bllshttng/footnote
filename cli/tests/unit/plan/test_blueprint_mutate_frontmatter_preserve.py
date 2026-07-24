@@ -35,6 +35,9 @@ _mutate_doc = _load_mutate_module()
 
 _DOC_WITH_AUTHOR_FRONTMATTER = """---
 title: example spec
+sources:
+  - internal/fno/plans/20260721-retro-synthesis-x304c.md
+  - AGENTS.md#pitfalls-corpus-capped
 status: design
 execution_mode: sequential
 waves:
@@ -227,3 +230,23 @@ def test_empty_kill_criteria_treated_as_unset(tmp_path: Path) -> None:
     assert fm["kill_criteria"], (
         "empty kill_criteria should be replaced with defaults, not left empty"
     )
+
+
+def test_preserve_author_sources(tmp_path: Path) -> None:
+    """The think-stamped sources: provenance list must survive blueprint mutation.
+
+    /blueprint transcribes sources: verbatim (no parser change - new_fm starts
+    from a copy of the loaded frontmatter). This pins the carry-through so a
+    future strict-schema or key-stripping change cannot silently drop it.
+    """
+    doc = tmp_path / "spec.md"
+    doc.write_text(_DOC_WITH_AUTHOR_FRONTMATTER, encoding="utf-8")
+
+    rc, proposed = _mutate_doc.mutate(doc, mode="greenfield", rewrite=False, no_emit=True)
+    assert rc == 0, f"mutate failed: {proposed}"
+
+    fm = _extract_frontmatter(proposed)
+    assert fm["sources"] == [
+        "internal/fno/plans/20260721-retro-synthesis-x304c.md",
+        "AGENTS.md#pitfalls-corpus-capped",
+    ], f"author sources: was clobbered: got {fm.get('sources')!r}"
