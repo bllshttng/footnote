@@ -405,7 +405,12 @@ def converge(
     source = source_root or _canonical_source_root()
     if channel == "release":
         local_manifest = source / ".codex-plugin" / "plugin.json"
-        version = _manifest_version(source) if local_manifest.is_file() else ""
+        release_check = source / "scripts" / "release" / "sync-version.sh"
+        version = (
+            _manifest_version(source)
+            if local_manifest.is_file() and release_check.is_file()
+            else ""
+        )
         marketplace_name = RELEASE_MARKETPLACE
         marketplace_source = RELEASE_SOURCE
         plugin_id = RELEASE_PLUGIN_ID
@@ -474,11 +479,6 @@ def converge(
         needs_install = selected is None or refresh or not selected_ok or not marketplace_ok
         if needs_install:
             if channel == "release" and version:
-                release_check = source / "scripts" / "release" / "sync-version.sh"
-                if not release_check.is_file():
-                    raise CodexPluginError(
-                        "release-version-check", f"missing {release_check}"
-                    )
                 _run(
                     runner,
                     "release-version-check",

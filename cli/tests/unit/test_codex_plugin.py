@@ -298,7 +298,10 @@ def test_packaged_release_install_does_not_require_local_plugin_source(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "ordinary-project"
-    source.mkdir()
+    (source / ".codex-plugin").mkdir(parents=True)
+    (source / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "unrelated", "version": "9.9.9"}), encoding="utf-8"
+    )
     marketplaces: list[dict[str, object]] = []
     plugins: list[dict[str, object]] = []
     calls: list[list[str]] = []
