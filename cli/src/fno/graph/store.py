@@ -575,7 +575,7 @@ def entries_with_archive(entries: list) -> list:
                 if isinstance(a, dict) and a.get("id") not in live
             ),
         ]
-    except (OSError, ValueError):
+    except Exception:  # noqa: BLE001 - archive is advisory; any read failure degrades to the working graph
         return entries
 
 

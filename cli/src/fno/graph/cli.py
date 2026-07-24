@@ -138,6 +138,18 @@ def _graph_path() -> Path:
     return GRAPH_JSON
 
 
+def _safe_stderr_warn(msg: str) -> None:
+    """Write ``msg`` to stderr, swallowing a closed/broken stream.
+
+    The post-write dedup fallback runs AFTER the node already committed, so a
+    secondary stderr failure (closed fd, broken pipe) must never escape and
+    fail a filing whose mutation already landed (codex P2)."""
+    try:
+        sys.stderr.write(msg)
+    except Exception:  # noqa: BLE001 - a dead stderr must not break the filing
+        pass
+
+
 # Distinct from exit 1 ("graph read cleanly, node absent"): the graph itself
 # could not be read. click reserves 2 for usage errors, so 3 is the first free
 # code. A resolution caller that today treats any non-zero as "absent" keeps
@@ -981,7 +993,7 @@ def _create_node_impl(
             if node is not None:
                 _warn_similar_nodes(node, post_entries, intake_hint=False)
         except Exception as e:  # noqa: BLE001 - dedup never breaks a filing
-            sys.stderr.write(f"warning: post-file dedup check skipped: {e}\n")
+            _safe_stderr_warn(f"warning: post-file dedup check skipped: {e}\n")
 
     # Born-with-why: route births through the shared birth hook. Gate-first and
     # strictly non-fatal, so a gate-OFF install is a no-op and a dispatch
@@ -2021,7 +2033,7 @@ def _intake_impl(
         if node is not None:
             _warn_similar_nodes(node, post_entries, intake_hint=True)
     except Exception as e:  # noqa: BLE001 - dedup never breaks the intake
-        sys.stderr.write(f"warning: post-intake dedup check skipped: {e}\n")
+        _safe_stderr_warn(f"warning: post-intake dedup check skipped: {e}\n")
 
     # Mirror the graph-authoritative navigation fields onto the plan doc the
     # node just linked. Non-fatal: a missing/unreadable plan never fails intake.
@@ -8035,7 +8047,7 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
             if node is not None:
                 _warn_similar_nodes(node, post_entries, intake_hint=True)
     except Exception as e:  # noqa: BLE001 - dedup never breaks the batch
-        sys.stderr.write(f"warning: post-intake dedup check skipped: {e}\n")
+        _safe_stderr_warn(f"warning: post-intake dedup check skipped: {e}\n")
 
     from fno.graph._intake import _warn_unknown_project, _list_known_projects
     known = _list_known_projects()
@@ -8315,7 +8327,7 @@ def cmd_new(
             if node is not None:
                 _warn_similar_nodes(node, post_entries, intake_hint=False)
         except Exception as e:  # noqa: BLE001 - dedup never breaks a filing
-            sys.stderr.write(f"warning: post-file dedup check skipped: {e}\n")
+            _safe_stderr_warn(f"warning: post-file dedup check skipped: {e}\n")
 
     typer.echo(new_id_holder[0])
 

@@ -787,3 +787,32 @@ def test_new_birth_path_warns_on_near_duplicate(tmp_path, monkeypatch):
     # CliRunner mixes stderr into output; the receipt names the done candidate.
     assert "dedup:" in result.output
     assert "ab-d0ne5678" in result.output
+
+
+def test_safe_stderr_warn_swallows_broken_stream(monkeypatch):
+    # codex P2: the dedup fallback runs after the node committed, so a
+    # closed/broken stderr must not escape and fail the filing.
+    from fno.graph.cli import _safe_stderr_warn
+
+    def boom(_msg):
+        raise OSError("stderr broken")
+
+    monkeypatch.setattr("sys.stderr.write", boom)
+    _safe_stderr_warn("warning: must not escape\n")  # must not raise
+
+
+def test_entries_with_archive_degrades_when_archive_read_raises(monkeypatch, tmp_path):
+    # codex P2: a malformed/unreadable archive must not suppress scoring of the
+    # valid working graph; the contract is best-effort degrade.
+    from fno.graph import store
+
+    bad_archive = tmp_path / "graph-archive.json"
+    bad_archive.write_text('{"entries": []}\n')
+    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: bad_archive)
+
+    def boom(_path=None):
+        raise RuntimeError("archive unreadable")
+
+    monkeypatch.setattr(store, "read_graph", boom)
+    working = [_node("live1", title="some live node", status="idea")]
+    assert store.entries_with_archive(working) == working  # degraded, did not raise
