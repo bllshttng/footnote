@@ -37,10 +37,10 @@ Columns:
 ### Filters
 
 ```bash
-fno agents list --provider claude              # claude agents only
+fno agents list --harness claude               # claude agents only
 fno agents list --status orphaned              # only stale entries
 fno agents list --cwd ~/code/proj              # only agents created in this repo
-fno agents list --provider claude --status live --cwd ~/code/proj
+fno agents list --harness claude --status live --cwd ~/code/proj
 ```
 
 `--cwd` resolves relative paths to absolute before comparing, so `./.` works.
@@ -83,7 +83,7 @@ Every entry has the same key set regardless of provider. Codex / gemini entries 
 
 ```bash
 # How many claude agents are working right now?
-fno agents list --provider claude --json | jq '[.agents[] | select(.live_status == "Working")] | length'
+fno agents list --harness claude --json | jq '[.agents[] | select(.live_status == "Working")] | length'
 
 # Names of every orphaned entry (script can stop or rm them):
 fno agents list --status orphaned --json | jq -r '.agents[].name'

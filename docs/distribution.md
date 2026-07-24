@@ -82,7 +82,7 @@ selects the runtime explicitly:
 fno agents spawn --name worker-A --harness codex             # Rust by default when installed
 fno agents list --json                                 # Rust: render_json shape; table on a TTY
 fno agents stop worker-A                               # Rust: prints "stopped: worker-A (<short_id>)"
-fno agents ask worker-A "hello" --provider codex       # Python (ask stays on Python — see below)
+fno agents ask worker-A "hello" --harness codex        # Python (ask stays on Python — see below)
 FNO_AGENTS_RUNTIME=rust fno agents ask worker-A "..."  # force the binary for every verb, ask included
 ```
 
@@ -93,7 +93,7 @@ Why the default routes most verbs, and is install-aware:
   `*-channel` verbs. Four shared verbs reached flag + stdout parity:
   `stop` prints `stopped: <name> (<short_id>)`, `rm` prints `removed: <name>`, and
   `list`/`reconcile` emit the `render_json` shape under `--json`/non-TTY (a functional
-  table on a TTY) and accept `--cwd/--provider/--status`. **`ask` is NOT auto-routed**: the
+  table on a TTY) and accept `--cwd/--harness/--status`. **`ask` is NOT auto-routed**: the
   daemon only PTY-manages codex/gemini (`ClaudeProvider.as_pty()` is `None` — claude is a
   `claude --bg` shellout), so routing a claude `ask` hits "worker not reachable" and the
   no-signal detector spins to the timeout; and even for codex/gemini the daemon's reply is

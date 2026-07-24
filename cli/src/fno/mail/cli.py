@@ -1276,8 +1276,13 @@ def cmd_send(
     message: str | None = typer.Argument(
         None, help="Message to send (async, fire-and-forget)."
     ),
-    provider: str | None = typer.Option(
-        None, "--provider", "-p", help="claude | codex | gemini (optional; used for mismatch check)."
+    harness: str | None = typer.Option(
+        None, "--harness", "-H",
+        help="claude | codex | gemini (optional; used for mismatch check).",
+    ),
+    _provider_tombstone: str | None = typer.Option(
+        None, "--provider", hidden=True,
+        help="Retired: the harness axis is --harness/-H. Removed at 0.4.0.",
     ),
     cwd: str | None = typer.Option(
         None, "--cwd", "-c", help="Working directory context."
@@ -1369,6 +1374,9 @@ def cmd_send(
         dispatch_send_to_project,
     )
     from fno.agents.self_stamp import stamp_from
+    from fno._flag_aliases import refuse_retired_provider
+
+    refuse_retired_provider(_provider_tombstone)
 
     workdir = Path(cwd).resolve() if cwd else Path(os.getcwd())
 
@@ -1554,7 +1562,7 @@ def cmd_send(
             result = dispatch_send_to_project(
                 to_project,
                 content,
-                provider=provider,
+                provider=harness,
                 cwd=workdir,
                 from_name=stamp_from(from_name),
                 any_=any_live,
@@ -1599,7 +1607,7 @@ def cmd_send(
         result = dispatch_send(
             name=name,
             message=message,
-            provider=provider,
+            provider=harness,
             cwd=workdir,
             from_name=stamp_from(from_name),
         )

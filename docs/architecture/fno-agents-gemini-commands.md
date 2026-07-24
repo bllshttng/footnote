@@ -8,19 +8,19 @@ Parent: [fno-agents-registry-and-dispatch.md](fno-agents-registry-and-dispatch.m
 
 ```bash
 # Create a gemini agent pinned to the current cwd:
-fno agents ask worker-A --provider gemini "draft the migration"
+fno agents ask worker-A --harness gemini "draft the migration"
 
 # Follow up on the same session (cwd is ignored; gemini sessions are cwd-pinned):
 fno agents ask worker-A "switch to zod"
 
 # Yolo: --yolo passes through to gemini's `-y` flag (sandbox bypass):
-fno agents ask worker-bootstrap --provider gemini --yolo "scaffold a Next.js app"
+fno agents ask worker-bootstrap --harness gemini --yolo "scaffold a Next.js app"
 
 # LLM orchestrator dispatch with a from-name advertised to the worker:
-fno agents ask gemini-helper --provider gemini --from-name orchestrator-main "review the migration"
+fno agents ask gemini-helper --harness gemini --from-name orchestrator-main "review the migration"
 ```
 
-No new top-level verbs. The `--provider gemini` value is the only user-visible delta from the codex provider.
+No new top-level verbs. The `--harness gemini` value is the only user-visible delta from the codex provider.
 
 ## Module layout
 

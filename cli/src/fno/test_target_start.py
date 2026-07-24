@@ -127,7 +127,7 @@ def test_happy_path_claims_and_prints_receipt(monkeypatch, tmp_path):
 
 
 def test_start_forwards_model_provider_to_init(monkeypatch, tmp_path):
-    """--model/--provider ride through to the composed `fno target init` call."""
+    """--model/--harness ride through to the composed `fno target init` call."""
     wt = tmp_path / "wt"
     wt.mkdir()
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
@@ -148,12 +148,12 @@ def test_start_forwards_model_provider_to_init(monkeypatch, tmp_path):
 
     monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
     result = runner.invoke(
-        target_app, ["start", "x-d91b", "--model", "glm-4.7", "--provider", "codex"]
+        target_app, ["start", "x-d91b", "--model", "glm-4.7", "--harness", "codex"]
     )
     assert result.exit_code == 0, result.stdout
     a = init_args["args"]
     assert a[a.index("--model") + 1] == "glm-4.7"
-    assert a[a.index("--provider") + 1] == "codex"
+    assert a[a.index("--harness") + 1] == "codex"
 
 
 def test_existing_manifest_is_idempotent(monkeypatch, tmp_path):
@@ -350,7 +350,7 @@ def test_resolve_model_command_empty_when_no_model(monkeypatch):
 
 
 def test_resolve_model_provider_filter_drops_cross_harness(monkeypatch):
-    """--provider claude drops a tier that resolved to a codex model (bg is claude-only)."""
+    """--harness claude drops a tier that resolved to a codex model (bg is claude-only)."""
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(
         target_cli,
@@ -359,14 +359,14 @@ def test_resolve_model_provider_filter_drops_cross_harness(monkeypatch):
     )
     # gpt-5.4 maps to the codex harness in the real REACHABILITY table.
     result = runner.invoke(
-        target_app, ["resolve-model", "x-d7a7", "--provider", "claude"]
+        target_app, ["resolve-model", "x-d7a7", "--harness", "claude"]
     )
     assert result.exit_code == 0
     assert result.stdout.strip() == ""  # dropped -> caller uses the provider default
 
 
 def test_resolve_model_provider_filter_keeps_same_harness(monkeypatch):
-    """--provider claude keeps a claude-reachable tier model."""
+    """--harness claude keeps a claude-reachable tier model."""
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(
         target_cli,
@@ -374,7 +374,7 @@ def test_resolve_model_provider_filter_keeps_same_harness(monkeypatch):
         lambda nid, explicit=None, provider=None: ("claude-sonnet-5", "task-tier(medium)"),
     )
     result = runner.invoke(
-        target_app, ["resolve-model", "x-d7a7", "--provider", "claude"]
+        target_app, ["resolve-model", "x-d7a7", "--harness", "claude"]
     )
     assert result.exit_code == 0
     assert result.stdout.strip() == "claude-sonnet-5"

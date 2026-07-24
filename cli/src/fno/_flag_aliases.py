@@ -74,3 +74,27 @@ def merge_deprecated_alias(
         err=True,
     )
     return legacy
+
+
+#: The axis-split tombstone (x-bab1). The harness axis (the CLI binary) was
+#: ``--provider/-p`` on every verb except spawn; it is ``--harness/-H`` everywhere
+#: now. A model vendor routes ONLY at spawn, so the retired spelling is a hidden
+#: long-only option whose sole behavior is to exit 2 with this map - a tombstone,
+#: not an alias (one spelling, one meaning). Removed at 0.4.0.
+PROVIDER_AXIS_TOMBSTONE = (
+    "--provider was split at the axis rename: the CLI binary is --harness/-H; "
+    "a model vendor is only routable at spawn "
+    "(`fno agents spawn --provider <vendor> --model <m>`). Removed at 0.4.0."
+)
+
+
+def refuse_retired_provider(value: object) -> None:
+    """Exit 2 with the axis map when the retired ``--provider`` is passed.
+
+    Pairs with a hidden ``_provider_tombstone: typer.Option(None, "--provider",
+    hidden=True)`` parameter on each migrated verb. Call it at the top of the
+    command body; it is a no-op when the flag was not given.
+    """
+    if _passed(_coerce(value)):
+        typer.echo(PROVIDER_AXIS_TOMBSTONE, err=True)
+        raise typer.Exit(code=2)

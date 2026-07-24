@@ -1488,12 +1488,17 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--provider" | "-P" => {
                 vendor_val = Some(it.next().ok_or("--provider needs a value")?);
             }
-            // Only `spawn` splits the two axes. Elsewhere (`ask`, `host`, ...)
-            // -p is still the provider short it has always been, so the letter
-            // means headless on spawn and provider everywhere else. This arm must
-            // precede the headless one, which also matches "-p".
+            // Off `spawn`, -p was the provider short (the harness axis). That axis
+            // is --harness/-H everywhere now, and -p/--headless is a spawn-only
+            // one-shot, so -p is a loud tombstone here - never silently bound to
+            // headless (the arm below) or to a harness. This arm must precede the
+            // headless one, which also matches "-p". Removed at 0.4.0.
             "-p" if verb != "spawn" => {
-                params.insert("provider".into(), str_arg(&mut it, "--provider")?);
+                return Err(format!(
+                    "-p is not valid here; the one-shot short (--headless) is spawn-only, \
+                     and the CLI binary is --harness/-H. \
+                     (--provider/-p was split at the axis rename.) Removed at 0.4.0."
+                ));
             }
             "--workspace" | "--squad" | "-s" => {
                 params.insert("squad".into(), str_arg(&mut it, "-s/--workspace")?);
@@ -1715,8 +1720,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
     }
 
     // On `spawn` the two flags are different axes: --harness is the CLI binary,
-    // --provider the model vendor. Everywhere else --provider is still the harness
-    // hint it has always been, so only spawn splits them.
+    // --provider the model vendor. Off spawn the vendor axis routes nothing, so
+    // --provider/-P (the retired harness spelling AND the vendor short) is a
+    // tombstone: exit 2 with the axis map, never silently forwarded.
     if let Some(v) = vendor_val {
         let v = v.trim().to_string();
         if verb == "spawn" {
@@ -1738,7 +1744,11 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                  fno-agents directly"
             ));
         }
-        params.insert("provider".into(), Value::String(v));
+        return Err(format!(
+            "--provider/-P was split at the axis rename: the CLI binary is --harness/-H; \
+             a model vendor is only routable at spawn \
+             (`fno agents spawn --provider {v} --model <m>`). Removed at 0.4.0."
+        ));
     }
     if let Some(v) = harness_val {
         params.insert("provider".into(), Value::String(v));
@@ -2140,7 +2150,7 @@ fn fetch_discovered_sessions(
     // An empty value is "no filter" on the Python side, so forwarding it would
     // make the two runtimes disagree again in the other direction.
     if let Some(p) = provider_filter.filter(|p| !p.is_empty()) {
-        cmd.args(["--provider", p]);
+        cmd.args(["--harness", p]);
     }
     let output = match cmd.output() {
         Ok(o) if o.status.success() => o.stdout,
@@ -2930,15 +2940,16 @@ mod tests {
 
     /// Codex P2 (PR #379): with `ask` unconditionally auto-routed, the binary
     /// must accept the Click/Typer `--flag=value` equals form for EVERY
-    /// value-carrying option, not just --provider/--from. Without the
-    /// normalization, `--cwd=/repo` / `--timeout=30` / `--from-name=bot` would
-    /// regress to "unknown flag" instead of reaching the dispatch.
+    /// value-carrying option. Without the normalization, `--cwd=/repo` /
+    /// `--timeout=30` / `--from-name=bot` would regress to "unknown flag"
+    /// instead of reaching the dispatch. The harness axis is `--harness`
+    /// (wire param `provider`); `--provider=...` is a tombstone (AC3).
     #[test]
     fn ask_accepts_equals_form_for_all_value_flags() {
         let args = vec![
             "myagent".to_string(),
             "hello there".to_string(),
-            "--provider=gemini".to_string(),
+            "--harness=gemini".to_string(),
             "--cwd=/repo".to_string(),
             "--timeout=30".to_string(),
             "--from-name=bot".to_string(),
@@ -2962,6 +2973,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p2["cwd"], "/a=b");
+        // AC3 (Rust path, equals form): the retired --provider spelling is a
+        // tombstone in both syntaxes - it must NOT silently route.
+        let err = build_request(
+            "ask",
+            &[
+                "a".to_string(),
+                "m".to_string(),
+                "--provider=gemini".to_string(),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.contains("split at the axis rename"), "got: {err}");
+        assert!(err.contains("--harness/-H"), "got: {err}");
     }
 
     /// codex P2 (PR #73): `--model` must reach the request, else
@@ -3122,19 +3146,19 @@ mod tests {
         assert_eq!(params["effort"], "high");
     }
 
-    /// ab-3ff64151 AC1 (Rust-path parity): `agents ask` accepts the phone shorts
-    /// `-p`/`-c`/`-t` and the global `-Y`, building the byte-identical request
-    /// the long flags would. This is the cross-language parity guard from the
-    /// design's highest-risk task: short flags MUST reach dispatch on the
-    /// Rust-routed `ask`, not just the Python `typer.Option` path.
+    /// ab-3ff64151 AC1 (Rust-path parity) + x-bab1 AC6: `agents ask` accepts the
+    /// surviving phone shorts `-c`/`-t` and the global `-Y`, with the harness axis
+    /// short `-H` (renamed from `-p`). `-p` was the provider short; off spawn it
+    /// is now a loud tombstone, never silently bound to a harness.
     #[test]
     fn ask_accepts_phone_short_flags() {
+        // -H/-c/-t/-Y build the byte-identical request the long flags would.
         let short = build_request(
             "ask",
             &[
                 "myagent".to_string(),
                 "hi".to_string(),
-                "-p".to_string(),
+                "-H".to_string(),
                 "claude".to_string(),
                 "-c".to_string(),
                 "/repo".to_string(),
@@ -3170,6 +3194,20 @@ mod tests {
         assert_eq!(params["cwd"], "/repo");
         assert_eq!(params["timeout"], 30u64);
         assert_eq!(params["yolo"], true);
+        // AC6 (Rust path): -p is no longer the provider short; it is a loud
+        // tombstone (the one-shot short is spawn-only), never a silent harness.
+        let err = build_request(
+            "ask",
+            &[
+                "myagent".to_string(),
+                "hi".to_string(),
+                "-p".to_string(),
+                "claude".to_string(),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.contains("-p is not valid here"), "got: {err}");
+        assert!(err.contains("--harness/-H"), "got: {err}");
     }
 
     /// ab-3ff64151 AC2 (Rust-path parity): the global-register boolean shorts
@@ -3526,18 +3564,17 @@ mod tests {
             "-p must not set a harness"
         );
 
-        // Off `spawn`, -p is still the provider short it has always been.
+        // Off `spawn`, -p is no longer the provider short (the harness axis is
+        // --harness/-H); it is a loud tombstone, never silently bound to a harness.
         let ask = vec![
             "wk".to_string(),
             "hi".to_string(),
             "-p".to_string(),
             "codex".to_string(),
         ];
-        let (_m, params) = build_request("ask", &ask).unwrap();
-        assert_eq!(
-            params.get("provider").and_then(|v| v.as_str()),
-            Some("codex")
-        );
+        let err = build_request("ask", &ask).unwrap_err();
+        assert!(err.contains("-p is not valid here"), "got: {err}");
+        assert!(err.contains("--harness/-H"), "got: {err}");
     }
 
     #[test]
@@ -3564,18 +3601,17 @@ mod tests {
         let err = build_request("spawn", &args).unwrap_err();
         assert!(err.contains("names a model vendor"), "got: {err}");
 
-        // Off `spawn` the flag is unchanged: still the harness hint.
+        // Off `spawn`, --provider is the retired harness-axis spelling: a
+        // tombstone (the CLI binary is --harness/-H), never silently routed.
         let ask = vec![
             "wk".to_string(),
             "hi".to_string(),
             "--provider".to_string(),
             "codex".to_string(),
         ];
-        let (_m, params) = build_request("ask", &ask).unwrap();
-        assert_eq!(
-            params.get("provider").and_then(|v| v.as_str()),
-            Some("codex")
-        );
+        let err = build_request("ask", &ask).unwrap_err();
+        assert!(err.contains("split at the axis rename"), "got: {err}");
+        assert!(err.contains("--harness/-H"), "got: {err}");
     }
 
     #[test]

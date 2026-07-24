@@ -614,12 +614,18 @@ def init(
         help="Pin a model for this session's dispatched workers (exact "
         "passthrough). Persisted to the manifest so it survives into the do phase.",
     ),
-    provider: Optional[str] = typer.Option(
+    harness: Optional[str] = typer.Option(
+        None,
+        "--harness",
+        "-H",
+        help="Pin a harness (the CLI binary) for this session's dispatched workers. "
+        "Absent, the spawn path infers it from the invoking harness at dispatch time.",
+    ),
+    _provider_tombstone: Optional[str] = typer.Option(
         None,
         "--provider",
-        "-p",
-        help="Pin a provider for this session's dispatched workers. Absent, the "
-        "spawn path infers it from the invoking harness at dispatch time.",
+        hidden=True,
+        help="Retired: the harness axis is --harness/-H. Removed at 0.4.0.",
     ),
     beastmode: bool = typer.Option(
         False,
@@ -680,20 +686,23 @@ def init(
             )
             raise typer.Exit(code=2)
 
-    # Validate the dispatch pins before writing any state. Empty --model/--provider
-    # is a usage error (never a forwarded empty argv token); provider is resolved
-    # only when given, so an absent pin lets the spawn path infer the harness at
-    # dispatch time rather than freezing it here.
+    # Validate the dispatch pins before writing any state. Empty --model/--harness
+    # is a usage error (never a forwarded empty argv token); the harness pin is
+    # resolved only when given, so an absent pin lets the spawn path infer the
+    # harness at dispatch time rather than freezing it here.
+    from fno._flag_aliases import refuse_retired_provider
     from fno.agents.provider_resolve import (
         DispatchFlagError,
         reject_empty_model,
         resolve_dispatch_provider,
     )
 
+    refuse_retired_provider(_provider_tombstone)
+
     try:
         dispatch_model = reject_empty_model(model)
         dispatch_provider = (
-            resolve_dispatch_provider(provider)[0] if provider is not None else None
+            resolve_dispatch_provider(harness)[0] if harness is not None else None
         )
     except DispatchFlagError as exc:
         typer.echo(f"fno target init: {exc}", err=True)
@@ -1058,14 +1067,18 @@ def _model_reachable_by(model: str, provider: str) -> bool:
 @target_app.command("resolve-model")
 def resolve_model(
     node: str = typer.Argument(..., help="Backlog node id/slug."),
-    provider: Optional[str] = typer.Option(
+    harness: Optional[str] = typer.Option(
         None,
-        "--provider",
+        "--harness",
         help="Only print the model if it is reachable by this harness. A tier "
-        "can resolve to a model mapped to another provider (e.g. a codex gpt-*); "
-        "a single-provider spawn lane (bg is claude-only) passes its provider "
-        "here so a cross-harness pick degrades to the provider default instead "
-        "of an invalid `<provider> --model <foreign-model>` spawn.",
+        "can resolve to a model mapped to another harness (e.g. a codex gpt-*); "
+        "a single-provider spawn lane (bg is claude-only) passes its harness "
+        "here so a cross-harness pick degrades to the harness default instead "
+        "of an invalid `<harness> --model <foreign-model>` spawn.",
+    ),
+    _provider_tombstone: Optional[str] = typer.Option(
+        None, "--provider", hidden=True,
+        help="Retired: the harness axis is --harness. Removed at 0.4.0.",
     ),
 ) -> None:
     """Print the dispatch model a node resolves to (its ``model`` pin / ``model_tier``).
@@ -1073,11 +1086,15 @@ def resolve_model(
     The one Python projection of ``route_resolve`` for bash dispatchers
     (``dispatch-node.sh``), so a tiered node's worker spawns on the tier model
     without bash ever reimplementing resolution. Prints the resolved model on
-    stdout, or nothing when the node has no pin/tier (the caller uses the provider
+    stdout, or nothing when the node has no pin/tier (the caller uses the harness
     default). Never fails a dispatch: any error prints nothing.
     """
-    model, _source = _resolve_node_model(_resolve_node_id(node), provider=provider)
-    if model and provider and not _model_reachable_by(model, provider):
+    from fno._flag_aliases import refuse_retired_provider
+
+    refuse_retired_provider(_provider_tombstone)
+
+    model, _source = _resolve_node_model(_resolve_node_id(node), provider=harness)
+    if model and harness and not _model_reachable_by(model, harness):
         return  # a pin resolves unfiltered; the guard drops a cross-harness pin
     if model:
         typer.echo(model)
@@ -1219,9 +1236,14 @@ def start(
         None, "--model", "-m",
         help="Pin a model for this session's dispatched workers (forwarded to init).",
     ),
-    provider: Optional[str] = typer.Option(
-        None, "--provider", "-p",
-        help="Pin a provider for this session's dispatched workers (forwarded to init).",
+    harness: Optional[str] = typer.Option(
+        None, "--harness", "-H",
+        help="Pin a harness (the CLI binary) for this session's dispatched workers "
+        "(forwarded to init).",
+    ),
+    _provider_tombstone: Optional[str] = typer.Option(
+        None, "--provider", hidden=True,
+        help="Retired: the harness axis is --harness/-H. Removed at 0.4.0.",
     ),
     beastmode: bool = typer.Option(
         False, "--beastmode", "--beast",
@@ -1240,6 +1262,10 @@ def start(
     manifest, claims the node exactly once) -> receipt. Run from INSIDE a valid
     worktree it is a no-op.
     """
+    from fno._flag_aliases import refuse_retired_provider
+
+    refuse_retired_provider(_provider_tombstone)
+
     cwd = Path.cwd()
 
     # Boundary: already isolated -> no-op, create nothing (x-45e6 case). But
@@ -1277,10 +1303,10 @@ def start(
     #    ambient marker omits it and ensure degrades to the external base.
     from fno.harness_identity import resolve_harness_identity
 
-    harness = resolve_harness_identity().harness
+    ambient_harness = resolve_harness_identity().harness
     ensure_cmd = fno + ["worktree", "ensure", "--repo", str(repo_root), "--name", name]
-    if harness:
-        ensure_cmd += ["--harness", harness]
+    if ambient_harness:
+        ensure_cmd += ["--harness", ambient_harness]
     ens = subprocess.run(ensure_cmd, capture_output=True, text=True)
     wt = ens.stdout.strip()
     if ens.returncode != 0 or not wt:
@@ -1358,7 +1384,7 @@ def start(
     # wins (precedence, resolved inside the helper); no pin/tier -> None ->
     # nothing forwarded, byte-identical to pre-change. Never blocks (Locked 10).
     model, decision_source = _resolve_node_model(
-        node, explicit=model, provider=provider
+        node, explicit=model, provider=harness
     )
 
     # 3. Init the session FROM the worktree (binds owner_cwd, claims the node
@@ -1370,8 +1396,8 @@ def start(
         init_cmd += ["--size", size]
     if model:
         init_cmd += ["--model", model]
-    if provider:
-        init_cmd += ["--provider", provider]
+    if harness:
+        init_cmd += ["--harness", harness]
     if beastmode:
         init_cmd += ["--beastmode"]
     init = subprocess.run(init_cmd, cwd=str(wt_path))

@@ -261,7 +261,7 @@ def test_target_init_size_sets_target_size_env(monkeypatch, tmp_path):
 
 
 def test_target_init_model_provider_set_dispatch_env(monkeypatch, tmp_path):
-    """--model/--provider persist to the init env so the bash writer stamps them."""
+    """--model/--harness persist to the init env so the bash writer stamps them."""
     captured = {}
 
     class _Result:
@@ -279,7 +279,7 @@ def test_target_init_model_provider_set_dispatch_env(monkeypatch, tmp_path):
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
     result = runner.invoke(
-        app, ["target", "init", "--input", "x", "--model", "glm-4.7", "--provider", "codex"]
+        app, ["target", "init", "--input", "x", "--model", "glm-4.7", "--harness", "codex"]
     )
     assert result.exit_code == 0, result.output
     assert captured["env"].get("TARGET_DISPATCH_MODEL") == "glm-4.7"

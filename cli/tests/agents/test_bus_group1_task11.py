@@ -3,7 +3,7 @@
 Acceptance criteria (operator-locked):
   AC1-ERR: unregistered name -> stderr "unknown agent" + "spawn it first", exit 16,
            registry unchanged, no provider subprocess invoked.
-  AC1-ERR variant: unknown name + --provider codex -> still unknown-agent error, exit 16.
+  AC1-ERR variant: unknown name + --harness codex -> still unknown-agent error, exit 16.
   AC1-HP regression: existing entries still follow up exactly as before.
   AC2-ERR: provider mismatch on existing name -> exit 2 (unchanged).
   AC3-VERIFY: agent_ask_failed with stage="unknown-name" lands in events.jsonl.
@@ -158,12 +158,12 @@ def test_unknown_agent_name_no_provider_subprocess(tmp_path: Path, monkeypatch) 
 
 
 # ---------------------------------------------------------------------------
-# AC1-ERR variant: unknown name WITH --provider codex -> still exit 16
+# AC1-ERR variant: unknown name WITH --harness codex -> still exit 16
 # ---------------------------------------------------------------------------
 
 
 def test_unknown_agent_name_with_provider_still_exits_16(tmp_path: Path, monkeypatch) -> None:
-    """AC1-ERR variant: unknown name + --provider codex -> still exit 16 (not create)."""
+    """AC1-ERR variant: unknown name + --harness codex -> still exit 16 (not create)."""
     use_tmpdir(monkeypatch, tmp_path)
 
     from fno.agents.providers import codex as codex_mod
@@ -208,7 +208,7 @@ def test_cmd_ask_unknown_agent_stderr_and_exit_16(tmp_path: Path, monkeypatch) -
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
-        ["ask", "blue", "hello", "--provider", "claude"],
+        ["ask", "blue", "hello", "--harness", "claude"],
     )
 
     assert result.exit_code == 16, f"Expected 16, got {result.exit_code}. output={result.output}"

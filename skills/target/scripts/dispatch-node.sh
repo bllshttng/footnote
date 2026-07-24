@@ -335,7 +335,7 @@ for id in "${NODES[@]}"; do
   # <foreign>` (the cross-harness mismatch obs 100675 named). Empty output (no
   # pin/tier, cross-harness pick, or any resolve error) -> zero args.
   if [[ -z "$model_pin" ]]; then
-    model_pin="$(fno target resolve-model "$id" --provider "$DISPATCH_PROVIDER" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    model_pin="$(fno target resolve-model "$id" --harness "$DISPATCH_PROVIDER" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
   fi
   model_args=()
   [[ -n "$model_pin" ]] && model_args=("--model" "$model_pin")

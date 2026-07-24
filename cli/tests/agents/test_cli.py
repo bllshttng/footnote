@@ -67,7 +67,7 @@ def test_agents_ask_help_is_documented(runner: CliRunner, monkeypatch) -> None:
     import re
 
     stripped = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", result.output).lower()
-    assert "--provider" in stripped, stripped[:500]
+    assert "--harness" in stripped, stripped[:500]
     assert "--cwd" in stripped, stripped[:500]
 
 
