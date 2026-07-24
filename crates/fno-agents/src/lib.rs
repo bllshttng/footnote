@@ -655,6 +655,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // `fno agents reap`. Distinct from `agent_orphan_reaped` (which flips a
     // live-but-unowned PID to exited); this REMOVES the row entirely.
     "agent_row_reaped",
+    // Dead-row GC also reconstructs the loop's canonical failure event when a
+    // convention-named dispatch disappeared without a termination receipt.
+    "node_failed",
     // Terminal-stop sweep (daemon-emitted, x-fcbf): a fire-and-forget
     // `claude --bg` worker that finalize marked terminal was `claude stop`ped so
     // its slot frees instead of parking at an idle prompt forever.

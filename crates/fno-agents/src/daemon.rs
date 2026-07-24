@@ -411,6 +411,55 @@ fn now_epoch_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Node id carried by an automatic target/reconcile worker name.
+///
+/// Dispatch names are the durable join available even when a worker wedges
+/// before taking its node claim. Keep the parser narrow: ad-hoc agents that
+/// merely start with `target-` must never create a backlog failure.
+fn dispatch_node_id(name: &str) -> Option<String> {
+    let mut parts = name.split('-');
+    match parts.next()? {
+        "target" | "reconcile" => {}
+        _ => return None,
+    }
+    let prefix = parts.next()?;
+    let hex = parts.next()?;
+    if prefix.is_empty()
+        || !prefix
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        || hex.is_empty()
+        || !hex.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(format!("{prefix}-{hex}"))
+}
+
+fn global_events_path(home: &AgentsHome) -> PathBuf {
+    home.root()
+        .parent()
+        .unwrap_or_else(|| home.root())
+        .join("events.jsonl")
+}
+
+fn dispatch_has_termination(home: &AgentsHome, entry: &RegistryEntry) -> bool {
+    let Some(session_id) = entry.harness_session_id.as_deref() else {
+        return false;
+    };
+    let journal = crate::loop_runtime::Journal::new(
+        crate::loop_runtime::ProjectJournalPath(
+            PathBuf::from(&entry.cwd).join(".fno/events.jsonl"),
+        ),
+        crate::loop_runtime::GlobalJournalPath(global_events_path(home)),
+    );
+    journal
+        .find_termination(session_id)
+        .ok()
+        .flatten()
+        .is_some()
+}
+
 /// Dead-row garbage collection sweep (x-b1aa). Removes terminal, past-grace,
 /// clean agent-view rows from the registry so finished rows stop accumulating
 /// "like browser tabs." Shared by the daemon idle tick (the automatic path) and
@@ -546,13 +595,55 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
             // lock (a stale candidate whose identity changed is not a reap).
             for e in &registry.entries {
                 if reaped_names.contains(&e.name) {
+                    let node_id = dispatch_node_id(&e.name);
+                    let termination_event = node_id
+                        .as_ref()
+                        .is_some_and(|_| dispatch_has_termination(home, e));
                     let _ = emitter.emit_fields(
                         "agent_row_reaped",
                         json_obj(&[
                             ("short_id", Value::String(e.short_id.clone())),
                             ("name", Value::String(e.name.clone())),
+                            (
+                                "node_id",
+                                node_id.clone().map_or(Value::Null, Value::String),
+                            ),
+                            (
+                                "session_id",
+                                e.harness_session_id
+                                    .clone()
+                                    .map_or(Value::Null, Value::String),
+                            ),
+                            ("termination_event", Value::Bool(termination_event)),
                         ]),
                     );
+                    if let Some(node_id) = node_id.filter(|_| !termination_event) {
+                        let failures = EventEmitter::new(global_events_path(home), "daemon");
+                        let session_id = e
+                            .harness_session_id
+                            .clone()
+                            .unwrap_or_else(|| e.short_id.clone());
+                        if let Err(err) = failures.emit(
+                            "node_failed",
+                            &json!({
+                                "unit_id": node_id,
+                                "session_id": session_id,
+                                "iteration": 0,
+                                "exit_code": 1,
+                                "short_id": e.short_id,
+                                "reason": "agent-row-reaped-no-termination",
+                            }),
+                        ) {
+                            let _ = emitter.emit(
+                                "daemon_recovery_error",
+                                &json!({
+                                    "op": "record_dead_dispatch",
+                                    "short_id": e.short_id,
+                                    "error": err.to_string(),
+                                }),
+                            );
+                        }
+                    }
                     summary.reaped.push(if e.short_id.is_empty() {
                         e.name.clone()
                     } else {
@@ -4391,6 +4482,81 @@ mod tests {
         let summary = gc_sweep(&home, &emitter, Duration::from_secs(3600));
         assert!(summary.reaped.is_empty());
         assert!(summary.kept_dirty.is_empty());
+    }
+
+    #[test]
+    fn gc_sweep_turns_unterminated_node_reap_into_durable_failure() {
+        let sandbox = tmp_home("gc-dead-dispatch");
+        let home = AgentsHome::at(sandbox.root().join("agents"));
+        home.ensure_root().unwrap();
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let repo = home.root().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+
+        let dead_session = "dead0001-1111-2222-3333-444455556666";
+        let done_session = "done0002-1111-2222-3333-444455556666";
+        state::update_registry(&home.registry_json(), |r| {
+            let mut dead = bg_claude_row("target-x-a35a-route-atomicity", "dead0001");
+            dead.status = AgentStatus::Exited;
+            dead.cwd = repo.to_string_lossy().into_owned();
+            dead.exited_at = Some("2020-01-01T00:00:00Z".into());
+            dead.harness_session_id = Some(dead_session.into());
+            r.entries.push(dead);
+
+            let mut done = bg_claude_row("target-x-b44e-finished", "done0002");
+            done.status = AgentStatus::Exited;
+            done.cwd = repo.to_string_lossy().into_owned();
+            done.exited_at = Some("2020-01-01T00:00:00Z".into());
+            done.harness_session_id = Some(done_session.into());
+            r.entries.push(done);
+        })
+        .unwrap();
+
+        let global_events = home.root().parent().unwrap().join("events.jsonl");
+        std::fs::write(
+            &global_events,
+            format!(
+                "{{\"ts\":\"2026-07-24T00:00:00Z\",\"type\":\"termination\",\"source\":\"loop\",\"data\":{{\"session_id\":\"{done_session}\",\"reason\":\"DonePRGreen\",\"message\":\"done\"}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let summary = gc_sweep(&home, &emitter, Duration::from_secs(0));
+        assert_eq!(summary.reaped.len(), 2);
+
+        let reaps = read_events(&home);
+        let dead_reap = reaps
+            .iter()
+            .find(|e| e["data"]["short_id"] == "dead0001")
+            .expect("dead dispatch reap event");
+        assert_eq!(dead_reap["data"]["node_id"], "x-a35a");
+        assert_eq!(dead_reap["data"]["termination_event"], false);
+        let done_reap = reaps
+            .iter()
+            .find(|e| e["data"]["short_id"] == "done0002")
+            .expect("completed dispatch reap event");
+        assert_eq!(done_reap["data"]["node_id"], "x-b44e");
+        assert_eq!(done_reap["data"]["termination_event"], true);
+
+        let global = std::fs::read_to_string(&global_events).unwrap();
+        let failures: Vec<Value> = global
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .filter(|e: &Value| e["type"] == "node_failed")
+            .collect();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0]["data"]["unit_id"], "x-a35a");
+        assert_eq!(failures[0]["data"]["session_id"], dead_session);
+        assert_eq!(
+            failures[0]["data"]["reason"],
+            "agent-row-reaped-no-termination"
+        );
     }
 
     #[test]

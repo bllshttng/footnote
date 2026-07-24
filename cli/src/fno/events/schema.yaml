@@ -1340,7 +1340,7 @@ event_types:
           type: integer
 
   - name: agent_row_reaped
-    description: "A terminal, past-grace, clean agent-view row was removed from the registry by the dead-row GC sweep or `fno agents reap` (x-b1aa). Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
+    description: "A terminal, past-grace, clean agent-view row was removed from the registry by the dead-row GC sweep or `fno agents reap` (x-b1aa). For a convention-named target/reconcile worker, node_id plus termination_event make a pre-claim death durable; no-termination reaps also emit node_failed for failure-streak accounting (x-5c08). Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
     sources: [daemon]
     data:
       required: []
@@ -1349,6 +1349,12 @@ event_types:
           type: string
         name:
           type: string
+        node_id:
+          type: [string, "null"]
+        session_id:
+          type: [string, "null"]
+        termination_event:
+          type: boolean
 
   - name: bg_worker_terminal_stopped
     description: "A fire-and-forget `claude --bg` /target|/think worker that finalize marked terminal was `claude stop`ped by the daemon terminal-stop sweep, so its slot frees instead of parking at an idle prompt forever (x-fcbf)."
@@ -1759,8 +1765,8 @@ event_types:
     consumers: [operator, megawalk]
 
   - name: node_failed
-    description: "Synthesized by the per-unit watchdog when a dispatched session exits without a TerminationReason event. Group-2 walk policy counts these toward the consecutive-failure pause."
-    sources: [loop]
+    description: "Synthesized when a dispatched session exits without a TerminationReason event: either immediately by the per-unit watchdog, or when dead-row GC reaps a convention-named target/reconcile worker that never terminated (x-5c08). Group-2 walk and dispatcher policy count both toward the same consecutive-failure streak."
+    sources: [loop, daemon]
     data:
       required: [session_id, unit_id, iteration, exit_code]
       properties:
@@ -1776,6 +1782,12 @@ event_types:
         exit_code:
           type: integer
           description: "Exit code returned by the session. When the process died by signal N rather than a clean exit, this field carries 128+N (the shell convention: e.g. SIGTERM=15 -> 143, SIGKILL=9 -> 137)."
+        short_id:
+          type: string
+          description: "Daemon worker short id when the failure was reconstructed from dead-row GC."
+        reason:
+          type: string
+          description: "Machine-readable reconstruction reason when the failure came from a later lifecycle seam."
     consumers: [operator, megawalk]
 
   - name: walk_paused
@@ -2043,6 +2055,46 @@ event_types:
         harness_to:
           type: string
           description: "The failover provider's harness (cli), when it differs from claude (a cross-harness failover, e.g. codex). Empty/omitted for a same-harness account switch."
+    consumers: [operator]
+
+  - name: dispatch_claim_observed
+    description: "Emitted at the shared target-dispatch claim seam after the family-2 claim classifier and truth-status probe agree on what occupies the node. Stale/suspect observations are also printed and notified so a successor is never minted or blocked silently (x-5c08)."
+    sources: [backlog]
+    data:
+      required: [node_id, claim_verdict, holder, truth_status, action]
+      properties:
+        node_id:
+          type: string
+        claim_verdict:
+          type: string
+          enum: [ours, foreign_live, dead_predecessor, free]
+        claim_state:
+          type: [string, "null"]
+        holder:
+          type: string
+        truth_status:
+          type: string
+          enum: [working, waiting, suspect, stalled, unknown]
+        action:
+          type: string
+          enum: [blocked, redispatch, dispatch, auto-deferred]
+    consumers: [operator]
+
+  - name: dispatch_dead_failure_limit
+    description: "Emitted before the shared target-dispatch seam refuses another worker because the node's durable failure streak reached active_backlog.failure_limit. A successful refusal auto-defers the node with a visible reason; a failed defer still blocks birth (x-5c08)."
+    sources: [backlog]
+    data:
+      required: [node_id, consecutive_failures, failure_limit, action]
+      properties:
+        node_id:
+          type: string
+        consecutive_failures:
+          type: integer
+        failure_limit:
+          type: integer
+        action:
+          type: string
+          enum: [auto-deferred, defer-failed]
     consumers: [operator]
 
   - name: quota_deferred

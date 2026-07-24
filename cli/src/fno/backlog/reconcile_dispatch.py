@@ -184,7 +184,9 @@ def _dispatch_reconcile(
 
     # node:<id> (global) is the cross-context dedup backstop: once the reconcile
     # worker inits it owns node:<id>, so a later trigger sees already-claimed.
-    if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
+    if _claim_is_live(f"node:{node_id}", root) or _claim_is_live(
+        f"dispatch:{node_id}"
+    ):
         return skip("already-claimed")
 
     from fno.claims.core import ClaimHeldByOther, acquire_claim

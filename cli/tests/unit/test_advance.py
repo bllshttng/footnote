@@ -149,6 +149,79 @@ def test_dispatch_reservation_held(iso, monkeypatch):
     assert res.decision == "skipped" and res.reason == "already-claimed"
 
 
+@pytest.mark.parametrize(
+    ("claim_state", "claim_verdict", "truth_state", "occupied", "action"),
+    [
+        ("stale", "dead_predecessor", "stalled", False, "redispatch"),
+        ("suspect", "foreign_live", "suspect", True, "blocked"),
+    ],
+)
+def test_node_claim_predispatch_is_family2_loud(
+    monkeypatch,
+    capsys,
+    claim_state,
+    claim_verdict,
+    truth_state,
+    occupied,
+    action,
+):
+    """Stale/suspect ownership is named before a retry or refusal."""
+    from fno import target_cli
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda _node: (
+            claim_verdict,
+            {
+                "state": claim_state,
+                "holder": "target-session:prior",
+                "pid": 404,
+                "host": "old-host",
+            },
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": truth_state, "claim_state": claim_state},
+    )
+    monkeypatch.setattr(adv, "_refuse_repeated_dead_dispatch", lambda *_a, **_k: None)
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "fno.agents.events.emit",
+        lambda kind, **data: emitted.append((kind, data)),
+    )
+    notices: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "fno.notify._impl.send_notification",
+        lambda title, body: notices.append((title, body)) or (0, ""),
+    )
+
+    assert adv._claim_is_live("node:x-a35a") is occupied
+
+    assert emitted == [
+        (
+            "dispatch_claim_observed",
+            {
+                "node_id": "x-a35a",
+                "claim_verdict": claim_verdict,
+                "claim_state": claim_state,
+                "holder": "target-session:prior",
+                "truth_status": truth_state,
+                "action": action,
+            },
+        )
+    ]
+    assert notices and "target-session:prior" in notices[0][1]
+    warning = capsys.readouterr().err
+    assert claim_state in warning
+    assert truth_state in warning
+    assert "target-session:prior" in warning
+
+
 def test_dispatched_happy_path_and_claim_survives(iso, monkeypatch):
     """AC1-HP + AC1-CLAIM: dispatch + reservation stays LIVE after advance returns."""
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
@@ -527,6 +600,113 @@ def test_spawn_worker_extra_env_reaches_subprocess(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker("ab-2222aaaa", "/w", extra_env={"CLAUDE_CONFIG_DIR": "/acct/x"})
     assert captured["env"]["CLAUDE_CONFIG_DIR"] == "/acct/x"
+
+
+def test_predispatch_auto_defers_before_birth_at_durable_failure_limit(monkeypatch):
+    """A dead-row failure at the configured limit refuses another birth."""
+    from fno.config import SettingsModel
+    from fno.graph import failure
+
+    settings = SettingsModel(active_backlog={"failure_limit": 2})
+    monkeypatch.setattr("fno.config.load_settings_for_repo", lambda *_: settings)
+    monkeypatch.setattr(
+        failure,
+        "read_events",
+        lambda: [
+            {"type": "node_failed", "data": {"unit_id": "ab-2222aaaa"}},
+            {"type": "node_failed", "data": {"unit_id": "ab-2222aaaa"}},
+        ],
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        return _FakeProc(0)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "fno.agents.events.emit",
+        lambda kind, **data: emitted.append((kind, data)),
+    )
+    notices: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "fno.notify._impl.send_notification",
+        lambda title, body: notices.append((title, body)) or (0, ""),
+    )
+    monkeypatch.setattr(
+        "fno.target_cli._classify_node_claim",
+        lambda _node: ("free", None),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "fno.agents.truth_status.resolve_truth_status",
+        lambda *_a, **_k: {"state": "unknown"},
+    )
+
+    assert adv._claim_is_live("node:ab-2222aaaa", "/work/dir") is True
+
+    assert len(calls) == 1
+    assert calls[0][1:4] == ["backlog", "defer", "ab-2222aaaa"]
+    reason = calls[0][calls[0].index("--reason") + 1]
+    assert (
+        reason == "auto-failure: 2 consecutive dead dispatches (worker reaped without termination)"
+    )
+    assert emitted[0] == (
+        "dispatch_dead_failure_limit",
+        {
+            "node_id": "ab-2222aaaa",
+            "consecutive_failures": 2,
+            "failure_limit": 2,
+            "action": "auto-deferred",
+        },
+    )
+    assert emitted[1][0] == "dispatch_claim_observed"
+    assert emitted[1][1]["action"] == "auto-deferred"
+    assert notices and "ab-2222aaaa" in notices[0][1]
+
+
+def test_predispatch_refuses_birth_when_auto_defer_write_fails(monkeypatch, capsys):
+    """A graph-write failure cannot turn the failure limit into fail-open."""
+    from fno.config import SettingsModel
+    from fno.graph import failure
+
+    settings = SettingsModel(active_backlog={"failure_limit": 1})
+    monkeypatch.setattr("fno.config.load_settings_for_repo", lambda *_: settings)
+    monkeypatch.setattr(
+        failure,
+        "read_events",
+        lambda: [{"type": "node_failed", "data": {"unit_id": "ab-2222aaaa"}}],
+    )
+    monkeypatch.setattr(
+        adv.subprocess,
+        "run",
+        lambda *_a, **_k: _FakeProc(9, "", "graph locked"),
+    )
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "fno.agents.events.emit",
+        lambda kind, **data: emitted.append((kind, data)),
+    )
+    monkeypatch.setattr(
+        "fno.notify._impl.send_notification", lambda *_a, **_k: (0, "")
+    )
+    monkeypatch.setattr(
+        "fno.target_cli._classify_node_claim",
+        lambda _node: ("free", None),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "fno.agents.truth_status.resolve_truth_status",
+        lambda *_a, **_k: {"state": "unknown"},
+    )
+
+    assert adv._claim_is_live("node:ab-2222aaaa", "/work/dir") is True
+    assert emitted[0][0] == "dispatch_dead_failure_limit"
+    assert emitted[0][1]["action"] == "defer-failed"
+    assert emitted[1][0] == "dispatch_claim_observed"
+    assert emitted[1][1]["action"] == "blocked"
+    assert "refusing another worker" in capsys.readouterr().err
 
 
 def test_spawn_worker_auto_merge_drops_no_merge(monkeypatch):

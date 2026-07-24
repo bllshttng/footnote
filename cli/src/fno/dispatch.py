@@ -277,7 +277,9 @@ def _dispatch_one(
     #    would share ONE (idempotent) lane slot and the loser's spawn-failure
     #    would free the winner's live slot, defeating the cap. Only the winner of
     #    the O_EXCL reservation proceeds; the loser reports already-dispatching.
-    if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
+    if _claim_is_live(f"node:{node_id}", cwd) or _claim_is_live(
+        f"dispatch:{node_id}"
+    ):
         return {"outcome": "already-dispatching", "node": node_id, "slug": slug or ""}
     dispatch_key = f"dispatch:{node_id}"
     dispatch_holder = f"dispatch-one:{os.getpid()}"

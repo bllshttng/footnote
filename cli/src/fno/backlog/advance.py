@@ -115,6 +115,8 @@ EVENT_FAILED = "advance_failed"
 # x-0676: paired receipt (not a decision) emitted just before an advance_dispatched
 # when on_exhaustion=failover rotates off an exhausted provider.
 EVENT_FAILOVER = "dispatch_failover"
+EVENT_CLAIM_OBSERVED = "dispatch_claim_observed"
+EVENT_DEAD_FAILURE_LIMIT = "dispatch_dead_failure_limit"
 _EVENT_SOURCE = "backlog"
 
 
@@ -624,6 +626,65 @@ def _worker_agent_name(
     return f"{base}-{slug}" if slug else base
 
 
+def _refuse_repeated_dead_dispatch(
+    node_id: str,
+    node_cwd: Optional[str],
+) -> Optional[str]:
+    """Auto-defer at the durable failure limit; return the refusal action."""
+    from fno.graph import failure
+
+    try:
+        from fno.config import load_settings, load_settings_for_repo
+
+        settings_obj = (
+            load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
+        )
+    except Exception:
+        settings_obj = None
+    try:
+        failure_limit = int(settings_obj.active_backlog.failure_limit)
+    except Exception:
+        failure_limit = 3
+    streak = failure.consecutive_failures(node_id, failure.read_events())
+    if streak < failure_limit:
+        return None
+
+    reason = (
+        f"auto-failure: {streak} consecutive dead dispatches "
+        "(worker reaped without termination)"
+    )
+    proc = subprocess.run(
+        [*_subprocess_util.fno_py_cmd(), "backlog", "defer", node_id, "--reason", reason],
+        cwd=node_cwd or None,
+        capture_output=True,
+        text=True,
+    )
+    action = "auto-deferred" if proc.returncode == 0 else "defer-failed"
+    from fno.agents import events as agent_events
+
+    agent_events.emit(
+        EVENT_DEAD_FAILURE_LIMIT,
+        node_id=node_id,
+        consecutive_failures=streak,
+        failure_limit=failure_limit,
+        action=action,
+    )
+    from fno.notify._impl import send_notification
+
+    send_notification(
+        "footnote: dead dispatch limit",
+        f"{node_id}: {streak} dead dispatches; {action}. No worker launched.",
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:200]
+        print(
+            f"dead-dispatch limit reached for {node_id}; defer failed "
+            f"(exit {proc.returncode}: {detail}); refusing another worker",
+            file=sys.stderr,
+        )
+    return action
+
+
 def _spawn_worker(
     node_id: str,
     node_cwd: Optional[str],
@@ -1075,7 +1136,9 @@ def dispatch_lanes(
         # path would see the node as ready+unclaimed and double-launch it. Guard
         # with the SAME dispatch:<id> reservation advance() uses (global-rooted,
         # TTL bridge) so the two dispatchers dedup against each other.
-        if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
+        if _claim_is_live(f"node:{node_id}", str(canonical)) or _claim_is_live(
+            f"dispatch:{node_id}"
+        ):
             _skip("already-claimed")
             continue
         dispatch_key = f"dispatch:{node_id}"
@@ -1178,10 +1241,65 @@ def _walker_key() -> str:
     return f"walker:{resolve_canonical_repo_root()}"
 
 
-def _claim_is_live(key: str) -> bool:
+def _observe_node_claim(node_id: str, node_cwd: Optional[str] = None) -> bool:
+    """Family-2 pre-dispatch verdict; loud for stale/suspect ownership."""
+    try:
+        from fno.target_cli import _classify_node_claim
+
+        verdict, info = _classify_node_claim(node_id)
+    except Exception:  # noqa: BLE001 - an unreadable claim must not crash advance
+        verdict, info = "free", None
+    info = info or {}
+    try:
+        from fno.agents.truth_status import resolve_truth_status
+
+        truth = resolve_truth_status(node_id).get("state") or "unknown"
+    except Exception:  # noqa: BLE001 - truth is diagnostic, claim verdict is authority
+        truth = "unknown"
+    claim_state = info.get("state")
+    holder = info.get("holder") or "unknown"
+    occupied = verdict in ("ours", "foreign_live")
+    dead_action = None if occupied else _refuse_repeated_dead_dispatch(node_id, node_cwd)
+    action = (
+        "blocked"
+        if occupied or dead_action == "defer-failed"
+        else "auto-deferred"
+        if dead_action
+        else "redispatch"
+        if verdict == "dead_predecessor"
+        else "dispatch"
+    )
+
+    from fno.agents import events as agent_events
+
+    agent_events.emit(
+        EVENT_CLAIM_OBSERVED,
+        node_id=node_id,
+        claim_verdict=verdict,
+        claim_state=claim_state,
+        holder=holder,
+        truth_status=truth,
+        action=action,
+    )
+    if claim_state in ("stale", "suspect"):
+        message = (
+            f"dispatch {action} for {node_id}: node claim is {claim_state}, "
+            f"prior holder={holder}, truth_status={truth}"
+        )
+        print(f"advance: WARNING: {message}", file=sys.stderr)
+        from fno.notify._impl import send_notification
+
+        send_notification("footnote: contested node dispatch", message)
+    return occupied or dead_action is not None
+
+
+def _claim_is_live(key: str, node_cwd: Optional[str] = None) -> bool:
     # "occupied" for dispatch: a live OR a suspect claim (x-ba4b) blocks
     # selection. suspect = TTL-unexpired, dead pid (respawned worker); the TTL
     # still protects the slot, so selection must skip it, never steal.
+    if key.startswith("node:"):
+        return _observe_node_claim(key.removeprefix("node:"), node_cwd)
+
     from fno.claims.core import claim_status
 
     try:
@@ -1376,7 +1494,9 @@ def advance(
     #    bridge token still covers the boot window). Either way, skip - this
     #    liveness check (not just the O_EXCL acquire below) is what dedups a
     #    same-process re-run AND a peer whose reservation already exists.
-    if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
+    if _claim_is_live(f"node:{node_id}", node_cwd) or _claim_is_live(
+        f"dispatch:{node_id}"
+    ):
         return skip("already-claimed", node_id=node_id)
 
     # 4b. Quota-aware defer (x-5d3e). advance IS an autonomous path, so it may
@@ -1716,7 +1836,9 @@ def _converge_one(
     # makes epic-advance idempotent (AC1-EDGE): a re-run finds the first pass's workers
     # holding node:<id> and dispatches nothing, WITHOUT depending on the 3-min
     # dispatch TTL still being live.
-    if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
+    if _claim_is_live(f"node:{node_id}", root) or _claim_is_live(
+        f"dispatch:{node_id}"
+    ):
         return skip("already-claimed")
 
     from fno.claims.core import ClaimHeldByOther, acquire_claim
