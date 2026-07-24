@@ -913,6 +913,113 @@ class TestNodeIsDone:
         assert recovery._node_is_done("x-370f") is False
 
 
+class TestMissionAwareTerminalGate:
+    """x-5583: a hollow ``<promise>`` no longer suppresses recovery forever."""
+
+    def _classify(self, mission_complete, age_s=3600):
+        return recovery.classify(
+            "running", None, _now(), 300,
+            truth_state="done", truth_age_s=age_s,
+            mission_complete=mission_complete,
+        )
+
+    def test_incomplete_and_stale_nudges(self):
+        # AC1: positive evidence of an unfinished mission relaxes the skip.
+        assert self._classify(False) == recovery.NUDGE
+
+    @pytest.mark.parametrize("mc", [True, None])
+    def test_complete_or_unverifiable_stays_terminal(self, mc):
+        # AC3/AC7: only False relaxes; None (probe failed, node-less thread)
+        # keeps today's behavior.
+        assert self._classify(mc) == recovery.SKIP_TERMINAL
+
+    def test_default_keyword_preserves_legacy_behavior(self):
+        assert recovery.classify(
+            "running", None, _now(), 300,
+            truth_state="done", truth_age_s=3600,
+        ) == recovery.SKIP_TERMINAL
+
+    @pytest.mark.parametrize("age", [None, 299])
+    def test_fresh_incomplete_promise_is_not_nudged(self, age):
+        # AC4: finalize may still be in flight; the staleness gate outwaits it.
+        assert self._classify(False, age_s=age) == recovery.NOT_STALE
+
+    def test_needs_input_still_wins_over_incomplete_mission(self):
+        assert recovery.classify(
+            "needs-input", None, _now(), 300,
+            truth_state="done", truth_age_s=3600, mission_complete=False,
+        ) == recovery.SKIP_NEEDS_INPUT
+
+    # -- sweep wiring -----------------------------------------------------
+    def _sweep(self, tmp_path, *, mission_complete_fn, counts=None,
+               failover_fn=None, output_result=None):
+        h = _Harness(state="done")
+        if output_result is not None:
+            h.read_state = lambda jobs_dir: recovery._SnapshotView(
+                "done", None, output_result)
+        counts = {} if counts is None else counts
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[_stale_candidate(tmp_path)],
+            counts=counts,
+            emit=h.emit, read_state_fn=h.read_state,
+            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            failover_fn=failover_fn,
+            mission_complete_fn=mission_complete_fn,
+        )
+        return h, counts
+
+    def test_sweep_nudges_hollow_promise(self, tmp_path):
+        h, counts = self._sweep(tmp_path, mission_complete_fn=lambda c: False)
+        assert h.event_types() == ["recovery_nudge"]
+        assert h.events[0][1]["nudge_count"] == 1
+        assert counts["aaaa1111"] == 1
+
+    def test_sweep_stays_silent_for_complete_mission(self, tmp_path):
+        h, _ = self._sweep(tmp_path, mission_complete_fn=lambda c: True)
+        assert (h.sends, h.events) == ([], [])
+
+    def test_sweep_without_seam_is_unchanged(self, tmp_path):
+        h, _ = self._sweep(tmp_path, mission_complete_fn=None)
+        assert (h.sends, h.events) == ([], [])
+
+    def test_probe_skipped_off_the_terminal_path(self, tmp_path):
+        calls: list = []
+        h = _Harness(state="running")  # truth -> stalled, not done
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[_stale_candidate(tmp_path)], counts={},
+            emit=h.emit, read_state_fn=h.read_state,
+            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            mission_complete_fn=lambda c: calls.append(c) or False,
+        )
+        assert calls == []
+        assert h.event_types() == ["recovery_nudge"]
+
+    def test_hollow_promise_reaches_failover(self, tmp_path):
+        # AC1/US4: a swap-class death behind a hollow promise rotates providers
+        # instead of nudging an already-rate-limited account.
+        seen: list = []
+        h, _ = self._sweep(
+            tmp_path, mission_complete_fn=lambda c: False,
+            output_result="API Error: 429 rate limit exceeded",
+            failover_fn=lambda c, err: seen.append(err) or "swapped",
+        )
+        assert len(seen) == 1
+        assert h.event_types() == ["failover_swapped"]
+        assert h.sends == []
+
+    def test_cap_bounds_the_restored_path(self, tmp_path):
+        # AC6: the newly reachable candidates obey max_nudges + capped-once.
+        h, counts = self._sweep(tmp_path, mission_complete_fn=lambda c: False,
+                                counts={"aaaa1111": 3})
+        assert h.sends == []
+        assert h.event_types() == ["recovery_capped"]
+        h2, _ = self._sweep(tmp_path, mission_complete_fn=lambda c: False,
+                            counts=counts)
+        assert h2.events == []
+
+
 class TestMissionComplete:
     """x-5583: the family-2 artifact probe behind the terminal-suppression gate."""
 

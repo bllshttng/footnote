@@ -76,13 +76,24 @@ def classify(
     *,
     truth_state: str,
     truth_age_s: Optional[float],
+    mission_complete: Optional[bool] = None,
 ) -> str:
-    """Classify from family-1 transcript truth; state.json is phase metadata."""
+    """Classify from family-1 transcript truth; state.json is phase metadata.
+
+    ``mission_complete`` is the family-2 half (x-5583): family 1 calls any
+    terminal ``<promise>`` done, so on its own it lets a worker that promised
+    and then died abnormally suppress recovery AND failover forever. Only an
+    explicit ``False`` - positive evidence of an unfinished mission - relaxes
+    that; True and None (unverifiable) keep the terminal skip.
+    """
     del updated_at, now
     if state == "needs-input" or truth_state == "your-move":
         return SKIP_NEEDS_INPUT
     if truth_state == "done":
-        return SKIP_TERMINAL
+        if mission_complete is not False:
+            return SKIP_TERMINAL
+        # Hollow promise: fall through to the staleness gate below, so a fresh
+        # promise mid-finalize is left alone and only an idle one is nudged.
     if truth_state in {"unknown", "watching"}:
         return NOT_STALE
     if truth_state == "stalled":
@@ -191,6 +202,7 @@ def recovery_sweep(
     liveness_fn: Callable[[str], bool],
     send_fn: Callable[[str, str, str], None],
     failover_fn: Optional[Callable[["Candidate", object], str]] = None,
+    mission_complete_fn: Optional[Callable[["Candidate"], Optional[bool]]] = None,
 ) -> None:
     """Classify each candidate and act: failover, nudge (capped), skip, or stay silent.
 
@@ -223,10 +235,17 @@ def recovery_sweep(
     for c in candidates:
         snap = read_state_fn(c.jobs_dir)
         truth = truth_fn(c)
+        truth_state = str(truth.get("state") or "unknown")
+        # Probe only behind a terminal promise - every other state is already
+        # decided by family 1 alone, so this stays off the hot path.
+        mc = (mission_complete_fn(c)
+              if truth_state == "done" and mission_complete_fn is not None
+              else None)
         decision = classify(
             snap.state, snap.updated_at, now, cfg.idle_threshold_seconds,
-            truth_state=str(truth.get("state") or "unknown"),
+            truth_state=truth_state,
             truth_age_s=truth.get("last_activity_age_s"),
+            mission_complete=mc,
         )
 
         if decision == SKIP_NEEDS_INPUT:
@@ -460,35 +479,35 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
     Returns None (unverifiable) for an unresolvable mission or any read failure;
     the caller treats None as "keep today's suppression" (fail closed).
     """
-    node_id = kind = None
-    if candidate.cwd:
-        # Manifest first: only a /target session writes one, and the runtime
-        # wrote it, so unlike the worker name it cannot drift from the mission.
-        node_id, kind = _node_id_from_worktree(candidate.cwd), "target"
-    if not node_id:
-        from fno.agents.truth_status import parse_worker_mission
-
-        parsed = parse_worker_mission(candidate.name)
-        if parsed is None:
-            return None
-        node_id, kind = parsed
-
     try:
+        node_id = kind = None
+        if candidate.cwd:
+            # Manifest first: only a /target session writes one, and the runtime
+            # wrote it, so unlike the worker name it cannot drift from the mission.
+            node_id, kind = _node_id_from_worktree(candidate.cwd), "target"
+        if not node_id:
+            from fno.agents.truth_status import parse_worker_mission
+
+            parsed = parse_worker_mission(candidate.name)
+            if parsed is None:
+                return None
+            node_id, kind = parsed
+
         from fno.graph.load import load_graph
 
         entry = next((e for e in load_graph() if e.get("id") == node_id), None)
+        if entry is None:
+            return None
+        if entry.get("status") == "done":
+            return True
+        if kind == "think":
+            # spawn_think's contract: a design pass with no linked plan_path failed.
+            return bool(str(entry.get("plan_path") or "").strip())
+        # A PR existing is the completion floor - red CI and pending bots are
+        # pr_watch's and /fno:pr check's beat, not the watchdog's (LD 4).
+        return bool(entry.get("pr_number") or entry.get("pr_url"))
     except Exception:  # noqa: BLE001 - a probe must never crash the sweep
         return None
-    if entry is None:
-        return None
-    if entry.get("status") == "done":
-        return True
-    if kind == "think":
-        # spawn_think's contract: a design pass with no linked plan_path failed.
-        return bool(str(entry.get("plan_path") or "").strip())
-    # A PR existing is the completion floor - red CI and pending bots are
-    # pr_watch's and /fno:pr check's beat, not the watchdog's (Locked Decision 4).
-    return bool(entry.get("pr_number") or entry.get("pr_url"))
 
 
 def _release_lane_slot(node: str, cwd: str) -> None:
@@ -943,6 +962,7 @@ def run_recovery_sweep(
     load_counts_fn: Optional[Callable] = None,
     save_counts_fn: Optional[Callable] = None,
     failover_fn: Optional[Callable] = None,
+    mission_complete_fn: Optional[Callable] = None,
 ) -> int:
     """Build the real seams, run one sweep, persist counts. Returns candidate count.
 
@@ -985,6 +1005,7 @@ def run_recovery_sweep(
     # controller returns QUEUE_EXHAUSTED (a bounded stop), so wiring it on by
     # default is safe (x-7abe).
     failover_fn = failover_fn or _default_failover
+    mission_complete_fn = mission_complete_fn or mission_complete
 
     candidates = iter_candidates(registry_load(), locate_fn)
     counts = load_counts_fn()
@@ -998,6 +1019,7 @@ def run_recovery_sweep(
         truth_fn=truth_fn,
         liveness_fn=liveness_fn, send_fn=send_fn,
         failover_fn=failover_fn,
+        mission_complete_fn=mission_complete_fn,
     )
 
     save_counts_fn(counts)
