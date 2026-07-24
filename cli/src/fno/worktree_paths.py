@@ -197,6 +197,8 @@ class WorktreePolicy:
     base: Path    # target worktrees base (informational for a `never` result)
     project: str  # resolved project id (for the receipt line)
     source: str   # "per-project" | "global" | "default"
+    requested_policy: str  # pre-degradation policy, for truthful receipts
+    degraded: bool  # requested harness-native but substrate cannot allocate it
 
 
 def _flat_config_or_raise(settings_path: Path) -> Optional[dict]:
@@ -340,8 +342,20 @@ def resolve_worktree_policy(
     if policy == "harness-native" and harness not in _NATIVE_WORKTREE_HARNESSES:
         policy = "external"
 
+    degraded = policy != raw_policy
+    base = (
+        _fallback_worktrees_base_from(merged)
+        if degraded
+        else _worktrees_base_from(merged)
+    )
+
     return WorktreePolicy(
-        policy=policy, base=_worktrees_base_from(merged), project=project_id, source=source
+        policy=policy,
+        base=base,
+        project=project_id,
+        source=source,
+        requested_policy=raw_policy,
+        degraded=degraded,
     )
 
 
@@ -359,6 +373,22 @@ def _worktrees_base_from(merged: dict) -> Path:
     raw = paths_cfg.get("worktrees_base") if isinstance(paths_cfg, dict) else None
     if isinstance(raw, str) and raw:
         return Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
+    state = merged.get("state_dir")
+    if not (isinstance(state, str) and state):
+        state = "~/.fno/"
+    return (Path(os.path.expandvars(os.path.expanduser(state))) / "worktrees").resolve()
+
+
+def _fallback_worktrees_base_from(merged: dict) -> Path:
+    """Unsupported-substrate fallback, isolated from external allocator config.
+
+    ``paths.worktrees_base`` is an explicit external allocator choice. Reusing
+    it when a harness-native request degrades would make an unsupported Codex
+    session look allocator-owned and can route it into Conductor. The fallback
+    is always Footnote state under ``<state_dir>/worktrees`` (normally
+    ``~/.fno/worktrees``); explicit ``policy = external`` still uses the
+    configured allocator through :func:`_worktrees_base_from`.
+    """
     state = merged.get("state_dir")
     if not (isinstance(state, str) and state):
         state = "~/.fno/"

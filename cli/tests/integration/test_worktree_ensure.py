@@ -335,6 +335,48 @@ def test_ensure_no_harness_degrades_to_external(main_repo: Path, tmp_path: Path)
     assert not (main_repo / ".claude" / "worktrees" / "nh").exists()
 
 
+def test_codex_native_degradation_uses_fno_fallback_not_configured_allocator(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """Unsupported Codex callers never counterfeit app ownership or inherit an
+    external allocator configured for explicit external worktrees."""
+    configured = tmp_path / "conductor" / "workspaces"
+    _write_config(
+        main_repo / ".fno",
+        f'[paths]\nworktrees_base = "{configured}"\n',
+    )
+
+    res = runner.invoke(
+        app,
+        ["worktree", "ensure", "--repo", str(main_repo), "--name", "cx", "--harness", "codex"],
+    )
+
+    assert res.exit_code == 0, res.stderr
+    assert res.stdout.strip() == str(_default_wt(tmp_path, main_repo, "cx"))
+    assert "requested=harness-native" in res.stderr
+    assert "degraded=true" in res.stderr
+    assert not (configured / main_repo.name / "cx").exists()
+
+
+def test_codex_explicit_external_policy_honors_configured_allocator(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    configured = tmp_path / "conductor" / "workspaces"
+    _write_config(
+        main_repo / ".fno",
+        f'[worktree]\npolicy = "external"\n[paths]\nworktrees_base = "{configured}"\n',
+    )
+
+    res = runner.invoke(
+        app,
+        ["worktree", "ensure", "--repo", str(main_repo), "--name", "cx-ext", "--harness", "codex"],
+    )
+
+    assert res.exit_code == 0, res.stderr
+    assert res.stdout.strip() == str(configured / main_repo.name / "cx-ext")
+    assert "degraded=true" not in res.stderr
+
+
 def test_policy_verb_reports_never_and_default(main_repo: Path, tmp_path: Path) -> None:
     """The read-only `policy` verb shares the resolver: `never` prints bare
     `never`; the default prints `harness-native` + a base line."""

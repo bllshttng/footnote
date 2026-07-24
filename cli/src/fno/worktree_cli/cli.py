@@ -175,6 +175,11 @@ def _worktree_ensure(
         # stdout + non-zero => caller launches in prior cwd, never auto-isolates.
         typer.echo(f"worktree ensure: {exc}", err=True)
         return 1
+    policy_receipt = f"policy={pol.policy} ({pol.project})"
+    if pol.degraded:
+        policy_receipt += (
+            f" requested={pol.requested_policy} degraded=true"
+        )
     if pol.policy == "never":
         # A caller that explicitly demanded a distinct branch (e.g. the batch
         # lane's `--branch feature/batch-...`) cannot get one in place: launching
@@ -190,7 +195,7 @@ def _worktree_ensure(
             return 1
         typer.echo(str(top))  # repo main-checkout path -> caller launches here
         typer.echo(
-            f"worktree ensure: policy=never ({pol.project}); launching in place",
+            f"worktree ensure: {policy_receipt}; launching in place",
             err=True,
         )
         return 0
@@ -229,7 +234,7 @@ def _worktree_ensure(
             and Path(wt_top.stdout.strip()).resolve() == wt.resolve()
         ):
             typer.echo(
-                f"worktree ensure: policy={pol.policy} ({pol.project}); "
+                f"worktree ensure: {policy_receipt}; "
                 f"reusing worktree at {wt}",
                 err=True,
             )
@@ -271,7 +276,7 @@ def _worktree_ensure(
     # location, incl. a harness-native->external degradation - the resolver already
     # collapsed a non-native harness to `external`, so pol.policy is the true mode).
     typer.echo(
-        f"worktree ensure: policy={pol.policy} ({pol.project}); worktree at {wt}",
+        f"worktree ensure: {policy_receipt}; worktree at {wt}",
         err=True,
     )
     typer.echo(str(wt))  # the ONLY stdout line -> the caller's $wt
