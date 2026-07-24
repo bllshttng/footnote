@@ -126,7 +126,57 @@ def test_claude_3_opus_routes_to_legacy_tier():
 def test_future_opus_versions_default_to_latest_modern_tier():
     _reset_fallback_state()
     assert model_tier("claude-opus-4-9") == LATEST_MODERN_OPUS_TIER
-    assert model_tier("claude-opus-5-0") == LATEST_MODERN_OPUS_TIER
+    assert model_tier("claude-opus-6") == LATEST_MODERN_OPUS_TIER
+
+
+# --- Opus 5: minorless model ID ----------------------------------------------
+
+
+def test_opus_5_tier_exists_with_modern_prices():
+    _reset_fallback_state()
+    assert "opus-5.0" in PRICING
+    for key, expected in MODERN_PRICES.items():
+        assert PRICING["opus-5.0"][key] == expected
+
+
+def test_minorless_opus_5_id_parses_without_warning():
+    # `claude-opus-5` carries no minor. The pre-Opus-5 regex required
+    # major[._-]minor, so every Opus 5 session fell through to the
+    # unparseable branch: correct price, but a stderr warning and a false
+    # entry in the drift-observable fallback set.
+    _reset_fallback_state()
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        for model_id in ("claude-opus-5", "claude-opus-5[1m]", "claude-opus-5-0"):
+            assert model_tier(model_id) == "opus-5.0", model_id
+    assert stderr.getvalue() == ""
+    assert cost_tracker.FALLBACK_MODELS_SEEN == set()
+
+
+# --- Fable / Mythos: above the opus tier --------------------------------------
+
+
+def test_fable_and_mythos_price_above_opus():
+    # Without a dedicated branch these fell to DEFAULT_TIER ("sonnet",
+    # $3/$15) against a real $10/$50 — a 3.3x undercount.
+    _reset_fallback_state()
+    for model_id in ("claude-fable-5", "claude-mythos-5", "claude-mythos-preview"):
+        assert model_tier(model_id) == "fable-5", model_id
+    assert PRICING["fable-5"]["input"] == 10.00
+    assert PRICING["fable-5"]["output"] == 50.00
+
+
+def test_calculate_cost_uses_fable_rates():
+    _reset_fallback_state()
+    usage = {
+        "input_tokens": 1_000_000,
+        "output_tokens": 1_000_000,
+        "cache_read_input_tokens": 1_000_000,
+        "cache_creation_input_tokens": 1_000_000,
+    }
+    cost = calculate_cost(usage, "claude-fable-5")
+    expected = 10.00 + 50.00 + 1.00 + 12.50
+    assert abs(cost - expected) < 1e-9, f"expected {expected}, got {cost}"
 
 
 # --- AC2-ERR: unparseable opus version ----------------------------------------
