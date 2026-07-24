@@ -9,6 +9,7 @@ subprocess + setup-hook stubbed so no real worktree/state is created:
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import pytest
 import typer
@@ -70,6 +71,154 @@ def test_resolve_node_id_freetext_fallthrough(monkeypatch):
         lambda q, e: SimpleNamespace(kind="none", id=None),
     )
     assert target_cli._resolve_node_id("fix the login bug") == "fix the login bug"
+
+
+# ----------------------- Codex Desktop native handoff --------------------- #
+def _write_codex_rollout(path: Path, *, session_id: str, cwd: Path, originator: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "cwd": str(cwd),
+                    "originator": originator,
+                },
+            }
+        )
+        + "\n"
+    )
+
+
+def test_codex_session_originator_reads_exact_rollout(monkeypatch, tmp_path):
+    rollout = tmp_path / "rollout-thread-desktop.jsonl"
+    _write_codex_rollout(
+        rollout,
+        session_id="thread-desktop",
+        cwd=Path("/canonical/footnote"),
+        originator="Codex Desktop",
+    )
+    monkeypatch.setattr(
+        "fno.agents.discover.codex_rollout_for_session",
+        lambda session_id: rollout if session_id == "thread-desktop" else None,
+    )
+
+    meta = target_cli._codex_session_meta("thread-desktop")
+
+    assert meta is not None
+    assert meta["originator"] == "Codex Desktop"
+    assert meta["cwd"] == "/canonical/footnote"
+
+
+def test_codex_session_originator_refuses_mismatched_rollout(monkeypatch, tmp_path):
+    rollout = tmp_path / "rollout-other.jsonl"
+    _write_codex_rollout(
+        rollout,
+        session_id="other-thread",
+        cwd=Path("/canonical/footnote"),
+        originator="Codex Desktop",
+    )
+    monkeypatch.setattr(
+        "fno.agents.discover.codex_rollout_for_session", lambda session_id: rollout
+    )
+
+    assert target_cli._codex_session_meta("thread-desktop") is None
+
+
+def test_desktop_canonical_start_requests_native_handoff_without_side_effects(
+    monkeypatch, tmp_path
+):
+    canonical = tmp_path / "footnote"
+    canonical.mkdir()
+    monkeypatch.chdir(canonical)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-desktop")
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(
+        target_cli,
+        "_git_out",
+        lambda cwd, *args: str(canonical) if args == ("rev-parse", "--show-toplevel") else None,
+    )
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_session_meta",
+        lambda session_id: {
+            "id": session_id,
+            "cwd": str(canonical),
+            "originator": "Codex Desktop",
+        },
+    )
+    monkeypatch.setattr(
+        "fno.worktree_paths.resolve_worktree_policy",
+        lambda repo, harness: SimpleNamespace(
+            policy="external",
+            requested_policy="harness-native",
+            degraded=True,
+            project="footnote",
+        ),
+    )
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda node: None)
+    calls = []
+    monkeypatch.setattr(
+        target_cli.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append((args, kwargs))
+        or subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+    )
+
+    result = runner.invoke(target_app, ["start", "x-0b3f"])
+
+    assert result.exit_code == target_cli._CODEX_NATIVE_HANDOFF_EXIT
+    assert "native-handoff=required" in result.output
+    assert "project=footnote" in result.output
+    assert "/worktree" in result.output
+    assert "fno target start x-0b3f" in result.output
+    assert calls == []
+
+
+def test_codex_tui_canonical_start_does_not_request_desktop_handoff(
+    monkeypatch, tmp_path
+):
+    canonical = tmp_path / "footnote"
+    wt = tmp_path / "fallback"
+    canonical.mkdir()
+    wt.mkdir()
+    monkeypatch.chdir(canonical)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-tui")
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
+    monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(
+        target_cli,
+        "_git_out",
+        lambda cwd, *args: str(canonical) if args == ("rev-parse", "--show-toplevel") else None,
+    )
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_session_meta",
+        lambda session_id: {
+            "id": session_id,
+            "cwd": str(canonical),
+            "originator": "codex-tui",
+        },
+    )
+    monkeypatch.setattr(
+        "fno.worktree._run_setup_worktree_hook", lambda repo, path: (0, "")
+    )
+
+    def fake_run(args, **kwargs):
+        if "ensure" in args:
+            return subprocess.CompletedProcess(args, 0, stdout=str(wt), stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+
+    result = runner.invoke(target_app, ["start", "x-0b3f"])
+
+    assert result.exit_code == 0, result.output
+    assert "native-handoff=required" not in result.output
+    assert f"worktree={wt}" in result.output
 
 
 # ------------------------------- no-op branch ----------------------------- #

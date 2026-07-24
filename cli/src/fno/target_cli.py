@@ -43,6 +43,7 @@ target_app = typer.Typer(
 )
 
 _INIT_RELPATH = "hooks/helpers/init-target-state.sh"
+_CODEX_NATIVE_HANDOFF_EXIT = 75
 
 
 def _resolve_init_script() -> Path:
@@ -1145,6 +1146,74 @@ def _is_linked_worktree(cwd: Path) -> bool:
     return _abs(gdir) != _abs(common)
 
 
+def _codex_session_meta(session_id: str) -> Optional[dict[str, Any]]:
+    """Verified first-line ``session_meta`` for one Codex rollout.
+
+    ``CODEX_THREAD_ID`` exists in both Codex Desktop and ``codex-tui``.  The
+    rollout originator is the only durable local fact that distinguishes a
+    Desktop chat capable of the supported Local -> Worktree handoff.  Return
+    ``None`` on any ambiguity so callers fall back externally rather than
+    pretending a TUI thread is app-owned.
+    """
+    if not session_id:
+        return None
+    try:
+        from fno.agents.discover import codex_rollout_for_session
+
+        rollout = codex_rollout_for_session(session_id)
+        if rollout is None:
+            return None
+        with rollout.open(encoding="utf-8") as fh:
+            record = json.loads(fh.readline())
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(record, dict) or record.get("type") != "session_meta":
+        return None
+    payload = record.get("payload")
+    if not isinstance(payload, dict) or payload.get("id") != session_id:
+        return None
+    return payload
+
+
+def _codex_desktop_handoff_policy(repo_root: Path) -> Optional[Any]:
+    """Resolved policy iff this is a canonical Codex Desktop Local chat."""
+    from fno.harness_identity import resolve_harness_identity
+
+    identity = resolve_harness_identity()
+    if identity.harness != "codex" or not identity.session_id:
+        return None
+    meta = _codex_session_meta(identity.session_id)
+    if meta is None or meta.get("originator") != "Codex Desktop":
+        return None
+    try:
+        recorded_cwd = Path(str(meta.get("cwd") or "")).resolve()
+    except (OSError, ValueError):
+        return None
+    if recorded_cwd != repo_root.resolve():
+        return None
+    try:
+        from fno.worktree_paths import resolve_worktree_policy
+
+        policy = resolve_worktree_policy(repo_root, "codex")
+    except Exception:  # noqa: BLE001 - an unreadable policy must not claim native
+        return None
+    requested = getattr(policy, "requested_policy", policy.policy)
+    return policy if requested == "harness-native" else None
+
+
+def _request_codex_native_handoff(repo_root: Path, node: str, policy: Any) -> None:
+    """Emit the supported same-thread Desktop handoff receipt and stop."""
+    typer.echo(
+        "native-handoff=required "
+        f"project={policy.project} canonical={repo_root} base=origin/main node={node}\n"
+        "Use `/worktree` or **Hand off -> Worktree** in Codex Desktop, select "
+        "the remote main branch, then rerun:\n"
+        f"  fno target start {node}\n"
+        "No worktree, branch, manifest, or claim was created by Footnote."
+    )
+    raise typer.Exit(code=_CODEX_NATIVE_HANDOFF_EXIT)
+
+
 def _manifest_node_id(manifest: Path) -> Optional[str]:
     """The manifest's claimed ``graph_node_id``, or None if absent/null/unreadable."""
     try:
@@ -1406,6 +1475,20 @@ def start(
     # worktree name and `init --input` then use the canonical id.
     node = _resolve_node_id(node)
     name = _wt_name(node)
+
+    # Codex Desktop owns the only supported native worktree transition.  Keep
+    # this thread rooted at the canonical project until the app performs its
+    # same-thread handoff; allocating first would permanently bucket Remote by
+    # the external cwd and merely placing that directory under CODEX_HOME would
+    # counterfeit app ownership.  The retry from the registered linked
+    # worktree is handled by the already-isolated branch above.
+    native_policy = _codex_desktop_handoff_policy(repo_root)
+    if native_policy is not None:
+        holder = _foreign_live_holder(node)
+        if holder is not None:
+            _print_foreign_holder_park(node, holder, repo_root)
+            raise typer.Exit(code=1)
+        _request_codex_native_handoff(repo_root, node, native_policy)
 
     # 1. Create/reuse the worktree off origin/main (x-73ca). ensure prints the
     #    worktree path on stdout and is idempotent (reuse) + refuses to nest.
