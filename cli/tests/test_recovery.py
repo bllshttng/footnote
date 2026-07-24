@@ -913,6 +913,246 @@ class TestNodeIsDone:
         assert recovery._node_is_done("x-370f") is False
 
 
+class TestMissionAwareTerminalGate:
+    """x-5583: a hollow ``<promise>`` no longer suppresses recovery forever."""
+
+    def _classify(self, mission_complete, age_s=3600):
+        return recovery.classify(
+            "running", None, _now(), 300,
+            truth_state="done", truth_age_s=age_s,
+            mission_complete=mission_complete,
+        )
+
+    def test_incomplete_and_stale_nudges(self):
+        # AC1: positive evidence of an unfinished mission relaxes the skip.
+        assert self._classify(False) == recovery.NUDGE
+
+    @pytest.mark.parametrize("mc", [True, None])
+    def test_complete_or_unverifiable_stays_terminal(self, mc):
+        # AC3/AC7: only False relaxes; None (probe failed, node-less thread)
+        # keeps today's behavior.
+        assert self._classify(mc) == recovery.SKIP_TERMINAL
+
+    def test_default_keyword_preserves_legacy_behavior(self):
+        assert recovery.classify(
+            "running", None, _now(), 300,
+            truth_state="done", truth_age_s=3600,
+        ) == recovery.SKIP_TERMINAL
+
+    @pytest.mark.parametrize("age", [None, 299])
+    def test_fresh_incomplete_promise_is_not_nudged(self, age):
+        # AC4: finalize may still be in flight; the staleness gate outwaits it.
+        assert self._classify(False, age_s=age) == recovery.NOT_STALE
+
+    def test_needs_input_still_wins_over_incomplete_mission(self):
+        assert recovery.classify(
+            "needs-input", None, _now(), 300,
+            truth_state="done", truth_age_s=3600, mission_complete=False,
+        ) == recovery.SKIP_NEEDS_INPUT
+
+    # -- sweep wiring -----------------------------------------------------
+    def _sweep(self, tmp_path, *, mission_complete_fn, counts=None,
+               failover_fn=None, output_result=None):
+        h = _Harness(state="done")
+        if output_result is not None:
+            h.read_state = lambda jobs_dir: recovery._SnapshotView(
+                "done", None, output_result)
+        counts = {} if counts is None else counts
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[_stale_candidate(tmp_path)],
+            counts=counts,
+            emit=h.emit, read_state_fn=h.read_state,
+            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            failover_fn=failover_fn,
+            mission_complete_fn=mission_complete_fn,
+        )
+        return h, counts
+
+    def test_sweep_nudges_hollow_promise(self, tmp_path):
+        h, counts = self._sweep(tmp_path, mission_complete_fn=lambda c: False)
+        assert h.event_types() == ["recovery_nudge"]
+        assert h.events[0][1]["nudge_count"] == 1
+        assert counts["aaaa1111"] == 1
+
+    def test_sweep_stays_silent_for_complete_mission(self, tmp_path):
+        h, _ = self._sweep(tmp_path, mission_complete_fn=lambda c: True)
+        assert (h.sends, h.events) == ([], [])
+
+    def test_sweep_without_seam_is_unchanged(self, tmp_path):
+        h, _ = self._sweep(tmp_path, mission_complete_fn=None)
+        assert (h.sends, h.events) == ([], [])
+
+    def test_probe_skipped_off_the_terminal_path(self, tmp_path):
+        calls: list = []
+        h = _Harness(state="running")  # truth -> stalled, not done
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[_stale_candidate(tmp_path)], counts={},
+            emit=h.emit, read_state_fn=h.read_state,
+            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            mission_complete_fn=lambda c: calls.append(c) or False,
+        )
+        assert calls == []
+        assert h.event_types() == ["recovery_nudge"]
+
+    def test_hollow_promise_reaches_failover(self, tmp_path):
+        # AC1/US4: a swap-class death behind a hollow promise rotates providers
+        # instead of nudging an already-rate-limited account.
+        seen: list = []
+        h, _ = self._sweep(
+            tmp_path, mission_complete_fn=lambda c: False,
+            output_result="API Error: 429 rate limit exceeded",
+            failover_fn=lambda c, err: seen.append(err) or "swapped",
+        )
+        assert len(seen) == 1
+        assert h.event_types() == ["failover_swapped"]
+        assert h.sends == []
+
+    def test_cap_bounds_the_restored_path(self, tmp_path):
+        # AC6: the newly reachable candidates obey max_nudges + capped-once.
+        h, counts = self._sweep(tmp_path, mission_complete_fn=lambda c: False,
+                                counts={"aaaa1111": 3})
+        assert h.sends == []
+        assert h.event_types() == ["recovery_capped"]
+        h2, _ = self._sweep(tmp_path, mission_complete_fn=lambda c: False,
+                            counts=counts)
+        assert h2.events == []
+
+
+class TestMissionComplete:
+    """x-5583: the family-2 artifact probe behind the terminal-suppression gate."""
+
+    def _patch_graph(self, monkeypatch, entries):
+        from fno.graph import load as gl
+        monkeypatch.setattr(gl, "load_graph", lambda *a, **k: entries)
+
+    def _cand(self, name=None, cwd=None):
+        return recovery.Candidate(short_id="s1", sock_path="/s", jobs_dir=None,
+                                  cwd=cwd, name=name)
+
+    def _worktree(self, tmp_path, node):
+        fno_dir = tmp_path / ".fno"
+        fno_dir.mkdir()
+        (fno_dir / "target-state.md").write_text(
+            f"graph_node_id: {node}\n", encoding="utf-8")
+        return str(tmp_path)
+
+    # -- resolution order -------------------------------------------------
+    def test_manifest_wins_over_name(self, monkeypatch, tmp_path):
+        # A non-standard name that WOULD parse to nothing still resolves via the
+        # manifest, and a manifest hit is always a target mission.
+        self._patch_graph(monkeypatch, [{"id": "x-1111", "plan_path": "/p.md"}])
+        cand = self._cand(name="tgt-x-9999-liveness",
+                          cwd=self._worktree(tmp_path, "x-1111"))
+        # plan_path alone never completes a target mission (AC5).
+        assert recovery.mission_complete(cand) is False
+
+    def test_name_fallback_when_no_manifest(self, monkeypatch, tmp_path):
+        self._patch_graph(monkeypatch, [{"id": "x-2222", "plan_path": "/p.md"}])
+        assert recovery.mission_complete(
+            self._cand(name="think-x-2222-bar", cwd=str(tmp_path))) is True
+
+    def test_think_name_ignores_a_foreign_manifest(self, monkeypatch, tmp_path):
+        # spawn_think dispatches with --cwd on the node's CANONICAL root, where
+        # an unrelated /target session's manifest can sit; a think worker writes
+        # none of its own. Reading that manifest would answer about x-1111 and
+        # nudge a design pass that actually finished.
+        self._patch_graph(monkeypatch, [
+            {"id": "x-1111", "status": "ready"},           # foreign, incomplete
+            {"id": "x-2222", "plan_path": "/plans/d.md"},  # ours, complete
+        ])
+        cand = self._cand(name="think-x-2222-bar",
+                          cwd=self._worktree(tmp_path, "x-1111"))
+        assert recovery.mission_complete(cand) is True
+
+    def test_unresolvable_mission_is_none(self, monkeypatch, tmp_path):
+        # AC7: no node id in the name and no manifest -> unverifiable.
+        self._patch_graph(monkeypatch, [{"id": "x-1111", "status": "ready"}])
+        assert recovery.mission_complete(
+            self._cand(name="relay-worker", cwd=str(tmp_path))) is None
+        assert recovery.mission_complete(self._cand()) is None
+
+    # -- target missions --------------------------------------------------
+    @pytest.mark.parametrize("entry,expected", [
+        ({"id": "x-1111", "status": "done"}, True),
+        ({"id": "x-1111", "status": "ready", "pr_number": 42}, True),
+        ({"id": "x-1111", "status": "ready", "pr_url": "https://gh/pr/42"}, True),
+        ({"id": "x-1111", "status": "ready"}, False),
+        # AC5: a blueprinted-but-unshipped target node is NOT complete.
+        ({"id": "x-1111", "status": "ready", "plan_path": "/p.md"}, False),
+    ])
+    def test_target_artifacts(self, monkeypatch, entry, expected):
+        self._patch_graph(monkeypatch, [entry])
+        assert recovery.mission_complete(
+            self._cand(name="target-x-1111-foo")) is expected
+
+    # -- think missions ---------------------------------------------------
+    @pytest.mark.parametrize("entry,expected", [
+        ({"id": "x-2222", "plan_path": "/plans/d.md"}, True),
+        ({"id": "x-2222", "status": "done"}, True),
+        ({"id": "x-2222", "plan_path": ""}, False),
+        ({"id": "x-2222", "plan_path": "   "}, False),  # whitespace is no artifact
+        ({"id": "x-2222", "plan_path": None}, False),
+        ({"id": "x-2222"}, False),
+    ])
+    def test_think_artifacts(self, monkeypatch, entry, expected):
+        self._patch_graph(monkeypatch, [entry])
+        assert recovery.mission_complete(
+            self._cand(name="think-x-2222-bar")) is expected
+
+    # -- non-birth think passes (codex P2 on PR #581) ---------------------
+    @pytest.mark.parametrize("name", [
+        "think-x-2222-retro-bar",          # dispatched only AFTER status done
+        "think-x-2222-work-start-bar",     # starts on an already-linked node
+        "think-x-2222-conversational-bar",
+        "think-x-2222-retro",              # no slug tail
+    ])
+    @pytest.mark.parametrize("entry", [
+        {"id": "x-2222", "status": "done"},
+        {"id": "x-2222", "plan_path": "/plans/d.md"},
+    ])
+    def test_non_birth_think_cannot_inherit_the_nodes_artifacts(
+        self, monkeypatch, name, entry,
+    ):
+        # These artifacts predate the worker, so reading them as completion
+        # would re-open the exact suppression this change closes. Unverifiable.
+        self._patch_graph(monkeypatch, [entry])
+        assert recovery.mission_complete(self._cand(name=name)) is None
+
+    def test_non_birth_think_is_unverifiable_in_both_directions(self, monkeypatch):
+        # A retro produces a retro doc, not a plan link, so a MISSING plan_path
+        # is no more evidence of failure than a present one is of success.
+        # Nudging on it would be the fail-toward-nudge spam this design rejected.
+        self._patch_graph(monkeypatch, [{"id": "x-2222", "status": "ready"}])
+        assert recovery.mission_complete(
+            self._cand(name="think-x-2222-retro-bar")) is None
+
+    def test_birth_pass_whose_slug_shadows_a_reason_fails_closed(self, monkeypatch):
+        # `think-x-2222-retrospective-ui` is a BIRTH pass whose slug merely starts
+        # with a reason word. Reading it as lifecycle costs a suppression we would
+        # have had anyway; the other direction would be a false completion.
+        self._patch_graph(monkeypatch, [{"id": "x-2222", "plan_path": "/p.md"}])
+        assert recovery.mission_complete(
+            self._cand(name="think-x-2222-retro-spective-ui")) is None
+
+    # -- failure paths (AC3) ----------------------------------------------
+    def test_absent_node_is_unverifiable_not_incomplete(self, monkeypatch):
+        self._patch_graph(monkeypatch, [{"id": "x-other", "status": "ready"}])
+        assert recovery.mission_complete(
+            self._cand(name="target-x-1111-foo")) is None
+
+    def test_graph_error_degrades_to_none(self, monkeypatch):
+        from fno.graph import load as gl
+
+        def boom(*a, **k):
+            raise RuntimeError("corrupt graph")
+
+        monkeypatch.setattr(gl, "load_graph", boom)
+        assert recovery.mission_complete(
+            self._cand(name="target-x-1111-foo")) is None
+
+
 class TestRedispatch:
     """x-370f residual 1: failover respawn frees the dead session's claim via
     ``fno claim force-release`` before spawning, skips an already-done node, and

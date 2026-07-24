@@ -27,6 +27,9 @@ def _clear_caches() -> None:
 def _isolate(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
+    # preflight's hermetic runner exports FNO_NO_CANONICAL_CONFIG=1, which drops
+    # the canonical candidate this module asserts is present.
+    monkeypatch.delenv("FNO_NO_CANONICAL_CONFIG", raising=False)
     _clear_caches()
     yield
     _clear_caches()

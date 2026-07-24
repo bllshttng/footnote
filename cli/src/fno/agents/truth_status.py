@@ -51,6 +51,11 @@ _TAIL_BYTES = 256 * 1024
 # not resolve -> unknown -> no change (fail-quiet, AC7).
 _NAME_NODE_RE = re.compile(r"^target-([a-z][a-z0-9]*-[0-9a-f]+)(?:-|$)")
 
+# Same shape widened to the design-pass dispatcher's ``think-<node>[-<reason>]``
+# (provenance/spawn_think.py). Kept separate from _NAME_NODE_RE so the
+# ``fno agents list`` node join through parse_node_id cannot regress.
+_NAME_MISSION_RE = re.compile(r"^(target|think)-([a-z][a-z0-9]*-[0-9a-f]+)(?:-|$)")
+
 _HOLDER_PREFIX = "target-session:"
 
 
@@ -60,6 +65,21 @@ def parse_node_id(name: Optional[str]) -> Optional[str]:
         return None
     m = _NAME_NODE_RE.match(name)
     return m.group(1) if m else None
+
+
+def parse_worker_mission(name: Optional[str]) -> Optional[tuple[str, str]]:
+    """``(node_id, kind)`` for a convention-named worker, else None.
+
+    Kind is ``target`` (PR-shaped mission) or ``think`` (design pass, whose only
+    completion artifact is a linked ``plan_path``). Names are a *convention*, not
+    a guarantee - real spawns like ``tgt-x-4175-liveness`` exist - so this is only
+    ever the fallback behind a manifest read, and a miss returns None rather than
+    a guess (the caller fails closed on None).
+    """
+    if not name:
+        return None
+    m = _NAME_MISSION_RE.match(name)
+    return (m.group(2), m.group(1)) if m else None
 
 
 def _session_from_holder(holder: Optional[str]) -> Optional[str]:
