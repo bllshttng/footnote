@@ -868,50 +868,66 @@ def _resolve_claim(
     )
 
 
-def _warn_similar_idea_titles(
-    new_title: str,
-    new_id: str,
+def _warn_similar_nodes(
+    node: dict,
     entries: list[dict],
-    threshold: float = 0.7,
+    *,
+    intake_hint: bool,
 ) -> None:
-    """Emit a stderr warning naming the closest idea-state node by title.
+    """Emit a stderr ``dedup:`` receipt naming the closest existing nodes.
 
-    Safety net for the third claims layer: a plan that did not declare a
-    claim but whose title strongly resembles an existing idea-state node is
-    very likely meant to claim it. We do not auto-merge - we just warn so
-    the author can re-run with ``--claims <id>``.
+    The filing-time duplicate net shared by every birth path (idea/add, single
+    intake, multi-intake): scores the just-born ``node`` against all live nodes
+    via relatedness.similar_nodes and prints up to three candidates. Warn-only -
+    an orchestrator filing fast must be informed, not stopped or prompted.
 
-    The scan is bounded by ``threshold`` (default 0.7 via
-    ``difflib.SequenceMatcher``). Only ``status: idea`` nodes are
-    considered; non-idea states are skipped because claiming them is
-    refused upstream anyway. ``new_id`` is excluded so a node never
-    triggers a warning about itself.
+    ``intake_hint`` adapts the remedy line: the single/multi intake paths can
+    re-file with ``--claims`` to consolidate against the top candidate, so they
+    name its id; idea/add cannot, so they get the supersede/update remedy only.
+
+    Receipt is stderr-only - stdout stays the machine-readable payload each
+    birth verb already returns. Scoring/state filtering lives in similar_nodes;
+    this helper only formats what it returns.
     """
-    from difflib import SequenceMatcher
-    new_title_norm = new_title.strip().lower()
-    if not new_title_norm:
+    from fno.graph.relatedness import similar_nodes
+    from fno.graph.store import entries_with_archive
+
+    # Score against the working graph AND archived (shipped) nodes: an archived
+    # done node is the answer to a duplicate filing, and the working graph alone
+    # misses it (codex P2). Best-effort; an unreadable archive degrades silently.
+    scoring_entries = entries_with_archive(entries)
+    candidates = similar_nodes(node, scoring_entries)
+    if not candidates:
         return
-    matches: list[tuple[float, str, str]] = []
-    for e in entries:
-        if e.get("id") == new_id:
-            continue
-        if e.get("status") != "idea":
-            continue
-        title = (e.get("title") or "").strip().lower()
-        if not title:
-            continue
-        ratio = SequenceMatcher(None, title, new_title_norm).ratio()
-        if ratio >= threshold:
-            matches.append((ratio, e.get("id") or "", e.get("title") or ""))
-    if not matches:
-        return
-    matches.sort(reverse=True)
-    top_ratio, top_id, top_title = matches[0]
-    sys.stderr.write(
-        f'warning: idea-state node {top_id} has a similar title '
-        f'("{top_title}", ratio={top_ratio:.2f}); if this plan implements '
-        f'it, rerun with --claims {top_id} to claim the existing node\n'
-    )
+    by_id = {e.get("id"): e for e in scoring_entries if isinstance(e, dict)}
+    new_id = node.get("id")
+    lines = [f"dedup: {len(candidates)} similar existing node(s) for {new_id}:"]
+    for cid, score, _reason in candidates:
+        cand = by_id.get(cid, {})
+        status = cand.get("status") or "?"
+        title = (cand.get("title") or "").strip()
+        if len(title) > 60:
+            title = title[:60] + "..."
+        pr = cand.get("pr_number")
+        pr_tok = f"  PR#{pr}" if isinstance(pr, int) and not isinstance(pr, bool) else ""
+        lines.append(f'  {cid}  {status:<10}{score:.2f}{pr_tok}  "{title}"')
+    top_id = candidates[0][0]
+    top_cand = by_id.get(top_id, {})
+    # The intake paths can re-file with --claims to consolidate, but only against
+    # an idea-state node (intake refuses to claim a non-idea node upstream); a
+    # missing status is malformed, not idea-state, so for any other top state the
+    # receipt informs only.
+    if intake_hint and top_cand.get("status") == "idea":
+        lines.append(
+            "consolidate: `fno backlog supersede` / `fno backlog update`, or "
+            f"re-file with --claims {top_id}"
+        )
+    else:
+        lines.append(
+            "consolidate: `fno backlog supersede` / `fno backlog update` the "
+            "existing node"
+        )
+    sys.stderr.write("\n".join(lines) + "\n")
 
 
 # -- Intake core --

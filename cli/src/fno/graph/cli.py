@@ -138,6 +138,18 @@ def _graph_path() -> Path:
     return GRAPH_JSON
 
 
+def _safe_stderr_warn(msg: str) -> None:
+    """Write ``msg`` to stderr, swallowing a closed/broken stream.
+
+    The post-write dedup fallback runs AFTER the node already committed, so a
+    secondary stderr failure (closed fd, broken pipe) must never escape and
+    fail a filing whose mutation already landed (codex P2)."""
+    try:
+        sys.stderr.write(msg)
+    except Exception:  # noqa: BLE001 - a dead stderr must not break the filing
+        pass
+
+
 # Distinct from exit 1 ("graph read cleanly, node absent"): the graph itself
 # could not be read. click reserves 2 for usage errors, so 3 is the first free
 # code. A resolution caller that today treats any non-zero as "absent" keeps
@@ -384,32 +396,6 @@ def _child_note(child: dict, events: list[dict], worker: Optional[str]) -> str:
     return "-"
 
 
-def _entries_with_archive(entries: list) -> list:
-    """``entries`` plus archived nodes, working graph winning on id.
-
-    Best-effort and read-only: an unreadable archive degrades to the working
-    graph rather than failing a read verb.
-    """
-    from fno.paths import graph_archive_json
-
-    try:
-        archive_path = graph_archive_json()
-        if not archive_path.exists():
-            return entries
-        from fno.graph.store import read_graph
-
-        live = {e.get("id") for e in entries if isinstance(e, dict)}
-        return [
-            *entries,
-            *(
-                a for a in read_graph(archive_path)
-                if isinstance(a, dict) and a.get("id") not in live
-            ),
-        ]
-    except (OSError, ValueError):
-        return entries
-
-
 def _scope_growth_line(growth) -> str:
     """One line: the growth figure with its coverage, or why it is withheld.
 
@@ -497,6 +483,7 @@ def cmd_epic_status(
         })
 
     from fno.graph.rollup import scope_growth
+    from fno.graph.store import entries_with_archive
 
     # Read through the archive for the METRIC only (the same read-only fallback
     # `get` uses). Without it a swept child stops counting and the epic's
@@ -504,7 +491,7 @@ def cmd_epic_status(
     # quietly changes with unrelated maintenance is the failure this metric is
     # supposed to be immune to. The children table above stays working-graph
     # only, as it was before.
-    growth = scope_growth(_entries_with_archive(entries), epic_id)
+    growth = scope_growth(entries_with_archive(entries), epic_id)
 
     if json_mode(ctx):
         typer.echo(json.dumps({
@@ -991,6 +978,22 @@ def _create_node_impl(
         )
     elif node_holder[0] is not None and node_holder[0].get("source_node_id"):
         typer.echo(f"origin: {node_holder[0]['source_node_id']}", err=True)
+
+    # Filing-time dedup net (plan x-6ac7): warn if the just-born node resembles
+    # an existing one across all live states. Post-write, fresh read, non-fatal -
+    # the mutation already committed, so a failure anywhere degrades to one
+    # warning and never fails the filing or touches its exit code.
+    if new_id_holder[0] is not None:
+        try:
+            from fno.graph.store import read_graph
+            from fno.graph._intake import _find_node, _warn_similar_nodes
+
+            post_entries = read_graph(_graph_path())
+            node = _find_node(post_entries, new_id_holder[0] or "")
+            if node is not None:
+                _warn_similar_nodes(node, post_entries, intake_hint=False)
+        except Exception as e:  # noqa: BLE001 - dedup never breaks a filing
+            _safe_stderr_warn(f"warning: post-file dedup check skipped: {e}\n")
 
     # Born-with-why: route births through the shared birth hook. Gate-first and
     # strictly non-fatal, so a gate-OFF install is a no-op and a dispatch
@@ -2010,22 +2013,27 @@ def _intake_impl(
     typer.echo(f'intake {new_id_holder[0]} -> {destination}: "{spec["title"]}"')
 
     try:
-        from fno.graph._intake import (
-            _warn_unknown_project, _find_node, _warn_similar_idea_titles,
-        )
+        from fno.graph._intake import _warn_unknown_project, _find_node
         post_entries = read_graph(_graph_path())
         node = _find_node(post_entries, new_id_holder[0] or "")
         landed_project = node.get("project") if node else None
         _warn_unknown_project(landed_project)
-        # Safety net: if the new node strongly resembles an existing idea,
-        # warn so the author can re-run with --claims to consolidate.
-        _warn_similar_idea_titles(
-            spec["title"], new_id_holder[0] or "", post_entries,
-        )
     except Exception as e:
         # The mutation already committed; a stray failure in the warning
         # path must not surface as if the intake itself failed.
         sys.stderr.write(f"warning: post-intake project check failed: {e}\n")
+
+    # Filing-time dedup net (plan x-6ac7): warn if the just-born node resembles
+    # an existing one across all live states. Own try/except so a dedup failure
+    # is reported as itself, not conflated with the project check above.
+    try:
+        from fno.graph._intake import _find_node, _warn_similar_nodes
+        post_entries = read_graph(_graph_path())
+        node = _find_node(post_entries, new_id_holder[0] or "")
+        if node is not None:
+            _warn_similar_nodes(node, post_entries, intake_hint=True)
+    except Exception as e:  # noqa: BLE001 - dedup never breaks the intake
+        _safe_stderr_warn(f"warning: post-intake dedup check skipped: {e}\n")
 
     # Mirror the graph-authoritative navigation fields onto the plan doc the
     # node just linked. Non-fatal: a missing/unreadable plan never fails intake.
@@ -7999,6 +8007,7 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
     tallies = {"intaked": 0, "already": 0}
     cli_project = getattr(args, "project", None)
     landed_projects: set[str] = set()
+    new_ids: list[str] = []
 
     def mutator(es):
         for r in resolved:
@@ -8020,12 +8029,25 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
                 node = _build_intake_node(prep["node_spec"], es)
                 es.append(node)
                 tallies["intaked"] += 1
+                new_ids.append(node["id"])
                 typer.echo(f'  intake {node["id"]}: "{node["title"]}"  ({f})')
                 if isinstance(node.get("project"), str):
                     landed_projects.add(node["project"])
         return es
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    # Filing-time dedup net (plan x-6ac7): per just-born node, warn if it
+    # resembles an existing one. Fresh post-write read; non-fatal.
+    try:
+        from fno.graph._intake import _find_node, _warn_similar_nodes
+        post_entries = read_graph(_graph_path())
+        for nid in new_ids:
+            node = _find_node(post_entries, nid)
+            if node is not None:
+                _warn_similar_nodes(node, post_entries, intake_hint=True)
+    except Exception as e:  # noqa: BLE001 - dedup never breaks the batch
+        _safe_stderr_warn(f"warning: post-intake dedup check skipped: {e}\n")
 
     from fno.graph._intake import _warn_unknown_project, _list_known_projects
     known = _list_known_projects()
@@ -8291,6 +8313,22 @@ def cmd_new(
         return es
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    # Filing-time dedup net (plan x-6ac7): `fno new` is a reachable plan-less
+    # birth path with its own mutator, so it gets the same post-write warn as
+    # idea/add/intake (codex P2). Non-fatal; this verb's stdout is the bare id,
+    # not JSON, so the stderr receipt cannot corrupt a machine-readable payload.
+    if new_id_holder[0] is not None:
+        try:
+            from fno.graph._intake import _find_node, _warn_similar_nodes
+
+            post_entries = read_graph(_graph_path())
+            node = _find_node(post_entries, new_id_holder[0] or "")
+            if node is not None:
+                _warn_similar_nodes(node, post_entries, intake_hint=False)
+        except Exception as e:  # noqa: BLE001 - dedup never breaks a filing
+            _safe_stderr_warn(f"warning: post-file dedup check skipped: {e}\n")
+
     typer.echo(new_id_holder[0])
 
 

@@ -553,6 +553,32 @@ def read_graph(path: Path = GRAPH_JSON) -> list[dict]:
         return []
 
 
+def entries_with_archive(entries: list) -> list:
+    """``entries`` plus archived nodes, the working graph winning on id.
+
+    Best-effort and read-only: an absent or unreadable archive degrades to the
+    working graph. Shared by historical recall (``cmd_find``) and the
+    filing-time dedup net so a duplicate of shipped-and-archived work still
+    surfaces (codex P2: the working graph alone misses it).
+    """
+    from fno.paths import graph_archive_json
+
+    try:
+        archive_path = graph_archive_json()
+        if not archive_path.exists():
+            return entries
+        live = {e.get("id") for e in entries if isinstance(e, dict)}
+        return [
+            *entries,
+            *(
+                a for a in read_graph(archive_path)
+                if isinstance(a, dict) and a.get("id") not in live
+            ),
+        ]
+    except Exception:  # noqa: BLE001 - archive is advisory; any read failure degrades to the working graph
+        return entries
+
+
 def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     """Failure-surfacing counterpart to :func:`read_graph`.
 
