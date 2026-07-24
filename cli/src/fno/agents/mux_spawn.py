@@ -535,6 +535,7 @@ def _mesh_env_wrapper(
     argv: list[str],
     provenance: Optional[dict[str, str]] = None,
     account_env: Optional[dict[str, str]] = None,
+    route_env: Optional[dict[str, str]] = None,
 ) -> list[str]:
     """Prefix ``argv`` with ``env(1)`` carrying the mesh identity the daemon
     worker used to set on its PTY child (worker.rs), plus any role-routing env
@@ -551,10 +552,12 @@ def _mesh_env_wrapper(
     if provider == "claude":
         # Worker parity: transcripts must persist for resume/adoption.
         pairs.append("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1")
-    if role:
-        from fno.agents.model_routing import resolve_route
+    if role or route_env:
+        route = route_env
+        if route is None:
+            from fno.agents.model_routing import resolve_route
 
-        route = resolve_route(role)
+            route = resolve_route(role)
         if route:
             # Scrub the parent's Anthropic creds so the routed AUTH_TOKEN wins:
             # a lingering API key or subscription OAuth token would otherwise
@@ -722,6 +725,7 @@ def dispatch_spawn_pane(
     crown_scope: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
     account_env: Optional[dict[str, str]] = None,
+    route_env: Optional[dict[str, str]] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
 ) -> MuxSpawnResult:
     """Spawn ``name`` as a mux-hosted agent pane (AC1-HP).
@@ -748,6 +752,17 @@ def dispatch_spawn_pane(
             f"{', '.join(PANE_HOSTABLE_PROVIDERS)}",
             exit_code=2,
         )
+
+    if provider == "claude" and (role is not None or route_env):
+        from fno.agents.model_routing import (
+            RouteCompositionError,
+            resolve_spawn_route,
+        )
+
+        try:
+            route_env = resolve_spawn_route(role, route_env)
+        except RouteCompositionError as exc:
+            raise DispatchAskError(str(exc), exit_code=2) from exc
 
     session = resolve_mux_session(session)
     session_uuid = str(_uuid.uuid4()) if provider == "claude" else None
@@ -782,7 +797,7 @@ def dispatch_spawn_pane(
     from fno.agents.spawn_gate import qos_wrap
 
     wrapped = _mesh_env_wrapper(
-        name, provider, role, qos_wrap(argv), provenance, account_env
+        name, provider, role, qos_wrap(argv), provenance, account_env, route_env
     )
 
     registry_path = paths.agents_registry_path()
@@ -871,9 +886,7 @@ def dispatch_spawn_pane(
             # Reuses the spawn `runner` seam, so the store read is stubbed by
             # the same fake every spawn test already installs and the suite
             # never touches the real ~/.local/share/opencode.
-            session_uuid = _backfill_opencode_session_id(
-                cwd, spawn_started_ms, runner=runner
-            )
+            session_uuid = _backfill_opencode_session_id(cwd, spawn_started_ms, runner=runner)
             if session_uuid is None:
                 from fno.agents import events as _events
 
@@ -892,17 +905,13 @@ def dispatch_spawn_pane(
         # resolve_agent's derived_short rule (harness_session_id[:8]), so the
         # receipt can hand the king a usable mail handle without touching the row
         # (US8). Empty for providers that resume off harness_session_id.
-        short_id_val = (
-            session_uuid[:8] if provider == "claude" and session_uuid else ""
-        )
+        short_id_val = session_uuid[:8] if provider == "claude" and session_uuid else ""
 
         # Crown stamp (US9): the grantor is the spawning session (the parent edge
         # captured above), or "human" for a direct human spawn with no session
         # env - never a caller-supplied value. Only stamped when a crown was
         # actually requested (crown_level is not None).
-        crown_grantor_val = (
-            (spawned_by_session or "human") if crown_level is not None else None
-        )
+        crown_grantor_val = (spawned_by_session or "human") if crown_level is not None else None
 
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
             # Claim check, inside the registry write lock so it is atomic with

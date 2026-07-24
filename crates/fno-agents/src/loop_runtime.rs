@@ -388,7 +388,7 @@ impl Journal {
     /// Unreadable lines (I/O errors from `.lines()`) are skipped silently.
     pub fn find_termination(&self, session_key: &str) -> Result<Option<Evidence>, LoopError> {
         // Scan project journal first.
-        if let Some(ev) = Self::scan_journal(&self.project_path, session_key) {
+        if let Some(ev) = Self::scan_journal_with_rotation(&self.project_path, session_key) {
             return Ok(Some(ev));
         }
 
@@ -397,12 +397,98 @@ impl Journal {
         // megawalk case where worker termination events land in a different
         // worktree's journal but are mirrored to the global file.
         if self.project_path != self.global_path {
-            if let Some(ev) = Self::scan_journal(&self.global_path, session_key) {
+            if let Some(ev) = Self::scan_journal_with_rotation(&self.global_path, session_key) {
                 return Ok(Some(ev));
             }
         }
 
         Ok(None)
+    }
+
+    /// Strict termination lookup for accounting decisions.
+    ///
+    /// Unlike `find_termination`, an unreadable existing journal or matching
+    /// corrupt termination is an error, not evidence of absence. Missing files
+    /// remain a clean no-match. The retained `.1` generation is searched after
+    /// the active file so completed sessions survive rotation.
+    pub fn find_termination_strict(
+        &self,
+        session_key: &str,
+    ) -> Result<Option<Evidence>, LoopError> {
+        let mut first_error: Option<LoopError> = None;
+        let mut paths = vec![self.project_path.clone()];
+        if self.global_path != self.project_path {
+            paths.push(self.global_path.clone());
+        }
+        for path in paths {
+            for candidate in [path.clone(), rotated_journal_path(&path)] {
+                match Self::scan_journal_strict(&candidate, session_key) {
+                    Ok(Some(ev)) => return Ok(Some(ev)),
+                    Ok(None) => {}
+                    Err(err) => {
+                        if first_error.is_none() {
+                            first_error = Some(err);
+                        }
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(None),
+        }
+    }
+
+    fn scan_journal_with_rotation(path: &Path, session_key: &str) -> Option<Evidence> {
+        Self::scan_journal(path, session_key)
+            .or_else(|| Self::scan_journal(&rotated_journal_path(path), session_key))
+    }
+
+    fn scan_journal_strict(path: &Path, session_key: &str) -> Result<Option<Evidence>, LoopError> {
+        let file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(LoopError::Journal(format!(
+                    "could not read journal {}: {err}",
+                    path.display()
+                )))
+            }
+        };
+        let mut last_match = None;
+        for line_result in BufReader::new(file).lines() {
+            let raw = line_result.map_err(|err| {
+                LoopError::Journal(format!("read journal {}: {err}", path.display()))
+            })?;
+            let line = raw.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let value: Value = match serde_json::from_str(line) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if value["type"].as_str() != Some("termination")
+                || value["data"]["session_id"].as_str() != Some(session_key)
+            {
+                continue;
+            }
+            let reason_raw = value["data"]["reason"].as_str().ok_or_else(|| {
+                LoopError::Journal(format!(
+                    "termination event for {session_key} in {} has no reason",
+                    path.display()
+                ))
+            })?;
+            let reason = parse_termination_reason(reason_raw).ok_or_else(|| {
+                LoopError::Journal(format!(
+                    "termination event for {session_key} in {} has unknown reason {reason_raw}",
+                    path.display()
+                ))
+            })?;
+            let message = value["data"]["message"].as_str().unwrap_or("").to_string();
+            last_match = Some(Evidence { reason, message });
+        }
+        Ok(last_match)
     }
 
     /// Scan a single journal file for the LAST termination event matching
@@ -477,6 +563,12 @@ impl Journal {
 
         last_match
     }
+}
+
+fn rotated_journal_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".1");
+    PathBuf::from(name)
 }
 
 /// Parse a reason string into TerminationReason. Returns None for unknown values.

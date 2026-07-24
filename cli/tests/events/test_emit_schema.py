@@ -97,6 +97,13 @@ def test_emit_schema_event_types_non_empty() -> None:
     assert len(data["event_types"]) > 0
 
 
+def test_emit_schema_excludes_rust_only_loop_events() -> None:
+    """A loop/daemon kind belongs only to the Rust producer registry."""
+    result = _run_emit_schema()
+    data = json.loads(result.stdout)
+    assert "node_failed" not in data["event_types"]
+
+
 def test_emit_schema_no_stderr_on_success() -> None:
     """--emit-schema must produce no stderr output on success (stdout is clean JSON)."""
     result = _run_emit_schema()

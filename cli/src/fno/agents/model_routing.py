@@ -47,8 +47,10 @@ Two non-negotiable invariants:
   ``PROTECTED_ROLES`` and short-circuit to ``None`` *before* any config is read.
   No settings edit can route the diff or verdict to a secondary provider.
 """
+
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Callable, Mapping, NamedTuple, Optional
 
 from fno.env_file import read_var_from_env_file
@@ -101,6 +103,40 @@ DEFAULT_ROUTED_ROLES = ("coordinate", "tidy", "orient", "consolidate", "post-mer
 # Roles the secondary provider must NEVER touch (writes a diff / renders a
 # correctness verdict). Hard guard, enforced before any config is read.
 PROTECTED_ROLES = frozenset({"implement", "review-verdict"})
+
+
+class RouteCompositionError(ValueError):
+    """A secondary route cannot compose atomically with the active provider."""
+
+
+def resolve_spawn_route(
+    role: Optional[str],
+    route_env: Optional[Mapping[str, str]] = None,
+    *,
+    intent: Optional[str] = None,
+    notice: Optional[Callable[[str], None]] = None,
+) -> Optional[dict[str, str]]:
+    """Resolve one spawn route and reject managed-OAuth half-composition.
+
+    This is the single composition decision consumed by CLI and in-process
+    pane/bg/headless births. A pre-resolved explicit route wins over ``role``;
+    otherwise the normal fail-safe role resolver decides whether routing is
+    active. Managed OAuth owns the default Claude credential slot, so applying
+    a secondary endpoint/model over that snapshot is refused as one unit.
+    """
+    route = dict(route_env) if route_env else resolve_route(role, notice=notice)
+    if route and os.environ.get("FNO_PROVIDER_AUTH", "").strip().lower() == "managed":
+        overlay_id = os.environ.get("FNO_PROVIDER_ID", "").strip() or "unknown"
+        route_intent = intent or (
+            f"routed role {role!r}" if role is not None else "pre-resolved route"
+        )
+        raise RouteCompositionError(
+            f"refusing {route_intent} over managed OAuth provider {overlay_id!r}: "
+            "endpoint, auth, and model must be selected as one provider route; "
+            "no worker launched."
+        )
+    return route
+
 
 # Routable lanes that are part of the known vocabulary but are NOT auto-routed
 # by default: config presence is the opt-in (writing model_routing.roles.build

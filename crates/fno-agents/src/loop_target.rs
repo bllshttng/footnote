@@ -65,16 +65,17 @@ pub(crate) fn install_sigint_handler() {
 // ── TargetQueue ───────────────────────────────────────────────────────────────
 
 /// Parsed fields from target-state.md frontmatter needed by the loop runtime.
-struct TargetManifest {
-    session_id: String,
-    input: String,
+pub(crate) struct TargetManifest {
+    pub(crate) session_id: String,
+    pub(crate) input: String,
+    pub(crate) harness_session_id: Option<String>,
     plan_path: String,
 }
 
 /// Parse the minimal frontmatter fields needed by TargetQueue.
 /// Style mirrors loopcheck.rs `parse_manifest` but is a local copy per the spec:
 /// "write your own tiny local parser - do NOT modify loopcheck.rs".
-fn parse_target_manifest(content: &str) -> Option<TargetManifest> {
+pub(crate) fn parse_target_manifest(content: &str) -> Option<TargetManifest> {
     let content = content.trim_start();
     if !content.starts_with("---") {
         return None;
@@ -87,6 +88,7 @@ fn parse_target_manifest(content: &str) -> Option<TargetManifest> {
     let mut fno_id = String::new();
     let mut session_id = String::new();
     let mut input = String::new();
+    let mut harness_session_id = String::new();
     let mut plan_path = String::new();
 
     for line in body.lines() {
@@ -102,6 +104,7 @@ fn parse_target_manifest(content: &str) -> Option<TargetManifest> {
                 "fno_id" => fno_id = v.to_string(),
                 "session_id" => session_id = v.to_string(),
                 "input" => input = v.to_string(),
+                "harness_session_id" => harness_session_id = v.to_string(),
                 "plan_path" => plan_path = v.to_string(),
                 _ => {}
             }
@@ -119,6 +122,8 @@ fn parse_target_manifest(content: &str) -> Option<TargetManifest> {
     Some(TargetManifest {
         session_id,
         input,
+        harness_session_id: (!harness_session_id.is_empty() && harness_session_id != "null")
+            .then_some(harness_session_id),
         plan_path,
     })
 }

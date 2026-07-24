@@ -5,9 +5,12 @@ and the release-on-failure path are genuinely exercised. Selection (`_next_node`
 and the pane spawn (`dispatch_spawn_pane`) are monkeypatched - no real
 `fno backlog next` subprocess, no real pane.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
+
+import pytest
 
 from fno import dispatch
 from fno.claims.lanes import active_lane_count
@@ -92,6 +95,22 @@ def test_same_node_second_dispatch_is_deduped(monkeypatch, tmp_path):
     assert v["node"] == "x-1"
     assert len(calls) == 1  # the second never spawned
     assert active_lane_count() == 1  # first worker's slot intact
+
+
+@pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
+def test_manual_dispatch_preserves_family2_refusal_reason(monkeypatch, tmp_path, reason):
+    calls = _wire(
+        monkeypatch,
+        tmp_path,
+        next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)},
+    )
+    monkeypatch.setattr("fno.backlog.advance._node_dispatch_block_reason", lambda *_a: reason)
+
+    verdict = dispatch._dispatch_one(session="s", node=None, project=None)
+
+    assert verdict["outcome"] == reason
+    assert calls == []
+    assert active_lane_count() == 0
 
 
 def test_spawn_failure_releases_the_slot(monkeypatch, tmp_path):
@@ -188,6 +207,7 @@ def test_resolve_brief_bytes_reported_in_kv():
 # ---------------------------------------------------------------------------
 # x-d1f4: `fno dispatch resolve` auto-resolves the brief from --node
 # ---------------------------------------------------------------------------
+
 
 def test_resolve_auto_brief_from_node_details(monkeypatch):
     """With --node but no --brief, the porcelain resolves the node's brief chain

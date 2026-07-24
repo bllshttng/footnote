@@ -229,6 +229,10 @@ def headless_create(
     route_env: Optional[Mapping[str, str]] = None,
 ) -> ProviderResult:
     """Run a one-shot ``claude -p`` without creating a background session."""
+    if route_env:
+        from fno.agents.model_routing import resolve_spawn_route
+
+        route_env = resolve_spawn_route(None, route_env)
     argv = ["claude", "-p"]
     # x-6de8: apply an explicit --route via --settings, same as bg_create. A
     # direct `claude -p` subprocess would inherit route env too, but --settings
@@ -342,6 +346,14 @@ def bg_create(
         ProviderSubprocessError: ``claude --bg`` exited non-zero.
         ProviderParseError: stdout did not match the short-id contract.
     """
+    if role is not None or route_env:
+        from fno.agents.model_routing import resolve_spawn_route
+
+        route_env = resolve_spawn_route(
+            role,
+            route_env,
+            notice=lambda note: print(note, file=sys.stderr),
+        )
     msg_bytes = message.encode("utf-8")
     use_stdin = len(msg_bytes) > _ARGV_OVERFLOW_THRESHOLD
     # x-6de8: a routed bg session loses its ANTHROPIC_* env across the daemon

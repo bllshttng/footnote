@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # test_spawn_guard.sh - the /agent spawn node-guard path (x-73cc).
 #
-# spawn.sh delegates the race-critical Guard 1 (node:<id> claim probe) + Guard 2
-# (dispatch:<id> reservation) to `fno agents spawn-guard`. These tests stub `fno`
-# on PATH so each verdict branch is exercised without a real daemon / claim
-# store, and assert the honest `result=` receipts + that no spawn/launch happens
-# on a non-dispatchable verdict (fail-closed). Self-contained: real jq, stubbed
-# fno. Run:
+# spawn.sh uses a read-only `fno agents spawn-guard` probe for early UX, while
+# `fno agents spawn --node` owns the race-critical guard and reservation at the
+# actual worker-birth choke point. These tests stub `fno` on PATH so each early
+# verdict and late refusal receipt is exercised without a real daemon / claim
+# store. Self-contained: real jq, stubbed fno. Run:
 #
 #   bash skills/agent/tests/test_spawn_guard.sh
 
@@ -22,7 +21,7 @@ FAIL=0
 ok()  { local l="$1"; if [[ "$2" == "$3" ]]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); printf 'FAIL: %s (want %q got %q)\n' "$l" "$3" "$2"; fi; }
 has() { local l="$1" hay="$2" needle="$3"; if printf '%s' "$hay" | grep -qF "$needle"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); printf 'FAIL: %s (%q not in %q)\n' "$l" "$needle" "$hay"; fi; }
 no()  { local l="$1" hay="$2" needle="$3"; if printf '%s' "$hay" | grep -qF "$needle"; then FAIL=$((FAIL+1)); printf 'FAIL: %s (%q UNEXPECTEDLY in %q)\n' "$l" "$needle" "$hay"; else PASS=$((PASS+1)); fi; }
-field() { printf '%s\n' "$1" | sed -n "s/^result=//p" | head -1 | awk '{print $1}'; }
+field() { printf '%s\n' "$1" | sed -n "s/^result=\\([^ ]*\\).*/\\1/p;q"; }
 
 # --- the fno stub: a programmable spawn-guard verdict + a call log -----------
 STUBDIR="$TMP/bin"; mkdir -p "$STUBDIR"
@@ -36,6 +35,17 @@ case "$1 $2" in
   "agents list")
     echo '{"agents":[]}'; exit 0 ;;
   "agents spawn"|"agents host")
+    if [[ -n "${STUB_CLI_GUARD_REASON:-}" ]]; then
+      node=""
+      previous=""
+      for argument in "$@"; do
+        [[ "$previous" == "--node" ]] && node="$argument"
+        previous="$argument"
+      done
+      echo "node dispatch refused: node=$node verdict=already-running reason=$STUB_CLI_GUARD_REASON; no worker launched" >&2
+      exit 2
+    fi
+    echo "LAUNCH: $*" >> "$STUB_LOG"
     if [[ "${STUB_SPAWN_FAIL:-0}" == "1" ]]; then echo "spawn boom" >&2; exit 1; fi
     # short_id is programmable (default 8-hex) so the receipt-shape tests can feed
     # a daemon name-slug / empty / torn value. `-` (not `:-`) keeps an explicit "".
@@ -94,12 +104,13 @@ out="$(STUB_VERDICT='{"verdict":"already-running","reason":"live-claim","holder"
 ok  'foreign holder + --self -> still already-running' "$(field "$out")" 'already-running'
 no  'foreign holder did NOT spawn' "$(calllog)" 'agents spawn --harness'
 
-# --- reservation-held already-running -> NO spawn ----------------------------
-out="$(STUB_VERDICT='{"verdict":"already-running","reason":"reservation-held"}' \
+# --- reservation acquired by a peer between probe and launch -> NO worker ----
+out="$(STUB_VERDICT='{"verdict":"dispatchable"}' STUB_CLI_GUARD_REASON=reservation-held \
   run --name w3 --provider claude --message '/target x' --node "$NODE")"
 ok 'reservation-held -> already-running' "$(field "$out")" 'already-running'
 has 'reservation-held -> duplicate-claim receipt' "$out" 'skipped: duplicate-claim (peer dispatcher holds dispatch:x-7777)'
-no  'reservation-held did NOT spawn' "$(calllog)" 'agents spawn --harness'
+has 'reservation-held action' "$out" 'action=duplicate-claim'
+no  'reservation-held did NOT launch a worker' "$(calllog)" 'LAUNCH:'
 
 # --- corrupted -> failed, NO spawn -------------------------------------------
 out="$(STUB_VERDICT='{"verdict":"corrupted","detail":"node:'"$NODE"' claim is corrupted; force-release or repair before dispatching"}' \
@@ -116,12 +127,12 @@ ok 'verb-absent -> failed (fail-closed)' "$(field "$out")" 'failed'
 has 'verb-absent reason' "$out" 'spawn-guard unavailable'
 no  'verb-absent did NOT spawn' "$(calllog)" 'agents spawn --harness'
 
-# --- spawn-guard returns dispatchable but the launch FAILS -> release + failed
+# --- spawn-guard returns dispatchable but the launch FAILS -> failed -----------
 out="$(STUB_VERDICT='{"verdict":"dispatchable","reservation_key":"dispatch:'"$NODE"'","reservation_holder":"dispatch-skill:1"}' \
   STUB_SPAWN_FAIL=1 \
   run --name w6 --provider claude --message '/target x' --node "$NODE")"
 ok 'spawn-fail -> failed' "$(field "$out")" 'failed'
-has 'spawn-fail released reservation' "$(calllog)" 'claim release dispatch:x-7777'
+no 'wrapper does not duplicate CLI reservation cleanup' "$(calllog)" 'claim release dispatch:x-7777'
 
 # --- no NODE (free-text) -> guard SKIPPED, spawn-guard never called ----------
 out="$(STUB_VERDICT='{"verdict":"SHOULD_NOT_BE_READ"}' \

@@ -22,6 +22,7 @@ Gated on the same opt-in as advance (auto_continue_enabled) and strictly
 non-fatal: every path emits exactly one decision event and the host merge op
 never wedges.
 """
+
 from __future__ import annotations
 
 import os
@@ -176,16 +177,25 @@ def _dispatch_reconcile(
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
-        return AdvanceResult("skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail)
+        return AdvanceResult(
+            "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail
+        )
 
     def failed(error: str) -> AdvanceResult:
-        _emit(EVENT_FAILED, {"node_id": node_id, "kind": "reconcile", "error": error[:200]}, ev_path)
-        return AdvanceResult("failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error)
+        _emit(
+            EVENT_FAILED, {"node_id": node_id, "kind": "reconcile", "error": error[:200]}, ev_path
+        )
+        return AdvanceResult(
+            "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
+        )
 
     # node:<id> (global) is the cross-context dedup backstop: once the reconcile
     # worker inits it owns node:<id>, so a later trigger sees already-claimed.
-    if _claim_is_live(f"node:{node_id}") or _claim_is_live(f"dispatch:{node_id}"):
-        return skip("already-claimed")
+    from fno.backlog.advance import _node_dispatch_block_reason
+
+    block_reason = _node_dispatch_block_reason(node_id, root)
+    if block_reason:
+        return skip(block_reason)
 
     from fno.claims.core import ClaimHeldByOther, acquire_claim
 
@@ -194,7 +204,8 @@ def _dispatch_reconcile(
     dispatch_root = _claims_root_for(dispatch_key)
     try:
         acquire_claim(
-            dispatch_key, holder,
+            dispatch_key,
+            holder,
             ttl_ms=180_000,  # 3m boot-window bridge, mirroring advance
             reason=f"reconcile dispatch for {node_id}",
             root=dispatch_root,
@@ -206,7 +217,9 @@ def _dispatch_reconcile(
 
     try:
         short_id = _spawn_worker(
-            node_id, root, dep.get("slug"),
+            node_id,
+            root,
+            dep.get("slug"),
             reconcile_manifest=str(manifest_path),
             model=_route_resolve.node_model(dep, provider=dep.get("provider")),
             provider=dep.get("provider"),
@@ -230,6 +243,7 @@ def _dispatch_reconcile(
     )
     if verbose:
         import sys
+
         print(f"reconcile: dispatched {node_id} -> worker {short_id}", file=sys.stderr)
     return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
 

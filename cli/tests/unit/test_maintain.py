@@ -6,6 +6,7 @@ tests/integration/test_maintain_cli.py.
 
 Filter: `python -m pytest tests/ -k maintain`
 """
+
 from __future__ import annotations
 
 import json
@@ -378,6 +379,55 @@ def test_streak_malformed_event_skipped(tmp_path):
 
 def test_read_events_absent_file_is_empty(tmp_path):
     assert f.read_events(tmp_path / "nope.jsonl") == []
+
+
+def test_read_events_spans_rotated_history_before_active(tmp_path):
+    """A rotation boundary cannot reset a consecutive failure streak."""
+    active = tmp_path / "events.jsonl"
+    rotated = tmp_path / "events.jsonl.1"
+    rotated.write_text(
+        '{"type":"node_failed","data":{"unit_id":"ab-x"}}\n'
+        '{"type":"node_failed","data":{"unit_id":"ab-x"}}\n',
+        encoding="utf-8",
+    )
+    active.write_text(
+        '{"type":"node_failed","data":{"unit_id":"ab-x"}}\n',
+        encoding="utf-8",
+    )
+
+    events = f.read_events(active)
+
+    assert f.consecutive_failures("ab-x", events) == 3
+
+
+def test_read_events_consumes_rust_agents_mirror_with_custom_state_dir(tmp_path, monkeypatch):
+    configured = tmp_path / "configured" / "events.jsonl"
+    agents_home = tmp_path / "runtime" / "agents"
+    rust_mirror = agents_home.parent / "events.jsonl"
+    configured.parent.mkdir(parents=True)
+    rust_mirror.parent.mkdir(parents=True)
+    first = {
+        "ts": "2026-07-24T01:00:00Z",
+        "type": "node_failed",
+        "data": {"unit_id": "ab-x"},
+    }
+    second = {
+        "ts": "2026-07-24T02:00:00Z",
+        "type": "node_failed",
+        "data": {"unit_id": "ab-x"},
+    }
+    configured.write_text(json.dumps(first) + "\n", encoding="utf-8")
+    rust_mirror.write_text(
+        json.dumps(first) + "\n" + json.dumps(second) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(f, "events_path", lambda: configured)
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
+
+    events = f.read_events()
+
+    assert events == [first, second]
+    assert f.consecutive_failures("ab-x", events) == 2
 
 
 def test_stranded_dependents_maps_auto_failure_deferred():
