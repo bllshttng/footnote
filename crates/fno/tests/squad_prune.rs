@@ -26,13 +26,16 @@ struct Scratch {
 
 impl Scratch {
     fn new(label: &str, squads_json: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("fno-prune-e2e-{label}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("fno-prune-e2e-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("mux")).unwrap();
         std::fs::create_dir_all(dir.join("survives-origin")).unwrap();
         let json = squads_json.replace(
             "__SURVIVES__",
-            dir.join("survives-origin").to_str().expect("utf8 scratch path"),
+            dir.join("survives-origin")
+                .to_str()
+                .expect("utf8 scratch path"),
         );
         std::fs::write(dir.join("squads.json"), json).unwrap();
         Scratch { dir }
@@ -44,7 +47,9 @@ impl Scratch {
     fn run(&self, squad_args: &[&str], unset_agents: bool) -> (bool, String, String) {
         let mut cmd = fno();
         cmd.args(["mux", "squad"]).args(squad_args);
-        cmd.env_clear().env("HOME", &self.dir).env("FNO_MUX_DIR", self.dir.join("mux"));
+        cmd.env_clear()
+            .env("HOME", &self.dir)
+            .env("FNO_MUX_DIR", self.dir.join("mux"));
         if !unset_agents {
             cmd.env("FNO_AGENTS_HOME", &self.dir);
         }
@@ -78,7 +83,10 @@ fn prune_reaps_orphans_keeps_named_and_surviving_origin() {
     let s = Scratch::new("reap", ORPHAN_NAMED_SURVIVING);
 
     let (ok, stdout, stderr) = s.run(&["prune"], false);
-    assert!(ok, "prune exited non-zero: {stderr}\n--- stdout ---\n{stdout}");
+    assert!(
+        ok,
+        "prune exited non-zero: {stderr}\n--- stdout ---\n{stdout}"
+    );
     assert!(
         stdout.contains("pruned <key:orphan>"),
         "receipt names the pruned orphan: {stdout}"
@@ -90,8 +98,14 @@ fn prune_reaps_orphans_keeps_named_and_surviving_origin() {
 
     let after = s.store();
     assert!(!after.contains("orphan"), "orphan removed: {after}");
-    assert!(after.contains("\"name\": \"work\""), "named squad kept: {after}");
-    assert!(after.contains("\"key\": \"survives\""), "surviving-origin squad kept: {after}");
+    assert!(
+        after.contains("\"name\": \"work\""),
+        "named squad kept: {after}"
+    );
+    assert!(
+        after.contains("\"key\": \"survives\""),
+        "surviving-origin squad kept: {after}"
+    );
 }
 
 #[test]
@@ -101,8 +115,14 @@ fn prune_dry_run_writes_nothing() {
 
     let (ok, stdout, stderr) = s.run(&["prune", "--dry-run"], false);
     assert!(ok, "dry-run exited non-zero: {stderr}\n{stdout}");
-    assert!(stdout.contains("would prune <key:orphan>"), "dry-run labels lines: {stdout}");
-    assert!(stdout.contains("dry-run: no changes written"), "dry-run trailer: {stdout}");
+    assert!(
+        stdout.contains("would prune <key:orphan>"),
+        "dry-run labels lines: {stdout}"
+    );
+    assert!(
+        stdout.contains("dry-run: no changes written"),
+        "dry-run trailer: {stdout}"
+    );
     assert_eq!(s.store(), before, "dry-run must not change the store");
 }
 
@@ -111,7 +131,10 @@ fn prune_empty_store_says_nothing_to_prune() {
     let s = Scratch::new("empty", r#"{"version":1,"squads":[]}"#);
     let (ok, stdout, stderr) = s.run(&["prune"], false);
     assert!(ok, "empty prune exited non-zero: {stderr}\n{stdout}");
-    assert!(stdout.contains("nothing to prune"), "empty store is a clean no-op: {stdout}");
+    assert!(
+        stdout.contains("nothing to prune"),
+        "empty store is a clean no-op: {stdout}"
+    );
 }
 
 #[test]
@@ -124,8 +147,14 @@ fn prune_include_named_removes_a_named_orphan() {
         ]}"#,
     );
     let (ok, stdout, stderr) = s.run(&["prune", "--include-named"], false);
-    assert!(ok, "include-named prune exited non-zero: {stderr}\n{stdout}");
-    assert!(stdout.contains("pruned stale"), "named orphan removed: {stdout}");
+    assert!(
+        ok,
+        "include-named prune exited non-zero: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("pruned stale"),
+        "named orphan removed: {stdout}"
+    );
     assert!(!s.store().contains("stale"), "named orphan gone from store");
 }
 
@@ -135,8 +164,14 @@ fn prune_json_envelope_names_the_removed_set() {
     let s = Scratch::new("json", ORPHAN_NAMED_SURVIVING);
     let (ok, stdout, stderr) = s.run(&["prune", "--json"], false);
     assert!(ok, "json prune exited non-zero: {stderr}\n{stdout}");
-    assert!(stdout.contains("\"pruned_count\":1"), "json count: {stdout}");
-    assert!(stdout.contains("\"key\":\"orphan\""), "json names the removed orphan: {stdout}");
+    assert!(
+        stdout.contains("\"pruned_count\":1"),
+        "json count: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"key\":\"orphan\""),
+        "json names the removed orphan: {stdout}"
+    );
 }
 
 #[test]
@@ -146,7 +181,10 @@ fn prune_refuses_from_a_build_tree_binary_without_agents_home() {
     // refusal naming FNO_AGENTS_HOME). Exit code read off Command::status.
     let s = Scratch::new("guard", r#"{"version":1,"squads":[]}"#);
     let (ok, _stdout, stderr) = s.run(&["prune"], true);
-    assert!(!ok, "a build-tree binary must refuse a prune without FNO_AGENTS_HOME");
+    assert!(
+        !ok,
+        "a build-tree binary must refuse a prune without FNO_AGENTS_HOME"
+    );
     assert!(
         stderr.contains("FNO_AGENTS_HOME"),
         "the refusal names the remedy: {stderr}"
@@ -168,10 +206,25 @@ fn doctor_reports_orphaned_squads_with_the_prune_remedy() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "doctor exited non-zero (a warn stays 0): {stderr}\n{stdout}");
-    assert!(stdout.contains("squad store"), "doctor runs the squad-store check: {stdout}");
-    assert!(stdout.contains("orphaned"), "the orphan count is a warn: {stdout}");
-    assert!(stdout.contains("fno mux squad prune"), "the remedy points at prune: {stdout}");
+    assert!(
+        out.status.success(),
+        "doctor exited non-zero (a warn stays 0): {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("squad store"),
+        "doctor runs the squad-store check: {stdout}"
+    );
+    assert!(
+        stdout.contains("orphaned"),
+        "the orphan count is a warn: {stdout}"
+    );
+    assert!(
+        stdout.contains("fno mux squad prune"),
+        "the remedy points at prune: {stdout}"
+    );
     // The orphan was only DETECTED, not removed - doctor is read-only.
-    assert!(s.store().contains("orphan"), "doctor did not mutate the store");
+    assert!(
+        s.store().contains("orphan"),
+        "doctor did not mutate the store"
+    );
 }

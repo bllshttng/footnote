@@ -540,10 +540,7 @@ fn build_tree_guard_refuses_a_write_without_agents_home() {
         "a build-tree binary must refuse a write without FNO_AGENTS_HOME"
     );
     assert!(
-        refused
-            .unwrap_err()
-            .to_string()
-            .contains("FNO_AGENTS_HOME"),
+        refused.unwrap_err().to_string().contains("FNO_AGENTS_HOME"),
         "the refusal names the remedy"
     );
     assert!(

@@ -3673,7 +3673,10 @@ impl Core {
         for sq in loaded.squads {
             let sweep = sq.name.is_empty()
                 && !sq.origins.iter().any(|o| origin_exists(o.as_str()))
-                && !sq.members.iter().any(|m| !m.tombstone && live.contains(&m.attach_id));
+                && !sq
+                    .members
+                    .iter()
+                    .any(|m| !m.tombstone && live.contains(&m.attach_id));
             if sweep {
                 if let Err(e) = crate::squad_store::remove("", &sq.key) {
                     self.notice_all(format!("squad prune at restore skipped: {e}"));
@@ -13895,7 +13898,7 @@ mod tests {
         crate::squad_store::upsert(
             "",
             "homekey1",
-            &[home_str.clone()],
+            std::slice::from_ref(&home_str),
             &[stored_member("deadbeef", false)],
         )
         .unwrap();
@@ -13948,14 +13951,15 @@ mod tests {
         let _s = StoreScratch::new("restore-separate-lane");
         // A real cwd so the self-heal sweep keeps the lane (a gone-origin lane
         // would be reaped at restore, x-a572 US4).
-        let lane_cwd = std::env::temp_dir().join(format!("fno-restore-separate-{}", std::process::id()));
+        let lane_cwd =
+            std::env::temp_dir().join(format!("fno-restore-separate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&lane_cwd);
         std::fs::create_dir_all(&lane_cwd).unwrap();
         let lane_cwd_str = lane_cwd.to_str().unwrap().to_string();
         crate::squad_store::upsert(
             "",
             "lanekey1",
-            &[lane_cwd_str.clone()],
+            std::slice::from_ref(&lane_cwd_str),
             &[stored_member("deadbeef", false)],
         )
         .unwrap();

@@ -1221,7 +1221,8 @@ fn live_pane_cwds() -> Vec<String> {
         let Ok(sock) = proto::socket_path(&name) else {
             continue;
         };
-        if let Ok(ServerMsg::PaneList { panes }) = control_roundtrip(&sock, &name, ControlVerb::PaneLs)
+        if let Ok(ServerMsg::PaneList { panes }) =
+            control_roundtrip(&sock, &name, ControlVerb::PaneLs)
         {
             for p in panes {
                 cwds.push(p.cwd);
@@ -1286,7 +1287,13 @@ fn squad_prune(args: &[OsString]) -> i32 {
         (removed, ku, sn, kp, false)
     } else {
         match crate::squad_store::prune(decide) {
-            Ok(o) => (o.removed, o.kept_unknown, o.skipped_named, o.kept_protected, true),
+            Ok(o) => (
+                o.removed,
+                o.kept_unknown,
+                o.skipped_named,
+                o.kept_protected,
+                true,
+            ),
             Err(e) => {
                 eprintln!("fno mux squad prune: {e}");
                 return EXIT_ERROR;
@@ -1295,7 +1302,13 @@ fn squad_prune(args: &[OsString]) -> i32 {
     };
 
     if json {
-        render_prune_json(&removed, applied, kept_unknown, skipped_named, kept_protected);
+        render_prune_json(
+            &removed,
+            applied,
+            kept_unknown,
+            skipped_named,
+            kept_protected,
+        );
     } else {
         let verb = if applied { "pruned" } else { "would prune" };
         for sq in &removed {
@@ -1349,7 +1362,9 @@ fn print_prune_summary(
         parts.push(format!("kept {kept_unknown} (liveness unknown)"));
     }
     if skipped_named > 0 && !include_named {
-        parts.push(format!("skipped {skipped_named} named (pass --include-named)"));
+        parts.push(format!(
+            "skipped {skipped_named} named (pass --include-named)"
+        ));
     }
     println!("{}", parts.join("; "));
 }
