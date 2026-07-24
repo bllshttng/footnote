@@ -221,6 +221,127 @@ def test_codex_tui_canonical_start_does_not_request_desktop_handoff(
     assert f"worktree={wt}" in result.output
 
 
+def _git_ok(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _native_git_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    canonical = tmp_path / "canonical" / "footnote"
+    origin = tmp_path / "origin.git"
+    codex_home = tmp_path / ".codex"
+    native = codex_home / "worktrees" / "abcd" / "footnote"
+    canonical.mkdir(parents=True)
+    _git_ok(canonical, "init", "-q", "-b", "main")
+    _git_ok(canonical, "config", "user.email", "test@example.com")
+    _git_ok(canonical, "config", "user.name", "Test")
+    (canonical / "README.md").write_text("base\n")
+    _git_ok(canonical, "add", "README.md")
+    _git_ok(canonical, "commit", "-qm", "base")
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True
+    )
+    _git_ok(canonical, "remote", "add", "origin", str(origin))
+    _git_ok(canonical, "push", "--no-verify", "-q", "origin", "main")
+    native.parent.mkdir(parents=True)
+    _git_ok(canonical, "worktree", "add", "--detach", str(native), "origin/main")
+    return canonical, native, codex_home
+
+
+def test_codex_native_repo_requires_desktop_registered_worktree(monkeypatch, tmp_path):
+    canonical, native, codex_home = _native_git_fixture(tmp_path)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-desktop")
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_session_meta",
+        lambda session_id: {"id": session_id, "originator": "Codex Desktop"},
+    )
+
+    assert target_cli._codex_native_repo(native) == canonical.resolve()
+    assert target_cli._codex_native_repo(canonical) is None
+
+
+def test_codex_native_repo_rejects_tui_even_under_codex_home(monkeypatch, tmp_path):
+    _canonical, native, codex_home = _native_git_fixture(tmp_path)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-tui")
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_session_meta",
+        lambda session_id: {"id": session_id, "originator": "codex-tui"},
+    )
+
+    assert target_cli._codex_native_repo(native) is None
+
+
+def test_prepare_codex_native_branch_uses_remote_main(tmp_path):
+    _canonical, native, _codex_home = _native_git_fixture(tmp_path)
+    remote_head = _git_ok(native, "rev-parse", "origin/main")
+
+    base = target_cli._prepare_codex_native_branch(native, "x-0b3f")
+
+    assert base == "origin/main"
+    assert _git_ok(native, "branch", "--show-current") == "feature/x-0b3f"
+    assert _git_ok(native, "rev-parse", "HEAD") == remote_head
+
+
+def test_prepare_codex_native_branch_refuses_dirty_detached_worktree(tmp_path):
+    _canonical, native, _codex_home = _native_git_fixture(tmp_path)
+    (native / "dirty.txt").write_text("dirty\n")
+
+    with pytest.raises(typer.Exit) as exc:
+        target_cli._prepare_codex_native_branch(native, "x-0b3f")
+
+    assert exc.value.exit_code == 1
+    assert _git_ok(native, "branch", "--show-current") == ""
+
+
+def test_native_codex_retry_initializes_in_app_owned_worktree(monkeypatch, tmp_path):
+    canonical = tmp_path / "canonical" / "footnote"
+    native = tmp_path / ".codex" / "worktrees" / "abcd" / "footnote"
+    canonical.mkdir(parents=True)
+    native.mkdir(parents=True)
+    monkeypatch.chdir(native)
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda node: None)
+    monkeypatch.setattr(target_cli, "_codex_native_repo", lambda cwd: canonical)
+    monkeypatch.setattr(
+        target_cli, "_prepare_codex_native_branch", lambda cwd, node: "origin/main"
+    )
+    monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_node_model",
+        lambda node, explicit=None, provider=None: (None, "provider-default"),
+    )
+    setup_calls = []
+    monkeypatch.setattr(
+        "fno.worktree._run_setup_worktree_hook",
+        lambda repo, wt: setup_calls.append((repo, wt)) or (0, ""),
+    )
+    init_calls = []
+
+    def fake_run(args, **kwargs):
+        if "init" in args:
+            init_calls.append((list(args), kwargs.get("cwd")))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+
+    result = runner.invoke(target_app, ["start", "x-0b3f"])
+
+    assert result.exit_code == 0, result.output
+    assert "app-owned=codex" in result.output
+    assert "base=origin/main" in result.output
+    assert "node=claimed" in result.output
+    assert setup_calls == [(canonical, native)]
+    assert len(init_calls) == 1
+    assert init_calls[0][1] == str(native)
+
+
 # ------------------------------- no-op branch ----------------------------- #
 def test_already_isolated_is_noop(monkeypatch):
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
