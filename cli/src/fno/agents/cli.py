@@ -1287,7 +1287,7 @@ def cmd_spawn_guard(
     closed in the caller.
     """
     from fno.claims.cli import _parse_ttl
-    from fno.claims.core import ClaimHeldByOther, acquire_claim, claim_status
+    from fno.claims.core import ClaimHeldByOther, acquire_claim, claim_status, release_claim
 
     def _root_for(key: str):
         # Delegate to the shared routing rule (fno.claims.io.claims_root_for):
@@ -1401,6 +1401,15 @@ def cmd_spawn_guard(
     except Exception:  # pragma: no cover - claim_status never raises today
         post = {}
     if post.get("holder") != holder:
+        # F9: we acquired dispatch:<id> but are skipping the launch (a peer won a
+        # visibility-lagged race, or the post-acquire re-read failed). Release our
+        # reservation so the slot does not strand for the TTL; release is
+        # holder-specific (a no-op if a peer actually holds it). Best-effort: a
+        # release failure never blocks the verdict.
+        try:
+            release_claim(res_key, holder, root=_root_for(res_key))
+        except Exception:
+            pass
         _emit(
             "already-running",
             reason="duplicate-claim",

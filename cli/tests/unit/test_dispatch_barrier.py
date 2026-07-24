@@ -63,6 +63,28 @@ def test_barrier_catches_peer_after_acquire(monkeypatch, tmp_path):
     assert v["holder"] == "target-session:PEER"
 
 
+def test_barrier_selfskip_releases_reservation(monkeypatch, tmp_path):
+    # F9: when the post-acquire re-read trips the barrier, the dispatch:<id>
+    # reservation we just acquired is released, not stranded for the TTL.
+    _route_to(monkeypatch, tmp_path)
+
+    def status(key, root=None):
+        if key == "node:N":
+            return {"key": key, "state": "free"}
+        return {"key": key, "state": "live", "holder": "target-session:PEER"}
+
+    monkeypatch.setattr("fno.claims.core.claim_status", status)
+    monkeypatch.setattr("fno.claims.core.acquire_claim", lambda *a, **k: SimpleNamespace(holder="ME"))
+    released = []
+    monkeypatch.setattr("fno.claims.core.release_claim", lambda *a, **k: released.append((a, k)))
+    r = runner.invoke(agents_app, ["spawn-guard", "N", "--holder", "ME", "--ttl", "3m", "--json"])
+    v = _last_json(r.output)
+    assert v["verdict"] == "already-running"
+    assert released, "the self-skip must release the reservation it acquired"
+    args, kwargs = released[0]
+    assert args[0] == "dispatch:N" and args[1] == "ME"
+
+
 def test_barrier_passes_when_holder_is_ours(monkeypatch, tmp_path):
     _route_to(monkeypatch, tmp_path)
     monkeypatch.setattr(
