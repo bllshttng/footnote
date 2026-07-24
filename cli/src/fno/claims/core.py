@@ -303,7 +303,26 @@ def acquire_claim(
 
             # Still stale; do the archive + recreate atomically (under the mutex).
             archive_claim(path, ts_ms=now_ms())
-            atomic_create_exclusive(path, payload)
+            try:
+                atomic_create_exclusive(path, payload)
+            except ClaimAlreadyHeld:
+                # A top-level creator won the empty path in the gap between our
+                # archive and this create (the top-level O_EXCL does not take the
+                # recovery mutex). Recurse to re-read and classify rather than
+                # letting the low-level ClaimAlreadyHeld escape acquire_claim's
+                # return-or-ClaimHeldByOther contract; the recursion sees the new
+                # live holder and raises ClaimHeldByOther.
+                return acquire_claim(
+                    key,
+                    holder,
+                    reason=reason,
+                    ttl_ms=ttl_ms,
+                    metadata=metadata,
+                    pid=pid,
+                    host=host,
+                    harness=harness,
+                    root=root,
+                )
             emit_claim_stale_reclaimed(new_claim, previous=existing)
             return new_claim
         finally:
