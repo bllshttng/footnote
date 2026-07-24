@@ -8,15 +8,28 @@ Rows marked `OPEN` below are intentionally not deleted when the repository still
 
 ## Census 1: post-merge ritual
 
+The dispatch lives in one leaf module: `cli/src/fno/post_merge_route.py`
+(`decide_post_merge_route` + `dispatch_post_merge_ritual` + the receipt). pr-watch
+is the sole detector; the cold path runs the mechanical `fno pr ritual <pr>
+--autonomous` verb directly (no bg thread, no `/fno:pr merged` LLM wrapper), and
+the warm route injects that SAME verb. The receipt is attribution only, never a
+dedup input (the marker + TTL claim remain the idempotency layer).
+
 | # | Path | Entry | Disposition | Closing PR |
 |---|---|---|---|---|
-| 1 | Detector: `fno backlog reconcile` backstop | `cli/src/fno/graph/cli.py:6706-6722` via `hooks/reconcile-session-start.sh` | RETIRE dispatch leg | OPEN |
-| 2 | Detector: pr-watch LaunchAgent daemon, 600s poll | `cli/src/fno/pr_watch/_dispatch.py:696-746`, `_install.py` | KEEP, sole detector | — |
-| 3 | Warm inject into live origin session | `cli/src/fno/post_merge_route.py:72-150`, `_reconcile.py:1411-1445` | KEEP, canonical delivery | — |
-| 4 | Direct-finalize rung | `_reconcile.py:1447-1477` | KEEP | — |
-| 5 | Cold `claude --bg` Sonnet session | `_reconcile.py:1560-1606` | DELETE | OPEN |
-| 6 | Cold headless `claude --print` `fire_skill` | `cli/src/fno/pr_watch/_dispatch.py:212-231,720-735` | RETIRE through canonical spawn | OPEN |
-| 7 | LLM wrapper around `merged.md` | `skills/pr/references/merged.md` | RETIRE wrapper | OPEN |
+| 1 | Detector: `fno backlog reconcile` backstop | was `graph/cli.py` dispatch leg (deleted); reconcile now closes nodes + stamps plans + advances only | RETIRED dispatch leg | #TBD |
+| 2 | Detector: pr-watch LaunchAgent daemon, 600s poll (SOLE detector) | `cli/src/fno/pr_watch/_dispatch.py` `_default_dispatch_ritual` -> `post_merge_route.dispatch_post_merge_ritual`, `_install.py` | KEEP, sole detector | — |
+| 3 | Warm inject into live origin session (the verb, not an LLM prompt) | `cli/src/fno/post_merge_route.py` `inject_pr_merged` (WARM_PROMPT = `fno pr ritual <pr> --autonomous`) | KEEP, canonical delivery | — |
+| 4 | Direct-finalize rung | `cli/src/fno/post_merge_route.py` `_finalize_origin_ledger` (cold prelude, falls through to the verb) | KEEP | — |
+| 5 | Cold `claude --bg` Sonnet session | was `_reconcile._spawn_post_merge_worker` (deleted) | DELETED; cold path runs the verb directly | #TBD |
+| 6 | Cold headless `claude --print` `fire_skill` merged branch | `cli/src/fno/pr_watch/_dispatch.py` `fire_skill` (check-only) | RETIRED merged branch; the review `check` fire is retained | #TBD |
+| 7 | LLM wrapper around the ritual | the `fno pr ritual` verb owns the mechanical core; pr-watch runs it directly with no whole-ritual model layer | RETIRED wrapper paths | #TBD |
+
+The merge-SHA marker, `post-merge-ritual:<sha>` TTL claim, and `reconcile:pr-<n>`
+ritual claim remain in place through a seven-day observation window; only after
+that window may a trigger-based cleanup retire the marker layer (the TTL claim
+stays as the single idempotency floor).
+
 
 ## Census 2: backlog grooming
 

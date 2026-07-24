@@ -297,6 +297,22 @@ def validate(event: dict[str, Any]) -> None:
                 f"(allowed: {allowed})"
             )
 
+    # Same chokepoint rationale: post_merge_dispatch_receipt is the attribution
+    # record for a merge hand-off, and its phase drives the reserved-before-
+    # accepted lifecycle the seven-day observation relies on (x-a35a). The typed
+    # emit_receipt helper constrains phase at call time, but the generic emit
+    # path is also a writer, so a typo'd phase/route must fail loud here, not
+    # land a silently-misattributed record.
+    if type_name == "post_merge_dispatch_receipt":
+        type_props = type_spec["data"]["properties"]
+        for field in ("phase", "route"):
+            allowed = type_props[field]["enum"]
+            if data.get(field) not in allowed:
+                raise ValidationError(
+                    f"unknown post_merge_dispatch_receipt data.{field}: "
+                    f"{data.get(field)!r} (allowed: {allowed})"
+                )
+
     serialized = _json.dumps(data, separators=(",", ":")).encode("utf-8")
     if len(serialized) > MAX_DATA_BYTES:
         raise ValidationError(

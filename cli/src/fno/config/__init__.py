@@ -356,9 +356,9 @@ class PostMergeBlock(BaseModel):
     # Canonical-sync (x-47be): all three default to the feature-off state so a
     # fresh install does nothing. sync_command is the project's whole sync
     # incantation (run via `bash -lc` from the canonical checkout); sync_paths
-    # gates it on the merged file list (empty = always run); auto_run lets
-    # merge-detection dispatch the /fno:pr merged ritual. Footnote's own values
-    # are a documented example, never engine defaults.
+    # gates it on the merged file list (empty = always run); auto_run arms the
+    # pr-watch daemon (the sole detector) to run `fno pr ritual` on a merge.
+    # Footnote's own values are a documented example, never engine defaults.
     sync_command: Optional[str] = None
     sync_paths: list[str] = Field(default_factory=list)
     auto_run: bool = False
@@ -425,10 +425,10 @@ class PostMergeBlock(BaseModel):
     def _coerce_auto_run(cls, v: object) -> bool:
         """Fail-safe to false on any non-boolean value.
 
-        auto_run lets merge-detection dispatch a background /fno:pr merged
-        ritual worker. Default off, and a scalar typo coerces to False rather
-        than raising - false is the safe direction (never spawn an agent behind
-        the maintainer's back on a malformed value).
+        auto_run arms the pr-watch daemon (the sole detector) to run
+        `fno pr ritual` on a merge. Default off, and a scalar typo coerces to
+        False rather than raising - false is the safe direction (never run the
+        ritual behind the maintainer's back on a malformed value).
         """
         if isinstance(v, bool):
             return v

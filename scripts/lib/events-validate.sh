@@ -306,6 +306,32 @@ validate_event() {
         fi
     fi
 
+    # post_merge_dispatch_receipt: phase + route enum checks (x-a35a) - mirrors
+    # the Python validator so a producer typo fails loud in both. phase drives
+    # the reserved-before-accepted lifecycle forensics rely on; route is the
+    # single decision function's verdict. Both are required (caught above if
+    # absent); this rejects a present-but-bad value so attribution never lands
+    # silently mislabeled.
+    if [[ "$type" == "post_merge_dispatch_receipt" ]]; then
+        local pm_phase pm_route enum_match
+        pm_phase=$(jq -r '.data.phase // empty' <<<"$payload" 2>/dev/null || true)
+        if [[ -n "$pm_phase" ]]; then
+            enum_match=$(jq -r --arg v "$pm_phase" '.event_types[] | select(.name == "post_merge_dispatch_receipt") | .data.properties.phase.enum[]? | select(. == $v)' "$EVENTS_SCHEMA_CACHE" 2>/dev/null || true)
+            if [[ -z "$enum_match" ]]; then
+                _ev_warn "unknown phase: $pm_phase"
+                return 1
+            fi
+        fi
+        pm_route=$(jq -r '.data.route // empty' <<<"$payload" 2>/dev/null || true)
+        if [[ -n "$pm_route" ]]; then
+            enum_match=$(jq -r --arg v "$pm_route" '.event_types[] | select(.name == "post_merge_dispatch_receipt") | .data.properties.route.enum[]? | select(. == $v)' "$EVENTS_SCHEMA_CACHE" 2>/dev/null || true)
+            if [[ -z "$enum_match" ]]; then
+                _ev_warn "unknown route: $pm_route"
+                return 1
+            fi
+        fi
+    fi
+
     # Size cap: encode data and check bytes.
     local max_bytes data_size
     max_bytes=$(jq -r '.limits.max_data_bytes // 65536' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)

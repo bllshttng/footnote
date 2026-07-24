@@ -17,11 +17,9 @@ stay function-local so the graph/pr_watch import graphs pick up nothing new.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
-import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -666,7 +664,7 @@ def dispatch_post_merge_ritual(
         cold_reason = verdict.reason
         finalized_origin = False
 
-        if verdict.route == "warm":
+        if verdict.route == "warm" and verdict.borrowed_session_id is not None:
             _inject = warm_inject if warm_inject is not None else inject_pr_merged
             try:
                 delivered, reason = _inject(
