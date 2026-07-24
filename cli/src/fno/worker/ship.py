@@ -117,6 +117,23 @@ def ship(
     session_id = state.get("session_id", "unknown-session")
     auto_merge_approved = state.get("auto_merge_approved", False)
 
+    # Incarnation fence (x-eea5 followup): a losing incarnation - one whose
+    # session:<uuid> single-writer claim another incarnation holds - must not
+    # create a PR. Same read-only, fail-closed semantics as fno pr merge. Runs
+    # before any gh/git call so a fenced incarnation publishes nothing.
+    from fno.claims.incarnation import incarnation_fence_blocks, resolve_fence_session_uuid
+
+    try:
+        _fence_uuid = resolve_fence_session_uuid(state_path.parent.parent)
+        _blocked, _fence_reason = incarnation_fence_blocks(_fence_uuid)
+    except Exception as _exc:  # noqa: BLE001 - a fence-CODE crash fails OPEN (proceed + log); the helper already fail-closes on unreadable/corrupted state
+        import sys
+
+        print(f"worker.ship: incarnation-fence check crashed ({_exc}); proceeding", file=sys.stderr)
+        _blocked, _fence_reason = False, ""
+    if _blocked:
+        return {"action": "blocked", "error": _fence_reason}
+
     if artifacts_dir is None:
         artifacts_dir = state_path.parent / "artifacts"
     artifacts_dir = Path(artifacts_dir)
