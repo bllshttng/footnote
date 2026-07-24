@@ -240,9 +240,11 @@ def _discover_from_codex(
 ) -> list[dict]:
     """Enumerate codex sessions from the rollout store (US2).
 
-    Mtime is not an enumeration predicate: an old final assistant turn can still
-    be ``watching`` or ``your-move``. Family 1 classifies every candidate after
-    enumeration. Rows are shaped like the claude loops' so the shared
+    Mtime bounds candidate enumeration only; family 1 still owns every liveness
+    verdict for the retained candidates. Exact handle resolution has its own
+    targeted rollout lookup, so an old ``watching`` or ``your-move`` session
+    remains addressable without making routine list/send paths classify every
+    historical transcript. Rows are shaped like the claude loops' so the shared
     dedup/alias pipeline consumes them unchanged; ``pid`` is 0 (no OS handle)
     and ``agent`` is ``codex``.
 
@@ -250,7 +252,7 @@ def _discover_from_codex(
     resolution), not in the hot drain path, so O(rollouts) stats is acceptable;
     prune to recent date-dirs by mtime if a heavy codex user's send drags.
     """
-    del recency_seconds, now  # retained for call compatibility; family 1 owns age
+    cutoff = (now if now is not None else time.time()) - recency_seconds
     exclude_sids = {s for s in (exclude_session_ids or ()) if s}
     rows: list[dict] = []
     seen: set[str] = set()
@@ -261,7 +263,8 @@ def _discover_from_codex(
                 mt = path.stat().st_mtime
             except OSError:
                 continue  # vanished mid-scan: skip, never abort the whole scan
-            dated.append((mt, path))
+            if mt >= cutoff:
+                dated.append((mt, path))
     except OSError:
         return rows
     for _mt, path in sorted(dated, key=lambda t: t[0], reverse=True):
@@ -1122,6 +1125,28 @@ def resolve_or_suggest(
                     agent="claude",
                     transcript_path=transcript_path,
                 ), []
+
+            # Full Codex ids stay exactly addressable even after their rollout
+            # ages out of bulk discovery. The filename-targeted reader verifies
+            # session_meta before returning, so this never turns a short-id
+            # collision or filename substring into a guessed recipient.
+            if _CLAUDE_UUID_RE.fullmatch(handle):
+                from fno.agents.peek import _codex_rollout_path
+
+                rollout = _codex_rollout_path(handle, codex_sessions_dir)
+                meta = _codex_meta(rollout) if rollout is not None else None
+                if meta is not None and meta[0] == handle:
+                    return DiscoveredSession(
+                        session_id=handle,
+                        short_id=canonical_handle(handle),
+                        handle=canonical_handle(handle),
+                        pid=0,
+                        cwd=meta[1],
+                        project=None,
+                        status=None,
+                        agent="codex",
+                        transcript_path=str(rollout),
+                    ), []
 
     discovery_kwargs = {
         "sessions_dir": sessions_dir,

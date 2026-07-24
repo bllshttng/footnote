@@ -655,10 +655,11 @@ def test_us2_codex_rollout_surfaces_live_session(tmp_path):
     assert s.cwd == "/Users/x/proj"
 
 
-def test_us2_codex_old_watching_rollout_still_surfaces(tmp_path):
+def test_us2_codex_old_watching_rollout_is_not_bulk_enumerated(tmp_path):
     codex = tmp_path / "codex"
+    session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     rollout = _write_codex_rollout(
-        codex, session_id="019f48e1-dead", cwd="/x", mtime_age=10_000.0,
+        codex, session_id=session_id, cwd="/x", mtime_age=10_000.0,
     )
     with rollout.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({
@@ -671,18 +672,36 @@ def test_us2_codex_old_watching_rollout_still_surfaces(tmp_path):
     stale = time.time() - 10_000.0
     os.utime(rollout, (stale, stale))
 
-    sessions = _run_codex(tmp_path, codex)
+    assert _run_codex(tmp_path, codex) == []
 
-    assert [s.session_id for s in sessions] == ["019f48e1-dead"]
-    assert sessions[0].truth_state == "watching"
-    assert sessions[0].is_alive is True
+    match, suggestions = discover.resolve_or_suggest(
+        session_id,
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil(alive={}),
+        require_alive=False,
+    )
+
+    assert suggestions == []
+    assert match is not None
+    assert match.session_id == session_id
+    from fno.agents.session_truth import resolve_session_truth
+
+    truth = resolve_session_truth(
+        session_id,
+        resolve=lambda _handle: (match, []),
+        codex_sessions_dir=codex,
+    )
+    assert truth["state"] == "watching"
 
 
 def test_codex_truth_reuses_discovered_rollout_path(tmp_path, monkeypatch):
     """One discovery scan serves tail content and mtime classification."""
     codex = tmp_path / "codex"
     rollout = _write_codex_rollout(
-        codex, session_id="019f48e1-direct", cwd="/x", mtime_age=10_000.0
+        codex, session_id="019f48e1-direct", cwd="/x", mtime_age=5.0
     )
     with rollout.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({

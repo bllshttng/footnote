@@ -4578,7 +4578,11 @@ def dispatch_send(
 
                 family1_state = _registered_family1_state(existing)
                 family1_live = family1_state in {"working", "watching", "your-move"}
-                if family1_live and _deliver_live(
+                # Unknown is hands-off, not dead. A registered peer still has a
+                # confirmable transport, so try it once and let delivery's ack
+                # decide; failure falls through to the durable bus.
+                family1_attemptable = family1_live or family1_state == "unknown"
+                if family1_attemptable and _deliver_live(
                     existing, message, from_name, mail_ctx
                 ):
                     delivery = "hosted"

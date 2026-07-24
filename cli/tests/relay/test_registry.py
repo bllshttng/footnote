@@ -142,6 +142,23 @@ def test_stalled_persisted_peer_is_not_routable(tmp_path, monkeypatch):
     assert "stale" not in reg.index(path=path)
 
 
+def test_unknown_persisted_peer_keeps_confirmable_inject_handle(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "registry.json"
+    reg.register(_peer(sid="unknown", handle="pty:owned"), path=path)
+    monkeypatch.setattr(reg, "discover_live_sessions", lambda: [])
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+
+    assert reg.index(path=path)["unknown"].inject_handle == "pty:owned"
+
+
 # ---------------------------------------------------------------------------
 # G4 / x-3f34: the cross-harness bridge -- live non-claude interactive agents
 # workers surfaced as routable relay peers (keyed by short_id, worker:<id> handle).
@@ -200,6 +217,20 @@ def test_index_bridge_is_provider_generic(tmp_path, monkeypatch):
     idx = reg.index(path=tmp_path / "registry.json")
     assert idx["gemwork1"].inject_handle == "worker:gemwork1"
     assert idx["shellw"].provider == "shell"  # an open-set harness surfaces too
+
+
+def test_index_bridge_keeps_unknown_open_set_transport(tmp_path, monkeypatch):
+    _no_discovery(monkeypatch)
+    _patch_worker_truth(monkeypatch, lambda _handle: "unknown")
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / "agents"))
+    _write_agents_registry(tmp_path / "agents", [
+        {"short_id": "shellw", "provider": "shell", "host_mode": "interactive",
+         "status": "live", "name": "sh"},
+    ])
+
+    assert reg.index(path=tmp_path / "registry.json")["shellw"].inject_handle == (
+        "worker:shellw"
+    )
 
 
 def test_index_bridge_skips_claude_dead_exec_and_unsafe(tmp_path, monkeypatch):

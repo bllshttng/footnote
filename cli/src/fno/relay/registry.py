@@ -225,7 +225,10 @@ def _live_agents_workers() -> dict[str, RegistryEntry]:
         truth = resolve_session_truth(
             short_id, resolve=lambda _handle: (known, [])
         )
-        if truth.get("state") not in {"working", "watching", "your-move"}:
+        # Unknown is not a death verdict. This row has an explicit worker
+        # transport whose submit ack is the delivery authority, so keep it
+        # routable; known terminal/stalled states still stay out of the index.
+        if truth.get("state") not in {"working", "watching", "your-move", "unknown"}:
             continue
         pid = e.get("pid")
         out[short_id] = RegistryEntry(
@@ -273,7 +276,8 @@ def index(
     from fno.agents.session_truth import resolve_session_truth
 
     # Persistence preserves an inject handle; it never proves the peer is live.
-    # Only family 1 may promote a stored row into the routable index.
+    # Family 1 admits known-live rows. Unknown rows retain only their confirmable
+    # transport: a later submit ack decides delivery without inventing liveness.
     for sid, entry in load(path).items():
         known = SimpleNamespace(
             agent=entry.provider,
@@ -283,6 +287,6 @@ def index(
         truth_state = "working" if sid in live_discovered_ids else resolve_session_truth(
             entry.name or sid, resolve=lambda _handle: (known, [])
         ).get("state")
-        if truth_state in {"working", "watching", "your-move"}:
-            merged[sid] = entry  # live persisted peers carry the real PTY handle
+        if truth_state in {"working", "watching", "your-move", "unknown"}:
+            merged[sid] = entry  # persisted peers carry the real PTY handle
     return merged
