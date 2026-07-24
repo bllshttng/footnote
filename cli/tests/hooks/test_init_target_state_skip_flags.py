@@ -65,20 +65,70 @@ _PROFILE_FLAGS: dict[str, dict[str, bool]] = {
 }
 
 
+_FNO_STUB = """\
+#!/usr/bin/env bash
+# Test stub: answers the fno round-trips hooks/helpers/init-target-state.sh makes
+# in a bare env (no graph, no config), so this hook test pays ~0s/round-trip
+# instead of ~0.45s of real CLI startup - the load-sensitive cost behind the
+# flake (a different size profile blew the timeout each full-suite run). Per-verb
+# exit status below was captured from ONE real bare-env run (HOME=tmp, no graph),
+# not guessed. NOT a blanket exit: the hook branches on fno's exit code (claim
+# acquire sets _NODE_OWNED), so a flipped code changes the manifest path. stdout
+# is empty everywhere; the hook's degrade paths (|| true, sanctioned-empty
+# _SESSION_PID at init-target-state.sh:1044) handle it byte-for-byte as today's
+# real-fno runs. Unknown verbs exit nonzero = conservative bare-env behavior
+# (real fno fails without a graph).
+printf '%s\\n' "$*" >> "${FNO_CALLS_LOG:-./fno-calls.log}"
+case "$1" in
+  config) exit 1 ;;                       # config get -> 1 (no config; degrade to default)
+  backlog) exit 1 ;;                      # backlog get/update -> 1 (no graph)
+  paths) exit 0 ;;                        # paths shell-stub -> 0; hook evals stdout (empty => STATE_DIR fallback)
+  worktree) exit 0 ;;                     # worktree policy -> 0; hook reads stdout (empty => harness-native default)
+  claim)
+    case "$2" in
+      status|session-pid|acquire|worktree-guard) exit 0 ;;  # all -> 0 in bare env
+      *) exit 1 ;;
+    esac ;;
+  *) exit 1 ;;
+esac
+"""
+
+
+def _stub_fno(bin_dir: Path) -> None:
+    """Write the PATH-shim `fno` (see _FNO_STUB) into bin_dir and chmod it executable."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    fno = bin_dir / "fno"
+    fno.write_text(_FNO_STUB, encoding="utf-8")
+    fno.chmod(0o755)
+
+
 def _run_init_script(tmpdir: Path, extra_env: dict[str, str]) -> subprocess.CompletedProcess:
-    """Run init-target-state.sh in an isolated tmpdir with the given env overrides."""
+    """Run init-target-state.sh in an isolated tmpdir with the given env overrides.
+
+    A PATH-shim `fno` (tmpdir/bin/fno) replaces the ~17 real CLI round-trips the
+    hook makes: the asserted manifest values are bash-computed, and the
+    round-trips are startup-cost no-ops in this isolated env. With the stub a run
+    is sub-second, so the timeout stops being load-sensitive.
+    """
     plan_file = tmpdir / "plan.md"
     plan_file.write_text("# Test plan\n")
 
     state_dir = tmpdir / ".fno"
     state_dir.mkdir(parents=True, exist_ok=True)
 
+    bin_dir = tmpdir / "bin"
+    _stub_fno(bin_dir)
+
     env = {
         "HOME": str(tmpdir),
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        # Prepend the stub dir so the hook resolves tmp/bin/fno first; keep the
+        # real PATH tail so bash/date/mkdir still resolve. A stub miss degrades
+        # to slow (real fno), never wrong.
+        "PATH": f"{bin_dir}{os.pathsep}" + os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "TARGET_START": "1",
         "TARGET_INPUT": str(plan_file),
         "TARGET_AUTO_MERGE": "false",
+        "FNO_CALLS_LOG": str(tmpdir / "fno-calls.log"),
     }
     env.update(extra_env)
 
@@ -88,11 +138,10 @@ def _run_init_script(tmpdir: Path, extra_env: dict[str, str]) -> subprocess.Comp
         env=env,
         capture_output=True,
         text=True,
-        # The script runs in ~5s standalone, but this helper fires 8 times across
-        # the module and a full-suite run contends enough to blow a 30s ceiling -
-        # which surfaced as a flake failing a DIFFERENT profile each run. The
-        # bound is a hang guard, not a perf assertion, so give it real headroom.
-        timeout=180,
+        # The stub makes each run sub-second, so 30s is a hang backstop with ample
+        # headroom, not a perf ceiling. Restored from the 180s stopgap (df9b9ddd):
+        # the stub removed the load-sensitivity that stopgap papered over.
+        timeout=30,
     )
     return proc
 
