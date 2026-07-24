@@ -309,21 +309,21 @@ validate_event() {
     # post_merge_dispatch_receipt: phase + route enum checks (x-a35a) - mirrors
     # the Python validator so a producer typo fails loud in both. phase drives
     # the reserved-before-accepted lifecycle forensics rely on; route is the
-    # single decision function's verdict. Both are required (caught above if
-    # absent); this rejects a present-but-bad value so attribution never lands
-    # silently mislabeled.
+    # single decision function's verdict. Both required (absence caught above);
+    # has() (not `// empty`) rejects a falsey null/false value too - jq `//`
+    # treats false/null as empty, which would otherwise slip it past as present.
     if [[ "$type" == "post_merge_dispatch_receipt" ]]; then
         local pm_phase pm_route enum_match
-        pm_phase=$(jq -r '.data.phase // empty' <<<"$payload" 2>/dev/null || true)
-        if [[ -n "$pm_phase" ]]; then
+        if jq -e '.data | has("phase")' <<<"$payload" >/dev/null 2>&1; then
+            pm_phase=$(jq -r '.data.phase | tostring' <<<"$payload" 2>/dev/null || true)
             enum_match=$(jq -r --arg v "$pm_phase" '.event_types[] | select(.name == "post_merge_dispatch_receipt") | .data.properties.phase.enum[]? | select(. == $v)' "$EVENTS_SCHEMA_CACHE" 2>/dev/null || true)
             if [[ -z "$enum_match" ]]; then
                 _ev_warn "unknown phase: $pm_phase"
                 return 1
             fi
         fi
-        pm_route=$(jq -r '.data.route // empty' <<<"$payload" 2>/dev/null || true)
-        if [[ -n "$pm_route" ]]; then
+        if jq -e '.data | has("route")' <<<"$payload" >/dev/null 2>&1; then
+            pm_route=$(jq -r '.data.route | tostring' <<<"$payload" 2>/dev/null || true)
             enum_match=$(jq -r --arg v "$pm_route" '.event_types[] | select(.name == "post_merge_dispatch_receipt") | .data.properties.route.enum[]? | select(. == $v)' "$EVENTS_SCHEMA_CACHE" 2>/dev/null || true)
             if [[ -z "$enum_match" ]]; then
                 _ev_warn "unknown route: $pm_route"
