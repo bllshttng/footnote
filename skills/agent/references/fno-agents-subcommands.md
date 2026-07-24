@@ -22,7 +22,7 @@ So "declutter the human `--help`" only touches the handful of *Python-registered
 | Subcommand | Routed by `/agent`? | What it does |
 |------|:---:|--------------|
 | `spawn` | yes (default) | Launch a worker (substrate `pane`/`bg`/`headless`). |
-| `ask` | yes (`ask`/bare) | One-shot prompt, verbatim, no `/target` wrap. |
+| `ask` | yes (`ask`) | Sync message to an EXISTING worker (`ln` short-command): deliver, wait, print the reply on stdout. |
 | `stop` | yes | Terminate a worker (confirm). |
 | `watch` / `list` / `logs` | yes | Observe. |
 | `whoami` | yes | This session's registered mesh identity. |
