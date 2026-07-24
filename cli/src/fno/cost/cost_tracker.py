@@ -22,6 +22,15 @@ import sys
 
 # Prices per million tokens
 PRICING = {
+    "opus-5.0": {
+        # Opus 5 held the 4.5 -> 4.8 sticker price. Fast mode ($10/$50) is a
+        # separate tier that this table does not yet carry; see model_tier.
+        "input": 5.00,
+        "output": 25.00,
+        "cache_read": 0.50,
+        "cache_create": 6.25,
+        "web_search": 0.01,
+    },
     "opus-4.8": {
         # Anthropic held the 4.5 / 4.6 / 4.7 sticker price through 4.8.
         "input": 5.00,
@@ -76,6 +85,15 @@ PRICING = {
         "cache_create": 18.75,
         "web_search": 0.01,
     },
+    "fable-5": {
+        # Fable 5 / Mythos 5 sit above the opus tier. Without this row they
+        # fall through to DEFAULT_TIER and undercount 3.3x.
+        "input": 10.00,
+        "output": 50.00,
+        "cache_read": 1.00,
+        "cache_create": 12.50,
+        "web_search": 0.01,
+    },
     "sonnet": {
         "input": 3.00,
         "output": 15.00,
@@ -109,13 +127,16 @@ DEFAULT_TIER = "sonnet"
 # backfill-cost-recompute.py). Every future opus is >= 4.5; defaulting to
 # modern pricing degrades to a small error only if Anthropic raises prices,
 # which `fno doctor --cost-check` catches.
-LATEST_MODERN_OPUS_TIER = "opus-4.8"
+LATEST_MODERN_OPUS_TIER = "opus-5.0"
 
-# First digit pair after "opus" wins, so context-size suffixes like the
-# live `claude-opus-4-8[1m]` parse as (4, 8), never (1, m). Contiguous
-# date digits (claude-3-opus-20240229) have no separator, so the pair
-# regex fails on them by construction.
-_OPUS_VERSION_RE = re.compile(r"opus[^0-9]*(\d+)[._-](\d+)")
+# First version number after "opus" wins, so context-size suffixes like the
+# live `claude-opus-4-8[1m]` parse as (4, 8), never (1, m). The minor is
+# optional because Opus 5 ships minorless (`claude-opus-5`). The `(?![\d])`
+# after the major is what keeps contiguous date digits
+# (claude-3-opus-20240229) from parsing as a version at all: a real major is
+# 1-2 digits and is never followed by another digit, so the match fails and
+# the claude-3 guard downstream routes it to legacy pricing.
+_OPUS_VERSION_RE = re.compile(r"opus[^0-9]*(\d{1,2})(?![\d])(?:[._-](\d+))?")
 
 # Model IDs that triggered the unparseable-opus fallback. The stderr
 # warning fires once per process per model; callers (session-cost.py
@@ -144,8 +165,9 @@ def model_tier(model_name: str, speed: str | None = None) -> str:
             # Date-artifact guard: claude-opus-4-20250514 (Opus 4.0's real
             # ID) parses as minor "20250514". Real minors are 1-2 digits;
             # anything longer is a date stamp, meaning the ID carried no
-            # minor at all -> treat as .0 so history is never repriced.
-            minor = int(minor_str) if len(minor_str) <= 2 else 0
+            # minor at all -> treat as .0 so history is never repriced. A
+            # minorless ID (claude-opus-5) lands on .0 the same way.
+            minor = int(minor_str) if minor_str and len(minor_str) <= 2 else 0
             version = (int(major_str), minor)
             exact = f"opus-{version[0]}.{version[1]}"
             if version >= (4, 5):
@@ -173,6 +195,9 @@ def model_tier(model_name: str, speed: str | None = None) -> str:
                 file=sys.stderr,
             )
         return LATEST_MODERN_OPUS_TIER
+
+    if "fable" in name or "mythos" in name:
+        return "fable-5"
 
     if "sonnet" in name:
         return "sonnet"

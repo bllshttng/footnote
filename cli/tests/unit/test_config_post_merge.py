@@ -259,13 +259,13 @@ def test_config_get_self_reap_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 # ---------------------------------------------------------------------------
 
 
-def test_post_merge_model_defaults_sonnet(
+def test_post_merge_model_defaults_opus(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No config: model defaults to sonnet (the Step-6 diff-judgment needs real
+    """No config: model defaults to opus (the Step-6 diff-judgment needs real
     reasoning), never the account default (Fable)."""
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    assert settings.post_merge.model == "claude-sonnet-5"
+    assert settings.post_merge.model == "claude-opus-5"
 
 
 def test_post_merge_model_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -287,4 +287,4 @@ def test_post_merge_model_empty_coerces_default(
         monkeypatch,
         'schema_version: 1\nconfig:\n  post_merge:\n    model: ""\n',
     )
-    assert settings.post_merge.model == "claude-sonnet-5"
+    assert settings.post_merge.model == "claude-opus-5"

@@ -11,6 +11,7 @@ import subprocess
 from types import SimpleNamespace
 
 
+from fno.config import PostMergeBlock
 from fno.pr import _ritual
 from fno.pr._proc import Result
 
@@ -63,11 +64,16 @@ class FakeRunner:
 
 
 def _bare(tmp_path, runner, *, autonomous=False, pr=7, parking_lot=None,
-          node_ids=None, self_reap=False):
-    """A Ritual built without __init__'s git/config resolution (hermetic)."""
+          node_ids=None, self_reap=False, model=PostMergeBlock().model):
+    """A Ritual built without __init__'s git/config resolution (hermetic).
+
+    ``model`` defaults to the REAL block's value rather than a literal: this
+    fake pm stands in for PostMergeBlock, and a hand-written default here would
+    let the two drift silently (the fake is what a leg actually reads).
+    """
     r = object.__new__(_ritual.Ritual)
     pm = SimpleNamespace(sync_command=None, self_reap=self_reap,
-                         parking_lot_path=parking_lot)
+                         parking_lot_path=parking_lot, model=model)
     r.ctx = _ritual._Ctx(
         pr=pr, autonomous=autonomous, canon=tmp_path, settings=None, pm=pm,
         project="", lane_project="", parking_lot=(tmp_path / parking_lot) if parking_lot else None,
@@ -281,6 +287,44 @@ def test_judgment_autonomous_nonempty_spawns_headless(tmp_path, capsys, monkeypa
     spawn_argv = argv[argv.index("spawn"):]  # ["spawn", ...]
     normalized = normalize_spawn_args(spawn_argv)  # raises SystemExit(2) if invalid
     assert normalized[normalized.index("--name") + 1] == "judgment-pr-7"
+
+
+def test_judgment_spawn_forwards_configured_model(tmp_path, capsys, monkeypatch):
+    """config.post_merge.model must reach the worker, not just the schema.
+
+    The field carried a tier default for the reasoning the judgment needs, but
+    the spawn passed no --model, so the worker silently ran on the harness /
+    account default and the whole setting was inert.
+    """
+    monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
+    runner = FakeRunner(diff_files=14, additions=300, deletions=20)
+    r = _bare(tmp_path, runner, autonomous=True, parking_lot="internal/x/parking-lot.md")
+    r.leg_judgment()
+    argv = [c for c in runner.calls if len(c) > 1 and c[1] == "agents" and "spawn" in c][0]
+    assert argv[argv.index("--model") + 1] == PostMergeBlock().model
+    # The model is a claude id, and an explicit --model bypasses the
+    # provider-scoping that would drop it: unpinned, a codex-ambient session
+    # hands the claude id to codex and 400s after the round-trip.
+    assert argv[argv.index("--harness") + 1] == "claude"
+    # NOT --role: `post-merge` is in DEFAULT_ROUTED_ROLES and would auto-route
+    # this leg to the weaker secondary provider - the opposite of the intent.
+    assert "--role" not in argv
+    # The model must survive the real normalizer, not just sit in a list.
+    from fno.agents.spawn_defaults import normalize_spawn_args
+
+    normalized = normalize_spawn_args(argv[argv.index("spawn"):])
+    assert normalized[normalized.index("--model") + 1] == PostMergeBlock().model
+
+
+def test_judgment_spawn_omits_model_when_unset(tmp_path, capsys, monkeypatch):
+    """A blank/absent model adds no flag - an empty --model value refuses at spawn."""
+    monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
+    runner = FakeRunner(diff_files=14, additions=300, deletions=20)
+    r = _bare(tmp_path, runner, autonomous=True,
+              parking_lot="internal/x/parking-lot.md", model="")
+    r.leg_judgment()
+    argv = [c for c in runner.calls if len(c) > 1 and c[1] == "agents" and "spawn" in c][0]
+    assert "--model" not in argv
 
 
 def test_judgment_attended_defers_to_skill(tmp_path, capsys):

@@ -129,8 +129,8 @@ auto_run = false
 catchup_window_days = 3
 # How long the newest merge may sit unsynced before `fno doctor` reports the canonical checkout stale (default 24h).
 sync_stale_hours = 24
-# Model for post-merge ritual workers (default claude-sonnet-5). Routing wins when a secondary provider is keyed.
-model = "claude-sonnet-5"
+# Model for post-merge ritual workers (default claude-opus-5). Routing wins when a secondary provider is keyed.
+model = "claude-opus-5"
 
 [research]
 # Landing dir for the `fno research` doc deliverable (brief + sources sidecar); vault area, not repo-relative. Unset => ship fails loud (never guesses).
