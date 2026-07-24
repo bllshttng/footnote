@@ -6,6 +6,18 @@
 
 Use this guide when you have an orchestrator (script, LLM session, CI job) that needs to hand work to a long-running Claude agent and read back the response without managing the session id, socket, or attach lifecycle yourself.
 
+## ask vs `fno mail send` (two contracts, not two spellings)
+
+Both lanes inject the message into the live session the same way; everything after delivery differs. Neither is a wrapper over the other, so retiring either would delete a contract, not deduplicate a path.
+
+| | `fno agents ask <name> "..."` | `fno mail send <name> "..."` |
+|---|---|---|
+| Contract | synchronous request-reply | asynchronous fire-and-receipt |
+| Returns | the recipient's REPLY on stdout (pipeable) | a delivery receipt (`delivered (hosted)` / `queued (durable)`) |
+| Waits | yes - reply-wait poll, `--timeout` (default 600s) | no - returns at delivery; the reply arrives later as its own mail |
+| Nobody live | exit 13 - spawn or wake first | durable bus (`queued`), drained at the recipient's next boundary |
+| Use when | a script or orchestrator needs the answer inline | agents coordinating across turns; delivery must survive an idle peer |
+
 ## Prerequisites
 
 - `fno` CLI installed (`uv tool install /path/to/footnote/cli` or via the footnote plugin postinstall).

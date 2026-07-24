@@ -41,17 +41,24 @@ means start a session with what you pass, nothing more (x-cbb0): an explicit
 via `/target`, and any other free text is sent **verbatim as the session seed** -
 no `/target` wrap, no build inference. The focused core:
 
-> **Retired verbs (x-cbb0):** `ask`, `bare`, and `discuss` are gone. If the
-> leading token is one of them, do NOT silently seed `"ask ..."`/`"discuss ..."`;
-> surface the redirect - a one-shot Q&A is `spawn "<question>" headless`, a
-> conversational session is just `spawn "<seed>"` (the default) - then run the
-> intended form. (The `--ask`/`--discuss` normalize flags are hard errors.)
+> **Retired verbs (x-cbb0):** `bare` and `discuss` are gone. A conversational
+> session is just `spawn "<seed>"` (the default); a one-shot Q&A to a NEW
+> worker is `spawn "<question>" headless`. (The `--ask`/`--discuss` normalize
+> flags remain hard errors.)
+>
+> **`ask` is back with different semantics.** The OLD ask (one-shot Q&A via a
+> throwaway worker) stays retired. Today's `ask <name> "<question>"` is the
+> synchronous request-reply lane to an EXISTING worker: it runs `fno agents
+> ask`, which delivers into the live session, waits for the reply (default
+> 600s), and prints it on stdout. Async fire-and-receipt stays on `send`
+> (`fno mail send`). See the `ask` section for the boundary.
 
 | Verb | Envelope | Routes to | Cost |
 |------|----------|-----------|------|
 | `spawn` (default) | normalize + honest-receipt (no confirm: free lane) | `fno agents spawn` - substrate axis (x-2c27): default `pane` (owned-PTY drivable); trailing `bg` -> detached `claude --bg` thread; trailing `headless` -> one-shot (`claude -p` / `codex --exec` / `agy -p`) | free (claude subscription) |
 | `handoff <doc>` | normalize `--handoff` + honest-receipt (free lane) | `fno agents spawn` (Claude/Codex/Gemini continuation seed, NO `/target`; default `pane`) | free (provider subscription) |
 | `send <name> "..."` | normalize recipient + addressed write | `fno mail send` (the addressed jsonl bus, sender-excluded) | free |
+| `ask <name> "..."` | parse + refuse-empty + honest reply relay | `fno agents ask` - sync deliver into a live worker + reply-wait poll; reply on stdout | free |
 | `watch <name>` | thin pass-through | `fno agents watch` | free |
 | `list` | thin pass-through | `fno agents list` | free |
 | `whoami` | thin pass-through (read-only) | `fno agents whoami` | free |
@@ -88,7 +95,7 @@ All three create via `spawn`. The substrate axis (x-2c27) selects the host:
 `pane` (default, owned-PTY drivable), `bg` (claude-only detached `claude --bg`
 thread), `headless` (one-shot `claude -p` / `codex --exec` / `agy -p`). `bg` on a
 non-claude provider is a hard error pointing to `headless`. A one-shot Q&A is the
-`headless` substrate (x-cbb0: it subsumes the retired `ask` verb). A codex/gemini
+`headless` substrate (x-cbb0: it subsumes the retired one-shot ask; today's `ask` verb is the sync lane to an existing worker). A codex/gemini
 exec worker is a **single autonomous pass**, not the claude "refuse to stop until
 shipped" loop - do not imply loop-grade completion guarantees for them.
 
@@ -118,7 +125,9 @@ see below):
   session; it does NOT build. To build free text, write `spawn /target <text>`
   or pass a node id.)
 - **one-shot Q&A**: append the `headless` substrate (x-cbb0: it replaced the
-  `ask`/`bare` verb) - `spawn "<question>" headless` returns a single reply.
+  old one-shot ask and `bare`) - `spawn "<question>" headless` returns a
+  single reply. (Messaging an EXISTING worker for an inline reply is the
+  `ask` verb, not a spawn.)
 - **provider** (optional, trailing bareword): any non-claude harness in the
   supported set - today `codex`, `gemini`, `agy`, `opencode`, with more coming.
   `spawn ab-X codex` -> provider `codex`; `spawn ab-X opencode` -> `opencode`.
@@ -607,13 +616,52 @@ outward actions.
 
 ---
 
-> **Retired verbs (x-cbb0):** `discuss` and `ask` no longer exist. A verbatim
-> conversational session is now the default free-text **seed** (`spawn "<seed>"`
-> opens a drivable pane with the words as its opening turn - what `discuss` did).
-> A one-shot question is the **`headless` substrate** (`spawn "<question>"
-> headless` returns a single reply - what `ask` did). `handoff` stays: its
-> guardrail preamble and continue-don't-re-derive contract are content, not
-> routing.
+> **Retired verbs (x-cbb0):** `discuss` no longer exists - a verbatim
+> conversational session is the default free-text **seed** (`spawn "<seed>"`
+> opens a drivable pane with the words as its opening turn). The OLD one-shot
+> `ask` is gone too; that shape is the **`headless` substrate**
+> (`spawn "<question>" headless` returns a single reply). Today's `ask` verb
+> is the sync request-reply lane to an existing worker (its own section
+> above). `handoff` stays: its guardrail preamble and
+> continue-don't-re-derive contract are content, not routing.
+
+---
+
+## `ask <name> "<question>"` - synchronous reply from a live worker
+
+The request-reply lane: deliver a message into an EXISTING worker's session,
+wait for its reply, and relay it. This is `fno agents ask` (distributed as the
+`ln` short-command) - NOT the retired one-shot ask, which spun up a throwaway
+worker (that shape is `spawn "<question>" headless`).
+
+**ask vs send in one line:** `ask` blocks and returns the ANSWER; `send`
+returns a delivery RECEIPT and the answer arrives later as its own mail. Use
+`ask` when you need the reply inline (pipeable stdout); use `send` for
+cross-turn coordination or when the peer may be idle (durable fallback). Full
+boundary table: [docs/guides/fno-agents-ask-followup.md](../../docs/guides/fno-agents-ask-followup.md).
+
+1. Parse the recipient name (first token after `ask`) and the question (the
+   rest; strip smart quotes as normalize does). Refuse an empty name or body
+   before running anything. A trailing `timeout <secs>` bareword maps to
+   `--timeout`.
+2. Run the genuine wire:
+
+   ```bash
+   fno agents ask "<name>" "<question>" [--timeout <secs>]
+   ```
+
+3. **REPORT honestly.** stdout IS the recipient's reply verbatim - relay it
+   (preview ~15 lines; full text via `fno agents logs <name>`). On failure,
+   relay the real exit meaning, never a fabricated answer:
+   - exit 16: unknown agent - "spawn it first"; do NOT guess a recipient.
+   - exit 13: worker not running (the reason names why: not-found /
+     suspended / liveness-failed); offer `claude attach <short-id>` or
+     `fno agents rm`.
+   - exit 15: reply timeout - the message WAS delivered (at-least-once);
+     point at `fno agents logs <name>` rather than blind-retrying.
+
+`ask` is free and never confirms (a read-reply exchange, nothing billed or
+destructive).
 
 ---
 
