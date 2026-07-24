@@ -262,13 +262,25 @@ def test_judgment_autonomous_nonempty_spawns_headless(tmp_path, capsys, monkeypa
     argv = spawns[0]
     assert "--substrate" in argv and "headless" in argv[argv.index("--substrate") + 1]
     assert "bg" not in argv
-    # codex P1: the prompt is the MESSAGE (last positional), with a short valid
-    # NAME before it. Passing the prompt as the sole positional made it the name,
-    # which spawn rejects (>64 chars, '/').
+    # The prompt is the SOLE positional (the MESSAGE); the name rides --name.
+    # Before the axis redesign the grammar was `[name] [message]` and this passed
+    # `judgment-pr-<n> <prompt>` as two positionals - which now fails closed. A
+    # FakeRunner only records argv, so a structural assertion alone let the real
+    # break hide; the normalizer guard below is what actually exercises the
+    # grammar this leg depends on.
     assert argv[-1].startswith("Post-merge judgment")   # the prompt = message
-    assert argv[-2] == "judgment-pr-7" and len(argv[-2]) <= 64  # name
+    i = argv.index("--name")
+    assert argv[i + 1] == "judgment-pr-7" and len(argv[i + 1]) <= 64
     # codex P2: the worker gets its own --timeout, not a 60s outer kill.
     assert "--timeout" in argv
+    # Guard against silent grammar drift: the constructed argv must SURVIVE the
+    # real spawn normalizer (the layer that refuses two positionals), not merely
+    # look right. `agents spawn` is argv[1:] with the verb token dropped.
+    from fno.agents.spawn_defaults import normalize_spawn_args
+
+    spawn_argv = argv[argv.index("spawn"):]  # ["spawn", ...]
+    normalized = normalize_spawn_args(spawn_argv)  # raises SystemExit(2) if invalid
+    assert normalized[normalized.index("--name") + 1] == "judgment-pr-7"
 
 
 def test_judgment_attended_defers_to_skill(tmp_path, capsys):
