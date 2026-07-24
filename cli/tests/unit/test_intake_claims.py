@@ -658,6 +658,19 @@ def test_idea_birth_path_warns_on_near_duplicate(fixture_graph, capsys):
     assert "dedup:" not in captured.out
 
 
+def test_idea_birth_path_warns_on_near_duplicate_of_done(fixture_graph, capsys):
+    # The exact regression class this PR fixes: a shipped `done` node is the
+    # answer to a duplicate filing, and the old idea-only net could not see it.
+    # Pins the wiring end-to-end (unit tests cover the scorer/helper in isolation).
+    _create_node_impl(
+        title="Already shipped feature refactor", details="feature shipped already"
+    )
+    captured = capsys.readouterr()
+    assert "dedup:" in captured.err
+    assert "ab-d0ne5678" in captured.err
+    assert re.search(r"ab-d0ne5678\s+done\s+0\.\d{2}", captured.err)
+
+
 def test_idea_birth_path_silent_on_clean_filing(fixture_graph, capsys):
     # AC2-HP: an unrelated filing warns nothing.
     _create_node_impl(title="Completely unrelated novel topic", details="unique content here")
@@ -682,8 +695,9 @@ def test_multi_intake_birth_path_warns_on_near_duplicate(fixture_graph, tmp_path
     )
     _do_intake_multi(args, [str(plan_a), str(plan_b)], roadmap_id=None, dry_run=False)
     err = capsys.readouterr().err
-    assert err.count("dedup:") >= 1
+    assert err.count("dedup:") == 2  # one receipt per intaked node
     assert "ab-1dea1234" in err
+    assert len(_read_entries(fixture_graph)) == 5  # 3 seeded + 2 intaked
 
 
 def test_old_idea_title_warning_function_is_gone():
@@ -720,6 +734,7 @@ def test_idea_path_survives_scorer_failure_exit_zero(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli, ["idea", "Backlog dedup gate filings"])
     assert result.exit_code == 0, result.output
     assert len(json.loads(g.read_text())["entries"]) == 1  # node persisted
-    # CliRunner mixes stderr into output; the skipped-check warning is the one
-    # and only warning line.
+    # CliRunner mixes stderr into output; pin the dedup warning text (not just
+    # any single warning line) and that it is the only one.
+    assert "post-file dedup check skipped" in result.output
     assert result.output.count("warning:") == 1

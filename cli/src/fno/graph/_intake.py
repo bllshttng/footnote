@@ -909,9 +909,10 @@ def _warn_similar_nodes(
     top_id = candidates[0][0]
     top_cand = by_id.get(top_id, {})
     # The intake paths can re-file with --claims to consolidate, but only against
-    # an idea-state node (intake refuses to claim a non-idea node upstream); for
-    # any other top state the receipt informs only.
-    if intake_hint and top_cand.get("status") in (None, "idea"):
+    # an idea-state node (intake refuses to claim a non-idea node upstream); a
+    # missing status is malformed, not idea-state, so for any other top state the
+    # receipt informs only.
+    if intake_hint and top_cand.get("status") == "idea":
         lines.append(
             "consolidate: `fno backlog supersede` / `fno backlog update`, or "
             f"re-file with --claims {top_id}"

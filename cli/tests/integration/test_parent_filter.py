@@ -34,7 +34,9 @@ def _add(title, **opts) -> str:
         args += [f"--{k}", str(v)]
     r = runner.invoke(app, args, catch_exceptions=False)
     assert r.exit_code == 0, r.output
-    return json.loads(r.output)["id"]
+    # raw_decode tolerates trailing stderr (the filing-time dedup receipt
+    # CliRunner mixes into r.output when the new node resembles an existing one).
+    return json.JSONDecoder().raw_decode(r.output)[0]["id"]
 
 
 def _set_parent(child_id, parent_id):

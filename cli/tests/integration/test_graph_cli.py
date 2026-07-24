@@ -446,7 +446,9 @@ def test_queue_accepts_multiple_ids_space_and_comma_separated(tmp_graph):
     ids = []
     for title in ("Multi-A", "Multi-B", "Multi-C"):
         r = _invoke("graph", "add", title)
-        ids.append(json.loads(r.output)["id"])
+        # raw_decode tolerates trailing stderr (Multi-B/C resemble Multi-A, so the
+        # filing-time dedup receipt mixes into r.output via CliRunner).
+        ids.append(json.JSONDecoder().raw_decode(r.output)[0]["id"])
     # Mix comma and space separators.
     r = _invoke("graph", "queue", f"{ids[0]},{ids[1]}", ids[2], "--reason", "batch")
     assert r.exit_code == 0, r.output
