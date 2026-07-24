@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from fno.retro.dedup import anchor_verdict, trailer
+from fno.retro.dedup import anchor_verdicts, trailer
 from fno.retro.types import TIER_INBOX, Candidate
 
 MODE_AUTONOMOUS = "autonomous"
@@ -149,6 +149,9 @@ def land_candidates(
     interactive = mode == MODE_INTERACTIVE
 
     results: list[LandResult] = []
+    # F10: batch the filing-time anchor scan once per harvest (each PR fetched
+    # once), not once per candidate (N gh round-trips, rate-limit prone).
+    _anchor_verdicts = anchor_verdicts(candidates, anchor_scan_fn) if anchor_scan_fn else {}
     born_rs = None  # one shared blast-cap across the whole harvest batch (lazy)
     for c in candidates:
         if c.uncited:
@@ -166,7 +169,7 @@ def land_candidates(
         # its source PR (fixed-on-main) is never minted. An unresolvable scan
         # fails toward filing with an anchor-unverified note (AC5-EDGE).
         if anchor_scan_fn is not None:
-            verdict = anchor_verdict(c, anchor_scan_fn)
+            verdict = _anchor_verdicts.get(c.source_id, "present")
             if verdict == "dead":
                 print(
                     f"skipped: fixed-on-main - finding addressed on source PR "

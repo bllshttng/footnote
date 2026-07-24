@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from hashlib import blake2b
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 from fno.retro.types import Candidate
 
@@ -141,3 +141,54 @@ def anchor_verdict(candidate: Candidate, scan_fn: Any) -> str:
         # minting clean on an unverifiable empty result.
         return "unresolvable"
     return "dead" if addressed else "present"
+
+
+def _unavailable_prs_from_warnings(warnings: Optional[Iterable[Any]]) -> set:
+    """Source-PR numbers flagged unavailable in scan warnings (GitHub outage)."""
+    out: set = set()
+    for w in warnings or []:
+        for m in re.finditer(r"#(\d+)", str(w)):
+            out.add(int(m.group(1)))
+    return out
+
+
+def anchor_verdicts(candidates: list, scan_fn: Any) -> dict:
+    """Batched filing-time anchor verdict (F10): one ``scan_addressed_findings``
+    call for all candidates (each PR fetched once), not one per candidate.
+
+    Returns ``{candidate.source_id: verdict}`` (present | dead | unresolvable). A
+    candidate is ``dead`` only if the scan marked ITS finding addressed;
+    ``unresolvable`` if its source PR was unavailable (a GitHub outage, read from
+    the scan's warnings); ``present`` otherwise. If the scan warned but no PR was
+    parseable, fall back to conservative (unresolvable) so an outage never reads
+    as present (preserves F8)."""
+    verdicts: dict = {}
+    scanable = [c for c in candidates if getattr(c, "source_pr", None)]
+    if not scan_fn or not scanable:
+        return {getattr(c, "source_id", None): "present" for c in candidates}
+    pseudos = [
+        {
+            "id": f"candidate:{c.source_id}",
+            "details": (
+                f"{c.body or ''}\n"
+                f"{trailer(c.source_pr, c.content_hash)}"
+            ),
+        }
+        for c in scanable
+    ]
+    scan_warnings: list = []
+    try:
+        addressed = scan_fn(pseudos, include_planned=True, warnings=scan_warnings)
+    except Exception:  # noqa: BLE001 - never close on uncertainty
+        return {c.source_id: "unresolvable" for c in scanable}
+    addressed_ids = {getattr(a, "node_id", None) for a in (addressed or [])}
+    unavailable_prs = _unavailable_prs_from_warnings(scan_warnings)
+    conservative = bool(scan_warnings) and not unavailable_prs
+    for c in scanable:
+        if f"candidate:{c.source_id}" in addressed_ids:
+            verdicts[c.source_id] = "dead"
+        elif c.source_pr in unavailable_prs or conservative:
+            verdicts[c.source_id] = "unresolvable"
+        else:
+            verdicts[c.source_id] = "present"
+    return verdicts
