@@ -649,12 +649,52 @@ The AC-FR type is new and catches the bugs that slip through:
 
 ### 7b. Domain Pitfalls
 
-Before handoff, ask: "What are the known pitfalls for [technology/domain]?"
+Apply the project's own failure corpus first, then general knowledge. Three
+feeds, all reachable without a new pipeline; record every artifact you actually
+read here - Step 8 stamps them into `sources:` frontmatter.
 
-Document any pitfalls that could affect the implementation plan. Examples:
-- Next.js App Router: server/client boundary, hydration mismatches
-- Supabase RLS: policies don't apply to service_role key
-- React state: stale closures in effects, batching behavior
+**The corpus (AGENTS.md `## Pitfalls corpus (capped)`).** It is in your
+session-start context on every harness, so apply it directly: for each entry,
+test whether the design's touched surfaces (a spawn path, a guard sitting on
+one of N implementations, a test-harness bypass, a probe that could lie) match
+the trap. Cite every applicable entry by its `###` heading in
+`## Domain Pitfalls`, naming the specific surface it applies to. Library
+footguns (a framework's known gotcha) stay a supplement, not the primary source.
+If the section is absent from your context (a fresh OSS install predating it),
+the corpus is missing - print `pitfalls: corpus missing` in the summary and
+proceed; a missing corpus never blocks the design.
+
+**Recent synthesis docs.** Glob the resolved plans dir for `*retro-synthesis*.md`
+and read the newest few whose epic or keywords intersect this seed:
+
+```bash
+PLANS_DIR=$(fno plan path --slug probe 2>/dev/null | xargs dirname 2>/dev/null)
+[[ -n "$PLANS_DIR" && -d "$PLANS_DIR" ]] && ls "$PLANS_DIR"/*retro-synthesis*.md 2>/dev/null | head -5
+```
+
+Skip silently when the dir does not resolve (OSS installs have no vault) or no
+synthesis matches. A synthesis that applies contributes a finding to
+`## Domain Pitfalls` or `## Failure Modes`, attributed to it by filename - a bare
+"see synthesis" with no named file fails AC2-HP.
+
+**Pending lesson candidates.** Surface the count (never inline the whole file;
+newest 3 at most) so staleness is visible at design time, not rotted the way
+`~/.fno/postmortems` did:
+
+```bash
+[[ -f ~/.fno/lesson-candidates.jsonl ]] && wc -l < ~/.fno/lesson-candidates.jsonl || echo 0
+```
+
+**Mandatory one-line summary** printed to the terminal when 7b completes - never
+a silent pass; its absence is visible in the transcript and the Step 8b reviewer
+checks for it:
+
+```
+pitfalls: N/10 corpus entries apply; sources: M synthesis doc(s); K candidates pending
+```
+
+Use `pitfalls: corpus missing` in place of `N/10` when the section is absent,
+and `sources: 0` / `K candidates pending` for the empty cases.
 
 ### 8. Finalize the Design Document
 
