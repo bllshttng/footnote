@@ -600,7 +600,7 @@ fn emit_claim_event(events_dir: Option<&Path>, type_name: &str, data: Map<String
         "source": "fno-loop",
         "data": Value::Object(data),
     });
-    if let Err(e) = append_event_line(&events_path, &event) {
+    if let Err(e) = append_event_line(&events_path, &event, Duration::from_secs(2)) {
         eprintln!("claims: failed to emit {type_name:?}: {e}");
     }
 }
@@ -639,6 +639,11 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
         return false;
     }
 
+    // Capture the corpse's identity BEFORE the rename: between this and the
+    // rename another stealer can win and a fresh holder acquire at the same
+    // path, so what we move may be a LIVE lock. The owner token is the identity
+    // check (inode recycling fooled the old inode+mtime compare).
+    let before_token = read_owner(lock_dir);
     // Unique per attempt (see the Python twin): one name per pid means a reap
     // dir left by a failed cleanup collides forever, silently disabling every
     // future steal by this process.
@@ -654,11 +659,9 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
     ));
     match std::fs::rename(lock_dir, &reaped) {
         Ok(()) => {
-            // The rename is atomic for a path, not for an inode: between the
-            // stat and here another stealer can have won and a fresh holder
-            // acquired at the same path, so what we moved may be a LIVE lock
-            // rather than the corpse we aged. Put it back and lose properly.
-            if !is_same_lock(&reaped, &before) {
+            // A live lock swapped in between the age check and the rename
+            // carries a different owner token: put it back and lose properly.
+            if !same_owner(&reaped, &before_token) {
                 if std::fs::rename(&reaped, lock_dir).is_err() {
                     eprintln!(
                         "claims: stole a live mutex at {} and could not restore it",
@@ -686,26 +689,83 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
     }
 }
 
-/// Identity for a lock dir: inode AND mtime.
-///
-/// The inode alone is not enough. Linux hands a freshly created directory the
-/// inode number just freed by the one it replaced, so a corpse swapped for a
-/// live lock compares equal on (ino, dev). The mtime separates them: the corpse
-/// is at least the threshold old, a fresh holder's is now.
-fn is_same_lock(path: &Path, expected: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match std::fs::symlink_metadata(path) {
-        Ok(got) => {
-            (got.ino(), got.dev(), got.mtime(), got.mtime_nsec())
-                == (
-                    expected.ino(),
-                    expected.dev(),
-                    expected.mtime(),
-                    expected.mtime_nsec(),
-                )
+/// Unique-per-acquire ownership token: `host:pid:ns`. Mirrors
+/// `fno.mutex._owner_token`; stamped into `lock_dir/owner` so a release can
+/// verify it owns the lock before removing the dir (a stealer that renamed the
+/// dir out from under a holder mid-write must not let the holder's trailing
+/// remove delete the new holder's live lock).
+fn owner_token() -> String {
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}:{}:{}", hostname(), std::process::id(), ns)
+}
+
+fn read_owner(lock_dir: &Path) -> String {
+    std::fs::read_to_string(lock_dir.join("owner")).unwrap_or_default()
+}
+
+/// Generate a token, write it to `lock_dir/owner`, return it. Mirrors
+/// `fno.mutex._stamp_owner`. Called right after the mkdir acquire; the
+/// mkdir-to-stamp gap is safe by the age gate, and a crash here leaves a
+/// no-owner corpse the age gate steals exactly as before.
+fn stamp_owner(lock_dir: &Path) -> String {
+    let token = owner_token();
+    let _ = std::fs::write(lock_dir.join("owner"), &token);
+    token
+}
+
+/// Acquire a mkdir dir mutex; return an owner token, or None on timeout.
+/// Mirrors `fno.mutex.acquire_dir_mutex`. None means a live, in-age holder was
+/// held past the deadline - genuine congestion, not a corpse.
+fn acquire_dir_mutex(lock_dir: &Path, timeout: Duration, steal: bool) -> Option<String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match std::fs::create_dir(lock_dir) {
+            Ok(()) => return Some(stamp_owner(lock_dir)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if steal && steal_if_stale(lock_dir) {
+                    continue;
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
-        Err(_) => false,
     }
+}
+
+/// Remove `lock_dir` only when its owner token matches; never raise. Mirrors
+/// `fno.mutex.release_dir_mutex`. A mismatch (or missing owner file) means the
+/// lock was stolen or replaced mid-write: leave the current holder's dir intact.
+/// The dir contains an `owner` file, so removal is `remove_dir_all`.
+fn release_dir_mutex(lock_dir: &Path, token: &str) {
+    if read_owner(lock_dir) == token {
+        let _ = std::fs::remove_dir_all(lock_dir);
+        return;
+    }
+    eprintln!(
+        "claims: release_dir_mutex {} no longer owned by {}; left intact",
+        lock_dir.display(),
+        token
+    );
+}
+
+/// Identity for a reaped lock dir via owner token. Mirrors
+/// `fno.mutex._same_owner`: a token match, or an empty owner file (a pre-token
+/// corpse from a crashed acquirer or an old binary), means we reaped what we
+/// aged; a different token means a live lock was swapped in.
+fn same_owner(path: &Path, before_token: &str) -> bool {
+    let after = read_owner(path);
+    after.is_empty() || after == before_token
 }
 
 /// Delete a reaped mutex, usually a directory but possibly a symlink
@@ -724,7 +784,11 @@ fn remove_reaped(path: &Path) {
     }
 }
 
-fn append_event_line(events_path: &Path, event: &Value) -> Result<(), String> {
+fn append_event_line(
+    events_path: &Path,
+    event: &Value,
+    lock_timeout: Duration,
+) -> Result<(), String> {
     if let Some(parent) = events_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -735,29 +799,15 @@ fn append_event_line(events_path: &Path, event: &Value) -> Result<(), String> {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "events.jsonl".into())
     ));
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        match std::fs::create_dir(&lock_dir) {
-            Ok(()) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if steal_if_stale(&lock_dir) {
-                    continue;
-                }
-                if Instant::now() >= deadline {
-                    return Err(format!("events.jsonl lock timeout: {}", lock_dir.display()));
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => return Err(e.to_string()),
-        }
-    }
+    let token = acquire_dir_mutex(&lock_dir, lock_timeout, true)
+        .ok_or_else(|| format!("events.jsonl lock timeout: {}", lock_dir.display()))?;
     let res = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(events_path)
         .and_then(|mut f| writeln!(f, "{event}"))
         .map_err(|e| e.to_string());
-    let _ = std::fs::remove_dir(&lock_dir);
+    release_dir_mutex(&lock_dir, &token);
     res
 }
 
@@ -1010,8 +1060,8 @@ fn recover_stale(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default()
     ));
-    match std::fs::create_dir(&recovery_lock) {
-        Ok(()) => {}
+    let token = match std::fs::create_dir(&recovery_lock) {
+        Ok(()) => stamp_owner(&recovery_lock),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // Another worker is doing recovery -- or died holding the mutex.
             // Steal a corpse so a killed recoverer cannot brick this key
@@ -1027,11 +1077,11 @@ fn recover_stale(
         // the top, where exclusive-create will recreate the parent.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RecoverResult::Retry,
         Err(e) => return RecoverResult::Done(AcquireOutcome::Error(e.to_string())),
-    }
+    };
 
-    // Inside the mutex: rmdir on ALL paths out.
+    // Inside the mutex: release on ALL paths out.
     let result = recover_stale_locked(path, key, holder, opts, events_dir);
-    let _ = std::fs::remove_dir(&recovery_lock);
+    release_dir_mutex(&recovery_lock, &token);
     result
 }
 
@@ -1254,13 +1304,15 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
     // would block every renewal until some other path cleared it, which is the
     // permanent-wedge shape this mutex's stealing exists to prevent, so retry
     // once past a stale one.
-    if std::fs::create_dir(&recovery_lock).is_err() {
-        if !steal_if_stale(&recovery_lock) || std::fs::create_dir(&recovery_lock).is_err() {
-            return Ok(false);
-        }
-    }
+    let token = if std::fs::create_dir(&recovery_lock).is_ok() {
+        stamp_owner(&recovery_lock)
+    } else if steal_if_stale(&recovery_lock) && std::fs::create_dir(&recovery_lock).is_ok() {
+        stamp_owner(&recovery_lock)
+    } else {
+        return Ok(false);
+    };
     let result = renew_locked(&path, holder, ttl_ms);
-    let _ = std::fs::remove_dir(&recovery_lock);
+    release_dir_mutex(&recovery_lock, &token);
     result
 }
 
@@ -1984,7 +2036,11 @@ mod tests {
         age_dir(&lock, STALE_MUTEX_STEAL.as_secs() + 60);
 
         let started = Instant::now();
-        let res = append_event_line(&events, &json!({"ts": "t", "type": "x"}));
+        let res = append_event_line(
+            &events,
+            &json!({"ts": "t", "type": "x"}),
+            Duration::from_secs(2),
+        );
 
         assert!(res.is_ok(), "{res:?}");
         assert!(started.elapsed() < Duration::from_secs(2));
@@ -2028,9 +2084,43 @@ mod tests {
         std::fs::create_dir_all(events.parent().unwrap()).unwrap();
         std::fs::create_dir(events.with_file_name("events.jsonl.lock.d")).unwrap();
 
-        let res = append_event_line(&events, &json!({"ts": "t", "type": "x"}));
+        let res = append_event_line(
+            &events,
+            &json!({"ts": "t", "type": "x"}),
+            Duration::from_secs(2),
+        );
 
         assert!(res.is_err(), "fresh lock was stolen");
+    }
+
+    #[test]
+    fn release_after_steal_leaves_new_holder_intact() {
+        // AC2: a holder whose lock was stolen mid-write must not delete the new
+        // holder's lock on release. This is the wrongful-delete vector the owner
+        // token exists to close (twin of the Python test_mutex_steal AC2 test).
+        let td = TempDir::new().unwrap();
+        let lock = td.path().join("events.jsonl.lock.d");
+
+        // Victim acquires, then is suspended past the steal threshold.
+        let victim = acquire_dir_mutex(&lock, Duration::from_secs(5), true).unwrap();
+        age_dir(&lock, STALE_MUTEX_STEAL.as_secs() + 60);
+
+        // A stealer reaps the corpse, then a new holder acquires at the path.
+        assert!(steal_if_stale(&lock));
+        assert!(!lock.exists());
+        let new_holder = acquire_dir_mutex(&lock, Duration::from_secs(5), true).unwrap();
+        assert_ne!(new_holder, victim);
+
+        // Victim resumes and releases: the new holder's lock must survive.
+        release_dir_mutex(&lock, &victim);
+        assert!(
+            lock.exists(),
+            "victim's release deleted the new holder's lock"
+        );
+
+        // The new holder releases cleanly (token matches -> remove_dir_all).
+        release_dir_mutex(&lock, &new_holder);
+        assert!(!lock.exists());
     }
 
     #[test]
@@ -2047,7 +2137,11 @@ mod tests {
             .map(|i| {
                 let events = events.clone();
                 std::thread::spawn(move || {
-                    append_event_line(&events, &json!({"ts": "t", "type": "x", "i": i}))
+                    append_event_line(
+                        &events,
+                        &json!({"ts": "t", "type": "x", "i": i}),
+                        Duration::from_secs(10),
+                    )
                 })
             })
             .collect();
