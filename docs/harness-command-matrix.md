@@ -1,14 +1,14 @@
-# `fno agents`: every verb, per provider
+# `fno agents`: every verb, per harness
 
-`fno agents` is one surface over five provider CLIs - `claude`, `codex`, `gemini`, `agy` (Antigravity), `opencode` - but the providers are not symmetric: substrates, session IDs, and re-entry paths differ per CLI. This page is the source of truth for what each verb does and which providers it works against.
+`fno agents` is one surface over five harness CLIs - `claude`, `codex`, `gemini`, `agy` (Antigravity), `opencode` - but the harnesses are not symmetric: substrates, session IDs, and re-entry paths differ per CLI. This page is the source of truth for what each verb does and which harnesses it works against.
 
 Two runtimes serve the surface. The **Rust client** (`fno-agents`, the shipped default) intercepts most verbs; **Python** owns a handful (`whoami`, `top`, `peek`, `watch`, plus internal helpers) and is the fallback when no binary is installed (`FNO_AGENTS_RUNTIME=python`). Routing is automatic - you type `fno agents <verb>` either way. Notably, **pane spawns are Python-owned by design**: the mux-hosted back half lives in the Python `cmd_spawn` path, and the router keeps every pane spawn there even when Rust mode is requested - so the default substrate works identically under both runtimes.
 
 Messaging note: `send` / `inbox` / `ack` are **not** `fno agents` verbs anymore - they moved to the dedicated `fno mail` namespace. The agents group is lifecycle-only.
 
-## The provider model
+## The harness model
 
-What each provider fundamentally is, from fno's point of view:
+What each harness fundamentally is, from fno's point of view:
 
 | | claude | codex | gemini | agy | opencode |
 |---|---|---|---|---|---|
@@ -20,18 +20,18 @@ What each provider fundamentally is, from fno's point of view:
 | Revive a **dead** session | `spawn --resume <uuid>` (bg lane) | no | no | no | no |
 | Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes |
 
-The pane substrate (the default) is the great equalizer: all five providers can be spawned as a mux-hosted interactive PTY pane. Everything asymmetric lives in the detached lanes.
+The pane substrate (the default) is the great equalizer: all five harnesses can be spawned as a mux-hosted interactive PTY pane. Everything asymmetric lives in the detached lanes.
 
 ## Verbs: creating and reviving workers
 
 | Verb | claude | codex | gemini | agy | opencode | What it does |
 |------|:---:|:---:|:---:|:---:|:---:|---|
 | `spawn "<prompt>"` | yes | yes | yes | yes | yes | Create + register a worker. Default substrate `pane` (mux-hosted PTY). |
-| `spawn --substrate bg` | yes | no | no | no | no | Persistent detached `claude --bg` thread. Hard error on any other provider, pointing to `headless`. |
-| `spawn --substrate headless` / `--headless` / `-p` / `--once` | yes | yes | yes | yes | no | One-shot: create + exchange + teardown. stdout is the provider reply. `-p` mirrors the harnesses' own one-shot short; `-H` is NOT a headless spelling, it selects the harness. |
+| `spawn --substrate bg` | yes | no | no | no | no | Persistent detached `claude --bg` thread. Hard error on any other harness, pointing to `headless`. |
+| `spawn --substrate headless` / `--headless` / `-p` / `--once` | yes | yes | yes | yes | no | One-shot: create + exchange + teardown. stdout is the harness reply. `-p` mirrors the harnesses' own one-shot short; `-H` is NOT a headless spelling, it selects the harness. |
 | `spawn --harness <h>` / `-H <h>` | selector | selector | selector | selector | selector | Canonical CLI-binary selector (`claude\|codex\|gemini\|opencode\|agy`); the `--harness` vocabulary the rest of fno uses. A model VENDOR (`zai`, ...) is never a harness value; that is `--provider`/`-P`, a separate axis. Reassigned from headless: `-H` now takes a harness value, not a one-shot toggle. |
-| `spawn --resume <uuid>` | yes (bg only) | no | no | no | no | **Revive a dead session**: mints a fresh detached bg thread seeded from the persisted transcript UUID, re-registers the row. Requires `--substrate bg` and provider claude. **Runtime caveat:** the `--resume` flag is wired only on the Python `cmd_spawn` path, so on an installed binary (default `auto`/`rust` runtime) the spawn auto-routes to the Rust client, which does not parse it; run it under `FNO_AGENTS_RUNTIME=python` until the flag joins the Python-only auto-route set. |
-| `spawn --model <m>` | pane+bg+headless | pane+headless | pane+headless | pane+headless | pane | Exact passthrough to the provider CLI. Every provider honors it on pane; the one-shot lanes forward it too (`codex exec --model`, `gemini --model`, `agy`, `claude -p --model`). |
+| `spawn --resume <uuid>` | yes (bg only) | no | no | no | no | **Revive a dead session**: mints a fresh detached bg thread seeded from the persisted transcript UUID, re-registers the row. Requires `--substrate bg` and harness claude. **Runtime caveat:** the `--resume` flag is wired only on the Python `cmd_spawn` path, so on an installed binary (default `auto`/`rust` runtime) the spawn auto-routes to the Rust client, which does not parse it; run it under `FNO_AGENTS_RUNTIME=python` until the flag joins the Python-only auto-route set. |
+| `spawn --model <m>` | pane+bg+headless | pane+headless | pane+headless | pane+headless | pane | Exact passthrough to the harness CLI. Every harness honors it on pane; the one-shot lanes forward it too (`codex exec --model`, `gemini --model`, `agy`, `claude -p --model`). |
 | `spawn --permission-mode <m>` | pane+bg+headless | pane | pane | pane | pane | Mapped approval mode (`claude -p`/`--bg` take it directly). Non-claude bg/headless lanes hardcode their own bypass form, so the flag is refused there (fail-closed, never silently dropped). Mutually exclusive with `--yolo`. |
 
 Retired creation verbs (each prints a pointer and exits non-zero, never a silent success): `host` and `promote` are gone - agent panes live in the mux now; use `fno agents spawn --name <n> --substrate pane`.
@@ -41,11 +41,11 @@ Retired creation verbs (each prints a pointer and exits non-zero, never a silent
 | Verb | claude | codex | gemini | agy | opencode | What it does |
 |------|:---:|:---:|:---:|:---:|:---:|---|
 | `ask <name> <msg>` | id-bearing rows | id-bearing rows | id-bearing rows | no | no | Follow-up message to an already-registered agent (spawn creates; ask continues) - but only for rows carrying a recorded session id (bg/headless-created workers). A default **pane** worker registers with a mux ref and no resume id, so `ask` refuses it: type into its pane (`fno mux`) or use `fno mail send`. agy is stateless; opencode has no ask adapter. |
-| `fno mail send <name> "<text>"` | yes | yes | yes | mux pane only | mux pane only | Async, live-inject first; never waits for a reply. A confirmed live delivery (`delivered (hosted)`) writes nothing to the bus; an unconfirmed one falls to a durable envelope (`queued (durable)`) that is recovery rather than delivery, so `peek` before re-sending (a busy peer can record the turn late - bounded double-delivery). Native inject lanes exist for claude/codex/gemini; a **mux-hosted** row of ANY provider rides PaneSend instead, so agy/opencode are live when mux-hosted and durable otherwise. Resolves a live session even if unregistered; a name that resolves to nothing exits 16. |
+| `fno mail send <name> "<text>"` | yes | yes | yes | mux pane only | mux pane only | Async, live-inject first; never waits for a reply. A confirmed live delivery (`delivered (hosted)`) writes nothing to the bus; an unconfirmed one falls to a durable envelope (`queued (durable)`) that is recovery rather than delivery, so `peek` before re-sending (a busy peer can record the turn late - bounded double-delivery). Native inject lanes exist for claude/codex/gemini; a **mux-hosted** row of ANY harness rides PaneSend instead, so agy/opencode are live when mux-hosted and durable otherwise. Resolves a live session even if unregistered; a name that resolves to nothing exits 16. |
 | `watch <name>` | yes | no | no | no | no | Observe a held stream-json thread's turns in real time. claude-only transport. |
 | `peek <name>` | yes | yes | status events only | status events only | status events only | Read-only: recent transcript + status from disk. Never spawns anything, works on suspended and exited rows. The transcript-fallback arm supports claude and codex only; a gemini/agy/opencode row with no normalized status event exits 1 (`ObserveUnsupported`). The observe twin of `fno mail send`. |
 | `attach <name>` | yes | no | no | no | no | Re-exec your terminal into the running session's own TUI (`claude attach <short_id>`). Requires the session to be **live**. |
-| `resume <name> [--print-command]` | yes (live only) | yes | yes | no | yes | Re-exec the provider's resume CLI in the agent's recorded cwd. Note the claude arm builds `claude attach <short_id>` - on claude this is attach-with-cwd, not a dead-session revival (that is `spawn --resume`). `--print-command` prints the shell snippet instead of exec'ing. |
+| `resume <name> [--print-command]` | yes (live only) | yes | yes | no | yes | Re-exec the harness's resume CLI in the agent's recorded cwd. Note the claude arm builds `claude attach <short_id>` - on claude this is attach-with-cwd, not a dead-session revival (that is `spawn --resume`). `--print-command` prints the shell snippet instead of exec'ing. |
 | `logs <name>` | yes | yes | yes | yes | yes | Tail or follow the agent's log output (reads `log_path`). |
 
 The three re-entry verbs are easy to conflate; the axes that separate them:
@@ -53,12 +53,12 @@ The three re-entry verbs are easy to conflate; the axes that separate them:
 | | Session must be live? | Where you end up | ID it keys on |
 |---|---|---|---|
 | `attach` / `resume` (claude) | yes | your terminal, inside the session's TUI | `claude_short_id` (8-hex jobId) |
-| `resume` (codex/gemini) | recorded session | your terminal, provider resume CLI | provider session ID |
+| `resume` (codex/gemini) | recorded session | your terminal, harness resume CLI | harness session ID |
 | `spawn --resume <uuid>` | **no - it revives the dead** | a new detached bg worker + registry row (same conversation: `--resume` keeps the session UUID; only the supervisor and its jobId are new) | `claude_session_uuid` (full transcript UUID) |
 
-## Verbs: registry and admin (provider-agnostic)
+## Verbs: registry and admin (harness-agnostic)
 
-These operate on the registry / daemon, not on a provider CLI, so they work for every provider's rows.
+These operate on the registry / daemon, not on a harness CLI, so they work for every harness's rows.
 
 | Verb | What it does |
 |------|---|
@@ -70,11 +70,11 @@ These operate on the registry / daemon, not on a provider CLI, so they work for 
 | `stop <name>` | Stop the underlying session (idempotent; already-exited is a clean no-op). |
 | `rm <name>` | Remove the registry row. Refused while live - stop first. |
 | `reap [--json]` | Garbage-collect exited rows in bulk (same sweep as the daemon's idle tick; keeps rows whose worktree is dirty and tells you why). |
-| `reconcile` | Sync registry status with provider reality. |
+| `reconcile` | Sync registry status with harness reality. |
 | `restart` | Restart a stale daemon to pick up a new build; PTY workers survive. |
 | `ping` | **Placeholder stub** - prints `(not yet implemented)` and exits 0 without probing anything. Do not script against it; use `status` for a real daemon probe. |
 
-## Verbs: waiting and catch-up (provider-agnostic)
+## Verbs: waiting and catch-up (harness-agnostic)
 
 | Verb | What it does |
 |------|---|
@@ -124,7 +124,7 @@ Retired verbs print these pointers and exit non-zero, so scripts fail loud rathe
 
 ## Why the asymmetries exist
 
-- **claude** is the only provider with a supervisor-managed detached thread (`claude --bg`), which is what makes the bg substrate, `attach`, `watch`, and dead-session revival (`spawn --resume` off the persisted transcript UUID) possible. When the supervisor dies, the short jobId dies with it - only the full session UUID survives on disk, which is why revival and attach key on different IDs.
+- **claude** is the only harness with a supervisor-managed detached thread (`claude --bg`), which is what makes the bg substrate, `attach`, `watch`, and dead-session revival (`spawn --resume` off the persisted transcript UUID) possible. When the supervisor dies, the short jobId dies with it - only the full session UUID survives on disk, which is why revival and attach key on different IDs.
 - **codex / gemini** run as mux-hosted PTY panes (the Python back half) or through their own one-shot/resume CLIs. No detached thread means no bg lane and no attach.
 - **agy** emits plain text with no parseable session ID, so it is **stateless**: the live pane works while attached, but there is nothing to re-enter after it settles. `ask`-by-name is refused; use a fresh `--once`.
 - **opencode** is pane-hostable with a readiness detector and badge manifest. Its `ses_` session id is captured at spawn (a best-effort store lookup; an ambiguous or missed capture leaves the row live-only), probed for store membership, and resumable via `opencode --session <id>`. The fno plugin exposes the footnote verbs in opencode's command palette AND headlessly, so dispatch renders the native `/fno:verb` (not a prose brief). The headless spawn routes it through `opencode run --command fno:verb <args>` (a bare `run <message>` treats a leading slash as prose - verified against opencode v1.14.50), so a rendered slash command actually invokes the plugin command.

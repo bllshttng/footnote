@@ -9,7 +9,7 @@ Storage and dispatch primitives for the `fno agents` subsystem. The registry rem
 ## Surface
 
 ```
-fno agents ask <name> <message> [--provider P] [--cwd PATH] [--timeout SECS]
+fno agents ask <name> <message> [--harness P] [--cwd PATH] [--timeout SECS]
 fno agents list
 fno agents ping
 ```
@@ -145,7 +145,7 @@ The `claude` provider's create path is the reference dispatch flow every other p
 ### Surface
 
 ```
-fno agents ask <name> <message> --provider claude [--cwd PATH] [--timeout SECS]
+fno agents ask <name> <message> --harness claude [--cwd PATH] [--timeout SECS]
 ```
 
 On success the command prints the 8-hex supervisor short-id on stdout and exits 0. The assistant reply is asynchronous — `claude --bg` spawns the supervisor and returns immediately; reply retrieval is `claude logs <short-id>` (or `fno agents logs <name>`).
@@ -184,7 +184,7 @@ dispatch_ask
 |------|---------|--------|
 | 0    | Success | stdout = `<short_id>\n`, registry entry written, events emitted |
 | 1    | Subprocess non-zero OR unparseable stdout | provider.bg_create raises `ProviderSubprocessError` / `ProviderParseError` |
-| 2    | Validation: empty/whitespace message; name too long; name matches `^[0-9a-f]{8}$`; name already in registry; missing `--provider` for new agent; unknown provider |
+| 2    | Validation: empty/whitespace message; name too long; name matches `^[0-9a-f]{8}$`; name already in registry; missing `--harness` for new agent; unknown harness |
 | 11   | Per-agent flock timeout (30s default) | `hold_agent_lock` raises `AgentLockTimeout` |
 | 12   | Registry read OR write failed | wrapped `OSError` / `ValueError` from `load_registry` / `update_registry` |
 | 14   | Provider CLI not on PATH | `shutil.which(chosen)` returned None |

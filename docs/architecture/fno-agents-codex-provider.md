@@ -1,6 +1,6 @@
 # fno agents — codex provider
 
-`fno agents ask --provider codex` spawns and follows up with OpenAI's `codex` CLI under fno's name registry, per-agent flock, and events.jsonl substrate — the same coordination primitives the claude path uses. Both create and follow-up are supported.
+`fno agents ask --harness codex` spawns and follows up with OpenAI's `codex` CLI under fno's name registry, per-agent flock, and events.jsonl substrate — the same coordination primitives the claude path uses. Both create and follow-up are supported.
 
 Parent: [fno-agents-registry-and-dispatch.md](fno-agents-registry-and-dispatch.md). Sibling: [fno-agents-list-logs.md](fno-agents-list-logs.md).
 
@@ -8,16 +8,16 @@ Parent: [fno-agents-registry-and-dispatch.md](fno-agents-registry-and-dispatch.m
 
 ```bash
 # Create a codex agent pinned to the current cwd:
-fno agents ask worker-mig --provider codex --cwd /Users/foo/proj 'write the schema migration'
+fno agents ask worker-mig --harness codex --cwd /Users/foo/proj 'write the schema migration'
 
 # Follow up on the same session (cwd is ignored; codex sessions are cwd-pinned):
 fno agents ask worker-mig 'switch to drizzle, not prisma'
 
 # Dangerous mode: --dangerously-bypass-approvals-and-sandbox in place of --sandbox workspace-write:
-fno agents ask worker-bootstrap --provider codex --yolo 'scaffold a Next.js app with auth'
+fno agents ask worker-bootstrap --harness codex --yolo 'scaffold a Next.js app with auth'
 
 # LLM orchestrator dispatch with a from-name advertised to the worker:
-fno agents ask codex-helper --provider codex --from-name orchestrator-main 'review the migration PR'
+fno agents ask codex-helper --harness codex --from-name orchestrator-main 'review the migration PR'
 ```
 
 The `--yolo` flag is provider-agnostic in spec but a no-op for claude (`claude --bg` has no equivalent; it emits a one-line stderr note and continues).
