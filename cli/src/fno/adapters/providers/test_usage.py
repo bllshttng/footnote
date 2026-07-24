@@ -475,6 +475,7 @@ class TestDispatchOneQuotaDefer:
         # so it must not even consult quota. Proven by making the dispatch reach
         # the spawn boundary (patched to a sentinel outcome).
         from fno.adapters.providers.model import QuotaConfig
+        import fno.backlog.advance as advance_mod
         import fno.dispatch as dispatch_mod
 
         monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rt.json"))
@@ -488,8 +489,12 @@ class TestDispatchOneQuotaDefer:
         write_usage_snapshot(_snap("p1", UsageWindow("5h", 100.0, 9e18), probed_at=_t.time()))
 
         # Force the downstream claim path to short-circuit so we only assert we
-        # did NOT quota-defer: a live dispatch reservation yields already-dispatching.
-        monkeypatch.setattr(dispatch_mod, "_claim_is_live", lambda key: True)
+        # did NOT quota-defer: a live claim yields already-dispatching.
+        monkeypatch.setattr(
+            advance_mod,
+            "_node_dispatch_block_reason",
+            lambda node_id, cwd: "already-claimed",
+        )
         verdict = dispatch_mod._dispatch_one(session="s", node="ab-77", project=None)
         assert verdict["outcome"] != "quota-deferred"
 
