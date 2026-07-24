@@ -587,6 +587,11 @@ struct PaneEntry {
     /// an ad-hoc `pane run` with no `FNO_NODE=` token. Surfaced to the client
     /// status row via `Layout::focus_node`.
     node: Option<String>,
+    /// (x-0ba1) The pane's `FNO_AGENT_SELF` registered worker name, parsed once
+    /// at spawn. `None` for a shell or ad-hoc pane. The top derived source for
+    /// the tab/pane title (decision b) - distinct from `node` (the backlog node
+    /// id) and `cmd` (what the pane is running): three facts, not conflation.
+    name: Option<String>,
     /// The spawn cwd, captured once so the tab-label derivation (x-c150) never
     /// touches the filesystem on the render path. Empty when the spawn fell
     /// back to the server cwd.
@@ -622,6 +627,15 @@ fn node_from_argv(argv: &[String]) -> Option<String> {
 /// the pane's own birth env can).
 fn account_from_argv(argv: &[String]) -> Option<String> {
     env_token_from_argv(argv, "FNO_ACCOUNT=")
+}
+
+/// (x-0ba1) The pane's `FNO_AGENT_SELF` registered worker name, parsed from the
+/// same `env(1)` wrapper prefix as `FNO_NODE`. `_mesh_env_wrapper` stamps it for
+/// every mux-spawned agent pane - the unique identity the sideline row already
+/// shows. The tab/pane title reads this, not the process table, so a QoS
+/// wrapper (taskpolicy/nice) that rewrites argv[0] cannot collapse the title.
+fn agent_self_from_argv(argv: &[String]) -> Option<String> {
+    env_token_from_argv(argv, "FNO_AGENT_SELF=")
 }
 
 /// The argv index where the `env(1)` `NAME=VALUE` assignment run begins:
@@ -758,27 +772,34 @@ fn isolated_attach_ctx() -> HashMap<String, (String, std::path::PathBuf)> {
 
 /// A tab's display label (x-c150), from spawn-time facts only - no I/O, no
 /// subprocess on the layout path (squad.rs's origin-freeze discipline).
-/// Chain (Locked 1): explicit rename > `FNO_NODE` provenance > spawn-cwd
-/// basename when it differs from the squad's > command basename > the bare
-/// 1-based index (exactly the pre-x-c150 label, so a plain shell tab renders
-/// unchanged). `pane` is the focused pane's `(node, cwd, cmd)`; `None` (a
-/// reaped pane racing tree cleanup) falls through to the index - the
+/// Chain: explicit rename > registered name (`FNO_AGENT_SELF`, x-0ba1) >
+/// `FNO_NODE` provenance > spawn-cwd basename when it differs from the squad's
+/// > command basename > the bare 1-based index (so a plain shell tab renders
+/// unchanged). `pane` is the focused pane's `(name, node, cwd, cmd)`; `None`
+/// (a reaped pane racing tree cleanup) falls through to the index - the
 /// derivation never panics on a missing pane.
+#[allow(clippy::type_complexity)]
 fn tab_label(
     rename: Option<&str>,
-    pane: Option<(Option<&str>, &str, Option<&str>)>,
+    pane: Option<(Option<&str>, Option<&str>, &str, Option<&str>)>,
     squad_cwd: &str,
     i: usize,
 ) -> String {
     if let Some(name) = rename {
         return name.to_string();
     }
-    if let Some((node, cwd, cmd)) = pane {
+    if let Some((name, node, cwd, cmd)) = pane {
         // Every derived candidate is sanitized like a rename (codex peer
         // review): FNO_NODE values, dir names, and argv all admit control
         // bytes, and these strings land in chrome cells. A candidate that
         // sanitizes to empty (e.g. whitespace-only) falls through to the
         // next source instead of rendering a blank label.
+        if let Some(name) = name {
+            let clean = sanitize_tab_name(name);
+            if !clean.is_empty() {
+                return clean;
+            }
+        }
         if let Some(node) = node {
             let clean = sanitize_tab_name(node);
             if !clean.is_empty() {
@@ -807,12 +828,13 @@ fn tab_label(
 
 /// A pane's display label for the session navigator (v22, x-653d). Unlike
 /// [`tab_label`] (which prefers a dir name so a tab reads as its worktree), a
-/// pane's discriminator WITHIN a tab is what it is running, so `cmd` leads:
-/// `cmd` -> `node` -> cwd basename -> `shell`. Sanitized like a wire name (these
-/// land in chrome cells). Never an ordinal - a plain pane is `shell`, not a
-/// number the operator cannot map back.
-fn pane_label(node: Option<&str>, cwd: &str, cmd: Option<&str>) -> String {
-    for c in [cmd, node].into_iter().flatten() {
+/// pane's discriminator WITHIN a tab is what it is running, so `cmd` leads when
+/// the pane carries no registered name. Chain (x-0ba1): registered name
+/// (`FNO_AGENT_SELF`) -> `cmd` -> `node` -> cwd basename -> `shell`. Sanitized
+/// like a wire name (these land in chrome cells). Never an ordinal - a plain
+/// pane is `shell`, not a number the operator cannot map back.
+fn pane_label(name: Option<&str>, node: Option<&str>, cwd: &str, cmd: Option<&str>) -> String {
+    for c in [name, cmd, node].into_iter().flatten() {
         let clean = sanitize_tab_name(c);
         if !clean.is_empty() {
             return clean;
@@ -1906,7 +1928,7 @@ impl Core {
         )
         .map_err(|e| e.to_string())?;
         // A shell pane carries no node provenance (no wrapper argv).
-        self.register_pane(id, pty, rows, cols, None, cwd.to_string(), None, None);
+        self.register_pane(id, pty, rows, cols, None, None, cwd.to_string(), None, None);
         Ok(id)
     }
 
@@ -1925,6 +1947,7 @@ impl Core {
             return Err("pane run needs a command (empty argv)".into());
         }
         let node = node_from_argv(argv);
+        let name = agent_self_from_argv(argv);
         let cmd = cmd_from_argv(argv);
         let account = account_from_argv(argv);
         let id = self.next_pane_id;
@@ -1940,7 +1963,17 @@ impl Core {
             self.exit_tx.clone(),
         )
         .map_err(|e| e.to_string())?;
-        self.register_pane(id, pty, rows, cols, node, cwd.to_string(), cmd, account);
+        self.register_pane(
+            id,
+            pty,
+            rows,
+            cols,
+            node,
+            name,
+            cwd.to_string(),
+            cmd,
+            account,
+        );
         Ok(id)
     }
 
@@ -1955,6 +1988,7 @@ impl Core {
         rows: u16,
         cols: u16,
         node: Option<String>,
+        name: Option<String>,
         cwd: String,
         cmd: Option<String>,
         account: Option<String>,
@@ -1967,6 +2001,7 @@ impl Core {
                 pty,
                 vt: vt::Pane::new(rows, cols),
                 node,
+                name,
                 cwd,
                 cmd,
                 account,
@@ -4617,9 +4652,14 @@ impl Core {
                         named: t.name.is_some(),
                         name: tab_label(
                             t.name.as_deref(),
-                            self.panes
-                                .get(&t.focus)
-                                .map(|e| (e.node.as_deref(), e.cwd.as_str(), e.cmd.as_deref())),
+                            self.panes.get(&t.focus).map(|e| {
+                                (
+                                    e.name.as_deref(),
+                                    e.node.as_deref(),
+                                    e.cwd.as_str(),
+                                    e.cmd.as_deref(),
+                                )
+                            }),
                             s.canonical_cwd(),
                             i,
                         ),
@@ -4633,6 +4673,7 @@ impl Core {
                                 PaneMeta {
                                     id: *pid,
                                     label: pane_label(
+                                        e.and_then(|e| e.name.as_deref()),
                                         e.and_then(|e| e.node.as_deref()),
                                         e.map(|e| e.cwd.as_str()).unwrap_or(""),
                                         e.and_then(|e| e.cmd.as_deref()),
@@ -4909,6 +4950,7 @@ impl Core {
                             AgentRow {
                                 squad: Some(squad.id),
                                 name: pane_label(
+                                    e.and_then(|e| e.name.as_deref()),
                                     e.and_then(|e| e.node.as_deref()),
                                     e.map(|e| e.cwd.as_str()).unwrap_or(""),
                                     e.and_then(|e| e.cmd.as_deref()),
@@ -9312,22 +9354,31 @@ mod tests {
         .collect();
         assert_eq!(node_from_argv(&argv), Some("x-1".to_string()));
         assert_eq!(account_from_argv(&argv), Some("readyrule".to_string()));
+        assert_eq!(agent_self_from_argv(&argv), Some("w".to_string()));
         assert_eq!(cmd_from_argv(&argv).as_deref(), Some("claude"));
     }
 
     #[test]
-    fn pane_label_prefers_cmd_then_node_then_cwd_then_shell() {
-        // The navigator's pane label (v22, x-653d): cmd is the intra-tab
-        // discriminator, then node, then the cwd basename, else "shell".
+    fn pane_label_prefers_cmd_then_node_then_cwd_when_no_registered_name() {
+        // The navigator's pane label (v22, x-653d) when no registered name: cmd
+        // is the intra-tab discriminator, then node, then the cwd basename, else
+        // "shell". (x-0ba1: a registered name leads when present - see
+        // pane_label_prefers_the_registered_name.)
         assert_eq!(
-            pane_label(Some("x-abcd"), "/home/u/proj", Some("claude")),
+            pane_label(None, Some("x-abcd"), "/home/u/proj", Some("claude")),
             "claude"
         );
-        assert_eq!(pane_label(Some("x-abcd"), "/home/u/proj", None), "x-abcd");
-        assert_eq!(pane_label(None, "/home/u/proj", None), "proj");
-        assert_eq!(pane_label(None, "", None), "shell");
+        assert_eq!(
+            pane_label(None, Some("x-abcd"), "/home/u/proj", None),
+            "x-abcd"
+        );
+        assert_eq!(pane_label(None, None, "/home/u/proj", None), "proj");
+        assert_eq!(pane_label(None, None, "", None), "shell");
         // A control-only candidate sanitizes to empty and falls through.
-        assert_eq!(pane_label(None, "/home/u/proj", Some("\u{7}")), "proj");
+        assert_eq!(
+            pane_label(None, None, "/home/u/proj", Some("\u{7}")),
+            "proj"
+        );
     }
 
     #[test]
@@ -9349,17 +9400,17 @@ mod tests {
         assert_eq!(
             tab_label(
                 Some("debug"),
-                Some((Some("x-1"), "/w/x-2", Some("claude"))),
+                Some((None, Some("x-1"), "/w/x-2", Some("claude"))),
                 "/w",
                 0
             ),
             "debug"
         );
-        // FNO_NODE provenance beats cwd + cmd (AC1-HP).
+        // FNO_NODE provenance beats cwd + cmd (AC1-HP). name absent here.
         assert_eq!(
             tab_label(
                 None,
-                Some((Some("x-abcd"), "/w/x-2", Some("claude"))),
+                Some((None, Some("x-abcd"), "/w/x-2", Some("claude"))),
                 "/w",
                 0
             ),
@@ -9371,6 +9422,7 @@ mod tests {
             tab_label(
                 None,
                 Some((
+                    None,
                     None,
                     "/conductor/workspaces/footnote/x-9f21",
                     Some("claude")
@@ -9384,7 +9436,7 @@ mod tests {
         assert_eq!(
             tab_label(
                 None,
-                Some((None, "/code/footnote", Some("htop"))),
+                Some((None, None, "/code/footnote", Some("htop"))),
                 "/code/footnote",
                 1
             ),
@@ -9395,7 +9447,7 @@ mod tests {
         assert_eq!(
             tab_label(
                 None,
-                Some((None, "/code/footnote", None)),
+                Some((None, None, "/code/footnote", None)),
                 "/code/footnote",
                 2
             ),
@@ -9415,19 +9467,112 @@ mod tests {
         // codex peer review: derived sources (FNO_NODE, dir names, argv) admit
         // control bytes and land in chrome cells - sanitize like a rename.
         assert_eq!(
-            tab_label(None, Some((Some("\x1b[31mx-1"), "/w", None)), "/w", 0),
+            tab_label(None, Some((None, Some("\x1b[31mx-1"), "/w", None)), "/w", 0),
             "[31mx-1"
         );
         // A whitespace-only node sanitizes to empty and falls through to the
         // next source instead of rendering a blank label.
         assert_eq!(
-            tab_label(None, Some((Some("   "), "/w/x-2", None)), "/w", 0),
+            tab_label(None, Some((None, Some("   "), "/w/x-2", None)), "/w", 0),
             "x-2"
         );
         // A control-char-only dir basename falls through to cmd.
         assert_eq!(
-            tab_label(None, Some((None, "/w/\x01\x02", Some("htop"))), "/w", 0),
+            tab_label(
+                None,
+                Some((None, None, "/w/\x01\x02", Some("htop"))),
+                "/w",
+                0
+            ),
             "htop"
+        );
+    }
+
+    #[test]
+    fn agent_self_from_argv_reads_the_registered_worker_name_past_qos_wrappers() {
+        // x-0ba1: the registered name lives in the env(1) prefix like FNO_NODE
+        // and parses past the same -u scrub. argv[0] past the env run is the
+        // QoS wrapper (taskpolicy), not the provider - the title must not read it.
+        let to_argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let argv = to_argv(&[
+            "env",
+            "FNO_AGENT_SELF=build",
+            "FNO_NODE=x-2af5",
+            "/usr/sbin/taskpolicy",
+            "-c",
+            "utility",
+            "--",
+            "claude",
+        ]);
+        assert_eq!(agent_self_from_argv(&argv).as_deref(), Some("build"));
+        // Empty value falls through (env_token_from_argv filters empties).
+        assert_eq!(
+            agent_self_from_argv(&to_argv(&["env", "FNO_AGENT_SELF=", "claude"])),
+            None
+        );
+        // An ad-hoc `pane run -- htop` carries no FNO_AGENT_SELF.
+        assert_eq!(agent_self_from_argv(&to_argv(&["htop"])), None);
+    }
+
+    #[test]
+    fn tab_label_reads_the_registered_name_over_a_qos_wrapper() {
+        // x-0ba1 decision b: a QoS-wrapped worker's argv[0] is taskpolicy/nice,
+        // so titling from the process table collapses every worker to one label.
+        // The registered name is the top derived source and wins over node/cwd/cmd.
+        let argv: Vec<String> = [
+            "env",
+            "FNO_AGENT_SELF=build",
+            "FNO_NODE=x-2af5",
+            "/usr/sbin/taskpolicy",
+            "-c",
+            "utility",
+            "--",
+            "claude",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let pane = (
+            agent_self_from_argv(&argv),
+            node_from_argv(&argv),
+            String::from("/w"),
+            cmd_from_argv(&argv),
+        );
+        // What a process-table title would show (and must NOT be used):
+        assert_eq!(pane.3.as_deref(), Some("taskpolicy"));
+        assert_eq!(
+            tab_label(
+                None,
+                Some((
+                    pane.0.as_deref(),
+                    pane.1.as_deref(),
+                    pane.2.as_str(),
+                    pane.3.as_deref()
+                )),
+                "/w",
+                0,
+            ),
+            "build"
+        );
+    }
+
+    #[test]
+    fn tab_label_distinguishes_two_registered_workers_in_one_session() {
+        // x-0ba1 verify: registered names are unique per session, so a second
+        // worker yields a different title. cwd basenames are not unique (two
+        // workers share a worktree), so name - not cwd - distinguishes them.
+        let mk = |self_name: &'static str| (Some(self_name), None, "/w", Some("taskpolicy"));
+        assert_eq!(tab_label(None, Some(mk("build")), "/w", 0), "build");
+        assert_eq!(tab_label(None, Some(mk("lint")), "/w", 0), "lint");
+    }
+
+    #[test]
+    fn pane_label_prefers_the_registered_name() {
+        // x-0ba1: the navigator discriminator reads the registered name first,
+        // so it no longer shows the QoS wrapper (taskpolicy) either.
+        assert_eq!(
+            pane_label(Some("build"), Some("x-1"), "/w", Some("taskpolicy")),
+            "build"
         );
     }
 
