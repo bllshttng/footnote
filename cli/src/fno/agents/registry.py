@@ -217,6 +217,12 @@ class AgentEntry:
     spawned_by_session: Optional[str] = None
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
+    # Registration origin: "operator" for a session a human started by hand (the
+    # SessionStart register hook / ``fno agents register``); absent for a
+    # spawn/host worker row. Additive-optional (None default) so pre-existing
+    # rows and the Rust RegistryEntry round-trip losslessly, and absence reads
+    # as worker -- the attended-miss escalation lane fails toward silence.
+    origin: Optional[str] = None
 
     # ----------------------------------------------------------------------
     # Rust-daemon-only PTY fields (ab-b946b59c). A genuine daemon PTY row
@@ -803,6 +809,7 @@ def register_existing_session(
     log_path: str = "",
     short_id: str = "",
     status: Optional[AgentStatus] = None,
+    origin: Optional[str] = None,
     registry_path: Optional[Path] = None,
 ) -> AgentEntry:
     """Register an operator-started session so peers can address it by name.
@@ -874,6 +881,11 @@ def register_existing_session(
                     entry.log_path = log_path
                 if short_id:
                     entry.short_id = short_id
+                # Only restamp origin when the caller passed one: the harness-store
+                # healer refreshes rows without it, and a blind `entry.origin = None`
+                # would clobber an operator stamp a re-firing hook must preserve.
+                if origin is not None:
+                    entry.origin = origin
                 return entries
         base = name or canonical_handle(session_id)
         taken = {entry.name for entry in entries}
@@ -888,6 +900,7 @@ def register_existing_session(
             cwd=cwd,
             log_path=log_path,
             status=_REGISTERED_STATUS,
+            origin=origin,
         )
         setattr(fresh, session_field, session_id)
         if short_id:

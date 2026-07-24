@@ -208,3 +208,94 @@ def test_escalation_failure_never_breaks_the_send(runner, mailbox, monkeypatch):
     )
     assert res.exit_code == 0, res.output
     assert _unread_count(runner, "web") == 1
+
+
+# ---------------------------------------------------------------------------
+# Attended-recipient live-miss lane (US3): a send to an operator-attended
+# session that misses live delivery escalates; a worker or a live-confirmed
+# send does not. Drives _name_lane_send directly with a constructed resolved
+# session + mocked injectors, so the assertion is the escalation site itself.
+# ---------------------------------------------------------------------------
+
+
+def _resolved_claude(session_id: str):
+    """A minimal duck-typed resolved session for _name_lane_send."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        session_id=session_id, agent="claude", handle=session_id[:8]
+    )
+
+
+def _skip_mux(monkeypatch):
+    """Force the mux-pane rung to skip (resolve_agent raises) so a live-miss
+    falls straight to the durable floor."""
+    from fno.agents.registry import AgentResolutionError
+
+    def _raise(*_a, **_k):
+        raise AgentResolutionError("test: skip mux rung")
+
+    monkeypatch.setattr("fno.agents.registry.resolve_agent", _raise)
+
+
+def test_attended_live_miss_escalates(mailbox, monkeypatch, emitted_events):
+    from fno.agents.registry import register_existing_session
+    from fno.mail.cli import _name_lane_send
+
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    register_existing_session(
+        provider="claude", session_id=sid, cwd=str(mailbox), origin="operator"
+    )
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
+    _skip_mux(monkeypatch)
+
+    _name_lane_send("need your eyes on this", from_name="sender", resolved=_resolved_claude(sid))
+
+    assert len(emitted_events) == 1, "operator live-miss escalates once"
+    assert emitted_events[0]["data"]["reason"] == "attended-miss"
+    assert emitted_events[0]["data"]["recipient"] == "9a063cd3"
+
+
+def test_worker_recipient_live_miss_does_not_escalate(mailbox, monkeypatch, emitted_events):
+    from fno.agents.registry import register_existing_session
+    from fno.mail.cli import _name_lane_send
+
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    # A spawn/host worker row: no origin -> reads as not-attended.
+    register_existing_session(provider="claude", session_id=sid, cwd=str(mailbox))
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
+    _skip_mux(monkeypatch)
+
+    _name_lane_send("fyi", from_name="sender", resolved=_resolved_claude(sid))
+
+    assert emitted_events == [], "a worker recipient never fires the attended lane"
+
+
+def test_live_confirmed_send_does_not_escalate(mailbox, monkeypatch, emitted_events):
+    from fno.agents.registry import register_existing_session
+    from fno.mail.cli import _name_lane_send
+
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    register_existing_session(
+        provider="claude", session_id=sid, cwd=str(mailbox), origin="operator"
+    )
+    # Live inject succeeds -> delivered (hosted); the durable block (and the
+    # attended-miss site in it) never runs.
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: True)
+
+    _name_lane_send("already in your transcript", from_name="sender", resolved=_resolved_claude(sid))
+
+    assert emitted_events == [], "a live-confirmed inject is in front of the human already"
+
+
+def test_registry_read_failure_escalates_neither_nor_breaks(monkeypatch):
+    # An unreadable registry must read as not-attended (never raise), so the
+    # send still succeeds and escalates nothing (AC3-ERR).
+    from fno.mail.cli import _recipient_is_attended
+
+    def _boom(*_a, **_k):
+        raise OSError("registry unreadable")
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", _boom)
+    assert _recipient_is_attended("9a063cd3") is False
+

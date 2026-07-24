@@ -1171,6 +1171,11 @@ def _name_lane_send(
     # birth we never know a recipient is gone for good (a token no store knows
     # already exits 16 upstream), so the durable floor never escalates non-zero.
     self_send = resolved is None and token is not None and token_lane == "self-send"
+    # A live rung was actually attempted (and missed): the resolved-session
+    # inject, or the token ladder run below discovery. A self-send and a
+    # durable-only reply (neither resolved nor token) had no live attempt, so
+    # the attended lane must not fire for them (Locked Decision 3: live-miss).
+    live_attempted = resolved is not None or (token is not None and not self_send)
     recipient_live = self_send or resolved is not None
     owner = classify_durable_owner(
         param_forced=False,
@@ -1200,12 +1205,43 @@ def _name_lane_send(
     # inject itself; everything else here is a live miss.
     reason = "self-send" if self_send else "live-miss"
     print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]")
+    # Attended live-miss lane: a send to an operator-attended session that missed
+    # live delivery is the stranded case (the human is not watching the drain, so
+    # nothing else surfaces it). Fires on live-miss only; worker rows (no origin)
+    # never escalate. Best-effort, same as the question lane: never affects the
+    # send's exit code or receipt.
+    if live_attempted and _recipient_is_attended(recipient):
+        if (
+            _escalate_to_human(
+                stamp_from(from_name), recipient, message, reason="attended-miss", msg_id=msg_id
+            )
+            == "escalated"
+        ):
+            print(f"escalated to human ({recipient}) [attended-miss]", file=sys.stderr)
 
 
 # Send-time human escalation for a question, per (sender, recipient). A burst
 # re-nudges every window rather than once forever (marker refreshed only on an
 # actual escalation, so the window runs from the last nudge, not the first send).
 _ESCALATION_DEBOUNCE_S = 300
+
+
+def _recipient_is_attended(recipient: str) -> bool:
+    """True iff ``recipient``'s registry row was stamped ``origin=operator`` at
+    a hand-start (SessionStart register hook / ``fno agents register``).
+
+    Attendance is declared at registration, never inferred at send time, so a
+    row missing the field (a spawn/host worker, or a pre-change row) reads as
+    not-attended -- fail toward silence. Never raises: an unreadable registry or
+    an unresolved recipient escalates nothing, so the send still succeeds.
+    """
+    try:
+        from fno.agents.registry import load_registry, resolve_agent_in
+
+        entry = resolve_agent_in(load_registry(), recipient).entry
+    except Exception:  # noqa: BLE001 - a registry read failure never breaks the send
+        return False
+    return getattr(entry, "origin", None) == "operator"
 
 
 def _escalate_to_human(

@@ -1980,7 +1980,8 @@ def cmd_register(
 
     try:
         entry = register_existing_session(
-            provider=harness, session_id=session_id, cwd=os.getcwd()
+            provider=harness, session_id=session_id, cwd=os.getcwd(),
+            origin="operator",
         )
     except Exception as exc:  # a deliberate manual join reports failure (unlike the fail-open hook)
         sys.stderr.write(f"register failed: {exc}\n")
