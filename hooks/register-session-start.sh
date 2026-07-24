@@ -30,11 +30,11 @@ AUTO="$(fno config get agents.auto_register_sessions 2>/dev/null || true)"
 # on (harness_identity.HARNESS_SESSION_MARKERS): claude uses CLAUDE_CODE_SESSION_ID,
 # not CLAUDE_SESSION_ID (the old name here was unset, so claude never registered).
 if [[ -n "${GEMINI_PROJECT_DIR:-}" ]]; then
-    PROVIDER="gemini"; SESSION_ID="${GEMINI_SESSION_ID:-}"
+    HARNESS="gemini"; SESSION_ID="${GEMINI_SESSION_ID:-}"
 elif [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
-    PROVIDER="codex"; SESSION_ID="${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}"
+    HARNESS="codex"; SESSION_ID="${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}"
 elif [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
-    PROVIDER="claude"; SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
+    HARNESS="claude"; SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 else
     exit 0  # generic/unknown harness: nothing addressable to register
 fi
@@ -44,7 +44,7 @@ fi
 
 cd "$REPO_ROOT" 2>/dev/null || true
 uv run --project "$CLI_DIR" python3 -m fno.agents.register_session \
-    --provider "$PROVIDER" \
+    --harness "$HARNESS" \
     --session-id "$SESSION_ID" \
     --cwd "$REPO_ROOT" 2>/dev/null || true
 

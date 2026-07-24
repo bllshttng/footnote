@@ -50,7 +50,7 @@ def test_codex_thread_id_wins_with_mocked_uv(tmp_path: Path) -> None:
     subprocess.run(["bash", str(HOOK)], check=True, env=env)
 
     argv = capture.read_text(encoding="utf-8").splitlines()
-    assert argv[argv.index("--provider") + 1] == "codex"
+    assert argv[argv.index("--harness") + 1] == "codex"
     assert argv[argv.index("--session-id") + 1] == "thread-wins"
 
 
@@ -83,8 +83,8 @@ def test_shared_codex_session_start_registers_thread_once(tmp_path: Path) -> Non
     )
 
     argv = capture.read_text(encoding="utf-8").splitlines()
-    assert argv.count("--provider") == 1
-    assert argv[argv.index("--provider") + 1] == "codex"
+    assert argv.count("--harness") == 1
+    assert argv[argv.index("--harness") + 1] == "codex"
     assert argv[argv.index("--session-id") + 1] == "shared-thread"
 
 

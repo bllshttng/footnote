@@ -142,7 +142,7 @@ def test_ac7_err_main_failopen_emits_event(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(register_session, "register_existing_session", _boom)
 
     rc = register_session.main(
-        ["--provider", "claude", "--session-id", "sess-x", "--cwd", "/s"]
+        ["--harness", "claude", "--session-id", "sess-x", "--cwd", "/s"]
     )
 
     assert rc == 0  # session start is never blocked
@@ -156,7 +156,7 @@ def test_main_success_emits_registered_event(tmp_path: Path, monkeypatch) -> Non
     from fno.agents.registry import load_registry
 
     rc = register_session.main(
-        ["--provider", "claude", "--session-id", "sess-ok", "--cwd", "/proj"]
+        ["--harness", "claude", "--session-id", "sess-ok", "--cwd", "/proj"]
     )
 
     assert rc == 0
@@ -171,12 +171,30 @@ def test_main_empty_session_id_is_silent_noop(tmp_path: Path, monkeypatch) -> No
     from fno.agents.registry import load_registry
 
     rc = register_session.main(
-        ["--provider", "claude", "--session-id", "", "--cwd", "/proj"]
+        ["--harness", "claude", "--session-id", "", "--cwd", "/proj"]
     )
 
     assert rc == 0
     assert load_registry() == []
     assert _events(tmp_path) == []  # no noise when there's nothing to register
+
+
+def test_main_accepts_provider_alias(tmp_path: Path, monkeypatch) -> None:
+    # --provider is the axis-rename alias for --harness (x-bab1); it must still
+    # register the same harness so the fail-soft SessionStart hook survives any
+    # cutover skew between hook and module.
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import register_session
+    from fno.agents.registry import load_registry
+
+    rc = register_session.main(
+        ["--provider", "codex", "--session-id", "sess-alias", "--cwd", "/proj"]
+    )
+
+    assert rc == 0
+    rows = load_registry()
+    assert len(rows) == 1
+    assert rows[0].harness == "codex"
 
 
 # ---------------------------------------------------------------------------

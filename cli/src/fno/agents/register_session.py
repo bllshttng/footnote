@@ -1,7 +1,7 @@
 """SessionStart entry point: register the current operator-started session.
 
 Invoked by ``hooks/register-session-start.sh`` as
-``python3 -m fno.agents.register_session --provider claude ...``.
+``python3 -m fno.agents.register_session --harness claude ...``.
 
 Fail-soft by contract (US7 AC7-ERR): any failure emits a
 ``session_register_failed`` warning event and still exits 0, so the hook
@@ -21,12 +21,19 @@ from fno.agents.registry import register_existing_session
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="register_session")
-    parser.add_argument("--provider", required=True)
+    # --harness is canonical; --provider is the axis-rename alias (x-bab1), kept
+    # so the fail-soft SessionStart hook keeps working across the cutover.
+    parser.add_argument("--harness", dest="harness",
+                        help="Harness/CLI identity to register (claude | codex | gemini).")
+    parser.add_argument("--provider", dest="harness", help=argparse.SUPPRESS)
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--cwd", required=True)
     parser.add_argument("--name", default=None)
     parser.add_argument("--log-path", default="")
     args = parser.parse_args(argv)
+
+    if not args.harness:
+        parser.error("--harness is required")
 
     # An empty session id reaches here when the hook's CLI env var is unset
     # (non-claude harness, or claude not exporting it). Treat as a silent
@@ -36,7 +43,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         entry = register_existing_session(
-            provider=args.provider,
+            provider=args.harness,
             session_id=args.session_id,
             cwd=args.cwd,
             name=args.name or None,
@@ -45,7 +52,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception as exc:  # fail-open: never block session start (AC7-ERR)
         events.emit(
             "session_register_failed",
-            provider=args.provider,
+            provider=args.harness,
             session_id=args.session_id,
             error=str(exc),
         )
