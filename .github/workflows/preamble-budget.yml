@@ -1,0 +1,32 @@
+name: preamble-budget
+
+on:
+  push:
+    branches: [main]
+    paths: &preamble_budget_paths
+      - AGENTS.md
+      - CLAUDE.md
+      - .claude/rules/**
+      - skills/using-fno/SKILL.md
+      - scripts/ci/check-preamble-budget.sh
+      - .github/workflows/preamble-budget.yml
+  pull_request:
+    paths: *preamble_budget_paths
+
+concurrency:
+  group: preamble-budget-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check-preamble-budget:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: SessionStart preamble byte budget
+        run: bash scripts/ci/check-preamble-budget.sh
