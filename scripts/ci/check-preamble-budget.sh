@@ -11,6 +11,7 @@ CEILING_BYTES=38000
 RATCHET_NUDGE_BYTES=2000
 QUIET=0
 REPO_ROOT="."
+REPO_ROOT_SET=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -22,11 +23,12 @@ for arg in "$@"; do
       exit 1
       ;;
     *)
-      if [[ "$REPO_ROOT" != "." ]]; then
+      if (( REPO_ROOT_SET )); then
         echo "check-preamble-budget: expected at most one repo root" >&2
         exit 1
       fi
       REPO_ROOT="$arg"
+      REPO_ROOT_SET=1
       ;;
   esac
 done
@@ -64,6 +66,10 @@ TOTAL_BYTES=0
 RECORDS=""
 for path in "${FILES[@]}"; do
   relative="${path#"$REPO_ROOT"/}"
+  [[ -f "$path" ]] || {
+    echo "check-preamble-budget: discovered path is not a regular file: $relative" >&2
+    exit 1
+  }
   [[ -r "$path" ]] || {
     echo "check-preamble-budget: discovered file is not readable: $relative" >&2
     exit 1

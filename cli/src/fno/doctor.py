@@ -43,6 +43,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -799,27 +800,85 @@ def _launch_agent_failures() -> dict[str, Any]:
     return {"applicable": True, "dead": dead}
 
 
-def _preamble_budget_line(repo_root: Optional[Path] = None) -> Optional[str]:
-    """Return the gate's quiet report, or None when it is absent or unrunnable."""
-    root = repo_root or Path.cwd()
-    gate = root / "scripts" / "ci" / "check-preamble-budget.sh"
-    if not gate.is_file():
-        return None
+def _bounded_command(argv: list[str]) -> Optional[tuple[int, str, str]]:
     try:
         proc = subprocess.Popen(
-            ["bash", str(gate), "--quiet", str(root)],
+            argv,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
             text=True,
         )
-        stdout, _ = proc.communicate(timeout=5)
+        stdout, stderr = proc.communicate(timeout=5)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         proc.communicate()
         return None
     except OSError:
         return None
-    return next((line for line in stdout.splitlines() if line.startswith("preamble:")), None)
+    return proc.returncode, stdout, stderr
+
+
+def _git_checkout_identity(path: Path) -> Optional[tuple[Path, Path]]:
+    result = _bounded_command(
+        [
+            "git",
+            "-C",
+            str(path),
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-common-dir",
+        ]
+    )
+    if result is None or result[0] != 0:
+        return None
+    lines = result[1].splitlines()
+    if len(lines) != 2:
+        return None
+    return Path(lines[0]).resolve(), Path(lines[1]).resolve()
+
+
+def _preamble_budget_line(
+    source_root: Optional[Path],
+    *,
+    cwd: Optional[Path] = None,
+) -> Optional[str]:
+    """Return the quiet report only inside the resolved Footnote checkout."""
+    if source_root is None:
+        return None
+    if cwd is None:
+        try:
+            cwd = Path.cwd()
+        except OSError:
+            return None
+    source = _git_checkout_identity(source_root)
+    current = _git_checkout_identity(cwd)
+    if source is None or current is None or source[1] != current[1]:
+        return None
+    root = current[0]
+    gate = root / "scripts" / "ci" / "check-preamble-budget.sh"
+    if not gate.is_file():
+        return None
+
+    result = _bounded_command(["bash", str(gate), "--quiet", str(root)])
+    if result is None:
+        return "preamble: unavailable (check did not complete)"
+    line = next(
+        (line for line in result[1].splitlines() if line.startswith("preamble:")),
+        None,
+    )
+    if line is not None:
+        return line
+    if result[0] != 0:
+        detail = next((line.strip() for line in result[2].splitlines() if line.strip()), "")
+        if detail:
+            return f"preamble: unavailable ({detail[:160]})"
+        return f"preamble: unavailable (check exited {result[0]})"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1731,7 +1790,7 @@ def doctor_command(
     else:
         _emit_human(result, src, rust, err=False, cargo_present=cargo_bin_present)
         if not fix:
-            preamble_line = _preamble_budget_line()
+            preamble_line = _preamble_budget_line(src)
             if preamble_line is not None:
                 typer.echo(preamble_line)
 
