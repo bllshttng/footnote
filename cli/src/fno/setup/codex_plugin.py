@@ -20,6 +20,8 @@ RELEASE_SOURCE = "bllshttng/footnote"
 RELEASE_PLUGIN_ID = "fno@footnote"
 DEV_MARKETPLACE = "footnote-dev"
 DEV_PLUGIN_ID = "fno@footnote-dev"
+LEGACY_PLUGIN_ID = "fno@footnote-local"
+OWNED_PLUGIN_IDS = frozenset({RELEASE_PLUGIN_ID, DEV_PLUGIN_ID, LEGACY_PLUGIN_ID})
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 _OUTPUT_LIMIT = 500
@@ -109,13 +111,19 @@ def parse_state(marketplaces_json: str, plugins_json: str) -> CodexState:
         if not isinstance(plugin_id, str) or not plugin_id:
             raise CodexPluginError("plugin-list", "installed plugin missing pluginId")
         source_type, source = _source(item.get("marketplaceSource"))
+        installed = item.get("installed")
+        enabled = item.get("enabled")
+        if not isinstance(installed, bool) or not isinstance(enabled, bool):
+            raise CodexPluginError("plugin-list", "installed and enabled must be booleans")
+        if enabled and not installed:
+            raise CodexPluginError("plugin-list", "enabled plugin is not installed")
         plugins.append(
             Plugin(
                 plugin_id=plugin_id,
                 marketplace_name=str(item.get("marketplaceName", "")),
                 version=str(item.get("version", "")),
-                installed=item.get("installed") is True,
-                enabled=item.get("enabled") is True,
+                installed=installed,
+                enabled=enabled,
                 source_type=source_type,
                 marketplace_source=source,
             )
@@ -242,12 +250,23 @@ def _manifest_version(source_root: Path) -> str:
 
 def plugin_payload_digest(plugin_root: Path) -> str:
     """Hash only files Codex can load from the Footnote plugin payload."""
-    candidates = [plugin_root / ".codex-plugin" / "plugin.json"]
+    candidates = [
+        plugin_root / ".codex-plugin" / "plugin.json",
+        plugin_root / "scripts" / "save-session.py",
+    ]
     for relative in ("skills", "hooks", ".codex/agents"):
         base = plugin_root / relative
         if base.is_dir():
-            candidates.extend(path for path in base.rglob("*") if path.is_file())
+            candidates.extend(
+                path
+                for path in base.rglob("*")
+                if path.is_file()
+                and "__pycache__" not in path.parts
+                and path.suffix not in {".pyc", ".pyo"}
+                and path.name != ".DS_Store"
+            )
     digest = hashlib.sha256()
+    candidates = [path for path in candidates if path.is_file()]
     for path in sorted(candidates, key=lambda item: item.relative_to(plugin_root).as_posix()):
         relative = path.relative_to(plugin_root).as_posix().encode()
         try:
@@ -302,7 +321,7 @@ def inspect_freshness(
             "remedy": f"fno setup codex-plugin --channel {remedy_channel} --refresh",
         }
 
-    installed = [p for p in state.plugins if p.installed and p.plugin_id.startswith("fno@")]
+    installed = [p for p in state.plugins if p.installed and p.plugin_id in OWNED_PLUGIN_IDS]
     enabled = [p for p in installed if p.enabled]
     base: dict[str, object] = {
         "channel": channel,
@@ -387,13 +406,15 @@ def converge(
         raise CodexPluginError("channel", f"unsupported channel: {channel}")
     home = resolve_codex_home(codex_home)
     source = source_root or _canonical_source_root()
-    version = _manifest_version(source)
     if channel == "release":
+        local_manifest = source / ".codex-plugin" / "plugin.json"
+        version = _manifest_version(source) if local_manifest.is_file() else ""
         marketplace_name = RELEASE_MARKETPLACE
         marketplace_source = RELEASE_SOURCE
         plugin_id = RELEASE_PLUGIN_ID
         source_matches = _same_release_source
     else:
+        version = _manifest_version(source)
         marketplace_name = DEV_MARKETPLACE
         dev_marketplace = source / ".agents" / "marketplaces" / DEV_MARKETPLACE
         manifest = dev_marketplace / ".agents" / "plugins" / "marketplace.json"
@@ -411,7 +432,7 @@ def converge(
         footnote_plugins = [
             plugin
             for plugin in state.plugins
-            if plugin.installed and plugin.plugin_id.startswith("fno@")
+            if plugin.installed and plugin.plugin_id in OWNED_PLUGIN_IDS
         ]
         marketplace = next(
             (item for item in state.marketplaces if item.name == marketplace_name), None
@@ -454,11 +475,16 @@ def converge(
 
         needs_install = selected is None or refresh or not selected_ok or not marketplace_ok
         if needs_install:
-            if channel == "release":
+            if channel == "release" and version:
+                release_check = source / "scripts" / "release" / "sync-version.sh"
+                if not release_check.is_file():
+                    raise CodexPluginError(
+                        "release-version-check", f"missing {release_check}"
+                    )
                 _run(
                     runner,
                     "release-version-check",
-                    [str(source / "scripts" / "release" / "sync-version.sh"), "--check"],
+                    [str(release_check), "--check"],
                     cwd=source,
                 )
             if marketplace is not None and not marketplace_ok:
@@ -491,16 +517,28 @@ def converge(
         enabled = [
             plugin
             for plugin in final.plugins
-            if plugin.installed and plugin.enabled and plugin.plugin_id.startswith("fno@")
+            if plugin.installed and plugin.enabled and plugin.plugin_id in OWNED_PLUGIN_IDS
         ]
         if (
             len(enabled) != 1
             or enabled[0].plugin_id != plugin_id
             or enabled[0].marketplace_name != marketplace_name
+            or not enabled[0].version
             or not source_matches(enabled[0].source_type, enabled[0].marketplace_source)
         ):
             found = ", ".join(plugin.plugin_id for plugin in enabled) or "none"
             raise CodexPluginError("final-verify", f"expected {plugin_id}; enabled={found}")
+        if refresh and channel == "dev":
+            cache = home / "plugins" / "cache" / marketplace_name / "fno" / enabled[0].version
+            if not cache.is_dir():
+                raise CodexPluginError("final-verify", f"cache missing after refresh: {cache}")
+            if enabled[0].version != version:
+                raise CodexPluginError(
+                    "final-verify",
+                    f"refreshed version {enabled[0].version} != source {version}",
+                )
+            if plugin_payload_digest(source) != plugin_payload_digest(cache):
+                raise CodexPluginError("final-verify", "cache payload differs after refresh")
         action = "refreshed" if refresh else ("installed" if selected is None else "repaired")
         if changed and selected is not None and not refresh:
             action = "repaired"

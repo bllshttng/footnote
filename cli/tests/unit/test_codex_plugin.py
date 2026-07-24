@@ -103,6 +103,13 @@ def test_parse_current_codex_json_state() -> None:
     assert state.plugins[0].enabled is True
 
 
+def test_parse_rejects_enabled_plugin_that_is_not_installed() -> None:
+    row = _plugin("fno@footnote", source="bllshttng/footnote", source_type="git")
+    row["installed"] = False
+    with pytest.raises(CodexPluginError, match="enabled plugin is not installed"):
+        parse_state('{"marketplaces": []}', json.dumps({"installed": [row]}))
+
+
 def test_release_convergence_removes_dev_then_installs_and_verifies(tmp_path: Path) -> None:
     source = _source(tmp_path)
     codex_home = tmp_path / "codex-home"
@@ -219,6 +226,122 @@ def test_release_convergence_is_source_aware_noop(tmp_path: Path) -> None:
         ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
     ]
+
+
+def test_packaged_release_install_does_not_require_local_plugin_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "ordinary-project"
+    source.mkdir()
+    marketplaces: list[dict[str, object]] = []
+    plugins: list[dict[str, object]] = []
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv == ["codex", "plugin", "marketplace", "list", "--json"]:
+            return _cp(argv, {"marketplaces": marketplaces})
+        if argv == ["codex", "plugin", "list", "--json"]:
+            return _cp(argv, {"installed": plugins, "available": []})
+        if argv == [
+            "codex",
+            "plugin",
+            "marketplace",
+            "add",
+            "bllshttng/footnote",
+            "--json",
+        ]:
+            marketplaces.append(
+                {
+                    "name": "footnote",
+                    "marketplaceSource": {
+                        "sourceType": "git",
+                        "source": "https://github.com/bllshttng/footnote.git",
+                    },
+                }
+            )
+            return _cp(argv, {"name": "footnote"})
+        if argv == [
+            "codex",
+            "plugin",
+            "marketplace",
+            "upgrade",
+            "footnote",
+            "--json",
+        ]:
+            return _cp(argv, {"upgraded": True})
+        if argv == ["codex", "plugin", "add", RELEASE_PLUGIN_ID, "--json"]:
+            plugins.append(
+                _plugin(
+                    RELEASE_PLUGIN_ID,
+                    source="https://github.com/bllshttng/footnote.git",
+                    source_type="git",
+                )
+            )
+            return _cp(argv, {"pluginId": RELEASE_PLUGIN_ID})
+        return _cp(argv, {}, rc=1, err=f"unexpected {argv}")
+
+    result = converge(
+        channel="release",
+        runner=runner,
+        codex_home=tmp_path / "codex-home",
+        source_root=source,
+    )
+
+    assert result.version == "0.3.0"
+    assert not any("sync-version.sh" in part for call in calls for part in call)
+
+
+def test_convergence_preserves_unrelated_fno_named_plugins(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    unrelated = _plugin(
+        "fno@company-tools", source="company/tools", source_type="git"
+    )
+    plugins = [unrelated]
+    marketplaces: list[dict[str, object]] = []
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv == ["codex", "plugin", "marketplace", "list", "--json"]:
+            return _cp(argv, {"marketplaces": marketplaces})
+        if argv == ["codex", "plugin", "list", "--json"]:
+            return _cp(argv, {"installed": plugins, "available": []})
+        if argv == [str(source / "scripts/release/sync-version.sh"), "--check"]:
+            return _cp(argv, {})
+        if "marketplace" in argv:
+            if "add" in argv:
+                marketplaces.append(
+                    {
+                        "name": "footnote",
+                        "marketplaceSource": {
+                            "sourceType": "git",
+                            "source": "bllshttng/footnote",
+                        },
+                    }
+                )
+            return _cp(argv, {})
+        if argv == ["codex", "plugin", "add", RELEASE_PLUGIN_ID, "--json"]:
+            plugins.append(
+                _plugin(
+                    RELEASE_PLUGIN_ID,
+                    source="bllshttng/footnote",
+                    source_type="git",
+                )
+            )
+            return _cp(argv, {})
+        return _cp(argv, {}, rc=1, err=f"unexpected {argv}")
+
+    result = converge(
+        channel="release",
+        runner=runner,
+        codex_home=tmp_path / "codex-home",
+        source_root=source,
+    )
+
+    assert result.plugin_id == RELEASE_PLUGIN_ID
+    assert unrelated in plugins
+    assert ["codex", "plugin", "remove", "fno@company-tools", "--json"] not in calls
 
 
 def test_dev_convergence_switches_from_release_and_writes_requested_marker(
@@ -339,8 +462,8 @@ def test_dev_refresh_replaces_same_version_cache_without_release_sync(tmp_path: 
             shutil.rmtree(cache)
             return _cp(argv, {"removed": True})
         if argv == ["codex", "plugin", "add", DEV_PLUGIN_ID, "--json"]:
-            cached_payload.parent.mkdir(parents=True)
-            cached_payload.write_bytes(source_payload.read_bytes())
+            shutil.copytree(source / ".codex-plugin", cache / ".codex-plugin")
+            shutil.copytree(source / "skills", cache / "skills")
             plugins.append(_plugin(DEV_PLUGIN_ID, source=str(dev_marketplace), source_type="local"))
             return _cp(argv, {"pluginId": DEV_PLUGIN_ID})
         return _cp(argv, {}, rc=1, err=f"unexpected {argv}")
@@ -543,9 +666,67 @@ def test_payload_digest_is_stable_and_ignores_non_plugin_files(tmp_path: Path) -
     first = plugin_payload_digest(source)
     (source / "tests").mkdir()
     (source / "tests" / "noise.txt").write_text("ignored\n", encoding="utf-8")
+    pycache = source / "skills" / "target" / "__pycache__"
+    pycache.mkdir(parents=True)
+    (pycache / "generated.pyc").write_bytes(b"transient")
+    (source / "hooks").mkdir(exist_ok=True)
+    (source / "hooks" / ".DS_Store").write_bytes(b"transient")
     assert plugin_payload_digest(source) == first
     payload.write_text("changed payload\n", encoding="utf-8")
     assert plugin_payload_digest(source) != first
+
+
+def test_payload_digest_includes_script_invoked_by_codex_hook(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    script = source / "scripts" / "save-session.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("print('first')\n", encoding="utf-8")
+    first = plugin_payload_digest(source)
+    script.write_text("print('second')\n", encoding="utf-8")
+    assert plugin_payload_digest(source) != first
+
+
+def test_dev_refresh_fails_when_codex_does_not_rebuild_cache(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    dev_marketplace = _dev_marketplace(source)
+    marketplace = {
+        "name": DEV_MARKETPLACE,
+        "marketplaceSource": {
+            "sourceType": "local",
+            "source": str(dev_marketplace),
+        },
+    }
+    plugins = [
+        _plugin(DEV_PLUGIN_ID, source=str(dev_marketplace), source_type="local")
+    ]
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv == ["codex", "plugin", "marketplace", "list", "--json"]:
+            return _cp(argv, {"marketplaces": [marketplace]})
+        if argv == ["codex", "plugin", "list", "--json"]:
+            return _cp(argv, {"installed": plugins, "available": []})
+        if argv == ["codex", "plugin", "remove", DEV_PLUGIN_ID, "--json"]:
+            plugins.clear()
+            return _cp(argv, {"removed": True})
+        if argv == ["codex", "plugin", "add", DEV_PLUGIN_ID, "--json"]:
+            plugins.append(
+                _plugin(
+                    DEV_PLUGIN_ID,
+                    source=str(dev_marketplace),
+                    source_type="local",
+                )
+            )
+            return _cp(argv, {"pluginId": DEV_PLUGIN_ID})
+        return _cp(argv, {}, rc=1, err=f"unexpected {argv}")
+
+    with pytest.raises(CodexPluginError, match="cache missing after refresh"):
+        converge(
+            channel="dev",
+            refresh=True,
+            runner=runner,
+            codex_home=tmp_path / "codex-home",
+            source_root=source,
+        )
 
 
 def test_external_failure_is_named_and_bounded(tmp_path: Path) -> None:

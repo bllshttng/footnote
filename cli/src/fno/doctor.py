@@ -1658,17 +1658,22 @@ def _harness_surface_report() -> dict[str, Any]:
     except Exception:
         pass
 
-    try:
-        from fno.setup.codex_plugin import inspect_freshness
+    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    plugin_state_exists = (codex_home / "footnote" / "plugin-channel.json").is_file() or (
+        codex_home / "plugins" / "cache" / "footnote"
+    ).exists() or (codex_home / "plugins" / "cache" / "footnote-dev").exists()
+    if shutil.which("codex") is not None or plugin_state_exists:
+        try:
+            from fno.setup.codex_plugin import inspect_freshness
 
-        report["codex_plugin"] = inspect_freshness()
-    except Exception as exc:  # noqa: BLE001 - doctor remains advisory
-        report["codex_plugin"] = {
-            "status": "unknown",
-            "issue": "inspection-failed",
-            "detail": str(exc)[-500:],
-            "remedy": "fno setup codex-plugin --channel release --refresh",
-        }
+            report["codex_plugin"] = inspect_freshness()
+        except Exception as exc:  # noqa: BLE001 - doctor remains advisory
+            report["codex_plugin"] = {
+                "status": "unknown",
+                "issue": "inspection-failed",
+                "detail": str(exc)[-500:],
+                "remedy": "fno setup codex-plugin --channel release --refresh",
+            }
 
     # Surface codex hooks dual-representation in the MAIN run too, not only the
     # opt-in `--codex-hooks` mode: a plain `fno doctor` should point at the heal.

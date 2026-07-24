@@ -203,6 +203,23 @@ def test_doctor_quiet_when_surfaces_healthy(monkeypatch: pytest.MonkeyPatch) -> 
     assert "marketplace" not in result.stdout
 
 
+def test_harness_surface_is_quiet_when_codex_and_footnote_state_are_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None if name == "codex" else "/bin/tool")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.setattr(
+        "fno.setup.codex_plugin.inspect_freshness",
+        lambda: pytest.fail("plugin inspection should not run without Codex or Footnote state"),
+    )
+    monkeypatch.setattr(doctor, "_codex_hooks_report", lambda: {})
+    monkeypatch.setattr(
+        "fno.setup.integration._opencode_plugins_dir", lambda: tmp_path / "no-opencode"
+    )
+
+    assert "codex_plugin" not in doctor._harness_surface_report()
+
+
 def test_doctor_reports_plugin_drift_without_staling_cli(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

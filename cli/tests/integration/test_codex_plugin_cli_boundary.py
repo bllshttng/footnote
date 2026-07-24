@@ -138,6 +138,17 @@ def _run_setup(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[s
     )
 
 
+def _run_doctor(env: dict[str, str], source: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "fno.cli", "doctor", "--json", "--source", str(source)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        timeout=30,
+    )
+
+
 def _environment(tmp_path: Path, source: Path, state_path: Path) -> dict[str, str]:
     fake_bin = tmp_path / "bin"
     _fake_codex(fake_bin)
@@ -208,6 +219,17 @@ def test_public_cli_refresh_idempotence_and_channel_switch_are_hermetic(
         ["plugin", "add", "fno@footnote-dev", "--json"],
         ["plugin", "list", "--json"],
     ]
+
+    doctor_fresh = _run_doctor(env, source)
+    fresh_payload = json.loads(doctor_fresh.stdout)
+    assert fresh_payload["harness_surface"]["codex_plugin"]["status"] == "fresh"
+    source_payload = source / "skills/target/SKILL.md"
+    source_payload.write_text("newer canonical payload\n", encoding="utf-8")
+    doctor_stale = _run_doctor(env, source)
+    stale_payload = json.loads(doctor_stale.stdout)
+    assert stale_payload["harness_surface"]["codex_plugin"]["status"] == "stale"
+    assert stale_payload["harness_surface"]["codex_plugin"]["issue"] == "payload-drift"
+    source_payload.write_text("canonical payload\n", encoding="utf-8")
 
     calls_path.write_text("", encoding="utf-8")
     repeated = _run_setup(env, "--channel", "dev")
