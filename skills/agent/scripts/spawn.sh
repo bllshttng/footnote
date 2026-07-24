@@ -198,7 +198,16 @@ if [[ -n "$NODE" ]]; then
           printf 'result=already-running name=%s reason="live worker holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
         fi
       else
-        printf 'result=already-running name=%s reason="a peer dispatcher holds %s (racing launch)"\n' "$NAME" "$RES_KEY"
+        case "$reason" in
+          reservation-held|duplicate-claim)
+            # x-a7ab 1.2 / x-b44e: a peer dispatcher won the visibility barrier
+            # or already holds the dispatch:<id> reservation. Exactly one worker
+            # launches; the loser's receipt carries skipped: duplicate-claim so a
+            # loop/human sees the dedup, not a generic already-running.
+            printf 'result=already-running name=%s reason="skipped: duplicate-claim (peer dispatcher holds %s)"\n' "$NAME" "$RES_KEY" ;;
+          *)
+            printf 'result=already-running name=%s reason="a peer dispatcher holds %s (racing launch)"\n' "$NAME" "$RES_KEY" ;;
+        esac
       fi
       exit 0 ;;
     corrupted)

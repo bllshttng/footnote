@@ -1388,6 +1388,24 @@ def cmd_spawn_guard(
             exit_code=3,
             detail=f"could not acquire dispatch reservation {res_key} ({exc})",
         )
+    # Visibility barrier (x-a7ab 1.2 / x-b44e): re-read dispatch:<id> AFTER the
+    # acquire to confirm THIS holder is the one on disk before launching. The
+    # create-only acquire already serializes two callers, but a peer whose
+    # exclusive create won a visibility-lagged race (or an FS where O_EXCL is
+    # not fully atomic across the acquire + launch) surfaces as a different
+    # holder here; that peer launches, this dispatcher skips with duplicate-
+    # claim so exactly one worker is born. Acquisition-before-observable-work
+    # is now a re-verified fact, not an assumption.
+    try:
+        post = claim_status(res_key, root=_root_for(res_key))
+    except Exception:  # pragma: no cover - claim_status never raises today
+        post = {}
+    if post.get("holder") != holder:
+        _emit(
+            "already-running",
+            reason="duplicate-claim",
+            holder=post.get("holder") or "unknown",
+        )
     _emit("dispatchable", reservation_key=res_key, reservation_holder=holder)
 
 
