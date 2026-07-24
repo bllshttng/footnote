@@ -486,3 +486,78 @@ fn external_lifecycle_round_trips_through_the_production_store() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The build-tree write guard (x-a572, AC2-HP): the integration-test binary is
+/// a real build-tree binary (`target/debug/deps/...`), and the library is
+/// compiled `cfg(not(test))` here - so this is the arm the `#[cfg(test)]`
+/// thread-local `TEST_PATH` override cannot protect (pitfalls corpus entry 1).
+/// With `FNO_AGENTS_HOME` unset, a store write must refuse (naming the remedy)
+/// and leave no `squads.json` under `HOME`; with it set to a temp dir, the write
+/// lands there. Env is mutated only under `PTY_GATE` and restored on drop, so it
+/// never races the file's other serialized, env-touching tests.
+#[test]
+fn build_tree_guard_refuses_a_write_without_agents_home() {
+    use fno::squad_store::{upsert, StoredMember};
+
+    let _gate = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let home = std::env::temp_dir().join(format!("fno-guard-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+
+    // Restore both vars on scope exit, even on panic.
+    struct EnvGuard {
+        agents: Option<std::ffi::OsString>,
+        home: Option<std::ffi::OsString>,
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.agents.clone() {
+                Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+                None => std::env::remove_var("FNO_AGENTS_HOME"),
+            }
+            match self.home.clone() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+    let _env = EnvGuard {
+        agents: std::env::var_os("FNO_AGENTS_HOME"),
+        home: std::env::var_os("HOME"),
+    };
+
+    // Refusal half: a build-tree binary with FNO_AGENTS_HOME unset refuses.
+    std::env::remove_var("FNO_AGENTS_HOME");
+    std::env::set_var("HOME", &home);
+    let member = StoredMember {
+        attach_id: "deadbeef".into(),
+        tombstone: false,
+        tab_name: None,
+    };
+    let refused = upsert("", "guardprobe", &["/no/such/origin".into()], &[member]);
+    assert!(
+        refused.is_err(),
+        "a build-tree binary must refuse a write without FNO_AGENTS_HOME"
+    );
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("FNO_AGENTS_HOME"),
+        "the refusal names the remedy"
+    );
+    assert!(
+        !home.join(".fno").join("squads.json").exists(),
+        "the guard returns before any file is touched, so nothing leaks under HOME"
+    );
+
+    // Escape-hatch half: FNO_AGENTS_HOME set -> the write lands there.
+    std::env::set_var("FNO_AGENTS_HOME", &home);
+    upsert("", "guardprobe", &[], &[]).unwrap();
+    assert!(
+        home.join("squads.json").exists(),
+        "with FNO_AGENTS_HOME set the write lands at the pointed-at store"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}

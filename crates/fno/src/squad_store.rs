@@ -285,12 +285,25 @@ pub fn load() -> Loaded {
             // aside so the next write starts clean, and tell the operator.
             let stamp = now_secs();
             let aside = path.with_file_name(format!("squads.json.corrupt-{stamp}"));
-            let _ = std::fs::rename(&path, &aside);
+            // The quarantine rename is the one write outside mutate_file, so the
+            // same build-tree guard backstops it. cfg(test) reaches here via the
+            // TEST_PATH override (the guard is compiled out), so it always
+            // quarantines; a guarded-out build-tree binary leaves the corrupt
+            // file in place and names the escape in the notice (reads never
+            // refuse - only the rename is held back).
+            #[cfg(not(test))]
+            let can_quarantine = assert_writable().is_ok();
+            #[cfg(test)]
+            let can_quarantine = true;
+            if can_quarantine {
+                let _ = std::fs::rename(&path, &aside);
+            }
             return Loaded {
-                notice: Some(format!(
-                    "quarantined corrupt squads.json to {}",
-                    aside.display()
-                )),
+                notice: Some(if can_quarantine {
+                    format!("quarantined corrupt squads.json to {}", aside.display())
+                } else {
+                    "corrupt squads.json left in place; set FNO_AGENTS_HOME to quarantine from a build-tree binary".into()
+                }),
                 ..Loaded::default()
             };
         }
@@ -604,6 +617,45 @@ fn mutate_lifecycle(f: impl FnOnce(&mut Vec<ExternalLifecycle>)) -> io::Result<(
     mutate_file(|sf| f(&mut sf.external_lifecycle))
 }
 
+/// Walk `exe`'s ancestors for a directory named `target` carrying a cargo
+/// build-tree marker (`.rustc_info.json` or `CACHEDIR.TAG`). Every exec'd test
+/// binary lives under `target/{debug,release,...}`; no installed binary
+/// (`~/.cargo/bin`, homebrew, a deployed `fno`) does. Pure over the path so the
+/// marker logic is unit-testable; [`assert_writable`] feeds it `current_exe()`.
+/// A bare directory named `target` without a marker is NOT a build tree (the
+/// marker is what proves cargo owns it), so a coincidentally-named dir never
+/// trips the guard.
+fn build_tree_target_dir(exe: &std::path::Path) -> Option<PathBuf> {
+    exe.ancestors()
+        .find(|d| d.file_name().is_some_and(|n| n == "target"))
+        .filter(|d| d.join(".rustc_info.json").exists() || d.join("CACHEDIR.TAG").exists())
+        .map(|d| d.to_path_buf())
+}
+
+/// Refuse a squad-store write from a build-tree binary unless `FNO_AGENTS_HOME`
+/// is set (the sole escape hatch: tests point it at a temp dir, dogfooding at
+/// `$HOME/.fno`). The call site in [`mutate_file`] is `#[cfg(not(test))]`: an
+/// in-process unit test already isolates via [`set_test_path`], and the guard
+/// would otherwise fire on every one of them (they all run under `target/`).
+/// It covers the OTHER arm - the exec'd binary and the library as linked into
+/// integration tests - where the thread-local override does not exist and
+/// [`squads_path`] resolves the real `$HOME/.fno`. Forgetting the env var then
+/// refuses loudly instead of silently polluting the user's store.
+#[cfg(not(test))]
+fn assert_writable() -> io::Result<()> {
+    if std::env::var_os("FNO_AGENTS_HOME").is_some() {
+        return Ok(());
+    }
+    if build_tree_target_dir(&std::env::current_exe()?).is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "refusing to write ~/.fno/squads.json from a build-tree binary; \
+             set FNO_AGENTS_HOME (tests: a temp dir; dogfooding: $HOME/.fno)",
+        ));
+    }
+    Ok(())
+}
+
 /// The locked read-modify-write core over the WHOLE [`StoreFile`]: acquire the
 /// exclusive non-blocking lock, re-read the current file (empty/absent = fresh,
 /// any other read/parse error FAILS LOUD rather than clobber unread content),
@@ -611,6 +663,8 @@ fn mutate_lifecycle(f: impl FnOnce(&mut Vec<ExternalLifecycle>)) -> io::Result<(
 /// rename a tmp over the target. `mutate` / `mutate_lifecycle` are thin views
 /// onto it, so every mutation preserves both collections.
 fn mutate_file(f: impl FnOnce(&mut StoreFile)) -> io::Result<()> {
+    #[cfg(not(test))]
+    assert_writable()?;
     let path = squads_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -1002,6 +1056,37 @@ mod tests {
         assert!(!valid_attach_id("c19cd2c33")); // 9
         assert!(!valid_attach_id("c19cd2cg")); // non-hex
         assert!(!valid_attach_id(""));
+    }
+
+    #[test]
+    fn build_tree_marker_detection_is_pure_over_path() {
+        // The guard's detector: an ancestor `target` with a cargo marker is a
+        // build tree; a coincidental `target` dir without one is not, and a
+        // binary with no `target` ancestor (an install) never is. Pure over the
+        // path so it needs no env and no real build tree.
+        let tmp = std::env::temp_dir().join(format!("fno-guard-unit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let target = tmp.join("target");
+        std::fs::create_dir_all(target.join("debug")).unwrap();
+        let exe = target.join("debug").join("fno");
+
+        // No marker -> a bare `target` dir is NOT a build tree.
+        assert_eq!(build_tree_target_dir(&exe), None);
+
+        // `.rustc_info.json` is the cargo marker written into target/.
+        std::fs::write(target.join(".rustc_info.json"), "{}").unwrap();
+        assert_eq!(build_tree_target_dir(&exe), Some(target.clone()));
+
+        // `CACHEDIR.TAG` alone also qualifies (llvm-cov / build tooling).
+        std::fs::remove_file(target.join(".rustc_info.json")).unwrap();
+        std::fs::write(target.join("CACHEDIR.TAG"), "x").unwrap();
+        assert_eq!(build_tree_target_dir(&exe), Some(target));
+
+        // An installed binary (no `target` ancestor) is never a build tree.
+        std::fs::create_dir_all(tmp.join("bin")).unwrap();
+        assert_eq!(build_tree_target_dir(&tmp.join("bin").join("fno")), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     fn lc(id: &str) -> Option<ExternalLifecycle> {
