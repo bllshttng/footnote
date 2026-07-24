@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import pytest
 
 from fno.post_merge_route import (
+    decide_post_merge_route,
+    emit_receipt,
     inject_pr_merged,
     resolve_warm_session,
     session_death_confirmed,
@@ -266,3 +268,227 @@ class TestCodexWarmRoute:
         delivered, _ = inject_pr_merged("cx-x", 7, "codex")
         assert delivered is True
         assert sent["entry"] is pane  # the transport-bearing row, not idle
+
+
+# ---------------------------------------------------------------------------
+# decide_post_merge_route: the ONE warm/cold/defer seam (AC2-HP, AC3-HP)
+# ---------------------------------------------------------------------------
+
+
+def _warm_only(*live: str):
+    """A resolve_warm seam that resolves exactly the given ids."""
+    return lambda sid, _harness: sid if sid in live else None
+
+
+class TestDecidePostMergeRoute:
+    def test_auto_run_disabled_defers(self):
+        d = decide_post_merge_route(
+            auto_run=False,
+            ship_session_id="S1",
+            resolve_warm=_warm_only("S1"),
+        )
+        assert d.route == "defer"
+        assert d.reason == "auto-run-disabled"
+        # A defer never resolves a borrowed session: no work is going to happen.
+        assert d.borrowed_session_id is None
+
+    def test_prefers_ship_session_over_source(self):
+        # Both are live; the session that SHIPPED the PR must win over the
+        # node-birth session (the PR #575 attribution specimen).
+        d = decide_post_merge_route(
+            auto_run=True,
+            ship_session_id="S1",
+            ship_harness="codex",
+            source_session_id="S0",
+            source_harness="claude",
+            resolve_warm=_warm_only("S1", "S0"),
+        )
+        assert d.route == "warm"
+        assert (d.borrowed_session_id, d.borrowed_harness) == ("S1", "codex")
+        assert (d.delivering_session_id, d.delivering_harness) == ("S1", "codex")
+
+    def test_falls_back_to_source_when_ship_not_warm(self):
+        d = decide_post_merge_route(
+            auto_run=True,
+            ship_session_id="S1",
+            ship_harness="codex",
+            source_session_id="S0",
+            source_harness="claude",
+            resolve_warm=_warm_only("S0"),
+        )
+        assert d.route == "warm"
+        assert (d.borrowed_session_id, d.borrowed_harness) == ("S0", "claude")
+        # Delivering identity stays the ship session even when it is unreachable:
+        # it names who shipped, not who was borrowed.
+        assert d.delivering_session_id == "S1"
+
+    def test_cold_when_no_candidate_warm(self):
+        d = decide_post_merge_route(
+            auto_run=True,
+            ship_session_id="S1",
+            source_session_id="S0",
+            resolve_warm=_warm_only(),
+        )
+        assert d.route == "cold"
+        assert d.borrowed_session_id is None
+        assert d.reason
+
+    def test_no_ship_provenance_omits_delivering_identity(self):
+        d = decide_post_merge_route(
+            auto_run=True,
+            source_session_id="S0",
+            resolve_warm=_warm_only("S0"),
+        )
+        assert d.route == "warm"
+        assert d.delivering_session_id is None
+        assert "provenance" in d.reason  # the miss is recorded, never invented
+
+    def test_no_candidates_at_all_is_cold(self):
+        d = decide_post_merge_route(auto_run=True, resolve_warm=_warm_only())
+        assert d.route == "cold"
+        assert d.delivering_session_id is None
+
+    def test_same_id_twice_is_probed_once(self):
+        probed: list[str] = []
+
+        def _resolve(sid, _harness):
+            probed.append(sid)
+            return None
+
+        decide_post_merge_route(
+            auto_run=True,
+            ship_session_id="S1",
+            source_session_id="S1",
+            resolve_warm=_resolve,
+        )
+        assert probed == ["S1"]
+
+    def test_origin_dead_only_when_death_confirmed(self):
+        cold = decide_post_merge_route(
+            auto_run=True,
+            source_session_id="S0",
+            source_cwd="/repo",
+            resolve_warm=_warm_only(),
+            death_confirmed=lambda *_a, **_k: True,
+        )
+        assert cold.route == "cold" and cold.origin_dead is True
+
+        alive = decide_post_merge_route(
+            auto_run=True,
+            source_session_id="S0",
+            source_cwd="/repo",
+            resolve_warm=_warm_only(),
+            death_confirmed=lambda *_a, **_k: False,
+        )
+        assert alive.origin_dead is False
+
+    def test_warm_route_never_direct_finalizes(self):
+        d = decide_post_merge_route(
+            auto_run=True,
+            source_session_id="S0",
+            resolve_warm=_warm_only("S0"),
+            death_confirmed=lambda *_a, **_k: True,
+        )
+        assert d.route == "warm" and d.origin_dead is False
+
+    def test_resolver_error_degrades_to_cold(self):
+        def _boom(_sid, _harness):
+            raise RuntimeError("registry exploded")
+
+        d = decide_post_merge_route(
+            auto_run=True, source_session_id="S0", resolve_warm=_boom
+        )
+        assert d.route == "cold"
+        assert "warm-error" in d.reason
+
+
+# ---------------------------------------------------------------------------
+# emit_receipt: the durable attribution artifact (AC2-HP, AC4-ERR, AC6-UI)
+# ---------------------------------------------------------------------------
+
+
+class TestEmitReceipt:
+    def _read(self, path):
+        import json
+
+        return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+    def test_reserved_receipt_lands_in_events(self, tmp_path):
+        events = tmp_path / "events.jsonl"
+        ok = emit_receipt(
+            "reserved",
+            dispatch_id="abc123",
+            attempt_id="att1",
+            pr=42,
+            node_id="x-1",
+            repo_slug="o/r",
+            route="warm",
+            outcome="pending",
+            delivering_session_id="S1",
+            delivering_harness="codex",
+            borrowed_session_id="S2",
+            borrowed_harness="claude",
+            events_path=events,
+        )
+        assert ok is True
+        (rec,) = self._read(events)
+        assert rec["type"] == "post_merge_dispatch_receipt"
+        assert rec["source"] == "daemon"
+        d = rec["data"]
+        assert d["phase"] == "reserved"
+        assert d["dispatch_id"] == "abc123"
+        assert d["attempt_id"] == "att1"
+        assert d["pr"] == 42
+        assert d["detector"] == "pr-watch"
+        assert d["route"] == "warm"
+        assert d["delivering_session_id"] == "S1"
+        assert d["borrowed_session_id"] == "S2"
+
+    def test_absent_identities_are_omitted_not_faked(self, tmp_path):
+        events = tmp_path / "events.jsonl"
+        emit_receipt(
+            "accepted",
+            dispatch_id="abc123",
+            attempt_id="att1",
+            pr=42,
+            route="cold",
+            outcome="completed",
+            events_path=events,
+        )
+        (rec,) = self._read(events)
+        assert "delivering_session_id" not in rec["data"]
+        assert "borrowed_session_id" not in rec["data"]
+        assert "node_id" not in rec["data"]
+
+    def test_detail_is_bounded(self, tmp_path):
+        events = tmp_path / "events.jsonl"
+        emit_receipt(
+            "failed",
+            dispatch_id="abc123",
+            attempt_id="att1",
+            pr=42,
+            route="cold",
+            outcome="failed",
+            detail="x" * 5000,
+            events_path=events,
+        )
+        (rec,) = self._read(events)
+        assert len(rec["data"]["detail"]) <= 512
+
+    def test_write_failure_returns_false(self, tmp_path, monkeypatch):
+        import fno.events as events_mod
+
+        def _boom(*_a, **_kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(events_mod, "append_event", _boom)
+        ok = emit_receipt(
+            "reserved",
+            dispatch_id="abc123",
+            attempt_id="att1",
+            pr=42,
+            route="cold",
+            outcome="pending",
+            events_path=tmp_path / "events.jsonl",
+        )
+        assert ok is False

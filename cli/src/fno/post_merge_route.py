@@ -1,19 +1,31 @@
-"""Warm-session routing for the post-merge ritual.
+"""The post-merge ritual's one dispatch seam: route, receipt, and execution.
 
-When a PR merges, the session that opened it (the node's
-``source_session_id``) still holds the context a cold worker would have to
-re-derive. Both merge detectors (the pr-watch daemon and the reconcile
-backstop) route through :func:`fno.graph._reconcile.dispatch_post_merge_ritual`,
-which calls this module to try a live inject into that originating session
-before falling back to the cold dispatch.
+When a PR merges, the session that shipped it still holds the context a cold
+runner would have to re-derive. The pr-watch daemon is the sole merge detector;
+it calls :func:`dispatch_post_merge_ritual` here, which asks
+:func:`decide_post_merge_route` for the single warm/cold/defer verdict, reserves
+a durable receipt, and then either live-injects the ritual into the borrowed
+session or runs ``fno pr ritual <n> --autonomous`` directly. No post-merge path
+creates a background thread.
 
-Deliberately a leaf: imports of ``fno.agents`` / ``fno.relay`` stay
-function-local so the graph/pr_watch import graphs pick up nothing new.
+The module owns the decision so a later caller adopts one function instead of
+extracting the choice from three: callers supply facts and execute the verdict,
+and none of them probes a session and picks a route on its own.
+
+Deliberately a leaf: imports of ``fno.agents`` / ``fno.relay`` / ``fno.config``
+stay function-local so the graph/pr_watch import graphs pick up nothing new.
 """
 from __future__ import annotations
 
+import json
 import os
-from typing import Optional, Tuple
+import re
+import subprocess
+import sys
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Literal, Optional, Tuple
 
 from fno.harness_identity import HARNESS_SESSION_MARKERS
 
@@ -189,3 +201,189 @@ def inject_pr_merged(
             return False, f"inject-error: {exc}"[:120]
         return (True, "delivered") if delivered else (False, "not-live")
     return False, f"unsupported-harness:{harness}"
+
+
+# ---------------------------------------------------------------------------
+# The one warm/cold/defer decision
+# ---------------------------------------------------------------------------
+
+Route = Literal["warm", "cold", "defer"]
+
+
+@dataclass(frozen=True)
+class RouteDecision:
+    """The single verdict every post-merge caller executes.
+
+    ``delivering_*`` names the session that SHIPPED the PR; ``borrowed_*`` names
+    the live session the ritual is injected into. They are usually the same, and
+    the case where they differ is the one that was invisible before.
+    """
+
+    route: Route
+    reason: str
+    delivering_session_id: Optional[str] = None
+    delivering_harness: Optional[str] = None
+    borrowed_session_id: Optional[str] = None
+    borrowed_harness: Optional[str] = None
+    # Gates the cold path's direct-finalize rung: a live origin is never
+    # finalized, so this is only ever True alongside ``route == "cold"``.
+    origin_dead: bool = False
+
+
+def decide_post_merge_route(
+    *,
+    auto_run: bool,
+    ship_session_id: Optional[str] = None,
+    ship_harness: Optional[str] = None,
+    source_session_id: Optional[str] = None,
+    source_harness: Optional[str] = None,
+    source_cwd: Optional[str] = None,
+    resolve_warm: Optional[Callable[[Optional[str], Optional[str]], Optional[str]]] = None,
+    death_confirmed: Optional[Callable[..., bool]] = None,
+) -> RouteDecision:
+    """Decide warm, cold, or defer for one merged PR. The only such function.
+
+    Order: an explicit automatic-run disable defers; otherwise the latest
+    ``phase: ship`` identity is tried first (it names who actually delivered the
+    PR), then the node-birth ``source_session_id`` for pre-provenance nodes; a
+    reachable candidate is warm, and no reachable candidate is cold.
+
+    Never reads receipt history -- the dispatch marker and claims are the only
+    idempotency inputs, and folding attribution into that decision would make
+    the receipt a hidden third guard with its own failure semantics.
+    """
+    if not auto_run:
+        return RouteDecision("defer", "auto-run-disabled")
+
+    _resolve = resolve_warm if resolve_warm is not None else resolve_warm_session
+    _dead = death_confirmed if death_confirmed is not None else session_death_confirmed
+
+    ship_sid = (ship_session_id or "").strip() or None
+    source_sid = (source_session_id or "").strip() or None
+    provenance = "ship-provenance" if ship_sid else "no-ship-provenance"
+
+    candidates: list[tuple[str, Optional[str]]] = []
+    for sid, harness in ((ship_sid, ship_harness), (source_sid, source_harness)):
+        if sid and sid not in {c[0] for c in candidates}:
+            candidates.append((sid, harness))
+
+    cold_reason = "no-live-source-session"
+    try:
+        for sid, harness in candidates:
+            warm_sid = _resolve(sid, harness)
+            if warm_sid is not None:
+                return RouteDecision(
+                    "warm",
+                    provenance,
+                    delivering_session_id=ship_sid,
+                    delivering_harness=ship_harness if ship_sid else None,
+                    borrowed_session_id=warm_sid,
+                    borrowed_harness=harness,
+                )
+    except Exception as exc:  # noqa: BLE001 - a resolver fault routes cold, never raises
+        cold_reason = f"warm-error: {exc}"[:120]
+
+    # Cold. The direct-finalize rung needs an explicit family-1 death verdict for
+    # the legacy origin (whose manifest and transcript it reads from disk), not
+    # merely "not warm-reachable".
+    origin_dead = False
+    if source_sid and source_cwd:
+        try:
+            origin_dead = bool(_dead(source_sid, source_harness, source_cwd))
+        except Exception:  # noqa: BLE001 - an unprovable death is not a death
+            origin_dead = False
+
+    if not ship_sid:
+        cold_reason = f"{cold_reason}; {provenance}"
+    return RouteDecision(
+        "cold",
+        cold_reason,
+        delivering_session_id=ship_sid,
+        delivering_harness=ship_harness if ship_sid else None,
+        origin_dead=origin_dead,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The durable attribution receipt
+# ---------------------------------------------------------------------------
+
+RECEIPT_EVENT = "post_merge_dispatch_receipt"
+_DETAIL_MAX = 512
+
+
+def _receipt_events_path() -> Optional[Path]:
+    """The global events log. Launchd starts pr-watch with no working directory,
+    so a cwd-relative path would silently drop every receipt."""
+    try:
+        from fno.paths import state_dir
+
+        return state_dir() / "events.jsonl"
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def emit_receipt(
+    phase: Literal["reserved", "accepted", "failed", "deferred"],
+    *,
+    dispatch_id: str,
+    attempt_id: str,
+    pr: int,
+    route: str,
+    outcome: str,
+    node_id: Optional[str] = None,
+    repo_slug: Optional[str] = None,
+    detector: str = "pr-watch",
+    delivering_session_id: Optional[str] = None,
+    delivering_harness: Optional[str] = None,
+    borrowed_session_id: Optional[str] = None,
+    borrowed_harness: Optional[str] = None,
+    detail: Optional[str] = None,
+    events_path: Optional[Path] = None,
+) -> bool:
+    """Append one post-merge dispatch receipt. Returns False on any write failure.
+
+    The caller decides what a False means: a ``reserved`` write is fail-closed
+    (no work starts without its artifact), every later phase is best-effort
+    because the work has already landed and a second delivery would be worse
+    than a missing record.
+    """
+    data: dict[str, Any] = {
+        "dispatch_id": dispatch_id,
+        "attempt_id": attempt_id,
+        "phase": phase,
+        "pr": int(pr),
+        "detector": detector,
+        "route": route,
+        "outcome": outcome,
+    }
+    # Absent identities are omitted rather than written empty: an invented
+    # attribution is worse than a recorded miss.
+    for key, value in (
+        ("node_id", node_id),
+        ("repo_slug", repo_slug),
+        ("delivering_session_id", delivering_session_id),
+        ("delivering_harness", delivering_harness),
+        ("borrowed_session_id", borrowed_session_id),
+        ("borrowed_harness", borrowed_harness),
+        ("detail", (detail or "")[:_DETAIL_MAX] or None),
+    ):
+        if value:
+            data[key] = value
+
+    path = events_path if events_path is not None else _receipt_events_path()
+    if path is None:
+        return False
+    try:
+        from fno.events import _build, append_event
+
+        append_event(_build(RECEIPT_EVENT, "daemon", data), path)
+    except Exception:  # noqa: BLE001 - the caller's phase decides what a miss means
+        return False
+    return True
+
+
+def new_attempt_id() -> str:
+    """A fresh correlation key for one reserve/action/result attempt. A crash
+    retry gets a new one under the same ``dispatch_id``."""
+    return uuid.uuid4().hex[:12]
