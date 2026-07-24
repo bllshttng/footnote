@@ -422,6 +422,149 @@ pub fn remove(name: &str, key: &str) -> io::Result<()> {
     mutate(|squads| squads.retain(|s| !same_squad(s, name, key)))
 }
 
+// --- prune: reap squads whose every origin is gone and nothing is live -----
+
+/// Mirror of `Squad::owns_path` over a stored squad's origins: `cwd` is one of
+/// `origins` or a child of one. Inlined rather than imported so the store stays
+/// file-local (the crate rule: the FILE is the contract).
+fn origin_owned(origins: &[String], cwd: &str) -> bool {
+    origins
+        .iter()
+        .any(|o| cwd == o.as_str() || cwd.strip_prefix(o.as_str()).is_some_and(|r| r.starts_with('/')))
+}
+
+/// One squad's fate under the prune predicate (pure; re-evaluated under the
+/// lock in [`prune`] against fresh fs state, so a squad a concurrent recruit
+/// made live between the off-lock snapshot and the write is kept).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PruneDecision {
+    /// Protected by a hard signal: a surviving origin dir, a provably-live
+    /// member, or a live pane mapped to the squad.
+    Keep,
+    /// A member or pane whose liveness is unknown (the liveness query failed).
+    /// Fail-safe: never prune on unknown - the liveness surface has lied before
+    /// (corpus entry 2).
+    KeepUnknown,
+    /// A named squad with `--include-named` not passed. Counted separately so the
+    /// receipt can name the flag (AC1-EDGE).
+    SkipNamed,
+    /// Unnamed (or `--include-named`), every origin gone, every member provably
+    /// dead, no live pane.
+    Prune,
+}
+
+/// The prune predicate (US2). `live` is the live attach-id set: `Some(set)` when
+/// the off-lock liveness query succeeded, `None` when it failed (then every
+/// non-tombstone member is unknown-liveness and the squad is kept). `live_cwds`
+/// are the cwds of live mux panes; a pane mapped to the squad protects it.
+/// `origin_exists` is injected so the matrix is unit-testable without disk; the
+/// verb passes `|p| std::path::Path::new(p).exists()` and re-runs it under the
+/// lock.
+pub fn prune_decision(
+    squad: &StoredSquad,
+    include_named: bool,
+    live: Option<&std::collections::HashSet<String>>,
+    live_cwds: &[String],
+    origin_exists: &dyn Fn(&str) -> bool,
+) -> PruneDecision {
+    if !squad.name.is_empty() && !include_named {
+        return PruneDecision::SkipNamed;
+    }
+    // Any surviving origin dir keeps the squad (cheap fs check; re-run under lock).
+    if squad.origins.iter().any(|o| origin_exists(o.as_str())) {
+        return PruneDecision::Keep;
+    }
+    // No surviving origin. A live pane mapped to the squad protects it; a live
+    // pane's cwd would itself be a surviving dir, so this guards the rare
+    // pane-in-an-unrecorded-cwd edge.
+    if live_cwds.iter().any(|cwd| origin_owned(&squad.origins, cwd)) {
+        return PruneDecision::Keep;
+    }
+    // Every non-tombstone member must be provably dead. A member not in the live
+    // set is dead; with the set absent (query failed) every member is unknown.
+    for m in &squad.members {
+        if m.tombstone {
+            continue;
+        }
+        match live {
+            None => return PruneDecision::KeepUnknown,
+            Some(set) if set.contains(&m.attach_id) => return PruneDecision::Keep,
+            _ => {}
+        }
+    }
+    PruneDecision::Prune
+}
+
+/// One squad the prune actually removed (the receipt is built from these, under
+/// the lock, never from the pre-lock candidate list - corpus entry 2).
+#[derive(Debug, Clone)]
+pub struct PrunedSquad {
+    pub name: String,
+    pub key: String,
+    pub origins: Vec<String>,
+    pub members: usize,
+}
+
+impl From<&StoredSquad> for PrunedSquad {
+    fn from(s: &StoredSquad) -> Self {
+        PrunedSquad {
+            name: s.name.clone(),
+            key: s.key.clone(),
+            origins: s.origins.clone(),
+            members: s.members.len(),
+        }
+    }
+}
+
+/// What a [`prune`] run did. Counts are classified under the lock from the same
+/// decisions that drove the removals, so the receipt never disagrees with the
+/// store (AC1-UI).
+#[derive(Debug, Clone, Default)]
+pub struct PruneOutcome {
+    pub removed: Vec<PrunedSquad>,
+    pub kept_unknown: usize,
+    pub skipped_named: usize,
+    pub kept_protected: usize,
+}
+
+impl PruneOutcome {
+    pub fn removed_count(&self) -> usize {
+        self.removed.len()
+    }
+}
+
+/// Prune prunable squads in ONE locked mutation, returning what was actually
+/// removed plus the keep/skip counts (the receipt source). `decide` is the pure
+/// [`prune_decision`] re-evaluated under the store lock against fresh fs state,
+/// so a squad a concurrent recruit made live between the off-lock snapshot and
+/// the write is kept (AC1-FR lost-update guard). `external_lifecycle` records
+/// are preserved byte-for-byte: `mutate_file` applies `decide` to squads only.
+pub fn prune(decide: impl Fn(&StoredSquad) -> PruneDecision) -> io::Result<PruneOutcome> {
+    let mut out = PruneOutcome::default();
+    mutate_file(|sf| {
+        let mut kept = Vec::with_capacity(sf.squads.len());
+        for sq in sf.squads.drain(..) {
+            match decide(&sq) {
+                PruneDecision::Prune => out.removed.push(PrunedSquad::from(&sq)),
+                PruneDecision::KeepUnknown => {
+                    out.kept_unknown += 1;
+                    kept.push(sq);
+                }
+                PruneDecision::SkipNamed => {
+                    out.skipped_named += 1;
+                    kept.push(sq);
+                }
+                PruneDecision::Keep => {
+                    out.kept_protected += 1;
+                    kept.push(sq);
+                }
+            }
+        }
+        sf.squads = kept;
+    })?;
+    Ok(out)
+}
+
 /// Rename `old` -> `new` in one locked mutation, carrying `created_at` across
 /// (a `RenameSquad`). Any pre-existing `new` entry is overwritten.
 pub fn rename(
@@ -1340,5 +1483,118 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("lifecycle record"));
+    }
+
+    #[test]
+    fn prune_predicate_matrix() {
+        use std::collections::HashSet;
+        let live: HashSet<String> = ["live0001".into()].into_iter().collect();
+        let live_some = Some(&live);
+        let no_cwds: Vec<String> = Vec::new();
+        let gone = |_: &str| false; // no origin dir exists
+        let exists = |p: &str| p == "/alive";
+
+        let squad = |name: &str, key: &str, origins: &[&str], members: &[&str]| StoredSquad {
+            name: name.into(),
+            key: key.into(),
+            origins: origins.iter().map(|s| (*s).to_string()).collect(),
+            members: members.iter().copied().map(m).collect(),
+            created_at: String::new(),
+            tab_specs: Vec::new(),
+        };
+
+        // Named without --include-named -> SkipNamed (AC1-EDGE).
+        assert_eq!(
+            prune_decision(&squad("work", "", &["/g"], &["deadbeef"]), false, live_some, &no_cwds, &gone),
+            PruneDecision::SkipNamed
+        );
+        // Named WITH --include-named, gone origin, dead member -> Prune.
+        assert_eq!(
+            prune_decision(&squad("work", "", &["/g"], &["deadbeef"]), true, live_some, &no_cwds, &gone),
+            PruneDecision::Prune
+        );
+        // Unnamed, gone, dead -> Prune.
+        assert_eq!(
+            prune_decision(&squad("", "k1", &["/g"], &["deadbeef"]), false, live_some, &no_cwds, &gone),
+            PruneDecision::Prune
+        );
+        // A surviving origin -> Keep (AC2-EDGE).
+        assert_eq!(
+            prune_decision(&squad("", "k1", &["/alive", "/g"], &["deadbeef"]), false, live_some, &no_cwds, &exists),
+            PruneDecision::Keep
+        );
+        // A live member -> Keep.
+        assert_eq!(
+            prune_decision(&squad("", "k1", &["/g"], &["live0001"]), false, live_some, &no_cwds, &gone),
+            PruneDecision::Keep
+        );
+        // Liveness query failed (None) with a non-tombstone member -> KeepUnknown (AC3-FR).
+        assert_eq!(
+            prune_decision(&squad("", "k1", &["/g"], &["deadbeef"]), false, None, &no_cwds, &gone),
+            PruneDecision::KeepUnknown
+        );
+        // Empty members, gone -> Prune (a side-effect squad with nothing live).
+        assert_eq!(
+            prune_decision(&squad("", "k1", &["/g"], &[]), false, live_some, &no_cwds, &gone),
+            PruneDecision::Prune
+        );
+        // Empty origins (no surviving origin), dead -> Prune.
+        assert_eq!(
+            prune_decision(&squad("", "k1", &[], &["deadbeef"]), false, live_some, &no_cwds, &gone),
+            PruneDecision::Prune
+        );
+        // All-tombstone members, gone -> Prune (tombstones are not live).
+        {
+            let mut s = squad("", "k1", &["/g"], &[]);
+            s.members = vec![StoredMember {
+                attach_id: "deadbeef".into(),
+                tombstone: true,
+                tab_name: None,
+            }];
+            assert_eq!(
+                prune_decision(&s, false, live_some, &no_cwds, &gone),
+                PruneDecision::Prune
+            );
+        }
+        // A live pane mapped to a gone-origin squad -> Keep.
+        {
+            let cwds = vec!["/gone/child".to_string()];
+            assert_eq!(
+                prune_decision(&squad("", "k1", &["/gone"], &["deadbeef"]), false, live_some, &cwds, &gone),
+                PruneDecision::Keep
+            );
+        }
+    }
+
+    #[test]
+    fn prune_removes_only_prunable_and_preserves_lifecycle() {
+        let _s = Scratch::new("prune");
+        upsert("", "dead", &["/gone".into()], &[m("deadbeef")]).unwrap();
+        upsert("", "kept", &["/survives".into()], &[m("deadbeef")]).unwrap();
+        upsert("named", "", &["/gone".into()], &[m("deadbeef")]).unwrap();
+        assert!(matches!(
+            begin_external_stop("cafef00d", "x", "/t").unwrap(),
+            LifecycleCas::Committed { generation: 1 }
+        ));
+
+        let live = std::collections::HashSet::<String>::new(); // nothing live
+        let outcome = prune(|sq| {
+            prune_decision(sq, false, Some(&live), &[], &|p| p == "/survives")
+        })
+        .unwrap();
+
+        assert_eq!(outcome.removed_count(), 1, "only the gone-origin unnamed squad is pruned");
+        assert_eq!(outcome.removed[0].key, "dead", "the receipt names the squad actually removed");
+        assert_eq!(outcome.skipped_named, 1, "the named squad is counted skip-named");
+
+        let after = load();
+        assert!(!after.squads.iter().any(|s| s.key == "dead"), "prunable squad gone");
+        assert!(after.squads.iter().any(|s| s.key == "kept"), "surviving-origin squad kept");
+        assert!(after.squads.iter().any(|s| s.name == "named"), "named squad kept");
+        assert_eq!(
+            after.external_lifecycle.len(),
+            1,
+            "external_lifecycle preserved byte-for-byte across a prune"
+        );
     }
 }

@@ -56,6 +56,9 @@ enum Role {
     MuxLayout(Vec<OsString>),
     /// (x-d865) `mux where <fno_id>`: resolve an fno session id to its location.
     MuxWhere(Vec<OsString>),
+    /// (x-a572) `mux squad <verb> ...`: squad-store maintenance (`squad prune`).
+    /// Same carry-verbatim shape as `mux pane`; `mux_cli::squad` parses.
+    MuxSquad(Vec<OsString>),
     /// `mux shell-init <zsh|bash> [--json]`: print the OSC 133 shell-integration
     /// snippet (v6). `None` / an unsupported shell is an error in the verb.
     MuxShellInit(Option<String>, bool),
@@ -179,6 +182,8 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             Some("tab") if args.len() > 2 => Role::MuxTab(args[2..].to_vec()),
             Some("layout") if args.len() > 2 => Role::MuxLayout(args[2..].to_vec()),
             Some("where") if args.len() > 2 => Role::MuxWhere(args[2..].to_vec()),
+            // (x-a572) `mux squad prune ...`: a bare `mux squad` is usage.
+            Some("squad") if args.len() > 2 => Role::MuxSquad(args[2..].to_vec()),
             // ls / doctor take no positional, an optional `--json` (US6).
             Some("ls") => match split_json(&args[2..]) {
                 Some((pos, json)) if pos.is_empty() => Role::MuxLs(json),
@@ -254,7 +259,8 @@ fn main() {
                  | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
                  | fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] \
                  | fno mux pane ls|read|run|send|wait|kill|claim|release ... \
-                 | fno mux block pipe --from <pane> --to <pane> [--block last|<seq>] [--json] [--force]"
+                 | fno mux block pipe --from <pane> --to <pane> [--block last|<seq>] [--json] [--force] \
+                 | fno mux squad prune [--dry-run] [--include-named] [--json]"
             );
             std::process::exit(2);
         }
@@ -274,6 +280,7 @@ fn main() {
         Role::MuxTab(rest) => std::process::exit(mux_cli::tab(&rest, env_session.as_deref())),
         Role::MuxLayout(rest) => std::process::exit(mux_cli::layout(&rest, env_session.as_deref())),
         Role::MuxWhere(rest) => std::process::exit(mux_cli::where_(&rest, env_session.as_deref())),
+        Role::MuxSquad(rest) => std::process::exit(mux_cli::squad(&rest)),
         Role::Client(flag) => {
             let env = env_session.as_deref().filter(|s| !s.is_empty());
             // Bare `fno` with nothing pinned: the pre-attach picker decides

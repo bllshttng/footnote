@@ -1333,6 +1333,31 @@ fn live_ids_from(reg_raw: Option<&str>, roster_raw: Option<&str>, now: u64) -> H
     live
 }
 
+/// The live attach-id set read synchronously from the registry + roster files
+/// (the dead-set source for the mux squad prune verb, x-a572). Free of `Server`
+/// so the standalone CLI computes the same liveness restore does, isolated
+/// rosters folded in (x-c914): a worker live in an alt-account roster is live.
+/// `None`-ish semantics are the caller's - this returns the set it could read;
+/// an unreadable registry/roster simply contributes nothing (fail-safe: the
+/// prune predicate then treats unprovable members as unknown and keeps them).
+pub(crate) fn live_attach_ids_snapshot() -> HashSet<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let reg = std::fs::read_to_string(agents_view::registry_path()).ok();
+    let roster = std::fs::read_to_string(agents_view::roster_path()).ok();
+    let mut live = live_ids_from(reg.as_deref(), roster.as_deref(), now);
+    for (_account, path) in agents_view::isolated_roster_paths() {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            for w in agents_view::parse_roster(&raw).into_iter().flatten() {
+                live.insert(w.short_id);
+            }
+        }
+    }
+    live
+}
+
 /// Loose `<prefix>-<hex4..8>` node-id shape check for the cwd-basename
 /// fallback, so a plain shell squad (basename "footnote") is never
 /// mis-attributed as a graph node.
@@ -3609,26 +3634,10 @@ impl Core {
     /// registry + roster files. Restore runs at the first attach, before the
     /// off-loop 1s reader has populated `self.agents`, so a stale in-memory
     /// catalog would tombstone every member (AC1-HP). One-shot read per server
-    /// lifetime, off the steady loop.
+    /// lifetime, off the steady loop. Delegates to [`live_attach_ids_snapshot`]
+    /// so the mux squad prune verb computes the same liveness.
     fn live_attach_ids_now(&self) -> HashSet<String> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let reg = std::fs::read_to_string(agents_view::registry_path()).ok();
-        let roster = std::fs::read_to_string(agents_view::roster_path()).ok();
-        let mut live = live_ids_from(reg.as_deref(), roster.as_deref(), now);
-        // (x-c914) An isolated-account worker in a persisted squad is live in
-        // ITS roster, not the default one; fold each so restore does not
-        // tombstone a live alt-account member.
-        for (_account, path) in agents_view::isolated_roster_paths() {
-            if let Ok(raw) = std::fs::read_to_string(&path) {
-                for w in agents_view::parse_roster(&raw).into_iter().flatten() {
-                    live.insert(w.short_id);
-                }
-            }
-        }
-        live
+        live_attach_ids_snapshot()
     }
 
     /// Materialize the persisted named squads at the first real attach (US2).
