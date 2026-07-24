@@ -162,12 +162,26 @@ def similar_nodes(
     """
     ta = _tokens(entry)
     nid = entry.get("id")
+    by_id = {
+        e.get("id"): e
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    # Exclude the node's own lineage: a child legitimately resembles its parent
+    # (rollup parented it there for exactly that reason), so flagging an
+    # ancestor as a duplicate would cry wolf on most filings and recommend
+    # superseding the node's own epic (codex P2).
+    lineage: set[str] = set()
+    cur = entry.get("parent")
+    while isinstance(cur, str) and cur in by_id and cur not in lineage:
+        lineage.add(cur)
+        cur = by_id[cur].get("parent")
     scored: list[tuple[str, float, str]] = []
     for e in entries:
         if not isinstance(e, dict):
             continue
         eid = e.get("id")
-        if not isinstance(eid, str) or eid == nid:
+        if not isinstance(eid, str) or eid == nid or eid in lineage:
             continue
         if e.get("status") == "superseded":
             continue

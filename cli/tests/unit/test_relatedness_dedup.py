@@ -111,3 +111,22 @@ def test_similar_nodes_handles_title_only_node():
     bare = {"id": "bare", "type": "feature", "title": "alpha bravo charlie", "domain": "code"}
     new = {"id": "new", "type": "feature", "title": "alpha bravo charlie delta", "domain": "code"}
     assert [r[0] for r in similar_nodes(new, [bare])] == ["bare"]
+
+
+def test_similar_nodes_excludes_own_parent():
+    # codex P2: a child legitimately resembles its parent (rollup parented it
+    # there); the parent must not be flagged as a duplicate.
+    parent = node("epic1", title="database migration safety", type="epic")
+    child = node("kid", title="database migration safety checks", parent="epic1")
+    # Parent scores ~0.85 against the child, but it is the lineage -> excluded.
+    assert similar_nodes(child, [parent, child]) == []
+
+
+def test_similar_nodes_excludes_grandparent_via_chain():
+    # The lineage walk follows the parent chain, not just the direct parent.
+    mission = node("miss1", title="database migration program", type="roadmap")
+    epic = node("epic1", title="database migration safety", type="epic", parent="miss1")
+    child = node("kid", title="database migration safety checks", parent="epic1")
+    ids = {r[0] for r in similar_nodes(child, [mission, epic, child])}
+    assert "epic1" not in ids  # direct parent
+    assert "miss1" not in ids  # grandparent reached via the chain
