@@ -27,6 +27,40 @@ def setup_main(ctx: typer.Context) -> None:
         raise typer.Exit(0)
 
 
+@app.command("codex-plugin")
+def codex_plugin_cmd(
+    channel: str = typer.Option(
+        ...,
+        "--channel",
+        help="Select the release or dev Footnote plugin channel.",
+    ),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        help="Remove and re-add the selected plugin even at the same version.",
+    ),
+) -> None:
+    """Converge Codex onto one Footnote plugin channel."""
+    from fno.setup.codex_plugin import CodexPluginError, converge
+
+    posture = (
+        "codex: hook approval may be needed; a new Codex session is required "
+        "after mutation."
+    )
+    try:
+        result = converge(channel=channel, refresh=refresh)
+    except CodexPluginError as exc:
+        typer.echo(f"codex-plugin error: {exc.stage}: {exc.detail}", err=True)
+        typer.echo(posture, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(
+        "codex-plugin verified: "
+        f"channel={result.channel} action={result.action} "
+        f"id={result.plugin_id} version={result.version}"
+    )
+    typer.echo(posture)
+
+
 @app.command("cli-hooks")
 def cli_hooks_cmd(
     codex: bool = typer.Option(True, "--codex/--no-codex", help="Install the Codex hook."),
