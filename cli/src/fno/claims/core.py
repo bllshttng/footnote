@@ -46,7 +46,7 @@ from .io import (
 )
 from .staleness import classify, now_ms
 from ..harness_identity import resolve_harness_identity
-from ..mutex import steal_if_stale
+from ..mutex import _stamp_owner, release_dir_mutex, steal_if_stale
 from .types import (
     MAX_ENCODED_FILENAME_BYTES,
     MAX_KEY_LENGTH,
@@ -233,9 +233,11 @@ def acquire_claim(
     if not _existing_is_live(existing):
         recovery_lock = path.with_name(path.name + ".recovery.d")
         acquired_lock = False
+        recovery_token = ""
         try:
             try:
                 recovery_lock.mkdir(parents=True)
+                recovery_token = _stamp_owner(recovery_lock)
                 acquired_lock = True
             except FileExistsError:
                 # Another worker is doing recovery -- or died holding the mutex.
@@ -303,15 +305,31 @@ def acquire_claim(
 
             # Still stale; do the archive + recreate atomically (under the mutex).
             archive_claim(path, ts_ms=now_ms())
-            atomic_create_exclusive(path, payload)
+            try:
+                atomic_create_exclusive(path, payload)
+            except ClaimAlreadyHeld:
+                # A top-level creator won the empty path in the gap between our
+                # archive and this create (the top-level O_EXCL does not take the
+                # recovery mutex). Recurse to re-read and classify rather than
+                # letting the low-level ClaimAlreadyHeld escape acquire_claim's
+                # return-or-ClaimHeldByOther contract; the recursion sees the new
+                # live holder and raises ClaimHeldByOther.
+                return acquire_claim(
+                    key,
+                    holder,
+                    reason=reason,
+                    ttl_ms=ttl_ms,
+                    metadata=metadata,
+                    pid=pid,
+                    host=host,
+                    harness=harness,
+                    root=root,
+                )
             emit_claim_stale_reclaimed(new_claim, previous=existing)
             return new_claim
         finally:
             if acquired_lock:
-                try:
-                    recovery_lock.rmdir()
-                except OSError:
-                    pass
+                release_dir_mutex(recovery_lock, recovery_token)
 
     # Live and not us => block.
     raise ClaimHeldByOther(
