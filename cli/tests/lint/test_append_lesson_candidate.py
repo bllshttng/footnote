@@ -54,3 +54,10 @@ def test_malformed_candidate_rejected_and_unblocks(tmp_path: Path) -> None:
     assert r.returncode == 0
     assert "jq rejected" in r.stderr
     assert out.read_text(encoding="utf-8") == "", "malformed candidate must not write"
+
+
+def test_missing_value_exits_zero() -> None:
+    # A flag with no value must warn + exit 0, never abort the caller (AC7-FR).
+    r = _run("--candidate")
+    assert r.returncode == 0
+    assert "missing value" in r.stderr

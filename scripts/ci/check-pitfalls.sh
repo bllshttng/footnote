@@ -61,7 +61,7 @@ while IFS=$'\t' read -r title has_grad has_added date; do
   elif [[ -z "$date" ]]; then
     add_violation "entry '${title}' has an 'added:' line without a YYYY-MM-DD date"
   else
-    STALE_DATES+="${title}|${date}"$'\n'
+    STALE_DATES+="${title}"$'\t'"${date}"$'\n'
   fi
 done < <(
   awk '
@@ -71,8 +71,8 @@ done < <(
       in_entry = 1; has_grad = "0"; has_added = "0"; date = ""
       next
     }
-    in_entry && $0 ~ /^[ \t]*-?[ \t]*graduates-to:/ { has_grad = "1" }
-    in_entry && $0 ~ /^[ \t]*-?[ \t]*added:/ {
+    in_entry && $0 ~ /^[ \t]*-?[ \t]*graduates-to:[ \t]*[^ \t]/ { has_grad = "1" }
+    in_entry && $0 ~ /^[ \t]*-?[ \t]*added:[ \t]*[^ \t]/ {
       has_added = "1"
       if (date == "" && match($0, /[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) {
         date = substr($0, RSTART, RLENGTH)
@@ -95,9 +95,9 @@ max_age = int(os.environ["MAX_AGE_DAYS"])
 out = []
 for rec in os.environ["STALE_DATES"].splitlines():
     rec = rec.strip()
-    if not rec or "|" not in rec:
+    if not rec or "\t" not in rec:
         continue
-    title, date = rec.split("|", 1)
+    title, date = rec.split("\t", 1)
     try:
         d = datetime.date.fromisoformat(date)
     except ValueError:

@@ -25,13 +25,23 @@ set -uo pipefail
 
 CANDIDATE_JSON=""
 SESSION_ID=""
-FILE="${LESSON_CANDIDATES_FILE:-$HOME/.fno/lesson-candidates.jsonl}"
+FILE="${LESSON_CANDIDATES_FILE:-${HOME:-}/.fno/lesson-candidates.jsonl}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --candidate)  CANDIDATE_JSON="$2"; shift 2 ;;
-        --session-id) SESSION_ID="$2"; shift 2 ;;
-        --file)       FILE="$2"; shift 2 ;;
+        --candidate|--session-id|--file)
+            # Guard $2 under set -u: a missing value must warn + exit 0, never
+            # abort the caller's memory write (AC7-FR never-blocks contract).
+            if [[ $# -lt 2 ]]; then
+                echo "append-lesson-candidate: missing value for $1 (non-fatal)" >&2
+                exit 0
+            fi
+            case "$1" in
+                --candidate)  CANDIDATE_JSON="$2" ;;
+                --session-id) SESSION_ID="$2" ;;
+                --file)       FILE="$2" ;;
+            esac
+            shift 2 ;;
         *) echo "append-lesson-candidate: unknown arg: $1 (non-fatal)" >&2; exit 0 ;;
     esac
 done

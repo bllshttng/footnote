@@ -91,3 +91,18 @@ def test_missing_section_fails(tmp_path: Path) -> None:
     r = _run(path)
     assert r.returncode == 1
     assert "no" in r.stderr and SECTION in r.stderr
+
+
+def test_title_with_pipe_parses_staleness(tmp_path: Path) -> None:
+    # A `|` in the heading must not corrupt the staleness record (tab-delimited).
+    path = tmp_path / "agents.md"
+    path.write_text(
+        f"# AGENTS\n\n{SECTION}\n\nrationale.\n\n### A | B trap\n\ntrap.\n\n"
+        f"- graduates-to: a lint\n- added: {STALE}\n\n{NEXT_HEADING}\n",
+        encoding="utf-8",
+    )
+    r = _run(path)
+    assert r.returncode == 1
+    assert "over the 60-day limit" in r.stderr
+    assert "A | B trap" in r.stderr
+    assert "unparseable" not in r.stderr

@@ -669,7 +669,8 @@ and read the newest few whose epic or keywords intersect this seed:
 
 ```bash
 PLANS_DIR=$(fno plan path --slug probe 2>/dev/null | xargs dirname 2>/dev/null)
-[[ -n "$PLANS_DIR" && -d "$PLANS_DIR" ]] && ls "$PLANS_DIR"/*retro-synthesis*.md 2>/dev/null | head -5
+# sort -r: filenames are date-prefixed (YYYYMMDD), so reverse-lexical = newest first.
+[[ -n "$PLANS_DIR" && -d "$PLANS_DIR" ]] && ls "$PLANS_DIR"/*retro-synthesis*.md 2>/dev/null | sort -r | head -5
 ```
 
 Skip silently when the dir does not resolve (OSS installs have no vault) or no
@@ -903,10 +904,12 @@ After saving the design document, spawn a Haiku reviewer subagent to critique it
      `epic` - `/blueprint` silently degrades to one empty "implement feature" task
      otherwise. This is a reviewer-prompt line, not a parser change.
    - **Fabricated-citation check (new):** every entry in the doc's `sources:`
-     frontmatter must name an artifact the session actually read in Step 7b (the
-     corpus section, a synthesis doc, a cited doc). A `sources:` entry pointing at
-     a file that was never opened is a finding - remove it, or actually read the
-     file before approval. (AC8-FR.)
+     frontmatter must name an artifact that exists AND was read in Step 7b (the
+     corpus section, a synthesis doc, a cited doc). A `sources:` entry whose path
+     does not resolve to a real file is an immediate finding; one that exists but
+     was not read is suspect - remove it or read it before approval. The main
+     thread is the primary enforcer (it stamps only what it read); this review is
+     the backstop. (AC8-FR.)
    - **AC adequacy attack (new):** for each AC in the doc, try to name one
      concrete implementation or input that satisfies the AC as written while
      violating the design's intent - a wrong-but-passing implementation, a

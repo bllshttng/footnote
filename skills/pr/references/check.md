@@ -481,16 +481,16 @@ bash "${CLAUDE_PLUGIN_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}
     --session-id "$SESSION_ID" \
     --candidate "$CANDIDATE"
 
-# Dual-emit a load-bearing PROJECT lesson (oss-fix-not-memory discriminator: a
-# stranger cloning the repo would need it) to the corpus staging file, so it
-# reaches the AGENTS.md pitfalls corpus on the next promotion PR instead of
-# private memory codex cannot read. Warns + exits 0 on failure - never blocks
-# the merge or the review cycle.
-bash "${CLAUDE_PLUGIN_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/scripts/memory/append-lesson-candidate.sh" \
-    --session-id "$SESSION_ID" \
-    --candidate "$CANDIDATE"
-# Appends one line to ~/.fno/lesson-candidates.jsonl (home-keyed, worktree-
-# independent). Promotion into AGENTS.md is a reviewed PR, never automatic.
+# Dual-emit ONLY for project-lesson candidates (type: project - a load-bearing
+# lesson a stranger cloning the repo would need, not session continuity). Warns +
+# exits 0 on failure - never blocks the merge or the review cycle.
+if jq -e '.type == "project"' <<<"$CANDIDATE" >/dev/null 2>&1; then
+    bash "${CLAUDE_PLUGIN_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/scripts/memory/append-lesson-candidate.sh" \
+        --session-id "$SESSION_ID" \
+        --candidate "$CANDIDATE"
+    # Appends one line to ~/.fno/lesson-candidates.jsonl (home-keyed, worktree-
+    # independent). Promotion into AGENTS.md is a reviewed PR, never automatic.
+fi
 ```
 
 If the pass script exits non-zero or no candidates pass the bar, continue silently.
