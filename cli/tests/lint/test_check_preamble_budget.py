@@ -309,6 +309,28 @@ def test_doctor_surfaces_a_present_gate_failure(
     assert "AGENTS.md" in line
 
 
+def test_doctor_surfaces_a_missing_quiet_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fno import doctor
+
+    common = ROOT / ".git-common"
+    monkeypatch.setattr(
+        doctor,
+        "_git_checkout_identity",
+        lambda path: (ROOT, common),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_bounded_command",
+        lambda argv: (0, "unexpected output\n", ""),
+    )
+
+    assert doctor._preamble_budget_line(ROOT, cwd=ROOT) == (
+        "preamble: unavailable (check emitted no report)"
+    )
+
+
 def test_doctor_deleted_cwd_degrades_to_silence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

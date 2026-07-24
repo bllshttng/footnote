@@ -878,7 +878,7 @@ def _preamble_budget_line(
         if detail:
             return f"preamble: unavailable ({detail[:160]})"
         return f"preamble: unavailable (check exited {result[0]})"
-    return None
+    return "preamble: unavailable (check emitted no report)"
 
 
 # ---------------------------------------------------------------------------
