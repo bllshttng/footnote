@@ -42,6 +42,18 @@ def test_anchor_verdict_unresolvable_on_scan_error():
     assert anchor_verdict(_cand(), boom) == "unresolvable"
 
 
+def test_anchor_verdict_unresolvable_on_outage_warning():
+    # F8: scan_addressed_findings signals a GitHub outage via warnings + an empty
+    # result (not an exception). anchor_verdict must read it as unresolvable, not
+    # present, so the finding mints with the anchor-unverified marker.
+    def outage(entries, *, include_planned=False, warnings=None):
+        if warnings is not None:
+            warnings.append("reconcile-findings: PR #42 thread state unavailable")
+        return []  # the PR was skipped (unavailable), not determined "not addressed"
+
+    assert anchor_verdict(_cand(), outage) == "unresolvable"
+
+
 def test_anchor_verdict_present_when_no_source_pr():
     seen = []
     assert anchor_verdict(_cand(source_pr=None), lambda e, **k: seen.append(e) or []) == "present"

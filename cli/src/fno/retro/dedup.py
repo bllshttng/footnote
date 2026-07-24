@@ -130,7 +130,14 @@ def anchor_verdict(candidate: Candidate, scan_fn: Any) -> str:
         ),
     }
     try:
-        addressed = scan_fn([pseudo], include_planned=True, warnings=[])
+        scan_warnings: list = []
+        addressed = scan_fn([pseudo], include_planned=True, warnings=scan_warnings)
     except Exception:  # noqa: BLE001 - never close on uncertainty
+        return "unresolvable"
+    if scan_warnings:
+        # A fetch was unavailable (GitHub outage, thread state unreadable): the
+        # empty result means "could not determine", not "not addressed". Fail
+        # toward filing with the anchor-unverified marker (AC5-EDGE) rather than
+        # minting clean on an unverifiable empty result.
         return "unresolvable"
     return "dead" if addressed else "present"
