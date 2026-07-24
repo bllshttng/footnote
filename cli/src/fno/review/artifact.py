@@ -21,6 +21,7 @@ class PublishResult:
     round_path: Path
     published: bool
     reason: str
+    finding_count: int
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,11 @@ def publish_sigma_artifact(
         raise ValueError("sigma artifact PR number must be positive")
 
     report = Path(report_path).read_text(encoding="utf-8")
+    from fno.retro.harvest import extract_severity
+
+    finding_count = sum(
+        1 for line in report.splitlines() if extract_severity(line) is not None
+    )
     rendered = _render(
         report,
         node=node,
@@ -123,6 +129,7 @@ def publish_sigma_artifact(
                 round_path=round_path,
                 published=False,
                 reason="current head unavailable",
+                finding_count=finding_count,
             )
         if reviewed_head != current_head:
             return PublishResult(
@@ -130,6 +137,7 @@ def publish_sigma_artifact(
                 round_path=round_path,
                 published=False,
                 reason="reviewed head is no longer current",
+                finding_count=finding_count,
             )
         _atomic_write(current_path, rendered)
 
@@ -138,6 +146,7 @@ def publish_sigma_artifact(
         round_path=round_path,
         published=True,
         reason="published current reviewed head",
+        finding_count=finding_count,
     )
 
 
@@ -187,6 +196,10 @@ def inspect_sigma_artifact(
         for key, value in expected.items()
         if metadata.get(key) != value
     ]
+    if not isinstance(metadata.get("review_round"), str) or not metadata.get(
+        "review_round"
+    ):
+        mismatches.append("review_round is missing or invalid")
     if mismatches:
         return InspectResult(
             path,

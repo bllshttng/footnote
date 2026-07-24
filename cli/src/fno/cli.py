@@ -733,6 +733,7 @@ def review(
                 "path": str(result.current_path),
                 "round_path": str(result.round_path),
                 "head_sha": sigma_head,
+                "finding_count": result.finding_count,
             }
         else:
             inspected = inspect_sigma_artifact(
@@ -760,6 +761,20 @@ def review(
         return
 
     state_path = state or Path(".fno/target-state.md")
+
+    head_result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if head_result.returncode != 0 or not head_result.stdout.strip():
+        typer.echo(
+            f"error: git rev-parse HEAD failed (rc={head_result.returncode}): "
+            f"{head_result.stderr.strip()}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    reviewed_head = head_result.stdout.strip()
 
     if diff is not None:
         diff_context = diff.read_text(encoding="utf-8")
@@ -794,6 +809,7 @@ def review(
             artifacts_dir=artifacts_dir,
             session_id=session,
             no_cache=no_cache,
+            git_sha_value=reviewed_head,
         )
     except ReviewLockBusy as exc:
         typer.echo(f"error: review lock busy: {exc}", err=True)

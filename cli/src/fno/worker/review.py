@@ -328,6 +328,7 @@ def _publish_durable_sigma(
     )
     print(
         f"[review] sigma artifact: {result.current_path} head={reviewed_head} "
+        f"findings={result.finding_count} "
         f"published={str(result.published).lower()} reason={result.reason}",
         file=sys.stderr,
     )
@@ -499,22 +500,25 @@ def review(
         if cache_body is not None:
             try:
                 cached_result = _cache.reconstruct_result(cache_body)
+            except Exception as exc:
+                print(
+                    f"[review] cache deserialization failed, re-running: {exc}",
+                    file=sys.stderr,
+                )
+            else:
                 kept_findings = score_findings(cached_result.findings)
-                # Re-use existing artifact if it already exists
-                if artifact_path.exists():
-                    verdict = _read_verdict_from_artifact(artifact_path)
-                else:
-                    _, verdict = write_artifact(
-                        session_id,
-                        OrchestratorResult(
-                            findings=kept_findings,
-                            workers_completed=cached_result.workers_completed,
-                            workers_failed=cached_result.workers_failed,
-                            suspicious=cached_result.suspicious,
-                            duration_seconds=cached_result.duration_seconds,
-                        ),
-                        artifacts_dir=artifacts_dir,
-                    )
+                artifact_path, verdict = write_artifact(
+                    session_id,
+                    OrchestratorResult(
+                        findings=kept_findings,
+                        workers_completed=cached_result.workers_completed,
+                        workers_failed=cached_result.workers_failed,
+                        suspicious=cached_result.suspicious,
+                        duration_seconds=cached_result.duration_seconds,
+                        outcomes=cached_result.outcomes,
+                    ),
+                    artifacts_dir=artifacts_dir,
+                )
                 _publish_durable_sigma(
                     artifact_path,
                     state_path=state_path,
@@ -528,11 +532,6 @@ def review(
                     "artifact_path": str(artifact_path),
                     "cached": True,
                 }
-            except Exception as exc:
-                print(
-                    f"[review] cache deserialization failed, re-running: {exc}",
-                    file=sys.stderr,
-                )
 
     # --- Cache miss: run the orchestrator ------------------------------------
     if runner is None:

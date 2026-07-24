@@ -8,7 +8,9 @@ equals what the ``build_review_runner`` panel resolves for the same inputs.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -124,6 +126,38 @@ def test_print_providers_flag_off_emits_empty_json(
     result = CliRunner().invoke(app, ["review", "--print-providers"])
     assert result.exit_code == 0
     assert json.loads(result.stdout.strip()) == {}
+
+
+def test_review_cli_pins_pre_panel_head_to_the_diff(tmp_path: Path) -> None:
+    diff = tmp_path / "diff.txt"
+    diff.write_text("diff --git a/a b/a\n", encoding="utf-8")
+    reviewed = {
+        "action": "reviewed",
+        "verdict": "ready-to-merge",
+        "findings": 0,
+        "artifact_path": str(tmp_path / "artifact.md"),
+        "cached": False,
+    }
+    completed = SimpleNamespace(returncode=0, stdout="head-a\n", stderr="")
+    with (
+        patch("subprocess.run", return_value=completed),
+        patch("fno.worker.review.review", return_value=reviewed) as worker_review,
+    ):
+        result = CliRunner().invoke(
+            app,
+            [
+                "review",
+                "--diff",
+                str(diff),
+                "--session-id",
+                "sess",
+                "--state",
+                str(tmp_path / "state.md"),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert worker_review.call_args.kwargs["git_sha_value"] == "head-a"
 
 
 def test_print_providers_flag_emits_routing_json(

@@ -62,21 +62,8 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `review.reviewers` | list[str] | `[]` | advanced | Local-attestation reviewers (sigma | /code-review | declare) that produce no GitHub review: loop-check accepts a head-pinned review_attestation event as gate evidence. Lets a solo/claude-only harness express a real gate with no App bot. |
 | `review.external_reviewers` | list[str] | `[]` | always | Which AI reviewers /pr requests a review from (the INVOCATION list). |
 | `review.agent_providers` | dict[str, str] | `{}` | never | Per-agent provider routing for the cross-model review panel. |
-| `review.agent_routes` | dict[str, {harness, provider, model}] | `{}` | never | Opt-in named-session model route per sigma agent. |
+| `review.agent_routes` | dict[str, AgentRouteBlock] | `{}` | never | Opt-in per-agent harness/provider/model routes for named sigma sessions. |
 | `review.cross_model.enabled` | bool | `false` | advanced | Enable cross-model (codex/gemini) second-opinion review. |
-
-`review.agent_routes` is deliberately opt-in because each configured panel agent starts a separate named session.
-At the measured 50–60K-token SessionStart preamble, routing all six sigma agents costs roughly 300–360K preamble tokens; use whole-session routing when the full panel should share one model.
-
-```yaml
-config:
-  review:
-    agent_routes:
-      code_reviewer:
-        harness: claude
-        provider: zai
-        model: glm-5.2
-```
 | `target.dedupe_dead_duplicates` | bool | `false` | never | Opt-in cleanup of provably-dead duplicate state files. |
 | `target.auto_launch_on_blueprint` | bool | `false` | advanced | Auto-launch a bg /target worker when a node reaches ready via /blueprint. |
 | `target.handoff.enabled` | bool | `true` | advanced | Enable target self-handoff at pipeline boundaries. |

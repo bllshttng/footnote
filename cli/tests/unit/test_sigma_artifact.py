@@ -37,6 +37,7 @@ def test_publish_writes_round_and_current_atomically(tmp_path: Path) -> None:
     assert result.round_path == tmp_path / "reviews/fno/reviews/x-bfbb/rounds/round-b.md"
     assert result.current_path.read_text() == result.round_path.read_text()
     assert _frontmatter(result.current_path)["head_sha"] == "head-b"
+    assert result.finding_count == 1
 
 
 def test_stale_completion_retains_round_without_displacing_current(tmp_path: Path) -> None:
@@ -155,6 +156,27 @@ def test_inspect_accepts_current_artifact_with_zero_external_reviewers(tmp_path:
     assert "**P1**" in inspected.body
 
 
+def test_inspect_rejects_missing_round_identity(tmp_path: Path) -> None:
+    from fno.review.artifact import inspect_sigma_artifact
+
+    path = tmp_path / "reviews/fno/reviews/x-bfbb/sigma.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\nschema: sigma-review/v1\nnode: x-bfbb\npr_number: 42\n"
+        "head_sha: head-b\n---\n\n- **P1** - bug\n",
+        encoding="utf-8",
+    )
+    result = inspect_sigma_artifact(
+        reviews_root=tmp_path / "reviews",
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+        head_sha="head-b",
+    )
+    assert result.status == "rejected"
+    assert "review_round" in result.reason
+
+
 def test_clean_report_headings_are_not_counted_as_findings(tmp_path: Path) -> None:
     from fno.review.artifact import inspect_sigma_artifact, publish_sigma_artifact
 
@@ -214,6 +236,7 @@ def test_cli_publish_and_inspect_share_the_artifact_writer(tmp_path: Path) -> No
     )
     assert published.exit_code == 0, published.output
     assert '"published": true' in published.output.lower()
+    assert '"finding_count": 1' in published.output
 
     inspected = CliRunner().invoke(
         app,

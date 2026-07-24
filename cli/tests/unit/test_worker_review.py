@@ -19,12 +19,10 @@ H6: worker layer does not call write_cache (orchestrator owns writes).
 
 from __future__ import annotations
 
-import asyncio
-import os
 import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -232,6 +230,36 @@ class TestWorkerReviewEndToEnd:
 
         assert publish.call_count == 2
 
+    def test_cache_hit_regenerates_artifact_instead_of_publishing_stale_body(
+        self, tmp_path: Path
+    ) -> None:
+        from fno.worker.review import review
+
+        state_path = _make_state(tmp_path, session_id="sess-cache-body")
+        artifacts_dir = tmp_path / "artifacts"
+        first = review(
+            diff_context="diff A",
+            state_path=state_path,
+            artifacts_dir=artifacts_dir,
+            session_id="sess-cache-body",
+            runner=_make_info_runner(),
+            git_sha_value="head-a",
+        )
+        artifact = Path(first["artifact_path"])
+        artifact.write_text("# stale body B\n", encoding="utf-8")
+
+        second = review(
+            diff_context="diff A",
+            state_path=state_path,
+            artifacts_dir=artifacts_dir,
+            session_id="sess-cache-body",
+            runner=_make_info_runner(),
+            git_sha_value="head-a",
+        )
+
+        assert second["action"] == "cached"
+        assert "stale body B" not in artifact.read_text(encoding="utf-8")
+
 
 def test_shared_publisher_resolves_pr_when_immutable_manifest_has_none(
     tmp_path: Path,
@@ -265,6 +293,7 @@ def test_shared_publisher_resolves_pr_when_immutable_manifest_has_none(
             current_path=tmp_path / "sigma.md",
             published=True,
             reason="published",
+            finding_count=0,
         )
         _publish_durable_sigma(
             report,
@@ -364,7 +393,7 @@ class TestWorkerReviewCached:
             )
 
         # First call - runs workers
-        result1 = review(
+        review(
             diff_context="diff ...",
             state_path=state_path,
             artifacts_dir=artifacts_dir,
@@ -389,6 +418,49 @@ class TestWorkerReviewCached:
             f"Workers spawned again on cache hit: call_count={call_count} after first={first_call_count}"
         )
         assert result2["cached"] is True
+
+    def test_cache_hit_publication_failure_does_not_rerun_panel(
+        self, tmp_path: Path
+    ) -> None:
+        from fno.worker.review import review
+
+        session_id = "sess-cache-publish-failure"
+        state_path = _make_state(tmp_path, session_id=session_id)
+        artifacts_dir = tmp_path / "artifacts"
+        call_count = 0
+
+        async def counting_runner(agent: str, prompt: str, diff: str) -> WorkerOutcome:
+            nonlocal call_count
+            call_count += 1
+            return WorkerOutcome(
+                agent=agent,
+                ok=True,
+                findings=[Finding(agent=agent, severity="info", message="ok")],
+            )
+
+        with patch("fno.worker.review._publish_durable_sigma") as publish:
+            review(
+                diff_context="diff",
+                state_path=state_path,
+                artifacts_dir=artifacts_dir,
+                session_id=session_id,
+                runner=counting_runner,
+                git_sha_value="head-a",
+            )
+            first_call_count = call_count
+            publish.side_effect = RuntimeError("artifact publication failed")
+
+            with pytest.raises(RuntimeError, match="artifact publication failed"):
+                review(
+                    diff_context="diff",
+                    state_path=state_path,
+                    artifacts_dir=artifacts_dir,
+                    session_id=session_id,
+                    runner=counting_runner,
+                    git_sha_value="head-a",
+                )
+
+        assert call_count == first_call_count
 
     def test_no_cache_flag_bypasses_cache(self, tmp_path: Path) -> None:
         from fno.worker.review import review
@@ -767,8 +839,6 @@ class TestC2DefaultRunnerConstruction:
 
             return _runner
 
-        original_orchestrate = None
-
         def fake_orchestrate(diff_context, *, runner, worker_pids=None, **kwargs):
             captured["orchestrate_pids"] = worker_pids
             # Call original to keep side-effects (artifact writing etc.)
@@ -863,7 +933,6 @@ class TestC3MakeAsyncRunnerCallSite:
 
         # Fake orchestrate that returns immediately without spawning workers
         def fake_orchestrate(diff_context, *, runner, worker_pids=None, **kwargs):
-            from fno.review.orchestrator import orchestrate_review_parallel as real_fn
 
             # Return a minimal result without actually calling anything
             return OrchestratorResult(
