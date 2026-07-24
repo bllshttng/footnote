@@ -228,6 +228,72 @@ def test_release_convergence_is_source_aware_noop(tmp_path: Path) -> None:
     ]
 
 
+def test_empty_selected_version_is_repaired_instead_of_verified_noop(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path)
+    row = _plugin(
+        RELEASE_PLUGIN_ID,
+        source="https://github.com/bllshttng/footnote.git",
+        source_type="git",
+    )
+    row["version"] = ""
+    plugins = [row]
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv == ["codex", "plugin", "marketplace", "list", "--json"]:
+            return _cp(
+                argv,
+                {
+                    "marketplaces": [
+                        {
+                            "name": "footnote",
+                            "marketplaceSource": {
+                                "sourceType": "git",
+                                "source": "https://github.com/bllshttng/footnote.git",
+                            },
+                        }
+                    ]
+                },
+            )
+        if argv == ["codex", "plugin", "list", "--json"]:
+            return _cp(argv, {"installed": plugins, "available": []})
+        if argv == ["codex", "plugin", "remove", RELEASE_PLUGIN_ID, "--json"]:
+            plugins.clear()
+            return _cp(argv, {"removed": True})
+        if argv == [str(source / "scripts/release/sync-version.sh"), "--check"]:
+            return _cp(argv, {})
+        if argv == [
+            "codex",
+            "plugin",
+            "marketplace",
+            "upgrade",
+            "footnote",
+            "--json",
+        ]:
+            return _cp(argv, {"upgraded": True})
+        if argv == ["codex", "plugin", "add", RELEASE_PLUGIN_ID, "--json"]:
+            plugins.append(
+                _plugin(
+                    RELEASE_PLUGIN_ID,
+                    source="https://github.com/bllshttng/footnote.git",
+                    source_type="git",
+                )
+            )
+            return _cp(argv, {"pluginId": RELEASE_PLUGIN_ID})
+        return _cp(argv, {}, rc=1, err=f"unexpected {argv}")
+
+    result = converge(
+        channel="release",
+        runner=runner,
+        codex_home=tmp_path / "codex-home",
+        source_root=source,
+    )
+
+    assert result.action == "repaired"
+    assert result.version == "0.3.0"
+
+
 def test_packaged_release_install_does_not_require_local_plugin_source(
     tmp_path: Path,
 ) -> None:
@@ -464,6 +530,7 @@ def test_dev_refresh_replaces_same_version_cache_without_release_sync(tmp_path: 
         if argv == ["codex", "plugin", "add", DEV_PLUGIN_ID, "--json"]:
             shutil.copytree(source / ".codex-plugin", cache / ".codex-plugin")
             shutil.copytree(source / "skills", cache / "skills")
+            shutil.copytree(source / "scripts", cache / "scripts")
             plugins.append(_plugin(DEV_PLUGIN_ID, source=str(dev_marketplace), source_type="local"))
             return _cp(argv, {"pluginId": DEV_PLUGIN_ID})
         return _cp(argv, {}, rc=1, err=f"unexpected {argv}")
@@ -676,7 +743,7 @@ def test_payload_digest_is_stable_and_ignores_non_plugin_files(tmp_path: Path) -
     assert plugin_payload_digest(source) != first
 
 
-def test_payload_digest_includes_script_invoked_by_codex_hook(tmp_path: Path) -> None:
+def test_payload_digest_includes_scripts_used_by_codex_runtime(tmp_path: Path) -> None:
     source = _source(tmp_path)
     script = source / "scripts" / "save-session.py"
     script.parent.mkdir(parents=True, exist_ok=True)
@@ -684,6 +751,12 @@ def test_payload_digest_includes_script_invoked_by_codex_hook(tmp_path: Path) ->
     first = plugin_payload_digest(source)
     script.write_text("print('second')\n", encoding="utf-8")
     assert plugin_payload_digest(source) != first
+    guard = source / "scripts" / "lib" / "target-guard.sh"
+    guard.parent.mkdir(parents=True)
+    guard.write_text("first guard\n", encoding="utf-8")
+    with_guard = plugin_payload_digest(source)
+    guard.write_text("second guard\n", encoding="utf-8")
+    assert plugin_payload_digest(source) != with_guard
 
 
 def test_dev_refresh_fails_when_codex_does_not_rebuild_cache(tmp_path: Path) -> None:

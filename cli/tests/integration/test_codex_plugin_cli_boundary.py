@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CLI_SRC = REPO_ROOT / "cli" / "src"
@@ -74,6 +76,9 @@ with calls_path.open("a", encoding="utf-8") as handle:
 if os.environ.get("FNO_TEST_CODEX_MALFORMED") and args == ["plugin", "marketplace", "list", "--json"]:
     print("not-json")
     raise SystemExit(0)
+if os.environ.get("FNO_TEST_CODEX_FAIL") == " ".join(args[:2]):
+    print("injected codex failure", file=sys.stderr)
+    raise SystemExit(17)
 if args == ["plugin", "marketplace", "list", "--json"]:
     print(json.dumps({{"marketplaces": state["marketplaces"]}}))
 elif args == ["plugin", "list", "--json"]:
@@ -104,7 +109,7 @@ elif len(args) == 4 and args[:2] == ["plugin", "add"] and args[3] == "--json":
     marketplace_source = "bllshttng/footnote" if marketplace == "footnote" else str(source / ".agents/marketplaces/footnote-dev")
     cache = home / "plugins" / "cache" / marketplace / "fno" / "0.3.0"
     shutil.rmtree(cache, ignore_errors=True)
-    for relative in (".codex-plugin", "skills", "hooks", ".codex/agents"):
+    for relative in (".codex-plugin", "skills", "hooks", "scripts", ".codex/agents"):
         origin = source / relative
         if origin.exists():
             shutil.copytree(origin, cache / relative)
@@ -301,3 +306,85 @@ def test_concurrent_public_channel_selection_serializes_to_one_plugin(
     state = json.loads(state_path.read_text())
     expected = "fno@footnote" if marker["channel"] == "release" else "fno@footnote-dev"
     assert [plugin["pluginId"] for plugin in state["plugins"]] == [expected]
+
+
+def test_public_cli_propagates_real_codex_failure_without_false_success(
+    tmp_path: Path,
+) -> None:
+    source = _source_fixture(tmp_path)
+    dev_marketplace = source / ".agents/marketplaces/footnote-dev"
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "marketplaces": [
+                    {
+                        "name": "footnote-dev",
+                        "root": str(dev_marketplace),
+                        "marketplaceSource": {
+                            "sourceType": "local",
+                            "source": str(dev_marketplace),
+                        },
+                    }
+                ],
+                "plugins": [
+                    {
+                        "pluginId": "fno@footnote-dev",
+                        "marketplaceName": "footnote-dev",
+                        "version": "0.3.0",
+                        "installed": True,
+                        "enabled": True,
+                        "marketplaceSource": {
+                            "sourceType": "local",
+                            "source": str(dev_marketplace),
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = _environment(tmp_path, source, state_path)
+    env["FNO_TEST_CODEX_FAIL"] = "plugin add"
+
+    result = _run_setup(env, "--channel", "release")
+
+    assert result.returncode == 1
+    assert "plugin-add: injected codex failure" in result.stderr
+    assert "verified" not in result.stdout
+    assert json.loads(state_path.read_text())["plugins"] == []
+    marker = json.loads(
+        (tmp_path / "codex-home/footnote/plugin-channel.json").read_text()
+    )
+    assert marker["channel"] == "release"
+
+
+def test_setup_wizard_adapter_uses_verified_release_convergence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from fno.setup.integration import build_adapters, run_cli_integration
+
+    source = _source_fixture(tmp_path)
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps({"marketplaces": [], "plugins": []}), encoding="utf-8"
+    )
+    env = _environment(tmp_path, source, state_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}:/usr/bin:/bin")
+    output: list[str] = []
+
+    results = run_cli_integration(
+        select_fn=lambda options: [
+            str(option["cli"]) for option in options if option["cli"] == "codex"
+        ],
+        echo_fn=output.append,
+        adapters=build_adapters(),
+    )
+
+    codex = next(result for result in results if result.cli == "codex")
+    assert codex.status == "installed"
+    assert any("Codex CLI: installed" in line for line in output)
+    state = json.loads(state_path.read_text())
+    assert [plugin["pluginId"] for plugin in state["plugins"]] == ["fno@footnote"]

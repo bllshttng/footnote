@@ -250,11 +250,8 @@ def _manifest_version(source_root: Path) -> str:
 
 def plugin_payload_digest(plugin_root: Path) -> str:
     """Hash only files Codex can load from the Footnote plugin payload."""
-    candidates = [
-        plugin_root / ".codex-plugin" / "plugin.json",
-        plugin_root / "scripts" / "save-session.py",
-    ]
-    for relative in ("skills", "hooks", ".codex/agents"):
+    candidates = [plugin_root / ".codex-plugin" / "plugin.json"]
+    for relative in ("skills", "hooks", "scripts", ".codex/agents"):
         base = plugin_root / relative
         if base.is_dir():
             candidates.extend(
@@ -444,6 +441,7 @@ def converge(
             selected is not None
             and selected.installed
             and selected.enabled
+            and bool(selected.version)
             and selected.marketplace_name == marketplace_name
             and source_matches(selected.source_type, selected.marketplace_source)
         )
