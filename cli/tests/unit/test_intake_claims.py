@@ -19,8 +19,8 @@ from unittest.mock import patch
 import click.exceptions
 import pytest
 
-from fno.graph._intake import _resolve_claim, _warn_similar_idea_titles, _warn_similar_nodes
-from fno.graph.cli import _intake_impl
+from fno.graph._intake import _resolve_claim, _warn_similar_nodes
+from fno.graph.cli import _create_node_impl, _do_intake_multi, _intake_impl
 
 
 # -- fixtures --
@@ -170,76 +170,17 @@ def test_resolve_claim_invalid_frontmatter_value_ignored(fixture_graph, tmp_path
     assert source is None
 
 
-# -- _warn_similar_idea_titles --
-
-
-def test_similar_titles_warning_fires_above_threshold(fixture_graph, capsys):
-    entries = _read_entries(fixture_graph)
-    _warn_similar_idea_titles(
-        new_title="Backlog intake honors plan claims to existing idea nodes",
-        new_id="ab-7ew15h01",
-        entries=entries,
-    )
-    err = capsys.readouterr().err
-    assert "ab-1dea1234" in err
-    assert "--claims ab-1dea1234" in err
-
-
-def test_similar_titles_warning_skipped_below_threshold(fixture_graph, capsys):
-    entries = _read_entries(fixture_graph)
-    _warn_similar_idea_titles(
-        new_title="Authentication middleware rewrite",
-        new_id="ab-7ew15h01",
-        entries=entries,
-    )
-    err = capsys.readouterr().err
-    assert "ab-1dea1234" not in err
-    assert "ab-0fff9999" not in err
-
-
-def test_similar_titles_warning_excludes_self(fixture_graph, capsys):
-    entries = list(_read_entries(fixture_graph))
-    # Add a node whose title matches the candidate exactly.
-    entries.append(
-        _node(
-            "ab-5e1f0001",
-            title="Backlog intake honors plan claims",
-            status="idea",
-        )
-    )
-    _warn_similar_idea_titles(
-        new_title="Backlog intake honors plan claims",
-        new_id="ab-5e1f0001",
-        entries=entries,
-    )
-    err = capsys.readouterr().err
-    # The self-id is excluded; ab-1dea1234 (ratio 1.0 with the new title) IS reported.
-    assert "ab-5e1f0001" not in err
-    assert "ab-1dea1234" in err
-
-
-def test_similar_titles_warning_skips_non_idea_states(fixture_graph, capsys):
-    entries = _read_entries(fixture_graph)
-    _warn_similar_idea_titles(
-        new_title="Already shipped feature",  # exact match to ab-d0ne5678
-        new_id="ab-7ew15h01",
-        entries=entries,
-    )
-    err = capsys.readouterr().err
-    # ab-d0ne5678 is `status: done`, not idea — skipped.
-    assert "ab-d0ne5678" not in err
-
-
 # -- _warn_similar_nodes (filing-time dedup net, plan x-6ac7) --
 
 
 def _dedup_entries():
-    """Four synthetic candidates exercising state filtering + pr_number."""
+    """Synthetic candidates: idea1 is the exact-match top; done1/rev1 carry
+    pr_number; sup1 is superseded and must be excluded."""
     return [
-        _node("done1", title="dedup gate for backlog filings", status="done", pr_number=42),
+        _node("idea1", title="dedup gate for backlog filings", status="idea"),
+        _node("done1", title="dedup gate for backlog filings extra tokens", status="done", pr_number=42),
         _node("rev1", title="dedup net for backlog node birth", status="in_review", pr_number=77),
         _node("sup1", title="dedup gate for backlog filings twin", status="superseded"),
-        _node("idea1", title="provider rotation substrate unique", status="idea"),
     ]
 
 
@@ -262,12 +203,23 @@ def test_warn_similar_nodes_silent_when_no_candidates(capsys):
     assert capsys.readouterr().err == ""
 
 
-def test_warn_similar_nodes_intake_hint_names_top_candidate_id(capsys):
-    new = _node("new", title="dedup gate for backlog filings", status="idea")
+def test_warn_similar_nodes_intake_hint_names_idea_state_top_candidate(capsys):
+    new = _node("new", title="dedup gate for backlog node filings", status="idea")
     _warn_similar_nodes(new, _dedup_entries(), intake_hint=True)
     err = capsys.readouterr().err
-    # The top candidate's id is embedded in the --claims remedy.
-    assert re.search(r"--claims\s+done1", err)
+    # The top candidate (idea1) is idea-state, so its id is in the --claims remedy.
+    assert re.search(r"--claims\s+idea1", err)
+
+
+def test_warn_similar_nodes_intake_hint_omits_claims_when_top_not_idea(capsys):
+    # Top candidate is done (not claimable upstream); the intake remedy informs
+    # only, no --claims hint.
+    done_top = _node("done1", title="already shipped feature exactly twin", status="done", pr_number=9)
+    new = _node("new", title="already shipped feature exactly", status="idea")
+    _warn_similar_nodes(new, [done_top], intake_hint=True)
+    err = capsys.readouterr().err
+    assert "--claims" not in err
+    assert "supersede" in err.lower()
 
 
 def test_warn_similar_nodes_without_intake_hint_omits_claims(capsys):
@@ -358,6 +310,7 @@ def test_intake_no_claim_appends_and_warns_on_similar_title(
     entries = _read_entries(fixture_graph)
     assert len(entries) == 4
     # Warning names the closest candidate.
+    assert "dedup:" in err
     assert "ab-1dea1234" in err
     assert re.search(r"--claims\s+ab-1dea1234", err)
 
@@ -681,3 +634,92 @@ def test_backlog_idea_has_add_flag_parity(tmp_path):
     assert node["parent"] == "ab-1234abcd"
     assert node["size"] == "M"
     assert node["domain"] == "infra"
+
+
+# -- birth-path dedup parity (plan x-6ac7 task 1.3: AC1/AC2/AC3/AC6-FR) --
+# Every node-birth path runs the SAME dedup net. A net on 2 of 3 paths is
+# decorative (pitfalls corpus entry 1), so these exercise all three through
+# their real entry points and pin that the old idea-state-only net is gone.
+
+
+def test_idea_birth_path_warns_on_near_duplicate(fixture_graph, capsys):
+    # AC1-HP + AC4-UI: the idea/add path (completely unguarded before this)
+    # files a near-dup of ab-1dea1234; receipt on stderr names id + status +
+    # 2-decimal score; stdout stays the JSON payload.
+    _create_node_impl(
+        title="Backlog intake plan-claim resolution net",
+        details="three-layer claim resolution for backlog intake",
+    )
+    captured = capsys.readouterr()
+    assert len(_read_entries(fixture_graph)) == 4  # new node persisted (exit 0)
+    assert "dedup:" in captured.err
+    assert "ab-1dea1234" in captured.err
+    assert re.search(r"ab-1dea1234\s+idea\s+0\.\d{2}", captured.err)
+    assert "dedup:" not in captured.out
+
+
+def test_idea_birth_path_silent_on_clean_filing(fixture_graph, capsys):
+    # AC2-HP: an unrelated filing warns nothing.
+    _create_node_impl(title="Completely unrelated novel topic", details="unique content here")
+    assert "dedup:" not in capsys.readouterr().err
+
+
+def test_multi_intake_birth_path_warns_on_near_duplicate(fixture_graph, tmp_path, capsys):
+    # AC6-FR (batch leg): the multi-intake path warns per intaked node.
+    from types import SimpleNamespace
+
+    def _plan(path: Path, title: str) -> Path:
+        path.write_text(
+            "\n".join(["---", "created: 2026-05-05T04:35", "---", "", f"# {title}", "", "Body.", ""])
+            + "\n"
+        )
+        return path
+
+    plan_a = _plan(tmp_path / "plan_a.md", "Backlog intake honors plan claims alpha")
+    plan_b = _plan(tmp_path / "plan_b.md", "Backlog intake honors plan claims beta")
+    args = SimpleNamespace(
+        deps=None, priority="p2", points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(args, [str(plan_a), str(plan_b)], roadmap_id=None, dry_run=False)
+    err = capsys.readouterr().err
+    assert err.count("dedup:") >= 1
+    assert "ab-1dea1234" in err
+
+
+def test_old_idea_title_warning_function_is_gone():
+    # AC6-FR: the difflib idea-state-only net cannot survive as a second path.
+    import fno.graph._intake as _intake
+
+    assert not hasattr(_intake, "_warn_similar_idea_titles")
+
+
+def test_idea_path_survives_scorer_failure_exit_zero(tmp_path, monkeypatch):
+    # AC3-ERR: a raising scorer leaves exit 0, the node persisted, and exactly
+    # one warning line. Real Typer exit code read in-process via CliRunner (no
+    # shell pipe - pitfalls corpus entry 3).
+    from typer.testing import CliRunner
+    from fno.graph.cli import cli
+    import fno.graph.relatedness as rel
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    g = tmp_path / "graph.json"
+    g.write_text(json.dumps({"entries": []}) + "\n")
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text('{"entries": []}\n')
+    monkeypatch.setattr(gc, "GRAPH_JSON", g)
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
+
+    def boom(entry, entries, k=3):
+        raise RuntimeError("scorer exploded")
+
+    monkeypatch.setattr(rel, "similar_nodes", boom)
+
+    result = CliRunner().invoke(cli, ["idea", "Backlog dedup gate filings"])
+    assert result.exit_code == 0, result.output
+    assert len(json.loads(g.read_text())["entries"]) == 1  # node persisted
+    # CliRunner mixes stderr into output; the skipped-check warning is the one
+    # and only warning line.
+    assert result.output.count("warning:") == 1

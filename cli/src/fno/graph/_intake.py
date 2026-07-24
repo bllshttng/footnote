@@ -907,7 +907,11 @@ def _warn_similar_nodes(
         pr_tok = f"  PR#{pr}" if isinstance(pr, int) and not isinstance(pr, bool) else ""
         lines.append(f'  {cid}  {status:<10}{score:.2f}{pr_tok}  "{title}"')
     top_id = candidates[0][0]
-    if intake_hint:
+    top_cand = by_id.get(top_id, {})
+    # The intake paths can re-file with --claims to consolidate, but only against
+    # an idea-state node (intake refuses to claim a non-idea node upstream); for
+    # any other top state the receipt informs only.
+    if intake_hint and top_cand.get("status") in (None, "idea"):
         lines.append(
             "consolidate: `fno backlog supersede` / `fno backlog update`, or "
             f"re-file with --claims {top_id}"
@@ -918,52 +922,6 @@ def _warn_similar_nodes(
             "existing node"
         )
     sys.stderr.write("\n".join(lines) + "\n")
-
-
-def _warn_similar_idea_titles(
-    new_title: str,
-    new_id: str,
-    entries: list[dict],
-    threshold: float = 0.7,
-) -> None:
-    """Emit a stderr warning naming the closest idea-state node by title.
-
-    Safety net for the third claims layer: a plan that did not declare a
-    claim but whose title strongly resembles an existing idea-state node is
-    very likely meant to claim it. We do not auto-merge - we just warn so
-    the author can re-run with ``--claims <id>``.
-
-    The scan is bounded by ``threshold`` (default 0.7 via
-    ``difflib.SequenceMatcher``). Only ``status: idea`` nodes are
-    considered; non-idea states are skipped because claiming them is
-    refused upstream anyway. ``new_id`` is excluded so a node never
-    triggers a warning about itself.
-    """
-    from difflib import SequenceMatcher
-    new_title_norm = new_title.strip().lower()
-    if not new_title_norm:
-        return
-    matches: list[tuple[float, str, str]] = []
-    for e in entries:
-        if e.get("id") == new_id:
-            continue
-        if e.get("status") != "idea":
-            continue
-        title = (e.get("title") or "").strip().lower()
-        if not title:
-            continue
-        ratio = SequenceMatcher(None, title, new_title_norm).ratio()
-        if ratio >= threshold:
-            matches.append((ratio, e.get("id") or "", e.get("title") or ""))
-    if not matches:
-        return
-    matches.sort(reverse=True)
-    top_ratio, top_id, top_title = matches[0]
-    sys.stderr.write(
-        f'warning: idea-state node {top_id} has a similar title '
-        f'("{top_title}", ratio={top_ratio:.2f}); if this plan implements '
-        f'it, rerun with --claims {top_id} to claim the existing node\n'
-    )
 
 
 # -- Intake core --

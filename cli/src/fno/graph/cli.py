@@ -992,6 +992,22 @@ def _create_node_impl(
     elif node_holder[0] is not None and node_holder[0].get("source_node_id"):
         typer.echo(f"origin: {node_holder[0]['source_node_id']}", err=True)
 
+    # Filing-time dedup net (plan x-6ac7): warn if the just-born node resembles
+    # an existing one across all live states. Post-write, fresh read, non-fatal -
+    # the mutation already committed, so a failure anywhere degrades to one
+    # warning and never fails the filing or touches its exit code.
+    if new_id_holder[0] is not None:
+        try:
+            from fno.graph.store import read_graph
+            from fno.graph._intake import _find_node, _warn_similar_nodes
+
+            post_entries = read_graph(_graph_path())
+            node = _find_node(post_entries, new_id_holder[0] or "")
+            if node is not None:
+                _warn_similar_nodes(node, post_entries, intake_hint=False)
+        except Exception as e:  # noqa: BLE001 - dedup never breaks a filing
+            sys.stderr.write(f"warning: post-file dedup check skipped: {e}\n")
+
     # Born-with-why: route births through the shared birth hook. Gate-first and
     # strictly non-fatal, so a gate-OFF install is a no-op and a dispatch
     # failure never wedges the filing of the node above.
@@ -2010,22 +2026,27 @@ def _intake_impl(
     typer.echo(f'intake {new_id_holder[0]} -> {destination}: "{spec["title"]}"')
 
     try:
-        from fno.graph._intake import (
-            _warn_unknown_project, _find_node, _warn_similar_idea_titles,
-        )
+        from fno.graph._intake import _warn_unknown_project, _find_node
         post_entries = read_graph(_graph_path())
         node = _find_node(post_entries, new_id_holder[0] or "")
         landed_project = node.get("project") if node else None
         _warn_unknown_project(landed_project)
-        # Safety net: if the new node strongly resembles an existing idea,
-        # warn so the author can re-run with --claims to consolidate.
-        _warn_similar_idea_titles(
-            spec["title"], new_id_holder[0] or "", post_entries,
-        )
     except Exception as e:
         # The mutation already committed; a stray failure in the warning
         # path must not surface as if the intake itself failed.
         sys.stderr.write(f"warning: post-intake project check failed: {e}\n")
+
+    # Filing-time dedup net (plan x-6ac7): warn if the just-born node resembles
+    # an existing one across all live states. Own try/except so a dedup failure
+    # is reported as itself, not conflated with the project check above.
+    try:
+        from fno.graph._intake import _find_node, _warn_similar_nodes
+        post_entries = read_graph(_graph_path())
+        node = _find_node(post_entries, new_id_holder[0] or "")
+        if node is not None:
+            _warn_similar_nodes(node, post_entries, intake_hint=True)
+    except Exception as e:  # noqa: BLE001 - dedup never breaks the intake
+        sys.stderr.write(f"warning: post-intake dedup check skipped: {e}\n")
 
     # Mirror the graph-authoritative navigation fields onto the plan doc the
     # node just linked. Non-fatal: a missing/unreadable plan never fails intake.
@@ -7999,6 +8020,7 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
     tallies = {"intaked": 0, "already": 0}
     cli_project = getattr(args, "project", None)
     landed_projects: set[str] = set()
+    new_ids: list[str] = []
 
     def mutator(es):
         for r in resolved:
@@ -8020,12 +8042,25 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
                 node = _build_intake_node(prep["node_spec"], es)
                 es.append(node)
                 tallies["intaked"] += 1
+                new_ids.append(node["id"])
                 typer.echo(f'  intake {node["id"]}: "{node["title"]}"  ({f})')
                 if isinstance(node.get("project"), str):
                     landed_projects.add(node["project"])
         return es
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    # Filing-time dedup net (plan x-6ac7): per just-born node, warn if it
+    # resembles an existing one. Fresh post-write read; non-fatal.
+    try:
+        from fno.graph._intake import _find_node, _warn_similar_nodes
+        post_entries = read_graph(_graph_path())
+        for nid in new_ids:
+            node = _find_node(post_entries, nid)
+            if node is not None:
+                _warn_similar_nodes(node, post_entries, intake_hint=True)
+    except Exception as e:  # noqa: BLE001 - dedup never breaks the batch
+        sys.stderr.write(f"warning: post-intake dedup check skipped: {e}\n")
 
     from fno.graph._intake import _warn_unknown_project, _list_known_projects
     known = _list_known_projects()
