@@ -165,31 +165,24 @@ pub fn isolated_roster_paths() -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// (x-ed59) The registered worker name for `short_id`, scanned across the
-/// default and isolated-account rosters. The durable source restore uses when
-/// the in-memory `agents` catalog is empty at cold restart (rosters are readable
-/// then, the same way `isolated_attach_ctx` reads them). `None` when no roster
-/// worker matches (an ad-hoc attach, or one not yet flushed to disk) - the caller
-/// then titles from the `claude` command basename, exactly as before.
-pub fn registered_name_for(short_id: &str) -> Option<String> {
-    let scan = |raw: &str| {
-        parse_roster(raw)
-            .and_then(|ws| ws.into_iter().find(|w| w.short_id == short_id))
-            .map(|w| w.name)
+/// (x-ed59) The registered worker name for `short_id` in ONE account's roster:
+/// the isolated account's when `config_dir` is set, else the default. Short IDs
+/// are unique only within a daemon/account namespace, so the scan is scoped
+/// rather than first-match-across-accounts (a cross-account scan would label a
+/// pane with another account's worker on a short-ID collision). The durable
+/// source restore uses when the in-memory `agents` catalog is empty at cold
+/// restart. `None` when no roster worker matches (an ad-hoc attach, or one not
+/// yet flushed to disk) - the caller then titles from the `claude` command
+/// basename, exactly as before.
+pub fn registered_name_for(short_id: &str, config_dir: Option<&std::path::Path>) -> Option<String> {
+    let path = match config_dir {
+        Some(dir) => dir.join("daemon").join("roster.json"),
+        None => roster_path(),
     };
-    if let Ok(raw) = std::fs::read_to_string(roster_path()) {
-        if let Some(name) = scan(&raw) {
-            return Some(name);
-        }
-    }
-    for (_account, path) in isolated_roster_paths() {
-        if let Ok(raw) = std::fs::read_to_string(&path) {
-            if let Some(name) = scan(&raw) {
-                return Some(name);
-            }
-        }
-    }
-    None
+    let raw = std::fs::read_to_string(&path).ok()?;
+    parse_roster(&raw)
+        .and_then(|ws| ws.into_iter().find(|w| w.short_id == short_id))
+        .map(|w| w.name)
 }
 
 /// (x-c914) The isolated `config_dir` for one account, or `None` for a managed

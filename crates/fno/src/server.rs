@@ -3672,13 +3672,18 @@ impl Core {
     /// (the sidepane's in-memory source) and fall back to the roster when the
     /// catalog is empty (cold restore). `None` (an ad-hoc attach, or a worker not
     /// yet known) leaves the field as the spawn set it, so the label falls through.
-    fn name_attached_pane(&mut self, pid: u64, attach_id: &str) {
+    fn name_attached_pane(
+        &mut self,
+        pid: u64,
+        attach_id: &str,
+        config_dir: Option<&std::path::Path>,
+    ) {
         let name = self
             .agents
             .iter()
             .find(|a| a.attach_id.as_deref() == Some(attach_id))
             .map(|a| a.name.clone())
-            .or_else(|| agents_view::registered_name_for(attach_id));
+            .or_else(|| agents_view::registered_name_for(attach_id, config_dir));
         if let (Some(name), Some(entry)) = (name, self.panes.get_mut(&pid)) {
             entry.name = Some(name);
         }
@@ -3795,7 +3800,7 @@ impl Core {
                         // (x-ed59) Title the restored pane from its registered name
                         // (the roster, the sidepane's source) so it matches the
                         // fresh-spawn label across reattach/restart.
-                        self.name_attached_pane(pid, &m.attach_id);
+                        self.name_attached_pane(pid, &m.attach_id, cd);
                         let tid = self.session.mint_tab_id();
                         tabs.push((
                             Tab {
@@ -6404,7 +6409,7 @@ impl Core {
                             return Flow::Continue;
                         }
                     };
-                    self.name_attached_pane(new_pid, &id);
+                    self.name_attached_pane(new_pid, &id, cd.as_deref());
                     // Swap-second: replace_leaf repoints the focused leaf at the new viewer, moving focus with it.
                     let Some(tab) = self.viewed_tab_mut(view) else {
                         self.reap_pane(new_pid);
@@ -6516,7 +6521,7 @@ impl Core {
                         return Flow::Continue;
                     }
                 };
-                self.name_attached_pane(pid, &id);
+                self.name_attached_pane(pid, &id, cd.as_deref());
                 // Place through the shared v41 helper: it honors the anchored
                 // drop's `tab`/`at` (a split beside the exact drop pane), and
                 // otherwise falls through to place_spawned_pane's whole-tab
@@ -6946,7 +6951,7 @@ impl Core {
                             continue;
                         }
                     };
-                    self.name_attached_pane(pid, id);
+                    self.name_attached_pane(pid, id, cd.as_deref());
                     let tid = self.session.mint_tab_id();
                     let tab = Tab {
                         name: None,
@@ -9341,11 +9346,11 @@ mod tests {
             "shell pane starts unnamed"
         );
         core.agents = vec![bg_row("build", "/tmp", Some("deadbee2"))];
-        core.name_attached_pane(p1, "deadbee2");
+        core.name_attached_pane(p1, "deadbee2", None);
         assert_eq!(core.panes.get(&p1).unwrap().name.as_deref(), Some("build"));
         // An ad-hoc attach (no matching worker) leaves the name unset.
         let (mut core2, _, q1, _, _) = seen_test_core();
-        core2.name_attached_pane(q1, "no-such-worker");
+        core2.name_attached_pane(q1, "no-such-worker", None);
         assert_eq!(core2.panes.get(&q1).unwrap().name, None);
     }
 
