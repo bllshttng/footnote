@@ -562,8 +562,14 @@ class Ritual:
         prompt = self._judgment_prompt(deferred, files, lines)
         argv = [*fno_py_cmd(), "agents", "spawn", "--substrate", "headless",
                 "--timeout", str(int(_JUDGMENT_TIMEOUT_S)),
-                "-c", str(self.canon),
-                "--name", f"judgment-pr-{self.ctx.pr}", prompt]
+                "-c", str(self.canon)]
+        # Un-routed site: no --role, so config.post_merge.model IS the model.
+        # Deliberately NOT `--role post-merge` - that role auto-routes to the
+        # secondary provider, and this leg renders a judgment.
+        model = getattr(self.ctx.pm, "model", None)
+        if model:
+            argv += ["--model", model]
+        argv += ["--name", f"judgment-pr-{self.ctx.pr}", prompt]
         try:
             r = self.runner(argv, timeout=_JUDGMENT_TIMEOUT_S + 60.0)
         except (ToolMissing, subprocess.SubprocessError):
