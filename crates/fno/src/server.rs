@@ -3665,6 +3665,25 @@ impl Core {
         (account, dir)
     }
 
+    /// (x-ed59) Stamp a freshly-attached pane's registered worker name so its
+    /// tab/pane title matches the sidepane row, not the `claude` command basename.
+    /// The attach argv is `claude attach <id>` with no `FNO_AGENT_SELF`, so unlike
+    /// a fresh spawn the name is not in the argv - resolve it from the live catalog
+    /// (the sidepane's in-memory source) and fall back to the roster when the
+    /// catalog is empty (cold restore). `None` (an ad-hoc attach, or a worker not
+    /// yet known) leaves the field as the spawn set it, so the label falls through.
+    fn name_attached_pane(&mut self, pid: u64, attach_id: &str) {
+        let name = self
+            .agents
+            .iter()
+            .find(|a| a.attach_id.as_deref() == Some(attach_id))
+            .map(|a| a.name.clone())
+            .or_else(|| agents_view::registered_name_for(attach_id));
+        if let (Some(name), Some(entry)) = (name, self.panes.get_mut(&pid)) {
+            entry.name = Some(name);
+        }
+    }
+
     /// The attach-ids that are LIVE right now, read synchronously from the
     /// registry + roster files. Restore runs at the first attach, before the
     /// off-loop 1s reader has populated `self.agents`, so a stale in-memory
@@ -3773,6 +3792,10 @@ impl Core {
                 let argv = attach_argv(&m.attach_id, acct, cd);
                 match self.spawn_pane_cmd(&argv, rows, cols, &cwd0) {
                     Ok(pid) => {
+                        // (x-ed59) Title the restored pane from its registered name
+                        // (the roster, the sidepane's source) so it matches the
+                        // fresh-spawn label across reattach/restart.
+                        self.name_attached_pane(pid, &m.attach_id);
                         let tid = self.session.mint_tab_id();
                         tabs.push((
                             Tab {
@@ -6381,6 +6404,7 @@ impl Core {
                             return Flow::Continue;
                         }
                     };
+                    self.name_attached_pane(new_pid, &id);
                     // Swap-second: replace_leaf repoints the focused leaf at the new viewer, moving focus with it.
                     let Some(tab) = self.viewed_tab_mut(view) else {
                         self.reap_pane(new_pid);
@@ -6492,6 +6516,7 @@ impl Core {
                         return Flow::Continue;
                     }
                 };
+                self.name_attached_pane(pid, &id);
                 // Place through the shared v41 helper: it honors the anchored
                 // drop's `tab`/`at` (a split beside the exact drop pane), and
                 // otherwise falls through to place_spawned_pane's whole-tab
@@ -6921,6 +6946,7 @@ impl Core {
                             continue;
                         }
                     };
+                    self.name_attached_pane(pid, id);
                     let tid = self.session.mint_tab_id();
                     let tab = Tab {
                         name: None,
@@ -9300,6 +9326,27 @@ mod tests {
         assert_eq!(from(&["env", "FNO_NODE=x-1", "claude"]), None);
         assert_eq!(from(&["claude"]), None);
         assert_eq!(from(&["env", "FNO_ACCOUNT=", "claude"]), None);
+    }
+
+    #[test]
+    fn name_attached_pane_titles_an_attached_pane_from_its_registered_name() {
+        // x-ed59: an attached/driven pane reads its registered name from the live
+        // catalog (the sidepane's source) so its tab/pane title matches the row,
+        // not the `claude` command basename. Falls through unchanged for an ad-hoc
+        // attach with no matching worker.
+        let (mut core, _client, p1, _p2, _rx) = seen_test_core();
+        assert_eq!(
+            core.panes.get(&p1).unwrap().name,
+            None,
+            "shell pane starts unnamed"
+        );
+        core.agents = vec![bg_row("build", "/tmp", Some("deadbee2"))];
+        core.name_attached_pane(p1, "deadbee2");
+        assert_eq!(core.panes.get(&p1).unwrap().name.as_deref(), Some("build"));
+        // An ad-hoc attach (no matching worker) leaves the name unset.
+        let (mut core2, _, q1, _, _) = seen_test_core();
+        core2.name_attached_pane(q1, "no-such-worker");
+        assert_eq!(core2.panes.get(&q1).unwrap().name, None);
     }
 
     #[test]
