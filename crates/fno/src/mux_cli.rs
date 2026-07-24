@@ -1047,6 +1047,68 @@ fn socket_dir_check() -> Check {
     }
 }
 
+/// The squad-store orphan verdict (x-a572 US3), pure so the ok/warn/Na rendering
+/// is unit-testable without a store. `total` is the persisted squad count;
+/// `orphan` is how many the prune predicate would reap (unnamed, every origin
+/// gone, no live member). Read-only: doctor detects and names the remedy, it
+/// never prunes (Locked Decision 1).
+fn squad_store_verdict(total: usize, orphan: usize) -> Check {
+    if total == 0 {
+        Check {
+            name: "squad store".into(),
+            verdict: Verdict::Na,
+            detail: "no squads persisted".into(),
+            remedy: None,
+        }
+    } else if orphan == 0 {
+        Check {
+            name: "squad store".into(),
+            verdict: Verdict::Ok,
+            detail: format!("{total} squad(s), none orphaned"),
+            remedy: None,
+        }
+    } else {
+        Check {
+            name: "squad store".into(),
+            verdict: Verdict::Warn,
+            detail: format!("{orphan} orphaned squad(s) (no surviving origin, no live member)"),
+            remedy: Some("fno mux squad prune".into()),
+        }
+    }
+}
+
+/// `fno mux doctor`'s squad-store check: count how many persisted squads the
+/// prune predicate would reap. Read-only (load + registry/roster reads, no pane
+/// probe, no mutation). An unreadable registry means the count is unknown, so
+/// the check warns and points at the prune verb (which is fail-safe regardless).
+fn squad_store_check() -> Check {
+    let loaded = crate::squad_store::load();
+    let total = loaded.squads.len();
+    if total == 0 {
+        return squad_store_verdict(0, 0);
+    }
+    let Some(live) = live_set_or_unknown() else {
+        return Check {
+            name: "squad store".into(),
+            verdict: Verdict::Warn,
+            detail: "agent registry unreadable; orphan count unknown".into(),
+            remedy: Some("fno mux squad prune".into()),
+        };
+    };
+    let origin_exists = |p: &str| std::path::Path::new(p).exists();
+    let orphan = loaded
+        .squads
+        .iter()
+        .filter(|sq| {
+            matches!(
+                crate::squad_store::prune_decision(sq, false, Some(&live), &[], &origin_exists),
+                crate::squad_store::PruneDecision::Prune
+            )
+        })
+        .count();
+    squad_store_verdict(total, orphan)
+}
+
 /// Run every check. The fs/net/env reads live here; the verdict logic each one
 /// calls is pure and unit-tested.
 fn gather_checks() -> Vec<Check> {
@@ -1070,6 +1132,7 @@ fn gather_checks() -> Vec<Check> {
         &std::env::var("COLORTERM").unwrap_or_default(),
     ));
     checks.push(clipboard_check(crate::clipboard::available_tool()));
+    checks.push(squad_store_check());
     checks
 }
 
@@ -1109,6 +1172,232 @@ fn render_doctor(checks: &[Check], json: bool) -> i32 {
 /// `fno mux doctor [--json]`: read-only environment diagnostics.
 pub fn doctor(json: bool) -> i32 {
     render_doctor(&gather_checks(), json)
+}
+
+// ---------------------------------------------------------------------------
+// `fno mux squad prune` - reap dead-origin residue (x-a572)
+// ---------------------------------------------------------------------------
+
+/// `fno mux squad <verb> ...`: the squad-store maintenance family. Only `prune`
+/// exists today; a bare `mux squad` or an unknown verb is usage. Carries the
+/// tokens after `mux squad` verbatim, like `pane`/`block`.
+pub fn squad(args: &[OsString]) -> i32 {
+    let Some(sub) = args.first().and_then(|a| a.to_str()) else {
+        eprintln!("fno mux squad: expected a verb (prune)");
+        return EXIT_USAGE;
+    };
+    match sub {
+        "prune" => squad_prune(&args[1..]),
+        _ => {
+            eprintln!("fno mux squad: unknown verb {sub:?} (expected prune)");
+            EXIT_USAGE
+        }
+    }
+}
+
+/// The live attach-id set, or `None` when the liveness query failed. A
+/// present-but-unreadable registry/roster is a failed query (AC3-FR): the prune
+/// predicate then treats every member as unknown-liveness and keeps everything.
+/// Absent files mean no agents system is running -> nothing is live.
+fn live_set_or_unknown() -> Option<std::collections::HashSet<String>> {
+    let unreadable = |p: &Path| p.exists() && std::fs::read_to_string(p).is_err();
+    if unreadable(&crate::agents_view::registry_path())
+        || unreadable(&crate::agents_view::roster_path())
+    {
+        return None;
+    }
+    Some(crate::server::live_attach_ids_snapshot())
+}
+
+/// The cwds of every live mux pane, via the read-only `PaneLs` probe (the same
+/// one `doctor` uses). Any miss contributes nothing (fail-safe): the member
+/// liveness set still gates, and a live squad almost always has a live member.
+fn live_pane_cwds() -> Vec<String> {
+    let mut cwds = Vec::new();
+    let Ok(names) = session_names() else {
+        return cwds;
+    };
+    for name in names {
+        let Ok(sock) = proto::socket_path(&name) else {
+            continue;
+        };
+        if let Ok(ServerMsg::PaneList { panes }) =
+            control_roundtrip(&sock, &name, ControlVerb::PaneLs)
+        {
+            for p in panes {
+                cwds.push(p.cwd);
+            }
+        }
+    }
+    cwds
+}
+
+/// `fno mux squad prune [--dry-run] [--include-named] [--json]`: remove squads
+/// whose every recorded origin is gone and which host no live member or pane
+/// (x-a572). Named squads require `--include-named`. The predicate is
+/// re-evaluated under the store lock against fresh fs state, and the receipt is
+/// built from the locked closure's actual removals - never the pre-lock
+/// candidate list (AC1-UI). `--dry-run` writes nothing.
+fn squad_prune(args: &[OsString]) -> i32 {
+    let mut dry_run = false;
+    let mut include_named = false;
+    let mut json = false;
+    for a in args {
+        match a.to_str() {
+            Some("--dry-run") => dry_run = true,
+            Some("--include-named") => include_named = true,
+            Some("--json") => json = true,
+            Some(other) => {
+                eprintln!("fno mux squad prune: unknown argument {other:?}");
+                return EXIT_USAGE;
+            }
+            None => {
+                eprintln!("fno mux squad prune: non-UTF-8 argument");
+                return EXIT_USAGE;
+            }
+        }
+    }
+
+    let live = live_set_or_unknown();
+    let live_cwds = live_pane_cwds();
+    let origin_exists = |p: &str| std::path::Path::new(p).exists();
+    let live_ref = live.as_ref();
+
+    let decide = |sq: &crate::squad_store::StoredSquad| {
+        crate::squad_store::prune_decision(sq, include_named, live_ref, &live_cwds, &origin_exists)
+    };
+
+    // Both paths produce the same receipt type. Dry-run builds it from a
+    // read-only load (no lock, no write); the real run builds it from the
+    // locked closure's actual removals (AC1-UI).
+    let (removed, kept_unknown, skipped_named, kept_protected, applied) = if dry_run {
+        let loaded = crate::squad_store::load();
+        let mut removed: Vec<crate::squad_store::PrunedSquad> = Vec::new();
+        let (mut ku, mut sn, mut kp) = (0usize, 0usize, 0usize);
+        for sq in &loaded.squads {
+            match decide(sq) {
+                crate::squad_store::PruneDecision::Prune => {
+                    removed.push(crate::squad_store::PrunedSquad::from(sq));
+                }
+                crate::squad_store::PruneDecision::KeepUnknown => ku += 1,
+                crate::squad_store::PruneDecision::SkipNamed => sn += 1,
+                crate::squad_store::PruneDecision::Keep => kp += 1,
+            }
+        }
+        (removed, ku, sn, kp, false)
+    } else {
+        match crate::squad_store::prune(decide) {
+            Ok(o) => (
+                o.removed,
+                o.kept_unknown,
+                o.skipped_named,
+                o.kept_protected,
+                true,
+            ),
+            Err(e) => {
+                eprintln!("fno mux squad prune: {e}");
+                return EXIT_ERROR;
+            }
+        }
+    };
+
+    if json {
+        render_prune_json(
+            &removed,
+            applied,
+            kept_unknown,
+            skipped_named,
+            kept_protected,
+        );
+    } else {
+        let verb = if applied { "pruned" } else { "would prune" };
+        for sq in &removed {
+            println!(
+                "{verb} {} origins={} members={}",
+                prune_identity(sq),
+                sq.origins.join(","),
+                sq.members
+            );
+        }
+        if applied && removed.is_empty() {
+            println!("nothing to prune");
+        } else if !applied {
+            println!("dry-run: no changes written");
+        }
+        print_prune_summary(
+            verb,
+            removed.len(),
+            kept_unknown,
+            skipped_named,
+            kept_protected,
+            include_named,
+        );
+    }
+    EXIT_OK
+}
+
+/// A pruned squad's identity line: its name if named, else its durable key.
+fn prune_identity(sq: &crate::squad_store::PrunedSquad) -> String {
+    if sq.name.is_empty() {
+        format!("<key:{}>", sq.key)
+    } else {
+        sq.name.clone()
+    }
+}
+
+/// The one-line summary after a (dry-)run: count pruned plus why the rest stayed.
+fn print_prune_summary(
+    verb: &str,
+    n: usize,
+    kept_unknown: usize,
+    skipped_named: usize,
+    kept_protected: usize,
+    include_named: bool,
+) {
+    let mut parts = vec![format!("{verb} {n} squad(s)")];
+    if kept_protected > 0 {
+        parts.push(format!("kept {kept_protected} (live/origin)"));
+    }
+    if kept_unknown > 0 {
+        parts.push(format!("kept {kept_unknown} (liveness unknown)"));
+    }
+    if skipped_named > 0 && !include_named {
+        parts.push(format!(
+            "skipped {skipped_named} named (pass --include-named)"
+        ));
+    }
+    println!("{}", parts.join("; "));
+}
+
+fn render_prune_json(
+    removed: &[crate::squad_store::PrunedSquad],
+    dry_run: bool,
+    kept_unknown: usize,
+    skipped_named: usize,
+    kept_protected: usize,
+) {
+    let pruned: Vec<_> = removed
+        .iter()
+        .map(|sq| {
+            serde_json::json!({
+                "name": sq.name,
+                "key": sq.key,
+                "origins": sq.origins,
+                "members": sq.members,
+            })
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::json!({
+            "pruned": pruned,
+            "pruned_count": pruned.len(),
+            "dry_run": dry_run,
+            "kept_protected": kept_protected,
+            "kept_unknown": kept_unknown,
+            "skipped_named": skipped_named,
+        })
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3556,6 +3845,31 @@ mod tests {
         let c = session_check("main", VersionVerdict::Skew(msg.into()));
         assert_eq!(c.verdict, Verdict::Fail);
         assert!(c.detail.contains("v7") && c.detail.contains("v6"));
+    }
+
+    #[test]
+    fn squad_store_verdict_empty_is_na() {
+        let c = squad_store_verdict(0, 0);
+        assert_eq!(c.verdict, Verdict::Na);
+        assert_eq!(c.name, "squad store");
+        assert!(c.remedy.is_none());
+    }
+
+    #[test]
+    fn squad_store_verdict_clean_is_ok() {
+        let c = squad_store_verdict(7, 0);
+        assert_eq!(c.verdict, Verdict::Ok);
+        assert!(c.detail.contains("7 squad(s), none orphaned"));
+    }
+
+    #[test]
+    fn squad_store_verdict_orphans_warn_with_prune_remedy() {
+        // AC3-UI: N>0 prunable -> warn naming the count + the prune remedy; a
+        // Warn never flips doctor's exit non-zero (only Fail does).
+        let c = squad_store_verdict(137, 124);
+        assert_eq!(c.verdict, Verdict::Warn);
+        assert!(c.detail.contains("124 orphaned"));
+        assert_eq!(c.remedy.as_deref(), Some("fno mux squad prune"));
     }
 
     #[test]

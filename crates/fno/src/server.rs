@@ -1333,6 +1333,31 @@ fn live_ids_from(reg_raw: Option<&str>, roster_raw: Option<&str>, now: u64) -> H
     live
 }
 
+/// The live attach-id set read synchronously from the registry + roster files
+/// (the dead-set source for the mux squad prune verb, x-a572). Free of `Server`
+/// so the standalone CLI computes the same liveness restore does, isolated
+/// rosters folded in (x-c914): a worker live in an alt-account roster is live.
+/// `None`-ish semantics are the caller's - this returns the set it could read;
+/// an unreadable registry/roster simply contributes nothing (fail-safe: the
+/// prune predicate then treats unprovable members as unknown and keeps them).
+pub(crate) fn live_attach_ids_snapshot() -> HashSet<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let reg = std::fs::read_to_string(agents_view::registry_path()).ok();
+    let roster = std::fs::read_to_string(agents_view::roster_path()).ok();
+    let mut live = live_ids_from(reg.as_deref(), roster.as_deref(), now);
+    for (_account, path) in agents_view::isolated_roster_paths() {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            for w in agents_view::parse_roster(&raw).into_iter().flatten() {
+                live.insert(w.short_id);
+            }
+        }
+    }
+    live
+}
+
 /// Loose `<prefix>-<hex4..8>` node-id shape check for the cwd-basename
 /// fallback, so a plain shell squad (basename "footnote") is never
 /// mis-attributed as a graph node.
@@ -3609,26 +3634,10 @@ impl Core {
     /// registry + roster files. Restore runs at the first attach, before the
     /// off-loop 1s reader has populated `self.agents`, so a stale in-memory
     /// catalog would tombstone every member (AC1-HP). One-shot read per server
-    /// lifetime, off the steady loop.
+    /// lifetime, off the steady loop. Delegates to [`live_attach_ids_snapshot`]
+    /// so the mux squad prune verb computes the same liveness.
     fn live_attach_ids_now(&self) -> HashSet<String> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let reg = std::fs::read_to_string(agents_view::registry_path()).ok();
-        let roster = std::fs::read_to_string(agents_view::roster_path()).ok();
-        let mut live = live_ids_from(reg.as_deref(), roster.as_deref(), now);
-        // (x-c914) An isolated-account worker in a persisted squad is live in
-        // ITS roster, not the default one; fold each so restore does not
-        // tombstone a live alt-account member.
-        for (_account, path) in agents_view::isolated_roster_paths() {
-            if let Ok(raw) = std::fs::read_to_string(&path) {
-                for w in agents_view::parse_roster(&raw).into_iter().flatten() {
-                    live.insert(w.short_id);
-                }
-            }
-        }
-        live
+        live_attach_ids_snapshot()
     }
 
     /// Materialize the persisted named squads at the first real attach (US2).
@@ -3652,13 +3661,37 @@ impl Core {
             return;
         }
         let live = self.live_attach_ids_now();
+        // (x-a572 US4) Self-heal sweep: drop unnamed squads whose every origin is
+        // gone and which host no restorable member, writing through remove() so
+        // the store converges without a manual prune. Named squads are never
+        // touched (Locked Decision 3). A remove() failure - including the
+        // build-tree write guard refusing, or a read-only store - degrades to a
+        // notice and the squad is still skipped in memory, so restore never
+        // aborts because of the sweep (AC2-FR).
+        let origin_exists = |p: &str| std::path::Path::new(p).exists();
+        let mut squads: Vec<_> = Vec::with_capacity(loaded.squads.len());
+        for sq in loaded.squads {
+            let sweep = sq.name.is_empty()
+                && !sq.origins.iter().any(|o| origin_exists(o.as_str()))
+                && !sq
+                    .members
+                    .iter()
+                    .any(|m| !m.tombstone && live.contains(&m.attach_id));
+            if sweep {
+                if let Err(e) = crate::squad_store::remove("", &sq.key) {
+                    self.notice_all(format!("squad prune at restore skipped: {e}"));
+                }
+                continue;
+            }
+            squads.push(sq);
+        }
         // (x-c914) Reverse lookup so a persisted isolated-account member restores
         // against its own daemon, not the default ~/.claude.
         let iso_ctx = isolated_attach_ctx();
         let home_cwd = std::env::var_os("HOME")
             .map(|h| h.to_string_lossy().into_owned())
             .unwrap_or_default();
-        for ps in loaded.squads {
+        for ps in squads {
             let cwd0 = ps
                 .origins
                 .first()
@@ -13726,6 +13759,55 @@ mod tests {
     }
 
     #[test]
+    fn restore_self_heal_sweeps_an_unnamed_dead_origin_orphan() {
+        // x-a572 US4: at restore, an unnamed squad whose every origin is gone
+        // and which hosts no restorable member is removed (the store converges
+        // without a manual prune) and skipped. A named squad in the same store
+        // is never touched (Locked Decision 3).
+        let _s = StoreScratch::new("restore-selfheal");
+        crate::squad_store::upsert(
+            "",
+            "orphan",
+            &["/no/such/selfheal".into()],
+            &[stored_member("deadbeef", false)],
+        )
+        .unwrap();
+        crate::squad_store::upsert(
+            "real",
+            "",
+            &["/no/such/selfheal".into()],
+            &[stored_member("deadbeef", false)],
+        )
+        .unwrap();
+
+        let mut core = empty_core();
+        core.shells = shell_candidates(std::env::var_os("SHELL").as_deref());
+        core.restore_squads(24, 80, 999);
+
+        // The orphan was swept from the store; the named squad remains.
+        let loaded = crate::squad_store::load();
+        assert!(
+            !loaded.squads.iter().any(|s| s.key == "orphan"),
+            "unnamed dead-origin orphan swept: {:?}",
+            loaded.squads
+        );
+        assert!(
+            loaded.squads.iter().any(|s| s.name == "real"),
+            "named squad kept: {:?}",
+            loaded.squads
+        );
+        // Only the named squad was restored into the session.
+        assert_eq!(core.session.squads.len(), 1, "the orphan is not restored");
+        assert_eq!(core.session.squads[0].name.as_deref(), Some("real"));
+
+        // Reap the spawned shell so the test leaks no process.
+        let pids: Vec<u64> = core.panes.keys().copied().collect();
+        for pid in pids {
+            core.reap_pane(pid);
+        }
+    }
+
+    #[test]
     fn picker_attach_into_unnamed_home_squad_persists_member() {
         // US2 root cause: a fresh picker-attach lands in the UNNAMED home squad
         // (seen_test_core's squad 1, origins=["/tmp/seen"], name=None), and its
@@ -13807,20 +13889,26 @@ mod tests {
         // home rather than duplicating it. (A dead member stands in for the live
         // re-attach, whose spawn path the named-restore tests already cover.)
         let _s = StoreScratch::new("restore-home-merge");
+        // A real cwd so the self-heal sweep sees a SURVIVING origin and keeps the
+        // lane (a gone-origin lane would be reaped at restore, x-a572 US4).
+        let home = std::env::temp_dir().join(format!("fno-restore-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let home_str = home.to_str().unwrap().to_string();
         crate::squad_store::upsert(
             "",
             "homekey1",
-            &["/tmp/home".into()],
+            std::slice::from_ref(&home_str),
             &[stored_member("deadbeef", false)],
         )
         .unwrap();
         let mut core = empty_core();
         core.shells = shell_candidates(std::env::var_os("SHELL").as_deref());
         // A freshly-minted home squad for the SAME cwd, exactly as attach() leaves it.
-        let home_pid = core.spawn_pane(24, 80, "/tmp/home").expect("home shell");
+        let home_pid = core.spawn_pane(24, 80, &home_str).expect("home shell");
         core.session.add_squad(
             1,
-            vec!["/tmp/home".into()],
+            vec![home_str.clone()],
             None,
             Tab {
                 name: None,
@@ -13861,10 +13949,17 @@ mod tests {
         // A persisted unnamed lane whose origins DON'T match home restores as its
         // own squad (not merged) - every squad remains, TUI or API.
         let _s = StoreScratch::new("restore-separate-lane");
+        // A real cwd so the self-heal sweep keeps the lane (a gone-origin lane
+        // would be reaped at restore, x-a572 US4).
+        let lane_cwd =
+            std::env::temp_dir().join(format!("fno-restore-separate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&lane_cwd);
+        std::fs::create_dir_all(&lane_cwd).unwrap();
+        let lane_cwd_str = lane_cwd.to_str().unwrap().to_string();
         crate::squad_store::upsert(
             "",
             "lanekey1",
-            &["/repo/other".into()],
+            std::slice::from_ref(&lane_cwd_str),
             &[stored_member("deadbeef", false)],
         )
         .unwrap();
@@ -13894,7 +13989,7 @@ mod tests {
             .session
             .squads
             .iter()
-            .find(|s| s.origins == vec!["/repo/other".to_string()])
+            .find(|s| s.origins == vec![lane_cwd_str.clone()])
             .expect("lane restored");
         assert!(lane.name.is_none(), "restored unnamed");
         assert_eq!(lane.tabs.len(), 1, "zero-live lane gets its fallback shell");
