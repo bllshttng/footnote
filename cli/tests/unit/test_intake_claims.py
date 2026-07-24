@@ -19,7 +19,7 @@ from unittest.mock import patch
 import click.exceptions
 import pytest
 
-from fno.graph._intake import _resolve_claim, _warn_similar_idea_titles
+from fno.graph._intake import _resolve_claim, _warn_similar_idea_titles, _warn_similar_nodes
 from fno.graph.cli import _intake_impl
 
 
@@ -228,6 +228,54 @@ def test_similar_titles_warning_skips_non_idea_states(fixture_graph, capsys):
     err = capsys.readouterr().err
     # ab-d0ne5678 is `status: done`, not idea — skipped.
     assert "ab-d0ne5678" not in err
+
+
+# -- _warn_similar_nodes (filing-time dedup net, plan x-6ac7) --
+
+
+def _dedup_entries():
+    """Four synthetic candidates exercising state filtering + pr_number."""
+    return [
+        _node("done1", title="dedup gate for backlog filings", status="done", pr_number=42),
+        _node("rev1", title="dedup net for backlog node birth", status="in_review", pr_number=77),
+        _node("sup1", title="dedup gate for backlog filings twin", status="superseded"),
+        _node("idea1", title="provider rotation substrate unique", status="idea"),
+    ]
+
+
+def test_warn_similar_nodes_names_done_and_in_review_with_pr_number(capsys):
+    # AC5-EDGE: done AND in_review both surface, each with PR#N; superseded excluded.
+    new = _node("new", title="dedup gate for backlog node filings", status="idea")
+    _warn_similar_nodes(new, _dedup_entries(), intake_hint=False)
+    captured = capsys.readouterr()
+    assert "dedup:" in captured.err
+    assert "done1" in captured.err and "done" in captured.err and "PR#42" in captured.err
+    assert "rev1" in captured.err and "in_review" in captured.err and "PR#77" in captured.err
+    assert "sup1" not in captured.err  # superseded never a candidate
+    # AC4-UI: receipt is stderr-only; stdout stays the machine-readable payload.
+    assert "dedup:" not in captured.out
+
+
+def test_warn_similar_nodes_silent_when_no_candidates(capsys):
+    new = _node("new", title="completely unrelated novel topic here", status="idea")
+    _warn_similar_nodes(new, _dedup_entries(), intake_hint=False)
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_similar_nodes_intake_hint_names_top_candidate_id(capsys):
+    new = _node("new", title="dedup gate for backlog filings", status="idea")
+    _warn_similar_nodes(new, _dedup_entries(), intake_hint=True)
+    err = capsys.readouterr().err
+    # The top candidate's id is embedded in the --claims remedy.
+    assert re.search(r"--claims\s+done1", err)
+
+
+def test_warn_similar_nodes_without_intake_hint_omits_claims(capsys):
+    new = _node("new", title="dedup gate for backlog filings", status="idea")
+    _warn_similar_nodes(new, _dedup_entries(), intake_hint=False)
+    err = capsys.readouterr().err
+    assert "--claims" not in err
+    assert "supersede" in err.lower()
 
 
 # -- _intake_impl: end-to-end claim mutation --

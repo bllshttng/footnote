@@ -868,6 +868,58 @@ def _resolve_claim(
     )
 
 
+def _warn_similar_nodes(
+    node: dict,
+    entries: list[dict],
+    *,
+    intake_hint: bool,
+) -> None:
+    """Emit a stderr ``dedup:`` receipt naming the closest existing nodes.
+
+    The filing-time duplicate net shared by every birth path (idea/add, single
+    intake, multi-intake): scores the just-born ``node`` against all live nodes
+    via relatedness.similar_nodes and prints up to three candidates. Warn-only -
+    an orchestrator filing fast must be informed, not stopped or prompted.
+
+    ``intake_hint`` adapts the remedy line: the single/multi intake paths can
+    re-file with ``--claims`` to consolidate against the top candidate, so they
+    name its id; idea/add cannot, so they get the supersede/update remedy only.
+
+    Receipt is stderr-only - stdout stays the machine-readable payload each
+    birth verb already returns. Scoring/state filtering lives in similar_nodes;
+    this helper only formats what it returns.
+    """
+    from fno.graph.relatedness import similar_nodes
+
+    candidates = similar_nodes(node, entries)
+    if not candidates:
+        return
+    by_id = {e.get("id"): e for e in entries if isinstance(e, dict)}
+    new_id = node.get("id")
+    lines = [f"dedup: {len(candidates)} similar existing node(s) for {new_id}:"]
+    for cid, score, _reason in candidates:
+        cand = by_id.get(cid, {})
+        status = cand.get("status") or "?"
+        title = (cand.get("title") or "").strip()
+        if len(title) > 60:
+            title = title[:60] + "..."
+        pr = cand.get("pr_number")
+        pr_tok = f"  PR#{pr}" if isinstance(pr, int) and not isinstance(pr, bool) else ""
+        lines.append(f'  {cid}  {status:<10}{score:.2f}{pr_tok}  "{title}"')
+    top_id = candidates[0][0]
+    if intake_hint:
+        lines.append(
+            "consolidate: `fno backlog supersede` / `fno backlog update`, or "
+            f"re-file with --claims {top_id}"
+        )
+    else:
+        lines.append(
+            "consolidate: `fno backlog supersede` / `fno backlog update` the "
+            "existing node"
+        )
+    sys.stderr.write("\n".join(lines) + "\n")
+
+
 def _warn_similar_idea_titles(
     new_title: str,
     new_id: str,
