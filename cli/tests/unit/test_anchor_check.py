@@ -12,14 +12,14 @@ from fno.retro.land import MODE_AUTONOMOUS, land_candidates
 from fno.retro.types import TIER_NODE, Candidate
 
 
-def _cand(*, source_pr=42, body="finding http://github.com/o/r/pull/42#discussion-rev-x"):
+def _cand(*, source_pr=42, source_id="c1", body="finding http://github.com/o/r/pull/42#discussion-rev-x"):
     return Candidate(
         title="t",
         body=body,
         tier=TIER_NODE,
         priority="p2",
         source_pr=source_pr,
-        source_id="c1",
+        source_id=source_id,
         content_hash="ab12cd34",
     )
 
@@ -73,7 +73,7 @@ def test_land_candidates_skips_fixed_on_main(tmp_path):
         mode=MODE_AUTONOMOUS,
         repo_root=tmp_path,
         create_fn=lambda **k: created.append(k) or "n1",
-        anchor_scan_fn=lambda e, **k: [SimpleNamespace()],
+        anchor_scan_fn=lambda e, **k: [SimpleNamespace(node_id="candidate:c1")],
     )
     assert created == []  # never minted
     assert results and results[0].outcome == "skipped"
@@ -117,3 +117,35 @@ def test_land_candidates_mints_normally_when_present(tmp_path):
     )
     assert created  # minted
     assert "anchor-unverified" not in created["details"]
+
+
+# F10: batched anchor scan (one scan per harvest, not per candidate) ----------- #
+def test_anchor_verdicts_one_scan_for_many_candidates():
+    # F10: N candidates -> ONE scan call (each PR fetched once), not N.
+    from fno.retro.dedup import anchor_verdicts
+
+    cands = [_cand(), _cand(source_id="c2")]
+    calls = []
+
+    def scan(entries, *, include_planned=False, warnings=None):
+        calls.append(len(entries))
+        return []
+
+    out = anchor_verdicts(cands, scan)
+    assert len(calls) == 1  # batched
+    assert calls[0] == 2  # both candidates in one batch
+    assert out == {"c1": "present", "c2": "present"}
+
+
+def test_anchor_verdicts_dead_only_for_the_addressed_candidate():
+    # F10: a candidate is dead only if ITS finding was addressed (membership, not
+    # a non-empty list), so one addressed finding does not mark a sibling dead.
+    from fno.retro.dedup import anchor_verdicts
+
+    cands = [_cand(), _cand(source_id="c2")]
+
+    def scan(entries, *, include_planned=False, warnings=None):
+        return [SimpleNamespace(node_id="candidate:c1")]  # only c1 addressed
+
+    out = anchor_verdicts(cands, scan)
+    assert out == {"c1": "dead", "c2": "present"}
