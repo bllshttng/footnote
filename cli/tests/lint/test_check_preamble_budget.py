@@ -5,8 +5,10 @@ formatter, so each assertion reads the gate's own return code.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -354,6 +356,34 @@ def test_non_regular_rule_fails_instead_of_blocking(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "not a regular file" in result.stderr
     assert ".claude/rules/stall.md" in result.stderr
+
+
+def test_doctor_timeout_kills_gate_descendants(tmp_path: Path) -> None:
+    """A timed-out gate must not leave its byte-counting child behind."""
+    from fno import doctor
+
+    pid_path = tmp_path / "child.pid"
+    result = doctor._bounded_command(
+        [
+            "bash",
+            "-c",
+            'sleep 30 & child=$!; printf "%s" "$child" > "$1"; wait "$child"',
+            "bash",
+            str(pid_path),
+        ]
+    )
+
+    assert result is None
+    child_pid = int(pid_path.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail(f"timed-out gate descendant {child_pid} is still alive")
 
 
 def test_doctor_resolves_the_worktree_from_a_subdirectory() -> None:
