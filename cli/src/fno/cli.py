@@ -720,7 +720,7 @@ def review(
         assert sigma_node is not None and sigma_pr is not None and sigma_head is not None
         if publish_sigma is not None:
             assert sigma_current_head is not None and sigma_round is not None
-            result = publish_sigma_artifact(
+            publish_result = publish_sigma_artifact(
                 publish_sigma,
                 reviews_root=root,
                 project=project,
@@ -731,12 +731,12 @@ def review(
                 round_id=sigma_round,
             )
             payload = {
-                "published": result.published,
-                "reason": result.reason,
-                "path": str(result.current_path),
-                "round_path": str(result.round_path),
+                "published": publish_result.published,
+                "reason": publish_result.reason,
+                "path": str(publish_result.current_path),
+                "round_path": str(publish_result.round_path),
                 "head_sha": sigma_head,
-                "finding_count": result.finding_count,
+                "finding_count": publish_result.finding_count,
             }
         else:
             inspected = inspect_sigma_artifact(
@@ -772,7 +772,7 @@ def review(
         raise typer.Exit(code=2)
 
     try:
-        result = _review(
+        review_result = _review(
             diff_context=diff_context,
             state_path=state_path,
             artifacts_dir=artifacts_dir,
@@ -786,12 +786,12 @@ def review(
 
     use_json = bool(ctx.obj and ctx.obj.get("json", False))
     if use_json:
-        typer.echo(json.dumps(result))
+        typer.echo(json.dumps(review_result))
     else:
-        typer.echo(f"action: {result['action']}")
-        typer.echo(f"verdict: {result.get('verdict', 'unknown')}")
-        typer.echo(f"findings: {result.get('findings', 0)}")
-        if result.get("cached"):
+        typer.echo(f"action: {review_result['action']}")
+        typer.echo(f"verdict: {review_result.get('verdict', 'unknown')}")
+        typer.echo(f"findings: {review_result.get('findings', 0)}")
+        if review_result.get("cached"):
             typer.echo("cached: true")
 
 

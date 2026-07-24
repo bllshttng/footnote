@@ -137,7 +137,11 @@ def build_review_runner(
         known_agents=AGENT_NAMES,
     )
     if route_resolver is None:
-        from fno.agents.model_routing import resolve_explicit_route as route_resolver
+        from fno.agents.model_routing import resolve_explicit_route
+
+        resolved_route = resolve_explicit_route
+    else:
+        resolved_route = route_resolver
 
     route_envs: dict[str, dict[str, str]] = {}
     route_specs: dict[str, tuple[str, str, str]] = {}
@@ -147,7 +151,7 @@ def build_review_runner(
         model = getattr(raw_route, "model", None) or raw_route.get("model")
         if harness != "claude" or not route_provider or not model:
             raise ValueError(f"invalid route tuple for {agent!r}")
-        route_env = route_resolver(route_provider, model)
+        route_env = resolved_route(route_provider, model)
         if not route_env:
             raise ValueError(
                 f"agent route for {agent!r} could not resolve provider/model "
