@@ -160,6 +160,32 @@ def test_review_cli_pins_pre_panel_head_to_the_diff(tmp_path: Path) -> None:
     assert worker_review.call_args.kwargs["git_sha_value"] == "head-a"
 
 
+def test_worker_review_cli_uses_shared_pinned_input(tmp_path: Path) -> None:
+    reviewed = {
+        "action": "reviewed",
+        "verdict": "ready-to-merge",
+        "findings": 0,
+        "artifact_path": str(tmp_path / "artifact.md"),
+        "cached": False,
+    }
+    with (
+        patch(
+            "fno.worker.review.capture_review_input",
+            return_value=("head-a", "pinned diff"),
+        ) as capture,
+        patch("fno.worker.review.review", return_value=reviewed) as worker_review,
+    ):
+        result = CliRunner().invoke(
+            app,
+            ["worker", "review", "--state", str(tmp_path / "state.md")],
+        )
+
+    assert result.exit_code == 0, result.output
+    capture.assert_called_once_with(None)
+    assert worker_review.call_args.kwargs["diff_context"] == "pinned diff"
+    assert worker_review.call_args.kwargs["git_sha_value"] == "head-a"
+
+
 def test_print_providers_flag_emits_routing_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

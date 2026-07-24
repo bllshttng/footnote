@@ -13,6 +13,13 @@ def test_sigma_publishes_before_comment_eligibility() -> None:
     assert "fno-sigma head=$REVIEWED_HEAD round=$ROUND_ID" in sigma[comment:]
 
 
+def test_sigma_captures_reviewed_head_before_panel_dispatch() -> None:
+    sigma = (ROOT / "skills/review/references/sigma.md").read_text(encoding="utf-8")
+    capture = sigma.index("REVIEWED_HEAD=$(git rev-parse HEAD)")
+    dispatch = sigma.index("### Step 2: Run Base Agents")
+    assert capture < dispatch
+
+
 def test_pr_check_inspects_sigma_before_zero_reviewer_return() -> None:
     check = (ROOT / "skills/pr/references/check.md").read_text(encoding="utf-8")
     step_zero = check.index("## Step 0: Determine Reviewers")
@@ -31,6 +38,8 @@ def test_pr_check_reuses_badge_and_response_sequence() -> None:
     assert "Apply this same badge parser to sigma artifact lines" in check
     assert "existing verify, decide, implement, push, and response sequence" in check
     assert "rather than inventing a thread" in check
+    assert "fno-sigma-disposition id=$STABLE_ID" in check
+    assert "exclude that stable id" in check
 
 
 def test_sigma_route_contract_prices_named_sessions_and_records_model() -> None:

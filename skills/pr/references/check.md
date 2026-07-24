@@ -233,6 +233,7 @@ is identical to the single-reviewer path.
 
 Also read `.body` from accepted `SIGMA_JSON` and append its findings to the same in-memory collection as the bot comments.
 Assign stable ids as `sigma:<review_round>:<ordinal>` and deduplicate a PR-comment projection carrying the same sigma marker.
+Before appending each artifact finding, search existing PR issue comments for `<!-- fno-sigma-disposition id=$STABLE_ID head=$PR_HEAD -->`; when a matching marker exists, exclude that stable id from the unresolved collection.
 Do not create a second implementation loop: artifact findings continue directly into Step 4 and the existing verify, decide, implement, push, and response sequence.
 
 ### 4. Parse Review Priority
@@ -370,6 +371,7 @@ gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments" \
 - **Scope:** only BLOCKING findings gate the loop. Medium/low/P2/P3 findings
   do not require an in-thread reply (though one never hurts).
 - **Artifact findings:** when the artifact carries a real GitHub thread id, use the same in-thread reply path; when no thread exists, include the stable sigma finding id and disposition in the consolidated response rather than inventing a thread.
+- **Threadless artifact idempotency:** for every fixed or declined threadless artifact finding, include `<!-- fno-sigma-disposition id=$STABLE_ID head=$PR_HEAD -->` beside its disposition in the consolidated response; later checks consume that durable marker and exclude that stable id instead of implementing it again.
 - The reply must be in-thread (`in_reply_to`), not a new top-level comment:
   the gate reads `in_reply_to_id` chains on `/pulls/N/comments`.
 

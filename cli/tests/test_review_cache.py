@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 
 from fno.review.orchestrator import (
     AGENT_NAMES,
@@ -383,6 +385,16 @@ class TestFindingsRoundTrip:
         )
 
         assert restored.outcomes == [outcome]
+
+    def test_legacy_body_without_outcomes_is_a_cache_miss(self) -> None:
+        from fno.review.cache import build_cache_body, reconstruct_result
+
+        legacy = build_cache_body("key", "session", "head", _make_result()).split(
+            "# Outcomes (JSON)", 1
+        )[0]
+
+        with pytest.raises(ValueError, match="outcomes"):
+            reconstruct_result(legacy)
 
 
 # ---------------------------------------------------------------------------

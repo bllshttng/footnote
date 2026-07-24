@@ -279,8 +279,10 @@ def reconstruct_result(body: str) -> "OrchestratorResult":
     else:
         serialized = rest.split(findings_marker, 1)[1]
         findings_text, separator, outcomes_text = serialized.partition(outcomes_marker)
+        if not separator:
+            raise ValueError("cache body missing per-agent outcomes")
         findings_raw = json.loads(findings_text.strip())
-        outcomes_raw = json.loads(outcomes_text.strip()) if separator else []
+        outcomes_raw = json.loads(outcomes_text.strip())
 
     # Filter to only the fields the Finding dataclass accepts.
     valid_fields = {f.name for f in dataclasses.fields(Finding)}

@@ -118,6 +118,15 @@ Load [agent-selection.md](agent-selection.md) for:
 2. Change type detection (frontend/backend/full-stack/docs-only)
 3. Agent selection based on both dimensions
 
+Before dispatch, pin the revision that every reviewer and the durable artifact describe:
+
+```bash
+REVIEWED_HEAD=$(git rev-parse HEAD) || exit 1
+```
+
+Do not resolve this value after the panel runs.
+If the head advances during review, Step 6d retains the completed round without replacing the current alias.
+
 ### Step 2: Run Base Agents (MANDATORY - Always Run)
 
 Always run `silent-failure-hunter` and `code-reviewer` regardless of change type.

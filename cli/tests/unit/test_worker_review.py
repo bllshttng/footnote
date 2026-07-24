@@ -682,6 +682,51 @@ class TestH2ThresholdDrop:
         )
         assert result["verdict"] == "done-with-concerns"
 
+    def test_cache_hit_preserves_threshold_drop_concern(self, tmp_path: Path) -> None:
+        from fno.worker.review import review
+
+        state_path = _make_state(tmp_path, session_id="sess-h2-cache")
+        artifacts_dir = tmp_path / "artifacts"
+        call_count = 0
+
+        async def low_confidence_runner(
+            agent: str, prompt: str, diff: str
+        ) -> WorkerOutcome:
+            nonlocal call_count
+            call_count += 1
+            return WorkerOutcome(
+                agent=agent,
+                ok=True,
+                findings=[Finding(agent=agent, severity="high", message="maybe")],
+            )
+
+        with patch(
+            "fno.review.confidence_scorer._resolve_default_scorer",
+            return_value=MagicMock(return_value=50),
+        ):
+            first = review(
+                diff_context="diff",
+                state_path=state_path,
+                artifacts_dir=artifacts_dir,
+                session_id="sess-h2-cache",
+                runner=low_confidence_runner,
+                git_sha_value="head-h2",
+            )
+            first_call_count = call_count
+            second = review(
+                diff_context="diff",
+                state_path=state_path,
+                artifacts_dir=artifacts_dir,
+                session_id="sess-h2-cache",
+                runner=low_confidence_runner,
+                git_sha_value="head-h2",
+            )
+
+        assert first["verdict"] == "done-with-concerns"
+        assert second["action"] == "cached"
+        assert second["verdict"] == "done-with-concerns"
+        assert call_count == first_call_count
+
 
 # ---- H6: worker layer does not call write_cache ----
 

@@ -98,9 +98,12 @@ def review(
 ) -> None:
     """Run internal sigma-review orchestrator and write quality_check artifact."""
     import json
-    import subprocess
     from fno._flag_aliases import merge_deprecated_alias
-    from fno.worker.review import review as _review
+    from fno.worker.review import (
+        ReviewInputError,
+        capture_review_input,
+        review as _review,
+    )
     from fno.review.locking import ReviewLockBusy
 
     session = merge_deprecated_alias(
@@ -109,25 +112,21 @@ def review(
 
     state_path = state or Path(".fno/target-state.md")
 
-    # Read diff from file or git
-    if diff is not None:
-        diff_context = diff.read_text(encoding="utf-8")
-    else:
-        git_result = subprocess.run(
-            ["git", "diff", "HEAD~1"],
-            capture_output=True,
-            text=True,
-        )
-        diff_context = git_result.stdout if git_result.returncode == 0 else ""
+    try:
+        reviewed_head, diff_context = capture_review_input(diff)
+    except ReviewInputError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2)
 
     try:
         result = _review(
             diff_context=diff_context,
             state_path=state_path,
             artifacts_dir=artifacts_dir,
-            session_id=session,
-            no_cache=no_cache,
-        )
+        session_id=session,
+        no_cache=no_cache,
+        git_sha_value=reviewed_head,
+    )
     except ReviewLockBusy as exc:
         typer.echo(f"error: review lock busy: {exc}", err=True)
         raise typer.Exit(code=11)

@@ -639,9 +639,12 @@ def review(
     ),
 ) -> None:
     """Run the internal sigma-review panel and write a quality_check artifact."""
-    import subprocess
     from fno._flag_aliases import merge_deprecated_alias
-    from fno.worker.review import review as _review
+    from fno.worker.review import (
+        ReviewInputError,
+        capture_review_input,
+        review as _review,
+    )
     from fno.review.locking import ReviewLockBusy
 
     session = merge_deprecated_alias(
@@ -762,45 +765,11 @@ def review(
 
     state_path = state or Path(".fno/target-state.md")
 
-    head_result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-    )
-    if head_result.returncode != 0 or not head_result.stdout.strip():
-        typer.echo(
-            f"error: git rev-parse HEAD failed (rc={head_result.returncode}): "
-            f"{head_result.stderr.strip()}",
-            err=True,
-        )
+    try:
+        reviewed_head, diff_context = capture_review_input(diff)
+    except ReviewInputError as exc:
+        typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2)
-    reviewed_head = head_result.stdout.strip()
-
-    if diff is not None:
-        diff_context = diff.read_text(encoding="utf-8")
-    else:
-        git_result = subprocess.run(
-            ["git", "diff", "HEAD~1"],
-            capture_output=True,
-            text=True,
-        )
-        if git_result.returncode != 0:
-            # Silent-empty substitution was the bug: a first-commit branch
-            # (no HEAD~1) or detached HEAD would yield an empty diff that
-            # the panel reviewed as "clean", producing zero findings
-            # indistinguishable from a real green review. Fail loud so
-            # "no findings" actually means "no findings" rather than
-            # "the diff was never read". The --diff path override
-            # remains as the documented escape hatch.
-            typer.echo(
-                f"error: git diff HEAD~1 failed (rc={git_result.returncode}): "
-                f"{git_result.stderr.strip()}\n"
-                "Pass --diff path/to/manual.diff to review an explicit "
-                "diff (e.g. first-commit branches without a HEAD~1 parent).",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        diff_context = git_result.stdout
 
     try:
         result = _review(

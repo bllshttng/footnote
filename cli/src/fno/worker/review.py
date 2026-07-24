@@ -33,6 +33,45 @@ from fno.review.orchestrator import (
 )
 
 
+class ReviewInputError(RuntimeError):
+    """The revision or exact diff for a review could not be captured."""
+
+
+def capture_review_input(diff_path: Path | None = None) -> tuple[str, str]:
+    """Capture one immutable reviewed SHA and the diff for exactly that SHA."""
+    head_result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if head_result.returncode != 0 or not head_result.stdout.strip():
+        raise ReviewInputError(
+            f"git rev-parse HEAD failed (rc={head_result.returncode}): "
+            f"{head_result.stderr.strip()}"
+        )
+    reviewed_head = head_result.stdout.strip()
+
+    if diff_path is not None:
+        try:
+            return reviewed_head, diff_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReviewInputError(f"could not read review diff {diff_path}: {exc}") from exc
+
+    git_result = subprocess.run(
+        ["git", "diff", f"{reviewed_head}~1", reviewed_head],
+        capture_output=True,
+        text=True,
+    )
+    if git_result.returncode != 0:
+        raise ReviewInputError(
+            f"git diff HEAD~1 failed for pinned head {reviewed_head} "
+            f"(rc={git_result.returncode}): {git_result.stderr.strip()}\n"
+            "Pass --diff path/to/manual.diff to review an explicit diff "
+            "(e.g. first-commit branches without a HEAD~1 parent)."
+        )
+    return reviewed_head, git_result.stdout
+
+
 def _read_state(state_path: Path) -> dict[str, Any]:
     """Read YAML frontmatter from target-state.md."""
     text = state_path.read_text(encoding="utf-8") if state_path.exists() else ""
@@ -506,14 +545,20 @@ def review(
                     file=sys.stderr,
                 )
             else:
+                raw_findings_count = len(cached_result.findings)
                 kept_findings = score_findings(cached_result.findings)
+                threshold_drop_suspicious = (
+                    raw_findings_count > 0 and len(kept_findings) == 0
+                )
                 artifact_path, verdict = write_artifact(
                     session_id,
                     OrchestratorResult(
                         findings=kept_findings,
                         workers_completed=cached_result.workers_completed,
                         workers_failed=cached_result.workers_failed,
-                        suspicious=cached_result.suspicious,
+                        suspicious=(
+                            cached_result.suspicious or threshold_drop_suspicious
+                        ),
                         duration_seconds=cached_result.duration_seconds,
                         outcomes=cached_result.outcomes,
                     ),
