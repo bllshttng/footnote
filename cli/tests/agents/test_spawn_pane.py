@@ -688,7 +688,7 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
 
     runner = CliRunner()
-    result = runner.invoke(agents_cli.agents_app, ["spawn", "peer", "--harness", "claude"])
+    result = runner.invoke(agents_cli.agents_app, ["spawn", "--name", "peer", "--harness", "claude"])
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.output.strip().splitlines()[-1])
     assert receipt == {

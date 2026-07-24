@@ -886,17 +886,17 @@ def test_plain_spawn_stays_python_bg_spawn_auto_routes(monkeypatch, tmp_path) ->
 
     # Plain spawn: stays Python (the pane back half). It will fail inside the
     # Python dispatch (no mux in this test env), but must never exec the binary.
-    CliRunner().invoke(app, ["agents", "spawn", "worker", "--harness", "claude"])
+    CliRunner().invoke(app, ["agents", "spawn", "--name", "worker", "--harness", "claude"])
     assert captured == [], "a pane-substrate spawn must not route to the binary"
 
     # bg substrate: still the binary's lane.
     result = CliRunner().invoke(
         app,
-        ["agents", "spawn", "worker", "--harness", "claude", "--substrate", "bg"],
+        ["agents", "spawn", "--name", "worker", "--harness", "claude", "--substrate", "bg"],
     )
     assert result.exit_code == 99
     assert captured == [
-        ["spawn", "worker", "--harness", "claude", "--substrate", "bg"]
+        ["spawn", "--name", "worker", "--harness", "claude", "--substrate", "bg"]
     ]
 
 

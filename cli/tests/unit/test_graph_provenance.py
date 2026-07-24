@@ -1350,7 +1350,7 @@ def test_cli_session_add_duplicate_exits_zero_added_false(tmp_path, monkeypatch)
     _clear_session_env(monkeypatch)
 
     args = ["session", "add", "ab-cli00002", "--phase", "do",
-            "--provider", "codex", "--session-id", "S", "--json"]
+            "--harness", "codex", "--session-id", "S", "--json"]
     r1 = CliRunner().invoke(C.cli, args)
     assert r1.exit_code == 0, r1.output
     assert json.loads(r1.output)["added"] is True
@@ -1581,7 +1581,7 @@ def test_guard_plan_with_pr_number_is_refused_not_ignored(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("override", [
     ["--session-id", "SESSION-B"],
-    ["--provider", "gemini"],
+    ["--harness", "gemini"],
 ])
 def test_require_session_refuses_an_identity_override(tmp_path, monkeypatch, override):
     """A guard a caller can satisfy by asserting its own answer is not a guard.

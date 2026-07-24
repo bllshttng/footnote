@@ -357,8 +357,8 @@ _PROFILE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 def _seed_of(toks: Sequence[str]) -> Optional[str]:
-    """The MESSAGE seed: the ``--message`` value, else the 2nd positional (the
-    first is NAME). Stops at the ``--argv`` payload boundary."""
+    """The MESSAGE seed: the ``--message`` value, else the sole positional (the
+    name rides ``--name``). Stops at the ``--argv`` payload boundary."""
     i = 0
     while i < len(toks):
         t = toks[i]
@@ -370,7 +370,7 @@ def _seed_of(toks: Sequence[str]) -> Optional[str]:
             return t.split("=", 1)[1]
         i += 1
     pos = _positional_indices(toks)
-    return toks[pos[1]] if len(pos) >= 2 else None
+    return toks[pos[0]] if pos else None
 
 
 def _profile_key(seed: Optional[str]) -> Optional[str]:
