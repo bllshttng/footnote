@@ -592,7 +592,7 @@ echo "$out" | grep -q -- "worktree ensure" \
 #      (boot-window race closed BEFORE the stray-message injection) ----
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free; : > "$MOCKSTATE/reserve_held"
 out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
-echo "$out" | grep -q "^already-running ab-aaaa1111 reason=\"a peer dispatcher holds dispatch:ab-aaaa1111" && [[ "$(ask_count)" -eq 0 ]] \
+echo "$out" | grep -q "^already-running ab-aaaa1111 reason=\"skipped: duplicate-claim (peer dispatcher holds dispatch:ab-aaaa1111)" && [[ "$(ask_count)" -eq 0 ]] \
   && pass "codex-P1: peer-held reservation -> already-running, no ask (race closed pre-injection)" \
   || fail "codex-P1: reservation race not closed: $out (asks=$(ask_count))"
 
