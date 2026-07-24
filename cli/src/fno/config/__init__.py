@@ -369,12 +369,12 @@ class PostMergeBlock(BaseModel):
     # long (a merge from two minutes ago is not yet an outage).
     catchup_window_days: int = 3
     sync_stale_hours: int = 24
-    # Model tier for post-merge ritual workers. Sonnet (not haiku): the Step-6
+    # Model tier for post-merge ritual workers. Opus (not haiku): the Step-6
     # diff-judgment needs real reasoning. A tier default, not an opt-in, so it
     # carries a non-None string rather than the block's feature-toggle None.
     # Routing still wins at the routable spawn site when a secondary provider
     # is keyed - this is only the un-routed fallback.
-    model: str = "claude-sonnet-5"
+    model: str = "claude-opus-5"
 
     @field_validator("parking_lot_path", mode="before")
     @classmethod
@@ -449,7 +449,7 @@ class PostMergeBlock(BaseModel):
         """
         if isinstance(v, str) and v.strip():
             return v.strip()
-        return "claude-sonnet-5"
+        return "claude-opus-5"
 
 
 class ResearchBlock(BaseModel):

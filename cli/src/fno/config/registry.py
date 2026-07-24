@@ -139,7 +139,7 @@ FIELD_META: dict[str, Meta] = {
     ),
     "post_merge.model": Meta(
         "advanced",
-        "Model for post-merge ritual workers (default claude-sonnet-5). Routing "
+        "Model for post-merge ritual workers (default claude-opus-5). Routing "
         "wins when a secondary provider is keyed.",
     ),
     # --- config.research.* ---
