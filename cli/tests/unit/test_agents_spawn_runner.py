@@ -5,8 +5,6 @@ import asyncio
 import time
 from pathlib import Path
 
-import pytest
-
 from fno.agents.dispatch import DispatchAskError, SpawnResult
 from fno.review.runners.agents_spawn_runner import (
     DISPATCH_FAILURE_PREFIX,
@@ -134,6 +132,42 @@ def test_dispatch_invoked_with_once_true() -> None:
     assert "DIFF CONTEXT:" in captured["message"]
     assert "diff-body" in captured["message"]
     assert captured["name"].startswith("review-code_reviewer-codex-")
+
+
+def test_explicit_route_dispatches_plugin_agent_and_attributes_effective_model() -> None:
+    captured: dict = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return SpawnResult(
+            kind="once",
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            short_id="",
+            reply="[]",
+        )
+
+    outcome = run_via_agents_spawn(
+        "code_reviewer",
+        "prompt",
+        "diff",
+        provider="claude",
+        cwd=Path("/tmp/x"),
+        route_env={"ANTHROPIC_BASE_URL": "https://api.z.ai"},
+        model="glm-5.2",
+        named_agent="fno:code-reviewer",
+        headless=True,
+        dispatch=_capture,
+    )
+
+    assert captured["provider"] == "claude"
+    assert captured["once"] is False
+    assert captured["headless"] is True
+    assert captured["agent"] == "fno:code-reviewer"
+    assert captured["route_env"]["ANTHROPIC_BASE_URL"] == "https://api.z.ai"
+    assert captured["model"] == "glm-5.2"
+    assert outcome.provider == "claude"
+    assert outcome.model == "glm-5.2"
 
 
 def test_dispatch_timeout_floored_to_one() -> None:

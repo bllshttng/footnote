@@ -520,6 +520,35 @@ class CrossModelBlock(BaseModel):
 # emit surfaces in skills/review and the loop-check attestation read.
 _RESOLVABLE_REVIEWERS = frozenset({"sigma", "code-review", "declare"})
 
+_SIGMA_AGENT_NAMES = frozenset(
+    {
+        "code_reviewer",
+        "integration_test_analyzer",
+        "multi_device_checker",
+        "silent_failure_hunter",
+        "type_design_analyzer",
+        "ux_flow_tester",
+    }
+)
+
+
+class AgentRouteBlock(BaseModel):
+    """Explicit, opt-in named-session route for one sigma panel agent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    harness: Literal["claude"]
+    provider: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+
+    @field_validator("provider", "model")
+    @classmethod
+    def strip_nonempty(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("agent route provider/model must not be empty")
+        return stripped
+
 
 class ReviewBlock(BaseModel):
     """External-review gate settings (nested under 'config.review').
@@ -594,6 +623,9 @@ class ReviewBlock(BaseModel):
     # Default empty: the curated correctness-subset default is computed in the
     # T2.1 resolver, NOT baked here, so an empty map stays a faithful empty map.
     agent_providers: dict[str, str] = Field(default_factory=dict)
+    # Full route tuple. Unlike agent_providers, each configured entry spends a
+    # separate named SessionStart and therefore remains explicit and opt-in.
+    agent_routes: dict[str, AgentRouteBlock] = Field(default_factory=dict)
     cross_model: CrossModelBlock = Field(default_factory=CrossModelBlock)
 
     @field_validator("github_apps", "required_bots", mode="before")
@@ -840,6 +872,21 @@ class ReviewBlock(BaseModel):
             v,
         )
         return {}
+
+    @field_validator("agent_routes", mode="before")
+    @classmethod
+    def validate_agent_routes(cls, value: object) -> object:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("config.review.agent_routes must be a mapping")
+        unknown = sorted(str(name) for name in value if name not in _SIGMA_AGENT_NAMES)
+        if unknown:
+            raise ValueError(
+                "config.review.agent_routes names unknown sigma agent(s): "
+                f"{unknown}; known agents: {sorted(_SIGMA_AGENT_NAMES)}"
+            )
+        return value
 
     @field_validator("cross_model", mode="before")
     @classmethod

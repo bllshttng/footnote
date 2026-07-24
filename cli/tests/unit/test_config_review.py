@@ -138,6 +138,44 @@ def test_review_agent_providers_scalar_fails_safe(
     assert settings.review.agent_providers == {}
 
 
+def test_review_agent_routes_parse_full_tuple(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    agent_routes:\n"
+        "      code_reviewer:\n        harness: claude\n        provider: zai\n"
+        "        model: glm-5.2\n",
+    )
+    route = settings.review.agent_routes["code_reviewer"]
+    assert route.harness == "claude"
+    assert route.provider == "zai"
+    assert route.model == "glm-5.2"
+
+
+@pytest.mark.parametrize(
+    "route_yaml",
+    [
+        "harness: codex\n        provider: zai\n        model: glm-5.2",
+        "harness: claude\n        provider: zai",
+        "harness: claude\n        provider: zai\n        model: ''",
+    ],
+)
+def test_review_agent_routes_reject_invalid_tuple_before_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    route_yaml: str,
+) -> None:
+    with pytest.raises(ValueError):
+        _load(
+            tmp_path,
+            monkeypatch,
+            "schema_version: 1\nconfig:\n  review:\n    agent_routes:\n"
+            f"      code_reviewer:\n        {route_yaml}\n",
+        )
+
+
 def test_review_cross_model_defaults_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

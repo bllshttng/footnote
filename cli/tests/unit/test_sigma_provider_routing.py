@@ -8,6 +8,7 @@ equals what the ``build_review_runner`` panel resolves for the same inputs.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -142,6 +143,39 @@ def test_print_providers_flag_emits_routing_json(
     routing = json.loads(result.stdout.strip())
     assert routing["code_reviewer"]["provider"] == "codex"
     assert set(routing) == set(AGENT_NAMES)
+
+
+def test_print_providers_includes_explicit_route_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(review_mod, "_read_cross_model_config", lambda: ({}, False))
+    monkeypatch.setattr(
+        review_mod,
+        "_read_agent_routes_config",
+        lambda: {
+            "code_reviewer": SimpleNamespace(
+                harness="claude", provider="zai", model="glm-5.2"
+            )
+        },
+    )
+    monkeypatch.setattr(pr, "load_implementer_provider", lambda _sid: "claude")
+    monkeypatch.setattr(pr, "available_provider_kinds", lambda: ["claude"])
+    monkeypatch.setattr(
+        "fno.agents.model_routing.resolve_explicit_route",
+        lambda provider, model: {"ROUTE": f"{provider}/{model}"},
+    )
+
+    result = CliRunner().invoke(app, ["review", "--print-providers"])
+    assert result.exit_code == 0, result.output
+    route = json.loads(result.stdout)["code_reviewer"]
+    assert route == {
+        "provider": "claude",
+        "harness": "claude",
+        "route_provider": "zai",
+        "model": "glm-5.2",
+        "degraded": False,
+        "reason": None,
+    }
 
 
 # ---- session resolution parity with the panel (Gemini HIGH: no drift) ----

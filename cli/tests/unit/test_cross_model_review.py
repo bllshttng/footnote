@@ -127,6 +127,62 @@ def test_ac2_operator_map_pins_gemini() -> None:
     assert dispatch.providers == ["gemini"]  # no new dispatch
 
 
+def test_explicit_agent_route_uses_named_headless_session_with_runtime_evidence() -> None:
+    dispatch = _RecordingDispatch(reply="[]")
+    runner, _, provider_set = build_review_runner(
+        agent_providers={},
+        agent_routes={
+            "code_reviewer": {
+                "harness": "claude",
+                "provider": "zai",
+                "model": "glm-5.2",
+            }
+        },
+        cross_model_enabled=False,
+        implementer_provider="claude",
+        available_providers=["claude"],
+        base_prompts=_base_prompts(),
+        cwd=Path("."),
+        dispatch=dispatch,
+        route_resolver=lambda provider, model: {
+            "ANTHROPIC_BASE_URL": f"https://{provider}.example/{model}"
+        },
+    )
+    assert "code_reviewer=claude/zai/glm-5.2" in provider_set
+
+    outcome = _run(runner, "code_reviewer")
+    call = dispatch.calls[0]
+    assert call["provider"] == "claude"
+    assert call["agent"] == "fno:code-reviewer"
+    assert call["headless"] is True
+    assert call["model"] == "glm-5.2"
+    assert outcome.provider == "claude"
+    assert outcome.model == "glm-5.2"
+
+
+def test_invalid_explicit_route_fails_before_dispatch() -> None:
+    dispatch = _RecordingDispatch(reply="[]")
+    with pytest.raises(ValueError, match="route"):
+        build_review_runner(
+            agent_providers={},
+            agent_routes={
+                "code_reviewer": {
+                    "harness": "claude",
+                    "provider": "unknown",
+                    "model": "missing",
+                }
+            },
+            cross_model_enabled=False,
+            implementer_provider="claude",
+            available_providers=["claude"],
+            base_prompts=_base_prompts(),
+            cwd=Path("."),
+            dispatch=dispatch,
+            route_resolver=lambda _provider, _model: None,
+        )
+    assert dispatch.calls == []
+
+
 # --- AC3-ERR: unparseable cross-model findings -> terminal soft fail ---
 
 
@@ -275,8 +331,8 @@ def test_off_path_returns_no_runner() -> None:
     assert (runner, prompts, provider_set) == (None, None, None)
 
 
-def test_off_path_report_has_no_cross_model_lines() -> None:
-    """An all-claude result (no provider set) renders the legacy report."""
+def test_off_path_report_records_effective_model_without_cross_model_cost() -> None:
+    """Every all-Claude row remains distinguishable from a routed-model row."""
     from fno.review.orchestrator import OrchestratorResult, WorkerOutcome
     from fno.review.report_builder import render_artifact_markdown
 
@@ -291,7 +347,7 @@ def test_off_path_report_has_no_cross_model_lines() -> None:
     md = render_artifact_markdown("sess", result, "ready-to-merge")
     assert "Cross-model" not in md
     assert "[codex]" not in md
-    assert "[claude]" not in md
+    assert md.count("[claude/unknown]") == len(AGENT_NAMES)
 
 
 def test_report_renders_attribution_softfail_and_cost_line() -> None:
@@ -317,8 +373,8 @@ def test_report_renders_attribution_softfail_and_cost_line() -> None:
     )
     md = render_artifact_markdown("sess", result, "done-with-concerns")
     assert "[codex/gpt-x]" in md
-    assert "[claude]" in md
-    assert "[gemini]" in md
+    assert "[claude/unknown]" in md
+    assert "[gemini/unknown]" in md
     assert "agent errored (unparseable findings)" in md
     assert "cross-model unavailable: ran on claude" in md
     assert "Billed a second provider's quota this run: codex, gemini" in md

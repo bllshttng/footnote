@@ -27,7 +27,7 @@ import logging
 import time as _time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from fno.review.findings_parser import (
     PARSE_FAILURE_PREFIX,
@@ -81,6 +81,10 @@ def run_via_agents_spawn(
     cwd: Path,
     timeout: float = DEFAULT_TIMEOUT,
     dispatch: Optional[Callable[..., Any]] = None,
+    route_env: Optional[Mapping[str, str]] = None,
+    model: Optional[str] = None,
+    named_agent: Optional[str] = None,
+    headless: bool = False,
 ) -> WorkerOutcome:
     """Dispatch one review agent on ``provider`` (codex/gemini) via spawn --once.
 
@@ -120,12 +124,16 @@ def run_via_agents_spawn(
                 message=composed,
                 provider=provider,
                 cwd=cwd,
-                once=True,
+                once=not headless,
                 # Floor at 1s: int(0.x) == 0, and a 0 timeout is "no timeout"
                 # in many subprocess APIs, which would let a hung provider's
                 # subprocess outlive the thread-join ceiling (gemini review).
                 timeout=max(1, int(timeout)),
                 from_name=_FROM_NAME,
+                route_env=route_env,
+                model=model,
+                agent=named_agent,
+                headless=headless,
             )
         except BaseException as e:  # noqa: BLE001 - funnel into WorkerOutcome
             exc_holder["value"] = e
@@ -142,7 +150,7 @@ def run_via_agents_spawn(
         )
         return WorkerOutcome(
             agent=agent, ok=False, error=TIMEOUT_FAILURE,
-            duration_seconds=elapsed, provider=provider,
+            duration_seconds=elapsed, provider=provider, model=model,
         )
 
     if "value" in exc_holder:
@@ -160,6 +168,7 @@ def run_via_agents_spawn(
             error=f"{DISPATCH_FAILURE_PREFIX}{suffix}: {exc}",
             duration_seconds=elapsed,
             provider=provider,
+            model=model,
         )
 
     spawn_result = result_holder.get("value")
@@ -172,6 +181,7 @@ def run_via_agents_spawn(
             error=f"{DISPATCH_FAILURE_PREFIX}: provider returned no reply text",
             duration_seconds=elapsed,
             provider=provider,
+            model=model,
         )
 
     try:
@@ -185,6 +195,7 @@ def run_via_agents_spawn(
             error=f"{PARSE_FAILURE_PREFIX}: {exc} (head={exc.raw_head!r})",
             duration_seconds=elapsed,
             provider=provider,
+            model=model,
         )
 
     return WorkerOutcome(
@@ -193,6 +204,7 @@ def run_via_agents_spawn(
         findings=findings,
         duration_seconds=elapsed,
         provider=provider,
+        model=model,
     )
 
 
@@ -202,6 +214,10 @@ def make_async_runner(
     cwd: Path,
     timeout: float = DEFAULT_TIMEOUT,
     dispatch: Optional[Callable[..., Any]] = None,
+    route_env: Optional[Mapping[str, str]] = None,
+    model: Optional[str] = None,
+    named_agent: Optional[str] = None,
+    headless: bool = False,
 ):
     """Return an async runner ``(agent, prompt, diff) -> WorkerOutcome``.
 
@@ -219,6 +235,10 @@ def make_async_runner(
             cwd=cwd,
             timeout=timeout,
             dispatch=dispatch,
+            route_env=route_env,
+            model=model,
+            named_agent=named_agent,
+            headless=headless,
         )
 
     return _runner

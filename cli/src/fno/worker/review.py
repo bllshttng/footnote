@@ -48,6 +48,7 @@ def _read_state(state_path: Path) -> dict[str, Any]:
 def build_review_runner(
     *,
     agent_providers: dict[str, str],
+    agent_routes: Optional[dict[str, Any]] = None,
     cross_model_enabled: bool,
     implementer_provider: str,
     available_providers: list[str],
@@ -57,6 +58,7 @@ def build_review_runner(
     timeout: float = 600.0,
     dispatch: Optional[Any] = None,
     claude_adapter: Optional[Any] = None,
+    route_resolver: Optional[Any] = None,
 ) -> tuple[Optional[Any], Optional[dict[str, str]], Optional[list[str]]]:
     """Build the per-agent cross-model review runner (ab-6c8f4c61).
 
@@ -73,7 +75,8 @@ def build_review_runner(
     resolved kinds (the cache dimension). ``dispatch`` / ``claude_adapter`` are
     injection seams for tests; production leaves them None.
     """
-    engaged = bool(cross_model_enabled) or bool(agent_providers)
+    agent_routes = agent_routes or {}
+    engaged = bool(cross_model_enabled) or bool(agent_providers) or bool(agent_routes)
     if not engaged:
         return None, None, None
 
@@ -83,6 +86,9 @@ def build_review_runner(
     from fno.review.runners import agents_spawn_runner, claude_runner
 
     _warn_unknown_agent_keys(agent_providers)
+    unknown_routes = sorted(set(agent_routes) - set(base_prompts))
+    if unknown_routes:
+        raise ValueError(f"agent route names unknown panel agent(s): {unknown_routes}")
 
     resolved = pr.resolve_panel_providers(
         list(base_prompts),
@@ -91,12 +97,42 @@ def build_review_runner(
         available_providers=available_providers,
         known_agents=AGENT_NAMES,
     )
+    if route_resolver is None:
+        from fno.agents.model_routing import resolve_explicit_route as route_resolver
+
+    route_envs: dict[str, dict[str, str]] = {}
+    route_specs: dict[str, tuple[str, str, str]] = {}
+    for agent, raw_route in agent_routes.items():
+        harness = getattr(raw_route, "harness", None) or raw_route.get("harness")
+        route_provider = getattr(raw_route, "provider", None) or raw_route.get("provider")
+        model = getattr(raw_route, "model", None) or raw_route.get("model")
+        if harness != "claude" or not route_provider or not model:
+            raise ValueError(f"invalid route tuple for {agent!r}")
+        route_env = route_resolver(route_provider, model)
+        if not route_env:
+            raise ValueError(
+                f"agent route for {agent!r} could not resolve provider/model "
+                f"{route_provider!r}/{model!r}"
+            )
+        route_envs[agent] = dict(route_env)
+        route_specs[agent] = (harness, route_provider, model)
+        resolved[agent] = pr.ResolvedProvider(
+            provider=harness,
+            harness=harness,
+            route_provider=route_provider,
+            model=model,
+        )
     # Cache dimension = the per-agent REQUESTED routing (not just the set of
     # kinds), so two configs that assign the same kinds to different agents
     # (e.g. {code_reviewer: codex} vs {silent_failure_hunter: codex}) never
     # collide on one cache key for the same SHA (codex review P2). Pairs are
     # sorted for a stable key.
-    provider_set = sorted(f"{agent}={rp.provider}" for agent, rp in resolved.items())
+    provider_set = sorted(
+        f"{agent}={rp.harness}/{rp.route_provider}/{rp.model}"
+        if rp.route_provider
+        else f"{agent}={rp.provider}"
+        for agent, rp in resolved.items()
+    )
     prompts = {agent: json_findings_prompt(body) for agent, body in base_prompts.items()}
     run_cwd = cwd or Path.cwd()
 
@@ -106,6 +142,28 @@ def build_review_runner(
 
     async def _runner(agent: str, prompt: str, diff_context: str):
         rp = resolved.get(agent)
+        if agent in route_specs:
+            harness, route_provider, model = route_specs[agent]
+            spawn_async = agents_spawn_runner.make_async_runner(
+                provider=harness,
+                cwd=run_cwd,
+                timeout=timeout,
+                dispatch=dispatch,
+                route_env=route_envs[agent],
+                model=model,
+                named_agent=f"fno:{agent.replace('_', '-')}",
+                headless=True,
+            )
+            outcome = await spawn_async(agent, prompt, diff_context)
+            if not outcome.ok and agents_spawn_runner.is_retryable_failure(outcome):
+                fallback = await claude_async(agent, prompt, diff_context)
+                fallback.note = (
+                    f"{route_provider}/{model} unavailable: fell back to claude"
+                    if fallback.ok
+                    else f"{route_provider}/{model} unavailable; claude fallback also failed"
+                )
+                return fallback
+            return outcome
         if rp is None or rp.provider == "claude":
             outcome = await claude_async(agent, prompt, diff_context)
             if rp is not None and rp.degraded and rp.reason and outcome.ok:
@@ -147,6 +205,13 @@ def _read_cross_model_config() -> tuple[dict[str, str], bool]:
             file=sys.stderr,
         )
         return {}, False
+
+
+def _read_agent_routes_config() -> dict[str, Any]:
+    """Read validated explicit per-agent route tuples."""
+    from fno.config import load_settings
+
+    return dict(load_settings().review.agent_routes or {})
 
 
 def _warn_unknown_agent_keys(agent_providers: dict[str, str]) -> None:
@@ -246,7 +311,8 @@ def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
     Never raises.
     """
     agent_providers, enabled = _read_cross_model_config()
-    if not (enabled or agent_providers):
+    agent_routes = _read_agent_routes_config()
+    if not (enabled or agent_providers or agent_routes):
         return {}
 
     _warn_unknown_agent_keys(agent_providers)
@@ -256,13 +322,30 @@ def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
 
     implementer = pr.load_implementer_provider(session_id or "")
     available = pr.available_provider_kinds()
-    return pr.resolve_panel_providers(
+    resolved = pr.resolve_panel_providers(
         list(AGENT_NAMES),
         agent_providers=agent_providers,
         implementer_provider=implementer,
         available_providers=available,
         known_agents=AGENT_NAMES,
     )
+    if agent_routes:
+        from fno.agents.model_routing import resolve_explicit_route
+
+        for agent, route in agent_routes.items():
+            env = resolve_explicit_route(route.provider, route.model)
+            if not env:
+                raise ValueError(
+                    f"agent route for {agent!r} could not resolve "
+                    f"{route.provider!r}/{route.model!r}"
+                )
+            resolved[agent] = pr.ResolvedProvider(
+                provider=route.harness,
+                harness=route.harness,
+                route_provider=route.provider,
+                model=route.model,
+            )
+    return resolved
 
 
 def _resolve_cross_model_runner(
@@ -274,7 +357,8 @@ def _resolve_cross_model_runner(
     failure (fail-safe to all-claude), or when the panel has no prompts.
     """
     agent_providers, enabled = _read_cross_model_config()
-    if not (enabled or agent_providers):
+    agent_routes = _read_agent_routes_config()
+    if not (enabled or agent_providers or agent_routes):
         return None, None, None
 
     from fno.review import provider_resolution as pr
@@ -284,6 +368,7 @@ def _resolve_cross_model_runner(
     base_prompts = load_prompts()
     return build_review_runner(
         agent_providers=agent_providers,
+        agent_routes=agent_routes,
         cross_model_enabled=enabled,
         implementer_provider=implementer,
         available_providers=available,

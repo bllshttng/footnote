@@ -28,3 +28,14 @@ def test_pr_check_reuses_badge_and_response_sequence() -> None:
     assert "Apply this same badge parser to sigma artifact lines" in check
     assert "existing verify, decide, implement, push, and response sequence" in check
     assert "rather than inventing a thread" in check
+
+
+def test_sigma_route_contract_prices_named_sessions_and_records_model() -> None:
+    sigma = (ROOT / "skills/review/references/sigma.md").read_text(encoding="utf-8")
+    template = (ROOT / "skills/review/references/report-template.md").read_text(
+        encoding="utf-8"
+    )
+    assert "--agent \"fno:$AGENT_HYPHEN\"" in sigma
+    assert "--route \"$ROUTE_PROVIDER/$MODEL\"" in sigma
+    assert "300–360K preamble tokens" in sigma
+    assert "Effective model" in template

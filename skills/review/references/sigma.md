@@ -298,7 +298,7 @@ The artifact remains authoritative if this comment call fails.
 - New UI states may need new error handling paths
 
 <!--
-  Cross-model review routing (config.review.cross_model / agent_providers) is
+  Cross-model review routing (config.review.agent_routes / legacy agent_providers) is
   documented in the "Cross-Model Review Routing" section below. It is resolved
   by `fno review --print-providers`, the SAME resolver the `fno review` panel
   uses, so /review sigma and fno review never drift.
@@ -323,9 +323,8 @@ recommendation: RECOMMEND RESTART". Honor sequence:
 
 ## Cross-Model Review Routing (optional)
 
-By default every panel agent runs on Claude (via `Task()`). An operator can route
-specific agents to a different coding model (`codex` / `gemini`) for a genuine
-cross-model read by setting `config.review.cross_model` / `config.review.agent_providers`
+By default every panel agent runs on Claude (via `Task()`). An operator can route specific agents through a full harness, route-provider, and model tuple for a genuine cross-model read by setting `config.review.agent_routes`.
+Legacy `config.review.cross_model` and `config.review.agent_providers` remain supported.
 in `.fno/config.toml` - the SAME config the internal `fno review` panel honors.
 When neither is set, this whole section is a no-op and the panel is byte-for-byte
 today's all-Claude run.
@@ -335,9 +334,11 @@ config:
   review:
     cross_model:
       enabled: true        # turn the correctness agents cross-model by default
-    agent_providers:       # optional explicit pins (override the default)
-      code_reviewer: codex
-      silent_failure_hunter: gemini
+    agent_routes:          # explicit opt-in; each entry creates one named session
+      code_reviewer:
+        harness: claude
+        provider: zai
+        model: glm-5.2
 ```
 
 Agent names are the orchestrator's underscore form (`code_reviewer`,
@@ -365,17 +366,24 @@ else
 fi
 ```
 
-`$ROUTING` is JSON `{ "<agent_underscore>": {"provider": "claude|codex|gemini",
-"degraded": bool, "reason": str|null}, ... }`, or `{}` when cross-model is OFF.
+`$ROUTING` includes runtime harness, route provider, effective model, degraded state, and reason, or `{}` when all routing features are off.
 
 ### Step R2: dispatch each agent by its resolved provider
 
 For each panel agent, read `provider` from `$ROUTING` (default `claude` when the
 key is absent or `$ROUTING` is `{}`):
 
-- **`claude`** -> dispatch via `Task(subagent_type="<agent-hyphen>", prompt=...)`
+- **unconfigured `claude`** -> dispatch via `Task(subagent_type="<agent-hyphen>", prompt=...)`
   exactly as today. This is the only path the headless megawalk Driver ever takes
   (megawalk does not set cross-model), so the HEADLESS-SAFE invariant holds.
+- **explicit route tuple** -> dispatch a plugin-qualified named headless session through the existing spawn surface and preserve the strict JSON response contract:
+
+  ```bash
+  fno agents spawn --harness "$HARNESS" --substrate headless \
+    --agent "fno:$AGENT_HYPHEN" --route "$ROUTE_PROVIDER/$MODEL" \
+    -t 600 "$(cat "$BRIEF")"
+  ```
+
 - **`codex` / `gemini`** -> run a synchronous one-shot, the SAME lane `/review peer`
   uses. Write the agent's review brief to a file (shell-safe), then YOU run it
   (never the user) so the reply returns in-context:
@@ -396,12 +404,15 @@ key is absent or `$ROUTING` is `{}`):
 
 ### Finding attribution
 
-When a finding comes from a cross-modeled agent, tag it with the dispatching
-`provider` (from `$ROUTING`) next to the existing `agent` field. This is
+Every per-agent row records the runtime harness and effective model, including an `unknown` marker when the legacy runtime exposes no model receipt.
+When a finding comes from a cross-modeled agent, tag it with the dispatching provider and effective model from runtime dispatch evidence next to the existing `agent` field. This is
 forensics-only: a HIGH finding is HIGH regardless of provider and triggers the
 same blocking behavior. The forensic `subagent_spawn` / `subagent_complete` event
 pair (via `dispatch_sigma_subagent` in `cli/src/fno/sigma_dispatch.py`) may still
 be emitted for non-Claude dispatches; it does not affect the verdict.
+
+Each explicit tuple creates a separate SessionStart preamble.
+At the measured 50–60K tokens per start, explicitly routing all six agents costs roughly 300–360K preamble tokens; keep this opt-in and prefer whole-session routing when every agent should use the same model.
 
 ### Quick cross-model second opinion
 

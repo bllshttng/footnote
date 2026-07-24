@@ -61,6 +61,9 @@ class ResolvedProvider:
     provider: str
     degraded: bool = False
     reason: str | None = None
+    harness: str | None = None
+    route_provider: str | None = None
+    model: str | None = None
 
 
 def _requested_for(

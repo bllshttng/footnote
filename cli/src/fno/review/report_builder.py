@@ -35,13 +35,12 @@ def _count_by(findings: list[Finding], severity: str) -> int:
 def _provider_tag(outcome) -> str:
     """Inline provider/model attribution for a per-agent line (ab-6c8f4c61).
 
-    Empty when no provider is set (all-claude OFF path) so output is unchanged.
+    Legacy runs without a receipt are explicit as ``claude/unknown`` rather than
+    being visually indistinguishable from a routed-model run.
     """
-    provider = getattr(outcome, "provider", None)
-    if not provider:
-        return ""
-    model = getattr(outcome, "model", None)
-    return f" [{provider}/{model}]" if model else f" [{provider}]"
+    provider = getattr(outcome, "provider", None) or "claude"
+    model = getattr(outcome, "model", None) or "unknown"
+    return f" [{provider}/{model}]"
 
 
 def choose_verdict(
