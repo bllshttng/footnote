@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from hashlib import blake2b
-from typing import Iterable
+from typing import Any, Iterable
 
 from fno.retro.types import Candidate
 
@@ -100,3 +100,37 @@ def dedup_candidates(
         seen.add(key)
         kept.append(c)
     return kept, skipped
+
+
+def anchor_verdict(candidate: Candidate, scan_fn: Any) -> str:
+    """Filing-time anchor verdict (x-a7ab 1.1): is this finding's code still
+    broken, or already addressed (fixed-on-main)?
+
+    Returns one of:
+      "present"      - not addressed, OR the check is not applicable (no
+                       source_pr, no scan_fn, or the finding carries no
+                       review-comment URL to resolve an anchor) -> mint normally.
+      "dead"         - the source PR now shows the finding addressed -> skip with
+                       a fixed-on-main receipt (AC1-HP).
+      "unresolvable" - the scan itself errored -> fail toward filing with an
+                       anchor-unverified note (AC5-EDGE); a false skip would lose
+                       a real finding, a false mint costs one triage row.
+
+    Reuses the x-7624 dispatch-time scan (``scan_addressed_findings``) by building
+    a transient trailer-bearing entry from the candidate; the scan derives
+    repo/comment_id from the review-comment URL embedded in the candidate body.
+    """
+    if not scan_fn or not candidate.source_pr:
+        return "present"
+    pseudo = {
+        "id": f"candidate:{candidate.source_id}",
+        "details": (
+            f"{candidate.body or ''}\n"
+            f"{trailer(candidate.source_pr, candidate.content_hash)}"
+        ),
+    }
+    try:
+        addressed = scan_fn([pseudo], include_planned=True, warnings=[])
+    except Exception:  # noqa: BLE001 - never close on uncertainty
+        return "unresolvable"
+    return "dead" if addressed else "present"

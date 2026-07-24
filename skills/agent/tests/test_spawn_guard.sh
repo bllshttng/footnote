@@ -98,7 +98,7 @@ no  'foreign holder did NOT spawn' "$(calllog)" 'agents spawn --harness'
 out="$(STUB_VERDICT='{"verdict":"already-running","reason":"reservation-held"}' \
   run --name w3 --provider claude --message '/target x' --node "$NODE")"
 ok 'reservation-held -> already-running' "$(field "$out")" 'already-running'
-has 'reservation-held text' "$out" 'a peer dispatcher holds dispatch:x-7777 (racing launch)'
+has 'reservation-held -> duplicate-claim receipt' "$out" 'skipped: duplicate-claim (peer dispatcher holds dispatch:x-7777)'
 no  'reservation-held did NOT spawn' "$(calllog)" 'agents spawn --harness'
 
 # --- corrupted -> failed, NO spawn -------------------------------------------

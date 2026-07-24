@@ -451,7 +451,11 @@ for id in "${NODES[@]}"; do
         echo "skipped-contested $id reason=\"suspect claim on node:$id ($holder); respawned worker, advancing\""
         n_skipped=$((n_skipped + 1))
       else
-        echo "already-running $id reason=\"a peer dispatcher holds $res_key (racing launch)\""
+        # x-a7ab 1.2 / x-b44e: a peer dispatcher holds dispatch:<id> (reservation-
+        # held, or won the visibility barrier). Mirror spawn.sh's receipt so the
+        # /target bg and /agent spawn dispatch paths never disagree: the loser
+        # carries skipped: duplicate-claim, not a generic racing-launch line.
+        echo "already-running $id reason=\"skipped: duplicate-claim (peer dispatcher holds $res_key)\""
         n_already=$((n_already + 1))
       fi
       continue ;;

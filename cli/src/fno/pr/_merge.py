@@ -655,6 +655,23 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         return 1
     pr_number = int(pr_raw)
 
+    # (-1) Incarnation fence (x-eea5 1.3): a losing incarnation - a forked or
+    # supervisor-restarted session whose session:<uuid> single-writer claim
+    # another incarnation now holds - must not merge by construction. Read-only,
+    # fail-closed; no resolvable identity -> invisible (proceed). Same outcome
+    # vocabulary as the other merge gates.
+    try:
+        from fno.claims.incarnation import incarnation_fence_blocks, resolve_fence_session_uuid
+
+        _fence_uuid = resolve_fence_session_uuid(repo)
+        _blocked, _fence_reason = incarnation_fence_blocks(_fence_uuid)
+    except Exception as _exc:  # noqa: BLE001 - a fence-CODE crash fails OPEN (proceed + log); the helper already fail-closes on an unreadable claims dir (AC4-FR)
+        _blocked, _fence_reason = False, ""
+        sys.stderr.write(f"incarnation-fence: check crashed ({_exc}); proceeding\n")
+    if _blocked:
+        _emit(pr_number, "blocked", _fence_reason, "none", err=True)
+        return 2
+
     # (0) Stub-manifest hold: a `contract`-tier dependent's PR must not merge
     # while it carries an unreconciled stub-manifest (mocks would ship). Checked
     # BEFORE the auto_merge gate so auto-merge cannot bypass it (AC7-EDGE), and

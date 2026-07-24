@@ -4038,6 +4038,68 @@ def _mail_inject_claude(recipient: str, text: str) -> bool:
         return False
 
 
+# Rung-2 (x-eea5 1.1) probe budget: a revived session needs a moment to bind its
+# control.sock before the rung-1 inject probe can land. Two short attempts bound
+# the wait; a miss falls through to the fork rung, which still delivers the mail.
+_RESPAWN_REINJECT_ATTEMPTS = 2
+_RESPAWN_REINJECT_DELAY_S = 1.0
+
+
+def _roster_entry_for_session(session_uuid: str) -> Optional["AgentEntry"]:
+    """The registry row whose ``harness_session_id`` is ``session_uuid``, or None.
+
+    Best-effort: an unreadable/missing registry returns None so rung 2 degrades
+    cleanly to the fork rung rather than blocking mail on registry state.
+    """
+    try:
+        for entry in load_registry():
+            if getattr(entry, "harness_session_id", None) == session_uuid:
+                return entry
+    except (OSError, RegistryVersionError):
+        return None
+    return None
+
+
+def _respawn_claude_session(short_id: str) -> int:
+    """Shell the public ``claude respawn <shortid>`` verb - the identity-
+    PRESERVING revival (same uuid, one roster row), the opposite of the
+    identity-breaking ``--bg --resume`` fork. Returns the honest subprocess exit
+    code; claude absent or a timeout return non-zero so the caller falls through.
+    """
+    try:
+        proc = subprocess.run(
+            ["claude", "respawn", short_id],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 127
+    return proc.returncode
+
+
+def _lineage_seed_prefix(root_uuid: str) -> str:
+    """The one-line lineage marker prefixed to a fork's seed prompt (x-eea5 1.2).
+
+    Carries the ROOT uuid durably in the transcript so the fork's own fence can
+    resolve its lineage. A registry field was the plan's first choice but is
+    NON-durable: the Rust daemon re-serializes registry rows and silently drops
+    Python-only fields (state.rs:75), so it would be a lying field - the exact
+    anti-pattern this node removes. The transcript is outside that loop.
+
+    ``root_uuid`` is the uuid the fork resumed from. The common mail-wake case
+    forks from the original, so the immediate parent IS the root; a fork-of-fork
+    carries its immediate parent (a documented tail; deep chains would need root
+    resolution across transcripts).
+    """
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    short_root = (root_uuid or "")[:8]
+    return (
+        f"[lineage: forked from {short_root} at {ts}; "
+        f"you are the claim-holding incarnation of {short_root}]"
+    )
+
+
 def wake_and_deliver(
     session_uuid: str, wrapped: str, *, cwd: Optional[Path] = None
 ) -> tuple[bool, str]:
@@ -4083,10 +4145,31 @@ def wake_and_deliver(
     if not session_uuid:
         return False, "no-session-uuid"
 
+    # Rung 2 (x-eea5 1.1): an exited-but-rostered session revives IN PLACE via
+    # `claude respawn <shortid>` (identity-preserving: same uuid, one roster
+    # row), then the rung-1 inject probe re-runs against the revived session.
+    # A respawn miss (claude absent, non-zero) or an inject that still does not
+    # land in the probe budget falls through to the fork rung (rung 3) so the
+    # mail is never dropped. The x-7fef single-writer claim still guards rung 3.
+    entry = _roster_entry_for_session(session_uuid)
+    if entry is not None and getattr(entry, "status", None) == "exited":
+        short = (
+            getattr(entry, "short_id", None)
+            or getattr(entry, "name", "")
+            or session_uuid[:8]
+        )
+        if _respawn_claude_session(short) == 0:
+            for _attempt in range(_RESPAWN_REINJECT_ATTEMPTS):
+                if _mail_inject_claude(session_uuid, wrapped):
+                    return True, short  # revived in place: no new uuid, no new row
+                time.sleep(_RESPAWN_REINJECT_DELAY_S)
+        # respawn failed or the revived session did not accept the inject within
+        # the probe budget -> fall through to the fork rung.
+
     try:
         result = dispatch_spawn(
             name=f"{_WAKE_NAME_PREFIX}{session_uuid[:8]}",
-            message=wrapped,
+            message=_lineage_seed_prefix(session_uuid) + "\n" + wrapped,
             provider="claude",
             cwd=cwd or Path.cwd(),
             resume_session_id=session_uuid,
@@ -4106,6 +4189,13 @@ def wake_and_deliver(
         return False, f"spawn-error-{type(exc).__name__}"
 
     short = getattr(result, "short_id", None) or getattr(result, "name", "") or "unknown"
+    # Rung 3 forked a new incarnation (x-eea5 1.2): make it loud. The receipt
+    # names both the new handle and the old lineage, and the seed prompt above
+    # carried the lineage prefix. A fork is never silent.
+    print(
+        f"forked new incarnation {short} from lineage {session_uuid[:8]}",
+        file=sys.stderr,
+    )
     return True, short
 
 

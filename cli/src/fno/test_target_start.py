@@ -10,7 +10,10 @@ subprocess + setup-hook stubbed so no real worktree/state is created:
 from __future__ import annotations
 
 import subprocess
+import pytest
+import typer
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
@@ -160,6 +163,13 @@ def test_existing_manifest_is_idempotent(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     wt.mkdir()
     init_calls = _wire_happy(monkeypatch, wt, manifest_exists=True)
+    # Same-session re-run: the live claim is ours, so start is idempotent
+    # (no re-acquire, no double-init). Without this patch a stale-free claim now
+    # reads as a successor takeover (reacquire), not already-claimed.
+    monkeypatch.setattr(
+        target_cli, "_classify_node_claim", lambda n: ("ours", {"state": "live"})
+    )
+    monkeypatch.setattr(target_cli, "_find_node", lambda n: {"id": n})
     result = runner.invoke(target_app, ["start", "x-d91b"])
     assert result.exit_code == 0
     assert "node=already-claimed" in result.stdout
@@ -552,8 +562,9 @@ def test_manifest_present_foreign_holder_refuses(monkeypatch, tmp_path):
     wt.mkdir()
     init_calls = _wire_happy(monkeypatch, wt, manifest_exists=True)
     monkeypatch.setattr(
-        target_cli, "_foreign_live_holder",
-        lambda nid: {"holder": "target-session:A", "pid": 4321, "host": "boxA"},
+        target_cli,
+        "_classify_node_claim",
+        lambda n: ("foreign_live", {"holder": "target-session:A", "pid": 4321, "host": "boxA", "state": "live"}),
     )
     result = runner.invoke(target_app, ["start", "x-d91b"])
     assert result.exit_code == 1
@@ -565,11 +576,14 @@ def test_manifest_present_foreign_holder_refuses(monkeypatch, tmp_path):
 
 
 def test_manifest_present_own_rerun_proceeds(monkeypatch, tmp_path):
-    # AC1-ERR: guard returns None (ours/dead) -> today's already-claimed receipt.
+    # AC1-ERR: the claim is ours (same-session re-run) -> idempotent
+    # already-claimed. (A dead predecessor now re-acquires instead - see
+    # test_successor_dead_predecessor_reacquires.)
     wt = tmp_path / "wt"
     wt.mkdir()
     _wire_happy(monkeypatch, wt, manifest_exists=True)
-    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda nid: None)
+    monkeypatch.setattr(target_cli, "_classify_node_claim", lambda n: ("ours", {"state": "live"}))
+    monkeypatch.setattr(target_cli, "_find_node", lambda n: {"id": n})
     result = runner.invoke(target_app, ["start", "x-d91b"])
     assert result.exit_code == 0
     assert "node=already-claimed" in result.output
@@ -605,3 +619,184 @@ def test_park_message_names_holder_pid_host_worktree(capsys):
     assert "pid=4321" in err  # pid
     assert "boxA" in err  # host
     assert "/wt/x-84fc" in err  # worktree path
+
+
+# successor re-acquisition (x-a7ab 1.3) -------------------------------------- #
+def test_classify_node_claim_free(monkeypatch):
+    _wire_claim(monkeypatch, {"key": "node:N", "state": "free"})
+    assert target_cli._classify_node_claim("N") == ("free", {"key": "node:N", "state": "free"})
+
+
+def test_classify_node_claim_unreadable_is_free(monkeypatch):
+    def _raise(*a, **k):
+        raise RuntimeError("unreadable")
+
+    monkeypatch.setattr("fno.claims.core.claim_status", _raise)
+    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: None)
+    verdict, info = target_cli._classify_node_claim("N")
+    assert verdict == "free" and info is None
+
+
+def test_classify_node_claim_dead_predecessor(monkeypatch):
+    _wire_claim(
+        monkeypatch,
+        {"key": "node:N", "state": "stale", "holder": "target-session:A", "pid": 1, "host": "h"},
+        own_pid=2,
+    )
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    verdict, info = target_cli._classify_node_claim("N")
+    assert verdict == "dead_predecessor"
+    assert info["holder"] == "target-session:A"
+
+
+def test_classify_node_claim_ours(monkeypatch):
+    _wire_claim(
+        monkeypatch,
+        {"key": "node:N", "state": "live", "holder": "target-session:X", "pid": 1, "host": "h"},
+    )
+    monkeypatch.setenv("TARGET_SESSION_ID", "X")
+    assert target_cli._classify_node_claim("N")[0] == "ours"
+
+
+def test_classify_node_claim_foreign_live(monkeypatch):
+    _wire_claim(
+        monkeypatch,
+        {"key": "node:N", "state": "live", "holder": "target-session:A", "pid": 9, "host": "h"},
+        own_pid=2,
+    )
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    assert target_cli._classify_node_claim("N")[0] == "foreign_live"
+
+
+def test_successor_dead_predecessor_reacquires(monkeypatch, tmp_path):
+    # AC3-ERR: a dead predecessor's claim is re-acquired under this session.
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    init_calls = _wire_happy(monkeypatch, wt, manifest_exists=True)
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda n: ("dead_predecessor", {"state": "stale", "holder": "target-session:DEAD", "pid": 111, "host": "h"}),
+    )
+    monkeypatch.setattr(target_cli, "_find_node", lambda n: {"id": n})
+    acq = []
+
+    def fake_acquire(*a, **k):
+        acq.append({"args": a, "kw": k})
+        return None
+
+    monkeypatch.setattr("fno.claims.core.acquire_claim", fake_acquire)
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 0, result.stdout
+    assert "node=reacquired" in result.stdout
+    assert "DEAD" in result.stdout  # prior holder named (loud takeover, never silent)
+    assert init_calls == []  # no double-init (manifest is write-once)
+    assert len(acq) == 1 and acq[0]["args"][0] == "node:x-d91b"
+
+
+def test_successor_ours_is_idempotent_no_reacquire(monkeypatch, tmp_path):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    init_calls = _wire_happy(monkeypatch, wt, manifest_exists=True)
+    monkeypatch.setattr(
+        target_cli, "_classify_node_claim", lambda n: ("ours", {"state": "live"})
+    )
+    monkeypatch.setattr(target_cli, "_find_node", lambda n: {"id": n})
+    acq = []
+    monkeypatch.setattr("fno.claims.core.acquire_claim", lambda *a, **k: acq.append(1))
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 0, result.stdout
+    assert "node=already-claimed" in result.stdout
+    assert acq == [] and init_calls == []  # ours -> no re-acquire, no init
+
+
+def test_successor_foreign_live_refuses(monkeypatch, tmp_path):
+    # AC3-ERR: a live foreign holder -> refuse, naming the holder.
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _wire_happy(monkeypatch, wt, manifest_exists=True)
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda n: ("foreign_live", {"state": "live", "holder": "target-session:OTHER", "pid": 999, "host": "h"}),
+    )
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 1
+    assert "OTHER" in result.output  # refusal names the live holder
+    assert "held by a live session" in result.output
+
+
+def test_successor_ghost_node_refuses(monkeypatch, tmp_path):
+    # A node no longer in the graph is never re-acquired (no claim for a ghost).
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _wire_happy(monkeypatch, wt, manifest_exists=True)
+    monkeypatch.setattr(
+        target_cli, "_classify_node_claim", lambda n: ("dead_predecessor", {"state": "stale"})
+    )
+    monkeypatch.setattr(target_cli, "_find_node", lambda n: None)
+    acq = []
+    monkeypatch.setattr("fno.claims.core.acquire_claim", lambda *a, **k: acq.append(1))
+    result = runner.invoke(target_app, ["start", "x-ghost"])
+    assert result.exit_code == 1
+    assert "not in the backlog graph" in result.output
+    assert acq == []
+
+
+def test_successor_free_claim_reacquires(monkeypatch, tmp_path):
+    # A stale-free claim (manifest exists, claim gone) also re-acquires.
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _wire_happy(monkeypatch, wt, manifest_exists=True)
+    monkeypatch.setattr(target_cli, "_classify_node_claim", lambda n: ("free", None))
+    monkeypatch.setattr(target_cli, "_find_node", lambda n: {"id": n})
+    acq = []
+    monkeypatch.setattr("fno.claims.core.acquire_claim", lambda *a, **k: acq.append(a[0]))
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 0, result.stdout
+    assert "node=reacquired" in result.stdout
+    assert "no prior claim" in result.stdout
+    assert acq == ["node:x-d91b"]
+
+
+def test_reacquire_parks_on_live_race(monkeypatch):
+    # A live-other racing the re-acquire -> park loudly + non-zero (backstop;
+    # the classifier already filtered foreign-live, but acquire_claim is the
+    # last word and must fail closed).
+    from fno.claims.core import ClaimHeldByOther
+
+    monkeypatch.setattr(target_cli, "_successor_claim_holder", lambda: "target-session:ME")
+    monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: 1)
+
+    def raise_other(*a, **k):
+        raise ClaimHeldByOther("target-session:RIVAL", 999, "h", "node:N")
+
+    monkeypatch.setattr("fno.claims.core.acquire_claim", raise_other)
+    with pytest.raises(typer.Exit) as exc:
+        target_cli._reacquire_node_claim("N", Path("/wt"), {"state": "stale"})
+    assert exc.value.exit_code == 1
+
+
+def test_successor_claim_holder_prefers_tsid(monkeypatch):
+    monkeypatch.setenv("TARGET_SESSION_ID", "abc-123")
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    assert target_cli._successor_claim_holder() == "target-session:abc-123"
+
+
+def test_successor_claim_holder_codex_parity(monkeypatch):
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-z")
+    assert target_cli._successor_claim_holder() == "target-session:thread-z"
+
+
+def test_successor_claim_holder_generated_form(monkeypatch):
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: 4242)
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_harness_identity",
+        lambda: SimpleNamespace(harness="claude", session_id=None),
+    )
+    h = target_cli._successor_claim_holder()
+    assert h.startswith("target-session:") and "-cl4242-" in h

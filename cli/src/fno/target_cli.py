@@ -1158,50 +1158,77 @@ def _manifest_node_id(manifest: Path) -> Optional[str]:
     return None if (not val or val == "null") else val
 
 
-def _foreign_live_holder(node_id: str) -> Optional[dict]:
-    """Claim info for ``node:<id>`` iff a DIFFERENT live/suspect session holds
-    it, else None (free / dead / ours).
+def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
+    """True iff ``holder`` is THIS session's identity (any claim state).
 
-    Read-only and never raises: any probe failure degrades to None so ``start``
-    behaves exactly as before the guard when the claim system is unreadable.
-    Liveness is pid-based (``classify``), so a busy owner whose TTL lapsed still
-    reads live - that is what lets the caller park a second session instead of
-    telling it the owner went idle.
+    Three arms, mirroring init-target-state.sh's ``claim_owner_id`` so a
+    successor and the classifier agree on 'ours': TARGET_SESSION_ID (a
+    driver-run claude session), CODEX_THREAD_ID (codex parity - the durable-pid
+    arm below only resolves a claude ancestor), then durable session pid + host
+    (a bare re-run with no env id). An uncapturable own pid reads as not-ours
+    (park / re-acquire, never assume ownership) - the conservative direction.
     """
-    from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
-    from fno.claims.session_pid import resolve_session_pid
-
-    # node: claims live under $HOME, not the default root -- claims_root_for(key)
-    # routes there; a bare claim_status(key) would read the wrong tree as free.
-    key = f"node:{node_id}"
-    try:
-        info = claim_status(key, root=claims_root_for(key))
-    except Exception:
-        return None
-    if info.get("state") not in ("live", "suspect"):
-        return None
-    # Ours by declared identity. A driver-run claude session sets
-    # TARGET_SESSION_ID; a codex session has no TARGET_SESSION_ID, so
-    # init-target-state.sh makes its raw CODEX_THREAD_ID the claim owner. Match
-    # either -- the durable-pid arm below only resolves a claude ancestor, so
-    # codex parity (a same-thread re-run is not foreign) depends on this arm.
-    holder = info.get("holder")
     for env_var in ("TARGET_SESSION_ID", "CODEX_THREAD_ID"):
         own_id = os.environ.get(env_var)
         if own_id and holder == f"target-session:{own_id}":
-            return None
-    # Ours by durable session pid + host (a bare interactive re-run with no TSID).
-    # An uncapturable own pid on a live foreign-looking claim reads as foreign
-    # (park, never share) -- the conservative direction.
+            return True
     try:
+        from fno.claims.session_pid import resolve_session_pid
+
         own_pid = resolve_session_pid(from_pid=os.getpid())
         own_host = socket.gethostname()  # can raise OSError in sandboxes
     except Exception:
         own_pid = own_host = None
-    if own_pid and info.get("pid") == own_pid and info.get("host") == own_host:
+    return bool(own_pid and info.get("pid") == own_pid and info.get("host") == own_host)
+
+
+def _read_node_claim(node_id: str) -> Optional[dict]:
+    """``claim_status`` dict for ``node:<id>``, or None (free / unreadable).
+
+    node: claims live under $HOME, not the default root - ``claims_root_for``
+    routes there; a bare ``claim_status(key)`` would read the wrong tree as free.
+    Read-only and never raises: any probe failure degrades to None.
+    """
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_root_for
+
+    key = f"node:{node_id}"
+    try:
+        return claim_status(key, root=claims_root_for(key))
+    except Exception:
         return None
-    return info  # foreign + live/suspect -> caller refuses
+
+
+def _classify_node_claim(node_id: str) -> tuple[str, Optional[dict]]:
+    """``(verdict, info)`` for ``node:<id>`` from THIS session's view.
+
+    verdict in ``{ours, foreign_live, dead_predecessor, free}``. Liveness is
+    pid-based (``classify``), so a busy owner whose TTL lapsed still reads live -
+    the surface that lets a caller park a second session instead of being told
+    the owner went idle. Read-only, never raises; a probe failure reads as
+    ``free`` (a re-acquire candidate) so an unreadable claims dir never wedges
+    start.
+    """
+    info = _read_node_claim(node_id)
+    if not info:
+        return ("free", None)
+    state = info.get("state")
+    if not state or state == "free":
+        return ("free", info)
+    if _holder_is_ours(info.get("holder"), info):
+        return ("ours", info)
+    if state in ("live", "suspect"):
+        return ("foreign_live", info)
+    # stale / dead / expired holder that is not ours -> a successor may take over
+    return ("dead_predecessor", info)
+
+
+def _foreign_live_holder(node_id: str) -> Optional[dict]:
+    """Claim info for ``node:<id>`` iff a DIFFERENT live/suspect session holds
+    it, else None (free / dead / ours). Thin view over ``_classify_node_claim``.
+    """
+    verdict, info = _classify_node_claim(node_id)
+    return info if verdict == "foreign_live" else None
 
 
 def _print_foreign_holder_park(node_id: str, info: dict, wt_path: Path) -> None:
@@ -1219,6 +1246,90 @@ def _print_foreign_holder_park(node_id: str, info: dict, wt_path: Path) -> None:
         f"  otherwise wait for it to release the claim, or pick another node.",
         err=True,
     )
+
+
+_HARNESS_CLAIM_INFIX = {
+    "claude": "cl",
+    "codex": "cx",
+    "gemini": "gm",
+    "agy": "ag",
+    "hermes": "hm",
+    "opencode": "oc",
+}
+
+
+def _successor_claim_holder() -> str:
+    """This session's ``node:`` claim holder, mirroring init-target-state.sh's
+    ``claim_owner_id`` (TARGET_SESSION_ID > CODEX_THREAD_ID > generated
+    ``{ts}-{prov}{pid}-{6hex}``) so a re-acquired lockfile names a holder the
+    classifier and the incarnation fence later recognize as ours."""
+    for env_var in ("TARGET_SESSION_ID", "CODEX_THREAD_ID"):
+        own_id = os.environ.get(env_var)
+        if own_id:
+            return f"target-session:{own_id}"
+    # No env id: the helper's generated form; liveness rides the durable pid.
+    import secrets
+    from datetime import datetime, timezone
+
+    from fno.claims.session_pid import resolve_session_pid
+    from fno.harness_identity import resolve_harness_identity
+
+    try:
+        pid = resolve_session_pid(from_pid=os.getpid()) or os.getpid()
+    except Exception:
+        pid = os.getpid()
+    infix = _HARNESS_CLAIM_INFIX.get(
+        (resolve_harness_identity().harness or "").lower(), ""
+    )
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"target-session:{ts}-{infix}{pid}-{secrets.token_hex(3)}"
+
+
+def _claim_ttl_ms() -> int:
+    """Node-claim TTL in ms. Mirrors init-target-state.sh (``2h`` default,
+    overridable via ``TARGET_CLAIM_TTL`` as ``30m`` / ``3600s``)."""
+    raw = (os.environ.get("TARGET_CLAIM_TTL") or "").strip()
+    m = re.match(r"^(\d+)\s*([hms])$", raw) if raw else None
+    if m:
+        return int(m.group(1)) * {"h": 3600, "m": 60, "s": 1}[m.group(2)] * 1000
+    return 2 * 60 * 60 * 1000
+
+
+def _reacquire_node_claim(
+    node_id: str, wt_path: Path, prior: Optional[dict]
+) -> str:
+    """Re-acquire ``node:<id>`` under THIS session (successor takeover of a
+    predecessor's dead/stale claim). ``acquire_claim`` archives the prior corpse
+    under its recovery mutex; a live-other race raises ``ClaimHeldByOther``
+    (already filtered by the classifier, so this is a defensive backstop that
+    parks loudly). Returns the holder now owning the claim."""
+    from fno.claims.core import acquire_claim, ClaimHeldByOther
+    from fno.claims.io import claims_root_for
+    from fno.claims.session_pid import resolve_session_pid
+
+    key = f"node:{node_id}"
+    holder = _successor_claim_holder()
+    try:
+        pid = resolve_session_pid(from_pid=os.getpid())
+    except Exception:
+        pid = None
+    try:
+        acquire_claim(
+            key,
+            holder,
+            ttl_ms=_claim_ttl_ms(),
+            pid=pid,
+            reason="target start successor re-acquire",
+            root=claims_root_for(key),
+        )
+    except ClaimHeldByOther as exc:
+        _print_foreign_holder_park(
+            node_id,
+            {"holder": exc.holder, "pid": exc.pid, "host": exc.host},
+            wt_path,
+        )
+        raise typer.Exit(code=1)
+    return holder
 
 
 @target_app.command()
@@ -1350,11 +1461,15 @@ def start(
     manifest = wt_path / ".fno" / "target-state.md"
     fno_state = "in-place" if in_place else ("healed" if healed else "ok")
     if manifest.exists() and not manifest.is_symlink():
-        # A manifest means init ran, so the claim is set - refuse if a DIFFERENT
-        # live session owns it rather than presenting its worktree as usable.
-        holder = _foreign_live_holder(node)
-        if holder is not None:
-            _print_foreign_holder_park(node, holder, wt_path)
+        # A manifest means init ran. Classify the live node claim from this
+        # session's view: foreign-live -> park; ours -> idempotent already-claimed;
+        # a dead predecessor (or stale-free) -> re-acquire under this session so
+        # the lockfile never keeps naming a dead pid that silently expires
+        # (x-a7ab successor-takeover gap: two sessions once shared one worktree
+        # because start short-circuited here without re-acquiring the claim).
+        verdict, claim_info = _classify_node_claim(node)
+        if verdict == "foreign_live":
+            _print_foreign_holder_park(node, claim_info or {}, wt_path)
             raise typer.Exit(code=1)
         # In-place (policy=never) manifests live in the SHARED canonical .fno, so
         # unlike a per-node worktree this one may belong to a DIFFERENT node - the
@@ -1371,10 +1486,39 @@ def start(
                     err=True,
                 )
                 raise typer.Exit(code=1)
+        # Ghost node: the manifest references a node no longer in the graph
+        # (superseded / removed). Never re-acquire a claim for a ghost.
+        if _find_node(node) is None:
+            typer.echo(
+                f"fno target start: node {node} is not in the backlog graph "
+                f"(superseded or removed); refusing to re-acquire its claim. "
+                f"Cancel the stale session (fno target cancel) or pick a live node.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if verdict == "ours":
+            typer.echo(
+                f"worktree={wt_path}  .fno={fno_state}  base={base_label}  "
+                f"node=already-claimed"
+            )
+            if beastmode:
+                _warn_if_authority_not_granted(wt_path)
+            return
+        # verdict in {dead_predecessor, free}: a successor inheriting a
+        # predecessor's worktree, or a stale-free claim. Re-acquire under this
+        # session so the lockfile names a live, recognizable holder.
+        _reacquire_node_claim(node, wt_path, claim_info)
+        prior = (
+            f"prior holder {claim_info.get('holder', '?')} "
+            f"(state={claim_info.get('state', '?')})"
+            if claim_info
+            else "no prior claim"
+        )
         typer.echo(
             f"worktree={wt_path}  .fno={fno_state}  base={base_label}  "
-            f"node=already-claimed"
+            f"node=reacquired (successor took over from {prior})"
         )
+        typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)
         if beastmode:
             _warn_if_authority_not_granted(wt_path)
         return
