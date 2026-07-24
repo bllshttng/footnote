@@ -150,6 +150,7 @@ def build_review_runner(
                 timeout=timeout,
                 dispatch=dispatch,
                 route_env=route_envs[agent],
+                route_provider=route_provider,
                 model=model,
                 named_agent=f"fno:{agent.replace('_', '-')}",
                 headless=True,
@@ -258,10 +259,29 @@ def _publish_durable_sigma(
 ) -> None:
     """Publish direct ``fno review`` output through the shared sigma writer."""
     state = _read_state(state_path)
-    node = state.get("graph_node_id")
+    from fno.worker.ship import _read_graph_node_id
+
+    node = _read_graph_node_id(state_path)
     pr_number = state.get("pr_number")
-    if not isinstance(node, str) or not isinstance(pr_number, int) or pr_number < 1:
+    if not isinstance(node, str):
         return
+
+    if not isinstance(pr_number, int) or pr_number < 1:
+        try:
+            current_pr = subprocess.run(
+                ["gh", "pr", "view", "--json", "number", "--jq", ".number"],
+                capture_output=True,
+                text=True,
+            )
+            pr_number = int(current_pr.stdout.strip()) if current_pr.returncode == 0 else None
+        except (OSError, ValueError):
+            pr_number = None
+        if pr_number is None:
+            print(
+                "[review] durable sigma artifact skipped: no PR is bound to this branch",
+                file=sys.stderr,
+            )
+            return
 
     from fno.config import load_settings
     from fno.paths import vault_root
@@ -277,12 +297,24 @@ def _publish_durable_sigma(
         )
         return
 
-    current = subprocess.run(
-        ["gh", "pr", "view", str(pr_number), "--json", "headRefOid", "--jq", ".headRefOid"],
-        capture_output=True,
-        text=True,
-    )
-    current_head = current.stdout.strip() if current.returncode == 0 else reviewed_head
+    try:
+        current = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "headRefOid",
+                "--jq",
+                ".headRefOid",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        current_head = current.stdout.strip() if current.returncode == 0 else None
+    except OSError:
+        current_head = None
     round_id = f"{reviewed_head[:12]}-{session_id[-8:]}-{uuid.uuid4().hex[:8]}"
     result = publish_sigma_artifact(
         report_path,
@@ -483,6 +515,12 @@ def review(
                         ),
                         artifacts_dir=artifacts_dir,
                     )
+                _publish_durable_sigma(
+                    artifact_path,
+                    state_path=state_path,
+                    session_id=session_id,
+                    reviewed_head=resolved_sha,
+                )
                 return {
                     "action": "cached",
                     "verdict": verdict,

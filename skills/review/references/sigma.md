@@ -384,6 +384,9 @@ key is absent or `$ROUTING` is `{}`):
     -t 600 "$(cat "$BRIEF")"
   ```
 
+  Judge the routed result by the same exit-code and non-empty-output contract as the legacy one-shot branch.
+  On a non-zero exit, empty output, or unavailable route, fall back to `Task()` on Claude for that agent and record the fallback runtime plus its effective model when the runtime exposes one; otherwise record `unknown` rather than falsely retaining the requested routed model.
+
 - **`codex` / `gemini`** -> run a synchronous one-shot, the SAME lane `/review peer`
   uses. Write the agent's review brief to a file (shell-safe), then YOU run it
   (never the user) so the reply returns in-context:

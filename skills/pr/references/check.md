@@ -56,9 +56,11 @@ hasn't been multi-reviewer-converted, bind the first configured reviewer to
 the legacy scalars:
 
 ```bash
-REVIEWER_TYPE="${REVIEWER_TYPES[0]}"
-REVIEWER_BOT="${REVIEWER_BOTS[0]}"
-REVIEWER_NAME="${REVIEWER_BOT%\[bot\]}"
+if [[ "$EXTERNAL_REVIEW_ENABLED" == "1" ]]; then
+    REVIEWER_TYPE="${REVIEWER_TYPES[0]}"
+    REVIEWER_BOT="${REVIEWER_BOTS[0]}"
+    REVIEWER_NAME="${REVIEWER_BOT%\[bot\]}"
+fi
 ```
 
 ### Reviewer Adapters
@@ -136,6 +138,8 @@ Resolve the current head and live node, then inspect the sigma artifact as a sec
 ```bash
 PR_NUMBER=$(gh pr view --json number --jq .number)
 PR_HEAD=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+OWNER=$(gh repo view --json owner --jq '.owner.login')
+REPO=$(gh repo view --json name --jq '.name')
 NODE_ID=$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | xargs)
 SIGMA_JSON=$(fno review --inspect-sigma --sigma-node "$NODE_ID" \
   --sigma-pr "$PR_NUMBER" --sigma-head "$PR_HEAD" --json)
@@ -157,9 +161,6 @@ Loop over every configured reviewer; if ANY has posted (`COMMENTED` or
 `APPROVED`), skip the cron and jump to Step 3:
 
 ```bash
-OWNER=$(gh repo view --json owner --jq '.owner.login')
-REPO=$(gh repo view --json name --jq '.name')
-
 # REVIEWER_BOTS[] is set up in Step 0.
 ANY_READY=0
 for bot in "${REVIEWER_BOTS[@]}"; do

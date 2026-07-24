@@ -21,6 +21,9 @@ def test_pr_check_inspects_sigma_before_zero_reviewer_return() -> None:
     assert "    exit 0" not in window
     assert "--inspect-sigma" in window
     assert "EXTERNAL_REVIEW_ENABLED=0" in window
+    assert 'if [[ "$EXTERNAL_REVIEW_ENABLED" == "1" ]]' in window
+    assert "OWNER=$(gh repo view" in window
+    assert "REPO=$(gh repo view" in window
 
 
 def test_pr_check_reuses_badge_and_response_sequence() -> None:
@@ -39,3 +42,5 @@ def test_sigma_route_contract_prices_named_sessions_and_records_model() -> None:
     assert "--route \"$ROUTE_PROVIDER/$MODEL\"" in sigma
     assert "300–360K preamble tokens" in sigma
     assert "Effective model" in template
+    assert "- **critical** -" in template
+    assert "- **high** -" in template

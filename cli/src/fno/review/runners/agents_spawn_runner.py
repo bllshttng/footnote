@@ -82,6 +82,7 @@ def run_via_agents_spawn(
     timeout: float = DEFAULT_TIMEOUT,
     dispatch: Optional[Callable[..., Any]] = None,
     route_env: Optional[Mapping[str, str]] = None,
+    route_provider: Optional[str] = None,
     model: Optional[str] = None,
     named_agent: Optional[str] = None,
     headless: bool = False,
@@ -150,7 +151,8 @@ def run_via_agents_spawn(
         )
         return WorkerOutcome(
             agent=agent, ok=False, error=TIMEOUT_FAILURE,
-            duration_seconds=elapsed, provider=provider, model=model,
+            duration_seconds=elapsed, provider=provider,
+            route_provider=route_provider, model=model,
         )
 
     if "value" in exc_holder:
@@ -168,6 +170,7 @@ def run_via_agents_spawn(
             error=f"{DISPATCH_FAILURE_PREFIX}{suffix}: {exc}",
             duration_seconds=elapsed,
             provider=provider,
+            route_provider=route_provider,
             model=model,
         )
 
@@ -181,6 +184,7 @@ def run_via_agents_spawn(
             error=f"{DISPATCH_FAILURE_PREFIX}: provider returned no reply text",
             duration_seconds=elapsed,
             provider=provider,
+            route_provider=route_provider,
             model=model,
         )
 
@@ -195,6 +199,7 @@ def run_via_agents_spawn(
             error=f"{PARSE_FAILURE_PREFIX}: {exc} (head={exc.raw_head!r})",
             duration_seconds=elapsed,
             provider=provider,
+            route_provider=route_provider,
             model=model,
         )
 
@@ -204,6 +209,7 @@ def run_via_agents_spawn(
         findings=findings,
         duration_seconds=elapsed,
         provider=provider,
+        route_provider=route_provider,
         model=model,
     )
 
@@ -215,6 +221,7 @@ def make_async_runner(
     timeout: float = DEFAULT_TIMEOUT,
     dispatch: Optional[Callable[..., Any]] = None,
     route_env: Optional[Mapping[str, str]] = None,
+    route_provider: Optional[str] = None,
     model: Optional[str] = None,
     named_agent: Optional[str] = None,
     headless: bool = False,
@@ -236,6 +243,7 @@ def make_async_runner(
             timeout=timeout,
             dispatch=dispatch,
             route_env=route_env,
+            route_provider=route_provider,
             model=model,
             named_agent=named_agent,
             headless=headless,

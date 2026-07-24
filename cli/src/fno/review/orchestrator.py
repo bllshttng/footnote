@@ -70,6 +70,7 @@ class WorkerOutcome:
     # report (e.g. "cross-model unavailable: ran on claude") on a SUCCESSFUL
     # run, distinct from ``error`` which carries soft-failure detail.
     provider: str | None = None
+    route_provider: str | None = None
     model: str | None = None
     note: str | None = None
 
@@ -571,7 +572,11 @@ def orchestrate_review_parallel(
                 try:
                     actual_dim = (
                         sorted(
-                            f"{o.agent}={o.provider}"
+                            (
+                                f"{o.agent}={o.provider}/{o.route_provider}/{o.model}"
+                                if o.route_provider and o.model
+                                else f"{o.agent}={o.provider}"
+                            )
                             for o in result.outcomes
                             if o.provider
                         )

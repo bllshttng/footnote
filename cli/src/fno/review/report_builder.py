@@ -39,8 +39,10 @@ def _provider_tag(outcome) -> str:
     being visually indistinguishable from a routed-model run.
     """
     provider = getattr(outcome, "provider", None) or "claude"
+    route_provider = getattr(outcome, "route_provider", None)
     model = getattr(outcome, "model", None) or "unknown"
-    return f" [{provider}/{model}]"
+    route = f"/{route_provider}" if route_provider else ""
+    return f" [{provider}{route}/{model}]"
 
 
 def choose_verdict(
@@ -125,7 +127,17 @@ def render_artifact_markdown(
 
     # Cross-model cost / coverage line (OQ2). Only when a run was attributed to
     # any provider (cross-model engaged); the all-claude OFF path adds nothing.
-    used = sorted({p for o in result.outcomes if (p := getattr(o, "provider", None))})
+    used = sorted(
+        {
+            identity
+            for outcome in result.outcomes
+            for identity in (
+                getattr(outcome, "provider", None),
+                getattr(outcome, "route_provider", None),
+            )
+            if identity
+        }
+    )
     if used:
         non_claude = [p for p in used if p != "claude"]
         if non_claude:

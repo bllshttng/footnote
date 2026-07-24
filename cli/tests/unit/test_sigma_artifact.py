@@ -70,6 +70,26 @@ def test_stale_completion_retains_round_without_displacing_current(tmp_path: Pat
     assert current.current_path.read_text() == current.round_path.read_text()
 
 
+def test_unknown_current_head_retains_round_without_publishing_alias(tmp_path: Path) -> None:
+    from fno.review.artifact import publish_sigma_artifact
+
+    result = publish_sigma_artifact(
+        _report(tmp_path / "report.md", "unknown"),
+        reviews_root=tmp_path / "reviews",
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+        reviewed_head="head-a",
+        current_head=None,
+        round_id="round-a",
+    )
+
+    assert result.published is False
+    assert result.reason == "current head unavailable"
+    assert result.round_path.exists()
+    assert not result.current_path.exists()
+
+
 def test_inspect_rejects_wrong_pr_or_head(tmp_path: Path) -> None:
     from fno.review.artifact import inspect_sigma_artifact, publish_sigma_artifact
 
@@ -131,7 +151,39 @@ def test_inspect_accepts_current_artifact_with_zero_external_reviewers(tmp_path:
     )
     assert inspected.status == "accepted"
     assert inspected.finding_count == 1
+    assert inspected.round_id == "round-b"
     assert "**P1**" in inspected.body
+
+
+def test_clean_report_headings_are_not_counted_as_findings(tmp_path: Path) -> None:
+    from fno.review.artifact import inspect_sigma_artifact, publish_sigma_artifact
+
+    report = tmp_path / "clean.md"
+    report.write_text(
+        "# Review\n\n### Critical Issues\n\nNone.\n\n### High Priority Issues\n\nNone.\n",
+        encoding="utf-8",
+    )
+    reviews_root = tmp_path / "reviews"
+    publish_sigma_artifact(
+        report,
+        reviews_root=reviews_root,
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+        reviewed_head="head-b",
+        current_head="head-b",
+        round_id="round-b",
+    )
+
+    inspected = inspect_sigma_artifact(
+        reviews_root=reviews_root,
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+        head_sha="head-b",
+    )
+    assert inspected.status == "accepted"
+    assert inspected.finding_count == 0
 
 
 def test_cli_publish_and_inspect_share_the_artifact_writer(tmp_path: Path) -> None:
@@ -184,3 +236,4 @@ def test_cli_publish_and_inspect_share_the_artifact_writer(tmp_path: Path) -> No
     assert inspected.exit_code == 0, inspected.output
     assert '"status": "accepted"' in inspected.output
     assert '"finding_count": 1' in inspected.output
+    assert '"review_round": "round-b"' in inspected.output

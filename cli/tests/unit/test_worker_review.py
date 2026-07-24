@@ -209,6 +209,73 @@ class TestWorkerReviewEndToEnd:
             reviewed_head="deadbeef0002",
         )
 
+    def test_cached_node_bound_review_republishes_shared_sigma_artifact(
+        self, tmp_path: Path
+    ) -> None:
+        from fno.worker.review import review
+
+        state_path = _make_state(
+            tmp_path,
+            session_id="sess-cached-publish",
+            extra={"graph_node_id": "x-bfbb", "pr_number": 42},
+        )
+        with patch("fno.worker.review._publish_durable_sigma") as publish:
+            for _ in range(2):
+                review(
+                    diff_context="some diff text",
+                    state_path=state_path,
+                    artifacts_dir=tmp_path / "artifacts",
+                    session_id="sess-cached-publish",
+                    runner=_make_info_runner(),
+                    git_sha_value="deadbeef0003",
+                )
+
+        assert publish.call_count == 2
+
+
+def test_shared_publisher_resolves_pr_when_immutable_manifest_has_none(
+    tmp_path: Path,
+) -> None:
+    from types import SimpleNamespace
+
+    from fno.worker.review import _publish_durable_sigma
+
+    state_path = _make_state(
+        tmp_path,
+        session_id="sess-publish",
+        extra={"pr_number": None},
+    )
+    state_path.write_text(
+        state_path.read_text(encoding="utf-8") + "graph_node_id: x-bfbb\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.md"
+    report.write_text("# report\n", encoding="utf-8")
+    completed = SimpleNamespace(returncode=0, stdout="42\n")
+    current = SimpleNamespace(returncode=0, stdout="deadbeef0002\n")
+
+    with (
+        patch("fno.worker.review.subprocess.run", side_effect=[completed, current]),
+        patch("fno.config.load_settings") as load_settings,
+        patch("fno.paths.vault_root", return_value=tmp_path / "vault"),
+        patch("fno.review.artifact.publish_sigma_artifact") as publish,
+    ):
+        load_settings.return_value.project.id = "fno"
+        publish.return_value = SimpleNamespace(
+            current_path=tmp_path / "sigma.md",
+            published=True,
+            reason="published",
+        )
+        _publish_durable_sigma(
+            report,
+            state_path=state_path,
+            session_id="sess-publish",
+            reviewed_head="deadbeef0002",
+        )
+
+    assert publish.call_args.kwargs["pr_number"] == 42
+    assert publish.call_args.kwargs["current_head"] == "deadbeef0002"
+
 
 # ---- AC2-VERDICT-BLOCKED ----
 

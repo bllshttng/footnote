@@ -158,6 +158,27 @@ def test_explicit_agent_route_uses_named_headless_session_with_runtime_evidence(
     assert call["model"] == "glm-5.2"
     assert outcome.provider == "claude"
     assert outcome.model == "glm-5.2"
+    assert outcome.route_provider == "zai"
+
+    from fno.review.orchestrator import OrchestratorResult
+    from fno.review.report_builder import render_artifact_markdown
+
+    report = render_artifact_markdown(
+        "sess",
+        OrchestratorResult(
+            findings=[],
+            workers_completed=1,
+            workers_failed=0,
+            suspicious=False,
+            duration_seconds=1.0,
+            outcomes=[outcome],
+        ),
+        "ready-to-merge",
+    )
+    assert "[claude/zai/glm-5.2]" in report
+    assert "Cross-model coverage: claude, zai" in report
+    assert "Billed a second provider's quota this run: zai" in report
+    assert "claude only" not in report
 
 
 def test_invalid_explicit_route_fails_before_dispatch() -> None:
@@ -440,3 +461,33 @@ def test_orchestrator_caches_under_actual_routing_on_fallback(tmp_path) -> None:
     # Written under the ACTUAL (claude) routing, NOT the requested (codex) one.
     assert _cache.cache_path(actual_key, artifacts_dir=tmp_path).exists()
     assert not _cache.cache_path(requested_key, artifacts_dir=tmp_path).exists()
+
+
+def test_orchestrator_named_route_writes_under_requested_model_dimension(tmp_path) -> None:
+    from fno.review import cache as _cache
+    from fno.review.orchestrator import Finding, WorkerOutcome, orchestrate_review_parallel
+
+    async def runner(agent: str, prompt: str, diff: str) -> WorkerOutcome:
+        return WorkerOutcome(
+            agent=agent,
+            ok=True,
+            provider="claude",
+            route_provider="zai",
+            model="glm-5.2",
+            findings=[Finding(agent=agent, severity="low", message="x")],
+        )
+
+    prompts = {"code_reviewer": "p"}
+    requested = ["code_reviewer=claude/zai/glm-5.2"]
+    orchestrate_review_parallel(
+        "diff",
+        prompts=prompts,
+        runner=runner,
+        agents=["code_reviewer"],
+        session_id="s-route",
+        artifacts_dir=tmp_path,
+        git_sha_value="sha",
+        provider_set=requested,
+    )
+    key = _cache.cache_key("s-route", "sha", _cache.prompt_hash(prompts), requested)
+    assert _cache.cache_path(key, artifacts_dir=tmp_path).exists()

@@ -748,6 +748,7 @@ def review(
                 "path": str(inspected.path),
                 "head_sha": sigma_head,
                 "finding_count": inspected.finding_count,
+                "review_round": inspected.round_id,
                 "body": inspected.body,
             }
         if json_output:

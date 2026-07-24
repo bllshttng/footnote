@@ -13,10 +13,6 @@ from pathlib import Path
 import yaml
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9._-]+$")
-_FINDING_BADGE = re.compile(
-    r"(?:\*\*)?(?:P[123]|critical|high|medium|low)(?:\*\*)?",
-    re.IGNORECASE,
-)
 
 
 @dataclass(frozen=True)
@@ -34,6 +30,7 @@ class InspectResult:
     reason: str
     finding_count: int
     body: str
+    round_id: str | None
 
 
 def _component(value: str, label: str) -> str:
@@ -90,7 +87,7 @@ def publish_sigma_artifact(
     node: str,
     pr_number: int,
     reviewed_head: str,
-    current_head: str,
+    current_head: str | None,
     round_id: str,
 ) -> PublishResult:
     """Retain a completed round and publish it only when its head is current."""
@@ -98,7 +95,8 @@ def publish_sigma_artifact(
     node = _component(node, "node")
     round_id = _component(round_id, "round")
     reviewed_head = _component(reviewed_head, "head")
-    current_head = _component(current_head, "current head")
+    if current_head is not None:
+        current_head = _component(current_head, "current head")
     if pr_number < 1:
         raise ValueError("sigma artifact PR number must be positive")
 
@@ -119,6 +117,13 @@ def publish_sigma_artifact(
     with lock_path.open("a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         _atomic_write(round_path, rendered)
+        if current_head is None:
+            return PublishResult(
+                current_path=current_path,
+                round_path=round_path,
+                published=False,
+                reason="current head unavailable",
+            )
         if reviewed_head != current_head:
             return PublishResult(
                 current_path=current_path,
@@ -165,11 +170,11 @@ def inspect_sigma_artifact(
         / "sigma.md"
     )
     if not path.exists():
-        return InspectResult(path, "missing", "artifact does not exist", 0, "")
+        return InspectResult(path, "missing", "artifact does not exist", 0, "", None)
     try:
         metadata, body = _split_artifact(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, yaml.YAMLError) as exc:
-        return InspectResult(path, "rejected", str(exc), 0, "")
+        return InspectResult(path, "rejected", str(exc), 0, "", None)
 
     expected = {
         "schema": "sigma-review/v1",
@@ -183,7 +188,24 @@ def inspect_sigma_artifact(
         if metadata.get(key) != value
     ]
     if mismatches:
-        return InspectResult(path, "rejected", "; ".join(mismatches), 0, body)
+        return InspectResult(
+            path,
+            "rejected",
+            "; ".join(mismatches),
+            0,
+            body,
+            str(metadata.get("review_round")) if metadata.get("review_round") else None,
+        )
 
-    count = sum(1 for line in body.splitlines() if _FINDING_BADGE.search(line))
-    return InspectResult(path, "accepted", "current artifact", count, body)
+    from fno.retro.harvest import extract_severity
+
+    count = sum(1 for line in body.splitlines() if extract_severity(line) is not None)
+    round_id = metadata.get("review_round")
+    return InspectResult(
+        path,
+        "accepted",
+        "current artifact",
+        count,
+        body,
+        str(round_id) if round_id else None,
+    )
