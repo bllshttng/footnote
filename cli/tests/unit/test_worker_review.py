@@ -16,6 +16,7 @@ C1: score_findings uses default resolver (batched `claude -p` when the CLI
 H2: all-findings-below-threshold produces done-with-concerns (not ready-to-merge).
 H6: worker layer does not call write_cache (orchestrator owns writes).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -70,14 +71,13 @@ def test_worker_outcome_provider_model_default_none() -> None:
 
 def test_worker_outcome_provider_model_settable() -> None:
     """Runners may attribute a provider/model for the report (AC6-UI)."""
-    outcome = WorkerOutcome(
-        agent="code_reviewer", ok=True, provider="codex", model="gpt-5.1-codex"
-    )
+    outcome = WorkerOutcome(agent="code_reviewer", ok=True, provider="codex", model="gpt-5.1-codex")
     assert outcome.provider == "codex"
     assert outcome.model == "gpt-5.1-codex"
 
 
 # ---- Helpers ----
+
 
 def _make_state(tmp_path: Path, session_id: str = "sess-abc123", extra: dict | None = None) -> Path:
     state = {
@@ -95,23 +95,23 @@ def _make_state(tmp_path: Path, session_id: str = "sess-abc123", extra: dict | N
 
 def _make_runner(findings: list[Finding]) -> Any:
     """Return an async WorkerRunner that returns the given findings."""
+
     async def runner(agent: str, prompt: str, diff: str) -> WorkerOutcome:
         return WorkerOutcome(agent=agent, ok=True, findings=findings, duration_seconds=0.01)
+
     return runner
 
 
 def _make_critical_runner() -> Any:
     """Runner that returns one critical finding."""
-    return _make_runner([
-        Finding(agent="code_reviewer", severity="critical", message="null deref")
-    ])
+    return _make_runner([Finding(agent="code_reviewer", severity="critical", message="null deref")])
 
 
 def _make_info_runner() -> Any:
     """Runner that returns one info finding."""
-    return _make_runner([
-        Finding(agent="code_reviewer", severity="info", message="consider renaming")
-    ])
+    return _make_runner(
+        [Finding(agent="code_reviewer", severity="info", message="consider renaming")]
+    )
 
 
 def _make_empty_runner() -> Any:
@@ -121,11 +121,13 @@ def _make_empty_runner() -> Any:
 
 # ---- AC2-END-TO-END ----
 
+
 class TestWorkerReviewEndToEnd:
     """AC2-END-TO-END: orchestrator path produces a gate-satisfying artifact."""
 
     def test_review_function_exists(self) -> None:
         from fno.worker.review import review  # noqa: F401
+
         assert callable(review)
 
     def test_review_returns_dict_with_action(self, tmp_path: Path) -> None:
@@ -181,8 +183,35 @@ class TestWorkerReviewEndToEnd:
         assert "findings_critical" in fm
         assert "findings_high" in fm
 
+    def test_node_bound_direct_review_calls_shared_sigma_publisher(self, tmp_path: Path) -> None:
+        from fno.worker.review import review
+
+        state_path = _make_state(
+            tmp_path,
+            session_id="sess-publish",
+            extra={"graph_node_id": "x-bfbb", "pr_number": 42},
+        )
+        with patch("fno.worker.review._publish_durable_sigma") as publish:
+            result = review(
+                diff_context="some diff text",
+                state_path=state_path,
+                artifacts_dir=tmp_path / "artifacts",
+                session_id="sess-publish",
+                runner=_make_info_runner(),
+                git_sha_value="deadbeef0002",
+                no_cache=True,
+            )
+
+        publish.assert_called_once_with(
+            Path(result["artifact_path"]),
+            state_path=state_path,
+            session_id="sess-publish",
+            reviewed_head="deadbeef0002",
+        )
+
 
 # ---- AC2-VERDICT-BLOCKED ----
+
 
 class TestWorkerReviewVerdictBlocked:
     """AC2-VERDICT-BLOCKED: critical finding -> verdict: blocked."""
@@ -208,13 +237,13 @@ class TestWorkerReviewVerdictBlocked:
         artifact_path = artifacts_dir / f"review-{session_id}.md"
         text = artifact_path.read_text(encoding="utf-8")
         rest = text[3:].lstrip("\n")
-        fm = yaml.safe_load(rest[:rest.find("\n---")])
+        fm = yaml.safe_load(rest[: rest.find("\n---")])
         assert fm["verdict"] == "blocked"
         assert fm["findings_critical"] >= 1
 
 
-
 # ---- AC2-VERDICT-READY ----
+
 
 class TestWorkerReviewVerdictReady:
     """AC2-VERDICT-READY: info-only findings -> verdict: ready-to-merge."""
@@ -238,8 +267,8 @@ class TestWorkerReviewVerdictReady:
         assert result["verdict"] == "ready-to-merge"
 
 
-
 # ---- AC2-CACHED ----
+
 
 class TestWorkerReviewCached:
     """AC2-CACHED: second call on same session+sha returns action=cached."""
@@ -337,6 +366,7 @@ class TestWorkerReviewCached:
 
 # ---- C1: scorer resolver is consulted and its scorer is invoked ----
 
+
 class TestC1ScorerResolver:
     """C1: score_findings must use default resolver (batched claude -p when
     present, pass-through otherwise). The worker must not bypass the resolver.
@@ -373,7 +403,9 @@ class TestC1ScorerResolver:
             mock_resolve.assert_called()
 
         # sentinel scorer must have been invoked on the findings
-        assert len(sentinel_calls) > 0, "sentinel scorer was never called - scorer kwarg was hardcoded"
+        assert len(sentinel_calls) > 0, (
+            "sentinel scorer was never called - scorer kwarg was hardcoded"
+        )
 
     def test_without_claude_binary_uses_pass_through(self, tmp_path: Path) -> None:
         """When `claude` is not on PATH, the pass-through path is selected."""
@@ -385,6 +417,7 @@ class TestC1ScorerResolver:
 
         with patch("shutil.which", return_value=None):
             import fno.review.confidence_scorer as cs_mod
+
             cs_mod._no_claude_warned = False
             result = review(
                 diff_context="diff ...",
@@ -398,7 +431,9 @@ class TestC1ScorerResolver:
         # Should complete without error, using pass-through
         assert result["action"] == "reviewed"
 
-    def test_end_to_end_claude_subprocess_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_end_to_end_claude_subprocess_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Full path: review() -> score_findings() -> _resolve_default_scorer()
         -> claude_scorer_batch -> subprocess.run('claude', '-p').
 
@@ -412,7 +447,10 @@ class TestC1ScorerResolver:
 
         # Override the autouse fixture's shutil.which stub so `claude` appears
         # available; monkeypatch teardown restores the autouse stub after.
-        monkeypatch.setattr("shutil.which", lambda name, *a, **k: "/usr/local/bin/claude" if name == "claude" else None)
+        monkeypatch.setattr(
+            "shutil.which",
+            lambda name, *a, **k: "/usr/local/bin/claude" if name == "claude" else None,
+        )
 
         session_id = "sess-c1-e2e-subprocess"
         state_path = _make_state(tmp_path, session_id=session_id)
@@ -458,6 +496,7 @@ class TestC1ScorerResolver:
 
 # ---- H2: all-findings-below-threshold produces done-with-concerns ----
 
+
 class TestH2ThresholdDrop:
     """H2: when all raw findings drop below threshold, verdict must be done-with-concerns."""
 
@@ -476,7 +515,9 @@ class TestH2ThresholdDrop:
         ]
 
         async def high_findings_runner(agent: str, prompt: str, diff: str) -> WorkerOutcome:
-            return WorkerOutcome(agent=agent, ok=True, findings=critical_findings, duration_seconds=0.01)
+            return WorkerOutcome(
+                agent=agent, ok=True, findings=critical_findings, duration_seconds=0.01
+            )
 
         # Scorer that always returns 50 (below threshold of 80) - all findings dropped
         low_scorer = MagicMock(return_value=50)
@@ -504,6 +545,7 @@ class TestH2ThresholdDrop:
 
 
 # ---- H6: worker layer does not call write_cache ----
+
 
 class TestH6NoDuplicateCacheWrite:
     """H6: worker layer must not write cache (orchestrator owns writes)."""
@@ -578,6 +620,7 @@ class TestH6NoDuplicateCacheWrite:
 
 # ---- C2: default runner construction + PID tracking ----
 
+
 class TestC2DefaultRunnerConstruction:
     """C2: when runner=None, review() must construct a default runner that
     tracks PIDs and passes the SAME tracked_pids list to orchestrate_review_parallel.
@@ -593,15 +636,18 @@ class TestC2DefaultRunnerConstruction:
 
         def fake_make_async_runner(*, worker_pids, timeout=None, adapter=None):
             spy_calls.append({"worker_pids": worker_pids})
+
             # Return an async runner that returns quickly
             async def _runner(agent: str, prompt: str, diff: str):
                 from fno.review.orchestrator import WorkerOutcome, Finding
+
                 return WorkerOutcome(
                     agent=agent,
                     ok=True,
                     findings=[Finding(agent=agent, severity="info", message="ok")],
                     duration_seconds=0.01,
                 )
+
             return _runner
 
         session_id = "sess-c2-default"
@@ -644,12 +690,14 @@ class TestC2DefaultRunnerConstruction:
 
             async def _runner(agent: str, prompt: str, diff: str):
                 from fno.review.orchestrator import WorkerOutcome, Finding
+
                 return WorkerOutcome(
                     agent=agent,
                     ok=True,
                     findings=[Finding(agent=agent, severity="info", message="ok")],
                     duration_seconds=0.01,
                 )
+
             return _runner
 
         original_orchestrate = None
@@ -658,14 +706,17 @@ class TestC2DefaultRunnerConstruction:
             captured["orchestrate_pids"] = worker_pids
             # Call original to keep side-effects (artifact writing etc.)
             from fno.review.orchestrator import orchestrate_review_parallel as real_fn
+
             return real_fn(diff_context, runner=runner, worker_pids=worker_pids, **kwargs)
 
         session_id = "sess-c2-identity"
         state_path = _make_state(tmp_path, session_id=session_id)
         artifacts_dir = tmp_path / "artifacts"
 
-        with patch("fno.worker.review.make_async_runner", side_effect=fake_make_async_runner), \
-             patch("fno.worker.review.orchestrate_review_parallel", side_effect=fake_orchestrate):
+        with (
+            patch("fno.worker.review.make_async_runner", side_effect=fake_make_async_runner),
+            patch("fno.worker.review.orchestrate_review_parallel", side_effect=fake_orchestrate),
+        ):
             review_mod.review(
                 diff_context="diff ...",
                 state_path=state_path,
@@ -691,9 +742,12 @@ class TestC2DefaultRunnerConstruction:
 
         def fake_make_async_runner(*, worker_pids, timeout=None, adapter=None):
             spy_calls.append(True)
+
             async def _runner(agent, prompt, diff):
                 from fno.review.orchestrator import WorkerOutcome
+
                 return WorkerOutcome(agent=agent, ok=True, duration_seconds=0.01)
+
             return _runner
 
         session_id = "sess-c2-explicit"
@@ -717,6 +771,7 @@ class TestC2DefaultRunnerConstruction:
 
 
 # ---- C3: make_async_runner call-site correctness (no TypeError) ----
+
 
 class TestC3MakeAsyncRunnerCallSite:
     """C3: review() must call make_async_runner with keyword-only args.
@@ -742,6 +797,7 @@ class TestC3MakeAsyncRunnerCallSite:
         # Fake orchestrate that returns immediately without spawning workers
         def fake_orchestrate(diff_context, *, runner, worker_pids=None, **kwargs):
             from fno.review.orchestrator import orchestrate_review_parallel as real_fn
+
             # Return a minimal result without actually calling anything
             return OrchestratorResult(
                 findings=[],
@@ -766,6 +822,4 @@ class TestC3MakeAsyncRunnerCallSite:
                 no_cache=True,
             )
 
-        assert result["action"] == "reviewed", (
-            f"Expected action=reviewed, got {result['action']!r}"
-        )
+        assert result["action"] == "reviewed", f"Expected action=reviewed, got {result['action']!r}"

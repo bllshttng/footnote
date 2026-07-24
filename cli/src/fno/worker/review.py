@@ -12,9 +12,12 @@ Exit codes used by the CLI wrapper:
   11 Review lock busy (another process is running the same session)
   130 SIGINT - workers were reaped
 """
+
 from __future__ import annotations
 
 import sys
+import subprocess
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -167,9 +170,7 @@ def _warn_unknown_agent_keys(agent_providers: dict[str, str]) -> None:
         )
 
 
-def resolve_session_id(
-    session_id: Optional[str], state_path: Path
-) -> Optional[str]:
+def resolve_session_id(session_id: Optional[str], state_path: Path) -> Optional[str]:
     """Resolve the session nonce: explicit arg, else the state file's value.
 
     The ONE place both the panel run (``review``) and the ``--print-providers``
@@ -181,6 +182,58 @@ def resolve_session_id(
     if session_id:
         return session_id
     return _read_state(state_path).get("session_id")
+
+
+def _publish_durable_sigma(
+    report_path: Path,
+    *,
+    state_path: Path,
+    session_id: str,
+    reviewed_head: str,
+) -> None:
+    """Publish direct ``fno review`` output through the shared sigma writer."""
+    state = _read_state(state_path)
+    node = state.get("graph_node_id")
+    pr_number = state.get("pr_number")
+    if not isinstance(node, str) or not isinstance(pr_number, int) or pr_number < 1:
+        return
+
+    from fno.config import load_settings
+    from fno.paths import vault_root
+    from fno.review.artifact import publish_sigma_artifact
+
+    settings = load_settings()
+    vault = vault_root()
+    project = settings.project.id
+    if vault is None or not project:
+        print(
+            "[review] durable sigma artifact skipped: configured vault/project unavailable",
+            file=sys.stderr,
+        )
+        return
+
+    current = subprocess.run(
+        ["gh", "pr", "view", str(pr_number), "--json", "headRefOid", "--jq", ".headRefOid"],
+        capture_output=True,
+        text=True,
+    )
+    current_head = current.stdout.strip() if current.returncode == 0 else reviewed_head
+    round_id = f"{reviewed_head[:12]}-{session_id[-8:]}-{uuid.uuid4().hex[:8]}"
+    result = publish_sigma_artifact(
+        report_path,
+        reviews_root=vault / "internal",
+        project=project,
+        node=node,
+        pr_number=pr_number,
+        reviewed_head=reviewed_head,
+        current_head=current_head,
+        round_id=round_id,
+    )
+    print(
+        f"[review] sigma artifact: {result.current_path} head={reviewed_head} "
+        f"published={str(result.published).lower()} reason={result.reason}",
+        file=sys.stderr,
+    )
 
 
 def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
@@ -402,6 +455,13 @@ def review(
         session_id,
         scored_result,
         artifacts_dir=artifacts_dir,
+    )
+    reviewed_head = git_sha_value if git_sha_value is not None else _cache.git_sha()
+    _publish_durable_sigma(
+        artifact_path_final,
+        state_path=state_path,
+        session_id=session_id,
+        reviewed_head=reviewed_head,
     )
 
     # H6 fix: worker layer does NOT write cache. The orchestrator owns cache

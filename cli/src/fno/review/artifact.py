@@ -1,0 +1,189 @@
+"""Durable, head-pinned sigma review artifacts."""
+
+from __future__ import annotations
+
+import fcntl
+import os
+import re
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9._-]+$")
+_FINDING_BADGE = re.compile(
+    r"(?:\*\*)?(?:P[123]|critical|high|medium|low)(?:\*\*)?",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class PublishResult:
+    current_path: Path
+    round_path: Path
+    published: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class InspectResult:
+    path: Path
+    status: str
+    reason: str
+    finding_count: int
+    body: str
+
+
+def _component(value: str, label: str) -> str:
+    if not value or not _SAFE_COMPONENT.fullmatch(value):
+        raise ValueError(f"invalid sigma artifact {label}: {value!r}")
+    return value
+
+
+def _render(
+    report: str,
+    *,
+    node: str,
+    pr_number: int,
+    reviewed_head: str,
+    round_id: str,
+) -> str:
+    metadata = {
+        "schema": "sigma-review/v1",
+        "node": node,
+        "pr_number": pr_number,
+        "head_sha": reviewed_head,
+        "review_round": round_id,
+        "generated_at": datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
+    }
+    return (
+        "---\n"
+        + yaml.safe_dump(metadata, default_flow_style=False, sort_keys=False)
+        + "---\n\n"
+        + report.lstrip()
+    )
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp = Path(raw_tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def publish_sigma_artifact(
+    report_path: Path,
+    *,
+    reviews_root: Path,
+    project: str,
+    node: str,
+    pr_number: int,
+    reviewed_head: str,
+    current_head: str,
+    round_id: str,
+) -> PublishResult:
+    """Retain a completed round and publish it only when its head is current."""
+    project = _component(project, "project")
+    node = _component(node, "node")
+    round_id = _component(round_id, "round")
+    reviewed_head = _component(reviewed_head, "head")
+    current_head = _component(current_head, "current head")
+    if pr_number < 1:
+        raise ValueError("sigma artifact PR number must be positive")
+
+    report = Path(report_path).read_text(encoding="utf-8")
+    rendered = _render(
+        report,
+        node=node,
+        pr_number=pr_number,
+        reviewed_head=reviewed_head,
+        round_id=round_id,
+    )
+    node_dir = Path(reviews_root) / project / "reviews" / node
+    round_path = node_dir / "rounds" / f"{round_id}.md"
+    current_path = node_dir / "sigma.md"
+    node_dir.mkdir(parents=True, exist_ok=True)
+
+    lock_path = node_dir / ".publish.lock"
+    with lock_path.open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        _atomic_write(round_path, rendered)
+        if reviewed_head != current_head:
+            return PublishResult(
+                current_path=current_path,
+                round_path=round_path,
+                published=False,
+                reason="reviewed head is no longer current",
+            )
+        _atomic_write(current_path, rendered)
+
+    return PublishResult(
+        current_path=current_path,
+        round_path=round_path,
+        published=True,
+        reason="published current reviewed head",
+    )
+
+
+def _split_artifact(text: str) -> tuple[dict[str, object], str]:
+    if not text.startswith("---\n"):
+        raise ValueError("missing sigma artifact frontmatter")
+    pieces = text.split("---", 2)
+    if len(pieces) != 3:
+        raise ValueError("unterminated sigma artifact frontmatter")
+    metadata = yaml.safe_load(pieces[1]) or {}
+    if not isinstance(metadata, dict):
+        raise ValueError("invalid sigma artifact frontmatter")
+    return metadata, pieces[2].lstrip()
+
+
+def inspect_sigma_artifact(
+    *,
+    reviews_root: Path,
+    project: str,
+    node: str,
+    pr_number: int,
+    head_sha: str,
+) -> InspectResult:
+    """Validate the deterministic artifact before the PR owner drains it."""
+    path = (
+        Path(reviews_root)
+        / _component(project, "project")
+        / "reviews"
+        / _component(node, "node")
+        / "sigma.md"
+    )
+    if not path.exists():
+        return InspectResult(path, "missing", "artifact does not exist", 0, "")
+    try:
+        metadata, body = _split_artifact(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        return InspectResult(path, "rejected", str(exc), 0, "")
+
+    expected = {
+        "schema": "sigma-review/v1",
+        "node": node,
+        "pr_number": pr_number,
+        "head_sha": head_sha,
+    }
+    mismatches = [
+        f"{key}={metadata.get(key)!r} (expected {value!r})"
+        for key, value in expected.items()
+        if metadata.get(key) != value
+    ]
+    if mismatches:
+        return InspectResult(path, "rejected", "; ".join(mismatches), 0, body)
+
+    count = sum(1 for line in body.splitlines() if _FINDING_BADGE.search(line))
+    return InspectResult(path, "accepted", "current artifact", count, body)

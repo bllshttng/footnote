@@ -10,11 +10,11 @@
 ---
 
 ### Agents Run
-| Agent | Status | Summary |
-|-------|--------|---------|
-| silent-failure-hunter | [ran] | [findings summary] |
-| code-reviewer | [ran] | [findings summary] |
-| [conditional agents...] | [ran] | [findings summary] |
+| Agent | Runtime | Effective model | Status | Summary |
+|-------|---------|-----------------|--------|---------|
+| silent-failure-hunter | [claude/codex/gemini] | [actual model or routed model] | [ran] | [findings summary] |
+| code-reviewer | [claude/codex/gemini] | [actual model or routed model] | [ran] | [findings summary] |
+| [conditional agents...] | [runtime] | [effective model] | [ran] | [findings summary] |
 
 ### Agents Skipped (not applicable)
 | Agent | Reason |

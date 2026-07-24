@@ -173,11 +173,14 @@ gh pr view --json state,isDraft --jq '{state: .state, isDraft: .isDraft}'
 ```
 - If PR is now closed/merged → skip posting, report locally only
 - If PR is now a draft → skip posting, report locally only
-- If Claude already commented → skip posting to avoid duplicates
+
+Do not use the existence of any prior Claude-authored comment as a dedup signal.
+After the report is durable, deduplicate only on the explicit marker for this reviewed head and round.
 
 ### Step 6: Generate Report (MANDATORY)
 
 Load [report-template.md](report-template.md) for the structured output format.
+Render the complete report once to a temporary file as well as to the user-facing response; this exact file is the input to the shared artifact writer in Step 6d.
 
 #### Goal Relevance (if config.toml has goals)
 
@@ -213,6 +216,31 @@ This is what lets a solo / claude-only harness (no GitHub App bot) express a rea
 - **Never emit on a blocking finding.** A failing or blocked panel emits nothing; absence holds the gate (fail closed).
 - **Head-pinned.** The helper stamps the current HEAD. If new commits land after this pass, re-run sigma — the old attestation no longer counts (loop-check discards a `head_sha` that is not the current HEAD).
 - **Advisory when not gating.** If no `reviewers` entry names `sigma`, the event is harmless telemetry; loop-check only reads it when the gate is configured.
+
+### Step 6d: Persist the report before deciding whether to comment
+
+Every completed panel writes the node-bound artifact, including draft, closed, merged, duplicate-comment, and comment-failure paths.
+Resolve the reviewed head before dispatch and retain it as `REVIEWED_HEAD`; resolve the current head again immediately before publication so a late review of an older head is retained under `rounds/` without displacing `sigma.md`.
+
+```bash
+NODE_ID=$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | xargs)
+PR_NUMBER=$(gh pr view --json number --jq .number)
+CURRENT_HEAD=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+ROUND_ID="${REVIEWED_HEAD:0:12}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+fno review --publish-sigma "$REPORT_FILE" \
+  --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" \
+  --sigma-head "$REVIEWED_HEAD" --sigma-current-head "$CURRENT_HEAD" \
+  --sigma-round "$ROUND_ID"
+```
+
+Treat a publication error as a failed review handoff and surface it; never claim the report is durable.
+The command prints the primary path, reviewed head, and whether compare-and-publish accepted it.
+
+### Step 6e: Project the durable report to the PR when eligible
+
+For an open, non-draft PR, search issue comments for `<!-- fno-sigma head=$REVIEWED_HEAD round=$ROUND_ID -->`.
+Post exactly one comment containing the report and that marker when it is absent; a retry with the same marker posts nothing, while a new head or explicit new round is not suppressed by an older local-user comment.
+The artifact remains authoritative if this comment call fails.
 
 ## What We DON'T Check
 
@@ -282,8 +310,8 @@ Post-review, verdicts inform the operator and the PR description. Deferred findi
 (items the panel flagged but chose not to block on) go into the PR body or the plan's
 COMPLETION.md so they surface to human reviewers rather than disappearing.
 
-There is no gate artifact to write and no `fno gate` call to make. The review happened;
-the six-agent panel output is the proof. The PR description carries the verdict forward.
+The durable node-bound sigma artifact is the primary carrier; the PR comment is its human-facing projection and the attestation is separate gate evidence.
+The PR-owning `/fno:pr check` session consumes the artifact and owns all implementation decisions.
 
 **When the approach is unsalvageable** - wrong architecture, a cascading design error,
 patch-on-patch accumulation where each fix spawns the next - the panel may emit the
@@ -381,4 +409,3 @@ This routing cross-models the *panel*. For a fast one-shot read of a whole diff
 from another model without running the six-agent panel, use
 `/review peer [PR#|branch] [codex|gemini]` instead - it is advisory and never
 satisfies a `required_bots` gate.
-

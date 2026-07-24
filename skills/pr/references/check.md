@@ -25,9 +25,10 @@ while IFS=$'\t' read -r rtype rbot; do
     REVIEWER_BOTS+=("$rbot")
 done < <("${SKILL_DIR}/scripts/list-reviewers.sh")
 
+EXTERNAL_REVIEW_ENABLED=1
 if [[ ${#REVIEWER_TYPES[@]} -eq 0 ]]; then
-    echo "External review disabled in settings."
-    exit 0
+    EXTERNAL_REVIEW_ENABLED=0
+    echo "External review disabled in settings; checking the sigma artifact source."
 fi
 ```
 
@@ -130,9 +131,25 @@ not actually post.
 gh pr view --json number,url --jq '{number: .number, url: .url}'
 ```
 
-### 2. Wait for Review (Cron-Based)
+Resolve the current head and live node, then inspect the sigma artifact as a second source before any zero-reviewer return or polling decision:
 
-Schedule two one-shot cron checks instead of a blocking poll loop. This frees
+```bash
+PR_NUMBER=$(gh pr view --json number --jq .number)
+PR_HEAD=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+NODE_ID=$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | xargs)
+SIGMA_JSON=$(fno review --inspect-sigma --sigma-node "$NODE_ID" \
+  --sigma-pr "$PR_NUMBER" --sigma-head "$PR_HEAD" --json)
+SIGMA_STATUS=$(printf '%s' "$SIGMA_JSON" | jq -r .status)
+```
+
+Print the artifact path, head, finding count, and acceptance or rejection reason.
+A missing artifact is simply an absent second source; a mismatched node, PR, head, or malformed artifact is rejected and must not drive changes.
+If there are no configured external reviewers and `SIGMA_STATUS` is not `accepted`, report both sources absent and return without scheduling external-review cron checks.
+
+### 2. Wait for Review (Cron-Based, external source only)
+
+Skip this step when `EXTERNAL_REVIEW_ENABLED=0` or when an accepted sigma artifact already provides work to drain.
+Otherwise schedule two one-shot cron checks instead of a blocking poll loop. This frees
 the session to do other work while waiting.
 
 **Step 2a: Quick check** - try immediately in case the review is already in.
@@ -213,6 +230,10 @@ done
 When only one reviewer is configured, this loop iterates once and behavior
 is identical to the single-reviewer path.
 
+Also read `.body` from accepted `SIGMA_JSON` and append its findings to the same in-memory collection as the bot comments.
+Assign stable ids as `sigma:<review_round>:<ordinal>` and deduplicate a PR-comment projection carrying the same sigma marker.
+Do not create a second implementation loop: artifact findings continue directly into Step 4 and the existing verify, decide, implement, push, and response sequence.
+
 ### 4. Parse Review Priority
 
 Each comment body contains a priority badge. Different reviewers use
@@ -238,6 +259,8 @@ different conventions; normalize them to one of `critical | high | medium | low`
 # Example Codex:  "![P1 Badge](https://img.shields.io/badge/P1-red?style=flat)"
 # Parse and normalize per reviewer.
 ```
+
+Apply this same badge parser to sigma artifact lines (`P1`/`P2`/`P3` and critical/high/medium/low); do not add an artifact-only severity parser.
 
 ### 4b. Verify Before Implementing (Critical Step)
 
@@ -345,6 +368,7 @@ gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments" \
   and silently claiming success would strand the session.
 - **Scope:** only BLOCKING findings gate the loop. Medium/low/P2/P3 findings
   do not require an in-thread reply (though one never hurts).
+- **Artifact findings:** when the artifact carries a real GitHub thread id, use the same in-thread reply path; when no thread exists, include the stable sigma finding id and disposition in the consolidated response rather than inventing a thread.
 - The reply must be in-thread (`in_reply_to`), not a new top-level comment:
   the gate reads `in_reply_to_id` chains on `/pulls/N/comments`.
 
