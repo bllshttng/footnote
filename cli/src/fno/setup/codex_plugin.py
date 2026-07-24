@@ -11,7 +11,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 
 import fno.paths as paths
 
@@ -138,7 +138,7 @@ def resolve_codex_home(explicit: Path | None = None) -> Path:
     return Path(configured).expanduser() if configured else Path.home() / ".codex"
 
 
-def _default_runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+def _default_runner(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             argv,
@@ -265,13 +265,13 @@ def plugin_payload_digest(plugin_root: Path) -> str:
     digest = hashlib.sha256()
     candidates = [path for path in candidates if path.is_file()]
     for path in sorted(candidates, key=lambda item: item.relative_to(plugin_root).as_posix()):
-        relative = path.relative_to(plugin_root).as_posix().encode()
+        relative_bytes = path.relative_to(plugin_root).as_posix().encode()
         try:
             payload = path.read_bytes()
         except OSError as exc:
             raise CodexPluginError("plugin-digest", str(exc)) from exc
-        digest.update(len(relative).to_bytes(8, "big"))
-        digest.update(relative)
+        digest.update(len(relative_bytes).to_bytes(8, "big"))
+        digest.update(relative_bytes)
         digest.update(len(payload).to_bytes(8, "big"))
         digest.update(payload)
     return digest.hexdigest()
@@ -403,6 +403,7 @@ def converge(
         raise CodexPluginError("channel", f"unsupported channel: {channel}")
     home = resolve_codex_home(codex_home)
     source = source_root or _canonical_source_root()
+    source_matches: Callable[[str, str], bool]
     if channel == "release":
         local_manifest = source / ".codex-plugin" / "plugin.json"
         release_check = source / "scripts" / "release" / "sync-version.sh"
@@ -425,8 +426,10 @@ def converge(
         marketplace_source = str(dev_marketplace.resolve())
         plugin_id = DEV_PLUGIN_ID
 
-        def source_matches(source_type: str, installed_source: str) -> bool:
+        def dev_source_matches(source_type: str, installed_source: str) -> bool:
             return _same_local_source(source_type, installed_source, dev_marketplace)
+
+        source_matches = dev_source_matches
 
     with _convergence_lock(home):
         state = _collect(runner)
@@ -458,7 +461,8 @@ def converge(
             source=marketplace_source,
         )
         if marketplace_ok and selected_ok and only_selected and not refresh:
-            return ConvergenceResult(channel, "no-op", plugin_id, selected.version)
+            selected_version = selected.version if selected is not None else version
+            return ConvergenceResult(channel, "no-op", plugin_id, selected_version)
 
         changed = False
         for plugin in sorted(
