@@ -1208,17 +1208,33 @@ def _name_lane_send(
 _ESCALATION_DEBOUNCE_S = 300
 
 
-def _escalate_question(sender: str, recipient: str, summary: str) -> str:
-    """Notify the human at send time that a question needs them (Locked Decision
-    7: a question NEVER autonomous-responds - only the human answers it).
+def _escalate_to_human(
+    sender: str,
+    recipient: str,
+    summary: str,
+    reason: str,
+    msg_id: str | None = None,
+) -> str:
+    """Notify the human at send time that mail needs them, and surface it in the
+    needs-me mux overlay.
 
-    Debounced per (sender, recipient) so a chatty peer cannot spam the queue.
-    The caller writes the durable question thread regardless, so the ambient
-    unread count stays truthful even when this nudge is debounced. Best-effort
-    throughout: a notifier or filesystem failure never breaks the send. Returns
-    ``"escalated"`` (the human was notified), ``"debounced"`` (a recent nudge for
-    this pair suppressed it), or ``"notifier-unavailable"`` (no OS notifier on
-    this host, so nothing displayed - the caller must not claim escalation).
+    ``reason`` is ``"question"`` (a --kind question send; Locked Decision 7: a
+    question NEVER autonomous-responds - only the human answers it) or
+    ``"attended-miss"`` (a send to an operator-attended session that fell to the
+    durable floor). Both reasons flow through this ONE helper so the overlay
+    event is emitted from a single place; a second emit site would leave one
+    reason un-surfaced (the silent-eat this exists to close).
+
+    Debounced per (sender, recipient) so a chatty peer cannot spam the queue, and
+    the debounce gates BOTH the notifier and the event (one event per
+    non-debounced escalation, zero on debounced). The caller writes the durable
+    thread regardless, so the ambient unread count stays truthful even when this
+    nudge is debounced. Best-effort throughout: a notifier, events-write, or
+    filesystem failure never breaks the send. Returns ``"escalated"`` (the human
+    was notified), ``"debounced"`` (a recent nudge for this pair suppressed it),
+    or ``"notifier-unavailable"`` (no OS notifier on this host, so nothing
+    displayed - the caller must not claim escalation; the overlay event still
+    fired).
     """
     import hashlib
 
@@ -1252,6 +1268,25 @@ def _escalate_question(sender: str, recipient: str, summary: str) -> str:
             pass
     except OSError:
         pass  # a missing marker just re-notifies; it never suppresses the durable write
+    # Debounce gate passed: this is a real escalation. Emit the overlay event
+    # BEFORE the notifier verdict - the overlay is an independent surface that
+    # must render even on a headless host where the notifier is unavailable (the
+    # whole point of surfacing in the mux). Best-effort: an events-write failure
+    # never breaks the notifier or the send.
+    try:
+        from fno.events import append_event, mail_escalation
+
+        append_event(
+            mail_escalation(
+                reason=reason,
+                sender=sender,
+                recipient=recipient,
+                summary=summary.split("\n", 1)[0][:120],
+                msg_id=msg_id,
+            )
+        )
+    except Exception:  # noqa: BLE001 - an overlay miss never breaks the send
+        pass
     # Only report escalation when the notification actually displayed:
     # send_notification returns (code, err) and a nonzero code means no OS
     # notifier (a headless host), so the human was NOT notified.
@@ -1259,8 +1294,9 @@ def _escalate_question(sender: str, recipient: str, summary: str) -> str:
         from fno.notify._impl import send_notification
 
         one_line = summary.split("\n", 1)[0][:120]
+        label = "missed you" if reason == "attended-miss" else "question"
         code, _err = send_notification(
-            f"fno mail: question from {sender}",
+            f"fno mail: {label} from {sender}",
             f"{one_line} - run `fno mail drain-self`",
         )
     except Exception:  # noqa: BLE001 - a notifier failure never breaks the send
@@ -1521,8 +1557,10 @@ def cmd_send(
         # A question never gets an autonomous responder (US9 wakes only heads-up);
         # it escalates to the human at send time instead, debounced per pair.
         if kind == Kind.QUESTION.value:
-            reason = _escalate_question(sender, recipient, content)
-            if reason == "escalated":
+            esc = _escalate_to_human(
+                sender, recipient, content, reason="question", msg_id=res.msg_id
+            )
+            if esc == "escalated":
                 print(f"escalated to human ({recipient})", file=sys.stderr)
         # A heads-up to a resumable-but-asleep claude session is woken at send
         # time to drain it: the per-project watch daemon drains project inboxes,
