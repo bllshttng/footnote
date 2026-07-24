@@ -4043,6 +4043,9 @@ def _mail_inject_claude(recipient: str, text: str) -> bool:
 # the wait; a miss falls through to the fork rung, which still delivers the mail.
 _RESPAWN_REINJECT_ATTEMPTS = 2
 _RESPAWN_REINJECT_DELAY_S = 1.0
+# F5: TTL for the rung-2 single-writer guard. Covers the respawn (30s timeout) +
+# inject probe window with margin; a crash auto-expires so the claim never strands.
+_RESPAWN_GUARD_TTL_MS = 120_000
 
 
 def _roster_entry_for_session(session_uuid: str) -> Optional["AgentEntry"]:
@@ -4098,6 +4101,43 @@ def _lineage_seed_prefix(root_uuid: str) -> str:
         f"[lineage: forked from {short_root} at {ts}; "
         f"you are the claim-holding incarnation of {short_root}]"
     )
+
+
+def _acquire_rung2_guard(session_uuid: str, short: str) -> Optional[str]:
+    """Take ``session:<uuid>`` for the rung-2 revive window (F5), or None.
+
+    Two concurrent wakes of one exited session would both respawn and inject the
+    same mail (double delivery, competing writers). The single-writer claim
+    serializes them: the loser's acquire fails and it falls through to the fork
+    rung, which claims/pins exactly as rung 3 does. Pinned to this pid with a TTL
+    so a crash auto-expires instead of stranding. Returns the holder to release,
+    or None when another incarnation holds the claim."""
+    from fno.agents.providers.claude import (
+        SessionWriterClaimError,
+        acquire_session_writer_claim,
+    )
+
+    holder = f"revive:{os.getpid()}"
+    try:
+        acquire_session_writer_claim(
+            session_uuid=session_uuid,
+            holder=holder,
+            claude_short_id=short,
+            pid=os.getpid(),
+            ttl_ms=_RESPAWN_GUARD_TTL_MS,
+        )
+        return holder
+    except SessionWriterClaimError:
+        return None
+
+
+def _release_rung2_guard(session_uuid: str, holder: Optional[str]) -> None:
+    """Release the rung-2 guard claim. Idempotent (silent no-op if not held)."""
+    if not holder:
+        return
+    from fno.agents.providers.claude import release_session_writer_claim
+
+    release_session_writer_claim(session_uuid=session_uuid, holder=holder)
 
 
 def wake_and_deliver(
@@ -4158,13 +4198,22 @@ def wake_and_deliver(
             or getattr(entry, "name", "")
             or session_uuid[:8]
         )
-        if _respawn_claude_session(short) == 0:
-            for _attempt in range(_RESPAWN_REINJECT_ATTEMPTS):
-                if _mail_inject_claude(session_uuid, wrapped):
-                    return True, short  # revived in place: no new uuid, no new row
-                time.sleep(_RESPAWN_REINJECT_DELAY_S)
-        # respawn failed or the revived session did not accept the inject within
-        # the probe budget -> fall through to the fork rung.
+        # F5: take session:<uuid> so two concurrent wakes of one exited session
+        # don't both respawn+inject (double delivery / competing writers). Another
+        # incarnation holding it -> skip rung 2 and let the fork rung claim/pin.
+        # Released on every exit from this block so rung 3 can claim on fall-through.
+        guard = _acquire_rung2_guard(session_uuid, short)
+        if guard is not None:
+            try:
+                if _respawn_claude_session(short) == 0:
+                    for _attempt in range(_RESPAWN_REINJECT_ATTEMPTS):
+                        if _mail_inject_claude(session_uuid, wrapped):
+                            return True, short  # revived in place: no new uuid, no new row
+                        time.sleep(_RESPAWN_REINJECT_DELAY_S)
+            finally:
+                _release_rung2_guard(session_uuid, guard)
+            # respawn failed or the revived session did not accept the inject within
+            # the probe budget -> fall through to the fork rung.
 
     try:
         result = dispatch_spawn(
