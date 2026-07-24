@@ -46,10 +46,9 @@ cat > "$BIN/fno" <<'MOCK'
 sub="$1 ${2:-}"
 case "$sub" in
   "agents spawn-guard")
-    # x-73cc: spawn.sh now calls this for the --node path instead of `claim
-    # status` + `claim acquire`. Synthesize the verdict from the same MOCK_* env
-    # (MOCK_CLAIM_RC / MOCK_CLAIM_STATE / MOCK_CLAIM_HOLDER / MOCK_ACQ_RC) so the
-    # existing Guard 1 + Guard 2 scenarios keep exercising spawn.sh's mapping.
+    # x-5c08: spawn.sh uses this read-only probe for early receipts. Synthesize
+    # claim state only; the real reservation belongs to `agents spawn --node`
+    # below, the shared worker-birth choke point.
     node="${3:-}"
     [[ "${MOCK_CLAIM_RC:-0}" -ne 0 ]] && { printf '{"verdict":"error","detail":"claim probe failed (mock rc=%s); not dispatching to avoid a double-launch"}\n' "${MOCK_CLAIM_RC}"; exit 3; }
     if [[ "${MOCK_CLAIM_STATE:-free}" == "_noparse_" ]]; then printf '{"verdict":"error","detail":"claim status returned no parseable state; not dispatching"}\n'; exit 3; fi
@@ -57,10 +56,8 @@ case "$sub" in
       live)      printf '{"verdict":"already-running","reason":"live-claim","holder":"%s"}\n' "${MOCK_CLAIM_HOLDER:-peer}"; exit 0 ;;
       corrupted) printf '{"verdict":"corrupted","detail":"node:%s claim is corrupted; force-release or repair before dispatching"}\n' "$node"; exit 0 ;;
     esac
-    # free / stale -> dispatchable candidate; Guard 2 reservation (MOCK_ACQ_RC=1 models a racing peer).
-    [[ "${MOCK_ACQ_RC:-0}" -eq 1 ]] && { printf '{"verdict":"already-running","reason":"reservation-held"}\n'; exit 0; }
-    [[ "${MOCK_ACQ_RC:-0}" -ne 0 ]] && { printf '{"verdict":"error","detail":"could not acquire dispatch reservation dispatch:%s (mock rc=%s)"}\n' "$node" "${MOCK_ACQ_RC}"; exit 3; }
-    printf '{"verdict":"dispatchable","reservation_key":"dispatch:%s","reservation_holder":"dispatch-skill:mock"}\n' "$node"; exit 0 ;;
+    # free / stale -> dispatchable candidate; --no-reserve never takes Guard 2.
+    printf '{"verdict":"dispatchable"}\n'; exit 0 ;;
   "claim status")
     [[ "${MOCK_CLAIM_RC:-0}" -ne 0 ]] && exit "${MOCK_CLAIM_RC}"
     if [[ "${MOCK_CLAIM_STATE:-free}" == "_noparse_" ]]; then echo '{}'; exit 0; fi
@@ -93,6 +90,17 @@ case "$sub" in
     # line; MOCK_SPAWN_OUT carries that JSON. Recorded to SPAWN_LOG so a test can
     # assert the verb/provider/--yolo/--cwd argv and that ask was NOT called.
     echo "$*" >> "$SPAWN_LOG"
+    if [[ "${MOCK_ACQ_RC:-0}" -eq 1 ]]; then
+      previous=""; node=""
+      for arg in "$@"; do
+        if [[ "$previous" == "--node" ]]; then node="$arg"; break; fi
+        previous="$arg"
+      done
+      if [[ -n "$node" ]]; then
+        printf 'node dispatch refused: node=%s verdict=already-running reason=reservation-held; no worker launched\n' "$node" >&2
+        exit 2
+      fi
+    fi
     [[ -n "${MOCK_SPAWN_ERR:-}" ]] && printf '%s' "$MOCK_SPAWN_ERR" >&2
     printf '%s' "${MOCK_SPAWN_OUT:-}"
     exit "${MOCK_SPAWN_RC:-0}"
@@ -282,8 +290,9 @@ fi
 reset_log
 OUT="$(MOCK_CLAIM_STATE=free MOCK_ACQ_RC=1 \
        run_spawn --name tgt-deadbeef --provider claude --message "/target ab-deadbeef" --node ab-deadbeef)"
-if [[ "$OUT" == *"result=already-running"* ]] && [[ "$OUT" == *"peer dispatcher"* ]] && [[ ! -s "$SPAWN_LOG" ]]; then
-  pass "Guard2 reservation held by peer -> already-running, no spawn"
+if [[ "$OUT" == *"result=already-running"* ]] && [[ "$OUT" == *"skipped: duplicate-claim"* ]] \
+   && [[ "$OUT" == *"peer dispatcher"* ]] && [[ -s "$SPAWN_LOG" ]]; then
+  pass "Guard2 reservation held at shared CLI choke -> already-running"
 else
   fail "Guard2 reservation race: $OUT"
 fi
