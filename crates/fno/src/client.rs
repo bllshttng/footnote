@@ -1717,6 +1717,7 @@ impl View {
                 let kind = match item.kind.as_str() {
                     "review_wedged" => NeedKind::ReviewWedged,
                     "budget_stop" => NeedKind::BudgetStop,
+                    "mail_question" => NeedKind::MailQuestion,
                     _ => continue,
                 };
                 match self.join_fold_row(item) {
@@ -6260,6 +6261,10 @@ enum NeedKind {
     // severity contract and the future fold arm have a home.
     #[allow(dead_code)]
     Decision,
+    // A human-addressed mail escalation (question, or a live-miss to an
+    // operator-attended recipient). Sits above the worker blocked-states: a
+    // human the mail is waiting on outranks a worker awaiting focus.
+    MailQuestion,
     BlockedAnswerable,
     BlockedFocusOnly,
     ReviewWedged,
@@ -6272,6 +6277,7 @@ enum NeedKind {
 fn need_glyph(k: NeedKind) -> char {
     match k {
         NeedKind::Decision => '⁉',
+        NeedKind::MailQuestion => '✉',
         NeedKind::BlockedAnswerable | NeedKind::BlockedFocusOnly => '▲',
         NeedKind::ReviewWedged => '⏳',
         NeedKind::BudgetStop => '⏹',
@@ -11182,6 +11188,33 @@ mod tests {
         assert!(!config_says_off("mux-panes\n")); // the default -> stays on
         assert!(!config_says_off("OFF")); // case-sensitive, like the Rust side
         assert!(!config_says_off("")); // unknown key / empty -> default on
+    }
+
+    #[test]
+    fn mail_question_fold_item_renders_squadless_not_dropped() {
+        // The client match arm must map mail_question -> a row, not `_ =>
+        // continue` -- the second silent-eat path this node closes (the fold
+        // produces the item; the client must not drop it). Always-live + no
+        // roster row -> squadless render with the mail glyph.
+        let mut view = two_pane_view();
+        view.needs_fold = Some(vec![crate::needs_overlay::FoldItem {
+            kind: "mail_question".into(),
+            session_id: "web".into(),
+            node: None,
+            name: Some("web".into()),
+            title: None,
+            ts: "2026-07-03T02:00:00Z".into(),
+            evidence: "question: etl -> web: which schema?".into(),
+            live: true,
+        }]);
+        let rows = view.needs_queue();
+        let mail = rows
+            .iter()
+            .find(|r| r.kind == NeedKind::MailQuestion)
+            .expect("mail_question maps to a row, not dropped by _ => continue");
+        assert_eq!(mail.name, "web");
+        assert!(mail.pane_id.is_none(), "squadless: no roster join");
+        assert_eq!(need_glyph(mail.kind), '✉');
     }
 
     #[test]

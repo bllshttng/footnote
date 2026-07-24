@@ -138,6 +138,12 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
     let mut sessions: HashMap<String, SessionAcc> = HashMap::new();
     // Monotonic fold position, breaking same-second ties in true stream order.
     let mut seq = 0usize;
+    // mail_escalation events carry no session_id (they are about mail between
+    // agents, not a target session), so they cannot enter the session-keyed
+    // accumulator and the session gate below would drop them. They get their own
+    // per-recipient accumulator (latest (epoch, seq) wins) and render
+    // squadless-live in the client.
+    let mut mail_escalations: HashMap<String, (u64, usize, NeedItem)> = HashMap::new();
 
     for line in events_raw.lines() {
         if line.trim().is_empty() {
@@ -150,10 +156,51 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
         if !in_window(ts, since) {
             continue;
         }
+        let kind = event_kind(&v);
+        // mail_escalation is folded before the session gate: it carries no
+        // session_id (it is mail between agents), so the gate below would drop
+        // it. One NeedItem (kind mail_question) per recipient, latest wins.
+        if kind == Some("mail_escalation") {
+            let Some(recipient) = str_field(&v, "recipient") else {
+                continue;
+            };
+            let reason = str_field(&v, "reason").unwrap_or("");
+            let sender = str_field(&v, "sender").unwrap_or("");
+            let summary = str_field(&v, "summary").unwrap_or("");
+            let epoch = to_epoch_lenient(ts).unwrap_or(0);
+            seq += 1;
+            // Same (epoch, seq) ordering as the session accumulator: a cross-source
+            // concat never lets an older line clobber a newer escalation.
+            if mail_escalations
+                .get(recipient)
+                .is_none_or(|(e, s, _)| (epoch, seq) >= (*e, *s))
+            {
+                mail_escalations.insert(
+                    recipient.to_string(),
+                    (
+                        epoch,
+                        seq,
+                        NeedItem {
+                            kind: "mail_question".to_string(),
+                            // No target session; the recipient handle is the row's
+                            // stable identity (id_key) and the roster join key.
+                            session_id: recipient.to_string(),
+                            node: None,
+                            name: Some(recipient.to_string()),
+                            title: None,
+                            ts: ts.to_string(),
+                            evidence: format!("{reason}: {sender} -> {recipient}: {summary}"),
+                            // Stamped always-live by stamp_liveness (no node claim).
+                            live: false,
+                        },
+                    ),
+                );
+            }
+            continue;
+        }
         let Some(sid) = str_field(&v, "session_id") else {
             continue; // an event with no session can't be joined to a row
         };
-        let kind = event_kind(&v);
         if !matches!(
             kind,
             Some("loop_check") | Some("termination") | Some("loop_terminated")
@@ -220,6 +267,9 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
                 live: false, // stamped by the IO layer; the fold stays pure
             });
         }
+    }
+    for (_, (_, _, item)) in mail_escalations {
+        items.push(item);
     }
     items.sort_by(|a, b| {
         a.ts.cmp(&b.ts)
@@ -424,6 +474,16 @@ fn default_sources(home: &AgentsHome) -> (Vec<PathBuf>, PathBuf) {
 /// is the IO half of the fold, kept out of the pure [`fold`] so it stays testable.
 fn stamp_liveness(mut items: Vec<NeedItem>) -> Vec<NeedItem> {
     for item in &mut items {
+        // A mail escalation is always-live by design: it carries no node claim
+        // (it is about mail between agents, not a target session), so the
+        // node-keyed stamp below would mark it dead and the client's
+        // squadless-render branch would drop it -- the silent eat this closes.
+        // The live bit here is an honest "surface this with no roster row"
+        // label, not a session-liveness claim.
+        if item.kind == "mail_question" {
+            item.live = true;
+            continue;
+        }
         item.live = item.node.as_deref().is_some_and(|n| {
             let (state, _) = crate::claims::status(&format!("node:{n}"), None);
             matches!(
@@ -576,6 +636,76 @@ mod tests {
     fn done_pr_green_termination_yields_nothing() {
         let events = termination("2026-07-03T02:00:00Z", "s", "DonePRGreen");
         assert!(fold(&events, "", ALL, DEFAULT_FIRES_FLOOR).is_empty());
+    }
+
+    fn mail_escalation(
+        ts: &str,
+        reason: &str,
+        sender: &str,
+        recipient: &str,
+        summary: &str,
+    ) -> String {
+        format!(
+            r#"{{"ts":"{ts}","type":"mail_escalation","source":"target","data":{{"reason":"{reason}","sender":"{sender}","recipient":"{recipient}","summary":"{summary}"}}}}"#
+        )
+    }
+
+    #[test]
+    fn mail_escalation_folds_to_mail_question_without_a_session() {
+        // The trap this node closes: a mail_escalation carries no session_id, so
+        // the session gate and the loop_check kind filter would both drop it. The
+        // fold arm handles it before the gate and emits a mail_question row keyed
+        // by recipient (the row identity, not a target session).
+        let events = mail_escalation(
+            "2026-07-03T02:00:00Z",
+            "question",
+            "etl",
+            "web",
+            "which schema?",
+        );
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "mail_question");
+        assert_eq!(items[0].name.as_deref(), Some("web"));
+        assert_eq!(items[0].session_id, "web");
+        assert!(items[0].evidence.contains("question"));
+        assert!(items[0].evidence.contains("etl -> web"));
+    }
+
+    #[test]
+    fn mail_escalation_is_stamped_always_live_with_no_node() {
+        // No node claim -> the node-keyed stamp would mark it dead and the
+        // client's squadless-render branch would drop it. stamp_liveness marks
+        // mail_question always-live so it renders with no roster row.
+        let events = mail_escalation(
+            "2026-07-03T02:00:00Z",
+            "attended-miss",
+            "ops",
+            "claude-9a06",
+            "need you",
+        );
+        let items = stamp_liveness(fold(&events, "", ALL, DEFAULT_FIRES_FLOOR));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].node, None);
+        assert!(
+            items[0].live,
+            "mail_question is always-live even with no node"
+        );
+    }
+
+    #[test]
+    fn mail_escalation_latest_per_recipient_wins() {
+        let events = format!(
+            "{}\n{}\n",
+            mail_escalation("2026-07-03T02:00:00Z", "question", "etl", "web", "old"),
+            mail_escalation("2026-07-03T03:00:00Z", "attended-miss", "ops", "web", "new"),
+        );
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(items.len(), 1, "one row per recipient");
+        assert!(
+            items[0].evidence.contains("new"),
+            "latest (epoch, seq) wins"
+        );
     }
 
     #[test]
