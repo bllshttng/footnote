@@ -286,6 +286,17 @@ def validate(event: dict[str, Any]) -> None:
                 f"(allowed: {allowed})"
             )
 
+    # Same chokepoint rationale: mail_escalation's reason drives the overlay
+    # evidence text and the question-vs-attended-miss split, so a typo'd reason
+    # must fail loud here, not land as a silent bucket.
+    if type_name == "mail_escalation":
+        allowed = type_spec["data"]["properties"]["reason"]["enum"]
+        if data.get("reason") not in allowed:
+            raise ValidationError(
+                f"unknown mail_escalation data.reason: {data.get('reason')!r} "
+                f"(allowed: {allowed})"
+            )
+
     # Same chokepoint rationale: gate_escape's reason drives the retro
     # autonomy-debt ranking (x-f894). A typo'd reason must fail CLOSED here so
     # it is loud, not a silent bucket - the design's #1 correctness invariant.
@@ -478,6 +489,44 @@ def integrity_warning(
             "artifact_path": artifact_path,
         },
     )
+
+
+MAIL_ESCALATION_REASONS = frozenset({"question", "attended-miss"})
+
+
+def mail_escalation(
+    *,
+    reason: str,
+    sender: str,
+    recipient: str,
+    summary: str,
+    msg_id: str | None = None,
+    source: str = "target",
+) -> dict[str, Any]:
+    """Build a ``mail_escalation`` event (mail that needs a human now).
+
+    Emitted from the shared escalation helper for two reasons: a ``question``
+    send (unconditional) or a live-miss to an operator-attended recipient. The
+    overlay renders it squadless-live, so the nudge survives even when the OS
+    notifier was missed or unavailable. The ``reason`` enum is enforced here at
+    build time (same chokepoint rationale as the other enum-bearing events); the
+    generic ``fno event emit`` CLI reaches ``validate()`` too, where the same
+    enum is checked so a shell typo cannot land.
+    """
+    if reason not in MAIL_ESCALATION_REASONS:
+        raise ValidationError(
+            f"unknown mail_escalation reason: {reason!r} "
+            f"(allowed: {sorted(MAIL_ESCALATION_REASONS)})"
+        )
+    data: dict[str, Any] = {
+        "reason": reason,
+        "sender": sender,
+        "recipient": recipient,
+        "summary": summary,
+    }
+    if msg_id is not None:
+        data["msg_id"] = msg_id
+    return _build("mail_escalation", source, data)
 
 
 def done_race_collision(
@@ -694,6 +743,8 @@ __all__ = [
     "child_promise",
     "done_race_collision",
     "integrity_warning",
+    "MAIL_ESCALATION_REASONS",
+    "mail_escalation",
     "mission_complete",
     "mission_started",
     "phase_0_decision",
