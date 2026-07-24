@@ -306,6 +306,21 @@ validate_event() {
         fi
     fi
 
+    # mail_escalation: reason enum check - mirrors the Python validator so a
+    # producer typo fails loud in both. reason drives the overlay evidence text
+    # and the question-vs-attended-miss split; a bad value must not land.
+    if [[ "$type" == "mail_escalation" ]]; then
+        local me_reason enum_match
+        me_reason=$(jq -r '.data.reason // empty' <<<"$payload" 2>/dev/null || true)
+        if [[ -n "$me_reason" ]]; then
+            enum_match=$(jq -r --arg r "$me_reason" '.event_types[] | select(.name == "mail_escalation") | .data.properties.reason.enum[]? | select(. == $r)' "$EVENTS_SCHEMA_CACHE" 2>/dev/null || true)
+            if [[ -z "$enum_match" ]]; then
+                _ev_warn "unknown reason: $me_reason"
+                return 1
+            fi
+        fi
+    fi
+
     # post_merge_dispatch_receipt: phase + route enum checks (x-a35a) - mirrors
     # the Python validator so a producer typo fails loud in both. phase drives
     # the reserved-before-accepted lifecycle forensics rely on; route is the

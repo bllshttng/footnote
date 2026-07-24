@@ -48,6 +48,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             cwd=args.cwd,
             name=args.name or None,
             log_path=args.log_path,
+            origin="operator",
         )
     except Exception as exc:  # fail-open: never block session start (AC7-ERR)
         events.emit(

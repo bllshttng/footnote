@@ -13,6 +13,7 @@ import json
 import pytest
 from typer.testing import CliRunner
 
+import fno.events
 from fno.cli import app
 from fno.paths_testing import use_tmpdir
 
@@ -42,6 +43,24 @@ def notified(monkeypatch):
 
     monkeypatch.setattr("fno.notify._impl.send_notification", fake)
     return calls
+
+
+@pytest.fixture
+def emitted_events(monkeypatch):
+    """Capture the mail_escalation events the escalation helper emits.
+
+    Replaces the project events.jsonl write with an in-memory capture so the
+    test asserts emission + schema-validity without depending on the
+    cwd-relative events.jsonl path. The builder still runs real (it validates
+    via _build), so a captured event is exactly what would have been appended.
+    """
+    events: list[dict] = []
+
+    def capture(event: dict) -> None:
+        events.append(event)
+
+    monkeypatch.setattr("fno.events.append_event", capture)
+    return events
 
 
 def _unread_count(runner, name: str) -> int:
@@ -90,6 +109,42 @@ def test_debounce_is_per_sender_recipient_pair(runner, mailbox, notified):
     )
     # Distinct senders are distinct pairs: both escalate.
     assert len(notified) == 2
+
+
+def test_question_send_emits_one_valid_overlay_event(runner, mailbox, emitted_events):
+    # The escalation surfaces in the needs-me overlay via a mail_escalation event
+    # (US1/US2): exactly one per non-debounced escalation, schema-valid.
+    res = runner.invoke(
+        app,
+        ["mail", "send", "--to-project", "web", "--kind", "question",
+         "--from-name", "etl", "--body", "which schema wins?"],
+    )
+    assert res.exit_code == 0, res.output
+    assert len(emitted_events) == 1, "exactly one mail_escalation event per escalation"
+    ev = emitted_events[0]
+    assert ev["type"] == "mail_escalation"
+    fno.events.validate(ev)  # raises if the envelope/shape is invalid
+    d = ev["data"]
+    assert d["reason"] == "question"
+    assert d["sender"] == "etl"
+    assert d["recipient"] == "web"
+    assert "which schema wins?" in d["summary"]
+    assert d["msg_id"].startswith("msg-"), "carries the mail id for correlation"
+
+
+def test_debounce_gates_the_event_exactly_like_the_notifier(
+    runner, mailbox, notified, emitted_events
+):
+    # A chatty pair escalates once: one notifier call AND one event (AC6-FR).
+    for _ in range(3):
+        res = runner.invoke(
+            app,
+            ["mail", "send", "--to-project", "web", "--kind", "question",
+             "--from-name", "etl", "--body", "spam?"],
+        )
+        assert res.exit_code == 0, res.output
+    assert len(notified) == 1
+    assert len(emitted_events) == 1, "debounce gates the event exactly as the notifier"
 
 
 def test_headsup_send_wakes_asleep_claude_addressee(runner, mailbox, monkeypatch):
@@ -153,3 +208,94 @@ def test_escalation_failure_never_breaks_the_send(runner, mailbox, monkeypatch):
     )
     assert res.exit_code == 0, res.output
     assert _unread_count(runner, "web") == 1
+
+
+# ---------------------------------------------------------------------------
+# Attended-recipient live-miss lane (US3): a send to an operator-attended
+# session that misses live delivery escalates; a worker or a live-confirmed
+# send does not. Drives _name_lane_send directly with a constructed resolved
+# session + mocked injectors, so the assertion is the escalation site itself.
+# ---------------------------------------------------------------------------
+
+
+def _resolved_claude(session_id: str):
+    """A minimal duck-typed resolved session for _name_lane_send."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        session_id=session_id, agent="claude", handle=session_id[:8]
+    )
+
+
+def _skip_mux(monkeypatch):
+    """Force the mux-pane rung to skip (resolve_agent raises) so a live-miss
+    falls straight to the durable floor."""
+    from fno.agents.registry import AgentResolutionError
+
+    def _raise(*_a, **_k):
+        raise AgentResolutionError("test: skip mux rung")
+
+    monkeypatch.setattr("fno.agents.registry.resolve_agent", _raise)
+
+
+def test_attended_live_miss_escalates(mailbox, monkeypatch, emitted_events):
+    from fno.agents.registry import register_existing_session
+    from fno.mail.cli import _name_lane_send
+
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    register_existing_session(
+        provider="claude", session_id=sid, cwd=str(mailbox), origin="operator"
+    )
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
+    _skip_mux(monkeypatch)
+
+    _name_lane_send("need your eyes on this", from_name="sender", resolved=_resolved_claude(sid))
+
+    assert len(emitted_events) == 1, "operator live-miss escalates once"
+    assert emitted_events[0]["data"]["reason"] == "attended-miss"
+    assert emitted_events[0]["data"]["recipient"] == "9a063cd3"
+
+
+def test_worker_recipient_live_miss_does_not_escalate(mailbox, monkeypatch, emitted_events):
+    from fno.agents.registry import register_existing_session
+    from fno.mail.cli import _name_lane_send
+
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    # A spawn/host worker row: no origin -> reads as not-attended.
+    register_existing_session(provider="claude", session_id=sid, cwd=str(mailbox))
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
+    _skip_mux(monkeypatch)
+
+    _name_lane_send("fyi", from_name="sender", resolved=_resolved_claude(sid))
+
+    assert emitted_events == [], "a worker recipient never fires the attended lane"
+
+
+def test_live_confirmed_send_does_not_escalate(mailbox, monkeypatch, emitted_events):
+    from fno.agents.registry import register_existing_session
+    from fno.mail.cli import _name_lane_send
+
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    register_existing_session(
+        provider="claude", session_id=sid, cwd=str(mailbox), origin="operator"
+    )
+    # Live inject succeeds -> delivered (hosted); the durable block (and the
+    # attended-miss site in it) never runs.
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: True)
+
+    _name_lane_send("already in your transcript", from_name="sender", resolved=_resolved_claude(sid))
+
+    assert emitted_events == [], "a live-confirmed inject is in front of the human already"
+
+
+def test_registry_read_failure_escalates_neither_nor_breaks(monkeypatch):
+    # An unreadable registry must read as not-attended (never raise), so the
+    # send still succeeds and escalates nothing (AC3-ERR).
+    from fno.mail.cli import _recipient_is_attended
+
+    def _boom(*_a, **_k):
+        raise OSError("registry unreadable")
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", _boom)
+    assert _recipient_is_attended("9a063cd3") is False
+
