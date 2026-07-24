@@ -29,7 +29,8 @@ An inconclusive family-1 read makes no new death or orphan verdict and fails liv
 
 Family 1 maps any terminal assistant `<promise>` to `done`, which is right for the `alive?` question and wrong as a completion verdict: a worker can promise and then die before shipping anything.
 So the recovery watchdog's `SKIP_TERMINAL` (`recovery.classify`) does not suppress on that verdict alone.
-It also reads the mission's external artifacts in the graph via `recovery.mission_complete`: for a `/target` mission, node `status: done` or a PR ref; for a `/think` design pass, a linked non-empty `plan_path`.
+It also reads the mission's external artifacts in the graph via `recovery.mission_complete`: for a `/target` mission, node `status: done` or a PR ref; for a *birth* `/think` design pass, a linked non-empty `plan_path`.
+Only a birth pass is certified that way, because a lifecycle or conversational pass runs on a node that already carries the link and a retro is dispatched only once the node is `done`, so those artifacts predate the worker and describe the node rather than the invocation; they read unverifiable until an ownership lease can date them.
 Only positive evidence of an *unfinished* mission relaxes the skip, and the candidate then falls through to the normal staleness gate, so a fresh promise mid-finalize is never nudged.
 Claim state is deliberately not the authority here: claims are PID-anchored, so a finished worker and an abandoned one both read `suspect`/`stale`, and design-pass workers hold no node claim at all.
 Which node a worker is on resolves from its manifest first, since the runtime wrote it and a worker name is only a convention; the exception is a `think-` named worker, which writes no manifest but runs with `--cwd` on the node's canonical root, where an unrelated `/target` session's manifest can sit.

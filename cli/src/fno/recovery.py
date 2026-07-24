@@ -467,6 +467,12 @@ def _node_is_done(node: str) -> bool:
     return False
 
 
+# spawn_think names a birth pass ``think-<node>-<slug>`` and every other pass
+# ``think-<node>-<reason>-<slug>`` over this closed vocabulary
+# (provenance/spawn_think.py). Only a birth pass is certified by ``plan_path``.
+_NON_BIRTH_THINK_REASONS = ("work-start", "retro", "conversational")
+
+
 def mission_complete(candidate: "Candidate") -> Optional[bool]:
     """Did this worker's MISSION finish, per the node's external artifacts?
 
@@ -507,10 +513,21 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
         entry = next((e for e in load_graph() if e.get("id") == node_id), None)
         if entry is None:
             return None
+        if kind == "think":
+            # Only a BIRTH pass is certified by the node's artifacts (spawn_think:
+            # a design pass ending without a linked plan_path FAILED). A lifecycle
+            # or conversational pass runs on a node that ALREADY carries the link,
+            # and a retro fires only once the node is `done` - so those artifacts
+            # predate the worker and prove nothing about THIS invocation. Claiming
+            # completion from them would re-open the very suppression this fixes,
+            # so they read unverifiable until an ownership lease can date them.
+            tail = (candidate.name or "")[len(f"think-{node_id}-"):]
+            if any(tail == r or tail.startswith(f"{r}-")
+                   for r in _NON_BIRTH_THINK_REASONS):
+                return None
         if entry.get("status") == "done":
             return True
         if kind == "think":
-            # spawn_think's contract: a design pass with no linked plan_path failed.
             return bool(str(entry.get("plan_path") or "").strip())
         # A PR existing is the completion floor - red CI and pending bots are
         # pr_watch's and /fno:pr check's beat, not the watchdog's (LD 4).

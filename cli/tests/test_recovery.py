@@ -1101,6 +1101,41 @@ class TestMissionComplete:
         assert recovery.mission_complete(
             self._cand(name="think-x-2222-bar")) is expected
 
+    # -- non-birth think passes (codex P2 on PR #581) ---------------------
+    @pytest.mark.parametrize("name", [
+        "think-x-2222-retro-bar",          # dispatched only AFTER status done
+        "think-x-2222-work-start-bar",     # starts on an already-linked node
+        "think-x-2222-conversational-bar",
+        "think-x-2222-retro",              # no slug tail
+    ])
+    @pytest.mark.parametrize("entry", [
+        {"id": "x-2222", "status": "done"},
+        {"id": "x-2222", "plan_path": "/plans/d.md"},
+    ])
+    def test_non_birth_think_cannot_inherit_the_nodes_artifacts(
+        self, monkeypatch, name, entry,
+    ):
+        # These artifacts predate the worker, so reading them as completion
+        # would re-open the exact suppression this change closes. Unverifiable.
+        self._patch_graph(monkeypatch, [entry])
+        assert recovery.mission_complete(self._cand(name=name)) is None
+
+    def test_non_birth_think_is_unverifiable_in_both_directions(self, monkeypatch):
+        # A retro produces a retro doc, not a plan link, so a MISSING plan_path
+        # is no more evidence of failure than a present one is of success.
+        # Nudging on it would be the fail-toward-nudge spam this design rejected.
+        self._patch_graph(monkeypatch, [{"id": "x-2222", "status": "ready"}])
+        assert recovery.mission_complete(
+            self._cand(name="think-x-2222-retro-bar")) is None
+
+    def test_birth_pass_whose_slug_shadows_a_reason_fails_closed(self, monkeypatch):
+        # `think-x-2222-retrospective-ui` is a BIRTH pass whose slug merely starts
+        # with a reason word. Reading it as lifecycle costs a suppression we would
+        # have had anyway; the other direction would be a false completion.
+        self._patch_graph(monkeypatch, [{"id": "x-2222", "plan_path": "/p.md"}])
+        assert recovery.mission_complete(
+            self._cand(name="think-x-2222-retro-spective-ui")) is None
+
     # -- failure paths (AC3) ----------------------------------------------
     def test_absent_node_is_unverifiable_not_incomplete(self, monkeypatch):
         self._patch_graph(monkeypatch, [{"id": "x-other", "status": "ready"}])
