@@ -47,6 +47,15 @@ cd "$REPO_ROOT"
 # satisfies. `PATH=""` degrade tests override this locally, so they still pass.
 PATH="$REPO_ROOT/cli/.venv/bin:$PATH"; export PATH
 
+# This output is read by a CI log or an agent transcript, never by a terminal
+# that renders SGR codes. An agent harness that exports FORCE_COLOR turns
+# pytest's progress dots into ~11 bytes of escape sequence each: a measured
+# 106,921-byte run collapses to 16,189 with color off, same information. Both
+# vars are set because tools disagree on which they honour, and NO_COLOR is
+# checked before FORCE_COLOR by the ones that read both.
+export NO_COLOR=1
+unset FORCE_COLOR
+
 # Failed-step record lives in whatever checkout runs the script. For preflight
 # that is the preflight worktree, never the invoking worktree.
 # SMOKE_FAILURE_RECORD overrides the location (test seam).

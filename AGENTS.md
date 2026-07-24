@@ -42,14 +42,6 @@ Footnote's receipt lines, manifest snapshots, process argv, and liveness probes 
 - graduates-to: the receipt-truth contract (init auto-first-fills `plan_path`, prints the live claim holder, verifies the base) and transcript-keyed session liveness.
 - added: 2026-07-23
 
-### `fno test` can report a false green
-
-The rtk tee wrapper and a wrong-import worktree can both mask a real failure as a pass, and bare `pytest` in a worktree imports the wrong `fno`. When a test's exit code is load-bearing, redirect output to a file and read `$?` directly; never trust piped output (`cmd | tail` overwrites the real exit code).
-
-- specimens: this repo runs two test trees and the root `tests/*.sh` are invisible to `pytest`; the pitfalls lint's own test in this change redirects to a file and asserts the exit code for exactly this reason.
-- graduates-to: a preflight/CI guard that fails on any exit code read through a tee or pipe.
-- added: 2026-07-23
-
 ### Judgment delegated to a subprocess on a truncated context produces junk
 
 A subprocess seeing only a tail of structured signals makes wrong calls with full confidence; the deprecated distill path saw a 50-line tail and produced junk, which is why it was removed for cause. Keep all judgment (candidate selection, promotion, review) on full-context main threads; delegate only mechanical work to subprocesses.

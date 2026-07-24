@@ -7,7 +7,9 @@
 
 set -euo pipefail
 
-CEILING_BYTES=38000
+# Lowered from 38000 by the 674 bytes the stale `fno test` corpus entry freed:
+# a graduated entry banks its saving as a lower ceiling, never as quiet slack.
+CEILING_BYTES=37326
 RATCHET_NUDGE_BYTES=2000
 QUIET=0
 REPO_ROOT="."

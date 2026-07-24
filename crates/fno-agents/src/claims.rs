@@ -2140,7 +2140,13 @@ mod tests {
                     append_event_line(
                         &events,
                         &json!({"ts": "t", "type": "x", "i": i}),
-                        Duration::from_secs(10),
+                        // Generous on purpose: the assertion is that all four
+                        // lines land whole with one rename winner, never that
+                        // they land fast. A tight budget makes a correctness
+                        // test fail on a loaded machine - this flaked at 10s
+                        // under a full preflight and passed alone. A real
+                        // deadlock still fails here, just later.
+                        Duration::from_secs(120),
                     )
                 })
             })
