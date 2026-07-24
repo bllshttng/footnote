@@ -4165,7 +4165,7 @@ def wake_if_asleep_claude(token: str) -> tuple[bool, Optional[str]]:
 
 def _mail_inject_codex(thread_id: str, text: str) -> bool:
     """Inject ``text`` into a live codex session over the app-server daemon socket
-    via the ``fno-agents mail-inject --provider codex`` verb (US8, node x-d899).
+    via the ``fno-agents mail-inject --harness codex`` verb (US8, node x-d899).
 
     ``thread_id`` is the codex threadId (full UUID). Returns True only when the
     daemon accepts the turn; any miss (binary absent, no daemon socket, thread
@@ -4181,7 +4181,7 @@ def _mail_inject_codex(thread_id: str, text: str) -> bool:
         return False
     try:
         proc = subprocess.run(
-            [str(binary), "mail-inject", "--provider", "codex", "--session", thread_id],
+            [str(binary), "mail-inject", "--harness", "codex", "--session", thread_id],
             input=text,
             capture_output=True,
             text=True,

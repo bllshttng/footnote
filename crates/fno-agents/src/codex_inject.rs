@@ -1,4 +1,4 @@
-//! `mail-inject --provider codex`: LIVE delivery into a running codex session
+//! `mail-inject --harness codex`: LIVE delivery into a running codex session
 //! over the codex app-server daemon socket (US8, node x-d899). The codex sibling
 //! of [`crate::mail_inject`]'s claude `control.sock` path. Python's send path
 //! (`_mail_inject_codex`) runs this as a subprocess and falls back to the durable
