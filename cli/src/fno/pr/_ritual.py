@@ -548,20 +548,22 @@ class Ritual:
     def _spawn_judgment(self, deferred: int, files: int, lines: int) -> bool:
         """ONE headless one-shot carrying only the two judgment steps.
 
-        ``agents spawn`` takes ``[name] [message]`` as positionals, so the
-        prompt is the MESSAGE (second positional) and a short valid name comes
-        first - passing the long prompt as the sole positional made it the
-        agent NAME, which spawn validation rejects (>64 chars, contains '/'),
-        silently breaking every autonomous judgment leg (codex P1). The headless
-        worker reads a diff and updates the backlog, which routinely exceeds a
-        minute, so it gets spawn's own ``--timeout`` and the outer bound matches
-        it rather than killing the worker early (codex P2).
+        ``agents spawn`` takes ONE positional - the MESSAGE - and the agent name
+        rides ``--name``; a second positional is refused ("takes one positional;
+        the agent name moved to --name"). So the prompt is the sole positional
+        and ``judgment-pr-<n>`` is passed via ``--name``. (Before the axis
+        redesign the grammar was ``[name] [message]`` and the two were swapped
+        positionals; a stale two-positional call fails closed here, which is
+        exactly how the redesign's refusal caught this leg.) The headless worker
+        reads a diff and updates the backlog, which routinely exceeds a minute,
+        so it gets spawn's own ``--timeout`` and the outer bound matches it
+        rather than killing the worker early.
         """
         prompt = self._judgment_prompt(deferred, files, lines)
         argv = [*fno_py_cmd(), "agents", "spawn", "--substrate", "headless",
                 "--timeout", str(int(_JUDGMENT_TIMEOUT_S)),
                 "-c", str(self.canon),
-                f"judgment-pr-{self.ctx.pr}", prompt]
+                "--name", f"judgment-pr-{self.ctx.pr}", prompt]
         try:
             r = self.runner(argv, timeout=_JUDGMENT_TIMEOUT_S + 60.0)
         except (ToolMissing, subprocess.SubprocessError):
