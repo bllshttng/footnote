@@ -1,14 +1,14 @@
 {
-  "name": "footnote",
+  "name": "footnote-dev",
   "interface": {
-    "displayName": "Footnote Release"
+    "displayName": "Footnote Development"
   },
   "plugins": [
     {
       "name": "fno",
       "source": {
         "source": "local",
-        "path": "."
+        "path": "../../.."
       },
       "policy": {
         "installation": "AVAILABLE",

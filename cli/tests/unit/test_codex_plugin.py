@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -8,6 +9,8 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.setup.codex_plugin import (
+    DEV_MARKETPLACE,
+    DEV_PLUGIN_ID,
     RELEASE_PLUGIN_ID,
     CodexPluginError,
     ConvergenceResult,
@@ -42,7 +45,27 @@ def _source(tmp_path: Path) -> Path:
     script = root / "scripts" / "release" / "sync-version.sh"
     script.parent.mkdir(parents=True)
     script.write_text("#!/bin/sh\n", encoding="utf-8")
+    marketplace = root / ".agents" / "marketplaces" / DEV_MARKETPLACE
+    (marketplace / ".agents" / "plugins").mkdir(parents=True)
+    (marketplace / ".agents" / "plugins" / "marketplace.json").write_text(
+        json.dumps(
+            {
+                "name": DEV_MARKETPLACE,
+                "plugins": [
+                    {
+                        "name": "fno",
+                        "source": {"source": "local", "path": "../../.."},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     return root
+
+
+def _dev_marketplace(source: Path) -> Path:
+    return source / ".agents" / "marketplaces" / DEV_MARKETPLACE
 
 
 def test_parse_current_codex_json_state() -> None:
@@ -198,6 +221,216 @@ def test_release_convergence_is_source_aware_noop(tmp_path: Path) -> None:
         ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
     ]
+
+
+def test_dev_convergence_switches_from_release_and_writes_requested_marker(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path)
+    dev_marketplace = _dev_marketplace(source)
+    codex_home = tmp_path / "codex-home"
+    marketplaces: list[dict[str, object]] = []
+    plugins = [
+        _plugin(
+            RELEASE_PLUGIN_ID,
+            source="https://github.com/bllshttng/footnote.git",
+            source_type="git",
+        )
+    ]
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv == ["codex", "plugin", "marketplace", "list", "--json"]:
+            return _cp(argv, {"marketplaces": marketplaces})
+        if argv == ["codex", "plugin", "list", "--json"]:
+            return _cp(argv, {"installed": plugins, "available": []})
+        if argv == ["codex", "plugin", "remove", RELEASE_PLUGIN_ID, "--json"]:
+            marker = json.loads(
+                (codex_home / "footnote" / "plugin-channel.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            assert marker == {
+                "channel": "dev",
+                "marketplace": DEV_MARKETPLACE,
+                "source": str(dev_marketplace),
+            }
+            plugins.clear()
+            return _cp(argv, {"removed": True})
+        if argv == [
+            "codex",
+            "plugin",
+            "marketplace",
+            "add",
+            str(dev_marketplace),
+            "--json",
+        ]:
+            marketplaces.append(
+                {
+                    "name": DEV_MARKETPLACE,
+                    "marketplaceSource": {
+                        "sourceType": "local",
+                        "source": str(dev_marketplace),
+                    },
+                }
+            )
+            return _cp(argv, {"name": DEV_MARKETPLACE})
+        if argv == ["codex", "plugin", "add", DEV_PLUGIN_ID, "--json"]:
+            plugins.append(
+                _plugin(
+                    DEV_PLUGIN_ID,
+                    source=str(dev_marketplace),
+                    source_type="local",
+                )
+            )
+            return _cp(argv, {"pluginId": DEV_PLUGIN_ID})
+        return _cp(argv, {}, rc=1, err=f"unexpected {argv}")
+
+    result = converge(
+        channel="dev",
+        runner=runner,
+        codex_home=codex_home,
+        source_root=source,
+    )
+
+    assert (result.channel, result.action, result.plugin_id, result.version) == (
+        "dev",
+        "installed",
+        DEV_PLUGIN_ID,
+        "0.3.0",
+    )
+    assert calls == [
+        ["codex", "plugin", "marketplace", "list", "--json"],
+        ["codex", "plugin", "list", "--json"],
+        ["codex", "plugin", "remove", RELEASE_PLUGIN_ID, "--json"],
+        ["codex", "plugin", "marketplace", "add", str(dev_marketplace), "--json"],
+        ["codex", "plugin", "add", DEV_PLUGIN_ID, "--json"],
+        ["codex", "plugin", "list", "--json"],
+    ]
+
+
+def test_dev_refresh_replaces_same_version_cache_without_release_sync(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    dev_marketplace = _dev_marketplace(source)
+    codex_home = tmp_path / "codex-home"
+    source_payload = source / "skills" / "target" / "SKILL.md"
+    source_payload.parent.mkdir(parents=True)
+    source_payload.write_text("canonical dev payload\n", encoding="utf-8")
+    cache = codex_home / "plugins" / "cache" / DEV_MARKETPLACE / "fno" / "0.3.0"
+    cached_payload = cache / "skills" / "target" / "SKILL.md"
+    cached_payload.parent.mkdir(parents=True)
+    cached_payload.write_text("stale payload\n", encoding="utf-8")
+    manifest_before = (source / ".codex-plugin" / "plugin.json").read_bytes()
+    marketplace_row = {
+        "name": DEV_MARKETPLACE,
+        "marketplaceSource": {
+            "sourceType": "local",
+            "source": str(dev_marketplace),
+        },
+    }
+    plugins = [
+        _plugin(DEV_PLUGIN_ID, source=str(dev_marketplace), source_type="local")
+    ]
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv == ["codex", "plugin", "marketplace", "list", "--json"]:
+            return _cp(argv, {"marketplaces": [marketplace_row]})
+        if argv == ["codex", "plugin", "list", "--json"]:
+            return _cp(argv, {"installed": plugins, "available": []})
+        if argv == ["codex", "plugin", "remove", DEV_PLUGIN_ID, "--json"]:
+            plugins.clear()
+            shutil.rmtree(cache)
+            return _cp(argv, {"removed": True})
+        if argv == ["codex", "plugin", "add", DEV_PLUGIN_ID, "--json"]:
+            cached_payload.parent.mkdir(parents=True)
+            cached_payload.write_bytes(source_payload.read_bytes())
+            plugins.append(
+                _plugin(DEV_PLUGIN_ID, source=str(dev_marketplace), source_type="local")
+            )
+            return _cp(argv, {"pluginId": DEV_PLUGIN_ID})
+        return _cp(argv, {}, rc=1, err=f"unexpected {argv}")
+
+    result = converge(
+        channel="dev",
+        refresh=True,
+        runner=runner,
+        codex_home=codex_home,
+        source_root=source,
+    )
+
+    assert result.action == "refreshed"
+    assert cached_payload.read_bytes() == source_payload.read_bytes()
+    assert (source / ".codex-plugin" / "plugin.json").read_bytes() == manifest_before
+    assert calls == [
+        ["codex", "plugin", "marketplace", "list", "--json"],
+        ["codex", "plugin", "list", "--json"],
+        ["codex", "plugin", "remove", DEV_PLUGIN_ID, "--json"],
+        ["codex", "plugin", "add", DEV_PLUGIN_ID, "--json"],
+        ["codex", "plugin", "list", "--json"],
+    ]
+
+
+def test_dev_convergence_is_source_aware_noop_and_records_authority(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path)
+    dev_marketplace = _dev_marketplace(source)
+    codex_home = tmp_path / "codex-home"
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv == ["codex", "plugin", "marketplace", "list", "--json"]:
+            return _cp(
+                argv,
+                {
+                    "marketplaces": [
+                        {
+                            "name": DEV_MARKETPLACE,
+                            "marketplaceSource": {
+                                "sourceType": "local",
+                                "source": str(dev_marketplace),
+                            },
+                        }
+                    ]
+                },
+            )
+        return _cp(
+            argv,
+            {
+                "installed": [
+                    _plugin(
+                        DEV_PLUGIN_ID,
+                        source=str(dev_marketplace),
+                        source_type="local",
+                    )
+                ],
+                "available": [],
+            },
+        )
+
+    result = converge(
+        channel="dev",
+        runner=runner,
+        codex_home=codex_home,
+        source_root=source,
+    )
+
+    assert result.action == "no-op"
+    assert calls == [
+        ["codex", "plugin", "marketplace", "list", "--json"],
+        ["codex", "plugin", "list", "--json"],
+    ]
+    assert json.loads(
+        (codex_home / "footnote" / "plugin-channel.json").read_text(encoding="utf-8")
+    ) == {
+        "channel": "dev",
+        "marketplace": DEV_MARKETPLACE,
+        "source": str(dev_marketplace),
+    }
 
 
 def test_external_failure_is_named_and_bounded(tmp_path: Path) -> None:

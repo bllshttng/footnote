@@ -177,15 +177,26 @@ def _same_release_source(source_type: str, source: str) -> bool:
     return normalized == RELEASE_SOURCE
 
 
-def _write_marker(home: Path) -> Path:
+def _same_local_source(source_type: str, source: str, expected: Path) -> bool:
+    if source_type != "local":
+        return False
+    try:
+        return Path(source).expanduser().resolve() == expected.resolve()
+    except OSError:
+        return False
+
+
+def _write_marker(
+    home: Path, *, channel: str, marketplace: str, source: str
+) -> Path:
     owned = home / "footnote"
     owned.mkdir(parents=True, exist_ok=True)
     marker = owned / "plugin-channel.json"
     temp = owned / f".{marker.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     payload = {
-        "channel": "release",
-        "marketplace": RELEASE_MARKETPLACE,
-        "source": RELEASE_SOURCE,
+        "channel": channel,
+        "marketplace": marketplace,
+        "source": source,
     }
     try:
         temp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
@@ -215,16 +226,16 @@ def _canonical_source_root() -> Path:
     return paths.resolve_plugin_script_durable(".codex-plugin/plugin.json").parents[1]
 
 
-def _release_version(source_root: Path) -> str:
+def _manifest_version(source_root: Path) -> str:
     try:
         payload = json.loads(
             (source_root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
         )
         version = payload["version"]
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise CodexPluginError("release-manifest", str(exc)) from exc
+        raise CodexPluginError("plugin-manifest", str(exc)) from exc
     if not isinstance(version, str) or not version:
-        raise CodexPluginError("release-manifest", "missing version")
+        raise CodexPluginError("plugin-manifest", "missing version")
     return version
 
 
@@ -238,49 +249,68 @@ def converge(
 ) -> ConvergenceResult:
     if channel not in {"release", "dev"}:
         raise CodexPluginError("channel", f"unsupported channel: {channel}")
-    if channel != "release":
-        raise CodexPluginError("channel", "dev convergence is not available yet")
     home = resolve_codex_home(codex_home)
     source = source_root or _canonical_source_root()
-    version = _release_version(source)
+    version = _manifest_version(source)
+    if channel == "release":
+        marketplace_name = RELEASE_MARKETPLACE
+        marketplace_source = RELEASE_SOURCE
+        plugin_id = RELEASE_PLUGIN_ID
+        source_matches = _same_release_source
+    else:
+        marketplace_name = DEV_MARKETPLACE
+        dev_marketplace = source / ".agents" / "marketplaces" / DEV_MARKETPLACE
+        manifest = dev_marketplace / ".agents" / "plugins" / "marketplace.json"
+        if not manifest.is_file():
+            raise CodexPluginError("dev-marketplace", f"missing {manifest}")
+        marketplace_source = str(dev_marketplace.resolve())
+        plugin_id = DEV_PLUGIN_ID
+
+        def source_matches(source_type: str, installed_source: str) -> bool:
+            return _same_local_source(source_type, installed_source, dev_marketplace)
 
     with _convergence_lock(home):
         state = _collect(runner)
-        selected = next((p for p in state.plugins if p.plugin_id == RELEASE_PLUGIN_ID), None)
+        selected = next((p for p in state.plugins if p.plugin_id == plugin_id), None)
         footnote_plugins = [
             plugin
             for plugin in state.plugins
             if plugin.installed and plugin.plugin_id.startswith("fno@")
         ]
         marketplace = next(
-            (item for item in state.marketplaces if item.name == RELEASE_MARKETPLACE), None
+            (item for item in state.marketplaces if item.name == marketplace_name), None
         )
-        marketplace_ok = marketplace is not None and _same_release_source(
+        marketplace_ok = marketplace is not None and source_matches(
             marketplace.source_type, marketplace.source
         )
         selected_ok = (
             selected is not None
             and selected.installed
             and selected.enabled
-            and _same_release_source(selected.source_type, selected.marketplace_source)
+            and source_matches(selected.source_type, selected.marketplace_source)
         )
         only_selected = (
             len(footnote_plugins) == 1
-            and footnote_plugins[0].plugin_id == RELEASE_PLUGIN_ID
+            and footnote_plugins[0].plugin_id == plugin_id
+        )
+        _write_marker(
+            home,
+            channel=channel,
+            marketplace=marketplace_name,
+            source=marketplace_source,
         )
         if marketplace_ok and selected_ok and only_selected and not refresh:
-            return ConvergenceResult("release", "no-op", RELEASE_PLUGIN_ID, selected.version)
+            return ConvergenceResult(channel, "no-op", plugin_id, selected.version)
 
-        _write_marker(home)
         changed = False
         for plugin in sorted(
             footnote_plugins,
-            key=lambda item: item.plugin_id == RELEASE_PLUGIN_ID,
+            key=lambda item: item.plugin_id == plugin_id,
         ):
-            remove_selected = plugin.plugin_id == RELEASE_PLUGIN_ID and (
+            remove_selected = plugin.plugin_id == plugin_id and (
                 refresh or not selected_ok or not marketplace_ok
             )
-            if plugin.plugin_id != RELEASE_PLUGIN_ID or remove_selected:
+            if plugin.plugin_id != plugin_id or remove_selected:
                 _run(
                     runner,
                     "plugin-remove",
@@ -290,33 +320,35 @@ def converge(
 
         needs_install = selected is None or refresh or not selected_ok or not marketplace_ok
         if needs_install:
-            _run(
-                runner,
-                "release-version-check",
-                [str(source / "scripts" / "release" / "sync-version.sh"), "--check"],
-                cwd=source,
-            )
+            if channel == "release":
+                _run(
+                    runner,
+                    "release-version-check",
+                    [str(source / "scripts" / "release" / "sync-version.sh"), "--check"],
+                    cwd=source,
+                )
             if marketplace is not None and not marketplace_ok:
                 _run(
                     runner,
                     "marketplace-remove",
-                    ["codex", "plugin", "marketplace", "remove", RELEASE_MARKETPLACE, "--json"],
+                    ["codex", "plugin", "marketplace", "remove", marketplace_name, "--json"],
                 )
             if not marketplace_ok:
                 _run(
                     runner,
                     "marketplace-add",
-                    ["codex", "plugin", "marketplace", "add", RELEASE_SOURCE, "--json"],
+                    ["codex", "plugin", "marketplace", "add", marketplace_source, "--json"],
+                )
+            if channel == "release":
+                _run(
+                    runner,
+                    "marketplace-upgrade",
+                    ["codex", "plugin", "marketplace", "upgrade", marketplace_name, "--json"],
                 )
             _run(
                 runner,
-                "marketplace-upgrade",
-                ["codex", "plugin", "marketplace", "upgrade", RELEASE_MARKETPLACE, "--json"],
-            )
-            _run(
-                runner,
                 "plugin-add",
-                ["codex", "plugin", "add", RELEASE_PLUGIN_ID, "--json"],
+                ["codex", "plugin", "add", plugin_id, "--json"],
             )
             changed = True
 
@@ -329,14 +361,14 @@ def converge(
         ]
         if (
             len(enabled) != 1
-            or enabled[0].plugin_id != RELEASE_PLUGIN_ID
-            or not _same_release_source(enabled[0].source_type, enabled[0].marketplace_source)
+            or enabled[0].plugin_id != plugin_id
+            or not source_matches(enabled[0].source_type, enabled[0].marketplace_source)
         ):
             found = ", ".join(plugin.plugin_id for plugin in enabled) or "none"
-            raise CodexPluginError("final-verify", f"expected {RELEASE_PLUGIN_ID}; enabled={found}")
+            raise CodexPluginError("final-verify", f"expected {plugin_id}; enabled={found}")
         action = "refreshed" if refresh else ("installed" if selected is None else "repaired")
         if changed and selected is not None and not refresh:
             action = "repaired"
         return ConvergenceResult(
-            "release", action, enabled[0].plugin_id, enabled[0].version or version
+            channel, action, enabled[0].plugin_id, enabled[0].version or version
         )
