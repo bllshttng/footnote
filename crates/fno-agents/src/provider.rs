@@ -405,6 +405,7 @@ impl ProviderWithPty for ClaudeInteractiveProvider {
 pub struct CodexProvider;
 
 pub fn normalize_codex_command(message: &str) -> String {
+    let message = message.trim();
     if let Some(verb) = message.strip_prefix("/fno:") {
         format!("$fno:{verb}")
     } else if let Some(verb) = message.strip_prefix('/') {
@@ -1341,7 +1342,7 @@ mod tests {
     #[test]
     fn codex_create_and_resume_normalize_direct_slash_commands() {
         let mut create = create_ctx();
-        create.message = "/fno:target x-81ad".into();
+        create.message = "  /fno:target x-81ad  ".into();
         assert_eq!(
             CodexProvider
                 .create_argv(&create)
@@ -1352,7 +1353,7 @@ mod tests {
 
         let resume = ResumeContext {
             session_id: "uuid-1".into(),
-            message: "/fno:target x-81ad".into(),
+            message: "  /fno:target x-81ad  ".into(),
             cwd: PathBuf::from("/x"),
             from_name: None,
             yolo: false,

@@ -736,6 +736,73 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
     assert "$fno:target x-81ad" in pane_run
 
 
+def test_cmd_spawn_rejects_output_format_on_pane_before_dispatch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setattr(
+        mux_spawn,
+        "dispatch_spawn_pane",
+        lambda **_kwargs: pytest.fail("pane dispatch must not run"),
+    )
+
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        [
+            "spawn", "--name", "peer", "--harness", "claude",
+            "--output-format", "json", "hello",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "supports only 'json' on claude headless spawns" in result.output
+
+
+def test_cmd_spawn_parses_pr_watch_headless_json_argv(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.dispatch as dispatch_mod
+    from fno.agents.dispatch import SpawnResult
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    captured: dict = {}
+
+    def fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return SpawnResult(
+            kind="once",
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            short_id="",
+            reply='{"is_error": false}',
+        )
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_spawn", fake_dispatch)
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        [
+            "spawn", "--name", "pr-check-7", "--substrate", "headless",
+            "--harness", "claude", "--output-format", "json",
+            "/fno:pr check 7",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["message"] == "/fno:pr check 7"
+    assert captured["headless"] is True
+    assert captured["output_format"] == "json"
+
+
 # ---------------------------------------------------------------------------
 # x-3e38 pane placement: squad/split on the outer pane-run transport
 # ---------------------------------------------------------------------------

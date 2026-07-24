@@ -247,7 +247,7 @@ fn codex_create_normalizes_direct_plugin_command() {
         &home,
         &bin_dir,
         "normalize-agent",
-        "/fno:target x-81ad",
+        "  /fno:target x-81ad  ",
         "fno",
         &cwd,
         false,

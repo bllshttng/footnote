@@ -258,6 +258,23 @@ def test_value_flag_values_are_never_counted_as_positionals():
         assert out[3:] == [flag, value, "do the thing"], f"{flag}: argv mangled"
 
 
+def test_output_format_value_is_not_counted_as_a_positional():
+    out = _norm([
+        "spawn",
+        "--substrate", "headless",
+        "--harness", "claude",
+        "--output-format", "json",
+        "/fno:pr check 7",
+    ])
+    assert out[1] == "--name"
+    assert out[3:] == [
+        "--substrate", "headless",
+        "--harness", "claude",
+        "--output-format", "json",
+        "/fno:pr check 7",
+    ]
+
+
 def test_spawn_value_flags_cover_every_cmd_spawn_value_option():
     """The normalizer's value-flag table is a hand-maintained mirror of
     cmd_spawn's option list; a missing entry silently turns that flag's value

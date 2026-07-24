@@ -962,6 +962,15 @@ def cmd_spawn(
         )
         raise typer.Exit(code=2)
 
+    if output_format is not None and (
+        provider != "claude" or substrate != "headless" or output_format != "json"
+    ):
+        print(
+            "--output-format supports only 'json' on claude headless spawns",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
     # US4 revival: --resume continues an existing claude --bg transcript, so it
     # only applies to the claude bg lane (the Python bg_create path forwards
     # --resume <uuid>). provider None defaults to claude downstream.
