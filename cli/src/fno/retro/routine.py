@@ -21,6 +21,7 @@ from fno.retro.classify import (
     classify_postmortem,
 )
 from fno.retro.dedup import dedup_candidates, existing_keys_from_nodes
+from fno.retro.reconcile_findings import scan_addressed_findings
 from fno.retro.land import (
     MODE_AUTONOMOUS,
     MODE_INTERACTIVE,
@@ -199,6 +200,7 @@ def triage_pr(
         create_fn=create_fn,
         inbox_fn=inbox_fn,
         caused_by=caused_by,
+        anchor_scan_fn=scan_addressed_findings,
     )
 
     # Autonomous keep-going engine (x-3360): after the carve-out follow-ups are
@@ -319,6 +321,7 @@ def triage_postmortems(
             cwd=cwd,
             create_fn=create_fn,
             inbox_fn=inbox_fn,
+            anchor_scan_fn=scan_addressed_findings,
         )
         report.results.extend(results)
         outcome = results[0].outcome if results else "failed"
@@ -326,7 +329,10 @@ def triage_postmortems(
             # Not stamped: the unconsumed entry retries next run (AC6-FR).
             report.dispositions[item.source_id] = "failed"
             continue
-        report.dispositions[item.source_id] = "node" if outcome in ("active", "queued") else "inbox"
+        if outcome == "skipped":
+            report.dispositions[item.source_id] = "skipped"
+        else:
+            report.dispositions[item.source_id] = "node" if outcome in ("active", "queued") else "inbox"
         _stamp(item.source_id)
 
     return report

@@ -15,12 +15,13 @@ to the PR's canonical repo root, never the run cwd (pitfall fu-cwd341).
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from fno.retro.dedup import trailer
+from fno.retro.dedup import anchor_verdict, trailer
 from fno.retro.types import TIER_INBOX, Candidate
 
 MODE_AUTONOMOUS = "autonomous"
@@ -34,10 +35,11 @@ InboxFn = Callable[[Candidate], None]
 
 @dataclass
 class LandResult:
-    outcome: str  # "active" | "queued" | "inbox" | "failed"
+    outcome: str  # "active" | "queued" | "inbox" | "failed" | "skipped"
     candidate: Candidate
     node_id: Optional[str] = None
     error: Optional[str] = None
+    reason: Optional[str] = None  # skip reason, e.g. "fixed-on-main" (x-a7ab 1.1)
 
 
 def resolve_mode(sentinel: Optional[dict]) -> str:
@@ -136,6 +138,7 @@ def land_candidates(
     create_fn: Optional[CreateFn] = None,
     inbox_fn: Optional[InboxFn] = None,
     caused_by: Optional[str] = None,
+    anchor_scan_fn: Optional[Callable] = None,
 ) -> list[LandResult]:
     """Land each candidate per mode/tier. Per-node failures are recorded (not raised)
     so partial progress persists and a re-run dedups what landed (AC4-FR)."""
@@ -159,6 +162,24 @@ def land_candidates(
             continue
 
         details = f"{c.body}\n\n{trailer(c.source_pr, c.content_hash)}"
+        # Filing-time anchor check (x-a7ab 1.1): a finding already addressed on
+        # its source PR (fixed-on-main) is never minted. An unresolvable scan
+        # fails toward filing with an anchor-unverified note (AC5-EDGE).
+        if anchor_scan_fn is not None:
+            verdict = anchor_verdict(c, anchor_scan_fn)
+            if verdict == "dead":
+                print(
+                    f"skipped: fixed-on-main - finding addressed on source PR "
+                    f"#{c.source_pr} ({(c.title or '')[:60]})",
+                    file=sys.stderr,
+                )
+                results.append(LandResult("skipped", c, reason="fixed-on-main"))
+                continue
+            if verdict == "unresolvable":
+                details += (
+                    "\n\n[anchor-unverified: filing-time anchor check could not "
+                    "resolve the anchor]"
+                )
         try:
             # Interactive nodes are created ALREADY queued in one mutation, so
             # there is no create-ok/queue-fail window that could leave a node
