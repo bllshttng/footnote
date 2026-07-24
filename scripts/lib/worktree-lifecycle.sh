@@ -318,6 +318,11 @@ case "${1:-status}" in
                 [[ "$BRANCH" != ${PREFIX}* ]] && continue
             fi
 
+            if _wt_app_owned "$wt"; then
+                echo "  SKIP: $wt (app-owned Codex worktree)"
+                continue
+            fi
+
             # Check age
             LAST_COMMIT=$(cd "$wt" 2>/dev/null && git log -1 --format="%ct" 2>/dev/null || echo 0)
             NOW=$(date +%s)

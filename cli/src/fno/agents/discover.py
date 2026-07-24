@@ -109,6 +109,9 @@ def default_codex_sessions_dir() -> Path:
     override = os.environ.get(CODEX_SESSIONS_DIR_ENV)
     if override:
         return Path(override)
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        return Path(os.path.expandvars(os.path.expanduser(codex_home))) / "sessions"
     return Path(os.path.expanduser("~")) / ".codex" / "sessions"
 
 

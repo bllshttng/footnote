@@ -65,6 +65,14 @@ def _sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
     )
 
 
+def _age_sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
+    script = canon / "scripts" / "lib" / "worktree-lifecycle.sh"
+    return subprocess.run(
+        ["bash", str(script), "cleanup", "--older-than", "0d", *flags],
+        cwd=str(canon), capture_output=True, text=True,
+    )
+
+
 def _add_merged(canon: Path, name: str) -> Path:
     """Worktree whose branch is merged into origin/main (a reap candidate)."""
     wt = canon / name
@@ -288,6 +296,22 @@ def test_merged_sweep_keeps_codex_app_owned_worktree(
     assert r.returncode == 0, diag
     assert "kept (app-owned)" in r.stdout, diag
     assert "1 app-owned" in r.stdout, diag
+    assert wt.exists()
+
+
+def test_age_sweep_keeps_codex_app_owned_worktree(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    codex_home = tmp_path / ".codex"
+    wt = codex_home / "worktrees" / "thread-c" / repo.name
+    wt.parent.mkdir(parents=True)
+    _git(repo, "worktree", "add", "--detach", str(wt), "main")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    r = _age_sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert f"SKIP: {wt} (app-owned Codex worktree)" in r.stdout
     assert wt.exists()
 
 
