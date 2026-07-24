@@ -20,6 +20,25 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_post_merge(monkeypatch):
+    """Keep tick tests hermetic after the verb-first cutover.
+
+    The default ``_default_dispatch_ritual`` now shells ``fno pr ritual`` and
+    appends receipts to the global events log. Tests that exercise the real
+    default dispatch (those that do NOT inject ``dispatch_ritual_fn``) would
+    otherwise spawn a subprocess and pollute ~/.fno/events.jsonl. Redirect both
+    to no-ops; tests injecting ``dispatch_ritual_fn`` never reach them.
+    """
+    import fno.post_merge_route as pmr
+
+    monkeypatch.setattr(
+        pmr, "_default_run_ritual_verb",
+        lambda pr, cwd: pmr.ColdRitualResult(ok=True, tail="ok"),
+    )
+    monkeypatch.setattr(pmr, "emit_receipt", lambda *a, **k: True)
+
+
 # ---------------------------------------------------------------------------
 # Helpers / stubs
 # ---------------------------------------------------------------------------
@@ -214,27 +233,9 @@ class TestFireSkill:
             return _claude_ok_response()
 
         monkeypatch.setenv("PR_WATCH_FIRE_CMD", "true")
-        result = fire_skill("merged", 5, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 5, tmp_path, runner=stub_runner)
         # When seam is set, the command prefix should change (stub runner sees it)
         assert result.ok is True
-
-    def test_merged_verb_fires_correct_skill(self, tmp_path):
-        """AC-HP: verb='merged' -> /fno:pr merged <n> in command."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        captured = {}
-
-        def stub_runner(cmd, **kw):
-            captured["cmd"] = cmd
-            return _claude_ok_response()
-
-        fire_skill("merged", 42, tmp_path, runner=stub_runner)
-        cmd_str = " ".join(str(c) for c in captured["cmd"])
-        assert "merged" in cmd_str
-        assert "42" in cmd_str
-        # x-490d US1: the merged ritual runs with no operator, so it carries the
-        # autonomous token (take every no-prompt branch, never stall).
-        assert "autonomous" in cmd_str
 
     def test_check_verb_fires_correct_skill(self, tmp_path):
         """AC-HP: verb='check' -> /fno:pr check <n> in command."""
@@ -267,23 +268,6 @@ class TestFireSkill:
         fire_skill("check", 7, tmp_path, runner=stub_runner)
         assert captured.get("timeout") is not None
         assert captured["timeout"] > 0
-
-    def test_merged_timeout_exceeds_check_timeout(self, tmp_path):
-        """x-97d8: the post-merge ritual gets a larger budget than a check fire."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        seen = {}
-
-        def make_runner(verb):
-            def stub_runner(cmd, **kw):
-                seen[verb] = kw.get("timeout")
-                return _claude_ok_response()
-
-            return stub_runner
-
-        fire_skill("check", 1, tmp_path, runner=make_runner("check"))
-        fire_skill("merged", 1, tmp_path, runner=make_runner("merged"))
-        assert seen["merged"] > seen["check"]
 
     def test_explicit_timeout_overrides_verb_default(self, tmp_path):
         """x-97d8: a caller-supplied timeout_s wins over the per-verb default."""
@@ -798,57 +782,6 @@ class TestTickOrchestrator:
         entry = fresh_store.get("owner/repo#1")
         assert entry["merge_dispatched"] is True
 
-    def _cold_fire_model(self, tmp_path, monkeypatch, config_raises=False):
-        """Drive _default_dispatch_ritual through its cold-spawn fallback and
-        return the model passed to the headless merged fire. Stubs the shared
-        dispatcher to just invoke the spawn closure (bypassing warm route +
-        claim + marker), so this isolates the model resolution in _cold_spawn."""
-        import fno.graph._reconcile as _rec
-        import fno.config as _config
-        from fno.pr_watch._dispatch import DispatchResult, _default_dispatch_ritual
-
-        if config_raises:
-            def _boom(_p):
-                raise RuntimeError("corrupt config")
-            monkeypatch.setattr(_config, "load_settings_for_repo", _boom)
-
-        fired: dict = {}
-
-        def fake_fire(verb, pr_number, repo_dir, *, model=None, **_kw):
-            fired["verb"] = verb
-            fired["model"] = model
-            return DispatchResult(ok=True, rc=0, is_error=False, raw="{}")
-
-        class _R:
-            outcome = "dispatched"
-            short_id = "headless"
-            detail = "cold"
-
-        def fake_dispatch(pr_number, *, spawn=None, node_cwd=None, **_kw):
-            spawn(pr_number, node_cwd or str(tmp_path))  # exercise _cold_spawn
-            return _R()
-
-        monkeypatch.setattr(_rec, "dispatch_post_merge_ritual", fake_dispatch)
-
-        cand = _make_candidate(pr_number=1, repo_dir=tmp_path)
-        obs = _make_obs(1, "MERGED", merged=True)
-        _default_dispatch_ritual(cand, obs, fake_fire)
-        return fired
-
-    def test_cold_merged_fire_carries_post_merge_model(self, tmp_path, monkeypatch):
-        """The cold-fallback merged fire passes config.post_merge.model (default
-        sonnet), not fire_skill's haiku default."""
-        fired = self._cold_fire_model(tmp_path, monkeypatch)
-        assert fired["verb"] == "merged"
-        # tmp_path has no config.toml -> post_merge.model defaults to sonnet.
-        assert fired["model"] == "claude-sonnet-5"
-
-    def test_cold_merged_fire_config_failure_falls_open_to_sonnet(self, tmp_path, monkeypatch):
-        """A config-load failure at the cold fire falls open to the sonnet
-        default, mirroring _spawn_post_merge_worker (both cold paths agree)."""
-        fired = self._cold_fire_model(tmp_path, monkeypatch, config_raises=True)
-        assert fired["model"] == "claude-sonnet-5"
-
     def test_merge_already_dispatched_does_not_refire(self, tmp_path):
         """AC2-UI: merge_dispatched=True in watermark -> no re-fire on second tick."""
         from fno.pr_watch._dispatch import tick
@@ -885,10 +818,17 @@ class TestTickOrchestrator:
         assert dispatched == []
         assert deps["fired"] == []
 
-    def test_merge_fire_fails_no_advance(self, tmp_path):
-        """AC2-ERR: merge fire fails -> merge_dispatched stays False, retry scheduled."""
+    def test_merge_fire_fails_no_advance(self, tmp_path, monkeypatch):
+        """AC2-ERR / AC5-ERR: the cold verb fails -> merge_dispatched stays False, retry scheduled."""
+        import fno.post_merge_route as pmr
         from fno.pr_watch._dispatch import tick
         from fno.pr_watch._state import WatermarkStore
+
+        # Override the autouse success verb so the dispatch returns 'failed'.
+        monkeypatch.setattr(
+            pmr, "_default_run_ritual_verb",
+            lambda pr, cwd: pmr.ColdRitualResult(ok=False, tail="fail"),
+        )
 
         store_path = tmp_path / "state.json"
         store = WatermarkStore(path=store_path)
@@ -904,7 +844,7 @@ class TestTickOrchestrator:
         candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
         obs_map = {1: _make_obs(1, "MERGED", merged=True)}
         deps = _make_tick_deps(tmp_path, candidates=[candidate], obs_map=obs_map,
-                               fire_ok=False, merge_ready=True)
+                               merge_ready=True)
 
         tick(
             graph_path=tmp_path / "graph.json",
@@ -1589,190 +1529,6 @@ class TestPerRepoReviewers:
 
 
 # ---------------------------------------------------------------------------
-# Item 3: the post-merge ritual fires under the routable post-merge role
-# ---------------------------------------------------------------------------
-
-
-class TestPostMergeRouting:
-    """The ``merged`` fire routes to GLM when a route resolves; ``check`` never
-    routes; without a route both fail-safe to today's behavior."""
-
-    _GLM_ROUTE = {
-        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-        "ANTHROPIC_AUTH_TOKEN": "zk-secret",
-        "ANTHROPIC_MODEL": "glm-5.2",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air",
-    }
-
-    def _capturing_runner(self, captured):
-        def runner(cmd, **kw):
-            captured["cmd"] = cmd
-            captured["env"] = kw.get("env")
-            return _claude_ok_response()
-
-        return runner
-
-    def test_merged_fire_carries_glm_env_when_routed(self, tmp_path, monkeypatch):
-        """AC: with post-merge routed, the ritual fire carries the GLM env and
-        drops the stale ANTHROPIC_API_KEY so the routed token wins."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-stale")
-        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-sub-stale")
-        captured = {}
-        result = fire_skill(
-            "merged",
-            5,
-            tmp_path,
-            runner=self._capturing_runner(captured),
-            resolve_route_fn=lambda role: dict(self._GLM_ROUTE),
-        )
-        assert result.ok is True
-        env = captured["env"]
-        assert env is not None
-        assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
-        assert env["ANTHROPIC_AUTH_TOKEN"] == "zk-secret"
-        assert env["ANTHROPIC_MODEL"] == "glm-5.2"
-        assert "ANTHROPIC_API_KEY" not in env  # stale key dropped on route
-        # Subscription OAuth token dropped too, else it would win over the route.
-        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
-        # A routed fire must NOT pin --model (the GLM endpoint lacks the id).
-        assert "--model" not in captured["cmd"]
-
-    def test_merged_fire_routes_by_post_merge_role(self, tmp_path):
-        """The role handed to resolve_route for the merged verb is post-merge."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        seen = {}
-
-        def route_fn(role):
-            seen["role"] = role
-            return dict(self._GLM_ROUTE)
-
-        fire_skill("merged", 5, tmp_path, runner=self._capturing_runner({}), resolve_route_fn=route_fn)
-        assert seen["role"] == "post-merge"
-
-    def test_merged_fire_failsafe_without_route_keeps_default_model(self, tmp_path):
-        """AC: without a key (route is None) the fire is byte-identical to today:
-        default --model, no env override."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        captured = {}
-        result = fire_skill(
-            "merged",
-            5,
-            tmp_path,
-            runner=self._capturing_runner(captured),
-            resolve_route_fn=lambda role: None,
-        )
-        assert result.ok is True
-        assert captured["env"] is None  # unrouted -> parent env inherited
-        assert "--model" in captured["cmd"]
-
-    def test_check_verb_never_routes(self, tmp_path):
-        """AC: the review fire (check) implements external review and must never
-        route, even if a route fn would return one."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        called = {"n": 0}
-
-        def route_fn(role):
-            called["n"] += 1
-            return dict(self._GLM_ROUTE)
-
-        captured = {}
-        fire_skill("check", 7, tmp_path, runner=self._capturing_runner(captured), resolve_route_fn=route_fn)
-        assert called["n"] == 0  # check has no routable role -> fn never consulted
-        assert captured["env"] is None
-        assert "--model" in captured["cmd"]
-
-    def test_routing_failure_falls_back_and_still_fires(self, tmp_path):
-        """A resolve_route that raises must not break the fire (fail-safe)."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        def boom(role):
-            raise RuntimeError("routing exploded")
-
-        captured = {}
-        result = fire_skill("merged", 5, tmp_path, runner=self._capturing_runner(captured), resolve_route_fn=boom)
-        assert result.ok is True
-        assert captured["env"] is None  # degraded to unrouted
-        assert "--model" in captured["cmd"]
-
-    def test_routed_fire_presets_onboarding_bypass(self, tmp_path, monkeypatch):
-        """AC: a cold headless routed fire pre-sets hasCompletedOnboarding so it
-        does not hang on the login wall."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        import stat as _stat
-
-        home = tmp_path / "home"
-        home.mkdir()
-        cj = home / ".claude.json"
-        cj.write_text(
-            json.dumps({"hasCompletedOnboarding": False, "other": 1}), encoding="utf-8"
-        )
-        cj.chmod(0o600)  # a credential-bearing file is typically 0600
-        monkeypatch.setenv("HOME", str(home))
-
-        fire_skill(
-            "merged",
-            5,
-            tmp_path,
-            runner=self._capturing_runner({}),
-            resolve_route_fn=lambda role: dict(self._GLM_ROUTE),
-        )
-        data = json.loads(cj.read_text(encoding="utf-8"))
-        assert data["hasCompletedOnboarding"] is True
-        assert data["other"] == 1  # other keys preserved
-        # The 0600 mode must survive the rewrite (never downgraded to 0644).
-        assert _stat.S_IMODE(cj.stat().st_mode) == 0o600
-
-    def test_routed_fire_creates_claude_json_when_absent(self, tmp_path, monkeypatch):
-        """A cold env with no ~/.claude.json: the routed fire creates one with
-        the onboarding flag rather than silently doing nothing."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        home = tmp_path / "home"
-        home.mkdir()  # no .claude.json inside
-        monkeypatch.setenv("HOME", str(home))
-
-        fire_skill(
-            "merged",
-            5,
-            tmp_path,
-            runner=self._capturing_runner({}),
-            resolve_route_fn=lambda role: dict(self._GLM_ROUTE),
-        )
-        cj = home / ".claude.json"
-        assert cj.exists()
-        assert json.loads(cj.read_text(encoding="utf-8"))["hasCompletedOnboarding"] is True
-        # A newly-created credential file must be 0600, not umask-derived.
-        import stat as _stat
-
-        assert _stat.S_IMODE(cj.stat().st_mode) == 0o600
-
-    def test_unrouted_fire_does_not_touch_onboarding(self, tmp_path, monkeypatch):
-        """An unrouted (Anthropic) fire must not rewrite the user's claude.json."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        home = tmp_path / "home"
-        home.mkdir()
-        original = json.dumps({"hasCompletedOnboarding": False})
-        (home / ".claude.json").write_text(original, encoding="utf-8")
-        monkeypatch.setenv("HOME", str(home))
-
-        fire_skill(
-            "merged",
-            5,
-            tmp_path,
-            runner=self._capturing_runner({}),
-            resolve_route_fn=lambda role: None,
-        )
-        assert (home / ".claude.json").read_text(encoding="utf-8") == original
-
-
-# ---------------------------------------------------------------------------
 # Warm-route merge dispatch (shared marker with reconcile)
 # ---------------------------------------------------------------------------
 
@@ -1781,7 +1537,7 @@ class TestWarmMergeRouting:
     """The tick's merge branch routes through the shared post-merge dispatcher."""
 
     def _run_merge_tick(self, tmp_path, ritual_outcome, ritual_detail=None):
-        from fno.graph._reconcile import PostMergeDispatchResult
+        from fno.post_merge_route import PostMergeDispatchResult
         from fno.pr_watch._dispatch import tick
         from fno.pr_watch._state import WatermarkStore
 

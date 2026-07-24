@@ -104,7 +104,7 @@ class TestInjectPrMerged:
         delivered, reason = inject_pr_merged("aaaa-bbbb", 123)
         assert delivered is True
         assert reason == "delivered"
-        assert sent == [("aaaa-bbbb", "/fno:pr merged 123 autonomous")]
+        assert sent == [("aaaa-bbbb", "fno pr ritual 123 --autonomous")]
 
     def test_unconfirmed_maps_to_queue_timeout(self, monkeypatch):
         self._patch_submit(monkeypatch, "unconfirmed")
@@ -215,7 +215,7 @@ class TestCodexWarmRoute:
         assert (delivered, reason) == (True, "delivered")
         # RAW command, no <fno_mail> envelope: mail is None so it lands verbatim.
         assert sent["args"][0] is entry
-        assert sent["args"][1] == "/fno:pr merged 42 autonomous"
+        assert sent["args"][1] == "fno pr ritual 42 --autonomous"
         assert sent["args"][2] is None
 
     def test_inject_codex_no_panel_is_not_live(self, monkeypatch):

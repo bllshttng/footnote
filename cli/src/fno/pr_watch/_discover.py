@@ -58,6 +58,12 @@ class PrCandidate:
     # The originating session's cwd: the direct-finalize rung (x-88df) resolves
     # its on-disk transcript + manifest from here. None -> probe skipped (cold).
     source_cwd: Optional[str] = None
+    # The latest pre-dispatch ``phase: ship`` identity from the node's
+    # append-only ``sessions[]`` list (who actually delivered the PR). Preferred
+    # over ``source_session_id`` (node-birth) by the warm/cold decision; None
+    # when the node predates lifecycle provenance or has no ship entry.
+    ship_session_id: Optional[str] = None
+    ship_harness: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -178,6 +184,31 @@ def _node_watchable(
     return _days_between(completed, now_iso) <= max_age_days
 
 
+def _latest_ship_session(node: dict) -> tuple[Optional[str], Optional[str]]:
+    """The node's latest ``phase: ship`` lifecycle entry as ``(id, harness)``.
+
+    ``sessions[]`` is append-only and phase-forward, so the last ship entry names
+    the session that actually delivered the PR -- the identity the warm/cold
+    decision prefers over node-birth ``source_session_id``. Captured before the
+    ritual's own session-add mutates provenance. ``(None, None)`` when the node
+    predates lifecycle provenance or has no ship entry.
+    """
+    sessions = node.get("sessions")
+    if not isinstance(sessions, list):
+        return None, None
+    sid: Optional[str] = None
+    harness: Optional[str] = None
+    for entry in sessions:
+        if not isinstance(entry, dict) or entry.get("phase") != "ship":
+            continue
+        s = entry.get("session_id")
+        if isinstance(s, str) and s:
+            sid = s
+            h = entry.get("harness")
+            harness = h if isinstance(h, str) and h else None
+    return sid, harness
+
+
 def discover_open_prs(
     entries: list[dict],
     *,
@@ -207,6 +238,7 @@ def discover_open_prs(
         repo_dir = _resolve_repo_dir(node)
         for pr_number, pr_url in refs:
             slug = repo_slug_from_url(pr_url)
+            ship_sid, ship_harness = _latest_ship_session(node)
             candidates.append(
                 PrCandidate(
                     node_id=node_id,
@@ -217,6 +249,8 @@ def discover_open_prs(
                     source_session_id=node.get("source_session_id") or None,
                     source_harness=node.get("source_harness") or None,
                     source_cwd=node.get("source_cwd") or None,
+                    ship_session_id=ship_sid,
+                    ship_harness=ship_harness,
                 )
             )
     return candidates

@@ -607,6 +607,38 @@ def test_reconcile_happy_path_then_noop(cli_env, monkeypatch):
     assert node2["completed_at"] == first_ts
 
 
+def test_reconcile_does_not_dispatch_post_merge_ritual(cli_env, monkeypatch):
+    """AC10-EDGE: reconcile is no longer a ritual detector. Closing a merged node
+    with post_merge.auto_run armed must NOT invoke the dispatch seam, run the
+    verb, or write a dispatch marker - pr-watch is the sole detector now."""
+    import fno.post_merge_route as pmr
+
+    graph_path, _sentinel = cli_env
+    repo_dir = graph_path.parent
+    _make_graph(graph_path, [_node("ab-pm", pr_number=200, cwd=str(repo_dir))])
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({200: "MERGED"}))
+    # Arm auto_run so the pre-cutover reconcile leg WOULD have dispatched; the
+    # cutover means this now does nothing.
+    (repo_dir / ".fno").mkdir(parents=True, exist_ok=True)
+    (repo_dir / ".fno" / "config.toml").write_text("[post_merge]\nauto_run = true\n")
+
+    dispatched: list = []
+    monkeypatch.setattr(
+        pmr, "dispatch_post_merge_ritual",
+        lambda *a, **k: dispatched.append(a) or pmr.PostMergeDispatchResult("dispatched", 200),
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile"])
+    assert result.exit_code == 0, result.output
+
+    # Reconcile still does its day job (closes the node)...
+    node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-pm")
+    assert node["completed_at"] is not None
+    # ...but never dispatches a ritual and writes no marker.
+    assert dispatched == []
+    assert not (repo_dir / ".fno" / "post-merge-dispatched").exists()
+
+
 def test_reconcile_backfills_reverse_mapped_pr_ref(cli_env, tmp_path, monkeypatch):
     """A reverse-mapped node (dead before stamp) gets its recovered PR ref
     written back to the graph, not just closed - else the board loses the PR
