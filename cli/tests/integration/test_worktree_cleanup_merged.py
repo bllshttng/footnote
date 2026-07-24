@@ -75,6 +75,15 @@ def _add_merged(canon: Path, name: str) -> Path:
     return wt
 
 
+def _add_merged_at(canon: Path, wt: Path, name: str) -> Path:
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    _git(canon, "worktree", "add", str(wt), "-b", f"feature/{name}", "main")
+    _commit(wt, f"{name}.txt")
+    _git(canon, "merge", "--no-ff", f"feature/{name}", "-m", f"merge {name}")
+    _git(canon, "push", "origin", "main")
+    return wt
+
+
 # ── AC1-UI: dry-run is the default and mutates nothing ──────────────────────
 def test_dry_run_default_mutates_nothing(repo: Path):
     wt = _add_merged(repo, "reapme")
@@ -241,6 +250,45 @@ def test_archive_script_excludes_own_process_tree(repo: Path):
     )
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert not wt.exists(), f"stderr={r.stderr}"
+
+
+def test_archive_refuses_codex_app_owned_worktree_even_with_force(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    codex_home = tmp_path / ".codex"
+    wt = codex_home / "worktrees" / "thread-a" / repo.name
+    wt.parent.mkdir(parents=True)
+    _git(repo, "worktree", "add", "--detach", str(wt), "main")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+
+    r = subprocess.run(
+        ["bash", str(script), "--force", str(wt)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 6
+    assert "app-owned Codex worktree" in r.stderr
+    assert "archive its associated chat" in r.stderr
+    assert wt.exists()
+
+
+def test_merged_sweep_keeps_codex_app_owned_worktree(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    codex_home = tmp_path / ".codex"
+    wt = _add_merged_at(
+        repo, codex_home / "worktrees" / "thread-b" / repo.name, "native"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    r = _sweep(repo, "--apply")
+    diag = f"stdout={r.stdout}\nstderr={r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "kept (app-owned)" in r.stdout, diag
+    assert "1 app-owned" in r.stdout, diag
+    assert wt.exists()
 
 
 # ── silent-failure guard: empty-state line is explicit, not silence ─────────

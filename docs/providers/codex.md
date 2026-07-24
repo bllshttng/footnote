@@ -25,27 +25,28 @@ packaged hooks provide the supported target-loop and safety lifecycle described 
 
 ## Codex App Worktrees
 
-Codex app worktrees are managed under `$CODEX_HOME/worktrees` and start from tracked
-files in the selected Git branch. That is why `.codex/agents/*.toml`,
-`.codex-plugin/plugin.json`, `hooks/codex-hooks.json`, and
-`.agents/plugins/marketplace.json` are committed.
+Codex app worktrees are managed under `$CODEX_HOME/worktrees` and start from tracked files in the selected Git branch.
+That is why `.codex/agents/*.toml`, `.codex-plugin/plugin.json`, `hooks/codex-hooks.json`, and `.agents/plugins/marketplace.json` are committed.
 
-Use the Codex app Worktree mode for background tasks. When a worktree needs a branch
-and PR, use **Create branch here** in the app, then push and open the PR. Use Handoff
-when you want to move the thread and code between Local and a Codex-managed worktree.
+Start a target chat from the canonical repository project in Codex Desktop, then run `fno target start <node>`.
+Under the default `harness-native` policy, the command prints `native-handoff=required` and creates no worktree, branch, manifest, or claim.
+Use `/worktree` or **Hand off -> Worktree** in that same chat and rerun the exact command from the Codex-managed worktree.
+The retry verifies Desktop rollout identity, the `$CODEX_HOME/worktrees` boundary, Git registration against the canonical common directory, clean detached state, and the remote main base before creating `feature/<node>` and initializing the target.
 
-footnote's CLI-created worktrees under `~/conductor/workspaces/` are still used by
-`/fno:target` and background dispatch. They are separate from Codex app managed
-worktrees.
+This same-thread handoff is load-bearing for Remote Control project roll-up.
+Codex Desktop records the managed chat against the canonical project while each chat retains a distinct worktree and branch, so concurrent Footnote chats remain isolated but appear under the same Footnote project in Desktop and mobile Remote.
+Footnote never writes the private Desktop project-assignment state and never asks its external allocator to create a directory under `$CODEX_HOME/worktrees`.
 
-The native plugin blocks `Edit`/`Write` tool calls from a canonical protected
-checkout (`main`, `master`, or detached HEAD) before `apply_patch` lands. For a
-footnote target, run `fno target start <node>` and read the `worktree=` path in
-its receipt, then continue the task from that path in a new or handed-off Codex
-session. Running the command does not relocate the current app thread. Alternatively,
-switch to Codex Worktree mode or use Handoff before retrying the edit. Both Codex-
-managed and CLI-created linked worktrees are allowed regardless of their directory
-base.
+Codex TUI, headless, and other substrates that cannot perform the Desktop handoff degrade to an honest external worktree under `~/.fno/worktrees`.
+That degraded native fallback deliberately ignores `config.paths.worktrees_base`; an explicitly configured `worktree.policy = "external"` still honors the configured allocator.
+
+Archive the associated chat to snapshot and remove a Codex-managed worktree.
+Footnote's archive and merged-worktree cleanup commands refuse to delete app-owned paths, even with `--force`.
+For a stale project in Desktop, use the project sidebar `...` menu and **Remove**.
+OpenAI's current documentation describes no equivalent mobile project-removal action, so use Desktop for that cleanup.
+
+The native plugin blocks `Edit`/`Write` tool calls from a canonical protected checkout (`main`, `master`, or detached HEAD) before `apply_patch` lands.
+The handoff receipt is the supported transition rather than an instruction to edit in the canonical checkout.
 
 ## Local-Development Fallback
 
