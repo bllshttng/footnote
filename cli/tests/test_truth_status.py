@@ -37,6 +37,31 @@ def test_parse_node_id(name, expected):
 
 
 # --------------------------------------------------------------------------
+# mission parse (name-shape fallback for the recovery watchdog, x-5583)
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("target-x-1111-foo", ("x-1111", "target")),
+        ("target-ab-1a2b3c4d-dashless-spawn", ("ab-1a2b3c4d", "target")),
+        ("target-x-4a48", ("x-4a48", "target")),  # no slug tail
+        ("think-x-2222-bar", ("x-2222", "think")),
+        ("think-x-2222-lifecycle-bar", ("x-2222", "think")),  # reason-suffixed
+        ("think-x-2222", ("x-2222", "think")),
+        # Non-standard names are NOT guessed at: the manifest is the primary
+        # resolver and an unparseable name must fail closed (Locked Decision 2).
+        ("tgt-x-4175-liveness", None),
+        ("failover-abcd1234", None),
+        ("phasestall", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_parse_worker_mission(name, expected):
+    assert ts.parse_worker_mission(name) == expected
+
+
+# --------------------------------------------------------------------------
 # state table (claim_status monkeypatched -> tests the combine logic only)
 # --------------------------------------------------------------------------
 def _patch_claim(monkeypatch, status):
