@@ -393,6 +393,47 @@ def _backfill_opencode_session_id(
     return None
 
 
+# Codex writes its rollout at session start, but the TUI has to boot first, so
+# the first look can legitimately land before the file exists. More attempts and
+# a longer nap than opencode's SQLite read for exactly that reason.
+_CODEX_BACKFILL_ATTEMPTS = 4
+_CODEX_BACKFILL_DELAY_S = 0.75
+
+
+def _backfill_codex_session_id(
+    cwd: Path,
+    since_ms: int,
+    *,
+    sessions_dir: Optional[Path] = None,
+    sleep: Optional[Callable] = None,
+) -> Optional[str]:
+    """Best-effort capture of a freshly spawned codex pane's session id.
+
+    Codex has no ``--session`` to pre-mint an id into, so like opencode the id is
+    discovered afterwards -- here from the rollout store, matched on exact pane
+    cwd AND a session start at/after this spawn. Without it the registry row
+    keeps ``harness_session_id=None``, and a sid-less row is dropped by
+    ``_discover_from_registry`` before name matching, which is what makes a live
+    codex worker unreachable by truth, peek, and the mail name lane at once.
+
+    Returns the id only on an unambiguous match. Zero candidates (or two, from a
+    same-cwd race) return ``None`` so the row stays live-only rather than
+    carrying a session id that may belong to another pane.
+    """
+    from fno.agents.discover import codex_session_ids_started_in
+
+    naptime = sleep or time.sleep
+    for attempt in range(_CODEX_BACKFILL_ATTEMPTS):
+        if attempt:
+            naptime(_CODEX_BACKFILL_DELAY_S)
+        ids = codex_session_ids_started_in(cwd, since_ms, sessions_dir=sessions_dir)
+        if len(ids) == 1:
+            return ids[0]
+        if len(ids) > 1:
+            return None  # ambiguous; retrying cannot narrow it
+    return None
+
+
 def build_pane_argv(
     provider: str,
     message: str,
@@ -732,6 +773,7 @@ def dispatch_spawn_pane(
     account_env: Optional[dict[str, str]] = None,
     route_env: Optional[dict[str, str]] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
+    codex_sessions_dir: Optional[Path] = None,
 ) -> MuxSpawnResult:
     """Spawn ``name`` as a mux-hosted agent pane (AC1-HP).
 
@@ -891,10 +933,10 @@ def dispatch_spawn_pane(
         child_pid = _lookup_child_pid(session, pane_id, runner)
         spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
 
-        # opencode ids are discovered, not minted (see _backfill_opencode_session_id).
-        # A miss leaves the row exactly as live-only as before capture existed,
-        # so it is logged rather than raised - the pane is already running and a
-        # missing id costs resume, not the spawn.
+        # opencode and codex ids are discovered, not minted (see the two
+        # backfills). A miss leaves the row exactly as live-only as before
+        # capture existed, so it is logged rather than raised - the pane is
+        # already running and a missing id costs resume, not the spawn.
         if provider == "opencode":
             # Reuses the spawn `runner` seam, so the store read is stubbed by
             # the same fake every spawn test already installs and the suite
@@ -909,6 +951,20 @@ def dispatch_spawn_pane(
                     harness=provider,
                     cwd=str(cwd),
                     reason="no unique opencode session for this cwd after spawn",
+                )
+        elif provider == "codex":
+            session_uuid = _backfill_codex_session_id(
+                cwd, spawn_started_ms, sessions_dir=codex_sessions_dir
+            )
+            if session_uuid is None:
+                from fno.agents import events as _events
+
+                _events.emit(
+                    "agent_session_id_uncaptured",
+                    name=name,
+                    harness=provider,
+                    cwd=str(cwd),
+                    reason="no unique codex rollout for this cwd after spawn",
                 )
 
         # Claude addresses a pane by its 8-hex jobId (the first block of the

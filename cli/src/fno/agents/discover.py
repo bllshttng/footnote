@@ -19,6 +19,7 @@ a 7000+ entry directory.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import re
@@ -171,13 +172,13 @@ def _discover_from_codex_daemon() -> list[dict]:
     return rows
 
 
-def _codex_meta(path: Path) -> Optional[tuple[str, str]]:
-    """``(session_id, cwd)`` from a rollout's first ``session_meta`` line, or None.
+def _codex_session_meta(path: Path) -> Optional[dict]:
+    """A rollout's first-line ``session_meta`` payload dict, or None.
 
-    Codex 0.1x writes ``{"type":"session_meta","payload":{"id":...,"cwd":...}}``
-    as line 1 (verified on a real rollout). A file that is unreadable, whose
-    first line is not JSON, or is not a session_meta record is skipped (returns
-    None), never raised — same posture as the claude readers.
+    Codex 0.1x writes ``{"type":"session_meta","payload":{"id":...,"cwd":...,
+    "timestamp":...}}`` as line 1 (verified on a real rollout). A file that is
+    unreadable, whose first line is not JSON, or is not a session_meta record is
+    skipped (returns None), never raised — same posture as the claude readers.
     """
     try:
         with open(path, encoding="utf-8") as fh:
@@ -191,12 +192,66 @@ def _codex_meta(path: Path) -> Optional[tuple[str, str]]:
     if not isinstance(rec, dict) or rec.get("type") != "session_meta":
         return None
     payload = rec.get("payload")
-    if not isinstance(payload, dict):
+    return payload if isinstance(payload, dict) else None
+
+
+def _codex_meta(path: Path) -> Optional[tuple[str, str]]:
+    """``(session_id, cwd)`` from a rollout's first ``session_meta`` line, or None."""
+    payload = _codex_session_meta(path)
+    if payload is None:
         return None
     sid, cwd = payload.get("id"), payload.get("cwd")
     if not isinstance(sid, str) or not sid:
         return None
     return sid, str(cwd or "")
+
+
+def _codex_started_ms(payload: dict) -> Optional[int]:
+    """Session start as epoch ms from ``session_meta.payload.timestamp``.
+
+    The payload timestamp is the only signal that separates a session this spawn
+    created from one already open in the same cwd: file mtime cannot, because an
+    older session still being typed into has a fresh mtime.
+    """
+    raw = payload.get("timestamp")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return int(_dt.datetime.fromisoformat(raw).timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def codex_session_ids_started_in(
+    cwd: Path, since_ms: int, *, sessions_dir: Optional[Path] = None
+) -> list[str]:
+    """Codex session ids whose rollout says they started in ``cwd`` at/after ``since_ms``.
+
+    Matched on the directory string, never a project id: several worktrees of one
+    repo would otherwise collapse into each other. ``sessions_dir`` is injectable
+    so tests never touch the developer's real ``~/.codex``.
+    """
+    root = sessions_dir if sessions_dir is not None else default_codex_sessions_dir()
+    target = str(cwd)
+    ids: list[str] = []
+    try:
+        paths = list(root.rglob("rollout-*.jsonl"))
+    except OSError:
+        return ids
+    for path in paths:
+        payload = _codex_session_meta(path)
+        if payload is None:
+            continue
+        sid = payload.get("id")
+        if not isinstance(sid, str) or not sid or sid in ids:
+            continue
+        if str(payload.get("cwd") or "") != target:
+            continue
+        started = _codex_started_ms(payload)
+        if started is None or started < since_ms:
+            continue
+        ids.append(sid)
+    return ids
 
 
 def codex_rollout_for_session(
