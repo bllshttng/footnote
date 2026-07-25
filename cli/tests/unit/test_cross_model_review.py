@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from fno.agents.dispatch import DispatchAskError, SpawnResult
+from fno.config import AgentRouteBlock
 from fno.review.orchestrator import AGENT_NAMES
 from fno.worker.review import build_review_runner
 
@@ -125,6 +126,91 @@ def test_ac2_operator_map_pins_gemini() -> None:
     cr = _run(runner, "code_reviewer")
     assert cr.provider == "claude"
     assert dispatch.providers == ["gemini"]  # no new dispatch
+
+
+def test_explicit_agent_route_uses_named_headless_session_with_runtime_evidence() -> None:
+    dispatch = _RecordingDispatch(reply="[]")
+    runner, _, provider_set = build_review_runner(
+        agent_providers={},
+        agent_routes={
+            "code_reviewer": AgentRouteBlock(
+                harness="claude",
+                provider="zai",
+                model="glm-5.2",
+            )
+        },
+        cross_model_enabled=False,
+        implementer_provider="claude",
+        available_providers=["claude"],
+        base_prompts=_base_prompts(),
+        cwd=Path("."),
+        dispatch=dispatch,
+        route_resolver=lambda provider, model: {
+            "ANTHROPIC_BASE_URL": f"https://{provider}.example/{model}"
+        },
+    )
+    assert "code_reviewer=claude/zai/glm-5.2" in provider_set
+
+    outcome = _run(runner, "code_reviewer")
+    call = dispatch.calls[0]
+    assert call["provider"] == "claude"
+    assert call["agent"] == "fno:code-reviewer"
+    assert call["headless"] is True
+    assert call["model"] == "glm-5.2"
+    assert outcome.provider == "claude"
+    assert outcome.model == "glm-5.2"
+    assert outcome.route_provider == "zai"
+
+    from fno.review.orchestrator import OrchestratorResult
+    from fno.review.report_builder import render_artifact_markdown
+
+    report = render_artifact_markdown(
+        "sess",
+        OrchestratorResult(
+            findings=[],
+            workers_completed=1,
+            workers_failed=0,
+            suspicious=False,
+            duration_seconds=1.0,
+            outcomes=[outcome],
+        ),
+        "ready-to-merge",
+    )
+    assert "[claude/zai/glm-5.2]" in report
+    assert "Cross-model coverage: claude, zai" in report
+    assert "Billed a second provider's quota this run: zai" in report
+    assert "claude only" not in report
+
+
+def test_invalid_explicit_route_degrades_before_dispatch() -> None:
+    dispatch = _RecordingDispatch(reply="[]")
+    adapter = _FakeClaudeDispatch("[]")
+    runner, _, provider_set = build_review_runner(
+        agent_providers={},
+        agent_routes={
+            "code_reviewer": AgentRouteBlock(
+                harness="claude",
+                provider="unknown",
+                model="missing",
+            )
+        },
+        cross_model_enabled=False,
+        implementer_provider="claude",
+        available_providers=["claude"],
+        base_prompts=_base_prompts(),
+        cwd=Path("."),
+        dispatch=dispatch,
+        claude_adapter=adapter,
+        route_resolver=lambda _provider, _model: None,
+    )
+
+    outcome = _run(runner, "code_reviewer")
+
+    assert dispatch.calls == []
+    assert adapter.calls == 1
+    assert outcome.provider == "claude"
+    assert outcome.note == "unknown/missing unavailable: ran on claude"
+    assert "code_reviewer=claude" in provider_set
 
 
 # --- AC3-ERR: unparseable cross-model findings -> terminal soft fail ---
@@ -275,8 +361,8 @@ def test_off_path_returns_no_runner() -> None:
     assert (runner, prompts, provider_set) == (None, None, None)
 
 
-def test_off_path_report_has_no_cross_model_lines() -> None:
-    """An all-claude result (no provider set) renders the legacy report."""
+def test_off_path_report_records_effective_model_without_cross_model_cost() -> None:
+    """Every all-Claude row remains distinguishable from a routed-model row."""
     from fno.review.orchestrator import OrchestratorResult, WorkerOutcome
     from fno.review.report_builder import render_artifact_markdown
 
@@ -291,7 +377,7 @@ def test_off_path_report_has_no_cross_model_lines() -> None:
     md = render_artifact_markdown("sess", result, "ready-to-merge")
     assert "Cross-model" not in md
     assert "[codex]" not in md
-    assert "[claude]" not in md
+    assert md.count("[claude/unknown]") == len(AGENT_NAMES)
 
 
 def test_report_renders_attribution_softfail_and_cost_line() -> None:
@@ -317,8 +403,8 @@ def test_report_renders_attribution_softfail_and_cost_line() -> None:
     )
     md = render_artifact_markdown("sess", result, "done-with-concerns")
     assert "[codex/gpt-x]" in md
-    assert "[claude]" in md
-    assert "[gemini]" in md
+    assert "[claude/unknown]" in md
+    assert "[gemini/unknown]" in md
     assert "agent errored (unparseable findings)" in md
     assert "cross-model unavailable: ran on claude" in md
     assert "Billed a second provider's quota this run: codex, gemini" in md
@@ -384,3 +470,33 @@ def test_orchestrator_caches_under_actual_routing_on_fallback(tmp_path) -> None:
     # Written under the ACTUAL (claude) routing, NOT the requested (codex) one.
     assert _cache.cache_path(actual_key, artifacts_dir=tmp_path).exists()
     assert not _cache.cache_path(requested_key, artifacts_dir=tmp_path).exists()
+
+
+def test_orchestrator_named_route_writes_under_requested_model_dimension(tmp_path) -> None:
+    from fno.review import cache as _cache
+    from fno.review.orchestrator import Finding, WorkerOutcome, orchestrate_review_parallel
+
+    async def runner(agent: str, prompt: str, diff: str) -> WorkerOutcome:
+        return WorkerOutcome(
+            agent=agent,
+            ok=True,
+            provider="claude",
+            route_provider="zai",
+            model="glm-5.2",
+            findings=[Finding(agent=agent, severity="low", message="x")],
+        )
+
+    prompts = {"code_reviewer": "p"}
+    requested = ["code_reviewer=claude/zai/glm-5.2"]
+    orchestrate_review_parallel(
+        "diff",
+        prompts=prompts,
+        runner=runner,
+        agents=["code_reviewer"],
+        session_id="s-route",
+        artifacts_dir=tmp_path,
+        git_sha_value="sha",
+        provider_set=requested,
+    )
+    key = _cache.cache_key("s-route", "sha", _cache.prompt_hash(prompts), requested)
+    assert _cache.cache_path(key, artifacts_dir=tmp_path).exists()

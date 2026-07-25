@@ -16,14 +16,13 @@ C1: score_findings uses default resolver (batched `claude -p` when the CLI
 H2: all-findings-below-threshold produces done-with-concerns (not ready-to-merge).
 H6: worker layer does not call write_cache (orchestrator owns writes).
 """
+
 from __future__ import annotations
 
-import asyncio
-import os
 import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -70,14 +69,13 @@ def test_worker_outcome_provider_model_default_none() -> None:
 
 def test_worker_outcome_provider_model_settable() -> None:
     """Runners may attribute a provider/model for the report (AC6-UI)."""
-    outcome = WorkerOutcome(
-        agent="code_reviewer", ok=True, provider="codex", model="gpt-5.1-codex"
-    )
+    outcome = WorkerOutcome(agent="code_reviewer", ok=True, provider="codex", model="gpt-5.1-codex")
     assert outcome.provider == "codex"
     assert outcome.model == "gpt-5.1-codex"
 
 
 # ---- Helpers ----
+
 
 def _make_state(tmp_path: Path, session_id: str = "sess-abc123", extra: dict | None = None) -> Path:
     state = {
@@ -95,23 +93,23 @@ def _make_state(tmp_path: Path, session_id: str = "sess-abc123", extra: dict | N
 
 def _make_runner(findings: list[Finding]) -> Any:
     """Return an async WorkerRunner that returns the given findings."""
+
     async def runner(agent: str, prompt: str, diff: str) -> WorkerOutcome:
         return WorkerOutcome(agent=agent, ok=True, findings=findings, duration_seconds=0.01)
+
     return runner
 
 
 def _make_critical_runner() -> Any:
     """Runner that returns one critical finding."""
-    return _make_runner([
-        Finding(agent="code_reviewer", severity="critical", message="null deref")
-    ])
+    return _make_runner([Finding(agent="code_reviewer", severity="critical", message="null deref")])
 
 
 def _make_info_runner() -> Any:
     """Runner that returns one info finding."""
-    return _make_runner([
-        Finding(agent="code_reviewer", severity="info", message="consider renaming")
-    ])
+    return _make_runner(
+        [Finding(agent="code_reviewer", severity="info", message="consider renaming")]
+    )
 
 
 def _make_empty_runner() -> Any:
@@ -121,11 +119,13 @@ def _make_empty_runner() -> Any:
 
 # ---- AC2-END-TO-END ----
 
+
 class TestWorkerReviewEndToEnd:
     """AC2-END-TO-END: orchestrator path produces a gate-satisfying artifact."""
 
     def test_review_function_exists(self) -> None:
         from fno.worker.review import review  # noqa: F401
+
         assert callable(review)
 
     def test_review_returns_dict_with_action(self, tmp_path: Path) -> None:
@@ -181,8 +181,158 @@ class TestWorkerReviewEndToEnd:
         assert "findings_critical" in fm
         assert "findings_high" in fm
 
+    def test_node_bound_direct_review_calls_shared_sigma_publisher(self, tmp_path: Path) -> None:
+        from fno.worker.review import review
+
+        state_path = _make_state(
+            tmp_path,
+            session_id="sess-publish",
+            extra={"graph_node_id": "x-bfbb", "pr_number": 42},
+        )
+        with patch("fno.worker.review._publish_durable_sigma") as publish:
+            result = review(
+                diff_context="some diff text",
+                state_path=state_path,
+                artifacts_dir=tmp_path / "artifacts",
+                session_id="sess-publish",
+                runner=_make_info_runner(),
+                git_sha_value="deadbeef0002",
+                no_cache=True,
+            )
+
+        publish.assert_called_once_with(
+            Path(result["artifact_path"]),
+            state_path=state_path,
+            session_id="sess-publish",
+            reviewed_head="deadbeef0002",
+        )
+
+    def test_cached_node_bound_review_republishes_shared_sigma_artifact(
+        self, tmp_path: Path
+    ) -> None:
+        from fno.worker.review import review
+
+        state_path = _make_state(
+            tmp_path,
+            session_id="sess-cached-publish",
+            extra={"graph_node_id": "x-bfbb", "pr_number": 42},
+        )
+        with patch("fno.worker.review._publish_durable_sigma") as publish:
+            for _ in range(2):
+                review(
+                    diff_context="some diff text",
+                    state_path=state_path,
+                    artifacts_dir=tmp_path / "artifacts",
+                    session_id="sess-cached-publish",
+                    runner=_make_info_runner(),
+                    git_sha_value="deadbeef0003",
+                )
+
+        assert publish.call_count == 2
+
+    def test_cache_hit_regenerates_artifact_instead_of_publishing_stale_body(
+        self, tmp_path: Path
+    ) -> None:
+        from fno.worker.review import review
+
+        state_path = _make_state(tmp_path, session_id="sess-cache-body")
+        artifacts_dir = tmp_path / "artifacts"
+        first = review(
+            diff_context="diff A",
+            state_path=state_path,
+            artifacts_dir=artifacts_dir,
+            session_id="sess-cache-body",
+            runner=_make_info_runner(),
+            git_sha_value="head-a",
+        )
+        artifact = Path(first["artifact_path"])
+        artifact.write_text("# stale body B\n", encoding="utf-8")
+
+        second = review(
+            diff_context="diff A",
+            state_path=state_path,
+            artifacts_dir=artifacts_dir,
+            session_id="sess-cache-body",
+            runner=_make_info_runner(),
+            git_sha_value="head-a",
+        )
+
+        assert second["action"] == "cached"
+        assert "stale body B" not in artifact.read_text(encoding="utf-8")
+
+
+def test_shared_publisher_resolves_pr_when_immutable_manifest_has_none(
+    tmp_path: Path,
+) -> None:
+    from types import SimpleNamespace
+
+    from fno.worker.review import _publish_durable_sigma
+
+    state_path = _make_state(
+        tmp_path,
+        session_id="sess-publish",
+        extra={"pr_number": None},
+    )
+    state_path.write_text(
+        state_path.read_text(encoding="utf-8") + "graph_node_id: x-bfbb\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.md"
+    report.write_text("# report\n", encoding="utf-8")
+    completed = SimpleNamespace(returncode=0, stdout="42\n")
+    current = SimpleNamespace(returncode=0, stdout="deadbeef0002\n")
+
+    with (
+        patch("fno.worker.review.subprocess.run", side_effect=[completed, current]),
+        patch("fno.config.load_settings") as load_settings,
+        patch("fno.paths.vault_root", return_value=tmp_path / "vault"),
+        patch("fno.review.artifact.publish_sigma_artifact") as publish,
+    ):
+        load_settings.return_value.project.id = "fno"
+        publish.return_value = SimpleNamespace(
+            current_path=tmp_path / "sigma.md",
+            published=True,
+            reason="published",
+            finding_count=0,
+        )
+        _publish_durable_sigma(
+            report,
+            state_path=state_path,
+            session_id="sess-publish",
+            reviewed_head="deadbeef0002",
+        )
+
+    assert publish.call_args.kwargs["pr_number"] == 42
+    assert publish.call_args.kwargs["current_head"] == "deadbeef0002"
+
+
+def test_shared_publisher_reports_missing_graph_node(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fno.worker.review import _publish_durable_sigma
+
+    state_path = _make_state(tmp_path, session_id="sess-publish")
+    report = tmp_path / "report.md"
+    report.write_text("# report\n", encoding="utf-8")
+
+    with (
+        patch("fno.worker.ship._read_graph_node_id", return_value=None),
+        patch("fno.worker.review.subprocess.run") as run,
+    ):
+        _publish_durable_sigma(
+            report,
+            state_path=state_path,
+            session_id="sess-publish",
+            reviewed_head="deadbeef0002",
+        )
+
+    run.assert_not_called()
+    assert "durable sigma artifact skipped: graph node unavailable" in capsys.readouterr().err
+
 
 # ---- AC2-VERDICT-BLOCKED ----
+
 
 class TestWorkerReviewVerdictBlocked:
     """AC2-VERDICT-BLOCKED: critical finding -> verdict: blocked."""
@@ -208,13 +358,13 @@ class TestWorkerReviewVerdictBlocked:
         artifact_path = artifacts_dir / f"review-{session_id}.md"
         text = artifact_path.read_text(encoding="utf-8")
         rest = text[3:].lstrip("\n")
-        fm = yaml.safe_load(rest[:rest.find("\n---")])
+        fm = yaml.safe_load(rest[: rest.find("\n---")])
         assert fm["verdict"] == "blocked"
         assert fm["findings_critical"] >= 1
 
 
-
 # ---- AC2-VERDICT-READY ----
+
 
 class TestWorkerReviewVerdictReady:
     """AC2-VERDICT-READY: info-only findings -> verdict: ready-to-merge."""
@@ -238,8 +388,8 @@ class TestWorkerReviewVerdictReady:
         assert result["verdict"] == "ready-to-merge"
 
 
-
 # ---- AC2-CACHED ----
+
 
 class TestWorkerReviewCached:
     """AC2-CACHED: second call on same session+sha returns action=cached."""
@@ -268,7 +418,7 @@ class TestWorkerReviewCached:
             )
 
         # First call - runs workers
-        result1 = review(
+        review(
             diff_context="diff ...",
             state_path=state_path,
             artifacts_dir=artifacts_dir,
@@ -293,6 +443,49 @@ class TestWorkerReviewCached:
             f"Workers spawned again on cache hit: call_count={call_count} after first={first_call_count}"
         )
         assert result2["cached"] is True
+
+    def test_cache_hit_publication_failure_does_not_rerun_panel(
+        self, tmp_path: Path
+    ) -> None:
+        from fno.worker.review import review
+
+        session_id = "sess-cache-publish-failure"
+        state_path = _make_state(tmp_path, session_id=session_id)
+        artifacts_dir = tmp_path / "artifacts"
+        call_count = 0
+
+        async def counting_runner(agent: str, prompt: str, diff: str) -> WorkerOutcome:
+            nonlocal call_count
+            call_count += 1
+            return WorkerOutcome(
+                agent=agent,
+                ok=True,
+                findings=[Finding(agent=agent, severity="info", message="ok")],
+            )
+
+        with patch("fno.worker.review._publish_durable_sigma") as publish:
+            review(
+                diff_context="diff",
+                state_path=state_path,
+                artifacts_dir=artifacts_dir,
+                session_id=session_id,
+                runner=counting_runner,
+                git_sha_value="head-a",
+            )
+            first_call_count = call_count
+            publish.side_effect = RuntimeError("artifact publication failed")
+
+            with pytest.raises(RuntimeError, match="artifact publication failed"):
+                review(
+                    diff_context="diff",
+                    state_path=state_path,
+                    artifacts_dir=artifacts_dir,
+                    session_id=session_id,
+                    runner=counting_runner,
+                    git_sha_value="head-a",
+                )
+
+        assert call_count == first_call_count
 
     def test_no_cache_flag_bypasses_cache(self, tmp_path: Path) -> None:
         from fno.worker.review import review
@@ -337,6 +530,7 @@ class TestWorkerReviewCached:
 
 # ---- C1: scorer resolver is consulted and its scorer is invoked ----
 
+
 class TestC1ScorerResolver:
     """C1: score_findings must use default resolver (batched claude -p when
     present, pass-through otherwise). The worker must not bypass the resolver.
@@ -373,7 +567,9 @@ class TestC1ScorerResolver:
             mock_resolve.assert_called()
 
         # sentinel scorer must have been invoked on the findings
-        assert len(sentinel_calls) > 0, "sentinel scorer was never called - scorer kwarg was hardcoded"
+        assert len(sentinel_calls) > 0, (
+            "sentinel scorer was never called - scorer kwarg was hardcoded"
+        )
 
     def test_without_claude_binary_uses_pass_through(self, tmp_path: Path) -> None:
         """When `claude` is not on PATH, the pass-through path is selected."""
@@ -385,6 +581,7 @@ class TestC1ScorerResolver:
 
         with patch("shutil.which", return_value=None):
             import fno.review.confidence_scorer as cs_mod
+
             cs_mod._no_claude_warned = False
             result = review(
                 diff_context="diff ...",
@@ -398,7 +595,9 @@ class TestC1ScorerResolver:
         # Should complete without error, using pass-through
         assert result["action"] == "reviewed"
 
-    def test_end_to_end_claude_subprocess_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_end_to_end_claude_subprocess_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Full path: review() -> score_findings() -> _resolve_default_scorer()
         -> claude_scorer_batch -> subprocess.run('claude', '-p').
 
@@ -408,11 +607,15 @@ class TestC1ScorerResolver:
         """
         import json as _json
 
+        import fno.llm  # noqa: F401 - capture the real runner before patching it
         from fno.worker.review import review
 
         # Override the autouse fixture's shutil.which stub so `claude` appears
         # available; monkeypatch teardown restores the autouse stub after.
-        monkeypatch.setattr("shutil.which", lambda name, *a, **k: "/usr/local/bin/claude" if name == "claude" else None)
+        monkeypatch.setattr(
+            "shutil.which",
+            lambda name, *a, **k: "/usr/local/bin/claude" if name == "claude" else None,
+        )
 
         session_id = "sess-c1-e2e-subprocess"
         state_path = _make_state(tmp_path, session_id=session_id)
@@ -458,6 +661,7 @@ class TestC1ScorerResolver:
 
 # ---- H2: all-findings-below-threshold produces done-with-concerns ----
 
+
 class TestH2ThresholdDrop:
     """H2: when all raw findings drop below threshold, verdict must be done-with-concerns."""
 
@@ -476,7 +680,9 @@ class TestH2ThresholdDrop:
         ]
 
         async def high_findings_runner(agent: str, prompt: str, diff: str) -> WorkerOutcome:
-            return WorkerOutcome(agent=agent, ok=True, findings=critical_findings, duration_seconds=0.01)
+            return WorkerOutcome(
+                agent=agent, ok=True, findings=critical_findings, duration_seconds=0.01
+            )
 
         # Scorer that always returns 50 (below threshold of 80) - all findings dropped
         low_scorer = MagicMock(return_value=50)
@@ -502,8 +708,54 @@ class TestH2ThresholdDrop:
         )
         assert result["verdict"] == "done-with-concerns"
 
+    def test_cache_hit_preserves_threshold_drop_concern(self, tmp_path: Path) -> None:
+        from fno.worker.review import review
+
+        state_path = _make_state(tmp_path, session_id="sess-h2-cache")
+        artifacts_dir = tmp_path / "artifacts"
+        call_count = 0
+
+        async def low_confidence_runner(
+            agent: str, prompt: str, diff: str
+        ) -> WorkerOutcome:
+            nonlocal call_count
+            call_count += 1
+            return WorkerOutcome(
+                agent=agent,
+                ok=True,
+                findings=[Finding(agent=agent, severity="high", message="maybe")],
+            )
+
+        with patch(
+            "fno.review.confidence_scorer._resolve_default_scorer",
+            return_value=MagicMock(return_value=50),
+        ):
+            first = review(
+                diff_context="diff",
+                state_path=state_path,
+                artifacts_dir=artifacts_dir,
+                session_id="sess-h2-cache",
+                runner=low_confidence_runner,
+                git_sha_value="head-h2",
+            )
+            first_call_count = call_count
+            second = review(
+                diff_context="diff",
+                state_path=state_path,
+                artifacts_dir=artifacts_dir,
+                session_id="sess-h2-cache",
+                runner=low_confidence_runner,
+                git_sha_value="head-h2",
+            )
+
+        assert first["verdict"] == "done-with-concerns"
+        assert second["action"] == "cached"
+        assert second["verdict"] == "done-with-concerns"
+        assert call_count == first_call_count
+
 
 # ---- H6: worker layer does not call write_cache ----
+
 
 class TestH6NoDuplicateCacheWrite:
     """H6: worker layer must not write cache (orchestrator owns writes)."""
@@ -578,6 +830,7 @@ class TestH6NoDuplicateCacheWrite:
 
 # ---- C2: default runner construction + PID tracking ----
 
+
 class TestC2DefaultRunnerConstruction:
     """C2: when runner=None, review() must construct a default runner that
     tracks PIDs and passes the SAME tracked_pids list to orchestrate_review_parallel.
@@ -593,15 +846,18 @@ class TestC2DefaultRunnerConstruction:
 
         def fake_make_async_runner(*, worker_pids, timeout=None, adapter=None):
             spy_calls.append({"worker_pids": worker_pids})
+
             # Return an async runner that returns quickly
             async def _runner(agent: str, prompt: str, diff: str):
                 from fno.review.orchestrator import WorkerOutcome, Finding
+
                 return WorkerOutcome(
                     agent=agent,
                     ok=True,
                     findings=[Finding(agent=agent, severity="info", message="ok")],
                     duration_seconds=0.01,
                 )
+
             return _runner
 
         session_id = "sess-c2-default"
@@ -644,28 +900,31 @@ class TestC2DefaultRunnerConstruction:
 
             async def _runner(agent: str, prompt: str, diff: str):
                 from fno.review.orchestrator import WorkerOutcome, Finding
+
                 return WorkerOutcome(
                     agent=agent,
                     ok=True,
                     findings=[Finding(agent=agent, severity="info", message="ok")],
                     duration_seconds=0.01,
                 )
-            return _runner
 
-        original_orchestrate = None
+            return _runner
 
         def fake_orchestrate(diff_context, *, runner, worker_pids=None, **kwargs):
             captured["orchestrate_pids"] = worker_pids
             # Call original to keep side-effects (artifact writing etc.)
             from fno.review.orchestrator import orchestrate_review_parallel as real_fn
+
             return real_fn(diff_context, runner=runner, worker_pids=worker_pids, **kwargs)
 
         session_id = "sess-c2-identity"
         state_path = _make_state(tmp_path, session_id=session_id)
         artifacts_dir = tmp_path / "artifacts"
 
-        with patch("fno.worker.review.make_async_runner", side_effect=fake_make_async_runner), \
-             patch("fno.worker.review.orchestrate_review_parallel", side_effect=fake_orchestrate):
+        with (
+            patch("fno.worker.review.make_async_runner", side_effect=fake_make_async_runner),
+            patch("fno.worker.review.orchestrate_review_parallel", side_effect=fake_orchestrate),
+        ):
             review_mod.review(
                 diff_context="diff ...",
                 state_path=state_path,
@@ -691,9 +950,12 @@ class TestC2DefaultRunnerConstruction:
 
         def fake_make_async_runner(*, worker_pids, timeout=None, adapter=None):
             spy_calls.append(True)
+
             async def _runner(agent, prompt, diff):
                 from fno.review.orchestrator import WorkerOutcome
+
                 return WorkerOutcome(agent=agent, ok=True, duration_seconds=0.01)
+
             return _runner
 
         session_id = "sess-c2-explicit"
@@ -718,6 +980,7 @@ class TestC2DefaultRunnerConstruction:
 
 # ---- C3: make_async_runner call-site correctness (no TypeError) ----
 
+
 class TestC3MakeAsyncRunnerCallSite:
     """C3: review() must call make_async_runner with keyword-only args.
 
@@ -741,7 +1004,7 @@ class TestC3MakeAsyncRunnerCallSite:
 
         # Fake orchestrate that returns immediately without spawning workers
         def fake_orchestrate(diff_context, *, runner, worker_pids=None, **kwargs):
-            from fno.review.orchestrator import orchestrate_review_parallel as real_fn
+
             # Return a minimal result without actually calling anything
             return OrchestratorResult(
                 findings=[],
@@ -766,6 +1029,4 @@ class TestC3MakeAsyncRunnerCallSite:
                 no_cache=True,
             )
 
-        assert result["action"] == "reviewed", (
-            f"Expected action=reviewed, got {result['action']!r}"
-        )
+        assert result["action"] == "reviewed", f"Expected action=reviewed, got {result['action']!r}"

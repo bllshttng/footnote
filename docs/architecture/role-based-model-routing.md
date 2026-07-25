@@ -126,3 +126,19 @@ The built-in `zai` provider already routes the background (haiku) tier to the ch
 ## Scope and deferrals
 
 Wires native per-spawn routing for the claude lane (Anthropic-protocol providers) with the fail-safe fallback and the hard guard. `extra_env` is the escape hatch for differentiated tiers (e.g. a cheaper `ANTHROPIC_DEFAULT_HAIKU_MODEL`). Deferred: a codex/openai lane that consumes the same provider registry over the OpenAI-protocol endpoints; claude-code-router (CCR) for routing an *in-session* subagent to a non-Anthropic provider; a config UI for editing roles (hand-edit is acceptable first). `consolidate` is already served out-of-repo by modelkit/memdream, which calls z.ai directly.
+
+## Sigma panel routes
+
+`review.agent_routes` optionally assigns a complete `harness`, route `provider`, and `model` tuple to a named sigma reviewer.
+Each configured reviewer starts its own named session, so a six-agent panel pays six SessionStart preambles.
+At the measured 50–60K tokens per preamble, routing all six agents costs roughly 300–360K tokens before review work; use whole-session routing when the full panel should share one model.
+
+```yaml
+config:
+  review:
+    agent_routes:
+      code_reviewer:
+        harness: claude
+        provider: zai
+        model: glm-5.2
+```

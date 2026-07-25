@@ -48,6 +48,15 @@ DEFAULT_ALTERNATE_AGENTS: frozenset[str] = frozenset(
 
 
 @dataclass(frozen=True)
+class RouteRef:
+    """A complete explicit harness/provider/model route."""
+
+    harness: str
+    provider: str
+    model: str
+
+
+@dataclass(frozen=True)
 class ResolvedProvider:
     """The provider one review agent resolves to, plus attribution context.
 
@@ -61,6 +70,7 @@ class ResolvedProvider:
     provider: str
     degraded: bool = False
     reason: str | None = None
+    route: RouteRef | None = None
 
 
 def _requested_for(

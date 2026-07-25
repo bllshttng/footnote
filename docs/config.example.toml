@@ -155,6 +155,8 @@ reviewers = []
 external_reviewers = []
 # Per-agent provider routing for the cross-model review panel.
 agent_providers = {}
+# Opt-in per-agent harness/provider/model routes for named sigma sessions.
+agent_routes = {}
 
 [review.cross_model]
 # Enable cross-model (codex/gemini) second-opinion review.

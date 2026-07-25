@@ -54,6 +54,8 @@ def test_ac5_err_git_diff_failure_exits_2(
 
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
         captured.append(list(cmd))
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return _completed(rc=0, stdout="head-a\n")
         return _completed(
             rc=128,
             stdout="",
@@ -90,8 +92,10 @@ def test_ac5_err_git_diff_failure_exits_2(
         f"expected git stderr substring in output; got "
         f"stdout={result.stdout!r} stderr={result.stderr!r}"
     )
-    assert captured, "subprocess.run should have been called for `git diff HEAD~1`"
-    assert captured[0][:3] == ["git", "diff", "HEAD~1"]
+    assert captured == [
+        ["git", "rev-parse", "HEAD"],
+        ["git", "diff", "head-a~1", "head-a"],
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +114,12 @@ def test_ac5_hp_git_diff_success_proceeds(
 
     diff_text = "diff --git a/foo.py b/foo.py\n+x\n"
 
+    commands: list[list[str]] = []
+
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        commands.append(list(cmd))
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return _completed(rc=0, stdout="head-a\n")
         return _completed(rc=0, stdout=diff_text, stderr="")
 
     monkeypatch.setattr(_subprocess, "run", fake_run)
@@ -125,8 +134,10 @@ def test_ac5_hp_git_diff_success_proceeds(
         artifacts_dir: Path | None,
         session_id: str | None,
         no_cache: bool,
+        git_sha_value: str,
     ) -> dict[str, Any]:
         captured_diff["value"] = diff_context
+        captured_diff["head"] = git_sha_value
         return {
             "action": "reviewed",
             "verdict": "ready-to-merge",
@@ -144,6 +155,11 @@ def test_ac5_hp_git_diff_success_proceeds(
         f"output={result.output!r}"
     )
     assert captured_diff.get("value") == diff_text
+    assert captured_diff.get("head") == "head-a"
+    assert commands == [
+        ["git", "rev-parse", "HEAD"],
+        ["git", "diff", "head-a~1", "head-a"],
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -163,13 +179,16 @@ def test_ac5_ui_diff_override_unchanged(
     diff_file = tmp_path / "patch.diff"
     diff_file.write_text("diff --git a/x b/x\n+y\n", encoding="utf-8")
 
-    # subprocess.run should NOT be called at all in this path.
-    def must_not_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess:
-        raise AssertionError(
-            "subprocess.run should not run when --diff is provided"
-        )
+    commands: list[list[str]] = []
 
-    monkeypatch.setattr(_subprocess, "run", must_not_run)
+    def pinned_head_only(
+        cmd: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess:
+        commands.append(list(cmd))
+        assert cmd == ["git", "rev-parse", "HEAD"]
+        return _completed(rc=0, stdout="head-a\n")
+
+    monkeypatch.setattr(_subprocess, "run", pinned_head_only)
     monkeypatch.setattr(cli_module, "subprocess", _subprocess, raising=False)
 
     captured_diff: dict[str, str] = {}
@@ -181,8 +200,10 @@ def test_ac5_ui_diff_override_unchanged(
         artifacts_dir: Path | None,
         session_id: str | None,
         no_cache: bool,
+        git_sha_value: str,
     ) -> dict[str, Any]:
         captured_diff["value"] = diff_context
+        captured_diff["head"] = git_sha_value
         return {
             "action": "reviewed",
             "verdict": "ready-to-merge",
@@ -197,3 +218,5 @@ def test_ac5_ui_diff_override_unchanged(
     result = runner.invoke(cli_module.app, ["review", "--diff", str(diff_file)])
     assert result.exit_code == 0
     assert captured_diff["value"] == diff_file.read_text(encoding="utf-8")
+    assert captured_diff["head"] == "head-a"
+    assert commands == [["git", "rev-parse", "HEAD"]]

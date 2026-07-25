@@ -271,18 +271,23 @@ class TestFireSkill:
         assert captured.get("timeout") is not None
         assert captured["timeout"] > 0
 
-    def test_explicit_timeout_overrides_verb_default(self, tmp_path):
-        """x-97d8: a caller-supplied timeout_s wins over the per-verb default."""
+    def test_explicit_timeout_bounds_child_before_wrapper(self, tmp_path):
+        """The child deadline fires before the wrapper can orphan its worker."""
         from fno.pr_watch._dispatch import fire_skill
 
         captured = {}
 
         def stub_runner(cmd, **kw):
+            captured["cmd"] = cmd
             captured.update(kw)
             return _claude_ok_response()
 
         fire_skill("check", 1, tmp_path, runner=stub_runner, timeout_s=12.0)
-        assert captured["timeout"] == 12.0
+        child_timeout = float(
+            captured["cmd"][captured["cmd"].index("--timeout") + 1]
+        )
+        assert child_timeout == 12.0
+        assert captured["timeout"] > child_timeout
 
     def test_runner_timeout_is_failure(self, tmp_path):
         """x-97d8: a real TimeoutExpired now reaches the (previously dead)

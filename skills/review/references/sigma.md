@@ -118,6 +118,15 @@ Load [agent-selection.md](agent-selection.md) for:
 2. Change type detection (frontend/backend/full-stack/docs-only)
 3. Agent selection based on both dimensions
 
+Before dispatch, pin the revision that every reviewer and the durable artifact describe:
+
+```bash
+REVIEWED_HEAD=$(git rev-parse HEAD) || exit 1
+```
+
+Do not resolve this value after the panel runs.
+If the head advances during review, Step 6d retains the completed round without replacing the current alias.
+
 ### Step 2: Run Base Agents (MANDATORY - Always Run)
 
 Always run `silent-failure-hunter` and `code-reviewer` regardless of change type.
@@ -173,11 +182,14 @@ gh pr view --json state,isDraft --jq '{state: .state, isDraft: .isDraft}'
 ```
 - If PR is now closed/merged → skip posting, report locally only
 - If PR is now a draft → skip posting, report locally only
-- If Claude already commented → skip posting to avoid duplicates
+
+Do not use the existence of any prior Claude-authored comment as a dedup signal.
+After the report is durable, deduplicate only on the explicit marker for this reviewed head and round.
 
 ### Step 6: Generate Report (MANDATORY)
 
 Load [report-template.md](report-template.md) for the structured output format.
+Render the complete report once to a temporary file as well as to the user-facing response; this exact file is the input to the shared artifact writer in Step 6d.
 
 #### Goal Relevance (if config.toml has goals)
 
@@ -213,6 +225,31 @@ This is what lets a solo / claude-only harness (no GitHub App bot) express a rea
 - **Never emit on a blocking finding.** A failing or blocked panel emits nothing; absence holds the gate (fail closed).
 - **Head-pinned.** The helper stamps the current HEAD. If new commits land after this pass, re-run sigma — the old attestation no longer counts (loop-check discards a `head_sha` that is not the current HEAD).
 - **Advisory when not gating.** If no `reviewers` entry names `sigma`, the event is harmless telemetry; loop-check only reads it when the gate is configured.
+
+### Step 6d: Persist the report before deciding whether to comment
+
+Every completed panel writes the node-bound artifact, including draft, closed, merged, duplicate-comment, and comment-failure paths.
+Resolve the reviewed head before dispatch and retain it as `REVIEWED_HEAD`; resolve the current head again immediately before publication so a late review of an older head is retained under `rounds/` without displacing `sigma.md`.
+
+```bash
+NODE_ID=$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | xargs)
+PR_NUMBER=$(gh pr view --json number --jq .number)
+CURRENT_HEAD=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+ROUND_ID="${REVIEWED_HEAD:0:12}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+fno review --publish-sigma "$REPORT_FILE" \
+  --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" \
+  --sigma-head "$REVIEWED_HEAD" --sigma-current-head "$CURRENT_HEAD" \
+  --sigma-round "$ROUND_ID"
+```
+
+Treat a publication error as a failed review handoff and surface it; never claim the report is durable.
+The command prints the primary path, reviewed head, and whether compare-and-publish accepted it.
+
+### Step 6e: Project the durable report to the PR when eligible
+
+For an open, non-draft PR, search issue comments for `<!-- fno-sigma head=$REVIEWED_HEAD round=$ROUND_ID -->`.
+Post exactly one comment containing the report and that marker when it is absent; a retry with the same marker posts nothing, while a new head or explicit new round is not suppressed by an older local-user comment.
+The artifact remains authoritative if this comment call fails.
 
 ## What We DON'T Check
 
@@ -270,7 +307,7 @@ This is what lets a solo / claude-only harness (no GitHub App bot) express a rea
 - New UI states may need new error handling paths
 
 <!--
-  Cross-model review routing (config.review.cross_model / agent_providers) is
+  Cross-model review routing (config.review.agent_routes / legacy agent_providers) is
   documented in the "Cross-Model Review Routing" section below. It is resolved
   by `fno review --print-providers`, the SAME resolver the `fno review` panel
   uses, so /review sigma and fno review never drift.
@@ -282,8 +319,8 @@ Post-review, verdicts inform the operator and the PR description. Deferred findi
 (items the panel flagged but chose not to block on) go into the PR body or the plan's
 COMPLETION.md so they surface to human reviewers rather than disappearing.
 
-There is no gate artifact to write and no `fno gate` call to make. The review happened;
-the six-agent panel output is the proof. The PR description carries the verdict forward.
+The durable node-bound sigma artifact is the primary carrier; the PR comment is its human-facing projection and the attestation is separate gate evidence.
+The PR-owning `/fno:pr check` session consumes the artifact and owns all implementation decisions.
 
 **When the approach is unsalvageable** - wrong architecture, a cascading design error,
 patch-on-patch accumulation where each fix spawns the next - the panel may emit the
@@ -295,33 +332,31 @@ recommendation: RECOMMEND RESTART". Honor sequence:
 
 ## Cross-Model Review Routing (optional)
 
-By default every panel agent runs on Claude (via `Task()`). An operator can route
-specific agents to a different coding model (`codex` / `gemini`) for a genuine
-cross-model read by setting `config.review.cross_model` / `config.review.agent_providers`
-in `.fno/config.toml` - the SAME config the internal `fno review` panel honors.
-When neither is set, this whole section is a no-op and the panel is byte-for-byte
-today's all-Claude run.
+By default every panel agent runs through `Task()` on the invoking harness.
+An operator can route specific agents through a full harness, route-provider, and model tuple for a genuine cross-model read by setting `config.review.agent_routes`.
+Legacy `config.review.cross_model` and `config.review.agent_providers` remain supported.
+Configure them in `.fno/config.toml`, which is the same config the internal `fno review` panel honors.
+When none of these routing options is set, this whole section is a no-op and the panel is byte-for-byte today's harness-local run.
 
 ```yaml
 config:
   review:
     cross_model:
       enabled: true        # turn the correctness agents cross-model by default
-    agent_providers:       # optional explicit pins (override the default)
-      code_reviewer: codex
-      silent_failure_hunter: gemini
+    agent_routes:          # explicit opt-in; each entry creates one named session
+      code_reviewer:
+        harness: claude
+        provider: zai
+        model: glm-5.2
 ```
 
-Agent names are the orchestrator's underscore form (`code_reviewer`,
-`silent_failure_hunter`, `type_design_analyzer`, `integration_test_analyzer`,
-`ux_flow_tester`, `multi_device_checker`) - NOT the hyphenated `Task()`
-`subagent_type` (`code-reviewer`). The mapping is just `_`<->`-`.
+Agent names are the orchestrator's underscore form (`code_reviewer`, `silent_failure_hunter`, `type_design_analyzer`, `integration_test_analyzer`, `ux_flow_tester`, `multi_device_checker`), not the hyphenated `Task()` `subagent_type` (`code-reviewer`).
+The mapping is just `_`<->`-`.
 
 ### Step R1: resolve routing (do NOT reimplement it)
 
-Before dispatching the panel, ask the CLI for the per-agent routing. This is the
-ONE resolver - the same `provider_resolution` path `fno review` dispatches through -
-so `/review sigma` and `fno review` never disagree:
+Before dispatching the panel, ask the CLI for the per-agent routing.
+This is the one resolver, using the same `provider_resolution` path that `fno review` dispatches through, so `/review sigma` and `fno review` never disagree:
 
 ```bash
 # --session-id is optional; pass it when running inside a target session so the
@@ -335,50 +370,68 @@ if [ -n "${SESSION_ID:-}" ]; then
 else
   ROUTING="$(fno review --print-providers)"
 fi
+INVOKING_HARNESS="$(fno whoami 2>/dev/null | sed -n 's/^provider:[[:space:]]*//p' | head -1 | xargs)"
+[ -n "$INVOKING_HARNESS" ] || INVOKING_HARNESS=unknown
 ```
 
-`$ROUTING` is JSON `{ "<agent_underscore>": {"provider": "claude|codex|gemini",
-"degraded": bool, "reason": str|null}, ... }`, or `{}` when cross-model is OFF.
+`$ROUTING` includes runtime harness, route provider, effective model, degraded state, and reason, or `{}` when all routing features are off.
+`INVOKING_HARNESS` is the observed runtime for a `Task()` dispatch; a requested provider is not execution evidence.
 
 ### Step R2: dispatch each agent by its resolved provider
 
-For each panel agent, read `provider` from `$ROUTING` (default `claude` when the
-key is absent or `$ROUTING` is `{}`):
+For each panel agent, keep the requested route from `$ROUTING` separate from the observed runtime that returns the result:
 
-- **`claude`** -> dispatch via `Task(subagent_type="<agent-hyphen>", prompt=...)`
-  exactly as today. This is the only path the headless megawalk Driver ever takes
-  (megawalk does not set cross-model), so the HEADLESS-SAFE invariant holds.
-- **`codex` / `gemini`** -> run a synchronous one-shot, the SAME lane `/review peer`
-  uses. Write the agent's review brief to a file (shell-safe), then YOU run it
-  (never the user) so the reply returns in-context:
+- **routing disabled (`$ROUTING` is `{}`)** -> dispatch via `Task(subagent_type="<agent-hyphen>", prompt=...)` exactly as today and record `INVOKING_HARNESS` as the observed runtime.
+  This is the only path the headless megawalk Driver ever takes because megawalk does not set cross-model, so the HEADLESS-SAFE invariant holds.
+- **legacy provider equals `INVOKING_HARNESS`** -> dispatch via `Task()` and record `INVOKING_HARNESS`, never the resolver label, as the observed runtime.
+- **legacy provider differs from `INVOKING_HARNESS`** -> run the synchronous one-shot spawn below with `--harness "$PROVIDER"`; a harness-local `Task()` cannot satisfy a cross-harness route.
+- **explicit route tuple** -> dispatch a plugin-qualified named headless session through the existing spawn surface and preserve the strict JSON response contract:
 
   ```bash
-  fno agents spawn --harness "$PROVIDER" --once -t 300 --name "sigma-$AGENT" "$(cat "$BRIEF")"
+  fno agents spawn --harness "$HARNESS" --substrate headless \
+    --agent "fno:$AGENT_HYPHEN" --route "$ROUTE_PROVIDER/$MODEL" \
+    -t 600 "$(cat "$BRIEF")"
   ```
 
-  Judge by exit code + emptiness only: exit 0 + non-empty stdout -> fold those
-  findings into the report; **non-zero or empty (or the daemon/binary is missing)
-  -> fall back to `Task()` on Claude** for that agent and note the fallback. NEVER
-  fabricate findings to fill the gap.
+  Judge the routed result by the same exit-code and non-empty-output contract as the legacy one-shot branch.
+  On a non-zero exit, empty output, or unavailable route, fall back to `Task()` on the invoking harness for that agent and record `INVOKING_HARNESS` plus its effective model when the runtime exposes one; otherwise record `unknown` rather than falsely retaining the requested routed model.
 
-- **`degraded: true`** (the resolver already returned `provider: claude` because no
-  alternate was available) -> dispatch on Claude and surface `reason` in the report
-  so the run reads as "cross-model unavailable: ran on claude" rather than silently
-  appearing cross-modeled.
+- **cross-harness legacy provider (`claude` / `codex` / `gemini`)** -> run a synchronous one-shot through the same lane `/review peer` uses.
+  Write the agent's review brief to a shell-safe file, then run it so the reply returns in-context; never ask the user to run it.
+
+  ```bash
+  if [ "$PROVIDER" = "claude" ]; then
+    fno agents spawn --harness claude --substrate headless \
+      --agent "fno:$AGENT_HYPHEN" -t 300 "$(cat "$BRIEF")"
+  else
+    fno agents spawn --harness "$PROVIDER" --once \
+      -t 300 --name "sigma-$AGENT" "$(cat "$BRIEF")"
+  fi
+  ```
+
+  Judge by exit code and emptiness only: exit 0 plus non-empty stdout folds those findings into the report.
+  A non-zero exit, empty output, unavailable daemon, or missing binary falls back to `Task()` on the invoking harness for that agent and records the fallback.
+  Never fabricate findings to fill the gap.
+
+- **`degraded: true`** -> use the resolved provider under the same rules and surface `reason` in the report so the run cannot silently appear cross-modeled.
+
+If the resolved provider differs from `INVOKING_HARNESS`, a `Task()` dispatch is a route violation rather than a successful cross-model run.
+Never copy the requested provider into the observed runtime.
+On fallback, record the requested route, the actual invoking harness, `unknown` when no model receipt exists, and a degraded reason.
 
 ### Finding attribution
 
-When a finding comes from a cross-modeled agent, tag it with the dispatching
-`provider` (from `$ROUTING`) next to the existing `agent` field. This is
-forensics-only: a HIGH finding is HIGH regardless of provider and triggers the
-same blocking behavior. The forensic `subagent_spawn` / `subagent_complete` event
-pair (via `dispatch_sigma_subagent` in `cli/src/fno/sigma_dispatch.py`) may still
-be emitted for non-Claude dispatches; it does not affect the verdict.
+Every per-agent row records the requested route, observed runtime harness, and effective model, including an `unknown` marker when the runtime exposes no model receipt.
+The requested route comes from resolution; the observed runtime comes only from the dispatch mechanism or its receipt.
+When a finding comes from a cross-modeled agent, tag it with the dispatching provider and effective model from runtime dispatch evidence next to the existing `agent` field.
+This is forensics-only: a HIGH finding is HIGH regardless of provider and triggers the same blocking behavior.
+The forensic `subagent_spawn` / `subagent_complete` event pair, emitted through `dispatch_sigma_subagent` in `cli/src/fno/sigma_dispatch.py`, may still be emitted for non-Claude dispatches; it does not affect the verdict.
+
+Each explicit tuple creates a separate SessionStart preamble.
+At the measured 50–60K tokens per start, explicitly routing all six agents costs roughly 300–360K preamble tokens; keep this opt-in and prefer whole-session routing when every agent should use the same model.
+A legacy cross-harness spawn has the same per-agent preamble cost: the default three-agent correctness subset costs roughly 150–180K tokens, while all six cost roughly 300–360K.
 
 ### Quick cross-model second opinion
 
-This routing cross-models the *panel*. For a fast one-shot read of a whole diff
-from another model without running the six-agent panel, use
-`/review peer [PR#|branch] [codex|gemini]` instead - it is advisory and never
-satisfies a `required_bots` gate.
-
+This routing cross-models the *panel*.
+For a fast one-shot read of a whole diff from another model without running the six-agent panel, use `/review peer [PR#|branch] [codex|gemini]` instead; it is advisory and never satisfies a `required_bots` gate.

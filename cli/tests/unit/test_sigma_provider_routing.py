@@ -8,11 +8,15 @@ equals what the ``build_review_runner`` panel resolves for the same inputs.
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.config import AgentRouteBlock
 from fno.review import provider_resolution as pr
 from fno.review.orchestrator import AGENT_NAMES
 from fno.worker import review as review_mod
@@ -125,6 +129,64 @@ def test_print_providers_flag_off_emits_empty_json(
     assert json.loads(result.stdout.strip()) == {}
 
 
+def test_review_cli_pins_pre_panel_head_to_the_diff(tmp_path: Path) -> None:
+    diff = tmp_path / "diff.txt"
+    diff.write_text("diff --git a/a b/a\n", encoding="utf-8")
+    reviewed = {
+        "action": "reviewed",
+        "verdict": "ready-to-merge",
+        "findings": 0,
+        "artifact_path": str(tmp_path / "artifact.md"),
+        "cached": False,
+    }
+    completed = SimpleNamespace(returncode=0, stdout="head-a\n", stderr="")
+    with (
+        patch("subprocess.run", return_value=completed),
+        patch("fno.worker.review.review", return_value=reviewed) as worker_review,
+    ):
+        result = CliRunner().invoke(
+            app,
+            [
+                "review",
+                "--diff",
+                str(diff),
+                "--session-id",
+                "sess",
+                "--state",
+                str(tmp_path / "state.md"),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert worker_review.call_args.kwargs["git_sha_value"] == "head-a"
+
+
+def test_worker_review_cli_uses_shared_pinned_input(tmp_path: Path) -> None:
+    reviewed = {
+        "action": "reviewed",
+        "verdict": "ready-to-merge",
+        "findings": 0,
+        "artifact_path": str(tmp_path / "artifact.md"),
+        "cached": False,
+    }
+    with (
+        patch(
+            "fno.worker.review.capture_review_input",
+            return_value=("head-a", "pinned diff"),
+        ) as capture,
+        patch("fno.worker.review.review", return_value=reviewed) as worker_review,
+    ):
+        result = CliRunner().invoke(
+            app,
+            ["worker", "review", "--state", str(tmp_path / "state.md")],
+        )
+
+    assert result.exit_code == 0, result.output
+    capture.assert_called_once_with(None)
+    assert worker_review.call_args.kwargs["diff_context"] == "pinned diff"
+    assert worker_review.call_args.kwargs["git_sha_value"] == "head-a"
+
+
 def test_print_providers_flag_emits_routing_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -142,6 +204,67 @@ def test_print_providers_flag_emits_routing_json(
     routing = json.loads(result.stdout.strip())
     assert routing["code_reviewer"]["provider"] == "codex"
     assert set(routing) == set(AGENT_NAMES)
+
+
+def test_print_providers_includes_explicit_route_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(review_mod, "_read_cross_model_config", lambda: ({}, False))
+    monkeypatch.setattr(
+        review_mod,
+        "_read_agent_routes_config",
+        lambda: {
+            "code_reviewer": AgentRouteBlock(
+                harness="claude", provider="zai", model="glm-5.2"
+            )
+        },
+    )
+    monkeypatch.setattr(pr, "load_implementer_provider", lambda _sid: "claude")
+    monkeypatch.setattr(pr, "available_provider_kinds", lambda: ["claude"])
+    monkeypatch.setattr(
+        "fno.agents.model_routing.resolve_explicit_route",
+        lambda provider, model: {"ROUTE": f"{provider}/{model}"},
+    )
+
+    result = CliRunner().invoke(app, ["review", "--print-providers"])
+    assert result.exit_code == 0, result.output
+    route = json.loads(result.stdout)["code_reviewer"]
+    assert route == {
+        "provider": "claude",
+        "harness": "claude",
+        "route_provider": "zai",
+        "model": "glm-5.2",
+        "degraded": False,
+        "reason": None,
+    }
+
+
+def test_explicit_route_resolution_failure_degrades_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(review_mod, "_read_cross_model_config", lambda: ({}, False))
+    monkeypatch.setattr(
+        review_mod,
+        "_read_agent_routes_config",
+        lambda: {
+            "code_reviewer": AgentRouteBlock(
+                harness="claude", provider="zai", model="glm-5.2"
+            )
+        },
+    )
+    monkeypatch.setattr(pr, "load_implementer_provider", lambda _sid: "claude")
+    monkeypatch.setattr(pr, "available_provider_kinds", lambda: ["claude"])
+    monkeypatch.setattr(
+        "fno.agents.model_routing.resolve_explicit_route",
+        lambda _provider, _model: None,
+    )
+
+    routing = review_mod.panel_provider_routing("s")
+
+    route = routing["code_reviewer"]
+    assert route.provider == "claude"
+    assert route.degraded is True
+    assert route.reason == "zai/glm-5.2 unavailable: ran on claude"
 
 
 # ---- session resolution parity with the panel (Gemini HIGH: no drift) ----

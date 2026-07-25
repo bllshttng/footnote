@@ -175,6 +175,7 @@ FIELD_META: dict[str, Meta] = {
         question="Which external reviewer(s) should review your PRs (gemini/codex/none)?",
     ),
     "review.agent_providers": Meta("never", "Per-agent provider routing for the cross-model review panel."),
+    "review.agent_routes": Meta("never", "Opt-in per-agent harness/provider/model routes for named sigma sessions."),
     "review.cross_model.enabled": Meta("advanced", "Enable cross-model (codex/gemini) second-opinion review."),
     # --- config.target.* ---
     "target.dedupe_dead_duplicates": Meta("never", "Opt-in cleanup of provably-dead duplicate state files."),

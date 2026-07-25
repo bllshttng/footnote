@@ -35,13 +35,14 @@ def _count_by(findings: list[Finding], severity: str) -> int:
 def _provider_tag(outcome) -> str:
     """Inline provider/model attribution for a per-agent line (ab-6c8f4c61).
 
-    Empty when no provider is set (all-claude OFF path) so output is unchanged.
+    Legacy runs without a receipt are explicit as ``claude/unknown`` rather than
+    being visually indistinguishable from a routed-model run.
     """
-    provider = getattr(outcome, "provider", None)
-    if not provider:
-        return ""
-    model = getattr(outcome, "model", None)
-    return f" [{provider}/{model}]" if model else f" [{provider}]"
+    provider = getattr(outcome, "provider", None) or "claude"
+    route_provider = getattr(outcome, "route_provider", None)
+    model = getattr(outcome, "model", None) or "unknown"
+    route = f"/{route_provider}" if route_provider else ""
+    return f" [{provider}{route}/{model}]"
 
 
 def choose_verdict(
@@ -126,7 +127,17 @@ def render_artifact_markdown(
 
     # Cross-model cost / coverage line (OQ2). Only when a run was attributed to
     # any provider (cross-model engaged); the all-claude OFF path adds nothing.
-    used = sorted({p for o in result.outcomes if (p := getattr(o, "provider", None))})
+    used = sorted(
+        {
+            identity
+            for outcome in result.outcomes
+            for identity in (
+                getattr(outcome, "provider", None),
+                getattr(outcome, "route_provider", None),
+            )
+            if identity
+        }
+    )
     if used:
         non_claude = [p for p in used if p != "claude"]
         if non_claude:

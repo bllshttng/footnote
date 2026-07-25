@@ -7,13 +7,11 @@ TDD sequence:
 
 from __future__ import annotations
 
-import dataclasses
-import json
 import os
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
+
 
 from fno.review.orchestrator import (
     AGENT_NAMES,
@@ -359,6 +357,45 @@ class TestFindingsRoundTrip:
         assert reconstructed.workers_completed == result.workers_completed
         assert reconstructed.workers_failed == result.workers_failed
 
+    def test_worker_outcomes_round_trip_with_effective_route(self) -> None:
+        from fno.review.cache import build_cache_body, reconstruct_result
+
+        finding = _make_finding()
+        outcome = WorkerOutcome(
+            agent="code_reviewer",
+            ok=True,
+            findings=[finding],
+            duration_seconds=2.75,
+            provider="claude",
+            route_provider="zai",
+            model="glm-5.2",
+            note="pinned session",
+        )
+        result = OrchestratorResult(
+            findings=[finding],
+            workers_completed=1,
+            workers_failed=0,
+            suspicious=False,
+            duration_seconds=2.75,
+            outcomes=[outcome],
+        )
+
+        restored = reconstruct_result(
+            build_cache_body("key", "session", "head", result)
+        )
+
+        assert restored.outcomes == [outcome]
+
+    def test_legacy_body_without_outcomes_is_a_cache_miss(self) -> None:
+        from fno.review.cache import build_cache_body, reconstruct_result
+
+        legacy = build_cache_body("key", "session", "head", _make_result()).split(
+            "# Outcomes (JSON)", 1
+        )[0]
+
+        with pytest.raises(ValueError, match="outcomes"):
+            reconstruct_result(legacy)
+
 
 # ---------------------------------------------------------------------------
 # Integration tests (AC2-*)
@@ -369,7 +406,6 @@ class TestCacheIntegration:
 
     def _make_async_runner(self, call_log: list[str]):
         """Returns an async runner that records which agents are called."""
-        import asyncio
 
         async def runner(agent: str, prompt: str, diff: str) -> WorkerOutcome:
             call_log.append(agent)
@@ -507,8 +543,7 @@ class TestCacheIntegration:
         self, tmp_path: Path
     ) -> None:
         """Bad runs (workers_failed > 0) must NOT be written to cache."""
-        import asyncio
-        from fno.review.cache import cache_key, cache_path, prompt_hash, read_cache
+        from fno.review.cache import cache_key, prompt_hash, read_cache
         from fno.review.orchestrator import orchestrate_review_parallel
 
         prompts = _make_prompts()
@@ -545,8 +580,7 @@ class TestCacheIntegration:
         self, tmp_path: Path
     ) -> None:
         """Suspicious runs (all-clean panel) must NOT be written to cache."""
-        import asyncio
-        from fno.review.cache import cache_key, cache_path, prompt_hash, read_cache
+        from fno.review.cache import cache_key, prompt_hash, read_cache
         from fno.review.orchestrator import orchestrate_review_parallel
 
         prompts = _make_prompts()

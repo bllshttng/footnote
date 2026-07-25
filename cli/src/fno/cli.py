@@ -14,6 +14,7 @@ mechanism and ``cli/benchmarks/measure_cli_help.py`` for measurement.
 Commands defined inline below (``help``, ``review``) stay eager
 because they live in this file and have no module body to defer.
 """
+
 from __future__ import annotations
 
 import json
@@ -51,66 +52,184 @@ from fno._lazy_group import make_lazy_group_cls
 # hidden; promotion to the menu is a deliberate, lint-gated act (see fno lint).
 LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] = {
     # Sub-apps (Typer instances) -----------------------------------------
-    "state":         ("fno.state.cli:cli",                 "manage fno state files", {"hidden": True}),
-    "target":        ("fno.target_cli:target_app",         "Target session bootstrap (fno target init)", {"hidden": True}),
-    "backlog":       ("fno.graph.cli:cli",                 "Feature graph management"),
-    "graph":         ("fno.graph.cli:cli",                 "Feature graph management", {"hidden": True}),
-    "runtime":       ("fno.runtime.cli:cli",               "manage runtime workers and worktrees", {"hidden": True}),
-    "worker":        ("fno.worker.cli:cli",                "manage delivery worker phases", {"hidden": True}),
-    "event":         ("fno.events.cli:cli",                "emit and audit events", {"hidden": True}),
-    "log":           ("fno.log_cmd:app",                   "Append a progress entry to the per-worktree agent-progress.jsonl", {"hidden": True}),
-    "reality-check": ("fno.reality_check.cli:cli",         "check external reality", {"hidden": True}),
-    "providers":     ("fno.adapters.providers.cli:cli",    "Manage provider records and active selection.", {"hidden": True}),
-    "mail":          ("fno.mail.cli:mail_app",             "Durable polled mailbox: send/unread/ack/reply/drain/status.", {"hidden": True}),
-    "mcp":           ("fno.mcp.cli:mcp_app",               "MCP sidecar client verbs (send an envelope to a channel).", {"hidden": True}),
-    "agents":        ("fno.agents.cli:agents_app",          "Cross-CLI agent dispatch (claude / codex / gemini)."),
-    "wake":          ("fno.wake.cli:wake_app",             "Wake-signal admin commands", {"hidden": True}),
-    "plan":          ("fno.plan:plan_app",                 "Plan frontmatter stamping (in-package)", {"hidden": True}),
-    "pr":            ("fno.pr:pr_app",                     "PR utilities (wraps scripts/lib/pr-*.sh)", {"hidden": True}),
-    "stub-manifest": ("fno.stub_manifest:stub_manifest_app", "Stub-manifest for contract-tier dependents (emit/validate/check-pr).", {"hidden": True}),
-    "status-fanout": ("fno.status_fanout:status_fanout_app", "Sweep events.jsonl and route status events to configured sinks (tick).", {"hidden": True}),
-    "bundle":        ("fno.bundle:bundle_app",             "Skill bundle build + lint.", {"hidden": True}),
-    "lint":          ("fno.lint_cli:app",                  "Repository lint checks", {"hidden": True}),
-    "claim":         ("fno.claims.cli:cli",                 "Work-claim coordination primitive", {"hidden": True}),
-    "carveout":      ("fno.carveout:carveout_app",          "Capture left-out work (deferred decisions, out-of-scope bugs) for retro-triage.", {"hidden": True}),
-    "annotate":      ("fno.annotate:annotate_app",           "Record an operator review finding against a node (add/list/resolve); gates loop-check.", {"hidden": True}),
-    "retro":         ("fno.retro.cli:retro_app",            "Consume retro-triage triggers; file left-out work as backlog nodes.", {"hidden": True}),
-    "think":         ("fno.provenance.cli:think_app",        "Context /think dispatch (explicit conversational verb).", {"hidden": True}),
-    "phase":         ("fno.phase:phase_app",               "Phase utilities (kill-check via the fno-agents binary)", {"hidden": True}),
-    "executor":      ("fno.executor:executor_app",         "Executor resolution (locked-decision parser + surface inference)", {"hidden": True}),
-    "config":        ("fno.config_cli:app",                "Configuration management"),
-    "notify":        ("fno.notify:notify_app",             "OS notification helper (in-package; macOS osascript / Linux notify-send)", {"hidden": True}),
-    "paths":         ("fno.paths_cli:app",                 "Path resolution helpers", {"hidden": True}),
-    "setup":         ("fno.setup_cli:app",                 "Interactive settings.yaml wizard"),
-    "tokens":        ("fno.tokens:app",                    "Token usage tracking", {"hidden": True}),
-    "codemap":       ("fno.codemap_cli:app",               "Codebase map management", {"hidden": True}),
-    "worktree":      ("fno.worktree_cli:app",              "Worktree management", {"hidden": True}),
-    "route":         ("fno.route_cli:route_app",           "Provider route lanes: ls / set / unset / env (GLM build lane).", {"hidden": True}),
-    "evals":         ("fno.evals.cli:evals_app",           "Golden-task efficacy evals (run / report / diff)", {"hidden": True}),
-    "observer":      ("fno.observer.cli:observer_app",      "Skill eval over a recorded corpus (sweep / replay).", {"hidden": True}),
-    "pr-watch":      ("fno.pr_watch.cli:cli",              "PR-state watcher: auto-fire /pr check + /pr merged for open-PR backlog nodes", {"hidden": True}),
-    "loops":         ("fno.loops:loops_app",                "Loop level config + pause-all kill switch (pause-all/resume-all/status/ls)", {"hidden": True}),
-    "skill-diff":    ("fno.skill_diff.cli:skill_diff_app",   "Skill-diff proposer: observer failure patterns -> cited SKILL.md diff -> PR (tick/reconcile).", {"hidden": True}),
+    "state": ("fno.state.cli:cli", "manage fno state files", {"hidden": True}),
+    "target": (
+        "fno.target_cli:target_app",
+        "Target session bootstrap (fno target init)",
+        {"hidden": True},
+    ),
+    "backlog": ("fno.graph.cli:cli", "Feature graph management"),
+    "graph": ("fno.graph.cli:cli", "Feature graph management", {"hidden": True}),
+    "runtime": ("fno.runtime.cli:cli", "manage runtime workers and worktrees", {"hidden": True}),
+    "worker": ("fno.worker.cli:cli", "manage delivery worker phases", {"hidden": True}),
+    "event": ("fno.events.cli:cli", "emit and audit events", {"hidden": True}),
+    "log": (
+        "fno.log_cmd:app",
+        "Append a progress entry to the per-worktree agent-progress.jsonl",
+        {"hidden": True},
+    ),
+    "reality-check": ("fno.reality_check.cli:cli", "check external reality", {"hidden": True}),
+    "providers": (
+        "fno.adapters.providers.cli:cli",
+        "Manage provider records and active selection.",
+        {"hidden": True},
+    ),
+    "mail": (
+        "fno.mail.cli:mail_app",
+        "Durable polled mailbox: send/unread/ack/reply/drain/status.",
+        {"hidden": True},
+    ),
+    "mcp": (
+        "fno.mcp.cli:mcp_app",
+        "MCP sidecar client verbs (send an envelope to a channel).",
+        {"hidden": True},
+    ),
+    "agents": ("fno.agents.cli:agents_app", "Cross-CLI agent dispatch (claude / codex / gemini)."),
+    "wake": ("fno.wake.cli:wake_app", "Wake-signal admin commands", {"hidden": True}),
+    "plan": ("fno.plan:plan_app", "Plan frontmatter stamping (in-package)", {"hidden": True}),
+    "pr": ("fno.pr:pr_app", "PR utilities (wraps scripts/lib/pr-*.sh)", {"hidden": True}),
+    "stub-manifest": (
+        "fno.stub_manifest:stub_manifest_app",
+        "Stub-manifest for contract-tier dependents (emit/validate/check-pr).",
+        {"hidden": True},
+    ),
+    "status-fanout": (
+        "fno.status_fanout:status_fanout_app",
+        "Sweep events.jsonl and route status events to configured sinks (tick).",
+        {"hidden": True},
+    ),
+    "bundle": ("fno.bundle:bundle_app", "Skill bundle build + lint.", {"hidden": True}),
+    "lint": ("fno.lint_cli:app", "Repository lint checks", {"hidden": True}),
+    "claim": ("fno.claims.cli:cli", "Work-claim coordination primitive", {"hidden": True}),
+    "carveout": (
+        "fno.carveout:carveout_app",
+        "Capture left-out work (deferred decisions, out-of-scope bugs) for retro-triage.",
+        {"hidden": True},
+    ),
+    "annotate": (
+        "fno.annotate:annotate_app",
+        "Record an operator review finding against a node (add/list/resolve); gates loop-check.",
+        {"hidden": True},
+    ),
+    "retro": (
+        "fno.retro.cli:retro_app",
+        "Consume retro-triage triggers; file left-out work as backlog nodes.",
+        {"hidden": True},
+    ),
+    "think": (
+        "fno.provenance.cli:think_app",
+        "Context /think dispatch (explicit conversational verb).",
+        {"hidden": True},
+    ),
+    "phase": (
+        "fno.phase:phase_app",
+        "Phase utilities (kill-check via the fno-agents binary)",
+        {"hidden": True},
+    ),
+    "executor": (
+        "fno.executor:executor_app",
+        "Executor resolution (locked-decision parser + surface inference)",
+        {"hidden": True},
+    ),
+    "config": ("fno.config_cli:app", "Configuration management"),
+    "notify": (
+        "fno.notify:notify_app",
+        "OS notification helper (in-package; macOS osascript / Linux notify-send)",
+        {"hidden": True},
+    ),
+    "paths": ("fno.paths_cli:app", "Path resolution helpers", {"hidden": True}),
+    "setup": ("fno.setup_cli:app", "Interactive settings.yaml wizard"),
+    "tokens": ("fno.tokens:app", "Token usage tracking", {"hidden": True}),
+    "codemap": ("fno.codemap_cli:app", "Codebase map management", {"hidden": True}),
+    "worktree": ("fno.worktree_cli:app", "Worktree management", {"hidden": True}),
+    "route": (
+        "fno.route_cli:route_app",
+        "Provider route lanes: ls / set / unset / env (GLM build lane).",
+        {"hidden": True},
+    ),
+    "evals": (
+        "fno.evals.cli:evals_app",
+        "Golden-task efficacy evals (run / report / diff)",
+        {"hidden": True},
+    ),
+    "observer": (
+        "fno.observer.cli:observer_app",
+        "Skill eval over a recorded corpus (sweep / replay).",
+        {"hidden": True},
+    ),
+    "pr-watch": (
+        "fno.pr_watch.cli:cli",
+        "PR-state watcher: auto-fire /pr check + /pr merged for open-PR backlog nodes",
+        {"hidden": True},
+    ),
+    "loops": (
+        "fno.loops:loops_app",
+        "Loop level config + pause-all kill switch (pause-all/resume-all/status/ls)",
+        {"hidden": True},
+    ),
+    "skill-diff": (
+        "fno.skill_diff.cli:skill_diff_app",
+        "Skill-diff proposer: observer failure patterns -> cited SKILL.md diff -> PR (tick/reconcile).",
+        {"hidden": True},
+    ),
     # Individual commands (plain functions wrapped as single-command apps) -
-    "whoami":        ("fno.agent.cli:whoami_command",       "Operating-stack summary: project + fleet + walker + session + provider."),
-    "status":        ("fno.agent.cli:status_command",       "Session gate satisfaction + bounded events tail + inconsistencies.", {"hidden": True}),
-    "doctor":        ("fno.doctor:doctor_command",         "Diagnose installed-vs-source fno skew (network-free)."),
-    "done":          ("fno.done.cli:done_command",         "Mark a backlog node as done.", {"hidden": True}),
-    "find":          ("fno.graph.cli:cmd_find",            "Fuzzy search across graph entries.", {"hidden": True}),
-    "research":      ("fno.research:research_command",     "Retrieve + store: ddgs backbone -> self-fetch -> sources.jsonl.", {"hidden": True}),
-    "scoreboard":    ("fno.scoreboard.cli:scoreboard_command", "Read-only telemetry: stop-cause, spend, autonomy, survival, coverage.", {"hidden": True}),
-    "new":           ("fno.graph.cli:cmd_new",             "Create a new graph entry without a plan file.", {"hidden": True}),
-    "test":          ("fno.test_cmd:test_command",         "Run pytest honestly: worktree-pinned PYTHONPATH, rtk-bypassed, real exit code."),
-    "update":        ("fno.update:update_command",         "Reinstall fno from its source directory."),
-    "upgrade":       ("fno.update:update_command",         "Reinstall fno from its source directory.", {"hidden": True}),
-    "restart":       ("fno.restart:restart_command",       "Restart running fno processes (agents daemon; mux with --mux) onto fresh builds.", {"hidden": True}),
-    "dispatch":      ("fno.dispatch:dispatch_app",         "Grab one ready node into a mux pane (mux leader+g shells `dispatch one`).", {"hidden": True}),
+    "whoami": (
+        "fno.agent.cli:whoami_command",
+        "Operating-stack summary: project + fleet + walker + session + provider.",
+    ),
+    "status": (
+        "fno.agent.cli:status_command",
+        "Session gate satisfaction + bounded events tail + inconsistencies.",
+        {"hidden": True},
+    ),
+    "doctor": (
+        "fno.doctor:doctor_command",
+        "Diagnose installed-vs-source fno skew (network-free).",
+    ),
+    "done": ("fno.done.cli:done_command", "Mark a backlog node as done.", {"hidden": True}),
+    "find": ("fno.graph.cli:cmd_find", "Fuzzy search across graph entries.", {"hidden": True}),
+    "research": (
+        "fno.research:research_command",
+        "Retrieve + store: ddgs backbone -> self-fetch -> sources.jsonl.",
+        {"hidden": True},
+    ),
+    "scoreboard": (
+        "fno.scoreboard.cli:scoreboard_command",
+        "Read-only telemetry: stop-cause, spend, autonomy, survival, coverage.",
+        {"hidden": True},
+    ),
+    "new": (
+        "fno.graph.cli:cmd_new",
+        "Create a new graph entry without a plan file.",
+        {"hidden": True},
+    ),
+    "test": (
+        "fno.test_cmd:test_command",
+        "Run pytest honestly: worktree-pinned PYTHONPATH, rtk-bypassed, real exit code.",
+    ),
+    "update": ("fno.update:update_command", "Reinstall fno from its source directory."),
+    "upgrade": (
+        "fno.update:update_command",
+        "Reinstall fno from its source directory.",
+        {"hidden": True},
+    ),
+    "restart": (
+        "fno.restart:restart_command",
+        "Restart running fno processes (agents daemon; mux with --mux) onto fresh builds.",
+        {"hidden": True},
+    ),
+    "dispatch": (
+        "fno.dispatch:dispatch_app",
+        "Grab one ready node into a mux pane (mux leader+g shells `dispatch one`).",
+        {"hidden": True},
+    ),
 }
 
 
 # ---------------------------------------------------------------------------
 # Helpers that defer their own imports until needed
 # ---------------------------------------------------------------------------
+
 
 def _load_v2_config_flag(repo_root: Path) -> bool:
     """Read ``v2_enabled`` from the project's config (config.toml, else legacy
@@ -137,6 +256,7 @@ def _load_v2_config_flag(repo_root: Path) -> bool:
         return True
     try:
         from fno import paths as _paths
+
         fallback = config_read_candidates([_paths.config_file()])
     except Exception:
         return False
@@ -175,6 +295,7 @@ def _check_migration() -> None:
         # run_migration() performs the cleanup INSIDE its FileLock, which
         # serializes it.
         from fno.setup.migrate_paths import run_migration
+
         run_migration(settings_root=_paths.state_dir())
     except Exception:  # noqa: BLE001
         # Never block normal fno commands on migration failure - silent fallback.
@@ -210,6 +331,7 @@ def callback(
         # attribute lookup -- the package is already imported (we are inside
         # ``fno.cli``), so this is free.
         from fno import __version__
+
         typer.echo(f"fno {__version__}")
         raise typer.Exit(code=0)
 
@@ -262,8 +384,8 @@ SHORTHAND_POINTER = (
 # Short help for the eager inline commands (defined in this module, so listing
 # them never imports anything). `help --all` merges these with LAZY_SUBCOMMANDS.
 _EAGER_COMMAND_HELP: dict[str, str] = {
-    "help":   "Show help for the root command or any subcommand.",
-    "cost":   "Cost + usage metrics from session transcripts and ledger.json.",
+    "help": "Show help for the root command or any subcommand.",
+    "cost": "Cost + usage metrics from session transcripts and ledger.json.",
     "review": "Run the internal sigma-review panel on the current diff.",
 }
 
@@ -283,8 +405,7 @@ def _render_full_menu() -> str:
     width = max(len(n) for n in rows)
     lines = [
         "fno full top-level surface - every top-level command, including hidden.",
-        "The curated menu is `fno --help`; hidden commands are invocable, just "
-        "not advertised.",
+        "The curated menu is `fno --help`; hidden commands are invocable, just not advertised.",
         "For a group's own verbs (hidden included) run `fno help <group> --all` "
         "(e.g. `fno help agents --all`), or `fno <group> --help` for its menu.",
         "",
@@ -339,8 +460,7 @@ def _render_group_full_menu(path: list[str]) -> Optional[str]:
     width = max(len(n) for n in rows)
     lines = [
         f"{title} full command surface - every subcommand, including hidden.",
-        f"The curated menu is `{title} --help`; hidden verbs are invocable, just "
-        "not advertised.",
+        f"The curated menu is `{title} --help`; hidden verbs are invocable, just not advertised.",
         "",
         "Commands:",
     ]
@@ -361,7 +481,7 @@ def _render_group_full_menu(path: list[str]) -> Optional[str]:
         "  fno help shorthands       show the short-flag legend\n"
         "  fno help --all            show every command, including hidden\n\n"
         "Equivalent to `fno <args> --help` but reads more naturally in "
-        "canonical instructions (e.g. \"Run `fno help claim` if unsure\")."
+        'canonical instructions (e.g. "Run `fno help claim` if unsure").'
     ),
 )
 def help_command(ctx: typer.Context) -> None:
@@ -405,6 +525,7 @@ def help_command(ctx: typer.Context) -> None:
     #     PermissionError / FileNotFoundError. Fall back to the canonical
     #     `python -m fno.cli` form, which works in both modes.
     import subprocess
+
     binary = sys.argv[0] if sys.argv else ""
     if binary and os.path.isfile(binary) and os.access(binary, os.X_OK):
         cmd = [binary, *args, "--help"]
@@ -412,6 +533,7 @@ def help_command(ctx: typer.Context) -> None:
         cmd = [sys.executable, "-m", "fno.cli", *args, "--help"]
     result = subprocess.run(cmd, check=False)
     from fno._subprocess_util import propagate_returncode
+
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
@@ -467,7 +589,7 @@ def cost(ctx: typer.Context) -> None:
         "  0   Reviewed (or cached hit)\n"
         " 11   Review lock busy\n"
         "130   SIGINT (workers reaped)\n"
-    )
+    ),
 )
 def review(
     ctx: typer.Context,
@@ -477,9 +599,7 @@ def review(
     session_legacy: Optional[str] = typer.Option(
         None, "--session", hidden=True, help="[DEPRECATED] alias for --session-id."
     ),
-    state: Optional[Path] = typer.Option(
-        None, "--state", help="path to target-state.md"
-    ),
+    state: Optional[Path] = typer.Option(None, "--state", help="path to target-state.md"),
     diff: Optional[Path] = typer.Option(
         None, "--diff", help="path to diff file (default: git diff HEAD~1)"
     ),
@@ -494,16 +614,37 @@ def review(
         "(no panel run). The /review sigma skill consumes this so it dispatches "
         "the same providers as the fno review panel.",
     ),
+    publish_sigma: Optional[Path] = typer.Option(
+        None,
+        "--publish-sigma",
+        help="Publish a completed sigma report to the node-bound durable artifact.",
+    ),
+    inspect_sigma: bool = typer.Option(
+        False,
+        "--inspect-sigma",
+        help="Inspect the current node-bound sigma artifact without running a panel.",
+    ),
+    sigma_node: Optional[str] = typer.Option(None, "--sigma-node", hidden=True),
+    sigma_pr: Optional[int] = typer.Option(None, "--sigma-pr", hidden=True),
+    sigma_head: Optional[str] = typer.Option(None, "--sigma-head", hidden=True),
+    sigma_current_head: Optional[str] = typer.Option(None, "--sigma-current-head", hidden=True),
+    sigma_round: Optional[str] = typer.Option(None, "--sigma-round", hidden=True),
+    sigma_project: Optional[str] = typer.Option(None, "--sigma-project", hidden=True),
+    sigma_reviews_root: Optional[Path] = typer.Option(None, "--sigma-reviews-root", hidden=True),
     json_output: bool = typer.Option(
         False,
-        "--json", "-J",
+        "--json",
+        "-J",
         help="Output structured JSON to stdout.",
     ),
 ) -> None:
     """Run the internal sigma-review panel and write a quality_check artifact."""
-    import subprocess
     from fno._flag_aliases import merge_deprecated_alias
-    from fno.worker.review import review as _review
+    from fno.worker.review import (
+        ReviewInputError,
+        capture_review_input,
+        review as _review,
+    )
     from fno.review.locking import ReviewLockBusy
 
     session = merge_deprecated_alias(
@@ -530,6 +671,9 @@ def review(
         routing = {
             agent: {
                 "provider": rp.provider,
+                "harness": rp.route.harness if rp.route else rp.provider,
+                "route_provider": rp.route.provider if rp.route else None,
+                "model": rp.route.model if rp.route else None,
                 "degraded": rp.degraded,
                 "reason": rp.reason,
             }
@@ -538,41 +682,103 @@ def review(
         typer.echo(json.dumps(routing))
         return
 
+    if publish_sigma is not None or inspect_sigma:
+        from fno.config import load_settings
+        from fno.paths import vault_root
+        from fno.review.artifact import inspect_sigma_artifact, publish_sigma_artifact
+
+        project = sigma_project or load_settings().project.id
+        root = sigma_reviews_root
+        if root is None:
+            vault = vault_root()
+            root = vault / "internal" if vault is not None else None
+        missing = [
+            name
+            for name, value in (
+                ("--sigma-node", sigma_node),
+                ("--sigma-pr", sigma_pr),
+                ("--sigma-head", sigma_head),
+                ("config.project.id/--sigma-project", project),
+                ("configured vault/--sigma-reviews-root", root),
+            )
+            if value is None
+        ]
+        if publish_sigma is not None:
+            missing.extend(
+                name
+                for name, value in (
+                    ("--sigma-current-head", sigma_current_head),
+                    ("--sigma-round", sigma_round),
+                )
+                if value is None
+            )
+        if missing:
+            typer.echo(f"error: sigma artifact metadata missing: {', '.join(missing)}", err=True)
+            raise typer.Exit(code=2)
+
+        assert root is not None and project is not None
+        assert sigma_node is not None and sigma_pr is not None and sigma_head is not None
+        if publish_sigma is not None:
+            assert sigma_current_head is not None and sigma_round is not None
+            publish_result = publish_sigma_artifact(
+                publish_sigma,
+                reviews_root=root,
+                project=project,
+                node=sigma_node,
+                pr_number=sigma_pr,
+                reviewed_head=sigma_head,
+                current_head=sigma_current_head,
+                round_id=sigma_round,
+            )
+            payload = {
+                "published": publish_result.published,
+                "reason": publish_result.reason,
+                "path": str(publish_result.current_path),
+                "round_path": str(publish_result.round_path),
+                "head_sha": sigma_head,
+                "finding_count": publish_result.finding_count,
+            }
+        else:
+            inspected = inspect_sigma_artifact(
+                reviews_root=root,
+                project=project,
+                node=sigma_node,
+                pr_number=sigma_pr,
+                head_sha=sigma_head,
+            )
+            payload = {
+                "status": inspected.status,
+                "reason": inspected.reason,
+                "path": str(inspected.path),
+                "head_sha": sigma_head,
+                "finding_count": inspected.finding_count,
+                "review_round": inspected.round_id,
+                "body": inspected.body,
+            }
+        if json_output:
+            typer.echo(json.dumps(payload))
+        else:
+            for key, value in payload.items():
+                if key != "body":
+                    typer.echo(f"{key}: {value}")
+        return
+
     state_path = state or Path(".fno/target-state.md")
 
-    if diff is not None:
-        diff_context = diff.read_text(encoding="utf-8")
-    else:
-        git_result = subprocess.run(
-            ["git", "diff", "HEAD~1"],
-            capture_output=True,
-            text=True,
-        )
-        if git_result.returncode != 0:
-            # Silent-empty substitution was the bug: a first-commit branch
-            # (no HEAD~1) or detached HEAD would yield an empty diff that
-            # the panel reviewed as "clean", producing zero findings
-            # indistinguishable from a real green review. Fail loud so
-            # "no findings" actually means "no findings" rather than
-            # "the diff was never read". The --diff path override
-            # remains as the documented escape hatch.
-            typer.echo(
-                f"error: git diff HEAD~1 failed (rc={git_result.returncode}): "
-                f"{git_result.stderr.strip()}\n"
-                "Pass --diff path/to/manual.diff to review an explicit "
-                "diff (e.g. first-commit branches without a HEAD~1 parent).",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        diff_context = git_result.stdout
+    try:
+        reviewed_head, diff_context = capture_review_input(diff)
+    except ReviewInputError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2)
 
     try:
-        result = _review(
+        review_result = _review(
             diff_context=diff_context,
             state_path=state_path,
             artifacts_dir=artifacts_dir,
             session_id=session,
             no_cache=no_cache,
+            git_sha_value=reviewed_head,
         )
     except ReviewLockBusy as exc:
         typer.echo(f"error: review lock busy: {exc}", err=True)
@@ -580,12 +786,12 @@ def review(
 
     use_json = bool(ctx.obj and ctx.obj.get("json", False))
     if use_json:
-        typer.echo(json.dumps(result))
+        typer.echo(json.dumps(review_result))
     else:
-        typer.echo(f"action: {result['action']}")
-        typer.echo(f"verdict: {result.get('verdict', 'unknown')}")
-        typer.echo(f"findings: {result.get('findings', 0)}")
-        if result.get("cached"):
+        typer.echo(f"action: {review_result['action']}")
+        typer.echo(f"verdict: {review_result.get('verdict', 'unknown')}")
+        typer.echo(f"findings: {review_result.get('findings', 0)}")
+        if review_result.get("cached"):
             typer.echo("cached: true")
 
 

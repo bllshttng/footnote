@@ -219,6 +219,8 @@ def build_cache_body(
     """
     findings_list = [dataclasses.asdict(f) for f in result.findings]
     findings_json = json.dumps(findings_list, ensure_ascii=False, sort_keys=True)
+    outcomes_list = [dataclasses.asdict(outcome) for outcome in result.outcomes]
+    outcomes_json = json.dumps(outcomes_list, ensure_ascii=False, sort_keys=True)
 
     frontmatter_lines = [
         "---",
@@ -236,7 +238,10 @@ def build_cache_body(
         )
     frontmatter_lines.append("---")
     frontmatter = "\n".join(frontmatter_lines)
-    return f"{frontmatter}\n# Findings (JSON)\n{findings_json}\n"
+    return (
+        f"{frontmatter}\n# Findings (JSON)\n{findings_json}\n"
+        f"# Outcomes (JSON)\n{outcomes_json}\n"
+    )
 
 
 def reconstruct_result(body: str) -> "OrchestratorResult":
@@ -246,7 +251,7 @@ def reconstruct_result(body: str) -> "OrchestratorResult":
         ValueError: if the body cannot be parsed (caller should fall through
             to a fresh run).
     """
-    from fno.review.orchestrator import Finding, OrchestratorResult
+    from fno.review.orchestrator import Finding, OrchestratorResult, WorkerOutcome
 
     # Split on the closing --- of the frontmatter.
     parts = body.split("---\n", 2)
@@ -266,12 +271,18 @@ def reconstruct_result(body: str) -> "OrchestratorResult":
     workers_completed = int(meta.get("workers_completed", "0"))
     workers_failed = int(meta.get("workers_failed", "0"))
 
-    # Extract JSON body (after the "# Findings (JSON)" header line).
-    json_start = rest.find("[")
-    if json_start == -1:
+    findings_marker = "# Findings (JSON)\n"
+    outcomes_marker = "\n# Outcomes (JSON)\n"
+    if findings_marker not in rest:
         findings_raw: list[dict] = []
+        outcomes_raw: list[dict] = []
     else:
-        findings_raw = json.loads(rest[json_start:])
+        serialized = rest.split(findings_marker, 1)[1]
+        findings_text, separator, outcomes_text = serialized.partition(outcomes_marker)
+        if not separator:
+            raise ValueError("cache body missing per-agent outcomes")
+        findings_raw = json.loads(findings_text.strip())
+        outcomes_raw = json.loads(outcomes_text.strip())
 
     # Filter to only the fields the Finding dataclass accepts.
     valid_fields = {f.name for f in dataclasses.fields(Finding)}
@@ -279,6 +290,16 @@ def reconstruct_result(body: str) -> "OrchestratorResult":
         Finding(**{k: v for k, v in d.items() if k in valid_fields})
         for d in findings_raw
     ]
+
+    outcome_fields = {f.name for f in dataclasses.fields(WorkerOutcome)}
+    outcomes = []
+    for raw_outcome in outcomes_raw:
+        values = {k: v for k, v in raw_outcome.items() if k in outcome_fields}
+        values["findings"] = [
+            Finding(**{k: v for k, v in raw.items() if k in valid_fields})
+            for raw in raw_outcome.get("findings", [])
+        ]
+        outcomes.append(WorkerOutcome(**values))
 
     # Reconstruct suspicious flag: all workers succeeded but no findings.
     suspicious = workers_completed > 0 and not findings
@@ -289,4 +310,5 @@ def reconstruct_result(body: str) -> "OrchestratorResult":
         workers_failed=workers_failed,
         suspicious=suspicious,
         duration_seconds=0.0,  # not meaningful for a cache hit
+        outcomes=outcomes,
     )

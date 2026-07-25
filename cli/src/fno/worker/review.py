@@ -12,14 +12,18 @@ Exit codes used by the CLI wrapper:
   11 Review lock busy (another process is running the same session)
   130 SIGINT - workers were reaped
 """
+
 from __future__ import annotations
 
 import sys
+import subprocess
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
 
+from fno.config import AgentRouteBlock
 from fno.review.runners.claude_runner import (
     make_async_runner,
 )
@@ -28,6 +32,66 @@ from fno.review.orchestrator import (
     orchestrate_review_parallel,
     OrchestratorResult,
 )
+
+
+class ReviewInputError(RuntimeError):
+    """The revision or exact diff for a review could not be captured."""
+
+
+def _resolve_agent_route(route: AgentRouteBlock, resolver: Any) -> tuple[dict[str, str] | None, Any]:
+    """Resolve one validated route identically for diagnostics and dispatch."""
+    from fno.review import provider_resolution as pr
+
+    route_env = resolver(route.provider, route.model)
+    if not route_env:
+        return None, pr.ResolvedProvider(
+            provider="claude",
+            degraded=True,
+            reason=f"{route.provider}/{route.model} unavailable: ran on claude",
+        )
+    return dict(route_env), pr.ResolvedProvider(
+        provider=route.harness,
+        route=pr.RouteRef(
+            harness=route.harness,
+            provider=route.provider,
+            model=route.model,
+        ),
+    )
+
+
+def capture_review_input(diff_path: Path | None = None) -> tuple[str, str]:
+    """Capture one immutable reviewed SHA and the diff for exactly that SHA."""
+    head_result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if head_result.returncode != 0 or not head_result.stdout.strip():
+        raise ReviewInputError(
+            f"git rev-parse HEAD failed (rc={head_result.returncode}): "
+            f"{head_result.stderr.strip()}"
+        )
+    reviewed_head = head_result.stdout.strip()
+
+    if diff_path is not None:
+        try:
+            return reviewed_head, diff_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReviewInputError(f"could not read review diff {diff_path}: {exc}") from exc
+
+    git_result = subprocess.run(
+        ["git", "diff", f"{reviewed_head}~1", reviewed_head],
+        capture_output=True,
+        text=True,
+    )
+    if git_result.returncode != 0:
+        raise ReviewInputError(
+            f"git diff HEAD~1 failed for pinned head {reviewed_head} "
+            f"(rc={git_result.returncode}): {git_result.stderr.strip()}\n"
+            "Pass --diff path/to/manual.diff to review an explicit diff "
+            "(e.g. first-commit branches without a HEAD~1 parent)."
+        )
+    return reviewed_head, git_result.stdout
 
 
 def _read_state(state_path: Path) -> dict[str, Any]:
@@ -45,6 +109,7 @@ def _read_state(state_path: Path) -> dict[str, Any]:
 def build_review_runner(
     *,
     agent_providers: dict[str, str],
+    agent_routes: Optional[dict[str, AgentRouteBlock]] = None,
     cross_model_enabled: bool,
     implementer_provider: str,
     available_providers: list[str],
@@ -54,6 +119,7 @@ def build_review_runner(
     timeout: float = 600.0,
     dispatch: Optional[Any] = None,
     claude_adapter: Optional[Any] = None,
+    route_resolver: Optional[Any] = None,
 ) -> tuple[Optional[Any], Optional[dict[str, str]], Optional[list[str]]]:
     """Build the per-agent cross-model review runner (ab-6c8f4c61).
 
@@ -70,7 +136,8 @@ def build_review_runner(
     resolved kinds (the cache dimension). ``dispatch`` / ``claude_adapter`` are
     injection seams for tests; production leaves them None.
     """
-    engaged = bool(cross_model_enabled) or bool(agent_providers)
+    agent_routes = agent_routes or {}
+    engaged = bool(cross_model_enabled) or bool(agent_providers) or bool(agent_routes)
     if not engaged:
         return None, None, None
 
@@ -80,6 +147,9 @@ def build_review_runner(
     from fno.review.runners import agents_spawn_runner, claude_runner
 
     _warn_unknown_agent_keys(agent_providers)
+    unknown_routes = sorted(set(agent_routes) - set(base_prompts))
+    if unknown_routes:
+        raise ValueError(f"agent route names unknown panel agent(s): {unknown_routes}")
 
     resolved = pr.resolve_panel_providers(
         list(base_prompts),
@@ -88,12 +158,33 @@ def build_review_runner(
         available_providers=available_providers,
         known_agents=AGENT_NAMES,
     )
+    if route_resolver is None:
+        from fno.agents.model_routing import resolve_explicit_route
+
+        resolved_route = resolve_explicit_route
+    else:
+        resolved_route = route_resolver
+
+    route_envs: dict[str, dict[str, str]] = {}
+    route_specs: dict[str, AgentRouteBlock] = {}
+    for agent, route in agent_routes.items():
+        route_env, route_resolution = _resolve_agent_route(route, resolved_route)
+        resolved[agent] = route_resolution
+        if route_env is None:
+            continue
+        route_envs[agent] = route_env
+        route_specs[agent] = route
     # Cache dimension = the per-agent REQUESTED routing (not just the set of
     # kinds), so two configs that assign the same kinds to different agents
     # (e.g. {code_reviewer: codex} vs {silent_failure_hunter: codex}) never
     # collide on one cache key for the same SHA (codex review P2). Pairs are
     # sorted for a stable key.
-    provider_set = sorted(f"{agent}={rp.provider}" for agent, rp in resolved.items())
+    provider_set = sorted(
+        f"{agent}={rp.route.harness}/{rp.route.provider}/{rp.route.model}"
+        if rp.route
+        else f"{agent}={rp.provider}"
+        for agent, rp in resolved.items()
+    )
     prompts = {agent: json_findings_prompt(body) for agent, body in base_prompts.items()}
     run_cwd = cwd or Path.cwd()
 
@@ -103,6 +194,30 @@ def build_review_runner(
 
     async def _runner(agent: str, prompt: str, diff_context: str):
         rp = resolved.get(agent)
+        if agent in route_specs:
+            route = route_specs[agent]
+            spawn_async = agents_spawn_runner.make_async_runner(
+                provider=route.harness,
+                cwd=run_cwd,
+                timeout=timeout,
+                dispatch=dispatch,
+                route_env=route_envs[agent],
+                route_provider=route.provider,
+                model=route.model,
+                named_agent=f"fno:{agent.replace('_', '-')}",
+                headless=True,
+            )
+            outcome = await spawn_async(agent, prompt, diff_context)
+            if not outcome.ok and agents_spawn_runner.is_retryable_failure(outcome):
+                fallback = await claude_async(agent, prompt, diff_context)
+                fallback.note = (
+                    f"{route.provider}/{route.model} unavailable: fell back to claude"
+                    if fallback.ok
+                    else f"{route.provider}/{route.model} unavailable; "
+                    "claude fallback also failed"
+                )
+                return fallback
+            return outcome
         if rp is None or rp.provider == "claude":
             outcome = await claude_async(agent, prompt, diff_context)
             if rp is not None and rp.degraded and rp.reason and outcome.ok:
@@ -146,6 +261,13 @@ def _read_cross_model_config() -> tuple[dict[str, str], bool]:
         return {}, False
 
 
+def _read_agent_routes_config() -> dict[str, AgentRouteBlock]:
+    """Read validated explicit per-agent route tuples."""
+    from fno.config import load_settings
+
+    return dict(load_settings().review.agent_routes or {})
+
+
 def _warn_unknown_agent_keys(agent_providers: dict[str, str]) -> None:
     """Warn (stderr) on agent_providers keys that name no real panel agent.
 
@@ -167,9 +289,7 @@ def _warn_unknown_agent_keys(agent_providers: dict[str, str]) -> None:
         )
 
 
-def resolve_session_id(
-    session_id: Optional[str], state_path: Path
-) -> Optional[str]:
+def resolve_session_id(session_id: Optional[str], state_path: Path) -> Optional[str]:
     """Resolve the session nonce: explicit arg, else the state file's value.
 
     The ONE place both the panel run (``review``) and the ``--print-providers``
@@ -183,6 +303,94 @@ def resolve_session_id(
     return _read_state(state_path).get("session_id")
 
 
+def _publish_durable_sigma(
+    report_path: Path,
+    *,
+    state_path: Path,
+    session_id: str,
+    reviewed_head: str,
+) -> None:
+    """Publish direct ``fno review`` output through the shared sigma writer."""
+    state = _read_state(state_path)
+    from fno.worker.ship import _read_graph_node_id
+
+    node = _read_graph_node_id(state_path)
+    pr_number = state.get("pr_number")
+    if not isinstance(node, str):
+        print(
+            "[review] durable sigma artifact skipped: graph node unavailable",
+            file=sys.stderr,
+        )
+        return
+
+    if not isinstance(pr_number, int) or pr_number < 1:
+        try:
+            current_pr = subprocess.run(
+                ["gh", "pr", "view", "--json", "number", "--jq", ".number"],
+                capture_output=True,
+                text=True,
+            )
+            pr_number = int(current_pr.stdout.strip()) if current_pr.returncode == 0 else None
+        except (OSError, ValueError):
+            pr_number = None
+        if pr_number is None:
+            print(
+                "[review] durable sigma artifact skipped: no PR is bound to this branch",
+                file=sys.stderr,
+            )
+            return
+
+    from fno.config import load_settings
+    from fno.paths import vault_root
+    from fno.review.artifact import publish_sigma_artifact
+
+    settings = load_settings()
+    vault = vault_root()
+    project = settings.project.id
+    if vault is None or not project:
+        print(
+            "[review] durable sigma artifact skipped: configured vault/project unavailable",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        current = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "headRefOid",
+                "--jq",
+                ".headRefOid",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        current_head = current.stdout.strip() if current.returncode == 0 else None
+    except OSError:
+        current_head = None
+    round_id = f"{reviewed_head[:12]}-{session_id[-8:]}-{uuid.uuid4().hex[:8]}"
+    result = publish_sigma_artifact(
+        report_path,
+        reviews_root=vault / "internal",
+        project=project,
+        node=node,
+        pr_number=pr_number,
+        reviewed_head=reviewed_head,
+        current_head=current_head,
+        round_id=round_id,
+    )
+    print(
+        f"[review] sigma artifact: {result.current_path} head={reviewed_head} "
+        f"findings={result.finding_count} "
+        f"published={str(result.published).lower()} reason={result.reason}",
+        file=sys.stderr,
+    )
+
+
 def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
     """Resolve every panel agent -> provider via the SAME path the panel uses.
 
@@ -193,7 +401,8 @@ def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
     Never raises.
     """
     agent_providers, enabled = _read_cross_model_config()
-    if not (enabled or agent_providers):
+    agent_routes = _read_agent_routes_config()
+    if not (enabled or agent_providers or agent_routes):
         return {}
 
     _warn_unknown_agent_keys(agent_providers)
@@ -203,13 +412,21 @@ def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
 
     implementer = pr.load_implementer_provider(session_id or "")
     available = pr.available_provider_kinds()
-    return pr.resolve_panel_providers(
+    resolved = pr.resolve_panel_providers(
         list(AGENT_NAMES),
         agent_providers=agent_providers,
         implementer_provider=implementer,
         available_providers=available,
         known_agents=AGENT_NAMES,
     )
+    if agent_routes:
+        from fno.agents.model_routing import resolve_explicit_route
+
+        for agent, route in agent_routes.items():
+            _env, resolved[agent] = _resolve_agent_route(
+                route, resolve_explicit_route
+            )
+    return resolved
 
 
 def _resolve_cross_model_runner(
@@ -221,7 +438,8 @@ def _resolve_cross_model_runner(
     failure (fail-safe to all-claude), or when the panel has no prompts.
     """
     agent_providers, enabled = _read_cross_model_config()
-    if not (enabled or agent_providers):
+    agent_routes = _read_agent_routes_config()
+    if not (enabled or agent_providers or agent_routes):
         return None, None, None
 
     from fno.review import provider_resolution as pr
@@ -231,6 +449,7 @@ def _resolve_cross_model_runner(
     base_prompts = load_prompts()
     return build_review_runner(
         agent_providers=agent_providers,
+        agent_routes=agent_routes,
         cross_model_enabled=enabled,
         implementer_provider=implementer,
         available_providers=available,
@@ -329,22 +548,37 @@ def review(
         if cache_body is not None:
             try:
                 cached_result = _cache.reconstruct_result(cache_body)
+            except Exception as exc:
+                print(
+                    f"[review] cache deserialization failed, re-running: {exc}",
+                    file=sys.stderr,
+                )
+            else:
+                raw_findings_count = len(cached_result.findings)
                 kept_findings = score_findings(cached_result.findings)
-                # Re-use existing artifact if it already exists
-                if artifact_path.exists():
-                    verdict = _read_verdict_from_artifact(artifact_path)
-                else:
-                    _, verdict = write_artifact(
-                        session_id,
-                        OrchestratorResult(
-                            findings=kept_findings,
-                            workers_completed=cached_result.workers_completed,
-                            workers_failed=cached_result.workers_failed,
-                            suspicious=cached_result.suspicious,
-                            duration_seconds=cached_result.duration_seconds,
+                threshold_drop_suspicious = (
+                    raw_findings_count > 0 and len(kept_findings) == 0
+                )
+                artifact_path, verdict = write_artifact(
+                    session_id,
+                    OrchestratorResult(
+                        findings=kept_findings,
+                        workers_completed=cached_result.workers_completed,
+                        workers_failed=cached_result.workers_failed,
+                        suspicious=(
+                            cached_result.suspicious or threshold_drop_suspicious
                         ),
-                        artifacts_dir=artifacts_dir,
-                    )
+                        duration_seconds=cached_result.duration_seconds,
+                        outcomes=cached_result.outcomes,
+                    ),
+                    artifacts_dir=artifacts_dir,
+                )
+                _publish_durable_sigma(
+                    artifact_path,
+                    state_path=state_path,
+                    session_id=session_id,
+                    reviewed_head=resolved_sha,
+                )
                 return {
                     "action": "cached",
                     "verdict": verdict,
@@ -352,11 +586,6 @@ def review(
                     "artifact_path": str(artifact_path),
                     "cached": True,
                 }
-            except Exception as exc:
-                print(
-                    f"[review] cache deserialization failed, re-running: {exc}",
-                    file=sys.stderr,
-                )
 
     # --- Cache miss: run the orchestrator ------------------------------------
     if runner is None:
@@ -402,6 +631,13 @@ def review(
         session_id,
         scored_result,
         artifacts_dir=artifacts_dir,
+    )
+    reviewed_head = git_sha_value if git_sha_value is not None else _cache.git_sha()
+    _publish_durable_sigma(
+        artifact_path_final,
+        state_path=state_path,
+        session_id=session_id,
+        reviewed_head=reviewed_head,
     )
 
     # H6 fix: worker layer does NOT write cache. The orchestrator owns cache

@@ -10,11 +10,11 @@
 ---
 
 ### Agents Run
-| Agent | Status | Summary |
-|-------|--------|---------|
-| silent-failure-hunter | [ran] | [findings summary] |
-| code-reviewer | [ran] | [findings summary] |
-| [conditional agents...] | [ran] | [findings summary] |
+| Agent | Requested route | Observed runtime | Effective model | Status | Summary |
+|-------|-----------------|------------------|-----------------|--------|---------|
+| silent-failure-hunter | [local/claude/codex/gemini/provider/model] | [claude/codex/gemini/unknown] | [observed model or unknown] | [ran] | [findings summary] |
+| code-reviewer | [local/claude/codex/gemini/provider/model] | [claude/codex/gemini/unknown] | [observed model or unknown] | [ran] | [findings summary] |
+| [conditional agents...] | [requested route] | [observed runtime] | [effective model] | [ran] | [findings summary] |
 
 ### Agents Skipped (not applicable)
 | Agent | Reason |
@@ -50,13 +50,13 @@ _If no project goals defined: "No project goals defined in config.toml — skipp
 ---
 
 ### Critical Issues (Must Fix)
-1. [Description] — `agent: <agent-name>` `provider: <provider_id>` `file: <path>` `line: <N>`
+- **critical** - [Description] — `agent: <agent-name>` `provider: <provider_id>` `file: <path>` `line: <N>`
 
 ### High Priority Issues
-1. [Description] — `agent: <agent-name>` `provider: <provider_id>` `file: <path>` `line: <N>`
+- **high** - [Description] — `agent: <agent-name>` `provider: <provider_id>` `file: <path>` `line: <N>`
 
 ### Recommendations
-1. [Description] — `agent: <agent-name>` `provider: <provider_id>`
+- **medium** - [Description] — `agent: <agent-name>` `provider: <provider_id>`
 
 _`provider` is the id from `config.providers.records[]` for the agent that produced this
 finding. Forensics-only — does not affect verdict or severity._

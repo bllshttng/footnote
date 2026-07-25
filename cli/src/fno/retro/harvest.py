@@ -33,6 +33,10 @@ from fno.retro.types import (
 # Severity badge -> normalized severity (check-pr Step 4 table). No badge -> medium.
 _GEMINI_BADGE = re.compile(r"!\[(critical|high|medium|low)\]", re.IGNORECASE)
 _CODEX_BADGE = re.compile(r"!\[P([123])\b", re.IGNORECASE)
+_SIGMA_BOLD = re.compile(
+    r"^\s*-\s+\*\*(P[123]|critical|high|medium|low)\*\*\s*(?:-|:)",
+    re.IGNORECASE,
+)
 _CODEX_P_MAP = {"1": "high", "2": "medium", "3": "low"}
 DEFAULT_SEVERITY = "medium"
 
@@ -55,13 +59,22 @@ def normalize_severity(body: str) -> str:
 
     No recognizable badge defaults to medium (node tier), per AC2-EDGE.
     """
+    return extract_severity(body) or DEFAULT_SEVERITY
+
+
+def extract_severity(body: str) -> str | None:
+    """Return a recognized reviewer badge severity, or ``None`` when absent."""
     m = _GEMINI_BADGE.search(body or "")
     if m:
         return m.group(1).lower()
     m = _CODEX_BADGE.search(body or "")
     if m:
         return _CODEX_P_MAP[m.group(1)]
-    return DEFAULT_SEVERITY
+    m = _SIGMA_BOLD.search(body or "")
+    if m:
+        raw = m.group(1).lower()
+        return {"p1": "high", "p2": "medium", "p3": "low"}.get(raw, raw)
+    return None
 
 
 def harvest_carveouts(
