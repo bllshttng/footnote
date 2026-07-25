@@ -332,7 +332,39 @@ else
 fi
 
 run_rust_leg "cargo test --all-targets (fno-agents)" "crates/fno-agents" "cargo test --all-targets"
+
+# squads.json leak guard (x-e447 US3): snapshot the REAL store mtime around the
+# crates/fno cargo test leg. A test that bypasses run_hermetic's HOME redirect and
+# writes the real ~/.fno/squads.json would otherwise stay green; this is the
+# class-level assertion (PR #589's assert_writable closed the build-tree binary
+# arm; this catches every other path at once). Read-only, stdlib, degrade-to-skip
+# on absent/unreadable (AC-FR2); a concurrent real mux session is a valid writer,
+# so the message names that caveat rather than asserting exclusive ownership.
+_real_squads_mtime() {
+    python3 -c "
+import os
+p = os.path.expanduser('~/.fno/squads.json')
+try:
+    print(int(os.path.getmtime(p)))
+except Exception:
+    print('')
+" 2>/dev/null
+}
+_squads_before=$(_real_squads_mtime)
 run_rust_leg "cargo test --all-targets (fno)" "crates/fno" "cargo test --all-targets"
+_squads_after=$(_real_squads_mtime)
+if [[ -z "$_squads_before" || -z "$_squads_after" ]]; then
+    record_leg "squads.json leak guard (fno)" "skipped (no real store)" 0
+elif [[ "$_squads_after" != "$_squads_before" ]]; then
+    echo "preflight: FAIL real ~/.fno/squads.json changed during crates/fno cargo test" \
+         "(mtime $_squads_before -> $_squads_after)" >&2
+    echo "  if a real mux session is running concurrently it is a valid writer;" >&2
+    echo "  otherwise a crates/fno test bypassed the HOME redirect and leaked." >&2
+    FAIL=1
+    record_leg "squads.json leak guard (fno)" fail 0
+else
+    record_leg "squads.json leak guard (fno)" pass 0
+fi
 
 # advisory: never flips the exit code
 echo ""
