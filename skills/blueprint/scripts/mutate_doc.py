@@ -198,20 +198,57 @@ def _detect_mode(arch_section: str | None, repo_root: Path) -> str:
 _US_ID_RE = r"US\d+[a-z]*(?:\.\d+)?"
 
 
+class UserStoryParseError(ValueError):
+    """A non-empty ## User Stories body yielded zero parseable stories.
+
+    That is a content error (stories written in a shape the parser does not
+    recognize), not a degrade-to-one-default-task. Silently degrading produces a
+    plausible-looking plan that under-scopes the whole build; refusing forces
+    the doc into a supported shape. See ``_build_execution_strategy``.
+    """
+
+
+def _first_body_line_after(us_body: str, end_pos: int, next_anchor_re: re.Pattern) -> str:
+    """First non-blank line after ``end_pos`` in ``us_body``, or ``""`` if the
+    next thing is a section heading or another User Story anchor.
+
+    Used by every anchor whose marker may carry an empty description (a
+    heading ``### US1``, a bold ``**US1:**``, or a list item ``- US1``): the
+    description then lives on the following paragraph. Stopping at the next
+    anchor prevents an empty marker from stealing the following story's text
+    (e.g. ``- US1`` must not swallow ``- US2: real desc``). Blockquote ``> ``
+    markers are stripped.
+    """
+    for raw_line in us_body[end_pos:].splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("##") or next_anchor_re.match(line):
+            break
+        return re.sub(r"^>\s*", "", line)
+    return ""
+
+
 def _parse_user_stories(us_body: str) -> list[tuple[str, str]]:
     """Parse User Stories from a section body, in document order.
 
-    Recognizes four real-world formats produced by /think or hand-edited specs:
+    Recognizes the natural shapes a /think doc or hand-edited spec carries:
 
     1. Inline bold: ``**US1:** description...`` or ``**US1 - Title.** desc...``
     2. H3 heading + colon: ``### US1: Title`` (title text on the heading line)
     3. H3 heading + em-dash: ``### US4c.1 — Title`` (compound IDs allowed)
     4. Markdown table: ``| US1 | description | ... |`` (first cell = id,
        second cell = description; header/separator rows are ignored)
+    5. Plain list item: ``- US1: description``, ``* US1: desc``, ``+ US1:``,
+       or ``1. US1: description`` (the natural dash/numbered forms /think's
+       own template emits when it does not wrap ids in bold)
 
-    For heading style, the heading's tail-text drives the description; if the
-    tail is empty (``### US1``), the first non-blank line of the following
-    paragraph is used (blockquote ``> `` markers stripped).
+    For heading and list style, the marker's tail-text drives the description;
+    if the tail is empty (``### US1`` or ``- US1``), the first non-blank line
+    of the following paragraph is used (blockquote ``> `` markers stripped).
+
+    Caller contract: a non-empty ``us_body`` that yields zero stories is a
+    parser refusal (see ``UserStoryParseError``), NOT a degrade-to-default.
 
     Returns: list of ``(id, description)`` tuples. Duplicates by ID are
     discarded (first occurrence wins), preserving document order.
@@ -236,34 +273,22 @@ def _parse_user_stories(us_body: str) -> list[tuple[str, str]]:
         rf"^###[ \t]+({_US_ID_RE})[ \t]*[:\.\-–—]?[ \t]*([^\n]*)$",
         re.MULTILINE,
     )
-    # Match a line that opens another User Story so the heading-empty fallback
-    # below does not "steal" the next story's text as this story's description.
-    # The trailing ``\|`` alternative treats any markdown table row as an
-    # anchor: a story description never begins with a pipe, so an empty-title
-    # heading (``### US1``) followed by a table must NOT swallow the table row
-    # as its description. Without this, a same-ID table row (``### US1`` then
-    # ``| US1 | real desc |``) would lose to the heading's garbage capture
-    # under first-occurrence dedup.
-    next_anchor_re = re.compile(rf"^(?:###\s+{_US_ID_RE}\b|\*\*{_US_ID_RE}\b|\|)")
+    # Match a line that opens another User Story so an empty-title/empty-desc
+    # marker does not "steal" the next story's text as this story's description.
+    # The ``\|`` alternative treats any markdown table row as an anchor: a story
+    # description never begins with a pipe. The list-item alternatives
+    # (``- USn`` / ``1. USn``) make a plain list item an anchor too, so an empty
+    # ``- US1`` does not swallow the following ``- US2: real desc`` line.
+    next_anchor_re = re.compile(
+        rf"^(?:###\s+{_US_ID_RE}\b|\*\*{_US_ID_RE}\b|\|"
+        rf"|[-*+]\s+{_US_ID_RE}\b|\d+\.\s+{_US_ID_RE}\b)"
+    )
     for m in heading_re.finditer(us_body):
         us_id = m.group(1)
         tail = m.group(2).strip()
         if not tail:
             # Heading had no title text; look at the following paragraph.
-            rest = us_body[m.end():]
-            for raw_line in rest.splitlines():
-                line = raw_line.strip()
-                if not line:
-                    continue
-                # Stop at the next section heading OR the next User Story
-                # anchor (heading-style or bold-style). Without this guard,
-                # `### US1\n\n**US2:** desc` would steal the US2 line.
-                if line.startswith("##") or next_anchor_re.match(line):
-                    break
-                # Strip blockquote markers
-                line = re.sub(r"^>\s*", "", line)
-                tail = line
-                break
+            tail = _first_body_line_after(us_body, m.end(), next_anchor_re)
         if not tail:
             continue
         candidates.append((m.start(), us_id, tail))
@@ -298,18 +323,8 @@ def _parse_user_stories(us_body: str) -> list[tuple[str, str]]:
         desc = m.group(2).strip()
         if not desc:
             # Same-line description is empty; some specs put it on the next
-            # line.  Walk forward like the heading-empty fallback, breaking
-            # on the next anchor or section heading so we don't steal it.
-            rest = us_body[m.end():]
-            for raw_line in rest.splitlines():
-                line = raw_line.strip()
-                if not line:
-                    continue
-                if line.startswith("##") or next_anchor_re.match(line):
-                    break
-                line = re.sub(r"^>\s*", "", line)
-                desc = line
-                break
+            # line.  Walk forward like the heading-empty fallback.
+            desc = _first_body_line_after(us_body, m.end(), next_anchor_re)
         if not desc:
             continue
         candidates.append((m.start(), us_id, desc))
@@ -339,6 +354,34 @@ def _parse_user_stories(us_body: str) -> list[tuple[str, str]]:
             continue
         candidates.append((m.start(), us_id, desc))
 
+    # Plain list-item anchor.  Matches a Markdown list bullet (``-``, ``*``,
+    # ``+``, or ``N.``) followed directly by a US id -- the natural dash /
+    # numbered forms a hand-written or /think-emitted spec uses when it does
+    # NOT wrap the id in bold:
+    #
+    #   - US1: description
+    #   1. US1: description
+    #
+    # The id must follow the bullet immediately (after whitespace); a
+    # bold-wrapped item (``- **US1:** ...``) keeps its ``**`` prefix, so the id
+    # pattern fails to match here and the inline-bold anchor owns that line --
+    # the two never double-count.  The optional separator after the id mirrors
+    # the heading anchor (colon / period / hyphen / en-dash / em-dash), so
+    # ``- US1 - Title`` and ``1. US1. Title`` work too.
+    list_re = re.compile(
+        rf"^[ \t]*(?:[-*+]|\d+\.)[ \t]+({_US_ID_RE})[ \t]*"
+        rf"[:\.\-–—]?[ \t]*([^\n]*)$",
+        re.MULTILINE,
+    )
+    for m in list_re.finditer(us_body):
+        us_id = m.group(1)
+        tail = m.group(2).strip()
+        if not tail:
+            tail = _first_body_line_after(us_body, m.end(), next_anchor_re)
+        if not tail:
+            continue
+        candidates.append((m.start(), us_id, tail))
+
     # Sort by position, then dedupe by ID with first-occurrence wins.
     candidates.sort(key=lambda x: x[0])
     seen: set[str] = set()
@@ -359,7 +402,26 @@ def _build_execution_strategy(sections: OrderedDict[str, str]) -> str:
 
     stories = _parse_user_stories(us_body)
     if not stories:
-        # No valid stories; emit a single default task with a warning
+        if us_body.strip():
+            # Non-empty section, zero recognized stories: the content is in a
+            # shape the parser does not accept. Refuse rather than emit a
+            # plausible-looking single-task plan that silently under-scopes the
+            # build. Name the accepted shapes so the author can fix the doc.
+            raise UserStoryParseError(
+                "## User Stories has content but no parseable stories were "
+                "found. Rewrite each story in one of the accepted shapes "
+                "(US1, US2, ...):\n"
+                "  - **US1:** description            (inline bold)\n"
+                "  - ### US1: Title                  (h3 heading)\n"
+                "  - | US1 | description |           (table row)\n"
+                "  - - US1: description              (dash / asterisk / plus bullet)\n"
+                "  - 1. US1: description             (numbered list)\n"
+                "Or leave the section truly empty if the work is not yet decomposed."
+            )
+        # Genuinely empty / absent: keep the default-task escape hatch. The
+        # empty-stories reviewer check in /think catches a blank section at
+        # design time; hard-failing here would also reject a section a
+        # concurrent edit left momentarily empty.
         print(
             "WARNING: no ## User Stories entries found; emitting single default task",
             file=sys.stderr,
@@ -709,7 +771,10 @@ def mutate(
         assert_blueprint_can_write("Execution Strategy")
     except OwnershipViolation as exc:
         return 2, str(exc)
-    new_sections["Execution Strategy"] = _build_execution_strategy(plan.sections)
+    try:
+        new_sections["Execution Strategy"] = _build_execution_strategy(plan.sections)
+    except UserStoryParseError as exc:
+        return 2, str(exc)
 
     # Brownfield only: File Ownership Map, Patterns to Reuse
     if effective_mode == "brownfield":
