@@ -33,11 +33,9 @@ SPAWN_SHAPE_ALLOWLIST = frozenset(
         "cli/src/fno/agents/dispatch.py",
         "cli/src/fno/agents/providers/claude.py",
         "cli/src/fno/agents/providers/codex.py",
-        "cli/src/fno/graph/maintain.py",
-        "cli/src/fno/graph/triage.py",
-        "cli/src/fno/inbox/triage.py",
-        "cli/src/fno/pr_watch/_dispatch.py",
-        "cli/src/fno/review/scorers/claude_scorer.py",
+        # Canonical tool-less one-shot judgment seam; x-81ad consolidated the
+        # former inbox/graph/review call-site shapes here.
+        "cli/src/fno/llm.py",
         "cli/src/fno/skill_diff/synthesize.py",
     }
 )
