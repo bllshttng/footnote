@@ -139,6 +139,12 @@ out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "empty attestation -> full run -> GREEN" || fail "expected 0 got $rc"
 echo "$out" | grep -q "reused attestation" && fail "trusted an empty attestation" || ok "empty attestation not trusted"
 
+echo "== AC2-EDGEb: a non-FULL / non-green attestation degrades to a full run =="
+printf 'sha=%s mode=FULL verdict=red at=%s iso=now host=%s pid=4242\n' "$GREEN_FULL" "$(date +%s)" "$HOST" > "$ATT"
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "non-green attestation -> full run -> GREEN" || fail "expected 0 got $rc"
+echo "$out" | grep -q "reused attestation" && fail "trusted a non-green attestation" || ok "non-green attestation not trusted"
+
 echo "== AC1-ERR: a --retry-failed (subset) pass mints no attestation =="
 rm -f "$ATT"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?

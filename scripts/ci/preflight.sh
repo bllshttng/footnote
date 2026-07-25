@@ -99,6 +99,9 @@ reuse_attestation() {
     [[ -n "$line" ]] || return 1
     att_sha="$(_attest_field "$line" sha)"
     [[ "$att_sha" =~ ^[0-9a-f]{40}$ ]] || return 1   # corrupt -> full run (AC2-EDGE)
+    # Only a FULL green verdict satisfies the gate: a hand-edited or
+    # future-different line must not pass just because its sha + host match.
+    [[ "$(_attest_field "$line" mode)" == "FULL" && "$(_attest_field "$line" verdict)" == "green" ]] || return 1
     [[ "$att_sha" == "$CANDIDATE_SHA" ]] || return 1
     att_host="$(_attest_field "$line" host)"
     if [[ "$att_host" != "$(_this_host)" ]]; then
