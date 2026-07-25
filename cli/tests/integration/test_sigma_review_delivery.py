@@ -15,7 +15,7 @@ from fno.retro.harvest import extract_severity
 from fno.worker.review import build_review_runner
 
 
-def test_zero_bot_artifact_journey_deduplicates_durable_disposition(
+def test_zero_bot_blocking_artifact_blocks_until_durable_disposition(
     tmp_path: Path,
 ) -> None:
     report = tmp_path / "report.md"
@@ -62,6 +62,17 @@ def test_zero_bot_artifact_journey_deduplicates_durable_disposition(
         for index, _line in enumerate(finding_lines, start=1)
     ]
     assert stable_ids == ["sigma:round-a:1"]
+    severities = [extract_severity(line) for line in finding_lines]
+    unresolved = list(stable_ids)
+    verdict = (
+        "blocked"
+        if any(severity in {"critical", "high"} for severity in severities)
+        and unresolved
+        else "ready"
+    )
+    assert severities == ["high"]
+    assert unresolved == ["sigma:round-a:1"]
+    assert verdict == "blocked"
 
     disposition_comment = (
         "Fixed.\n<!-- fno-sigma-disposition "
@@ -73,6 +84,13 @@ def test_zero_bot_artifact_journey_deduplicates_durable_disposition(
         if f"id={stable_id} head=head-a" not in disposition_comment
     ]
     assert unresolved == []
+    verdict = (
+        "blocked"
+        if any(severity in {"critical", "high"} for severity in severities)
+        and unresolved
+        else "ready"
+    )
+    assert verdict == "ready"
 
     stale = CliRunner().invoke(
         app,
