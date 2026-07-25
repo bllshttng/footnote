@@ -74,6 +74,10 @@ def ship(
         typer.echo(f"error: {result.get('error')}", err=True)
         raise typer.Exit(code=2)
 
+    if result.get("action") == "blocked":
+        typer.echo(f"blocked: {result.get('error')}", err=True)
+        raise typer.Exit(code=2)
+
     if _json_mode(ctx):
         typer.echo(json.dumps(result))
     else:

@@ -332,3 +332,33 @@ def test_stale_base_refusal_blocks_pr_create(tmp_path, monkeypatch):
     # gh pr create was never invoked (only git rev-parse + gh pr list ran).
     assert mock_run.call_count == 2
     assert not any("create" in str(c) for c in mock_run.call_args_list)
+
+
+# ---- F2: incarnation fence blocks PR creation ----
+
+def test_incarnation_fence_blocks_pr_create(tmp_path, monkeypatch):
+    """F2: a losing incarnation (its session claim held by another) never reaches
+    gh pr create / gh pr list / git rev-parse - the fence refuses first."""
+    monkeypatch.chdir(tmp_path)
+    state_path = _make_state(tmp_path)
+
+    mock_run = MagicMock()  # any subprocess.run call means an outward action slipped through
+
+    with patch("subprocess.run", mock_run), patch(
+        "fno.claims.incarnation.resolve_fence_session_uuid", return_value="transcript-uuid"
+    ), patch(
+        "fno.claims.incarnation.incarnation_fence_blocks",
+        return_value=(True, "incarnation-fence: session:transcript-uuid held by other"),
+    ):
+        from fno.worker.ship import ship
+
+        result = ship(
+            state_path=state_path,
+            title="feat: fenced",
+            body="body",
+            artifacts_dir=tmp_path / ".fno" / "artifacts",
+        )
+
+    assert result["action"] == "blocked"
+    assert "incarnation-fence" in result["error"]
+    assert mock_run.call_count == 0  # no outward action ran
