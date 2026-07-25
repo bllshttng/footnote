@@ -32,6 +32,14 @@ Agent panes die with the mux server (the tmux model): a mux crash takes its pane
 
 The undo, if a real crash ever makes it worth building, is a supervisor that keeps the child PTY file descriptors alive across a mux restart (an fd-keeper / re-parent handoff). It is deliberately **not** built here; file it only when a crash actually bites.
 
+## File-descriptor ceiling on a GUI-launched mux
+
+A mux launched from the macOS GUI (Dock, Spotlight, a login item) inherits the `launchctl limit maxfiles` soft cap of 256 open file descriptors.
+A terminal-launched mux does not hit it: zsh raises the soft limit (a shell reports 1048576), so the cap is invisible from a terminal and bites only the GUI-launched process.
+With enough live panes, restored squads, and subprocess churn, a GUI mux can exhaust the 256-descriptor table and fail as `attach failed: no spawnable shell: ... Too many open files (os error 24)`.
+State that accumulates across restarts lowers the headroom that makes the default livable; a squad store that grew one row per restart was one such accumulator (closed by deriving a squad's durable key from its origin, so one repo holds one row across unbounded restarts).
+Raising the ceiling is an operator decision (`launchctl limit maxfiles <soft> <hard>`, or a `SoftResourceLimits` key on a LaunchDaemon), not a code change.
+
 ## Reconcile at startup
 
 Because the migration removes PTY workers, a registry row that still carries a pre-migration worker ref would otherwise look live forever. The daemon settles these at startup: recovery scans for a live worker socket and, finding none, falls back to a PID-liveness probe (`kill(0)` plus a start-time match to defeat PID reuse) and marks the row exited. No stranded agents, no phantoms — the first `list` after a restart reads truthful liveness.

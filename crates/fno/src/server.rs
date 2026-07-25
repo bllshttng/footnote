@@ -3486,9 +3486,17 @@ impl Core {
         let mut key = sq.key.clone();
         let origins = sq.origins.clone();
         if name.is_empty() && key.is_empty() {
-            // First persist of an unnamed squad: mint its durable identity and
-            // record it on the live squad so every later persist reuses it.
-            key = crate::squad_store::mint_key();
+            // First persist of an unnamed squad: derive its durable identity from
+            // its origins when it has any (stable across restarts, so a repo's
+            // home squad upserts onto one row forever - x-e447), else mint a
+            // random key (an originless squad has no stable identity). Recording
+            // it on the live squad makes every later persist in this process
+            // reuse it.
+            key = if origins.is_empty() {
+                crate::squad_store::mint_key()
+            } else {
+                crate::squad_store::origin_key(&origins)
+            };
             if let Some(s) = self.session.squad_mut(sid) {
                 s.key = key.clone();
             }
@@ -3706,6 +3714,15 @@ impl Core {
     /// a squad that cannot even open a shell is skipped with a notice, never a
     /// crash (AC2-FR: a degraded restore leaves a fully usable session).
     fn restore_squads(&mut self, rows: u16, cols: u16, home_sid: u64) {
+        // Heal the store before reading (x-e447): the old random-mint identity
+        // let a repo's home squad append a row per mux restart. The write side
+        // now derives a stable key; this migrates the backlog rows already on
+        // disk onto that key and collapses the duplicates. One locked mutation,
+        // prune-shaped; a write error degrades to a notice, never refuses
+        // (AC2-FR / AC-ERR1).
+        if let Err(e) = crate::squad_store::collapse_duplicate_unnamed() {
+            self.notice_all(format!("squad collapse at restore skipped: {e}"));
+        }
         let loaded = crate::squad_store::load();
         if let Some(n) = loaded.notice {
             self.notice_all(n);
@@ -14552,6 +14569,96 @@ mod tests {
         core.session.squads.clear();
         assert!(core.named_squad_taken("harden"), "persisted name is taken");
         assert!(!core.named_squad_taken("nope-zzz"));
+    }
+
+    #[test]
+    fn persist_squad_unnamed_same_origin_upserts_one_row_across_persists() {
+        // x-e447 AC-HP1: a repo's home squad derives its durable key from its
+        // origin, so two server lifetimes (a fresh in-memory squad each) upsert
+        // onto ONE row instead of appending. The old random mint minted a fresh
+        // key per lifetime, so upsert never matched the prior row.
+        let _s = StoreScratch::new("persist-unnamed-origin");
+        let repo = "/repo/e447";
+        let expected_key = crate::squad_store::origin_key(&[repo.to_string()]);
+        // Lifetime 1: a fresh unnamed home squad, persisted.
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec![repo.into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        core.persist_squad(1);
+        assert_eq!(crate::squad_store::load().squads.len(), 1);
+        // Lifetime 2: the in-memory squad is GONE (process restarted); a fresh
+        // one for the same repo persists again. The derived key matches, so it
+        // upserts onto the same row instead of appending.
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec![repo.into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        core.persist_squad(1);
+        let loaded = crate::squad_store::load();
+        assert_eq!(
+            loaded.squads.len(),
+            1,
+            "second lifetime upserts onto one row, not a second"
+        );
+        assert_eq!(
+            loaded.squads[0].key, expected_key,
+            "key is the derived origin key, not a fresh mint"
+        );
+        assert_eq!(loaded.squads[0].origins, vec![repo.to_string()]);
+    }
+
+    #[test]
+    fn persist_squad_unnamed_originless_mints_a_random_key() {
+        // x-e447 AC-EDGE1: an unnamed squad with NO origins has no stable referent,
+        // so it mints a random key (not the fixed hash of the empty set). Two such
+        // squads get distinct keys and stay distinct rows.
+        let _s = StoreScratch::new("persist-unnamed-originless");
+        let mk = |core: &mut Core, sid: u64| {
+            core.session.add_squad(
+                sid,
+                vec![],
+                None,
+                Tab {
+                    name: None,
+                    id: sid,
+                    root: Node::Leaf(sid),
+                    focus: sid,
+                },
+            );
+        };
+        let mut core = empty_core();
+        mk(&mut core, 1);
+        core.persist_squad(1);
+        mk(&mut core, 2);
+        core.persist_squad(2);
+        let loaded = crate::squad_store::load();
+        assert_eq!(
+            loaded.squads.len(),
+            2,
+            "two originless squads stay distinct"
+        );
+        assert_ne!(loaded.squads[0].key, loaded.squads[1].key);
+        assert!(
+            loaded.squads.iter().all(|s| !s.key.is_empty()),
+            "each minted a key"
+        );
     }
 
     #[test]
