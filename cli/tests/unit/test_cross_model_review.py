@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from fno.agents.dispatch import DispatchAskError, SpawnResult
+from fno.config import AgentRouteBlock
 from fno.review.orchestrator import AGENT_NAMES
 from fno.worker.review import build_review_runner
 
@@ -132,11 +133,11 @@ def test_explicit_agent_route_uses_named_headless_session_with_runtime_evidence(
     runner, _, provider_set = build_review_runner(
         agent_providers={},
         agent_routes={
-            "code_reviewer": {
-                "harness": "claude",
-                "provider": "zai",
-                "model": "glm-5.2",
-            }
+            "code_reviewer": AgentRouteBlock(
+                harness="claude",
+                provider="zai",
+                model="glm-5.2",
+            )
         },
         cross_model_enabled=False,
         implementer_provider="claude",
@@ -187,11 +188,11 @@ def test_invalid_explicit_route_fails_before_dispatch() -> None:
         build_review_runner(
             agent_providers={},
             agent_routes={
-                "code_reviewer": {
-                    "harness": "claude",
-                    "provider": "unknown",
-                    "model": "missing",
-                }
+                "code_reviewer": AgentRouteBlock(
+                    harness="claude",
+                    provider="unknown",
+                    model="missing",
+                )
             },
             cross_model_enabled=False,
             implementer_provider="claude",

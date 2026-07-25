@@ -16,6 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.config import AgentRouteBlock
 from fno.review import provider_resolution as pr
 from fno.review.orchestrator import AGENT_NAMES
 from fno.worker import review as review_mod
@@ -213,7 +214,7 @@ def test_print_providers_includes_explicit_route_model(
         review_mod,
         "_read_agent_routes_config",
         lambda: {
-            "code_reviewer": SimpleNamespace(
+            "code_reviewer": AgentRouteBlock(
                 harness="claude", provider="zai", model="glm-5.2"
             )
         },
@@ -236,6 +237,34 @@ def test_print_providers_includes_explicit_route_model(
         "degraded": False,
         "reason": None,
     }
+
+
+def test_explicit_route_resolution_failure_degrades_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(review_mod, "_read_cross_model_config", lambda: ({}, False))
+    monkeypatch.setattr(
+        review_mod,
+        "_read_agent_routes_config",
+        lambda: {
+            "code_reviewer": AgentRouteBlock(
+                harness="claude", provider="zai", model="glm-5.2"
+            )
+        },
+    )
+    monkeypatch.setattr(pr, "load_implementer_provider", lambda _sid: "claude")
+    monkeypatch.setattr(pr, "available_provider_kinds", lambda: ["claude"])
+    monkeypatch.setattr(
+        "fno.agents.model_routing.resolve_explicit_route",
+        lambda _provider, _model: None,
+    )
+
+    routing = review_mod.panel_provider_routing("s")
+
+    route = routing["code_reviewer"]
+    assert route.provider == "claude"
+    assert route.degraded is True
+    assert route.reason == "zai/glm-5.2 unavailable: ran on claude"
 
 
 # ---- session resolution parity with the panel (Gemini HIGH: no drift) ----

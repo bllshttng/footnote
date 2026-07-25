@@ -23,6 +23,7 @@ from typing import Any, Optional
 
 import yaml
 
+from fno.config import AgentRouteBlock
 from fno.review.runners.claude_runner import (
     make_async_runner,
 )
@@ -87,7 +88,7 @@ def _read_state(state_path: Path) -> dict[str, Any]:
 def build_review_runner(
     *,
     agent_providers: dict[str, str],
-    agent_routes: Optional[dict[str, Any]] = None,
+    agent_routes: Optional[dict[str, AgentRouteBlock]] = None,
     cross_model_enabled: bool,
     implementer_provider: str,
     available_providers: list[str],
@@ -144,26 +145,21 @@ def build_review_runner(
         resolved_route = route_resolver
 
     route_envs: dict[str, dict[str, str]] = {}
-    route_specs: dict[str, tuple[str, str, str]] = {}
-    for agent, raw_route in agent_routes.items():
-        harness = getattr(raw_route, "harness", None) or raw_route.get("harness")
-        route_provider = getattr(raw_route, "provider", None) or raw_route.get("provider")
-        model = getattr(raw_route, "model", None) or raw_route.get("model")
-        if harness != "claude" or not route_provider or not model:
-            raise ValueError(f"invalid route tuple for {agent!r}")
-        route_env = resolved_route(route_provider, model)
+    route_specs: dict[str, AgentRouteBlock] = {}
+    for agent, route in agent_routes.items():
+        route_env = resolved_route(route.provider, route.model)
         if not route_env:
             raise ValueError(
                 f"agent route for {agent!r} could not resolve provider/model "
-                f"{route_provider!r}/{model!r}"
+                f"{route.provider!r}/{route.model!r}"
             )
         route_envs[agent] = dict(route_env)
-        route_specs[agent] = (harness, route_provider, model)
+        route_specs[agent] = route
         resolved[agent] = pr.ResolvedProvider(
-            provider=harness,
-            harness=harness,
-            route_provider=route_provider,
-            model=model,
+            provider=route.harness,
+            harness=route.harness,
+            route_provider=route.provider,
+            model=route.model,
         )
     # Cache dimension = the per-agent REQUESTED routing (not just the set of
     # kinds), so two configs that assign the same kinds to different agents
@@ -186,15 +182,15 @@ def build_review_runner(
     async def _runner(agent: str, prompt: str, diff_context: str):
         rp = resolved.get(agent)
         if agent in route_specs:
-            harness, route_provider, model = route_specs[agent]
+            route = route_specs[agent]
             spawn_async = agents_spawn_runner.make_async_runner(
-                provider=harness,
+                provider=route.harness,
                 cwd=run_cwd,
                 timeout=timeout,
                 dispatch=dispatch,
                 route_env=route_envs[agent],
-                route_provider=route_provider,
-                model=model,
+                route_provider=route.provider,
+                model=route.model,
                 named_agent=f"fno:{agent.replace('_', '-')}",
                 headless=True,
             )
@@ -202,9 +198,10 @@ def build_review_runner(
             if not outcome.ok and agents_spawn_runner.is_retryable_failure(outcome):
                 fallback = await claude_async(agent, prompt, diff_context)
                 fallback.note = (
-                    f"{route_provider}/{model} unavailable: fell back to claude"
+                    f"{route.provider}/{route.model} unavailable: fell back to claude"
                     if fallback.ok
-                    else f"{route_provider}/{model} unavailable; claude fallback also failed"
+                    else f"{route.provider}/{route.model} unavailable; "
+                    "claude fallback also failed"
                 )
                 return fallback
             return outcome
@@ -251,7 +248,7 @@ def _read_cross_model_config() -> tuple[dict[str, str], bool]:
         return {}, False
 
 
-def _read_agent_routes_config() -> dict[str, Any]:
+def _read_agent_routes_config() -> dict[str, AgentRouteBlock]:
     """Read validated explicit per-agent route tuples."""
     from fno.config import load_settings
 
@@ -411,10 +408,15 @@ def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
         for agent, route in agent_routes.items():
             env = resolve_explicit_route(route.provider, route.model)
             if not env:
-                raise ValueError(
-                    f"agent route for {agent!r} could not resolve "
-                    f"{route.provider!r}/{route.model!r}"
+                resolved[agent] = pr.ResolvedProvider(
+                    provider="claude",
+                    harness="claude",
+                    degraded=True,
+                    reason=(
+                        f"{route.provider}/{route.model} unavailable: ran on claude"
+                    ),
                 )
+                continue
             resolved[agent] = pr.ResolvedProvider(
                 provider=route.harness,
                 harness=route.harness,
