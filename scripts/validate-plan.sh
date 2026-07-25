@@ -11,9 +11,33 @@ WARNINGS=0
 TMPDIR_BASE_VAL="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BASE_VAL"' EXIT
 
+# New single-doc plans carry either the canonical Execution Strategy YAML or
+# the explicit quick-plan kind. Their executable contract is validated by the
+# Python authority; the heading-oriented checks below remain only for legacy
+# plans that predate the single-doc shape.
+SEMANTIC_SINGLE_DOC=0
+if [[ -f "$PLAN_DIR" ]]; then
+    if grep -q '^## Execution Strategy$' "$PLAN_DIR" 2>/dev/null \
+            || awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
+                | grep -qE '^[[:space:]]*kind:[[:space:]]*quick-plan'; then
+        SEMANTIC_SINGLE_DOC=1
+    fi
+fi
+
 error() { echo "  ERROR: $*"; ((ERRORS++)) || true; }
 warn()  { echo "  WARN:  $*"; ((WARNINGS++)) || true; }
 ok()    { echo "  OK:    $*"; }
+
+_semantic_validate() {
+    local repo_root=""
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    if [[ -n "$repo_root" && -d "$repo_root/cli/src" ]]; then
+        PYTHONPATH="$repo_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
+            fno plan validate "$PLAN_DIR" --execution
+    else
+        fno plan validate "$PLAN_DIR" --execution
+    fi
+}
 
 echo "Validating plan: $PLAN_DIR"
 echo ""
@@ -141,7 +165,13 @@ if [[ -f "$PLAN_DIR" ]]; then
     TASK_HEADINGS_RAW=$(grep -n '^### Task' "$PLAN_DIR" 2>/dev/null || true)
 fi
 
-if [[ -z "$TASK_HEADINGS_RAW" ]]; then
+if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
+    if semantic_output=$(_semantic_validate 2>&1); then
+        ok "semantic execution contract valid"
+    else
+        error "$semantic_output"
+    fi
+elif [[ -z "$TASK_HEADINGS_RAW" ]]; then
     warn "no tasks found (no '### Task' headings)"
 else
     while IFS=: read -r lineno heading_rest; do
@@ -175,7 +205,9 @@ fi
 echo ""
 echo "--- Parallel Conflict Check ---"
 
-if [[ -f "$PLAN_DIR" ]]; then
+if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
+    ok "Parallel ownership validated by semantic execution contract"
+elif [[ -f "$PLAN_DIR" ]]; then
     # Find parallel waves in the Execution Strategy YAML: lines like
     # "mode: parallel" followed by tasks. Strategy: extract task IDs listed
     # in parallel waves, then check their Files sections for duplicates.
@@ -243,7 +275,9 @@ fi
 echo ""
 echo "--- Dependency Check ---"
 
-if [[ -f "$PLAN_DIR" ]]; then
+if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
+    ok "Dependency topology validated by semantic execution contract"
+elif [[ -f "$PLAN_DIR" ]]; then
     # Extract dependency edges: look for "depends_on:" or "Depends on wave"
     # Simple check: ensure wave numbers in depends_on are always lower
     DEP_ERRORS=0
@@ -266,7 +300,9 @@ fi
 echo ""
 echo "--- Critical Path Trace ---"
 
-if [[ -f "$PLAN_DIR" ]]; then
+if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
+    ok "Critical-path prose is optional for semantic single-doc plans"
+elif [[ -f "$PLAN_DIR" ]]; then
     if grep -q "^## Critical Path Trace" "$PLAN_DIR" 2>/dev/null; then
         ok "Critical Path Trace section found"
 
@@ -617,7 +653,11 @@ validate_wave_section_headers() {
     fi
 }
 
-validate_wave_section_headers
+if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
+    ok "Wave topology validated from Execution Strategy YAML"
+else
+    validate_wave_section_headers
+fi
 
 # -------------------------------------------------------------------
 # Check 7: impeccable_stages pin validator (Phase 02.2)

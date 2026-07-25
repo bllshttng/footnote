@@ -297,6 +297,58 @@ else
     fail "AC6g: Should warn about missing scope classification"
 fi
 
+# --- AC7: Single-doc semantic contract ---
+echo ""
+echo "--- AC7: Single-doc Semantic Contract ---"
+
+PLAN_SEMANTIC="$TMPDIR_BASE/semantic.md"
+cat > "$PLAN_SEMANTIC" <<'HEREDOC'
+---
+status: ready
+created: 2026-07-25
+project: fno
+---
+
+# Semantic plan
+
+## Execution Strategy
+
+```yaml
+execution_mode: sequential
+waves:
+  - wave: 1
+    mode: sequential
+    tasks: ["1.1"]
+tasks:
+  - id: "1.1"
+    title: Validate semantics
+    surface: [scripts/validate-plan.sh]
+    verify: bash tests/test-validate-plan.sh
+    acceptance: [AC7]
+```
+HEREDOC
+OUTPUT=$(bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1)
+if ! echo "$OUTPUT" | grep -q "WARN:"; then
+    pass "AC7a: Semantic plan needs no task/wave/critical-path headings"
+else
+    fail "AC7a: Semantic plan should have zero warnings: $OUTPUT"
+fi
+if echo "$OUTPUT" | grep -q "semantic execution contract valid"; then
+    pass "AC7a: Wrapper delegates to semantic validator"
+else
+    fail "AC7a: Semantic validator receipt missing"
+fi
+
+PLAN_PLACEHOLDER="$TMPDIR_BASE/semantic-placeholder.md"
+sed 's#bash tests/test-validate-plan.sh#\# fill in verify command#' \
+    "$PLAN_SEMANTIC" > "$PLAN_PLACEHOLDER"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_PLACEHOLDER" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "tasks.1.1.verify"; then
+    pass "AC7b: Placeholder verification fails with exact task field"
+else
+    fail "AC7b: Placeholder verification should fail loud: $OUTPUT"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Test Results ==="

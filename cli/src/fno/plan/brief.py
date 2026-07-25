@@ -99,21 +99,34 @@ def parse_execution_strategy(yaml_text: str) -> dict[str, Any]:
         raise BriefParseError("Execution Strategy 'tasks' must be a list")
 
     normalized_tasks = []
-    for t in tasks:
+    for index, t in enumerate(tasks, start=1):
         if not isinstance(t, dict):
-            continue
+            raise BriefParseError(
+                f"Execution Strategy task {index} must be a mapping"
+            )
+        task_id = str(t.get("id", ""))
+        surface = t.get("surface", [])
+        acceptance = t.get("acceptance", [])
+        if not isinstance(surface, list):
+            raise BriefParseError(f"Execution Strategy task '{task_id}' surface must be a list")
+        if not isinstance(acceptance, list):
+            raise BriefParseError(f"Execution Strategy task '{task_id}' acceptance must be a list")
         normalized_tasks.append({
-            "id": str(t.get("id", "")),
+            "id": task_id,
             "title": str(t.get("title", "")),
-            "surface": list(t.get("surface", [])),
+            "surface": list(surface),
             "verify": str(t.get("verify", "")),
-            "acceptance": [str(a) for a in t.get("acceptance", [])],
+            "acceptance": [str(a) for a in acceptance],
             "notes": str(t.get("notes", "")).strip(),
         })
 
+    waves = parsed.get("waves", [])
+    if not isinstance(waves, list):
+        raise BriefParseError("Execution Strategy 'waves' must be a list")
+
     return {
         "tasks": normalized_tasks,
-        "waves": parsed.get("waves", []),
+        "waves": waves,
         "execution_mode": parsed.get("execution_mode", "sequential"),
     }
 

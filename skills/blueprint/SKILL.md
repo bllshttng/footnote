@@ -138,14 +138,9 @@ fi
    codemap, run the **Schema Citation Gate** ([references/blueprint-gates.md](references/blueprint-gates.md#schema-citation-gate-graduated-db-touching-plans)) before adopt.
    Quick mode is `-S`-class, so it WARNS on an uncited DB-touching task and
    proceeds; it does not block.
-2b. **Discovery gate** - After structural context but before writing the plan,
-   surface unknowns. Load `references/discovery-gate.md` for the protocol.
-   - With `quick`: 3 questions max (keep it lightweight)
-   - Otherwise (default): up to 5 questions
-   - **Skip if** /think already ran and produced a design doc with a
-     `## Discovery` or `## Assumptions` section (questions were already answered)
-   - Detection: check if the user's input references a design doc path, and if
-     that doc has a `## Discovery` or `## Assumptions` section
+2b. **Discovery ownership** - A supplied design doc never re-runs discovery: `/think` owns that reasoning, and `/blueprint` compiles its artifact even when it has no exact `## Discovery` or `## Assumptions` heading.
+   Run discovery only for a direct node-seeded path with no completed design artifact.
+   Load `references/discovery-gate.md` then; use 3 questions max with `quick` and 5 otherwise.
 
 3. **Write** the plan.
 

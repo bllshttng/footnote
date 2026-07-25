@@ -4,7 +4,7 @@ Verbs:
     stamp             - mark a plan's frontmatter with ship metadata (status:in_review)
     graduate          - flip a stamped plan from status:in_review to status:done
     brief             - generate a scoped task brief from a single-doc plan
-    validate          - validate a plan's frontmatter against fno.plan.schema (read-only)
+    validate          - validate plan frontmatter or executable semantics (read-only)
     reconcile-status  - normalize drifted plan frontmatter status in place
     folder-audit      - count folder plans owned by a non-terminal graph node
     path              - print the save path for a NEW plan/design doc (config.plans_filename)
@@ -229,17 +229,22 @@ def brief(
 @plan_app.command(
     "validate",
     help=(
-        "Validate a single-doc plan's frontmatter against fno.plan.schema "
-        "(read-only). Exit 0 + 'valid' on a clean plan; exit 1 with a "
-        "per-field report otherwise. A load failure (unreadable / missing / "
-        "malformed YAML) reports distinctly from a schema violation."
+        "Validate a single-doc plan (read-only). The default checks frontmatter "
+        "against fno.plan.schema; --execution checks the worker/scheduler "
+        "contract instead. Exit 0 on clean input and 1 with a field report "
+        "otherwise."
     ),
 )
 def validate(
     plan_path: str = typer.Argument(..., help="Path to the plan markdown file"),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the report as JSON."),
+    execution: bool = typer.Option(
+        False,
+        "--execution",
+        help="Validate executable single-doc semantics instead of frontmatter.",
+    ),
 ) -> None:
-    """Report every frontmatter schema violation in one read-only pass."""
+    """Report every violation in one read-only pass."""
     from pydantic import ValidationError
 
     from fno.plan._doc import FrontmatterError, ParseError, load_plan
@@ -278,6 +283,47 @@ def validate(
         msg = f"cannot load plan {plan_path}: {exc}"
         typer.echo(json.dumps({"loaded": False, "error": msg}) if json_out else msg, err=True)
         raise typer.Exit(code=1)
+
+    if execution:
+        from fno.plan.execution_validation import validate_execution
+
+        result = validate_execution(doc)
+        if result.violations:
+            violations = [
+                {"field": violation.field, "message": violation.message}
+                for violation in result.violations
+            ]
+            if json_out:
+                typer.echo(json.dumps({
+                    "valid": False,
+                    "path": str(resolved),
+                    "scope": "execution",
+                    "violations": violations,
+                    "warnings": [],
+                }))
+            else:
+                typer.echo(
+                    f"invalid execution: {resolved} ({len(violations)} violation(s))",
+                    err=True,
+                )
+                for violation in violations:
+                    typer.echo(
+                        f"  {violation['field']}: {violation['message']}",
+                        err=True,
+                    )
+            raise typer.Exit(code=1)
+
+        if json_out:
+            typer.echo(json.dumps({
+                "valid": True,
+                "path": str(resolved),
+                "scope": "execution",
+                "violations": [],
+                "warnings": [],
+            }))
+        else:
+            typer.echo(f"valid execution: {resolved}")
+        return
 
     try:
         PlanFrontmatter.model_validate(doc.frontmatter)
