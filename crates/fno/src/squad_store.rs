@@ -606,6 +606,89 @@ pub fn prune(decide: impl Fn(&StoredSquad) -> PruneDecision) -> io::Result<Prune
     Ok(out)
 }
 
+/// Heal the UNNAMED-squad rows that accumulated under the old random-mint
+/// identity (x-e447). Migrate every unnamed squad with origins onto its derived
+/// [`origin_key`] (Locked Decision 1: the durable key IS a function of the
+/// origin set), then collapse rows that now share an identity: among same-key
+/// rows keep the one with the most members (tiebreak newest `created_at`),
+/// MERGE every dropped row's members and tab specs into it, and drop the rest.
+/// Named squads are never touched (they key by name); an originless unnamed
+/// squad keeps its random key and never collapses (Locked Decision 2: no stable
+/// identity). One locked mutation, prune-shaped; a write error surfaces to the
+/// caller rather than healing on one machine and silently staying broken on
+/// another.
+pub fn collapse_duplicate_unnamed() -> io::Result<usize> {
+    let mut dropped = 0usize;
+    mutate_file(|sf| {
+        for sq in sf.squads.iter_mut() {
+            if sq.name.is_empty() && !sq.origins.is_empty() {
+                sq.key = origin_key(&sq.origins);
+            }
+        }
+        let mut groups: std::collections::BTreeMap<String, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (i, sq) in sf.squads.iter().enumerate() {
+            if sq.name.is_empty() && !sq.key.is_empty() {
+                groups.entry(sq.key.clone()).or_default().push(i);
+            }
+        }
+        let mut drop_idx: Vec<usize> = Vec::new();
+        for idxs in groups.values() {
+            if idxs.len() < 2 {
+                continue;
+            }
+            // Survivor: most members, tiebreak newest created_at.
+            let mut ranked: Vec<usize> = idxs.clone();
+            ranked.sort_by(|&a, &b| {
+                sf.squads[b]
+                    .members
+                    .len()
+                    .cmp(&sf.squads[a].members.len())
+                    .then_with(|| sf.squads[b].created_at.cmp(&sf.squads[a].created_at))
+            });
+            let surv = ranked[0];
+            for &i in &ranked[1..] {
+                let extra_members = std::mem::take(&mut sf.squads[i].members);
+                let extra_specs = std::mem::take(&mut sf.squads[i].tab_specs);
+                sf.squads[surv].members.extend(extra_members);
+                sf.squads[surv].tab_specs.extend(extra_specs);
+                drop_idx.push(i);
+            }
+            // Dedup merged members by attach_id; a live member (tombstone=false)
+            // wins over a tombstone of the same id.
+            sf.squads[surv].members.sort_by(|a, b| {
+                a.attach_id
+                    .cmp(&b.attach_id)
+                    .then(a.tombstone.cmp(&b.tombstone))
+            });
+            sf.squads[surv]
+                .members
+                .dedup_by(|a, b| a.attach_id == b.attach_id);
+            sf.squads[surv]
+                .tab_specs
+                .sort_by(|a, b| a.tab_name.cmp(&b.tab_name));
+            sf.squads[surv]
+                .tab_specs
+                .dedup_by(|a, b| a.tab_name == b.tab_name);
+        }
+        if drop_idx.is_empty() {
+            return;
+        }
+        drop_idx.sort_unstable();
+        drop_idx.dedup();
+        let mut kept = Vec::with_capacity(sf.squads.len().saturating_sub(drop_idx.len()));
+        for (i, sq) in sf.squads.drain(..).enumerate() {
+            if drop_idx.binary_search(&i).is_ok() {
+                dropped += 1;
+            } else {
+                kept.push(sq);
+            }
+        }
+        sf.squads = kept;
+    })?;
+    Ok(dropped)
+}
+
 /// Rename `old` -> `new` in one locked mutation, carrying `created_at` across
 /// (a `RenameSquad`). Any pre-existing `new` entry is overwritten.
 pub fn rename(
@@ -1240,6 +1323,77 @@ mod tests {
             origin_key(&["/other".into()]),
             "distinct origins derive distinct keys"
         );
+    }
+
+    #[test]
+    fn collapse_duplicate_unnamed_merges_same_origin_into_one() {
+        // x-e447 AC-HP2: the backlog rows carry distinct random keys (the old
+        // mint), so a key-based upsert cannot heal them. collapse groups by
+        // origin, rekeys onto origin_key, keeps the membered row, merges every
+        // dropped row's members, and leaves exactly one row per origin. A named
+        // squad sharing the origin is NOT absorbed (it keys by name).
+        let _s = Scratch::new("collapse-same-origin");
+        let repo = "/repo/backlog";
+        let one = origin_key(&[repo.into()]);
+        upsert("", "dead0001", &[repo.into()], &[]).unwrap();
+        upsert("", "dead0002", &[repo.into()], &[m("aaaaaaaa")]).unwrap();
+        upsert("", "dead0003", &[repo.into()], &[m("bbbbbbbb")]).unwrap();
+        // A different origin and a named squad stay separate.
+        upsert("", "other1", &["/other".into()], &[]).unwrap();
+        upsert("named", "", &[repo.into()], &[m("cccccccc")]).unwrap();
+
+        let dropped = collapse_duplicate_unnamed().unwrap();
+        assert_eq!(dropped, 2, "collapsed the two extra same-origin rows");
+
+        let loaded = load();
+        let same_origin: Vec<_> = loaded
+            .squads
+            .iter()
+            .filter(|s| s.name.is_empty() && s.origins == vec![repo.to_string()])
+            .collect();
+        assert_eq!(same_origin.len(), 1, "one row for the origin");
+        assert_eq!(
+            same_origin[0].key, one,
+            "migrated onto the derived origin key"
+        );
+        assert_eq!(
+            same_origin[0].members.len(),
+            2,
+            "members merged into the survivor"
+        );
+        assert_eq!(
+            loaded.squads.len(),
+            3,
+            "named + other-origin + the one collapsed row"
+        );
+        assert!(
+            loaded.squads.iter().any(|s| s.name == "named"),
+            "named squad untouched"
+        );
+    }
+
+    #[test]
+    fn collapse_duplicate_unnamed_is_idempotent() {
+        // x-e447: collapse runs every restore; a second pass must be a no-op
+        // (drops nothing) once the store has converged.
+        let _s = Scratch::new("collapse-idempotent");
+        upsert("", "k1", &["/r".into()], &[m("aaaaaaaa")]).unwrap();
+        upsert("", "k2", &["/r".into()], &[]).unwrap();
+        assert_eq!(collapse_duplicate_unnamed().unwrap(), 1);
+        assert_eq!(collapse_duplicate_unnamed().unwrap(), 0, "second pass no-op");
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 1);
+        assert_eq!(loaded.squads[0].key, origin_key(&["/r".into()]));
+    }
+
+    #[test]
+    fn collapse_duplicate_unnamed_surfaces_a_write_error() {
+        // x-e447 AC-ERR1: a collapse write error is not swallowed. A corrupt
+        // store makes the locked read fail loud, and collapse returns Err so the
+        // caller degrades restore instead of healing silently on one machine.
+        let s = Scratch::new("collapse-err");
+        std::fs::write(s.file(), "{garbage not json").unwrap();
+        assert!(collapse_duplicate_unnamed().is_err());
     }
 
     #[test]

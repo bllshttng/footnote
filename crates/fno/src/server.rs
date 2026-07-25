@@ -3714,6 +3714,15 @@ impl Core {
     /// a squad that cannot even open a shell is skipped with a notice, never a
     /// crash (AC2-FR: a degraded restore leaves a fully usable session).
     fn restore_squads(&mut self, rows: u16, cols: u16, home_sid: u64) {
+        // Heal the store before reading (x-e447): the old random-mint identity
+        // let a repo's home squad append a row per mux restart. The write side
+        // now derives a stable key; this migrates the backlog rows already on
+        // disk onto that key and collapses the duplicates. One locked mutation,
+        // prune-shaped; a write error degrades to a notice, never refuses
+        // (AC2-FR / AC-ERR1).
+        if let Err(e) = crate::squad_store::collapse_duplicate_unnamed() {
+            self.notice_all(format!("squad collapse at restore skipped: {e}"));
+        }
         let loaded = crate::squad_store::load();
         if let Some(n) = loaded.notice {
             self.notice_all(n);
