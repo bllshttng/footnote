@@ -649,6 +649,7 @@ def _discover_from_registry(
                 "cwd": getattr(e, "cwd", "") or "",
                 "status": None,
                 "agent": harness,
+                "name": getattr(e, "name", None),
             }
         )
     return rows
@@ -668,6 +669,7 @@ class DiscoveredSession:
     agent: str = "claude"
     truth_state: str = "unknown"
     transcript_path: Optional[str] = None
+    name: Optional[str] = None  # registered spawn name (address axis, distinct from handle/alias)
 
     @property
     def is_alive(self) -> bool:
@@ -1146,7 +1148,7 @@ def resolve_or_suggest(
         registry_matches = [
             row
             for row in _discover_from_registry(registry_path)
-            if handle and handle == row["session_id"]
+            if handle and (handle == row["session_id"] or handle == row.get("name"))
         ]
         if len(registry_matches) == 1:
             row = registry_matches[0]
@@ -1167,6 +1169,7 @@ def resolve_or_suggest(
                 transcript_path=(
                     transcript_path if transcript_path is not None else None
                 ),
+                name=row.get("name"),
             ), []
 
         if handle:
@@ -1259,6 +1262,7 @@ def resolve_or_suggest(
                 or s.session_id == handle
                 or s.short_id == handle
                 or canonical_handle(s.session_id) == handle
+                or s.name == handle
             )
         ]
         if len(exact) == 1:
@@ -1269,8 +1273,8 @@ def resolve_or_suggest(
 
     candidates: list[str] = []
     for s in sessions:
-        for cand in (s.handle, s.short_id, canonical_handle(s.session_id)):
-            if cand not in candidates:
+        for cand in (s.handle, s.short_id, canonical_handle(s.session_id), s.name):
+            if cand and cand not in candidates:
                 candidates.append(cand)
     # Name the bug rather than emitting a bare "not found": a harness-prefixed
     # address means some caller (a stale binary, a hardcoded string, a note
@@ -1861,6 +1865,8 @@ def discover_live_sessions(
                 existing["cwd"] = r["cwd"]
             if not existing.get("transcript_path") and r.get("transcript_path"):
                 existing["transcript_path"] = r["transcript_path"]
+            if not existing.get("name") and r.get("name"):
+                existing["name"] = r["name"]
     live = list(by_sid.values())
 
     if resolve_metadata:
@@ -1881,6 +1887,7 @@ def discover_live_sessions(
             status=r["status"],
             agent=r["agent"],
             transcript_path=r.get("transcript_path"),
+            name=r.get("name"),
         )
         for r in live
     ]

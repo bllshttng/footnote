@@ -1289,6 +1289,136 @@ def test_us2_registry_handle_resolves(tmp_path, monkeypatch):
     assert by_short is not None
 
 
+def test_us2_registry_name_resolves_codex_on_fast_path(tmp_path, monkeypatch):
+    """US2/AC1-HP: truth resolves a live codex pane worker by its registered NAME.
+
+    The name axis lives on the require_alive=False registry fast-path (truth's
+    path), so a name resolves without scanning the transcript store."""
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="codex-x2af5",
+                harness="codex",
+                harness_session_id="019f48e1-fast-path",
+                cwd="/x",
+                log_path="/tmp/codex.log",
+            )
+        ],
+        path=registry,
+    )
+    monkeypatch.setattr(
+        discover,
+        "_discover_from_codex",
+        lambda *_a, **_k: pytest.fail("transcript store was scanned"),
+    )
+
+    match, _suggestions = discover.resolve_or_suggest(
+        "codex-x2af5",
+        registry_path=registry,
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.session_id == "019f48e1-fast-path"
+    assert match.agent == "codex"
+    assert match.name == "codex-x2af5"
+
+
+def test_us2_registry_name_resolves_claude(tmp_path):
+    """US2/AC2-HP: a registered claude name resolves independent of codex row
+    population (the independent-defect specimen from the repro)."""
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="x-bbde",
+                harness="claude",
+                harness_session_id="c655c326-1111-2222-3333-444455556666",
+                short_id="c655c326",
+                cwd="/repo/one",
+                log_path="/tmp/claude.log",
+            )
+        ],
+        path=registry,
+    )
+
+    match, _suggestions = discover.resolve_or_suggest(
+        "x-bbde",
+        registry_path=registry,
+        projects_dir=tmp_path / "no-projects",
+        require_alive=False,
+    )
+
+    assert match is not None
+    assert match.session_id == "c655c326-1111-2222-3333-444455556666"
+    assert match.agent == "claude"
+    assert match.name == "x-bbde"
+
+
+def test_us2_peek_resolves_codex_name(tmp_path, monkeypatch):
+    """US2/AC1-HP: peek (require_alive=True default) resolves a codex pane name
+    through the catch-all exact-match once the row is named and live."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="codex-x2af5",
+                harness="codex",
+                harness_session_id="019f48e1-peek",
+                cwd="/x",
+                log_path="/tmp/codex.log",
+            )
+        ],
+        path=registry,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+
+    match, _suggestions = discover.resolve_or_suggest(
+        "codex-x2af5", registry_path=registry, **_empty_seams(tmp_path)
+    )
+
+    assert match is not None
+    assert match.session_id == "019f48e1-peek"
+    assert match.name == "codex-x2af5"
+
+
+def test_ac1_err_name_miss_suggests_registered_names(tmp_path, monkeypatch):
+    """AC1-ERR: a near-miss on a registered name suggests the roster's actual
+    names, now that the name axis is in the did-you-mean candidate pool."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="codex-x2af5",
+                harness="codex",
+                harness_session_id="019f48e1-sugg",
+                cwd="/x",
+                log_path="/tmp/codex.log",
+            )
+        ],
+        path=registry,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+
+    match, suggestions = discover.resolve_or_suggest(
+        "codex-x2af", registry_path=registry, **_empty_seams(tmp_path)
+    )
+
+    assert match is None
+    assert "codex-x2af5" in suggestions
+
+
 def test_ac1_edge_source_overlap_dedups(tmp_path, monkeypatch):
     """AC1-EDGE: one session present in registry AND roster yields exactly one row."""
     use_tmpdir(monkeypatch, tmp_path)
