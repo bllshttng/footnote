@@ -159,14 +159,11 @@ fn family1_truth_state_with_command(
         }
     };
     if !output.status.success() {
-        let detail = family1_truth_failure_detail(
-            &output.stdout,
-            &String::from_utf8_lossy(&output.stderr),
-        );
+        let detail =
+            family1_truth_failure_detail(&output.stdout, &String::from_utf8_lossy(&output.stderr));
         eprintln!(
             "WARN: family-1 truth probe exited {}: {}",
-            output.status,
-            detail
+            output.status, detail
         );
         return None;
     }
@@ -3856,10 +3853,8 @@ mod tests {
     fn family1_truth_failure_detail_prefers_stdout_reason() {
         // truth writes {state,reason} to stdout on a refusal (exit 13); stderr
         // holds the verify banner and is empty, so the reason is read off stdout.
-        let detail = family1_truth_failure_detail(
-            br#"{"state":"unknown","reason":"not-found"}"#,
-            "",
-        );
+        let detail =
+            family1_truth_failure_detail(br#"{"state":"unknown","reason":"not-found"}"#, "");
         assert_eq!(detail, "not-found");
     }
 
