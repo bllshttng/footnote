@@ -151,6 +151,13 @@ OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbee
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "/check-pr 42")"
 [[ "$(field "$OUT" message)" == "/check-pr 42" ]] && pass "explicit /command passthrough (no /target, no no-merge)" || fail "passthrough: $OUT"
 
+# The advertised plugin-qualified spelling is already namespaced. Codex swaps
+# the surface marker only; it must not double-prefix the skill name.
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider codex --input "/fno:target x-81ad")"
+[[ "$(field "$OUT" message)" == '$fno:target x-81ad no-merge' ]] \
+  && pass "codex qualified passthrough stays single-prefixed" \
+  || fail "codex qualified passthrough idempotency: $OUT"
+
 # --- explicit /target ... keeps no-merge default applied once (idempotent) ---
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "/target L ab-deadbeef no-merge")"
 [[ "$(field "$OUT" message)" == "/target L ab-deadbeef no-merge" ]] && pass "explicit /target no-merge not duplicated" || fail "idempotent no-merge: $OUT"

@@ -41,6 +41,7 @@ from fno.agents.dispatch import (
     _capture_parent_edge,
     validate_spawn_name,
 )
+from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import hold_agent_lock
 from fno.agents.registry import (
     AgentEntry,
@@ -82,6 +83,7 @@ class MuxSpawnResult:
     # Claude's 8-hex jobId (``session_uuid[:8]``), the addressable mail handle;
     # "" for providers whose transport key is not short_id (US8).
     short_id: str = ""
+    effective_message: Optional[str] = None
 
 
 def _fno_bin() -> str:
@@ -418,6 +420,9 @@ def build_pane_argv(
     ``--model <provider/model>``). Exact passthrough, no fuzzy resolution;
     empty/None = provider default. A CLI ``--model`` arg beats any role-routing
     model set via env (``resolve_route``), so explicit intent wins."""
+    if message.strip().startswith(("/", "$fno:")):
+        message = normalize_command(message, provider)
+
     # x-b6e2: resolve the Tier-3 passthrough tokens once, up front, so an
     # unmappable (provider, flag) cell fails closed BEFORE any provider arm builds
     # an argv. Supported cells return the tokens; every arm splices them in below.
@@ -764,6 +769,14 @@ def dispatch_spawn_pane(
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
 
+    effective_message: Optional[str] = None
+    if message.strip().startswith(("/", "$fno:")):
+        try:
+            message = normalize_command(message, provider)
+        except DispatchResolveError as exc:
+            raise DispatchAskError(str(exc), exit_code=2) from exc
+        effective_message = message
+
     session = resolve_mux_session(session)
     session_uuid = str(_uuid.uuid4()) if provider == "claude" else None
     # Read before the pane exists so the opencode backfill can only ever match a
@@ -953,4 +966,5 @@ def dispatch_spawn_pane(
         child_pid=child_pid,
         session_uuid=session_uuid,
         short_id=short_id_val,
+        effective_message=effective_message,
     )

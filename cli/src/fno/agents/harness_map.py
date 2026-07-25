@@ -148,7 +148,13 @@ def normalize_command(command: str, harness: str) -> str:
     if surface == _REFUSED:
         raise DispatchResolveError(_refused_reason(harness))
     if surface == _CODEX_SKILL and cmd.startswith("/"):
-        return "$fno:" + cmd[1:]
+        # Operators use both the portable ``/target`` spelling and the
+        # advertised plugin-qualified ``/fno:target`` spelling. Codex's native
+        # skill surface is ``$fno:target`` in both cases. Strip the optional
+        # slash namespace before swapping the surface marker so repeated
+        # normalization at independent dispatch choke points is idempotent.
+        verb = cmd[len("/fno:") :] if cmd.startswith("/fno:") else cmd[1:]
+        return "$fno:" + verb
     if surface == _SLASH and cmd.startswith("/"):
         # Plugin-namespace prefix swap only (never re-tokenize): claude/agy inject
         # the skill natively (""), opencode's fno plugin exposes it as `/fno:verb`.

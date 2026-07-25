@@ -13,36 +13,8 @@ import json
 import pytest
 
 from fno.inbox.triage import (
-    _build_claude_cmd,
     _raise_on_claude_error,
-    TriageSettings,
 )
-
-SCHEMA = {"type": "object"}
-
-
-# --- Bug 1: --bare auth gating ---------------------------------------------
-
-def test_bare_omitted_without_api_key(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    cmd = _build_claude_cmd(SCHEMA, TriageSettings())
-    assert "--bare" not in cmd
-    assert cmd[:2] == ["claude", "-p"]
-    assert "--output-format" in cmd and "json" in cmd
-
-
-def test_bare_used_with_api_key(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    cmd = _build_claude_cmd(SCHEMA, TriageSettings())
-    assert "--bare" in cmd
-
-
-def test_model_flag_appended(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    cmd = _build_claude_cmd(SCHEMA, TriageSettings(model="claude-opus-4-8"))
-    assert "--model" in cmd
-    assert cmd[cmd.index("--model") + 1] == "claude-opus-4-8"
-
 
 # --- Bug 2: fail loud on the is_error envelope -----------------------------
 

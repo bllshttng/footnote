@@ -22,6 +22,8 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING
 
+from fno.llm import LLMCallRefused, llm_call
+
 if TYPE_CHECKING:
     from fno.review.orchestrator import Finding
 
@@ -115,21 +117,16 @@ def claude_scorer(finding: "Finding", *, timeout: int = 60) -> int:
     Returns 0 on any failure (subprocess error, missing binary, non-numeric
     output, timeout).
     """
-    cmd = [
-        "claude",
-        "-p",
-        "--model",
-        _MODEL,
-        "--output-format",
-        "json",
-        "--append-system-prompt",
-        _SINGLE_SYSTEM_PROMPT,
-        _format_finding(finding),
-    ]
     ctx = f"{finding.agent}:{finding.file}:{finding.line}"
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = llm_call(
+            _format_finding(finding),
+            model=_MODEL,
+            system_prompt=_SINGLE_SYSTEM_PROMPT,
+            timeout=timeout,
+            prompt_as_arg=True,
+        )
     except subprocess.TimeoutExpired:
         print(f"claude_scorer: timeout for {ctx}", file=sys.stderr)
         return 0
@@ -138,6 +135,9 @@ def claude_scorer(finding: "Finding", *, timeout: int = 60) -> int:
         return 0
     except OSError as exc:
         print(f"claude_scorer: subprocess error for {ctx}: {exc}", file=sys.stderr)
+        return 0
+    except LLMCallRefused as exc:
+        print(f"claude_scorer: {exc} for {ctx}", file=sys.stderr)
         return 0
 
     if result.returncode != 0:
@@ -249,20 +249,14 @@ def claude_scorer_batch(findings: list["Finding"], *, timeout: int = 120) -> lis
             for f in findings
         ]
     )
-    cmd = [
-        "claude",
-        "-p",
-        "--model",
-        _MODEL,
-        "--output-format",
-        "json",
-        "--append-system-prompt",
-        _batch_system_prompt(len(findings)),
-        payload,
-    ]
-
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = llm_call(
+            payload,
+            model=_MODEL,
+            system_prompt=_batch_system_prompt(len(findings)),
+            timeout=timeout,
+            prompt_as_arg=True,
+        )
     except subprocess.TimeoutExpired:
         print(
             f"claude_scorer_batch: timeout after {timeout}s "
@@ -289,6 +283,9 @@ def claude_scorer_batch(findings: list["Finding"], *, timeout: int = 120) -> lis
             )
             return _per_finding_fallback(findings, timeout=timeout)
         print(f"claude_scorer_batch: subprocess error: {exc}", file=sys.stderr)
+        return [0] * len(findings)
+    except LLMCallRefused as exc:
+        print(f"claude_scorer_batch: {exc}; returning zeros", file=sys.stderr)
         return [0] * len(findings)
 
     if result.returncode != 0:

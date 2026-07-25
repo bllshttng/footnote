@@ -225,6 +225,7 @@ def headless_create(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    output_format: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
     route_env: Optional[Mapping[str, str]] = None,
 ) -> ProviderResult:
@@ -253,6 +254,8 @@ def headless_create(
         argv += ["--effort", effort]
     # x-b6e2: Tier-3 passthrough, same order as the Rust headless builder.
     argv += _tier3_tokens(add_dir, agent, tools, deny_tools)
+    if output_format:
+        argv += ["--output-format", output_format]
     argv.append(message or "hello")
     # A one-shot `claude -p` inherits the parent env, so an ambient
     # ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN would override BOTH a per-spawn

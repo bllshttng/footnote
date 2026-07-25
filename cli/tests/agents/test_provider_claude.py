@@ -10,7 +10,7 @@ ACs (US1):
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -420,6 +420,29 @@ def test_headless_create_no_account_inherits_env(tmp_path: Path, monkeypatch) ->
     cwd.mkdir()
     claude_mod.headless_create(message="hi", cwd=cwd)
     assert captured["has_env"] is False
+
+
+def test_headless_create_forwards_json_output_format(tmp_path: Path, monkeypatch) -> None:
+    """Internal canonical callers can preserve Claude's result envelope."""
+    from fno.agents.providers import claude as claude_mod
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["argv"] = argv
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = '{"is_error":false}'
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd, output_format="json")
+
+    argv = captured["argv"]
+    assert argv[-3:] == ["--output-format", "json", "hi"]
 
 
 def test_headless_create_scrubs_inherited_auth(tmp_path: Path, monkeypatch) -> None:

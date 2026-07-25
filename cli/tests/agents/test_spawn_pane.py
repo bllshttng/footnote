@@ -346,6 +346,39 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
     assert "run" not in opencode and "--session-id" not in opencode
 
 
+def test_build_pane_argv_normalizes_direct_slash_commands(tmp_path: Path) -> None:
+    """Direct ``fno agents spawn`` calls bypass resolve_dispatch.
+
+    The pane argv builder is therefore a load-bearing normalization choke point,
+    including for the advertised plugin-qualified command spelling.
+    """
+    from fno.agents.mux_spawn import build_pane_argv
+
+    assert build_pane_argv(
+        "codex", "/fno:target x-81ad", tmp_path, False, None
+    )[-1] == "$fno:target x-81ad"
+    assert build_pane_argv(
+        "opencode", "/fno:target x-81ad", tmp_path, False, None
+    )[2] == "/fno:target x-81ad"
+    assert build_pane_argv(
+        "claude", "/fno:target x-81ad", tmp_path, False, "uuid"
+    )[-1] == "/fno:target x-81ad"
+
+
+def test_gemini_direct_slash_spawn_refuses_cleanly(tmp_path: Path, monkeypatch) -> None:
+    """Deprecated harness refusal stays inside the public dispatch error type."""
+    from fno.agents.dispatch import DispatchAskError
+
+    with pytest.raises(DispatchAskError, match="successor 'agy'") as exc_info:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            provider="gemini",
+            message="/fno:target x-81ad",
+        )
+    assert exc_info.value.exit_code == 2
+
+
 def test_build_pane_argv_forwards_model(tmp_path: Path) -> None:
     # x-c772: an explicit --model reaches every pane provider's TUI flag
     # (opencode included, now that it is spawnable). Exact passthrough; opencode
@@ -660,27 +693,22 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
 
 
 def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
-    """The CLI receipt is one JSON line, a superset of the daemon-spawn shape
-    ({"name","short_id","provider","status"}) plus the mux fields."""
+    """The public CLI launches and reports the same translated pane payload."""
     from typer.testing import CliRunner
 
     import fno.agents.cli as agents_cli
-    from fno.agents.mux_spawn import MuxSpawnResult
-
-    def fake_dispatch(**kwargs):
-        return MuxSpawnResult(
-            name=kwargs["name"],
-            provider=kwargs["provider"],
-            session="main",
-            pane_id=9,
-            child_pid=111,
-            session_uuid="u-1",
-        )
-
     import fno.agents.mux_spawn as mux_spawn
 
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
+    use_tmpdir(monkeypatch, tmp_path)
+    fake_runner = FakeRunner(run_stdout="9\n")
+    real_dispatch = mux_spawn.dispatch_spawn_pane
+
+    def dispatch_with_fake_mux(**kwargs):
+        return real_dispatch(**kwargs, runner=fake_runner)
+
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", dispatch_with_fake_mux)
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setenv("FNO_SESSION", "main")
     # x-85fe: pin canonical == caller so this node-less spawn does NOT move to
     # the canonical root (AC1-EDGE no-op) -- the receipt/redirect note would
     # otherwise drift when run from a linked worktree. This test checks the pane
@@ -688,18 +716,91 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
 
     runner = CliRunner()
-    result = runner.invoke(agents_cli.agents_app, ["spawn", "--name", "peer", "--harness", "claude"])
+    result = runner.invoke(
+        agents_cli.agents_app,
+        ["spawn", "--name", "peer", "--harness", "codex", "/fno:target x-81ad"],
+    )
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.output.strip().splitlines()[-1])
     assert receipt == {
         "name": "peer",
         "short_id": "",
-        "provider": "claude",
+        "provider": "codex",
         "provider_source": "explicit",  # dispatch-provider provenance
         "status": "live",
         "mux_session": "main",
         "pane_id": 9,
+        "effective_message": "$fno:target x-81ad",
     }
+    pane_run = next(call for call in fake_runner.calls if call[1:4] == ["mux", "pane", "run"])
+    assert "$fno:target x-81ad" in pane_run
+
+
+def test_cmd_spawn_rejects_output_format_on_pane_before_dispatch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setattr(
+        mux_spawn,
+        "dispatch_spawn_pane",
+        lambda **_kwargs: pytest.fail("pane dispatch must not run"),
+    )
+
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        [
+            "spawn", "--name", "peer", "--harness", "claude",
+            "--output-format", "json", "hello",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "supports only 'json' on claude headless spawns" in result.output
+
+
+def test_cmd_spawn_parses_pr_watch_headless_json_argv(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.dispatch as dispatch_mod
+    from fno.agents.dispatch import SpawnResult
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    captured: dict = {}
+
+    def fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return SpawnResult(
+            kind="once",
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            short_id="",
+            reply='{"is_error": false}',
+        )
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_spawn", fake_dispatch)
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        [
+            "spawn", "--name", "pr-check-7", "--substrate", "headless",
+            "--harness", "claude", "--output-format", "json",
+            "/fno:pr check 7",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["message"] == "/fno:pr check 7"
+    assert captured["headless"] is True
+    assert captured["output_format"] == "json"
 
 
 # ---------------------------------------------------------------------------

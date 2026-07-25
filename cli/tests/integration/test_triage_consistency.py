@@ -157,7 +157,7 @@ def test_unwrap_structured_output(tmp_path, monkeypatch):
         "structured_output": _prop([{"id": "ab-1", "to": "p1"}]),
         "result": json.dumps(_prop([{"id": "ab-1", "to": "p1"}])),
     })
-    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, envelope))
+    monkeypatch.setenv("FNO_LLM_STUB", _stub(tmp_path, envelope))
     out = triage._run_consistency_propose({"candidates": []}, None)
     assert triage._priority_map(out) == {"ab-1": "p1"}  # not the empty envelope
 
@@ -168,7 +168,7 @@ def test_unwrap_result_json_string(tmp_path, monkeypatch):
         "is_error": False,
         "result": json.dumps(_prop([{"id": "ab-2", "to": "p0"}])),
     })
-    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, envelope))
+    monkeypatch.setenv("FNO_LLM_STUB", _stub(tmp_path, envelope))
     out = triage._run_consistency_propose({"candidates": []}, None)
     assert triage._priority_map(out) == {"ab-2": "p0"}
 
@@ -176,14 +176,14 @@ def test_unwrap_result_json_string(tmp_path, monkeypatch):
 def test_direct_object_stub_passes_through(tmp_path, monkeypatch):
     # A stub that prints the proposal object directly (no envelope) is unchanged.
     direct = _prop([{"id": "ab-3", "to": "p3"}])
-    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, json.dumps(direct)))
+    monkeypatch.setenv("FNO_LLM_STUB", _stub(tmp_path, json.dumps(direct)))
     out = triage._run_consistency_propose({"candidates": []}, None)
     assert out == direct
 
 
 def test_is_error_raises_before_unwrap(tmp_path, monkeypatch):
     envelope = json.dumps({"is_error": True, "result": "auth failed"})
-    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, envelope))
+    monkeypatch.setenv("FNO_LLM_STUB", _stub(tmp_path, envelope))
     with pytest.raises(RuntimeError, match="auth failed"):
         triage._run_consistency_propose({"candidates": []}, None)
 
@@ -191,7 +191,7 @@ def test_is_error_raises_before_unwrap(tmp_path, monkeypatch):
 def test_missing_structured_output_unparseable_result_raises(tmp_path, monkeypatch):
     # No structured_output AND result is not JSON: raise ValueError, never {}.
     envelope = json.dumps({"is_error": False, "result": "not json at all"})
-    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, envelope))
+    monkeypatch.setenv("FNO_LLM_STUB", _stub(tmp_path, envelope))
     with pytest.raises(ValueError):
         triage._run_consistency_propose({"candidates": []}, None)
 
@@ -201,7 +201,7 @@ def test_direct_proposal_with_stray_result_field_not_misrouted(tmp_path, monkeyp
     # string `result` field never triggers envelope-unwrapping that would drop
     # the real proposal (codex peer, PR #321).
     direct = {**_prop([{"id": "ab-9", "to": "p1"}]), "result": "not an envelope"}
-    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, json.dumps(direct)))
+    monkeypatch.setenv("FNO_LLM_STUB", _stub(tmp_path, json.dumps(direct)))
     out = triage._run_consistency_propose({"candidates": []}, None)
     assert triage._priority_map(out) == {"ab-9": "p1"}
 
@@ -210,7 +210,7 @@ def test_result_parses_to_non_dict_raises(tmp_path, monkeypatch):
     # result is valid JSON but not an object (a list): the downstream dict guard
     # rejects it rather than handing a non-dict proposal downstream.
     envelope = json.dumps({"is_error": False, "result": json.dumps([1, 2, 3])})
-    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, envelope))
+    monkeypatch.setenv("FNO_LLM_STUB", _stub(tmp_path, envelope))
     with pytest.raises(ValueError, match="not a JSON object"):
         triage._run_consistency_propose({"candidates": []}, None)
 
@@ -219,6 +219,6 @@ def test_empty_structured_output_raises_not_silent_zero(tmp_path, monkeypatch):
     # An underfilled envelope (structured_output missing priority_changes) must
     # be an errored run, never a silently-completed zero-proposal agreement.
     envelope = json.dumps({"is_error": False, "structured_output": {}})
-    monkeypatch.setenv("FNO_TRIAGE_CONSISTENCY_STUB", _stub(tmp_path, envelope))
+    monkeypatch.setenv("FNO_LLM_STUB", _stub(tmp_path, envelope))
     with pytest.raises(ValueError, match="priority_changes"):
         triage._run_consistency_propose({"candidates": []}, None)

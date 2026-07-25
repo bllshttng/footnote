@@ -49,6 +49,10 @@ set -e
 if [ -n "$FAKE_CODEX_SIGINT_SENTINEL" ]; then
   trap 'printf caught > "$FAKE_CODEX_SIGINT_SENTINEL"; exit 130' INT TERM
 fi
+if [ -n "$FAKE_CODEX_PROMPT_DUMP" ]; then
+  for arg in "$@"; do last_arg="$arg"; done
+  printf '%s' "$last_arg" > "$FAKE_CODEX_PROMPT_DUMP"
+fi
 if [ -n "$FAKE_CODEX_EXIT" ] && [ "$FAKE_CODEX_EXIT" != "0" ]; then
   # Emit nothing and exit with error code
   exit "$FAKE_CODEX_EXIT"
@@ -227,6 +231,41 @@ fn codex_create_happy_path_returns_reply() {
         outcome.stderr.contains("torn down"),
         "expected teardown receipt on stderr: {}",
         outcome.stderr
+    );
+}
+
+#[test]
+fn codex_create_normalizes_direct_plugin_command() {
+    let home = AgentsHome::at(tmpdir("normalize-home"));
+    let bin_dir = tmpdir("normalize-bin");
+    let cwd = tmpdir("normalize-cwd");
+    install_fake_codex(&bin_dir);
+    let prompt_dump = cwd.join("prompt.txt");
+    let prompt_dump_str = prompt_dump.to_string_lossy().into_owned();
+
+    let outcome = dispatch_once_with_fake_codex(
+        &home,
+        &bin_dir,
+        "normalize-agent",
+        "  /fno:target x-81ad  ",
+        "fno",
+        &cwd,
+        false,
+        Some(Duration::from_secs(10)),
+        &[
+            ("FAKE_CODEX_PROMPT_DUMP", prompt_dump_str.as_str()),
+            (
+                "FAKE_CODEX_SESSION_ID",
+                "aaaabbbb-1111-2222-3333-444455556667",
+            ),
+            ("FAKE_CODEX_REPLY", "done"),
+        ],
+    );
+
+    assert_eq!(outcome.exit_code, 0, "stderr: {}", outcome.stderr);
+    assert_eq!(
+        fs::read_to_string(prompt_dump).unwrap(),
+        "[from: fno]\n\n$fno:target x-81ad"
     );
 }
 

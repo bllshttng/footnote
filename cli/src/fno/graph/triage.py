@@ -25,6 +25,8 @@ from typing import Optional
 
 import typer
 
+from fno.llm import llm_call
+
 from fno import paths as _paths
 
 
@@ -398,36 +400,18 @@ def _run_consistency_propose(context: dict, model: Optional[str]) -> dict:
 
     Dispatch is a synchronous headless one-shot on the subscription-OAuth lane -
     the same primitive fno.inbox.triage uses (plain ``claude -p``, which honors
-    OAuth; NOT ``--bare``, which needs an API key). Tests set
-    ``FNO_TRIAGE_CONSISTENCY_STUB`` to a script that prints proposal JSON so the
-    real model is never called under pytest/CI.
+    OAuth; NOT ``--bare``, which needs an API key). Tests use the shared
+    ``FNO_LLM_STUB`` seam so the real model is never called under pytest/CI.
     # ponytail: claude-only for v1; provider rotation is a follow-up node.
     """
-    import os
-    import subprocess
-
-    stub = os.environ.get("FNO_TRIAGE_CONSISTENCY_STUB")
-    in_pytest = os.environ.get("PYTEST_CURRENT_TEST") is not None
-    in_ci = os.environ.get("CI", "").lower() in ("true", "1", "yes")
-    if not stub and (in_pytest or in_ci):
-        raise RuntimeError(
-            "FNO_TRIAGE_CONSISTENCY_STUB not configured; refusing real claude -p in tests"
-        )
-
     prompt = f"{_CONSISTENCY_PROMPT}\n\nCONTEXT:\n{json.dumps(context)}"
-    if stub:
-        cmd = [stub]
-    else:
-        cmd = [
-            "claude", "-p",
-            "--output-format", "json",
-            "--json-schema", json.dumps(_CONSISTENCY_SCHEMA),
-            "--append-system-prompt", "You are a triage agent. Respond with JSON only.",
-        ]
-        if model:
-            cmd += ["--model", model]
-    result = subprocess.run(
-        cmd, input=prompt, capture_output=True, text=True, timeout=300, check=True
+    result = llm_call(
+        prompt,
+        schema=_CONSISTENCY_SCHEMA,
+        system_prompt="You are a triage agent. Respond with JSON only.",
+        model=model,
+        timeout=300,
+        check=True,
     )
     data = json.loads(result.stdout)
     # `claude -p --output-format json --json-schema` returns an envelope

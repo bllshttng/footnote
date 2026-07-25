@@ -724,7 +724,15 @@ case "$payload_mode" in
           message="/${_prefix}${msg#/}"
         fi
         ;;
-      codex-skill) message="\$fno:${msg#/}" ;;
+      codex-skill)
+        if [[ "$msg" == '/fno:'* ]]; then
+          message="\$fno:${msg#/fno:}"
+        elif [[ "$msg" == '$fno:'* ]]; then
+          message="$msg"
+        else
+          message="\$fno:${msg#/}"
+        fi
+        ;;
       *)           emit_error "$provider is deprecated (successor: agy) and has no dispatch lane; '$msg' cannot be dispatched there (route to a claude/codex/opencode/agy harness)" ;;
     esac
     ;;

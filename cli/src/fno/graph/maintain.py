@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from fno.llm import llm_call
+
 
 # ---------------------------------------------------------------------------
 # Workspace map (settings.yaml) - shared with cli/scripts/list_misscoped_graph_nodes.py
@@ -1093,36 +1095,19 @@ def _run_validity_analysis(
     Same subscription-OAuth headless primitive triage uses (``claude -p``, which
     honors OAuth; NOT ``--bare``). Returns ``{node_id: raw_result}``. Raises on
     any dispatch/parse failure so the caller writes an evidence-only degraded
-    deck instead of a partial one (AC2-ERR). Tests set ``FNO_VALIDITY_STUB`` to a
-    script that prints the results JSON; a real ``claude -p`` is refused under
+    deck instead of a partial one (AC2-ERR). Tests use ``FNO_LLM_STUB`` to print
+    the results JSON; a real ``claude -p`` is refused under
     pytest/CI.
     """
-    import subprocess
-
-    stub = os.environ.get("FNO_VALIDITY_STUB")
-    in_pytest = os.environ.get("PYTEST_CURRENT_TEST") is not None
-    in_ci = os.environ.get("CI", "").lower() in ("true", "1", "yes")
-    if not stub and (in_pytest or in_ci):
-        raise RuntimeError(
-            "FNO_VALIDITY_STUB not configured; refusing real claude -p in tests"
-        )
-
     context = {"packets": [p.to_json() for p in packets]}
     prompt = f"{_VALIDITY_PROMPT}\n\nCONTEXT:\n{json.dumps(context)}"
-    if stub:
-        cmd = [stub]
-    else:
-        cmd = [
-            "claude", "-p",
-            "--output-format", "json",
-            "--json-schema", json.dumps(_VALIDITY_SCHEMA),
-            "--append-system-prompt", "You classify backlog ideas. Respond with JSON only.",
-        ]
-        if model:
-            cmd += ["--model", model]
-    result = subprocess.run(
-        cmd, input=prompt, capture_output=True, text=True,
-        timeout=VALIDITY_RUN_TIMEOUT_S, check=True,
+    result = llm_call(
+        prompt,
+        schema=_VALIDITY_SCHEMA,
+        system_prompt="You classify backlog ideas. Respond with JSON only.",
+        model=model,
+        timeout=VALIDITY_RUN_TIMEOUT_S,
+        check=True,
     )
     data = json.loads(result.stdout)
     # A test stub prints {results:[...]} directly; a real `claude -p` wraps it in

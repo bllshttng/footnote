@@ -58,7 +58,7 @@ chmod +x "$STUB"
 # Common env for all fno calls
 export FNO_INBOX_ROOT="$INBOX_ROOT"
 export FNO_INBOX_KNOWN_PROJECTS="example-pipeline,acme-web"
-export FNO_INBOX_TRIAGE_STUB="$STUB"
+export FNO_LLM_STUB="$STUB"
 export HOME="$HOME_OVERRIDE"
 
 # Resolve fno command

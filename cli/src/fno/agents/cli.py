@@ -776,6 +776,12 @@ def cmd_spawn(
             "to claude --disallowedTools; other providers reject it (fail-closed)."
         ),
     ),
+    output_format: str | None = typer.Option(
+        None,
+        "--output-format",
+        hidden=True,
+        help="Internal headless Claude output format; only 'json' is supported.",
+    ),
     squad: str | None = typer.Option(
         None,
         "--workspace",
@@ -952,6 +958,15 @@ def cmd_spawn(
     if substrate not in ("pane", "bg", "headless"):
         print(
             f"--substrate must be one of: pane, bg, headless (got {substrate})",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
+    if output_format is not None and (
+        provider != "claude" or substrate != "headless" or output_format != "json"
+    ):
+        print(
+            "--output-format supports only 'json' on claude headless spawns",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
@@ -1263,6 +1278,9 @@ def cmd_spawn(
                 "mux_session": pane_result.session,
                 "pane_id": pane_result.pane_id,
             }
+            effective_message = getattr(pane_result, "effective_message", None)
+            if effective_message is not None:
+                receipt_obj["effective_message"] = effective_message
             # Locked Decision 5: name the applied mode so an audit of "why did
             # this worker have edit rights" has a durable answer. Only when set,
             # so the unset receipt is unchanged.
@@ -1319,6 +1337,7 @@ def cmd_spawn(
                 tools=tools,
                 deny_tools=deny_tools,
                 headless=substrate == "headless",
+                output_format=output_format,
                 resume_session_id=resume,
                 account_env=account_env,
             )
@@ -1371,10 +1390,16 @@ def cmd_spawn(
         # receipt stays byte-identical to the Rust client's (which never emits
         # it - an --account spawn always re-execs into this Python path).
         account_field = f', "account": {json.dumps(account)}' if account else ""
+        effective_message = getattr(result, "effective_message", None)
+        message_field = (
+            f', "effective_message": {json.dumps(effective_message)}'
+            if effective_message is not None
+            else ""
+        )
         receipt = (
             f'{{"name": "{safe_name}", "short_id": "{result.short_id}", '
             f'"provider": "{result.provider}", "status": "live"'
-            f"{perm_field}{cwd_field}{account_field}}}"
+            f"{perm_field}{cwd_field}{account_field}{message_field}}}"
         )
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()
@@ -1960,8 +1985,8 @@ def cmd_whoami(
 
     The derived-name peers use to address you via ``fno mail send <name>``.
     Resolves identity from ``FNO_AGENT_SELF`` (the env the spawn path
-    injects), falling back to a registry row matching
-    ``CLAUDE_CODE_SESSION_ID`` when the env is absent. Read-only: it never
+    injects), falling back to a registry row matching the active harness's
+    session marker when the env is absent. Read-only: it never
     mutates the registry, emits an event, or writes state.
 
     Exit 0 when a name is resolved; exit 3 ("not a registered mesh agent")
@@ -1986,15 +2011,13 @@ def cmd_whoami(
     # requires both).
     # Resolve THIS process's session id from whichever harness marker is set
     # (x-ec59): a codex/gemini worker resolves its own row via harness_session_id,
-    # not just CLAUDE_CODE_SESSION_ID. Falls back to the claude marker when the
-    # shared resolver finds nothing so today's claude behavior is unchanged.
+    # not just CLAUDE_CODE_SESSION_ID.
     from fno.harness_identity import resolve_harness_identity
 
     _ident = resolve_harness_identity()
-    session_uuid = _ident.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    session_uuid = _ident.session_id
     # Scope registry matching to this process's harness so a provider-local session
-    # id can't match a same-id row of another harness (x-ec59). The env fallback is
-    # CLAUDE_CODE_SESSION_ID, so an unresolved marker means claude.
+    # id can't match a same-id row of another harness (x-ec59).
     session_harness = _ident.harness or ("claude" if session_uuid else None)
     live_warnings: list[str] = []
 
@@ -2056,7 +2079,7 @@ def cmd_register(
     from fno.harness_identity import resolve_harness_identity
 
     ident = resolve_harness_identity()
-    session_id = ident.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    session_id = ident.session_id
     harness = ident.harness or ("claude" if session_id else None)
     if not session_id or not harness:
         sys.stderr.write(

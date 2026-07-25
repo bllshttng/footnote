@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test: fno mail triage with FNO_INBOX_TRIAGE_STUB on the new layout.
+# Smoke test: fno mail triage with FNO_LLM_STUB on the new layout.
 set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 CLI_DIR="$REPO_ROOT/cli"
@@ -27,7 +27,7 @@ chmod +x "$STUB_SCRIPT"
 
 export FNO_INBOX_ROOT="$INBOX_ROOT"
 export FNO_INBOX_KNOWN_PROJECTS="proj-a,somesender"
-export FNO_INBOX_TRIAGE_STUB="$STUB_SCRIPT"
+export FNO_LLM_STUB="$STUB_SCRIPT"
 
 # Seed proj-a with a heads-up thread, capture msg-id.
 SEND_OUT=$(uv run fno-py mail send --to-project proj-a --kind heads-up \

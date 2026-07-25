@@ -1,6 +1,6 @@
 """PR-state watcher: headless dispatch + impure tick orchestrator.
 
-``fire_skill`` fires a headless ``claude --print`` for one PR; ``tick``
+``fire_skill`` routes one PR through ``fno agents spawn --substrate headless``; ``tick``
 is the impure orchestrator that ties together discovery, state, decisions,
 and dispatch for one poll interval.
 
@@ -19,6 +19,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
+
+from fno import _subprocess_util
 
 log = logging.getLogger(__name__)
 
@@ -89,13 +91,13 @@ def fire_skill(
     env_seam: str = _ENV_SEAM,
     timeout_s: Optional[float] = None,
 ) -> DispatchResult:
-    """Fire a headless ``claude --print`` for one PR's review poll and return it.
+    """Fire one canonical headless spawn for a PR review poll and return it.
 
-    The command runs in the repository with ``--output-format json`` so we can
-    detect ``is_error:true`` even when the exit code is 0. A test seam
-    (``PR_WATCH_FIRE_CMD`` env, or *env_seam*) replaces the ``claude`` binary with
-    an arbitrary command string for unit tests; when set, the command is built as
-    ``["<seam>"]`` and the runner receives it like any other call.
+    The canonical headless spawn preserves Claude's JSON output so we can detect
+    ``is_error:true`` even when the exit code is 0. A test seam
+    (``PR_WATCH_FIRE_CMD`` env, or *env_seam*) replaces the complete spawn command
+    with an arbitrary command string for unit tests; when set, the command is
+    built as ``["<seam>"]`` and the runner receives it like any other call.
 
     This is the review (``check``) fire only. The post-merge ritual no longer
     fires here: pr-watch runs ``fno pr ritual <n> --autonomous`` directly, and
@@ -110,28 +112,36 @@ def fire_skill(
     SUCCESS = rc == 0 AND parsed ``is_error`` is ``False``. Every other outcome
     is a failure.
     """
-    seam_cmd = os.environ.get(env_seam)
-
-    if seam_cmd:
-        cmd = [seam_cmd]
-    else:
-        # --dangerously-skip-permissions is required for headless unattended use.
-        cmd = [
-            "claude",
-            "--print",
-            "--output-format",
-            "json",
-            "--dangerously-skip-permissions",
-        ]
-        if model:
-            cmd += ["--model", model]
-        cmd.append(f"/fno:pr {verb} {pr_number}")
-
     fire_timeout = (
         timeout_s
         if timeout_s is not None
         else _TIMEOUT_FOR_VERB.get(verb, _DEFAULT_FIRE_TIMEOUT)
     )
+    seam_cmd = os.environ.get(env_seam)
+
+    if seam_cmd:
+        cmd = [seam_cmd]
+    else:
+        cmd = [
+            *_subprocess_util.fno_py_cmd(),
+            "agents",
+            "spawn",
+            "--substrate",
+            "headless",
+            "--harness",
+            "claude",
+            "--timeout",
+            str(max(1, int(fire_timeout))),
+            "--cwd",
+            str(repo_dir),
+            "--name",
+            f"pr-check-{pr_number}",
+            "--output-format",
+            "json",
+        ]
+        if model:
+            cmd += ["--model", model]
+        cmd.append(f"/fno:pr {verb} {pr_number}")
 
     try:
         result = runner(

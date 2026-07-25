@@ -35,6 +35,7 @@ _VALUE_FLAGS = frozenset(
         "--from", "--cwd", "-c",
         "--message", "--session-id", "--cc-session-id", "--channel-id", "--status",
         "--from-name", "--timeout", "-t", "--mode", "--substrate", "--permission-mode",
+        "--output-format",
     }
 )
 

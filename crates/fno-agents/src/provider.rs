@@ -404,6 +404,19 @@ impl ProviderWithPty for ClaudeInteractiveProvider {
 /// `cli/tests/agents/fixtures/codex-jsonl-sample.jsonl`.
 pub struct CodexProvider;
 
+pub fn normalize_codex_command(message: &str) -> String {
+    let command = message.trim();
+    if let Some(verb) = command.strip_prefix("/fno:") {
+        format!("$fno:{verb}")
+    } else if let Some(verb) = command.strip_prefix('/') {
+        format!("$fno:{verb}")
+    } else if command.starts_with("$fno:") {
+        command.to_string()
+    } else {
+        message.to_string()
+    }
+}
+
 impl CodexProvider {
     fn sandbox_create(yolo: bool) -> Vec<String> {
         // codex.py::sandbox_flag (LD5/LD6): mutually exclusive; never both.
@@ -446,7 +459,7 @@ impl Provider for CodexProvider {
             argv.push("-c".into());
             argv.push(format!("model_reasoning_effort={effort}"));
         }
-        argv.push(ctx.message.clone());
+        argv.push(normalize_codex_command(&ctx.message));
         argv
     }
 
@@ -460,7 +473,7 @@ impl Provider for CodexProvider {
             "--skip-git-repo-check".into(),
         ];
         argv.extend(Self::sandbox_resume(ctx.yolo));
-        argv.push(ctx.message.clone());
+        argv.push(normalize_codex_command(&ctx.message));
         argv
     }
 
@@ -1326,6 +1339,39 @@ mod tests {
         assert!(argv
             .windows(2)
             .any(|w| w == ["-c", "model_reasoning_effort=high"]));
+    }
+
+    #[test]
+    fn codex_create_and_resume_normalize_direct_slash_commands() {
+        let mut create = create_ctx();
+        create.message = "  /fno:target x-81ad  ".into();
+        assert_eq!(
+            CodexProvider
+                .create_argv(&create)
+                .last()
+                .map(String::as_str),
+            Some("$fno:target x-81ad")
+        );
+
+        let resume = ResumeContext {
+            session_id: "uuid-1".into(),
+            message: "  /fno:target x-81ad  ".into(),
+            cwd: PathBuf::from("/x"),
+            from_name: None,
+            yolo: false,
+        };
+        assert_eq!(
+            CodexProvider
+                .resume_argv(&resume)
+                .last()
+                .map(String::as_str),
+            Some("$fno:target x-81ad")
+        );
+
+        assert_eq!(
+            normalize_codex_command("  review this\n  code  "),
+            "  review this\n  code  "
+        );
     }
 
     #[test]

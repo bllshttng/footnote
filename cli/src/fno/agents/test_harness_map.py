@@ -142,6 +142,18 @@ def test_explicit_command_normalized_per_harness():
     assert out["command"] == "$fno:target no-merge x-1"
 
 
+def test_codex_normalization_accepts_plugin_qualified_slash_and_native_skill():
+    """A direct CLI caller naturally sends the advertised ``/fno:`` form.
+
+    Codex needs the equivalent ``$fno:`` skill reference, and repeating the
+    normalization at multiple dispatch choke points must stay idempotent.
+    """
+    from fno.agents.harness_map import normalize_command
+
+    assert normalize_command("/fno:target x-81ad", "codex") == "$fno:target x-81ad"
+    assert normalize_command("$fno:target x-81ad", "codex") == "$fno:target x-81ad"
+
+
 def test_opencode_default_dispatch_renders_fno_slash():
     """AC1-HP: a default opencode dispatch renders the plugin-namespaced palette
     invocation `/fno:target ...` on the headless substrate - no prose brief."""

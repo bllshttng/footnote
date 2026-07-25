@@ -1073,7 +1073,7 @@ def test_run_validity_sweep_reread_marks_stale_after_analysis(tmp_path):
 
 def test_run_validity_analysis_refuses_real_call_under_pytest(monkeypatch):
     import pytest
-    monkeypatch.delenv("FNO_VALIDITY_STUB", raising=False)
+    monkeypatch.delenv("FNO_LLM_STUB", raising=False)
     with pytest.raises(RuntimeError, match="refusing real claude"):
         m._run_validity_analysis([_packet("ab-x")])
 
@@ -1086,7 +1086,7 @@ def test_run_validity_analysis_parses_stub(tmp_path, monkeypatch):
         '"confidence":0.8,"rationale":"good","evidence_ids":[]}]}\'\n'
     )
     stub.chmod(0o755)
-    monkeypatch.setenv("FNO_VALIDITY_STUB", str(stub))
+    monkeypatch.setenv("FNO_LLM_STUB", str(stub))
     out = m._run_validity_analysis([_packet("ab-x")])
     assert out["ab-x"]["classification"] == "keep"
 

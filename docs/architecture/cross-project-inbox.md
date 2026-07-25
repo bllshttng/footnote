@@ -164,7 +164,7 @@ class TriagePlan:
     follow_up_question: str | None  # required when action == request_clarification
 ```
 
-The subprocess respects `FNO_INBOX_TRIAGE_STUB` so tests can inject canned plans without burning real LLM tokens. On parse or schema failure, retry-once with a stricter reminder; on second failure, log to `.fno/inbox-errors.jsonl` and raise `TriageFailedError` (the message stays unread for the next iteration).
+The subprocess respects the shared `FNO_LLM_STUB` seam so tests can inject canned plans without burning real LLM tokens. On parse or schema failure, retry-once with a stricter reminder; on second failure, log to `.fno/inbox-errors.jsonl` and raise `TriageFailedError` (the message stays unread for the next iteration).
 
 ## Idempotent triage (crash recovery)
 
@@ -250,4 +250,3 @@ The substrate ships as a single feature. Four follow-up backlog entries land in 
 - `cli/src/fno/graph/cli.py` - `--source-*` flags on `fno new`
 - `skills/megawalk/SKILL.md` - Step 0 drain section
 - `skills/megawalk/references/inbox-handlers.md` - Per-kind handler reference
-
