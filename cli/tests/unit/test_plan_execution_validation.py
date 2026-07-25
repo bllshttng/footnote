@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 from typer.testing import CliRunner
 
@@ -11,6 +12,8 @@ from fno.plan.execution_validation import validate_execution
 
 
 runner = CliRunner()
+REPO_ROOT = Path(__file__).resolve().parents[3]
+VALIDATOR = REPO_ROOT / "scripts" / "validate-plan.sh"
 
 
 def _write_plan(tmp_path: Path, body: str, *, frontmatter: str = "") -> Path:
@@ -146,6 +149,44 @@ tasks:
     assert "tasks.1.1.surface" in fields
     assert "tasks.1.1.verify" in fields
     assert "tasks.1.1.acceptance" in fields
+
+
+def test_prose_task_verification_is_not_runnable(tmp_path: Path) -> None:
+    strategy = VALID_STRATEGY.replace(
+        "verify: fno test cli/tests/unit/test_plan_execution_validation.py",
+        "verify: manually inspect the result",
+    )
+    plan = _write_plan(tmp_path, _full_plan(strategy))
+
+    messages = "\n".join(v.message for v in validate_execution(load_plan(plan)).violations)
+
+    assert "task verify must be a concrete runnable command" in messages
+
+
+def test_wrapper_routes_incomplete_execution_strategy_to_semantic_validation(
+    tmp_path: Path,
+) -> None:
+    strategy = """execution_mode: sequential
+waves:
+  - wave: 1
+    mode: sequential
+    tasks: ["1.1"]
+"""
+    plan = _write_plan(
+        tmp_path,
+        _full_plan(strategy),
+        frontmatter="status: ready\ncreated: 2026-07-25\n",
+    )
+
+    result = subprocess.run(
+        ["bash", str(VALIDATOR), str(plan)],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+
+    assert result.returncode == 1, result.stdout
+    assert "Execution Strategy must declare at least one task" in result.stdout
 
 
 def test_duplicate_task_and_unknown_wave_reference_fail(tmp_path: Path) -> None:

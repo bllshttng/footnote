@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 import posixpath
 import re
+import shlex
 
 from fno.plan._doc import PlanDoc
 from fno.plan.brief import BriefParseError, parse_execution_strategy
@@ -34,6 +35,17 @@ _QUICK_PLACEHOLDERS = (
     "replace me",
     "fill in",
 )
+_RUNNABLE_COMMANDS = frozenset(
+    """
+    [ bash bun bundle cargo cd composer curl deno docker dotnet fno fno-agents
+    git go gradle grep gh helm java javac jq just make mvn mypy node npm npx php
+    pnpm podman pre-commit pytest python python3 rg rspec ruby ruff rustc sh
+    shellcheck swift terraform test tofu uv wget xcodebuild yarn yq zsh
+    """.split()
+)
+_COMMAND_WRAPPERS = frozenset({"command", "env", "gtimeout", "sudo", "timeout"})
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SHELL_SEGMENT_RE = re.compile(r"(?:&&|\|\||[;|])")
 
 
 def _violation(field: str, message: str) -> ExecutionViolation:
@@ -48,6 +60,28 @@ def _is_placeholder_verify(value: str) -> bool:
         or "fill in" in normalized
         or normalized in {"none", "null", "todo", "tbd", "replace me"}
     )
+
+
+def _is_runnable_verify(value: str) -> bool:
+    if _is_placeholder_verify(value):
+        return False
+    for segment in _SHELL_SEGMENT_RE.split(value):
+        try:
+            tokens = shlex.split(segment, comments=False, posix=True)
+        except ValueError:
+            continue
+        while tokens and (tokens[0] == "!" or _ENV_ASSIGNMENT_RE.match(tokens[0])):
+            tokens.pop(0)
+        while tokens and tokens[0] in _COMMAND_WRAPPERS:
+            tokens.pop(0)
+            while tokens and (tokens[0].startswith("-") or _ENV_ASSIGNMENT_RE.match(tokens[0])):
+                tokens.pop(0)
+        if not tokens:
+            continue
+        command = tokens[0]
+        if command in _RUNNABLE_COMMANDS or "/" in command:
+            return True
+    return False
 
 
 def _normalize_refs(value: object) -> list[str] | None:
@@ -188,7 +222,7 @@ def validate_execution(doc: PlanDoc) -> ExecutionValidationResult:
             )
 
         verify = str(task.get("verify", ""))
-        if _is_placeholder_verify(verify):
+        if not _is_runnable_verify(verify):
             violations.append(
                 _violation(f"tasks.{label}.verify", "task verify must be a concrete runnable command")
             )

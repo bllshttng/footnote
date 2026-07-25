@@ -20,17 +20,15 @@ _is_quick_plan() {
         | grep -qE "^[[:space:]]*kind:[[:space:]]*['\"]?quick-plan['\"]?([[:space:]]*(#.*)?)?$"
 }
 
-_has_semantic_strategy() {
+_has_execution_strategy() {
     awk '
-        /^##[[:space:]]+Execution Strategy[[:space:]]*$/ { in_strategy=1; next }
-        in_strategy && /^##[[:space:]]+/ { exit }
-        in_strategy && /^tasks:[[:space:]]*/ { found=1; exit }
+        /^##[[:space:]]+Execution Strategy[[:space:]]*$/ { found=1; exit }
         END { exit(found ? 0 : 1) }
     ' "$PLAN_DIR" 2>/dev/null
 }
 
 SEMANTIC_SINGLE_DOC=0
-if [[ -f "$PLAN_DIR" ]] && { _is_quick_plan || _has_semantic_strategy; }; then
+if [[ -f "$PLAN_DIR" ]] && { _is_quick_plan || _has_execution_strategy; }; then
     SEMANTIC_SINGLE_DOC=1
 fi
 
@@ -39,7 +37,7 @@ warn()  { echo "  WARN:  $*"; ((WARNINGS++)) || true; }
 ok()    { echo "  OK:    $*"; }
 
 _semantic_validate() {
-    local repo_root="" script_dir="" source_root="" candidate=""
+    local repo_root="" script_dir="" source_root="" candidate="" python_bin=""
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
     script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
     for candidate in \
@@ -52,9 +50,26 @@ _semantic_validate() {
         fi
     done
     if [[ -n "$source_root" ]]; then
+        if [[ -n "${FNO_PYTHON:-}" && -x "${FNO_PYTHON}" ]]; then
+            python_bin="$FNO_PYTHON"
+        elif [[ -x "$source_root/cli/.venv/bin/python" ]]; then
+            python_bin="$source_root/cli/.venv/bin/python"
+        elif command -v python3 >/dev/null 2>&1; then
+            python_bin=$(command -v python3)
+        elif command -v python >/dev/null 2>&1; then
+            python_bin=$(command -v python)
+        fi
+        if [[ -z "$python_bin" ]]; then
+            echo "source fno CLI found at $source_root/cli/src but no Python interpreter is available" >&2
+            return 2
+        fi
         PYTHONPATH="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
-            fno plan validate "$PLAN_DIR" --execution
+            "$python_bin" -m fno.cli plan validate "$PLAN_DIR" --execution
         return
+    fi
+    if ! command -v fno >/dev/null 2>&1; then
+        echo "fno CLI not found; install or update it before validating executable plans" >&2
+        return 2
     fi
     if ! fno plan validate --help 2>&1 | grep -q -- '--execution'; then
         echo "installed fno predates semantic plan validation; run 'fno update' or 'fno doctor --fix'" >&2

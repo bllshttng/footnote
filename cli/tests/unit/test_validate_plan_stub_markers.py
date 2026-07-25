@@ -9,6 +9,7 @@ test and cli/src/fno/graph/_decompose.py from drifting.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -18,10 +19,15 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 VALIDATOR = REPO_ROOT / "skills" / "blueprint" / "scripts" / "validate-plan.sh"
 
 
-def _run(plan: Path) -> subprocess.CompletedProcess:
+def _run(
+    plan: Path, *, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", str(VALIDATOR), str(plan)],
-        capture_output=True, text=True, cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        env=env,
     )
 
 
@@ -103,6 +109,18 @@ def test_validator_passes_filled_child(tmp_path):
     assert result.returncode == 0, result.stdout
     assert "no unfilled stub markers" in result.stdout
     assert "## Why (from epic) is non-empty" in result.stdout
+
+
+def test_validator_uses_source_cli_when_fno_is_not_on_path(tmp_path):
+    plan = tmp_path / "big.group-1.md"
+    plan.write_text(_FILLED)
+    env = os.environ.copy()
+    env["PATH"] = "/usr/bin:/bin"
+
+    result = _run(plan, env=env)
+
+    assert result.returncode == 0, result.stdout
+    assert "semantic execution contract valid" in result.stdout
 
 
 def test_validator_ignores_why_on_non_group_plan(tmp_path):

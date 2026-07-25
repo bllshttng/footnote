@@ -417,10 +417,10 @@ waves:
 - The change works.
 HEREDOC
 OUTPUT=$(bash "$VALIDATE" "$PLAN_LEGACY" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "### Task 1.1"; then
-    pass "AC8c: Legacy wave manifest retains compatibility validation"
+if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "Execution Strategy must declare at least one task"; then
+    pass "AC8c: Every Execution Strategy uses semantic validation"
 else
-    fail "AC8c: Legacy wave manifest was misclassified: $OUTPUT"
+    fail "AC8c: Incomplete Execution Strategy bypassed semantics: $OUTPUT"
 fi
 
 OUTPUT=$(cd "$TMPDIR_BASE" && bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1) \
