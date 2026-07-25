@@ -1257,12 +1257,16 @@ def resolve_or_suggest(
     )
     if require_alive:
         sessions = [s for s in sessions if s.is_alive]
-    # Exact-match the address (alias, short-id, OR registered name) BEFORE the
-    # retired-syntax rejection: a registered name that happens to match the
-    # retired <harness>-<short8> shape (e.g. codex-deadbeef, which
-    # validate_spawn_name permits) must still resolve here, or truth's fast-path
-    # and peek disagree (Codex P2, #603). The retired form is only reinterpreted
-    # as a did-you-mean suggestion when it is NOT a live registered name.
+    # Exact-match the address BEFORE the retired-syntax rejection: a registered
+    # name matching the retired <harness>-<short8> shape (e.g. codex-deadbeef,
+    # which validate_spawn_name permits) must still resolve here, or truth's
+    # fast-path and peek disagree (Codex P2, #603). Registered names take
+    # PRECEDENCE over alias/id tiers (resolve_agent_in is name-first): a name
+    # that also matches another live session's alias resolves to the named row,
+    # not rejected as ambiguous by peek while truth resolves it (Codex P2 r4).
+    by_name = [s for s in sessions if handle and s.name == handle]
+    if len(by_name) == 1:
+        return by_name[0], []
     exact = [
         s
         for s in sessions
@@ -1272,7 +1276,6 @@ def resolve_or_suggest(
             or s.session_id == handle
             or s.short_id == handle
             or canonical_handle(s.session_id) == handle
-            or s.name == handle
         )
     ]
     if len(exact) == 1:

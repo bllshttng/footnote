@@ -1454,6 +1454,41 @@ def test_us2_registered_name_matching_retired_shape_resolves_for_peek(
     assert match.session_id == sid
 
 
+def test_us2_registered_name_beats_a_colliding_alias(monkeypatch):
+    """Codex P2 r4 (#603): a registered name that also matches another live
+    session's alias resolves to the named row (resolve_agent_in is name-first),
+    not rejected as ambiguous by peek while truth's fast-path resolves it."""
+    named = discover.DiscoveredSession(
+        session_id="sid-named",
+        short_id="aa111111",
+        handle="aa111111",
+        pid=0,
+        cwd="/x",
+        project=None,
+        status=None,
+        agent="codex",
+        truth_state="working",
+        name="dup-name",
+    )
+    aliased = discover.DiscoveredSession(
+        session_id="sid-alias",
+        short_id="bb222222",
+        handle="dup-name",
+        pid=0,
+        cwd="/x",
+        project=None,
+        status=None,
+        agent="claude",
+        truth_state="working",
+    )
+    monkeypatch.setattr(
+        discover, "discover_live_sessions", lambda **_k: [named, aliased]
+    )
+    match, _ = discover.resolve_or_suggest("dup-name")
+    assert match is not None
+    assert match.session_id == "sid-named"
+
+
 def test_ac1_edge_source_overlap_dedups(tmp_path, monkeypatch):
     """AC1-EDGE: one session present in registry AND roster yields exactly one row."""
     use_tmpdir(monkeypatch, tmp_path)

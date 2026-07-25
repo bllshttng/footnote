@@ -250,6 +250,19 @@ def test_codex_session_id_for_pid_returns_none_with_no_rollout_open() -> None:
     assert _codex_session_id_for_pid(4242, psutil_mod=psu) is None
 
 
+def test_codex_session_id_for_pid_matches_the_basename_not_a_parent_uuid() -> None:
+    """Codex P2 r4 (#603): a UUID elsewhere in the open-file path (e.g. a
+    UUID-named custom CODEX_HOME) must not win over the id in the rollout filename."""
+    from fno.agents.mux_spawn import _codex_session_id_for_pid
+
+    path = (
+        "/home/x/.codex-1a2b3c4d-1111-2222-3333-444455556666/sessions/2026/07/25/"
+        f"rollout-2026-07-25T13-46-27-{SID_A}.jsonl"
+    )
+    psu = _FakePsutil(_FakeProc([_FakeOpenFile(path)]))
+    assert _codex_session_id_for_pid(4242, psutil_mod=psu) == SID_A
+
+
 def test_backfill_with_child_pid_never_consults_the_cwd_store(
     tmp_path: Path, monkeypatch
 ) -> None:

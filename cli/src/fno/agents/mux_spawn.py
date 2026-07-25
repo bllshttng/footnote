@@ -428,9 +428,13 @@ def _codex_session_id_for_pid(pid: int, *, psutil_mod=None) -> Optional[str]:
     except Exception:  # noqa: BLE001 -- NoSuchProcess / AccessDenied / ZombiProcess
         return None
     for f in files:
-        if "rollout-" not in f.path or ".jsonl" not in f.path:
+        # Match the rollout BASENAME only: the id lives in the filename, and a
+        # UUID elsewhere in the path (e.g. a UUID-named custom CODEX_HOME) would
+        # otherwise be matched first and stamp the wrong id (Codex P2, #603 r4).
+        base = os.path.basename(f.path)
+        if not base.startswith("rollout-") or not base.endswith(".jsonl"):
             continue
-        m = _CODEX_SESSION_ID_RE.search(f.path)
+        m = _CODEX_SESSION_ID_RE.search(base)
         if m:
             return m.group(1)
     return None
