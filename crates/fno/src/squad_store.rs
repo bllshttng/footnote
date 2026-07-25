@@ -131,6 +131,41 @@ pub fn mint_key() -> String {
     format!("t{:x}", now_secs())
 }
 
+/// FNV-1a over bytes: deterministic and dependency-free, the same hash server's
+/// `mission_sid` uses. File-local (this module does not import server.rs); kept
+/// in sync with `crates/fno/src/server.rs::fnv1a`.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// A durable identity for an UNNAMED squad derived from what it represents: its
+/// sorted, deduped origin set (the home squad for a repo has one origin, so it
+/// derives one key forever and every later persist upserts onto a single row
+/// across unbounded restarts - x-e447). Order-independent and set-stable, so a
+/// multi-origin lane derives consistently. The unit separator (`\x1f`, which
+/// cannot occur in a path) keeps `["a","bc"]` and `["ab","c"]` distinct. Returns
+/// 16 hex chars, the shape `mint_key` produces, so it is a drop-in for `key`.
+/// `mint_key` stays correct for the only case with no stable referent: an
+/// unnamed, originless squad.
+pub fn origin_key(origins: &[String]) -> String {
+    let mut set: Vec<&str> = origins.iter().map(|s| s.as_str()).collect();
+    set.sort_unstable();
+    set.dedup();
+    let mut joined = String::new();
+    for (i, o) in set.iter().enumerate() {
+        if i > 0 {
+            joined.push('\u{001f}');
+        }
+        joined.push_str(o);
+    }
+    format!("{:016x}", fnv1a(joined.as_bytes()))
+}
+
 /// One persisted squad. Named workspaces key by `name`; an unnamed squad (empty
 /// `name` - a home squad or a project lane) keys by its durable `key`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1172,6 +1207,39 @@ mod tests {
         assert_eq!(loaded.squads.len(), 1);
         assert_eq!(loaded.squads[0].key, "k2");
         assert_eq!(loaded.squads[0].origins, vec!["/repo".to_string()]);
+    }
+
+    #[test]
+    fn origin_key_is_stable_order_independent_and_distinct_per_set() {
+        // x-e447: an unnamed squad's durable key is a pure function of its origin
+        // SET, so one repo's home squad derives one key across restarts. Order-
+        // independent and duplicate-insensitive (sorted + deduped), distinct per
+        // distinct set, and the separator keeps adjacent-path sets apart.
+        assert_eq!(
+            origin_key(&["/a".into(), "/b".into()]),
+            origin_key(&["/b".into(), "/a".into()]),
+            "order does not matter"
+        );
+        assert_eq!(
+            origin_key(&["/a".into(), "/a".into()]),
+            origin_key(&["/a".into()]),
+            "duplicate origins collapse"
+        );
+        assert_eq!(
+            origin_key(&["/a".into()]).len(),
+            16,
+            "16 hex chars, mint_key shape"
+        );
+        assert_ne!(
+            origin_key(&["/ab".into()]),
+            origin_key(&["/a".into(), "b".into()]),
+            "separator keeps adjacent sets distinct"
+        );
+        assert_ne!(
+            origin_key(&["/repo".into()]),
+            origin_key(&["/other".into()]),
+            "distinct origins derive distinct keys"
+        );
     }
 
     #[test]
