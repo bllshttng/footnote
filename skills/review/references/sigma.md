@@ -332,11 +332,11 @@ recommendation: RECOMMEND RESTART". Honor sequence:
 
 ## Cross-Model Review Routing (optional)
 
-By default every panel agent runs on Claude (via `Task()`). An operator can route specific agents through a full harness, route-provider, and model tuple for a genuine cross-model read by setting `config.review.agent_routes`.
+By default every panel agent runs through `Task()` on the invoking harness.
+An operator can route specific agents through a full harness, route-provider, and model tuple for a genuine cross-model read by setting `config.review.agent_routes`.
 Legacy `config.review.cross_model` and `config.review.agent_providers` remain supported.
-in `.fno/config.toml` - the SAME config the internal `fno review` panel honors.
-When neither is set, this whole section is a no-op and the panel is byte-for-byte
-today's all-Claude run.
+Configure them in `.fno/config.toml`, which is the same config the internal `fno review` panel honors.
+When none of these routing options is set, this whole section is a no-op and the panel is byte-for-byte today's harness-local run.
 
 ```yaml
 config:
@@ -350,16 +350,13 @@ config:
         model: glm-5.2
 ```
 
-Agent names are the orchestrator's underscore form (`code_reviewer`,
-`silent_failure_hunter`, `type_design_analyzer`, `integration_test_analyzer`,
-`ux_flow_tester`, `multi_device_checker`) - NOT the hyphenated `Task()`
-`subagent_type` (`code-reviewer`). The mapping is just `_`<->`-`.
+Agent names are the orchestrator's underscore form (`code_reviewer`, `silent_failure_hunter`, `type_design_analyzer`, `integration_test_analyzer`, `ux_flow_tester`, `multi_device_checker`), not the hyphenated `Task()` `subagent_type` (`code-reviewer`).
+The mapping is just `_`<->`-`.
 
 ### Step R1: resolve routing (do NOT reimplement it)
 
-Before dispatching the panel, ask the CLI for the per-agent routing. This is the
-ONE resolver - the same `provider_resolution` path `fno review` dispatches through -
-so `/review sigma` and `fno review` never disagree:
+Before dispatching the panel, ask the CLI for the per-agent routing.
+This is the one resolver, using the same `provider_resolution` path that `fno review` dispatches through, so `/review sigma` and `fno review` never disagree:
 
 ```bash
 # --session-id is optional; pass it when running inside a target session so the
@@ -373,18 +370,21 @@ if [ -n "${SESSION_ID:-}" ]; then
 else
   ROUTING="$(fno review --print-providers)"
 fi
+INVOKING_HARNESS="$(fno whoami 2>/dev/null | sed -n 's/^provider:[[:space:]]*//p' | head -1 | xargs)"
+[ -n "$INVOKING_HARNESS" ] || INVOKING_HARNESS=unknown
 ```
 
 `$ROUTING` includes runtime harness, route provider, effective model, degraded state, and reason, or `{}` when all routing features are off.
+`INVOKING_HARNESS` is the observed runtime for a `Task()` dispatch; a requested provider is not execution evidence.
 
 ### Step R2: dispatch each agent by its resolved provider
 
-For each panel agent, read `provider` from `$ROUTING` (default `claude` when the
-key is absent or `$ROUTING` is `{}`):
+For each panel agent, keep the requested route from `$ROUTING` separate from the observed runtime that returns the result:
 
-- **unconfigured `claude`** -> dispatch via `Task(subagent_type="<agent-hyphen>", prompt=...)`
-  exactly as today. This is the only path the headless megawalk Driver ever takes
-  (megawalk does not set cross-model), so the HEADLESS-SAFE invariant holds.
+- **routing disabled (`$ROUTING` is `{}`)** -> dispatch via `Task(subagent_type="<agent-hyphen>", prompt=...)` exactly as today and record `INVOKING_HARNESS` as the observed runtime.
+  This is the only path the headless megawalk Driver ever takes because megawalk does not set cross-model, so the HEADLESS-SAFE invariant holds.
+- **legacy provider equals `INVOKING_HARNESS`** -> dispatch via `Task()` and record `INVOKING_HARNESS`, never the resolver label, as the observed runtime.
+- **legacy provider differs from `INVOKING_HARNESS`** -> run the synchronous one-shot spawn below with `--harness "$PROVIDER"`; a harness-local `Task()` cannot satisfy a cross-harness route.
 - **explicit route tuple** -> dispatch a plugin-qualified named headless session through the existing spawn surface and preserve the strict JSON response contract:
 
   ```bash
@@ -394,41 +394,44 @@ key is absent or `$ROUTING` is `{}`):
   ```
 
   Judge the routed result by the same exit-code and non-empty-output contract as the legacy one-shot branch.
-  On a non-zero exit, empty output, or unavailable route, fall back to `Task()` on Claude for that agent and record the fallback runtime plus its effective model when the runtime exposes one; otherwise record `unknown` rather than falsely retaining the requested routed model.
+  On a non-zero exit, empty output, or unavailable route, fall back to `Task()` on the invoking harness for that agent and record `INVOKING_HARNESS` plus its effective model when the runtime exposes one; otherwise record `unknown` rather than falsely retaining the requested routed model.
 
-- **`codex` / `gemini`** -> run a synchronous one-shot, the SAME lane `/review peer`
-  uses. Write the agent's review brief to a file (shell-safe), then YOU run it
-  (never the user) so the reply returns in-context:
+- **cross-harness legacy provider (`claude` / `codex` / `gemini`)** -> run a synchronous one-shot through the same lane `/review peer` uses.
+  Write the agent's review brief to a shell-safe file, then run it so the reply returns in-context; never ask the user to run it.
 
   ```bash
-  fno agents spawn --harness "$PROVIDER" --once -t 300 --name "sigma-$AGENT" "$(cat "$BRIEF")"
+  if [ "$PROVIDER" = "claude" ]; then
+    fno agents spawn --harness claude --substrate headless \
+      --agent "fno:$AGENT_HYPHEN" -t 300 "$(cat "$BRIEF")"
+  else
+    fno agents spawn --harness "$PROVIDER" --once \
+      -t 300 --name "sigma-$AGENT" "$(cat "$BRIEF")"
+  fi
   ```
 
-  Judge by exit code + emptiness only: exit 0 + non-empty stdout -> fold those
-  findings into the report; **non-zero or empty (or the daemon/binary is missing)
-  -> fall back to `Task()` on Claude** for that agent and note the fallback. NEVER
-  fabricate findings to fill the gap.
+  Judge by exit code and emptiness only: exit 0 plus non-empty stdout folds those findings into the report.
+  A non-zero exit, empty output, unavailable daemon, or missing binary falls back to `Task()` on the invoking harness for that agent and records the fallback.
+  Never fabricate findings to fill the gap.
 
-- **`degraded: true`** (the resolver already returned `provider: claude` because no
-  alternate was available) -> dispatch on Claude and surface `reason` in the report
-  so the run reads as "cross-model unavailable: ran on claude" rather than silently
-  appearing cross-modeled.
+- **`degraded: true`** -> use the resolved provider under the same rules and surface `reason` in the report so the run cannot silently appear cross-modeled.
+
+If the resolved provider differs from `INVOKING_HARNESS`, a `Task()` dispatch is a route violation rather than a successful cross-model run.
+Never copy the requested provider into the observed runtime.
+On fallback, record the requested route, the actual invoking harness, `unknown` when no model receipt exists, and a degraded reason.
 
 ### Finding attribution
 
-Every per-agent row records the runtime harness and effective model, including an `unknown` marker when the legacy runtime exposes no model receipt.
-When a finding comes from a cross-modeled agent, tag it with the dispatching provider and effective model from runtime dispatch evidence next to the existing `agent` field. This is
-forensics-only: a HIGH finding is HIGH regardless of provider and triggers the
-same blocking behavior. The forensic `subagent_spawn` / `subagent_complete` event
-pair (via `dispatch_sigma_subagent` in `cli/src/fno/sigma_dispatch.py`) may still
-be emitted for non-Claude dispatches; it does not affect the verdict.
+Every per-agent row records the requested route, observed runtime harness, and effective model, including an `unknown` marker when the runtime exposes no model receipt.
+The requested route comes from resolution; the observed runtime comes only from the dispatch mechanism or its receipt.
+When a finding comes from a cross-modeled agent, tag it with the dispatching provider and effective model from runtime dispatch evidence next to the existing `agent` field.
+This is forensics-only: a HIGH finding is HIGH regardless of provider and triggers the same blocking behavior.
+The forensic `subagent_spawn` / `subagent_complete` event pair, emitted through `dispatch_sigma_subagent` in `cli/src/fno/sigma_dispatch.py`, may still be emitted for non-Claude dispatches; it does not affect the verdict.
 
 Each explicit tuple creates a separate SessionStart preamble.
 At the measured 50–60K tokens per start, explicitly routing all six agents costs roughly 300–360K preamble tokens; keep this opt-in and prefer whole-session routing when every agent should use the same model.
+A legacy cross-harness spawn has the same per-agent preamble cost: the default three-agent correctness subset costs roughly 150–180K tokens, while all six cost roughly 300–360K.
 
 ### Quick cross-model second opinion
 
-This routing cross-models the *panel*. For a fast one-shot read of a whole diff
-from another model without running the six-agent panel, use
-`/review peer [PR#|branch] [codex|gemini]` instead - it is advisory and never
-satisfies a `required_bots` gate.
+This routing cross-models the *panel*.
+For a fast one-shot read of a whole diff from another model without running the six-agent panel, use `/review peer [PR#|branch] [codex|gemini]` instead; it is advisory and never satisfies a `required_bots` gate.

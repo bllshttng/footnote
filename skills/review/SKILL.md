@@ -1,6 +1,6 @@
 ---
 name: review
-description: "Review a diff or a research brief. Routes to the internal six-agent Claude panel (sigma, default), a cross-model second opinion (peer), the advisory research-verify panel for a doc deliverable (research), or a self-cert attestation for the config.review.reviewers gate (declare). Use when: 'review this', 'code review', 'is this ready', 'get a second opinion', 'have codex review this PR', 'review this research brief', 'declare this reviewed'."
+description: "Review a diff or a research brief. Routes to the internal multi-agent sigma panel (default), a cross-model second opinion (peer), the advisory research-verify panel for a doc deliverable (research), or a self-cert attestation for the config.review.reviewers gate (declare). Use when: 'review this', 'code review', 'is this ready', 'get a second opinion', 'have codex review this PR', 'review this research brief', 'declare this reviewed'."
 argument-hint: "[sigma|peer|research|declare]  (peer: [adversarial] [PR#|branch] [codex|gemini] [focus...]; research: [brief.md])   e.g. (bare = sigma), `peer 657 codex`, `peer adversarial codex`, `research out/topic.md`, `declare`"
 requires:
   binaries:
@@ -15,7 +15,7 @@ requires:
 
 | Mode | What runs | Shared object |
 |------|-----------|---------------|
-| `sigma` (default) | internal six-agent Claude review panel | the diff |
+| `sigma` (default) | internal multi-agent review panel with observed runtime attribution | the diff |
 | `peer` | a cross-model second opinion (`codex` / `gemini`) on your coding-account quota | the diff |
 | `research` | advisory research-verify panel (fact-checker / citation-auditor / contradiction-finder / completeness-critic) | a `doc` deliverable (brief + sources sidecar) |
 

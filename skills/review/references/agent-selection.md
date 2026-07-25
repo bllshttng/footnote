@@ -251,13 +251,11 @@ Agent keys are the orchestrator's **underscore** names (`code_reviewer`,
 `multi_device_checker`, `integration_test_analyzer`) - the `_`<->`-` mapping of
 the hyphenated `Task()` `subagent_type`. A key naming an unknown agent is warned
 and ignored. When neither key is set, the panel is byte-for-byte today's
-all-Claude run.
+harness-local run.
 
 ### Dispatch + degradation
 
-Resolution and dispatch (claude -> `Task()`; codex/gemini -> `fno agents spawn
---once`; unavailable alternate -> graceful fallback to claude with a `reason`)
-are owned by the **Cross-Model Review Routing** section in `sigma.md`. The
-`dispatch_sigma_subagent()` helper (`cli/src/fno/sigma_dispatch.py`) may still
-emit the forensic `subagent_spawn` / `subagent_complete` event pair for
-non-Claude dispatches; it is forensics-only and does not affect the verdict.
+Resolution and dispatch are owned by the **Cross-Model Review Routing** section in `sigma.md`.
+A resolved provider matching the invoking harness uses `Task()`; a provider on a different harness uses `fno agents spawn --once` so the requested route is actually honored.
+Fallback uses `Task()` on the invoking harness and reports that observed runtime plus a degraded reason instead of retaining the requested provider as if it ran.
+The `dispatch_sigma_subagent()` helper (`cli/src/fno/sigma_dispatch.py`) may still emit the forensic `subagent_spawn` / `subagent_complete` event pair for cross-harness dispatches; it is forensics-only and does not affect the verdict.

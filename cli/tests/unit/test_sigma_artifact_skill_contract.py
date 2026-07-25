@@ -53,3 +53,25 @@ def test_sigma_route_contract_prices_named_sessions_and_records_model() -> None:
     assert "Effective model" in template
     assert "- **critical** -" in template
     assert "- **high** -" in template
+
+
+def test_sigma_reports_observed_runtime_not_requested_route() -> None:
+    sigma = (ROOT / "skills/review/references/sigma.md").read_text(encoding="utf-8")
+    router = (ROOT / "skills/review/SKILL.md").read_text(encoding="utf-8")
+    selection = (ROOT / "skills/review/references/agent-selection.md").read_text(
+        encoding="utf-8"
+    )
+    template = (ROOT / "skills/review/references/report-template.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "INVOKING_HARNESS=" in sigma
+    assert "differs from `INVOKING_HARNESS`" in sigma
+    assert "Never copy the requested provider into the observed runtime" in sigma
+    assert 'if [ "$PROVIDER" = "claude" ]; then' in sigma
+    assert '--harness claude --substrate headless' in sigma
+    assert "Requested route" in template
+    assert "Observed runtime" in template
+    assert "six-agent Claude review panel" not in router
+    assert "claude -> `Task()`" not in selection
+    assert "all-Claude run" not in selection
