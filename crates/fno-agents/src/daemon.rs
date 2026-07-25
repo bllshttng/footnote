@@ -3445,16 +3445,17 @@ where
                     None
                 }
             }
-            Ok(false) if entry.is_interactive() => {
-                // host_mode=interactive (task 2.3 / US4): an interactive host is a
-                // long-lived drivable TUI whose liveness is its PTY *process*, not
-                // session-store membership. A live `codex resume`/`gemini -r` TUI
-                // may not appear in the exec session index, so a store miss must
-                // NOT orphan a healthy worker. But a genuinely dead interactive
-                // worker must still be reaped DURING `reconcile` -- not only at
-                // daemon restart via recover()'s pid sweep -- so check pid
-                // liveness here and flip to Exited when the worker process is gone
-                // ("unexpected exit is exited, not orphaned"; Codex P2, PR #373).
+            Ok(false) if entry.is_interactive() || entry.mux.is_some() => {
+                // A PTY-governed host: host_mode=interactive (task 2.3 / US4) OR a
+                // mux-pane row. Its liveness is the PTY *process*, not session-store
+                // membership, so a store miss must not orphan it. Mux pane rows are
+                // written with the default exec host_mode but carry a `mux` ref + pid
+                // exactly so this branch covers them: without it, 1.1's backfilled
+                // codex session id (absent from the exec session_index) would make the
+                // probe return Ok(false) and false-orphan a live pane (Codex P1, #603).
+                // A dead worker is still reaped here -- not only via recover()'s restart
+                // pid sweep -- by flipping to Exited when the pid is gone ("unexpected
+                // exit is exited, not orphaned"; Codex P2, PR #373).
                 if pid_live(entry) {
                     None
                 } else {
@@ -5426,6 +5427,42 @@ mod tests {
         // Reaped to Exited, never orphaned.
         assert!(out.orphans.is_empty());
         assert_eq!(out.updated, vec!["dead-tui".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_does_not_orphan_a_live_mux_pane_on_store_miss() {
+        // Codex P1 (#603): a mux-hosted pane row is PTY-governed even though
+        // mux_spawn writes it with the default exec host_mode. 1.1's backfilled
+        // codex session id is absent from the exec session_index, so the probe
+        // returns Ok(false); without the mux-aware branch the live pane would be
+        // orphaned. A live pid keeps it Live; a dead pid reaps to Exited.
+        let mut live_pane = rentry("codex-pane", AgentStatus::Live, None);
+        live_pane.mux = Some(crate::state::MuxRef {
+            session: "main".into(),
+            pane_id: 7,
+        });
+        let mut dead_pane = rentry("codex-pane-dead", AgentStatus::Live, None);
+        dead_pane.mux = Some(crate::state::MuxRef {
+            session: "main".into(),
+            pane_id: 8,
+        });
+        let entries = vec![live_pane, dead_pane];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(false), // session_index miss for both
+            || false,
+            |e| e.name == "codex-pane", // only the live pane's pid is alive
+        );
+        assert_eq!(
+            changes[0].new_status, None,
+            "a live mux pane must not be orphaned on a session-store miss"
+        );
+        assert_eq!(
+            changes[1].new_status,
+            Some(AgentStatus::Exited),
+            "a dead mux pane is reaped to Exited, not orphaned"
+        );
+        assert!(out.orphans.is_empty());
     }
 
     #[test]
