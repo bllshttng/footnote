@@ -13,9 +13,18 @@
 # cargo test, advisory audit) -> one summary + exit.
 #
 # Usage:
-#   scripts/ci/preflight.sh [--retry-failed]
+#   scripts/ci/preflight.sh [--retry-failed] [--force]
 #     --retry-failed   re-run only the steps smoke.sh recorded last time
 #                      (a SUBSET; run a full preflight before the settle push).
+#     --force          ignore a cached attestation for this SHA and run every
+#                      suite. A FULL GREEN still records a fresh attestation;
+#                      a RED still deletes a matching one.
+#
+# Reuse: a FULL, non-VOID, all-legs-green run records a SHA+host-bound
+# attestation beside the lock. The next caller on the same SHA + host reuses it
+# and exits 0 before taking the lock, so a second caller is never blocked by a
+# still-running one (a plain GREEN with no test run prints its own evidence;
+# --force discards it). A RED run deletes a matching attestation.
 #
 # Exit codes: 0 all non-advisory suites passed; 1 a suite failed; 2 bad usage /
 #   missing prerequisite; 3 lock held; 4 dirty invoking tree; 5 VOID (the run
@@ -29,9 +38,11 @@ set -uo pipefail
 PINNED_FMT="1.94.1"   # keep in lockstep with rust-ci.yml RUSTFMT_TOOLCHAIN
 
 RETRY_FAILED=0
+FORCE_RUN=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --retry-failed) RETRY_FAILED=1 ;;
+        --force) FORCE_RUN=1 ;;
         -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "preflight: unknown arg '$1'" >&2; exit 2 ;;
     esac
@@ -66,6 +77,57 @@ if [[ -n "$DIRTY" ]]; then
 fi
 CANDIDATE_SHA="$(git -C "$INVOKING_ROOT" rev-parse HEAD)"
 CANDIDATE_SHORT="$(git -C "$INVOKING_ROOT" rev-parse --short HEAD)"
+
+# --- attestation: reuse a prior FULL run's GREEN verdict --------------------
+# A (full SHA, host) pair is a complete cache key: preflight hard-resets a
+# dedicated worktree to CANDIDATE_SHA, clean -fdx's it, and scrubs the env, so
+# the checked-out tree is a pure function of the SHA. A FULL GREEN records one
+# attestation line; the next caller on the same SHA + host reuses it. The check
+# runs BEFORE acquire_lock so a cache hit never contends for the lock - that is
+# the whole point: a second caller blocked behind a still-running preflight is
+# the 'exit 3' failure this exists to remove.
+ATTEST="$COMMON_DIR/.preflight-attestation"   # sibling of .preflight.lock.d
+_this_host() { hostname 2>/dev/null || echo unknown; }
+# Pull one space-separated `key=value` field out of the attestation line. Empty
+# on no match, which callers treat as "not a hit" (corrupt file -> full run).
+_attest_field() { printf '%s\n' "$1" | sed -n "s/.*$2=\([^ ]*\).*/\1/p"; }
+
+reuse_attestation() {
+    [[ -f "$ATTEST" ]] || return 1
+    local line att_sha att_host att_pid att_at now age_s age_h
+    line="$(cat "$ATTEST" 2>/dev/null)" || return 1
+    [[ -n "$line" ]] || return 1
+    att_sha="$(_attest_field "$line" sha)"
+    [[ "$att_sha" =~ ^[0-9a-f]{40}$ ]] || return 1   # corrupt -> full run (AC2-EDGE)
+    # Only a FULL green verdict satisfies the gate: a hand-edited or
+    # future-different line must not pass just because its sha + host match.
+    [[ "$(_attest_field "$line" mode)" == "FULL" && "$(_attest_field "$line" verdict)" == "green" ]] || return 1
+    [[ "$att_sha" == "$CANDIDATE_SHA" ]] || return 1
+    att_host="$(_attest_field "$line" host)"
+    if [[ "$att_host" != "$(_this_host)" ]]; then
+        echo "preflight: attestation for $CANDIDATE_SHORT rejected (foreign host: recorded=$att_host) - running full suite"
+        return 1   # AC3-EDGE: a cross-environment green never satisfies the gate
+    fi
+    att_pid="$(_attest_field "$line" pid)"
+    att_at="$(_attest_field "$line" at)"; att_at="${att_at//[!0-9]/}"; att_at="${att_at:-0}"
+    now="$(date +%s 2>/dev/null || echo 0)"
+    age_s=$((now - att_at)); (( age_s < 0 )) && age_s=0
+    if   (( age_s < 60 ));   then age_h="${age_s}s"
+    elif (( age_s < 3600 )); then age_h="$((age_s / 60))m"
+    else age_h="$((age_s / 3600))h"; fi
+    # The receipt carries its own evidence (matched SHA, age, earning pid, host):
+    # a GREEN printed by a process that ran zero tests is the receipts-can-lie
+    # shape, so every field is checkable and --force discards it.
+    echo "preflight: GREEN (reused attestation) candidate=$CANDIDATE_SHORT earned=${age_h} ago by pid=${att_pid:-?} host=$att_host"
+    echo "preflight: this verdict was earned by a FULL run on this exact SHA; --force re-runs from scratch"
+    exit 0
+}
+
+# The dirty-tree refusal above (exit 4) still wins: a cache hit must never bless
+# an uncommitted tree (AC1-EDGE). --force opts out of reuse (AC2-FR).
+if [[ $FORCE_RUN -eq 0 ]]; then
+    reuse_attestation   # exits 0 on a hit; returns (miss) otherwise
+fi
 
 # --- lock (atomic mkdir; steal a dead holder) -------------------------------
 LOCKDIR="$COMMON_DIR/.preflight.lock.d"
@@ -308,6 +370,44 @@ if [[ -n "$VOID_REASON" ]]; then
     exit 5
 fi
 
+# --- attestation verdict (after the tripwire, before the summary) ------------
+# VOID exited 5 above, so it reaches neither write nor delete and any
+# pre-existing attestation is left untouched (AC2-ERR). A FULL GREEN records;
+# any RED deletes a matching attestation so a stale green cannot outlive a real
+# failure (AC3-ERR); a --retry-failed pass mints nothing (AC1-ERR: subset green
+# is not full green).
+record_attestation() {
+    local now iso tmp
+    now="$(date +%s 2>/dev/null || echo 0)"
+    iso="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
+    tmp="${ATTEST}.$$"
+    # Temp file + rename: a concurrent reader never sees a half line, and two
+    # runs finishing on the same SHA make the last writer's identical content
+    # harmless. An unwritable common dir warns and continues (AC1-ERR error
+    # boundary): the run is still green, reuse just stays off until writable.
+    if printf 'sha=%s mode=FULL verdict=green at=%s iso=%s host=%s pid=%s\n' \
+            "$CANDIDATE_SHA" "$now" "$iso" "$(_this_host)" "$$" > "$tmp" 2>/dev/null \
+       && mv -f "$tmp" "$ATTEST" 2>/dev/null; then
+        :
+    else
+        rm -f "$tmp" 2>/dev/null
+        echo "preflight: WARN attestation write failed ($ATTEST); reuse unavailable until writable" >&2
+    fi
+}
+invalidate_attestation() {
+    [[ -f "$ATTEST" ]] || return 0
+    local line att_sha
+    line="$(cat "$ATTEST" 2>/dev/null)" || return 0
+    att_sha="$(_attest_field "$line" sha)"
+    [[ "$att_sha" == "$CANDIDATE_SHA" ]] || return 0
+    rm -f "$ATTEST" && echo "preflight: invalidated a stale green attestation for $CANDIDATE_SHORT"
+}
+if [[ $RETRY_FAILED -eq 0 && $FAIL -eq 0 ]]; then
+    record_attestation
+elif [[ $FAIL -ne 0 ]]; then
+    invalidate_attestation
+fi
+
 # --- summary -----------------------------------------------------------------
 echo ""
 echo "preflight: SUMMARY  repo=$REPO_NAME  candidate=$CANDIDATE_SHORT  mode=$([[ $RETRY_FAILED -eq 1 ]] && echo RETRY-SUBSET || echo FULL)"
@@ -317,7 +417,11 @@ for i in "${!LEG_NAMES[@]}"; do
 done
 echo ""
 if [[ $FAIL -eq 0 ]]; then
-    echo "preflight: GREEN - safe to push $CANDIDATE_SHORT"
+    if [[ $RETRY_FAILED -eq 0 && -f "$ATTEST" ]]; then
+        echo "preflight: GREEN - safe to push $CANDIDATE_SHORT (attestation recorded; next call on this SHA reuses it)"
+    else
+        echo "preflight: GREEN - safe to push $CANDIDATE_SHORT"
+    fi
     exit 0
 else
     echo "preflight: RED - fix, commit, then 'scripts/ci/preflight.sh --retry-failed'" >&2

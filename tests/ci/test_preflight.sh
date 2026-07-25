@@ -8,6 +8,13 @@
 # recovery: stale lock is stealable), plus the shared-worktree safety net:
 # exactly one winner when racers steal the same dead lock, and a VOID (never a
 # GREEN/RED) when either the worktree or the lock changes hands mid-run.
+#
+# Also covers the SHA+host-bound attestation reuse: a second call on an attested
+# SHA exits 0 without the lock (AC1-HP/AC1-FR), --force discards it (AC2-FR), a
+# dirty tree still refuses (AC1-EDGE), a foreign host and a corrupt/empty file
+# degrade to a full run (AC3-EDGE/AC2-EDGE), a subset pass mints nothing
+# (AC1-ERR), a RED deletes a matching one (AC3-ERR), and a VOID leaves a prior
+# one untouched (AC2-ERR).
 
 set -uo pipefail
 
@@ -61,6 +68,14 @@ mkdir -p "$FIX/crates/fno-agents" "$FIX/crates/fno"
 echo x > "$FIX/crates/fno-agents/.keep"; echo x > "$FIX/crates/fno/.keep"
 git -C "$FIX" add -A; git -C "$FIX" commit -qm "green base"
 GREEN_SHA="$(git -C "$FIX" rev-parse --short HEAD)"
+GREEN_FULL="$(git -C "$FIX" rev-parse HEAD)"
+# The fixture is a plain repo, so its git-common-dir is $FIX/.git; the lock and
+# the attestation are siblings under it.
+LOCKDIR="$FIX/.git/.preflight.lock.d"
+ATT="$FIX/.git/.preflight-attestation"
+HOST="$(hostname 2>/dev/null || echo unknown)"
+# Plant an attestation line for a given full SHA (defaulting to this host).
+write_attest() { printf 'sha=%s mode=FULL verdict=green at=%s iso=now host=%s pid=4242\n' "$1" "$(date +%s)" "${2:-$HOST}" > "$ATT"; }
 
 run_pf() { ( cd "$FIX" && bash scripts/ci/preflight.sh "$@" ); }
 
@@ -71,6 +86,80 @@ echo "$out" | grep -q "GREEN - safe to push" && ok "reports GREEN" || fail "no G
 echo "$out" | grep -q "cargo fmt --check (fno-agents" && ok "fmt leg in summary (AC3-HP)" || fail "no fmt leg"
 echo "$out" | grep -q "cargo test --all-targets (fno-agents)" && ok "cargo test leg in summary (AC3-HP)" || fail "no test leg"
 echo "$out" | grep -q "ADVISORY" && ok "audit ADVISORY row present" || fail "no ADVISORY row"
+
+echo "== attestation: a FULL GREEN records one (sha + host pinned) =="
+[[ -f "$ATT" ]] && ok "attestation written on full green" || fail "no attestation file after green"
+grep -q "^sha=$GREEN_FULL " "$ATT" && ok "attestation pins the full candidate SHA" || fail "attestation sha wrong: $(cat "$ATT")"
+grep -q " host=$HOST" "$ATT" && ok "attestation pins this host" || fail "attestation host wrong: $(cat "$ATT")"
+
+echo "== AC1-HP: a second call on the attested SHA reuses (exit 0, no lock) =="
+rm -rf "$LOCKDIR"   # a cache hit must create no lock
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "reuse exits 0" || fail "expected 0 got $rc: $out"
+echo "$out" | grep -q "reused attestation" && ok "prints reuse receipt" || fail "no reuse receipt: $out"
+echo "$out" | grep -q "candidate=$GREEN_SHA" && ok "receipt names the matched SHA" || fail "receipt omits candidate"
+echo "$out" | grep -qE "earned=.*ago" && ok "receipt reports the attestation age" || fail "receipt omits age: $out"
+echo "$out" | grep -q "host=$HOST" && ok "receipt reports the earning host" || fail "receipt omits host"
+[[ ! -d "$LOCKDIR" ]] && ok "a cache hit created no lock directory" || fail "reuse took the lock"
+
+echo "== AC1-FR: a cache hit does not contend for a held lock =="
+mkdir -p "$LOCKDIR"; printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"  # live pid
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "reuse exit 0 despite a live lock holder" || fail "expected 0 got $rc: $out"
+echo "$out" | grep -q "reused attestation" && ok "satisfied by the cache, not the lock" || fail "did not reuse under a held lock"
+grep -q "pid=$$" "$LOCKDIR/holder" && ok "the held lock was left untouched" || fail "reuse clobbered the live lock"
+rm -rf "$LOCKDIR"
+
+echo "== AC2-FR: --force always discards the attestation and re-runs =="
+out="$(run_pf --force 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "--force re-runs to GREEN" || fail "expected 0 got $rc: $out"
+echo "$out" | grep -q "reused attestation" && fail "--force printed a reuse receipt" || ok "--force did not reuse"
+
+echo "== AC1-EDGE: a dirty tree still refuses, attestation or not =="
+( cd "$FIX" && echo dirt > dirty.txt )
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 4 ]] && ok "exit 4 on dirty even with a valid attestation" || fail "expected 4 got $rc"
+echo "$out" | grep -q "reused attestation" && fail "dirty tree printed a reuse GREEN" || ok "dirty tree never reuses"
+( cd "$FIX" && rm -f dirty.txt )
+
+echo "== AC3-EDGE: an attestation from another host is rejected =="
+write_attest "$GREEN_FULL" foreign-box
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "still GREEN after rejecting the foreign attestation" || fail "expected 0 got $rc: $out"
+echo "$out" | grep -q "foreign host" && ok "receipt states the attestation was rejected as foreign" || fail "no foreign-host line: $out"
+echo "$out" | grep -q "reused attestation" && fail "reused a foreign attestation" || ok "did not reuse the foreign attestation"
+
+echo "== AC2-EDGE: a corrupt / empty attestation degrades to a full run =="
+printf 'sha=not-even-a-sha garbage\n' > "$ATT"
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "unparseable attestation -> full run -> GREEN" || fail "expected 0 got $rc"
+echo "$out" | grep -q "reused attestation" && fail "trusted an unparseable attestation" || ok "unparseable attestation not trusted"
+: > "$ATT"   # empty file
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "empty attestation -> full run -> GREEN" || fail "expected 0 got $rc"
+echo "$out" | grep -q "reused attestation" && fail "trusted an empty attestation" || ok "empty attestation not trusted"
+
+echo "== AC2-EDGEb: a non-FULL / non-green attestation degrades to a full run =="
+printf 'sha=%s mode=FULL verdict=red at=%s iso=now host=%s pid=4242\n' "$GREEN_FULL" "$(date +%s)" "$HOST" > "$ATT"
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "non-green attestation -> full run -> GREEN" || fail "expected 0 got $rc"
+echo "$out" | grep -q "reused attestation" && fail "trusted a non-green attestation" || ok "non-green attestation not trusted"
+
+echo "== AC1-ERR: a --retry-failed (subset) pass mints no attestation =="
+rm -f "$ATT"
+out="$(run_pf --retry-failed 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "retry-failed subset passes" || fail "expected 0 got $rc: $out"
+[[ ! -f "$ATT" ]] && ok "subset run wrote no attestation" || fail "subset run minted a full-run attestation"
+
+echo "== AC3-ERR: a RED run deletes a matching attestation =="
+( cd "$FIX" && touch POISON && git add -A && git commit -qm "poison for AC3-ERR" )
+write_attest "$(git -C "$FIX" rev-parse HEAD)"   # plant a stale green for the RED sha
+out="$(run_pf --force 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && ok "RED run exits non-zero" || fail "expected red got $rc"
+echo "$out" | grep -q "RED - fix" && ok "reports RED" || fail "no RED line: $out"
+[[ ! -f "$ATT" ]] && ok "RED deleted the matching attestation" || fail "RED left a stale green attestation"
+( cd "$FIX" && git rm -q POISON && git commit -qm "unpoison AC3-ERR" )
+rm -f "$ATT"
 
 echo "== AC2-HP-red: a POISON commit is caught locally, exit non-zero, no push =="
 ( cd "$FIX" && touch POISON && git add -A && git commit -qm "poisoned" )
@@ -90,7 +179,6 @@ echo "$out" | grep -q "dirty.txt" && ok "lists the dirty file" || fail "did not 
 ( cd "$FIX" && rm -f dirty.txt )
 
 echo "== AC2-EDGE: concurrent invocation -> exit 3 with holder =="
-LOCKDIR="$FIX/.git/.preflight.lock.d"
 mkdir -p "$LOCKDIR"; printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"  # $$ is alive
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 3 ]] && ok "exit 3 when lock held by a live pid" || fail "expected 3 got $rc"
@@ -112,6 +200,7 @@ echo "== steal-race: concurrent steal of one dead holder -> exactly one winner =
 steal_winners=0
 for _round in 1 2 3 4 5; do
     rm -rf "$LOCKDIR"
+    rm -f "$ATT"   # else the prior green attestation satisfies the gate and no one contends
     mkdir -p "$LOCKDIR"; printf 'pid=%s started=OLD host=x sha=deadbee\n' 999999 > "$LOCKDIR/holder"
     run_pf >/dev/null 2>&1 & p1=$!
     run_pf >/dev/null 2>&1 & p2=$!
@@ -136,12 +225,16 @@ printf 'pid=424242 started=NOW host=x sha=cafe123\n' > "$LOCKDIR/holder"
 echo "smoke: all green (stub, stole the lock)"; exit 0
 EOF
 ( cd "$FIX" && git add -A && git commit -qm "lock-stealing smoke stub" )
-out="$(run_pf 2>&1)"; rc=$?
+write_attest "$(git -C "$FIX" rev-parse HEAD)"   # AC2-ERR: a prior attestation for this SHA
+# --force bypasses reuse so the planted attestation does not short-circuit; the
+# run must actually execute to reach the VOID tripwire.
+out="$(run_pf --force 2>&1)"; rc=$?
 [[ $rc -eq 5 ]] && ok "exit 5 (VOID) when the lock changed hands" || fail "expected 5 got $rc: $out"
 echo "$out" | grep -q "VOID - another preflight took our lock" && ok "names the lock, not the worktree" || fail "wrong VOID cause: $out"
 grep -q "pid=424242" "$LOCKDIR/holder" 2>/dev/null && ok "the stealer's lock survived our exit" \
     || fail "cleanup deleted a lock owned by the stealer"
-rm -rf "$LOCKDIR"
+[[ -f "$ATT" ]] && ok "VOID left the prior attestation untouched (AC2-ERR)" || fail "VOID wrote or deleted the attestation"
+rm -rf "$LOCKDIR"; rm -f "$ATT"
 
 # NOTE: keep the worktree-hijack leg LAST. Its stub permanently resets the
 # fixture's preflight worktree, so any test appended after it inherits a

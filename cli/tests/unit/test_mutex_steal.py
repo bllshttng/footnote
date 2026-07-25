@@ -285,7 +285,12 @@ class TestEventsMutex:
 
         def emit() -> None:
             gate.wait()
-            append_event(_event(), events_path=events, lock_timeout_seconds=10)
+            # The budget is incidental scaffolding, not an assertion: the test
+            # checks that exactly one rename wins and all four events land as
+            # whole lines, nothing about latency. Under pytest-xdist load a 10s
+            # budget blows past on a busy host, so raise it rather than pin the
+            # test to a single worker.
+            append_event(_event(), events_path=events, lock_timeout_seconds=60)
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             for fut in [pool.submit(emit) for _ in range(workers)]:

@@ -73,7 +73,7 @@ step() { STEP_NAMES+=("$1"); STEP_CWDS+=("$2"); STEP_CMDS+=("$3"); }
 register_steps() {
     step "Sync + build" "cli" 'uv sync
 uv build'
-    step "Pytest (unit + integration)" "cli" 'uv run pytest --tb=short -q'
+    step "Pytest (unit + integration)" "cli" 'uv run pytest --tb=short -q -n auto'
     step "paths.sh hash gate" "cli" 'uv run fno-py paths verify ../scripts/lib/paths.sh'
     step "Bash events-validate harness" "." 'bash tests/events/test-bash-validator.sh'
     step "frontend-craft gate harness (frontend-craft-gate plan)" "." 'bash tests/lib/test_frontend_surface.sh

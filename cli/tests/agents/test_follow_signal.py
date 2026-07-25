@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -303,8 +304,25 @@ def test_subprocess_follow_clean_sigint_exit(tmp_path, monkeypatch):
         cwd=str(tmp_path),
     )
     try:
-        # Give the follow loop ~1s to enter the poll waiting state.
-        time.sleep(1.0)
+        # Wait for the process to actually reach the follow loop before
+        # signalling, rather than a fixed sleep. read_logs writes the JSONL
+        # tail (the seed line) to stdout once it has loaded the registry and
+        # is about to enter _follow_jsonl, whose caller traps KeyboardInterrupt
+        # for the clean exit. Under pytest-xdist load the heavy
+        # ``python -m fno.cli`` import is slow, so SIGINT that lands during
+        # startup is caught by the default handler and kills the process
+        # (returncode 130) - the same load-sensitivity family the suite is
+        # being hardened against.
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                pytest.fail(
+                    f"follow exited before reaching the loop;"
+                    f" returncode={proc.returncode}"
+                )
+            ready, _, _ = select.select([proc.stdout], [], [], 0.2)
+            if ready and proc.stdout.readline():
+                break   # tail (seed) line written -> entering the follow loop
         proc.send_signal(signal.SIGINT)
         try:
             stdout, stderr = proc.communicate(timeout=5.0)

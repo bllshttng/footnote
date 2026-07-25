@@ -100,6 +100,19 @@ Behavior:
   holder). A dead holder's lock is stolen so a crashed run never wedges you.
   The steal is a single atomic rename, so when several runs find the same dead
   holder exactly one wins and the rest exit 3.
+- Reuses a prior verdict: a FULL, non-VOID, all-legs-green run records a
+  one-line attestation beside the lock, bound to `(full SHA, host)`. The next
+  caller on the same SHA + host reads it before taking the lock and exits 0 in
+  well under a second without re-running anything - so a second caller is never
+  blocked behind a run still holding the lock. The receipt prints its own
+  evidence (the matched SHA, the attestation's age, the earning pid, the host),
+  because a GREEN printed by a process that ran no tests is exactly the receipt
+  a reader should be able to audit; `--force` discards it and re-runs every
+  suite. A RED run deletes a matching attestation, so a stale green cannot
+  outlive a real failure; a `--retry-failed` (subset) pass or a VOID mints
+  nothing. The SHA is a complete cache key because the runner hard-resets a
+  dedicated worktree to that SHA and scrubs the environment; `host=` closes the
+  one cross-environment hole a SHA key alone leaves.
 - Exits 5 (VOID) if the shared preflight worktree or the lock changed hands
   mid-run, printing which of the two it lost. The run earned no verdict, so it
   prints neither GREEN nor RED. Treat 5 as re-run, never as a code failure:
@@ -119,6 +132,13 @@ script exists in the repo (see `skills/target/references/ship-phase.md`):
 - `--retry-failed` between fix-loop commits, then one full run before the push
   you expect to go green.
 
+Verdict reuse needs no caller change: it is checked inside `preflight.sh`
+itself, before the lock, so the ship phase and fix loop inherit it from the one
+invocation they already make. (A second push of an unchanged SHA therefore
+returns instantly; `--force` is there for the rare case a caller wants to
+re-prove it. The reuse check is deliberately not duplicated in `ship-phase.md`
+or the fix loop - one implementation, every reachable caller.)
+
 The trigger is an existence guard (`[[ -x scripts/ci/preflight.sh ]]`), so it
 no-ops in any repo that does not ship the script - a repo-neutral convention,
 not a footnote hardcode. Skips are explicit and auditable:
@@ -128,7 +148,8 @@ The scripts never self-skip; the skip decision lives in the caller.
 ## Running it yourself
 
 ```bash
-scripts/ci/preflight.sh                 # full run against your committed HEAD
+scripts/ci/preflight.sh                 # full run; reuses a matching attestation if one exists
+scripts/ci/preflight.sh --force         # ignore the cached attestation, run every suite
 scripts/ci/preflight.sh --retry-failed  # fast: only last run's failures
 bash scripts/ci/smoke.sh --keep-going   # non-hermetic, in your working tree
 bash scripts/ci/smoke.sh --list         # what CI actually runs
