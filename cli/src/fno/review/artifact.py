@@ -206,7 +206,7 @@ def inspect_sigma_artifact(
             "rejected",
             "; ".join(mismatches),
             0,
-            body,
+            "",
             str(metadata.get("review_round")) if metadata.get("review_round") else None,
         )
 

@@ -106,26 +106,24 @@ def test_inspect_rejects_wrong_pr_or_head(tmp_path: Path) -> None:
         round_id="round-b",
     )
 
-    assert (
-        inspect_sigma_artifact(
-            reviews_root=reviews_root,
-            project="fno",
-            node="x-bfbb",
-            pr_number=99,
-            head_sha="head-b",
-        ).status
-        == "rejected"
+    wrong_pr = inspect_sigma_artifact(
+        reviews_root=reviews_root,
+        project="fno",
+        node="x-bfbb",
+        pr_number=99,
+        head_sha="head-b",
     )
-    assert (
-        inspect_sigma_artifact(
-            reviews_root=reviews_root,
-            project="fno",
-            node="x-bfbb",
-            pr_number=42,
-            head_sha="head-c",
-        ).status
-        == "rejected"
+    wrong_head = inspect_sigma_artifact(
+        reviews_root=reviews_root,
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+        head_sha="head-c",
     )
+    assert wrong_pr.status == "rejected"
+    assert wrong_pr.body == ""
+    assert wrong_head.status == "rejected"
+    assert wrong_head.body == ""
 
 
 def test_inspect_accepts_current_artifact_with_zero_external_reviewers(tmp_path: Path) -> None:
