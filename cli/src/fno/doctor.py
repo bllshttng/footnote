@@ -1224,6 +1224,21 @@ def _emit_human(
             f"marketplace source ({', '.join(dupes)}); remove the extras with "
             "`codex plugin marketplace remove <name>`."
         )
+    plugin = surf.get("codex_plugin") or {}
+    plugin_status = plugin.get("status")
+    if plugin_status == "fresh":
+        out(
+            "fno doctor: codex plugin: fresh "
+            f"(channel={plugin.get('channel')} version={plugin.get('cache_version')} "
+            f"digest={str(plugin.get('cache_digest') or '')[:12]})."
+        )
+    elif plugin_status:
+        detail = plugin.get("issue") or plugin_status
+        enabled = ", ".join(plugin.get("enabled_plugin_ids") or []) or "none"
+        out(
+            f"fno doctor: codex plugin: {str(plugin_status).upper()} "
+            f"({detail}; enabled={enabled}); run `{plugin.get('remedy')}`."
+        )
     # Agent health (x-1c7b). Grooming freshness is advisory - a fresh install has
     # legitimately never groomed - but a nonzero-exit agent reddens the exit code
     # below, because "installed" has repeatedly not meant "running".
@@ -1643,21 +1658,22 @@ def _harness_surface_report() -> dict[str, Any]:
     except Exception:
         pass
 
-    try:
-        result = subprocess.run(
-            ["codex", "plugin", "marketplace", "list"],
-            capture_output=True,
-            text=True,
-            errors="replace",  # localized/non-UTF-8 output must not crash doctor
-            timeout=5,
-            check=False,
-        )
-        if result.returncode == 0:
-            dupes = _codex_marketplace_duplicates(result.stdout)
-            if dupes:
-                report["codex_marketplace_duplicates"] = dupes
-    except (OSError, subprocess.SubprocessError):
-        pass  # codex not installed -> silent
+    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    plugin_state_exists = (codex_home / "footnote" / "plugin-channel.json").is_file() or (
+        codex_home / "plugins" / "cache" / "footnote"
+    ).exists() or (codex_home / "plugins" / "cache" / "footnote-dev").exists()
+    if shutil.which("codex") is not None or plugin_state_exists:
+        try:
+            from fno.setup.codex_plugin import inspect_freshness
+
+            report["codex_plugin"] = inspect_freshness()
+        except Exception as exc:  # noqa: BLE001 - doctor remains advisory
+            report["codex_plugin"] = {
+                "status": "unknown",
+                "issue": "inspection-failed",
+                "detail": str(exc)[-500:],
+                "remedy": "fno setup codex-plugin --channel release --refresh",
+            }
 
     # Surface codex hooks dual-representation in the MAIN run too, not only the
     # opt-in `--codex-hooks` mode: a plain `fno doctor` should point at the heal.

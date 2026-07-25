@@ -160,16 +160,33 @@ def test_codex_hooks_block_canonical_edit_tools() -> None:
     )
 
 
-def test_local_codex_marketplace_points_at_repo_plugin_root() -> None:
+def test_release_codex_marketplace_points_at_repo_plugin_root() -> None:
     marketplace = json.loads(
         (REPO_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(
             encoding="utf-8"
         )
     )
+    assert marketplace["name"] == "footnote"
     entry = marketplace["plugins"][0]
     assert entry["name"] == "fno"
     assert entry["source"] == {"source": "local", "path": "."}
     plugin_root = (REPO_ROOT / entry["source"]["path"]).resolve()
+    assert plugin_root == REPO_ROOT
+    assert (plugin_root / ".codex-plugin" / "plugin.json").is_file()
+
+
+def test_dev_codex_marketplace_points_back_at_repo_plugin_root() -> None:
+    marketplace_root = REPO_ROOT / ".agents" / "marketplaces" / "footnote-dev"
+    marketplace = json.loads(
+        (marketplace_root / ".agents" / "plugins" / "marketplace.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert marketplace["name"] == "footnote-dev"
+    entry = marketplace["plugins"][0]
+    assert entry["name"] == "fno"
+    assert entry["source"] == {"source": "local", "path": "../../.."}
+    plugin_root = (marketplace_root / entry["source"]["path"]).resolve()
     assert plugin_root == REPO_ROOT
     assert (plugin_root / ".codex-plugin" / "plugin.json").is_file()
 

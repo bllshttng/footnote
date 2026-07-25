@@ -203,6 +203,89 @@ def test_doctor_quiet_when_surfaces_healthy(monkeypatch: pytest.MonkeyPatch) -> 
     assert "marketplace" not in result.stdout
 
 
+def test_harness_surface_is_quiet_when_codex_and_footnote_state_are_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None if name == "codex" else "/bin/tool")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.setattr(
+        "fno.setup.codex_plugin.inspect_freshness",
+        lambda: pytest.fail("plugin inspection should not run without Codex or Footnote state"),
+    )
+    monkeypatch.setattr(doctor, "_codex_hooks_report", lambda: {})
+    monkeypatch.setattr(
+        "fno.setup.integration._opencode_plugins_dir", lambda: tmp_path / "no-opencode"
+    )
+
+    assert "codex_plugin" not in doctor._harness_surface_report()
+
+
+def test_doctor_reports_plugin_drift_without_staling_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+    )
+    plugin = {
+        "status": "stale",
+        "issue": "payload-drift",
+        "channel": "dev",
+        "source_version": "0.3.0",
+        "cache_version": "0.3.0",
+        "source_digest": "a" * 64,
+        "cache_digest": "b" * 64,
+        "enabled_plugin_ids": ["fno@footnote-dev"],
+        "remedy": "fno setup codex-plugin --channel dev --refresh",
+    }
+    monkeypatch.setattr(
+        doctor, "_harness_surface_report", lambda: {"codex_plugin": plugin}
+    )
+
+    result = runner.invoke(app, ["doctor", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "fresh"
+    assert payload["harness_surface"]["codex_plugin"] == plugin
+    assert "codex plugin: STALE" in result.stderr
+    assert "fno setup codex-plugin --channel dev --refresh" in result.stderr
+
+
+def test_doctor_reports_wrong_or_simultaneous_channel_without_freshness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_harness_surface_report",
+        lambda: {
+            "codex_plugin": {
+                "status": "conflict",
+                "issue": "simultaneous-channels",
+                "enabled_plugin_ids": ["fno@footnote", "fno@footnote-dev"],
+                "remedy": "fno setup codex-plugin --channel dev --refresh",
+            }
+        },
+    )
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "codex plugin: CONFLICT" in result.stdout
+    assert "fno@footnote, fno@footnote-dev" in result.stdout
+    assert "codex plugin: fresh" not in result.stdout.lower()
+
+
 def test_ac1_err_rev_behind_reports_stale(monkeypatch: pytest.MonkeyPatch) -> None:
     """AC1-ERR variant: marker behind source HEAD => stale, exit nonzero."""
     _stub_signals(

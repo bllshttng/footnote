@@ -2,17 +2,37 @@
 
 footnote ships a native Codex plugin plus a local-development fallback.
 
-## Native Quick Start
+## Plugin Channels
 
-The repo carries a local Codex marketplace fixture at `.agents/plugins/marketplace.json`.
-It points at this checkout and exposes `.codex-plugin/plugin.json`.
+Use the release channel for normal Codex sessions.
+It installs `fno@footnote` from the Git-backed `bllshttng/footnote` marketplace and keeps the version in `.codex-plugin/plugin.json` authoritative.
 
 ```bash
-codex plugin marketplace add .
-codex plugin add fno@footnote-local
+fno setup codex-plugin --channel release
 ```
 
-Then install `fno` from that marketplace in the Codex app. The plugin manifest exposes:
+Use the dev channel while changing plugin content locally.
+It installs `fno@footnote-dev` from the durable canonical checkout rather than a disposable feature worktree.
+
+```bash
+fno setup codex-plugin --channel dev
+```
+
+Codex caches plugins by version, so local edits at the same manifest version require an explicit refresh.
+Refresh removes and re-adds the selected copy through Codex, which deterministically rebuilds its cache without changing release version files.
+
+```bash
+fno setup codex-plugin --channel dev --refresh
+```
+
+Setup removes the other installed Footnote channel before installing the selected one and verifies that exactly one Footnote plugin is enabled.
+An already-correct selection is a no-op unless `--refresh` is present.
+Every mutation can require hook approval and takes effect in a new Codex session.
+
+`fno doctor` reports Codex plugin freshness separately from Python and Rust CLI freshness.
+It compares the selected channel's loadable source payload with `CODEX_HOME/plugins/cache/<marketplace>/fno/<version>` and gives the exact refresh command for wrong-channel, missing-cache, version-mismatch, and payload-drift findings.
+
+The plugin manifest exposes:
 
 - skills from `skills/`
 - plugin-bundled Codex lifecycle hooks through `hooks/codex-hooks.json`
