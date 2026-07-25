@@ -762,15 +762,11 @@ this table marks it for the resolved type:
 | Locked Decisions + Claude's Discretion | yes | yes | yes | yes - written child-consumable (decompose transcribes the Locked block verbatim) |
 | Open Questions | yes | yes | yes | yes |
 
-**Why a bug keeps `## User Stories`.** `/blueprint` synthesizes its
-`## Execution Strategy` task list *solely* from `## User Stories`
-(`mutate_doc.py:_build_execution_strategy`); a doc with no stories degrades to a
-single empty "implement feature" task. A bug's discrete fix steps therefore live
-under `## User Stories` (framed as work items, not "As a user I can..."
-narratives) so the bug's real work survives into the plan. Dropping the section
-would silently gut blueprint's task synthesis - and the parser seam is frozen, so
-this is a think.md-side obligation, not a blueprint change. An `investigation`
-omits it because it is no-build (it never reaches `/blueprint`).
+**Why a bug keeps `## User Stories`.** `/blueprint` synthesizes its `## Execution Strategy` task list *solely* from `## User Stories` (`mutate_doc.py:_build_execution_strategy`), so a bug's discrete fix steps live here (framed as work items, not "As a user I can..." narratives) or they do not reach the plan.
+The parser accepts the natural shapes a doc or a hand-edit carries, so write stories in whichever reads best: inline bold (`**US1:** desc`), an h3 heading (`### US1: Title`), a table row (`| US1 | desc |`), or a plain list item (`- US1: desc`, `1. US1: desc`).
+A `## User Stories` section whose content the parser cannot match to a story fails loud at `/blueprint` naming the accepted shapes, never a silent degrade - a one-task plan that quietly drops stories under-scopes the whole build.
+Only a section left truly empty falls through to a single placeholder task, and the empty-stories reviewer check below catches that case.
+An `investigation` omits the section because it is no-build (it never reaches `/blueprint`).
 
 **The three type-specific new sections:**
 
@@ -899,10 +895,9 @@ After saving the design document, spawn a Haiku reviewer subagent to critique it
      x-2bf7 failure inverted: the reviewer once approved a no-build verdict's
      fabricated AC-UI sections; a type-excluded (type-excluded == filler) section
      is now a finding.
-   - **Empty-stories check (new, all buildable types):** a `## User Stories`
-     heading with no story content under it is a finding on `feature`, `bug`, AND
-     `epic` - `/blueprint` silently degrades to one empty "implement feature" task
-     otherwise. This is a reviewer-prompt line, not a parser change.
+   - **Empty-stories check (all buildable types):** a `## User Stories` heading with no story content under it is a finding on `feature`, `bug`, AND `epic`.
+     A truly empty section falls through to one placeholder "implement feature" task; a non-empty section whose content the parser cannot match to a story fails loud at `/blueprint` instead (it names the accepted shapes and refuses rather than under-scope).
+     The reviewer check exists for the blank case the parser cannot tell apart from "not yet decomposed".
    - **Fabricated-citation check (new):** every entry in the doc's `sources:`
      frontmatter must name an artifact that exists AND was read in Step 7b (the
      corpus section, a synthesis doc, a cited doc). A `sources:` entry whose path

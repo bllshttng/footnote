@@ -622,20 +622,49 @@ class TestUserStoryParserFormats:
         assert len(strategy["tasks"]) == 2, \
             f"Mixed-format doc should yield 2 tasks, got {len(strategy['tasks'])}"
 
-    def test_truly_empty_user_stories_still_warns(self, tmp_path):
-        """Negative case: no stories at all should still emit the WARNING + default task."""
-        doc = tmp_path / "empty.md"
+    def test_nonempty_unparseable_stories_fails_loud(self, tmp_path):
+        """A non-empty ## User Stories body that yields zero stories must FAIL
+        LOUD (non-zero exit, naming the accepted formats) instead of silently
+        degrading to one default task. The guard-corollary rule: a parser that
+        recognizes N of M legal shapes must refuse on the rest, never no-op into
+        a plausible-looking single-task plan.
+        """
+        doc = tmp_path / "prose_only.md"
         doc.write_text(
             _doc_with_us_section("Just some prose with no story markers at all.\n"),
             encoding="utf-8",
         )
         result = _run_mutate(doc, "--mode", "greenfield")
+        assert result.returncode != 0, \
+            "Non-empty unparseable User Stories must fail loud, not exit 0"
+        assert "no ## User Stories entries found" not in result.stderr, \
+            "Fail-loud must replace the old silent-degrade warning"
+        # Message must name the expected formats so the author can fix the doc.
+        assert "US1" in result.stderr or "format" in result.stderr.lower(), \
+            f"Error must name an accepted format; got: {result.stderr}"
+        # Failure happens before the write, so the doc is left unmutated.
+        assert "## Execution Strategy" not in doc.read_text(encoding="utf-8"), \
+            "Fail-loud must not write a degraded Execution Strategy"
+
+    def test_truly_empty_section_keeps_default_escape(self, tmp_path):
+        """A genuinely EMPTY section (whitespace only) is a different case from
+        unparseable prose: the section may be absent or intentionally blank, and
+        think.md's empty-stories reviewer check catches it at design time. The
+        default-task escape hatch is preserved so blueprint does not hard-fail on
+        a blank section a concurrent edit may have left half-written.
+        """
+        doc = tmp_path / "blank.md"
+        doc.write_text(
+            _doc_with_us_section("   \n\n  \n"),
+            encoding="utf-8",
+        )
+        result = _run_mutate(doc, "--mode", "greenfield")
         assert result.returncode == 0, result.stderr
         assert "no ## User Stories entries found" in result.stderr, \
-            "Genuine empty section should still emit warning"
+            "Genuinely empty section should keep the default-task escape"
         strategy = _read_strategy_yaml(doc.read_text(encoding="utf-8"))
         assert len(strategy["tasks"]) == 1, \
-            "Genuine empty should fall through to single default task"
+            "Genuinely empty should fall through to single default task"
 
     def test_empty_bold_marker_does_not_steal_next_story(self, tmp_path):
         """Codex P2 / Gemini HIGH: `**US1:**` followed by `**US2:** desc` must
@@ -795,3 +824,133 @@ class TestUserStoryParserFormats:
         title = strategy["tasks"][0]["title"]
         assert "bold first wins" in title, \
             f"Expected the FIRST occurrence (bold) to win, got title={title!r}"
+
+
+# ---------------------------------------------------------------------------
+# Plain list-item shapes (dash / asterisk / numbered): the natural forms a
+# hand-written or /think-emitted spec uses when it does not wrap ids in bold.
+# Pre-fix these parsed to zero and silently degraded to one default task.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bullet",
+    [
+        "- ",   # dash bullet
+        "* ",   # asterisk bullet
+        "+ ",   # plus bullet
+    ],
+    ids=["dash", "asterisk", "plus"],
+)
+def test_plain_dash_bullet_story_parses(tmp_path, bullet):
+    """`- US1: desc`, `* US1: desc`, `+ US1: desc` each yield one task per story."""
+    doc = tmp_path / "dash.md"
+    doc.write_text(
+        _doc_with_us_section(
+            f"{bullet}US1: first discrete work item.\n"
+            f"{bullet}US2: second discrete work item.\n"
+        ),
+        encoding="utf-8",
+    )
+    result = _run_mutate(doc, "--mode", "greenfield")
+    assert result.returncode == 0, result.stderr
+    assert "no ## User Stories entries found" not in result.stderr, \
+        f"Parser missed plain {bullet.strip()!r}-bullet stories: {result.stderr}"
+    strategy = _read_strategy_yaml(doc.read_text(encoding="utf-8"))
+    assert len(strategy["tasks"]) == 2, \
+        f"Expected 2 tasks for {bullet.strip()!r}-bullet, got {len(strategy['tasks'])}"
+
+
+def test_plain_numbered_list_story_parses(tmp_path):
+    """`1. US1: desc`, `2. US2: desc` (the shape /think's template emits) yields
+    one task per story. This is the form that broke three separate design docs."""
+    doc = tmp_path / "numbered.md"
+    doc.write_text(
+        _doc_with_us_section(
+            "1. US1: first work item.\n"
+            "2. US2: second work item.\n"
+            "3. US3: third work item.\n"
+        ),
+        encoding="utf-8",
+    )
+    result = _run_mutate(doc, "--mode", "greenfield")
+    assert result.returncode == 0, result.stderr
+    assert "no ## User Stories entries found" not in result.stderr, \
+        f"Parser missed plain numbered-list stories: {result.stderr}"
+    strategy = _read_strategy_yaml(doc.read_text(encoding="utf-8"))
+    assert len(strategy["tasks"]) == 3, \
+        f"Expected 3 tasks for numbered list, got {len(strategy['tasks'])}"
+
+
+def test_plain_list_item_with_dash_title_separator(tmp_path):
+    """`- US1 - Title text` (dash separator, no bold) parses with the title as
+    the task title."""
+    doc = tmp_path / "dash_title.md"
+    doc.write_text(
+        _doc_with_us_section(
+            "- US1 - Parse the natural list shapes.\n"
+            "- US2 - Fail loud on unparseable content.\n"
+        ),
+        encoding="utf-8",
+    )
+    result = _run_mutate(doc, "--mode", "greenfield")
+    assert result.returncode == 0, result.stderr
+    strategy = _read_strategy_yaml(doc.read_text(encoding="utf-8"))
+    assert len(strategy["tasks"]) == 2, \
+        f"Expected 2 tasks, got {len(strategy['tasks'])}"
+    titles = [t["title"] for t in strategy["tasks"]]
+    assert any("parse" in t.lower() for t in titles), \
+        f"List-item title text not propagated: {titles}"
+
+
+def test_story_count_equals_task_count_across_every_shape(tmp_path):
+    """The contract this defect is named for: for EVERY supported shape, the
+    number of stories in the section equals the number of tasks in Execution
+    Strategy. A shape that silently drops stories breaks this equality, which is
+    exactly how the degrade-to-one-default failure hides.
+    """
+    shapes = {
+        "bold_colon": "**US1:** a.\n**US2:** b.\n",
+        "bold_title": "**US1: Title one.** a.\n**US2: Title two.** b.\n",
+        "heading_colon": "### US1: Alpha\n### US2: Beta\n",
+        "heading_emdash": "### US1 — Alpha\n### US2 — Beta\n",
+        "table": "| US1 | a |\n| US2 | b |\n",
+        "dash_bold": "- **US1: Title.** a.\n- **US2: Title.** b.\n",
+        "numbered_bold": "1. **US1:** a.\n2. **US2:** b.\n",
+        "dash_plain": "- US1: a.\n- US2: b.\n",
+        "numbered_plain": "1. US1: a.\n2. US2: b.\n",
+    }
+    for name, body in shapes.items():
+        doc = tmp_path / f"{name}.md"
+        doc.write_text(_doc_with_us_section(body), encoding="utf-8")
+        result = _run_mutate(doc, "--mode", "greenfield")
+        assert result.returncode == 0, \
+            f"{name}: blueprint failed: {result.stderr}"
+        strategy = _read_strategy_yaml(doc.read_text(encoding="utf-8"))
+        assert len(strategy["tasks"]) == 2, \
+            f"{name}: expected 2 tasks (story count), got {len(strategy['tasks'])}"
+
+
+def test_plain_list_does_not_steal_next_list_story(tmp_path):
+    """`- US1` with no description, then `- US2: desc` -- the empty-tail fallback
+    must stop at the next list anchor and leave US1 unmatched (no real content),
+    not consume US2's line as US1's description.
+    """
+    doc = tmp_path / "list_no_steal.md"
+    doc.write_text(
+        _doc_with_us_section(
+            "- US1\n\n"
+            "- US2: real description for US2.\n"
+        ),
+        encoding="utf-8",
+    )
+    result = _run_mutate(doc, "--mode", "greenfield")
+    assert result.returncode == 0, result.stderr
+    strategy = _read_strategy_yaml(doc.read_text(encoding="utf-8"))
+    notes = [t["notes"] for t in strategy["tasks"]]
+    assert "Implement US2." in notes, \
+        f"List fallback dropped US2; notes={notes}"
+    assert "Implement US1." not in notes, \
+        f"Empty list item stole US2's line; notes={notes}"
+    assert len(strategy["tasks"]) == 1, \
+        f"Expected 1 task (US2 only), got {len(strategy['tasks'])}"
