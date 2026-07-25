@@ -11,10 +11,8 @@ Covers:
 from __future__ import annotations
 
 from collections import OrderedDict
-from pathlib import Path
 
 import pytest
-import yaml
 
 from fno.plan._doc import PlanDoc
 
@@ -132,9 +130,26 @@ class TestParseExecutionStrategy:
         assert "uv run pytest" in t["verify"]
 
     def test_malformed_yaml_raises(self) -> None:
-        from fno.plan.brief import parse_execution_strategy, BriefError
+        from fno.plan.brief import parse_execution_strategy
         with pytest.raises((Exception,)):
             parse_execution_strategy("tasks:\n  - id: [unclosed\n")
+
+    @pytest.mark.parametrize(
+        ("yaml_text", "message"),
+        [
+            ("tasks:\n  - not-a-mapping\n", "task 1 must be a mapping"),
+            (
+                "tasks:\n  - id: '1.1'\n    surface: cli/main.py\n",
+                "task '1.1' surface must be a list",
+            ),
+            ("waves: not-a-list\n", "'waves' must be a list"),
+        ],
+    )
+    def test_structural_type_errors_raise(self, yaml_text: str, message: str) -> None:
+        from fno.plan.brief import BriefParseError, parse_execution_strategy
+
+        with pytest.raises(BriefParseError, match=message):
+            parse_execution_strategy(yaml_text)
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +403,7 @@ class TestBuildBrief:
 
     def test_build_brief_malformed_exec_strategy_raises(self) -> None:
         """AC2-FR: malformed Execution Strategy YAML raises appropriate error."""
-        from fno.plan.brief import build_brief, BriefError
+        from fno.plan.brief import build_brief
         sections: OrderedDict[str, str] = OrderedDict()
         sections["Overview"] = SAMPLE_OVERVIEW
         sections["Acceptance Criteria"] = SAMPLE_AC_SECTION
@@ -407,7 +422,7 @@ class TestBuildBrief:
 class TestToJsonDict:
     def test_json_schema_keys(self) -> None:
         """AC2-UI: JSON output has the fixed schema keys."""
-        from fno.plan.brief import build_brief, BriefResult
+        from fno.plan.brief import build_brief
         doc = _make_plan_doc()
         result = build_brief(doc, task_id="2.1", include_failure_modes="relevant", include_locked_decisions="relevant")
         d = result.to_json_dict()

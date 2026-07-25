@@ -8,11 +8,9 @@ Each test maps to an acceptance criterion from the lean-blueprint plan.
 from __future__ import annotations
 
 import hashlib
-import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -96,13 +94,13 @@ def _has_section(path: Path, section_name: str) -> bool:
 
 
 class TestAC1HPGreenfield:
-    def test_status_transitions_to_ready(self, tmp_path):
-        """AC1-HP: status=design, greenfield -> status becomes ready."""
+    def test_status_stays_design_until_finalize(self, tmp_path):
+        """AC1-HP: a generated skeleton remains a non-executable draft."""
         doc = _copy_fixture(GREENFIELD_FIXTURE, tmp_path)
         result = _run_mutate(doc, "--mode", "greenfield")
         assert result.returncode == 0, f"Expected exit 0, got {result.returncode}\nstderr: {result.stderr}"
         fm = _load_frontmatter(doc)
-        assert fm.get("status") == "ready", f"Expected status=ready, got {fm.get('status')}"
+        assert fm.get("status") == "design", f"Expected status=design, got {fm.get('status')}"
 
     def test_execution_strategy_section_added(self, tmp_path):
         """AC1-HP: Execution Strategy section is appended."""
@@ -177,6 +175,36 @@ class TestAC1HPGreenfield:
         assert isinstance(waves, list), f"waves should be a list, got {type(waves)}"
 
 
+class TestExecutableDraftLifecycle:
+    def test_draft_stays_design_until_semantic_finalize(self, tmp_path):
+        doc = _copy_fixture(GREENFIELD_FIXTURE, tmp_path)
+
+        draft = _run_mutate(doc, "--mode", "greenfield", "--draft")
+
+        assert draft.returncode == 0, draft.stderr
+        assert _load_frontmatter(doc).get("status") == "design"
+
+        rejected = _run_mutate(doc, "--finalize")
+
+        assert rejected.returncode == 2
+        assert "tasks.1.1.surface" in rejected.stderr
+        assert _load_frontmatter(doc).get("status") == "design"
+
+        text = doc.read_text(encoding="utf-8")
+        text = text.replace("surface: []", "surface: [src/generated.py]")
+        text = text.replace(
+            "verify: '# fill in verify command'",
+            "verify: pytest tests/test_generated.py",
+        )
+        text = text.replace("acceptance: []", "acceptance: [AC1]")
+        doc.write_text(text, encoding="utf-8")
+
+        finalized = _run_mutate(doc, "--finalize")
+
+        assert finalized.returncode == 0, finalized.stderr
+        assert _load_frontmatter(doc).get("status") == "ready"
+
+
 # ---------------------------------------------------------------------------
 # W2 (x-408f / ab-638f9066): projectable frontmatter block-lists
 # The reader _stamp.parse_frontmatter only consumes INDENTED block-list
@@ -244,13 +272,13 @@ class TestAC1HPBrownfield:
         assert _has_section(doc, "Patterns to Reuse"), \
             "## Patterns to Reuse should be present in brownfield mode"
 
-    def test_brownfield_status_transitions_to_ready(self, tmp_path):
-        """AC1-HP brownfield: status transitions to ready."""
+    def test_brownfield_status_stays_design_until_finalize(self, tmp_path):
+        """AC1-HP brownfield: generated skeleton remains a draft."""
         doc = _copy_fixture(BROWNFIELD_FIXTURE, tmp_path)
         result = _run_mutate(doc, "--mode", "brownfield")
         assert result.returncode == 0, result.stderr
         fm = _load_frontmatter(doc)
-        assert fm.get("status") == "ready"
+        assert fm.get("status") == "design"
 
     def test_brownfield_think_sections_unchanged(self, tmp_path):
         """AC1-HP brownfield: /think sections are not modified."""
@@ -271,16 +299,16 @@ class TestAC1HPBrownfield:
 
 
 class TestAC1ERR:
-    def test_ready_without_rewrite_exits_1(self, tmp_path):
-        """AC1-ERR: status=ready + no --rewrite -> exit 1."""
+    def test_existing_draft_without_rewrite_exits_1(self, tmp_path):
+        """AC1-ERR: an existing execution draft requires explicit rewrite."""
         doc = _copy_fixture(GREENFIELD_FIXTURE, tmp_path)
-        # First run to get to ready
+        # First run creates a design-status execution draft.
         first = _run_mutate(doc, "--mode", "greenfield")
         assert first.returncode == 0, f"Setup failed: {first.stderr}"
         # Second run without --rewrite
         result = _run_mutate(doc, "--mode", "greenfield")
         assert result.returncode == 1, \
-            f"Expected exit 1 for re-run without --rewrite, got {result.returncode}"
+            f"Expected exit 1 for draft re-run without --rewrite, got {result.returncode}"
 
     def test_ready_without_rewrite_stderr_message(self, tmp_path):
         """AC1-ERR: stderr message mentions 'ready' and 'rewrite'."""
@@ -396,7 +424,7 @@ class TestAC1FR:
         assert result.returncode == 0, result.stderr
         # Should contain proposed execution strategy in stdout
         assert "Execution Strategy" in result.stdout, \
-            f"Expected 'Execution Strategy' in --no-emit stdout output"
+            "Expected 'Execution Strategy' in --no-emit stdout output"
 
 
 # ---------------------------------------------------------------------------

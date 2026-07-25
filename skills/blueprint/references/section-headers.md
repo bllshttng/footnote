@@ -5,7 +5,8 @@
 1. **Humans** browsing a plan in Obsidian or GitHub can navigate by section.
 2. **Backlog wikilinks** (`plan_path: internal/.../2026-04-29-feature-name.md#wave-3-component-2-profile-sweep-nh-first`) resolve to a specific shippable unit by hashing into the slug-form of the header. Without a stable header, the link silently breaks.
 
-`scripts/validate-plan.sh` enforces the wave-header subset via `validate_wave_section_headers()`. Other headers are convention, not validated, but emitted into the single plan doc by the mutation script ([`../scripts/mutate_doc.py`](../scripts/mutate_doc.py)) for consistency.
+For new single-doc plans, `## Execution Strategy` YAML is the executable authority and other headers are optional navigation.
+`scripts/validate-plan.sh` retains heading checks only for legacy plans without the semantic single-doc shape.
 
 ## Canonical headers
 
@@ -14,14 +15,14 @@ In emit order, inside the single plan doc's `## Execution Strategy` waves:
 | Header | Required | Purpose |
 |--------|----------|---------|
 | `## Execution Strategy` | yes | Machine-readable YAML wave manifest for `/do waves` |
-| `## Wave N: <name>` (one per wave) | yes when waves declared in YAML | Human + wikilink target for each shippable unit |
-| `## Phase Dependencies` | yes | Visual + tabular phase DAG |
-| `## User Stories Summary` | yes | BDD acceptance criteria roll-up by epic |
-| `## Technical Architecture Overview` | yes | High-level tables, components, decisions |
+| `## Wave N: <name>` (one per wave) | optional | Human or legacy wikilink target for a shippable unit |
+| `## Phase Dependencies` | optional | Human-readable phase DAG when YAML alone is insufficient |
+| `## User Stories Summary` | optional | BDD acceptance criteria roll-up by epic |
+| `## Technical Architecture Overview` | optional | High-level tables, components, decisions |
 | `## Success Metrics` | optional | Target/measurement table |
 | `## Goal Alignment` | when `project.goals` present | Task → goal mapping |
-| `## Critical Path Trace` | yes | User journey + status markers (✅🔨⚠️❌🔗) |
-| `## Scope Classification` | yes | `feature` \| `scaffolding` \| `poc` |
+| `## Critical Path Trace` | optional | User journey + status markers (✅🔨⚠️❌🔗) |
+| `## Scope Classification` | optional | `feature` \| `scaffolding` \| `poc` |
 | `## File Ownership Map` | optional | Per-task file ownership for parallel-wave conflict detection |
 | `## Out of Scope` | optional | Explicit non-goals |
 
@@ -78,7 +79,8 @@ fno backlog intake \
   --title "FL AHCA v1: Wave 1 schema migrations"
 ```
 
-The graph stores the full path verbatim, including the `#fragment`. `validate-plan.sh` guarantees the fragment resolves before the node is adopted, so callers don't see silently-broken wikilinks weeks later.
+The graph stores the full path verbatim, including the `#fragment`.
+Fragment-targeted plans are a legacy shape and must retain the matching header while they remain in flight; new decomposition writes separate child plan files instead.
 
 When splitting a previously-monolithic plan into per-wave nodes, point each sibling node at the same plan_path file with different fragments. `additional_prs` is no longer needed for that case — each wave becomes its own node with its own PR, and the plan file itself is the shared source of truth.
 
@@ -86,8 +88,9 @@ When splitting a previously-monolithic plan into per-wave nodes, point each sibl
 
 | File | Role |
 |------|------|
-| [`../scripts/mutate_doc.py`](../scripts/mutate_doc.py) | Appends `## Execution Strategy` (and, per wave, `## Wave N: <name>`) to the single plan doc |
-| [`../scripts/validate-plan.sh`](../scripts/validate-plan.sh) | `validate_wave_section_headers()` asserts YAML-vs-headers parity |
+| [`../scripts/mutate_doc.py`](../scripts/mutate_doc.py) | Appends the authoritative `## Execution Strategy` YAML to the single plan doc |
+| [`../scripts/validate-plan.sh`](../scripts/validate-plan.sh) | Routes semantic plans to `fno plan validate --execution` and preserves legacy heading checks |
 | This file | Reference doc — slug rules, examples, backlog usage |
 
-Adding a new canonical header? Update the table in the [Canonical headers](#canonical-headers) section above and (if it should be enforced) add a check to `validate-plan.sh`. Adding to the emitter alone is not enough — the convention has to be queryable from outside `/blueprint`.
+Adding a new machine-consumed field belongs in the Execution Strategy schema and semantic validator.
+Add a heading only when it improves navigation or an explicit legacy fragment still consumes it.

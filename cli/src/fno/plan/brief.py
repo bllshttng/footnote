@@ -51,6 +51,45 @@ class BriefParseError(ValueError):
     """
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader variant that refuses silent mapping-key replacement."""
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeyLoader,
+    node: yaml.MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:
+            raise yaml.constructor.ConstructorError(
+                "while constructing an Execution Strategy mapping",
+                node.start_mark,
+                f"unhashable YAML key {key!r}",
+                key_node.start_mark,
+            ) from exc
+        if duplicate:
+            raise yaml.constructor.ConstructorError(
+                "while constructing an Execution Strategy mapping",
+                node.start_mark,
+                f"duplicate YAML key {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
 # ---------------------------------------------------------------------------
 # Execution Strategy parsing
 # ---------------------------------------------------------------------------
@@ -74,7 +113,7 @@ def parse_execution_strategy(yaml_text: str) -> dict[str, Any]:
         raw_yaml = yaml_text
 
     try:
-        parsed = yaml.safe_load(raw_yaml)
+        parsed = yaml.load(raw_yaml, Loader=_UniqueKeyLoader)
     except yaml.YAMLError as exc:
         line: int | None = None
         mark = getattr(exc, "problem_mark", None)
@@ -99,21 +138,46 @@ def parse_execution_strategy(yaml_text: str) -> dict[str, Any]:
         raise BriefParseError("Execution Strategy 'tasks' must be a list")
 
     normalized_tasks = []
-    for t in tasks:
+    for index, t in enumerate(tasks, start=1):
         if not isinstance(t, dict):
-            continue
+            raise BriefParseError(
+                f"Execution Strategy task {index} must be a mapping"
+            )
+        task_id = str(t.get("id", ""))
+        surface = t.get("surface", [])
+        acceptance = t.get("acceptance", [])
+        if not isinstance(surface, list):
+            raise BriefParseError(f"Execution Strategy task '{task_id}' surface must be a list")
+        if not isinstance(acceptance, list):
+            raise BriefParseError(f"Execution Strategy task '{task_id}' acceptance must be a list")
+        for item_index, item in enumerate(surface, start=1):
+            if not isinstance(item, str) or not item.strip():
+                raise BriefParseError(
+                    f"Execution Strategy task '{task_id}' surface item "
+                    f"{item_index} must be a non-empty path string"
+                )
+        for item_index, item in enumerate(acceptance, start=1):
+            if not isinstance(item, str) or not item.strip():
+                raise BriefParseError(
+                    f"Execution Strategy task '{task_id}' acceptance item "
+                    f"{item_index} must be a non-empty string"
+                )
         normalized_tasks.append({
-            "id": str(t.get("id", "")),
+            "id": task_id,
             "title": str(t.get("title", "")),
-            "surface": list(t.get("surface", [])),
+            "surface": list(surface),
             "verify": str(t.get("verify", "")),
-            "acceptance": [str(a) for a in t.get("acceptance", [])],
+            "acceptance": [str(a) for a in acceptance],
             "notes": str(t.get("notes", "")).strip(),
         })
 
+    waves = parsed.get("waves", [])
+    if not isinstance(waves, list):
+        raise BriefParseError("Execution Strategy 'waves' must be a list")
+
     return {
         "tasks": normalized_tasks,
-        "waves": parsed.get("waves", []),
+        "waves": waves,
         "execution_mode": parsed.get("execution_mode", "sequential"),
     }
 

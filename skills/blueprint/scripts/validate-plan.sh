@@ -11,9 +11,72 @@ WARNINGS=0
 TMPDIR_BASE_VAL="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BASE_VAL"' EXIT
 
+# New single-doc plans carry either the canonical Execution Strategy YAML or
+# the explicit quick-plan kind. Their executable contract is validated by the
+# Python authority; the heading-oriented checks below remain only for legacy
+# plans that predate the single-doc shape.
+_is_quick_plan() {
+    awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" 2>/dev/null \
+        | grep -qE "^[[:space:]]*kind:[[:space:]]*['\"]?quick-plan['\"]?([[:space:]]*(#.*)?)?$"
+}
+
+_has_execution_strategy() {
+    awk '
+        /^##[[:space:]]+Execution Strategy[[:space:]]*$/ { found=1; exit }
+        END { exit(found ? 0 : 1) }
+    ' "$PLAN_DIR" 2>/dev/null
+}
+
+SEMANTIC_SINGLE_DOC=0
+if [[ -f "$PLAN_DIR" ]] && { _is_quick_plan || _has_execution_strategy; }; then
+    SEMANTIC_SINGLE_DOC=1
+fi
+
 error() { echo "  ERROR: $*"; ((ERRORS++)) || true; }
 warn()  { echo "  WARN:  $*"; ((WARNINGS++)) || true; }
 ok()    { echo "  OK:    $*"; }
+
+_semantic_validate() {
+    local repo_root="" script_dir="" source_root="" candidate="" python_bin=""
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    for candidate in \
+        "$repo_root" \
+        "$script_dir/.." \
+        "$script_dir/../../.."; do
+        if [[ -n "$candidate" && -d "$candidate/cli/src/fno" ]]; then
+            source_root=$(cd "$candidate" && pwd)
+            break
+        fi
+    done
+    if [[ -n "$source_root" ]]; then
+        if [[ -n "${FNO_PYTHON:-}" && -x "${FNO_PYTHON}" ]]; then
+            python_bin="$FNO_PYTHON"
+        elif [[ -x "$source_root/cli/.venv/bin/python" ]]; then
+            python_bin="$source_root/cli/.venv/bin/python"
+        elif command -v python3 >/dev/null 2>&1; then
+            python_bin=$(command -v python3)
+        elif command -v python >/dev/null 2>&1; then
+            python_bin=$(command -v python)
+        fi
+        if [[ -z "$python_bin" ]]; then
+            echo "source fno CLI found at $source_root/cli/src but no Python interpreter is available" >&2
+            return 2
+        fi
+        PYTHONPATH="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
+            "$python_bin" -m fno.cli plan validate "$PLAN_DIR" --execution
+        return
+    fi
+    if ! command -v fno >/dev/null 2>&1; then
+        echo "fno CLI not found; install or update it before validating executable plans" >&2
+        return 2
+    fi
+    if ! fno plan validate --help 2>&1 | grep -q -- '--execution'; then
+        echo "installed fno predates semantic plan validation; run 'fno update' or 'fno doctor --fix'" >&2
+        return 2
+    fi
+    fno plan validate "$PLAN_DIR" --execution
+}
 
 echo "Validating plan: $PLAN_DIR"
 echo ""
@@ -141,7 +204,13 @@ if [[ -f "$PLAN_DIR" ]]; then
     TASK_HEADINGS_RAW=$(grep -n '^### Task' "$PLAN_DIR" 2>/dev/null || true)
 fi
 
-if [[ -z "$TASK_HEADINGS_RAW" ]]; then
+if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
+    if semantic_output=$(_semantic_validate 2>&1); then
+        ok "semantic execution contract valid"
+    else
+        error "$semantic_output"
+    fi
+elif [[ -z "$TASK_HEADINGS_RAW" ]]; then
     warn "no tasks found (no '### Task' headings)"
 else
     while IFS=: read -r lineno heading_rest; do
@@ -175,7 +244,9 @@ fi
 echo ""
 echo "--- Parallel Conflict Check ---"
 
-if [[ -f "$PLAN_DIR" ]]; then
+if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
+    ok "Parallel ownership validated by semantic execution contract"
+elif [[ -f "$PLAN_DIR" ]]; then
     # Find parallel waves in the Execution Strategy YAML: lines like
     # "mode: parallel" followed by tasks. Strategy: extract task IDs listed
     # in parallel waves, then check their Files sections for duplicates.
@@ -243,7 +314,9 @@ fi
 echo ""
 echo "--- Dependency Check ---"
 
-if [[ -f "$PLAN_DIR" ]]; then
+if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
+    ok "Dependency topology validated by semantic execution contract"
+elif [[ -f "$PLAN_DIR" ]]; then
     # Extract dependency edges: look for "depends_on:" or "Depends on wave"
     # Simple check: ensure wave numbers in depends_on are always lower
     DEP_ERRORS=0
@@ -266,7 +339,9 @@ fi
 echo ""
 echo "--- Critical Path Trace ---"
 
-if [[ -f "$PLAN_DIR" ]]; then
+if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
+    ok "Critical-path prose is optional for semantic single-doc plans"
+elif [[ -f "$PLAN_DIR" ]]; then
     if grep -q "^## Critical Path Trace" "$PLAN_DIR" 2>/dev/null; then
         ok "Critical Path Trace section found"
 
@@ -617,7 +692,11 @@ validate_wave_section_headers() {
     fi
 }
 
-validate_wave_section_headers
+if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
+    ok "Wave topology validated from Execution Strategy YAML"
+else
+    validate_wave_section_headers
+fi
 
 # -------------------------------------------------------------------
 # Check 7: impeccable_stages pin validator (Phase 02.2)

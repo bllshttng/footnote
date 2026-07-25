@@ -5,12 +5,16 @@ making assumptions and moving forward - this protocol forces unknowns into
 the open where they can be answered (by the user) or made explicit (by the
 model in autonomous mode).
 
+`/think` owns discovery for a supplied design artifact.
+`/blueprint` consumes that artifact without re-running this protocol; the presence or absence of an exact `## Discovery` or `## Assumptions` heading is not a second planning gate.
+
 ## When to Run
 
 - After reading codebase/docs but BEFORE designing or planning
 - Skipped when a plan already exists (input_type: plan)
 - Skipped for Small size (-S) in target (too lightweight for ceremony)
-- Skipped if /think already produced a Discovery section
+- Skipped whenever the input is a supplied /think design artifact
+- Runs for raw prose and direct node-seeded inputs that have no completed design artifact
 
 ## The Protocol
 
@@ -91,11 +95,11 @@ Skip the discovery gate if any of these are true:
 |-----------|--------|
 | `input_type: plan` | Plan already exists - unknowns were (should have been) resolved |
 | Size `-S` | Small tasks don't justify discovery ceremony |
-| /think already ran with Discovery section | Questions were already answered |
+| A supplied /think design artifact exists | Discovery belongs to /think; Blueprint compiles the result |
 | Pure greenfield with no codebase | No code to discover unknowns from |
 
-Detection for "think already ran": check if the scratchpad has
-`think-findings.md` with a `## Discovery` or `## Assumptions` section.
+Detection for Blueprint is artifact-based: an existing design-doc input means think already owns discovery.
+Target's own idea-first discovery retains its separate scratchpad detection contract.
 
 ## Schema Reconciliation (DB-backed repos)
 

@@ -138,14 +138,9 @@ fi
    codemap, run the **Schema Citation Gate** ([references/blueprint-gates.md](references/blueprint-gates.md#schema-citation-gate-graduated-db-touching-plans)) before adopt.
    Quick mode is `-S`-class, so it WARNS on an uncited DB-touching task and
    proceeds; it does not block.
-2b. **Discovery gate** - After structural context but before writing the plan,
-   surface unknowns. Load `references/discovery-gate.md` for the protocol.
-   - With `quick`: 3 questions max (keep it lightweight)
-   - Otherwise (default): up to 5 questions
-   - **Skip if** /think already ran and produced a design doc with a
-     `## Discovery` or `## Assumptions` section (questions were already answered)
-   - Detection: check if the user's input references a design doc path, and if
-     that doc has a `## Discovery` or `## Assumptions` section
+2b. **Discovery ownership** - A supplied design doc never re-runs discovery: `/think` owns that reasoning, and `/blueprint` compiles its artifact even when it has no exact `## Discovery` or `## Assumptions` heading.
+   Run discovery when creating a fresh plan from raw prose or a direct node-seeded path with no completed design artifact.
+   Load `references/discovery-gate.md` then; use 3 questions max with `quick` and 5 otherwise.
 
 3. **Write** the plan.
 
@@ -170,6 +165,18 @@ fi
    inlined into the plan's frontmatter as `executor: <value>`. Empty parser
    output leaves the frontmatter without an `executor:` field, falling through to
    runtime surface inference.
+
+   **Enrich the Execution Strategy before it becomes executable.**
+   Run `mutate_doc.py` with `--draft`; it produces the deterministic wave/task skeleton while keeping a design-status document in `design`.
+   On the full-context main thread, replace every placeholder and populate each task's `surface`, concrete `verify` command, and `acceptance` list from the design and inspected codebase.
+   Then validate the exact saved file before collision checking or intake:
+
+   ```bash
+   bash "${SKILL_DIR}/scripts/validate-plan.sh" "$PLAN_PATH"
+   python3 "${SKILL_DIR}/scripts/mutate_doc.py" "$PLAN_PATH" --finalize
+   ```
+
+   A nonzero exit stops Blueprint before `3a` and `3b`; never register a draft that the executor would reject.
 
 3a. **Collision check + peer heads-up** (conditional). Between writing the plan and auto-intake, run the collision check (skip with `no-collision-check`) and, when a `peers` block exists, the cross-project peer heads-up. Both are gate-shaped, skip-flagged steps - full procedure (the `fno backlog collisions check` read, high-severity AskUserQuestion / beastmode auto-decision, the four options, and the peer-surface match + send) is in [references/blueprint-gates.md](references/blueprint-gates.md#collision-check-step-3a-skip-with-no-collision-check).
 
@@ -385,6 +392,7 @@ Arguments mirror the modifiers above:
 python3 skills/blueprint/scripts/mutate_doc.py <doc-path> \
   [--mode greenfield|brownfield|auto] \
   [--rewrite] \
+  [--draft | --finalize] \
   [--no-emit]
 ```
 

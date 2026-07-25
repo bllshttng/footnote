@@ -9,6 +9,8 @@ Usage (script mode):
     python3 skills/blueprint/scripts/mutate_doc.py <design-doc-path>
         [--mode greenfield|brownfield|auto]
         [--rewrite]
+        [--draft]
+        [--finalize]
         [--no-emit]
 
 Exit codes:
@@ -71,6 +73,7 @@ from fno.plan._status import (  # noqa: E402
     coerce_status_from_yaml,
     StatusTransitionError,
 )
+from fno.plan.execution_validation import validate_execution  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -538,6 +541,40 @@ def _reconstruct_doc(
     return fm_text + body
 
 
+def _replace_frontmatter(original_text: str, new_frontmatter: dict[str, Any]) -> str:
+    body = original_text
+    if original_text.startswith("---"):
+        rest = original_text[4:]
+        close = rest.find("\n---")
+        if close != -1:
+            body = rest[close + 4:]
+            if body.startswith("\n"):
+                body = body[1:]
+    return "---\n" + _serialize_frontmatter(new_frontmatter) + "\n---\n\n" + body
+
+
+def _atomic_write(path: Path, content: str) -> str | None:
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=".mutate_",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(content)
+            os.replace(tmp_name, str(path))
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    except OSError as exc:
+        return f"Atomic write failed: {exc}"
+    return None
+
+
 def _remove_blueprint_sections(body: str) -> str:
     """Remove /blueprint-owned sections from body text."""
     lines = body.splitlines(keepends=True)
@@ -686,6 +723,7 @@ def mutate(
     rewrite: bool = False,
     no_emit: bool = False,
     repo_root: Path | None = None,
+    draft: bool = False,
 ) -> tuple[int, str]:
     """Perform the mutation and return (exit_code, result_text_or_error).
 
@@ -750,6 +788,15 @@ def mutate(
     if current_status == "ready" and not rewrite:
         return 1, (
             "doc already in `ready` status; pass `rewrite` to regenerate execution sections."
+        )
+    if (
+        current_status == "design"
+        and plan.has_section("Execution Strategy")
+        and not rewrite
+    ):
+        return 1, (
+            "doc already has a Blueprint execution draft; pass `rewrite` to regenerate it "
+            "or `--finalize` after enrichment."
         )
 
     # --- Validate required sections ---
@@ -819,7 +866,7 @@ def mutate(
         new_fm["waves"] = [1]
 
     # Validate and apply status transition
-    if current_status == "design":
+    if current_status == "design" and not draft:
         try:
             validate_transition(current_status, "ready")
         except StatusTransitionError as exc:
@@ -853,29 +900,58 @@ def mutate(
     if no_emit:
         return 0, proposed_doc
 
-    # --- Atomic write ---
-    tmp_dir = resolved.parent
-    try:
-        fd, tmp_name = tempfile.mkstemp(
-            dir=tmp_dir, prefix=".mutate_", suffix=".tmp"
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(proposed_doc)
-            os.replace(tmp_name, str(resolved))
-        except Exception:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
-    except OSError as exc:
-        return 3, f"Atomic write failed: {exc}"
+    write_error = _atomic_write(resolved, proposed_doc)
+    if write_error is not None:
+        return 3, write_error
 
     _sync_graph_status(new_fm.get("node"), resolved)
     _warn_no_file_surface(resolved)
 
     return 0, proposed_doc
+
+
+def finalize(doc_path: Path, no_emit: bool = False) -> tuple[int, str]:
+    """Promote a semantically valid Blueprint draft from design to ready."""
+    try:
+        resolved = doc_path.expanduser().resolve(strict=True)
+        plan = load_plan(resolved)
+    except (OSError, FrontmatterError) as exc:
+        return 3, f"Cannot read {doc_path}: {exc}"
+
+    raw_status = plan.frontmatter.get("status")
+    try:
+        current_status = coerce_status_from_yaml(raw_status)
+    except StatusTransitionError as exc:
+        return 3, f"Frontmatter status invalid: {exc}"
+    if current_status not in {"design", "ready"}:
+        return 1, f"cannot finalize Blueprint draft from status {current_status!r}"
+
+    result = validate_execution(plan)
+    if result.violations:
+        report = "\n".join(
+            f"  {violation.field}: {violation.message}"
+            for violation in result.violations
+        )
+        return 2, "Execution Strategy is not ready:\n" + report
+
+    if current_status == "ready":
+        return 0, resolved.read_text(encoding="utf-8")
+
+    try:
+        validate_transition(current_status, "ready")
+    except StatusTransitionError as exc:
+        return 3, str(exc)
+    frontmatter = dict(plan.frontmatter)
+    frontmatter["status"] = "ready"
+    original = resolved.read_text(encoding="utf-8")
+    proposed = _replace_frontmatter(original, frontmatter)
+    if no_emit:
+        return 0, proposed
+    write_error = _atomic_write(resolved, proposed)
+    if write_error is not None:
+        return 3, write_error
+    _sync_graph_status(frontmatter.get("node"), resolved)
+    return 0, proposed
 
 
 def _warn_no_file_surface(plan_path: Path) -> None:
@@ -979,15 +1055,29 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Dry-run: print proposed doc to stdout without writing",
     )
+    parser.add_argument(
+        "--draft",
+        action="store_true",
+        help="Write the execution skeleton but keep a design-status doc in design.",
+    )
+    parser.add_argument(
+        "--finalize",
+        action="store_true",
+        help="Validate an enriched draft and promote status from design to ready.",
+    )
     args = parser.parse_args(argv)
 
     doc_path = Path(args.design_doc)
-    exit_code, result = mutate(
-        doc_path=doc_path,
-        mode=args.mode,
-        rewrite=args.rewrite,
-        no_emit=args.no_emit,
-    )
+    if args.finalize:
+        exit_code, result = finalize(doc_path, no_emit=args.no_emit)
+    else:
+        exit_code, result = mutate(
+            doc_path=doc_path,
+            mode=args.mode,
+            rewrite=args.rewrite,
+            no_emit=args.no_emit,
+            draft=True,
+        )
 
     if exit_code != 0:
         print(result, file=sys.stderr)

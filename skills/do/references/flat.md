@@ -15,6 +15,18 @@ Read the plan file. Expect the focused plan format:
 - `## Patterns to Reuse` — (optional) existing code to follow
 - `## Verification` — how to confirm success
 
+## 1a. Validate the executable contract
+
+Before editing, validate the resolved single-file plan through the bundled compatibility entrypoint:
+
+```bash
+PLAN_PATH="$1"
+bash "${SKILL_DIR:-skills/do}/scripts/validate-plan.sh" "$PLAN_PATH"
+```
+
+On any nonzero exit, stop and report the field-level errors.
+Do not execute a quick plan that has empty sections, template placeholders, or no concrete verification command.
+
 ## 1b. Resolve the executor — don't let frontend work skip the craft pass
 
 Before editing, check whether the plan touches **frontend surfaces**: any
