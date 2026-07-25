@@ -306,6 +306,31 @@ def test_shared_publisher_resolves_pr_when_immutable_manifest_has_none(
     assert publish.call_args.kwargs["current_head"] == "deadbeef0002"
 
 
+def test_shared_publisher_reports_missing_graph_node(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fno.worker.review import _publish_durable_sigma
+
+    state_path = _make_state(tmp_path, session_id="sess-publish")
+    report = tmp_path / "report.md"
+    report.write_text("# report\n", encoding="utf-8")
+
+    with (
+        patch("fno.worker.ship._read_graph_node_id", return_value=None),
+        patch("fno.worker.review.subprocess.run") as run,
+    ):
+        _publish_durable_sigma(
+            report,
+            state_path=state_path,
+            session_id="sess-publish",
+            reviewed_head="deadbeef0002",
+        )
+
+    run.assert_not_called()
+    assert "durable sigma artifact skipped: graph node unavailable" in capsys.readouterr().err
+
+
 # ---- AC2-VERDICT-BLOCKED ----
 
 

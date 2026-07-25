@@ -304,6 +304,10 @@ def _publish_durable_sigma(
     node = _read_graph_node_id(state_path)
     pr_number = state.get("pr_number")
     if not isinstance(node, str):
+        print(
+            "[review] durable sigma artifact skipped: graph node unavailable",
+            file=sys.stderr,
+        )
         return
 
     if not isinstance(pr_number, int) or pr_number < 1:
