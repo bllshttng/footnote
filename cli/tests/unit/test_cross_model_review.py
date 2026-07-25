@@ -182,27 +182,35 @@ def test_explicit_agent_route_uses_named_headless_session_with_runtime_evidence(
     assert "claude only" not in report
 
 
-def test_invalid_explicit_route_fails_before_dispatch() -> None:
+def test_invalid_explicit_route_degrades_before_dispatch() -> None:
     dispatch = _RecordingDispatch(reply="[]")
-    with pytest.raises(ValueError, match="route"):
-        build_review_runner(
-            agent_providers={},
-            agent_routes={
-                "code_reviewer": AgentRouteBlock(
-                    harness="claude",
-                    provider="unknown",
-                    model="missing",
-                )
-            },
-            cross_model_enabled=False,
-            implementer_provider="claude",
-            available_providers=["claude"],
-            base_prompts=_base_prompts(),
-            cwd=Path("."),
-            dispatch=dispatch,
-            route_resolver=lambda _provider, _model: None,
-        )
+    adapter = _FakeClaudeDispatch("[]")
+    runner, _, provider_set = build_review_runner(
+        agent_providers={},
+        agent_routes={
+            "code_reviewer": AgentRouteBlock(
+                harness="claude",
+                provider="unknown",
+                model="missing",
+            )
+        },
+        cross_model_enabled=False,
+        implementer_provider="claude",
+        available_providers=["claude"],
+        base_prompts=_base_prompts(),
+        cwd=Path("."),
+        dispatch=dispatch,
+        claude_adapter=adapter,
+        route_resolver=lambda _provider, _model: None,
+    )
+
+    outcome = _run(runner, "code_reviewer")
+
     assert dispatch.calls == []
+    assert adapter.calls == 1
+    assert outcome.provider == "claude"
+    assert outcome.note == "unknown/missing unavailable: ran on claude"
+    assert "code_reviewer=claude" in provider_set
 
 
 # --- AC3-ERR: unparseable cross-model findings -> terminal soft fail ---

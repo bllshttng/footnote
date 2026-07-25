@@ -38,6 +38,27 @@ class ReviewInputError(RuntimeError):
     """The revision or exact diff for a review could not be captured."""
 
 
+def _resolve_agent_route(route: AgentRouteBlock, resolver: Any) -> tuple[dict[str, str] | None, Any]:
+    """Resolve one validated route identically for diagnostics and dispatch."""
+    from fno.review import provider_resolution as pr
+
+    route_env = resolver(route.provider, route.model)
+    if not route_env:
+        return None, pr.ResolvedProvider(
+            provider="claude",
+            degraded=True,
+            reason=f"{route.provider}/{route.model} unavailable: ran on claude",
+        )
+    return dict(route_env), pr.ResolvedProvider(
+        provider=route.harness,
+        route=pr.RouteRef(
+            harness=route.harness,
+            provider=route.provider,
+            model=route.model,
+        ),
+    )
+
+
 def capture_review_input(diff_path: Path | None = None) -> tuple[str, str]:
     """Capture one immutable reviewed SHA and the diff for exactly that SHA."""
     head_result = subprocess.run(
@@ -147,28 +168,20 @@ def build_review_runner(
     route_envs: dict[str, dict[str, str]] = {}
     route_specs: dict[str, AgentRouteBlock] = {}
     for agent, route in agent_routes.items():
-        route_env = resolved_route(route.provider, route.model)
-        if not route_env:
-            raise ValueError(
-                f"agent route for {agent!r} could not resolve provider/model "
-                f"{route.provider!r}/{route.model!r}"
-            )
-        route_envs[agent] = dict(route_env)
+        route_env, route_resolution = _resolve_agent_route(route, resolved_route)
+        resolved[agent] = route_resolution
+        if route_env is None:
+            continue
+        route_envs[agent] = route_env
         route_specs[agent] = route
-        resolved[agent] = pr.ResolvedProvider(
-            provider=route.harness,
-            harness=route.harness,
-            route_provider=route.provider,
-            model=route.model,
-        )
     # Cache dimension = the per-agent REQUESTED routing (not just the set of
     # kinds), so two configs that assign the same kinds to different agents
     # (e.g. {code_reviewer: codex} vs {silent_failure_hunter: codex}) never
     # collide on one cache key for the same SHA (codex review P2). Pairs are
     # sorted for a stable key.
     provider_set = sorted(
-        f"{agent}={rp.harness}/{rp.route_provider}/{rp.model}"
-        if rp.route_provider
+        f"{agent}={rp.route.harness}/{rp.route.provider}/{rp.route.model}"
+        if rp.route
         else f"{agent}={rp.provider}"
         for agent, rp in resolved.items()
     )
@@ -410,22 +423,8 @@ def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
         from fno.agents.model_routing import resolve_explicit_route
 
         for agent, route in agent_routes.items():
-            env = resolve_explicit_route(route.provider, route.model)
-            if not env:
-                resolved[agent] = pr.ResolvedProvider(
-                    provider="claude",
-                    harness="claude",
-                    degraded=True,
-                    reason=(
-                        f"{route.provider}/{route.model} unavailable: ran on claude"
-                    ),
-                )
-                continue
-            resolved[agent] = pr.ResolvedProvider(
-                provider=route.harness,
-                harness=route.harness,
-                route_provider=route.provider,
-                model=route.model,
+            _env, resolved[agent] = _resolve_agent_route(
+                route, resolve_explicit_route
             )
     return resolved
 

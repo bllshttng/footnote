@@ -671,9 +671,9 @@ def review(
         routing = {
             agent: {
                 "provider": rp.provider,
-                "harness": rp.harness or rp.provider,
-                "route_provider": rp.route_provider,
-                "model": rp.model,
+                "harness": rp.route.harness if rp.route else rp.provider,
+                "route_provider": rp.route.provider if rp.route else None,
+                "model": rp.route.model if rp.route else None,
                 "degraded": rp.degraded,
                 "reason": rp.reason,
             }
