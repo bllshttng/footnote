@@ -14,6 +14,17 @@
 //! required for new agent" text (wrong — the agent exists — and a dead end).
 //! Mirrors [`crate::agy_ask::maybe_run_agy_ask`]'s shape.
 
+/// The refusal text. A pointer that stops at `--text <prompt>` is a remedy that
+/// fails when followed literally: the bytes land in the composer and the command
+/// still exits 0, so the sender reads "delivered" for a prompt that was never
+/// submitted. Naming the submit key is the load-bearing half.
+const ASK_REFUSAL: &str = "fno-agents: opencode has no stateful 'ask' resume \
+    (pane-hosted, no client-side dispatch); drive the pane directly with \
+    'fno mux pane send <pane> --session <session> --text <prompt>'. \
+    --text only fills the composer, it does not submit: append the TUI's submit key \
+    (a trailing \\r, or a SECOND send of $'\\t' once the payload is large enough to \
+    render as a pasted block) or the prompt sits there unsent.";
+
 /// Returns `None` for a non-opencode target (fall through to the next
 /// provider's ask hook), or `Some(2)` after printing the refusal.
 pub fn maybe_run_opencode_ask(
@@ -38,10 +49,7 @@ pub fn maybe_run_opencode_ask(
     if resolved != Some("opencode") {
         return None; // not an opencode target; fall through
     }
-    eprintln!(
-        "fno-agents: opencode has no stateful 'ask' resume (pane-hosted, no client-side dispatch); \
-         drive the pane directly with 'fno mux pane send <pane> --session <session> --text <prompt>'."
-    );
+    eprintln!("{ASK_REFUSAL}");
     Some(2)
 }
 
@@ -328,6 +336,23 @@ mod tests {
 
     fn home(dir: &std::path::Path) -> crate::paths::AgentsHome {
         crate::paths::AgentsHome::at(dir.to_path_buf())
+    }
+
+    // The pointer sends the caller to `pane send`, which does not submit. If the
+    // submit step ever gets edited back out, the remedy silently starts failing
+    // for anyone who follows it literally.
+    #[test]
+    fn ask_refusal_names_the_submit_step() {
+        assert!(ASK_REFUSAL.contains("mux pane send"), "keeps the pointer");
+        assert!(
+            ASK_REFUSAL.contains("does not submit"),
+            "names that --text alone leaves the prompt unsent"
+        );
+        assert!(ASK_REFUSAL.contains(r"\r"), "names the plain submit key");
+        assert!(
+            ASK_REFUSAL.contains(r"\t"),
+            "names the pasted-block submit key"
+        );
     }
 
     // Raw JSON (not a typed RegistryEntry) so this test only names the fields

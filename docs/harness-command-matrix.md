@@ -115,12 +115,22 @@ You rarely type these by hand - hooks and drivers do - but they live under `fno 
 | Old verb | Where it went |
 |---|---|
 | `grid` | The mux. Open `fno mux`; script panes with `fno mux pane ls\|read\|run\|send\|wait\|kill`. |
-| `drive` | `fno mux pane send <pane> ...`, or type into the pane in `fno mux`. |
+| `drive` | `fno mux pane send <pane> ...`, or type into the pane in `fno mux`. `--text` fills the composer without submitting - see [Submitting a pane send](#submitting-a-pane-send). |
 | `host` | `fno agents spawn --name <n> --substrate pane`. |
 | `promote` | Same - the mux hosts agent panes now. |
 | `send` / `inbox` / `ack` | The `fno mail` namespace (`fno mail send`, `fno mail inbox`, ...). |
 
 Retired verbs print these pointers and exit non-zero, so scripts fail loud rather than silently succeeding.
+
+## Submitting a pane send
+
+`fno mux pane send <pane> --text <s>` writes bytes into the pane's PTY.
+It does not press enter for you: submission is the receiving TUI's decision, and there is no `--key` flag.
+A send that omits the submit key leaves the payload sitting in the composer while the command exits 0, so the caller reads it as delivered.
+
+Append the submit key to the text (`--text $'...\r'`), or send it separately.
+Above the size where a TUI stops echoing the text and renders it as a pasted block (codex shows `[Pasted Content N chars]`), a trailing `\r` does **not** submit; a second send of `$'\t'` queues it.
+Read the pane back with `fno mux pane read <id> --lines N` to confirm, rather than trusting the exit code.
 
 ## Why the asymmetries exist
 
