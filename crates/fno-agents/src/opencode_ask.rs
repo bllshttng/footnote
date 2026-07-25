@@ -2,7 +2,7 @@
 //! the headless one-shot dispatch (`dispatch_opencode_once`).
 //!
 //! opencode is hosted two ways: an interactive PTY pane (the `ask` resume path,
-//! which stays refused — no stateful client-side resume in v1) and a headless
+//! which stays refused - no stateful client-side resume in v1) and a headless
 //! one-shot `opencode run --dangerously-skip-permissions "<prompt>"` (this module's `dispatch_opencode_once`,
 //! substrate `headless`). The one-shot is STATELESS like agy: plain-text stdout,
 //! no session id minted here, no registry row, no `--continue` resume from this
@@ -11,7 +11,7 @@
 //!
 //! `ask` (resume-by-name) still refuses: it names the real limitation instead of
 //! falling through to `bin/client.rs`'s `unresolvable_ask_exit` "provider is
-//! required for new agent" text (wrong — the agent exists — and a dead end).
+//! required for new agent" text (wrong - the agent exists - and a dead end).
 //! Mirrors [`crate::agy_ask::maybe_run_agy_ask`]'s shape.
 
 /// The refusal text. A pointer that stops at `--text <prompt>` is a remedy that
@@ -54,7 +54,7 @@ pub fn maybe_run_opencode_ask(
 }
 
 // ===========================================================================
-// Headless one-shot dispatch (`opencode run`) — stateless, plain-text
+// Headless one-shot dispatch (`opencode run`) - stateless, plain-text
 // ===========================================================================
 
 use std::io::{Read, Write};
@@ -93,11 +93,11 @@ impl AskOutcome {
     }
 }
 
-/// `opencode run --dangerously-skip-permissions [--model <m>] <tail>` — the
+/// `opencode run --dangerously-skip-permissions [--model <m>] <tail>` - the
 /// headless one-shot argv (matches `OpencodeProvider::create_argv`). The bypass
 /// flag auto-approves permissions so an unattended worker never wedges on an
 /// approval prompt; confirmed against opencode v1.14.50's `run --help` (the
-/// docs' `--auto` is stale — the shipped binary renamed it). The trailing argv
+/// docs' `--auto` is stale - the shipped binary renamed it). The trailing argv
 /// is built by `opencode_run_tail`: a footnote slash command rides `--command`
 /// (opencode expands the plugin command), a prose prompt stays the message
 /// positional (x-de43 / codex P1).
@@ -139,7 +139,7 @@ fn derive_log_path(home: &crate::paths::AgentsHome, name: &str) -> std::path::Pa
 /// Drive one `opencode run` subprocess: stdin `/dev/null` (never block on a
 /// non-TTS input wait), stdout captured as plain text, stderr drained on a
 /// thread (bounded pipe), the whole call bounded by the shared watchdog. Lean
-/// mirror of `agy_ask::run_agy` — same shape, no elaborate stderr taxonomy: a
+/// mirror of `agy_ask::run_agy` - same shape, no elaborate stderr taxonomy: a
 /// non-zero exit surfaces the stderr tail, a hang maps to the timeout code.
 ///
 /// Returns the plain-text reply on a clean exit, or `(exit_code, message)`.
@@ -181,14 +181,14 @@ fn run_opencode(
     };
     let pid = child.id();
     // Forward operator Ctrl-C to opencode's process group for this call. RAII
-    // guard held for the whole function — do NOT discard to `_`.
+    // guard held for the whole function - do NOT discard to `_`.
     let _sigint_guard = crate::subprocess_ask::SigintForwarder::install(pid);
 
     let mut stdout_pipe = child.stdout.take().expect("stdout piped");
     let stderr_pipe = child.stderr.take().expect("stderr piped");
 
     // Drain stderr on a thread so a chatty stream can't deadlock the pipe while
-    // we block on stdout; captured (unbounded is fine — opencode is not agy-loopy,
+    // we block on stdout; captured (unbounded is fine - opencode is not agy-loopy,
     // and a real runaway is bounded by the watchdog killing the process).
     let stderr_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let cap = stderr_buf.clone();
@@ -244,7 +244,7 @@ fn run_opencode(
 
 /// Orchestrate one opencode `spawn --substrate headless`: validate, fail-closed
 /// registry + name-collision check, then run `opencode run` and return the
-/// reply. STATELESS by design — opencode's own `--session`/`--continue` resume is
+/// reply. STATELESS by design - opencode's own `--session`/`--continue` resume is
 /// a pane/interactive concern, not this one-shot; `name` labels the log + events.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_opencode_once(
@@ -293,7 +293,7 @@ pub fn dispatch_opencode_once(
         );
     }
 
-    // spawn allows an empty initial message; default to "hello" (Python parity —
+    // spawn allows an empty initial message; default to "hello" (Python parity -
     // only the empty string, not whitespace).
     let effective_message = if message.is_empty() { "hello" } else { message };
     // A footnote slash command (`/fno:verb ...`) is a command dispatch, not a
