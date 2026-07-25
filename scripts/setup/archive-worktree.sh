@@ -24,6 +24,7 @@
 #   3  user declined process-kill prompt
 #   4  git worktree remove failed
 #   5  salvage of local-only .fno state failed (worktree kept)
+#   6  app-owned Codex worktree (archive the associated chat instead)
 
 set -euo pipefail
 
@@ -113,6 +114,24 @@ CANONICAL="$(git -C "$TARGET" worktree list --porcelain 2>/dev/null \
 if [[ "$TARGET" == "$CANONICAL" ]]; then
   echo "archive-worktree: refusing to archive canonical checkout: $TARGET" >&2
   exit 1
+fi
+
+# Codex Desktop owns worktrees it creates beneath CODEX_HOME/worktrees. Their
+# chat lifecycle snapshots and removes them; deleting one through Git leaves
+# the app with stale ownership metadata. Path placement is only trusted here
+# because this is a deletion guard (false positives keep data), never as proof
+# that an external allocator created a native worktree. --force cannot override
+# a foreign lifecycle owner.
+CODEX_WORKTREES_RAW="${CODEX_HOME:-$HOME/.codex}/worktrees"
+if [[ -d "$CODEX_WORKTREES_RAW" ]]; then
+  CODEX_WORKTREES_ROOT="$(cd "$CODEX_WORKTREES_RAW" && pwd)"
+  case "$TARGET/" in
+    "$CODEX_WORKTREES_ROOT/"*)
+      echo "archive-worktree: refusing to remove app-owned Codex worktree: $TARGET" >&2
+      echo "    In Codex Desktop, archive its associated chat; the app owns snapshot and cleanup." >&2
+      exit 6
+      ;;
+  esac
 fi
 
 # Operate from canonical so removing TARGET doesn't yank our cwd out from

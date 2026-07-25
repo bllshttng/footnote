@@ -22,6 +22,17 @@ _wt_live() {
     return 1
 }
 
+_wt_app_owned() {
+    local wt="$1" raw root
+    raw="${CODEX_HOME:-$HOME/.codex}/worktrees"
+    [[ -d "$raw" ]] || return 1
+    root="$(cd "$raw" 2>/dev/null && pwd)" || return 1
+    case "$wt/" in
+        "$root/"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # PIDs actually rooted in the worktree (cwd under it) OR whose cmdline
 # references it. Mirrors archive-worktree.sh's enumeration (escaped regex so
 # path metachars are literal); drops our own PID and our own tooling.
@@ -189,7 +200,7 @@ case "${1:-status}" in
             fi
 
             N_TOTAL=0; N_REAP=0; N_FAIL=0
-            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0
+            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0; N_APP_OWNED=0
 
             printf '%-18s %-34s %s\n' "STATUS" "BRANCH" "PATH"
             while IFS= read -r wt; do
@@ -204,6 +215,13 @@ case "${1:-status}" in
                     continue
                 fi
                 N_TOTAL=$((N_TOTAL + 1))
+
+                # Codex Desktop owns snapshot/removal for its managed
+                # worktrees. Keep them even after merge; archiving the chat is
+                # the supported cleanup primitive.
+                if _wt_app_owned "$wt"; then
+                    printf '%-18s %-34s %s\n' "kept (app-owned)" "$branch" "$wt"; N_APP_OWNED=$((N_APP_OWNED + 1)); continue
+                fi
 
                 # 1. dirty (tracked only; no --ignored so the .fno symlink family is not "dirty")
                 if [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]]; then
@@ -262,6 +280,7 @@ case "${1:-status}" in
                        _reap_jobs "$wt" "$CANONICAL_MAIN" ;;
                     3) printf '%-18s %-34s %s\n' "kept (needs-confirmation)" "$branch" "$wt"; N_NEEDCONF=$((N_NEEDCONF + 1)) ;;
                     5) printf '%-18s %-34s %s\n' "kept (salvage-failed)" "$branch" "$wt"; N_SALVAGE=$((N_SALVAGE + 1)) ;;
+                    6) printf '%-18s %-34s %s\n' "kept (app-owned)" "$branch" "$wt"; N_APP_OWNED=$((N_APP_OWNED + 1)) ;;
                     *) printf '%-18s %-34s %s\n' "failed (rc=$rc)" "$branch" "$wt"; N_FAIL=$((N_FAIL + 1)) ;;
                 esac
             done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
@@ -273,7 +292,7 @@ case "${1:-status}" in
                 _reap_jobs "__MISSING__" "$CANONICAL_MAIN"
             fi
 
-            KEPT=$((N_DIRTY + N_UNPUSHED + N_UNMERGED + N_LIVE + N_PROC + N_SALVAGE + N_NEEDCONF))
+            KEPT=$((N_DIRTY + N_UNPUSHED + N_UNMERGED + N_LIVE + N_PROC + N_SALVAGE + N_NEEDCONF + N_APP_OWNED))
             echo ""
             if [[ "$N_TOTAL" -eq 0 ]]; then
                 echo "No non-canonical worktrees found."
@@ -281,8 +300,8 @@ case "${1:-status}" in
                 EXECUTED=""; [[ -n "$APPLY" && -z "$DRY_RUN" ]] && EXECUTED="1"
                 VERB="would archive"; [[ -n "$EXECUTED" ]] && VERB="archived"
                 SUFFIX=""; [[ -z "$EXECUTED" ]] && SUFFIX="  [dry-run: no changes made; pass --apply to execute]"
-                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation), %d failed%s\n' \
-                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_FAIL" "$SUFFIX"
+                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation, %d app-owned), %d failed%s\n' \
+                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_APP_OWNED" "$N_FAIL" "$SUFFIX"
             fi
             exit 0
         fi
@@ -297,6 +316,11 @@ case "${1:-status}" in
             if [[ -n "$PREFIX" ]]; then
                 BRANCH=$(cd "$wt" 2>/dev/null && git branch --show-current || echo "")
                 [[ "$BRANCH" != ${PREFIX}* ]] && continue
+            fi
+
+            if _wt_app_owned "$wt"; then
+                echo "  SKIP: $wt (app-owned Codex worktree)"
+                continue
             fi
 
             # Check age

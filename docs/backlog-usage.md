@@ -262,9 +262,8 @@ of that. Values (`never | harness-native | external`):
   the product (e.g. an Obsidian vault attached live, committing straight to
   main). `ensure` prints the repo root and exits 0 (not a failure, so dispatch
   lanes are never skipped).
-- `harness-native` (default) - the harness's own worktree location (claude ->
-  `<repo>/.claude/worktrees/<name>`). A harness with no native mechanism
-  degrades to `external`.
+- `harness-native` (default) - the harness's own worktree lifecycle (claude -> `<repo>/.claude/worktrees/<name>`; Codex Desktop -> same-thread `/worktree` or **Hand off -> Worktree** under `$CODEX_HOME/worktrees`).
+  A substrate with no native transition degrades to the Footnote-owned `<state_dir>/worktrees` fallback, normally `~/.fno/worktrees`, without inheriting an external allocator from `paths.worktrees_base`.
 - `external` - `<config.paths.worktrees_base>/<repo>/<name>` (the maintainer's
   `~/conductor/workspaces` when that knob is set).
 

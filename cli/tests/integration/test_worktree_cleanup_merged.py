@@ -16,6 +16,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LIFECYCLE_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-lifecycle.sh"
+LIFECYCLE_COMPAT_SRC = REPO_ROOT / "scripts" / "worktree-lifecycle.sh"
 ARCHIVE_SRC = REPO_ROOT / "scripts" / "setup" / "archive-worktree.sh"
 
 
@@ -53,6 +54,7 @@ def repo(tmp_path: Path) -> Path:
     (canon / "scripts" / "lib").mkdir(parents=True)
     (canon / "scripts" / "setup").mkdir(parents=True)
     shutil.copy2(LIFECYCLE_SRC, canon / "scripts" / "lib" / "worktree-lifecycle.sh")
+    shutil.copy2(LIFECYCLE_COMPAT_SRC, canon / "scripts" / "worktree-lifecycle.sh")
     shutil.copy2(ARCHIVE_SRC, canon / "scripts" / "setup" / "archive-worktree.sh")
     return canon
 
@@ -65,9 +67,34 @@ def _sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
     )
 
 
+def _age_sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
+    script = canon / "scripts" / "lib" / "worktree-lifecycle.sh"
+    return subprocess.run(
+        ["bash", str(script), "cleanup", "--older-than", "0d", *flags],
+        cwd=str(canon), capture_output=True, text=True,
+    )
+
+
+def _compat_age_sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
+    script = canon / "scripts" / "worktree-lifecycle.sh"
+    return subprocess.run(
+        ["bash", str(script), "cleanup", "--older-than", "0d", *flags],
+        cwd=str(canon), capture_output=True, text=True,
+    )
+
+
 def _add_merged(canon: Path, name: str) -> Path:
     """Worktree whose branch is merged into origin/main (a reap candidate)."""
     wt = canon / name
+    _git(canon, "worktree", "add", str(wt), "-b", f"feature/{name}", "main")
+    _commit(wt, f"{name}.txt")
+    _git(canon, "merge", "--no-ff", f"feature/{name}", "-m", f"merge {name}")
+    _git(canon, "push", "origin", "main")
+    return wt
+
+
+def _add_merged_at(canon: Path, wt: Path, name: str) -> Path:
+    wt.parent.mkdir(parents=True, exist_ok=True)
     _git(canon, "worktree", "add", str(wt), "-b", f"feature/{name}", "main")
     _commit(wt, f"{name}.txt")
     _git(canon, "merge", "--no-ff", f"feature/{name}", "-m", f"merge {name}")
@@ -241,6 +268,77 @@ def test_archive_script_excludes_own_process_tree(repo: Path):
     )
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert not wt.exists(), f"stderr={r.stderr}"
+
+
+def test_archive_refuses_codex_app_owned_worktree_even_with_force(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    codex_home = tmp_path / ".codex"
+    wt = codex_home / "worktrees" / "thread-a" / repo.name
+    wt.parent.mkdir(parents=True)
+    _git(repo, "worktree", "add", "--detach", str(wt), "main")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+
+    r = subprocess.run(
+        ["bash", str(script), "--force", str(wt)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 6
+    assert "app-owned Codex worktree" in r.stderr
+    assert "archive its associated chat" in r.stderr
+    assert wt.exists()
+
+
+def test_merged_sweep_keeps_codex_app_owned_worktree(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    codex_home = tmp_path / ".codex"
+    wt = _add_merged_at(
+        repo, codex_home / "worktrees" / "thread-b" / repo.name, "native"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    r = _sweep(repo, "--apply")
+    diag = f"stdout={r.stdout}\nstderr={r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "kept (app-owned)" in r.stdout, diag
+    assert "1 app-owned" in r.stdout, diag
+    assert wt.exists()
+
+
+def test_age_sweep_keeps_codex_app_owned_worktree(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    codex_home = tmp_path / ".codex"
+    wt = codex_home / "worktrees" / "thread-c" / repo.name
+    wt.parent.mkdir(parents=True)
+    _git(repo, "worktree", "add", "--detach", str(wt), "main")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    r = _age_sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert f"SKIP: {wt} (app-owned Codex worktree)" in r.stdout
+    assert wt.exists()
+
+
+def test_compat_age_sweep_delegates_app_owned_guard(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    codex_home = tmp_path / ".codex"
+    wt = codex_home / "worktrees" / "thread-d" / repo.name
+    wt.parent.mkdir(parents=True)
+    _git(repo, "worktree", "add", "--detach", str(wt), "main")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    r = _compat_age_sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert f"SKIP: {wt} (app-owned Codex worktree)" in r.stdout
+    assert wt.exists()
 
 
 # ── silent-failure guard: empty-state line is explicit, not silence ─────────

@@ -9,6 +9,7 @@ subprocess + setup-hook stubbed so no real worktree/state is created:
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import pytest
 import typer
@@ -70,6 +71,763 @@ def test_resolve_node_id_freetext_fallthrough(monkeypatch):
         lambda q, e: SimpleNamespace(kind="none", id=None),
     )
     assert target_cli._resolve_node_id("fix the login bug") == "fix the login bug"
+
+
+# ----------------------- Codex Desktop native handoff --------------------- #
+def _write_codex_rollout(path: Path, *, session_id: str, cwd: Path, originator: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "cwd": str(cwd),
+                    "originator": originator,
+                },
+            }
+        )
+        + "\n"
+    )
+
+
+def _write_codex_project_assignment(
+    codex_home: Path, *, session_id: str, canonical: Path, cwd: Path
+) -> None:
+    state_path = codex_home / ".codex-global-state.json"
+    state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    project_id = "local-footnote"
+    state.setdefault("local-projects", {})[project_id] = {
+        "name": canonical.name,
+        "rootPaths": [str(canonical)],
+    }
+    state.setdefault("thread-project-assignments", {})[session_id] = {
+        "projectKind": "local",
+        "projectId": project_id,
+        "cwd": str(cwd),
+    }
+    codex_home.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(state))
+
+
+def test_codex_session_originator_reads_exact_rollout(monkeypatch, tmp_path):
+    rollout = tmp_path / "rollout-thread-desktop.jsonl"
+    _write_codex_rollout(
+        rollout,
+        session_id="thread-desktop",
+        cwd=Path("/canonical/footnote"),
+        originator="Codex Desktop",
+    )
+    monkeypatch.setattr(
+        "fno.agents.discover.codex_rollout_for_session",
+        lambda session_id: rollout if session_id == "thread-desktop" else None,
+    )
+
+    meta = target_cli._codex_session_meta("thread-desktop")
+
+    assert meta is not None
+    assert meta["originator"] == "Codex Desktop"
+    assert meta["cwd"] == "/canonical/footnote"
+
+
+def test_codex_session_originator_refuses_mismatched_rollout(monkeypatch, tmp_path):
+    rollout = tmp_path / "rollout-other.jsonl"
+    _write_codex_rollout(
+        rollout,
+        session_id="other-thread",
+        cwd=Path("/canonical/footnote"),
+        originator="Codex Desktop",
+    )
+    monkeypatch.setattr(
+        "fno.agents.discover.codex_rollout_for_session", lambda session_id: rollout
+    )
+
+    assert target_cli._codex_session_meta("thread-desktop") is None
+
+
+def test_desktop_canonical_start_requests_native_handoff_without_side_effects(
+    monkeypatch, tmp_path
+):
+    canonical = tmp_path / "footnote"
+    canonical.mkdir()
+    monkeypatch.chdir(canonical)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-desktop")
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(
+        target_cli,
+        "_git_out",
+        lambda cwd, *args: (
+            str(canonical)
+            if args == ("rev-parse", "--show-toplevel")
+            else "base-sha"
+            if args == ("rev-parse", "--verify", "origin/main^{commit}")
+            else "base-sha"
+            if args == ("merge-base", "HEAD", "origin/main")
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_session_meta",
+        lambda session_id: {
+            "id": session_id,
+            "cwd": str(canonical),
+            "originator": "Codex Desktop",
+        },
+    )
+    monkeypatch.setattr(
+        "fno.worktree_paths.resolve_worktree_policy",
+        lambda repo, harness: SimpleNamespace(
+            policy="external",
+            requested_policy="harness-native",
+            degraded=True,
+            project="footnote",
+        ),
+    )
+    monkeypatch.setattr(
+        target_cli, "_codex_project_assignment", lambda *args: True
+    )
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda node: None)
+    calls = []
+    monkeypatch.setattr(
+        target_cli.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append((args, kwargs))
+        or subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+    )
+
+    result = runner.invoke(target_app, ["start", "x-0b3f"])
+
+    assert result.exit_code == target_cli._CODEX_NATIVE_HANDOFF_EXIT
+    assert "native-handoff=required" in result.output
+    assert "project=footnote" in result.output
+    assert "/worktree" in result.output
+    assert "fno target start x-0b3f" in result.output
+    assert len(calls) == 1
+    assert calls[0][0][0][:5] == [
+        "git", "-C", str(canonical), "fetch", "--quiet"
+    ]
+
+
+def test_codex_tui_canonical_start_does_not_request_desktop_handoff(
+    monkeypatch, tmp_path
+):
+    canonical = tmp_path / "footnote"
+    wt = tmp_path / "fallback"
+    canonical.mkdir()
+    wt.mkdir()
+    monkeypatch.chdir(canonical)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-tui")
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
+    monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(
+        target_cli,
+        "_git_out",
+        lambda cwd, *args: str(canonical) if args == ("rev-parse", "--show-toplevel") else None,
+    )
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_session_meta",
+        lambda session_id: {
+            "id": session_id,
+            "cwd": str(canonical),
+            "originator": "codex-tui",
+        },
+    )
+    monkeypatch.setattr(
+        "fno.worktree._run_setup_worktree_hook", lambda repo, path: (0, "")
+    )
+
+    def fake_run(args, **kwargs):
+        if "ensure" in args:
+            return subprocess.CompletedProcess(args, 0, stdout=str(wt), stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+
+    result = runner.invoke(target_app, ["start", "x-0b3f"])
+
+    assert result.exit_code == 0, result.output
+    assert "native-handoff=required" not in result.output
+    assert f"worktree={wt}" in result.output
+
+
+def test_desktop_canonical_start_refuses_without_project_assignment(
+    monkeypatch, tmp_path
+):
+    canonical = tmp_path / "footnote"
+    canonical.mkdir()
+    monkeypatch.chdir(canonical)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-desktop")
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda node: node)
+    monkeypatch.setattr(
+        target_cli,
+        "_git_out",
+        lambda cwd, *args: str(canonical)
+        if args == ("rev-parse", "--show-toplevel")
+        else None,
+    )
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_session_meta",
+        lambda session_id: {
+            "id": session_id,
+            "cwd": str(canonical),
+            "originator": "Codex Desktop",
+        },
+    )
+    monkeypatch.setattr(
+        target_cli, "_codex_project_assignment", lambda *args: False
+    )
+    calls = []
+    monkeypatch.setattr(
+        target_cli.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    result = runner.invoke(target_app, ["start", "x-0b3f"])
+
+    assert result.exit_code == 1
+    assert "no verified assignment" in result.output
+    assert all(
+        "ensure" not in call[0][0] and "init" not in call[0][0]
+        for call in calls
+    )
+
+
+def _git_ok(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _native_git_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    canonical = tmp_path / "canonical" / "footnote"
+    origin = tmp_path / "origin.git"
+    codex_home = tmp_path / ".codex"
+    native = codex_home / "worktrees" / "abcd" / "footnote"
+    canonical.mkdir(parents=True)
+    _git_ok(canonical, "init", "-q", "-b", "main")
+    _git_ok(canonical, "config", "user.email", "test@example.com")
+    _git_ok(canonical, "config", "user.name", "Test")
+    (canonical / "README.md").write_text("base\n")
+    _git_ok(canonical, "add", "README.md")
+    _git_ok(canonical, "commit", "-qm", "base")
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True
+    )
+    _git_ok(canonical, "remote", "add", "origin", str(origin))
+    _git_ok(canonical, "push", "--no-verify", "-q", "origin", "main")
+    native.parent.mkdir(parents=True)
+    _git_ok(canonical, "worktree", "add", "--detach", str(native), "origin/main")
+    return canonical, native, codex_home
+
+
+def test_codex_native_repo_requires_desktop_registered_worktree(monkeypatch, tmp_path):
+    canonical, native, codex_home = _native_git_fixture(tmp_path)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-desktop")
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_session_meta",
+        lambda session_id: {
+            "id": session_id,
+            "cwd": str(canonical),
+            "originator": "Codex Desktop",
+        },
+    )
+    _write_codex_project_assignment(
+        codex_home,
+        session_id="thread-desktop",
+        canonical=canonical,
+        cwd=native,
+    )
+
+    assert target_cli._codex_native_repo(native) == canonical.resolve()
+    assert target_cli._codex_native_repo(canonical) is None
+
+
+def test_codex_native_repo_rejects_unassigned_external_worktree(monkeypatch, tmp_path):
+    canonical, native, codex_home = _native_git_fixture(tmp_path)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-desktop")
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_session_meta",
+        lambda session_id: {
+            "id": session_id,
+            "cwd": str(canonical),
+            "originator": "Codex Desktop",
+        },
+    )
+
+    assert target_cli._codex_native_repo(native) is None
+
+
+def test_codex_project_assignments_roll_distinct_worktrees_to_one_project(tmp_path):
+    canonical = tmp_path / "canonical" / "footnote"
+    codex_home = tmp_path / ".codex"
+    first = codex_home / "worktrees" / "one" / "footnote"
+    second = codex_home / "worktrees" / "two" / "footnote"
+    canonical.mkdir(parents=True)
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    _write_codex_project_assignment(
+        codex_home, session_id="thread-one", canonical=canonical, cwd=first
+    )
+    _write_codex_project_assignment(
+        codex_home, session_id="thread-two", canonical=canonical, cwd=second
+    )
+
+    assert target_cli._codex_project_assignment(
+        "thread-one", first, canonical, codex_home=codex_home
+    )
+    assert target_cli._codex_project_assignment(
+        "thread-two", second, canonical, codex_home=codex_home
+    )
+
+
+def test_codex_native_repo_rejects_worktree_not_handed_off_from_canonical(
+    monkeypatch, tmp_path
+):
+    canonical, native, codex_home = _native_git_fixture(tmp_path)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-desktop")
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_session_meta",
+        lambda session_id: {
+            "id": session_id,
+            "cwd": str(native),
+            "originator": "Codex Desktop",
+        },
+    )
+
+    assert target_cli._codex_native_repo(native) is None
+
+
+def test_codex_native_repo_rejects_tui_even_under_codex_home(monkeypatch, tmp_path):
+    _canonical, native, codex_home = _native_git_fixture(tmp_path)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-tui")
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_session_meta",
+        lambda session_id: {"id": session_id, "originator": "codex-tui"},
+    )
+
+    assert target_cli._codex_native_repo(native) is None
+
+
+def test_prepare_codex_native_branch_uses_remote_main(tmp_path):
+    _canonical, native, _codex_home = _native_git_fixture(tmp_path)
+    remote_head = _git_ok(native, "rev-parse", "origin/main")
+
+    base = target_cli._prepare_codex_native_branch(native, "x-0b3f")
+
+    assert base == f"origin/main@{remote_head[:12]}"
+    assert _git_ok(native, "branch", "--show-current") == "feature/x-0b3f"
+    assert _git_ok(native, "rev-parse", "HEAD") == remote_head
+
+
+def test_prepare_codex_native_branch_refuses_dirty_detached_worktree(tmp_path):
+    _canonical, native, _codex_home = _native_git_fixture(tmp_path)
+    (native / "dirty.txt").write_text("dirty\n")
+
+    with pytest.raises(typer.Exit) as exc:
+        target_cli._prepare_codex_native_branch(native, "x-0b3f")
+
+    assert exc.value.exit_code == 1
+    assert _git_ok(native, "branch", "--show-current") == ""
+
+
+def test_prepare_codex_native_branch_refuses_preexisting_detached_target(tmp_path):
+    canonical, native, _codex_home = _native_git_fixture(tmp_path)
+    _git_ok(canonical, "branch", "feature/x-0b3f", "origin/main")
+
+    with pytest.raises(typer.Exit) as exc:
+        target_cli._prepare_codex_native_branch(native, "x-0b3f")
+
+    assert exc.value.exit_code == 1
+    assert _git_ok(native, "branch", "--show-current") == ""
+
+
+def test_prepare_codex_native_branch_refuses_unmanifested_divergent_resume(tmp_path):
+    _canonical, native, _codex_home = _native_git_fixture(tmp_path)
+    target_cli._prepare_codex_native_branch(native, "x-0b3f")
+    (native / "diverged.txt").write_text("diverged\n")
+    _git_ok(native, "add", "diverged.txt")
+    _git_ok(native, "commit", "-qm", "diverged")
+
+    with pytest.raises(typer.Exit) as exc:
+        target_cli._prepare_codex_native_branch(native, "x-0b3f")
+
+    assert exc.value.exit_code == 1
+
+
+def test_native_codex_retry_initializes_in_app_owned_worktree(monkeypatch, tmp_path):
+    canonical = tmp_path / "canonical" / "footnote"
+    native = tmp_path / ".codex" / "worktrees" / "abcd" / "footnote"
+    canonical.mkdir(parents=True)
+    native.mkdir(parents=True)
+    monkeypatch.chdir(native)
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda node: None)
+    monkeypatch.setattr(target_cli, "_codex_native_repo", lambda cwd: canonical)
+    monkeypatch.setattr(
+        target_cli, "_prepare_codex_native_branch", lambda cwd, node: "origin/main"
+    )
+    monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_node_model",
+        lambda node, explicit=None, provider=None: (None, "provider-default"),
+    )
+    setup_calls = []
+    monkeypatch.setattr(
+        "fno.worktree._run_setup_worktree_hook",
+        lambda repo, wt: setup_calls.append((repo, wt)) or (0, ""),
+    )
+    init_calls = []
+
+    def fake_run(args, **kwargs):
+        if "init" in args:
+            init_calls.append((list(args), kwargs.get("cwd")))
+            (native / ".fno").mkdir()
+            (native / ".fno" / "target-state.md").write_text(
+                "graph_node_id: x-0b3f\n"
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        target_cli, "_classify_node_claim", lambda node: ("ours", {"state": "live"})
+    )
+
+    result = runner.invoke(target_app, ["start", "x-0b3f"])
+
+    assert result.exit_code == 0, result.output
+    assert "app-owned=codex" in result.output
+    assert "base=origin/main" in result.output
+    assert "node=claimed" in result.output
+    assert setup_calls == [(canonical, native)]
+    assert len(init_calls) == 1
+    assert init_calls[0][1] == str(native)
+
+
+def test_native_codex_initial_free_text_receipt_is_unclaimed(
+    monkeypatch, tmp_path, capsys
+):
+    canonical = tmp_path / "canonical"
+    native = tmp_path / "native"
+    canonical.mkdir()
+    native.mkdir()
+    monkeypatch.setattr(
+        target_cli, "_prepare_codex_native_branch", lambda cwd, node: "origin/main@abc"
+    )
+    monkeypatch.setattr(
+        "fno.worktree._run_setup_worktree_hook", lambda repo, wt: (0, "")
+    )
+    monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_node_model",
+        lambda node, explicit=None, provider=None: (None, "provider-default"),
+    )
+
+    def fake_run(args, **kwargs):
+        (native / ".fno").mkdir()
+        (native / ".fno" / "target-state.md").write_text("graph_node_id: null\n")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+
+    target_cli._start_codex_native(
+        canonical=canonical,
+        cwd=native,
+        node="some feature text",
+        plan_path=None,
+        size=None,
+        model=None,
+        harness=None,
+        beastmode=False,
+    )
+
+    assert "node=unclaimed" in capsys.readouterr().out
+
+
+def test_desktop_explicit_external_policy_skips_assignment_proof(
+    monkeypatch, tmp_path
+):
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-desktop")
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_session_meta",
+        lambda session_id: {
+            "id": session_id,
+            "cwd": str(canonical),
+            "originator": "Codex Desktop",
+        },
+    )
+    monkeypatch.setattr(
+        "fno.worktree_paths.resolve_worktree_policy",
+        lambda repo, harness: SimpleNamespace(
+            policy="external",
+            requested_policy="external",
+            degraded=False,
+            project="footnote",
+        ),
+    )
+    monkeypatch.setattr(
+        target_cli,
+        "_codex_project_assignment",
+        lambda *args: pytest.fail("explicit external policy needs no app assignment"),
+    )
+
+    assert target_cli._codex_desktop_handoff_policy(canonical) is None
+
+
+def test_unverified_codex_worktree_refuses_instead_of_noop(monkeypatch, tmp_path):
+    codex_home = tmp_path / ".codex"
+    native = codex_home / "worktrees" / "abcd" / "footnote"
+    native.mkdir(parents=True)
+    monkeypatch.chdir(native)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda node: node)
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda node: None)
+    monkeypatch.setattr(target_cli, "_codex_native_repo", lambda cwd: None)
+
+    result = runner.invoke(target_app, ["start", "x-0b3f"])
+
+    assert result.exit_code == 1
+    assert "native ownership could not be verified" in result.output
+    assert "already isolated" not in result.output
+
+
+def test_native_codex_retry_fails_closed_when_setup_fails(monkeypatch, tmp_path):
+    canonical = tmp_path / "canonical"
+    native = tmp_path / "native"
+    canonical.mkdir()
+    native.mkdir()
+    monkeypatch.setattr(
+        target_cli, "_prepare_codex_native_branch", lambda cwd, node: "origin/main"
+    )
+    monkeypatch.setattr(
+        "fno.worktree._run_setup_worktree_hook", lambda repo, wt: (2, "broken")
+    )
+    init_calls = []
+    monkeypatch.setattr(
+        target_cli.subprocess,
+        "run",
+        lambda *args, **kwargs: init_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(typer.Exit) as exc:
+        target_cli._start_codex_native(
+            canonical=canonical,
+            cwd=native,
+            node="x-0b3f",
+            plan_path=None,
+            size=None,
+            model=None,
+            harness=None,
+            beastmode=False,
+        )
+
+    assert exc.value.exit_code == 2
+    assert init_calls == []
+
+
+def test_native_codex_resume_refuses_manifest_without_exact_node(monkeypatch, tmp_path):
+    canonical = tmp_path / "canonical"
+    native = tmp_path / "native"
+    canonical.mkdir()
+    (native / ".fno").mkdir(parents=True)
+    (native / ".fno" / "target-state.md").write_text("graph_node_id: null\n")
+    monkeypatch.setattr(
+        target_cli, "_prepare_codex_native_branch", lambda cwd, node: "origin/main"
+    )
+    monkeypatch.setattr(
+        "fno.worktree._run_setup_worktree_hook", lambda repo, wt: (0, "")
+    )
+    monkeypatch.setattr(
+        target_cli, "_classify_node_claim", lambda node: ("ours", {"state": "live"})
+    )
+    monkeypatch.setattr(target_cli, "_find_node", lambda node: {"id": node})
+
+    with pytest.raises(typer.Exit) as exc:
+        target_cli._start_codex_native(
+            canonical=canonical,
+            cwd=native,
+            node="x-0b3f",
+            plan_path=None,
+            size=None,
+            model=None,
+            harness=None,
+            beastmode=False,
+        )
+
+    assert exc.value.exit_code == 1
+
+
+@pytest.mark.parametrize(
+    "verdict,expected",
+    [("ours", "already-claimed"), ("dead_predecessor", "reacquired")],
+)
+def test_native_codex_resume_preserves_exact_node_claim(
+    monkeypatch, tmp_path, capsys, verdict, expected
+):
+    canonical = tmp_path / "canonical"
+    native = tmp_path / "native"
+    canonical.mkdir()
+    (native / ".fno").mkdir(parents=True)
+    (native / ".fno" / "target-state.md").write_text("graph_node_id: x-0b3f\n")
+    monkeypatch.setattr(
+        target_cli, "_prepare_codex_native_branch", lambda cwd, node: "origin/main@abc"
+    )
+    monkeypatch.setattr(
+        "fno.worktree._run_setup_worktree_hook", lambda repo, wt: (0, "")
+    )
+    monkeypatch.setattr(target_cli, "_find_node", lambda node: {"id": node})
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda node: (verdict, {"state": "stale", "holder": "old"}),
+    )
+    reacquired = []
+    monkeypatch.setattr(
+        target_cli,
+        "_reacquire_node_claim",
+        lambda node, cwd, info: reacquired.append(node) or "holder",
+    )
+    monkeypatch.setattr(
+        target_cli.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("native resume must not rerun init"),
+    )
+
+    target_cli._start_codex_native(
+        canonical=canonical,
+        cwd=native,
+        node="x-0b3f",
+        plan_path=None,
+        size=None,
+        model=None,
+        harness=None,
+        beastmode=False,
+    )
+
+    assert expected in capsys.readouterr().out
+    assert reacquired == (["x-0b3f"] if verdict == "dead_predecessor" else [])
+
+
+def test_native_codex_resume_refuses_foreign_exact_node_claim(monkeypatch, tmp_path):
+    canonical = tmp_path / "canonical"
+    native = tmp_path / "native"
+    canonical.mkdir()
+    (native / ".fno").mkdir(parents=True)
+    (native / ".fno" / "target-state.md").write_text("graph_node_id: x-0b3f\n")
+    monkeypatch.setattr(
+        target_cli, "_prepare_codex_native_branch", lambda cwd, node: "origin/main@abc"
+    )
+    monkeypatch.setattr(
+        "fno.worktree._run_setup_worktree_hook", lambda repo, wt: (0, "")
+    )
+    monkeypatch.setattr(target_cli, "_find_node", lambda node: {"id": node})
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda node: (
+            "foreign_live",
+            {"state": "live", "holder": "other", "pid": 42, "host": "host"},
+        ),
+    )
+
+    with pytest.raises(typer.Exit) as exc:
+        target_cli._start_codex_native(
+            canonical=canonical,
+            cwd=native,
+            node="x-0b3f",
+            plan_path=None,
+            size=None,
+            model=None,
+            harness=None,
+            beastmode=False,
+        )
+
+    assert exc.value.exit_code == 1
+
+
+def test_native_codex_free_text_resume_stays_unclaimed(monkeypatch, tmp_path, capsys):
+    canonical = tmp_path / "canonical"
+    native = tmp_path / "native"
+    canonical.mkdir()
+    (native / ".fno").mkdir(parents=True)
+    (native / ".fno" / "target-state.md").write_text("graph_node_id: null\n")
+    monkeypatch.setattr(
+        target_cli, "_prepare_codex_native_branch", lambda cwd, node: "origin/main@abc"
+    )
+    monkeypatch.setattr(
+        "fno.worktree._run_setup_worktree_hook", lambda repo, wt: (0, "")
+    )
+    monkeypatch.setattr(target_cli, "_find_node", lambda node: None)
+    monkeypatch.setattr(
+        target_cli,
+        "_reacquire_node_claim",
+        lambda *args: pytest.fail("free-text target must remain unclaimed"),
+    )
+
+    target_cli._start_codex_native(
+        canonical=canonical,
+        cwd=native,
+        node="some feature text",
+        plan_path=None,
+        size=None,
+        model=None,
+        harness=None,
+        beastmode=False,
+    )
+
+    assert "node=unclaimed" in capsys.readouterr().out
+
+
+def test_native_codex_free_text_resume_refuses_malformed_manifest(
+    monkeypatch, tmp_path
+):
+    canonical = tmp_path / "canonical"
+    native = tmp_path / "native"
+    canonical.mkdir()
+    (native / ".fno").mkdir(parents=True)
+    (native / ".fno" / "target-state.md").write_text("truncated: true\n")
+    monkeypatch.setattr(
+        target_cli, "_prepare_codex_native_branch", lambda cwd, node: "origin/main@abc"
+    )
+    monkeypatch.setattr(
+        "fno.worktree._run_setup_worktree_hook", lambda repo, wt: (0, "")
+    )
+    monkeypatch.setattr(target_cli, "_find_node", lambda node: None)
+
+    with pytest.raises(typer.Exit) as exc:
+        target_cli._start_codex_native(
+            canonical=canonical,
+            cwd=native,
+            node="some feature text",
+            plan_path=None,
+            size=None,
+            model=None,
+            harness=None,
+            beastmode=False,
+        )
+
+    assert exc.value.exit_code == 1
 
 
 # ------------------------------- no-op branch ----------------------------- #

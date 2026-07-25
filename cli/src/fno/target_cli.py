@@ -43,6 +43,7 @@ target_app = typer.Typer(
 )
 
 _INIT_RELPATH = "hooks/helpers/init-target-state.sh"
+_CODEX_NATIVE_HANDOFF_EXIT = 75
 
 
 def _resolve_init_script() -> Path:
@@ -1145,6 +1146,428 @@ def _is_linked_worktree(cwd: Path) -> bool:
     return _abs(gdir) != _abs(common)
 
 
+def _codex_session_meta(session_id: str) -> Optional[dict[str, Any]]:
+    """Verified first-line ``session_meta`` for one Codex rollout.
+
+    ``CODEX_THREAD_ID`` exists in both Codex Desktop and ``codex-tui``.  The
+    rollout originator is the only durable local fact that distinguishes a
+    Desktop chat capable of the supported Local -> Worktree handoff.  Return
+    ``None`` on any ambiguity so callers fall back externally rather than
+    pretending a TUI thread is app-owned.
+    """
+    if not session_id:
+        return None
+    try:
+        from fno.agents.discover import codex_rollout_for_session
+
+        rollout = codex_rollout_for_session(session_id)
+        if rollout is None:
+            return None
+        with rollout.open(encoding="utf-8") as fh:
+            record = json.loads(fh.readline())
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(record, dict) or record.get("type") != "session_meta":
+        return None
+    payload = record.get("payload")
+    if not isinstance(payload, dict) or payload.get("id") != session_id:
+        return None
+    return payload
+
+
+def _codex_project_assignment(
+    session_id: str,
+    cwd: Path,
+    canonical: Path,
+    *,
+    codex_home: Optional[Path] = None,
+) -> bool:
+    """True iff Desktop maps this exact thread/cwd to the canonical project.
+
+    The assignment overlay is read-only, strict, and fail-closed. It is the
+    only local evidence that Desktop, rather than an external Git allocator,
+    owns the worktree and will roll the chat up under the canonical project.
+    Footnote never creates, repairs, or writes this private app state.
+    """
+    home = (
+        codex_home
+        or Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    ).resolve()
+    try:
+        state = json.loads((home / ".codex-global-state.json").read_text())
+        assignment = state["thread-project-assignments"][session_id]
+        if assignment.get("projectKind") != "local":
+            return False
+        if Path(str(assignment.get("cwd") or "")).resolve() != cwd.resolve():
+            return False
+        project = state["local-projects"][assignment["projectId"]]
+        roots = project.get("rootPaths")
+        if not isinstance(roots, list):
+            return False
+        return canonical.resolve() in {
+            Path(str(root)).expanduser().resolve() for root in roots
+        }
+    except (KeyError, OSError, TypeError, ValueError, UnicodeDecodeError):
+        return False
+
+
+def _codex_desktop_handoff_policy(repo_root: Path) -> Optional[Any]:
+    """Resolved policy iff this is a canonical Codex Desktop Local chat."""
+    from fno.harness_identity import resolve_harness_identity
+
+    identity = resolve_harness_identity()
+    if identity.harness != "codex" or not identity.session_id:
+        return None
+    meta = _codex_session_meta(identity.session_id)
+    if meta is None or meta.get("originator") != "Codex Desktop":
+        return None
+    try:
+        recorded_cwd = Path(str(meta.get("cwd") or "")).resolve()
+    except (OSError, ValueError):
+        return None
+    if recorded_cwd != repo_root.resolve():
+        return None
+    try:
+        from fno.worktree_paths import resolve_worktree_policy
+
+        policy = resolve_worktree_policy(repo_root, "codex")
+    except Exception:  # noqa: BLE001 - an unreadable policy must not claim native
+        return None
+    requested = getattr(policy, "requested_policy", policy.policy)
+    if requested != "harness-native":
+        return None
+    if not _codex_project_assignment(
+        identity.session_id, repo_root, repo_root
+    ):
+        typer.echo(
+            "fno target start: Codex Desktop origin is confirmed, but this "
+            "thread has no verified assignment to the canonical project; "
+            "refusing external fallback because it would split Remote roll-up.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    return policy
+
+
+def _remote_base_ref(cwd: Path, *, fetch: bool = False) -> str:
+    """Verified remote default-branch ref used by native target bootstrap."""
+    if fetch:
+        refreshed = subprocess.run(
+            ["git", "-C", str(cwd), "fetch", "--quiet", "origin"],
+            capture_output=True,
+            text=True,
+        )
+        if refreshed.returncode != 0:
+            typer.echo(
+                "fno target start: could not refresh remote base: "
+                f"{refreshed.stderr.strip() or 'git fetch origin failed'}",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+    for candidate in ("origin/main", "origin/master"):
+        if _git_out(cwd, "rev-parse", "--verify", f"{candidate}^{{commit}}"):
+            return candidate
+    typer.echo(
+        "fno target start: neither origin/main nor origin/master resolves.", err=True
+    )
+    raise typer.Exit(code=1)
+
+
+def _base_receipt(cwd: Path, base: str, *, head: str = "HEAD") -> str:
+    """Remote ref plus the actual fork commit, never a symbolic base claim."""
+    fork = _git_out(cwd, "merge-base", head, base)
+    if not fork:
+        typer.echo(
+            f"fno target start: {head} has no merge base with {base}; refusing "
+            "to report false base provenance.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    return f"{base}@{fork[:12]}"
+
+
+def _request_codex_native_handoff(
+    repo_root: Path, node: str, policy: Any, base: str
+) -> None:
+    """Emit the supported same-thread Desktop handoff receipt and stop."""
+    typer.echo(
+        "native-handoff=required "
+        f"project={policy.project} canonical={repo_root} base={base} node={node}\n"
+        "Use `/worktree` or **Hand off -> Worktree** in Codex Desktop, select "
+        "the remote main branch, then rerun:\n"
+        f"  fno target start {node}\n"
+        "No worktree, branch, manifest, or claim was created by Footnote."
+    )
+    raise typer.Exit(code=_CODEX_NATIVE_HANDOFF_EXIT)
+
+
+def _codex_native_repo(cwd: Path) -> Optional[Path]:
+    """Canonical repo iff ``cwd`` is this Desktop chat's app-owned worktree.
+
+    Location alone is deliberately insufficient: an external allocator can
+    create a linked worktree below ``CODEX_HOME/worktrees`` without making
+    Codex Desktop its lifecycle owner.  The rollout originator authenticates
+    the Desktop chat; Git's common dir authenticates registration and yields
+    the stable canonical repository identity used for project roll-up.
+    """
+    from fno.harness_identity import resolve_harness_identity
+
+    identity = resolve_harness_identity()
+    if identity.harness != "codex" or not identity.session_id:
+        return None
+    meta = _codex_session_meta(identity.session_id)
+    if meta is None or meta.get("originator") != "Codex Desktop":
+        return None
+    try:
+        resolved = cwd.resolve()
+        codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser().resolve()
+        native_root = codex_home / "worktrees"
+        if resolved == native_root or not resolved.is_relative_to(native_root):
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not _is_linked_worktree(resolved):
+        return None
+    common = _git_out(
+        resolved, "rev-parse", "--path-format=absolute", "--git-common-dir"
+    )
+    if not common:
+        return None
+    common_dir = Path(common).resolve()
+    if common_dir.name != ".git":
+        return None
+    canonical = common_dir.parent.resolve()
+    try:
+        recorded_cwd = Path(str(meta.get("cwd") or "")).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if recorded_cwd != canonical:
+        return None
+    if not _codex_project_assignment(
+        identity.session_id, resolved, canonical
+    ):
+        return None
+    registered = _git_out(canonical, "worktree", "list", "--porcelain")
+    if not registered:
+        return None
+    worktrees = {
+        Path(line.removeprefix("worktree ")).resolve()
+        for line in registered.splitlines()
+        if line.startswith("worktree ")
+    }
+    return canonical if resolved in worktrees and canonical in worktrees else None
+
+
+def _under_codex_worktrees(cwd: Path) -> bool:
+    """Whether ``cwd`` is inside the app's reserved worktree namespace."""
+    try:
+        native_root = (
+            Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser().resolve()
+            / "worktrees"
+        )
+        resolved = cwd.resolve()
+        return resolved != native_root and resolved.is_relative_to(native_root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _prepare_codex_native_branch(cwd: Path, node: str) -> str:
+    """Attach an app-created detached worktree to this target's feature branch."""
+    branch = f"feature/{_wt_name(node)}"
+    base = _remote_base_ref(cwd, fetch=True)
+    current = _git_out(cwd, "branch", "--show-current") or ""
+    if current == branch:
+        manifest = cwd / ".fno" / "target-state.md"
+        if not (manifest.exists() and not manifest.is_symlink()):
+            head_sha = _git_out(cwd, "rev-parse", "HEAD")
+            base_sha = _git_out(cwd, "rev-parse", base)
+            if not head_sha or not base_sha or head_sha != base_sha:
+                typer.echo(
+                    f"fno target start: {branch} has no target manifest and HEAD "
+                    f"does not equal refreshed {base}; refusing an unproven resume.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+        return _base_receipt(cwd, base)
+    if current:
+        typer.echo(
+            f"fno target start: Codex worktree is already on branch {current}; "
+            f"expected detached HEAD or {branch}.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    dirty = subprocess.run(
+        ["git", "-C", str(cwd), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+    )
+    if dirty.returncode != 0 or dirty.stdout.strip():
+        typer.echo(
+            "fno target start: refusing to attach a dirty detached Codex worktree; "
+            "stash or discard its changes first.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    exists = _git_out(cwd, "show-ref", "--verify", f"refs/heads/{branch}")
+    if exists:
+        typer.echo(
+            f"fno target start: branch {branch} already exists but this detached "
+            "Codex worktree has no target manifest proving it is a resume; refusing "
+            "to claim an arbitrary branch.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    args = ["git", "-C", str(cwd), "switch", "-c", branch, base]
+    switched = subprocess.run(args, capture_output=True, text=True)
+    if switched.returncode != 0:
+        typer.echo(
+            "fno target start: could not attach Codex worktree to "
+            f"{branch}: {switched.stderr.strip()}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    return _base_receipt(cwd, base)
+
+
+def _start_codex_native(
+    *,
+    canonical: Path,
+    cwd: Path,
+    node: str,
+    plan_path: Optional[str],
+    size: Optional[str],
+    model: Optional[str],
+    harness: Optional[str],
+    beastmode: bool,
+) -> None:
+    """Finish target bootstrap inside a worktree Codex Desktop already owns."""
+    base = _prepare_codex_native_branch(cwd, node)
+    from fno.worktree import _run_setup_worktree_hook
+
+    rc, tail = _run_setup_worktree_hook(canonical, cwd)
+    if rc not in (0, -1):
+        typer.echo(
+            f"fno target start: setup-worktree.sh exited {rc}: {tail}; refusing "
+            "to initialize against unverified shared state.",
+            err=True,
+        )
+        raise typer.Exit(code=rc)
+    manifest = cwd / ".fno" / "target-state.md"
+    if manifest.exists() and not manifest.is_symlink():
+        manifest_node = _manifest_node_id(manifest)
+        requested_graph_node = _find_node(node)
+        if requested_graph_node is None:
+            try:
+                manifest_text = manifest.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                manifest_text = ""
+            explicitly_unclaimed = _manifest_is_explicitly_unclaimed(manifest_text)
+            if manifest_node is not None or not explicitly_unclaimed:
+                typer.echo(
+                    f"fno target start: {manifest} does not contain a valid "
+                    "unclaimed free-text target manifest; refusing native resume.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            typer.echo(
+                f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  "
+                "node=unclaimed"
+            )
+            if beastmode:
+                _warn_if_authority_not_granted(cwd)
+            return
+        if requested_graph_node is not None and manifest_node != node:
+            typer.echo(
+                f"fno target start: {manifest} does not record the requested node "
+                f"{node} (found {manifest_node or 'null'}); refusing native resume.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        verdict, info = _classify_node_claim(node)
+        if verdict == "foreign_live":
+            _print_foreign_holder_park(node, info or {}, cwd)
+            raise typer.Exit(code=1)
+        if manifest_node is not None and _find_node(manifest_node) is None:
+            typer.echo(
+                f"fno target start: node {manifest_node} is not in the backlog graph; "
+                "refusing to restore a ghost claim.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if verdict == "ours":
+            typer.echo(
+                f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  "
+                "node=already-claimed"
+            )
+            if beastmode:
+                _warn_if_authority_not_granted(cwd)
+            return
+        _reacquire_node_claim(node, cwd, info)
+        typer.echo(
+            f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  node=reacquired"
+        )
+        return
+
+    resolved_model, source = _resolve_node_model(
+        node, explicit=model, provider=harness
+    )
+    cmd = _resolve_fno_cmd() + ["target", "init", "--input", node]
+    if plan_path:
+        cmd += ["--plan-path", plan_path]
+    if size:
+        cmd += ["--size", size]
+    if resolved_model:
+        cmd += ["--model", resolved_model]
+    if harness:
+        cmd += ["--harness", harness]
+    if beastmode:
+        cmd += ["--beastmode"]
+    init = subprocess.run(cmd, cwd=str(cwd))
+    if init.returncode != 0:
+        typer.echo(
+            f"fno target start: target init failed in app-owned worktree "
+            f"(exit {init.returncode}); no replacement worktree was allocated.",
+            err=True,
+        )
+        raise typer.Exit(code=init.returncode)
+    created_node = _manifest_node_id(manifest)
+    if created_node is None:
+        try:
+            manifest_text = manifest.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            manifest_text = ""
+        if not _manifest_is_explicitly_unclaimed(manifest_text):
+            typer.echo(
+                f"fno target start: target init exited successfully but {manifest} "
+                "does not contain valid claim provenance; refusing success receipt.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        claim_state = "unclaimed"
+    else:
+        if created_node != node:
+            typer.echo(
+                f"fno target start: target init recorded node {created_node}, not "
+                f"{node}; refusing success receipt.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        verdict, info = _classify_node_claim(created_node)
+        if verdict != "ours":
+            typer.echo(
+                f"fno target start: target init did not leave this thread owning "
+                f"node:{created_node} (claim={verdict}); refusing success receipt.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        claim_state = "claimed"
+    model_note = f"  model={resolved_model} ({source})" if resolved_model else ""
+    typer.echo(
+        f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  "
+        f"node={claim_state}{model_note}"
+    )
+
+
 def _manifest_node_id(manifest: Path) -> Optional[str]:
     """The manifest's claimed ``graph_node_id``, or None if absent/null/unreadable."""
     try:
@@ -1156,6 +1579,16 @@ def _manifest_node_id(manifest: Path) -> Optional[str]:
         return None
     val = m.group(1).strip().strip("\"'")
     return None if (not val or val == "null") else val
+
+
+def _manifest_is_explicitly_unclaimed(text: str) -> bool:
+    return bool(
+        re.search(
+            r"^graph_node_id\s*:\s*(?:null|''|\"\")\s*$",
+            text,
+            re.MULTILINE,
+        )
+    )
 
 
 def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
@@ -1388,6 +1821,27 @@ def start(
         if holder is not None:
             _print_foreign_holder_park(node_id, holder, cwd)
             raise typer.Exit(code=1)
+        canonical = _codex_native_repo(cwd)
+        if canonical is not None:
+            _start_codex_native(
+                canonical=canonical,
+                cwd=cwd,
+                node=node_id,
+                plan_path=plan_path,
+                size=size,
+                model=model,
+                harness=harness,
+                beastmode=beastmode,
+            )
+            return
+        if _under_codex_worktrees(cwd):
+            typer.echo(
+                "fno target start: this linked worktree is under CODEX_HOME, but "
+                "native ownership could not be verified for the current Desktop "
+                "thread and canonical repository; refusing to no-op or claim it.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
         typer.echo(f"already isolated at {cwd}; nothing created.")
         if beastmode:
             _warn_if_authority_not_granted()
@@ -1406,6 +1860,26 @@ def start(
     # worktree name and `init --input` then use the canonical id.
     node = _resolve_node_id(node)
     name = _wt_name(node)
+
+    # Codex Desktop owns the only supported native worktree transition.  Keep
+    # this thread rooted at the canonical project until the app performs its
+    # same-thread handoff; allocating first would permanently bucket Remote by
+    # the external cwd and merely placing that directory under CODEX_HOME would
+    # counterfeit app ownership.  The retry from the registered linked
+    # worktree is handled by the already-isolated branch above.
+    native_policy = _codex_desktop_handoff_policy(repo_root)
+    if native_policy is not None:
+        holder = _foreign_live_holder(node)
+        if holder is not None:
+            _print_foreign_holder_park(node, holder, repo_root)
+            raise typer.Exit(code=1)
+        native_base = _remote_base_ref(repo_root, fetch=True)
+        _request_codex_native_handoff(
+            repo_root,
+            node,
+            native_policy,
+            _base_receipt(repo_root, native_base),
+        )
 
     # 1. Create/reuse the worktree off origin/main (x-73ca). ensure prints the
     #    worktree path on stdout and is idempotent (reuse) + refuses to nest.

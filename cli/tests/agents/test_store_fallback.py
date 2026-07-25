@@ -57,6 +57,15 @@ def _write_codex_session(root, uuid, cwd="/repo/two"):
     )
 
 
+def test_default_codex_sessions_dir_honors_codex_home(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv(discover.CODEX_SESSIONS_DIR_ENV)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "custom-codex"))
+
+    assert discover.default_codex_sessions_dir() == tmp_path / "custom-codex" / "sessions"
+
+
 # --- shape gate ------------------------------------------------------------
 
 
