@@ -165,6 +165,28 @@ def test_backfill_skips_a_same_cwd_sibling_started_earlier(tmp_path: Path) -> No
     )
 
 
+def test_backfill_waits_out_a_transiently_unique_sibling(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2 (#603): a sibling rollout surfacing before this pane's must not
+    be stamped. The stability gate holds the first single sighting; when a second
+    candidate appears on the next probe the backfill returns None rather than
+    committing to the sibling."""
+    from fno.agents import discover
+
+    seq = iter([[SID_B], [SID_B, SID_A]])
+
+    monkeypatch.setattr(
+        discover, "codex_session_ids_started_in", lambda *_a, **_k: next(seq)
+    )
+    assert (
+        _backfill_codex_session_id(
+            Path("/w/proj"), _ms(T_SPAWN), sessions_dir=tmp_path, sleep=_no_sleep
+        )
+        is None
+    )
+
+
 def test_backfill_miss_returns_none_rather_than_raising(tmp_path: Path) -> None:
     """AC2-FR: the pane is already running; a missing id costs resume, not the spawn."""
     assert (

@@ -395,8 +395,10 @@ def _backfill_opencode_session_id(
 
 # Codex writes its rollout at session start, but the TUI has to boot first, so
 # the first look can legitimately land before the file exists. More attempts and
-# a longer nap than opencode's SQLite read for exactly that reason.
-_CODEX_BACKFILL_ATTEMPTS = 4
+# a longer nap than opencode's SQLite read for exactly that reason. One extra
+# attempt buys the stability gate in _backfill_codex_session_id its confirmation
+# probe without shrinking the capture window (Codex P2, #603).
+_CODEX_BACKFILL_ATTEMPTS = 5
 _CODEX_BACKFILL_DELAY_S = 0.75
 
 
@@ -423,14 +425,22 @@ def _backfill_codex_session_id(
     from fno.agents.discover import codex_session_ids_started_in
 
     naptime = sleep or time.sleep
+    # Do not stamp on a single sighting. Two codex panes starting in this cwd
+    # after since_ms can surface rollouts out of order, so the first probe may
+    # see exactly one candidate -- a sibling -- and stamp the wrong id. Accept
+    # only once the same single id repeats on the next probe, so a transiently
+    # unique sibling either grows to an ambiguous pair (-> None below) or is
+    # displaced by the real session before acceptance (Codex P2, #603).
+    prev: Optional[str] = None
     for attempt in range(_CODEX_BACKFILL_ATTEMPTS):
         if attempt:
             naptime(_CODEX_BACKFILL_DELAY_S)
         ids = codex_session_ids_started_in(cwd, since_ms, sessions_dir=sessions_dir)
-        if len(ids) == 1:
-            return ids[0]
         if len(ids) > 1:
             return None  # ambiguous; retrying cannot narrow it
+        if len(ids) == 1 and ids[0] == prev:
+            return ids[0]
+        prev = ids[0] if ids else None
     return None
 
 
