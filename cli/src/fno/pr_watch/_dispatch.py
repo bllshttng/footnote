@@ -79,6 +79,7 @@ _DEFAULT_MODEL = "claude-haiku-4-5"
 # runs ``fno pr ritual`` directly, and that verb owns its own judgment leg.
 _TIMEOUT_FOR_VERB: dict[str, float] = {"check": 180.0}
 _DEFAULT_FIRE_TIMEOUT = 300.0
+_SPAWN_TIMEOUT_GRACE = 30.0
 
 
 def fire_skill(
@@ -105,18 +106,21 @@ def fire_skill(
     carries no merged branch, no post-merge model role, and no whole-ritual
     prompt (AC1-HP, AC10-EDGE).
 
-    ``timeout_s`` bounds the fire so a hung claude cannot wedge the launchd tick
-    forever (x-97d8); when None it defaults via ``_TIMEOUT_FOR_VERB``. A timeout
+    ``timeout_s`` bounds the spawned worker so a hung claude cannot wedge the
+    launchd tick forever (x-97d8); when None it defaults via
+    ``_TIMEOUT_FOR_VERB``. The wrapper deadline includes grace so the canonical
+    spawn can reap its child before this process reports failure. A timeout
     surfaces as a normal failed dispatch.
 
     SUCCESS = rc == 0 AND parsed ``is_error`` is ``False``. Every other outcome
     is a failure.
     """
-    fire_timeout = (
+    worker_timeout = (
         timeout_s
         if timeout_s is not None
         else _TIMEOUT_FOR_VERB.get(verb, _DEFAULT_FIRE_TIMEOUT)
     )
+    wrapper_timeout = worker_timeout + _SPAWN_TIMEOUT_GRACE
     seam_cmd = os.environ.get(env_seam)
 
     if seam_cmd:
@@ -131,7 +135,7 @@ def fire_skill(
             "--harness",
             "claude",
             "--timeout",
-            str(max(1, int(fire_timeout))),
+            str(max(1, int(worker_timeout))),
             "--cwd",
             str(repo_dir),
             "--name",
@@ -150,7 +154,7 @@ def fire_skill(
             text=True,
             check=False,
             cwd=str(repo_dir),
-            timeout=fire_timeout,
+            timeout=wrapper_timeout,
         )
     except subprocess.TimeoutExpired as exc:
         log.warning("fire_skill %s #%d timed out: %s", verb, pr_number, exc)
