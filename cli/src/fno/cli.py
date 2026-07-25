@@ -118,7 +118,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     ),
     "think": (
         "fno.provenance.cli:think_app",
-        "Context /think dispatch (explicit conversational verb).",
+        "Think inspection and explicit conversational dispatch.",
         {"hidden": True},
     ),
     "phase": (

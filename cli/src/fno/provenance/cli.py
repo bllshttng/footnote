@@ -1,4 +1,4 @@
-"""CLI surface for the explicit conversational /think dispatch verb (x-0a9c, Wave C).
+"""Deterministic CLI utilities used by the conversational /think workflow.
 
 ``fno think dispatch <node>`` - the operator, mid-conversation about an
 fno-touched node, hands it to a bg /think that picks it up with full LIVE
@@ -17,7 +17,7 @@ import typer
 
 think_app = typer.Typer(
     name="think",
-    help="Context /think dispatch (explicit conversational verb, x-0a9c).",
+    help="Read-only discovery inspection and explicit conversational dispatch.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -31,6 +31,30 @@ def _callback() -> None:
     which would make ``fno think dispatch <node>`` parse ``dispatch`` as NODE.
     An explicit (no-op) callback preserves the ``fno think dispatch`` shape.
     """
+
+
+@think_app.command("inspect")
+def inspect(
+    seed: str = typer.Argument(..., help="Node id, slug, or free-text design seed."),
+    repo: Optional[str] = typer.Option(
+        None, "--repo", help="Repository to inspect (default: current repository)."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit the versioned receipt as JSON."
+    ),
+) -> None:
+    """Collect graph, PR, schema, history, and pitfall evidence without writes."""
+    from pathlib import Path
+
+    from fno.paths import resolve_repo_root
+    from fno.think_inspect import build_receipt, render_receipt
+
+    target = Path(repo).expanduser().resolve() if repo else Path(resolve_repo_root())
+    if not target.is_dir():
+        typer.echo(f"fno think inspect: repository directory not found: {target}", err=True)
+        raise typer.Exit(code=2)
+    receipt = build_receipt(seed, target)
+    typer.echo(json.dumps(receipt, indent=2) if json_output else render_receipt(receipt))
 
 
 @think_app.command("dispatch")

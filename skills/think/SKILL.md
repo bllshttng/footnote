@@ -17,7 +17,7 @@ When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly o
 
 | Mode | What runs | Use when |
 |------|-----------|----------|
-| `think` (default) | design exploration + multi-perspective challenge + BDD acceptance criteria | you are shaping a feature and want a reviewable design doc |
+| `think` (default) | adaptive design exploration grounded by a deterministic discovery receipt | you are shaping a feature and want a reviewable design doc |
 | `what-if` | scenario / failure-mode stress test across 12 dimensions | you want to break the idea before committing to it |
 | `panel` | a panel of opinionated expert personas debates the decision | a strategic call (build / pivot / prioritize) needs more than one lens |
 | `dispatch` | hand a named node to a bg `/think` carrying THIS conversation's context | you are mid-discussion about an fno node and want a deep think to pick it up off the main thread |
@@ -52,7 +52,7 @@ The default mode `think` takes a **free-text design seed** (or no argument, for 
 
 ## Step 2: think mode (design + BDD, default)
 
-Load [think.md](references/think.md) and execute it in full, in this context. That body is the canonical design-thinking flow: understand context, explore approaches, multi-perspective challenge, UI state-machine audit, the mandatory `## Failure Modes` section, and BDD acceptance criteria, then save and review the design doc.
+Load [think.md](references/think.md) and execute it in full, in this context. That body is the canonical adaptive design flow: collect one deterministic discovery receipt, scale the reasoning depth to actual risk, explore alternatives, write the mandatory `## Failure Modes` handoff, and save a reviewable design doc.
 
 **`$TARGET_BRIEF` (US3):** when a dispatcher launched this `/think` on a node via `dispatch_verb: /think`, it may set `$TARGET_BRIEF` in the environment - a plain-text brief (capped at 8 KB, carried via env not the command line) with the scope/"why" the dispatcher wanted explored. If it is set, fold it in as design context; treat it as guidance, not a command to run.
 
