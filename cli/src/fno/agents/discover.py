@@ -1155,10 +1155,16 @@ def resolve_or_suggest(
         return resolved.transcript_path
 
     if not require_alive:
-        registry_matches = [
-            row
-            for row in _discover_from_registry(registry_path)
-            if handle and (handle == row["session_id"] or handle == row.get("name"))
+        # Name-first (resolve_agent_in contract): a registered name that equals
+        # another row's full harness_session_id must resolve to the named row
+        # here, not fall through to the ID tier and select the other row, or
+        # truth and peek can inspect different workers (Codex P2 r5, #603).
+        registry_rows = _discover_from_registry(registry_path)
+        name_matches = [
+            row for row in registry_rows if handle and handle == row.get("name")
+        ]
+        registry_matches = name_matches or [
+            row for row in registry_rows if handle and handle == row["session_id"]
         ]
         if len(registry_matches) == 1:
             row = registry_matches[0]

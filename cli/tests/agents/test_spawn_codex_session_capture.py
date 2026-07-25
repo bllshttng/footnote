@@ -210,11 +210,19 @@ class _FakeOpenFile:
 
 
 class _FakeProc:
-    def __init__(self, open_files: list) -> None:
-        self._files = open_files
+    def __init__(self, files=(), children=()) -> None:
+        self._files = list(files)
+        self._children = list(children)
 
     def open_files(self) -> list:
         return self._files
+
+    def children(self, recursive: bool = False) -> list:
+        out = list(self._children)
+        if recursive:
+            for c in self._children:
+                out += c.children(recursive=True)
+        return out
 
 
 class _FakePsutil:
@@ -228,18 +236,62 @@ class _FakePsutil:
         return self._proc
 
 
-ROLLOUT_A = (
-    "/Users/x/.codex/sessions/2026/07/24/"
-    "rollout-2026-07-24T18-00-00-" + SID_A + ".jsonl"
-)
+def _write_rollout_with_id(root: Path, filename_id: str, payload_id: str) -> Path:
+    """A rollout whose filename UUID may differ from session_meta.payload.id, to
+    prove the id is read from metadata, not the filename (Codex P2 r5, #603)."""
+    day = root / "2026" / "07" / "24"
+    day.mkdir(parents=True, exist_ok=True)
+    path = day / f"rollout-2026-07-24T18-00-00-{filename_id}.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "timestamp": T_SPAWN,
+                "type": "session_meta",
+                "payload": {"id": payload_id, "timestamp": T_SPAWN, "cwd": "/w/proj"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
-def test_codex_session_id_for_pid_reads_the_open_rollout_filename() -> None:
+def test_codex_session_id_for_pid_reads_metadata_from_the_open_rollout(
+    tmp_path: Path,
+) -> None:
+    """The id is session_meta.payload.id (authoritative), read race-free from the
+    pane's own open rollout (Codex P1, #603)."""
     from fno.agents.mux_spawn import _codex_session_id_for_pid
 
+    rollout = _write_rollout_with_id(tmp_path, SID_A, SID_A)
     psu = _FakePsutil(
-        _FakeProc([_FakeOpenFile(ROLLOUT_A), _FakeOpenFile("/unrelated.log")])
+        _FakeProc([_FakeOpenFile(str(rollout)), _FakeOpenFile("/unrelated.log")])
     )
+    assert _codex_session_id_for_pid(4242, psutil_mod=psu) == SID_A
+
+
+def test_codex_session_id_for_pid_uses_metadata_not_the_filename_uuid(
+    tmp_path: Path,
+) -> None:
+    """Codex P2 r5 (#603): older turn-id layouts name the rollout by a UUID that
+    is not session_meta.payload.id; the id must come from the metadata."""
+    from fno.agents.mux_spawn import _codex_session_id_for_pid
+
+    other = "11111111-2222-3333-4444-555566667777"  # filename UUID, not the session
+    rollout = _write_rollout_with_id(tmp_path, other, SID_A)
+    psu = _FakePsutil(_FakeProc([_FakeOpenFile(str(rollout))]))
+    assert _codex_session_id_for_pid(4242, psutil_mod=psu) == SID_A
+
+
+def test_codex_session_id_for_pid_walks_wrapper_descendants(tmp_path: Path) -> None:
+    """Codex P1 r5 (#603): a wrapper launcher (@openai/codex Node shim) holds the
+    pane pid while its native child opens the rollout; the descendant walk finds it."""
+    from fno.agents.mux_spawn import _codex_session_id_for_pid
+
+    rollout = _write_rollout_with_id(tmp_path, SID_A, SID_A)
+    native = _FakeProc([_FakeOpenFile(str(rollout))])
+    wrapper = _FakeProc(files=(), children=[native])  # pane pid is the wrapper
+    psu = _FakePsutil(wrapper)
     assert _codex_session_id_for_pid(4242, psutil_mod=psu) == SID_A
 
 
@@ -248,19 +300,6 @@ def test_codex_session_id_for_pid_returns_none_with_no_rollout_open() -> None:
 
     psu = _FakePsutil(_FakeProc([_FakeOpenFile("/unrelated.log")]))
     assert _codex_session_id_for_pid(4242, psutil_mod=psu) is None
-
-
-def test_codex_session_id_for_pid_matches_the_basename_not_a_parent_uuid() -> None:
-    """Codex P2 r4 (#603): a UUID elsewhere in the open-file path (e.g. a
-    UUID-named custom CODEX_HOME) must not win over the id in the rollout filename."""
-    from fno.agents.mux_spawn import _codex_session_id_for_pid
-
-    path = (
-        "/home/x/.codex-1a2b3c4d-1111-2222-3333-444455556666/sessions/2026/07/25/"
-        f"rollout-2026-07-25T13-46-27-{SID_A}.jsonl"
-    )
-    psu = _FakePsutil(_FakeProc([_FakeOpenFile(path)]))
-    assert _codex_session_id_for_pid(4242, psutil_mod=psu) == SID_A
 
 
 def test_backfill_with_child_pid_never_consults_the_cwd_store(
@@ -272,6 +311,7 @@ def test_backfill_with_child_pid_never_consults_the_cwd_store(
     from fno.agents import discover
     from fno.agents.mux_spawn import _backfill_codex_session_id
 
+    rollout = _write_rollout_with_id(tmp_path, SID_A, SID_A)
     # A sibling the old discovery path would have picked up.
     _rollout(tmp_path, SID_B, "/w/proj", T_SPAWN)
     monkeypatch.setattr(
@@ -279,7 +319,7 @@ def test_backfill_with_child_pid_never_consults_the_cwd_store(
         "codex_session_ids_started_in",
         lambda *_a, **_k: pytest.fail("cwd store was consulted on the pid path"),
     )
-    psu = _FakePsutil(_FakeProc([_FakeOpenFile(ROLLOUT_A)]))
+    psu = _FakePsutil(_FakeProc([_FakeOpenFile(str(rollout))]))
     assert (
         _backfill_codex_session_id(
             Path("/w/proj"),

@@ -402,19 +402,21 @@ _CODEX_BACKFILL_ATTEMPTS = 5
 _CODEX_BACKFILL_DELAY_S = 0.75
 
 
-_CODEX_SESSION_ID_RE = re.compile(
-    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
-)
-
-
 def _codex_session_id_for_pid(pid: int, *, psutil_mod=None) -> Optional[str]:
-    """The codex TUI's session id, read race-free from its open rollout file.
+    """The codex TUI's session id, read race-free from an open rollout in the
+    pane's own process tree.
 
-    codex holds its rollout fd open for the session and the filename embeds the
-    id, so the pane's own child process identifies its session deterministically:
-    each pane's child holds a distinct rollout, so a sibling pane in the same cwd
-    can never be mis-identified (Codex P1, #603). Returns None when psutil is
-    unavailable, the process is gone, or no rollout is open yet.
+    codex holds its rollout fd open and the first-line session_meta carries the
+    id, so the pane's process identifies its session deterministically: each
+    pane's tree holds a distinct rollout, so a same-cwd sibling can never be
+    mis-identified (Codex P1, #603). The pane pid AND its descendants are
+    inspected: a wrapper launcher (the @openai/codex Node shim) holds the pane
+    pid while its native child opens the rollout (Codex P1, #603 r5). The id
+    comes from session_meta.payload.id, not the filename UUID, which is not
+    always the session id in older turn-id layouts (Codex P2, #603 r5).
+
+    Returns None when psutil is unavailable, the process is gone, no rollout is
+    open yet, or the tree holds more than one distinct session (ambiguous).
     """
     psu = psutil_mod
     if psu is None:
@@ -424,19 +426,35 @@ def _codex_session_id_for_pid(pid: int, *, psutil_mod=None) -> Optional[str]:
             return None
         psu = psutil
     try:
-        files = psu.Process(pid).open_files()
-    except Exception:  # noqa: BLE001 -- NoSuchProcess / AccessDenied / ZombiProcess
+        procs = [psu.Process(pid)]
+    except Exception:  # noqa: BLE001 -- NoSuchProcess / AccessDenied / ZombieProcess
         return None
-    for f in files:
-        # Match the rollout BASENAME only: the id lives in the filename, and a
-        # UUID elsewhere in the path (e.g. a UUID-named custom CODEX_HOME) would
-        # otherwise be matched first and stamp the wrong id (Codex P2, #603 r4).
-        base = os.path.basename(f.path)
-        if not base.startswith("rollout-") or not base.endswith(".jsonl"):
+    try:
+        procs += psu.Process(pid).children(recursive=True)
+    except Exception:  # noqa: BLE001 -- a child dying mid-walk yields a partial tree
+        pass
+    rollout_paths = []
+    for proc in procs:
+        try:
+            files = proc.open_files()
+        except Exception:  # noqa: BLE001 -- NoSuchProcess / AccessDenied per proc
             continue
-        m = _CODEX_SESSION_ID_RE.search(base)
-        if m:
-            return m.group(1)
+        for f in files:
+            base = os.path.basename(f.path)
+            if base.startswith("rollout-") and base.endswith(".jsonl"):
+                rollout_paths.append(f.path)
+    if not rollout_paths:
+        return None
+    from fno.agents.discover import _codex_session_meta
+
+    ids = set()
+    for path in rollout_paths:
+        payload = _codex_session_meta(Path(path))
+        sid = payload.get("id") if payload else None
+        if isinstance(sid, str) and sid:
+            ids.add(sid)
+    if len(ids) == 1:
+        return next(iter(ids))
     return None
 
 
