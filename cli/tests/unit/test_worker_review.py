@@ -607,6 +607,7 @@ class TestC1ScorerResolver:
         """
         import json as _json
 
+        import fno.llm  # noqa: F401 - capture the real runner before patching it
         from fno.worker.review import review
 
         # Override the autouse fixture's shutil.which stub so `claude` appears
