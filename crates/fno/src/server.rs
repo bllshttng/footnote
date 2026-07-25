@@ -14649,7 +14649,11 @@ mod tests {
         mk(&mut core, 2);
         core.persist_squad(2);
         let loaded = crate::squad_store::load();
-        assert_eq!(loaded.squads.len(), 2, "two originless squads stay distinct");
+        assert_eq!(
+            loaded.squads.len(),
+            2,
+            "two originless squads stay distinct"
+        );
         assert_ne!(loaded.squads[0].key, loaded.squads[1].key);
         assert!(
             loaded.squads.iter().all(|s| !s.key.is_empty()),

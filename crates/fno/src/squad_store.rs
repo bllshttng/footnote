@@ -1380,7 +1380,11 @@ mod tests {
         upsert("", "k1", &["/r".into()], &[m("aaaaaaaa")]).unwrap();
         upsert("", "k2", &["/r".into()], &[]).unwrap();
         assert_eq!(collapse_duplicate_unnamed().unwrap(), 1);
-        assert_eq!(collapse_duplicate_unnamed().unwrap(), 0, "second pass no-op");
+        assert_eq!(
+            collapse_duplicate_unnamed().unwrap(),
+            0,
+            "second pass no-op"
+        );
         let loaded = load();
         assert_eq!(loaded.squads.len(), 1);
         assert_eq!(loaded.squads[0].key, origin_key(&["/r".into()]));
