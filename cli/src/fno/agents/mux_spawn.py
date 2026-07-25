@@ -821,9 +821,6 @@ def dispatch_spawn_pane(
 
     session = resolve_mux_session(session)
     session_uuid = str(_uuid.uuid4()) if provider == "claude" else None
-    # Read before the pane exists so the opencode backfill can only ever match a
-    # session this spawn created, never one already open in the same cwd.
-    spawn_started_ms = int(time.time() * 1000)
     argv = build_pane_argv(
         provider,
         message,
@@ -892,6 +889,12 @@ def dispatch_spawn_pane(
             placement_args += ["squad", squad]
         if split:
             placement_args += ["split", split]
+        # Stamp the spawn clock immediately before the pane runs, not at function
+        # entry. A sibling pane starting a same-cwd session during the lock-wait
+        # or argv-build above would otherwise clear the since_ms lower bound and
+        # become the sole backfill candidate, stamping this row with the
+        # sibling's id. Sampling here keeps the bound as tight as the pane run.
+        spawn_started_ms = int(time.time() * 1000)
         proc = _run_mux(
             [
                 "mux",

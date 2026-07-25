@@ -147,6 +147,24 @@ def test_backfill_refuses_an_ambiguous_pair(tmp_path: Path) -> None:
     )
 
 
+def test_backfill_skips_a_same_cwd_sibling_started_earlier(tmp_path: Path) -> None:
+    """The race a too-early spawn timestamp loses.
+
+    A sibling pane that started its codex session before this spawn's pane run
+    must not be stamped onto this row. since_ms is sampled at the pane run, so
+    the earlier sibling is excluded and this spawn's own session is the unique
+    candidate (and the one stamped), not the sibling.
+    """
+    _rollout(tmp_path, SID_B, "/w/proj", T_EARLIER)
+    _rollout(tmp_path, SID_A, "/w/proj", T_SPAWN)
+    assert (
+        _backfill_codex_session_id(
+            Path("/w/proj"), _ms(T_SPAWN), sessions_dir=tmp_path, sleep=_no_sleep
+        )
+        == SID_A
+    )
+
+
 def test_backfill_miss_returns_none_rather_than_raising(tmp_path: Path) -> None:
     """AC2-FR: the pane is already running; a missing id costs resume, not the spawn."""
     assert (
