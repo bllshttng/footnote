@@ -172,8 +172,6 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/validate-plan.sh" "$PLAN_DIR"
 
 Running validation at execution time catches all four cases.
 
-**Quick-plan exception:** Single-file plans (no folder, no `00-INDEX.md`) cannot be validated by `validate-plan.sh` (which expects a folder structure). Skip validation for those and rely on the kill-criteria check instead.
-
 ## Step 3d: Domain Resolution (AUTO)
 
 Read domain from the lookup chain:

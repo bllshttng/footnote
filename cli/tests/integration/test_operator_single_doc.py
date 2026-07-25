@@ -8,7 +8,6 @@ Covers:
 """
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 from textwrap import dedent
@@ -25,8 +24,8 @@ sys.path.insert(0, str(_CLI_SRC))
 
 from orchestrator import (  # noqa: E402
     ExecutionStrategy,
-    Wave,
     load_plan_strategy,
+    parse_execution_strategy,
 )
 
 
@@ -109,6 +108,51 @@ def test_single_doc_multi_wave_plan(tmp_path: Path) -> None:
     assert strategy is not None
     assert len(strategy.waves) == 2
     assert strategy.waves[1].tasks == ["2.1", "2.2"]
+
+
+def test_public_orchestrator_parser_uses_canonical_strategy_loader(tmp_path: Path) -> None:
+    plan_file = tmp_path / "canonical.md"
+    plan_file.write_text(
+        dedent("""\
+            ---
+            status: ready
+            ---
+
+            # Canonical plan
+
+            ## Execution Strategy
+
+            Explanatory prose is allowed before the manifest.
+
+            ```yml
+            execution_mode: sequential
+            waves:
+              - wave: 1
+                mode: sequential
+                tasks: ["1.1"]
+              - wave: 2
+                mode: sequential
+                tasks: ["2.1"]
+            tasks:
+              - id: "1.1"
+                title: First
+                surface: [src/a.py]
+                verify: pytest tests/test_a.py
+                acceptance: [AC1]
+              - id: "2.1"
+                title: Second
+                surface: [src/b.py]
+                verify: pytest tests/test_b.py
+                acceptance: [AC2]
+            ```
+        """),
+        encoding="utf-8",
+    )
+
+    strategy = parse_execution_strategy(str(plan_file))
+
+    assert strategy is not None
+    assert [wave.tasks for wave in strategy.waves] == [["1.1"], ["2.1"]]
 
 
 # ---------------------------------------------------------------------------

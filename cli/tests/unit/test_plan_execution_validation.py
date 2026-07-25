@@ -96,6 +96,36 @@ def test_quick_plan_reports_missing_semantic_section(tmp_path: Path) -> None:
     assert fields == {"Changes", "Files to Modify", "Verification"}
 
 
+def test_quick_plan_rejects_canonical_template_placeholders(tmp_path: Path) -> None:
+    plan = _write_plan(
+        tmp_path,
+        """## Context
+
+Why this is needed.
+
+## Changes
+
+### 1. [Change name]
+
+[Describe the change.]
+
+## Files to Modify
+
+| File | Action |
+|---|---|
+| `path/to/file.ts` | modify |
+
+## Verification
+
+1. [Concrete runnable check]
+""",
+    )
+
+    fields = {v.field for v in validate_execution(load_plan(plan)).violations}
+
+    assert fields == {"Changes", "Files to Modify", "Verification"}
+
+
 def test_placeholder_task_fields_fail_with_exact_paths(tmp_path: Path) -> None:
     strategy = """execution_mode: sequential
 waves:
@@ -209,6 +239,107 @@ tasks:
     messages = "\n".join(v.message for v in validate_execution(load_plan(plan)).violations)
 
     assert "dependency cycle" in messages
+
+
+def test_wave_contract_matches_scheduler(tmp_path: Path) -> None:
+    strategy = VALID_STRATEGY.replace("wave: 1", "wave: nope").replace(
+        "mode: sequential\n    name: Build",
+        "mode: mixed\n    name: Build",
+    )
+    plan = _write_plan(tmp_path, _full_plan(strategy))
+
+    fields = {v.field for v in validate_execution(load_plan(plan)).violations}
+
+    assert "waves.nope.wave" in fields
+    assert "waves.nope.mode" in fields
+
+
+def test_forward_wave_dependency_fails(tmp_path: Path) -> None:
+    strategy = """execution_mode: sequential
+waves:
+  - wave: 1
+    mode: sequential
+    depends_on: 2
+    tasks: ["1.1"]
+  - wave: 2
+    mode: sequential
+    tasks: ["2.1"]
+tasks:
+  - id: "1.1"
+    title: First
+    surface: [src/a.py]
+    verify: fno test tests/test_a.py
+    acceptance: [AC1]
+  - id: "2.1"
+    title: Second
+    surface: [src/b.py]
+    verify: fno test tests/test_b.py
+    acceptance: [AC2]
+"""
+    plan = _write_plan(tmp_path, _full_plan(strategy))
+
+    messages = "\n".join(v.message for v in validate_execution(load_plan(plan)).violations)
+
+    assert "must reference an earlier declared wave" in messages
+
+
+def test_task_id_matches_durable_state_grammar(tmp_path: Path) -> None:
+    plan = _write_plan(
+        tmp_path,
+        _full_plan(VALID_STRATEGY.replace('"1.1"', '"setup-api"')),
+    )
+
+    fields = {v.field for v in validate_execution(load_plan(plan)).violations}
+
+    assert "tasks.setup-api.id" in fields
+
+
+def test_surface_items_are_paths_and_aliases_collide(tmp_path: Path) -> None:
+    malformed = VALID_STRATEGY.replace(
+        "surface: [cli/src/fno/plan/cli.py]",
+        "surface: [{path: cli/src/fno/plan/cli.py}]",
+    )
+    malformed_plan = _write_plan(tmp_path, _full_plan(malformed))
+
+    malformed_messages = "\n".join(
+        v.message for v in validate_execution(load_plan(malformed_plan)).violations
+    )
+
+    assert "surface item 1 must be a non-empty path string" in malformed_messages
+
+    alias_strategy = """execution_mode: parallel
+waves:
+  - wave: 1
+    mode: parallel
+    tasks: ["1.1", "1.2"]
+tasks:
+  - id: "1.1"
+    title: First
+    surface: [src/shared.py]
+    verify: fno test tests/test_a.py
+    acceptance: [AC1]
+  - id: "1.2"
+    title: Second
+    surface: [./src/shared.py]
+    verify: fno test tests/test_b.py
+    acceptance: [AC2]
+"""
+    alias_plan = _write_plan(tmp_path, _full_plan(alias_strategy))
+
+    alias_messages = "\n".join(
+        v.message for v in validate_execution(load_plan(alias_plan)).violations
+    )
+
+    assert "parallel tasks share surface 'src/shared.py'" in alias_messages
+
+
+def test_duplicate_yaml_keys_fail_loud(tmp_path: Path) -> None:
+    strategy = VALID_STRATEGY + "tasks: []\n"
+    plan = _write_plan(tmp_path, _full_plan(strategy))
+
+    messages = "\n".join(v.message for v in validate_execution(load_plan(plan)).violations)
+
+    assert "duplicate YAML key 'tasks'" in messages
 
 
 def test_execution_cli_text_and_json(tmp_path: Path) -> None:

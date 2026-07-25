@@ -14,6 +14,7 @@ model in autonomous mode).
 - Skipped when a plan already exists (input_type: plan)
 - Skipped for Small size (-S) in target (too lightweight for ceremony)
 - Skipped whenever the input is a supplied /think design artifact
+- Runs for raw prose and direct node-seeded inputs that have no completed design artifact
 
 ## The Protocol
 

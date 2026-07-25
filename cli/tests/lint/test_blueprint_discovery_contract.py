@@ -13,10 +13,10 @@ def test_supplied_design_docs_do_not_repeat_discovery() -> None:
     assert "that doc has a `## Discovery` or `## Assumptions` section" not in text
 
 
-def test_direct_node_seeded_path_keeps_discovery() -> None:
+def test_fresh_plan_paths_keep_discovery() -> None:
     text = SKILL.read_text(encoding="utf-8")
 
-    assert "Run discovery only for a direct node-seeded path" in text
+    assert "raw prose or a direct node-seeded path" in text
 
 
 def test_discovery_reference_names_think_as_owner() -> None:

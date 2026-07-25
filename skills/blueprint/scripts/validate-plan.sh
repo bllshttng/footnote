@@ -15,13 +15,23 @@ trap 'rm -rf "$TMPDIR_BASE_VAL"' EXIT
 # the explicit quick-plan kind. Their executable contract is validated by the
 # Python authority; the heading-oriented checks below remain only for legacy
 # plans that predate the single-doc shape.
+_is_quick_plan() {
+    awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" 2>/dev/null \
+        | grep -qE "^[[:space:]]*kind:[[:space:]]*['\"]?quick-plan['\"]?([[:space:]]*(#.*)?)?$"
+}
+
+_has_semantic_strategy() {
+    awk '
+        /^##[[:space:]]+Execution Strategy[[:space:]]*$/ { in_strategy=1; next }
+        in_strategy && /^##[[:space:]]+/ { exit }
+        in_strategy && /^tasks:[[:space:]]*/ { found=1; exit }
+        END { exit(found ? 0 : 1) }
+    ' "$PLAN_DIR" 2>/dev/null
+}
+
 SEMANTIC_SINGLE_DOC=0
-if [[ -f "$PLAN_DIR" ]]; then
-    if grep -q '^## Execution Strategy$' "$PLAN_DIR" 2>/dev/null \
-            || awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-                | grep -qE '^[[:space:]]*kind:[[:space:]]*quick-plan'; then
-        SEMANTIC_SINGLE_DOC=1
-    fi
+if [[ -f "$PLAN_DIR" ]] && { _is_quick_plan || _has_semantic_strategy; }; then
+    SEMANTIC_SINGLE_DOC=1
 fi
 
 error() { echo "  ERROR: $*"; ((ERRORS++)) || true; }
@@ -29,14 +39,28 @@ warn()  { echo "  WARN:  $*"; ((WARNINGS++)) || true; }
 ok()    { echo "  OK:    $*"; }
 
 _semantic_validate() {
-    local repo_root=""
+    local repo_root="" script_dir="" source_root="" candidate=""
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
-    if [[ -n "$repo_root" && -d "$repo_root/cli/src" ]]; then
-        PYTHONPATH="$repo_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
+    script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    for candidate in \
+        "$repo_root" \
+        "$script_dir/.." \
+        "$script_dir/../../.."; do
+        if [[ -n "$candidate" && -d "$candidate/cli/src/fno" ]]; then
+            source_root=$(cd "$candidate" && pwd)
+            break
+        fi
+    done
+    if [[ -n "$source_root" ]]; then
+        PYTHONPATH="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
             fno plan validate "$PLAN_DIR" --execution
-    else
-        fno plan validate "$PLAN_DIR" --execution
+        return
     fi
+    if ! fno plan validate --help 2>&1 | grep -q -- '--execution'; then
+        echo "installed fno predates semantic plan validation; run 'fno update' or 'fno doctor --fix'" >&2
+        return 2
+    fi
+    fno plan validate "$PLAN_DIR" --execution
 }
 
 echo "Validating plan: $PLAN_DIR"

@@ -105,3 +105,5 @@ bundles:
     files:
       - source: skills/target/references/cli-tool-mapping.md
         dest: references/cli-tool-mapping.md
+      - source: scripts/validate-plan.sh
+        dest: scripts/validate-plan.sh

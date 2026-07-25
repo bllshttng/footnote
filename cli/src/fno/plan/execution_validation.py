@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+import posixpath
+import re
 
 from fno.plan._doc import PlanDoc
 from fno.plan.brief import BriefParseError, parse_execution_strategy
@@ -20,7 +22,18 @@ class ExecutionValidationResult:
 
 
 _QUICK_REQUIRED_SECTIONS = ("Context", "Changes", "Files to Modify", "Verification")
-_VALID_MODES = {"sequential", "parallel", "mixed"}
+_EXECUTION_MODES = {"sequential", "parallel", "mixed"}
+_WAVE_MODES = {"sequential", "parallel"}
+_TASK_ID_RE = re.compile(r"^\d+(?:\.\d+)*[A-Za-z]*$")
+_QUICK_PLACEHOLDERS = (
+    "[change name]",
+    "[describe the change",
+    "[concrete runnable check]",
+    "[how to verify",
+    "path/to/",
+    "replace me",
+    "fill in",
+)
 
 
 def _violation(field: str, message: str) -> ExecutionViolation:
@@ -43,11 +56,73 @@ def _normalize_refs(value: object) -> list[str] | None:
     return [str(item).strip() for item in value]
 
 
+def _has_quick_placeholder(value: str) -> bool:
+    lowered = value.strip().lower()
+    return (
+        any(marker in lowered for marker in _QUICK_PLACEHOLDERS)
+        or lowered.strip("[] .:") in {"todo", "tbd"}
+    )
+
+
+def _quick_file_candidates(body: str) -> list[str]:
+    candidates = re.findall(r"`([^`\n]+)`", body)
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line or re.fullmatch(r"\|?[\s:|-]+\|?", line):
+            continue
+        if line.startswith("|"):
+            cells = [cell.strip().strip("`") for cell in line.strip("|").split("|")]
+            if cells and cells[0].lower() != "file":
+                candidates.append(cells[0])
+            continue
+        bullet = re.match(r"^[-*+]\s+([^\s]+)", line)
+        if bullet:
+            candidates.append(bullet.group(1).strip("`"))
+    return candidates
+
+
+def _quick_verification_candidates(body: str) -> list[str]:
+    candidates = re.findall(r"`([^`\n]+)`", body)
+    for raw_line in body.splitlines():
+        line = re.sub(r"^\s*(?:[-*+] |\d+[.)] )", "", raw_line).strip()
+        if line and not line.startswith(("```", "|")):
+            candidates.append(line)
+    return candidates
+
+
 def _validate_quick(doc: PlanDoc) -> ExecutionValidationResult:
     violations = []
     for section in _QUICK_REQUIRED_SECTIONS:
         if not (doc.get_section(section) or "").strip():
             violations.append(_violation(section, f"missing or empty ## {section} section"))
+    for section in ("Changes", "Files to Modify", "Verification"):
+        body = (doc.get_section(section) or "").strip()
+        lowered = body.lower()
+        if body and _has_quick_placeholder(lowered):
+            violations.append(
+                _violation(section, f"## {section} contains template placeholder content")
+            )
+
+    files_body = (doc.get_section("Files to Modify") or "").strip()
+    file_tokens = _quick_file_candidates(files_body)
+    if files_body and not any(
+        token.strip() and not _has_quick_placeholder(token)
+        for token in file_tokens
+    ):
+        violations.append(
+            _violation("Files to Modify", "must name at least one concrete file path")
+        )
+
+    verification = (doc.get_section("Verification") or "").strip()
+    commands = _quick_verification_candidates(verification)
+    if verification and not any(
+        command.strip()
+        and not _has_quick_placeholder(command)
+        for command in commands
+    ):
+        violations.append(
+            _violation("Verification", "must contain at least one concrete runnable command")
+        )
     return ExecutionValidationResult(violations)
 
 
@@ -70,11 +145,11 @@ def validate_execution(doc: PlanDoc) -> ExecutionValidationResult:
 
     violations: list[ExecutionViolation] = []
     mode = str(strategy.get("execution_mode", "")).strip()
-    if mode not in _VALID_MODES:
+    if mode not in _EXECUTION_MODES:
         violations.append(
             _violation(
                 "execution_mode",
-                f"expected one of {sorted(_VALID_MODES)}, got {mode!r}",
+                f"expected one of {sorted(_EXECUTION_MODES)}, got {mode!r}",
             )
         )
 
@@ -93,6 +168,13 @@ def validate_execution(doc: PlanDoc) -> ExecutionValidationResult:
         label = task_id or str(index)
         if not task_id:
             violations.append(_violation(f"tasks.{label}.id", "task id is required"))
+        elif not _TASK_ID_RE.fullmatch(task_id):
+            violations.append(
+                _violation(
+                    f"tasks.{label}.id",
+                    "task id must match the durable state grammar (for example 1.1 or 02b)",
+                )
+            )
         else:
             tasks_by_id.setdefault(task_id, task)
 
@@ -125,29 +207,44 @@ def validate_execution(doc: PlanDoc) -> ExecutionValidationResult:
         violations.append(_violation("waves", "Execution Strategy must declare at least one wave"))
         return ExecutionValidationResult(violations)
 
-    wave_ids = [str(wave.get("wave", "")).strip() for wave in waves if isinstance(wave, dict)]
+    wave_ids = [
+        str(wave.get("wave"))
+        for wave in waves
+        if isinstance(wave, dict)
+        and isinstance(wave.get("wave"), int)
+        and not isinstance(wave.get("wave"), bool)
+        and wave["wave"] > 0
+    ]
     duplicate_wave_ids = sorted(wave_id for wave_id, count in Counter(wave_ids).items() if wave_id and count > 1)
     for wave_id in duplicate_wave_ids:
         violations.append(_violation(f"waves.{wave_id}.wave", f"duplicate wave id '{wave_id}'"))
 
     declared_wave_ids = {wave_id for wave_id in wave_ids if wave_id}
+    wave_positions = {wave_id: index for index, wave_id in enumerate(wave_ids)}
     referenced_tasks: list[str] = []
     dependency_graph: dict[str, set[str]] = {wave_id: set() for wave_id in declared_wave_ids}
     for index, wave in enumerate(waves, start=1):
         if not isinstance(wave, dict):
             violations.append(_violation(f"waves.{index}", "wave must be a mapping"))
             continue
-        wave_id = str(wave.get("wave", "")).strip()
+        wave_value = wave.get("wave")
+        wave_id = str(wave_value).strip() if wave_value is not None else ""
         label = wave_id or str(index)
-        if not wave_id:
-            violations.append(_violation(f"waves.{label}.wave", "wave id is required"))
+        if (
+            not isinstance(wave_value, int)
+            or isinstance(wave_value, bool)
+            or wave_value <= 0
+        ):
+            violations.append(
+                _violation(f"waves.{label}.wave", "wave id must be a positive integer")
+            )
 
         wave_mode = str(wave.get("mode", "")).strip()
-        if wave_mode not in _VALID_MODES:
+        if wave_mode not in _WAVE_MODES:
             violations.append(
                 _violation(
                     f"waves.{label}.mode",
-                    f"expected one of {sorted(_VALID_MODES)}, got {wave_mode!r}",
+                    f"expected one of {sorted(_WAVE_MODES)}, got {wave_mode!r}",
                 )
             )
 
@@ -177,8 +274,15 @@ def validate_execution(doc: PlanDoc) -> ExecutionValidationResult:
                             f"wave references unknown dependency '{dependency_id}'",
                         )
                     )
-                elif wave_id:
+                elif wave_id in wave_positions:
                     dependency_graph[wave_id].add(dependency_id)
+                    if wave_positions[dependency_id] >= wave_positions[wave_id]:
+                        violations.append(
+                            _violation(
+                                f"waves.{label}.depends_on",
+                                f"dependency '{dependency_id}' must reference an earlier declared wave",
+                            )
+                        )
 
         if wave_mode == "parallel":
             owners: dict[str, list[str]] = defaultdict(list)
@@ -187,7 +291,7 @@ def validate_execution(doc: PlanDoc) -> ExecutionValidationResult:
                 if not task:
                     continue
                 for path in task.get("surface", []):
-                    normalized = str(path).strip()
+                    normalized = posixpath.normpath(str(path).strip())
                     if normalized:
                         owners[normalized].append(ref)
             for path, owner_ids in sorted(owners.items()):

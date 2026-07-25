@@ -293,7 +293,7 @@ DOMAIN_MAP: Dict[str, str] = {
 # Legacy alias: agent routing maps to target for all domains
 # Kept for backward compatibility with --agent CLI flag
 AGENT_MAP: Dict[str, str] = {
-    keyword: f"archer"
+    keyword: "archer"
     for domain, keywords in _DOMAIN_KEYWORDS.items()
     for keyword in keywords
 }
@@ -457,93 +457,8 @@ def resolve_wave_execution_mode(
 
 
 def parse_execution_strategy(index_path: str) -> Optional[ExecutionStrategy]:
-    """Parse execution strategy YAML from a plan doc without PyYAML."""
-    path = Path(index_path)
-    if not path.exists():
-        print(f"Warning: Index file not found: {index_path}", file=sys.stderr)
-        return None
-
-    content = path.read_text()
-
-    # Find YAML block after "## Execution Strategy"
-    match = re.search(
-        r'## Execution Strategy\s*```yaml\s*(.*?)\s*```',
-        content,
-        re.DOTALL
-    )
-
-    if not match:
-        print(f"Warning: No execution strategy section found in {index_path}", file=sys.stderr)
-        return None
-
-    strategy_text = match.group(1)
-    execution_mode = "sequential"
-    scope = "single-project"
-    waves: List[Wave] = []
-    current_wave: Optional[dict] = None
-    in_projects = False
-    current_project_key: Optional[str] = None
-    project_tasks: Dict[str, List[str]] = {}
-
-    for raw_line in strategy_text.splitlines():
-        line = raw_line.rstrip()
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if stripped.startswith("execution_mode:"):
-            execution_mode = stripped.split(":", 1)[1].strip()
-            continue
-        if stripped.startswith("scope:"):
-            scope = stripped.split(":", 1)[1].strip()
-            continue
-        if stripped == "projects:":
-            in_projects = True
-            current_project_key = None
-            continue
-        if in_projects and re.match(r"^[a-zA-Z_]", stripped):
-            in_projects = False
-            current_project_key = None
-        if re.match(r"^- wave:\s*\d+", stripped):
-            if current_wave:
-                waves.append(Wave(**current_wave))
-            current_wave = {
-                "number": int(stripped.split(":", 1)[1].strip()),
-                "mode": "sequential",
-                "tasks": [],
-                "reason": "",
-            }
-            continue
-        if in_projects and re.match(r"^[a-zA-Z0-9_-]+:\s*$", stripped):
-            current_project_key = stripped[:-1]
-            project_tasks[current_project_key] = []
-            continue
-        if in_projects and current_project_key and stripped.startswith("tasks:"):
-            project_tasks[current_project_key] = _parse_scalar(stripped.split(":", 1)[1].strip())
-            continue
-        if current_wave is None:
-            continue
-        if stripped.startswith("mode:"):
-            current_wave["mode"] = stripped.split(":", 1)[1].strip()
-            continue
-        if stripped.startswith("tasks:"):
-            current_wave["tasks"] = _parse_scalar(stripped.split(":", 1)[1].strip())
-            continue
-        if stripped.startswith("reason:"):
-            current_wave["reason"] = stripped.split(":", 1)[1].strip().strip('"')
-
-    if current_wave:
-        waves.append(Wave(**current_wave))
-
-    if not waves:
-        print(f"Error: No valid waves found in {index_path}", file=sys.stderr)
-        return None
-
-    return ExecutionStrategy(
-        execution_mode=execution_mode,
-        waves=waves,
-        scope=scope,
-        project_tasks=project_tasks,
-    )
+    """Compatibility entrypoint backed by the canonical plan loader."""
+    return load_plan_strategy(index_path)
 
 
 def get_completed_tasks_from_state(state_path: str) -> List[str]:
@@ -1314,7 +1229,7 @@ if __name__ == "__main__":
 
     # Parse index file for all other commands
     index_path = sys.argv[1]
-    strategy = parse_execution_strategy(index_path)
+    strategy = load_plan_strategy(index_path)
     provider = detect_provider()
     if "--provider" in sys.argv:
         provider_idx = sys.argv.index("--provider")

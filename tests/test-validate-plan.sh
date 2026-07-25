@@ -349,6 +349,88 @@ else
     fail "AC7b: Placeholder verification should fail loud: $OUTPUT"
 fi
 
+# --- AC8: Semantic shape discrimination and portable source loading ---
+echo ""
+echo "--- AC8: Semantic Shape and Portable CLI ---"
+
+PLAN_TRAILING="$TMPDIR_BASE/semantic-trailing.md"
+sed 's/^## Execution Strategy$/## Execution Strategy   /' \
+    "$PLAN_PLACEHOLDER" > "$PLAN_TRAILING"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_TRAILING" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "tasks.1.1.verify"; then
+    pass "AC8a: Trailing heading whitespace stays on semantic path"
+else
+    fail "AC8a: Trailing heading whitespace bypassed semantics: $OUTPUT"
+fi
+
+PLAN_QUOTED_QUICK="$TMPDIR_BASE/quoted-quick.md"
+cat > "$PLAN_QUOTED_QUICK" <<'HEREDOC'
+---
+kind: "quick-plan"
+status: ready
+created: 2026-07-25
+project: fno
+---
+
+# Quick
+
+## Context
+
+Only context.
+HEREDOC
+OUTPUT=$(bash "$VALIDATE" "$PLAN_QUOTED_QUICK" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "Changes"; then
+    pass "AC8b: Quoted quick-plan kind stays on semantic path"
+else
+    fail "AC8b: Quoted quick-plan kind bypassed semantics: $OUTPUT"
+fi
+
+PLAN_LEGACY="$TMPDIR_BASE/legacy-strategy.md"
+cat > "$PLAN_LEGACY" <<'HEREDOC'
+---
+status: ready
+created: 2026-07-25
+project: fno
+---
+
+# Legacy plan
+
+## Execution Strategy
+
+```yaml
+execution_mode: sequential
+waves:
+  - wave: 1
+    mode: sequential
+    tasks: ["1.1"]
+```
+
+### Task 1.1: Legacy task
+
+**Files:**
+- Modify: `src/a.py`
+
+**Steps:**
+1. Make the change.
+
+**Acceptance Criteria:**
+- The change works.
+HEREDOC
+OUTPUT=$(bash "$VALIDATE" "$PLAN_LEGACY" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "### Task 1.1"; then
+    pass "AC8c: Legacy wave manifest retains compatibility validation"
+else
+    fail "AC8c: Legacy wave manifest was misclassified: $OUTPUT"
+fi
+
+OUTPUT=$(cd "$TMPDIR_BASE" && bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1) \
+    && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "semantic execution contract valid"; then
+    pass "AC8d: Validator resolves worktree source outside a Git cwd"
+else
+    fail "AC8d: Portable invocation used a stale installed CLI: $OUTPUT"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Test Results ==="
