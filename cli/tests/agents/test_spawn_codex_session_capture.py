@@ -22,6 +22,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from fno.agents.discover import codex_session_ids_started_in
 from fno.agents.mux_spawn import _backfill_codex_session_id
 
@@ -194,4 +196,107 @@ def test_backfill_miss_returns_none_rather_than_raising(tmp_path: Path) -> None:
             Path("/w/proj"), 1, sessions_dir=tmp_path, sleep=_no_sleep
         )
         is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# Race-free id via the child pid's open rollout (Codex P1, #603)
+# ---------------------------------------------------------------------------
+
+
+class _FakeOpenFile:
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+
+class _FakeProc:
+    def __init__(self, open_files: list) -> None:
+        self._files = open_files
+
+    def open_files(self) -> list:
+        return self._files
+
+
+class _FakePsutil:
+    class NoSuchProcess(Exception):
+        pass
+
+    def __init__(self, proc) -> None:
+        self._proc = proc
+
+    def Process(self, pid: int):  # noqa: N802 (mirror psutil API)
+        return self._proc
+
+
+ROLLOUT_A = (
+    "/Users/x/.codex/sessions/2026/07/24/"
+    "rollout-2026-07-24T18-00-00-" + SID_A + ".jsonl"
+)
+
+
+def test_codex_session_id_for_pid_reads_the_open_rollout_filename() -> None:
+    from fno.agents.mux_spawn import _codex_session_id_for_pid
+
+    psu = _FakePsutil(
+        _FakeProc([_FakeOpenFile(ROLLOUT_A), _FakeOpenFile("/unrelated.log")])
+    )
+    assert _codex_session_id_for_pid(4242, psutil_mod=psu) == SID_A
+
+
+def test_codex_session_id_for_pid_returns_none_with_no_rollout_open() -> None:
+    from fno.agents.mux_spawn import _codex_session_id_for_pid
+
+    psu = _FakePsutil(_FakeProc([_FakeOpenFile("/unrelated.log")]))
+    assert _codex_session_id_for_pid(4242, psutil_mod=psu) is None
+
+
+def test_backfill_with_child_pid_never_consults_the_cwd_store(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P1 (#603): with the child pid, the id comes race-free from the
+    child's open rollout. The cwd/timestamp store is never read, so a sibling
+    rollout present in the same cwd cannot be stamped onto this row."""
+    from fno.agents import discover
+    from fno.agents.mux_spawn import _backfill_codex_session_id
+
+    # A sibling the old discovery path would have picked up.
+    _rollout(tmp_path, SID_B, "/w/proj", T_SPAWN)
+    monkeypatch.setattr(
+        discover,
+        "codex_session_ids_started_in",
+        lambda *_a, **_k: pytest.fail("cwd store was consulted on the pid path"),
+    )
+    psu = _FakePsutil(_FakeProc([_FakeOpenFile(ROLLOUT_A)]))
+    assert (
+        _backfill_codex_session_id(
+            Path("/w/proj"),
+            _ms(T_SPAWN),
+            sessions_dir=tmp_path,
+            child_pid=4242,
+            sleep=_no_sleep,
+            psutil_mod=psu,
+        )
+        == SID_A
+    )
+
+
+# ---------------------------------------------------------------------------
+# mtime-bounded rollout scan (Codex P2 perf, #603)
+# ---------------------------------------------------------------------------
+
+
+def test_rollout_scan_skips_files_older_than_since(tmp_path: Path) -> None:
+    """A rollout whose last write precedes since_ms is pruned before parsing.
+    codex appends over the session so mtime >= start always; a file older than
+    since_ms therefore cannot be a session started at/after it (Codex P2, #603)."""
+    import os as _os
+
+    path = _rollout(tmp_path, SID_A, "/w/proj", T_SPAWN)
+    old_mt = _ms(T_EARLIER) / 1000.0
+    _os.utime(path, (old_mt, old_mt))
+    assert (
+        codex_session_ids_started_in(
+            Path("/w/proj"), _ms(T_SPAWN), sessions_dir=tmp_path
+        )
+        == []
     )

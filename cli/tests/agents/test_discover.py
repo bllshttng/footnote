@@ -1419,6 +1419,41 @@ def test_ac1_err_name_miss_suggests_registered_names(tmp_path, monkeypatch):
     assert "codex-x2af5" in suggestions
 
 
+def test_us2_registered_name_matching_retired_shape_resolves_for_peek(
+    tmp_path, monkeypatch
+):
+    """Codex P2 (#603): a registered name that matches the retired
+    <harness>-<short8> syntax (codex-deadbeef, which validate_spawn_name
+    permits) must resolve via peek too. Exact names take precedence over the
+    legacy-syntax did-you-mean rejection, or truth's fast-path and peek disagree."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    sid = "019f48e1-dead-beef-0000-000000000001"
+    write_registry(
+        [
+            AgentEntry(
+                name="codex-deadbeef",
+                harness="codex",
+                harness_session_id=sid,
+                cwd="/x",
+                log_path="/tmp/codex.log",
+            )
+        ],
+        path=registry,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+
+    match, _ = discover.resolve_or_suggest(
+        "codex-deadbeef", registry_path=registry, **_empty_seams(tmp_path)
+    )
+
+    assert match is not None
+    assert match.name == "codex-deadbeef"
+    assert match.session_id == sid
+
+
 def test_ac1_edge_source_overlap_dedups(tmp_path, monkeypatch):
     """AC1-EDGE: one session present in registry AND roster yields exactly one row."""
     use_tmpdir(monkeypatch, tmp_path)

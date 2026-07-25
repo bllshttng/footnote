@@ -402,35 +402,82 @@ _CODEX_BACKFILL_ATTEMPTS = 5
 _CODEX_BACKFILL_DELAY_S = 0.75
 
 
+_CODEX_SESSION_ID_RE = re.compile(
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+)
+
+
+def _codex_session_id_for_pid(pid: int, *, psutil_mod=None) -> Optional[str]:
+    """The codex TUI's session id, read race-free from its open rollout file.
+
+    codex holds its rollout fd open for the session and the filename embeds the
+    id, so the pane's own child process identifies its session deterministically:
+    each pane's child holds a distinct rollout, so a sibling pane in the same cwd
+    can never be mis-identified (Codex P1, #603). Returns None when psutil is
+    unavailable, the process is gone, or no rollout is open yet.
+    """
+    psu = psutil_mod
+    if psu is None:
+        try:
+            import psutil
+        except ImportError:
+            return None
+        psu = psutil
+    try:
+        files = psu.Process(pid).open_files()
+    except Exception:  # noqa: BLE001 -- NoSuchProcess / AccessDenied / ZombiProcess
+        return None
+    for f in files:
+        if "rollout-" not in f.path or ".jsonl" not in f.path:
+            continue
+        m = _CODEX_SESSION_ID_RE.search(f.path)
+        if m:
+            return m.group(1)
+    return None
+
+
 def _backfill_codex_session_id(
     cwd: Path,
     since_ms: int,
     *,
     sessions_dir: Optional[Path] = None,
+    child_pid: Optional[int] = None,
     sleep: Optional[Callable] = None,
+    psutil_mod=None,
 ) -> Optional[str]:
     """Best-effort capture of a freshly spawned codex pane's session id.
 
-    Codex has no ``--session`` to pre-mint an id into, so like opencode the id is
-    discovered afterwards -- here from the rollout store, matched on exact pane
-    cwd AND a session start at/after this spawn. Without it the registry row
-    keeps ``harness_session_id=None``, and a sid-less row is dropped by
-    ``_discover_from_registry`` before name matching, which is what makes a live
-    codex worker unreachable by truth, peek, and the mail name lane at once.
+    With the pane's child pid, the id is read race-free from the child's open
+    rollout (see :func:`_codex_session_id_for_pid`): codex mints no ``--session``
+    id, but its process holds the rollout open and the filename embeds the id, so
+    each pane resolves its own session even when two spawn in one cwd at once.
+    Without a child pid (direct/test callers only) this falls back to cwd +
+    started-after-spawn discovery, stability-gated -- that path cannot fully
+    separate a same-cwd sibling and is not used by production spawns.
 
-    Returns the id only on an unambiguous match. Zero candidates (or two, from a
-    same-cwd race) return ``None`` so the row stays live-only rather than
-    carrying a session id that may belong to another pane.
+    A miss leaves the row id-less so ``_discover_from_registry`` drops it before
+    name matching, which is what makes a live codex worker unreachable by truth,
+    peek, and the mail name lane -- a miss costs addressability, never the spawn.
     """
     from fno.agents.discover import codex_session_ids_started_in
 
     naptime = sleep or time.sleep
-    # Do not stamp on a single sighting. Two codex panes starting in this cwd
-    # after since_ms can surface rollouts out of order, so the first probe may
-    # see exactly one candidate -- a sibling -- and stamp the wrong id. Accept
-    # only once the same single id repeats on the next probe, so a transiently
-    # unique sibling either grows to an ambiguous pair (-> None below) or is
-    # displaced by the real session before acceptance (Codex P2, #603).
+    if child_pid is not None:
+        # Race-free primary path: the child's open rollout identifies its own
+        # session. codex opens the rollout shortly after start, so retry until it
+        # appears; never fall through to cwd/time guessing when we have a pid.
+        for attempt in range(_CODEX_BACKFILL_ATTEMPTS):
+            if attempt:
+                naptime(_CODEX_BACKFILL_DELAY_S)
+            sid = _codex_session_id_for_pid(child_pid, psutil_mod=psutil_mod)
+            if sid is not None:
+                return sid
+        return None
+
+    # No child pid: direct/test caller only. Two same-cwd panes can surface
+    # rollouts out of order, so accept only once the same single id repeats on
+    # the next probe -- a transiently-unique sibling then grows to an ambiguous
+    # pair (-> None below) or is displaced first (Codex P1 residual, #603).
     prev: Optional[str] = None
     for attempt in range(_CODEX_BACKFILL_ATTEMPTS):
         if attempt:
@@ -966,9 +1013,18 @@ def dispatch_spawn_pane(
                     reason="no unique opencode session for this cwd after spawn",
                 )
         elif provider == "codex":
-            session_uuid = _backfill_codex_session_id(
-                cwd, spawn_started_ms, sessions_dir=codex_sessions_dir
-            )
+            # child_pid reads the id race-free from the pane's open rollout. A
+            # pid-less row (_lookup_child_pid best-effort miss) is left id-less:
+            # the id is what routes the row into reconcile's mux branch, and a
+            # pid-less row there would be kept immortal (pid_live maps None to
+            # true), so never stamp one without a pid to correlate (Codex P1/P2, #603).
+            if child_pid is not None:
+                session_uuid = _backfill_codex_session_id(
+                    cwd,
+                    spawn_started_ms,
+                    sessions_dir=codex_sessions_dir,
+                    child_pid=child_pid,
+                )
             if session_uuid is None:
                 from fno.agents import events as _events
 

@@ -239,6 +239,16 @@ def codex_session_ids_started_in(
     except OSError:
         return ids
     for path in paths:
+        # Prune by mtime before opening: a rollout's last write is always >= its
+        # session start (codex appends over the session), so a file older than
+        # since_ms cannot be a session started at/after it. Bounds the per-spawn
+        # cost on hosts with a long codex history instead of parsing every
+        # historical rollout on each probe (Codex P2, #603).
+        try:
+            if int(path.stat().st_mtime * 1000) < since_ms:
+                continue
+        except OSError:
+            pass
         payload = _codex_session_meta(path)
         if payload is None:
             continue
@@ -1247,28 +1257,29 @@ def resolve_or_suggest(
     )
     if require_alive:
         sessions = [s for s in sessions if s.is_alive]
+    # Exact-match the address (alias, short-id, OR registered name) BEFORE the
+    # retired-syntax rejection: a registered name that happens to match the
+    # retired <harness>-<short8> shape (e.g. codex-deadbeef, which
+    # validate_spawn_name permits) must still resolve here, or truth's fast-path
+    # and peek disagree (Codex P2, #603). The retired form is only reinterpreted
+    # as a did-you-mean suggestion when it is NOT a live registered name.
+    exact = [
+        s
+        for s in sessions
+        if handle
+        and (
+            s.handle == handle
+            or s.session_id == handle
+            or s.short_id == handle
+            or canonical_handle(s.session_id) == handle
+            or s.name == handle
+        )
+    ]
+    if len(exact) == 1:
+        return exact[0], []
+    if len(exact) > 1:
+        return None, sorted(s.session_id for s in exact)
     retired = bool(handle and LEGACY_HANDLE_RE.fullmatch(handle))
-    # An address is the friendly <project>-<short8> alias, the bare hex short-id,
-    # or a stored row name. The retired <harness>-<short8> form is NOT accepted:
-    # nothing generates it any more, so a caller still passing one is a bug, and
-    # translating it silently would hide the bug forever.
-    if not retired:
-        exact = [
-            s
-            for s in sessions
-            if handle
-            and (
-                s.handle == handle
-                or s.session_id == handle
-                or s.short_id == handle
-                or canonical_handle(s.session_id) == handle
-                or s.name == handle
-            )
-        ]
-        if len(exact) == 1:
-            return exact[0], []
-        if len(exact) > 1:
-            return None, sorted(s.session_id for s in exact)
     import difflib
 
     candidates: list[str] = []
