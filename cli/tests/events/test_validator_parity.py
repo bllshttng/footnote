@@ -184,6 +184,48 @@ def test_verification_receipt_utf8_byte_cap_has_python_bash_parity() -> None:
     assert bash_ok is False
 
 
+def test_event_data_cap_counts_compact_utf8_bytes_in_python_and_bash() -> None:
+    event = next(
+        json.loads(json.dumps(rec["event"]))
+        for rec in _RECORDS
+        if rec["reason"] == "verification_receipt full passed exact sha"
+    )
+    event["data"]["detail"] = "é" * 11_000
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is True
+    assert bash_ok is True
+
+
+@pytest.mark.parametrize("field", ["ts", "started_at", "finished_at"])
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2023-02-29T00:00:00Z",
+        "2016-12-31T23:59:60Z",
+        "0000-01-01T00:00:00Z",
+    ],
+)
+def test_verification_receipt_calendar_timestamp_parity(
+    field: str, timestamp: str
+) -> None:
+    event = next(
+        json.loads(json.dumps(rec["event"]))
+        for rec in _RECORDS
+        if rec["reason"] == "verification_receipt full passed exact sha"
+    )
+    target = event if field == "ts" else event["data"]
+    target[field] = timestamp
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is False
+    assert bash_ok is False
+
+
 @pytest.mark.parametrize(
     ("generation", "expected"),
     [

@@ -86,8 +86,21 @@ if [[ -n "$DIRTY" ]]; then
 fi
 CANDIDATE_SHA="$(git -C "$INVOKING_ROOT" rev-parse HEAD)"
 CANDIDATE_SHORT="$(git -C "$INVOKING_ROOT" rev-parse --short HEAD)"
-RECEIPT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 1970-01-01T00:00:00Z)"
+if ! RECEIPT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
+   || [[ -z "$RECEIPT_STARTED_AT" ]]; then
+    echo "preflight: receipt start timestamp unavailable" >&2
+    exit 1
+fi
+if ! RECEIPT_HOST="$(hostname 2>/dev/null)" || [[ -z "$RECEIPT_HOST" ]]; then
+    echo "preflight: receipt host identity unavailable" >&2
+    exit 1
+fi
+if ! RECEIPT_PLATFORM="$(uname -sm 2>/dev/null)" || [[ -z "$RECEIPT_PLATFORM" ]]; then
+    echo "preflight: receipt platform identity unavailable" >&2
+    exit 1
+fi
 EVENTS_PATH="$INVOKING_ROOT/.fno/events.jsonl"
+_this_host() { printf '%s\n' "$RECEIPT_HOST"; }
 
 _json_array() {
     jq -cn --args '$ARGS.positional' -- "$@"
@@ -124,13 +137,13 @@ emit_verification_receipt() {
     generation="$(next_receipt_generation)" || return 1
     finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || return 1
     environment_json="$(jq -nc \
-        --arg host "$(_this_host)" \
-        --arg platform "$(uname -sm 2>/dev/null || echo unknown)" \
+        --arg host "$RECEIPT_HOST" \
+        --arg platform "$RECEIPT_PLATFORM" \
         --arg runner "scripts/ci/preflight.sh" \
         '{host:$host,platform:$platform,runner:$runner}')" || return 1
     producer_json="$(jq -nc \
         --arg kind preflight \
-        --arg id "$(_this_host):$$" \
+        --arg id "$RECEIPT_HOST:$$" \
         '{kind:$kind,id:$id}')" || return 1
     data="$(jq -nc \
         --arg candidate_sha "$CANDIDATE_SHA" \
@@ -188,7 +201,6 @@ next_receipt_generation() {
 # the whole point: a second caller blocked behind a still-running preflight is
 # the 'exit 3' failure this exists to remove.
 ATTEST="$COMMON_DIR/.preflight-attestation"   # sibling of .preflight.lock.d
-_this_host() { hostname 2>/dev/null || echo unknown; }
 # Pull one space-separated `key=value` field out of the attestation line. Empty
 # on no match, which callers treat as "not a hit" (corrupt file -> full run).
 _attest_field() { printf '%s\n' "$1" | sed -n "s/.*$2=\([^ ]*\).*/\1/p"; }
@@ -624,35 +636,46 @@ REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
 # writes the real ~/.fno/squads.json would otherwise stay green; this is the
 # class-level assertion (PR #589's assert_writable closed the build-tree binary
 # arm; this catches every other path at once). Read-only, stdlib, degrade-to-skip
-# on absent/unreadable (AC-FR2); a concurrent real mux session is a valid writer,
-# so the message names that caveat rather than asserting exclusive ownership.
-_real_squads_mtime() {
+# only when absent; an unavailable stat fails closed. A concurrent real mux
+# session is a valid writer, so the message names that caveat rather than
+# asserting exclusive ownership.
+_real_squads_state() {
     python3 -c "
 import os
 p = os.path.expanduser('~/.fno/squads.json')
 try:
-    print(int(os.path.getmtime(p)))
-except Exception:
-    print('')
+    print(f'present:{os.stat(p).st_mtime_ns}')
+except FileNotFoundError:
+    print('absent')
+except OSError:
+    print('unavailable')
 " 2>/dev/null
 }
-_squads_before=$(_real_squads_mtime)
+_squads_before="$(_real_squads_state || printf '%s' unavailable)"
+case "$_squads_before" in
+    absent|unavailable|present:*) ;;
+    *) _squads_before=unavailable ;;
+esac
 run_rust_leg "cargo test --all-targets (fno)" "crates/fno" "cargo test --all-targets"
 REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-_squads_after=$(_real_squads_mtime)
+_squads_after="$(_real_squads_state || printf '%s' unavailable)"
+case "$_squads_after" in
+    absent|unavailable|present:*) ;;
+    *) _squads_after=unavailable ;;
+esac
 SQUADS_INCLUDED=1
-if [[ -z "$_squads_before" || -z "$_squads_after" ]]; then
-    if [[ -z "$_squads_before" && -z "$_squads_after" ]]; then
-        SQUADS_INCLUDED=0
-        record_leg "squads.json leak guard (fno)" "not configured (no real store)" 0
-        SQUADS_SCOPE="$(_json_array squads-leak-guard:fno)"
-        emit_verification_receipt advisory not_configured "$SQUADS_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "no real squads store" \
-            || echo "preflight: WARN could not append squads not-configured receipt" >&2
-    else
-        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-        FAIL=1
-        record_leg "squads.json leak guard (fno)" fail 0
-    fi
+RECEIPT_UNAVAILABLE=0
+if [[ "$_squads_before" == "absent" && "$_squads_after" == "absent" ]]; then
+    SQUADS_INCLUDED=0
+    record_leg "squads.json leak guard (fno)" "not configured (no real store)" 0
+    SQUADS_SCOPE="$(_json_array squads-leak-guard:fno)"
+    emit_verification_receipt advisory not_configured "$SQUADS_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "no real squads store" \
+        || echo "preflight: WARN could not append squads not-configured receipt" >&2
+elif [[ "$_squads_before" == "unavailable" || "$_squads_after" == "unavailable" ]]; then
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+    RECEIPT_UNAVAILABLE=1
+    FAIL=1
+    record_leg "squads.json leak guard (fno)" unavailable 0
 elif [[ "$_squads_after" != "$_squads_before" ]]; then
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
     echo "preflight: FAIL real ~/.fno/squads.json changed during crates/fno cargo test" \
@@ -669,7 +692,7 @@ fi
 # advisory: never flips the exit code
 echo ""
 echo "preflight: === cargo audit (ADVISORY) ==="
-ADVISORY_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 1970-01-01T00:00:00Z)"
+ADVISORY_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
 ADVISORY_EXECUTED=0
 if run_hermetic bash -c "command -v cargo-audit >/dev/null 2>&1"; then
     a0="$SECONDS"
@@ -693,7 +716,9 @@ case "$ADVISORY_STATUS" in
     *) ADVISORY_RESULT=unavailable ;;
 esac
 ADVISORY_SCOPE="$(_json_array "cargo-audit:fno-agents" "cargo-audit:fno")"
-if ! emit_verification_receipt advisory "$ADVISORY_RESULT" "$ADVISORY_SCOPE" 2 "$ADVISORY_EXECUTED" "$ADVISORY_STARTED_AT" "$ADVISORY_STATUS"; then
+if [[ -z "$ADVISORY_STARTED_AT" ]]; then
+    echo "preflight: WARN advisory receipt timestamp unavailable" >&2
+elif ! emit_verification_receipt advisory "$ADVISORY_RESULT" "$ADVISORY_SCOPE" 2 "$ADVISORY_EXECUTED" "$ADVISORY_STARTED_AT" "$ADVISORY_STATUS"; then
     echo "preflight: WARN could not append advisory verification receipt" >&2
 fi
 
@@ -719,6 +744,7 @@ RECEIPT_MODE=full
 [[ $RETRY_FAILED -eq 1 ]] && RECEIPT_MODE=subset
 RECEIPT_RESULT=passed
 [[ $FAIL -ne 0 ]] && RECEIPT_RESULT=failed
+[[ $RECEIPT_UNAVAILABLE -eq 1 ]] && RECEIPT_RESULT=unavailable
 if ! emit_verification_receipt "$RECEIPT_MODE" "$RECEIPT_RESULT" "$REQUIRED_SCOPE" "$REQUIRED_COUNT" "$REQUIRED_EXECUTED" "$RECEIPT_STARTED_AT" "preflight suite verdict"; then
     echo "preflight: verification receipt append failed; verdict is unavailable" >&2
     FAIL=1

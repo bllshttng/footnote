@@ -423,6 +423,10 @@ def test_fresh_install_without_ledger_starts_generation_one(
         '{"wrong": []}\n',
         '"not-a-ledger"\n',
         '[null]\n',
+        '{"entries": [{"root_path": false}]}\n',
+        '{"entries": [{"root_path": 1}]}\n',
+        '{"entries": [{"canonical_root_path": []}]}\n',
+        '{"entries": [{"canonical_root_path": ""}]}\n',
     ],
 )
 def test_present_structurally_invalid_ledger_fails_closed(
@@ -433,6 +437,41 @@ def test_present_structurally_invalid_ledger_fails_closed(
     monkeypatch.setattr("fno.paths.ledger_json", lambda: ledger)
 
     with pytest.raises(ValueError, match="ledger"):
+        next_verification_generation(cwd=str(tmp_path), candidate_sha=SHA)
+
+
+def test_missing_and_null_ledger_discovery_fields_are_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text('{"entries": [{}, {"root_path": null, "canonical_root_path": null}]}\n')
+    monkeypatch.setattr("fno.paths.ledger_json", lambda: ledger)
+
+    assert next_verification_generation(cwd=str(tmp_path), candidate_sha=SHA) == 1
+
+
+def test_unavailable_salvage_scan_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "canonical_root_path": str(tmp_path / "canonical"),
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr("fno.paths.ledger_json", lambda: ledger)
+    monkeypatch.setattr(
+        "fno.pr._preflight.os.scandir",
+        lambda _path: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+
+    with pytest.raises(ValueError, match="salvage journal discovery failed"):
         next_verification_generation(cwd=str(tmp_path), candidate_sha=SHA)
 
 

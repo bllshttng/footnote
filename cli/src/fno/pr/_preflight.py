@@ -373,14 +373,39 @@ def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], 
         if not all(isinstance(row, dict) for row in rows):
             raise ValueError("ledger entries must be objects")
         for row in rows:
+            for field in ("root_path", "canonical_root_path"):
+                value = row.get(field)
+                if value is not None and (
+                    not isinstance(value, str) or not value.strip()
+                ):
+                    raise ValueError(f"ledger {field} must be a non-empty string or null")
             delivery_root = row.get("root_path")
-            if isinstance(delivery_root, str) and delivery_root:
+            if delivery_root is not None:
                 paths.append(Path(delivery_root).expanduser() / ".fno" / "events.jsonl")
             canonical = row.get("canonical_root_path")
-            if isinstance(canonical, str) and canonical:
+            if canonical is not None:
                 salvage = Path(canonical).expanduser() / ".fno" / "salvage"
-                if salvage.is_dir():
-                    paths.extend(sorted(salvage.glob("*/events.jsonl")))
+                try:
+                    entries = list(os.scandir(salvage))
+                except FileNotFoundError:
+                    entries = []
+                except OSError as exc:
+                    raise ValueError(
+                        f"salvage journal discovery failed for {salvage}: {exc}"
+                    ) from exc
+                for entry in sorted(entries, key=lambda item: item.name):
+                    try:
+                        if not entry.is_dir():
+                            continue
+                        journal = Path(entry.path) / "events.jsonl"
+                        journal.stat()
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        raise ValueError(
+                            f"salvage journal discovery failed for {journal}: {exc}"
+                        ) from exc
+                    paths.append(journal)
     except FileNotFoundError:
         pass
     except (OSError, ValueError, json.JSONDecodeError) as exc:

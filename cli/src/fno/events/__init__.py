@@ -502,7 +502,9 @@ def validate(event: dict[str, Any]) -> None:
                     f"{data.get(field)!r} (allowed: {allowed})"
                 )
 
-    serialized = _json.dumps(data, separators=(",", ":")).encode("utf-8")
+    serialized = _json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
     if len(serialized) > MAX_DATA_BYTES:
         raise ValidationError(
             f"event data exceeds max_data_bytes "

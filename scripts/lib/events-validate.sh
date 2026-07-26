@@ -348,8 +348,14 @@ validate_event() {
                 else (
                     capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<frac>[0-9]{1,6}))?(?:Z|\\+00:00)$")?
                     | if . == null then null
-                      else ((.whole + "Z" | fromdateiso8601?)
-                        + (("0." + (.frac // "0")) | tonumber))
+                      else (. as $parts
+                        | ($parts.whole + "Z" | fromdateiso8601?) as $epoch
+                        | if $epoch == null
+                            or ($epoch | strftime("%Y-%m-%dT%H:%M:%S")) != $parts.whole
+                          then null
+                          else ($epoch
+                            + (("0." + ($parts.frac // "0")) | tonumber))
+                          end)
                       end
                 ) end;
             .data as $d

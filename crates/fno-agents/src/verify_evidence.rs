@@ -536,12 +536,12 @@ fn receipt_timestamp(value: &Value) -> Option<DateTime<Utc>> {
     static UTC_TIMESTAMP: OnceLock<Regex> = OnceLock::new();
     let pattern = UTC_TIMESTAMP.get_or_init(|| {
         Regex::new(
-            r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)$",
+            r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-5][0-9](?:\.[0-9]{1,6})?(?:Z|\+00:00)$",
         )
         .expect("receipt timestamp regex is valid")
     });
     let raw = value.as_str()?;
-    if !pattern.is_match(raw) {
+    if !pattern.is_match(raw) || raw.starts_with("0000-") {
         return None;
     }
     let without_zone = raw
@@ -1325,21 +1325,27 @@ mod tests {
     }
 
     #[test]
-    fn receipt_validation_requires_literal_t_in_every_timestamp() {
-        let mut event = receipt_event(
-            "2026-07-26T01:00:00Z",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "full",
-            "passed",
-        );
-        event["ts"] = json!("2026-07-26 01:00:00+00:00");
-        assert!(!valid_receipt(&event));
-        event["ts"] = json!("2026-07-26T01:00:00Z");
-        event["data"]["started_at"] = json!("2026-07-26 01:00:00+00:00");
-        assert!(!valid_receipt(&event));
-        event["data"]["started_at"] = json!("2026-07-26T01:00:00Z");
-        event["data"]["finished_at"] = json!("2026-07-26 01:00:01+00:00");
-        assert!(!valid_receipt(&event));
+    fn receipt_validation_requires_canonical_calendar_timestamps() {
+        for invalid in [
+            "2026-07-26 01:00:00+00:00",
+            "2023-02-29T00:00:00Z",
+            "2016-12-31T23:59:60Z",
+            "0000-01-01T00:00:00Z",
+        ] {
+            for pointer in ["/ts", "/data/started_at", "/data/finished_at"] {
+                let mut event = receipt_event(
+                    "2026-07-26T01:00:00Z",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "full",
+                    "passed",
+                );
+                *event.pointer_mut(pointer).unwrap() = json!(invalid);
+                assert!(
+                    !valid_receipt(&event),
+                    "{pointer} accepted invalid timestamp {invalid}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1353,6 +1359,19 @@ mod tests {
         event["data"]["detail"] = Value::String("x".repeat(70_000));
 
         assert!(!valid_receipt(&event));
+    }
+
+    #[test]
+    fn receipt_validation_counts_compact_utf8_data_bytes() {
+        let mut event = receipt_event(
+            "2026-07-26T01:00:00Z",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "full",
+            "passed",
+        );
+        event["data"]["detail"] = Value::String("é".repeat(11_000));
+
+        assert!(valid_receipt(&event));
     }
 
     fn receipt_event(ts: &str, candidate_sha: &str, mode: &str, result: &str) -> Value {

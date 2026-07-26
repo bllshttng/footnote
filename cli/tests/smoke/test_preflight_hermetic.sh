@@ -43,5 +43,22 @@ grep -Fq 'if [[ $RETRY_FAILED -eq 0 && $FAIL -eq 0 ]]; then' "$PF" \
 awk '/^CHANGED_BASE=""/,/^echo ""$/' "$PF" | grep -Fq 'record_attestation' \
   && fail "the changed leg can mint a FULL attestation" || true
 
+grep -Fq 'receipt start timestamp unavailable' "$PF" \
+  || fail "receipt start timestamp discovery does not fail closed"
+grep -Fq 'receipt host identity unavailable' "$PF" \
+  || fail "receipt host discovery does not fail closed"
+grep -Fq 'receipt platform identity unavailable' "$PF" \
+  || fail "receipt platform discovery does not fail closed"
+grep -Fq -- '--arg host "$RECEIPT_HOST"' "$PF" \
+  || fail "receipt does not bind the discovered host"
+grep -Fq -- '--arg platform "$RECEIPT_PLATFORM"' "$PF" \
+  || fail "receipt does not bind the discovered platform"
+grep -Fq 'except FileNotFoundError:' "$PF" \
+  || fail "squads probe does not distinguish absent"
+grep -Fq "print('unavailable')" "$PF" \
+  || fail "squads probe does not preserve unavailable"
+grep -Fq 'RECEIPT_RESULT=unavailable' "$PF" \
+  || fail "unavailable required evidence does not reach the final receipt"
+
 echo "PASS: hermetic env scrubs harness markers + drops canonical config;"
-echo "      changed packet is hermetic, base-pinned, and cannot mint FULL evidence"
+echo "      changed packet and verification evidence contracts are preserved"
