@@ -528,10 +528,26 @@ if [[ "$NAME_SET" -eq 1 ]]; then
   [[ -z "$agent_name" ]] && emit_error "supplied --name normalized to empty"
 elif [[ -n "$NODE" ]]; then
   _node_slug="$(resolve_node_slug "$NODE")"
-  if [[ -n "$_node_slug" ]]; then
-    agent_name="${verb}-${NODE}-${_node_slug}"
-  else
-    agent_name="${verb}-${NODE}"
+  # x-3218: delegate to the canonical owner (`fno.agents.naming`) rather than
+  # assembling a fourth copy of the policy here. The owner budgets the ASSEMBLED
+  # name against the runtime's 64-char limit and spends that budget on the slug,
+  # which a local `cut -c1-64` cannot do. Exit 2 is a typed refusal (the required
+  # identity does not fit) and must surface, never degrade into a silently
+  # altered name.
+  agent_name="$(fno agents name "$verb" "$NODE" --slug "$_node_slug" 2>/dev/null)"
+  _name_rc=$?
+  if [[ "$_name_rc" -eq 2 ]]; then
+    emit_error "node $NODE cannot be represented as an agent name within 64 chars"
+  elif [[ "$_name_rc" -ne 0 || -z "$agent_name" ]]; then
+    # Degraded: no reachable fno (the same condition that empties the slug via
+    # resolve_node_slug, so this normally yields <verb>-<node>). Uncapped by
+    # design - the daemon still refuses an over-long name loudly at the spawn
+    # boundary, which beats inventing a fifth local budget here.
+    if [[ -n "$_node_slug" ]]; then
+      agent_name="${verb}-${NODE}-${_node_slug}"
+    else
+      agent_name="${verb}-${NODE}"
+    fi
   fi
 else
   # Free-form name source. For handoff, slug the doc BASENAME (sans extension),

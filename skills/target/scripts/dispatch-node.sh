@@ -307,13 +307,28 @@ for id in "${NODES[@]}"; do
   # reads at a glance which node a /target worker is on (e.g.
   # target-ab-4040eee8-cargo-bootstrapper). The slug is the node's title-derived
   # handle; a node with no slug degrades to target-<full-node-id>.
-  node_slug="$(printf '%s' "$node_json" | jq -r '.slug // .title // empty' 2>/dev/null \
-    | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
-    | sed -E 's/-+/-/g; s/^-+//; s/-+$//' | cut -c1-30 | sed -E 's/-+$//')"
-  if [[ -n "$node_slug" ]]; then
-    agent_name="target-${id}-${node_slug}"
-  else
-    agent_name="target-${id}"
+  node_slug="$(printf '%s' "$node_json" | jq -r '.slug // .title // empty' 2>/dev/null)"
+  # x-3218: the canonical owner (`fno.agents.naming`) sanitizes the slug AND
+  # budgets the assembled name against the runtime's 64-char limit; this site
+  # used to assemble it uncapped, so a long configured node id produced a name
+  # `fno agents spawn` rejected - the dispatch vanished with no session and no
+  # event. Exit 2 is a typed refusal and skips the node loudly.
+  agent_name="$(fno agents name target "$id" --slug "$node_slug" 2>/dev/null)"
+  name_rc=$?
+  if [[ "$name_rc" -eq 2 ]]; then
+    echo "failed $id reason=\"node id cannot be represented as an agent name within 64 chars\""
+    n_failed=$((n_failed + 1))
+    continue
+  elif [[ "$name_rc" -ne 0 || -z "$agent_name" ]]; then
+    # Degraded (no reachable fno): keep the historical assembly. The daemon still
+    # refuses an over-long name loudly at the spawn boundary.
+    node_slug="$(printf '%s' "$node_slug" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
+      | sed -E 's/-+/-/g; s/^-+//; s/-+$//' | cut -c1-30 | sed -E 's/-+$//')"
+    if [[ -n "$node_slug" ]]; then
+      agent_name="target-${id}-${node_slug}"
+    else
+      agent_name="target-${id}"
+    fi
   fi
 
   # x-571f: per-node model pin. Read once from the node JSON we already hold; a

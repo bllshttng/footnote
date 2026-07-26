@@ -1444,6 +1444,39 @@ def cmd_spawn(
         sys.stdout.flush()
 
 
+@agents_app.command("name", hidden=True)
+def cmd_name(
+    prefix: str = typer.Argument(..., help="Operation prefix (target|spawn|handoff|...)."),
+    node_id: str = typer.Argument(..., help="Full backlog node id; never abbreviated."),
+    slug: str = typer.Option("", "--slug", help="Human-readable tail; the only expendable part."),
+    qualifier: str = typer.Option("", "--qualifier", help="Lifecycle reason, e.g. retro."),
+    discriminator: str = typer.Option(
+        "", "--discriminator", help="Per-invocation uniqueness token; never shaved."
+    ),
+) -> None:
+    """Mechanical bridge to the canonical agent-name owner, for shell dispatchers.
+
+    Prints one name on stdout, or exits 2 with the naming error on stderr. Shell
+    callers delegate here instead of reimplementing the budget: the assembled
+    64-char precedence rule differs from a `cut -c1-64`, which shaves the
+    uniqueness discriminator and collapses two dispatches onto one dedup token.
+    """
+    from fno.agents.naming import AgentNameError, agent_name as _agent_name
+
+    try:
+        name = _agent_name(
+            prefix,
+            node_id,
+            slug=slug or None,
+            qualifier=qualifier or None,
+            discriminator=discriminator or None,
+        )
+    except AgentNameError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2)
+    typer.echo(name)
+
+
 @agents_app.command("spawn-guard", hidden=True)
 def cmd_spawn_guard(
     node_id: str = typer.Argument(
