@@ -121,6 +121,22 @@ candidate_fno() {
     fi
 }
 
+candidate_python() {
+    if [[ -x "$INVOKING_ROOT/cli/.venv/bin/python" ]]; then
+        PYTHONPATH="$INVOKING_ROOT/cli/src" \
+            "$INVOKING_ROOT/cli/.venv/bin/python" "$@"
+    elif [[ -f "$INVOKING_ROOT/cli/pyproject.toml" ]]; then
+        if ! command -v uv >/dev/null 2>&1; then
+            echo "preflight: candidate CLI source exists but uv is unavailable" >&2
+            return 127
+        fi
+        PYTHONPATH="$INVOKING_ROOT/cli/src" \
+            uv run --project "$INVOKING_ROOT/cli" python "$@"
+    else
+        python3 "$@"
+    fi
+}
+
 GLOBAL_EVENTS_PATH="$(candidate_fno pr global-receipt-events-path)" || {
     echo "preflight: canonical receipt journal path unavailable" >&2
     exit 1
@@ -171,15 +187,26 @@ emit_verification_receipt() {
         source "$INVOKING_ROOT/scripts/lib/events-validate.sh"
         validate_event verification_receipt "$event"
     ) || return 1
-    mkdir -p "$(dirname "$GLOBAL_EVENTS_PATH")" || return 1
-    printf '%s\n' "$event" >> "$GLOBAL_EVENTS_PATH" || return 1
+    append_receipt_journal "$GLOBAL_EVENTS_PATH" "$event" || return 1
     if [[ "$GLOBAL_EVENTS_PATH" != "$EVENTS_PATH" ]]; then
-        if ! mkdir -p "$(dirname "$EVENTS_PATH")" \
-            || ! printf '%s\n' "$event" >> "$EVENTS_PATH"; then
+        if ! append_receipt_journal "$EVENTS_PATH" "$event"; then
             echo "preflight: note: global receipt committed; delivery-root mirror unavailable at $EVENTS_PATH" >&2
         fi
     fi
     return 0
+}
+
+append_receipt_journal() {
+    local events_path="$1" event="$2"
+    candidate_python -c '
+import json
+import sys
+from pathlib import Path
+from fno.events import append_event
+
+event = json.load(sys.stdin)
+append_event(event, events_path=Path(sys.argv[1]))
+' "$events_path" <<< "$event"
 }
 
 emit_setup_unavailable() {
