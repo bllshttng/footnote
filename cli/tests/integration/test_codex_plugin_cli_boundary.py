@@ -93,7 +93,14 @@ with calls_path.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps({{"live": is_live, "args": args}}) + "\\n")
 
 source_mutation = live_home / "mutated-source-once"
-if is_live and os.environ.get("FNO_TEST_MUTATE_SOURCE_ON_LIVE") and not source_mutation.exists():
+is_mutating = (
+    args[:2] == ["plugin", "remove"]
+    or args[:2] == ["plugin", "add"]
+    or args[:3] == ["plugin", "marketplace", "remove"]
+    or args[:3] == ["plugin", "marketplace", "add"]
+    or args[:3] == ["plugin", "marketplace", "upgrade"]
+)
+if is_live and is_mutating and os.environ.get("FNO_TEST_MUTATE_SOURCE_ON_LIVE") and not source_mutation.exists():
     source_mutation.touch()
     payload = source / "skills" / "target" / "SKILL.md"
     payload.write_text(payload.read_text() + "changed after validation\\n")
@@ -300,7 +307,15 @@ def test_invalid_candidate_never_replaces_live_channel(tmp_path: Path) -> None:
     assert state_path.read_bytes() == before
     assert marker.read_bytes() == marker_bytes
     calls = [json.loads(line) for line in Path(env["FNO_TEST_CODEX_CALLS"]).read_text().splitlines()]
-    assert calls and all(not call["live"] for call in calls)
+    # Live read-only list calls run first (no-op detection reads live state
+    # before isolated candidate validation); no live mutating command may run,
+    # since candidate validation must gate replacement.
+    read_only = (["plugin", "marketplace", "list"], ["plugin", "list"])
+    assert calls and all(
+        not call["live"]
+        or any(call["args"][: len(prefix)] == prefix for prefix in read_only)
+        for call in calls
+    )
 
 
 def test_malformed_live_codex_state_fails_before_mutation(tmp_path: Path) -> None:
