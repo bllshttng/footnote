@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from fno import context_observation
 from fno.cli import app
 from fno.context_audit import (
     ContextSource,
@@ -991,6 +992,93 @@ def test_nonreturning_observer_is_killed_without_changing_hook_result(
     assert term_marker.is_file()
     assert result.returncode == 7
     assert result.stdout == '{"session_id":"hung-observer","source":"startup"}::original'
+
+
+def test_run_bounded_uses_the_configured_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 123
+
+        def wait(self, *, timeout: float) -> int:
+            observed["timeout"] = timeout
+            return 0
+
+    def fake_popen(command: list[str], *, start_new_session: bool) -> FakeProcess:
+        observed["command"] = command
+        observed["start_new_session"] = start_new_session
+        return FakeProcess()
+
+    monkeypatch.setattr(context_observation.subprocess, "Popen", fake_popen)
+
+    assert (
+        context_observation._run_bounded(
+            ["--timeout", "0.2", "--", "observer", "--flag"]
+        )
+        == 0
+    )
+    assert observed == {
+        "command": ["observer", "--flag"],
+        "start_new_session": True,
+        "timeout": 0.2,
+    }
+
+
+def test_context_observer_threads_the_timeout_override(tmp_path: Path) -> None:
+    fixture = tmp_path / "original.sh"
+    fixture.write_text(
+        "#!/usr/bin/env bash\n"
+        "/bin/cat\n"
+        "printf '%s' '::original'\n"
+        "exit 7\n",
+        encoding="utf-8",
+    )
+    fixture.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "python-calls"
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '<%s>' \"$@\" >>\"$FNO_PYTHON_CALLS\"\n"
+        "printf '\\n' >>\"$FNO_PYTHON_CALLS\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_uv.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            str(ROOT / "hooks" / "context-observe-hook.sh"),
+            "--source-id",
+            "fixture",
+            "--expected",
+            "fixture",
+            "--",
+            str(fixture),
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS": "0.2",
+            "FNO_PYTHON_CALLS": str(calls),
+        },
+        input="exact stdin",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 7
+    assert result.stdout == "exact stdin::original"
+    assert "<run-bounded><--timeout><0.2><--><uv>" in calls.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> None:
