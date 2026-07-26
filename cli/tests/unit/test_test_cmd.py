@@ -309,3 +309,18 @@ def test_changed_pytest_step_is_preceded_by_the_binary_scrub() -> None:
     import fno.test_cmd as tc
     src = inspect.getsource(tc._run_changed)
     assert "Pytest (changed subset" in src and "target/debug/fno-agents" in src
+
+
+def test_prereq_codes_are_per_mode(tmp_path: Path) -> None:
+    """22 is changed-only; the full run keeps its documented exit 2.
+
+    A public CLI contract: callers distinguishing setup errors from
+    changed-packet non-verdicts must not see one mode's sentinel from the other.
+    """
+    import inspect
+
+    import fno.test_cmd as tc
+    assert "return CHANGED_RC_PREREQ" in inspect.getsource(tc._run_changed)
+    full = inspect.getsource(tc._run_smoke)
+    assert "CHANGED_RC_PREREQ" not in full
+    assert "return 2" in full

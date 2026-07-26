@@ -1172,7 +1172,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     miss = _smoke_prereqs([steps[i][2] for i in selected])
     if miss:
         sys.stderr.write(f"smoke: missing prerequisite: {miss}\n")
-        return CHANGED_RC_PREREQ
+        return 2  # the full run's documented prerequisite code; 22 is changed-only
 
     # Faithful-ordering guard: the main pytest step runs with the fno-agents
     # binary absent so @requires_rust parity tests skip (they need a provider
