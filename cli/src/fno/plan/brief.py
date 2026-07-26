@@ -30,6 +30,7 @@ from typing import Any
 import yaml
 
 from fno.plan._doc import PlanDoc
+from fno.plan.criteria import CriteriaParseError, compile_criteria
 
 
 # ---------------------------------------------------------------------------
@@ -319,38 +320,28 @@ def parse_patterns(text: str) -> list[dict[str, Any]]:
 
 
 def parse_acceptance_criteria(text: str) -> list[dict[str, Any]]:
-    """Parse the Acceptance Criteria section into structured entries.
+    """Parse the Acceptance Criteria section into legacy-shaped entries.
 
-    Handles the bold-prefixed format:
-        **ACN-TYPE:** text
-    or
-        **ACN-TYPE (tags):** text
+    Compatibility adapter over the canonical compiler
+    (:func:`fno.plan.criteria.compile_criteria`): the source may use any of the
+    accepted shapes (legacy bold, heading, numbered, bullet, table row, or a
+    label with a Given/When/Then block), and this returns the dict shape callers
+    and the JSON contract already depend on (ac_type, code, text, tags).
 
-    Each entry dict has: ac_type, code, text, tags.
+    Returns ``[]`` for a truly empty section or for content the compiler refuses
+    (malformed non-empty, duplicate explicit ids). Strict enforcement is
+    finalization's job (validate_execution under compiled-v1), not the brief
+    generator's: a worker brief must never crash on a legacy or in-progress
+    section, so refusal degrades to "no criteria" here rather than propagating.
     """
-    entries: list[dict[str, Any]] = []
-    # Match bold AC codes at start of line or paragraph
-    pattern = re.compile(
-        r"\*\*(AC\d+-([A-Z]+)(?:\s+[^*]*)?):\*\*\s*(.+?)(?=\*\*AC\d+|\Z)",
-        re.DOTALL,
-    )
-    for match in pattern.finditer(text):
-        full_code_part = match.group(1).strip()
-        ac_type = match.group(2)
-        ac_text = match.group(3).strip()
-
-        # Extract the base code (e.g. AC2-HP)
-        code_match = re.match(r"(AC\d+-[A-Z]+)", full_code_part)
-        code = code_match.group(1) if code_match else full_code_part
-
-        entries.append({
-            "ac_type": ac_type,
-            "code": code,
-            "text": ac_text,
-            "tags": [],
-        })
-
-    return entries
+    try:
+        criteria = compile_criteria(text)
+    except CriteriaParseError:
+        return []
+    return [
+        {"ac_type": c.kind, "code": c.code, "text": c.text, "tags": []}
+        for c in criteria
+    ]
 
 
 # ---------------------------------------------------------------------------

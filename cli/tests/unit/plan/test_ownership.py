@@ -31,8 +31,11 @@ class TestBlueprintWriteAllowlist:
     def test_AC1_HP_allowlist_contains_waves(self):
         assert "waves" in BLUEPRINT_WRITE_ALLOWLIST
 
-    def test_AC1_HP_allowlist_has_exactly_six_entries(self):
-        assert len(BLUEPRINT_WRITE_ALLOWLIST) == 6
+    def test_AC1_HP_allowlist_contains_acceptance_contract(self):
+        assert "acceptance_contract" in BLUEPRINT_WRITE_ALLOWLIST
+
+    def test_AC1_HP_allowlist_has_exactly_seven_entries(self):
+        assert len(BLUEPRINT_WRITE_ALLOWLIST) == 7
 
 
 class TestAssertBlueprintCanWrite:
@@ -54,6 +57,9 @@ class TestAssertBlueprintCanWrite:
 
     def test_AC2_HP_waves_allowed(self):
         assert_blueprint_can_write("waves")
+
+    def test_AC2_HP_acceptance_contract_allowed(self):
+        assert_blueprint_can_write("acceptance_contract")
 
     # Non-allowlist entries - must raise OwnershipViolation
     def test_AC3_ERR_architecture_rejected(self):

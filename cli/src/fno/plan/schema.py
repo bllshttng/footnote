@@ -79,6 +79,10 @@ class PlanFrontmatter(BaseModel):
     # markdown-heading form stays out of scope (Locked Decision 3).
     kill_criteria: str | list[Any] | None = None
     updated: datetime | None = None
+    # compiled-v1 marks a plan whose Acceptance Criteria Blueprint compiled and
+    # whose task acceptance references all resolve (x-f905). Absent on historical
+    # plans, which keep permissive legacy reads.
+    acceptance_contract: Literal["compiled-v1"] | None = None
     shipped_at: datetime | None = None  # PR creation (implementation complete)
     done_at: datetime | None = None  # PR merged (first-write-only; x-f34f)
     urls: list[str] = []

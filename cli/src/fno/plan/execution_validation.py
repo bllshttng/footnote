@@ -9,6 +9,7 @@ import shlex
 
 from fno.plan._doc import PlanDoc
 from fno.plan.brief import BriefParseError, parse_execution_strategy
+from fno.plan.criteria import CriteriaParseError, compile_criteria
 
 
 @dataclass(frozen=True)
@@ -160,8 +161,55 @@ def _validate_quick(doc: PlanDoc) -> ExecutionValidationResult:
     return ExecutionValidationResult(violations)
 
 
-def validate_execution(doc: PlanDoc) -> ExecutionValidationResult:
-    """Validate the representation consumed by workers and wave scheduling."""
+def _validate_compiled_acceptance(
+    doc: PlanDoc, tasks: list[dict]
+) -> list[ExecutionViolation]:
+    """compiled-v1 reference resolution: every task acceptance ref resolves.
+
+    Compiles the Acceptance Criteria section through the canonical compiler and
+    refuses on a malformed/duplicate section or on any task reference that maps
+    to no compiled criterion. The diagnostic names the task and the unresolved
+    code so an author can fix the reference without decoding the whole plan.
+    """
+    out: list[ExecutionViolation] = []
+    ac_section = doc.get_section("Acceptance Criteria") or ""
+    try:
+        criteria = compile_criteria(ac_section)
+    except CriteriaParseError as exc:
+        out.append(_violation("Acceptance Criteria", str(exc)))
+        return out
+    codes = {c.code for c in criteria}
+    for task in tasks:
+        task_id = str(task.get("id", "")).strip() or "?"
+        refs = task.get("acceptance", [])
+        if not isinstance(refs, list):
+            continue
+        for ref in refs:
+            ref_str = str(ref).strip()
+            if ref_str and ref_str not in codes:
+                out.append(
+                    _violation(
+                        f"tasks.{task_id}.acceptance",
+                        f"references {ref_str!r}, which resolves to no compiled criterion",
+                    )
+                )
+    return out
+
+
+def validate_execution(
+    doc: PlanDoc,
+    *,
+    acceptance_contract: str | None = None,
+) -> ExecutionValidationResult:
+    """Validate the representation consumed by workers and wave scheduling.
+
+    ``acceptance_contract`` overrides the frontmatter value so a caller can
+    validate a PROPOSED state without writing it first (``mutate_doc.finalize``
+    passes ``compiled-v1`` to validate a design->ready promotion before it
+    lands). When ``None`` the contract is read from ``doc.frontmatter``. Only a
+    ``compiled-v1`` plan gets strict acceptance-reference resolution; an
+    unstamped historical plan keeps the permissive legacy read (AC3-COMPAT).
+    """
     strategy_text = doc.get_section("Execution Strategy")
     if strategy_text is None:
         if doc.frontmatter.get("kind") == "quick-plan":
@@ -176,7 +224,6 @@ def validate_execution(doc: PlanDoc) -> ExecutionValidationResult:
         return ExecutionValidationResult(
             [_violation("Execution Strategy", str(exc))]
         )
-
     violations: list[ExecutionViolation] = []
     mode = str(strategy.get("execution_mode", "")).strip()
     if mode not in _EXECUTION_MODES:
@@ -235,6 +282,15 @@ def validate_execution(doc: PlanDoc) -> ExecutionValidationResult:
                     "task acceptance must contain at least one criterion",
                 )
             )
+
+    # compiled-v1: every task acceptance reference must resolve to exactly one
+    # compiled criterion (AC5-ERR). Unstamped plans skip this (AC3-COMPAT).
+    contract = acceptance_contract
+    if contract is None:
+        raw_contract = doc.frontmatter.get("acceptance_contract")
+        contract = str(raw_contract).strip() if raw_contract else None
+    if contract == "compiled-v1":
+        violations.extend(_validate_compiled_acceptance(doc, tasks))
 
     waves = strategy.get("waves", [])
     if not isinstance(waves, list) or not waves:

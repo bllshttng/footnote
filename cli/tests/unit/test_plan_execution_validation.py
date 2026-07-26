@@ -422,3 +422,106 @@ def test_default_cli_remains_frontmatter_only(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert result.stdout == f"valid: {plan}\n"
+
+
+# ---------------------------------------------------------------------------
+# compiled-v1 acceptance-contract enforcement (x-f905)
+# ---------------------------------------------------------------------------
+
+_AC_PLAN_BODY = """## Overview
+
+Executable plan.
+
+## Acceptance Criteria
+
+**AC1-HP:** Given valid input, the module returns the result.
+
+## Execution Strategy
+
+```yaml
+{strategy}```
+"""
+
+
+def _ac_plan(strategy: str) -> str:
+    return _AC_PLAN_BODY.format(strategy=strategy)
+
+
+def _compiled_v1_frontmatter() -> str:
+    return (
+        "node: x-test\nstatus: ready\ncreated: 2026-07-25\n"
+        "acceptance_contract: compiled-v1\n"
+    )
+
+
+_STRATEGY_WITH_AC9_REF = """execution_mode: sequential
+waves:
+  - wave: 1
+    mode: sequential
+    name: Build
+    tasks: ["1.1"]
+tasks:
+  - id: "1.1"
+    title: Build the validator
+    surface: [cli/src/fno/plan/cli.py]
+    verify: fno test cli/tests/unit/test_plan_execution_validation.py
+    acceptance: [AC9]
+"""
+
+
+def test_compiled_v1_refuses_unresolved_acceptance_reference(tmp_path: Path) -> None:
+    """AC5-ERR: a compiled-v1 task ref that resolves to no criterion fails."""
+    plan = _write_plan(
+        tmp_path,
+        _ac_plan(_STRATEGY_WITH_AC9_REF),
+        frontmatter=_compiled_v1_frontmatter(),
+    )
+
+    result = validate_execution(load_plan(plan))
+
+    fields = [v.field for v in result.violations]
+    messages = [v.message for v in result.violations]
+    assert any("tasks.1.1.acceptance" in f for f in fields), fields
+    assert any("AC9" in m for m in messages), messages
+
+
+def test_compiled_v1_accepts_resolving_reference(tmp_path: Path) -> None:
+    """A compiled-v1 task ref that resolves to a compiled criterion passes."""
+    strategy = _STRATEGY_WITH_AC9_REF.replace("acceptance: [AC9]", "acceptance: [AC1-HP]")
+    plan = _write_plan(
+        tmp_path,
+        _ac_plan(strategy),
+        frontmatter=_compiled_v1_frontmatter(),
+    )
+
+    result = validate_execution(load_plan(plan))
+
+    assert result.violations == []
+
+
+def test_unstamped_plan_keeps_permissive_reference_read(tmp_path: Path) -> None:
+    """AC3-COMPAT: an unstamped historical plan does not acquire ref-resolution failures."""
+    # Same unresolved AC9 ref, but no acceptance_contract marker.
+    frontmatter = "node: x-test\nstatus: ready\ncreated: 2026-07-25\n"
+    plan = _write_plan(tmp_path, _ac_plan(_STRATEGY_WITH_AC9_REF), frontmatter=frontmatter)
+
+    result = validate_execution(load_plan(plan))
+
+    assert [v for v in result.violations if "AC9" in v.message] == []
+
+
+def test_validate_execution_acceptance_contract_override(tmp_path: Path) -> None:
+    """The acceptance_contract param validates a PROPOSED state without writing it.
+
+    mutate_doc.finalize passes compiled-v1 to validate a design->ready promotion
+    before stamping; an unstamped doc is validated as if it were compiled-v1.
+    """
+    plan = _write_plan(
+        tmp_path,
+        _ac_plan(_STRATEGY_WITH_AC9_REF),
+        frontmatter="node: x-test\nstatus: design\ncreated: 2026-07-25\n",
+    )
+
+    result = validate_execution(load_plan(plan), acceptance_contract="compiled-v1")
+
+    assert any("AC9" in v.message for v in result.violations)

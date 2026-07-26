@@ -26,6 +26,23 @@ def test_blueprint_handoff_contract_survives_prompt_diet() -> None:
     assert "Load the `/bdd-acceptance-criteria` skill" not in text
 
 
+def test_acceptance_criteria_require_behavior_not_format() -> None:
+    """AC10-DOC: Think requires observable behavior, not one Markdown spelling.
+
+    Explicit AC identifiers are optional author input; Blueprint supplies
+    deterministic identifiers when absent. A future prompt edit must not
+    silently reintroduce mandatory AC formatting.
+    """
+    text = THINK.read_text()
+    # Observable, verifiable behavior stays required.
+    assert "observable" in text
+    # Explicit AC labels are framed as optional, not mandatory.
+    assert "optional author input" in text
+    # At least one compiler-accepted shape beyond bold AC is named, so the
+    # guidance does not collapse back to "write a bold AC token".
+    assert "Given/When/Then" in text
+
+
 def test_router_and_architecture_define_native_plan_boundary() -> None:
     router = SKILL.read_text()
     architecture = ARCH.read_text()
