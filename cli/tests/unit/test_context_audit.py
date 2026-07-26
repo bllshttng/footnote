@@ -1022,7 +1022,12 @@ def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> No
             text=True,
             capture_output=True,
             check=False,
-            timeout=5,
+            # Only a hang-catcher, deliberately loose. What this test actually
+            # asserts is the DELTA below, which is load-robust; a tight absolute
+            # bound is not - nominal is ~2s, so under `-n auto` on a busy machine
+            # a 5s cap fired before the real assertion ever ran. Anything under
+            # the hung stub's `sleep 30` still catches a non-returning observer.
+            timeout=20,
         )
         return result, time.monotonic() - started
 
