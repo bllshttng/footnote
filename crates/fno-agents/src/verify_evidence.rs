@@ -563,6 +563,10 @@ fn valid_receipt(event: &Value) -> bool {
     let Some(executed) = data.get("steps_executed").and_then(nonnegative_integer) else {
         return false;
     };
+    let scope_len = data
+        .get("scope")
+        .and_then(Value::as_array)
+        .map(|scope| scope.len() as f64);
     full_sha(candidate)
         && bounded_strings(data.get("command").unwrap_or(&Value::Null), 4096, 4096)
         && bounded_strings(data.get("scope").unwrap_or(&Value::Null), 128, 512)
@@ -583,8 +587,48 @@ fn valid_receipt(event: &Value) -> bool {
             "not_configured" | "unavailable" | "pending" | "failed" | "passed" | "stale"
         )
         && executed <= expected
+        && scope_len == Some(expected)
         && (mode != "full" || result != "passed" || (expected > 0.0 && executed == expected))
         && (mode != "void" || result != "passed")
+}
+
+fn gate_eligible_receipt(event: &Value) -> bool {
+    const SCOPE: [&str; 6] = [
+        "smoke",
+        "rustfmt:fno-agents",
+        "rustfmt:fno",
+        "cargo-test:fno-agents",
+        "cargo-test:fno",
+        "squads-leak-guard:fno",
+    ];
+    let Some(data) = event.get("data") else {
+        return false;
+    };
+    let command_path = data
+        .get("command")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let environment = data.get("environment").unwrap_or(&Value::Null);
+    let producer = data.get("producer").unwrap_or(&Value::Null);
+    let scope = data.get("scope").and_then(Value::as_array);
+    event.get("source").and_then(Value::as_str) == Some("target")
+        && producer.get("kind").and_then(Value::as_str) == Some("preflight")
+        && producer
+            .get("id")
+            .and_then(Value::as_str)
+            .zip(environment.get("host").and_then(Value::as_str))
+            .is_some_and(|(id, host)| id.starts_with(&format!("{host}:")))
+        && environment.get("runner").and_then(Value::as_str) == Some("scripts/ci/preflight.sh")
+        && (command_path == "scripts/ci/preflight.sh"
+            || command_path.ends_with("/scripts/ci/preflight.sh"))
+        && scope.is_some_and(|items| {
+            items.len() == SCOPE.len()
+                && SCOPE
+                    .iter()
+                    .all(|expected| items.iter().any(|item| item.as_str() == Some(expected)))
+        })
 }
 
 fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
@@ -653,7 +697,8 @@ fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
             "satisfied": malformed == 0
                 && unreadable == 0
                 && mode == "full"
-                && result == "passed",
+                && result == "passed"
+                && gate_eligible_receipt(event),
             "mode": mode,
             "result": result,
             "receipt": event,
@@ -1005,6 +1050,19 @@ mod tests {
         assert!(!valid_receipt(&event));
     }
 
+    #[test]
+    fn receipt_validation_rejects_excessive_command_arguments() {
+        let mut event = receipt_event(
+            "2026-07-26T01:00:00Z",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "full",
+            "passed",
+        );
+        event["data"]["command"] =
+            Value::Array((0..4097).map(|_| Value::String("x".to_string())).collect());
+        assert!(!valid_receipt(&event));
+    }
+
     fn receipt_event(ts: &str, candidate_sha: &str, mode: &str, result: &str) -> Value {
         json!({
             "ts": ts,
@@ -1013,15 +1071,22 @@ mod tests {
             "data": {
                 "candidate_sha": candidate_sha,
                 "command": ["scripts/ci/preflight.sh", "--force"],
-                "environment": {"host": "h", "platform": "p", "runner": "preflight"},
-                "scope": ["smoke"],
+                "environment": {"host": "h", "platform": "p", "runner": "scripts/ci/preflight.sh"},
+                "scope": [
+                    "smoke",
+                    "rustfmt:fno-agents",
+                    "rustfmt:fno",
+                    "cargo-test:fno-agents",
+                    "cargo-test:fno",
+                    "squads-leak-guard:fno"
+                ],
                 "started_at": "2026-07-26T01:00:00Z",
                 "finished_at": "2026-07-26T01:00:01Z",
                 "mode": mode,
                 "result": result,
                 "producer": {"kind": "preflight", "id": "h:1"},
-                "steps_expected": 1,
-                "steps_executed": 1
+                "steps_expected": 6,
+                "steps_executed": 6
             }
         })
     }

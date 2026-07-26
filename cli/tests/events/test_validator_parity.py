@@ -128,3 +128,30 @@ def test_overflow_exponent_is_rejected_on_the_raw_bash_wire() -> None:
     )
 
     assert result.returncode != 0
+
+
+def test_verification_receipt_command_count_cap_has_python_bash_parity() -> None:
+    event = {
+        "ts": "2026-07-26T01:02:04Z",
+        "type": "verification_receipt",
+        "source": "target",
+        "data": {
+            "candidate_sha": "a" * 40,
+            "command": ["x"] * 4097,
+            "environment": {"host": "h", "platform": "p", "runner": "r"},
+            "scope": ["smoke"],
+            "started_at": "2026-07-26T01:00:00Z",
+            "finished_at": "2026-07-26T01:02:03Z",
+            "mode": "full",
+            "result": "failed",
+            "producer": {"kind": "preflight", "id": "h:1"},
+            "steps_expected": 1,
+            "steps_executed": 1,
+        },
+    }
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is False
+    assert bash_ok is False

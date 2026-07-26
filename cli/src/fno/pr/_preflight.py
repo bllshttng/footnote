@@ -38,6 +38,17 @@ OK = 0
 REFUSED_STALE = 3
 UNRELATED = 4
 
+_PREFLIGHT_GATE_SCOPE = frozenset(
+    {
+        "smoke",
+        "rustfmt:fno-agents",
+        "rustfmt:fno",
+        "cargo-test:fno-agents",
+        "cargo-test:fno",
+        "squads-leak-guard:fno",
+    }
+)
+
 
 def _event_timestamp(value: object) -> Optional[dt.datetime]:
     if not isinstance(value, str) or not value:
@@ -204,9 +215,26 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
     if exact:
         event = exact[-1][2]
         data = event["data"]
+        command = data["command"]
+        environment = data["environment"]
+        producer = data["producer"]
+        command_path = Path(command[0]).as_posix()
+        trusted_producer = (
+            event["source"] == "target"
+            and producer["kind"] == "preflight"
+            and producer["id"].startswith(f"{environment['host']}:")
+            and environment["runner"] == "scripts/ci/preflight.sh"
+            and (
+                command_path == "scripts/ci/preflight.sh"
+                or command_path.endswith("/scripts/ci/preflight.sh")
+            )
+            and frozenset(data["scope"]) == _PREFLIGHT_GATE_SCOPE
+            and len(data["scope"]) == len(_PREFLIGHT_GATE_SCOPE)
+        )
         return {
             "satisfied": (
                 coverage["complete"]
+                and trusted_producer
                 and data["mode"] == "full"
                 and data["result"] == "passed"
             ),
@@ -233,14 +261,16 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
     }
 
 
-def verification_event_paths(*, cwd: Optional[str] = None) -> list[Path]:
-    """Return project, global, and known delivery-root event journals."""
+def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], list[str]]:
+    """Return event journals plus discovery errors that make coverage uncertain."""
     repo = Path(cwd or os.getcwd()).resolve()
+    errors: list[str] = []
     try:
         discovered = _git(["rev-parse", "--show-toplevel"], str(repo))
         root = Path(discovered.stdout.strip()).resolve() if discovered.returncode == 0 else repo
-    except Exception:
+    except (OSError, ValueError) as exc:
         root = repo
+        errors.append(f"repository root discovery failed: {exc}")
     paths = [root / ".fno" / "events.jsonl", Path.home() / ".fno" / "events.jsonl"]
     try:
         from fno.paths import ledger_json
@@ -258,9 +288,9 @@ def verification_event_paths(*, cwd: Optional[str] = None) -> list[Path]:
                 salvage = Path(canonical).expanduser() / ".fno" / "salvage"
                 if salvage.is_dir():
                     paths.extend(sorted(salvage.glob("*/events.jsonl")))
-    except (OSError, ValueError):
-        pass
-    return paths
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        errors.append(f"delivery journal discovery failed: {exc}")
+    return paths, errors
 
 
 def check_verification_evidence(
@@ -281,10 +311,15 @@ def check_verification_evidence(
             "receipt": None,
             "coverage": {"complete": False, "error": "candidate SHA unavailable"},
         }
-    return verification_decision(
-        candidate_sha,
-        event_paths if event_paths is not None else verification_event_paths(cwd=repo),
-    )
+    discovery_errors: list[str] = []
+    if event_paths is None:
+        event_paths, discovery_errors = verification_event_paths(cwd=repo)
+    decision = verification_decision(candidate_sha, event_paths)
+    if discovery_errors:
+        decision["coverage"]["complete"] = False
+        decision["coverage"]["discovery_errors"] = discovery_errors
+        decision["satisfied"] = False
+    return decision
 
 
 def run_evidence_check(*, cwd: Optional[str] = None) -> int:

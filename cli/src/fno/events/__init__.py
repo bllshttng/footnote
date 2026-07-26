@@ -182,6 +182,12 @@ def validate(event: dict[str, Any]) -> None:
         raise ValidationError(f"unknown event type: {type_name}")
 
     type_spec = EVENT_TYPES[type_name]
+    type_sources = type_spec.get("sources")
+    if isinstance(type_sources, list) and source not in type_sources:
+        raise ValidationError(
+            f"event type {type_name} does not allow source {source!r} "
+            f"(allowed: {sorted(type_sources)})"
+        )
     raw_data = event.get("data")
     if raw_data is not None and not isinstance(raw_data, dict):
         raise ValidationError("event data must be an object")
@@ -321,7 +327,7 @@ def validate(event: dict[str, Any]) -> None:
             raise ValidationError("verification_receipt candidate_sha must be full 40-hex")
         command = data.get("command")
         scope = data.get("scope")
-        if not isinstance(command, list) or not command or not all(
+        if not isinstance(command, list) or not command or len(command) > 4096 or not all(
             isinstance(item, str) and item and len(item) <= 4096 for item in command
         ):
             raise ValidationError("verification_receipt command must contain bounded argv strings")
@@ -355,6 +361,7 @@ def validate(event: dict[str, Any]) -> None:
             not _is_nonnegative_integral_number(expected)
             or not _is_nonnegative_integral_number(executed)
             or int(executed) > int(expected)
+            or int(expected) != len(scope)
         ):
             raise ValidationError("verification_receipt step counts are invalid")
         if mode == "full" and result == "passed" and (

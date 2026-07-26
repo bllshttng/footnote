@@ -7,11 +7,24 @@ from pathlib import Path
 import pytest
 
 from fno.events import ValidationError, validate
-from fno.pr._preflight import hosted_ci_decision, hosted_workflow_state, verification_decision
+from fno.pr._preflight import (
+    check_verification_evidence,
+    hosted_ci_decision,
+    hosted_workflow_state,
+    verification_decision,
+)
 
 
 SHA = "a" * 40
 OTHER_SHA = "b" * 40
+PREFLIGHT_SCOPE = [
+    "smoke",
+    "rustfmt:fno-agents",
+    "rustfmt:fno",
+    "cargo-test:fno-agents",
+    "cargo-test:fno",
+    "squads-leak-guard:fno",
+]
 
 
 def receipt(
@@ -20,8 +33,8 @@ def receipt(
     candidate_sha: str = SHA,
     mode: str = "full",
     result: str = "passed",
-    steps_expected: int = 2,
-    steps_executed: int = 2,
+    steps_expected: int = 6,
+    steps_executed: int = 6,
 ) -> dict:
     return {
         "ts": ts,
@@ -35,7 +48,7 @@ def receipt(
                 "platform": "Darwin-arm64",
                 "runner": "scripts/ci/preflight.sh",
             },
-            "scope": ["smoke", "cargo-test"],
+            "scope": PREFLIGHT_SCOPE,
             "started_at": "2026-07-26T01:00:00Z",
             "finished_at": "2026-07-26T01:02:03Z",
             "mode": mode,
@@ -108,6 +121,44 @@ def test_full_pass_requires_real_steps() -> None:
             validate(receipt(steps_expected=expected, steps_executed=executed))
 
 
+def test_command_argument_count_is_bounded_across_receipt_contract() -> None:
+    event = receipt()
+    event["data"]["command"] = ["x"] * 4097
+    with pytest.raises(ValidationError):
+        validate(event)
+
+
+def test_type_specific_source_is_enforced() -> None:
+    event = receipt()
+    event["source"] = "subagent"
+    with pytest.raises(ValidationError):
+        validate(event)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda event: event.update(source="test"),
+        lambda event: event["data"].update(producer={"kind": "untrusted", "id": "x"}),
+        lambda event: event["data"].update(command=["true"]),
+        lambda event: event["data"].update(scope=[f"fake-{i}" for i in range(6)]),
+    ],
+)
+def test_shape_valid_but_untrusted_receipt_cannot_satisfy_ship_gate(
+    mutate, tmp_path: Path
+) -> None:
+    event = receipt()
+    mutate(event)
+    validate(event)
+    journal = tmp_path / "events.jsonl"
+    write(journal, event)
+
+    decision = verification_decision(SHA, [journal])
+
+    assert decision["result"] == "passed"
+    assert decision["satisfied"] is False
+
+
 def test_wrong_sha_is_stale_not_absent(tmp_path: Path) -> None:
     journal = tmp_path / "events.jsonl"
     write(journal, receipt(candidate_sha=OTHER_SHA))
@@ -170,6 +221,26 @@ def test_latest_exact_receipt_wins_even_when_file_order_disagrees(tmp_path: Path
 
     assert decision["satisfied"] is False
     assert decision["result"] == "pending"
+
+
+def test_delivery_journal_discovery_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    journal = tmp_path / "events.jsonl"
+    write(journal, receipt())
+    monkeypatch.setattr(
+        "fno.pr._preflight.verification_event_paths",
+        lambda **_kwargs: ([journal], ["delivery journal discovery failed"]),
+    )
+
+    decision = check_verification_evidence(cwd=str(tmp_path), candidate_sha=SHA)
+
+    assert decision["result"] == "passed"
+    assert decision["coverage"]["complete"] is False
+    assert decision["coverage"]["discovery_errors"] == [
+        "delivery journal discovery failed"
+    ]
+    assert decision["satisfied"] is False
 
 
 @pytest.mark.parametrize(

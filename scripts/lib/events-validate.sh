@@ -209,6 +209,14 @@ validate_event() {
         _ev_warn "unknown event type: $type"
         return 1
     fi
+    local type_source_allowed
+    type_source_allowed=$(jq -r --arg t "$type" --arg s "$src" '
+        any(.event_types[] | select(.name == $t) | .sources[]?; . == $s)
+    ' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
+    if [[ "$type_source_allowed" != "true" ]]; then
+        _ev_warn "event type $type does not allow source $src"
+        return 1
+    fi
 
     # Required data fields per type, with conditional-gate handling for
     # phase_transition. We read required fields one per line (bash 3.2 compat:
@@ -346,7 +354,10 @@ validate_event() {
         receipt_ok=$(jq -r --slurpfile schema "$EVENTS_SCHEMA_CACHE" '
             def utc_epoch:
                 if type != "string" then null
-                else (sub("\\+00:00$"; "Z") | fromdateiso8601?) end;
+                else (
+                    capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.[0-9]+)?(?:Z|\\+00:00)$")?
+                    | if . == null then null else (.whole + "Z" | fromdateiso8601?) end
+                ) end;
             .data as $d
             | ($schema[0].event_types[]
                 | select(.name == "verification_receipt")
@@ -355,7 +366,7 @@ validate_event() {
             | ($d.finished_at | utc_epoch) as $finished
             | (($d.candidate_sha | type == "string")
                 and ($d.candidate_sha | test("^[0-9A-Fa-f]{40}$")))
-                and ($d.command | type == "array" and length > 0
+                and ($d.command | type == "array" and length > 0 and length <= 4096
                     and all(.[]; type == "string" and length > 0 and length <= 4096))
                 and ($d.environment | type == "object"
                     and all(["host", "platform", "runner"][];
@@ -371,6 +382,7 @@ validate_event() {
                 and ($d.steps_expected | type == "number" and floor == . and . >= 0)
                 and ($d.steps_executed | type == "number" and floor == . and . >= 0)
                 and ($d.steps_executed <= $d.steps_expected)
+                and ($d.steps_expected == ($d.scope | length))
                 and (($d.mode != "full" or $d.result != "passed")
                     or ($d.steps_expected > 0 and $d.steps_executed == $d.steps_expected))
                 and ($d.mode != "void" or $d.result != "passed")

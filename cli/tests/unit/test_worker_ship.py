@@ -174,6 +174,35 @@ def test_ac3_edge_ship_no_duplicate_pr(tmp_path, monkeypatch):
     assert not any("create" in c for c in calls)
 
 
+def test_existing_pr_still_requires_current_verification(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    state_path = _make_state(tmp_path)
+    existing_pr = [{"number": 55, "url": "https://github.com/owner/repo/pull/55"}]
+    mock_run = MagicMock()
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="feature/test\n", stderr=""),
+        MagicMock(returncode=0, stdout=json.dumps(existing_pr), stderr=""),
+    ]
+    monkeypatch.setattr(
+        "fno.pr._preflight.check_verification_evidence",
+        lambda **_kwargs: {"satisfied": False, "mode": "subset", "result": "passed"},
+    )
+
+    with patch("subprocess.run", mock_run):
+        from fno.worker.ship import ship
+
+        result = ship(
+            state_path=state_path,
+            title="feat: existing",
+            body="body",
+            artifacts_dir=tmp_path / ".fno" / "artifacts",
+        )
+
+    assert result["action"] == "error"
+    assert "mode=subset result=passed" in result["error"]
+    assert not list((tmp_path / ".fno" / "artifacts").glob("ship-*.md"))
+
+
 # ---- AC4-HP: ship arms auto-merge when approved ----
 
 def test_ac4_hp_ship_arms_automerge(tmp_path, monkeypatch):

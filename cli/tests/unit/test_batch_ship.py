@@ -173,6 +173,28 @@ def test_ship_stale_base_abandons_and_skips_create(tmp_path, graph, monkeypatch)
     assert by_id["x-2"]["batch"] is None
 
 
+def test_ship_unverified_head_abandons_before_push_or_create(tmp_path, graph, monkeypatch):
+    gpath = graph([_member_node("x-1"), _member_node("x-2")])
+    _open(tmp_path)
+    B.join_batch(domain="code", node_id="x-1", root=tmp_path)
+    B.join_batch(domain="code", node_id="x-2", root=tmp_path)
+    monkeypatch.setattr(
+        "fno.pr._preflight.check_verification_evidence",
+        lambda **_kwargs: {"satisfied": False, "mode": "subset", "result": "passed"},
+    )
+    gh = FakeGh()
+
+    result = B.ship_batch(domain="code", root=tmp_path, run=gh)
+
+    assert result.action == "abandoned"
+    assert "verification" in (result.reason or "")
+    assert not any(call[:2] == ["git", "push"] for call in gh.calls)
+    assert not any(call[:3] == ["gh", "pr", "create"] for call in gh.calls)
+    by_id = {node["id"]: node for node in _read_graph(gpath)}
+    assert by_id["x-1"]["batch"] is None
+    assert by_id["x-2"]["batch"] is None
+
+
 def test_ship_fresh_base_creates_pr(tmp_path, graph, monkeypatch):
     """AC: fresh worktree (behind-count 0) -> guard passes, PR created as today."""
     graph([_member_node("x-1")])
@@ -413,3 +435,9 @@ def test_pr_body_lists_members():
     assert "batch-abcd" in body
     assert "`x-1` - did A" in body
     assert "`x-2`" in body
+@pytest.fixture(autouse=True)
+def verified_batch_head(monkeypatch):
+    monkeypatch.setattr(
+        "fno.pr._preflight.check_verification_evidence",
+        lambda **_kwargs: {"satisfied": True, "mode": "full", "result": "passed"},
+    )

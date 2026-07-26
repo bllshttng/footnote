@@ -167,6 +167,19 @@ def ship(
                 "branch": branch,
             }
 
+    from fno.pr._preflight import check_verification_evidence
+
+    evidence = check_verification_evidence()
+    if not evidence["satisfied"]:
+        return {
+            "action": "error",
+            "error": (
+                "verification evidence refused ship: "
+                f"mode={evidence['mode']} result={evidence['result']}"
+            ),
+            "branch": branch,
+        }
+
     if existing_prs:
         # Use existing PR - idempotent
         pr = existing_prs[0]
@@ -177,7 +190,7 @@ def ship(
         # Stale-base guard: a branch cut from a stale local HEAD ships a PR full
         # of phantom deletions. Refuse before gh pr create (the same check the
         # /pr create router runs; bypass FNO_PR_BASE_OK=stale-acknowledged).
-        from fno.pr._preflight import check_stale_base, check_verification_evidence
+        from fno.pr._preflight import check_stale_base
 
         base_code, base_msg = check_stale_base(base=f"origin/{base_branch}")
         if base_msg and base_code == 0:
@@ -190,16 +203,6 @@ def ship(
             return {
                 "action": "error",
                 "error": base_msg or "stale base: refused to open PR from a stale base",
-                "branch": branch,
-            }
-        evidence = check_verification_evidence()
-        if not evidence["satisfied"]:
-            return {
-                "action": "error",
-                "error": (
-                    "verification evidence refused ship: "
-                    f"mode={evidence['mode']} result={evidence['result']}"
-                ),
                 "branch": branch,
             }
         # Create new PR
