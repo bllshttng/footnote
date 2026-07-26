@@ -238,3 +238,41 @@ def test_root_level_test_maps_to_the_registry_step_that_runs_it(tmp_path: Path) 
         tmp_path, ["tests/metrics/test_session_cost_dedup.py"])
     assert [s["rule"] for s in sel] == ["registry-step"]
     assert unmapped == []
+
+
+def test_journey_harness_carries_its_build_prerequisite(tmp_path: Path) -> None:
+    """A harness needing the debug binary must not run without the build step.
+
+    Without it the harness exits 77 (a SKIP), which the packet counts as a
+    failure - a false red instead of early feedback.
+    """
+    from fno.test_cmd import _RUST_BUILD_STEP, _changed_steps
+    _repo(tmp_path)
+    _write(tmp_path / "tests/hooks/test_journey.sh",
+           '#!/usr/bin/env bash\nB="$REPO_ROOT/crates/fno-agents/target/debug/fno-agents"\n'
+           '[[ -x "$B" ]] || exit 77\n', executable=True)
+    sel, _ = select_changed(tmp_path, ["tests/hooks/test_journey.sh"])
+    names = [s[0] for s in _changed_steps(tmp_path, sel)]
+    assert names[0] == _RUST_BUILD_STEP, names
+    assert "tests/hooks/test_journey.sh" in names
+
+
+def test_plain_harness_does_not_drag_in_the_rust_build(tmp_path: Path) -> None:
+    """The prerequisite is conditional; a plain harness pays nothing for it."""
+    from fno.test_cmd import _RUST_BUILD_STEP, _changed_steps
+    _repo(tmp_path)
+    sel, _ = select_changed(tmp_path, ["tests/lib/test_a.sh"])
+    assert _RUST_BUILD_STEP not in [s[0] for s in _changed_steps(tmp_path, sel)]
+
+
+def test_parent_dir_source_ref_resolves_to_the_real_helper(tmp_path: Path) -> None:
+    """`source "$SCRIPT_DIR/../lib/config.sh"` is how shared helpers are used."""
+    _repo(tmp_path)
+    _write(tmp_path / "scripts/lib/shared.sh", "#!/usr/bin/env bash\n:\n")
+    _write(tmp_path / "scripts/tests/test_uses_shared.sh",
+           '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+           'source "$SCRIPT_DIR/../lib/shared.sh"\n', executable=True)
+    sel, unmapped = select_changed(tmp_path, ["scripts/lib/shared.sh"])
+    assert [(s["rule"], s["target"]) for s in sel] == [
+        ("shell-helper-reverse", "scripts/tests/test_uses_shared.sh")]
+    assert unmapped == []

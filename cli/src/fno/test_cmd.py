@@ -29,6 +29,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -376,30 +377,49 @@ def _has_shell_shebang(path: Path) -> bool:
     return first.startswith(b"#!") and b"sh" in first
 
 
-def _resolve_source_ref(sourcer_rel: str, target: str) -> Optional[str]:
+def _resolve_source_ref(sourcer_rel: str, target: str,
+                        root: Optional[Path] = None) -> Optional[str]:
     """Resolve a `source`/`.` target to a repo-relative path.
 
-    Handles the common shapes: `./x.sh`, a bare `x.sh` in the sourcer's dir,
-    and the variable-based same-dir helper forms (`source "$SCRIPT_DIR/x.sh"`,
-    `source "$(dirname "$0")/x.sh"`) by falling back to the trailing basename
-    under the sourcer's directory. Absolute or parent-dir refs return None
-    (rare, best-effort); a `$REPO_ROOT/...` ref resolves to a path that is not
-    an owned-tree candidate anyway, so it harmlessly misses.
+    Handles `./x.sh`, a bare `x.sh` beside the sourcer, and the variable forms
+    (`$SCRIPT_DIR/x.sh`, `$(dirname "$0")/x.sh`, `$SCRIPT_DIR/../lib/x.sh`,
+    `$REPO_ROOT/scripts/lib/x.sh`).
+
+    A leading variable is ambiguous: `$SCRIPT_DIR/..` is sourcer-relative while
+    `$REPO_ROOT/...` is repo-relative, and the name alone cannot tell them
+    apart. So both readings are built, `..` is normalized away, and the one
+    that exists on disk wins - collapsing to the trailing basename instead
+    (the previous behavior) silently missed every `../lib/x.sh` helper, which
+    is how most shared helpers here are actually sourced.
     """
     t = target.strip().strip("'\"")
     if not t.endswith(".sh"):
         return None
     base = sourcer_rel.rsplit("/", 1)[0] if "/" in sourcer_rel else ""
+
+    def _norm(candidate: str) -> Optional[str]:
+        n = posixpath.normpath(candidate)
+        # Escaping the checkout is not a repo-relative ref.
+        return None if n.startswith("..") or n.startswith("/") else n
+
     if "$" in t:
-        # Variable / command-substitution prefix: resolve the trailing basename
-        # against the sourcer's dir (the conventional same-dir helper).
-        name = os.path.basename(t)
-        return f"{base}/{name}" if base else name
+        # Drop the leading variable / command-substitution component; what
+        # follows is the path, read either way.
+        rest = t.split("/", 1)[1] if "/" in t else os.path.basename(t)
+        cands = [c for c in (_norm(f"{base}/{rest}" if base else rest), _norm(rest)) if c]
+        if not cands:
+            return None
+        if root is not None:
+            for c in cands:
+                if (root / c).exists():
+                    return c
+        return cands[0]
+
     if t.startswith("./"):
         t = t[2:]
-    if t.startswith("/") or t.startswith(".."):
+    if t.startswith("/"):
         return None
-    return f"{base}/{t}" if base else t
+    return _norm(f"{base}/{t}" if base else t)
 
 
 def _source_edges(root: Path) -> dict[str, set[str]]:
@@ -424,7 +444,7 @@ def _source_edges(root: Path) -> dict[str, set[str]]:
                 if line.lstrip().startswith("#"):
                     continue
                 for m in _SOURCE_RE.finditer(line):
-                    resolved = _resolve_source_ref(sourcer_rel, m.group(1))
+                    resolved = _resolve_source_ref(sourcer_rel, m.group(1), root)
                     if resolved is not None and resolved != sourcer_rel:
                         edges.setdefault(resolved, set()).add(sourcer_rel)
     return edges
@@ -835,7 +855,22 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
     return selections, unmapped
 
 
-def _changed_steps(selections: Sequence[dict]) -> list[tuple[str, str, str]]:
+# A journey harness that cannot find the debug binary exits 77 (a SKIP), which
+# the packet counts as a failure - so selecting one without its build step
+# produces a false red instead of feedback. The registry already owns the
+# build; selection has to carry it along.
+_RUST_BIN_MARKER = "target/debug/fno-agents"
+_RUST_BUILD_STEP = "Build fno-agents debug binary (for journey tests)"
+
+
+def _needs_rust_binary(root: Path, rel: str) -> bool:
+    try:
+        return _RUST_BIN_MARKER in (root / rel).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, str, str]]:
     """Turn selections into runner steps, fastest-signal first."""
     pytest_targets = [s["target"] for s in selections if s["kind"] == "pytest"]
     steps: list[tuple[str, str, str]] = []
@@ -846,10 +881,13 @@ def _changed_steps(selections: Sequence[dict]) -> list[tuple[str, str, str]]:
         steps.append((f"Pytest (changed subset, {len(targets)} file(s))", ".",
                       f"uv run --project cli pytest --tb=short -q{par} "
                       + " ".join(shlex.quote(t) for t in targets)))
-    for rel in sorted({s["target"] for s in selections if s["kind"] == "shell"}):
-        steps.append((rel, ".", f"bash {shlex.quote(rel)}"))
+    shell_rels = sorted({s["target"] for s in selections if s["kind"] == "shell"})
     by_name = {name: (name, cwd, cmd) for name, cwd, cmd in _STRUCTURAL_STEPS}
-    shell_targets = {s["target"] for s in selections if s["kind"] == "shell"}
+    if any(_needs_rust_binary(root, rel) for rel in shell_rels) and _RUST_BUILD_STEP in by_name:
+        steps.append(by_name[_RUST_BUILD_STEP])
+    for rel in shell_rels:
+        steps.append((rel, ".", f"bash {shlex.quote(rel)}"))
+    shell_targets = set(shell_rels)
     for name in sorted({s["target"] for s in selections if s["kind"] == "step"}):
         step = by_name[name]
         refs = {t.strip("./") for t in _SH_PATH_RE.findall(step[2])}
@@ -892,7 +930,7 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
         return CHANGED_RC_UNEVALUATED
 
     selections, unmapped = select_changed(root, paths)
-    steps = _changed_steps(selections)
+    steps = _changed_steps(root, selections)
     select_s = time.monotonic() - t0
 
     print(f"smoke: base={opts['base'] or 'merge-base origin/main'} "
