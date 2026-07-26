@@ -171,6 +171,18 @@ echo "== attestation: a FULL GREEN records one (sha + host pinned) =="
 grep -q "^sha=$GREEN_FULL " "$ATT" && ok "attestation pins the full candidate SHA" || fail "attestation sha wrong: $(cat "$ATT")"
 grep -q " host=$HOST" "$ATT" && ok "attestation pins this host" || fail "attestation host wrong: $(cat "$ATT")"
 
+echo "== global authority: a failed delivery-root mirror stays GREEN and clears revocation =="
+mv "$EVENTS" "$EVENTS.saved"
+mkdir "$EVENTS"
+out="$(run_pf --force 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "global commit remains authoritative" || fail "mirror failure changed verdict rc=$rc: $out"
+echo "$out" | grep -q "delivery-root mirror unavailable" \
+    && ok "mirror failure is observable" || fail "mirror failure was silent"
+[[ ! -e "$FIX/.git/.preflight-revoked/$GREEN_FULL" ]] \
+    && ok "canonical global receipt clears revocation" || fail "mirror failure left clone-local revocation"
+rm -rf "$EVENTS"
+mv "$EVENTS.saved" "$EVENTS"
+
 echo "== AC1-HP: a second call on the attested SHA reuses (exit 0, no lock) =="
 rm -rf "$LOCKDIR"   # a cache hit must create no lock
 out="$(run_pf 2>&1)"; rc=$?

@@ -153,10 +153,13 @@ emit_verification_receipt() {
     [[ -n "$global_events" ]] || return 1
     mkdir -p "$(dirname "$global_events")" || return 1
     printf '%s\n' "$event" >> "$global_events" || return 1
-    mkdir -p "$(dirname "$EVENTS_PATH")" || return 1
     if [[ "$global_events" != "$EVENTS_PATH" ]]; then
-        printf '%s\n' "$event" >> "$EVENTS_PATH" || return 1
+        if ! mkdir -p "$(dirname "$EVENTS_PATH")" \
+            || ! printf '%s\n' "$event" >> "$EVENTS_PATH"; then
+            echo "preflight: note: global receipt committed; delivery-root mirror unavailable at $EVENTS_PATH" >&2
+        fi
     fi
+    return 0
 }
 
 emit_setup_unavailable() {

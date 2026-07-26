@@ -304,6 +304,24 @@ def test_unregistered_checkouts_share_the_global_generation_floor(
     assert next_verification_generation(cwd=str(second), candidate_sha=SHA) == 5
 
 
+def test_independent_checkout_accepts_canonical_global_receipt_without_local_mirror(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    clone = tmp_path / "clone-b"
+    common = clone / ".git"
+    common.mkdir(parents=True)
+    global_events = tmp_path / "global-events.jsonl"
+    write(global_events, receipt(generation=4))
+    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
+
+    decision = check_verification_evidence(
+        cwd=str(clone), candidate_sha=SHA, event_paths=[global_events]
+    )
+
+    assert decision["satisfied"] is True
+    assert decision["receipt"]["data"]["generation"] == 4
+
+
 def test_next_generation_reports_non_object_receipt_data(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
