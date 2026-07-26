@@ -38,10 +38,20 @@ _QUICK_PLACEHOLDERS = (
 )
 _RUNNABLE_COMMANDS = frozenset(
     """
-    [ bash bun bundle cargo cd composer curl deno docker dotnet fno fno-agents
-    git go gradle grep gh helm java javac jq just make mvn mypy node npm npx php
-    pnpm podman pre-commit pytest python python3 rg rspec ruby ruff rustc sh
-    shellcheck swift terraform test tofu uv wget xcodebuild yarn yq zsh
+    [ bash bun bundle cargo cd composer ctest curl deno docker dotnet eslint fno
+    fno-agents flutter git go gradle grep gh helm java javac jest jq just
+    kubectl make mvn mypy node npm npx php pip pip3 pipenv pnpm podman poetry
+    pre-commit psql pytest python python3 rake rg rspec ruby ruff rustc sh
+    shellcheck swift terraform test tofu tox tsc uv vitest wget xcodebuild yarn
+    yq zsh
+    """.split()
+)
+# Command names that are also ordinary English words, so a prose line can lead
+# with one. A candidate carrying any of these reads as a sentence, not a command.
+_PROSE_TOKENS = frozenset(
+    """
+    a an the this that then sure manually into it its correctly works work
+    should verify check ensure confirm page button screen flow
     """.split()
 )
 _COMMAND_WRAPPERS = frozenset({"command", "env", "gtimeout", "sudo", "timeout"})
@@ -55,6 +65,9 @@ _CONVENTIONAL_FILENAMES = frozenset(
 _FILE_REJECT_RE = re.compile(r"""[\s`$&|;<>(){}*?"'!]""")
 _FILE_EXTENSION_RE = re.compile(r"[\w.+-]+\.[A-Za-z0-9]+")
 _DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+_NON_EXECUTABLE_SUFFIXES = (
+    ".md", ".txt", ".rst", ".json", ".yaml", ".yml", ".toml", ".lock", ".csv",
+)
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SHELL_SEGMENT_RE = re.compile(r"(?:&&|\|\||[;|])")
 
@@ -76,6 +89,16 @@ def _is_placeholder_verify(value: str) -> bool:
 def _is_runnable_verify(value: str) -> bool:
     if _is_placeholder_verify(value):
         return False
+    try:
+        # Whole-value parse first: a well-formed segment must not rescue a value
+        # bash itself would reject, such as `pytest tests/ && echo "unclosed`.
+        whole = shlex.split(value, comments=False, posix=True)
+    except ValueError:
+        return False
+    # `make`, `test`, `go` and `cd` are English words, so `make sure the button
+    # works` would otherwise parse as a runnable `make` invocation.
+    if any(token.lower() in _PROSE_TOKENS for token in whole):
+        return False
     for segment in _SHELL_SEGMENT_RE.split(value):
         try:
             tokens = shlex.split(segment, comments=False, posix=True)
@@ -94,7 +117,12 @@ def _is_runnable_verify(value: str) -> bool:
         if not tokens:
             continue
         command = tokens[0]
-        if command in _RUNNABLE_COMMANDS or "/" in command:
+        if command in _RUNNABLE_COMMANDS:
+            return True
+        # A path-shaped first token is a command only if it could be executed;
+        # `docs/verify.md describes the check` is prose that happens to lead
+        # with a path.
+        if "/" in command and not command.lower().endswith(_NON_EXECUTABLE_SUFFIXES):
             return True
     return False
 
@@ -122,6 +150,9 @@ def _is_concrete_file(value: str) -> bool:
     """
     token = value.strip().strip("`").strip()
     if not token or _has_quick_placeholder(token):
+        return False
+    # Matched whole, never as a substring: `src/en/api.ts` contains "n/a".
+    if token.lower() in {"n/a", "na", "none", "nil"}:
         return False
     if _FILE_REJECT_RE.search(token) or "://" in token or token.startswith("-"):
         return False

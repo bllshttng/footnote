@@ -62,24 +62,33 @@ _semantic_validate() {
         # A source checkout whose interpreter lacks the CLI deps (a fresh
         # worktree has no cli/.venv, so this lands on a bare python3) would
         # otherwise surface an ImportError traceback as a plan violation.
-        local source_pythonpath="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}"
-        if [[ -n "$python_bin" ]] &&
-            PYTHONPATH="$source_pythonpath" "$python_bin" -c 'import fno.cli' >/dev/null 2>&1; then
-            PYTHONPATH="$source_pythonpath" \
-                "$python_bin" -m fno.cli plan validate "$PLAN_DIR" --execution
-            return
+        local source_pythonpath="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" probe_error=""
+        # Import what the real invocation imports. `import fno.cli` alone proves
+        # only that typer is present: the plan sub-app is loaded lazily and pulls
+        # in PyYAML, so a narrower probe passes and the real call still crashes.
+        if [[ -n "$python_bin" ]]; then
+            probe_error=$(PYTHONPATH="$source_pythonpath" \
+                "$python_bin" -c 'import fno.cli, fno.plan.execution_validation' 2>&1) && {
+                PYTHONPATH="$source_pythonpath" \
+                    "$python_bin" -m fno.cli plan validate "$PLAN_DIR" --execution
+                return
+            }
         fi
-        if command -v uv >/dev/null 2>&1 &&
-            uv run --project "$source_root/cli" python -c 'import fno.cli' >/dev/null 2>&1; then
-            uv run --project "$source_root/cli" \
-                python -m fno.cli plan validate "$PLAN_DIR" --execution
-            return
+        if command -v uv >/dev/null 2>&1; then
+            probe_error=$(uv run --project "$source_root/cli" \
+                python -c 'import fno.cli, fno.plan.execution_validation' 2>&1) && {
+                uv run --project "$source_root/cli" \
+                    python -m fno.cli plan validate "$PLAN_DIR" --execution
+                return
+            }
         fi
         # Refuse rather than delegate: an installed fno older than this checkout
         # advertises --execution while missing the guards this source defines,
         # so falling back would pass a plan this tree rejects.
         echo "source fno CLI at $source_root/cli/src is not runnable: no usable interpreter" >&2
         echo "run 'uv sync --project $source_root/cli' or set FNO_PYTHON to an interpreter with the CLI deps" >&2
+        [[ -n "$probe_error" ]] && echo "last probe error: ${probe_error##*$'\n'}" >&2
+        [[ -n "${FNO_PYTHON:-}" ]] && echo "note: FNO_PYTHON=$FNO_PYTHON is a strict override and outranks $source_root/cli/.venv" >&2
         return 2
     fi
     if ! command -v fno >/dev/null 2>&1; then
@@ -220,8 +229,18 @@ if [[ -f "$PLAN_DIR" ]]; then
 fi
 
 if [[ "$SEMANTIC_SINGLE_DOC" -eq 1 ]]; then
-    if semantic_output=$(_semantic_validate 2>&1); then
+    semantic_output=$(_semantic_validate 2>&1) && semantic_status=0 || semantic_status=$?
+    if [[ $semantic_status -eq 0 ]]; then
         ok "semantic execution contract valid"
+    elif [[ $semantic_status -eq 2 ]]; then
+        # "The validator could not run" is not "your plan is wrong": callers are
+        # told to stop and fix the plan on ERROR, so a broken tool must not
+        # arrive wearing that costume.
+        echo "  TOOLFAIL: $semantic_output"
+        echo ""
+        echo "=== Result ==="
+        echo "validation could not run -- the plan was NOT judged; fix the tooling above"
+        exit 2
     else
         error "$semantic_output"
     fi

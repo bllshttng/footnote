@@ -184,6 +184,9 @@ def test_quick_plan_verification_stays_representation_tolerant(tmp_path: Path) -
         "1. `./scripts/ci/preflight.sh`",
         "1. `timeout 30 pytest cli/tests/unit/test_a.py`",
         "1. `timeout -k 5 1m fno test cli/tests/unit/test_a.py`",
+        "1. `gtimeout 30 pytest cli/tests/unit/test_a.py`",
+        "1. `poetry run pytest -q`",
+        "1. `tsc --noEmit`",
     ):
         plan = _write_plan(tmp_path, _quick_plan(verification=verification))
 
@@ -203,13 +206,14 @@ def test_quick_plan_accepts_concrete_paths_without_touching_the_filesystem(
         ".gitignore",
         "gradle.properties",
         "site.webmanifest",
+        # Extensionless paths are real files; accepting them is what keeps the
+        # predicate lexical instead of asking the filesystem.
+        "bin/mycli",
+        "cli/src",
     ):
         plan = _write_plan(tmp_path, _quick_plan(files=f"- `{token}`"))
-        doc = load_plan(plan)
 
-        first = validate_execution(doc).violations
-        assert first == [], token
-        assert [v.field for v in validate_execution(doc).violations] == [], token
+        assert validate_execution(load_plan(plan)).violations == [], token
 
 
 def test_quick_plan_rejects_non_path_tokens(tmp_path: Path) -> None:
@@ -222,6 +226,7 @@ def test_quick_plan_rejects_non_path_tokens(tmp_path: Path) -> None:
         "/",
         "~/.fno/",
         "..",
+        "N/A",
     ):
         plan = _write_plan(tmp_path, _quick_plan(files=f"- `{token}`"))
 
@@ -231,11 +236,44 @@ def test_quick_plan_rejects_non_path_tokens(tmp_path: Path) -> None:
 
 
 def test_quick_plan_malformed_shell_verification_fails_closed(tmp_path: Path) -> None:
-    plan = _write_plan(tmp_path, _quick_plan(verification='1. fno test "unclosed'))
+    for verification in (
+        '1. fno test "unclosed',
+        # A parseable segment must not rescue a value bash itself would reject.
+        '1. pytest cli/tests/ && echo "done',
+    ):
+        plan = _write_plan(tmp_path, _quick_plan(verification=verification))
 
-    fields = {v.field for v in validate_execution(load_plan(plan)).violations}
+        fields = {v.field for v in validate_execution(load_plan(plan)).violations}
 
-    assert fields == {"Verification"}
+        assert fields == {"Verification"}, verification
+
+
+def test_prose_that_opens_with_a_command_word_is_not_runnable(tmp_path: Path) -> None:
+    for verification in (
+        "1. docs/verify.md describes the check",
+        # `make`, `test`, `go`, `cd` are English words as well as commands.
+        "1. make sure the button works",
+        "1. test the login flow manually",
+        "1. go to the settings page",
+        # A wrapper with no command behind it runs nothing.
+        "1. timeout 30",
+        "1. timeout 30 handwave",
+    ):
+        plan = _write_plan(tmp_path, _quick_plan(verification=verification))
+
+        fields = {v.field for v in validate_execution(load_plan(plan)).violations}
+
+        assert fields == {"Verification"}, verification
+
+
+def test_full_plan_task_verify_accepts_a_timeout_wrapper(tmp_path: Path) -> None:
+    strategy = VALID_STRATEGY.replace(
+        "verify: fno test cli/tests/unit/test_plan_execution_validation.py",
+        "verify: timeout 300 fno test cli/tests/unit/test_plan_execution_validation.py",
+    )
+    plan = _write_plan(tmp_path, _full_plan(strategy))
+
+    assert validate_execution(load_plan(plan)).violations == []
 
 
 def test_quick_plan_file_predicate_leaves_full_plan_surfaces_alone(tmp_path: Path) -> None:

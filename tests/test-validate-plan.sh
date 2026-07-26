@@ -431,15 +431,38 @@ else
     fail "AC8d: Portable invocation used a stale installed CLI: $OUTPUT"
 fi
 
+# The uv branch is the fresh-worktree path: no cli/.venv, so the elected
+# interpreter cannot import the CLI and `uv run` must run the SOURCE validator
+# rather than falling through to the refusal.
+if command -v uv >/dev/null 2>&1; then
+    OUTPUT=$(FNO_PYTHON=/usr/bin/python3 bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1) \
+        && EXIT_CODE=0 || EXIT_CODE=$?
+    if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "semantic execution contract valid"; then
+        pass "AC8g: uv fallback runs the source validator when no venv interpreter works"
+    else
+        fail "AC8g: uv fallback did not run the source validator (exit $EXIT_CODE): $OUTPUT"
+    fi
+else
+    echo "  SKIP:  AC8g: uv not installed"
+fi
+
 # An installed fno older than this checkout advertises --execution while missing
 # the guards this source defines, so an unrunnable source tree must refuse rather
 # than hand the plan to it. PATH is stripped so uv is unreachable too.
 OUTPUT=$(PATH=/usr/bin:/bin FNO_PYTHON=/usr/bin/python3 bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1) \
     && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -ne 0 ]] && echo "$OUTPUT" | grep -q "is not runnable"; then
+if [[ $EXIT_CODE -eq 2 ]] && echo "$OUTPUT" | grep -q "is not runnable"; then
     pass "AC8e: Unrunnable source refuses instead of delegating to an installed CLI"
 else
-    fail "AC8e: Unrunnable source did not refuse (exit $EXIT_CODE): $OUTPUT"
+    fail "AC8e: Unrunnable source did not refuse with exit 2 (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# A broken validator must not be reported as an invalid plan: callers are told to
+# stop and rewrite the plan on ERROR, and the underlying cause must survive.
+if echo "$OUTPUT" | grep -q "TOOLFAIL" && echo "$OUTPUT" | grep -q "last probe error:"; then
+    pass "AC8f: Tool failure is distinct from a plan violation and keeps its cause"
+else
+    fail "AC8f: Tool failure was indistinguishable or lost its cause: $OUTPUT"
 fi
 
 # --- Summary ---

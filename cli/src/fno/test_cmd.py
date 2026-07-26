@@ -512,7 +512,6 @@ tests/test-ship-stamp-integration.sh
 tests/test-size-routing.sh
 tests/test-stamp-plan.sh
 tests/test-target-state-recovery.sh
-tests/test-validate-plan.sh
 tests/test-worktree-inside-checkout-redirect.sh
 tests/test-worktree-setup-hook.sh
 tests/test_config.sh
