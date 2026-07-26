@@ -391,13 +391,19 @@ def _restore_marker(home: Path, payload: bytes | None) -> None:
         raise CodexPluginError("rollback-marker", str(exc)) from exc
 
 
-def _rollback_receipt(home: Path, original: CodexPluginError, detail: str) -> None:
+def _rollback_receipt(
+    home: Path, original: CodexPluginError, detail: str, *, channel: str
+) -> None:
     path = home / "footnote" / "rollback-failure.json"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(
-                {"stage": original.stage, "detail": detail[-_OUTPUT_LIMIT:]},
+                {
+                    "channel": channel,
+                    "stage": original.stage,
+                    "detail": detail[-_OUTPUT_LIMIT:],
+                },
                 sort_keys=True,
             )
             + "\n",
@@ -539,9 +545,11 @@ def _restore_owned_config(home: Path, snapshot: _OwnedConfig) -> None:
 
 def _quarantine_cache(home: Path, marketplace: str) -> _CacheQuarantine | None:
     cache = home / "plugins" / "cache" / marketplace
+    if cache.is_symlink():
+        raise CodexPluginError("cache-quarantine", f"refusing non-directory {cache}")
     if not cache.exists():
         return None
-    if cache.is_symlink() or not cache.is_dir():
+    if not cache.is_dir():
         raise CodexPluginError("cache-quarantine", f"refusing non-directory {cache}")
     quarantine = home / "footnote" / f".{marketplace}.{uuid.uuid4().hex}"
     try:
@@ -613,8 +621,10 @@ def _restore_snapshot(
     home: Path,
     snapshot: _Snapshot,
     cache_quarantines: tuple[_CacheQuarantine, ...],
+    *,
+    env: dict[str, str],
 ) -> None:
-    current = _collect(runner)
+    current = _collect(runner, env=env)
     expected = _owned_state_fingerprint(snapshot.state)
     if _owned_state_fingerprint(current) == expected:
         if snapshot.config.marketplaces or snapshot.config.plugins:
@@ -623,7 +633,7 @@ def _restore_snapshot(
             _restore_cache(item)
         _restore_marker(home, snapshot.marker)
         _restore_rollback_receipt(home, snapshot.rollback_receipt)
-        restored = _collect(runner)
+        restored = _collect(runner, env=env)
         if _owned_state_fingerprint(restored) != expected:
             raise CodexPluginError(
                 "rollback-final-verify", "owned state changed during rollback"
@@ -639,8 +649,9 @@ def _restore_snapshot(
                 runner,
                 "rollback-plugin-remove",
                 ["codex", "plugin", "remove", plugin.plugin_id, "--json"],
+                env=env,
             )
-    current = _collect(runner)
+    current = _collect(runner, env=env)
     for marketplace in current.marketplaces:
         if _owned_marketplace(marketplace):
             _run(
@@ -654,6 +665,7 @@ def _restore_snapshot(
                     marketplace.name,
                     "--json",
                 ],
+                env=env,
             )
     for marketplace in snapshot.state.marketplaces:
         if _owned_marketplace(marketplace):
@@ -668,6 +680,7 @@ def _restore_snapshot(
                     marketplace.source,
                     "--json",
                 ],
+                env=env,
             )
     config_restore_needed = False
     for plugin in snapshot.state.plugins:
@@ -677,6 +690,7 @@ def _restore_snapshot(
                     runner,
                     "rollback-plugin-add",
                     ["codex", "plugin", "add", plugin.plugin_id, "--json"],
+                    env=env,
                 )
             except CodexPluginError:
                 if plugin.plugin_id != LEGACY_DEV_PLUGIN_ID:
@@ -690,9 +704,13 @@ def _restore_snapshot(
         _restore_owned_config(home, snapshot.config)
     for cache_name in {MARKETPLACE, LEGACY_DEV_MARKETPLACE} - snapshot.cache_names:
         introduced_cache = home / "plugins" / "cache" / cache_name
+        if introduced_cache.is_symlink():
+            raise CodexPluginError(
+                "rollback-cache", f"refusing non-directory {introduced_cache}"
+            )
         if not introduced_cache.exists():
             continue
-        if introduced_cache.is_symlink() or not introduced_cache.is_dir():
+        if not introduced_cache.is_dir():
             raise CodexPluginError(
                 "rollback-cache", f"refusing non-directory {introduced_cache}"
             )
@@ -704,7 +722,7 @@ def _restore_snapshot(
         _restore_cache(item)
     _restore_marker(home, snapshot.marker)
     _restore_rollback_receipt(home, snapshot.rollback_receipt)
-    restored = _collect(runner)
+    restored = _collect(runner, env=env)
     found = _owned_state_fingerprint(restored)
     if found != expected:
         raise CodexPluginError(
@@ -789,6 +807,7 @@ def inspect_freshness(
 ) -> dict[str, object]:
     """Return an advisory plugin verdict independent of CLI freshness."""
     home = resolve_codex_home(codex_home)
+    live_env = {**os.environ, "CODEX_HOME": str(home)}
     marker_path = home / "footnote" / "plugin-channel.json"
     rollback_path = home / "footnote" / "rollback-failure.json"
     remedy_channel = "dev"
@@ -799,13 +818,17 @@ def inspect_freshness(
                 "rollback-failure",
             )
             detail = str(rollback.get("detail", "rollback did not complete"))
+            rollback_channel = rollback.get("channel")
+            if rollback_channel not in {"release", "dev"}:
+                rollback_channel = "release"
         except (OSError, ValueError, TypeError, CodexPluginError) as exc:
             detail = str(exc)
+            rollback_channel = "release"
         return {
             "status": "error",
             "issue": "rollback-failure",
             "detail": detail[-_OUTPUT_LIMIT:],
-            "remedy": "fno setup codex-plugin --channel release --refresh",
+            "remedy": f"fno setup codex-plugin --channel {rollback_channel} --refresh",
         }
     marker: dict[str, object] | None = None
     marker_error: Exception | None = None
@@ -831,7 +854,7 @@ def inspect_freshness(
     except (FileNotFoundError, OSError, ValueError, TypeError, CodexPluginError) as exc:
         marker_error = exc
     try:
-        state = _collect(runner)
+        state = _collect(runner, env=live_env)
     except CodexPluginError as exc:
         detail = str(exc)
         return {
@@ -965,6 +988,7 @@ def converge(
     if channel not in {"release", "dev"}:
         raise CodexPluginError("channel", f"unsupported channel: {channel}")
     home = resolve_codex_home(codex_home)
+    live_env = {**os.environ, "CODEX_HOME": str(home)}
     source = source_root or _canonical_source_root()
     source_matches: Callable[[str, str], bool]
     if channel == "release":
@@ -996,6 +1020,7 @@ def converge(
             "release-version-check",
             [str(release_check), "--check"],
             cwd=source,
+            env=live_env,
         )
     if validate_candidate is None:
         validate_candidate = True
@@ -1006,7 +1031,7 @@ def converge(
     )
 
     with _convergence_lock(home):
-        state = _collect(runner)
+        state = _collect(runner, env=live_env)
         snapshot = _Snapshot(
             state=state,
             marker=_marker_bytes(home),
@@ -1061,9 +1086,8 @@ def converge(
                 )
             except (UnicodeError, ValueError, TypeError, CodexPluginError):
                 pass
-        legacy_cache_present = (
-            home / "plugins" / "cache" / LEGACY_DEV_MARKETPLACE
-        ).exists()
+        legacy_cache = home / "plugins" / "cache" / LEGACY_DEV_MARKETPLACE
+        legacy_cache_present = legacy_cache.exists() or legacy_cache.is_symlink()
         no_op = (
             channel_stable
             and marker_matches
@@ -1108,6 +1132,7 @@ def converge(
                     runner,
                     "plugin-remove",
                     ["codex", "plugin", "remove", plugin.plugin_id, "--json"],
+                    env=live_env,
                 )
 
             for legacy_marketplace in legacy_marketplaces:
@@ -1123,6 +1148,7 @@ def converge(
                         legacy_marketplace.name,
                         "--json",
                     ],
+                    env=live_env,
                 )
 
             if needs_install:
@@ -1139,6 +1165,7 @@ def converge(
                             marketplace_name,
                             "--json",
                         ],
+                        env=live_env,
                     )
                 if not marketplace_ok:
                     changed = True
@@ -1153,6 +1180,7 @@ def converge(
                             marketplace_source,
                             "--json",
                         ],
+                        env=live_env,
                     )
                 if channel == "release":
                     changed = True
@@ -1167,15 +1195,17 @@ def converge(
                             marketplace_name,
                             "--json",
                         ],
+                        env=live_env,
                     )
                 changed = True
                 _run(
                     runner,
                     "plugin-add",
                     ["codex", "plugin", "add", plugin_id, "--json"],
+                    env=live_env,
                 )
 
-            final = _collect(runner)
+            final = _collect(runner, env=live_env)
             installed = [
                 plugin
                 for plugin in final.plugins
@@ -1286,7 +1316,13 @@ def converge(
             if not changed:
                 raise original
             try:
-                _restore_snapshot(runner, home, snapshot, tuple(cache_quarantines))
+                _restore_snapshot(
+                    runner,
+                    home,
+                    snapshot,
+                    tuple(cache_quarantines),
+                    env=live_env,
+                )
             except Exception as raw_rollback:  # noqa: BLE001 - receipt must cover every rollback failure
                 rollback_error = (
                     raw_rollback
@@ -1295,8 +1331,8 @@ def converge(
                 )
                 detail = f"{original}; rollback failed: {rollback_error}"
                 try:
-                    _rollback_receipt(home, original, detail)
+                    _rollback_receipt(home, original, detail, channel=channel)
                 except CodexPluginError as receipt_error:
                     detail = f"{detail}; receipt failed: {receipt_error}"
-                raise CodexPluginError("rollback-failure", detail) from original
+                raise CodexPluginError("rollback-failure", detail) from raw_rollback
             raise original
