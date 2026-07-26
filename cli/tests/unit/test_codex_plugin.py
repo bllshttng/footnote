@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import fno.setup.codex_plugin as codex_plugin
 from fno.setup.codex_plugin import (
     DEV_MARKETPLACE,
     DEV_PLUGIN_ID,
@@ -135,6 +136,80 @@ def _dev_marketplace(source: Path) -> Path:
     return source
 
 
+class _StatefulCodex:
+    def __init__(self, source: Path) -> None:
+        self.source = source
+        self.marketplaces: list[dict[str, object]] = []
+        self.plugins: list[dict[str, object]] = []
+        self.fail_git_plugin_once = False
+        self.fail_local_marketplace = False
+
+    def add_marketplace(self, *, name: str, source: str, source_type: str) -> None:
+        self.marketplaces.append(
+            {
+                "name": name,
+                "root": source,
+                "marketplaceSource": {
+                    "sourceType": source_type,
+                    "source": source,
+                },
+            }
+        )
+
+    def __call__(
+        self, argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if argv == [str(self.source / "scripts/release/sync-version.sh"), "--check"]:
+            return _cp(argv, {})
+        if argv == ["codex", "plugin", "marketplace", "list", "--json"]:
+            return _cp(argv, {"marketplaces": self.marketplaces})
+        if argv == ["codex", "plugin", "list", "--json"]:
+            return _cp(argv, {"installed": self.plugins, "available": []})
+        if argv[1:4] == ["plugin", "marketplace", "remove"]:
+            self.marketplaces[:] = [row for row in self.marketplaces if row["name"] != argv[4]]
+            return _cp(argv, {})
+        if argv[1:4] == ["plugin", "marketplace", "add"]:
+            added_source = argv[4]
+            source_type = "git" if added_source == "bllshttng/footnote" else "local"
+            if self.fail_local_marketplace and source_type == "local":
+                return _cp(argv, {}, rc=17, err="injected rollback add failure")
+            name = (
+                LEGACY_DEV_MARKETPLACE
+                if Path(added_source).name == LEGACY_DEV_MARKETPLACE
+                else MARKETPLACE
+            )
+            self.add_marketplace(name=name, source=added_source, source_type=source_type)
+            return _cp(argv, {})
+        if argv[1:4] == ["plugin", "marketplace", "upgrade"]:
+            return _cp(argv, {})
+        if argv[1:3] == ["plugin", "remove"]:
+            self.plugins[:] = [row for row in self.plugins if row["pluginId"] != argv[3]]
+            return _cp(argv, {})
+        if argv[1:3] == ["plugin", "add"]:
+            plugin_id = argv[3]
+            marketplace_name = plugin_id.split("@", 1)[1]
+            marketplace = next(
+                row for row in self.marketplaces if row["name"] == marketplace_name
+            )
+            marketplace_source = marketplace["marketplaceSource"]
+            assert isinstance(marketplace_source, dict)
+            if (
+                self.fail_git_plugin_once
+                and marketplace_source["sourceType"] == "git"
+            ):
+                self.fail_git_plugin_once = False
+                return _cp(argv, {}, rc=19, err="injected candidate replacement failure")
+            self.plugins.append(
+                _plugin(
+                    plugin_id,
+                    source=str(marketplace_source["source"]),
+                    source_type=str(marketplace_source["sourceType"]),
+                )
+            )
+            return _cp(argv, {})
+        return _cp(argv, {}, rc=1, err=f"unexpected {argv}")
+
+
 def test_parse_current_codex_json_state() -> None:
     state = parse_state(
         json.dumps(
@@ -190,7 +265,7 @@ def test_release_convergence_removes_dev_then_installs_and_verifies(tmp_path: Pa
             return _cp(argv, {"installed": plugins, "available": []})
         if argv == ["codex", "plugin", "remove", "fno@footnote-dev", "--json"]:
             marker = codex_home / "footnote" / "plugin-channel.json"
-            assert json.loads(marker.read_text(encoding="utf-8"))["channel"] == "release"
+            assert not marker.exists()
             plugins.clear()
             return _cp(argv, {"removed": True})
         if argv == ["codex", "plugin", "marketplace", "add", "bllshttng/footnote", "--json"]:
@@ -233,16 +308,17 @@ def test_release_convergence_removes_dev_then_installs_and_verifies(tmp_path: Pa
         "0.3.0",
     )
     assert [call[0] for call in calls] == [
+        [str(source / "scripts/release/sync-version.sh"), "--check"],
         ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
         ["codex", "plugin", "remove", "fno@footnote-dev", "--json"],
-        [str(source / "scripts/release/sync-version.sh"), "--check"],
         ["codex", "plugin", "marketplace", "add", "bllshttng/footnote", "--json"],
         ["codex", "plugin", "marketplace", "upgrade", "footnote", "--json"],
         ["codex", "plugin", "add", "fno@footnote", "--json"],
+        ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
     ]
-    assert calls[3][1]["cwd"] == source
+    assert calls[0][1]["cwd"] == source
 
 
 def test_release_convergence_is_source_aware_noop(tmp_path: Path) -> None:
@@ -288,6 +364,9 @@ def test_release_convergence_is_source_aware_noop(tmp_path: Path) -> None:
     )
     assert result.action == "no-op"
     assert calls == [
+        [str(source / "scripts/release/sync-version.sh"), "--check"],
+        ["codex", "plugin", "marketplace", "list", "--json"],
+        ["codex", "plugin", "list", "--json"],
         ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
     ]
@@ -501,14 +580,7 @@ def test_dev_convergence_switches_from_release_and_writes_requested_marker(
         if argv == ["codex", "plugin", "list", "--json"]:
             return _cp(argv, {"installed": plugins, "available": []})
         if argv == ["codex", "plugin", "remove", RELEASE_PLUGIN_ID, "--json"]:
-            marker = json.loads(
-                (codex_home / "footnote" / "plugin-channel.json").read_text(encoding="utf-8")
-            )
-            assert marker == {
-                "channel": "dev",
-                "marketplace": DEV_MARKETPLACE,
-                "source": str(dev_marketplace),
-            }
+            assert not (codex_home / "footnote" / "plugin-channel.json").exists()
             plugins.clear()
             return _cp(argv, {"removed": True})
         if argv == [
@@ -559,6 +631,7 @@ def test_dev_convergence_switches_from_release_and_writes_requested_marker(
         ["codex", "plugin", "remove", RELEASE_PLUGIN_ID, "--json"],
         ["codex", "plugin", "marketplace", "add", str(dev_marketplace), "--json"],
         ["codex", "plugin", "add", DEV_PLUGIN_ID, "--json"],
+        ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
     ]
 
@@ -619,6 +692,7 @@ def test_dev_refresh_replaces_same_version_cache_without_release_sync(tmp_path: 
         ["codex", "plugin", "list", "--json"],
         ["codex", "plugin", "remove", DEV_PLUGIN_ID, "--json"],
         ["codex", "plugin", "add", DEV_PLUGIN_ID, "--json"],
+        ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
     ]
 
@@ -671,6 +745,8 @@ def test_dev_convergence_is_source_aware_noop_and_records_authority(
 
     assert result.action == "no-op"
     assert calls == [
+        ["codex", "plugin", "marketplace", "list", "--json"],
+        ["codex", "plugin", "list", "--json"],
         ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
     ]
@@ -827,6 +903,149 @@ def test_payload_digest_includes_scripts_used_by_codex_runtime(tmp_path: Path) -
     assert plugin_payload_digest(source) != with_guard
 
 
+def test_payload_digest_includes_loaded_agents_and_commands(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    agent = source / "agents" / "reviewer.md"
+    command = source / "commands" / "target.md"
+    agent.parent.mkdir(parents=True)
+    command.parent.mkdir(parents=True)
+    agent.write_text("first agent\n", encoding="utf-8")
+    command.write_text("first command\n", encoding="utf-8")
+    initial = plugin_payload_digest(source)
+    agent.write_text("second agent\n", encoding="utf-8")
+    with_agent_change = plugin_payload_digest(source)
+    assert with_agent_change != initial
+    command.write_text("second command\n", encoding="utf-8")
+    assert plugin_payload_digest(source) != with_agent_change
+
+
+def test_failed_switch_restores_working_channel_and_marker_bytes(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    marker = home / "footnote" / "plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker_bytes = b'{"channel":"dev","marketplace":"footnote","source":"original"}\n'
+    marker.write_bytes(marker_bytes)
+    fake.fail_git_plugin_once = True
+
+    with pytest.raises(CodexPluginError) as caught:
+        converge(
+            channel="release",
+            runner=fake,
+            codex_home=home,
+            source_root=source,
+        )
+
+    assert caught.value.stage == "plugin-add"
+    assert marker.read_bytes() == marker_bytes
+    assert [row["name"] for row in fake.marketplaces] == [MARKETPLACE]
+    marketplace_source = fake.marketplaces[0]["marketplaceSource"]
+    assert isinstance(marketplace_source, dict)
+    assert marketplace_source == {"sourceType": "local", "source": str(source)}
+    assert [row["pluginId"] for row in fake.plugins] == [PLUGIN_ID]
+
+
+def test_marker_failure_after_write_rolls_back_exact_previous_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    marker = home / "footnote" / "plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker_bytes = b'{"preexisting":true}\n'
+    marker.write_bytes(marker_bytes)
+    write_marker = codex_plugin._write_marker
+
+    def fail_after_write(*args: object, **kwargs: object) -> Path:
+        write_marker(*args, **kwargs)
+        raise CodexPluginError("desired-channel-marker", "injected post-write failure")
+
+    monkeypatch.setattr(codex_plugin, "_write_marker", fail_after_write)
+    with pytest.raises(CodexPluginError) as caught:
+        converge(
+            channel="release",
+            runner=fake,
+            codex_home=home,
+            source_root=source,
+        )
+
+    assert caught.value.stage == "desired-channel-marker"
+    assert marker.read_bytes() == marker_bytes
+    marketplace_source = fake.marketplaces[0]["marketplaceSource"]
+    assert isinstance(marketplace_source, dict)
+    assert marketplace_source["sourceType"] == "local"
+
+
+def test_rollback_failure_is_persisted_and_named(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    fake.fail_git_plugin_once = True
+    fake.fail_local_marketplace = True
+
+    with pytest.raises(CodexPluginError) as caught:
+        converge(
+            channel="release",
+            runner=fake,
+            codex_home=home,
+            source_root=source,
+        )
+
+    assert caught.value.stage == "rollback-failure"
+    receipt = json.loads(
+        (home / "footnote" / "rollback-failure.json").read_text(encoding="utf-8")
+    )
+    assert receipt["stage"] == "plugin-add"
+    assert "rollback failed" in receipt["detail"]
+
+
+def test_dev_migrates_legacy_identity_and_removes_legacy_cache(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    legacy = tmp_path / LEGACY_DEV_MARKETPLACE
+    legacy.mkdir()
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(
+        name=LEGACY_DEV_MARKETPLACE,
+        source=str(legacy),
+        source_type="local",
+    )
+    fake.plugins.append(
+        _plugin(LEGACY_DEV_PLUGIN_ID, source=str(legacy), source_type="local")
+    )
+    legacy_cache = home / "plugins" / "cache" / LEGACY_DEV_MARKETPLACE
+    legacy_cache.mkdir(parents=True)
+    (legacy_cache / "stale").write_text("old", encoding="utf-8")
+
+    result = converge(
+        channel="dev",
+        runner=fake,
+        codex_home=home,
+        source_root=source,
+    )
+
+    assert result.plugin_id == PLUGIN_ID
+    assert [row["name"] for row in fake.marketplaces] == [MARKETPLACE]
+    assert [row["pluginId"] for row in fake.plugins] == [PLUGIN_ID]
+    assert not legacy_cache.exists()
+    marker = json.loads(
+        (home / "footnote" / "plugin-channel.json").read_text(encoding="utf-8")
+    )
+    assert marker == {
+        "channel": "dev",
+        "marketplace": MARKETPLACE,
+        "source": str(source),
+    }
+
+
 def test_dev_refresh_fails_when_codex_does_not_rebuild_cache(tmp_path: Path) -> None:
     source = _source(tmp_path)
     dev_marketplace = _dev_marketplace(source)
@@ -883,7 +1102,7 @@ def test_external_failure_is_named_and_bounded(tmp_path: Path) -> None:
             codex_home=tmp_path / "codex-home",
             source_root=source,
         )
-    assert caught.value.stage == "marketplace-list"
+    assert caught.value.stage == "release-version-check"
     assert len(caught.value.detail) == 500
 
 
