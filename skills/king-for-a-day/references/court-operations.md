@@ -12,9 +12,9 @@ The pane layer owns placement, lifecycle, and I/O; fno stays the authority for i
 
 | Duty | Verb | Notes |
 |---|---|---|
-| **Place** a teammate near the king | `fno agents spawn --name <n> "<payload>" --substrate pane --squad <s> --split <dir>` | Splits the target squad's active tab; min-size refusal falls back to a same-squad tab. Read the receipt for which one landed. |
+| **Place** a teammate near the king | `fno agents spawn --name <n> "<payload>" --substrate pane --workspace <w> --split <dir>` | Splits the target workspace's active tab; min-size refusal falls back to a tab in the same workspace. Read the receipt for which one landed. Pane substrate only - `bg` and `headless` refuse placement flags. |
 | **Inject** the next phase into a live session | `fno mail send <handle> "<ruling + /fno:verb>" --from-self` | A direct send to a live pane injects as a notification it acts on this turn. Receipt-gated - see delivery truth below. Auto-wrapped in the `<fno_mail>` envelope; a raw pane-layer prompt is not - see the envelope rule below. |
-| **Wait** on lifecycle | `fno agents top` + `fno agents peek <handle>` per heartbeat | Push-first (the teammate's report mail); this is the backstop sweep. `top` = who is alive; `peek` = is a quiet pane done/blocked/dead. `fno-agents needs --json` is a separate loop-wedge signal, not pane completion. |
+| **Wait** on lifecycle | `fno agents top` + `fno agents peek <handle>` at a boundary | Push-first (the teammate's report mail); this is the backstop sweep, run at a named boundary while you are already awake, never on a timer. `top` = who is alive; `peek` = is a quiet pane done/blocked/dead. `fno-agents needs --json` is a separate loop-wedge signal, not pane completion. |
 | **Read / triage** | `fno agents peek <handle>` | Read-only. Full-screen agents render in the alternate screen, so scrolled-off rows are unrecoverable - reads are triage, results live in artifacts and the graph. |
 
 ## The `<fno_mail>` envelope, on every lane
@@ -32,7 +32,8 @@ Every agent-to-agent payload carries the `<fno_mail>` envelope - king to teammat
 
 | Job | Verb |
 |---|---|
-| Spawn a teammate pane | `fno agents spawn --name <n> "<payload>" --substrate pane --squad <s> --split <dir> --effort <e>` |
+| Spawn a teammate pane | `fno agents spawn --name <n> "<payload>" --substrate pane --workspace <w> --split <dir> --effort <e>` |
+| Move a running pane into another workspace | unsupported - no `fno mux pane` verb does it; `break` only detaches to a new tab in the same session |
 | Anoint a sub-king at spawn | `fno agents spawn --name <n> "<payload>" --substrate pane --crown level=<N>,scope=<scope>` |
 | Coronate a running session in place | `fno agents crown <handle> --scope <scope> [--level N]` (scope = epic/project/node id; level 0..2) |
 | Read your own crown | `fno whoami` (prints a `crown:` line when your row holds one) |
@@ -71,17 +72,17 @@ read -r -d '' payload <<'CLAUSE' || true   # read -d '' exits 1 at EOF; absorb i
 Take node x-b3a8 through /fno:think.
 <minion clause - paste verbatim from references/minion-clause.md>
 CLAUSE
-fno agents spawn --name node-x-b3a8 "$payload" --substrate pane --squad epic-squad --split right --effort high
+fno agents spawn --name node-x-b3a8 "$payload" --substrate pane --workspace path-consolidation --split right --effort high
 ```
 
-The `<minion clause>` is the canonical block in [minion-clause.md](minion-clause.md), not something you compose here - that is the whole point of the template. Capture the teammate's mail handle from the spawn receipt's `short_id` (a claude pane now carries its 8-hex jobId there).
+`path-consolidation` stands in for your own mission workspace, named for the epic; it is created by this first placement, so nothing sets it up beforehand. The `<minion clause>` is the canonical block in [minion-clause.md](minion-clause.md), not something you compose here - that is the whole point of the template. Capture the teammate's mail handle from the spawn receipt's `short_id` (a claude pane now carries its 8-hex jobId there).
 
 **Route the next phase into the live session (reuse):**
 
 ```bash
 fno mail send <teammate-handle> \
   "Ruling: approved, the design covers the three failure modes. \
-Cross-squad: node <sibling> owns <shared-file> - do not touch it. \
+Cross-node: node <sibling> owns <shared-file> - do not touch it. \
 Next: /fno:blueprint <node>." --from-self
 ```
 
@@ -95,7 +96,7 @@ Continue node x-b3a8 at /fno:blueprint. Prior /think artifact: <path>.
 <minion clause - paste verbatim from references/minion-clause.md>
 CLAUSE
 fno agents spawn --name node-x-b3a8-g2 "$payload" \
-  --substrate pane --squad epic-squad --split down --effort high
+  --substrate pane --workspace path-consolidation --split down --effort high
 # ...only after the successor's session header prints, close the predecessor
 # PANE (a mux row -> fno mux pane kill, not fno agents stop). Its <session>:<pane_id>
 # ref is in the mux field of `fno agents list --json`:
@@ -122,6 +123,11 @@ fno backlog update x-b3a8 --add-blocker x-7a53   # if a merge-order constraint a
 
 ## Caveats
 
+- **`--workspace` is the canonical spelling.** A deprecated alias still resolves, which is the trap: a stale command runs clean in a manual test and teaches the wrong flag anyway. The migration note is in the [spawn guide](../../../docs/guides/fno-agents-spawn.md#place-a-pane-in-a-mux-workspace).
+- **Placement is pane-only.** `--workspace`/`-s`, `--split`/`-x`, and `--at` are refused for `bg` and `headless`, which have no mux geometry. A court teammate is a pane, so this never binds court; it binds a pass that dispatches unattended, which carries mission provenance in the graph instead.
+- **You never create a workspace first.** The first placement into a name creates it; there is no create verb. A blank name is a CLI error, not a fallback to the default.
+- **A running pane cannot be moved to another workspace.** No `fno mux pane` verb migrates one - `break` detaches a pane into a new tab in the same session. Grid recruitment (`m` in the agents grid) builds a *view*: membership is a reference, never a move, so a recruited agent still sits where its pane always sat. Adopt an already-running worker logically (claim + mail), never physically, and do not kill a healthy one for layout.
+- **Sweep at boundaries, not on a clock.** A heartbeat poll costs a context re-read every pass and surfaces nothing the teammate's own projected events would not. Silence is not an event.
 - **Qualified verbs, always.** Bare `/do`, `/think`, `/blueprint` in a mixed-plugin session can resolve to a different plugin. Use `/fno:...` in every payload, routing mail, and `--dispatch-verb`.
 - **`/fno:target` is the execution verb, all sizes.** Raw `/fno:do` has no claim, no gates, no ship, no finalize. A small PR is not an exemption.
 - **Lane accounting counts corpses.** Dead bg claims can starve court spawns; check `fno claim` liveness before concluding the project is saturated.

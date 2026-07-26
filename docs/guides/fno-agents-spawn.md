@@ -67,16 +67,21 @@ Pane-hosted agents can join an existing mux workspace and tile beside its focuse
 
 ```bash
 fno agents spawn "review the current diff" --name reviewer \
-  -H codex -s reviews -x right
+  -H codex --workspace reviews --split right
 ```
 
-`-s` / `--squad` selects a workspace by the same visible name shown in the mux sideline. `-x` / `--split` accepts `left`, `right`, `up`, or `down`; omit it to create a new tab in that squad. Omitting both options preserves the cwd-routed new-tab behavior. Placement does not change the worker's cwd, and the options are rejected for `bg` and `headless`, which have no mux geometry.
+`--workspace` (short `-s`) selects a workspace by the same visible name shown in the mux sideline. `--split` (short `-x`) accepts `left`, `right`, `up`, or `down`; omit it to create a new tab in that workspace. Omitting both options preserves the cwd-routed new-tab behavior. Placement does not change the worker's cwd, and the options are rejected for `bg` and `headless`, which have no mux geometry.
 
-The lower-level equivalent avoids option punctuation entirely: `fno mux pane run squad reviews split right echo ready`. It also accepts `-s` / `--squad` and `-x` / `--split`. A missing squad or a split that would make a pane too small fails without leaving a child process or layout mutation behind.
+The workspace does not have to exist first: the first placement into a name creates it, so there is no separate create step. A blank name is an error rather than a silent fall back to the default.
+
+Migrating an older command: `--squad` is a hidden deprecated alias for `--workspace`.
+It still resolves, and `--workspace` wins when both are passed, but new commands should be written with `--workspace`.
+
+The lower-level equivalent avoids option punctuation entirely: `fno mux pane run workspace reviews split right echo ready`. It also accepts `--workspace` / `-s` and `--split` / `-x`. A missing workspace or a split that would make a pane too small fails without leaving a child process or layout mutation behind.
 
 ## Place a pane next to the calling pane (`--at current`)
 
-`-s`/`-x` place a pane relative to the squad's *focused* pane, which is unsuitable for automation: another client can move focus between command construction and execution. `--at current` pins the new pane to the calling pane (the one the command runs inside), so focus races cannot redirect it.
+`--workspace`/`--split` place a pane relative to the workspace's *focused* pane, which is unsuitable for automation: another client can move focus between command construction and execution. `--at current` pins the new pane to the calling pane (the one the command runs inside), so focus races cannot redirect it.
 
 ```bash
 fno agents spawn "investigate the failing test" --name digger \
@@ -85,7 +90,7 @@ fno agents spawn "investigate the failing test" --name digger \
 
 `--at current` resolves the calling pane from the `FNO_PANE` environment variable the mux server sets in every pane, and requires `--split` and `--substrate pane`. It opts into *strict* placement: if the anchor pane is gone, a selector names a workspace or tab the anchor is not in, or the split cannot fit the minimum pane size, the spawn refuses (nonzero exit) rather than substituting focus or minting a new tab.
 The mux server never creates a tab and never steals the viewer's focus on this path.
-On a strict spawn the `--json` receipt carries `placement` with the server-committed `anchor`, `direction`, `fallback` (`refuse`), `squad`, and `tab`, so automation captures real identities instead of predicting pane ids.
+On a strict spawn the `--json` receipt carries `placement` with the server-committed `anchor`, `direction`, `fallback` (`refuse`), `squad` (the receipt's field name for the workspace), and `tab`, so automation captures real identities instead of predicting pane ids.
 A provider that exits before it is ready is treated as a launch failure: the spawned pane is reaped, the split collapses through normal tree normalization, and no agent registry row is written.
 The lower-level equivalent is `fno mux pane run --at current --split down -- <argv>`, which resolves `current` the same way.
 
