@@ -369,17 +369,26 @@ def _has_shell_shebang(path: Path) -> bool:
 def _resolve_source_ref(sourcer_rel: str, target: str) -> Optional[str]:
     """Resolve a `source`/`.` target to a repo-relative path.
 
-    Handles the common shapes (`./x.sh`, bare `x.sh` in the sourcer's dir);
-    absolute or parent-dir refs return None (rare, best-effort).
+    Handles the common shapes: `./x.sh`, a bare `x.sh` in the sourcer's dir,
+    and the variable-based same-dir helper forms (`source "$SCRIPT_DIR/x.sh"`,
+    `source "$(dirname "$0")/x.sh"`) by falling back to the trailing basename
+    under the sourcer's directory. Absolute or parent-dir refs return None
+    (rare, best-effort); a `$REPO_ROOT/...` ref resolves to a path that is not
+    an owned-tree candidate anyway, so it harmlessly misses.
     """
     t = target.strip().strip("'\"")
     if not t.endswith(".sh"):
         return None
+    base = sourcer_rel.rsplit("/", 1)[0] if "/" in sourcer_rel else ""
+    if "$" in t:
+        # Variable / command-substitution prefix: resolve the trailing basename
+        # against the sourcer's dir (the conventional same-dir helper).
+        name = os.path.basename(t)
+        return f"{base}/{name}" if base else name
     if t.startswith("./"):
         t = t[2:]
     if t.startswith("/") or t.startswith(".."):
         return None
-    base = sourcer_rel.rsplit("/", 1)[0] if "/" in sourcer_rel else ""
     return f"{base}/{t}" if base else t
 
 

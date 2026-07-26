@@ -40,6 +40,13 @@ def test_discovers_new_harness_and_excludes_non_harnesses(tmp_path: Path) -> Non
            executable=True)
     _write(root / "tests/hooks/test_uses_helper.sh",
            "#!/usr/bin/env bash\nsource ./test_helper.sh\necho ok\n", executable=True)
+    # A helper sourced via the conventional variable form ($SCRIPT_DIR/...):
+    # the resolver falls back to the basename under the sourcer's dir.
+    _write(root / "tests/hooks/test_var_helper.sh",
+           "#!/usr/bin/env bash\n# sourced via $SCRIPT_DIR\n", executable=True)
+    _write(root / "tests/hooks/test_uses_var_helper.sh",
+           '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+           'source "$SCRIPT_DIR/test_var_helper.sh"\necho ok\n', executable=True)
 
     # Excluded classes.
     _write(root / "scripts/lib/libthing.sh",       # library, out of owned scope
@@ -57,6 +64,8 @@ def test_discovers_new_harness_and_excludes_non_harnesses(tmp_path: Path) -> Non
     assert "skills/agent/tests/test_one.sh" in found
     assert "tests/hooks/test_uses_helper.sh" in found     # real harness that sources a helper
     assert "tests/hooks/test_helper.sh" not in found      # source-only helper excluded
+    assert "tests/hooks/test_uses_var_helper.sh" in found  # real harness, variable source ref
+    assert "tests/hooks/test_var_helper.sh" not in found   # $SCRIPT_DIR-sourced helper excluded
     assert "scripts/lib/libthing.sh" not in found         # library excluded
     assert "cli/tests/smoke/test_smoke_one.sh" not in found  # orchestrated subtree excluded
     assert "tests/hooks/not_shell.sh" not in found        # non-shell shebang excluded
