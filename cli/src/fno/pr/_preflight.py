@@ -289,14 +289,22 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
     if canonical["coverage"].get("conflicting_latest"):
         return canonical
     receipt = canonical.get("receipt")
+    receipt_data = receipt.get("data") if isinstance(receipt, dict) else None
     receipt_sha = (
-        receipt.get("data", {}).get("candidate_sha")
-        if isinstance(receipt, dict)
+        receipt_data.get("candidate_sha")
+        if isinstance(receipt_data, dict)
+        else None
+    )
+    canonical_generation = (
+        receipt_data.get("generation")
+        if isinstance(receipt_data, dict)
         else None
     )
     if not (
         isinstance(receipt_sha, str)
         and receipt_sha.lower() == candidate_sha.lower()
+        and isinstance(canonical_generation, (int, float))
+        and not isinstance(canonical_generation, bool)
     ):
         canonical["coverage"]["canonical_required"] = True
         canonical["satisfied"] = False
@@ -314,7 +322,6 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
             continue
         readable.append(path)
     combined = _verification_decision_all(candidate_sha, readable)
-    canonical_generation = receipt["data"]["generation"]
     combined_receipt = combined.get("receipt")
     combined_generation = (
         combined_receipt.get("data", {}).get("generation")

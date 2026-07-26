@@ -15,7 +15,6 @@ from __future__ import annotations
 import enum
 import json
 import os
-from pathlib import Path
 from typing import Optional
 
 import typer
