@@ -57,6 +57,11 @@ def _is_nonnegative_integral_number(value: Any) -> TypeGuard[int | float]:
 def _utc_timestamp(value: Any) -> _dt.datetime | None:
     if not isinstance(value, str) or not value:
         return None
+    if _re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|\+00:00)",
+        value,
+    ) is None:
+        return None
     try:
         parsed = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:

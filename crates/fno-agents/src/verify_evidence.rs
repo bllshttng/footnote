@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
 
 // ── shared helpers ────────────────────────────────────────────────────────────
@@ -593,13 +593,12 @@ fn valid_receipt(event: &Value) -> bool {
 }
 
 fn gate_eligible_receipt(event: &Value) -> bool {
-    const SCOPE: [&str; 6] = [
+    const BASE_SCOPE: [&str; 5] = [
         "smoke",
         "rustfmt:fno-agents",
         "rustfmt:fno",
         "cargo-test:fno-agents",
         "cargo-test:fno",
-        "squads-leak-guard:fno",
     ];
     let Some(data) = event.get("data") else {
         return false;
@@ -624,10 +623,14 @@ fn gate_eligible_receipt(event: &Value) -> bool {
         && (command_path == "scripts/ci/preflight.sh"
             || command_path.ends_with("/scripts/ci/preflight.sh"))
         && scope.is_some_and(|items| {
-            items.len() == SCOPE.len()
-                && SCOPE
+            matches!(items.len(), 5 | 6)
+                && BASE_SCOPE
                     .iter()
                     .all(|expected| items.iter().any(|item| item.as_str() == Some(expected)))
+                && (items.len() == 5
+                    || items
+                        .iter()
+                        .any(|item| item.as_str() == Some("squads-leak-guard:fno")))
         })
 }
 
@@ -665,6 +668,10 @@ fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
                 continue;
             }
             let ts = receipt_timestamp(event.get("ts").unwrap()).unwrap();
+            if ts > Utc::now() + Duration::minutes(5) {
+                malformed += 1;
+                continue;
+            }
             let signature = serde_json::to_string(&event).unwrap_or_default();
             if seen.insert(signature.clone()) {
                 receipts.push((ts, signature, event));
@@ -684,7 +691,32 @@ fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
             .and_then(Value::as_str)
             .is_some_and(|receipt_sha| receipt_sha.eq_ignore_ascii_case(candidate_sha))
     });
-    if let Some((_, _, event)) = exact {
+    if let Some((newest_ts, _, event)) = exact {
+        let conflicting_latest = receipts
+            .iter()
+            .filter(|(ts, _, candidate)| {
+                ts == newest_ts
+                    && candidate
+                        .pointer("/data/candidate_sha")
+                        .and_then(Value::as_str)
+                        .is_some_and(|receipt_sha| receipt_sha.eq_ignore_ascii_case(candidate_sha))
+            })
+            .count();
+        if conflicting_latest != 1 {
+            return json!({
+                "satisfied": false,
+                "mode": Value::Null,
+                "result": "unavailable",
+                "receipt": Value::Null,
+                "coverage": {
+                    "complete": false,
+                    "malformed_lines": malformed,
+                    "unreadable_paths": unreadable,
+                    "deduped_events": receipts.len(),
+                    "conflicting_latest": conflicting_latest,
+                },
+            });
+        }
         let mode = event
             .pointer("/data/mode")
             .and_then(Value::as_str)
@@ -1130,6 +1162,63 @@ mod tests {
         assert_eq!(decision["result"], "passed");
         assert_eq!(decision["coverage"]["complete"], false);
         assert_eq!(decision["satisfied"], false);
+    }
+
+    #[test]
+    fn receipt_decision_rejects_equal_timestamp_conflicts() {
+        let mut journal = tempfile::NamedTempFile::new().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        writeln!(
+            journal,
+            "{}",
+            receipt_event("2026-07-26T03:00:00Z", sha, "full", "failed")
+        )
+        .unwrap();
+        writeln!(
+            journal,
+            "{}",
+            receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed")
+        )
+        .unwrap();
+
+        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
+
+        assert_eq!(decision["satisfied"], false);
+        assert_eq!(decision["result"], "unavailable");
+        assert_eq!(decision["coverage"]["conflicting_latest"], 2);
+    }
+
+    #[test]
+    fn receipt_decision_rejects_future_dated_evidence() {
+        let mut journal = tempfile::NamedTempFile::new().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        writeln!(
+            journal,
+            "{}",
+            receipt_event("2099-01-01T00:00:00Z", sha, "full", "passed")
+        )
+        .unwrap();
+
+        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
+
+        assert_eq!(decision["satisfied"], false);
+        assert_eq!(decision["coverage"]["malformed_lines"], 1);
+    }
+
+    #[test]
+    fn gate_accepts_actual_five_step_scope_without_optional_squads_guard() {
+        let mut event = receipt_event(
+            "2026-07-26T03:00:00Z",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "full",
+            "passed",
+        );
+        event["data"]["scope"].as_array_mut().unwrap().pop();
+        event["data"]["steps_expected"] = json!(5);
+        event["data"]["steps_executed"] = json!(5);
+
+        assert!(valid_receipt(&event));
+        assert!(gate_eligible_receipt(&event));
     }
 
     #[test]

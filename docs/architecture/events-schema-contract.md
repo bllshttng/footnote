@@ -205,15 +205,20 @@ Explicit false, absent, pending, unavailable, stale, and advisory observations a
 Python validation in `fno.events`, Bash validation in `scripts/lib/events-validate.sh`, and Rust validation in `fno-agents verify-evidence receipt` enforce the same receipt vocabulary and invariants.
 The parity corpus includes fractional UTC timestamps and bounded-command failures so wire-compatible RFC3339 values and size limits do not drift between implementations.
 
-`scripts/ci/preflight.sh` emits the receipt and remains the authority for actual local execution.
-Its full deterministic scope is `smoke`, both Rust format checks, both Rust test suites, and the squads leak guard; the two cargo-audit scopes are separate advisory evidence and each execution is counted independently.
+`scripts/ci/preflight.sh` remains the authority for actual local execution and calls the preflight-owned receipt recorder while it holds the shared preflight lock.
+The generic event emitter refuses `verification_receipt`, so a caller cannot self-assert the trusted producer, environment, candidate SHA, or finish time.
+Its required deterministic scope is `smoke`, both Rust format checks, and both Rust test suites; the squads leak guard joins the full scope only when squads exist to measure, while a not-configured guard is recorded separately as advisory evidence.
+The two cargo-audit scopes are also separate advisory evidence, and every receipt counts only steps that actually executed.
 Setup failures emit a zero-executed void/unavailable receipt instead of manufacturing a verdict.
 The preflight attestation is only a cache carrier and never substitutes for the event receipt.
 
 Ship-gate consumers accept only the newest exact-SHA full/passed receipt from the trusted preflight producer with the canonical command, runner, host-bound producer identity, and complete deterministic scope.
 Project, global, delivery-root, and salvage journals may be concatenated in any order, so consumers parse RFC3339 timestamps, deduplicate canonical event objects, and select the newest exact candidate receipt.
-Malformed rows, unreadable journals, or errors while discovering delivery journals mark coverage incomplete and prevent satisfaction even when another journal contains a plausible pass.
+Future-dated receipts and distinct receipts tied for the newest parsed timestamp are unavailable rather than arbitrarily ordered.
+Starting a new preflight atomically revokes the candidate's older green receipt until the new final receipt is durably appended, so a failed append or interrupted run cannot expose stale success.
+Malformed rows, unreadable journals, revocation markers, or errors while discovering delivery journals mark coverage incomplete and prevent satisfaction even when another journal contains a plausible pass.
 An older valid receipt for a different SHA is reported as stale rather than absent.
+Local ship paths apply one shared requirement policy: explicit skip, documentation-only changes, and repositories without a configured preflight runner remain distinct exemptions; every other candidate must present trusted receipt evidence.
 
 ### `mission_started` / `wave_advanced` / `mission_complete`
 

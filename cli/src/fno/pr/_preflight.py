@@ -21,7 +21,9 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import platform
 import re
+import socket
 import stat
 import sys
 from pathlib import Path
@@ -48,6 +50,8 @@ _PREFLIGHT_GATE_SCOPE = frozenset(
         "squads-leak-guard:fno",
     }
 )
+_PREFLIGHT_BASE_SCOPE = _PREFLIGHT_GATE_SCOPE - {"squads-leak-guard:fno"}
+_MAX_RECEIPT_FUTURE_SKEW = dt.timedelta(minutes=5)
 
 
 def _event_timestamp(value: object) -> Optional[dt.datetime]:
@@ -196,7 +200,10 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
                 malformed += 1
                 continue
             parsed_ts = _event_timestamp(event.get("ts"))
-            if parsed_ts is None:
+            if (
+                parsed_ts is None
+                or parsed_ts > dt.datetime.now(dt.timezone.utc) + _MAX_RECEIPT_FUTURE_SKEW
+            ):
                 malformed += 1
                 continue
             signature = json.dumps(event, sort_keys=True, separators=(",", ":"))
@@ -213,6 +220,18 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
     receipts.sort(key=lambda item: (item[0], item[1]))
     exact = [item for item in receipts if item[2]["data"]["candidate_sha"].lower() == candidate_sha.lower()]
     if exact:
+        newest_ts = exact[-1][0]
+        newest = [item for item in exact if item[0] == newest_ts]
+        if len(newest) != 1:
+            coverage["complete"] = False
+            coverage["conflicting_latest"] = len(newest)
+            return {
+                "satisfied": False,
+                "mode": None,
+                "result": "unavailable",
+                "receipt": None,
+                "coverage": coverage,
+            }
         event = exact[-1][2]
         data = event["data"]
         command = data["command"]
@@ -228,8 +247,8 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
                 command_path == "scripts/ci/preflight.sh"
                 or command_path.endswith("/scripts/ci/preflight.sh")
             )
-            and frozenset(data["scope"]) == _PREFLIGHT_GATE_SCOPE
-            and len(data["scope"]) == len(_PREFLIGHT_GATE_SCOPE)
+            and frozenset(data["scope"]) in {_PREFLIGHT_BASE_SCOPE, _PREFLIGHT_GATE_SCOPE}
+            and len(data["scope"]) == len(frozenset(data["scope"]))
         )
         return {
             "satisfied": (
@@ -319,7 +338,108 @@ def check_verification_evidence(
         decision["coverage"]["complete"] = False
         decision["coverage"]["discovery_errors"] = discovery_errors
         decision["satisfied"] = False
+    revocation = _preflight_revocation(repo)
+    if revocation == candidate_sha.lower():
+        decision["coverage"]["complete"] = False
+        decision["coverage"]["revoked"] = True
+        decision["satisfied"] = False
     return decision
+
+
+def local_verification_required(
+    *, cwd: str, base_ref: str = "origin/main", env: Optional[Mapping[str, str]] = None
+) -> tuple[bool, str]:
+    environment = os.environ if env is None else env
+    root = Path(cwd).resolve()
+    if environment.get("FNO_SKIP_PREFLIGHT") == "1":
+        return False, "explicit-skip"
+    if not (root / "scripts" / "ci" / "preflight.sh").is_file():
+        return False, "runner-not-configured"
+    changed = _git(["diff", "--name-only", f"{base_ref}...HEAD"], str(root))
+    if changed.returncode != 0:
+        return True, "diff-unavailable"
+    non_docs = [
+        path
+        for path in changed.stdout.splitlines()
+        if path and not (path.startswith(("docs/", "internal/")) or path.endswith(".md"))
+    ]
+    return (True, "required") if non_docs else (False, "docs-only")
+
+
+def _git_common_dir(repo: str) -> Optional[Path]:
+    result = _git(["rev-parse", "--path-format=absolute", "--git-common-dir"], repo)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return Path(result.stdout.strip()).resolve()
+
+
+def _preflight_revocation(repo: str) -> Optional[str]:
+    common = _git_common_dir(repo)
+    if common is None:
+        return None
+    try:
+        value = (common / ".preflight-revoked").read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        return None
+    return value if re.fullmatch(r"[0-9a-f]{40}", value) else None
+
+
+def record_preflight_receipt(
+    *,
+    cwd: str,
+    events_path: Path,
+    mode: str,
+    result: str,
+    scope: list[str],
+    started_at: str,
+    steps_expected: int,
+    steps_executed: int,
+    command: list[str],
+    detail: str,
+) -> dict:
+    from fno.events import _build, append_event
+
+    common = _git_common_dir(cwd)
+    if common is None:
+        raise ValueError("preflight receipt refused: git common directory unavailable")
+    holder_path = common / ".preflight.lock.d" / "holder"
+    try:
+        holder = holder_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"preflight receipt refused: lock holder unavailable: {exc}") from exc
+    match = re.search(r"(?:^| )pid=([0-9]+)(?: |$)", holder)
+    if match is None or int(match.group(1)) != os.getppid():
+        raise ValueError("preflight receipt refused: caller does not own the preflight lock")
+    candidate = _git(["rev-parse", "HEAD"], cwd)
+    candidate_sha = candidate.stdout.strip().lower() if candidate.returncode == 0 else ""
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
+        raise ValueError("preflight receipt refused: candidate SHA unavailable")
+    host = socket.gethostname() or "unknown"
+    finished_at = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    event = _build(
+        "verification_receipt",
+        "target",
+        {
+            "candidate_sha": candidate_sha,
+            "command": command,
+            "environment": {
+                "host": host,
+                "platform": f"{platform.system()} {platform.machine()}".strip(),
+                "runner": "scripts/ci/preflight.sh",
+            },
+            "scope": scope,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "mode": mode,
+            "result": result,
+            "producer": {"kind": "preflight", "id": f"{host}:{match.group(1)}"},
+            "steps_expected": steps_expected,
+            "steps_executed": steps_executed,
+            "detail": detail,
+        },
+    )
+    append_event(event, events_path=events_path)
+    return event
 
 
 def run_evidence_check(*, cwd: Optional[str] = None) -> int:

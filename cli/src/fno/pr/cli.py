@@ -13,7 +13,9 @@ dependency. Each module preserves the bash exit-code / output contract.
 from __future__ import annotations
 
 import enum
+import json
 import os
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -159,6 +161,43 @@ def evidence_check() -> None:
     from fno.pr import _preflight
 
     raise typer.Exit(code=_preflight.run_evidence_check())
+
+
+@pr_app.command("record-preflight-receipt", hidden=True)
+def record_preflight_receipt(
+    mode: str = typer.Option(...),
+    result: str = typer.Option(...),
+    scope_json: str = typer.Option(..., "--scope-json"),
+    started_at: str = typer.Option(..., "--started-at"),
+    steps_expected: int = typer.Option(..., "--steps-expected"),
+    steps_executed: int = typer.Option(..., "--steps-executed"),
+    command_json: str = typer.Option(..., "--command-json"),
+    events_path: Path = typer.Option(..., "--events"),
+    detail: str = typer.Option(""),
+) -> None:
+    from fno.pr import _preflight
+
+    try:
+        scope = json.loads(scope_json)
+        command = json.loads(command_json)
+        if not isinstance(scope, list) or not isinstance(command, list):
+            raise ValueError("scope and command must be JSON arrays")
+        event = _preflight.record_preflight_receipt(
+            cwd=os.getcwd(),
+            events_path=events_path,
+            mode=mode,
+            result=result,
+            scope=scope,
+            started_at=started_at,
+            steps_expected=steps_expected,
+            steps_executed=steps_executed,
+            command=command,
+            detail=detail,
+        )
+    except (ValueError, json.JSONDecodeError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    typer.echo(json.dumps(event, separators=(",", ":")))
 
 
 @pr_app.command(

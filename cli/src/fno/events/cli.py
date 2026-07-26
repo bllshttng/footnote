@@ -286,6 +286,12 @@ def emit(
     Source defaults to ``target`` when a target state file is present and
     ``test`` otherwise. Override with ``--source``.
     """
+    if type_ == "verification_receipt":
+        typer.echo(
+            "error: verification_receipt is preflight-owned; use the preflight runner",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     # Lazy imports keep top-level `fno --help` cold-path fast and avoid
     # paying PyYAML schema-load cost when the user is invoking an
     # unrelated subcommand.

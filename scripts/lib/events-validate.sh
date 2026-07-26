@@ -363,7 +363,7 @@ validate_event() {
                     and all(.[]; type == "string" and length > 0 and length <= 4096))
                 and ($d.environment | type == "object"
                     and all(["host", "platform", "runner"][];
-                        . as $f | ($d.environment[$f] | type == "string" and length > 0)))
+                        . as $f | ($d.environment[$f] | type == "string" and test("[^[:space:]]"))))
                 and ($d.scope | type == "array" and length > 0 and length <= 128
                     and all(.[]; type == "string" and length > 0 and length <= 512))
                 and ($started != null and $finished != null and $finished >= $started)
@@ -371,7 +371,7 @@ validate_event() {
                 and ($p.result.enum | index($d.result) != null)
                 and ($d.producer | type == "object"
                     and all(["kind", "id"][];
-                        . as $f | ($d.producer[$f] | type == "string" and length > 0)))
+                        . as $f | ($d.producer[$f] | type == "string" and test("[^[:space:]]"))))
                 and ($d.steps_expected | type == "number" and floor == . and . >= 0)
                 and ($d.steps_executed | type == "number" and floor == . and . >= 0)
                 and ($d.steps_executed <= $d.steps_expected)
