@@ -980,10 +980,14 @@ def test_nonreturning_observer_is_killed_without_changing_hook_result(
         text=True,
         capture_output=True,
         check=False,
-        timeout=3,
+        timeout=10,
     )
 
-    assert time.monotonic() - started < 2
+    # The claim under test is "a hung observer does not stall the hook", and the
+    # hung stub sleeps 30 - so any bound well under 30 proves it. Sizing these at
+    # ~2x nominal instead made them report machine load: under `-n auto` this
+    # test failed a full smoke run while passing standalone.
+    assert time.monotonic() - started < 5
     assert result.returncode == 7
     assert result.stdout == '{"session_id":"hung-observer","source":"startup"}::original'
 
