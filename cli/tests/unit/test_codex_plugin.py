@@ -332,9 +332,9 @@ def test_release_convergence_removes_dev_then_installs_and_verifies(tmp_path: Pa
         "0.3.0",
     )
     assert [call[0] for call in calls] == [
-        [str(source / "scripts/release/sync-version.sh"), "--check"],
         ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
+        [str(source / "scripts/release/sync-version.sh"), "--check"],
         ["codex", "plugin", "remove", "fno@footnote-dev", "--json"],
         ["codex", "plugin", "marketplace", "add", "bllshttng/footnote", "--json"],
         ["codex", "plugin", "marketplace", "upgrade", "footnote", "--json"],
@@ -342,7 +342,7 @@ def test_release_convergence_removes_dev_then_installs_and_verifies(tmp_path: Pa
         ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
     ]
-    assert calls[0][1]["cwd"] == source
+    assert calls[2][1]["cwd"] == source
 
 
 def test_release_convergence_is_source_aware_noop(tmp_path: Path) -> None:
@@ -406,9 +406,6 @@ def test_release_convergence_is_source_aware_noop(tmp_path: Path) -> None:
     )
     assert result.action == "no-op"
     assert calls == [
-        [str(source / "scripts/release/sync-version.sh"), "--check"],
-        ["codex", "plugin", "marketplace", "list", "--json"],
-        ["codex", "plugin", "list", "--json"],
         ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
     ]
@@ -806,8 +803,6 @@ def test_dev_convergence_is_source_aware_noop_and_records_authority(
 
     assert result.action == "no-op"
     assert calls == [
-        ["codex", "plugin", "marketplace", "list", "--json"],
-        ["codex", "plugin", "list", "--json"],
         ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
     ]
@@ -1833,7 +1828,7 @@ def test_external_failure_is_named_and_bounded(tmp_path: Path) -> None:
             codex_home=tmp_path / "codex-home",
             source_root=source,
         )
-    assert caught.value.stage == "release-version-check"
+    assert caught.value.stage == "marketplace-list"
     assert len(caught.value.detail) == 500
 
 
@@ -1866,3 +1861,75 @@ def test_public_cli_exits_nonzero_without_success_on_stage_failure(
     assert result.exit_code == 1
     assert "plugin-add: network unavailable" in result.output
     assert "verified" not in result.output
+
+
+def test_stable_release_noop_skips_offline_preflight_and_only_collects_live_state(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    marker = home / "footnote" / "plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "channel": "release",
+                "marketplace": MARKETPLACE,
+                "source": "bllshttng/footnote",
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        # If the release-version-check preflight ever ran, fail to model an
+        # offline or version-drift host. A true no-op must never reach it.
+        if argv == [str(source / "scripts/release/sync-version.sh"), "--check"]:
+            return _cp(argv, {}, rc=1, err="simulated offline preflight failure")
+        if argv == ["codex", "plugin", "marketplace", "list", "--json"]:
+            return _cp(
+                argv,
+                {
+                    "marketplaces": [
+                        {
+                            "name": "footnote",
+                            "marketplaceSource": {
+                                "sourceType": "git",
+                                "source": "https://github.com/bllshttng/footnote.git",
+                            },
+                        }
+                    ]
+                },
+            )
+        if argv == ["codex", "plugin", "list", "--json"]:
+            return _cp(
+                argv,
+                {
+                    "installed": [
+                        _plugin(
+                            RELEASE_PLUGIN_ID,
+                            source="https://github.com/bllshttng/footnote.git",
+                            source_type="git",
+                        )
+                    ],
+                    "available": [],
+                },
+            )
+        return _cp(argv, {}, rc=1, err=f"unexpected {argv}")
+
+    result = converge(
+        channel="release",
+        runner=runner,
+        codex_home=home,
+        source_root=source,
+    )
+
+    assert result.action == "no-op"
+    assert result.plugin_id == RELEASE_PLUGIN_ID
+    assert result.version == "0.3.0"
+    assert calls == [
+        ["codex", "plugin", "marketplace", "list", "--json"],
+        ["codex", "plugin", "list", "--json"],
+    ]

@@ -1027,22 +1027,6 @@ def converge(
 
         source_matches = dev_source_matches
 
-    if channel == "release" and version:
-        _run(
-            runner,
-            "release-version-check",
-            [str(release_check), "--check"],
-            cwd=source,
-            env=live_env,
-        )
-    if validate_candidate is None:
-        validate_candidate = True
-    candidate = (
-        _validate_candidate(runner, source=marketplace_source)
-        if validate_candidate
-        else None
-    )
-
     with _convergence_lock(home):
         state = _collect(runner, env=live_env)
         snapshot = _Snapshot(
@@ -1106,6 +1090,29 @@ def converge(
             and marker_matches
             and not legacy_cache_present
             and snapshot.rollback_receipt is None
+        )
+        if no_op:
+            # ponytail: short-circuit before any preflight. no_op already proves
+            # the live one-identity state matches the marker, so the
+            # release-version-check and isolated candidate validation would only
+            # risk failing an already-converged host (offline / version drift).
+            return ConvergenceResult(
+                channel, "no-op", selected.plugin_id, selected.version or version
+            )
+        if channel == "release" and version:
+            _run(
+                runner,
+                "release-version-check",
+                [str(release_check), "--check"],
+                cwd=source,
+                env=live_env,
+            )
+        if validate_candidate is None:
+            validate_candidate = True
+        candidate = (
+            _validate_candidate(runner, source=marketplace_source)
+            if validate_candidate
+            else None
         )
         needs_install = selected is None or refresh or not selected_ok or not marketplace_ok
         changed = False
@@ -1285,10 +1292,6 @@ def converge(
                     raise CodexPluginError(
                         "final-verify", "live payload differs from validated candidate"
                     )
-            if no_op:
-                return ConvergenceResult(
-                    channel, "no-op", enabled[0].plugin_id, enabled[0].version or version
-                )
             changed = True
             _write_marker(
                 home,
