@@ -1,37 +1,48 @@
 #!/usr/bin/env bash
 # tests/ci/test_smoke_modes.sh
 #
-# Exercises scripts/ci/smoke.sh's mode machinery (keep-going, failure record,
+# Exercises `fno test smoke`'s mode machinery (keep-going, failure record,
 # --retry-failed, --only, subset labelling) against a tiny hermetic registry
 # via the SMOKE_REGISTRY_FILE / SMOKE_FAILURE_RECORD test seams, so the real
-# 45 steps (and their uv/cargo prerequisites) never run.
+# ~57 structural steps (and their uv/cargo prerequisites) never run.
 #
 # Covers AC1-EDGE (keep-going harvests all failures), AC1-UI (summary + header),
 # AC2-FR (subset labelled), AC3-ERR (corrupt/missing record -> full run).
+#
+# The runner is `fno-py test smoke` (the deployed console script, on PATH inside
+# a smoke run via cli/.venv/bin; falls back to `uv run --project cli fno-py` for
+# a standalone local run).
 
 set -uo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-SMOKE="$REPO_ROOT/scripts/ci/smoke.sh"
+cd "$REPO_ROOT"
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 REC="$TMP/failures.txt"
-REG="$TMP/registry.sh"
+REG="$TMP/registry.py"
 cat > "$REG" <<'EOF'
-register_steps() {
-    step "alpha pass" "." 'true'
-    step "bravo fail" "." 'exit 1'
-    step "charlie pass" "." 'true'
-    step "delta fail" "." 'false'
-}
+STEPS = [("alpha pass", ".", "true"), ("bravo fail", ".", "exit 1"),
+         ("charlie pass", ".", "true"), ("delta fail", ".", "false")]
 EOF
+
+# Prefer the worktree's venv'd fno-py (current source); fall back to uv run so
+# a fresh checkout with no synced venv still resolves. Never trust a global
+# `fno-py` on PATH: a deployed build is stale and lacks the smoke subcommand.
+VENVED="$REPO_ROOT/cli/.venv/bin/fno-py"
+if [[ -x "$VENVED" ]]; then
+    RUNNER=("$VENVED" test smoke)
+else
+    RUNNER=(uv run --project cli fno-py test smoke)
+fi
 
 FAILS=0
 ok()   { echo "  ok: $1"; }
 fail() { echo "  FAIL: $1"; FAILS=$((FAILS+1)); }
 
-run() { SMOKE_REGISTRY_FILE="$REG" SMOKE_FAILURE_RECORD="$REC" bash "$SMOKE" "$@"; }
+run() { SMOKE_REGISTRY_FILE="$REG" SMOKE_FAILURE_RECORD="$REC" "${RUNNER[@]}" "$@"; }
 
 echo "== AC1-EDGE: keep-going harvests all failures + records them =="
 out="$(run --keep-going 2>&1)"; rc=$?
@@ -66,17 +77,22 @@ out="$(run --retry-failed 2>&1)"
 echo "$out" | grep -q "falling back to FULL run" && ok "missing record -> fallback" || fail "no fallback on missing record"
 
 echo "== --only glob selects by name; no-match hard-fails =="
-out="$(run --only '*fail' --keep-going 2>&1)"
+out="$(run --only '*pass' --keep-going 2>&1)"
 echo "$out" | grep -q "ONLY SUBSET steps=2/4" && ok "only subset 2/4" || fail "only header wrong: $(echo "$out" | grep mode=)"
 run --only 'zzz-none' >/dev/null 2>&1 && fail "no-match should exit non-zero" || ok "no-match exits non-zero"
 
 echo "== zero steps is never green =="
-EMPTY="$TMP/empty.sh"; echo 'register_steps() { :; }' > "$EMPTY"
-SMOKE_REGISTRY_FILE="$EMPTY" SMOKE_FAILURE_RECORD="$REC" bash "$SMOKE" --keep-going >/dev/null 2>&1 \
+EMPTY="$TMP/empty.py"; echo 'STEPS = []' > "$EMPTY"
+SMOKE_REGISTRY_FILE="$EMPTY" SMOKE_FAILURE_RECORD="$REC" "${RUNNER[@]}" --keep-going >/dev/null 2>&1 \
     && fail "empty registry should not be green" || ok "empty registry exits non-zero"
 
 echo "== --list is verbatim-stable (all-pass registry) =="
-out="$(run --list)"
+PASS_REG="$TMP/pass.py"
+cat > "$PASS_REG" <<'EOF'
+STEPS = [("alpha pass", ".", "true"), ("bravo pass", ".", "true"),
+         ("charlie pass", ".", "true"), ("delta pass", ".", "true")]
+EOF
+out="$(SMOKE_REGISTRY_FILE="$PASS_REG" "${RUNNER[@]}" --list)"
 [[ "$(echo "$out" | wc -l | tr -d ' ')" == "4" ]] && ok "--list prints 4 names" || fail "--list count wrong"
 
 echo ""

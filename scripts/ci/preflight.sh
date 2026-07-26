@@ -9,12 +9,12 @@
 #
 # Flow: resolve the persistent preflight worktree -> refuse a dirty invoking
 # tree -> lock -> reset the worktree to the invoking HEAD (caches preserved) ->
-# build a hermetic env -> smoke.sh --keep-going -> rust-ci legs (pinned fmt,
+# build a hermetic env -> fno-py test smoke --keep-going -> rust-ci legs (pinned fmt,
 # cargo test, advisory audit) -> one summary + exit.
 #
 # Usage:
 #   scripts/ci/preflight.sh [--retry-failed] [--force]
-#     --retry-failed   re-run only the steps smoke.sh recorded last time
+#     --retry-failed   re-run only the steps the smoke runner recorded last time
 #                      (a SUBSET; run a full preflight before the settle push).
 #     --force          ignore a cached attestation for this SHA and run every
 #                      suite. A FULL GREEN still records a fresh attestation;
@@ -304,7 +304,11 @@ echo ""
 echo "preflight: === smoke suite ($([[ $RETRY_FAILED -eq 1 ]] && echo retry-failed || echo keep-going)) ==="
 SMOKE_ARGS=(--keep-going); [[ $RETRY_FAILED -eq 1 ]] && SMOKE_ARGS=(--retry-failed --keep-going)
 s0="$SECONDS"
-run_hermetic bash scripts/ci/smoke.sh "${SMOKE_ARGS[@]}"
+# Bootstrap via `uv run --project cli`: there is no repo-root pyproject and no
+# global fno-py in a hermetic env, so a bare `fno test smoke` is not on PATH
+# until uv syncs the cli project (uv auto-syncs). The attestation logic below
+# is unchanged: a FULL GREEN records, a RED deletes, a subset mints nothing.
+run_hermetic uv run --project cli fno-py test smoke "${SMOKE_ARGS[@]}"
 sreq=$?
 [[ $sreq -eq 0 ]] && record_leg "smoke suite" pass $(( SECONDS - s0 )) || { record_leg "smoke suite" fail $(( SECONDS - s0 )); FAIL=1; }
 

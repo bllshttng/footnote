@@ -26,10 +26,13 @@ uses it verbatim, giving `UNPROCESSED` passthrough: every pytest flag (`-x`,
 """
 from __future__ import annotations
 
+import fnmatch
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 from collections import deque
 from pathlib import Path
 from typing import Optional, Sequence
@@ -213,16 +216,570 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
     return _run_captured(cmds, env, _log_path(root))
 
 
+# ---------------------------------------------------------------------------
+# fno test smoke - the one authoritative Python + shell smoke entry.
+#
+# Replaces the hand-edited scripts/ci/smoke.sh registry: the structural steps
+# below are the code-owned translation of that file's ~45 step() lines, and
+# discover_shell_harnesses() auto-discovers the owned shell-harness trees so a
+# new tests/hooks/test_x.sh runs with zero registry edits (the two-test-trees
+# lesson: a green subset is not proof that everything ran).
+#
+# Modes mirror the retired smoke.sh: --keep-going / --only / --retry-failed /
+# --list, the FULL vs RETRY-SUBSET vs ONLY-SUBSET header, and the failure
+# record. A partial green never satisfies preflight's mode=FULL verdict=green
+# attestation (preflight gates that on its own RETRY_FAILED flag, independent
+# of this runner's honest exit code).
+# ---------------------------------------------------------------------------
+
+SMOKE_FAILURE_RECORD_DEFAULT = ".fno/preflight-last-failures.txt"
+
+# (name, cwd, cwd, cmd). cwd is repo-relative ("." = root). A multi-line cmd
+# runs under `bash -eo pipefail -c`, matching GitHub's default shell.
+_STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
+    ("Sync + build", "cli", "uv sync\nuv build"),
+    ("Pytest (unit + integration)", "cli", "uv run pytest --tb=short -q -n auto"),
+    ("paths.sh hash gate", "cli", "uv run fno-py paths verify ../scripts/lib/paths.sh"),
+    ("Bash events-validate harness", ".", "bash tests/events/test-bash-validator.sh"),
+    ("frontend-craft gate harness", ".",
+     "bash tests/lib/test_frontend_surface.sh\n"
+     "bash tests/lib/test_infer_has_ui.sh\n"
+     "bash tests/lib/test_resolve_plan_executor.sh"),
+    ("config global-precedence harness", ".", "bash tests/lib/test_config_global_precedence.sh"),
+    ("cost-accuracy harness", ".",
+     "uv run --project cli python tests/lib/test_cost_tracker_pricing.py\n"
+     "uv run --project cli python tests/metrics/test_session_cost_dedup.py\n"
+     "uv run --project cli python tests/metrics/test_backfill_cost_recompute.py\n"
+     "bash tests/lib/test_cost_tracker_sh_parity.sh"),
+    ("loop-check shim + immutable manifest harness", ".",
+     "bash tests/hooks/test_loop_check_shim.sh\n"
+     "bash tests/hooks/test_manifest_immutable.sh\n"
+     "bash tests/hooks/test_graph_write_protect.sh\n"
+     "bash tests/hooks/test_worktree_write_protect.sh\n"
+     "bash tests/hooks/test_worktree_harness_guard.sh\n"
+     "bash tests/hooks/test_setup_nudge_session_start.sh\n"
+     "bash tests/hooks/test_init_target_session_id.sh\n"
+     "bash tests/hooks/test_agy_stop_hook.sh\n"
+     "bash tests/hooks/test_check_impl_location.sh"),
+    ("worktree lifecycle: remove-hook contract + cwd-anchored liveness + ttyless archive + job reap",
+     ".", "bash tests/hooks/test_worktree_remove_lifecycle.sh"),
+    ("in_review dispatch guard", ".", "bash tests/hooks/test_init_in_review_gate.sh"),
+    ("born-with-why offer inject harness", ".", "bash tests/hooks/test_born_with_why_offer_inject.sh"),
+    ("eval-sweep hygiene harness", ".", "bash tests/hooks/test_eval_sweep_session_start.sh"),
+    ("ship-phase PR->node link verify guard", ".", "bash tests/target/test_ship_phase_link_verify.sh"),
+    ("docs-before-ship phase-ordering guard", ".", "bash tests/test-docs-before-ship.sh"),
+    (".fno/ dir-hygiene harness", ".",
+     "python3 tests/metrics/test_completion_summary_path.py\n"
+     "bash tests/lib/test_rotate_append_log.sh\n"
+     "bash scripts/tests/test_prune_fno_dir.sh"),
+    ("corrections.log placement migration", ".", "bash scripts/tests/test_corrections_migrate.sh"),
+    ("placement-rule lint self-test", ".", "bash scripts/tests/test_check_placement_rule.sh"),
+    ("Build fno-agents debug binary (for journey tests)", "crates/fno-agents", "cargo build"),
+    # The debug binary is present here, so the @requires_rust parity suites run
+    # instead of skipping. Stub codex/gemini on PATH (test_rust_verb_parity
+    # presence-checks them without faking); per-test fakes still win where a
+    # provider is actually executed. Reuses the build above; no second compile.
+    ("Scoped @requires_rust parity suites (binary present; stubbed providers)", "cli",
+     'FAKE_BIN="$(mktemp -d)"\n'
+     'for p in codex gemini; do printf "%s\\n%s\\n" "#!/bin/sh" "exit 0" > "$FAKE_BIN/$p"; chmod +x "$FAKE_BIN/$p"; done\n'
+     'PATH="$FAKE_BIN:$PATH" uv run pytest --tb=short -q '
+     "tests/agents/test_rust_verb_parity.py tests/agents/test_ask_e2e_dispatch.py"),
+    ("registry-miss heal across the Rust/Python seam", ".", "bash tests/test-agents-heal-token.sh"),
+    ("Cross-impl claims compat matrix (merge gate; fails loudly, never skips here)", "cli",
+     "FNO_CLAIMS_COMPAT_REQUIRED=1 uv run pytest --tb=short -q tests/integration/test_claims_cross_impl.py"),
+    ("loop-check journey tests (e2e + emission-schema + backstop-subprocess)", ".",
+     "bash tests/hooks/test_loop_check_e2e.sh\n"
+     "bash tests/events/test-loop-check-emission-schema.sh\n"
+     "bash tests/hooks/test_loop_check_backstop_subprocess.sh"),
+    ("megawalk-walk smoke test", ".", "bash tests/smoke-megawalk-walk.sh"),
+    ("Target self-handoff harness", ".",
+     "bash tests/test-handoff.sh\n"
+     "bash tests/target/test_handoff_ledger_record.sh"),
+    ("Plan Mode front door harness", ".",
+     "bash tests/hooks/test_capture_plan_mode.sh\n"
+     "bash tests/hooks/test_pending_plan_wipe.sh\n"
+     "bash tests/target/test_backfill_plan.sh\n"
+     "bash tests/target/test_detect_pending_plan.sh\n"
+     "bash tests/target/test_plan_mode_e2e.sh"),
+    ("bg-dispatch + ready-gated auto-launch harness", ".", "bash tests/test-bg-dispatch.sh"),
+    ("agent skill harness", ".",
+     "bash tests/skills/test_agent_normalize.sh\n"
+     "bash tests/skills/test_agent_receipt.sh\n"
+     "bash skills/agent/tests/test_normalize.sh\n"
+     "bash skills/agent/tests/test_confirm.sh\n"
+     "bash skills/agent/tests/test_auto_worktree.sh\n"
+     "bash skills/agent/tests/test_spawn_guard.sh"),
+    ("mail skill harness", ".", "bash skills/mail/tests/test_normalize.sh"),
+    ("events-discipline lint", ".", "bash scripts/lint/events-discipline.sh"),
+    ("events-discipline lint self-test", ".", "bash tests/lint/test-events-discipline.sh"),
+    ("No quarantined events.invalid.jsonl rows", ".", "bash scripts/lint/no-invalid-events.sh"),
+    ("ruff + mypy (both repo-wide)", "cli",
+     "uv run ruff check --no-respect-gitignore src/\n"
+     "uv run mypy src/"),
+    ("Smoke tests", ".", "bash cli/tests/smoke/run-all.sh"),
+    ("no hardcoded paths", ".", "bash scripts/ci/check-no-hardcoded-paths.sh"),
+    ("placement rule", ".", "bash scripts/ci/check-placement-rule.sh"),
+    ("No residual old-name patterns (rename guard)", ".", "bash scripts/rename/residual-check.sh"),
+    ("No stale skill refs (consolidation audit)", ".", "bash scripts/ci/check-no-stale-skill-refs.sh"),
+    ("Skill snippet hazard lint", ".", "bash scripts/ci/check-skill-snippets.sh"),
+    ("Skill snippet lint self-test", ".", "bash tests/ci/test_check_skill_snippets.sh"),
+    ("No stale /spec refs (blueprint rename audit)", ".", "bash scripts/ci/check-no-stale-spec-refs.sh"),
+    ("Config schema docs freshness", ".", "bash scripts/ci/check-config-schema-drift.sh"),
+    ("Skill bundles freshness check", ".", "bash scripts/lint/check-skill-bundles-fresh.sh"),
+    ("No ${REPO_ROOT}/scripts in skills", ".", "bash scripts/lint/no-repo-root-scripts-in-skills.sh"),
+    ("Marketplace-readiness lint (no Skill calls, no path escapes, fno declared)", ".",
+     "bash scripts/lint/no-cross-skill-runtime-calls.sh"),
+    ("No unwrapped lib scripts", ".", "bash scripts/lint/no-unwrapped-lib-scripts.sh"),
+    ("pin-skill generator self-test", ".", "bash tests/test-pin-skill.sh"),
+    ("Agent flock-pattern lint", "cli", "uv run fno-py lint flock-pattern"),
+    ("Provider stderr-merge lint", "cli", "uv run fno-py lint provider-stderr-merge"),
+    ("Repo-root shell-out drift guard (clone-only allowlist)", "cli", "uv run fno-py lint shellout-drift"),
+    ("Spawn-shape lint (single-line argv guard)", "cli", "uv run fno-py lint spawn-paths"),
+    ("In-N-Out menu-cap ratchet", "cli", "uv run fno-py lint menu-caps"),
+    ("Schema parity self-test", ".", "bash scripts/tests/check-event-schema-parity-selftest.sh"),
+    ("Schema parity check (Python side)", ".", "bash scripts/check-event-schema-parity.sh"),
+    ("Registry schema parity selftest", ".", "bash scripts/ci/check-registry-schema-parity.sh --selftest"),
+    ("Registry schema parity check", ".", "bash scripts/ci/check-registry-schema-parity.sh"),
+    ("smoke mode machinery self-test", ".", "bash tests/ci/test_smoke_modes.sh"),
+    ("preflight orchestration self-test", ".", "bash tests/ci/test_preflight.sh"),
+)
+
+# Owned shell-harness trees: a new file here runs with zero registry edits.
+_SMOKE_HARNESS_GLOBS = (
+    "tests/*.sh",
+    "tests/hooks/*.sh", "tests/lib/*.sh", "tests/target/*.sh",
+    "tests/skills/*.sh", "tests/events/*.sh", "tests/lint/*.sh",
+    "scripts/tests/*.sh",
+    "skills/*/tests/*.sh",
+)
+
+_SH_PATH_RE = re.compile(r"[\w./@{}$+-]*\.sh\b")
+_SOURCE_RE = re.compile(r"(?:^|[\s;|&(])(?:source|\.)\s+(?:\./)?(\S+\.sh)")
+
+
+def _has_shell_shebang(path: Path) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            first = fh.readline()
+    except OSError:
+        return False
+    return first.startswith(b"#!") and b"sh" in first
+
+
+def _resolve_source_ref(sourcer_rel: str, target: str) -> Optional[str]:
+    """Resolve a `source`/`.` target to a repo-relative path.
+
+    Handles the common shapes: `./x.sh`, a bare `x.sh` in the sourcer's dir,
+    and the variable-based same-dir helper forms (`source "$SCRIPT_DIR/x.sh"`,
+    `source "$(dirname "$0")/x.sh"`) by falling back to the trailing basename
+    under the sourcer's directory. Absolute or parent-dir refs return None
+    (rare, best-effort); a `$REPO_ROOT/...` ref resolves to a path that is not
+    an owned-tree candidate anyway, so it harmlessly misses.
+    """
+    t = target.strip().strip("'\"")
+    if not t.endswith(".sh"):
+        return None
+    base = sourcer_rel.rsplit("/", 1)[0] if "/" in sourcer_rel else ""
+    if "$" in t:
+        # Variable / command-substitution prefix: resolve the trailing basename
+        # against the sourcer's dir (the conventional same-dir helper).
+        name = os.path.basename(t)
+        return f"{base}/{name}" if base else name
+    if t.startswith("./"):
+        t = t[2:]
+    if t.startswith("/") or t.startswith(".."):
+        return None
+    return f"{base}/{t}" if base else t
+
+
+def _sourced_helpers(root: Path, candidates: set[str]) -> set[str]:
+    """Candidates that a sibling sources (`. x` / `source x`) -> helpers.
+
+    A sourced file is a helper, not a standalone harness; running it directly
+    produces a spurious failure (it expects to inherit a caller's state).
+    """
+    if not candidates:
+        return set()
+    scan_dirs = [root / "tests", root / "scripts" / "tests", root / "skills"]
+    sourced: set[str] = set()
+    for d in scan_dirs:
+        if not d.exists():
+            continue
+        for p in d.rglob("*.sh"):
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            sourcer_rel = p.relative_to(root).as_posix()
+            for line in text.splitlines():
+                if line.lstrip().startswith("#"):
+                    continue
+                for m in _SOURCE_RE.finditer(line):
+                    resolved = _resolve_source_ref(sourcer_rel, m.group(1))
+                    if resolved is not None and resolved in candidates:
+                        sourced.add(resolved)
+    return sourced
+
+
+def discover_shell_harnesses(root: Path) -> list[str]:
+    """Auto-discover owned shell harnesses; return repo-relative paths.
+
+    A file is a harness iff it has a shell shebang, is not a library
+    (scripts/lib/) or an orchestrated subtree (cli/tests/smoke/), and is not a
+    source-only helper. This is what makes a new tests/hooks/test_x.sh run with
+    no registry edit.
+    """
+    candidates: set[str] = set()
+    for pat in _SMOKE_HARNESS_GLOBS:
+        for p in root.glob(pat):
+            rel = p.relative_to(root).as_posix()
+            if rel.startswith("scripts/lib/") or rel.startswith("cli/tests/smoke/"):
+                continue
+            if not _has_shell_shebang(p):
+                continue
+            candidates.add(rel)
+    sourced = _sourced_helpers(root, candidates)
+    return sorted(candidates - sourced)
+
+
+def _referenced_sh_files(steps: Sequence[tuple[str, str, str]]) -> set[str]:
+    """Repo-relative .sh paths a structural step already invokes (for dedup)."""
+    referenced: set[str] = set()
+    for _, _, cmd in steps:
+        for token in _SH_PATH_RE.findall(cmd):
+            referenced.add(token.strip("./"))
+    return referenced
+
+
+# Owned harnesses that lived in the trees when scripts/ci/smoke.sh retired but
+# were never wired into its hand registry. Running them is real coverage the
+# consolidation should eventually grow into, but it is NOT this node's job:
+# several are red (pre-existing rot), and wiring/fixing them trips this node's
+# files_outside kill criterion. Discovery still catches anything added AFTER
+# this snapshot, so the safety net is live; this set only parks the orphans
+# that pre-date the consolidation. Drain it one harness at a time as a
+# follow-up wires each (run it green, then drop its line here and rely on
+# discovery to keep it covered).
+_DISCOVERY_DEFERRED: frozenset[str] = frozenset("""
+scripts/tests/test_config_auto_merge.sh
+scripts/tests/test_do_provenance_stamp.sh
+scripts/tests/test_git_protection_hook.sh
+scripts/tests/test_graph_resolve.sh
+scripts/tests/test_init_target_state_auto_merge.sh
+scripts/tests/test_megawalk_args.sh
+scripts/tests/test_provider_pricing.sh
+tests/events/test-check-pr-emits-polling.sh
+tests/events/test-polling-event-emission.sh
+tests/hooks/test_archive_artifacts_session_aware.sh
+tests/hooks/test_arm_handoff.sh
+tests/hooks/test_attest_model.sh
+tests/hooks/test_claim_heartbeat.sh
+tests/hooks/test_finalize_invocation.sh
+tests/hooks/test_frontdoor_nudge_session_start.sh
+tests/hooks/test_gc_dead_target_manifest.sh
+tests/hooks/test_groom_self_heal.sh
+tests/hooks/test_hook_events.sh
+tests/hooks/test_init_budget_lines.sh
+tests/hooks/test_init_claim_stderr_and_modern_claim.sh
+tests/hooks/test_init_contested_steal_guard.sh
+tests/hooks/test_init_has_ui_from_plan.sh
+tests/hooks/test_init_node_guard_tokenize.sh
+tests/hooks/test_init_target_state_mission_fields.sh
+tests/hooks/test_inject_fno_agent_whoami.sh
+tests/hooks/test_inject_mail_notify.sh
+tests/hooks/test_inside_leg_report_markers.sh
+tests/hooks/test_reconcile_session_start.sh
+tests/hooks/test_size_profile.sh
+tests/hooks/test_state_parser.sh
+tests/hooks/test_target_guard_claim_liveness.sh
+tests/hooks/verify-self-short-id-propagation.sh
+tests/skills/test_agent_confirm.sh
+tests/smoke-megatron-e2e.sh
+tests/smoke-target-shim.sh
+tests/test-autolaunch-gate.sh
+tests/test-backlog-aliases.sh
+tests/test-backlog-triage.sh
+tests/test-context-probe.sh
+tests/test-dynamic-parallelization.sh
+tests/test-ensure-fno-gitignored.sh
+tests/test-graph-resolve.sh
+tests/test-parallel-wave-conflicts.sh
+tests/test-quick-plan-sidecar.sh
+tests/test-register-task.sh
+tests/test-rename-plan-to-node-id.sh
+tests/test-scan-antipatterns.sh
+tests/test-ship-stamp-integration.sh
+tests/test-size-routing.sh
+tests/test-stamp-plan.sh
+tests/test-target-state-recovery.sh
+tests/test-validate-plan.sh
+tests/test-worktree-inside-checkout-redirect.sh
+tests/test-worktree-setup-hook.sh
+tests/test_config.sh
+tests/test_emit_gate_transition.sh
+tests/test_provider_substrate_e2e.sh
+tests/test_register_task_provider_attribution.sh
+""".split())
+
+
+def _smoke_env(root: Path) -> dict:
+    """_child_env + the smoke additions: NO_COLOR, venv on PATH, no FORCE_COLOR.
+
+    NO_COLOR=1 + unset FORCE_COLOR kill the SGR escapes that re-inflate an agent
+    log ~7x; cli/.venv/bin on PATH pins every step's python3/fno/pytest to the
+    project env (inert until the first `uv sync` creates it, exactly as the
+    retired smoke.sh did).
+    """
+    env = _child_env(root)
+    env["NO_COLOR"] = "1"
+    env.pop("FORCE_COLOR", None)
+    venv_bin = str((root / "cli" / ".venv" / "bin"))
+    env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _read_failure_record(path: str, known: set[str]) -> set[str]:
+    """Recorded step names that still exist in the registry (corrupt -> drop)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = [ln.strip() for ln in fh if ln.strip()]
+    except OSError:
+        return set()
+    return {ln for ln in lines if ln in known}
+
+
+def _write_failure_record(path: str, failed_names: Sequence[str]) -> None:
+    # The parent (.fno/) may not exist in a fresh checkout / preflight worktree;
+    # the retired smoke.sh did `mkdir -p "$(dirname "$FAILURE_RECORD")"`. Without
+    # this the open() raises OSError, is swallowed, and no record is written, so
+    # the next --retry-failed falls back to the full suite instead of the failures.
+    parent = os.path.dirname(path)
+    try:
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            for n in failed_names:
+                fh.write(n + "\n")
+    except OSError:
+        pass  # last-writer-wins per checkout; unwritable is non-fatal
+
+
+def _smoke_prereqs(selected_cmds: Sequence[str]) -> Optional[str]:
+    """Assert only what the selected steps need (uv / python3+yaml / cargo)."""
+    blob = "\n".join(selected_cmds)
+    if "uv " in blob or blob.endswith("uv") or "\nuv" in blob:
+        if not shutil.which("uv"):
+            return "uv (install from https://docs.astral.sh/uv)"
+    if "python3" in blob:
+        if not shutil.which("python3"):
+            return "python3 (install Python 3)"
+    if "cargo" in blob:
+        if not shutil.which("cargo"):
+            return "cargo (install the Rust toolchain)"
+    return None
+
+
+def _parse_smoke_args(args: Sequence[str]) -> tuple:
+    """Parse smoke flags; returns (list_mode, keep_going, retry_failed, verbose, only_glob).
+
+    Raises ValueError on a bad/unknown argument; the caller prints it and
+    exits 2. `--help`/`-h` is handled by the caller before parsing.
+    """
+    list_mode = keep_going = retry_failed = verbose = False
+    only_glob = ""
+    need_only = False
+    for a in args:
+        if a == "--list":
+            list_mode = True
+        elif a == "--verbose":
+            verbose = True
+        elif a == "--keep-going":
+            keep_going = True
+        elif a == "--retry-failed":
+            retry_failed = True
+        elif a == "--only":
+            need_only = True
+        elif a.startswith("--only="):
+            only_glob = a[len("--only="):]
+        elif need_only:
+            only_glob = a
+            need_only = False
+        else:
+            raise ValueError(f"smoke: unknown arg {a!r}")
+    if need_only:
+        raise ValueError("smoke: --only needs a glob")
+    return list_mode, keep_going, retry_failed, verbose, only_glob
+
+
+def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
+    """Run the full smoke with mode machinery; return the real child exit code.
+
+    First failure wins in fail-fast; --keep-going runs every step, records the
+    failures, and aggregates a non-zero exit. The exit code is the child's
+    actual rc (no pipe/tail masking), so preflight's attestation gate reads the
+    truth.
+    """
+    root = _repo_root(Path.cwd()) or Path.cwd()
+    if any(a in ("-h", "--help") for a in args):
+        print(_run_smoke.__doc__)
+        return 0
+    try:
+        list_mode, keep_going, retry_failed, verbose, only_glob = _parse_smoke_args(args)
+    except ValueError as exc:
+        sys.stderr.write(str(exc) + "\n")
+        return 2
+
+    env = _smoke_env(root)
+
+    reg_file = os.environ.get("SMOKE_REGISTRY_FILE")
+    if reg_file:
+        # Test seam: a tiny hermetic registry exercises the mode machinery
+        # without the real ~57 steps or their uv/cargo prerequisites.
+        ns: dict = {}
+        with open(reg_file, encoding="utf-8") as fh:
+            exec(fh.read(), ns)
+        steps = list(ns["STEPS"])
+        discovered: list[tuple[str, str, str]] = []
+    else:
+        structural = list(_STRUCTURAL_STEPS)
+        referenced = _referenced_sh_files(structural)
+        discovered = [
+            (rel, ".", f"bash {rel}")
+            for rel in discover_shell_harnesses(root)
+            if rel not in referenced and rel not in _DISCOVERY_DEFERRED
+        ]
+        steps = structural + discovered
+
+    names = [s[0] for s in steps]
+    total = len(steps)
+    name_set = set(names)
+
+    failure_record = os.environ.get("SMOKE_FAILURE_RECORD") or str(
+        root / SMOKE_FAILURE_RECORD_DEFAULT
+    )
+
+    # Selection: build the selected indices from the mode.
+    retry_fell_back = False
+    if retry_failed:
+        recorded = _read_failure_record(failure_record, name_set)
+        if recorded:
+            selected = [i for i, n in enumerate(names) if n in recorded]
+        else:
+            retry_fell_back = True
+            selected = list(range(total))
+    elif only_glob:
+        selected = [i for i, n in enumerate(names) if fnmatch.fnmatch(n, only_glob)]
+        if not selected:
+            sys.stderr.write(f"smoke: --only {only_glob!r} matched no steps. Available:\n")
+            for n in names:
+                sys.stderr.write(f"  {n}\n")
+            return 1
+    else:
+        selected = list(range(total))
+
+    if list_mode:
+        for i in selected:
+            if verbose:
+                joined = steps[i][2].replace("\n", ";")
+                print(f"{names[i]}\n  cwd: {steps[i][1]}\n  cmd: {joined}")
+            else:
+                print(names[i])
+        return 0
+
+    # Header: a partial run must never read as full.
+    label = "FULL"
+    if retry_failed:
+        label = "RETRY SUBSET"
+    elif only_glob:
+        label = "ONLY SUBSET"
+    kg = " keep-going" if keep_going else ""
+    print(f"smoke: mode={label} steps={len(selected)}/{total}{kg}", flush=True)
+    if retry_fell_back:
+        print("smoke: no usable failure record - falling back to FULL run", flush=True)
+    if len(selected) != total:
+        print("smoke: SUBSET run - run 'fno test smoke' full before the settle-green push",
+              flush=True)
+
+    miss = _smoke_prereqs([steps[i][2] for i in selected])
+    if miss:
+        sys.stderr.write(f"smoke: missing prerequisite: {miss}\n")
+        return 2
+
+    # Faithful-ordering guard: the main pytest step runs with the fno-agents
+    # binary absent so @requires_rust parity tests skip (they need a provider
+    # CLI CI lacks); the dedicated build step recreates it for later rust steps.
+    if "Pytest (unit + integration)" in {names[i] for i in selected}:
+        for rel in ("crates/fno-agents/target/debug/fno-agents",
+                    "crates/fno-agents/target/release/fno-agents"):
+            try:
+                (root / rel).unlink()
+            except OSError:
+                pass
+
+    if not selected:
+        sys.stderr.write("smoke: zero steps selected - never green\n")
+        return 1
+
+    in_ci = bool(os.environ.get("GITHUB_ACTIONS"))
+
+    def _run_step(cmd: str, cwd: str) -> int:
+        try:
+            proc = subprocess.run(
+                ["bash", "-eo", "pipefail", "-c", cmd],
+                cwd=str(root / cwd) if cwd != "." else str(root),
+                env=env,
+            )
+        except OSError as exc:
+            sys.stderr.write(f"smoke: failed to run step: {exc}\n")
+            return 127
+        return proc.returncode
+
+    results: list[tuple[str, str, float]] = []
+    failed = 0
+    for i in selected:
+        name, cwd, cmd = steps[i]
+        if in_ci:
+            print(f"::group::{name}", flush=True)
+        else:
+            print(f"\n=== {name} ===", flush=True)
+        t0 = time.monotonic()
+        rc = _run_step(cmd, cwd)
+        dur = time.monotonic() - t0
+        if in_ci:
+            print("::endgroup::", flush=True)
+        status = "pass" if rc == 0 else "fail"
+        if rc != 0:
+            failed += 1
+        results.append((name, status, dur))
+        print(f"smoke: {status}  {dur:4.0f}s  {name}", flush=True)
+        if not keep_going and rc != 0:
+            sys.stderr.write(f"smoke: step failed, stopping (fail-fast): {name}\n")
+            _write_failure_record(failure_record, [n for n, s, _ in results if s == "fail"])
+            return 1
+
+    print("", flush=True)
+    kind = ("retry-subset" if retry_failed else "only-subset" if only_glob else "full")
+    print(f"smoke: summary ({kind}, {len(results)} steps)", flush=True)
+    for n, s, d in results:
+        print(f"  {s:6} {d:4.0f}s  {n}", flush=True)
+
+    _write_failure_record(failure_record, [n for n, s, _ in results if s == "fail"])
+    return 1 if failed else 0
+
+
 @click.command(
     name="test",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
-        "Run the Python suite (or `fno test rust ...` for the crates) with the "
-        "real exit code, rtk bypassed, and PYTHONPATH pinned to the worktree. "
-        "Use this, never a bare `pytest` in a worktree: that imports the "
-        "canonical fno, lets rtk re-wrap the run, and masks the exit code. "
-        "Full output goes to .fno/last-test.log; the transcript gets PASS or "
-        "the failing tail. --stream restores full inherited-stdio output."
+        "Run the Python suite (default), or a sub-suite: `fno test rust ...` "
+        "(crates) or `fno test smoke [flags]` (the full CI smoke: structural "
+        "steps plus auto-discovered shell harnesses). The real exit code is "
+        "propagated, rtk is bypassed (RTK_DISABLED=1), and PYTHONPATH is "
+        "pinned to the worktree's cli/src. Use this, never a bare `pytest` in "
+        "a worktree: that imports the canonical fno, lets rtk re-wrap the run, "
+        "and masks the exit code. Bare `fno test` is serial and captures to "
+        ".fno/last-test.log (the transcript gets PASS or the failing tail); "
+        "--stream restores full inherited-stdio output."
     ),
 )
 @click.option("--stream", is_flag=True, help="Stream full output (no capture/log).")
@@ -231,4 +788,6 @@ def test_command(stream: bool, runner_args: tuple[str, ...]) -> None:
     args = list(runner_args)
     if args and args[0] == "rust":
         raise SystemExit(_run_rust(args[1:], stream=stream))
+    if args and args[0] == "smoke":
+        raise SystemExit(_run_smoke(args[1:], stream=stream))
     raise SystemExit(_run(args, stream=stream))

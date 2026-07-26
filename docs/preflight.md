@@ -12,38 +12,42 @@ runs no LLM review; review stays at `config.review.*`.
 
 ## The two scripts
 
-### `scripts/ci/smoke.sh` - the step registry
+### `fno test smoke` - the step registry
 
-One ordered list of the cli-ci smoke job's test and lint steps. The workflow
-calls `bash scripts/ci/smoke.sh` instead of spelling the steps inline, so there
-is no second copy of the list to drift. Environment provisioning (checkout,
-Python/uv setup, the Rust toolchain install, the cargo cache, the system PyYAML
-install) stays in the workflow yaml - those are CI-runner concerns and that
-divergence is deliberate. Everything a test needs at run time (the `uv sync` /
-`uv build`, the `fno-agents` debug build) lives in the script.
+One ordered list of the cli-ci smoke job's test and lint steps, code-owned in
+`cli/src/fno/test_cmd.py` (`_STRUCTURAL_STEPS`) plus auto-discovered owned
+shell harnesses. The workflow calls `uv run --project cli fno-py test smoke`
+(`fno test smoke` is the same runner locally), so there is no second copy of
+the list to drift. Environment provisioning (checkout, Python/uv setup, the
+Rust toolchain install, the cargo cache, the system PyYAML install) stays in
+the workflow yaml - those are CI-runner concerns and that divergence is
+deliberate. Everything a test needs at run time (the `uv sync` / `uv build`,
+the `fno-agents` debug build) lives in the runner.
 
 Modes:
 
 | Invocation | Behavior |
 |---|---|
-| `smoke.sh` | Fail-fast. Exactly the pre-extraction CI semantics. |
-| `smoke.sh --keep-going` | Run every step, print a summary table, record failures, exit non-zero if any failed. |
-| `smoke.sh --only '<glob>'` | Run only steps whose name matches the shell glob. |
-| `smoke.sh --retry-failed` | Re-run only the steps recorded by the last `--keep-going` run; full run if the record is missing or corrupt. |
-| `smoke.sh --list [--verbose]` | Print the registry (names; with `--verbose`, working dir + command) and exit. |
+| `fno test smoke` | Fail-fast. Exactly the pre-extraction CI semantics. |
+| `fno test smoke --keep-going` | Run every step, print a summary table, record failures, exit non-zero if any failed. |
+| `fno test smoke --only '<glob>'` | Run only steps whose name matches the shell glob. |
+| `fno test smoke --retry-failed` | Re-run only the steps recorded by the last `--keep-going` run; full run if the record is missing or corrupt. |
+| `fno test smoke --list [--verbose]` | Print the registry (names; with `--verbose`, working dir + command) and exit. |
 
 Prerequisites (`uv`, `python3` with `yaml` importable, `cargo` when a selected
 step needs it) are asserted up front and named on failure with exit 2. The
-script never installs anything at the system level - locally you install PyYAML
+runner never installs anything at the system level - locally you install PyYAML
 once by hand. A subset run (`--only` / `--retry-failed`) labels itself in the
-header so a partial green can never be mistaken for a full green; a run that
-executes zero steps exits non-zero rather than reading as green.
+header so a partial green can never be mistaken for a full green, and preflight
+records a `mode=FULL verdict=green` attestation only on a full, all-green run,
+so a subset pass can never mint or satisfy one; a run that executes zero steps
+exits non-zero rather than reading as green.
 
 ### `scripts/ci/preflight.sh` - the hermetic runner
 
 One command to run before pushing. It validates the invoking checkout's
 **committed HEAD** inside a persistent, hermetic preflight worktree, then runs
-`smoke.sh --keep-going` plus the rust-ci legs (pinned `cargo +1.94.1 fmt
+`fno-py test smoke --keep-going` plus the rust-ci legs (pinned `cargo +1.94.1 fmt
 --check`, `cargo test --all-targets` for both crates, advisory `cargo audit`).
 
 Why a separate worktree with a scrubbed environment: the canonical checkout's
@@ -84,7 +88,7 @@ temp `HOME` cannot hide either, because both travel through channels other than
    `"1"`. The broader "a worktree always resolves its own config" loader change
    remains a separate root-cause node; this flag is the preflight-scoped subset.
 
-`smoke.sh --keep-going` still names every failing step, so any genuine red stays
+The smoke runner still names every failing step, so any genuine red stays
 visible and distinguishable.
 
 Worktree location follows `config.paths.worktrees_base`
@@ -151,11 +155,11 @@ The scripts never self-skip; the skip decision lives in the caller.
 scripts/ci/preflight.sh                 # full run; reuses a matching attestation if one exists
 scripts/ci/preflight.sh --force         # ignore the cached attestation, run every suite
 scripts/ci/preflight.sh --retry-failed  # fast: only last run's failures
-bash scripts/ci/smoke.sh --keep-going   # non-hermetic, in your working tree
-bash scripts/ci/smoke.sh --list         # what CI actually runs
+fno test smoke --keep-going             # non-hermetic, in your working tree
+fno test smoke --list                   # what CI actually runs
 ```
 
-`smoke.sh --keep-going` run directly in your working tree is the fast,
-non-hermetic option for checking before you commit - the same registry, minus
+`fno test smoke --keep-going` run directly in your working tree is the fast,
+non-hermetic option for checking before you commit, the same registry minus
 the worktree isolation. Preflight refuses a dirty tree on purpose; that direct
 smoke run is how you check uncommitted work.
