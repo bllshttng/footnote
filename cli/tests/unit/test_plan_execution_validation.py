@@ -129,6 +129,112 @@ Why this is needed.
     assert fields == {"Changes", "Files to Modify", "Verification"}
 
 
+_QUICK_FILES = "| File | Action |\n|---|---|\n| `cli/src/fno/plan/execution_validation.py` | modify |"
+_QUICK_VERIFY = "1. `fno test cli/tests/unit/test_plan_execution_validation.py`"
+
+
+def _quick_plan(*, files: str = _QUICK_FILES, verification: str = _QUICK_VERIFY) -> str:
+    return f"""## Context
+
+Why this is needed.
+
+## Changes
+
+### 1. Do the work
+
+Make the change.
+
+## Files to Modify
+
+{files}
+
+## Verification
+
+{verification}
+"""
+
+
+def test_quick_plan_prose_verification_is_not_runnable(tmp_path: Path) -> None:
+    plan = _write_plan(tmp_path, _quick_plan(verification="1. Manually inspect the result."))
+
+    result = validate_execution(load_plan(plan))
+    cli_result = runner.invoke(plan_app, ["validate", str(plan), "--execution"])
+
+    assert {v.field for v in result.violations} == {"Verification"}
+    assert cli_result.exit_code == 1
+    assert "Verification:" in cli_result.output
+
+
+def test_quick_plan_arbitrary_surface_word_is_not_a_file(tmp_path: Path) -> None:
+    plan = _write_plan(tmp_path, _quick_plan(files="- backend"))
+
+    result = validate_execution(load_plan(plan))
+    cli_result = runner.invoke(plan_app, ["validate", str(plan), "--execution"])
+
+    assert {v.field for v in result.violations} == {"Files to Modify"}
+    assert cli_result.exit_code == 1
+    assert "Files to Modify:" in cli_result.output
+
+
+def test_quick_plan_verification_stays_representation_tolerant(tmp_path: Path) -> None:
+    for verification in (
+        "1. `fno test cli/tests/unit/test_a.py`",
+        "- fno test cli/tests/unit/test_a.py",
+        "Run the check first.\n\n1. env FNO_DEBUG=1 fno test cli/tests/unit/test_a.py",
+        "1. `./scripts/ci/preflight.sh`",
+    ):
+        plan = _write_plan(tmp_path, _quick_plan(verification=verification))
+
+        assert validate_execution(load_plan(plan)).violations == [], verification
+
+
+def test_quick_plan_accepts_concrete_paths_without_touching_the_filesystem(
+    tmp_path: Path,
+) -> None:
+    for token in (
+        "cli/src/fno/plan/does_not_exist_yet.py",
+        "/etc/hosts",
+        "~/.fno/config.toml",
+        "AGENTS.md",
+        "Dockerfile",
+        ".gitignore",
+    ):
+        plan = _write_plan(tmp_path, _quick_plan(files=f"- `{token}`"))
+        doc = load_plan(plan)
+
+        first = validate_execution(doc).violations
+        assert first == [], token
+        assert [v.field for v in validate_execution(doc).violations] == [], token
+
+
+def test_quick_plan_rejects_non_path_tokens(tmp_path: Path) -> None:
+    for token in (
+        "https://example.com/a.py",
+        "--dry-run",
+        "cli/**/*.py",
+        "backend service",
+    ):
+        plan = _write_plan(tmp_path, _quick_plan(files=f"- `{token}`"))
+
+        fields = {v.field for v in validate_execution(load_plan(plan)).violations}
+
+        assert fields == {"Files to Modify"}, token
+
+
+def test_quick_plan_malformed_shell_verification_fails_closed(tmp_path: Path) -> None:
+    plan = _write_plan(tmp_path, _quick_plan(verification='1. fno test "unclosed'))
+
+    fields = {v.field for v in validate_execution(load_plan(plan)).violations}
+
+    assert fields == {"Verification"}
+
+
+def test_quick_plan_file_predicate_leaves_full_plan_surfaces_alone(tmp_path: Path) -> None:
+    plan = _write_plan(tmp_path, _full_plan(VALID_STRATEGY.replace("cli/src/fno/plan/cli.py", "backend")))
+
+    assert validate_execution(load_plan(plan)).violations == []
+
+
 def test_placeholder_task_fields_fail_with_exact_paths(tmp_path: Path) -> None:
     strategy = """execution_mode: sequential
 waves:

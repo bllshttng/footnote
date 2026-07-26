@@ -45,6 +45,14 @@ _RUNNABLE_COMMANDS = frozenset(
     """.split()
 )
 _COMMAND_WRAPPERS = frozenset({"command", "env", "gtimeout", "sudo", "timeout"})
+_CONVENTIONAL_FILENAMES = frozenset(
+    """
+    brewfile changelog codeowners dockerfile gemfile justfile license makefile
+    notice procfile rakefile readme vagrantfile
+    """.split()
+)
+_FILE_REJECT_RE = re.compile(r"""[\s`$&|;<>(){}\[\]*?"'!]""")
+_FILE_EXTENSION_RE = re.compile(r"[\w.+-]+\.[A-Za-z0-9]{1,8}")
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SHELL_SEGMENT_RE = re.compile(r"(?:&&|\|\||[;|])")
 
@@ -99,6 +107,27 @@ def _has_quick_placeholder(value: str) -> bool:
     )
 
 
+def _is_concrete_file(value: str) -> bool:
+    """Quick-plan-only lexical path predicate.
+
+    Never touches the filesystem: a quick plan may name a file it is about to
+    create, so validity must not depend on checkout state. Full-plan ``surface``
+    values stay symbolic and are deliberately not routed through this.
+    """
+    token = value.strip().strip("`").strip()
+    if not token or _has_quick_placeholder(token):
+        return False
+    if _FILE_REJECT_RE.search(token) or "://" in token or token.startswith("-"):
+        return False
+    if "/" in token:
+        return True
+    return (
+        token.lower() in _CONVENTIONAL_FILENAMES
+        or (token.startswith(".") and len(token) > 1)
+        or bool(_FILE_EXTENSION_RE.fullmatch(token))
+    )
+
+
 def _quick_file_candidates(body: str) -> list[str]:
     candidates = re.findall(r"`([^`\n]+)`", body)
     for raw_line in body.splitlines():
@@ -140,21 +169,14 @@ def _validate_quick(doc: PlanDoc) -> ExecutionValidationResult:
 
     files_body = (doc.get_section("Files to Modify") or "").strip()
     file_tokens = _quick_file_candidates(files_body)
-    if files_body and not any(
-        token.strip() and not _has_quick_placeholder(token)
-        for token in file_tokens
-    ):
+    if files_body and not any(_is_concrete_file(token) for token in file_tokens):
         violations.append(
             _violation("Files to Modify", "must name at least one concrete file path")
         )
 
     verification = (doc.get_section("Verification") or "").strip()
     commands = _quick_verification_candidates(verification)
-    if verification and not any(
-        command.strip()
-        and not _has_quick_placeholder(command)
-        for command in commands
-    ):
+    if verification and not any(_is_runnable_verify(command) for command in commands):
         violations.append(
             _violation("Verification", "must contain at least one concrete runnable command")
         )
