@@ -80,7 +80,10 @@ def _split_list(raw: Optional[str]) -> list[str]:
 @receipt_app.command("write")
 def write_cmd(
     node: str = typer.Option(..., "--node", help="Backlog node id"),
-    session: str = typer.Option(..., "--session", help="Writing session id"),
+    session_id: Optional[str] = typer.Option(None, "--session-id", help="Writing session id"),
+    session_legacy: Optional[str] = typer.Option(
+        None, "--session", hidden=True, help="[DEPRECATED] alias for --session-id."
+    ),
     phase: str = typer.Option(..., "--phase", help="Phase/boundary (do, review, ship, wave, ...)"),
     generation: int = typer.Option(..., "--generation", help="Handoff generation (>=1)"),
     repo: str = typer.Option(..., "--repo", help="Repository name"),
@@ -102,6 +105,11 @@ def write_cmd(
     Snapshots the supplied state into a receipt file named by identity. Refuses
     to overwrite a completed receipt for the same identity.
     """
+    from fno._flag_aliases import merge_deprecated_alias
+
+    session = merge_deprecated_alias(
+        session_id, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
+    )
     try:
         receipt = build_receipt(
             node=node,
@@ -190,7 +198,10 @@ def _live_claim_holder(node: str, claims_root: Optional[Path]) -> Optional[str]:
 @receipt_app.command("validate")
 def validate_cmd(
     node: str = typer.Option(..., "--node", help="Backlog node id to revalidate"),
-    session: Optional[str] = typer.Option(None, "--session", help="Successor (own) session id; default: receipt session"),
+    session_id: Optional[str] = typer.Option(None, "--session-id", help="Successor (own) session id; default: receipt session"),
+    session_legacy: Optional[str] = typer.Option(
+        None, "--session", hidden=True, help="[DEPRECATED] alias for --session-id."
+    ),
     worktree: Optional[str] = typer.Option(None, "--worktree", help="Override worktree to probe (default: receipt worktree)"),
     events_file: Optional[str] = typer.Option(None, "--events", help="Override events.jsonl path (default: <worktree>/.fno/events.jsonl)"),
     harness: Optional[str] = typer.Option(None, "--harness", help="Owning harness for generation scoping"),
@@ -203,6 +214,11 @@ def validate_cmd(
     verdict. Never acquires or releases claims - on failure the caller parks
     and the predecessor's state is preserved.
     """
+    from fno._flag_aliases import merge_deprecated_alias
+
+    session = merge_deprecated_alias(
+        session_id, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
+    )
     artifacts_dir = _artifacts_dir()
     latest = _find_latest_receipt(node, artifacts_dir)
     if latest is None:
