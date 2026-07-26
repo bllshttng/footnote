@@ -41,11 +41,11 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from fno import _subprocess_util
+from fno.agents.naming import AgentNameError, agent_name
 from fno.provenance.spawn_think import (
     _bump_daily_count,
     _daily_cap,
     _daily_count,
-    _name_slug,
     _parse_short_id,
 )
 from fno.retro.land import LandResult
@@ -179,7 +179,11 @@ def _spawn_target_worker(node_id: str, cwd: Optional[str]) -> bool:
     command rides as the prompt, ``--substrate bg`` is the detached claude thread
     (never ``-p``). Returns True on a spawn receipt (a short_id), False otherwise.
     """
-    name = f"keepgo-{_name_slug(node_id) or node_id}"[:64].rstrip("-")
+    try:
+        name = agent_name("keepgo", node_id)
+    except AgentNameError as exc:
+        _LOG.debug("keep_going: unrepresentable worker name for %s: %s", node_id, exc)
+        return False
     cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn",
            "--harness", "claude", "--substrate", "bg"]
     if cwd:

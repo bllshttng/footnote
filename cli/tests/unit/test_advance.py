@@ -2059,3 +2059,76 @@ def test_wiring_explicit_brief_passes_through(iso, monkeypatch):
     assert res.decision == "dispatched"
     assert cap["brief"] == "HAND SET BRIEF"
     assert _events(iso)[0]["data"]["brief"] == "explicit"
+
+
+# ---------------------------------------------------------------------------
+# x-3218: graph-driven names are budgeted before spawn, never silently lost
+# ---------------------------------------------------------------------------
+
+
+def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypatch):
+    """AC2: a naive assembly would overflow; the budgeted name spawns once.
+
+    Node ids are configuration-driven, so this deliberately uses a prefix much
+    longer than today's ``x-`` examples: the old uncapped generator emitted a
+    77-char name that ``fno agents spawn`` rejected, and the dispatch was lost
+    with no session and no event.
+    """
+    import re
+
+    from fno.agents.naming import MAX_LEN, slug_component
+
+    node_id = "regready-pipeline-2c4f9a1b3d"
+    slug = "path consolidation wave 0 delegate handoff"
+    assert len(f"target-{node_id}-{slug_component(slug)}") > MAX_LEN
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return _FakeProc(0, _RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    sid = adv._spawn_worker(node_id, "/w", slug)
+
+    assert sid == "abc12345"
+    assert len(calls) == 1  # exactly one worker launch requested
+    name = calls[0][calls[0].index("--name") + 1]
+    assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name), name
+    assert name.startswith(f"target-{node_id}-")  # full node identity preserved
+
+
+def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypatch):
+    """AC5 + AC6: refuse before spawn; the lane fails loudly, never 'launched'."""
+    node_id = "n-" + "z" * 70
+    node = {"id": node_id, "title": "irrelevant", "project": "fno", "_resolved_cwd": "/tmp/x"}
+    monkeypatch.setattr(adv, "_next_node", lambda project: node)
+    monkeypatch.setattr(
+        adv.subprocess, "run", lambda *a, **k: pytest.fail("must not spawn")
+    )
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "failed" and res.node_id == node_id
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["type"] == "advance_failed"
+    assert evs[0]["data"]["node_id"] == node_id
+    assert "64" in evs[0]["data"]["error"]
+    # Re-dispatchable: the reservation is released, not stuck holding a lane.
+    key = f"dispatch:{node_id}"
+    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+
+
+def test_duplicate_dispatch_converges_on_one_dedup_name():
+    """AC7: the name is the dedup token, so identical components must converge."""
+    args = ("regready-pipeline-2c4f9a1b3d", "path consolidation wave 0 delegate")
+    assert adv._worker_agent_name(*args) == adv._worker_agent_name(*args)
+    # A different lifecycle prefix stays distinct (G4 de-stub never collides).
+    assert adv._worker_agent_name(*args) != adv._worker_agent_name(*args, prefix="reconcile")
+
+
+def test_filed_specimen_names_remain_byte_for_byte():
+    """The 43/45-char specimens from the node fit and must not change shape."""
+    assert adv._worker_agent_name("x-8096", "path-consolidation-wave-0-delegate") == (
+        "target-x-8096-path-consolidation-wave-0-dele"
+    )

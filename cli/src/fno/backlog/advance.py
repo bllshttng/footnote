@@ -48,6 +48,7 @@ from typing import Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
+from fno.agents.naming import agent_name
 from fno.provenance import autobrief as _autobrief
 
 _LOG = logging.getLogger(__name__)
@@ -613,39 +614,23 @@ def select_lane_fill(
     return selected
 
 
-def _name_slug(raw: Optional[str]) -> str:
-    """Normalize a slug/title tail to match the shell dispatchers byte-for-byte.
-
-    Mirrors the pipeline in skills/target/scripts/dispatch-node.sh and
-    skills/agent/scripts/normalize.sh: lowercase, replace any non-[a-z0-9-] run
-    with a hyphen, collapse repeats, strip, then ``cut -c1-30`` and trim a
-    trailing hyphen. The 30-char cut matters: graph slugs are capped at 48
-    (``slug._LEN_CAP``), so an un-truncated tail here would diverge from the
-    shell name and defeat the same-name spawn-collision dedup (codex P2 /
-    gemini HIGH on PR #525).
-    """
-    if not raw:
-        return ""
-    s = re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]", "-", raw.lower())).strip("-")
-    return s[:30].rstrip("-")
-
-
 def _worker_agent_name(
     node_id: str, node_slug: Optional[str], prefix: str = "target"
 ) -> str:
     """Provenance-carrying bg worker name: ``<prefix>-<full-node-id>-<slug>``.
 
-    Mirrors skills/target/scripts/dispatch-node.sh: the verb prefix plus the
-    full node id and the node's title-derived slug (sanitized via
-    ``_name_slug``), so the thread title reads at a glance (e.g.
-    ``target-ab-4040eee8-cargo-bootstrapper``). A node with no usable slug
-    degrades to ``<prefix>-<full-node-id>``. ``prefix`` is ``reconcile`` for the
-    G4 de-stub pass so its worker name never collides with the (ended) first
-    pass's ``target-<id>-<slug>``.
+    Thin adapter over the canonical owner (``fno.agents.naming``), which also
+    enforces the runtime's 64-char limit this call site used to skip - a long
+    configured node id assembled a name ``fno agents spawn`` rejected, losing
+    the dispatch with no session and no event (x-3218). ``prefix`` is
+    ``reconcile`` for the G4 de-stub pass so its worker name never collides
+    with the (ended) first pass's ``target-<id>-<slug>``.
+
+    Raises :class:`~fno.agents.naming.AgentNameError` when the required
+    identity cannot be represented; the dispatch path projects that as a
+    node-identifying failure event rather than a launched lane.
     """
-    base = f"{prefix}-{node_id}"
-    slug = _name_slug(node_slug)
-    return f"{base}-{slug}" if slug else base
+    return agent_name(prefix, node_id, slug=node_slug)
 
 
 def _refuse_repeated_dead_dispatch(
