@@ -628,12 +628,20 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
     pending = ""
     for a in args:
         if pending:
+            # An empty value is a caller bug (an unset shell variable), never an
+            # instruction. Accepting it silently turned `--only=` into a FULL
+            # run and `--base=` into local mode, both looking like the subset
+            # the caller asked for.
+            if not a:
+                raise ValueError(f"smoke: --{pending.replace('_', '-')} needs a value")
             opts[pending] = a
             pending = ""
         elif a in valued:
             pending = valued[a]
         elif "=" in a and a.split("=", 1)[0] in valued:
             flag, val = a.split("=", 1)
+            if not val:
+                raise ValueError(f"smoke: {flag} needs a value")
             opts[valued[flag]] = val
         elif a == "--list":
             opts["list"] = True
@@ -649,8 +657,6 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
             raise ValueError(f"smoke: unknown arg {a!r}")
     if pending:
         raise ValueError(f"smoke: --{pending.replace('_', '-')} needs a value")
-    if opts["only"] == "" and "--only" in args:
-        raise ValueError("smoke: --only needs a glob")
     # Three subset modes with no defined precedence: refuse rather than let one
     # silently win and mislabel the evidence.
     subsets = [n for n, on in

@@ -324,3 +324,22 @@ def test_prereq_codes_are_per_mode(tmp_path: Path) -> None:
     full = inspect.getsource(tc._run_smoke)
     assert "CHANGED_RC_PREREQ" not in full
     assert "return 2" in full
+
+
+def test_empty_flag_values_are_refused(tmp_path: Path) -> None:
+    """An unset shell variable is a caller bug, never an instruction.
+
+    `--only=` silently disabled subset selection and ran the FULL suite;
+    `--base=` silently fell back to local mode. Both look like the subset the
+    caller asked for, which is the whole failure class this mode guards.
+    """
+    import pytest
+
+    from fno.test_cmd import _parse_smoke_args
+    for argv in (["--only="], ["--only"], ["--changed", "--base=", "--head", "HEAD"],
+                 ["--changed", "--base", "HEAD", "--head="], ["--changed", "--head", ""]):
+        with pytest.raises(ValueError, match="needs a value"):
+            _parse_smoke_args(argv)
+    # Real values still parse.
+    opts = _parse_smoke_args(["--changed", "--base", "HEAD~1", "--head", "HEAD"])
+    assert opts["changed"] and opts["base"] == "HEAD~1" and opts["head"] == "HEAD"
