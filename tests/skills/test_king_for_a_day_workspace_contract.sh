@@ -92,16 +92,27 @@ join_continuations() {
     ' "$1"
 }
 
-NONPANE_RE='--substrate[[:space:]]+(bg|headless)|--headless|(^|[[:space:]])(--once|-o|-p)([[:space:]]|$)'
-POSITIONAL_RE='fno[[:space:]]+agents[[:space:]]+spawn[[:space:]].*[[:space:]](bg|headless)([[:space:]]|$)'
+# `--substrate bg` and `--substrate=bg` are both accepted by the CLI, so both
+# must be matched or the guard has a hole in the shape it exists to catch.
+NONPANE_RE='--substrate[[:space:]=]+(bg|headless)|--headless|(^|[[:space:]])(--once|-o|-p)([[:space:]]|$)'
 PLACEMENT_RE='--workspace|(^|[[:space:]])-s[[:space:]]|--split|(^|[[:space:]])-x[[:space:]]|--at[[:space:]]'
+
+# The positional substrate is the token immediately after the quoted prompt,
+# and it is matched only in that slot. A blanket scan for a standalone `bg`
+# anywhere flags a prompt that merely contains the word ("debug bg worker") or
+# a legitimate `--workspace bg`, failing CI on valid pane examples. The prompt
+# must match as a whole quoted string: allowing a bare token here lets the
+# regex backtrack into `"debug` and match the `bg` inside the prompt.
+is_positional_nonpane() {
+    grep -qE "fno[[:space:]]+agents[[:space:]]+spawn[[:space:]]+(\"[^\"]*\"|'[^']*')[[:space:]]+(bg|headless)([[:space:]]|$)" <<<"$1"
+}
 
 for f in "${ALL_SURFACES[@]}"; do
     while IFS= read -r cmd; do
         [[ -n "$cmd" ]] || continue
         is_command_line "$cmd" || continue
         grep -qE -- "$NONPANE_RE" <<<"$cmd" ||
-            grep -qE -- "$POSITIONAL_RE" <<<"$cmd" || continue
+            is_positional_nonpane "$cmd" || continue
         grep -qE -- "$PLACEMENT_RE" <<<"$cmd" || continue
         note "$f puts placement flags on a non-pane substrate: $cmd"
     done < <(join_continuations "$f")
