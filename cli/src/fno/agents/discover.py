@@ -19,6 +19,7 @@ a 7000+ entry directory.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import re
@@ -171,13 +172,13 @@ def _discover_from_codex_daemon() -> list[dict]:
     return rows
 
 
-def _codex_meta(path: Path) -> Optional[tuple[str, str]]:
-    """``(session_id, cwd)`` from a rollout's first ``session_meta`` line, or None.
+def _codex_session_meta(path: Path) -> Optional[dict]:
+    """A rollout's first-line ``session_meta`` payload dict, or None.
 
-    Codex 0.1x writes ``{"type":"session_meta","payload":{"id":...,"cwd":...}}``
-    as line 1 (verified on a real rollout). A file that is unreadable, whose
-    first line is not JSON, or is not a session_meta record is skipped (returns
-    None), never raised — same posture as the claude readers.
+    Codex 0.1x writes ``{"type":"session_meta","payload":{"id":...,"cwd":...,
+    "timestamp":...}}`` as line 1 (verified on a real rollout). A file that is
+    unreadable, whose first line is not JSON, or is not a session_meta record is
+    skipped (returns None), never raised — same posture as the claude readers.
     """
     try:
         with open(path, encoding="utf-8") as fh:
@@ -191,12 +192,76 @@ def _codex_meta(path: Path) -> Optional[tuple[str, str]]:
     if not isinstance(rec, dict) or rec.get("type") != "session_meta":
         return None
     payload = rec.get("payload")
-    if not isinstance(payload, dict):
+    return payload if isinstance(payload, dict) else None
+
+
+def _codex_meta(path: Path) -> Optional[tuple[str, str]]:
+    """``(session_id, cwd)`` from a rollout's first ``session_meta`` line, or None."""
+    payload = _codex_session_meta(path)
+    if payload is None:
         return None
     sid, cwd = payload.get("id"), payload.get("cwd")
     if not isinstance(sid, str) or not sid:
         return None
     return sid, str(cwd or "")
+
+
+def _codex_started_ms(payload: dict) -> Optional[int]:
+    """Session start as epoch ms from ``session_meta.payload.timestamp``.
+
+    The payload timestamp is the only signal that separates a session this spawn
+    created from one already open in the same cwd: file mtime cannot, because an
+    older session still being typed into has a fresh mtime.
+    """
+    raw = payload.get("timestamp")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return int(_dt.datetime.fromisoformat(raw).timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def codex_session_ids_started_in(
+    cwd: Path, since_ms: int, *, sessions_dir: Optional[Path] = None
+) -> list[str]:
+    """Codex session ids whose rollout says they started in ``cwd`` at/after ``since_ms``.
+
+    Matched on the directory string, never a project id: several worktrees of one
+    repo would otherwise collapse into each other. ``sessions_dir`` is injectable
+    so tests never touch the developer's real ``~/.codex``.
+    """
+    root = sessions_dir if sessions_dir is not None else default_codex_sessions_dir()
+    target = str(cwd)
+    ids: list[str] = []
+    try:
+        paths = list(root.rglob("rollout-*.jsonl"))
+    except OSError:
+        return ids
+    for path in paths:
+        # Prune by mtime before opening: a rollout's last write is always >= its
+        # session start (codex appends over the session), so a file older than
+        # since_ms cannot be a session started at/after it. Bounds the per-spawn
+        # cost on hosts with a long codex history instead of parsing every
+        # historical rollout on each probe (Codex P2, #603).
+        try:
+            if int(path.stat().st_mtime * 1000) < since_ms:
+                continue
+        except OSError:
+            pass
+        payload = _codex_session_meta(path)
+        if payload is None:
+            continue
+        sid = payload.get("id")
+        if not isinstance(sid, str) or not sid or sid in ids:
+            continue
+        if str(payload.get("cwd") or "") != target:
+            continue
+        started = _codex_started_ms(payload)
+        if started is None or started < since_ms:
+            continue
+        ids.append(sid)
+    return ids
 
 
 def codex_rollout_for_session(
@@ -594,6 +659,7 @@ def _discover_from_registry(
                 "cwd": getattr(e, "cwd", "") or "",
                 "status": None,
                 "agent": harness,
+                "name": getattr(e, "name", None),
             }
         )
     return rows
@@ -613,6 +679,7 @@ class DiscoveredSession:
     agent: str = "claude"
     truth_state: str = "unknown"
     transcript_path: Optional[str] = None
+    name: Optional[str] = None  # registered spawn name (address axis, distinct from handle/alias)
 
     @property
     def is_alive(self) -> bool:
@@ -1088,10 +1155,16 @@ def resolve_or_suggest(
         return resolved.transcript_path
 
     if not require_alive:
-        registry_matches = [
-            row
-            for row in _discover_from_registry(registry_path)
-            if handle and handle == row["session_id"]
+        # Name-first (resolve_agent_in contract): a registered name that equals
+        # another row's full harness_session_id must resolve to the named row
+        # here, not fall through to the ID tier and select the other row, or
+        # truth and peek can inspect different workers (Codex P2 r5, #603).
+        registry_rows = _discover_from_registry(registry_path)
+        name_matches = [
+            row for row in registry_rows if handle and handle == row.get("name")
+        ]
+        registry_matches = name_matches or [
+            row for row in registry_rows if handle and handle == row["session_id"]
         ]
         if len(registry_matches) == 1:
             row = registry_matches[0]
@@ -1112,6 +1185,7 @@ def resolve_or_suggest(
                 transcript_path=(
                     transcript_path if transcript_path is not None else None
                 ),
+                name=row.get("name"),
             ), []
 
         if handle:
@@ -1189,33 +1263,38 @@ def resolve_or_suggest(
     )
     if require_alive:
         sessions = [s for s in sessions if s.is_alive]
+    # Exact-match the address BEFORE the retired-syntax rejection: a registered
+    # name matching the retired <harness>-<short8> shape (e.g. codex-deadbeef,
+    # which validate_spawn_name permits) must still resolve here, or truth's
+    # fast-path and peek disagree (Codex P2, #603). Registered names take
+    # PRECEDENCE over alias/id tiers (resolve_agent_in is name-first): a name
+    # that also matches another live session's alias resolves to the named row,
+    # not rejected as ambiguous by peek while truth resolves it (Codex P2 r4).
+    by_name = [s for s in sessions if handle and s.name == handle]
+    if len(by_name) == 1:
+        return by_name[0], []
+    exact = [
+        s
+        for s in sessions
+        if handle
+        and (
+            s.handle == handle
+            or s.session_id == handle
+            or s.short_id == handle
+            or canonical_handle(s.session_id) == handle
+        )
+    ]
+    if len(exact) == 1:
+        return exact[0], []
+    if len(exact) > 1:
+        return None, sorted(s.session_id for s in exact)
     retired = bool(handle and LEGACY_HANDLE_RE.fullmatch(handle))
-    # An address is the friendly <project>-<short8> alias, the bare hex short-id,
-    # or a stored row name. The retired <harness>-<short8> form is NOT accepted:
-    # nothing generates it any more, so a caller still passing one is a bug, and
-    # translating it silently would hide the bug forever.
-    if not retired:
-        exact = [
-            s
-            for s in sessions
-            if handle
-            and (
-                s.handle == handle
-                or s.session_id == handle
-                or s.short_id == handle
-                or canonical_handle(s.session_id) == handle
-            )
-        ]
-        if len(exact) == 1:
-            return exact[0], []
-        if len(exact) > 1:
-            return None, sorted(s.session_id for s in exact)
     import difflib
 
     candidates: list[str] = []
     for s in sessions:
-        for cand in (s.handle, s.short_id, canonical_handle(s.session_id)):
-            if cand not in candidates:
+        for cand in (s.handle, s.short_id, canonical_handle(s.session_id), s.name):
+            if cand and cand not in candidates:
                 candidates.append(cand)
     # Name the bug rather than emitting a bare "not found": a harness-prefixed
     # address means some caller (a stale binary, a hardcoded string, a note
@@ -1806,6 +1885,8 @@ def discover_live_sessions(
                 existing["cwd"] = r["cwd"]
             if not existing.get("transcript_path") and r.get("transcript_path"):
                 existing["transcript_path"] = r["transcript_path"]
+            if not existing.get("name") and r.get("name"):
+                existing["name"] = r["name"]
     live = list(by_sid.values())
 
     if resolve_metadata:
@@ -1826,6 +1907,7 @@ def discover_live_sessions(
             status=r["status"],
             agent=r["agent"],
             transcript_path=r.get("transcript_path"),
+            name=r.get("name"),
         )
         for r in live
     ]

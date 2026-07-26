@@ -3446,20 +3446,49 @@ where
                 }
             }
             Ok(false) if entry.is_interactive() => {
-                // host_mode=interactive (task 2.3 / US4): an interactive host is a
-                // long-lived drivable TUI whose liveness is its PTY *process*, not
-                // session-store membership. A live `codex resume`/`gemini -r` TUI
-                // may not appear in the exec session index, so a store miss must
-                // NOT orphan a healthy worker. But a genuinely dead interactive
-                // worker must still be reaped DURING `reconcile` -- not only at
-                // daemon restart via recover()'s pid sweep -- so check pid
-                // liveness here and flip to Exited when the worker process is gone
-                // ("unexpected exit is exited, not orphaned"; Codex P2, PR #373).
+                // host_mode=interactive (task 2.3 / US4): a daemon-managed
+                // interactive host is always pid'd; its liveness is the PTY
+                // process, not the session store, so a store miss must not orphan
+                // it. A dead worker reaps to Exited ("unexpected exit is exited,
+                // not orphaned"; Codex P2, PR #373).
                 if pid_live(entry) {
                     None
                 } else {
                     out.updated.push(entry.name.clone());
                     Some(AgentStatus::Exited)
+                }
+            }
+            Ok(false) if entry.mux.is_some() => {
+                // A mux-pane row is PTY-governed only with a captured pid. Mux
+                // rows are written with the default exec host_mode but carry a mux
+                // ref; without this arm, 1.1's backfilled codex id (or a claude
+                // pane's minted id) would false-orphan a live pane on a store
+                // miss. But pid_live maps None to true, so a pid-less mux row
+                // (_lookup_child_pid best-effort miss) must NOT be preserved here
+                // or a maybe-dead pane stays immortal -- it defers to store
+                // liveness (orphan) instead. A live pid keeps it Live; a dead pid
+                // reaps to Exited (Codex P1/P2, #603 r3/r4).
+                if entry.pid.is_some() && pid_live(entry) {
+                    None
+                } else if entry.pid.is_some() {
+                    out.updated.push(entry.name.clone());
+                    Some(AgentStatus::Exited)
+                } else {
+                    let live_ish = matches!(
+                        entry.status,
+                        AgentStatus::Live
+                            | AgentStatus::Ready
+                            | AgentStatus::Idle
+                            | AgentStatus::Busy
+                            | AgentStatus::Spawning
+                    );
+                    if live_ish {
+                        out.orphans.push(entry.name.clone());
+                        out.updated.push(entry.name.clone());
+                        Some(AgentStatus::Orphaned)
+                    } else {
+                        None
+                    }
                 }
             }
             Ok(false) => {
@@ -5426,6 +5455,51 @@ mod tests {
         // Reaped to Exited, never orphaned.
         assert!(out.orphans.is_empty());
         assert_eq!(out.updated, vec!["dead-tui".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_mux_pane_liveness_follows_the_pid_not_the_store() {
+        // Codex P1/P2 (#603): a mux-hosted pane is PTY-governed, so on a
+        // session-store miss a live pid keeps it Live and a dead pid reaps to
+        // Exited. A pid-less pane (_lookup_child_pid best-effort miss) has no PTY
+        // signal and must NOT be preserved -- pid_live maps None to true, so that
+        // would keep a maybe-dead pane immortal; it defers to store liveness
+        // (orphan) instead.
+        let mk = |name: &str, pid: Option<u32>| {
+            let mut e = rentry(name, AgentStatus::Live, None);
+            e.mux = Some(crate::state::MuxRef {
+                session: "main".into(),
+                pane_id: 7,
+            });
+            e.pid = pid;
+            e
+        };
+        let entries = vec![
+            mk("live-pane", Some(4242)), // pid present + alive
+            mk("dead-pane", Some(4243)), // pid present + dead
+            mk("pidless-pane", None),    // pid capture missed
+        ];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(false), // session_index miss for all
+            || false,
+            |e| e.name == "live-pane", // only live-pane's pid is alive
+        );
+        assert_eq!(
+            changes[0].new_status, None,
+            "a live-pid mux pane is preserved"
+        );
+        assert_eq!(
+            changes[1].new_status,
+            Some(AgentStatus::Exited),
+            "a dead-pid mux pane is reaped to Exited"
+        );
+        assert_eq!(
+            changes[2].new_status,
+            Some(AgentStatus::Orphaned),
+            "a pid-less mux pane defers to store liveness (orphan), not immortal"
+        );
+        assert_eq!(out.orphans, vec!["pidless-pane".to_string()]);
     }
 
     #[test]

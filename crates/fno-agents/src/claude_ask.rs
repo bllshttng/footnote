@@ -106,6 +106,16 @@ pub fn family1_truth_state(handle: &str) -> Option<String> {
     family1_truth_state_with_command(command, Duration::from_secs(5))
 }
 
+/// Diagnostic for a failed family-1 truth probe. truth writes its refusal
+/// JSON ({state,reason}) to stdout on a non-zero exit, so the reason is read
+/// off stdout, falling back to stderr only when stdout is not the expected JSON.
+fn family1_truth_failure_detail(stdout: &[u8], stderr: &str) -> String {
+    let reason = serde_json::from_slice::<serde_json::Value>(stdout)
+        .ok()
+        .and_then(|value| value.get("reason")?.as_str().map(str::to_owned));
+    reason.unwrap_or_else(|| stderr.trim().to_owned())
+}
+
 fn family1_truth_state_with_command(
     mut command: std::process::Command,
     timeout: Duration,
@@ -149,10 +159,11 @@ fn family1_truth_state_with_command(
         }
     };
     if !output.status.success() {
+        let detail =
+            family1_truth_failure_detail(&output.stdout, &String::from_utf8_lossy(&output.stderr));
         eprintln!(
             "WARN: family-1 truth probe exited {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.status, detail
         );
         return None;
     }
@@ -3836,5 +3847,21 @@ mod tests {
             None
         );
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn family1_truth_failure_detail_prefers_stdout_reason() {
+        // truth writes {state,reason} to stdout on a refusal (exit 13); stderr
+        // holds the verify banner and is empty, so the reason is read off stdout.
+        let detail =
+            family1_truth_failure_detail(br#"{"state":"unknown","reason":"not-found"}"#, "");
+        assert_eq!(detail, "not-found");
+    }
+
+    #[test]
+    fn family1_truth_failure_detail_falls_back_to_stderr() {
+        // A non-JSON stdout (e.g. a crashed probe) falls back to the stderr tail.
+        let detail = family1_truth_failure_detail(b"not json", "  banner  ");
+        assert_eq!(detail, "banner");
     }
 }
