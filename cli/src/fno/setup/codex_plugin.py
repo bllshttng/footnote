@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import subprocess
+import tempfile
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -15,13 +16,17 @@ from typing import Any, Callable, Iterator
 
 import fno.paths as paths
 
-RELEASE_MARKETPLACE = "footnote"
+MARKETPLACE = "footnote"
+PLUGIN_ID = "fno@footnote"
+RELEASE_MARKETPLACE = MARKETPLACE
 RELEASE_SOURCE = "bllshttng/footnote"
-RELEASE_PLUGIN_ID = "fno@footnote"
-DEV_MARKETPLACE = "footnote-dev"
-DEV_PLUGIN_ID = "fno@footnote-dev"
+RELEASE_PLUGIN_ID = PLUGIN_ID
+DEV_MARKETPLACE = MARKETPLACE
+DEV_PLUGIN_ID = PLUGIN_ID
+LEGACY_DEV_MARKETPLACE = "footnote-dev"
+LEGACY_DEV_PLUGIN_ID = "fno@footnote-dev"
 LEGACY_PLUGIN_ID = "fno@footnote-local"
-OWNED_PLUGIN_IDS = frozenset({RELEASE_PLUGIN_ID, DEV_PLUGIN_ID, LEGACY_PLUGIN_ID})
+OWNED_PLUGIN_IDS = frozenset({PLUGIN_ID, LEGACY_DEV_PLUGIN_ID, LEGACY_PLUGIN_ID})
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 _OUTPUT_LIMIT = 500
@@ -158,10 +163,13 @@ def _run(
     argv: list[str],
     *,
     cwd: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     kwargs: dict[str, object] = {"timeout": 120}
     if cwd is not None:
         kwargs["cwd"] = cwd
+    if env is not None:
+        kwargs["env"] = env
     try:
         result = runner(argv, **kwargs)
     except Exception as exc:  # noqa: BLE001 - adapters must fail as a named stage
@@ -171,14 +179,100 @@ def _run(
     return result
 
 
-def _collect(runner: Runner) -> CodexState:
+def _collect(runner: Runner, *, env: dict[str, str] | None = None) -> CodexState:
     marketplaces = _run(
         runner,
         "marketplace-list",
         ["codex", "plugin", "marketplace", "list", "--json"],
+        env=env,
     )
-    plugins = _run(runner, "plugin-list", ["codex", "plugin", "list", "--json"])
+    plugins = _run(
+        runner,
+        "plugin-list",
+        ["codex", "plugin", "list", "--json"],
+        env=env,
+    )
     return parse_state(marketplaces.stdout, plugins.stdout)
+
+
+def _validate_candidate(runner: Runner, *, source: str) -> None:
+    """Prove Codex can parse and install a candidate without touching live state."""
+    with tempfile.TemporaryDirectory(prefix="fno-codex-candidate-") as raw_home:
+        candidate_home = Path(raw_home)
+        env = {**os.environ, "CODEX_HOME": str(candidate_home)}
+        _run(
+            runner,
+            "candidate-marketplace-add",
+            ["codex", "plugin", "marketplace", "add", source, "--json"],
+            env=env,
+        )
+        available_result = _run(
+            runner,
+            "candidate-plugin-list",
+            [
+                "codex",
+                "plugin",
+                "list",
+                "--available",
+                "--marketplace",
+                MARKETPLACE,
+                "--json",
+            ],
+            env=env,
+        )
+        try:
+            available_doc = _object(
+                json.loads(available_result.stdout), "candidate-plugin-list"
+            )
+        except (ValueError, TypeError) as exc:
+            raise CodexPluginError(
+                "candidate-plugin-list", f"malformed JSON: {exc}"
+            ) from exc
+        rows = available_doc.get("available")
+        if not isinstance(rows, list):
+            raise CodexPluginError("candidate-plugin-list", "missing available array")
+        matches = [
+            row
+            for row in rows
+            if isinstance(row, dict) and row.get("pluginId") == PLUGIN_ID
+        ]
+        if len(matches) != 1 or not matches[0].get("version"):
+            raise CodexPluginError(
+                "candidate-plugin-list",
+                f"expected one available {PLUGIN_ID}; found {len(matches)}",
+            )
+        _run(
+            runner,
+            "candidate-plugin-add",
+            ["codex", "plugin", "add", PLUGIN_ID, "--json"],
+            env=env,
+        )
+        state = _collect(runner, env=env)
+        selected = [
+            plugin
+            for plugin in state.plugins
+            if plugin.installed and plugin.enabled and plugin.plugin_id == PLUGIN_ID
+        ]
+        marketplace = next(
+            (item for item in state.marketplaces if item.name == MARKETPLACE), None
+        )
+        if len(selected) != 1 or marketplace is None or not marketplace.root:
+            raise CodexPluginError(
+                "candidate-final-verify", f"expected one enabled {PLUGIN_ID}"
+            )
+        cache = (
+            candidate_home
+            / "plugins"
+            / "cache"
+            / MARKETPLACE
+            / "fno"
+            / selected[0].version
+        )
+        root = Path(marketplace.root)
+        if not cache.is_dir() or plugin_payload_digest(root) != plugin_payload_digest(cache):
+            raise CodexPluginError(
+                "candidate-final-verify", "candidate cache payload differs from source"
+            )
 
 
 def _same_release_source(source_type: str, source: str) -> bool:
@@ -398,6 +492,7 @@ def converge(
     runner: Runner = _default_runner,
     codex_home: Path | None = None,
     source_root: Path | None = None,
+    validate_candidate: bool | None = None,
 ) -> ConvergenceResult:
     if channel not in {"release", "dev"}:
         raise CodexPluginError("channel", f"unsupported channel: {channel}")
@@ -419,17 +514,18 @@ def converge(
     else:
         version = _manifest_version(source)
         marketplace_name = DEV_MARKETPLACE
-        dev_marketplace = source / ".agents" / "marketplaces" / DEV_MARKETPLACE
-        manifest = dev_marketplace / ".agents" / "plugins" / "marketplace.json"
-        if not manifest.is_file():
-            raise CodexPluginError("dev-marketplace", f"missing {manifest}")
-        marketplace_source = str(dev_marketplace.resolve())
+        marketplace_source = str(source.resolve())
         plugin_id = DEV_PLUGIN_ID
 
         def dev_source_matches(source_type: str, installed_source: str) -> bool:
-            return _same_local_source(source_type, installed_source, dev_marketplace)
+            return _same_local_source(source_type, installed_source, source)
 
         source_matches = dev_source_matches
+
+    if validate_candidate is None:
+        validate_candidate = runner is _default_runner
+    if validate_candidate:
+        _validate_candidate(runner, source=marketplace_source)
 
     with _convergence_lock(home):
         state = _collect(runner)

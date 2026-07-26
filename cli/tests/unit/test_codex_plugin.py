@@ -11,14 +11,95 @@ from typer.testing import CliRunner
 from fno.setup.codex_plugin import (
     DEV_MARKETPLACE,
     DEV_PLUGIN_ID,
+    LEGACY_DEV_MARKETPLACE,
+    LEGACY_DEV_PLUGIN_ID,
+    MARKETPLACE,
+    PLUGIN_ID,
     RELEASE_PLUGIN_ID,
     CodexPluginError,
     ConvergenceResult,
+    _validate_candidate,
     converge,
     inspect_freshness,
     parse_state,
     plugin_payload_digest,
 )
+
+
+def test_release_and_dev_share_one_identity() -> None:
+    assert MARKETPLACE == DEV_MARKETPLACE == "footnote"
+    assert PLUGIN_ID == DEV_PLUGIN_ID == RELEASE_PLUGIN_ID == "fno@footnote"
+    assert LEGACY_DEV_MARKETPLACE == "footnote-dev"
+    assert LEGACY_DEV_PLUGIN_ID == "fno@footnote-dev"
+
+
+def test_candidate_validation_uses_an_explicit_isolated_codex_home(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path)
+    live_home = tmp_path / "live-codex-home"
+    candidate_homes: set[Path] = set()
+
+    def runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        env = kwargs.get("env")
+        assert isinstance(env, dict)
+        home = Path(str(env["CODEX_HOME"]))
+        assert home != live_home
+        candidate_homes.add(home)
+        if argv[1:4] == ["plugin", "marketplace", "add"]:
+            return _cp(argv, {"marketplaceName": "footnote"})
+        if argv[1:4] == ["plugin", "list", "--available"]:
+            return _cp(
+                argv,
+                {
+                    "installed": [],
+                    "available": [
+                        {
+                            "pluginId": "fno@footnote",
+                            "version": "0.3.0",
+                        }
+                    ],
+                },
+            )
+        if argv == ["codex", "plugin", "add", "fno@footnote", "--json"]:
+            cache = home / "plugins/cache/footnote/fno/0.3.0"
+            shutil.copytree(source, cache)
+            return _cp(argv, {"pluginId": "fno@footnote"})
+        if argv == ["codex", "plugin", "marketplace", "list", "--json"]:
+            return _cp(
+                argv,
+                {
+                    "marketplaces": [
+                        {
+                            "name": "footnote",
+                            "root": str(source),
+                            "marketplaceSource": {
+                                "sourceType": "local",
+                                "source": str(source),
+                            },
+                        }
+                    ]
+                },
+            )
+        if argv == ["codex", "plugin", "list", "--json"]:
+            return _cp(
+                argv,
+                {
+                    "installed": [
+                        _plugin(
+                            "fno@footnote",
+                            source=str(source),
+                            source_type="local",
+                        )
+                    ]
+                },
+            )
+        return _cp(argv, {}, rc=1, err=f"unexpected {argv}")
+
+    _validate_candidate(runner, source=str(source))
+
+    assert len(candidate_homes) == 1
+    assert not live_home.exists()
 
 
 def _cp(
@@ -47,27 +128,11 @@ def _source(tmp_path: Path) -> Path:
     script = root / "scripts" / "release" / "sync-version.sh"
     script.parent.mkdir(parents=True)
     script.write_text("#!/bin/sh\n", encoding="utf-8")
-    marketplace = root / ".agents" / "marketplaces" / DEV_MARKETPLACE
-    (marketplace / ".agents" / "plugins").mkdir(parents=True)
-    (marketplace / ".agents" / "plugins" / "marketplace.json").write_text(
-        json.dumps(
-            {
-                "name": DEV_MARKETPLACE,
-                "plugins": [
-                    {
-                        "name": "fno",
-                        "source": {"source": "local", "path": "../../.."},
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
     return root
 
 
 def _dev_marketplace(source: Path) -> Path:
-    return source / ".agents" / "marketplaces" / DEV_MARKETPLACE
+    return source
 
 
 def test_parse_current_codex_json_state() -> None:
@@ -484,7 +549,7 @@ def test_dev_convergence_switches_from_release_and_writes_requested_marker(
 
     assert (result.channel, result.action, result.plugin_id, result.version) == (
         "dev",
-        "installed",
+        "repaired",
         DEV_PLUGIN_ID,
         "0.3.0",
     )
