@@ -172,11 +172,12 @@ fi
    Then validate the exact saved file before collision checking or intake:
 
    ```bash
-   bash "${SKILL_DIR}/scripts/validate-plan.sh" "$PLAN_PATH"
-   python3 "${SKILL_DIR}/scripts/mutate_doc.py" "$PLAN_PATH" --finalize
+   bash "${SKILL_DIR}/scripts/validate-plan.sh" "$PLAN_PATH" \
+     && python3 "${SKILL_DIR}/scripts/mutate_doc.py" "$PLAN_PATH" --finalize
    ```
 
    A nonzero exit stops Blueprint before `3a` and `3b`; never register a draft that the executor would reject.
+   The `&&` is load-bearing: `--finalize` re-checks only the execution contract, so an unchained run stamps `status: ready` onto a plan the validator rejected for anything else (stub markers, malformed `kill_criteria`).
 
 3a. **Collision check + peer heads-up** (conditional). Between writing the plan and auto-intake, run the collision check (skip with `no-collision-check`) and, when a `peers` block exists, the cross-project peer heads-up. Both are gate-shaped, skip-flagged steps - full procedure (the `fno backlog collisions check` read, high-severity AskUserQuestion / beastmode auto-decision, the four options, and the peer-surface match + send) is in [references/blueprint-gates.md](references/blueprint-gates.md#collision-check-step-3a-skip-with-no-collision-check).
 
