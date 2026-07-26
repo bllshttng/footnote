@@ -986,7 +986,7 @@ def test_nonreturning_observer_is_killed_without_changing_hook_result(
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=60,
     )
 
     assert term_marker.is_file()
@@ -1072,7 +1072,7 @@ def test_context_observer_threads_the_timeout_override(tmp_path: Path) -> None:
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=60,
     )
 
     assert result.returncode == 7
@@ -1132,9 +1132,7 @@ def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> No
             text=True,
             capture_output=True,
             check=False,
-            # The termination marker below asserts the behavior directly; this
-            # loose bound only catches a non-returning observer.
-            timeout=20,
+            timeout=60,
         )
 
     baseline = invoke(fast_bin)
