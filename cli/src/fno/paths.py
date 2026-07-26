@@ -307,7 +307,12 @@ def _warn_unset_project_id_once(name: str) -> None:
     )
 
 
-def _project_name(project_root: Optional[Path] = None, *, for_vault: bool = False) -> str:
+def _project_name(
+    project_root: Optional[Path] = None,
+    *,
+    for_vault: bool = False,
+    settings: Optional[SettingsModel] = None,
+) -> str:
     """Stable project-folder name for ``internal/<project>/`` paths.
 
     ``config.project.id`` (canonical) -> git-remote slug (stable across
@@ -315,7 +320,7 @@ def _project_name(project_root: Optional[Path] = None, *, for_vault: bool = Fals
     result can never escape ``internal/<project>/`` - covers a mangled
     ``project.id`` and a derived name alike, at one site.
     """
-    pid = _settings().project.id
+    pid = (settings or _settings()).project.id
     name = (
         pid
         or _slug_from_git_remote(project_root)
@@ -328,7 +333,12 @@ def _project_name(project_root: Optional[Path] = None, *, for_vault: bool = Fals
     return name
 
 
-def _resolve(raw: str, project_root: Optional[Path] = None) -> Path:
+def _resolve(
+    raw: str,
+    project_root: Optional[Path] = None,
+    *,
+    settings: Optional[SettingsModel] = None,
+) -> Path:
     """Expand ~, $VAR, {vault}, {project}; absolutize via .resolve().
 
     Template rules:
@@ -344,7 +354,7 @@ def _resolve(raw: str, project_root: Optional[Path] = None) -> Path:
       4. os.path.expanduser (~)
       5. Path(...).resolve()
     """
-    settings = _settings()
+    active_settings = settings or _settings()
 
     # 1. expandvars
     expanded = os.path.expandvars(raw)
@@ -353,12 +363,12 @@ def _resolve(raw: str, project_root: Optional[Path] = None) -> Path:
     def _substitute(match: re.Match[str]) -> str:
         var = match.group(1)
         if var == "vault":
-            if not settings.obsidian.enabled:
+            if not active_settings.obsidian.enabled:
                 raise ValueError(
                     "Path template uses {vault} but obsidian.enabled is false. "
                     "Either set obsidian.enabled: true or rewrite the path."
                 )
-            vault = settings.obsidian.vault
+            vault = active_settings.obsidian.vault
             if not vault:
                 raise ValueError(
                     "Path template uses {vault} but obsidian.vault is not set."
@@ -370,7 +380,7 @@ def _resolve(raw: str, project_root: Optional[Path] = None) -> Path:
             # path relative, anchoring it at project_root/CWD - in a
             # worktree that lands handoffs at a junk worktree-local path
             # (ab-347f6482).
-            vroot = vault_root()
+            vroot = vault_root(settings=active_settings)
             if vroot is None:  # unreachable: enabled + vault guarded above
                 raise ValueError(
                     "Path template uses {vault} but the vault could not be resolved."
@@ -379,7 +389,9 @@ def _resolve(raw: str, project_root: Optional[Path] = None) -> Path:
         elif var == "project":
             # project.id -> git-remote slug -> checkout basename, sanitized.
             return _project_name(
-                project_root, for_vault=settings.obsidian.enabled
+                project_root,
+                for_vault=active_settings.obsidian.enabled,
+                settings=active_settings,
             )
         else:
             raise ValueError(
@@ -400,6 +412,16 @@ def _resolve(raw: str, project_root: Optional[Path] = None) -> Path:
     if not path.is_absolute() and project_root:
         path = project_root / path
     return path.resolve()
+
+
+def resolve_configured_path(
+    raw: str,
+    *,
+    project_root: Path,
+    settings: SettingsModel,
+) -> Path:
+    """Resolve a configured path against an explicitly loaded repository."""
+    return _resolve(raw, project_root=project_root, settings=settings)
 
 
 # ---------------------------------------------------------------------------
@@ -848,7 +870,7 @@ def status_sinks_dir(project_root: Optional[Path] = None) -> Path:
 _INBOX_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-def vault_root() -> Optional[Path]:
+def vault_root(*, settings: Optional[SettingsModel] = None) -> Optional[Path]:
     """Filesystem path of the configured Obsidian vault, or None.
 
     Returns None when ``obsidian.enabled`` is false or ``obsidian.vault`` is
@@ -857,8 +879,8 @@ def vault_root() -> Optional[Path]:
     default that lived under ``~/myvault``. A value that is already absolute or
     ``~``-prefixed is honored as-is.
     """
-    settings = _settings()
-    obs = settings.obsidian
+    active_settings = settings or _settings()
+    obs = active_settings.obsidian
     if not (obs.enabled and obs.vault):
         return None
     expanded = Path(os.path.expanduser(obs.vault))
