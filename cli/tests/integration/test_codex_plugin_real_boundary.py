@@ -91,6 +91,15 @@ def test_codex_0145_rejects_escaping_alias_and_installs_canonical_identity(
     )
     assert legacy_plugin_add.returncode == 1
     assert "not found" in legacy_plugin_add.stderr
+    legacy_remove = _run(
+        home,
+        "plugin",
+        "marketplace",
+        "remove",
+        "footnote-dev",
+        "--json",
+    )
+    assert legacy_remove.returncode == 0, legacy_remove.stderr
 
     canonical_add = _run(
         home,
@@ -111,3 +120,11 @@ def test_codex_0145_rejects_escaping_alias_and_installs_canonical_identity(
         if row["installed"] and row["enabled"] and row["pluginId"].startswith("fno@")
     ]
     assert [row["pluginId"] for row in enabled] == ["fno@footnote"]
+    marketplaces = _run(home, "plugin", "marketplace", "list", "--json")
+    assert marketplaces.returncode == 0, marketplaces.stderr
+    assert [
+        row["name"] for row in json.loads(marketplaces.stdout)["marketplaces"]
+    ] == ["footnote"]
+    cache = home / "plugins/cache/footnote/fno/0.3.0"
+    for relative in ("skills", "agents", "commands", "hooks"):
+        assert (cache / relative).is_dir(), relative
