@@ -110,20 +110,47 @@ candidate_fno() {
 
 emit_verification_receipt() {
     local mode="$1" result="$2" scope_json="$3" expected="$4" executed="$5" started_at="$6" detail="$7"
-    local command_json
+    local command_json finished_at environment_json producer_json data event generation
     command_json="$(_json_array "${RECEIPT_COMMAND[@]}")" || return 1
+    generation="$(next_receipt_generation)" || return 1
+    finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || return 1
+    environment_json="$(jq -nc \
+        --arg host "$(_this_host)" \
+        --arg platform "$(uname -sm 2>/dev/null || echo unknown)" \
+        --arg runner "scripts/ci/preflight.sh" \
+        '{host:$host,platform:$platform,runner:$runner}')" || return 1
+    producer_json="$(jq -nc \
+        --arg kind preflight \
+        --arg id "$(_this_host):$$" \
+        '{kind:$kind,id:$id}')" || return 1
+    data="$(jq -nc \
+        --arg candidate_sha "$CANDIDATE_SHA" \
+        --argjson command "$command_json" \
+        --argjson environment "$environment_json" \
+        --argjson scope "$scope_json" \
+        --arg started_at "$started_at" \
+        --arg finished_at "$finished_at" \
+        --arg mode "$mode" \
+        --arg result "$result" \
+        --argjson producer "$producer_json" \
+        --argjson generation "$generation" \
+        --argjson steps_expected "$expected" \
+        --argjson steps_executed "$executed" \
+        --arg detail "$detail" \
+        '{candidate_sha:$candidate_sha,command:$command,environment:$environment,scope:$scope,started_at:$started_at,finished_at:$finished_at,mode:$mode,result:$result,producer:$producer,generation:$generation,steps_expected:$steps_expected,steps_executed:$steps_executed,detail:$detail}')" || return 1
+    event="$(jq -nc \
+        --arg ts "$finished_at" \
+        --argjson data "$data" \
+        '{ts:$ts,type:"verification_receipt",source:"target",data:$data}')" || return 1
+    # Receipt construction stays inside this lock-holding process. There is no
+    # supported CLI that can mint a trusted receipt from caller-authored fields.
+    (
+        # shellcheck source=scripts/lib/events-validate.sh
+        source "$INVOKING_ROOT/scripts/lib/events-validate.sh"
+        validate_event verification_receipt "$event"
+    ) || return 1
     mkdir -p "$(dirname "$EVENTS_PATH")" || return 1
-    candidate_fno pr record-preflight-receipt \
-        --mode "$mode" \
-        --result "$result" \
-        --scope-json "$scope_json" \
-        --started-at "$started_at" \
-        --steps-expected "$expected" \
-        --steps-executed "$executed" \
-        --command-json "$command_json" \
-        --events "$EVENTS_PATH" \
-        --capability "$PREFLIGHT_CAPABILITY" \
-        --detail "$detail" >/dev/null
+    printf '%s\n' "$event" >> "$EVENTS_PATH"
 }
 
 emit_setup_unavailable() {
@@ -192,16 +219,8 @@ fi
 
 # --- lock (atomic mkdir; steal a dead holder) -------------------------------
 LOCKDIR="$COMMON_DIR/.preflight.lock.d"
-PREFLIGHT_CAPABILITY="$(
-    openssl rand -hex 32 2>/dev/null \
-        || od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n'
-)"
-if [[ ! "$PREFLIGHT_CAPABILITY" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "preflight: cannot create an opaque receipt capability" >&2
-    exit 1
-fi
 stamp_holder() {
-    printf 'pid=%s started=%s host=%s sha=%s token=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(hostname 2>/dev/null || echo unknown)" "$CANDIDATE_SHA" "$PREFLIGHT_CAPABILITY" > "$LOCKDIR/holder"
+    printf 'pid=%s started=%s host=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(hostname 2>/dev/null || echo unknown)" "$CANDIDATE_SHA" > "$LOCKDIR/holder"
 }
 acquire_lock() {
     if mkdir "$LOCKDIR" 2>/dev/null; then stamp_holder; return 0; fi
@@ -260,6 +279,22 @@ acquire_lock
 
 REVOCATION_DIR="$COMMON_DIR/.preflight-revoked"
 REVOCATION="$REVOCATION_DIR/$CANDIDATE_SHA"
+GENERATION_DIR="$COMMON_DIR/.preflight-generations"
+GENERATION_FILE="$GENERATION_DIR/$CANDIDATE_SHA"
+next_receipt_generation() {
+    local current=0 next tmp
+    if [[ -e "$GENERATION_FILE" ]]; then
+        current="$(cat "$GENERATION_FILE" 2>/dev/null)" || return 1
+        [[ "$current" =~ ^[0-9]+$ ]] || return 1
+    fi
+    next=$((current + 1))
+    [[ "$next" -gt "$current" ]] || return 1
+    mkdir -p "$GENERATION_DIR" 2>/dev/null || return 1
+    tmp="${GENERATION_FILE}.$$"
+    printf '%s\n' "$next" > "$tmp" 2>/dev/null || return 1
+    mv -f "$tmp" "$GENERATION_FILE" 2>/dev/null || return 1
+    printf '%s\n' "$next"
+}
 mark_revoked() {
     local tmp="${REVOCATION}.$$"
     mkdir -p "$REVOCATION_DIR" 2>/dev/null \

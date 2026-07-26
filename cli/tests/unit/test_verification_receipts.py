@@ -14,7 +14,6 @@ from fno.pr._preflight import (
     hosted_ci_decision,
     hosted_workflow_state,
     local_verification_required,
-    record_preflight_receipt,
     verification_decision,
 )
 
@@ -39,6 +38,7 @@ def receipt(
     result: str = "passed",
     steps_expected: int = 6,
     steps_executed: int = 6,
+    generation: int = 1,
     scope: list[str] | None = None,
 ) -> dict:
     return {
@@ -59,6 +59,7 @@ def receipt(
             "mode": mode,
             "result": result,
             "producer": {"kind": "preflight", "id": "builder-1:42"},
+            "generation": generation,
             "steps_expected": steps_expected,
             "steps_executed": steps_executed,
         },
@@ -109,6 +110,7 @@ def test_non_full_modes_never_satisfy(mode: str, tmp_path: Path) -> None:
         ("mode", "complete"),
         ("result", "green"),
         ("producer", {}),
+        ("generation", 0),
         ("steps_expected", -1),
         ("steps_executed", 3),
     ],
@@ -200,8 +202,8 @@ def test_corrupt_coverage_fails_closed_even_with_valid_full_pass(tmp_path: Path)
 
 
 def test_journals_dedupe_and_select_latest_parsed_timestamp(tmp_path: Path) -> None:
-    older = receipt(ts="2026-07-26T01:00:00Z", result="failed")
-    latest = receipt(ts="2026-07-26T03:00:00+00:00", result="passed")
+    older = receipt(ts="2026-07-26T01:00:00Z", result="failed", generation=1)
+    latest = receipt(ts="2026-07-26T03:00:00+00:00", result="passed", generation=2)
     global_log = tmp_path / "global.jsonl"
     delivery_log = tmp_path / "delivery.jsonl"
     write(global_log, latest, older)
@@ -215,8 +217,8 @@ def test_journals_dedupe_and_select_latest_parsed_timestamp(tmp_path: Path) -> N
 
 
 def test_latest_exact_receipt_wins_even_when_file_order_disagrees(tmp_path: Path) -> None:
-    passed = receipt(ts="2026-07-26T01:00:00Z")
-    pending = receipt(ts="2026-07-26T02:00:00Z", result="pending")
+    passed = receipt(ts="2026-07-26T01:00:00Z", generation=1)
+    pending = receipt(ts="2026-07-26T02:00:00Z", result="pending", generation=2)
     first = tmp_path / "first.jsonl"
     second = tmp_path / "second.jsonl"
     write(first, pending)
@@ -237,6 +239,21 @@ def test_equal_timestamp_conflict_is_unavailable_not_lexical_green(tmp_path: Pat
     assert decision["satisfied"] is False
     assert decision["result"] == "unavailable"
     assert decision["coverage"]["conflicting_latest"] == 2
+
+
+def test_generation_supersedes_timestamp_after_clock_rollback(tmp_path: Path) -> None:
+    journal = tmp_path / "events.jsonl"
+    write(
+        journal,
+        receipt(ts="2026-07-26T03:00:00Z", result="passed", generation=1),
+        receipt(ts="2026-07-26T02:00:00Z", result="failed", generation=2),
+    )
+
+    decision = verification_decision(SHA, [journal])
+
+    assert decision["satisfied"] is False
+    assert decision["result"] == "failed"
+    assert decision["receipt"]["data"]["generation"] == 2
 
 
 def test_future_dated_receipt_fails_closed(tmp_path: Path) -> None:
@@ -277,6 +294,13 @@ def test_optional_squads_guard_absence_keeps_actual_five_step_scope_eligible(
 def test_delivery_journal_discovery_failure_fails_closed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    common = tmp_path / ".git"
+    common.mkdir()
+    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
+    monkeypatch.setattr(
+        "fno.pr._preflight._preflight_revocation",
+        lambda _repo, _sha: ("absent", None),
+    )
     journal = tmp_path / "events.jsonl"
     write(journal, receipt())
     monkeypatch.setattr(
@@ -297,6 +321,9 @@ def test_delivery_journal_discovery_failure_fails_closed(
 def test_live_revocation_blocks_older_pass(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    common = tmp_path / ".git"
+    common.mkdir()
+    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
     journal = tmp_path / "events.jsonl"
     write(journal, receipt())
     monkeypatch.setattr(
@@ -316,6 +343,9 @@ def test_live_revocation_blocks_older_pass(
 def test_unavailable_revocation_state_fails_closed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    common = tmp_path / ".git"
+    common.mkdir()
+    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
     journal = tmp_path / "events.jsonl"
     write(journal, receipt())
     monkeypatch.setattr(
@@ -330,6 +360,26 @@ def test_unavailable_revocation_state_fails_closed(
     assert decision["coverage"]["complete"] is False
     assert decision["coverage"]["revocation_error"] == "marker unreadable"
     assert decision["satisfied"] is False
+
+
+def test_reader_refuses_during_preflight_transition(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    common = tmp_path / ".git"
+    lock = common / ".preflight.lock.d"
+    lock.mkdir(parents=True)
+    (lock / "holder").write_text("pid=42 sha=" + SHA + "\n")
+    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
+    journal = tmp_path / "events.jsonl"
+    write(journal, receipt())
+
+    decision = check_verification_evidence(
+        cwd=str(tmp_path), candidate_sha=SHA, event_paths=[journal]
+    )
+
+    assert decision["satisfied"] is False
+    assert decision["result"] == "unavailable"
+    assert decision["coverage"]["lock_error"] == "preflight transition in progress"
 
 
 def test_revocation_markers_are_candidate_scoped(
@@ -359,6 +409,20 @@ def test_malformed_revocation_marker_is_unavailable(
 
     assert state == "unavailable"
     assert error == "revocation marker is malformed"
+
+
+def test_broken_revocation_symlink_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    common = tmp_path / ".git"
+    common.mkdir()
+    (common / ".preflight-revoked").symlink_to(tmp_path / "missing-target")
+    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
+
+    state, error = _preflight_revocation(str(tmp_path), SHA)
+
+    assert state == "unavailable"
+    assert error is not None
 
 
 def test_local_verification_policy_preserves_explicit_exemptions(
@@ -403,68 +467,6 @@ def test_base_configured_runner_removal_requires_verification(
     )
 
     assert local_verification_required(cwd=str(tmp_path)) == (True, "runner-removed")
-
-
-def test_preflight_owned_recorder_derives_producer_and_candidate(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    capability = "c" * 64
-    common = tmp_path / ".git"
-    holder = common / ".preflight.lock.d" / "holder"
-    holder.parent.mkdir(parents=True)
-    holder.write_text(f"pid=4242 sha={SHA} token={capability}\n")
-    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _cwd: common)
-    monkeypatch.setattr("fno.pr._preflight.os.getppid", lambda: 4242)
-    monkeypatch.setattr("fno.pr._preflight.socket.gethostname", lambda: "builder-1")
-    monkeypatch.setattr(
-        "fno.pr._preflight._git",
-        lambda *_args, **_kwargs: type("Result", (), {"returncode": 0, "stdout": SHA + "\n"})(),
-    )
-    events = tmp_path / "events.jsonl"
-
-    event = record_preflight_receipt(
-        cwd=str(tmp_path),
-        events_path=events,
-        mode="full",
-        result="passed",
-        scope=PREFLIGHT_SCOPE[:-1],
-        started_at="2026-07-26T01:00:00Z",
-        steps_expected=5,
-        steps_executed=5,
-        command=["scripts/ci/preflight.sh", "--force"],
-        detail="green",
-        capability=capability,
-    )
-
-    assert event["data"]["candidate_sha"] == SHA
-    assert event["data"]["producer"] == {"kind": "preflight", "id": "builder-1:4242"}
-    assert json.loads(events.read_text())["data"] == event["data"]
-
-
-def test_preflight_recorder_rejects_wrong_capability(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    common = tmp_path / ".git"
-    holder = common / ".preflight.lock.d" / "holder"
-    holder.parent.mkdir(parents=True)
-    holder.write_text(f"pid=4242 sha={SHA} token={'c' * 64}\n")
-    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _cwd: common)
-    monkeypatch.setattr("fno.pr._preflight.os.getppid", lambda: 4242)
-
-    with pytest.raises(ValueError, match="does not own"):
-        record_preflight_receipt(
-            cwd=str(tmp_path),
-            events_path=tmp_path / "events.jsonl",
-            mode="full",
-            result="passed",
-            scope=PREFLIGHT_SCOPE[:-1],
-            started_at="2026-07-26T01:00:00Z",
-            steps_expected=5,
-            steps_executed=5,
-            command=["scripts/ci/preflight.sh", "--force"],
-            detail="green",
-            capability="d" * 64,
-        )
 
 
 @pytest.mark.parametrize(

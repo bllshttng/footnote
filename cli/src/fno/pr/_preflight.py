@@ -19,14 +19,12 @@ Exit-code contract (callers branch on codes, not text):
 from __future__ import annotations
 
 import datetime as dt
-import hmac
 import json
 import os
-import platform
 import re
-import socket
 import stat
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
 
@@ -215,8 +213,12 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
     receipts.sort(key=lambda item: (item[0], item[1]))
     exact = [item for item in receipts if item[2]["data"]["candidate_sha"].lower() == candidate_sha.lower()]
     if exact:
-        newest_ts = exact[-1][0]
-        newest = [item for item in exact if item[0] == newest_ts]
+        newest_generation = max(item[2]["data"]["generation"] for item in exact)
+        newest = [
+            item
+            for item in exact
+            if item[2]["data"]["generation"] == newest_generation
+        ]
         if len(newest) != 1:
             coverage["complete"] = False
             coverage["conflicting_latest"] = len(newest)
@@ -227,7 +229,7 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
                 "receipt": None,
                 "coverage": coverage,
             }
-        event = exact[-1][2]
+        event = newest[0][2]
         data = event["data"]
         command = data["command"]
         environment = data["environment"]
@@ -325,24 +327,33 @@ def check_verification_evidence(
             "receipt": None,
             "coverage": {"complete": False, "error": "candidate SHA unavailable"},
         }
-    discovery_errors: list[str] = []
-    if event_paths is None:
-        event_paths, discovery_errors = verification_event_paths(cwd=repo)
-    decision = verification_decision(candidate_sha, event_paths)
-    if discovery_errors:
-        decision["coverage"]["complete"] = False
-        decision["coverage"]["discovery_errors"] = discovery_errors
-        decision["satisfied"] = False
-    revocation, revocation_error = _preflight_revocation(repo, candidate_sha)
-    if revocation == "revoked":
-        decision["coverage"]["complete"] = False
-        decision["coverage"]["revoked"] = True
-        decision["satisfied"] = False
-    elif revocation == "unavailable":
-        decision["coverage"]["complete"] = False
-        decision["coverage"]["revocation_error"] = revocation_error
-        decision["satisfied"] = False
-    return decision
+    with _verification_read_lock(repo) as lock_error:
+        if lock_error is not None:
+            return {
+                "satisfied": False,
+                "mode": None,
+                "result": "unavailable",
+                "receipt": None,
+                "coverage": {"complete": False, "lock_error": lock_error},
+            }
+        discovery_errors: list[str] = []
+        if event_paths is None:
+            event_paths, discovery_errors = verification_event_paths(cwd=repo)
+        decision = verification_decision(candidate_sha, event_paths)
+        if discovery_errors:
+            decision["coverage"]["complete"] = False
+            decision["coverage"]["discovery_errors"] = discovery_errors
+            decision["satisfied"] = False
+        revocation, revocation_error = _preflight_revocation(repo, candidate_sha)
+        if revocation == "revoked":
+            decision["coverage"]["complete"] = False
+            decision["coverage"]["revoked"] = True
+            decision["satisfied"] = False
+        elif revocation == "unavailable":
+            decision["coverage"]["complete"] = False
+            decision["coverage"]["revocation_error"] = revocation_error
+            decision["satisfied"] = False
+        return decision
 
 
 def local_verification_required(
@@ -382,6 +393,39 @@ def _git_common_dir(repo: str) -> Optional[Path]:
     return Path(result.stdout.strip()).resolve()
 
 
+@contextmanager
+def _verification_read_lock(repo: str):
+    common = _git_common_dir(repo)
+    if common is None:
+        yield "git common directory unavailable"
+        return
+    lock = common / ".preflight.lock.d"
+    stamp = f"pid={os.getpid()} kind=evidence-reader"
+    try:
+        lock.mkdir()
+        (lock / "holder").write_text(stamp + "\n", encoding="utf-8")
+    except FileExistsError:
+        yield "preflight transition in progress"
+        return
+    except OSError as exc:
+        try:
+            (lock / "holder").unlink(missing_ok=True)
+            lock.rmdir()
+        except OSError:
+            pass
+        yield f"verification lock unavailable: {exc}"
+        return
+    try:
+        yield None
+    finally:
+        try:
+            if (lock / "holder").read_text(encoding="utf-8").strip() == stamp:
+                (lock / "holder").unlink()
+                lock.rmdir()
+        except OSError:
+            pass
+
+
 def _preflight_revocation(repo: str, candidate_sha: str) -> tuple[str, Optional[str]]:
     common = _git_common_dir(repo)
     if common is None:
@@ -389,92 +433,22 @@ def _preflight_revocation(repo: str, candidate_sha: str) -> tuple[str, Optional[
     directory = common / ".preflight-revoked"
     marker = directory / candidate_sha.lower()
     try:
+        directory_mode = directory.lstat().st_mode
+    except FileNotFoundError:
+        return "absent", None
+    except OSError as exc:
+        return "unavailable", f"revocation directory unreadable: {exc}"
+    if stat.S_ISLNK(directory_mode) or not stat.S_ISDIR(directory_mode):
+        return "unavailable", f"revocation path is not a directory: {directory}"
+    try:
         value = marker.read_text(encoding="utf-8").strip().lower()
     except FileNotFoundError:
-        try:
-            directory_mode = directory.stat().st_mode
-        except FileNotFoundError:
-            return "absent", None
-        except OSError as exc:
-            return "unavailable", f"revocation directory unreadable: {exc}"
-        if not stat.S_ISDIR(directory_mode):
-            return "unavailable", f"revocation path is not a directory: {directory}"
         return "absent", None
     except (OSError, UnicodeError) as exc:
         return "unavailable", f"revocation marker unreadable: {exc}"
     if value != candidate_sha.lower():
         return "unavailable", "revocation marker is malformed"
     return "revoked", None
-
-
-def record_preflight_receipt(
-    *,
-    cwd: str,
-    events_path: Path,
-    mode: str,
-    result: str,
-    scope: list[str],
-    started_at: str,
-    steps_expected: int,
-    steps_executed: int,
-    command: list[str],
-    detail: str,
-    capability: str,
-) -> dict:
-    from fno.events import _build, append_event
-
-    common = _git_common_dir(cwd)
-    if common is None:
-        raise ValueError("preflight receipt refused: git common directory unavailable")
-    holder_path = common / ".preflight.lock.d" / "holder"
-    try:
-        holder = holder_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ValueError(f"preflight receipt refused: lock holder unavailable: {exc}") from exc
-    match = re.search(r"(?:^| )pid=([0-9]+)(?: |$)", holder)
-    token_match = re.search(r"(?:^| )token=([0-9a-f]{64})(?: |$)", holder)
-    sha_match = re.search(r"(?:^| )sha=([0-9a-f]{40})(?: |$)", holder)
-    if (
-        match is None
-        or token_match is None
-        or sha_match is None
-        or int(match.group(1)) != os.getppid()
-        or re.fullmatch(r"[0-9a-f]{64}", capability) is None
-        or not hmac.compare_digest(token_match.group(1), capability)
-    ):
-        raise ValueError("preflight receipt refused: caller does not own the preflight lock")
-    candidate = _git(["rev-parse", "HEAD"], cwd)
-    candidate_sha = candidate.stdout.strip().lower() if candidate.returncode == 0 else ""
-    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
-        raise ValueError("preflight receipt refused: candidate SHA unavailable")
-    if not hmac.compare_digest(sha_match.group(1), candidate_sha):
-        raise ValueError("preflight receipt refused: lock candidate does not match HEAD")
-    host = socket.gethostname() or "unknown"
-    finished_at = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
-    event = _build(
-        "verification_receipt",
-        "target",
-        {
-            "candidate_sha": candidate_sha,
-            "command": command,
-            "environment": {
-                "host": host,
-                "platform": f"{platform.system()} {platform.machine()}".strip(),
-                "runner": "scripts/ci/preflight.sh",
-            },
-            "scope": scope,
-            "started_at": started_at,
-            "finished_at": finished_at,
-            "mode": mode,
-            "result": result,
-            "producer": {"kind": "preflight", "id": f"{host}:{match.group(1)}"},
-            "steps_expected": steps_expected,
-            "steps_executed": steps_executed,
-            "detail": detail,
-        },
-    )
-    append_event(event, events_path=events_path)
-    return event
 
 
 def run_evidence_check(*, cwd: Optional[str] = None) -> int:

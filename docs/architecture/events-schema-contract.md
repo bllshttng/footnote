@@ -188,7 +188,7 @@ the operator's signal of substrate degradation.
 ### `verification_receipt`
 
 A verification receipt is the append-only, schema-owned record of what was actually executed against one candidate commit.
-It binds a full 40-hex `candidate_sha`, the exact command argument vector, host/platform/runner environment, named scope, start and finish timestamps, evidence mode, result, producer identity, and expected versus executed step counts.
+It binds a full 40-hex `candidate_sha`, the exact command argument vector, host/platform/runner environment, named scope, start and finish timestamps, evidence mode, result, producer identity, a positive lock-serialized per-candidate generation, and expected versus executed step counts.
 The command, scope, payload, and string sizes are bounded before the receipt can enter a journal.
 
 Modes and results remain orthogonal and explicit:
@@ -205,18 +205,19 @@ Explicit false, absent, pending, unavailable, stale, and advisory observations a
 Python validation in `fno.events`, Bash validation in `scripts/lib/events-validate.sh`, and Rust validation in `fno-agents verify-evidence receipt` enforce the same receipt vocabulary and invariants.
 The parity corpus includes fractional UTC timestamps and bounded-command failures so wire-compatible RFC3339 values and size limits do not drift between implementations.
 
-`scripts/ci/preflight.sh` remains the authority for actual local execution and calls the preflight-owned receipt recorder with a per-run opaque capability while it holds the shared preflight lock for the exact candidate SHA.
-The generic event emitter refuses `verification_receipt`, so a caller cannot self-assert the trusted producer, environment, candidate SHA, or finish time.
+`scripts/ci/preflight.sh` remains the authority for actual local execution and constructs, schema-validates, and appends each receipt inside the process that holds the shared preflight lock for the exact candidate SHA.
+No CLI accepts caller-authored trusted receipt fields, and the generic event emitter refuses `verification_receipt`.
 Its required deterministic scope is `smoke`, both Rust format checks, and both Rust test suites; the squads leak guard joins the full scope only when squads exist to measure, while a not-configured guard is recorded separately as advisory evidence.
 The two cargo-audit scopes are also separate advisory evidence, and every receipt counts only steps that actually executed.
 Setup failures emit a zero-executed void/unavailable receipt instead of manufacturing a verdict.
 The preflight attestation is only a cache carrier and never substitutes for the event receipt.
 
 Ship-gate consumers accept only the newest exact-SHA full/passed receipt from the trusted preflight producer with the canonical command, runner, host-bound producer identity, and complete deterministic scope.
-Project, global, delivery-root, and salvage journals may be concatenated in any order, so consumers parse RFC3339 timestamps, deduplicate canonical event objects, and select the newest exact candidate receipt.
-Future-dated receipts and distinct receipts tied for the newest parsed timestamp are unavailable rather than arbitrarily ordered.
+Project, global, delivery-root, and salvage journals may be concatenated in any order, so consumers parse RFC3339 timestamps, deduplicate canonical event objects, and select the highest exact-candidate generation.
+Timestamps retain at most six fractional digits and remain observational metadata; future-dated receipts and distinct receipts tied for the highest generation are unavailable rather than arbitrarily ordered.
 Starting a new preflight atomically creates a per-candidate revocation marker until the new final receipt is durably appended, so a failed append, interrupted run, or concurrent run for another SHA cannot expose stale success.
 Python and Rust both reduce an exact candidate's revocation as absent, revoked, or unavailable; malformed and unreadable marker state fails closed.
+Ship-gate readers take the same repository lock while reducing journals and revocation, so they cannot observe half of an append-and-clear transition.
 Malformed rows, unreadable journals, live revocation markers, or errors while discovering delivery journals mark coverage incomplete and prevent satisfaction even when another journal contains a plausible pass.
 An older valid receipt for a different SHA is reported as stale rather than absent.
 Local ship paths apply one shared requirement policy: explicit skip, documentation-only changes, and repositories without a configured preflight runner remain distinct exemptions; every other candidate must present trusted receipt evidence.

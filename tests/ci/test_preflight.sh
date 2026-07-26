@@ -38,32 +38,6 @@ if [[ "\$*" == *"paths.worktrees_base"* ]]; then
     echo "$WT_BASE"
     exit 0
 fi
-if [[ "\${1:-} \${2:-}" == "pr record-preflight-receipt" ]]; then
-    shift 2
-    mode=''; result=''; scope='[]'; started=''; expected=0; executed=0; command='[]'; events=''; detail=''
-    while [[ \$# -gt 0 ]]; do
-        case "\$1" in
-            --mode) mode="\$2"; shift 2 ;;
-            --result) result="\$2"; shift 2 ;;
-            --scope-json) scope="\$2"; shift 2 ;;
-            --started-at) started="\$2"; shift 2 ;;
-            --steps-expected) expected="\$2"; shift 2 ;;
-            --steps-executed) executed="\$2"; shift 2 ;;
-            --command-json) command="\$2"; shift 2 ;;
-            --events) events="\$2"; shift 2 ;;
-            --detail) detail="\$2"; shift 2 ;;
-            *) shift ;;
-        esac
-    done
-    sha="\$(git rev-parse HEAD)"; host="\$(hostname)"; finished="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    mkdir -p "\$(dirname "\$events")"
-    jq -nc --arg ts "\$finished" --arg sha "\$sha" --arg host "\$host" \
-        --argjson command "\$command" --argjson scope "\$scope" --arg started "\$started" \
-        --arg finished "\$finished" --arg mode "\$mode" --arg result "\$result" \
-        --argjson expected "\$expected" --argjson executed "\$executed" --arg detail "\$detail" \
-        '{ts:\$ts,type:"verification_receipt",source:"target",data:{candidate_sha:\$sha,command:\$command,environment:{host:\$host,platform:"test",runner:"scripts/ci/preflight.sh"},scope:\$scope,started_at:\$started,finished_at:\$finished,mode:\$mode,result:\$result,producer:{kind:"preflight",id:(\$host+":fixture")},steps_expected:\$expected,steps_executed:\$executed,detail:\$detail}}' >> "\$events"
-    exit 0
-fi
 if [[ "\${1:-} \${2:-}" == "pr evidence-check" ]]; then
     sha="\$(git rev-parse HEAD)"
     events="\$(git rev-parse --show-toplevel)/.fno/events.jsonl"
@@ -118,10 +92,12 @@ chmod +x "$BIN/fno" "$BIN/cargo" "$BIN/cargo-audit" "$BIN/rustup" "$BIN/uv"
 export PATH="$BIN:$PATH"
 
 # --- build the fixture repo -------------------------------------------------
-FIX="$TMP/repo"; mkdir -p "$FIX/scripts/ci"
+FIX="$TMP/repo"; mkdir -p "$FIX/scripts/ci" "$FIX/scripts/lib" "$FIX/cli/src/fno/events"
 git -C "$FIX" init -q
 git -C "$FIX" config user.email t@t.t; git -C "$FIX" config user.name t
 cp "$PREFLIGHT_SRC" "$FIX/scripts/ci/preflight.sh"
+cp "$REPO_ROOT/scripts/lib/events-validate.sh" "$FIX/scripts/lib/events-validate.sh"
+cp "$REPO_ROOT/cli/src/fno/events/schema.yaml" "$FIX/cli/src/fno/events/schema.yaml"
 echo '.fno/' > "$FIX/.gitignore"
 # crate dirs so preflight's `cd crates/fno*` legs run (cargo is stubbed).
 mkdir -p "$FIX/crates/fno-agents" "$FIX/crates/fno"
@@ -152,7 +128,7 @@ echo "$out" | grep -q "cargo fmt --check (fno-agents" && ok "fmt leg in summary 
 echo "$out" | grep -q "cargo test --all-targets (fno-agents)" && ok "cargo test leg in summary (AC3-HP)" || fail "no test leg"
 echo "$out" | grep -q "ADVISORY" && ok "audit ADVISORY row present" || fail "no ADVISORY row"
 jq -se --arg sha "$GREEN_FULL" \
-    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "full" and .data.result == "passed"' \
+    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "full" and .data.result == "passed" and .data.generation >= 1' \
     "$EVENTS" >/dev/null \
     && ok "full green emits exact-SHA full/passed evidence" \
     || fail "missing exact-SHA full/passed event receipt"

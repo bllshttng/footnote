@@ -98,7 +98,15 @@ candidate_fno pr base-check --base "$BASE" || {
   # 3 = stale, 4 = unrelated histories, 127 = missing CLI; all refuse.
   [ "$rc" -ge 3 ] && { echo "refusing to open a PR from a bad base (see above)."; exit "$rc"; }
 }
-if candidate_fno pr evidence-required --base "$BASE"; then
+policy_json="$(candidate_fno pr evidence-required --base "$BASE")" || {
+  echo "PR creation refused: verification policy could not be evaluated." >&2
+  exit 1
+}
+policy_required="$(printf '%s' "$policy_json" | jq -er 'if .required == true then "true" elif .required == false then "false" else error("missing required state") end')" || {
+  echo "PR creation refused: verification policy returned malformed state." >&2
+  exit 1
+}
+if [ "$policy_required" = "true" ]; then
   candidate_fno pr evidence-check || {
     echo "PR creation refused: current HEAD has no full/passed verification receipt." >&2
     exit 1

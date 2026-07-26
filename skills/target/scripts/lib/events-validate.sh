@@ -346,7 +346,7 @@ validate_event() {
             def utc_epoch:
                 if type != "string" then null
                 else (
-                    capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<frac>[0-9]+))?(?:Z|\\+00:00)$")?
+                    capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<frac>[0-9]{1,6}))?(?:Z|\\+00:00)$")?
                     | if . == null then null
                       else ((.whole + "Z" | fromdateiso8601?)
                         + (("0." + (.frac // "0")) | tonumber))
@@ -375,6 +375,7 @@ validate_event() {
                 and ($d.producer | type == "object"
                     and all(["kind", "id"][];
                         . as $f | ($d.producer[$f] | type == "string" and test("[^[:space:]]"))))
+                and ($d.generation | type == "number" and floor == . and . >= 1)
                 and ($d.steps_expected | type == "number" and floor == . and . >= 0)
                 and ($d.steps_executed | type == "number" and floor == . and . >= 0)
                 and ($d.steps_executed <= $d.steps_expected)

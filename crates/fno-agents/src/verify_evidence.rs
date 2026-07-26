@@ -528,7 +528,19 @@ fn nonnegative_integer(value: &Value) -> Option<f64> {
 }
 
 fn receipt_timestamp(value: &Value) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value.as_str()?)
+    let raw = value.as_str()?;
+    let without_zone = raw
+        .strip_suffix('Z')
+        .or_else(|| raw.strip_suffix("+00:00"))?;
+    if let Some((_, fraction)) = without_zone.rsplit_once('.') {
+        if fraction.is_empty()
+            || fraction.len() > 6
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+    }
+    DateTime::parse_from_rfc3339(raw)
         .ok()
         .filter(|parsed| parsed.offset().local_minus_utc() == 0)
         .map(|parsed| parsed.with_timezone(&Utc))
@@ -563,6 +575,9 @@ fn valid_receipt(event: &Value) -> bool {
     let Some(executed) = data.get("steps_executed").and_then(nonnegative_integer) else {
         return false;
     };
+    let Some(generation) = data.get("generation").and_then(nonnegative_integer) else {
+        return false;
+    };
     let scope_len = data
         .get("scope")
         .and_then(Value::as_array)
@@ -587,6 +602,7 @@ fn valid_receipt(event: &Value) -> bool {
             "not_configured" | "unavailable" | "pending" | "failed" | "passed" | "stale"
         )
         && executed <= expected
+        && generation >= 1.0
         && scope_len == Some(expected)
         && (mode != "full" || result != "passed" || (expected > 0.0 && executed == expected))
         && (mode != "void" || result != "passed")
@@ -664,9 +680,18 @@ fn preflight_revocation(
     let Some(common_dir) = common_dir else {
         return RevocationState::Unavailable;
     };
-    let marker = common_dir
-        .join(".preflight-revoked")
-        .join(candidate_sha.to_ascii_lowercase());
+    let root = common_dir.join(".preflight-revoked");
+    match std::fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return RevocationState::Unavailable;
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return RevocationState::Absent;
+        }
+        Err(_) => return RevocationState::Unavailable,
+    }
+    let marker = root.join(candidate_sha.to_ascii_lowercase());
     match std::fs::read_to_string(marker) {
         Ok(value) if value.trim().eq_ignore_ascii_case(candidate_sha) => {
             RevocationState::Revoked
@@ -676,6 +701,36 @@ fn preflight_revocation(
             RevocationState::Absent
         }
         Err(_) => RevocationState::Unavailable,
+    }
+}
+
+struct VerificationReadLock {
+    path: PathBuf,
+    stamp: String,
+}
+
+impl VerificationReadLock {
+    fn acquire(common_dir: &Path) -> Option<Self> {
+        let path = common_dir.join(".preflight.lock.d");
+        std::fs::create_dir(&path).ok()?;
+        let stamp = format!("pid={} kind=evidence-reader", std::process::id());
+        if std::fs::write(path.join("holder"), format!("{stamp}\n")).is_err() {
+            let _ = std::fs::remove_dir(&path);
+            return None;
+        }
+        Some(Self { path, stamp })
+    }
+}
+
+impl Drop for VerificationReadLock {
+    fn drop(&mut self) {
+        let holder = self.path.join("holder");
+        if std::fs::read_to_string(&holder)
+            .is_ok_and(|value| value.trim() == self.stamp)
+        {
+            let _ = std::fs::remove_file(holder);
+            let _ = std::fs::remove_dir(&self.path);
+        }
     }
 }
 
@@ -739,26 +794,32 @@ fn receipt_decision(
     } else if revocation == RevocationState::Unavailable {
         coverage["revocation_error"] = Value::String("revocation state unavailable".to_string());
     }
-    let exact = receipts.iter().rev().find(|(_, _, event)| {
-        event
-            .pointer("/data/candidate_sha")
-            .and_then(Value::as_str)
-            .is_some_and(|receipt_sha| receipt_sha.eq_ignore_ascii_case(candidate_sha))
-    });
-    if let Some((newest_ts, _, event)) = exact {
-        let conflicting_latest = receipts
+    let exact: Vec<&(DateTime<Utc>, String, Value)> = receipts
+        .iter()
+        .filter(|(_, _, event)| {
+            event
+                .pointer("/data/candidate_sha")
+                .and_then(Value::as_str)
+                .is_some_and(|receipt_sha| receipt_sha.eq_ignore_ascii_case(candidate_sha))
+        })
+        .collect();
+    if !exact.is_empty() {
+        let newest_generation = exact
             .iter()
-            .filter(|(ts, _, candidate)| {
-                ts == newest_ts
-                    && candidate
-                        .pointer("/data/candidate_sha")
-                        .and_then(Value::as_str)
-                        .is_some_and(|receipt_sha| receipt_sha.eq_ignore_ascii_case(candidate_sha))
+            .filter_map(|(_, _, event)| {
+                event.pointer("/data/generation").and_then(Value::as_f64)
             })
-            .count();
-        if conflicting_latest != 1 {
+            .fold(0.0_f64, f64::max);
+        let newest: Vec<&&(DateTime<Utc>, String, Value)> = exact
+            .iter()
+            .filter(|(_, _, event)| {
+                event.pointer("/data/generation").and_then(Value::as_f64)
+                    == Some(newest_generation)
+            })
+            .collect();
+        if newest.len() != 1 {
             coverage["complete"] = Value::Bool(false);
-            coverage["conflicting_latest"] = json!(conflicting_latest);
+            coverage["conflicting_latest"] = json!(newest.len());
             return json!({
                 "satisfied": false,
                 "mode": Value::Null,
@@ -767,6 +828,7 @@ fn receipt_decision(
                 "coverage": coverage,
             });
         }
+        let event = &newest[0].2;
         let mode = event
             .pointer("/data/mode")
             .and_then(Value::as_str)
@@ -1040,8 +1102,27 @@ fn run(args: &[String]) -> (i32, String, String) {
                         .to_string(),
                 );
             }
-            let common_dir = git_common_dir(&git_bin);
-            let revocation = preflight_revocation(common_dir.as_deref(), &rest[0]);
+            let Some(common_dir) = git_common_dir(&git_bin) else {
+                let decision = json!({
+                    "satisfied": false,
+                    "mode": Value::Null,
+                    "result": "unavailable",
+                    "receipt": Value::Null,
+                    "coverage": {"complete": false, "lock_error": "git common directory unavailable"},
+                });
+                return (1, format!("{decision}\n"), String::new());
+            };
+            let Some(_guard) = VerificationReadLock::acquire(&common_dir) else {
+                let decision = json!({
+                    "satisfied": false,
+                    "mode": Value::Null,
+                    "result": "unavailable",
+                    "receipt": Value::Null,
+                    "coverage": {"complete": false, "lock_error": "preflight transition in progress"},
+                });
+                return (1, format!("{decision}\n"), String::new());
+            };
+            let revocation = preflight_revocation(Some(&common_dir), &rest[0]);
             let decision = receipt_decision(&rest[0], &rest[1..], revocation);
             let code = if decision["satisfied"] == Value::Bool(true) {
                 0
@@ -1131,6 +1212,7 @@ mod tests {
                 "mode": "full",
                 "result": "passed",
                 "producer": {"kind": "preflight", "id": "h:1"},
+                "generation": 1,
                 "steps_expected": 0,
                 "steps_executed": 0
             }
@@ -1148,6 +1230,18 @@ mod tests {
         );
         event["data"]["command"] =
             Value::Array((0..4097).map(|_| Value::String("x".to_string())).collect());
+        assert!(!valid_receipt(&event));
+    }
+
+    #[test]
+    fn receipt_validation_requires_positive_generation() {
+        let mut event = receipt_event(
+            "2026-07-26T01:00:00Z",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "full",
+            "passed",
+        );
+        event["data"]["generation"] = json!(0);
         assert!(!valid_receipt(&event));
     }
 
@@ -1173,6 +1267,7 @@ mod tests {
                 "mode": mode,
                 "result": result,
                 "producer": {"kind": "preflight", "id": "h:1"},
+                "generation": 1,
                 "steps_expected": 6,
                 "steps_executed": 6
             }
@@ -1186,7 +1281,9 @@ mod tests {
         let second = dir.path().join("delivery.jsonl");
         let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let failed = receipt_event("2026-07-26T01:00:00Z", sha, "full", "failed");
-        let passed = receipt_event("2026-07-26T03:00:00+00:00", sha, "full", "passed");
+        let mut passed =
+            receipt_event("2026-07-26T03:00:00+00:00", sha, "full", "passed");
+        passed["data"]["generation"] = json!(2);
         std::fs::write(&first, format!("{passed}\n{failed}\n")).unwrap();
         std::fs::write(&second, format!("{failed}\n{passed}\n")).unwrap();
 
@@ -1199,6 +1296,27 @@ mod tests {
         assert_eq!(decision["satisfied"], true);
         assert_eq!(decision["coverage"]["deduped_events"], 2);
         assert_eq!(decision["receipt"]["ts"], "2026-07-26T03:00:00+00:00");
+    }
+
+    #[test]
+    fn receipt_generation_supersedes_timestamp_after_clock_rollback() {
+        let mut journal = tempfile::NamedTempFile::new().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let passed = receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed");
+        let mut failed = receipt_event("2026-07-26T02:00:00Z", sha, "full", "failed");
+        failed["data"]["generation"] = json!(2);
+        writeln!(journal, "{passed}").unwrap();
+        writeln!(journal, "{failed}").unwrap();
+
+        let decision = receipt_decision(
+            sha,
+            &[journal.path().display().to_string()],
+            RevocationState::Absent,
+        );
+
+        assert_eq!(decision["satisfied"], false);
+        assert_eq!(decision["result"], "failed");
+        assert_eq!(decision["receipt"]["data"]["generation"], 2);
     }
 
     #[test]
@@ -1296,6 +1414,27 @@ mod tests {
         assert_eq!(
             unavailable["coverage"]["revocation_error"],
             "revocation state unavailable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_revocation_symlink_is_unavailable() {
+        use std::os::unix::fs::symlink;
+
+        let common = tempfile::tempdir().unwrap();
+        symlink(
+            common.path().join("missing"),
+            common.path().join(".preflight-revoked"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            preflight_revocation(
+                Some(common.path()),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+            RevocationState::Unavailable
         );
     }
 

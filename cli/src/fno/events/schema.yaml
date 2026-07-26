@@ -147,7 +147,7 @@ event_types:
     description: "Commit-bound deterministic verification evidence. Mode describes coverage; result describes the observed state. Only an exact-SHA full/passed receipt with every expected step executed may satisfy a full-evidence gate."
     sources: [target, hook, test]
     data:
-      required: [candidate_sha, command, environment, scope, started_at, finished_at, mode, result, producer, steps_expected, steps_executed]
+      required: [candidate_sha, command, environment, scope, started_at, finished_at, mode, result, producer, generation, steps_expected, steps_executed]
       properties:
         candidate_sha:
           type: string
@@ -178,6 +178,9 @@ event_types:
         producer:
           type: object
           description: "Structured producer kind and unique id."
+        generation:
+          type: integer
+          description: "Positive lock-serialized per-candidate receipt generation; authoritative for supersession."
         steps_expected:
           type: integer
         steps_executed:
