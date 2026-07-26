@@ -337,7 +337,12 @@ def test_empty_flag_values_are_refused(tmp_path: Path) -> None:
 
     from fno.test_cmd import _parse_smoke_args
     for argv in (["--only="], ["--only"], ["--changed", "--base=", "--head", "HEAD"],
-                 ["--changed", "--base", "HEAD", "--head="], ["--changed", "--head", ""]):
+                 ["--changed", "--base", "HEAD", "--head="], ["--changed", "--head", ""],
+                 # A following option is a forgotten value, not the value:
+                 # `--only --retry-failed` otherwise became an only-glob of
+                 # "--retry-failed" and skipped the mutual-exclusion check.
+                 ["--only", "--retry-failed"], ["--only", "--changed"],
+                 ["--changed", "--base", "--head", "HEAD"]):
         with pytest.raises(ValueError, match="needs a value"):
             _parse_smoke_args(argv)
     # Real values still parse.

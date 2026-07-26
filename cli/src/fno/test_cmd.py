@@ -632,8 +632,14 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
             # instruction. Accepting it silently turned `--only=` into a FULL
             # run and `--base=` into local mode, both looking like the subset
             # the caller asked for.
-            if not a:
-                raise ValueError(f"smoke: --{pending.replace('_', '-')} needs a value")
+            # A following option is a forgotten value, not the value. Taking it
+            # made `--only --retry-failed` an only-glob of "--retry-failed",
+            # which matches no step and silently skips the mutual-exclusion
+            # check that should have caught the combination.
+            if not a or a.startswith("--"):
+                raise ValueError(
+                    f"smoke: --{pending.replace('_', '-')} needs a value"
+                    + (f" (got the flag {a})" if a else ""))
             opts[pending] = a
             pending = ""
         elif a in valued:
