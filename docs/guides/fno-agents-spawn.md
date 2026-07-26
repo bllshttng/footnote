@@ -81,7 +81,9 @@ The Python fallback prefers `--workspace` regardless of order, while the default
 
 The lower-level equivalent avoids option punctuation entirely: `fno mux pane run workspace reviews split right echo ready`. It also accepts `--workspace` / `-s` and `--split` / `-x`.
 
-**The two verbs differ on an absent workspace, and only here.** `fno agents spawn` creates it, as above. `fno mux pane run` does not: it resolves the name against existing workspaces and fails when none matches, so the lower-level verb places into a workspace that already exists. Both refuse a blank name, both refuse an ambiguous one (two or more matches, never a silent pick), and on either verb a split that would make a pane too small fails without leaving a child process or layout mutation behind.
+It behaves the same as the option form on the two things worth knowing: an absent named workspace is created rather than refused, and a split that would make a pane too small falls back to a fresh tab rather than failing. Both refuse a blank name, and both refuse an ambiguous one (two or more matches, never a silent pick). Neither leaves a child process or a half-applied layout behind on a refusal.
+
+Note this non-strict fallback is exactly what `--at current` opts out of: strict placement refuses instead of minting a tab, which is what makes it safe for automation.
 
 ## Place a pane next to the calling pane (`--at current`)
 

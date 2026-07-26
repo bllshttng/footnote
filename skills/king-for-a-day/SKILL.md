@@ -132,7 +132,7 @@ A pass dispatching on `bg` or `headless` carries its mission in the graph and th
 Which placement flag depends on whether you are already in the target workspace, and the two cases split by shape.
 A **court** teammate anchors to your own pane with `--at current --split <dir>`, never `--workspace --split` - see [the court spawn contract](#spawn-each-teammate-into-your-mission-workspace) for why aiming at a workspace races on focus.
 The **ad-hoc pane a pass launches mid-kickoff** has no king pane to anchor to, so it takes explicit `--workspace <mission-workspace> --split <dir>` and accepts that race, which is harmless for a one-off it never has to sit beside.
-You never create the workspace first: on `fno agents spawn` the first placement into a name creates it, and there is no create verb to run.
+You never create the workspace first: the first placement into a name creates it, and there is no create verb to run.
 A blank name is a CLI error, not an implicit default, and an ambiguous one is refused rather than silently picked.
 
 To reach a worker that is already running, mail it (below).
@@ -353,8 +353,11 @@ The one reason to mint a new session is **context pressure**. Every teammate rep
   The wait is a real command, not a resolution - `top` and `peek` return immediately and wake nobody, so ending a turn on them is the wedge:
 
   ```bash
-  fno-agents wait --agent <teammate-name> --state done --timeout-ms 900000
+  fno-agents wait --agent <teammate-name> --state done    --timeout-ms 900000 &
+  fno-agents wait --agent <teammate-name> --state blocked --timeout-ms 900000 &
   ```
+
+  **Two waits per teammate, because the verb takes one target and returns only on an exact match.** A `done`-only wait sleeps straight through a teammate that goes `blocked`, and `blocked` is the transition you most owe an answer to - the whole point of court is that a stuck teammate gets unstuck. Arm both and let whichever fires first wake you; the other is spent when you re-arm after reconciling. If your harness makes two background waits awkward, the fallback is `done` alone plus accepting that a blocked teammate whose report mail failed waits out the timeout - bounded, but the slowest path in the design, so prefer both.
 
   **Always `done`, and never `idle`.** `idle` looks like the portable choice and is a trap: it is the *default* verdict, returned for a lapsed hook, an unrecognized screen state, and any live row with no screen state at all. So a wait on `idle` can return instantly while the teammate is still working, and since you re-arm every live teammate, that returns you to a tight wake-sweep-rearm loop burning context on every pass - worse than the heartbeat this replaced.
 
