@@ -38,19 +38,30 @@ if [[ "\$*" == *"paths.worktrees_base"* ]]; then
     echo "$WT_BASE"
     exit 0
 fi
-if [[ "\${1:-} \${2:-}" == "event emit" ]]; then
+if [[ "\${1:-} \${2:-}" == "pr record-preflight-receipt" ]]; then
     shift 2
-    data='{}'; events=''
+    mode=''; result=''; scope='[]'; started=''; expected=0; executed=0; command='[]'; events=''; detail=''
     while [[ \$# -gt 0 ]]; do
         case "\$1" in
-            --data) data="\$2"; shift 2 ;;
+            --mode) mode="\$2"; shift 2 ;;
+            --result) result="\$2"; shift 2 ;;
+            --scope-json) scope="\$2"; shift 2 ;;
+            --started-at) started="\$2"; shift 2 ;;
+            --steps-expected) expected="\$2"; shift 2 ;;
+            --steps-executed) executed="\$2"; shift 2 ;;
+            --command-json) command="\$2"; shift 2 ;;
             --events) events="\$2"; shift 2 ;;
+            --detail) detail="\$2"; shift 2 ;;
             *) shift ;;
         esac
     done
+    sha="\$(git rev-parse HEAD)"; host="\$(hostname)"; finished="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     mkdir -p "\$(dirname "\$events")"
-    jq -nc --arg ts "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson data "\$data" \
-        '{ts:\$ts,type:"verification_receipt",source:"target",data:\$data}' >> "\$events"
+    jq -nc --arg ts "\$finished" --arg sha "\$sha" --arg host "\$host" \
+        --argjson command "\$command" --argjson scope "\$scope" --arg started "\$started" \
+        --arg finished "\$finished" --arg mode "\$mode" --arg result "\$result" \
+        --argjson expected "\$expected" --argjson executed "\$executed" --arg detail "\$detail" \
+        '{ts:\$ts,type:"verification_receipt",source:"target",data:{candidate_sha:\$sha,command:\$command,environment:{host:\$host,platform:"test",runner:"scripts/ci/preflight.sh"},scope:\$scope,started_at:\$started,finished_at:\$finished,mode:\$mode,result:\$result,producer:{kind:"preflight",id:(\$host+":fixture")},steps_expected:\$expected,steps_executed:\$executed,detail:\$detail}}' >> "\$events"
     exit 0
 fi
 if [[ "\${1:-} \${2:-}" == "pr evidence-check" ]]; then

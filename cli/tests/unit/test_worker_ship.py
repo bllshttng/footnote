@@ -12,6 +12,10 @@ import pytest
 @pytest.fixture(autouse=True)
 def _verified_head(monkeypatch):
     monkeypatch.setattr(
+        "fno.pr._preflight.local_verification_required",
+        lambda **_kwargs: (True, "required"),
+    )
+    monkeypatch.setattr(
         "fno.pr._preflight.check_verification_evidence",
         lambda **_kwargs: {
             "satisfied": True,
@@ -201,6 +205,37 @@ def test_existing_pr_still_requires_current_verification(tmp_path, monkeypatch):
     assert result["action"] == "error"
     assert "mode=subset result=passed" in result["error"]
     assert not list((tmp_path / ".fno" / "artifacts").glob("ship-*.md"))
+
+
+def test_explicit_preflight_exemption_does_not_require_receipt(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    state_path = _make_state(tmp_path)
+    existing_pr = [{"number": 55, "url": "https://github.com/owner/repo/pull/55"}]
+    monkeypatch.setattr(
+        "fno.pr._preflight.local_verification_required",
+        lambda **_kwargs: (False, "docs-only"),
+    )
+    monkeypatch.setattr(
+        "fno.pr._preflight.check_verification_evidence",
+        lambda **_kwargs: pytest.fail("exempt ship must not read receipt evidence"),
+    )
+    mock_run = MagicMock()
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="feature/test\n", stderr=""),
+        MagicMock(returncode=0, stdout=json.dumps(existing_pr), stderr=""),
+    ]
+
+    with patch("subprocess.run", mock_run):
+        from fno.worker.ship import ship
+
+        result = ship(
+            state_path=state_path,
+            title="docs: update",
+            body="body",
+            artifacts_dir=tmp_path / ".fno" / "artifacts",
+        )
+
+    assert result["action"] == "pr_exists"
 
 
 # ---- AC4-HP: ship arms auto-merge when approved ----

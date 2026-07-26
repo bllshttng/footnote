@@ -110,39 +110,19 @@ candidate_fno() {
 
 emit_verification_receipt() {
     local mode="$1" result="$2" scope_json="$3" expected="$4" executed="$5" started_at="$6" detail="$7"
-    local finished_at command_json environment_json producer_json data
-    finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 1970-01-01T00:00:00Z)"
+    local command_json
     command_json="$(_json_array "${RECEIPT_COMMAND[@]}")" || return 1
-    environment_json="$(jq -nc \
-        --arg host "$(_this_host)" \
-        --arg platform "$(uname -sm 2>/dev/null || echo unknown)" \
-        --arg runner "scripts/ci/preflight.sh" \
-        '{host:$host,platform:$platform,runner:$runner}')" || return 1
-    producer_json="$(jq -nc \
-        --arg kind preflight \
-        --arg id "$(_this_host):$$" \
-        '{kind:$kind,id:$id}')" || return 1
-    data="$(jq -nc \
-        --arg candidate_sha "$CANDIDATE_SHA" \
-        --argjson command "$command_json" \
-        --argjson environment "$environment_json" \
-        --argjson scope "$scope_json" \
-        --arg started_at "$started_at" \
-        --arg finished_at "$finished_at" \
-        --arg mode "$mode" \
-        --arg result "$result" \
-        --argjson producer "$producer_json" \
-        --argjson steps_expected "$expected" \
-        --argjson steps_executed "$executed" \
-        --arg detail "$detail" \
-        '{candidate_sha:$candidate_sha,command:$command,environment:$environment,scope:$scope,started_at:$started_at,finished_at:$finished_at,mode:$mode,result:$result,producer:$producer,steps_expected:$steps_expected,steps_executed:$steps_executed,detail:$detail}')" || return 1
     mkdir -p "$(dirname "$EVENTS_PATH")" || return 1
-    candidate_fno event emit \
-        --type verification_receipt \
-        --source target \
+    candidate_fno pr record-preflight-receipt \
+        --mode "$mode" \
+        --result "$result" \
+        --scope-json "$scope_json" \
+        --started-at "$started_at" \
+        --steps-expected "$expected" \
+        --steps-executed "$executed" \
+        --command-json "$command_json" \
         --events "$EVENTS_PATH" \
-        --state "$INVOKING_ROOT/.fno/target-state.md" \
-        --data "$data" >/dev/null
+        --detail "$detail" >/dev/null
 }
 
 emit_setup_unavailable() {
@@ -212,7 +192,7 @@ fi
 # --- lock (atomic mkdir; steal a dead holder) -------------------------------
 LOCKDIR="$COMMON_DIR/.preflight.lock.d"
 stamp_holder() {
-    printf 'pid=%s started=%s host=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(hostname 2>/dev/null || echo unknown)" "$CANDIDATE_SHORT" > "$LOCKDIR/holder"
+    printf 'pid=%s started=%s host=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(hostname 2>/dev/null || echo unknown)" "$CANDIDATE_SHA" > "$LOCKDIR/holder"
 }
 acquire_lock() {
     if mkdir "$LOCKDIR" 2>/dev/null; then stamp_holder; return 0; fi
@@ -268,6 +248,20 @@ acquire_lock() {
     exit 3
 }
 acquire_lock
+
+REVOCATION="$COMMON_DIR/.preflight-revoked"
+mark_revoked() {
+    local tmp="${REVOCATION}.$$"
+    printf '%s\n' "$CANDIDATE_SHA" > "$tmp" 2>/dev/null && mv -f "$tmp" "$REVOCATION" 2>/dev/null
+}
+clear_revocation() {
+    [[ "$(cat "$REVOCATION" 2>/dev/null || true)" == "$CANDIDATE_SHA" ]] || return 1
+    rm -f "$REVOCATION"
+}
+if ! mark_revoked; then
+    echo "preflight: cannot persist fail-closed revocation at $REVOCATION" >&2
+    exit 1
+fi
 
 TMPHOME=""
 holder_pid_now() { sed -n 's/.*pid=\([0-9]*\).*/\1/p' "$LOCKDIR/holder" 2>/dev/null; }
@@ -390,7 +384,8 @@ run_hermetic() {
 # being reset under it earned nothing, so it must VOID rather than report RED.
 exit_if_void() {
     local VOID_REASON="" WT_HEAD_NOW VOID_SCOPE_NAME="${1:-}"
-    local REQUIRED_COUNT REQUIRED_SCOPE VOID_RESULT
+    local REQUIRED_COUNT REQUIRED_SCOPE VOID_RESULT EXECUTED_COUNT
+    local -a REQUIRED_SCOPE_NAMES
     # 2>/dev/null, never 2>&1: merging stderr into the value means any benign git
     # warning makes the captured string differ from the sha and VOIDs a good run.
     if ! WT_HEAD_NOW="$(git -C "$PREFLIGHT_WT" rev-parse HEAD 2>/dev/null)"; then
@@ -404,13 +399,17 @@ exit_if_void() {
     if [[ -n "$VOID_SCOPE_NAME" ]]; then
         REQUIRED_COUNT=1
         REQUIRED_SCOPE="$(_json_array "$VOID_SCOPE_NAME")"
+        EXECUTED_COUNT=1
     else
-        REQUIRED_COUNT=6
-        REQUIRED_SCOPE="$(_json_array smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno squads-leak-guard:fno)"
+        REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno)
+        [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
+        REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
+        REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
+        EXECUTED_COUNT=$REQUIRED_EXECUTED
     fi
     VOID_RESULT=unavailable
     [[ "$VOID_REASON" == worktree\ moved\ off* ]] && VOID_RESULT=stale
-    emit_verification_receipt void "$VOID_RESULT" "$REQUIRED_SCOPE" "$REQUIRED_COUNT" "$REQUIRED_COUNT" "$RECEIPT_STARTED_AT" "$VOID_REASON" \
+    emit_verification_receipt void "$VOID_RESULT" "$REQUIRED_SCOPE" "$REQUIRED_COUNT" "$EXECUTED_COUNT" "$RECEIPT_STARTED_AT" "$VOID_REASON" \
         || echo "preflight: WARN could not append VOID verification receipt" >&2
     echo "preflight: VOID - $VOID_REASON." >&2
     echo "preflight: verdict discarded - nothing here was earned by $CANDIDATE_SHORT. Re-run; this is not a code failure." >&2
@@ -508,12 +507,14 @@ echo ""
 echo "preflight: === smoke suite ($([[ $RETRY_FAILED -eq 1 ]] && echo retry-failed || echo keep-going)) ==="
 SMOKE_ARGS=(--keep-going); [[ $RETRY_FAILED -eq 1 ]] && SMOKE_ARGS=(--retry-failed --keep-going)
 s0="$SECONDS"
+REQUIRED_EXECUTED=0
 # Bootstrap via `uv run --project cli`: there is no repo-root pyproject and no
 # global fno-py in a hermetic env, so a bare `fno test smoke` is not on PATH
 # until uv syncs the cli project (uv auto-syncs). The attestation logic below
 # is unchanged: a FULL GREEN records, a RED deletes, a subset mints nothing.
 run_hermetic uv run --project cli fno-py test smoke "${SMOKE_ARGS[@]}"
 sreq=$?
+REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
 [[ $sreq -eq 0 ]] && record_leg "smoke suite" pass $(( SECONDS - s0 )) || { record_leg "smoke suite" fail $(( SECONDS - s0 )); FAIL=1; }
 
 # rust-ci legs (pinned fmt, cargo test, advisory audit) ----------------------
@@ -533,6 +534,7 @@ run_rust_leg() { # name status-var  cwd  cmd...
 if have_pinned_fmt; then
     run_rust_leg "cargo fmt --check (fno-agents, +$PINNED_FMT)" "crates/fno-agents" "cargo +$PINNED_FMT fmt --all --check"
     run_rust_leg "cargo fmt --check (fno, +$PINNED_FMT)" "crates/fno" "cargo +$PINNED_FMT fmt --all --check"
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 2))
 else
     echo "preflight: pinned rustfmt toolchain $PINNED_FMT not installed - fmt leg cannot match rust-ci" >&2
     echo "preflight: install it: rustup toolchain install $PINNED_FMT --component rustfmt" >&2
@@ -540,6 +542,7 @@ else
 fi
 
 run_rust_leg "cargo test --all-targets (fno-agents)" "crates/fno-agents" "cargo test --all-targets"
+REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
 
 # squads.json leak guard (x-e447 US3): snapshot the REAL store mtime around the
 # crates/fno cargo test leg. A test that bypasses run_hermetic's HOME redirect and
@@ -560,10 +563,23 @@ except Exception:
 }
 _squads_before=$(_real_squads_mtime)
 run_rust_leg "cargo test --all-targets (fno)" "crates/fno" "cargo test --all-targets"
+REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
 _squads_after=$(_real_squads_mtime)
+SQUADS_INCLUDED=1
 if [[ -z "$_squads_before" || -z "$_squads_after" ]]; then
-    record_leg "squads.json leak guard (fno)" "skipped (no real store)" 0
+    if [[ -z "$_squads_before" && -z "$_squads_after" ]]; then
+        SQUADS_INCLUDED=0
+        record_leg "squads.json leak guard (fno)" "not configured (no real store)" 0
+        SQUADS_SCOPE="$(_json_array squads-leak-guard:fno)"
+        emit_verification_receipt advisory not_configured "$SQUADS_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "no real squads store" \
+            || echo "preflight: WARN could not append squads not-configured receipt" >&2
+    else
+        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+        FAIL=1
+        record_leg "squads.json leak guard (fno)" fail 0
+    fi
 elif [[ "$_squads_after" != "$_squads_before" ]]; then
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
     echo "preflight: FAIL real ~/.fno/squads.json changed during crates/fno cargo test" \
          "(mtime $_squads_before -> $_squads_after)" >&2
     echo "  if a real mux session is running concurrently it is a valid writer;" >&2
@@ -571,6 +587,7 @@ elif [[ "$_squads_after" != "$_squads_before" ]]; then
     FAIL=1
     record_leg "squads.json leak guard (fno)" fail 0
 else
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
     record_leg "squads.json leak guard (fno)" pass 0
 fi
 
@@ -619,14 +636,20 @@ elif [[ $FAIL -ne 0 ]]; then
     invalidate_attestation
 fi
 
-REQUIRED_COUNT=6
-REQUIRED_SCOPE="$(_json_array smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno squads-leak-guard:fno)"
+REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno)
+[[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
+REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
+REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
 RECEIPT_MODE=full
 [[ $RETRY_FAILED -eq 1 ]] && RECEIPT_MODE=subset
 RECEIPT_RESULT=passed
 [[ $FAIL -ne 0 ]] && RECEIPT_RESULT=failed
-if ! emit_verification_receipt "$RECEIPT_MODE" "$RECEIPT_RESULT" "$REQUIRED_SCOPE" "$REQUIRED_COUNT" "$REQUIRED_COUNT" "$RECEIPT_STARTED_AT" "preflight suite verdict"; then
+if ! emit_verification_receipt "$RECEIPT_MODE" "$RECEIPT_RESULT" "$REQUIRED_SCOPE" "$REQUIRED_COUNT" "$REQUIRED_EXECUTED" "$RECEIPT_STARTED_AT" "preflight suite verdict"; then
     echo "preflight: verification receipt append failed; verdict is unavailable" >&2
+    FAIL=1
+    invalidate_attestation
+elif ! clear_revocation; then
+    echo "preflight: verification receipt appended but revocation could not be cleared" >&2
     FAIL=1
     invalidate_attestation
 elif [[ $RETRY_FAILED -eq 0 && $FAIL -eq 0 ]]; then

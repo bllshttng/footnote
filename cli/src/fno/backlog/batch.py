@@ -440,20 +440,33 @@ def ship_batch(
             pr_url = existing[0].get("url")
             pr_number = existing[0].get("number")
 
-    from fno.pr._preflight import check_verification_evidence
+    from fno.pr._preflight import check_verification_evidence, local_verification_required
 
-    evidence = check_verification_evidence(cwd=worktree)
-    if not evidence["satisfied"]:
-        _abandon_and_requeue(domain, members, root)
-        return ShipResult(
-            "abandoned",
-            domain,
-            reason=(
-                "verification evidence refused batch ship: "
-                f"mode={evidence['mode']} result={evidence['result']}"
-            ),
-            members=members,
-        )
+    evidence_required, _policy_reason = local_verification_required(
+        cwd=worktree, base_ref=f"origin/{base}"
+    )
+    if evidence_required:
+        evidence = check_verification_evidence(cwd=worktree)
+        if not evidence["satisfied"]:
+            preflight = run(["scripts/ci/preflight.sh", "--force"], cwd=worktree)
+            if preflight.returncode != 0:
+                return ShipResult(
+                    "noop",
+                    domain,
+                    reason=f"verification pending: preflight exited {preflight.returncode}",
+                    members=members,
+                )
+            evidence = check_verification_evidence(cwd=worktree)
+        if not evidence["satisfied"]:
+            return ShipResult(
+                "noop",
+                domain,
+                reason=(
+                    "verification pending: "
+                    f"mode={evidence['mode']} result={evidence['result']}"
+                ),
+                members=members,
+            )
 
     if pr_url is None:
         # Stale-base guard parity (x-9b87): the batch lane is the third

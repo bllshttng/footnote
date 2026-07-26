@@ -86,16 +86,20 @@ candidate_fno() {
     PYTHONPATH="$ROOT/cli/src" "$ROOT/cli/.venv/bin/python" -m fno.cli "$@"
   elif [ -f "$ROOT/cli/pyproject.toml" ] && command -v uv >/dev/null 2>&1; then
     PYTHONPATH="$ROOT/cli/src" uv run --project "$ROOT/cli" fno-py "$@"
-  else
+  elif command -v fno >/dev/null 2>&1; then
     fno "$@"
+  else
+    echo "PR creation refused: fno CLI is unavailable." >&2
+    return 127
   fi
 }
-if command -v fno >/dev/null 2>&1 || [ -f "$ROOT/cli/pyproject.toml" ]; then
-  candidate_fno pr base-check --base "$BASE" || {
-    rc=$?
-    # 3 = stale, 4 = unrelated histories (both refuse); fresh/bypass/fail-open exit 0.
-    [ "$rc" -ge 3 ] && { echo "refusing to open a PR from a bad base (see above)."; exit "$rc"; }
-  }
+candidate_fno pr base-check --base "$BASE" || {
+  rc=$?
+  # 3 = stale, 4 = unrelated histories, 127 = missing CLI; all refuse.
+  [ "$rc" -ge 3 ] && { echo "refusing to open a PR from a bad base (see above)."; exit "$rc"; }
+}
+non_docs="$(git diff --name-only "$BASE"...HEAD | grep -vE '^(docs/|internal/|.*\.md$)' || true)"
+if [ "${FNO_SKIP_PREFLIGHT:-0}" != "1" ] && [ -x "$ROOT/scripts/ci/preflight.sh" ] && [ -n "$non_docs" ]; then
   candidate_fno pr evidence-check || {
     echo "PR creation refused: current HEAD has no full/passed verification receipt." >&2
     exit 1
