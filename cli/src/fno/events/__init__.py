@@ -106,6 +106,7 @@ SCHEMA: dict[str, Any] | None
 EVENT_TYPES: dict[str, dict[str, Any]] | None
 ENVELOPE_REQUIRED: list[str]
 MAX_DATA_BYTES: int
+DATA_SIZE_ENCODING: str
 ALLOWED_SOURCES: set[str]
 # x-2901: per-agent worker sources (worker:<id>, stream-worker:<id>) validate by
 # regex, not enum membership. Compiled from envelope.properties.source.patterns.
@@ -118,6 +119,12 @@ try:
     EVENT_TYPES = {e["name"]: e for e in SCHEMA.get("event_types", [])}
     ENVELOPE_REQUIRED = SCHEMA["envelope"]["required"]
     MAX_DATA_BYTES = SCHEMA.get("limits", {}).get("max_data_bytes", 65536)
+    DATA_SIZE_ENCODING = SCHEMA.get("limits", {}).get("data_size_encoding", "")
+    if DATA_SIZE_ENCODING != "compact-json-ascii-v1":
+        raise SchemaUnavailableError(
+            "unsupported limits.data_size_encoding: "
+            f"{DATA_SIZE_ENCODING!r}"
+        )
     ALLOWED_SOURCES = set(SCHEMA["envelope"]["properties"]["source"]["enum"])
     ALLOWED_SOURCE_PATTERNS = [
         _re.compile(p)
@@ -137,6 +144,7 @@ except SchemaUnavailableError as _exc:
     EVENT_TYPES = None
     ENVELOPE_REQUIRED = []
     MAX_DATA_BYTES = 65536
+    DATA_SIZE_ENCODING = ""
     ALLOWED_SOURCES = set()
     ALLOWED_SOURCE_PATTERNS = []
     ALLOWED_GATES = set()
@@ -502,9 +510,15 @@ def validate(event: dict[str, Any]) -> None:
                     f"{data.get(field)!r} (allowed: {allowed})"
                 )
 
-    serialized = _json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode(
-        "utf-8"
-    )
+    try:
+        _json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        serialized = (
+            _json.dumps(data, separators=(",", ":"), ensure_ascii=True)
+            .replace("\x7f", "\\u007f")
+            .encode("ascii")
+        )
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise ValidationError(f"event data is not serializable: {exc}") from exc
     if len(serialized) > MAX_DATA_BYTES:
         raise ValidationError(
             f"event data exceeds max_data_bytes "

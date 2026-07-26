@@ -184,19 +184,45 @@ def test_verification_receipt_utf8_byte_cap_has_python_bash_parity() -> None:
     assert bash_ok is False
 
 
-def test_event_data_cap_counts_compact_utf8_bytes_in_python_and_bash() -> None:
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [
+        ("é" * 10_000, True),
+        ("é" * 11_000, False),
+        ("\x7f" * 10_000, True),
+        ("\x7f" * 11_000, False),
+    ],
+)
+def test_event_data_cap_counts_compact_ascii_json_in_python_and_bash(
+    detail: str, expected: bool
+) -> None:
     event = next(
         json.loads(json.dumps(rec["event"]))
         for rec in _RECORDS
         if rec["reason"] == "verification_receipt full passed exact sha"
     )
-    event["data"]["detail"] = "é" * 11_000
+    event["data"]["detail"] = detail
 
     py_ok, _ = _python_verdict(event)
     bash_ok, _ = _bash_verdict(event)
 
-    assert py_ok is True
-    assert bash_ok is True
+    assert py_ok is expected
+    assert bash_ok is expected
+
+
+def test_event_data_lone_surrogate_rejects_in_python_and_bash() -> None:
+    event = next(
+        json.loads(json.dumps(rec["event"]))
+        for rec in _RECORDS
+        if rec["reason"] == "verification_receipt full passed exact sha"
+    )
+    event["data"]["detail"] = "\ud800"
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is False
+    assert bash_ok is False
 
 
 @pytest.mark.parametrize("field", ["ts", "started_at", "finished_at"])
@@ -218,6 +244,47 @@ def test_verification_receipt_calendar_timestamp_parity(
     )
     target = event if field == "ts" else event["data"]
     target[field] = timestamp
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is False
+    assert bash_ok is False
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "0001-01-01T00:00:00Z",
+        "1969-12-31T23:59:59.123456Z",
+    ],
+)
+def test_verification_receipt_pre_epoch_timestamp_parity(timestamp: str) -> None:
+    event = next(
+        json.loads(json.dumps(rec["event"]))
+        for rec in _RECORDS
+        if rec["reason"] == "verification_receipt full passed exact sha"
+    )
+    event["ts"] = timestamp
+    event["data"]["started_at"] = timestamp
+    event["data"]["finished_at"] = timestamp
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is True
+    assert bash_ok is True
+
+
+def test_verification_receipt_far_future_microsecond_ordering_parity() -> None:
+    event = next(
+        json.loads(json.dumps(rec["event"]))
+        for rec in _RECORDS
+        if rec["reason"] == "verification_receipt full passed exact sha"
+    )
+    event["ts"] = "9999-12-31T23:59:59.000003Z"
+    event["data"]["started_at"] = "9999-12-31T23:59:59.000002Z"
+    event["data"]["finished_at"] = "9999-12-31T23:59:59.000001Z"
 
     py_ok, _ = _python_verdict(event)
     bash_ok, _ = _bash_verdict(event)

@@ -2989,6 +2989,7 @@ event_types:
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:
   max_data_bytes: 65536
+  data_size_encoding: compact-json-ascii-v1
 
 # ── a2a status-breakpoint protocol family (x-dbaf) ──────────────────────────
 # The four types above carry an EXTENDED envelope: routable fields live at

@@ -373,18 +373,27 @@ def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], 
         if not all(isinstance(row, dict) for row in rows):
             raise ValueError("ledger entries must be objects")
         for row in rows:
+            normalized_roots: dict[str, Path] = {}
             for field in ("root_path", "canonical_root_path"):
                 value = row.get(field)
                 if value is not None and (
                     not isinstance(value, str) or not value.strip()
                 ):
                     raise ValueError(f"ledger {field} must be a non-empty string or null")
-            delivery_root = row.get("root_path")
+                if value is not None:
+                    try:
+                        normalized = Path(value).expanduser()
+                        if not normalized.is_absolute():
+                            raise ValueError("path must be absolute")
+                        normalized_roots[field] = normalized.resolve(strict=False)
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        raise ValueError(f"ledger {field} is invalid: {exc}") from exc
+            delivery_root = normalized_roots.get("root_path")
             if delivery_root is not None:
-                paths.append(Path(delivery_root).expanduser() / ".fno" / "events.jsonl")
-            canonical = row.get("canonical_root_path")
+                paths.append(delivery_root / ".fno" / "events.jsonl")
+            canonical = normalized_roots.get("canonical_root_path")
             if canonical is not None:
-                salvage = Path(canonical).expanduser() / ".fno" / "salvage"
+                salvage = canonical / ".fno" / "salvage"
                 try:
                     entries = list(os.scandir(salvage))
                 except FileNotFoundError:
@@ -408,7 +417,7 @@ def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], 
                     paths.append(journal)
     except FileNotFoundError:
         pass
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         errors.append(f"delivery journal discovery failed: {exc}")
     return paths, errors
 

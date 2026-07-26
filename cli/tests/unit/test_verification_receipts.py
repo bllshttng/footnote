@@ -425,8 +425,12 @@ def test_fresh_install_without_ledger_starts_generation_one(
         '[null]\n',
         '{"entries": [{"root_path": false}]}\n',
         '{"entries": [{"root_path": 1}]}\n',
+        '{"entries": [{"root_path": "relative-root"}]}\n',
+        '{"entries": [{"root_path": "~fno-user-that-does-not-exist-1932"}]}\n',
         '{"entries": [{"canonical_root_path": []}]}\n',
         '{"entries": [{"canonical_root_path": ""}]}\n',
+        '{"entries": [{"canonical_root_path": "relative-root"}]}\n',
+        '{"entries": [{"canonical_root_path": "~fno-user-that-does-not-exist-1932"}]}\n',
     ],
 )
 def test_present_structurally_invalid_ledger_fails_closed(

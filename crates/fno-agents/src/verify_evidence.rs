@@ -27,8 +27,9 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde_json::{json, Value};
 
-// Mirrors cli/src/fno/events/schema.yaml limits.max_data_bytes.
+// Mirrors cli/src/fno/events/schema.yaml limits.
 const MAX_RECEIPT_DATA_BYTES: usize = 65_536;
+const DATA_SIZE_ENCODING: &str = "compact-json-ascii-v1";
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
@@ -561,6 +562,30 @@ fn receipt_timestamp(value: &Value) -> Option<DateTime<Utc>> {
         .map(|parsed| parsed.with_timezone(&Utc))
 }
 
+fn compact_ascii_json_len(value: &Value) -> Option<usize> {
+    if DATA_SIZE_ENCODING != "compact-json-ascii-v1" {
+        return None;
+    }
+    serde_json::to_string(value).ok().map(|encoded| {
+        encoded
+            .chars()
+            .map(|ch| {
+                if ch == '\u{7f}' {
+                    6
+                } else if !ch.is_ascii() {
+                    if u32::from(ch) <= 0xffff {
+                        6
+                    } else {
+                        12
+                    }
+                } else {
+                    1
+                }
+            })
+            .sum()
+    })
+}
+
 fn valid_receipt(event: &Value) -> bool {
     let Some(root) = event.as_object() else {
         return false;
@@ -577,8 +602,8 @@ fn valid_receipt(event: &Value) -> bool {
     let Some(data) = root.get("data") else {
         return false;
     };
-    if serde_json::to_vec(data)
-        .map(|encoded| encoded.len() > MAX_RECEIPT_DATA_BYTES)
+    if compact_ascii_json_len(data)
+        .map(|encoded_len| encoded_len > MAX_RECEIPT_DATA_BYTES)
         .unwrap_or(true)
     {
         return false;
@@ -1362,16 +1387,42 @@ mod tests {
     }
 
     #[test]
-    fn receipt_validation_counts_compact_utf8_data_bytes() {
-        let mut event = receipt_event(
-            "2026-07-26T01:00:00Z",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "full",
-            "passed",
-        );
-        event["data"]["detail"] = Value::String("é".repeat(11_000));
+    fn receipt_validation_counts_compact_ascii_json_bytes() {
+        for (detail, expected) in [
+            ("é".repeat(10_000), true),
+            ("é".repeat(11_000), false),
+            ("\u{7f}".repeat(10_000), true),
+            ("\u{7f}".repeat(11_000), false),
+        ] {
+            let mut event = receipt_event(
+                "2026-07-26T01:00:00Z",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "full",
+                "passed",
+            );
+            event["data"]["detail"] = Value::String(detail);
 
-        assert!(valid_receipt(&event));
+            assert_eq!(valid_receipt(&event), expected);
+        }
+    }
+
+    #[test]
+    fn receipt_validation_accepts_pre_epoch_utc_timestamps() {
+        for timestamp in ["0001-01-01T00:00:00Z", "1969-12-31T23:59:59.123456Z"] {
+            let mut event = receipt_event(
+                timestamp,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "full",
+                "passed",
+            );
+            event["data"]["started_at"] = json!(timestamp);
+            event["data"]["finished_at"] = json!(timestamp);
+
+            assert!(
+                valid_receipt(&event),
+                "rejected valid pre-epoch timestamp {timestamp}"
+            );
+        }
     }
 
     fn receipt_event(ts: &str, candidate_sha: &str, mode: &str, result: &str) -> Value {

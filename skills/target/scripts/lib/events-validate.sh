@@ -343,28 +343,45 @@ validate_event() {
     if [[ "$type" == "verification_receipt" ]]; then
         local receipt_ok
         receipt_ok=$(jq -r --arg src "$src" --slurpfile schema "$EVENTS_SCHEMA_CACHE" '
-            def utc_epoch:
+            def leap_year($year):
+                ($year % 4 == 0)
+                and (($year % 100 != 0) or ($year % 400 == 0));
+            def days_in_month($year; $month):
+                if $month == 2 then
+                    if leap_year($year) then 29 else 28 end
+                elif ([4, 6, 9, 11] | index($month)) != null then 30
+                else 31
+                end;
+            def utc_order_key:
                 if type != "string" then null
                 else (
-                    capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<frac>[0-9]{1,6}))?(?:Z|\\+00:00)$")?
+                    capture("^(?<year>[0-9]{4})-(?<month>[0-9]{2})-(?<day>[0-9]{2})T(?<hour>[0-9]{2}):(?<minute>[0-9]{2}):(?<second>[0-9]{2})(?:\\.(?<frac>[0-9]{1,6}))?(?:Z|\\+00:00)$")?
                     | if . == null then null
                       else (. as $parts
-                        | ($parts.whole + "Z" | fromdateiso8601?) as $epoch
-                        | if $epoch == null
-                            or ($epoch | strftime("%Y-%m-%dT%H:%M:%S")) != $parts.whole
+                        | ($parts.year | tonumber) as $year
+                        | ($parts.month | tonumber) as $month
+                        | ($parts.day | tonumber) as $day
+                        | ($parts.hour | tonumber) as $hour
+                        | ($parts.minute | tonumber) as $minute
+                        | ($parts.second | tonumber) as $second
+                        | if $year < 1
+                            or $month < 1 or $month > 12
+                            or $day < 1 or $day > days_in_month($year; $month)
+                            or $hour > 23 or $minute > 59 or $second > 59
                           then null
-                          else ($epoch
-                            + (("0." + ($parts.frac // "0")) | tonumber))
+                          else ($parts.year + $parts.month + $parts.day
+                            + $parts.hour + $parts.minute + $parts.second
+                            + ((($parts.frac // "") + "000000")[0:6]))
                           end)
                       end
                 ) end;
             .data as $d
-            | (.ts | utc_epoch) as $envelope_ts
+            | (.ts | utc_order_key) as $envelope_ts
             | ($schema[0].event_types[]
                 | select(.name == "verification_receipt")
                 | .data.properties) as $p
-            | ($d.started_at | utc_epoch) as $started
-            | ($d.finished_at | utc_epoch) as $finished
+            | ($d.started_at | utc_order_key) as $started
+            | ($d.finished_at | utc_order_key) as $finished
             | (($schema[0].event_types[] | select(.name == "verification_receipt") | .sources) as $sources
                 | ($sources | index($src)) != null)
                 and ($envelope_ts != null)
@@ -493,11 +510,16 @@ validate_event() {
     fi
 
     # Size cap: encode data and check bytes.
-    local max_bytes data_size
+    local max_bytes data_size data_size_encoding
     max_bytes=$(jq -r '.limits.max_data_bytes // 65536' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
-    # `jq -c .data` gives compact JSON; -n removes trailing newline so wc -c
-    # counts only payload bytes.
-    data_size=$(jq -cn --argjson p "$payload" '$p.data' | tr -d '\n' | wc -c | tr -d ' ')
+    data_size_encoding=$(jq -r '.limits.data_size_encoding // empty' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
+    if [[ "$data_size_encoding" != "compact-json-ascii-v1" ]]; then
+        _ev_warn "unsupported limits.data_size_encoding: ${data_size_encoding:-missing}"
+        return 1
+    fi
+    # `jq -ac .data` gives compact ASCII JSON; -n removes the trailing newline
+    # so wc -c counts only payload bytes.
+    data_size=$(jq -acn --argjson p "$payload" '$p.data' | tr -d '\n' | wc -c | tr -d ' ')
     if (( data_size > max_bytes )); then
         _ev_warn "event data exceeds max_data_bytes (got $data_size, limit $max_bytes)"
         return 1
