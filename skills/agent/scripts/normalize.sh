@@ -538,17 +538,22 @@ elif [[ -n "$NODE" ]]; then
   # command", so an `fno` too old to know this verb would otherwise read as
   # "unrepresentable" and refuse every node.
   # Streams are merged so a refusal's cause survives; the exit code says which
-  # stream it came from, and a name is adopted only after it matches the runtime
-  # contract, so a stray warning on stderr degrades rather than poisons.
+  # stream it came from. Merging means a stray warning on stderr can ride along,
+  # so a name is adopted only when the WHOLE capture matches the runtime contract
+  # - `grep -q` would not do: it matches per line, so a warning followed by a
+  # valid name would pass the guard and then be adopted in full.
   _name_out="$(FNO_AGENTS_RUNTIME=python fno agents name "$verb" "$NODE" --slug "$_node_slug" 2>&1)"
   _name_rc=$?
   agent_name=""
-  [[ "$_name_rc" -eq 0 ]] && printf '%s' "$_name_out" | grep -qE '^[A-Za-z0-9_-]{1,64}$' && agent_name="$_name_out"
+  [[ "$_name_rc" -eq 0 && "$_name_out" =~ ^[A-Za-z0-9_-]{1,64}$ ]] && agent_name="$_name_out"
   if [[ "$_name_rc" -eq 3 ]]; then
     # Exit 3 covers every refusal cause (over-budget identity, invalid
     # characters, empty identity), so relay the real message rather than
-    # asserting a length problem the operator may not actually have.
-    emit_error "${_name_out:-node $NODE cannot be represented as an agent name}"
+    # asserting a length problem the operator may not actually have. Newlines
+    # are squeezed first: emit_error writes into a one-key-per-line protocol,
+    # so an extra line in the capture would inject a bogus field.
+    _name_msg="$(printf '%s' "${_name_out:-node $NODE cannot be represented as an agent name}" | tr '\n' ' ')"
+    emit_error "$_name_msg"
   elif [[ "$_name_rc" -ne 0 || -z "$agent_name" ]]; then
     # Degraded: fno unreachable or too old for this verb (the same condition that
     # empties the slug via resolve_node_slug, so this normally yields

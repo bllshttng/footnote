@@ -2122,7 +2122,11 @@ def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypat
 def test_duplicate_dispatch_converges_on_one_dedup_name():
     """AC7: the name is the dedup token, so identical components must converge."""
     args = ("regready-pipeline-2c4f9a1b3d", "path consolidation wave 0 delegate")
-    assert adv._worker_agent_name(*args) == adv._worker_agent_name(*args)
+    # An exact expectation, not f(x) == f(x): a tautology holds for any
+    # deterministic implementation, including one that returns "".
+    assert adv._worker_agent_name(*args) == (
+        "target-regready-pipeline-2c4f9a1b3d-path-consolidation-wave-0-de"
+    )
     # A different lifecycle prefix stays distinct (G4 de-stub never collides).
     assert adv._worker_agent_name(*args) != adv._worker_agent_name(*args, prefix="reconcile")
 

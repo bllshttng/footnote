@@ -572,9 +572,11 @@ print(agent_name('spawn', 'ab-deadbeef', slug='path consolidation wave 0 delegat
   [[ -n "$SHELL_NAME" && "$SHELL_NAME" == "$PY_NAME" ]] \
     && pass "x-3218 shell bridge is byte-identical to direct Python generation" \
     || fail "x-3218 parity: shell=$SHELL_NAME python=$PY_NAME"
-  [[ "${#SHELL_NAME}" -gt 0 && "${#SHELL_NAME}" -le 64 ]] \
-    && pass "x-3218 bridged name stays within the 64-char runtime limit" \
-    || fail "x-3218 length: ${#SHELL_NAME} chars: $SHELL_NAME"
+  # An exact expectation: "<= 64" would pass on a 20-char name and prove nothing
+  # about the budget (this fixture's name is 48 chars, well clear of the limit).
+  [[ "$SHELL_NAME" == "spawn-ab-deadbeef-path-consolidation-wave-0-dele" ]] \
+    && pass "x-3218 bridged name is the exact budgeted string" \
+    || fail "x-3218 exact name: got '$SHELL_NAME'"
 
   # Ordinary names are byte-for-byte unchanged by the delegation.
   OUT="$(NODE_SLUG_RESOLVER="$STUB_SLUG" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" \

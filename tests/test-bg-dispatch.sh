@@ -203,6 +203,26 @@ chmod +x "$MOCKBIN/fno"
 export MOCK_STATE="$MOCKSTATE"
 export PATH="$MOCKBIN:$PATH"
 
+# x-3218: point the mock's `agents name` case at the REAL canonical owner for the
+# WHOLE suite. Production always has a working bridge, so leaving it unset would
+# run every scenario through the degraded fallback and certify a branch that only
+# fires on a broken or stale fno. Cases wanting the degraded, stale, or noisy
+# behaviour override NAME_BRIDGE per call.
+VENV_PY="$REPO_ROOT/cli/.venv/bin/python"
+if [[ ! -x "$VENV_PY" ]]; then
+  CANON="$(cd "$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd)"
+  [[ -n "$CANON" ]] && VENV_PY="$CANON/cli/.venv/bin/python"
+fi
+NAME_BRIDGE="$TMP/name-bridge"
+{
+  echo '#!/usr/bin/env bash'
+  echo "exec \"$VENV_PY\" -c 'import sys; sys.path.insert(0, \"$REPO_ROOT/cli/src\"); from fno.cli import app; app()' agents name \"\$@\""
+} > "$NAME_BRIDGE"
+chmod +x "$NAME_BRIDGE"
+"$NAME_BRIDGE" target x-1 >/dev/null 2>&1 \
+  || { echo "FATAL: canonical naming bridge unreachable at $VENV_PY" >&2; exit 1; }
+export NAME_BRIDGE
+
 set_status() { echo "$2" > "$MOCKSTATE/status_$1"; }
 set_claim()  { echo "$2" > "$MOCKSTATE/claim_$1"; }
 set_agent_live() { printf '{"agents":[{"name":"%s","status":"%s"}]}\n' "$1" "$2" > "$MOCKSTATE/agents_list.json"; }
@@ -813,21 +833,8 @@ echo "=============================================="
 # The launcher used to assemble target-<id>-<slug> locally with no cap on the
 # ASSEMBLED name, so a long configured node id emitted a name the runtime
 # rejects: no session, no event, a silently lost dispatch. It now delegates to
-# the canonical owner. NAME_BRIDGE points the mock at the REAL primitive.
-VENV_PY="$REPO_ROOT/cli/.venv/bin/python"
-if [[ ! -x "$VENV_PY" ]]; then
-  CANON="$(cd "$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd)"
-  [[ -n "$CANON" ]] && VENV_PY="$CANON/cli/.venv/bin/python"
-fi
-NAME_BRIDGE="$TMP/name-bridge"
-{
-  echo '#!/usr/bin/env bash'
-  echo "exec \"$VENV_PY\" -c 'import sys; sys.path.insert(0, \"$REPO_ROOT/cli/src\"); from fno.cli import app; app()' agents name \"\$@\""
-} > "$NAME_BRIDGE"
-chmod +x "$NAME_BRIDGE"
-
-if "$NAME_BRIDGE" target x-1 >/dev/null 2>&1; then
-  export NAME_BRIDGE
+# the canonical owner (wired suite-wide via NAME_BRIDGE above).
+if true; then
 
   # A node id long enough that target-<id>-<slug30> overflows 64 chars.
   reset_mock
@@ -877,6 +884,22 @@ if "$NAME_BRIDGE" target x-1 >/dev/null 2>&1; then
   [[ "$(ask_count)" == "1" ]] \
     && pass "x-3218 stale fno still dispatches its worker" \
     || fail "x-3218 stale fno lost the dispatch: $(ask_count)"
+
+  # A bridge that emits a warning ahead of the name must NOT have that warning
+  # adopted into the name. Streams are merged, so the guard must match the WHOLE
+  # capture; a per-line `grep -q` passes here and poisons the spawn.
+  reset_mock
+  set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+  NOISY_BRIDGE="$TMP/noisy-bridge"
+  printf '#!/usr/bin/env bash\necho "DeprecationWarning: something" >&2\necho "target-ab-aaaa1111"\nexit 0\n' > "$NOISY_BRIDGE"
+  chmod +x "$NOISY_BRIDGE"
+  out="$(NAME_BRIDGE="$NOISY_BRIDGE" bash "$DISPATCH" ab-aaaa1111 2>&1)"
+  echo "$out" | grep -q "^launched ab-aaaa1111 name=target-ab-aaaa1111 " \
+    && pass "x-3218 a warning on stderr degrades instead of poisoning the name" \
+    || fail "x-3218 stderr poisoning: $out"
+  echo "$out" | grep -q "name=.*DeprecationWarning" \
+    && fail "x-3218 warning text reached the agent name: $out" \
+    || pass "x-3218 the stray warning never reaches the agent name"
 
   # Ordinary names are byte-for-byte unchanged.
   reset_mock

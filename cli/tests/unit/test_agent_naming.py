@@ -55,7 +55,9 @@ def test_uniqueness_suffixes_stay_distinct_near_the_limit():
 
 def test_identical_components_converge_on_one_name():
     kwargs = dict(prefix="target", node_id="x-3218", slug="dedup token")
-    assert agent_name(**kwargs) == agent_name(**kwargs)
+    # Exact, not f(x) == f(x): the tautology holds for any deterministic
+    # implementation, including one that returns the empty string.
+    assert agent_name(**kwargs) == "target-x-3218-dedup-token"
 
 
 def test_over_budget_required_identity_fails_closed():
@@ -104,3 +106,83 @@ def test_every_result_satisfies_the_daemon_contract(kwargs):
 
     name = agent_name(**kwargs)
     assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name), name
+
+
+# ---------------------------------------------------------------------------
+# The `fno agents name` bridge contract (what the shell dispatchers branch on)
+# ---------------------------------------------------------------------------
+
+
+def _run_name(*args):
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+
+    return CliRunner().invoke(app, ["agents", "name", *args])
+
+
+def test_bridge_prints_the_name_and_exits_zero():
+    res = _run_name("target", "x-3218", "--slug", "Path Consolidation: Wave 0")
+    assert res.exit_code == 0
+    assert res.stdout.strip() == "target-x-3218-path-consolidation-wave-0"
+
+
+def test_bridge_refusal_exit_code_is_three_not_two():
+    """The load-bearing constant: 3 is the refusal, 2 is Click's usage error.
+
+    Both shell dispatchers branch on 3 alone. If this collapses to 2, an `fno`
+    too old to know this verb (Click answers "no such command" with 2) reads as
+    "node unrepresentable" and refuses every dispatch instead of degrading to
+    the fallback assembly. Asserting the exact code is the only thing that
+    catches that: the downstream receipt lines are indistinguishable, because
+    the degraded path has its own over-64 refusal that prints a similar message.
+    """
+    from fno.agents.cli import NAME_REFUSED_EXIT
+
+    assert NAME_REFUSED_EXIT == 3
+    assert NAME_REFUSED_EXIT != 2, "2 is Click's usage/unknown-command exit"
+
+    res = _run_name("target", "n-" + "z" * 70)
+    assert res.exit_code == NAME_REFUSED_EXIT
+    assert res.exit_code == 3
+
+
+def test_bridge_unknown_verb_exits_two_the_stale_install_signal():
+    """The other half of the contract: what a stale `fno` actually returns."""
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+
+    res = CliRunner().invoke(app, ["agents", "no-such-naming-verb", "x-1"])
+    assert res.exit_code == 2
+
+
+def test_bridge_refusal_message_is_one_quote_free_line():
+    """dispatch-node.sh relays this into a `reason="..."` field with a grammar."""
+    res = _run_name("target", "n-" + "z" * 70)
+    combined = (res.stdout or "") + (getattr(res, "stderr", "") or "")
+    assert "64" in combined
+    body = combined.strip()
+    assert '"' not in body, f"a double quote would break the outcome-line grammar: {body!r}"
+
+
+def test_max_len_matches_the_daemon_contract():
+    """MAX_LEN is a copy of the Rust validator's limit; pin them together.
+
+    On a `--node` spawn nothing downstream re-checks 64 (the Python path allows
+    128), so the generator is the only enforcement in production. A silent drift
+    between these two numbers reopens exactly the hole this module closed.
+    """
+    import re as _re
+    from pathlib import Path
+
+    daemon = Path(__file__).resolve().parents[3] / "crates/fno-agents/src/daemon.rs"
+    if not daemon.is_file():
+        import pytest as _pytest
+
+        _pytest.skip("rust crate not present in this checkout")
+    src = daemon.read_text()
+    fn = src[src.index("fn valid_agent_name") : src.index("fn valid_agent_name") + 400]
+    found = _re.search(r"len\(\)\s*<=\s*(\d+)", fn)
+    assert found, f"could not locate the daemon length check in: {fn[:200]!r}"
+    assert int(found.group(1)) == MAX_LEN

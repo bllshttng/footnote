@@ -303,11 +303,25 @@ def test_keepgo_name_preserves_the_full_node_id():
         agent_name("keepgo", "n-" + "z" * 70)
 
 
-def test_keepgo_spawn_refuses_an_unrepresentable_node(monkeypatch):
-    """AC5/AC6 on the retro arm: no subprocess, and the failure is not silent."""
+def test_keepgo_spawn_refuses_an_unrepresentable_node(monkeypatch, caplog):
+    """AC5/AC6 on the retro arm: no subprocess, and the failure is not silent.
+
+    The caplog assertion is the half that makes the docstring true. The caller
+    only prints "dispatch failed", so if this logged at debug the operator could
+    not tell a permanently unnameable node from a transient spawn error.
+    """
+    import logging
+
     from fno.retro import keep_going as kg
 
+    node_id = "n-" + "z" * 70
     monkeypatch.setattr(
         kg.subprocess, "run", lambda *a, **k: pytest.fail("must not spawn")
     )
-    assert kg._spawn_target_worker("n-" + "z" * 70, None) is False
+    with caplog.at_level(logging.WARNING, logger="fno.retro.keep_going"):
+        assert kg._spawn_target_worker(node_id, None) is False
+
+    assert any(
+        r.levelno >= logging.WARNING and node_id in r.getMessage()
+        for r in caplog.records
+    ), f"the refusal was not surfaced at WARNING: {[r.getMessage() for r in caplog.records]}"
