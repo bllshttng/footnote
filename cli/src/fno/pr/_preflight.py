@@ -563,7 +563,7 @@ def local_verification_required(
     non_docs = [
         path
         for path in changed.stdout.splitlines()
-        if path and not (path.startswith(("docs/", "internal/")) or path.endswith(".md"))
+        if path and not path.startswith(("docs/", "internal/"))
     ]
     return (True, "required") if non_docs else (False, "docs-only")
 

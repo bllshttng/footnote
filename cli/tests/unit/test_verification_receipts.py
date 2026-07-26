@@ -689,6 +689,36 @@ def test_local_verification_policy_preserves_explicit_exemptions(
     assert local_verification_required(cwd=str(tmp_path)) == (True, "required")
 
 
+@pytest.mark.parametrize(
+    "runtime_markdown",
+    [
+        "skills/target/SKILL.md",
+        "agents/code-reviewer.md",
+        "commands/fno-target.md",
+        "AGENTS.md",
+    ],
+)
+def test_runtime_markdown_requires_local_verification(
+    runtime_markdown: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = tmp_path / "scripts" / "ci" / "preflight.sh"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("#!/bin/sh\n")
+    runner.chmod(0o755)
+
+    def runtime_markdown_git(args, *_args, **_kwargs):
+        output = (
+            "100755 blob abc\tscripts/ci/preflight.sh\n"
+            if args[0] == "ls-tree"
+            else f"{runtime_markdown}\n"
+        )
+        return type("Result", (), {"returncode": 0, "stdout": output})()
+
+    monkeypatch.setattr("fno.pr._preflight._git", runtime_markdown_git)
+
+    assert local_verification_required(cwd=str(tmp_path)) == (True, "required")
+
+
 def test_base_configured_runner_removal_requires_verification(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
