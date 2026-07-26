@@ -68,6 +68,16 @@ cat > "$BIN/cargo" <<'EOF'
 #!/usr/bin/env bash
 # stub cargo: drop a leading +toolchain, succeed on fmt/test
 [[ "${1:-}" == +* ]] && shift
+if [[ "${1:-}" == "audit" ]]; then
+    [[ -n "${PREFLIGHT_AUDIT_LOG:-}" ]] && printf '%s\n' "$PWD" >> "$PREFLIGHT_AUDIT_LOG"
+    if [[ "${PREFLIGHT_TEST_FAIL_AUDIT:-0}" == "1" && "$PWD" == */fno-agents ]]; then
+        exit 1
+    fi
+fi
+exit 0
+EOF
+cat > "$BIN/cargo-audit" <<'EOF'
+#!/usr/bin/env bash
 exit 0
 EOF
 cat > "$BIN/rustup" <<'EOF'
@@ -93,7 +103,7 @@ esac
 if [[ -f POISON ]]; then echo "smoke: POISON step failed"; exit 1; fi
 echo "smoke: all green (stub)"; exit 0
 EOF
-chmod +x "$BIN/fno" "$BIN/cargo" "$BIN/rustup" "$BIN/uv"
+chmod +x "$BIN/fno" "$BIN/cargo" "$BIN/cargo-audit" "$BIN/rustup" "$BIN/uv"
 export PATH="$BIN:$PATH"
 
 # --- build the fixture repo -------------------------------------------------
@@ -116,6 +126,7 @@ git -C "$FIX" update-ref refs/remotes/origin/main "$GREEN_FULL"
 LOCKDIR="$FIX/.git/.preflight.lock.d"
 ATT="$FIX/.git/.preflight-attestation"
 EVENTS="$FIX/.fno/events.jsonl"
+export PREFLIGHT_AUDIT_LOG="$TMP/audit.log"
 HOST="$(hostname 2>/dev/null || echo unknown)"
 # Plant an attestation line for a given full SHA (defaulting to this host).
 write_attest() { printf 'sha=%s mode=FULL verdict=green at=%s iso=now host=%s pid=4242\n' "$1" "$(date +%s)" "${2:-$HOST}" > "$ATT"; }
@@ -169,6 +180,18 @@ out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 4 ]] && ok "exit 4 on dirty even with a valid attestation" || fail "expected 4 got $rc"
 echo "$out" | grep -q "reused attestation" && fail "dirty tree printed a reuse GREEN" || ok "dirty tree never reuses"
 ( cd "$FIX" && rm -f dirty.txt )
+
+echo "== advisory evidence: both audit scopes execute even when the first fails =="
+: > "$PREFLIGHT_AUDIT_LOG"
+out="$(PREFLIGHT_TEST_FAIL_AUDIT=1 run_pf --force 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "advisory audit failure stays non-blocking" || fail "expected green got $rc: $out"
+[[ "$(wc -l < "$PREFLIGHT_AUDIT_LOG" | tr -d ' ')" == "2" ]] \
+    && ok "both audit commands executed" || fail "audit short-circuited: $(cat "$PREFLIGHT_AUDIT_LOG")"
+jq -se --arg sha "$GREEN_FULL" \
+    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha and .data.mode == "advisory")] | last | .data.result == "failed" and .data.steps_executed == 2' \
+    "$EVENTS" >/dev/null \
+    && ok "advisory receipt records failed with two actual executions" \
+    || fail "advisory receipt execution count/result wrong"
 
 echo "== AC3-EDGE: an attestation from another host is rejected =="
 write_attest "$GREEN_FULL" foreign-box

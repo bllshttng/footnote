@@ -97,9 +97,12 @@ candidate_fno() {
     if [[ -x "$INVOKING_ROOT/cli/.venv/bin/python" ]]; then
         PYTHONPATH="$INVOKING_ROOT/cli/src" \
             "$INVOKING_ROOT/cli/.venv/bin/python" -m fno.cli "$@"
-    elif [[ -f "$INVOKING_ROOT/cli/pyproject.toml" ]] && command -v uv >/dev/null 2>&1; then
-        PYTHONPATH="$INVOKING_ROOT/cli/src" \
-            uv run --project "$INVOKING_ROOT/cli" fno-py "$@"
+    elif [[ -f "$INVOKING_ROOT/cli/pyproject.toml" ]]; then
+        if ! command -v uv >/dev/null 2>&1; then
+            echo "preflight: candidate CLI source exists but uv is unavailable" >&2
+            return 127
+        fi
+        PYTHONPATH="$INVOKING_ROOT/cli/src" uv run --project "$INVOKING_ROOT/cli" fno-py "$@"
     else
         fno "$@"
     fi
@@ -140,6 +143,12 @@ emit_verification_receipt() {
         --events "$EVENTS_PATH" \
         --state "$INVOKING_ROOT/.fno/target-state.md" \
         --data "$data" >/dev/null
+}
+
+emit_setup_unavailable() {
+    local reason="$1" setup_scope
+    setup_scope="$(_json_array "preflight-setup")" || return 1
+    emit_verification_receipt void unavailable "$setup_scope" 1 0 "$RECEIPT_STARTED_AT" "$reason"
 }
 
 # --- attestation: reuse a prior FULL run's GREEN verdict --------------------
@@ -298,11 +307,13 @@ fi
 if ! is_registered; then
     mkdir -p "$(dirname "$PREFLIGHT_WT")"
     git -C "$INVOKING_ROOT" worktree add --detach "$PREFLIGHT_WT" "$CANDIDATE_SHA" >/dev/null 2>&1 || {
+        emit_setup_unavailable "git worktree add failed" || true
         echo "preflight: git worktree add failed" >&2; exit 1; }
 fi
 
 # Sync to candidate; keep caches. Worktrees share the object DB, so no fetch.
 if ! git -C "$PREFLIGHT_WT" reset --hard "$CANDIDATE_SHA" >/dev/null 2>&1; then
+    emit_setup_unavailable "git reset failed" || true
     echo "preflight: git reset --hard failed in the preflight worktree" >&2; exit 1
 fi
 # clean -fdx but preserve warm caches + the failure record ONLY. Excluding all
@@ -310,6 +321,7 @@ fi
 # reads) that could mask a regression a fresh CI checkout would catch, so we
 # scope the exclusion to the single retry-record file.
 git -C "$PREFLIGHT_WT" clean -fdx -e target -e cli/.venv -e .fno/preflight-last-failures.txt >/dev/null 2>&1 || {
+    emit_setup_unavailable "git clean failed" || true
     echo "preflight: git clean failed in the preflight worktree" >&2; exit 1; }
 
 # --- hermetic env ------------------------------------------------------------
@@ -393,9 +405,8 @@ exit_if_void() {
         REQUIRED_COUNT=1
         REQUIRED_SCOPE="$(_json_array "$VOID_SCOPE_NAME")"
     else
-        REQUIRED_COUNT=$((${#LEG_NAMES[@]} - 1))
-        (( REQUIRED_COUNT < 0 )) && REQUIRED_COUNT=0
-        REQUIRED_SCOPE="$(_json_array "${LEG_NAMES[@]:0:$REQUIRED_COUNT}")"
+        REQUIRED_COUNT=6
+        REQUIRED_SCOPE="$(_json_array smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno squads-leak-guard:fno)"
     fi
     VOID_RESULT=unavailable
     [[ "$VOID_REASON" == worktree\ moved\ off* ]] && VOID_RESULT=stale
@@ -567,9 +578,15 @@ fi
 echo ""
 echo "preflight: === cargo audit (ADVISORY) ==="
 ADVISORY_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 1970-01-01T00:00:00Z)"
+ADVISORY_EXECUTED=0
 if run_hermetic bash -c "command -v cargo-audit >/dev/null 2>&1"; then
     a0="$SECONDS"
-    if run_hermetic bash -c "cd crates/fno-agents && cargo audit" && run_hermetic bash -c "cd crates/fno && cargo audit"; then
+    ADVISORY_FAILED=0
+    run_hermetic bash -c "cd crates/fno-agents && cargo audit" || ADVISORY_FAILED=1
+    ADVISORY_EXECUTED=$((ADVISORY_EXECUTED + 1))
+    run_hermetic bash -c "cd crates/fno && cargo audit" || ADVISORY_FAILED=1
+    ADVISORY_EXECUTED=$((ADVISORY_EXECUTED + 1))
+    if [[ $ADVISORY_FAILED -eq 0 ]]; then
         record_leg "cargo audit (ADVISORY)" pass $(( SECONDS - a0 ))
     else
         record_leg "cargo audit (ADVISORY)" "advisory-fail" $(( SECONDS - a0 ))
@@ -583,8 +600,8 @@ case "$ADVISORY_STATUS" in
     advisory-fail) ADVISORY_RESULT=failed ;;
     *) ADVISORY_RESULT=unavailable ;;
 esac
-ADVISORY_SCOPE="$(_json_array "cargo audit (fno-agents)" "cargo audit (fno)")"
-if ! emit_verification_receipt advisory "$ADVISORY_RESULT" "$ADVISORY_SCOPE" 2 "$([[ "$ADVISORY_RESULT" == unavailable ]] && echo 0 || echo 2)" "$ADVISORY_STARTED_AT" "$ADVISORY_STATUS"; then
+ADVISORY_SCOPE="$(_json_array "cargo-audit:fno-agents" "cargo-audit:fno")"
+if ! emit_verification_receipt advisory "$ADVISORY_RESULT" "$ADVISORY_SCOPE" 2 "$ADVISORY_EXECUTED" "$ADVISORY_STARTED_AT" "$ADVISORY_STATUS"; then
     echo "preflight: WARN could not append advisory verification receipt" >&2
 fi
 
@@ -602,8 +619,8 @@ elif [[ $FAIL -ne 0 ]]; then
     invalidate_attestation
 fi
 
-REQUIRED_COUNT=$((${#LEG_NAMES[@]} - 1))
-REQUIRED_SCOPE="$(_json_array "${LEG_NAMES[@]:0:$REQUIRED_COUNT}")"
+REQUIRED_COUNT=6
+REQUIRED_SCOPE="$(_json_array smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno squads-leak-guard:fno)"
 RECEIPT_MODE=full
 [[ $RETRY_FAILED -eq 1 ]] && RECEIPT_MODE=subset
 RECEIPT_RESULT=passed
