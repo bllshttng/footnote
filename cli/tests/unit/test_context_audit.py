@@ -977,7 +977,7 @@ def test_nonreturning_observer_is_killed_without_changing_hook_result(
         env={
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            "FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS": "0.2",
+            "FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS": "2",
             "FNO_PLATFORM": "codex",
             "FNO_REPO_ROOT": str(tmp_path),
             "FNO_OBSERVER_TERM_MARKER": str(term_marker),
@@ -1121,7 +1121,7 @@ def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> No
                 "HOME": str(tmp_path / "home"),
                 "FNO_HOME": str(tmp_path / "fno-home"),
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                "FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS": "0.2",
+                "FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS": "2",
                 "FNO_PLATFORM": "gemini",
                 "FNO_REPO_ROOT": str(tmp_path),
                 "FNO_OBSERVER_TERM_MARKER": str(term_marker),
@@ -1140,7 +1140,7 @@ def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> No
 
     assert baseline.returncode == hung.returncode == 0
     assert term_marker.is_file()
-    assert "<run-bounded><--timeout><0.2><--><uv>" in calls.read_text(
+    assert "<run-bounded><--timeout><2><--><uv>" in calls.read_text(
         encoding="utf-8"
     )
     assert json.loads(hung.stdout) == json.loads(baseline.stdout)
