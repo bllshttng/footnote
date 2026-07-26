@@ -86,6 +86,61 @@ jobs:
           FNO_REAL_CODEX_PLUGIN_TEST: "1"
         run: cli/.venv/bin/fno-py test -q cli/tests/integration/test_codex_plugin_real_boundary.py
 
+  # Early, explicitly partial feedback. It runs BESIDE the canonical smoke job,
+  # never in front of it: no `needs:` edge in either direction, so both start at
+  # once and this one cannot add merge latency. Only `smoke` satisfies the merge
+  # gate - a green here means the selected packet passed and nothing more.
+  changed-smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The selector diffs two explicit revisions, so both must be present;
+          # the default shallow fetch cannot resolve the base and the packet
+          # would report UNEVALUATED on every run.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Install PyYAML for bundler + marketplace lint
+        run: python3 -m pip install --upgrade pyyaml
+
+      - name: Install stable Rust toolchain
+        # A changed crate selects its Rust step family; without the toolchain
+        # that would red as a missing prerequisite rather than a real failure.
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Changed packet (CHANGED SUBSET)
+        env:
+          CHANGED_BASE: ${{ github.event.pull_request.base.sha }}
+          CHANGED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          uv run --project cli fno-py test smoke --changed \
+            --base "$CHANGED_BASE" --head "$CHANGED_HEAD"
+          rc=$?
+          set -e
+          # 20 = the selector mapped nothing. That is evidence about the
+          # selector, not a coverage claim, and the full smoke job still gates -
+          # so it is not a failure here. Every other code, including 21
+          # (UNEVALUATED: no trustworthy diff), stays non-green.
+          if [ "$rc" -eq 20 ]; then
+            echo "changed packet mapped nothing to run; the full smoke job remains the gate"
+            exit 0
+          fi
+          exit $rc
+
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 20

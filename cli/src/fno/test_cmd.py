@@ -343,6 +343,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("Registry schema parity check", ".", "bash scripts/ci/check-registry-schema-parity.sh"),
     ("smoke mode machinery self-test", ".", "bash tests/ci/test_smoke_modes.sh"),
     ("preflight orchestration self-test", ".", "bash tests/ci/test_preflight.sh"),
+    ("changed/full CI job-boundary guard", ".", "bash tests/ci/test_changed_smoke_workflow.sh"),
 )
 
 # Owned shell-harness trees: a new file here runs with zero registry edits.
