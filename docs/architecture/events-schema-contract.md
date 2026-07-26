@@ -1,3 +1,9 @@
+---
+created: 2026-06-18T11:54
+updated: 2026-07-26T10:55
+status: approved
+---
+
 # Events Schema Contract
 
 How `events.jsonl` rows are produced, validated, and consumed across footnote.
@@ -58,6 +64,8 @@ schema's `gates:` allowlist; `gate_bearing: false` is for audit-only
 phase boundaries (no gate flip happened).
 
 The 64KB cap on `data` payload is enforced by both validators.
+
+Each event type also owns its allowed producers through `event_types[].sources`, and Python and Bash reject a globally known source when that specific type does not allow it.
 
 `schemas/events-v3.json` is the JSON-Schema mirror of this envelope,
 used by the cross-language parity gate; `cli/src/fno/events/schema.yaml`
@@ -179,6 +187,36 @@ the operator's signal of substrate degradation.
   `cli/tests/integration/test_verify_child_promise.py::test_diagnostic_symmetry`
   pins the vocabulary so future refactors cannot drift the two apart.
 
+### `verification_receipt`
+
+A verification receipt is the append-only, schema-owned record of what was actually executed against one candidate commit.
+It binds a full 40-hex `candidate_sha`, the exact command argument vector, host/platform/runner environment, named scope, start and finish timestamps, evidence mode, result, producer identity, and expected versus executed step counts.
+The command, scope, payload, and string sizes are bounded before the receipt can enter a journal.
+
+Modes and results remain orthogonal and explicit:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `mode` | `full`, `subset`, `void`, `advisory` | The coverage class that was attempted. |
+| `result` | `not_configured`, `unavailable`, `pending`, `failed`, `passed`, `stale` | The observed outcome without collapsing absence or uncertainty into success. |
+
+A full passed receipt is structurally valid only when the scope is non-empty, `steps_expected` equals the number of named scope items, and every expected step executed.
+A void receipt can never be passed.
+Explicit false, absent, pending, unavailable, stale, and advisory observations are therefore not interchangeable, and unknown evidence fails closed.
+
+Python validation in `fno.events`, Bash validation in `scripts/lib/events-validate.sh`, and Rust validation in `fno-agents verify-evidence receipt` enforce the same receipt vocabulary and invariants.
+The parity corpus includes fractional UTC timestamps and bounded-command failures so wire-compatible RFC3339 values and size limits do not drift between implementations.
+
+`scripts/ci/preflight.sh` emits the receipt and remains the authority for actual local execution.
+Its full deterministic scope is `smoke`, both Rust format checks, both Rust test suites, and the squads leak guard; the two cargo-audit scopes are separate advisory evidence and each execution is counted independently.
+Setup failures emit a zero-executed void/unavailable receipt instead of manufacturing a verdict.
+The preflight attestation is only a cache carrier and never substitutes for the event receipt.
+
+Ship-gate consumers accept only the newest exact-SHA full/passed receipt from the trusted preflight producer with the canonical command, runner, host-bound producer identity, and complete deterministic scope.
+Project, global, delivery-root, and salvage journals may be concatenated in any order, so consumers parse RFC3339 timestamps, deduplicate canonical event objects, and select the newest exact candidate receipt.
+Malformed rows, unreadable journals, or errors while discovering delivery journals mark coverage incomplete and prevent satisfaction even when another journal contains a plausible pass.
+An older valid receipt for a different SHA is reported as stale rather than absent.
+
 ### `mission_started` / `wave_advanced` / `mission_complete`
 
 Megatron lifecycle events. Emitted automatically from
@@ -252,8 +290,9 @@ Both validators load the same YAML manifest and enforce the same
 shape. Run them against the parity corpus on every PR:
 
 ```bash
-pytest cli/tests/events/test_validator_parity.py -v
+fno test cli/tests/events/test_validator_parity.py
 bash tests/events/test-bash-validator.sh
+cargo test --manifest-path crates/fno-agents/Cargo.toml verify_evidence::tests --lib
 ```
 
 Either side drifting fails the parity test with a side-by-side
