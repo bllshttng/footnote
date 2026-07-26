@@ -28,6 +28,7 @@ _STOPWORDS = frozenset({
 })
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}", re.IGNORECASE)
 
 # Below this combined score a pair is dropped as unrelated.
 _MIN_SCORE = 0.15
@@ -39,6 +40,80 @@ _EPIC_BONUS = 0.25
 # real specimen duplicates score 0.568 and 0.447, the epic-sibling noise pair
 # sits at 0.234, and the floor is 0/1558 false positives on the live graph.
 _DEDUP_MIN_SCORE = 0.30
+
+
+def classify_closure(
+    *,
+    behavior: str,
+    current_main_probe: dict[str, Any] | None = None,
+    merged_history: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Classify pre-design closure without treating carriers as evidence.
+
+    A current-main observation takes precedence over history. Positive and
+    negative probe results both bind the named behavior, command, and full HEAD;
+    every incomplete or unresolved specimen remains ``unknown``.
+    """
+    behavior = behavior.strip()
+    unknown = {
+        "state": "unknown",
+        "behavior": behavior or None,
+        "proof": None,
+    }
+    if not behavior:
+        return unknown
+
+    if current_main_probe is not None:
+        status = current_main_probe.get("status")
+        command = current_main_probe.get("command")
+        head = current_main_probe.get("head")
+        observed = current_main_probe.get("observed")
+        if (
+            status not in {"passed", "failed"}
+            or not isinstance(command, str)
+            or not command.strip()
+            or not isinstance(head, str)
+            or _FULL_SHA_RE.fullmatch(head) is None
+            or not isinstance(observed, str)
+            or observed.strip() != behavior
+        ):
+            return unknown
+        return {
+            "state": "already_shipped" if status == "passed" else "live",
+            "behavior": behavior,
+            "proof": {
+                "kind": "current_main_probe",
+                "command": command.strip(),
+                "head": head.lower(),
+                "observed": observed.strip(),
+                "result": status,
+            },
+        }
+
+    if merged_history is not None:
+        commit = merged_history.get("commit")
+        observed = merged_history.get("observed")
+        if (
+            merged_history.get("status") != "merged"
+            or merged_history.get("on_current_main") is not True
+            or not isinstance(commit, str)
+            or _FULL_SHA_RE.fullmatch(commit) is None
+            or not isinstance(observed, str)
+            or observed.strip() != behavior
+        ):
+            return unknown
+        return {
+            "state": "already_shipped",
+            "behavior": behavior,
+            "proof": {
+                "kind": "merged_commit",
+                "commit": commit.lower(),
+                "observed": observed.strip(),
+                "on_current_main": True,
+            },
+        }
+
+    return unknown
 
 
 class NoMapError(Exception):

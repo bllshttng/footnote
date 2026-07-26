@@ -11,6 +11,7 @@ requires:
 # Think
 
 **One verb on a design.** `/think` routes to the right reasoning flow for the idea in front of you.
+The default flow runs the evidence-backed current-main closure probe before full design; only positive behavior evidence may return `already_shipped`, while `live` and `unknown` continue normally.
 
 When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly once:
 `codex posture: think uses this Codex conversation as the source; dispatch defaults to Claude bg; explicit non-Claude providers are refused.`
