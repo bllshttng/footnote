@@ -659,11 +659,7 @@ enum RevocationState {
 
 fn git_common_dir(git_bin: &str) -> Option<PathBuf> {
     let output = Command::new(git_bin)
-        .args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-common-dir",
-        ])
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -673,10 +669,7 @@ fn git_common_dir(git_bin: &str) -> Option<PathBuf> {
     (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
-fn preflight_revocation(
-    common_dir: Option<&Path>,
-    candidate_sha: &str,
-) -> RevocationState {
+fn preflight_revocation(common_dir: Option<&Path>, candidate_sha: &str) -> RevocationState {
     let Some(common_dir) = common_dir else {
         return RevocationState::Unavailable;
     };
@@ -693,13 +686,9 @@ fn preflight_revocation(
     }
     let marker = root.join(candidate_sha.to_ascii_lowercase());
     match std::fs::read_to_string(marker) {
-        Ok(value) if value.trim().eq_ignore_ascii_case(candidate_sha) => {
-            RevocationState::Revoked
-        }
+        Ok(value) if value.trim().eq_ignore_ascii_case(candidate_sha) => RevocationState::Revoked,
         Ok(_) => RevocationState::Unavailable,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            RevocationState::Absent
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => RevocationState::Absent,
         Err(_) => RevocationState::Unavailable,
     }
 }
@@ -711,19 +700,37 @@ struct VerificationReadLock {
 }
 
 impl VerificationReadLock {
-    fn acquire(common_dir: &Path) -> Option<Self> {
+    fn acquire(common_dir: &Path) -> Result<Self, String> {
         let path = common_dir.join(".preflight.lock.d");
-        std::fs::create_dir(&path).ok()?;
+        std::fs::create_dir(&path)
+            .map_err(|error| format!("verification lock unavailable: {error}"))?;
         let stamp = format!("pid={} kind=evidence-reader", std::process::id());
-        if std::fs::write(path.join("holder"), format!("{stamp}\n")).is_err() {
-            let _ = std::fs::remove_dir(&path);
-            return None;
+        if let Err(error) = std::fs::write(path.join("holder"), format!("{stamp}\n")) {
+            return Err(Self::cleanup_partial_acquisition(&path, &error.to_string()));
         }
-        Some(Self {
+        Ok(Self {
             path,
             stamp,
             released: false,
         })
+    }
+
+    fn cleanup_partial_acquisition(path: &Path, cause: &str) -> String {
+        let mut cleanup_errors = Vec::new();
+        if let Err(error) = std::fs::remove_file(path.join("holder")) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                cleanup_errors.push(error.to_string());
+            }
+        }
+        if let Err(error) = std::fs::remove_dir(path) {
+            cleanup_errors.push(error.to_string());
+        }
+        let mut detail = format!("verification lock unavailable: {cause}");
+        if !cleanup_errors.is_empty() {
+            detail.push_str("; partial acquisition cleanup failed: ");
+            detail.push_str(&cleanup_errors.join("; "));
+        }
+        detail
     }
 
     fn release(mut self) -> Result<(), String> {
@@ -748,20 +755,14 @@ impl Drop for VerificationReadLock {
             return;
         }
         let holder = self.path.join("holder");
-        if std::fs::read_to_string(&holder)
-            .is_ok_and(|value| value.trim() == self.stamp)
-        {
+        if std::fs::read_to_string(&holder).is_ok_and(|value| value.trim() == self.stamp) {
             let _ = std::fs::remove_file(holder);
             let _ = std::fs::remove_dir(&self.path);
         }
     }
 }
 
-fn receipt_decision(
-    candidate_sha: &str,
-    paths: &[String],
-    revocation: RevocationState,
-) -> Value {
+fn receipt_decision(candidate_sha: &str, paths: &[String], revocation: RevocationState) -> Value {
     let mut seen = std::collections::HashSet::new();
     let mut receipts: Vec<(DateTime<Utc>, String, Value)> = Vec::new();
     let mut malformed = 0u64;
@@ -829,15 +830,12 @@ fn receipt_decision(
     if !exact.is_empty() {
         let newest_generation = exact
             .iter()
-            .filter_map(|(_, _, event)| {
-                event.pointer("/data/generation").and_then(Value::as_f64)
-            })
+            .filter_map(|(_, _, event)| event.pointer("/data/generation").and_then(Value::as_f64))
             .fold(0.0_f64, f64::max);
         let newest: Vec<&&(DateTime<Utc>, String, Value)> = exact
             .iter()
             .filter(|(_, _, event)| {
-                event.pointer("/data/generation").and_then(Value::as_f64)
-                    == Some(newest_generation)
+                event.pointer("/data/generation").and_then(Value::as_f64) == Some(newest_generation)
             })
             .collect();
         if newest.len() != 1 {
@@ -1135,15 +1133,18 @@ fn run(args: &[String]) -> (i32, String, String) {
                 });
                 return (1, format!("{decision}\n"), String::new());
             };
-            let Some(guard) = VerificationReadLock::acquire(&common_dir) else {
-                let decision = json!({
-                    "satisfied": false,
-                    "mode": Value::Null,
-                    "result": "unavailable",
-                    "receipt": Value::Null,
-                    "coverage": {"complete": false, "lock_error": "preflight transition in progress"},
-                });
-                return (1, format!("{decision}\n"), String::new());
+            let guard = match VerificationReadLock::acquire(&common_dir) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    let decision = json!({
+                        "satisfied": false,
+                        "mode": Value::Null,
+                        "result": "unavailable",
+                        "receipt": Value::Null,
+                        "coverage": {"complete": false, "lock_error": error},
+                    });
+                    return (1, format!("{decision}\n"), String::new());
+                }
             };
             let revocation = preflight_revocation(Some(&common_dir), &rest[0]);
             let decision = receipt_decision(&rest[0], &rest[1..], revocation);
@@ -1318,8 +1319,7 @@ mod tests {
         let second = dir.path().join("delivery.jsonl");
         let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let failed = receipt_event("2026-07-26T01:00:00Z", sha, "full", "failed");
-        let mut passed =
-            receipt_event("2026-07-26T03:00:00+00:00", sha, "full", "passed");
+        let mut passed = receipt_event("2026-07-26T03:00:00+00:00", sha, "full", "passed");
         passed["data"]["generation"] = json!(2);
         std::fs::write(&first, format!("{passed}\n{failed}\n")).unwrap();
         std::fs::write(&second, format!("{failed}\n{passed}\n")).unwrap();
@@ -1488,6 +1488,18 @@ mod tests {
         let error = guard.release().unwrap_err();
 
         assert!(error.contains("verification lock release failed"));
+    }
+
+    #[test]
+    fn reader_partial_acquisition_cleanup_failure_is_reported() {
+        let common = tempfile::tempdir().unwrap();
+        let lock = common.path().join(".preflight.lock.d");
+        std::fs::create_dir(&lock).unwrap();
+        std::fs::write(lock.join("unexpected"), "x").unwrap();
+
+        let error = VerificationReadLock::cleanup_partial_acquisition(&lock, "holder write failed");
+
+        assert!(error.contains("partial acquisition cleanup failed"));
     }
 
     #[test]

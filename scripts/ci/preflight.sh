@@ -110,7 +110,7 @@ candidate_fno() {
 
 emit_verification_receipt() {
     local mode="$1" result="$2" scope_json="$3" expected="$4" executed="$5" started_at="$6" detail="$7"
-    local command_json finished_at environment_json producer_json data event generation
+    local command_json finished_at environment_json producer_json data event generation global_events
     command_json="$(_json_array "${RECEIPT_COMMAND[@]}")" || return 1
     generation="$(next_receipt_generation)" || return 1
     finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || return 1
@@ -149,8 +149,14 @@ emit_verification_receipt() {
         source "$INVOKING_ROOT/scripts/lib/events-validate.sh"
         validate_event verification_receipt "$event"
     ) || return 1
+    global_events="$(candidate_fno pr global-receipt-events-path)" || return 1
+    [[ -n "$global_events" ]] || return 1
+    mkdir -p "$(dirname "$global_events")" || return 1
+    printf '%s\n' "$event" >> "$global_events" || return 1
     mkdir -p "$(dirname "$EVENTS_PATH")" || return 1
-    printf '%s\n' "$event" >> "$EVENTS_PATH"
+    if [[ "$global_events" != "$EVENTS_PATH" ]]; then
+        printf '%s\n' "$event" >> "$EVENTS_PATH" || return 1
+    fi
 }
 
 emit_setup_unavailable() {

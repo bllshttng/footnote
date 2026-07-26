@@ -206,6 +206,7 @@ Python validation in `fno.events`, Bash validation in `scripts/lib/events-valida
 The parity corpus includes fractional UTC timestamps and bounded-command failures so wire-compatible RFC3339 values and size limits do not drift between implementations.
 
 `scripts/ci/preflight.sh` remains the authority for actual local execution and constructs, schema-validates, and appends each receipt inside the process that holds the shared preflight lock for the exact candidate SHA.
+It appends the canonical event to the global journal first and mirrors the same event to the delivery-root journal, so unregistered worktrees and independent local clones share a durable generation floor.
 No CLI accepts caller-authored trusted receipt fields, and the generic event emitter refuses `verification_receipt`.
 Its required deterministic scope is `smoke`, both Rust format checks, and both Rust test suites; the squads leak guard joins the full scope only when squads exist to measure, while a not-configured guard is recorded separately as advisory evidence.
 The two cargo-audit scopes are also separate advisory evidence, and every receipt counts only steps that actually executed.

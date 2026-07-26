@@ -193,6 +193,14 @@ def next_receipt_generation(
     typer.echo(str(generation))
 
 
+@pr_app.command("global-receipt-events-path", hidden=True)
+def global_receipt_events_path() -> None:
+    """Print the durable cross-checkout verification receipt journal."""
+    from fno.paths import state_dir
+
+    typer.echo(str(state_dir() / "events.jsonl"))
+
+
 @pr_app.command(
     "sync-canonical",
     help=(

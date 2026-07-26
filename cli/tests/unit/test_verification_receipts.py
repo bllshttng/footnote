@@ -286,6 +286,48 @@ def test_next_generation_fails_closed_on_uncertain_journal(
         next_verification_generation(cwd=str(tmp_path), candidate_sha=SHA)
 
 
+def test_unregistered_checkouts_share_the_global_generation_floor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    first = tmp_path / "clone-a"
+    second = tmp_path / "clone-b"
+    first.mkdir()
+    second.mkdir()
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    write(global_dir / "events.jsonl", receipt(generation=4))
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text('{"entries":[]}\n')
+    monkeypatch.setattr("fno.paths.state_dir", lambda: global_dir)
+    monkeypatch.setattr("fno.paths.ledger_json", lambda: ledger)
+
+    assert next_verification_generation(cwd=str(second), candidate_sha=SHA) == 5
+
+
+def test_next_generation_reports_non_object_receipt_data(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    malformed = tmp_path / "events.jsonl"
+    malformed.write_text(
+        json.dumps(
+            {
+                "ts": "2026-07-26T01:00:00Z",
+                "type": "verification_receipt",
+                "source": "target",
+                "data": [],
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(
+        "fno.pr._preflight.verification_event_paths",
+        lambda **_kwargs: ([malformed], []),
+    )
+
+    with pytest.raises(ValueError, match="data must be an object"):
+        next_verification_generation(cwd=str(tmp_path), candidate_sha=SHA)
+
+
 def test_future_dated_receipt_fails_closed(tmp_path: Path) -> None:
     journal = tmp_path / "events.jsonl"
     write(journal, receipt(ts="2099-01-01T00:00:00Z"))
@@ -437,6 +479,32 @@ def test_reader_release_failure_invalidates_verdict(
     assert decision["satisfied"] is False
     assert decision["result"] == "unavailable"
     assert "release failed" in decision["coverage"]["lock_error"]
+
+
+def test_reader_partial_acquisition_cleanup_failure_is_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    common = tmp_path / ".git"
+    common.mkdir()
+    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
+    original_write = Path.write_text
+
+    def fail_holder_write(path: Path, *args, **kwargs):
+        if path.name == "holder":
+            raise OSError("simulated holder write failure")
+        return original_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_holder_write)
+    monkeypatch.setattr(
+        Path,
+        "rmdir",
+        lambda _path: (_ for _ in ()).throw(OSError("simulated cleanup failure")),
+    )
+
+    decision = check_verification_evidence(cwd=str(tmp_path), candidate_sha=SHA)
+
+    assert decision["result"] == "unavailable"
+    assert "partial acquisition cleanup failed" in decision["coverage"]["lock_error"]
 
 
 def test_revocation_markers_are_candidate_scoped(

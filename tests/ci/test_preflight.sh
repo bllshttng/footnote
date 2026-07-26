@@ -31,6 +31,8 @@ fail() { echo "  FAIL: $1"; FAILS=$((FAILS+1)); }
 # --- build stub tool dir ----------------------------------------------------
 BIN="$TMP/bin"; mkdir -p "$BIN"
 WT_BASE="$TMP/wtbase"; mkdir -p "$WT_BASE"
+GLOBAL_EVENTS="$TMP/global-events.jsonl"
+: > "$GLOBAL_EVENTS"
 
 cat > "$BIN/fno" <<EOF
 #!/usr/bin/env bash
@@ -48,13 +50,20 @@ if [[ "\${1:-} \${2:-}" == "pr next-receipt-generation" ]]; then
         esac
     done
     events="\$(git rev-parse --show-toplevel)/.fno/events.jsonl"
-    if [[ -s "\$events" ]]; then
+    files=()
+    [[ -s "\$events" ]] && files+=("\$events")
+    [[ -s "$GLOBAL_EVENTS" ]] && files+=("$GLOBAL_EVENTS")
+    if [[ \${#files[@]} -gt 0 ]]; then
         jq -sr --arg sha "\$sha" \
             '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha) | .data.generation] | (max // 0) + 1' \
-            "\$events"
+            "\${files[@]}"
     else
         echo 1
     fi
+    exit 0
+fi
+if [[ "\${1:-} \${2:-}" == "pr global-receipt-events-path" ]]; then
+    echo "$GLOBAL_EVENTS"
     exit 0
 fi
 if [[ "\${1:-} \${2:-}" == "pr evidence-check" ]]; then
@@ -151,6 +160,11 @@ jq -se --arg sha "$GREEN_FULL" \
     "$EVENTS" >/dev/null \
     && ok "full green emits exact-SHA full/passed evidence" \
     || fail "missing exact-SHA full/passed event receipt"
+jq -se --arg sha "$GREEN_FULL" \
+    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.result == "passed"' \
+    "$GLOBAL_EVENTS" >/dev/null \
+    && ok "full green mirrors evidence to the global journal" \
+    || fail "missing global exact-SHA receipt"
 
 echo "== attestation: a FULL GREEN records one (sha + host pinned) =="
 [[ -f "$ATT" ]] && ok "attestation written on full green" || fail "no attestation file after green"

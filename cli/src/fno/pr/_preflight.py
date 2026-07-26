@@ -348,7 +348,10 @@ def next_verification_generation(*, cwd: str, candidate_sha: str) -> int:
                 raise ValueError(f"receipt journal malformed: {path}: {exc}") from exc
             if not isinstance(event, dict) or event.get("type") != "verification_receipt":
                 continue
-            raw_candidate = event.get("data", {}).get("candidate_sha")
+            data = event.get("data")
+            if not isinstance(data, dict):
+                raise ValueError(f"receipt journal malformed: {path}: data must be an object")
+            raw_candidate = data.get("candidate_sha")
             if not isinstance(raw_candidate, str):
                 raise ValueError(f"receipt journal malformed: {path}: candidate SHA missing")
             if raw_candidate.lower() != candidate_sha.lower():
@@ -471,12 +474,19 @@ def _verification_read_lock(repo: str):
         yield "preflight transition in progress"
         return
     except OSError as exc:
+        cleanup_errors: list[str] = []
         try:
             (lock / "holder").unlink(missing_ok=True)
+        except OSError as cleanup_exc:
+            cleanup_errors.append(str(cleanup_exc))
+        try:
             lock.rmdir()
-        except OSError:
-            pass
-        yield f"verification lock unavailable: {exc}"
+        except OSError as cleanup_exc:
+            cleanup_errors.append(str(cleanup_exc))
+        detail = f"verification lock unavailable: {exc}"
+        if cleanup_errors:
+            detail += f"; partial acquisition cleanup failed: {'; '.join(cleanup_errors)}"
+        yield detail
         return
     try:
         yield None
