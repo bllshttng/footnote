@@ -759,12 +759,11 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
     unmapped: list[str] = []
     seen: set[tuple[str, str]] = set()
 
-    def add(rule: str, path: str, kind: str, target: str) -> bool:
+    def add(rule: str, path: str, kind: str, target: str) -> None:
         if (kind, target) in seen:
-            return True
+            return
         seen.add((kind, target))
         selections.append({"rule": rule, "path": path, "kind": kind, "target": target})
-        return True
 
     for rel in paths:
         base = os.path.basename(rel)
@@ -902,7 +901,14 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     e0 = time.monotonic()
     results, rc = _execute_steps(root, env, steps, keep_going=opts["keep_going"])
     exec_s = time.monotonic() - e0
-    signal = sum(d for _, _, d in results)
+    # Time to first signal: elapsed up to and including the first failing step,
+    # or the whole packet when it is green. Summing every step would overstate
+    # it under --keep-going, where execution continues past the first failure.
+    signal = 0.0
+    for _, status, dur in results:
+        signal += dur
+        if status == "fail":
+            break
 
     print("", flush=True)
     print(f"smoke: summary (changed-subset, {len(results)} steps)", flush=True)
