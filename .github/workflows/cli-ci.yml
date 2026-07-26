@@ -84,7 +84,7 @@ jobs:
       - name: Real Codex 0.145 plugin boundary
         env:
           FNO_REAL_CODEX_PLUGIN_TEST: "1"
-        run: cli/.venv/bin/fno test -q cli/tests/integration/test_codex_plugin_real_boundary.py
+        run: cli/.venv/bin/fno-py test -q cli/tests/integration/test_codex_plugin_real_boundary.py
 
   smoke:
     runs-on: ubuntu-latest
