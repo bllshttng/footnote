@@ -332,14 +332,10 @@ cleanup() {
     [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"
 }
 trap cleanup EXIT
-# Signals must EXIT, not just clean up. A bare `trap cleanup INT TERM` released
-# the lock and deleted the hermetic HOME, then let the script carry on through
-# the remaining suites unlocked - so a second preflight could enter the shared
-# worktree while this one was still reporting on it. Exit only, and let the EXIT
-# trap do the single cleanup: calling cleanup here too would run it twice, and
-# the second pass (our lockdir already gone) could delete a successor's lock.
-trap 'exit 130' INT TERM
-
+# Defer cancellation only across mkdir + holder stamping. Exiting between those
+# commands would leave an acquired lock without a complete cleanup token.
+LOCK_SIGNAL=0
+trap 'LOCK_SIGNAL=1' INT TERM
 acquire_lock
 LOCAL_LOCK_ACQUIRED=1
 mkdir -p "$(dirname "$GLOBAL_LOCKDIR")" || {
@@ -350,6 +346,10 @@ LOCKDIR="$GLOBAL_LOCKDIR"
 acquire_lock
 GLOBAL_LOCK_ACQUIRED=1
 LOCKDIR="$LOCAL_LOCKDIR"
+trap 'exit 130' INT TERM
+if [[ "$LOCK_SIGNAL" -eq 1 ]]; then
+    exit 130
+fi
 
 PENDING_SCOPE="$(_json_array "preflight-execution")"
 if ! emit_verification_receipt void pending "$PENDING_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "preflight execution started"; then

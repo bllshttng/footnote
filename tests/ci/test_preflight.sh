@@ -94,6 +94,17 @@ cat > "$BIN/rustup" <<'EOF'
 [[ "$*" == "toolchain list"* ]] && { echo "1.94.1-x86_64-apple-darwin (default)"; exit 0; }
 exit 0
 EOF
+cat > "$BIN/mkdir" <<'EOF'
+#!/usr/bin/env bash
+/bin/mkdir "$@"
+rc=$?
+last="${!#}"
+if [[ $rc -eq 0 && "${PREFLIGHT_TEST_SIGNAL_LOCK:-0}" == "1" \
+      && "$last" == */.preflight-receipt-locks/*.d ]]; then
+    kill -TERM "$PPID"
+fi
+exit "$rc"
+EOF
 # preflight calls `uv run --project cli fno-py test smoke [flags]`; stub uv to
 # behave like the retired smoke.sh stub (red iff POISON is checked out).
 # The changed packet is a distinct invocation (--changed) and must be stubbable
@@ -112,7 +123,7 @@ esac
 if [[ -f POISON ]]; then echo "smoke: POISON step failed"; exit 1; fi
 echo "smoke: all green (stub)"; exit 0
 EOF
-chmod +x "$BIN/fno" "$BIN/cargo" "$BIN/cargo-audit" "$BIN/rustup" "$BIN/uv"
+chmod +x "$BIN/fno" "$BIN/cargo" "$BIN/cargo-audit" "$BIN/rustup" "$BIN/mkdir" "$BIN/uv"
 export PATH="$BIN:$PATH"
 
 # --- build the fixture repo -------------------------------------------------
@@ -370,6 +381,17 @@ out="$(run_pf --force 2>&1)"; rc=$?
 [[ $rc -eq 3 ]] && ok "unstamped canonical lock refuses the loser" || fail "expected 3 got $rc: $out"
 [[ -d "$GLOBAL_RECEIPT_LOCKDIR" ]] && ok "loser cleanup preserves the winner's lock" || fail "loser deleted the winner's lock"
 rm -rf "$GLOBAL_RECEIPT_LOCKDIR"
+
+echo "== canonical lock signal: cancellation after mkdir cleans both owned locks =="
+before="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+export PREFLIGHT_TEST_SIGNAL_LOCK=1
+out="$(run_pf --force 2>&1)"; rc=$?
+unset PREFLIGHT_TEST_SIGNAL_LOCK
+after="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+[[ $rc -eq 130 ]] && ok "deferred signal exits 130 after ownership is complete" || fail "expected 130 got $rc: $out"
+[[ ! -d "$LOCKDIR" && ! -d "$GLOBAL_RECEIPT_LOCKDIR" ]] \
+    && ok "signal cleanup releases both owned locks" || fail "signal left a lock behind"
+[[ "$after" == "$before" ]] && ok "cancelled run appended no pending receipt" || fail "receipt count changed: $before -> $after"
 
 echo "== AC1-FR: a stale lock (dead holder) is stolen, run proceeds =="
 mkdir -p "$LOCKDIR"; printf 'pid=%s started=OLD host=x sha=deadbee\n' 999999 > "$LOCKDIR/holder"  # dead pid
