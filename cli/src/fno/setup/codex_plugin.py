@@ -1092,6 +1092,7 @@ def converge(
             and snapshot.rollback_receipt is None
         )
         if no_op:
+            assert selected is not None  # no_op implies channel_stable -> selected_ok
             # ponytail: short-circuit before any preflight. no_op already proves
             # the live one-identity state matches the marker, so the
             # release-version-check and isolated candidate validation would only
