@@ -1716,8 +1716,94 @@ def doctor_command(
         "--codex-hooks",
         help="Inspect Codex user-level SessionStart hook layers and trust (advisory).",
     ),
+    context_audit: bool = typer.Option(
+        False,
+        "--context-audit",
+        hidden=True,
+        help="Emit the read-only Footnote context census/compiler report.",
+    ),
+    context_harness: str = typer.Option(
+        "all",
+        "--context-harness",
+        hidden=True,
+        help="Context audit harness: claude, codex, gemini, or all.",
+    ),
+    context_entry: str = typer.Option(
+        "all",
+        "--context-entry",
+        hidden=True,
+        help="Context audit entry state: startup, resume, clear, post_compact, or all.",
+    ),
+    context_budget: int = typer.Option(
+        32_768,
+        "--context-budget",
+        hidden=True,
+        help="Maximum compiled context packet bytes.",
+    ),
+    context_host: Optional[Path] = typer.Option(
+        None,
+        "--context-host",
+        hidden=True,
+        help="Host project root whose Footnote-owned native directives are audited.",
+    ),
 ) -> None:
     """Report skew between the installed fno and its source checkout."""
+    if context_audit:
+        if fix or cost_check or codex_hooks:
+            raise typer.BadParameter(
+                "--context-audit cannot be combined with --fix, --cost-check, or --codex-hooks"
+            )
+        from fno.context_audit import (
+            SUPPORTED_ENTRY_STATES,
+            SUPPORTED_HARNESSES,
+            build_context_report,
+        )
+
+        harnesses = (
+            SUPPORTED_HARNESSES
+            if context_harness == "all"
+            else (context_harness,)
+        )
+        entry_states = (
+            SUPPORTED_ENTRY_STATES if context_entry == "all" else (context_entry,)
+        )
+        if context_harness != "all" and context_harness not in SUPPORTED_HARNESSES:
+            raise typer.BadParameter(
+                "--context-harness must be claude, codex, gemini, or all"
+            )
+        if context_entry != "all" and context_entry not in SUPPORTED_ENTRY_STATES:
+            raise typer.BadParameter(
+                "--context-entry must be startup, resume, clear, post_compact, or all"
+            )
+        if context_budget < 1:
+            raise typer.BadParameter("--context-budget must be at least 1")
+
+        plugin_root = source or Path.cwd()
+        host_root = context_host or plugin_root
+        report = build_context_report(
+            host_root,
+            plugin_root=plugin_root,
+            harnesses=harnesses,
+            entry_states=entry_states,
+            packet_budget_bytes=context_budget,
+            node_count=1,
+        )
+        if json_out:
+            typer.echo(json.dumps(report))
+        else:
+            typer.echo("fno doctor --context-audit")
+            for cell in report["cells"]:
+                compiled = cell["compiled"]
+                packet = compiled["packet"]
+                typer.echo(
+                    f"  {cell['harness']}/{cell['entry_state']}: "
+                    f"{packet['bytes']}/{packet['budget_bytes']} bytes; "
+                    f"{len(compiled['duplicates'])} duplicate group(s); "
+                    f"{len(compiled['conflicts'])} conflict(s); "
+                    f"{len(compiled['omitted_sources'])} omitted"
+                )
+        raise typer.Exit(0)
+
     if codex_hooks:
         if fix or source is not None or cost_check:
             raise typer.BadParameter("--codex-hooks may only be combined with --json")

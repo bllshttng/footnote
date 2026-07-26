@@ -46,11 +46,14 @@ def test_bundle_lint_help_renders():
     assert "marketplace" in result.stdout.lower()
 
 
-def test_bundle_no_subcommand_runs_bundler_against_committed_tree():
+def test_bundle_no_subcommand_runs_bundler_without_mutating_committed_tree(tmp_path):
     """The no-subcommand default invokes scripts/generate-skill-bundles.sh.
-    Run against the real repo tree (idempotent; safe to call from CI)."""
+    Generate into an isolated target so this test cannot self-heal stale
+    committed bundles before the freshness test runs."""
     env = dict(os.environ)
     env["FNO_REPO_ROOT"] = str(REPO_ROOT)
+    bundle_root = tmp_path / "bundle-root"
+    env["REPO_ROOT"] = str(bundle_root)
     # Use subprocess directly so we exercise the real `fno bundle` entry
     # point (CliRunner doesn't enter the subprocess that the wrapper spawns).
     result = subprocess.run(
@@ -63,6 +66,9 @@ def test_bundle_no_subcommand_runs_bundler_against_committed_tree():
     )
     assert result.returncode == 0, result.stderr
     assert "bundled:" in result.stdout
+    assert (
+        bundle_root / "skills/target/cli/src/fno/events/schema.yaml"
+    ).read_bytes() == (REPO_ROOT / "cli/src/fno/events/schema.yaml").read_bytes()
 
 
 def test_bundle_check_passes_for_fresh_tree():

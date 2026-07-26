@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# PostCompact hook: re-inject plan goal + current phase into context
-# Fires after context compaction completes. Outputs additionalContext
-# so the model doesn't lose its bearings after compaction.
+# PostCompact hook: re-inject plan goal + current phase into context.
+# The output envelope is harness-specific because Codex rejects additionalContext.
 set -uo pipefail
 
 STATE_FILE=".fno/target-state.md"
@@ -15,10 +14,24 @@ FNO_DIR=".fno"
 GUARD_LIB="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/lib/target-guard.sh"
 HANDOFF_NUDGE=""
 emit_context() {
+    local platform="${FNO_PLATFORM:-}"
+    if [[ -z "$platform" && -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
+        platform="claude"
+    fi
     python3 -c "
 import json, sys
-print(json.dumps({'additionalContext': sys.argv[1]}))
-" "$1" 2>/dev/null
+platform, context = sys.argv[1:3]
+if platform == 'claude':
+    payload = {
+        'hookSpecificOutput': {
+            'hookEventName': 'PostCompact',
+            'additionalContext': context,
+        }
+    }
+else:
+    payload = {'systemMessage': context}
+print(json.dumps(payload))
+" "$platform" "$1" 2>/dev/null
 }
 
 # Compute the armed-handoff nudge (if any) and apply the reinject gate in one
@@ -79,7 +92,7 @@ for live phase + completion state (git HEAD, PR/CI, review)."
 
 ${HANDOFF_NUDGE}"
 
-# Output as additionalContext JSON
+# Emit only fields accepted by the active harness's PostCompact schema.
 emit_context "$CONTEXT"
 
 exit 0

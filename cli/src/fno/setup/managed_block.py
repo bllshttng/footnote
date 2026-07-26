@@ -14,8 +14,8 @@ Three hard rules, all enforced here:
 - **Only its own fences.** ``stamp_block`` splices the region between the markers
   and preserves every byte outside them; a re-stamp replaces only the fenced
   content.
-- **Refuse on malformed.** Exactly one marker present -> there is no valid region
-  to replace, so it touches nothing and says so.
+- **Refuse on malformed.** Anything other than one ordered marker pair has no
+  valid region to replace, so it touches nothing and says so.
 
 ``fno doctor`` reads ``stamped_version`` to flag a block older than
 ``BLOCK_VERSION`` (advisory).
@@ -86,14 +86,29 @@ def stamped_version(text: str) -> Optional[int]:
 
 
 def marker_state(text: str) -> str:
-    """`none` (no markers), `both` (a well-formed pair), or `malformed` (one)."""
-    has_begin = _BEGIN_PREFIX in text
-    has_end = _END_MARKER in text
-    if has_begin and has_end:
+    """`none`, `both` for one ordered pair, or `malformed`."""
+    begin_count = text.count(_BEGIN_PREFIX)
+    end_count = text.count(_END_MARKER)
+    if begin_count == 0 and end_count == 0:
+        return "none"
+    if (
+        begin_count == 1
+        and end_count == 1
+        and text.find(_BEGIN_PREFIX) < text.find(_END_MARKER)
+    ):
         return "both"
-    if has_begin or has_end:
-        return "malformed"
-    return "none"
+    return "malformed"
+
+
+def extract_block(text: str) -> Optional[str]:
+    """Return Footnote's exact fenced directive block, if it is well formed."""
+    if marker_state(text) != "both":
+        return None
+    begin = text.find(_BEGIN_PREFIX)
+    end = text.find(_END_MARKER, begin)
+    if begin == -1 or end == -1:
+        return None
+    return text[begin : end + len(_END_MARKER)]
 
 
 @dataclass
@@ -119,7 +134,7 @@ def stamp_block(path: Path, *, version: int = BLOCK_VERSION) -> StampResult:
 
     Missing file -> created. No markers -> appended. A well-formed pair ->
     replaced in place (or ``current`` if already byte-identical). Exactly one
-    marker -> ``refused-malformed``, touching nothing.
+    malformed marker set -> ``refused-malformed``, touching nothing.
     """
     path = Path(path)
     block = render_block(version)

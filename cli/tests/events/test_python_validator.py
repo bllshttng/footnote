@@ -9,12 +9,15 @@ Covers:
 """
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from fno.events import (
     SchemaUnavailableError,
     ValidationError,
     child_promise,
+    context_snapshot,
     mission_complete,
     mission_started,
     phase_transition,
@@ -198,6 +201,95 @@ def test_child_promise_builder() -> None:
     assert ev["type"] == "child_promise"
     assert ev["source"] == "target"
     assert ev["data"] == {"session_id": "s", "nonce": "n"}
+
+
+def test_context_snapshot_builder_is_session_bound_and_canonical() -> None:
+    source_hash = "b" * 64
+    ev = context_snapshot(
+        session_id="harness-session",
+        harness="codex",
+        entry_state="startup",
+        context_bytes=123,
+        estimated_tokens=31,
+        context_hash=hashlib.sha256(source_hash.encode()).hexdigest(),
+        source_hashes=[source_hash],
+        source_manifest=[
+            {
+                "source_id": "using-fno",
+                "status": "observed",
+                "bytes": 123,
+                "content_hash": source_hash,
+            }
+        ],
+        measurement_complete=True,
+    )
+
+    assert ev["type"] == "context_snapshot"
+    assert ev["source"] == "hook"
+    assert ev["data"]["session_id"] == "harness-session"
+    assert ev["data"]["measurement_complete"] is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda event: event.update(source="target"), "source must be hook or test"),
+        (
+            lambda event: event["data"].update(session_id=" "),
+            "session_id cannot be empty",
+        ),
+        (
+            lambda event: event["data"].update(harness="bogus"),
+            "unknown context_snapshot harness",
+        ),
+        (
+            lambda event: event["data"].update(entry_state="bogus"),
+            "unknown context_snapshot entry_state",
+        ),
+        (
+            lambda event: event["data"].update(measurement_complete="false"),
+            "measurement_complete must be boolean",
+        ),
+        (
+            lambda event: event["data"].update(context_bytes=1),
+            "context_bytes disagrees",
+        ),
+        (
+            lambda event: event["data"].update(
+                measurement_complete=True,
+                measurement_errors=["missing source"],
+            ),
+            "completeness disagrees",
+        ),
+    ],
+)
+def test_context_snapshot_validator_rejects_inconsistent_observations(
+    mutation,
+    message: str,
+) -> None:
+    source_hash = "c" * 64
+    event = context_snapshot(
+        session_id="harness-session",
+        harness="codex",
+        entry_state="startup",
+        context_bytes=5,
+        estimated_tokens=2,
+        context_hash=hashlib.sha256(source_hash.encode()).hexdigest(),
+        source_hashes=[source_hash],
+        source_manifest=[
+            {
+                "source_id": "fixture",
+                "status": "observed",
+                "bytes": 5,
+                "content_hash": source_hash,
+            }
+        ],
+        measurement_complete=True,
+    )
+    mutation(event)
+
+    with pytest.raises(ValidationError, match=message):
+        validate(event)
 
 
 def test_mission_started_builder() -> None:

@@ -24,10 +24,13 @@ alongside them.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib as _hashlib
 import json as _json
+import math as _math
 import re as _re
+import sys as _sys
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 import yaml as _yaml
 
@@ -41,6 +44,14 @@ class ValidationError(Exception):
 
 class SchemaUnavailableError(Exception):
     """Raised when the schema manifest cannot be loaded at module import."""
+
+
+def _is_nonnegative_integral_number(value: Any) -> TypeGuard[int | float]:
+    if type(value) is int:
+        return 0 <= value <= _sys.float_info.max
+    if type(value) is float:
+        return _math.isfinite(value) and value >= 0 and value.is_integer()
+    return False
 
 
 def _resolve_manifest_path() -> Path:
@@ -159,7 +170,10 @@ def validate(event: dict[str, Any]) -> None:
         raise ValidationError(f"unknown event type: {type_name}")
 
     type_spec = EVENT_TYPES[type_name]
-    data = event.get("data") or {}
+    raw_data = event.get("data")
+    if raw_data is not None and not isinstance(raw_data, dict):
+        raise ValidationError("event data must be an object")
+    data = raw_data or {}
 
     for field in type_spec.get("data", {}).get("required", []):
         if field == "gate" and not data.get("gate_bearing", False):
@@ -211,6 +225,74 @@ def validate(event: dict[str, Any]) -> None:
         raise ValidationError(
             "phase_transition with gate_bearing=true must include data.gate"
         )
+
+    if type_name == "context_snapshot":
+        if source not in {"hook", "test"}:
+            raise ValidationError(
+                f"context_snapshot source must be hook or test (got {source!r})"
+            )
+        session_id = data.get("session_id")
+        harness = data.get("harness")
+        entry_state = data.get("entry_state")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValidationError("context_snapshot session_id cannot be empty")
+        if not isinstance(harness, str) or harness not in {"claude", "codex", "gemini"}:
+            raise ValidationError(f"unknown context_snapshot harness: {harness!r}")
+        if not isinstance(entry_state, str) or entry_state not in {
+            "startup",
+            "resume",
+            "clear",
+            "post_compact",
+        }:
+            raise ValidationError(f"unknown context_snapshot entry_state: {entry_state!r}")
+        manifest = data.get("source_manifest")
+        errors = data.get("measurement_errors", [])
+        if not isinstance(manifest, list) or not all(
+            isinstance(item, dict) for item in manifest
+        ):
+            raise ValidationError("context_snapshot source_manifest must contain objects")
+        if not isinstance(errors, list) or not all(isinstance(item, str) for item in errors):
+            raise ValidationError("context_snapshot measurement_errors must contain strings")
+        observed = [item for item in manifest if item.get("status") == "observed"]
+        if any(
+            not _is_nonnegative_integral_number(item.get("bytes"))
+            or not isinstance(item.get("content_hash"), str)
+            for item in observed
+        ):
+            raise ValidationError(
+                "context_snapshot observed sources require nonnegative bytes and content_hash"
+            )
+        expected_bytes = sum(int(item["bytes"]) for item in observed)
+        expected_hashes = [item["content_hash"] for item in observed]
+        expected_context_hash = (
+            _hashlib.sha256("\n".join(expected_hashes).encode()).hexdigest()
+            if expected_hashes
+            else None
+        )
+        context_bytes = data.get("context_bytes")
+        estimated_tokens = data.get("estimated_tokens")
+        if (
+            not _is_nonnegative_integral_number(context_bytes)
+            or int(context_bytes) != expected_bytes
+        ):
+            raise ValidationError("context_snapshot context_bytes disagrees with source_manifest")
+        if (
+            not _is_nonnegative_integral_number(estimated_tokens)
+            or int(estimated_tokens) != (expected_bytes + 3) // 4
+        ):
+            raise ValidationError("context_snapshot estimated_tokens disagrees with context_bytes")
+        if data.get("source_hashes") != expected_hashes:
+            raise ValidationError("context_snapshot source_hashes disagree with source_manifest")
+        if data.get("context_hash") != expected_context_hash:
+            raise ValidationError("context_snapshot context_hash disagrees with source_hashes")
+        if not isinstance(data.get("measurement_complete"), bool):
+            raise ValidationError("context_snapshot measurement_complete must be boolean")
+        complete = data.get("measurement_complete") is True
+        all_observed = bool(manifest) and len(observed) == len(manifest)
+        if complete != (all_observed and not errors):
+            raise ValidationError(
+                "context_snapshot completeness disagrees with manifest and errors"
+            )
 
     if type_name == "phase_transition" and data.get("gate") and data["gate"] not in ALLOWED_GATES:
         raise ValidationError(
@@ -332,7 +414,11 @@ def validate(event: dict[str, Any]) -> None:
 
 
 def _ts_now() -> str:
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (
+        _dt.datetime.now(_dt.timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _build(
@@ -383,6 +469,47 @@ def phase_transition(
 def child_promise(*, session_id: str, nonce: str, source: str = "target") -> dict[str, Any]:
     """Build a ``child_promise`` event (target emits at COMPLETE; megawalk verifies)."""
     return _build("child_promise", source, {"session_id": session_id, "nonce": nonce})
+
+
+def context_snapshot(
+    *,
+    session_id: str,
+    harness: str,
+    entry_state: str,
+    context_bytes: int,
+    estimated_tokens: int,
+    context_hash: str | None,
+    source_hashes: list[str],
+    source_manifest: list[dict[str, Any]],
+    measurement_complete: bool,
+    measurement_errors: list[str] | None = None,
+    node_id: str | None = None,
+    source: str = "hook",
+) -> dict[str, Any]:
+    """Build one exact runtime context-delivery observation."""
+    if not session_id.strip():
+        raise ValidationError("context_snapshot session_id cannot be empty")
+    if harness not in {"claude", "codex", "gemini"}:
+        raise ValidationError(f"unknown context_snapshot harness: {harness!r}")
+    if entry_state not in {"startup", "resume", "clear", "post_compact"}:
+        raise ValidationError(f"unknown context_snapshot entry_state: {entry_state!r}")
+    if context_bytes < 0 or estimated_tokens < 0:
+        raise ValidationError("context_snapshot byte and token counts cannot be negative")
+    data: dict[str, Any] = {
+        "session_id": session_id,
+        "harness": harness,
+        "entry_state": entry_state,
+        "context_bytes": context_bytes,
+        "estimated_tokens": estimated_tokens,
+        "context_hash": context_hash,
+        "source_hashes": source_hashes,
+        "source_manifest": source_manifest,
+        "measurement_complete": measurement_complete,
+        "measurement_errors": measurement_errors or [],
+    }
+    if node_id:
+        data["node_id"] = node_id
+    return _build("context_snapshot", source, data)
 
 
 def mission_started(*, mission_id: str) -> dict[str, Any]:
@@ -684,7 +811,7 @@ def append_event(
     event: dict[str, Any],
     events_path: Path | None = None,
     *,
-    lock_timeout_seconds: int = 30,
+    lock_timeout_seconds: float = 30,
 ) -> None:
     """Append a validated event to events.jsonl under a mkdir mutex.
 
@@ -729,6 +856,7 @@ __all__ = [
     "backlog_done_forced",
     "backlog_done_refused",
     "child_promise",
+    "context_snapshot",
     "done_race_collision",
     "integrity_warning",
     "MAIL_ESCALATION_REASONS",

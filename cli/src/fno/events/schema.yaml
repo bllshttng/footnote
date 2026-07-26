@@ -97,6 +97,42 @@ event_types:
           type: string
     consumers: [hooks/megawalk-stop-hook.sh]
 
+  - name: context_snapshot
+    description: "A runtime observation of the exact directive text delivered by Footnote-owned SessionStart or PostCompact hook carriers. Session-bound, derived, and read-only with respect to delivery behavior."
+    sources: [hook, test]
+    data:
+      required: [session_id, harness, entry_state, context_bytes, estimated_tokens, source_hashes, source_manifest, measurement_complete]
+      properties:
+        session_id:
+          type: string
+          description: "Harness session identity observed by the delivery hook."
+        harness:
+          type: string
+          enum: [claude, codex, gemini]
+        entry_state:
+          type: string
+          enum: [startup, resume, clear, post_compact]
+        context_bytes:
+          type: integer
+          description: "UTF-8 bytes of delivered directive text, excluding carrier implementation bytes."
+        estimated_tokens:
+          type: integer
+        context_hash:
+          type: [string, "null"]
+        source_hashes:
+          type: array
+        source_manifest:
+          type: array
+          description: "Per-source delivered-byte/hash/status observations."
+        measurement_complete:
+          type: boolean
+          description: "True only when every expected delivery source was observed in the same hook invocation."
+        measurement_errors:
+          type: array
+        node_id:
+          type: string
+    consumers: [fno scoreboard --plan-fidelity]
+
   - name: review_attestation
     description: "A local reviewer (sigma | code-review | declare) completed a head-pinned review pass. loop-check reads this as gate evidence for a config.review.reviewers entry (x-e703, Phase 2): the entry is satisfied when reviewer matches, head_sha == current HEAD, and verdict == pass. Head-pinning is mandatory - a pass on an old commit must not count after new commits land."
     sources: [target, subagent, hook, test]

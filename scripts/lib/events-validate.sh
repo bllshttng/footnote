@@ -90,6 +90,18 @@ EVENTS_SCHEMA_CACHE="${EVENTS_SCHEMA_CACHE:-/tmp/events-schema-$$.cache}"
 
 _ev_warn() { printf '%s\n' "$*" >&2; }
 
+_ev_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$1" | sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}'
+    else
+        return 2
+    fi
+}
+
 _ev_load_schema_cache() {
     if [[ -s "$EVENTS_SCHEMA_CACHE" ]]; then
         # Validate cache is non-empty JSON; jq -e is fine on a top-level object.
@@ -251,6 +263,81 @@ validate_event() {
                 _ev_warn "unknown status: $mc_status"
                 return 1
             fi
+        fi
+    fi
+
+    if [[ "$type" == "context_snapshot" ]]; then
+        if [[ "$src" != "hook" && "$src" != "test" ]]; then
+            _ev_warn "context_snapshot source must be hook or test"
+            return 1
+        fi
+        local context_ok observed_hashes declared_hashes joined_hashes
+        local expected_hash actual_hash
+        context_ok=$(jq -r '
+            .data as $d
+            | (if ($d | has("measurement_errors"))
+                then $d.measurement_errors else [] end) as $errors
+            | (($d.session_id | type == "string")
+                and (($d.session_id | gsub("\\s"; "") | length) > 0)) as $session_ok
+            | ($d.harness == "claude" or $d.harness == "codex"
+                or $d.harness == "gemini") as $harness_ok
+            | ($d.entry_state == "startup" or $d.entry_state == "resume"
+                or $d.entry_state == "clear"
+                or $d.entry_state == "post_compact") as $entry_state_ok
+            | ($d.source_manifest | type == "array"
+                and all(.[]; type == "object")) as $manifest_ok
+            | ($errors | type == "array"
+                and all(.[]; type == "string")) as $errors_ok
+            | [$d.source_manifest[] | select(.status == "observed")] as $observed
+            | ($observed | all(.[];
+                (.bytes | type == "number")
+                and (.bytes | floor == .)
+                and (.bytes >= 0 and .bytes <= 1.7976931348623157e308)
+                and (.content_hash | type == "string"))) as $observed_ok
+            | ($observed | map(.bytes) | add // 0) as $bytes
+            | ($observed | map(.content_hash)) as $hashes
+            | (($d.measurement_complete == true)
+                == (($d.source_manifest | length) > 0
+                    and ($observed | length) == ($d.source_manifest | length)
+                    and ($errors | length) == 0)) as $complete_ok
+            | $session_ok and $harness_ok and $entry_state_ok
+                and $manifest_ok and $errors_ok and $observed_ok
+                and ($d.context_bytes | type == "number")
+                and ($d.context_bytes | floor == .)
+                and ($d.estimated_tokens | type == "number")
+                and ($d.estimated_tokens | floor == .)
+                and $d.context_bytes == $bytes
+                and $d.estimated_tokens == (($bytes + 3) / 4 | floor)
+                and $d.source_hashes == $hashes
+                and ($d.measurement_complete | type == "boolean")
+                and $complete_ok
+        ' <<<"$payload" 2>/dev/null || true)
+        if [[ "$context_ok" != "true" ]]; then
+            _ev_warn "context_snapshot derived fields disagree with manifest"
+            return 1
+        fi
+        observed_hashes=$(jq -c '
+            [.data.source_manifest[]
+                | select(.status == "observed") | .content_hash]
+        ' <<<"$payload" 2>/dev/null || true)
+        declared_hashes=$(jq -c '.data.source_hashes' <<<"$payload" 2>/dev/null || true)
+        if [[ "$observed_hashes" != "$declared_hashes" ]]; then
+            _ev_warn "context_snapshot source_hashes disagree with source_manifest"
+            return 1
+        fi
+        joined_hashes=$(jq -r '.data.source_hashes | join("\n")' <<<"$payload" 2>/dev/null)
+        if [[ "$observed_hashes" == "[]" ]]; then
+            expected_hash="null"
+        elif ! expected_hash="$(_ev_sha256 "$joined_hashes")"; then
+            _ev_warn "context_snapshot validation requires a SHA-256 command"
+            return 2
+        fi
+        actual_hash=$(jq -r '
+            if .data.context_hash == null then "null" else .data.context_hash end
+        ' <<<"$payload" 2>/dev/null)
+        if [[ "$actual_hash" != "$expected_hash" ]]; then
+            _ev_warn "context_snapshot context_hash disagrees with source_hashes"
+            return 1
         fi
     fi
 

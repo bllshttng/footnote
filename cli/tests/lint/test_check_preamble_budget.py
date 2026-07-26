@@ -5,6 +5,8 @@ formatter, so each assertion reads the gate's own return code.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -126,6 +128,32 @@ def test_report_is_sorted_and_marks_consumer(tmp_path: Path) -> None:
         "AGENTS.md"
     )
     assert "skills/using-fno/SKILL.md  [shipped to every consumer]" in result.stdout
+
+
+def test_json_manifest_reports_hashes_without_changing_exit_semantics(
+    tmp_path: Path,
+) -> None:
+    """Task 1.1: the static gate doubles as a machine-readable census seam."""
+    _write_fixed_roots(tmp_path, agents_bytes=500)
+    result = subprocess.run(
+        ["bash", str(GATE), "--json", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["total_bytes"] == 610
+    assert payload["estimated_tokens"] == 153
+    assert payload["ceiling_bytes"] == CEILING_BYTES
+    by_path = {record["path"]: record for record in payload["sources"]}
+    assert by_path["AGENTS.md"] == {
+        "path": "AGENTS.md",
+        "bytes": 500,
+        "estimated_tokens": 125,
+        "content_hash": hashlib.sha256(b"a" * 500).hexdigest(),
+    }
 
 
 def test_exact_ceiling_passes_and_one_byte_over_fails(tmp_path: Path) -> None:

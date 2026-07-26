@@ -101,3 +101,30 @@ def test_parity(rec: dict) -> None:
         pytest.fail(
             f"{rec['reason']!r}: expected {verdict}, got {observed}"
         )
+
+
+def test_overflow_exponent_is_rejected_on_the_raw_bash_wire() -> None:
+    raw = (
+        '{"ts":"2026-07-26T01:00:00Z","type":"context_snapshot","source":"hook",'
+        '"data":{"session_id":"s","harness":"codex","entry_state":"startup",'
+        '"context_bytes":1e999,"estimated_tokens":1.7976931348623157e308,'
+        '"context_hash":"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",'
+        '"source_hashes":["x"],"source_manifest":[{"source_id":"x","status":"observed",'
+        '"bytes":1e999,"content_hash":"x"}],"measurement_complete":true,'
+        '"measurement_errors":[]}}'
+    )
+    with pytest.raises(ValidationError):
+        validate(json.loads(raw))
+    command = (
+        f"source {BASH_VALIDATOR} && payload=$(cat) && "
+        'validate_event context_snapshot "$payload"'
+    )
+    result = subprocess.run(
+        ["bash", "-c", command],
+        input=raw,
+        text=True,
+        capture_output=True,
+        cwd=REPO_ROOT,
+    )
+
+    assert result.returncode != 0
