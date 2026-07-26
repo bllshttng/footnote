@@ -158,6 +158,7 @@ def test_codex_0145_failed_legacy_migration_restores_config_cache_and_marker(
     )
     config = home / "config.toml"
     config.write_text(
+        "# unrelated user comment must survive rollback\n"
         "\n".join(
             (
                 "[marketplaces.footnote-dev]",
@@ -171,6 +172,7 @@ def test_codex_0145_failed_legacy_migration_restores_config_cache_and_marker(
         ),
         encoding="utf-8",
     )
+    expected_config_bytes = config.read_bytes()
     expected_config = tomllib.loads(config.read_text(encoding="utf-8"))
     legacy_cache = home / "plugins/cache/footnote-dev/fno/0.3.0"
     legacy_cache.mkdir(parents=True)
@@ -220,6 +222,7 @@ def test_codex_0145_failed_legacy_migration_restores_config_cache_and_marker(
         )
 
     assert caught.value.stage == "plugin-add"
+    assert config.read_bytes() == expected_config_bytes
     assert tomllib.loads(config.read_text(encoding="utf-8")) == expected_config
     assert (legacy_cache / "payload").read_bytes() == cache_bytes
     assert marker.read_bytes() == marker_bytes

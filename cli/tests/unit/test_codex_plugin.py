@@ -153,6 +153,7 @@ class _StatefulCodex:
         self.fail_local_marketplace = False
         self.fail_plugin_remove_after_mutation_once = False
         self.retain_removed_plugin_disabled_once = False
+        self.fail_legacy_plugin_once = False
 
     def add_marketplace(self, *, name: str, source: str, source_type: str) -> None:
         self.marketplaces.append(
@@ -206,6 +207,9 @@ class _StatefulCodex:
             return _cp(argv, {})
         if argv[1:3] == ["plugin", "add"]:
             plugin_id = argv[3]
+            if self.fail_legacy_plugin_once and plugin_id == LEGACY_DEV_PLUGIN_ID:
+                self.fail_legacy_plugin_once = False
+                return _cp(argv, {}, rc=17, err="legacy identity cannot be re-added")
             marketplace_name = plugin_id.split("@", 1)[1]
             marketplace = next(
                 row for row in self.marketplaces if row["name"] == marketplace_name
@@ -343,6 +347,19 @@ def test_release_convergence_removes_dev_then_installs_and_verifies(tmp_path: Pa
 
 def test_release_convergence_is_source_aware_noop(tmp_path: Path) -> None:
     source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    marker = home / "footnote/plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "channel": "release",
+                "marketplace": MARKETPLACE,
+                "source": "bllshttng/footnote",
+            }
+        ),
+        encoding="utf-8",
+    )
     calls: list[list[str]] = []
 
     def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -380,7 +397,7 @@ def test_release_convergence_is_source_aware_noop(tmp_path: Path) -> None:
         channel="release",
         validate_candidate=False,
         runner=runner,
-        codex_home=tmp_path / "codex-home",
+        codex_home=home,
         source_root=source,
     )
     assert result.action == "no-op"
@@ -729,6 +746,18 @@ def test_dev_convergence_is_source_aware_noop_and_records_authority(
     source = _source(tmp_path)
     dev_marketplace = _dev_marketplace(source)
     codex_home = tmp_path / "codex-home"
+    marker = codex_home / "footnote/plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "channel": "dev",
+                "marketplace": MARKETPLACE,
+                "source": str(dev_marketplace),
+            }
+        ),
+        encoding="utf-8",
+    )
     calls: list[list[str]] = []
 
     def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -1033,6 +1062,57 @@ def test_payload_digest_includes_loaded_agents_and_commands(tmp_path: Path) -> N
     assert plugin_payload_digest(source) != with_agent_change
 
 
+def test_owned_config_rollback_restores_exact_bytes_and_comments(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    config = home / "config.toml"
+    config.parent.mkdir(parents=True)
+    expected = (
+        b"# user heading\n"
+        b"[unrelated]\n"
+        b"value = 1 # keep this comment\n\n"
+        b"[marketplaces.footnote-dev]\n"
+        b"source_type = \"local\"\n"
+        b"source = \"/legacy\"\n\n"
+        b"[plugins.\"fno@footnote-dev\"]\n"
+        b"enabled = true\n"
+    )
+    config.write_bytes(expected)
+    snapshot = codex_plugin._read_owned_config(home)
+    config.write_text(
+        "[unrelated]\nvalue = 1\n\n"
+        "[marketplaces.footnote]\nsource_type = \"local\"\nsource = \"/new\"\n\n"
+        "[plugins.\"fno@footnote\"]\nenabled = true\n",
+        encoding="utf-8",
+    )
+
+    codex_plugin._restore_owned_config(home, snapshot)
+
+    assert config.read_bytes() == expected
+
+
+def test_owned_config_rollback_refuses_nonfootnote_change(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    config = home / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "[unrelated]\nvalue = 1\n\n"
+        "[marketplaces.footnote-dev]\nsource_type = \"local\"\nsource = \"/legacy\"\n",
+        encoding="utf-8",
+    )
+    snapshot = codex_plugin._read_owned_config(home)
+    current = (
+        "[unrelated]\nvalue = 2\n\n"
+        "[marketplaces.footnote]\nsource_type = \"local\"\nsource = \"/new\"\n"
+    )
+    config.write_text(current, encoding="utf-8")
+
+    with pytest.raises(CodexPluginError) as caught:
+        codex_plugin._restore_owned_config(home, snapshot)
+
+    assert caught.value.stage == "rollback-config"
+    assert config.read_text(encoding="utf-8") == current
+
+
 def test_failed_switch_restores_working_channel_and_marker_bytes(tmp_path: Path) -> None:
     source = _source(tmp_path)
     home = tmp_path / "codex-home"
@@ -1233,7 +1313,7 @@ def test_marker_failure_restores_quarantined_legacy_cache(
     assert [row["pluginId"] for row in fake.plugins] == [LEGACY_DEV_PLUGIN_ID]
 
 
-def test_rollback_receipt_clear_failure_rolls_back_switch(
+def test_rollback_receipt_clear_failure_prevents_switch_before_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = _source(tmp_path)
@@ -1241,6 +1321,10 @@ def test_rollback_receipt_clear_failure_rolls_back_switch(
     fake = _StatefulCodex(source)
     fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
     fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    receipt = home / "footnote/rollback-failure.json"
+    receipt.parent.mkdir(parents=True)
+    receipt_bytes = b'{"detail":"prior rollback failed","stage":"plugin-add"}\n'
+    receipt.write_bytes(receipt_bytes)
 
     def fail_clear(_home: Path) -> None:
         raise CodexPluginError("rollback-receipt-clear", "injected clear failure")
@@ -1259,6 +1343,159 @@ def test_rollback_receipt_clear_failure_rolls_back_switch(
     marketplace_source = fake.marketplaces[0]["marketplaceSource"]
     assert isinstance(marketplace_source, dict)
     assert marketplace_source["sourceType"] == "local"
+    assert receipt.read_bytes() == receipt_bytes
+
+
+def test_successful_repair_clears_prior_rollback_receipt(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    marker = home / "footnote/plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {"channel": "dev", "marketplace": MARKETPLACE, "source": str(source)}
+        ),
+        encoding="utf-8",
+    )
+    receipt = home / "footnote/rollback-failure.json"
+    receipt.write_text('{"detail":"prior failure","stage":"plugin-add"}\n')
+
+    result = converge(
+        channel="dev",
+        validate_candidate=False,
+        runner=fake,
+        codex_home=home,
+        source_root=source,
+    )
+
+    assert result.action == "repaired"
+    assert not receipt.exists()
+
+
+def test_stable_channel_removes_orphan_legacy_cache_as_repair(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    marker = home / "footnote/plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {"channel": "dev", "marketplace": MARKETPLACE, "source": str(source)}
+        ),
+        encoding="utf-8",
+    )
+    canonical_cache = home / "plugins/cache/footnote/fno/0.3.0"
+    canonical_cache.mkdir(parents=True)
+    canonical_bytes = b"working canonical cache\n"
+    (canonical_cache / "payload").write_bytes(canonical_bytes)
+    legacy_cache = home / "plugins/cache/footnote-dev/fno/0.3.0"
+    legacy_cache.mkdir(parents=True)
+    (legacy_cache / "payload").write_text("orphan legacy cache\n")
+
+    result = converge(
+        channel="dev",
+        validate_candidate=False,
+        runner=fake,
+        codex_home=home,
+        source_root=source,
+    )
+
+    assert result.action == "repaired"
+    assert not legacy_cache.exists()
+    assert (canonical_cache / "payload").read_bytes() == canonical_bytes
+
+
+def test_legacy_cache_symlink_is_refused_without_mutation(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    marker = home / "footnote/plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {"channel": "dev", "marketplace": MARKETPLACE, "source": str(source)}
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "outside-cache"
+    target.mkdir()
+    legacy_cache = home / "plugins/cache/footnote-dev"
+    legacy_cache.parent.mkdir(parents=True)
+    legacy_cache.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(CodexPluginError) as caught:
+        converge(
+            channel="dev",
+            validate_candidate=False,
+            runner=fake,
+            codex_home=home,
+            source_root=source,
+        )
+
+    assert caught.value.stage == "cache-quarantine"
+    assert legacy_cache.is_symlink()
+    assert [row["pluginId"] for row in fake.plugins] == [PLUGIN_ID]
+
+
+def test_legacy_plugin_restore_falls_back_to_exact_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    legacy = tmp_path / LEGACY_DEV_MARKETPLACE
+    legacy.mkdir()
+    config = home / "config.toml"
+    config.parent.mkdir(parents=True)
+    config_bytes = (
+        f"[marketplaces.footnote-dev]\nsource_type = \"local\"\nsource = \"{legacy}\"\n\n"
+        '[plugins."fno@footnote-dev"]\nenabled = true\n'
+    ).encode()
+    config.write_bytes(config_bytes)
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(
+        name=LEGACY_DEV_MARKETPLACE,
+        source=str(legacy),
+        source_type="local",
+    )
+    fake.plugins.append(
+        _plugin(LEGACY_DEV_PLUGIN_ID, source=str(legacy), source_type="local")
+    )
+    snapshot = codex_plugin._Snapshot(
+        state=codex_plugin._collect(fake),
+        marker=None,
+        rollback_receipt=None,
+        config=codex_plugin._read_owned_config(home),
+        cache_names=frozenset(),
+    )
+    fake.marketplaces.clear()
+    fake.plugins.clear()
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    fake.fail_legacy_plugin_once = True
+    restore_config = codex_plugin._restore_owned_config
+
+    def restore_and_reload(
+        target_home: Path, owned: codex_plugin._OwnedConfig
+    ) -> None:
+        restore_config(target_home, owned)
+        fake.plugins.append(
+            _plugin(LEGACY_DEV_PLUGIN_ID, source=str(legacy), source_type="local")
+        )
+
+    monkeypatch.setattr(codex_plugin, "_restore_owned_config", restore_and_reload)
+
+    codex_plugin._restore_snapshot(fake, home, snapshot, ())
+
+    assert config.read_bytes() == config_bytes
+    assert [row["name"] for row in fake.marketplaces] == [LEGACY_DEV_MARKETPLACE]
+    assert [row["pluginId"] for row in fake.plugins] == [LEGACY_DEV_PLUGIN_ID]
 
 
 def test_rollback_failure_is_persisted_and_named(tmp_path: Path) -> None:
@@ -1285,6 +1522,37 @@ def test_rollback_failure_is_persisted_and_named(tmp_path: Path) -> None:
     )
     assert receipt["stage"] == "plugin-add"
     assert "rollback failed" in receipt["detail"]
+
+
+def test_unexpected_rollback_exception_is_persisted_and_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    fake.fail_git_plugin_once = True
+
+    def fail_rollback(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected unexpected rollback failure")
+
+    monkeypatch.setattr(codex_plugin, "_restore_snapshot", fail_rollback)
+    with pytest.raises(CodexPluginError) as caught:
+        converge(
+            channel="release",
+            validate_candidate=False,
+            runner=fake,
+            codex_home=home,
+            source_root=source,
+        )
+
+    assert caught.value.stage == "rollback-failure"
+    receipt = json.loads(
+        (home / "footnote/rollback-failure.json").read_text(encoding="utf-8")
+    )
+    assert receipt["stage"] == "plugin-add"
+    assert "unexpected rollback failure" in receipt["detail"]
 
 
 def test_dev_migrates_legacy_identity_and_removes_legacy_cache(tmp_path: Path) -> None:
