@@ -172,7 +172,9 @@ Cover the happy path plus only the edge, error, abuse, accessibility, or concurr
 Every criterion must be observable and later verifiable through a real command, test, artifact, or external state.
 Do not require a specific private implementation unless it is itself the contract.
 
-Use stable identifiers such as `AC1-HP`, `AC2-ERR`, and `AC3-CON` so Blueprint tasks can cite them.
+Explicit AC identifiers such as `AC1-HP`, `AC2-ERR`, and `AC3-CON` are optional author input: supply them when you want a stable hand-written cite, and Blueprint preserves them verbatim.
+When you omit them, write the criterion as a numbered item, a bullet, a heading, a table row, or a descriptive label followed by a Given/When/Then block; Blueprint compiles the section and assigns deterministic `AC1`, `AC2`, ... identifiers in document order, so every accepted shape is equally citable.
+What is required is observable, verifiable behavior, not one Markdown spelling; formatting is normalized, not enforced.
 
 ## 10. Save the design
 

@@ -362,9 +362,10 @@ When the input to `/blueprint` is a path to an existing design doc (produced by 
    - >= 50% exist -> brownfield; < 50% exist -> greenfield
 5. Build ## Execution Strategy (waves YAML block)
 6. Brownfield only: ## File Ownership Map, ## Patterns to Reuse
-7. Update frontmatter: status -> ready, execution_mode, waves, kill_criteria
-8. Write atomically (tempfile + os.replace in same directory)
-9. Auto-intake to backlog via `fno backlog intake` (handled by skill body)
+7. Update frontmatter: status -> ready (design stays a draft until `--finalize`), execution_mode, waves, kill_criteria
+8. On `--finalize`: validate the proposed ready + `acceptance_contract: compiled-v1` contract (every task acceptance reference resolves) and atomically stamp both
+9. Write atomically (tempfile + os.replace in same directory)
+10. Auto-intake to backlog via `fno backlog intake` (handled by skill body)
 ```
 
 ### Modifiers
@@ -411,8 +412,34 @@ Exit codes:
 - `File Ownership Map` (brownfield only)
 - `Patterns to Reuse` (brownfield only)
 - `kill_criteria` (frontmatter)
+- `execution_mode`, `waves` (frontmatter)
+- `acceptance_contract` (frontmatter; stamped `compiled-v1` at finalize)
 
 Any attempt to write outside this allowlist exits 2. /think-owned sections (Overview, Architecture, User Stories, Failure Modes, Acceptance Criteria, Locked Decisions, etc.) are never touched.
+
+### Acceptance criteria compilation
+
+The `## Acceptance Criteria` section is **source**: authors and native plan modes have creative freedom in how they phrase a criterion. Blueprint compiles that source into strict execution semantics through one canonical compiler (`cli/src/fno/plan/criteria.py`), the same implementation the mutation script, the semantic validator, and the worker-brief generator all call.
+
+Accepted source shapes (container syntax alone does not decide validity; a candidate is valid when it yields a non-empty statement):
+
+- legacy bold labels: `**AC1-HP:** Given ... when ... then ...`
+- headings: `### AC1-HP: Title` or `### Title`
+- numbered items: `1. Given ... when ... then ...`
+- bullets: `-` / `*` / `+` behavior
+- table rows: `| label | behavior |` (cells concatenate in column order)
+- a descriptive label followed by a contiguous Given/When/Then block
+
+Explicit AC identifiers (`AC1-HP`, `AC7`) are preserved verbatim. Unlabeled criteria get deterministic `AC1`, `AC2`, ... in document order, with `GENERAL` as the compatibility kind. This is execution metadata, not a formatting correction; Blueprint does not rewrite the source for style.
+
+**Normalization vs refusal.** Formatting preferences (missing AC prefix, list-marker style, heading order, category suffix) are silent normalization or advisory. Semantic failures are hard errors at finalize:
+
+- a non-empty `## Acceptance Criteria` section that yields no criterion;
+- two criteria sharing one explicit identifier (both source locations named);
+- a task `acceptance` reference that resolves to no compiled criterion;
+- a task with no acceptance reference.
+
+Finalize validates the proposed ready + `compiled-v1` contract and atomically stamps `status: ready` and `acceptance_contract: compiled-v1` together, so a half-promoted plan never lands. Plans finalized before this feature carry no marker and keep their existing permissive brief behavior; strict reference resolution begins at `compiled-v1`.
 
 ## Ready-gated auto-launch (opt-in, default OFF) — Phase 2 / US6
 

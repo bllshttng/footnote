@@ -70,6 +70,12 @@ The brief contains: one paragraph of project context from Overview, the task's s
 
 Tag-filter semantics are fail-open: entries without `affects_surface` tags are always included. Tags reduce brief size as they accumulate over time; absent tags never drop content.
 
+### Acceptance source vs compiled semantics
+
+The `## Acceptance Criteria` section is source; the brief, validator, and mutation script never re-parse its Markdown independently. One canonical compiler (`cli/src/fno/plan/criteria.py`) accepts legacy bold labels, headings, numbered items, bullets, table rows, and descriptive labels with a Given/When/Then block, and emits one ordered representation: a stable code, the original statement, a behavior kind, and a source position. Explicit AC identifiers are preserved verbatim; unlabeled criteria get deterministic `AC1`, `AC2`, ... in document order. This mirrors the User Story boundary: multiple source shapes enter, one execution shape leaves.
+
+A plan finalized after this boundary is stamped `acceptance_contract: compiled-v1` in frontmatter. Only a `compiled-v1` plan enforces strict reference resolution (every task `acceptance` entry resolves to exactly one compiled criterion); a duplicate explicit identifier, a malformed non-empty section, or an unresolved reference refuses finalization with a source-aware diagnostic. Historical plans without the marker keep the existing permissive brief behavior, so a previously executable artifact does not become invalid because Footnote upgraded. The brief adapter degrades to no criteria on a refused section, so worker-brief generation never crashes on a legacy or in-progress plan.
+
 Exit codes: 0 success, 1 plan not found, 2 contract violation (missing sections, task-id absent from Execution Strategy), 3 malformed content requiring human inspection.
 
 For operator's detection and dispatch logic, see [skills/do/references/single-doc-shape.md](../../skills/do/references/single-doc-shape.md).
