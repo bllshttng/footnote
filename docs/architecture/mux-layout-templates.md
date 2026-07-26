@@ -85,3 +85,74 @@ On server restart, a template-managed tab is rebuilt by re-applying its stored s
 An unnamed tab has no durable key and stays live-only.
 
 Live re-binding at cold start is eventually consistent: the off-loop registry reader has not populated the in-memory agent catalog at restore time, so bindings that cannot resolve yet restore as shells and bind on a later re-apply once the sessions register.
+
+## Local layout graft (`fno mux layout graft`)
+
+`layout apply` owns and persists an entire tab.
+`layout graft` owns only the subtree it substitutes at one anchor pane and is session-local: it is never written to the template store, and it leaves every pane outside that subtree exactly where it was.
+The two verbs have deliberately different ownership scopes so a local automation cannot accidentally reconcile away an operator's tab.
+
+```
+fno mux layout graft --at current \
+    --template col-thirds --slot anchor --slot fno:abcd1234 --slot fno:ef901234
+
+# or a typed spec file (TOML or JSON), the same AnchoredLayoutSpec:
+fno mux layout graft --at current --spec path/to/stack.toml [--focus] [--json]
+```
+
+`--at current` resolves the anchor from `FNO_PANE` (run the command inside a mux pane); a numeric `--at <pane>` pins a specific pane.
+The graft replaces that anchor's leaf with the spec's subtree while preserving the enclosing tab.
+A named template compiles into the same typed tree as an arbitrary spec (`template_to_tree`), so the macro form and the file form share one representation.
+
+### The typed schema
+
+The arbitrary topology is a recursive `LayoutTreeSpec`: a `Slot(name)` leaf, or a `Split { axis, children: [(weight, tree)] }`.
+Slots bind to exactly one of `Anchor` (the calling pane, which survives inside the subtree), `Fno(id)` (a live session's pane, reused with its PTY untouched), or `Shell` (an empty pane the graft spawns).
+Raw commands in leaves are out of scope; agent launch stays in the agents subsystem.
+
+The spec carries a version (`version: 1`).
+Weights must be finite and positive and are normalized before geometry validation.
+The tree is bounded at 24 leaves and depth 16 so malformed or machine-generated input cannot create unbounded recursion or unusable geometry.
+Exactly one slot must bind `Anchor`, and every slot name is referenced exactly once in the tree; `validate_anchored_spec` enforces all of this before any pane is touched.
+
+```toml
+version = 1
+[tree]
+axis = "vertical"
+[[tree.children]]
+weight = 0.5
+[tree.children.tree]
+slot = "anchor"
+[[tree.children]]
+weight = 0.5
+[tree.children.tree]
+axis = "horizontal"
+[[tree.children.tree.children]]
+weight = 0.5
+[tree.children.tree.children.tree]
+slot = "reviewer"
+[[tree.children.tree.children]]
+weight = 0.5
+[tree.children.tree.children.tree]
+slot = "tester"
+
+[[slots]]
+name = "anchor"
+binding = "anchor"
+[[slots]]
+name = "reviewer"
+binding = { fno = "abcd1234" }
+[[slots]]
+name = "tester"
+binding = "shell"
+```
+
+### Atomicity, rollback, and the never-kill invariant
+
+Graft validation and materialization are atomic from the operator's perspective.
+The server validates the spec, resolves the bindings, and probes fit before it spawns anything; an unavailable `Fno` binding is refused rather than degraded to a shell, and two slots resolving to one pane are refused.
+Shell slots spawn only after pure validation passes; if any shell spawn fails, every transaction-owned shell is reaped and the tree is left byte-unchanged (no partial subtree).
+A reused live pane is detached from its old leaf and rehomed into the subtree with its PTY untouched; a live bound PTY is never killed.
+The whole turn runs in the mux's single serialized core loop, so concurrent grafts at one anchor commit at most one valid tree and the second refuses.
+Graft never moves the viewer's focus and never persists state, so the reusable artifact is the spec file rather than hidden ownership metadata.
+

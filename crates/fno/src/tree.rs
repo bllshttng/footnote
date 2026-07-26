@@ -860,6 +860,62 @@ fn graft_node(
 }
 
 // ---------------------------------------------------------------------------
+// replace_anchor_with_candidate (x-6928 local graft)
+// ---------------------------------------------------------------------------
+
+/// Pure anchor substitution: build a candidate tab root where `anchor_pid`'s
+/// leaf is REPLACED by `subtree` (in-place, unlike [`graft_subtree`]'s adjacent
+/// splice), then normalize and min-size-validate against `viewport`. Never
+/// mutates `tab`; returns the candidate root or the fit/anchor failure. The
+/// graft transaction (x-6928) builds and validates its candidate here before
+/// committing in one serialized server turn, so a refused graft leaves the
+/// source tree untouched.
+pub fn replace_anchor_with_candidate(
+    tab: &Tab,
+    viewport: Rect,
+    anchor_pid: PaneId,
+    subtree: Node,
+) -> Result<Node, MoveError> {
+    let Some(candidate) = replace_anchor_node(&tab.root, anchor_pid, subtree) else {
+        return Err(MoveError::PaneGone);
+    };
+    let candidate = normalize(candidate);
+    if layout(&candidate, viewport)
+        .iter()
+        .any(|(_, r)| r.rows < MIN_ROWS || r.cols < MIN_COLS)
+    {
+        return Err(MoveError::TooSmall {
+            min_rows: MIN_ROWS,
+            min_cols: MIN_COLS,
+        });
+    }
+    Ok(candidate)
+}
+
+/// Replace `anchor`'s leaf with `subtree` wholesale (the anchor pane survives
+/// INSIDE `subtree`, at its Anchor-slot position). `None` when `anchor` isn't
+/// in this subtree. The substitution analog of [`graft_node`].
+fn replace_anchor_node(node: &Node, anchor: PaneId, subtree: Node) -> Option<Node> {
+    match node {
+        Node::Leaf(id) if *id == anchor => Some(subtree),
+        Node::Leaf(_) => None,
+        Node::Branch { axis, children } => {
+            for (i, (ratio, child)) in children.iter().enumerate() {
+                if let Some(new_child) = replace_anchor_node(child, anchor, subtree.clone()) {
+                    let mut new_children = children.clone();
+                    new_children[i] = (*ratio, new_child);
+                    return Some(Node::Branch {
+                        axis: *axis,
+                        children: new_children,
+                    });
+                }
+            }
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // navigate
 // ---------------------------------------------------------------------------
 
@@ -2685,5 +2741,67 @@ mod detach_graft_tests {
         let after: std::collections::BTreeSet<_> = leaves(&t.root).into_iter().collect();
         assert_eq!(before, after, "pane set preserved across detach+graft");
         check_invariants(&t).unwrap();
+    }
+
+    #[test]
+    fn anchored_candidate_replaces_anchor_and_preserves_source() {
+        // AC2-HP (pure half): the anchor pane's leaf is REPLACED by a realized
+        // subtree; the anchor survives inside it (slot realized to its own id).
+        let t = tab_1234(); // H[ V[1,3], V[2,4] ]
+        let before = t.clone();
+        // Subtree V[1,5]: anchor pane 1 keeps living, pane 5 is the new leaf.
+        let subtree = Node::Branch {
+            axis: Axis::Vertical,
+            children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(5))],
+        };
+        let candidate = replace_anchor_with_candidate(&t, VP, 1, subtree).expect("fits");
+        assert_eq!(t.root, before.root, "source tab is never mutated");
+        let mut ls = leaves(&candidate);
+        ls.sort_unstable();
+        assert_eq!(ls, vec![1, 2, 3, 4, 5]);
+        // The candidate is a well-formed tree (same-axis nesting flattened).
+        let ct = Tab {
+            id: 0,
+            root: candidate,
+            focus: 1,
+            name: None,
+        };
+        check_invariants(&ct).unwrap();
+    }
+
+    #[test]
+    fn anchored_candidate_refuses_minimum_fit() {
+        // AC4-EDGE-MINIMUM-FIT: a candidate whose panes fall below the minimum
+        // is refused, and the source tab is left untouched.
+        let t = leaf_tab(1);
+        let tiny = Rect {
+            x: 0,
+            y: 0,
+            rows: 3,
+            cols: 60,
+        };
+        let subtree = Node::Branch {
+            axis: Axis::Vertical,
+            children: vec![(0.5, Node::Leaf(1)), (0.5, Node::Leaf(5))],
+        };
+        assert_eq!(
+            replace_anchor_with_candidate(&t, tiny, 1, subtree),
+            Err(MoveError::TooSmall {
+                min_rows: MIN_ROWS,
+                min_cols: MIN_COLS,
+            })
+        );
+        assert_eq!(t.root, Node::Leaf(1), "refusal leaves source untouched");
+    }
+
+    #[test]
+    fn anchored_candidate_missing_anchor_is_pane_gone() {
+        let t = tab_1234();
+        let before = t.clone();
+        assert_eq!(
+            replace_anchor_with_candidate(&t, VP, 99, Node::Leaf(7)),
+            Err(MoveError::PaneGone)
+        );
+        assert_eq!(t.root, before.root);
     }
 }

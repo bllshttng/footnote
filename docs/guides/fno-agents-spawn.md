@@ -74,6 +74,25 @@ fno agents spawn "review the current diff" --name reviewer \
 
 The lower-level equivalent avoids option punctuation entirely: `fno mux pane run squad reviews split right echo ready`. It also accepts `-s` / `--squad` and `-x` / `--split`. A missing squad or a split that would make a pane too small fails without leaving a child process or layout mutation behind.
 
+## Place a pane next to the calling pane (`--at current`)
+
+`-s`/`-x` place a pane relative to the squad's *focused* pane, which is unsuitable for automation: another client can move focus between command construction and execution. `--at current` pins the new pane to the calling pane (the one the command runs inside), so focus races cannot redirect it.
+
+```bash
+fno agents spawn "investigate the failing test" --name digger \
+  -H codex --substrate pane --at current --split down
+```
+
+`--at current` resolves the calling pane from the `FNO_PANE` environment variable the mux server sets in every pane, and requires `--split` and `--substrate pane`. It opts into *strict* placement: if the anchor pane is gone, a selector names a workspace or tab the anchor is not in, or the split cannot fit the minimum pane size, the spawn refuses (nonzero exit) rather than substituting focus or minting a new tab.
+The mux server never creates a tab and never steals the viewer's focus on this path.
+On a strict spawn the `--json` receipt carries `placement` with the server-committed `anchor`, `direction`, `fallback` (`refuse`), `squad`, and `tab`, so automation captures real identities instead of predicting pane ids.
+A provider that exits before it is ready is treated as a launch failure: the spawned pane is reaped, the split collapses through normal tree normalization, and no agent registry row is written.
+The lower-level equivalent is `fno mux pane run --at current --split down -- <argv>`, which resolves `current` the same way.
+
+## Arrange a local stack at the calling pane (`--at current` + layout graft)
+
+For a multi-pane topology instead of one adjacent pane, `fno mux layout graft` realizes a typed H/V subtree at the calling pane while preserving the rest of the tab. See [mux-layout-templates.md](../architecture/mux-layout-templates.md) for the schema and the `apply` vs `graft` ownership split.
+
 ## Reasoning effort (`--effort`)
 
 `--effort` tunes reasoning without changing the selected model. Omit it to keep

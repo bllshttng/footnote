@@ -36,6 +36,10 @@ class FakeRunner:
         run_stderr: str = "",
         ls_stdout: Optional[str] = None,
         db_stdout: str = "",
+        # x-6928 interactive-readiness gate probes.
+        wait_returncode: int = 11,
+        read_stdout: str = "",
+        placement: Optional[dict] = None,
     ) -> None:
         self.calls: list[list[str]] = []
         self.run_returncode = run_returncode
@@ -43,6 +47,10 @@ class FakeRunner:
         self.run_stderr = run_stderr
         self.ls_stdout = ls_stdout
         self.db_stdout = db_stdout
+        self.wait_returncode = wait_returncode
+        self.read_stdout = read_stdout
+        self.placement = placement
+        self.kill_calls: list[list[str]] = []
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
@@ -52,6 +60,13 @@ class FakeRunner:
         if argv[:2] == ["opencode", "db"]:
             return subprocess.CompletedProcess(argv, 0, self.db_stdout, "")
         if argv[1:4] == ["mux", "pane", "run"]:
+            if "--json" in argv:
+                payload = {"pane_id": 7}
+                if self.placement is not None:
+                    payload["placement"] = self.placement
+                return subprocess.CompletedProcess(
+                    argv, self.run_returncode, json.dumps(payload), self.run_stderr
+                )
             return subprocess.CompletedProcess(
                 argv, self.run_returncode, self.run_stdout, self.run_stderr
             )
@@ -62,6 +77,13 @@ class FakeRunner:
                     [{"pane_id": 7, "squad_id": 1, "tab_id": 1, "cwd": "/w", "child_pid": 4242}]
                 )
             return subprocess.CompletedProcess(argv, 0, out, "")
+        if argv[1:4] == ["mux", "pane", "wait"]:
+            return subprocess.CompletedProcess(argv, self.wait_returncode, "", "")
+        if argv[1:4] == ["mux", "pane", "read"]:
+            return subprocess.CompletedProcess(argv, 0, self.read_stdout, "")
+        if argv[1:4] == ["mux", "pane", "kill"]:
+            self.kill_calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
         raise AssertionError(f"unexpected fno invocation: {argv}")
 
 
@@ -847,7 +869,7 @@ def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatc
         ["spawn", "peer", "--harness", "claude", "--substrate", "bg", "-x", "left"],
     )
     assert res.exit_code == 2, res.output
-    assert "--workspace/-s and --split/-x apply only to --substrate pane" in res.output
+    assert "--split/-x, and --at apply only to --substrate pane" in res.output
 
 
 def test_cmd_spawn_rejects_bad_split_value(tmp_path: Path, monkeypatch) -> None:
@@ -1006,3 +1028,89 @@ def test_mesh_env_wrapper_clears_inherited_provenance(monkeypatch):
     assert "FNO_NODE=x-aaaa" in bound
     assert "-u" in bound and "FNO_PLAN" in bound
     assert "FNO_NODE" not in bound[: bound.index("FNO_NODE=x-aaaa")]
+
+
+# -- x-6928: agents spawn --at current + interactive-readiness gate ----------
+
+
+def test_exact_at_current_forwards_token_runs_json_and_reads_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC1-HP / AC1-UI: --at current forwards the token before the `--` fence,
+    requests --json, and reads the SERVER-authored placement receipt - never
+    synthesized from the requested flags. A painted, alive pane writes the row.
+    """
+    from fno.agents.registry import load_registry
+
+    placement = {
+        "anchor": 4,
+        "direction": "Down",
+        "fallback": "refuse",
+        "squad": 1,
+        "tab": 10,
+    }
+    result, runner = _spawn(
+        monkeypatch,
+        tmp_path,
+        split="down",
+        at="current",
+        runner=FakeRunner(placement=placement, read_stdout="claude\n"),
+    )
+    run_call = runner.calls[0]
+    assert run_call[1:4] == ["mux", "pane", "run"]
+    assert "at" in run_call and "current" in run_call, "token forwarded verbatim"
+    assert "--json" in run_call, "exact placement requests the server receipt"
+    assert run_call.index("at") < run_call.index("--"), "token rides before the argv fence"
+    assert result.placement == placement, "receipt is server-authored, not synthesized"
+    # The readiness gate probes the spawn's own session, not the default.
+    wait_call = next(c for c in runner.calls if c[1:4] == ["mux", "pane", "wait"])
+    assert "--session" in wait_call, "readiness probe targets the spawn's session"
+    assert [r.name for r in load_registry()] == ["peer"], "a ready spawn writes the row"
+    assert runner.kill_calls == [], "no reap on a successful readiness gate"
+
+
+def test_exact_at_current_kills_pane_and_writes_no_row_on_early_exit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC5-ERR: a provider that exits before readiness is reaped (pane kill),
+    the split collapses via tree normalization, and NO registry row is written.
+    """
+    from fno.agents.mux_spawn import DispatchAskError, dispatch_spawn_pane
+    from fno.agents.registry import load_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.delenv("FNO_SESSION", raising=False)
+    runner = FakeRunner(placement={"anchor": 4}, wait_returncode=12)
+    with pytest.raises(DispatchAskError):
+        dispatch_spawn_pane(
+            name="peer",
+            message="hi",
+            provider="claude",
+            cwd=tmp_path,
+            split="down",
+            at="current",
+            runner=runner,
+        )
+    assert len(runner.kill_calls) == 1, "the transaction-owned pane was reaped"
+    kill = runner.kill_calls[0]
+    assert kill[1:4] == ["mux", "pane", "kill"]
+    assert "--session" in kill and "main" in kill, "cleanup targets the spawn's session"
+    assert "7" in kill, "the placed pane id is reaped"
+    assert load_registry() == [], "no registry row on launch failure"
+
+
+def test_exact_at_current_proceeds_live_when_unpainted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC5-ERR complement: an ALIVE but unpainted child is LIVE, not failure -
+    the gate never reaps a live process; the row is written."""
+    from fno.agents.registry import load_registry
+
+    _spawn(
+        monkeypatch,
+        tmp_path,
+        split="down",
+        at="current",
+        runner=FakeRunner(placement={"anchor": 4}, wait_returncode=11, read_stdout=""),
+    )
+    assert [r.name for r in load_registry()] == ["peer"], "a live spawn still writes the row"

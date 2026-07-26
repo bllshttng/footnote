@@ -10,10 +10,11 @@ use std::time::{Duration, Instant};
 
 use common::{connect_with_retry, spawn_server, FakeClient};
 use fno::proto::{
-    read_msg_sync, write_msg_sync, ClientMsg, Command, ControlVerb, PanePlacement, PaneTarget,
-    ServerMsg, BUILD_VERSION, PROTO_VERSION,
+    read_msg_sync, write_msg_sync, AnchoredLayoutSpec, ClientMsg, Command, ControlVerb,
+    LayoutBinding, LayoutSlot, LayoutTreeChild, LayoutTreeSpec, PanePlacement, PaneTarget,
+    PlacementFallback, ResolvedPlacement, ServerMsg, BUILD_VERSION, PROTO_VERSION,
 };
-use fno::tree::Dir;
+use fno::tree::{Axis, Dir};
 
 struct Scratch(PathBuf);
 
@@ -73,7 +74,7 @@ fn run_pane(scratch: &Scratch, cwd: &Path, placement: PanePlacement) -> Result<u
     )
     .unwrap();
     match read_msg_sync(&mut stream).unwrap() {
-        ServerMsg::PaneSpawned { pane_id } => Ok(pane_id),
+        ServerMsg::PaneSpawned { pane_id, .. } => Ok(pane_id),
         ServerMsg::Err { msg, .. } => Err(msg),
         other => panic!("unexpected pane-run reply: {other:?}"),
     }
@@ -103,6 +104,7 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
             target: PaneTarget::CurrentRoute,
             split: Some(Dir::Left),
             here: false,
+            fallback: PlacementFallback::NewTab,
         },
     )
     .unwrap();
@@ -140,6 +142,7 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
             target: PaneTarget::CurrentRoute,
             split: Some(Dir::Right),
             here: false,
+            fallback: PlacementFallback::NewTab,
         },
     )
     .unwrap();
@@ -607,4 +610,383 @@ fn layout_e2e_select_squad_is_per_client_and_stale_id_refused() {
     a.wait(10, "stale-tab notice", |c| {
         (c.notices.len() > notices_before).then_some(())
     });
+}
+
+// -- x-6928: exact current-pane placement (--at current, fallback=Refuse) -----
+
+/// Like [`run_pane`] but returns the server-authored placement receipt so the
+/// exact-placement context (anchor/direction/fallback/squad/tab) is assertable.
+fn run_pane_receipt(
+    scratch: &Scratch,
+    cwd: &Path,
+    placement: PanePlacement,
+) -> Result<(u64, Option<ResolvedPlacement>), String> {
+    let mut stream = connect_with_retry(&scratch.sock());
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write_msg_sync(
+        &mut stream,
+        &ClientMsg::Control {
+            proto: PROTO_VERSION,
+            build: BUILD_VERSION.into(),
+            verb: ControlVerb::PaneRun {
+                cwd: cwd.to_string_lossy().into_owned(),
+                argv: vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()],
+                cols: None,
+                rows: None,
+                claim: false,
+                placement,
+            },
+        },
+    )
+    .unwrap();
+    match read_msg_sync(&mut stream).unwrap() {
+        ServerMsg::PaneSpawned { pane_id, placement } => Ok((pane_id, placement)),
+        ServerMsg::Err { msg, .. } => Err(msg),
+        other => panic!("unexpected pane-run reply: {other:?}"),
+    }
+}
+
+fn exact_placement(at: u64, split: Dir) -> PanePlacement {
+    PanePlacement {
+        tab: None,
+        at: Some(at),
+        target: PaneTarget::CurrentRoute,
+        split: Some(split),
+        here: false,
+        fallback: PlacementFallback::Refuse,
+    }
+}
+
+#[test]
+fn exact_current_places_beside_anchor_not_focus() {
+    // AC1-HP / AC1-FR: a strict spawn pins the calling pane; focus is elsewhere.
+    // The new pane lands beside the ANCHOR, never the focused pane, and the
+    // receipt names the committed context (AC1-UI). Focus is not stolen.
+    let scratch = Scratch::new("exact-current");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+    let (mut c, pane1) = attach_settled(&scratch, &cwd);
+    // Legacy split to make a second pane; focus follows to it (pane2).
+    let pane2 = run_pane(
+        &scratch,
+        &cwd,
+        PanePlacement {
+            tab: None,
+            at: None,
+            target: PaneTarget::CurrentRoute,
+            split: Some(Dir::Right),
+            here: false,
+            fallback: PlacementFallback::NewTab,
+        },
+    )
+    .unwrap();
+    let layout = c.wait_layout(10, "two panes", |l| l.panes.len() == 2 && l.focus == pane2);
+    let r1 = layout.panes.iter().find(|(id, _)| *id == pane1).unwrap().1;
+    let r2 = layout.panes.iter().find(|(id, _)| *id == pane2).unwrap().1;
+
+    // Exact placement anchored at pane1, DOWN, while focus is on pane2.
+    let (pane3, receipt) = run_pane_receipt(&scratch, &cwd, exact_placement(pane1, Dir::Down))
+        .expect("exact placement beside a live anchor succeeds");
+    let layout = c.wait_layout(10, "exact split lands", |l| {
+        l.panes.len() == 3 && l.focus == pane2 // focus not stolen
+    });
+    let r3 = layout.panes.iter().find(|(id, _)| *id == pane3).unwrap().1;
+    // Beside pane1 (same left column, below it), NOT beside the focused pane2.
+    assert_eq!(r3.x, r1.x, "new pane shares the anchor's column");
+    assert!(r3.y > r1.y, "new pane is below the anchor");
+    assert!(r3.x < r2.x, "new pane is not in the focused pane's column");
+
+    let resolved = receipt.expect("exact spawn carries a resolved-placement receipt");
+    assert_eq!(resolved.anchor, pane1);
+    assert_eq!(resolved.direction, Dir::Down);
+    assert_eq!(resolved.fallback, PlacementFallback::Refuse);
+}
+
+#[test]
+fn exact_current_refuses_stale_anchor_selector_and_min_size() {
+    // AC2-ERR / AC1-EDGE / AC3-ERR: strict placement fails closed - a stale
+    // anchor, a conflicting selector, and a too-small split each refuse with no
+    // orphan pane and no new tab.
+    let scratch = Scratch::new("exact-current-refuse");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+    let (mut c, pane1) = attach_settled(&scratch, &cwd);
+    run_pane(
+        &scratch,
+        &cwd,
+        PanePlacement {
+            tab: None,
+            at: None,
+            target: PaneTarget::CurrentRoute,
+            split: Some(Dir::Right),
+            here: false,
+            fallback: PlacementFallback::NewTab,
+        },
+    )
+    .unwrap();
+    c.wait_layout(10, "two panes", |l| l.panes.len() == 2);
+    let tabs_before = c
+        .layout
+        .as_ref()
+        .unwrap()
+        .squads
+        .iter()
+        .map(|s| s.tabs.len())
+        .sum::<usize>();
+
+    // Stale anchor: pane 999 does not exist -> refuse, no mutation.
+    let err = run_pane_receipt(&scratch, &cwd, exact_placement(999, Dir::Down))
+        .expect_err("stale anchor must refuse");
+    assert!(
+        err.contains("no longer exists"),
+        "stale-anchor message: {err}"
+    );
+    let l = c.wait_layout(10, "unchanged after stale refuse", |l| l.panes.len() == 2);
+    let tabs_now: usize = l.squads.iter().map(|s| s.tabs.len()).sum();
+    assert_eq!(tabs_now, tabs_before, "no new tab minted on refusal");
+
+    // A conflicting explicit selector (a different existing squad/tab than the
+    // anchor's) is covered by a focused server unit test; here the load-bearing
+    // strict refusals are the stale anchor and the too-small split.
+
+    // Too-small split: narrow so a Down split cannot fit two minimum panes.
+    c.resize(3, 80);
+    c.wait_layout(10, "short layout", |l| l.area == (3, 80));
+    let err = run_pane_receipt(&scratch, &cwd, exact_placement(pane1, Dir::Down))
+        .expect_err("min-size strict split must refuse");
+    assert!(err.contains("cannot fit"), "min-size message: {err}");
+    let tabs_after: usize = c
+        .layout
+        .as_ref()
+        .unwrap()
+        .squads
+        .iter()
+        .map(|s| s.tabs.len())
+        .sum();
+    assert_eq!(tabs_after, tabs_before, "strict refusal never mints a tab");
+}
+
+#[test]
+fn legacy_focused_split_keeps_new_tab_fallback() {
+    // AC3-EDGE / US6: a caller that omits --at current keeps the shipped
+    // focus-relative split and new-tab fallback - the strict path never engaged.
+    let scratch = Scratch::new("legacy-focused");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+    let (mut c, pane1) = attach_settled(&scratch, &cwd);
+    let pane2 = run_pane(
+        &scratch,
+        &cwd,
+        PanePlacement {
+            tab: None,
+            at: None,
+            target: PaneTarget::CurrentRoute,
+            split: Some(Dir::Right),
+            here: false,
+            fallback: PlacementFallback::NewTab,
+        },
+    )
+    .unwrap();
+    let layout = c.wait_layout(10, "two panes focus on pane2", |l| {
+        l.panes.len() == 2 && l.focus == pane2
+    });
+    let r2 = layout.panes.iter().find(|(id, _)| *id == pane2).unwrap().1;
+
+    // Legacy split: no anchor, follows focus (pane2), splits Down. No receipt.
+    let (pane3, receipt) = run_pane_receipt(
+        &scratch,
+        &cwd,
+        PanePlacement {
+            tab: None,
+            at: None,
+            target: PaneTarget::CurrentRoute,
+            split: Some(Dir::Down),
+            here: false,
+            fallback: PlacementFallback::NewTab,
+        },
+    )
+    .unwrap();
+    assert!(
+        receipt.is_none(),
+        "legacy spawn carries no placement receipt"
+    );
+    let layout = c.wait_layout(10, "legacy split below focus", |l| l.panes.len() == 3);
+    let r3 = layout.panes.iter().find(|(id, _)| *id == pane3).unwrap().1;
+    assert_eq!(r3.x, r2.x, "legacy split follows the focused pane's column");
+    assert!(r3.y > r2.y, "legacy split lands below the focused pane");
+
+    // A too-small legacy split falls back to a NEW TAB, never an error.
+    let tabs_before: usize = layout.squads.iter().map(|s| s.tabs.len()).sum();
+    c.resize(24, 16);
+    c.wait_layout(10, "narrow", |l| l.area == (24, 16));
+    run_pane(
+        &scratch,
+        &cwd,
+        PanePlacement {
+            tab: None,
+            at: None,
+            target: PaneTarget::CurrentRoute,
+            split: Some(Dir::Right),
+            here: false,
+            fallback: PlacementFallback::NewTab,
+        },
+    )
+    .unwrap();
+    c.wait_layout(10, "legacy fallback adds a tab", |l| {
+        let t: usize = l.squads.iter().map(|s| s.tabs.len()).sum();
+        t == tabs_before + 1
+    });
+    let _ = pane1;
+}
+
+// -- x-6928: local anchored layout graft -------------------------------------
+
+/// Send `LayoutGraft` at `anchor`; return the per-slot (name, pane) results or
+/// the server's error message.
+fn graft_at(
+    scratch: &Scratch,
+    anchor: u64,
+    spec: AnchoredLayoutSpec,
+) -> Result<Vec<(String, u64)>, String> {
+    let mut stream = connect_with_retry(&scratch.sock());
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write_msg_sync(
+        &mut stream,
+        &ClientMsg::Control {
+            proto: PROTO_VERSION,
+            build: BUILD_VERSION.into(),
+            verb: ControlVerb::LayoutGraft {
+                squad: PaneTarget::CurrentRoute,
+                anchor,
+                spec,
+                focus: false,
+            },
+        },
+    )
+    .unwrap();
+    match read_msg_sync(&mut stream).unwrap() {
+        ServerMsg::LayoutGrafted { results, .. } => {
+            Ok(results.into_iter().map(|r| (r.slot, r.pane_id)).collect())
+        }
+        ServerMsg::Err { msg, .. } => Err(msg),
+        other => panic!("unexpected graft reply: {other:?}"),
+    }
+}
+
+#[test]
+fn layout_graft_replaces_anchor_and_preserves_enclosing_tab() {
+    // AC2-HP / AC4-EDGE-ENCLOSING-TREE / AC4-EDGE-NO-FOCUS: a typed V[anchor,
+    // shell] subtree replaces the anchor leaf; the enclosing sibling and the
+    // viewer's focus are untouched; the receipt names every slot's pane.
+    let scratch = Scratch::new("graft");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+    let (mut c, pane1) = attach_settled(&scratch, &cwd);
+    let pane2 = run_pane(
+        &scratch,
+        &cwd,
+        PanePlacement {
+            tab: None,
+            at: None,
+            target: PaneTarget::CurrentRoute,
+            split: Some(Dir::Right),
+            here: false,
+            fallback: PlacementFallback::NewTab,
+        },
+    )
+    .unwrap();
+    let layout = c.wait_layout(10, "two panes", |l| l.panes.len() == 2 && l.focus == pane2);
+    let r2_before = layout.panes.iter().find(|(id, _)| *id == pane2).unwrap().1;
+
+    let spec = AnchoredLayoutSpec {
+        version: 1,
+        tree: LayoutTreeSpec::Split {
+            axis: Axis::Vertical,
+            children: vec![
+                LayoutTreeChild {
+                    weight: 0.5,
+                    tree: LayoutTreeSpec::Slot("anchor".into()),
+                },
+                LayoutTreeChild {
+                    weight: 0.5,
+                    tree: LayoutTreeSpec::Slot("fresh".into()),
+                },
+            ],
+        },
+        slots: vec![
+            LayoutSlot {
+                name: "anchor".into(),
+                binding: LayoutBinding::Anchor,
+            },
+            LayoutSlot {
+                name: "fresh".into(),
+                binding: LayoutBinding::Shell,
+            },
+        ],
+    };
+    let results = graft_at(&scratch, pane1, spec).expect("graft succeeds");
+    let shell = results
+        .iter()
+        .find(|(n, _)| n == "fresh")
+        .map(|(_, p)| *p)
+        .unwrap();
+
+    let layout = c.wait_layout(10, "graft lands three panes", |l| l.panes.len() == 3);
+    let r1 = layout.panes.iter().find(|(id, _)| *id == pane1).unwrap().1;
+    let rs = layout.panes.iter().find(|(id, _)| *id == shell).unwrap().1;
+    let r2 = layout.panes.iter().find(|(id, _)| *id == pane2).unwrap().1;
+    // The anchor leaf is replaced by V[pane1, shell] in pane1's column.
+    assert_eq!(r1.x, rs.x, "anchor + shell share the anchor's column");
+    assert!(rs.y > r1.y, "the shell lands below the anchor");
+    assert!(
+        rs.x < r2.x,
+        "the subtree stays in the anchor's column, not pane2's"
+    );
+    // AC4-EDGE-ENCLOSING-TREE: the enclosing sibling is byte-unchanged.
+    assert_eq!(r2, r2_before, "the enclosing pane2 is untouched");
+    // AC4-EDGE-NO-FOCUS: scripted graft never steals focus.
+    assert_eq!(layout.focus, pane2, "graft did not move the viewer's focus");
+}
+
+#[test]
+fn layout_graft_refuses_unavailable_fno_and_duplicate_binding() {
+    // AC4-EDGE-FNO-UNAVAILABLE / AC2-EDGE: an fno binding with no live pane is
+    // refused (never degraded to a shell); two slots resolving to one pane too.
+    let scratch = Scratch::new("graft-refuse");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+    let (_c, pane1) = attach_settled(&scratch, &cwd);
+
+    let spec = AnchoredLayoutSpec {
+        version: 1,
+        tree: LayoutTreeSpec::Split {
+            axis: Axis::Vertical,
+            children: vec![
+                LayoutTreeChild {
+                    weight: 0.5,
+                    tree: LayoutTreeSpec::Slot("a".into()),
+                },
+                LayoutTreeChild {
+                    weight: 0.5,
+                    tree: LayoutTreeSpec::Slot("b".into()),
+                },
+            ],
+        },
+        slots: vec![
+            LayoutSlot {
+                name: "a".into(),
+                binding: LayoutBinding::Anchor,
+            },
+            LayoutSlot {
+                name: "b".into(),
+                binding: LayoutBinding::Fno("no-such-session".into()),
+            },
+        ],
+    };
+    let err = graft_at(&scratch, pane1, spec).expect_err("unavailable fno refused");
+    assert!(err.contains("no live pane"), "{err}");
 }

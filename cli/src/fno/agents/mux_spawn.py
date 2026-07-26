@@ -84,6 +84,9 @@ class MuxSpawnResult:
     # "" for providers whose transport key is not short_id (US8).
     short_id: str = ""
     effective_message: Optional[str] = None
+    # Server-authored exact-placement receipt (x-6928): anchor/direction/fallback
+    # + squad/tab the split landed in. None unless `--at` pinned the origin.
+    placement: Optional[dict] = None
 
 
 def _fno_bin() -> str:
@@ -828,6 +831,36 @@ def _lookup_child_pid(
     return None
 
 
+#: `fno mux pane wait` exit code when the pane's child exited mid-wait
+#: (crates/fno EXIT_WAIT_EXITED). The readiness gate treats it as launch failure.
+_WAIT_EXITED = 12
+
+
+def _await_interactive_readiness(
+    session: str,
+    pane_id: int,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> str:
+    """Interactive readiness gate (x-6928).
+
+    A painted first frame plus a still-live child after a 1s dwell is READY; an
+    alive but unpainted child at the deadline is LIVE; an early child exit is
+    FAILED. Probed through the mux CLI so the gate works across the subprocess
+    boundary: ``pane wait`` (exit 12 == the child exited) for liveness, and
+    ``pane read`` (non-empty == painted) for the ready/live label. Only FAILED
+    stops the spawn (AC5-ERR); READY and LIVE both proceed to the registry row.
+    """
+    probe = _run_mux(
+        ["mux", "pane", "wait", "--session", session, str(pane_id), "--timeout", "1"], runner
+    )
+    if probe.returncode == _WAIT_EXITED:
+        return "failed"
+    painted = _run_mux(
+        ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "1"], runner
+    )
+    return "ready" if (painted.stdout or "").strip() else "live"
+
+
 def dispatch_spawn_pane(
     name: str,
     message: str,
@@ -846,6 +879,7 @@ def dispatch_spawn_pane(
     session: Optional[str] = None,
     squad: Optional[str] = None,
     split: Optional[str] = None,
+    at: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
@@ -968,26 +1002,39 @@ def dispatch_spawn_pane(
             placement_args += ["squad", squad]
         if split:
             placement_args += ["split", split]
+        if at:
+            # `--at current` (or a numeric anchor) rides the outer pane-run
+            # transport before the `--` fence. Python forwards the token
+            # verbatim; the mux CLI resolves `current` from FNO_PANE so one Rust
+            # parser owns env identity for every reachable caller (no Python
+            # env drift, AC1-ERR).
+            placement_args += ["at", at]
         # Stamp the spawn clock immediately before the pane runs, not at function
         # entry. A sibling pane starting a same-cwd session during the lock-wait
         # or argv-build above would otherwise clear the since_ms lower bound and
         # become the sole backfill candidate, stamping this row with the
         # sibling's id. Sampling here keeps the bound as tight as the pane run.
         spawn_started_ms = int(time.time() * 1000)
+        run_args = [
+            "mux",
+            "pane",
+            "run",
+            "--claim",
+            "--session",
+            session,
+            "--cwd",
+            str(cwd),
+            *placement_args,
+        ]
+        # Exact placement answers --json so the server authors the receipt
+        # (anchor/direction/fallback); Python never synthesizes those from the
+        # requested flags (AC1-UI). Legacy spawns keep the plain pane-id stdout.
+        exact = bool(at)
+        if exact:
+            run_args.append("--json")
+        run_args += ["--", *wrapped]
         proc = _run_mux(
-            [
-                "mux",
-                "pane",
-                "run",
-                "--claim",
-                "--session",
-                session,
-                "--cwd",
-                str(cwd),
-                *placement_args,
-                "--",
-                *wrapped,
-            ],
+            run_args,
             runner,
             env={**os.environ, "FNO_MUX_SHELL_INTEGRATION": _shell_integration()},
         )
@@ -1001,18 +1048,47 @@ def dispatch_spawn_pane(
                 "there is no daemon-PTY fallback)",
                 exit_code=1,
             )
-        try:
-            pane_id = int((proc.stdout or "").strip().splitlines()[-1])
-        except (ValueError, IndexError) as exc:
-            raise DispatchAskError(
-                f"mux pane run returned unparseable output {proc.stdout!r} "
-                f"for session {session!r}; a pane may exist without a "
-                f"registry row - inspect with 'fno mux pane ls --session "
-                f"{session}'",
-                exit_code=1,
-            ) from exc
+        placement_receipt: Optional[dict] = None
+        if exact:
+            try:
+                payload = json.loads((proc.stdout or "").strip().splitlines()[-1])
+                pane_id = int(payload["pane_id"])
+                placement_receipt = payload.get("placement")
+            except (ValueError, KeyError, IndexError, json.JSONDecodeError) as exc:
+                raise DispatchAskError(
+                    f"mux pane run returned unparseable --json {proc.stdout!r} "
+                    f"for session {session!r}; a pane may exist without a "
+                    f"registry row - inspect with 'fno mux pane ls --session "
+                    f"{session}'",
+                    exit_code=1,
+                ) from exc
+        else:
+            try:
+                pane_id = int((proc.stdout or "").strip().splitlines()[-1])
+            except (ValueError, IndexError) as exc:
+                raise DispatchAskError(
+                    f"mux pane run returned unparseable output {proc.stdout!r} "
+                    f"for session {session!r}; a pane may exist without a "
+                    f"registry row - inspect with 'fno mux pane ls --session "
+                    f"{session}'",
+                    exit_code=1,
+                ) from exc
 
         child_pid = _lookup_child_pid(session, pane_id, runner)
+
+        if exact:
+            # Interactive readiness gate (x-6928): hold the registry row and the
+            # success receipt until the provider proves it launched. An early
+            # exit (AC5-ERR) reaps ONLY this pane - the mux's tree normalization
+            # collapses the split, the viewer's focus and any later sibling split
+            # survive (AC5-FR/AC6-FR), and no registry row is written.
+            if _await_interactive_readiness(session, pane_id, runner) == "failed":
+                _run_mux(["mux", "pane", "kill", "--session", session, str(pane_id)], runner)
+                raise DispatchAskError(
+                    f"agent {name!r} provider exited before readiness in session "
+                    f"{session!r}; pane {pane_id} reaped, no registry row written",
+                    exit_code=1,
+                )
         spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
 
         # opencode and codex ids are discovered, not minted (see the two
@@ -1114,4 +1190,5 @@ def dispatch_spawn_pane(
         session_uuid=session_uuid,
         short_id=short_id_val,
         effective_message=effective_message,
+        placement=placement_receipt,
     )

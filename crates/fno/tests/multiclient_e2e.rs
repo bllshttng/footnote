@@ -468,3 +468,190 @@ fn multiclient_nested_same_session_attach_refused_pre_raw_mode() {
         "the terminal must never enter the alternate screen on a refusal"
     );
 }
+
+// -- x-6928: concurrent strict spawns serialize; only one fits ---------------
+
+#[test]
+fn concurrent_strict_spawn_only_one_commits() {
+    // AC3-FR: two exact down-splits at the same origin pane, with geometry for
+    // only one, are serialized by the core loop. Exactly one commits beside the
+    // anchor; the other refuses (no new-tab fallback, no orphan pane, no extra
+    // tab). A 5-row viewport admits one MIN_ROWS split but not a second.
+    use common::connect_with_retry;
+    use fno::proto::{
+        read_msg_sync, write_msg_sync, ClientMsg, ControlVerb, PanePlacement, PaneTarget,
+        PlacementFallback, ServerMsg, BUILD_VERSION, PROTO_VERSION,
+    };
+    use fno::tree::Dir;
+
+    let scratch = Scratch::new("concurrent-strict");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+    let mut c = FakeClient::attach(&scratch.sock(), 5, 80, cwd.to_str().unwrap());
+    let layout = c.wait_layout(10, "first layout", |l| l.panes.len() == 1);
+    let pane1 = layout.focus;
+    let tabs_before: usize = c
+        .layout
+        .as_ref()
+        .unwrap()
+        .squads
+        .iter()
+        .map(|s| s.tabs.len())
+        .sum();
+
+    let req = ClientMsg::Control {
+        proto: PROTO_VERSION,
+        build: BUILD_VERSION.into(),
+        verb: ControlVerb::PaneRun {
+            cwd: cwd.to_string_lossy().into_owned(),
+            argv: vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()],
+            cols: None,
+            rows: None,
+            claim: false,
+            placement: PanePlacement {
+                tab: None,
+                at: Some(pane1),
+                target: PaneTarget::CurrentRoute,
+                split: Some(Dir::Down),
+                here: false,
+                fallback: PlacementFallback::Refuse,
+            },
+        },
+    };
+    // Queue both before reading either: the server serializes them in arrival
+    // order, so the first splits pane1 (fits) and the second finds pane1 now too
+    // short and refuses.
+    let mut s1 = connect_with_retry(&scratch.sock());
+    s1.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write_msg_sync(&mut s1, &req).unwrap();
+    let mut s2 = connect_with_retry(&scratch.sock());
+    s2.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write_msg_sync(&mut s2, &req).unwrap();
+    let r1 = read_msg_sync(&mut s1).unwrap();
+    let r2 = read_msg_sync(&mut s2).unwrap();
+
+    let ok = matches!(r1, ServerMsg::PaneSpawned { .. }) as usize
+        + matches!(r2, ServerMsg::PaneSpawned { .. }) as usize;
+    assert_eq!(
+        ok, 1,
+        "exactly one strict spawn commits (got {r1:?}, {r2:?})"
+    );
+    let refuse_msg = match (&r1, &r2) {
+        (ServerMsg::Err { msg, .. }, _) | (_, ServerMsg::Err { msg, .. }) => msg.clone(),
+        _ => String::new(),
+    };
+    assert!(
+        refuse_msg.contains("cannot fit"),
+        "the losing spawn refuses on min-size, not a fallback: {refuse_msg}"
+    );
+
+    let layout = c.wait_layout(10, "settled to two panes", |l| l.panes.len() == 2);
+    let tabs_after: usize = layout.squads.iter().map(|s| s.tabs.len()).sum();
+    assert_eq!(tabs_after, tabs_before, "no new tab minted by the refusal");
+}
+
+// -- x-6928: concurrent grafts serialize; only one fits ----------------------
+
+#[test]
+fn concurrent_graft_one_commits_one_refuses() {
+    // AC4-EDGE-CONCURRENT-GRAFT: two identical grafts at the same anchor, on a
+    // 5-row viewport that admits one V[anchor,shell] split but not a second
+    // nested one. The core loop serializes them: one commits, the other refuses
+    // on min-size (no partial tree, no orphan shell).
+    use common::connect_with_retry;
+    use fno::proto::{
+        read_msg_sync, write_msg_sync, AnchoredLayoutSpec, ClientMsg, ControlVerb, GraftOutcome,
+        LayoutBinding, LayoutSlot, LayoutTreeChild, LayoutTreeSpec, PaneTarget, ServerMsg,
+        BUILD_VERSION, PROTO_VERSION,
+    };
+    use fno::tree::Axis;
+
+    fn spec() -> AnchoredLayoutSpec {
+        AnchoredLayoutSpec {
+            version: 1,
+            tree: LayoutTreeSpec::Split {
+                axis: Axis::Vertical,
+                children: vec![
+                    LayoutTreeChild {
+                        weight: 0.5,
+                        tree: LayoutTreeSpec::Slot("anchor".into()),
+                    },
+                    LayoutTreeChild {
+                        weight: 0.5,
+                        tree: LayoutTreeSpec::Slot("fresh".into()),
+                    },
+                ],
+            },
+            slots: vec![
+                LayoutSlot {
+                    name: "anchor".into(),
+                    binding: LayoutBinding::Anchor,
+                },
+                LayoutSlot {
+                    name: "fresh".into(),
+                    binding: LayoutBinding::Shell,
+                },
+            ],
+        }
+    }
+
+    let scratch = Scratch::new("concurrent-graft");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+    let mut c = FakeClient::attach(&scratch.sock(), 5, 80, cwd.to_str().unwrap());
+    let pane1 = c
+        .wait_layout(10, "first layout", |l| l.panes.len() == 1)
+        .focus;
+
+    let req = ClientMsg::Control {
+        proto: PROTO_VERSION,
+        build: BUILD_VERSION.into(),
+        verb: ControlVerb::LayoutGraft {
+            squad: PaneTarget::CurrentRoute,
+            anchor: pane1,
+            spec: spec(),
+            focus: false,
+        },
+    };
+    // Queue both before reading: the server serializes them in arrival order.
+    let mut s1 = connect_with_retry(&scratch.sock());
+    s1.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write_msg_sync(&mut s1, &req).unwrap();
+    let mut s2 = connect_with_retry(&scratch.sock());
+    s2.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write_msg_sync(&mut s2, &req).unwrap();
+    let r1 = read_msg_sync(&mut s1).unwrap();
+    let r2 = read_msg_sync(&mut s2).unwrap();
+
+    let committed = (matches!(r1, ServerMsg::LayoutGrafted { .. }) as usize)
+        + (matches!(r2, ServerMsg::LayoutGrafted { .. }) as usize);
+    assert_eq!(
+        committed, 1,
+        "exactly one graft commits (got {r1:?}, {r2:?})"
+    );
+    let committed_results = match (&r1, &r2) {
+        (ServerMsg::LayoutGrafted { results, .. }, _)
+        | (_, ServerMsg::LayoutGrafted { results, .. }) => results,
+        _ => unreachable!("exactly one graft committed"),
+    };
+    // The committed graft names an Anchor slot and a fresh Shell slot.
+    assert!(committed_results
+        .iter()
+        .any(|r| r.outcome == GraftOutcome::Anchor));
+    assert!(committed_results
+        .iter()
+        .any(|r| r.outcome == GraftOutcome::Shell));
+    let err_is_fit = matches!(
+        (&r1, &r2),
+        (ServerMsg::Err { msg, .. }, _) | (_, ServerMsg::Err { msg, .. })
+            if msg.contains("cannot fit")
+    );
+    assert!(
+        err_is_fit,
+        "the losing graft refuses on min-size: {r1:?} / {r2:?}"
+    );
+
+    let layout = c.wait_layout(10, "settled to two panes", |l| l.panes.len() == 2);
+    // No orphan shell from the refused graft: exactly the anchor + one shell.
+    assert_eq!(layout.panes.len(), 2);
+}

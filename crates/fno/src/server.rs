@@ -37,11 +37,11 @@ use crate::agents_view::{self, RegistryAgent};
 use crate::backlog_view;
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
-    BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
-    Frame, LayoutScope, LayoutSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
-    PanePlacement, PaneTarget, ProtoError, ServerMsg, SlotBinding, SlotOutcome, SlotResult,
-    SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta, TabSel, WaitOutcome, MAX_SQUAD_NAME,
-    MAX_TAB_NAME,
+    AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg,
+    Command, ControlVerb, Frame, LayoutScope, LayoutSpec, MouseButton, MouseEvent, MouseKind,
+    PaneInfo, PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError,
+    ResolvedPlacement, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta,
+    TabInfo, TabLayout, TabMeta, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
@@ -478,6 +478,14 @@ enum CoreMsg {
         squad: PaneTarget,
         tab: TabSel,
         spec: LayoutSpec,
+        focus: bool,
+        reply: ControlReply,
+    },
+    /// (v44, x-6928) Local anchored layout graft: realize `spec` at `anchor`.
+    LayoutGraft {
+        squad: PaneTarget,
+        anchor: u64,
+        spec: AnchoredLayoutSpec,
         focus: bool,
         reply: ControlReply,
     },
@@ -2361,6 +2369,14 @@ impl Core {
         pid: u64,
         placement: &PanePlacement,
     ) -> Result<(u64, TabId, bool), (u32, String)> {
+        // Strict origin placement (--at current, fallback=Refuse): locate the
+        // anchor pane, infer its squad+tab, refuse a conflicting explicit
+        // selector, and never fall back to a new tab. Handled before the
+        // selector-resolved path, which assumes the active tab rather than the
+        // anchor's real location.
+        if placement.at.is_some() && placement.fallback == PlacementFallback::Refuse {
+            return self.place_strict_at_anchor(pid, placement);
+        }
         if placement.tab.is_none() && placement.at.is_none() {
             return self
                 .place_spawned_pane(dest, squad_key, pid, placement.split)
@@ -2421,8 +2437,18 @@ impl Core {
         match res {
             Ok(()) => Ok((sid, tid, false)),
             // Min-size refusal falls back to a fresh tab, never a dead-end -
-            // mirroring place_spawned_pane.
+            // mirroring place_spawned_pane. Strict placement never reaches here
+            // (it routes through place_strict_at_anchor), but a Refuse policy on
+            // any selector-resolved path still fails closed rather than minting.
             Err(tree::SplitError::TooSmall { .. }) => {
+                if placement.fallback == PlacementFallback::Refuse {
+                    self.reap_pane(pid);
+                    return Err((
+                        err_code::BAD_REQUEST,
+                        "placement cannot fit: a resulting pane would be below the minimum size"
+                            .into(),
+                    ));
+                }
                 let ntid = self.session.mint_tab_id();
                 self.session.squads[si].tabs.push(Tab {
                     name: None,
@@ -2431,6 +2457,93 @@ impl Core {
                     focus: pid,
                 });
                 Ok((sid, ntid, true))
+            }
+            Err(e) => {
+                self.reap_pane(pid);
+                Err((err_code::BAD_REQUEST, e.to_string()))
+            }
+        }
+    }
+
+    /// Strict origin placement for `--at current` (v44, x-6928): the anchor is
+    /// pinned to the calling pane id, so focus races cannot redirect it. The
+    /// server locates the anchor once inside this (serialized) turn, infers its
+    /// squad+tab, refuses a conflicting explicit selector, splits beside it, and
+    /// never creates a tab or moves focus. Any failure reaps the pre-spawned
+    /// child and leaves the tree, focus, and registry untouched.
+    fn place_strict_at_anchor(
+        &mut self,
+        pid: u64,
+        placement: &PanePlacement,
+    ) -> Result<(u64, TabId, bool), (u32, String)> {
+        let anchor = placement.at.expect("strict placement carries an anchor");
+        let dir = placement.split.unwrap_or(Dir::Down);
+        let (sid, ti) = match self.session.find_pane(anchor) {
+            Some(loc) => loc,
+            None => {
+                self.reap_pane(pid);
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("anchor pane {anchor} no longer exists"),
+                ));
+            }
+        };
+        // An explicit workspace/tab selector must name the anchor's actual
+        // location; anything else is refused rather than redirecting placement.
+        if !matches!(placement.target, PaneTarget::CurrentRoute) {
+            let ok = matches!(self.resolve_placement_target(&placement.target, None), Ok(s) if s == Some(sid));
+            if !ok {
+                self.reap_pane(pid);
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("anchor pane {anchor} is not in the requested workspace"),
+                ));
+            }
+        }
+        if let Some(sel) = placement.tab.as_ref() {
+            if matches!(sel, TabSel::New) {
+                // Strict placement pins the anchor's tab and never mints one;
+                // `--tab new` asks for the opposite, so the combination is
+                // refused rather than silently dropping the new-tab request.
+                self.reap_pane(pid);
+                return Err((
+                    err_code::BAD_REQUEST,
+                    "exact placement cannot combine --at with a new-tab selector".into(),
+                ));
+            }
+            let ok = matches!(self.resolve_tab_index(sid, sel), Ok(rti) if rti == ti);
+            if !ok {
+                self.reap_pane(pid);
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("anchor pane {anchor} is not in the requested tab"),
+                ));
+            }
+        }
+        let tid = self
+            .session
+            .squad(sid)
+            .expect("find_pane returned a live squad")
+            .tabs[ti]
+            .id;
+        let vp = self.tab_rect(tid);
+        let res = {
+            let tab = &mut self
+                .session
+                .squad_mut(sid)
+                .expect("find_pane returned a live squad")
+                .tabs[ti];
+            tree::split_at(tab, vp, anchor, dir, pid)
+        };
+        match res {
+            Ok(()) => Ok((sid, tid, false)),
+            Err(tree::SplitError::TooSmall { .. }) => {
+                self.reap_pane(pid);
+                Err((
+                    err_code::BAD_REQUEST,
+                    "exact placement cannot fit: a resulting pane would be below the minimum size"
+                        .into(),
+                ))
             }
             Err(e) => {
                 self.reap_pane(pid);
@@ -3016,6 +3129,207 @@ impl Core {
     ) -> Result<Vec<SlotResult>, (u32, String)> {
         let sid = self.resolve_squad(squad)?;
         self.apply_spec(sid, tab_sel, spec, focus)
+    }
+
+    /// Realize an [`AnchoredLayoutSpec`] as a local subtree at `anchor`
+    /// (v44, x-6928). Atomic: validate -> resolve bindings -> spawn shells ->
+    /// detach reused panes -> swap the candidate in, all in one serialized turn.
+    /// No partial success (a refusal is a top-level `Err`); no live PTY killed.
+    fn layout_graft(
+        &mut self,
+        squad: &PaneTarget,
+        anchor: u64,
+        spec: &AnchoredLayoutSpec,
+        _focus: bool,
+    ) -> Result<ServerMsg, (u32, String)> {
+        use crate::proto::{GraftOutcome, GraftSlotResult, LayoutBinding};
+        use std::collections::HashMap;
+
+        // 1. Pure topology + slot-integrity validation, pre-mutation.
+        crate::templates::validate_anchored_spec(spec)
+            .map_err(|e| (err_code::BAD_REQUEST, e.to_string()))?;
+
+        // 2. Locate the anchor; refuse stale + a conflicting workspace selector.
+        let (sid, ti) = match self.session.find_pane(anchor) {
+            Some(loc) => loc,
+            None => {
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("anchor pane {anchor} no longer exists"),
+                ));
+            }
+        };
+        if !matches!(squad, PaneTarget::CurrentRoute) {
+            let ok = matches!(self.resolve_placement_target(squad, None), Ok(s) if s == Some(sid));
+            if !ok {
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("anchor pane {anchor} is not in the requested workspace"),
+                ));
+            }
+        }
+        let tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
+        let vp = self.tab_rect(tid);
+
+        // 3. Resolve Anchor + Fno bindings to live pane ids; collect Shell slots.
+        //    An unavailable Fno is REFUSED, never degraded to a shell. Duplicates
+        //    (two bindings -> one pane, or Fno -> the anchor) are refused.
+        let mut resolved: HashMap<String, u64> = HashMap::new();
+        let mut shell_slots: Vec<String> = Vec::new();
+        let mut results: Vec<GraftSlotResult> = Vec::new();
+        for slot in &spec.slots {
+            let (pid, outcome) = match &slot.binding {
+                LayoutBinding::Anchor => (anchor, GraftOutcome::Anchor),
+                LayoutBinding::Fno(id) => {
+                    let p = self.resolve_local_pane(id).ok_or_else(|| {
+                        (
+                            err_code::BAD_REQUEST,
+                            format!("fno binding {:?} has no live pane", slot.name),
+                        )
+                    })?;
+                    (p, GraftOutcome::Fno)
+                }
+                LayoutBinding::Shell => {
+                    shell_slots.push(slot.name.clone());
+                    continue;
+                }
+            };
+            if resolved.values().any(|&v| v == pid) {
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("two graft slots resolve to the same pane {pid}"),
+                ));
+            }
+            resolved.insert(slot.name.clone(), pid);
+            results.push(GraftSlotResult {
+                slot: slot.name.clone(),
+                pane_id: pid,
+                outcome,
+            });
+        }
+
+        // 4. Pre-spawn fit probe: realize the subtree with placeholder shell ids
+        //    and confirm the candidate fits, so a too-small graft refuses BEFORE
+        //    any shell spawns (AC4-EDGE-MINIMUM-FIT).
+        let mut fit_map = resolved.clone();
+        for (i, name) in shell_slots.iter().enumerate() {
+            fit_map.insert(name.clone(), u64::MAX - i as u64);
+        }
+        let probe_tab = self.session.squad(sid).expect("live").tabs[ti].clone();
+        let probe_subtree = crate::templates::realize_spec_tree(&spec.tree, &fit_map);
+        if tree::replace_anchor_with_candidate(&probe_tab, vp, anchor, probe_subtree).is_err() {
+            return Err((
+                err_code::BAD_REQUEST,
+                "graft cannot fit: a resulting pane would be below the minimum size".into(),
+            ));
+        }
+
+        // 5. Spawn Shell slots AFTER pure validation. All-or-nothing: a failed
+        //    spawn reaps every shell spawned so far (no detach happened yet, so
+        //    rollback is shell-only - AC4-EDGE-SHELL-ROLLBACK).
+        let cwd = self
+            .session
+            .squad(sid)
+            .map(|s| s.canonical_cwd().to_string())
+            .unwrap_or_default();
+        let mut spawned: Vec<u64> = Vec::new();
+        for name in &shell_slots {
+            match self.spawn_pane(vt::DEFAULT_ROWS, vt::DEFAULT_COLS, &cwd) {
+                Ok(p) => {
+                    spawned.push(p);
+                    resolved.insert(name.clone(), p);
+                    results.push(GraftSlotResult {
+                        slot: name.clone(),
+                        pane_id: p,
+                        outcome: GraftOutcome::Shell,
+                    });
+                }
+                Err(_) => {
+                    for p in &spawned {
+                        self.reap_pane(*p);
+                    }
+                    return Err((
+                        err_code::SPAWN_FAILED,
+                        format!("graft shell slot {name:?} failed to spawn; rolled back"),
+                    ));
+                }
+            }
+        }
+
+        // 6. Detach reused Fno panes from their current leaves (PTY kept) so the
+        //    candidate's substitution is their only occurrence. The anchor stays;
+        //    it is the substitution site and lives at its Anchor slot.
+        for slot in &spec.slots {
+            if let LayoutBinding::Fno(_) = slot.binding {
+                let p = resolved[&slot.name];
+                if p != anchor {
+                    self.detach_pane_keep_pty(p);
+                }
+            }
+        }
+
+        // 7. Commit: realize the subtree with real ids and swap it in. The fit
+        //    probe already passed; this re-validates on the live (post-detach)
+        //    tab and swaps the candidate in one turn. Re-resolve the anchor's tab
+        //    by its stable id: a detached single-pane source tab earlier in the
+        //    squad shifts `ti`, so the pre-detach index can no longer name it.
+        let subtree = crate::templates::realize_spec_tree(&spec.tree, &resolved);
+        let si = self
+            .session
+            .squads
+            .iter()
+            .position(|s| s.id == sid)
+            .expect("squad live");
+        let ti = self.session.squads[si]
+            .tabs
+            .iter()
+            .position(|t| t.id == tid)
+            .ok_or_else(|| {
+                // The anchor's own tab vanished mid-turn (a concurrent close);
+                // reap the shells and refuse rather than graft into the void.
+                for p in &spawned {
+                    self.reap_pane(*p);
+                }
+                (
+                    err_code::BAD_REQUEST,
+                    format!("anchor pane {anchor} tab vanished during graft"),
+                )
+            })?;
+        let commit = {
+            let tab = &mut self.session.squads[si].tabs[ti];
+            match tree::replace_anchor_with_candidate(tab, vp, anchor, subtree) {
+                Ok(node) => {
+                    tab.root = node;
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        };
+        if let Err(e) = commit {
+            // A race only (the probe passed); reap the shells and refuse.
+            for p in &spawned {
+                self.reap_pane(*p);
+            }
+            return Err((
+                err_code::BAD_REQUEST,
+                format!("graft commit failed: {e}; rolled back spawned shells"),
+            ));
+        }
+
+        self.push_layout(true);
+        // Order results by the tree's slot traversal for a stable receipt.
+        results.sort_by_key(|r| {
+            spec.slots
+                .iter()
+                .position(|s| s.name == r.slot)
+                .unwrap_or(usize::MAX)
+        });
+        Ok(ServerMsg::LayoutGrafted {
+            anchor,
+            squad: sid,
+            tab: tid,
+            results,
+        })
     }
 
     /// The sid-resolved core of [`Self::layout_apply`], shared with US8 restore
@@ -7555,8 +7869,40 @@ impl Core {
             } => {
                 let rows = rows.unwrap_or(vt::DEFAULT_ROWS);
                 let cols = cols.unwrap_or(vt::DEFAULT_COLS);
+                // Capture the exact-placement intent before `placement` moves
+                // into run_pane, so the receipt can echo the committed context.
+                let exact =
+                    placement.at.is_some() && placement.fallback == PlacementFallback::Refuse;
+                let (anchor, direction) = (placement.at, placement.split);
                 let msg = match self.run_pane(squad_key, cwd, argv, rows, cols, claim, placement) {
-                    Ok(pane_id) => ServerMsg::PaneSpawned { pane_id },
+                    Ok(pane_id) => {
+                        let resolved = if exact {
+                            // The new pane now sits beside the anchor in the
+                            // anchor's squad+tab; read its real location back.
+                            let (sid, tid) = self
+                                .session
+                                .find_pane(pane_id)
+                                .and_then(|(sid, ti)| {
+                                    self.session
+                                        .squad(sid)
+                                        .and_then(|s| s.tabs.get(ti).map(|t| (sid, t.id)))
+                                })
+                                .unwrap_or((0, 0));
+                            Some(ResolvedPlacement {
+                                anchor: anchor.unwrap(),
+                                direction: direction.unwrap_or(Dir::Down),
+                                fallback: PlacementFallback::Refuse,
+                                squad: sid,
+                                tab: tid,
+                            })
+                        } else {
+                            None
+                        };
+                        ServerMsg::PaneSpawned {
+                            pane_id,
+                            placement: resolved,
+                        }
+                    }
                     Err((code, msg)) => ServerMsg::Err { code, msg },
                 };
                 let _ = reply.send(msg);
@@ -7682,7 +8028,10 @@ impl Core {
                 reply,
             } => {
                 let msg = match self.split_pane_script(pane, direction, no_focus) {
-                    Ok(pane_id) => ServerMsg::PaneSpawned { pane_id },
+                    Ok(pane_id) => ServerMsg::PaneSpawned {
+                        pane_id,
+                        placement: None,
+                    },
                     Err((code, msg)) => ServerMsg::Err { code, msg },
                 };
                 let _ = reply.send(msg);
@@ -7698,7 +8047,10 @@ impl Core {
             }
             CoreMsg::TabCreate { squad, name, reply } => {
                 let msg = match self.tab_create(&squad, name) {
-                    Ok(pane_id) => ServerMsg::PaneSpawned { pane_id },
+                    Ok(pane_id) => ServerMsg::PaneSpawned {
+                        pane_id,
+                        placement: None,
+                    },
                     Err((code, msg)) => ServerMsg::Err { code, msg },
                 };
                 let _ = reply.send(msg);
@@ -7766,6 +8118,20 @@ impl Core {
             } => {
                 let msg = match self.layout_apply(&squad, &tab, &spec, focus) {
                     Ok(results) => ServerMsg::LayoutApplied { results },
+                    Err((code, msg)) => ServerMsg::Err { code, msg },
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
+            CoreMsg::LayoutGraft {
+                squad,
+                anchor,
+                spec,
+                focus,
+                reply,
+            } => {
+                let msg = match self.layout_graft(&squad, anchor, &spec, focus) {
+                    Ok(msg) => msg,
                     Err((code, msg)) => ServerMsg::Err { code, msg },
                 };
                 let _ = reply.send(msg);
@@ -8917,6 +9283,22 @@ async fn handle_control(
                 .send(CoreMsg::LayoutApply {
                     squad,
                     tab,
+                    spec,
+                    focus,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::LayoutGraft {
+            squad,
+            anchor,
+            spec,
+            focus,
+        } => {
+            core_tx
+                .send(CoreMsg::LayoutGraft {
+                    squad,
+                    anchor,
                     spec,
                     focus,
                     reply: reply_tx,
@@ -11116,6 +11498,7 @@ mod tests {
                     here: false,
                     tab: Some(TabSel::Id(10)),
                     at: Some(2),
+                    fallback: PlacementFallback::NewTab,
                 },
             )
             .unwrap();
@@ -11146,6 +11529,7 @@ mod tests {
                     here: false,
                     tab: Some(TabSel::Id(10)),
                     at: Some(999),
+                    fallback: PlacementFallback::NewTab,
                 },
             )
             .unwrap_err();
@@ -11156,6 +11540,207 @@ mod tests {
             "a bad anchor reaps the pre-spawned pane (no orphan)"
         );
         let _ = before_panes;
+    }
+
+    #[test]
+    fn exact_current_refuses_conflicting_tab_selector() {
+        // AC1-EDGE: --at current pins pane 1 (tab 10); an explicit --tab id:20
+        // names a tab the anchor is NOT in. Strict placement refuses rather than
+        // redirecting, reaps the pre-spawned child, and changes no tree.
+        let mut core = two_tab_core();
+        core.shells = vec!["/bin/cat".into()];
+        let err = core
+            .run_pane(
+                "/a".into(),
+                "/a".into(),
+                vec!["/bin/cat".into()],
+                24,
+                80,
+                false,
+                PanePlacement {
+                    target: PaneTarget::SquadId(1),
+                    split: Some(Dir::Down),
+                    here: false,
+                    tab: Some(TabSel::Id(20)),
+                    at: Some(1),
+                    fallback: PlacementFallback::Refuse,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.0, err_code::BAD_REQUEST);
+        assert!(
+            err.1.contains("not in the requested tab"),
+            "conflict message: {}",
+            err.1
+        );
+        let s = core.session.squad(1).unwrap();
+        assert_eq!(s.tabs.len(), 2, "no new tab minted");
+        assert!(tree::leaves(&s.tabs.iter().find(|t| t.id == 10).unwrap().root).contains(&1));
+    }
+
+    #[test]
+    fn graft_materialization_rollback_preserves_tree_on_shell_failure() {
+        // AC4-EDGE-SHELL-ROLLBACK / AC2-FR: when a Shell slot cannot spawn, the
+        // graft refuses - no shell, no tree mutation, no focus change survives,
+        // and the anchor's tab is byte-unchanged. Forced by an empty
+        // shell-candidate list so spawn_pane fails.
+        use crate::proto::{
+            AnchoredLayoutSpec, LayoutBinding, LayoutSlot, LayoutTreeChild, LayoutTreeSpec,
+        };
+        use crate::tree::Axis;
+
+        let mut core = two_tab_core();
+        core.shells = Vec::new(); // every spawn_pane fails
+        let tab10_before = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 10)
+            .unwrap()
+            .clone();
+        let spec = AnchoredLayoutSpec {
+            version: 1,
+            tree: LayoutTreeSpec::Split {
+                axis: Axis::Vertical,
+                children: vec![
+                    LayoutTreeChild {
+                        weight: 0.5,
+                        tree: LayoutTreeSpec::Slot("a".into()),
+                    },
+                    LayoutTreeChild {
+                        weight: 0.5,
+                        tree: LayoutTreeSpec::Slot("b".into()),
+                    },
+                ],
+            },
+            slots: vec![
+                LayoutSlot {
+                    name: "a".into(),
+                    binding: LayoutBinding::Anchor,
+                },
+                LayoutSlot {
+                    name: "b".into(),
+                    binding: LayoutBinding::Shell,
+                },
+            ],
+        };
+        let err = core
+            .layout_graft(&PaneTarget::SquadId(1), 1, &spec, false)
+            .unwrap_err();
+        assert!(
+            err.1.contains("failed to spawn") && err.1.contains("rolled back"),
+            "rollback message: {}",
+            err.1
+        );
+        let tab10_after = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 10)
+            .unwrap()
+            .clone();
+        assert_eq!(tab10_after.root, tab10_before.root, "tree byte-unchanged");
+        assert_eq!(tab10_after.focus, tab10_before.focus, "focus unchanged");
+        // No leaked pane id: only the original 1 and 2 remain.
+        let mut leaves = tree::leaves(&tab10_after.root);
+        leaves.sort_unstable();
+        assert_eq!(leaves, vec![1, 2]);
+    }
+
+    #[test]
+    fn graft_re_resolves_anchor_tab_after_detaching_earlier_source_tab() {
+        // P1 (codex review): an Fno binding whose pane lives in an EARLIER
+        // single-pane tab than the anchor's. Detaching it removes that source
+        // tab and shifts the anchor's tab index; the graft must re-resolve the
+        // anchor's tab by stable id, or it grafts into the wrong tab / panics.
+        use crate::proto::{
+            AnchoredLayoutSpec, LayoutBinding, LayoutSlot, LayoutTreeChild, LayoutTreeSpec,
+            ServerMsg,
+        };
+        use crate::tree::Axis;
+
+        let (mut core, p1) = template_core(); // p1 lives alone in tab 5
+        core.agents = vec![bound_agent("S1", p1)];
+        // A second tab holding the anchor; squad tabs are now [5, anchor_tid],
+        // so the Fno pane's tab 5 is EARLIER than the anchor's.
+        let anchor_tid = core.create_tab_in(1, Some("anchor-tab".into())).unwrap();
+        core.tab_areas.insert(anchor_tid, (24, 80));
+        let anchor_pane = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == anchor_tid)
+            .unwrap()
+            .focus;
+
+        let spec = AnchoredLayoutSpec {
+            version: 1,
+            tree: LayoutTreeSpec::Split {
+                axis: Axis::Vertical,
+                children: vec![
+                    LayoutTreeChild {
+                        weight: 0.5,
+                        tree: LayoutTreeSpec::Slot("a".into()),
+                    },
+                    LayoutTreeChild {
+                        weight: 0.5,
+                        tree: LayoutTreeSpec::Slot("b".into()),
+                    },
+                ],
+            },
+            slots: vec![
+                LayoutSlot {
+                    name: "a".into(),
+                    binding: LayoutBinding::Anchor,
+                },
+                LayoutSlot {
+                    name: "b".into(),
+                    binding: LayoutBinding::Fno("S1".into()),
+                },
+            ],
+        };
+        let msg = core
+            .layout_graft(&PaneTarget::SquadId(1), anchor_pane, &spec, false)
+            .expect("graft commits into the anchor's tab");
+        let ServerMsg::LayoutGrafted { tab, .. } = msg else {
+            panic!("not LayoutGrafted");
+        };
+        assert_eq!(
+            tab, anchor_tid,
+            "grafted into the anchor's tab, not the removed source"
+        );
+        // Source tab 5 emptied (p1 relocated) -> removed.
+        assert!(
+            core.session
+                .squad(1)
+                .unwrap()
+                .tabs
+                .iter()
+                .all(|t| t.id != 5),
+            "the earlier single-pane source tab was removed"
+        );
+        let anchor_tab = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == anchor_tid)
+            .unwrap();
+        let mut leaves = tree::leaves(&anchor_tab.root);
+        leaves.sort_unstable();
+        let mut expected = vec![anchor_pane, p1];
+        expected.sort_unstable();
+        assert_eq!(
+            leaves, expected,
+            "the anchor + the relocated fno pane, no stale index"
+        );
     }
 
     /// A client with a LIVE reliable receiver, so `push_layout` never drops it
@@ -12379,6 +12964,7 @@ mod tests {
                     target: PaneTarget::SquadName("ghost".into()),
                     split: None,
                     here: false,
+                    fallback: PlacementFallback::NewTab,
                 },
             },
         );
@@ -13322,6 +13908,7 @@ mod tests {
                     target: PaneTarget::CurrentRoute,
                     split: Some(Dir::Right),
                     here: false,
+                    fallback: PlacementFallback::NewTab,
                 },
             },
         );
@@ -15516,6 +16103,7 @@ mod tests {
                     target: PaneTarget::SquadName("review".into()),
                     split: None,
                     here: false,
+                    fallback: PlacementFallback::NewTab,
                 },
             )
             .unwrap();
@@ -15569,6 +16157,7 @@ mod tests {
                     target: PaneTarget::SquadName("readyrule".into()),
                     split: None,
                     here: false,
+                    fallback: PlacementFallback::NewTab,
                 },
             )
             .unwrap()
@@ -15625,6 +16214,7 @@ mod tests {
                     target: PaneTarget::SquadName("   ".into()),
                     split: None,
                     here: false,
+                    fallback: PlacementFallback::NewTab,
                 },
             )
             .unwrap_err();

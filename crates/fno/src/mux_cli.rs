@@ -35,8 +35,8 @@ use std::time::{Duration, Instant};
 
 use crate::proto::{
     self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, LayoutScope,
-    PanePlacement, PaneTarget, ServerMsg, TabSel, WaitOutcome, BUILD_VERSION, DEFAULT_SESSION,
-    PROTO_VERSION,
+    PanePlacement, PaneTarget, PlacementFallback, ServerMsg, TabSel, WaitOutcome, BUILD_VERSION,
+    DEFAULT_SESSION, PROTO_VERSION,
 };
 use crate::tree::Dir;
 
@@ -1613,6 +1613,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         let mut split = None;
         let mut tab = None;
         let mut at = None;
+        let mut at_current = false;
         let mut i = 1;
         while i < args.len() {
             let tok = args[i]
@@ -1640,7 +1641,14 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 // (x-d865) exact placement: land in a named tab, adjacent to an
                 // anchor pane.
                 "--tab" => tab = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?),
-                "--at" => at = Some(parse_u64(&flag_value(args, &mut i, "--at")?, "--at")?),
+                "--at" => {
+                    let v = flag_value(args, &mut i, "--at")?;
+                    if v == "current" {
+                        at_current = true;
+                    } else {
+                        at = Some(parse_u64(&v, "--at")?);
+                    }
+                }
                 t if t.starts_with("--") => return Err(format!("unknown flag: {t}")),
                 _ => break, // first bare token begins the command argv
             }
@@ -1657,6 +1665,28 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         if argv.is_empty() {
             return Err("pane run needs a command".to_string());
         }
+        let mut fallback = PlacementFallback::NewTab;
+        if at_current {
+            // `--at current` resolves the calling pane from FNO_PANE here in the
+            // one parser both high- and low-level callers route through, and opts
+            // into strict placement (Refuse). FNO_SESSION selects the server via
+            // resolve_session; a missing/invalid FNO_PANE is a usage error before
+            // any process is spawned (AC1-ERR).
+            if split.is_none() {
+                return Err("--at current requires --split".to_string());
+            }
+            let fno_pane = std::env::var("FNO_PANE")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse::<u64>().ok())
+                .ok_or_else(|| {
+                    "--at current requires a numeric FNO_PANE (run it inside a mux pane)"
+                        .to_string()
+                })?;
+            at = Some(fno_pane);
+            fallback = PlacementFallback::Refuse;
+        }
         return Ok(ParsedPane {
             session,
             json,
@@ -1672,6 +1702,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     here: false,
                     tab,
                     at,
+                    fallback,
                 },
             },
         });
@@ -2036,11 +2067,14 @@ pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
     if rest.first().map(String::as_str) == Some("apply") {
         return layout_apply_cli(session.as_deref(), env_session, json, &rest[1..]);
     }
+    if rest.first().map(String::as_str) == Some("graft") {
+        return layout_graft_cli(session.as_deref(), env_session, json, &rest[1..]);
+    }
     // Otherwise `get` (a bare `layout` also means get).
     let flags = match rest.first().map(String::as_str) {
         Some("get") | None => args,
         Some(other) => {
-            eprintln!("fno mux layout: unknown verb {other} (get|apply)");
+            eprintln!("fno mux layout: unknown verb {other} (get|apply|graft)");
             return EXIT_USAGE;
         }
     };
@@ -2160,6 +2194,165 @@ fn layout_apply_cli(
         ControlVerb::LayoutApply {
             squad: squad_target(squad),
             tab: tab.unwrap_or(TabSel::Active),
+            spec,
+            focus,
+        },
+    )
+}
+
+/// Load an [`AnchoredLayoutSpec`] from a TOML or JSON file (TOML first).
+fn load_anchored_spec_file(path: &str) -> Result<crate::proto::AnchoredLayoutSpec, String> {
+    use crate::proto::AnchoredLayoutSpec;
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    toml::from_str::<AnchoredLayoutSpec>(&raw)
+        .or_else(|_| serde_json::from_str::<AnchoredLayoutSpec>(&raw))
+        .map_err(|e| format!("parsing {path} (tried TOML then JSON): {e}"))
+}
+
+/// A graft `--slot` binding: `anchor` -> Anchor, `fno:<id>` -> Fno, `-`/`shell`
+/// -> Shell.
+fn parse_graft_slot(s: &str) -> Result<crate::proto::LayoutBinding, String> {
+    use crate::proto::LayoutBinding;
+    match s {
+        "anchor" | "a" => Ok(LayoutBinding::Anchor),
+        "-" | "shell" => Ok(LayoutBinding::Shell),
+        other if other.starts_with("fno:") => Ok(LayoutBinding::Fno(other[4..].to_string())),
+        other => Err(format!(
+            "graft --slot must be anchor|fno:<id>|- (shell), got {other:?}"
+        )),
+    }
+}
+
+/// `fno mux layout graft --at current|<pane> (--spec <file> | --template <name>
+/// --slot <b>...) [--workspace <name>] [--focus]` (v44, x-6928).
+fn layout_graft_cli(
+    session: Option<&str>,
+    env_session: Option<&str>,
+    json: bool,
+    rest: &[String],
+) -> i32 {
+    use crate::proto::{AnchoredLayoutSpec, ControlVerb, LayoutSlot};
+    use crate::templates::template_to_tree;
+
+    let mut at_raw: Option<String> = None;
+    let mut template = None;
+    let mut slot_bindings: Vec<crate::proto::LayoutBinding> = Vec::new();
+    let mut spec_file = None;
+    let mut squad = None;
+    let mut focus = false;
+    let mut i = 0;
+    let res = (|| -> Result<(), String> {
+        while i < rest.len() {
+            let val = |i: &mut usize| -> Result<String, String> {
+                *i += 1;
+                rest.get(*i)
+                    .cloned()
+                    .ok_or_else(|| format!("{} needs a value", rest[*i - 1]))
+            };
+            match rest[i].as_str() {
+                "--at" => at_raw = Some(val(&mut i)?),
+                "--template" | "-t" => template = Some(parse_template_name(&val(&mut i)?)?),
+                "--slot" => slot_bindings.push(parse_graft_slot(&val(&mut i)?)?),
+                "--spec" => spec_file = Some(val(&mut i)?),
+                "--workspace" | "--squad" | "-s" => squad = Some(val(&mut i)?),
+                "--focus" => focus = true,
+                other => return Err(format!("unknown flag: {other}")),
+            }
+            i += 1;
+        }
+        Ok(())
+    })();
+    if let Err(e) = res {
+        eprintln!("fno mux layout graft: {e}");
+        return EXIT_USAGE;
+    }
+
+    // Resolve the anchor: `current` -> FNO_PANE (run inside a mux pane), else a
+    // numeric pane id. The symbolic resolution lives here so one parser owns it.
+    let anchor = match at_raw.as_deref() {
+        None => {
+            eprintln!("fno mux layout graft: --at <current|pane> is required");
+            return EXIT_USAGE;
+        }
+        Some("current") => match std::env::var("FNO_PANE")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "fno mux layout graft: --at current requires a numeric FNO_PANE (run it inside a mux pane)"
+                );
+                return EXIT_USAGE;
+            }
+        },
+        Some(n) => match n.parse::<u64>() {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("fno mux layout graft: --at must be `current` or a numeric pane id");
+                return EXIT_USAGE;
+            }
+        },
+    };
+
+    let spec = match spec_file {
+        Some(f) => {
+            if template.is_some() || !slot_bindings.is_empty() {
+                eprintln!("fno mux layout graft: --spec cannot combine with --template/--slot");
+                return EXIT_USAGE;
+            }
+            match load_anchored_spec_file(&f) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("fno mux layout graft: {e}");
+                    return EXIT_USAGE;
+                }
+            }
+        }
+        None => {
+            let Some(t) = template else {
+                eprintln!(
+                    "fno mux layout graft: needs --template <name> (+ --slot ...) or --spec <file>"
+                );
+                return EXIT_USAGE;
+            };
+            if slot_bindings.len() < 2 {
+                eprintln!("fno mux layout graft: a graft needs at least two --slot bindings");
+                return EXIT_USAGE;
+            }
+            let names: Vec<String> = (0..slot_bindings.len()).map(|i| format!("s{i}")).collect();
+            let tree = match template_to_tree(t, &names) {
+                Ok(tree) => tree,
+                Err(e) => {
+                    eprintln!("fno mux layout graft: {e}");
+                    return EXIT_USAGE;
+                }
+            };
+            let slots = names
+                .iter()
+                .zip(slot_bindings)
+                .map(|(n, b)| LayoutSlot {
+                    name: n.clone(),
+                    binding: b,
+                })
+                .collect();
+            AnchoredLayoutSpec {
+                version: 1,
+                tree,
+                slots,
+            }
+        }
+    };
+
+    run_on_existing_server(
+        session,
+        env_session,
+        json,
+        ControlVerb::LayoutGraft {
+            squad: squad_target(squad),
+            anchor,
             spec,
             focus,
         },
@@ -2535,12 +2728,30 @@ fn render_reply(
             }
             EXIT_OK
         }
-        ServerMsg::PaneSpawned { pane_id } => {
-            // AC4-UI: stdout is EXACTLY the machine-readable pane id.
+        ServerMsg::PaneSpawned { pane_id, placement } => {
+            // AC4-UI: stdout is EXACTLY the machine-readable pane id. The
+            // server-authored exact-placement receipt (anchor/direction/fallback)
+            // rides the JSON object and a stderr line, never stdout.
             if json {
-                println!("{}", serde_json::json!({ "pane_id": pane_id }));
+                let mut obj = serde_json::json!({ "pane_id": pane_id });
+                if let Some(p) = &placement {
+                    obj["placement"] = serde_json::json!({
+                        "anchor": p.anchor,
+                        "direction": p.direction,
+                        "fallback": p.fallback,
+                        "squad": p.squad,
+                        "tab": p.tab,
+                    });
+                }
+                println!("{obj}");
             } else {
                 println!("{pane_id}");
+                if let Some(p) = placement {
+                    eprintln!(
+                        "anchor={} direction={:?} fallback={:?} squad={} tab={}",
+                        p.anchor, p.direction, p.fallback, p.squad, p.tab
+                    );
+                }
             }
             EXIT_OK
         }
@@ -2678,6 +2889,30 @@ fn render_reply(
                         .map(|p| p.to_string())
                         .unwrap_or_else(|| "-".into());
                     println!("slot {} pane={} {:?}", r.slot, pane, r.outcome);
+                }
+            }
+            EXIT_OK
+        }
+        ServerMsg::LayoutGrafted {
+            anchor,
+            squad,
+            tab,
+            results,
+        } => {
+            // The graft receipt: anchor/squad/tab + one pane per named slot.
+            if json {
+                let mut obj = serde_json::json!({
+                    "anchor": anchor,
+                    "squad": squad,
+                    "tab": tab,
+                    "results": results,
+                });
+                let _ = &mut obj;
+                println!("{obj}");
+            } else {
+                println!("grafted anchor={anchor} squad={squad} tab={tab}");
+                for r in &results {
+                    println!("  slot {} pane={} {:?}", r.slot, r.pane_id, r.outcome);
                 }
             }
             EXIT_OK
