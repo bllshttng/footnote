@@ -241,7 +241,11 @@ SMOKE_FAILURE_RECORD_DEFAULT = ".fno/preflight-last-failures.txt"
 # runs under `bash -eo pipefail -c`, matching GitHub's default shell.
 _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("Sync + build", "cli", "uv sync\nuv build"),
-    ("Pytest (unit + integration)", "cli", "uv run pytest --tb=short -q -n auto"),
+    (
+        "Pytest (unit + integration)",
+        "cli",
+        "uv run pytest --tb=short -q -n auto --maxprocesses=4",
+    ),
     ("paths.sh hash gate", "cli", "uv run fno-py paths verify ../scripts/lib/paths.sh"),
     ("Bash events-validate harness", ".", "bash tests/events/test-bash-validator.sh"),
     ("frontend-craft gate harness", ".",
