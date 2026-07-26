@@ -9,7 +9,6 @@ import pytest
 
 from fno.events import ValidationError, validate
 from fno.pr._preflight import (
-    _preflight_revocation,
     check_verification_evidence,
     hosted_ci_decision,
     hosted_workflow_state,
@@ -202,6 +201,22 @@ def test_corrupt_coverage_fails_closed_even_with_valid_full_pass(tmp_path: Path)
     assert decision["satisfied"] is False
 
 
+def test_canonical_exact_receipt_ignores_unreadable_optional_mirror(
+    tmp_path: Path,
+) -> None:
+    canonical = tmp_path / "global.jsonl"
+    mirror = tmp_path / "delivery.jsonl"
+    write(canonical, receipt(generation=4))
+    mirror.mkdir()
+
+    decision = verification_decision(SHA, [canonical, mirror])
+
+    assert decision["satisfied"] is True
+    assert decision["receipt"]["data"]["generation"] == 4
+    assert decision["coverage"]["unreadable_paths"] == 0
+    assert decision["coverage"]["unavailable_mirrors"] == 1
+
+
 def test_journals_dedupe_and_select_latest_parsed_timestamp(tmp_path: Path) -> None:
     older = receipt(ts="2026-07-26T01:00:00Z", result="failed", generation=1)
     latest = receipt(ts="2026-07-26T03:00:00+00:00", result="passed", generation=2)
@@ -257,6 +272,28 @@ def test_generation_supersedes_timestamp_after_clock_rollback(tmp_path: Path) ->
     assert decision["receipt"]["data"]["generation"] == 2
 
 
+def test_void_pending_generation_supersedes_older_pass(tmp_path: Path) -> None:
+    journal = tmp_path / "events.jsonl"
+    write(
+        journal,
+        receipt(generation=1),
+        receipt(
+            mode="void",
+            result="pending",
+            generation=2,
+            scope=["preflight-execution"],
+            steps_expected=1,
+            steps_executed=0,
+        ),
+    )
+
+    decision = verification_decision(SHA, [journal])
+
+    assert decision["satisfied"] is False
+    assert decision["mode"] == "void"
+    assert decision["result"] == "pending"
+
+
 def test_next_generation_uses_every_discovered_exact_sha_journal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -298,10 +335,27 @@ def test_unregistered_checkouts_share_the_global_generation_floor(
     write(global_dir / "events.jsonl", receipt(generation=4))
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries":[]}\n')
-    monkeypatch.setattr("fno.paths.state_dir", lambda: global_dir)
+    monkeypatch.setattr(
+        "fno.paths.global_events_json", lambda: global_dir / "events.jsonl"
+    )
     monkeypatch.setattr("fno.paths.ledger_json", lambda: ledger)
 
     assert next_verification_generation(cwd=str(second), candidate_sha=SHA) == 5
+
+
+def test_canonical_generation_ignores_unreadable_optional_mirror(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    canonical = tmp_path / "global.jsonl"
+    mirror = tmp_path / "delivery.jsonl"
+    write(canonical, receipt(generation=4))
+    mirror.mkdir()
+    monkeypatch.setattr(
+        "fno.pr._preflight.verification_event_paths",
+        lambda **_kwargs: ([canonical, mirror], []),
+    )
+
+    assert next_verification_generation(cwd=str(tmp_path), candidate_sha=SHA) == 5
 
 
 def test_independent_checkout_accepts_canonical_global_receipt_without_local_mirror(
@@ -387,10 +441,6 @@ def test_delivery_journal_discovery_failure_fails_closed(
     common = tmp_path / ".git"
     common.mkdir()
     monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
-    monkeypatch.setattr(
-        "fno.pr._preflight._preflight_revocation",
-        lambda _repo, _sha: ("absent", None),
-    )
     journal = tmp_path / "events.jsonl"
     write(journal, receipt())
     monkeypatch.setattr(
@@ -405,50 +455,6 @@ def test_delivery_journal_discovery_failure_fails_closed(
     assert decision["coverage"]["discovery_errors"] == [
         "delivery journal discovery failed"
     ]
-    assert decision["satisfied"] is False
-
-
-def test_live_revocation_blocks_older_pass(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    common = tmp_path / ".git"
-    common.mkdir()
-    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
-    journal = tmp_path / "events.jsonl"
-    write(journal, receipt())
-    monkeypatch.setattr(
-        "fno.pr._preflight._preflight_revocation",
-        lambda _repo, _sha: ("revoked", None),
-    )
-
-    decision = check_verification_evidence(
-        cwd=str(tmp_path), candidate_sha=SHA, event_paths=[journal]
-    )
-
-    assert decision["result"] == "passed"
-    assert decision["coverage"]["revoked"] is True
-    assert decision["satisfied"] is False
-
-
-def test_unavailable_revocation_state_fails_closed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    common = tmp_path / ".git"
-    common.mkdir()
-    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
-    journal = tmp_path / "events.jsonl"
-    write(journal, receipt())
-    monkeypatch.setattr(
-        "fno.pr._preflight._preflight_revocation",
-        lambda _repo, _sha: ("unavailable", "marker unreadable"),
-    )
-
-    decision = check_verification_evidence(
-        cwd=str(tmp_path), candidate_sha=SHA, event_paths=[journal]
-    )
-
-    assert decision["coverage"]["complete"] is False
-    assert decision["coverage"]["revocation_error"] == "marker unreadable"
     assert decision["satisfied"] is False
 
 
@@ -478,10 +484,6 @@ def test_reader_release_failure_invalidates_verdict(
     common = tmp_path / ".git"
     common.mkdir()
     monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
-    monkeypatch.setattr(
-        "fno.pr._preflight._preflight_revocation",
-        lambda _repo, _sha: ("absent", None),
-    )
     monkeypatch.setattr(
         Path,
         "rmdir",
@@ -523,49 +525,6 @@ def test_reader_partial_acquisition_cleanup_failure_is_reported(
 
     assert decision["result"] == "unavailable"
     assert "partial acquisition cleanup failed" in decision["coverage"]["lock_error"]
-
-
-def test_revocation_markers_are_candidate_scoped(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    common = tmp_path / ".git"
-    directory = common / ".preflight-revoked"
-    directory.mkdir(parents=True)
-    (directory / SHA).write_text(SHA + "\n")
-    (directory / OTHER_SHA).write_text(OTHER_SHA + "\n")
-    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
-
-    assert _preflight_revocation(str(tmp_path), SHA) == ("revoked", None)
-    assert _preflight_revocation(str(tmp_path), OTHER_SHA) == ("revoked", None)
-
-
-def test_malformed_revocation_marker_is_unavailable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    common = tmp_path / ".git"
-    marker = common / ".preflight-revoked" / SHA
-    marker.parent.mkdir(parents=True)
-    marker.write_text("not-a-sha\n")
-    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
-
-    state, error = _preflight_revocation(str(tmp_path), SHA)
-
-    assert state == "unavailable"
-    assert error == "revocation marker is malformed"
-
-
-def test_broken_revocation_symlink_is_unavailable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    common = tmp_path / ".git"
-    common.mkdir()
-    (common / ".preflight-revoked").symlink_to(tmp_path / "missing-target")
-    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
-
-    state, error = _preflight_revocation(str(tmp_path), SHA)
-
-    assert state == "unavailable"
-    assert error is not None
 
 
 def test_local_verification_policy_preserves_explicit_exemptions(

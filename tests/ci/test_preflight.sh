@@ -49,14 +49,10 @@ if [[ "\${1:-} \${2:-}" == "pr next-receipt-generation" ]]; then
             *) shift ;;
         esac
     done
-    events="\$(git rev-parse --show-toplevel)/.fno/events.jsonl"
-    files=()
-    [[ -s "\$events" ]] && files+=("\$events")
-    [[ -s "$GLOBAL_EVENTS" ]] && files+=("$GLOBAL_EVENTS")
-    if [[ \${#files[@]} -gt 0 ]]; then
+    if [[ -s "$GLOBAL_EVENTS" ]]; then
         jq -sr --arg sha "\$sha" \
             '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha) | .data.generation] | (max // 0) + 1' \
-            "\${files[@]}"
+            "$GLOBAL_EVENTS"
     else
         echo 1
     fi
@@ -68,7 +64,7 @@ if [[ "\${1:-} \${2:-}" == "pr global-receipt-events-path" ]]; then
 fi
 if [[ "\${1:-} \${2:-}" == "pr evidence-check" ]]; then
     sha="\$(git rev-parse HEAD)"
-    events="\$(git rev-parse --show-toplevel)/.fno/events.jsonl"
+    events="$GLOBAL_EVENTS"
     [[ -s "\$events" ]] || exit 1
     jq -se --arg sha "\$sha" \
         '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha)] | sort_by(.ts) | last | .data.mode == "full" and .data.result == "passed"' \
@@ -165,21 +161,29 @@ jq -se --arg sha "$GREEN_FULL" \
     "$GLOBAL_EVENTS" >/dev/null \
     && ok "full green mirrors evidence to the global journal" \
     || fail "missing global exact-SHA receipt"
+jq -se --arg sha "$GREEN_FULL" \
+    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] as $r
+     | any($r[]; .data.result == "pending")
+       and (($r | map(.data.generation) | max) == ($r | last | .data.generation))' \
+    "$GLOBAL_EVENTS" >/dev/null \
+    && ok "canonical pending receipt precedes the final verdict" \
+    || fail "missing canonical pending-to-final transition"
 
 echo "== attestation: a FULL GREEN records one (sha + host pinned) =="
 [[ -f "$ATT" ]] && ok "attestation written on full green" || fail "no attestation file after green"
 grep -q "^sha=$GREEN_FULL " "$ATT" && ok "attestation pins the full candidate SHA" || fail "attestation sha wrong: $(cat "$ATT")"
 grep -q " host=$HOST" "$ATT" && ok "attestation pins this host" || fail "attestation host wrong: $(cat "$ATT")"
 
-echo "== global authority: a failed delivery-root mirror stays GREEN and clears revocation =="
+echo "== global authority: a failed delivery-root mirror stays GREEN everywhere =="
 mv "$EVENTS" "$EVENTS.saved"
 mkdir "$EVENTS"
 out="$(run_pf --force 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "global commit remains authoritative" || fail "mirror failure changed verdict rc=$rc: $out"
 echo "$out" | grep -q "delivery-root mirror unavailable" \
     && ok "mirror failure is observable" || fail "mirror failure was silent"
-[[ ! -e "$FIX/.git/.preflight-revoked/$GREEN_FULL" ]] \
-    && ok "canonical global receipt clears revocation" || fail "mirror failure left clone-local revocation"
+( cd "$FIX" && fno pr evidence-check >/dev/null 2>&1 ) \
+    && ok "canonical global receipt satisfies the producing checkout" \
+    || fail "producing checkout rejected canonical evidence"
 rm -rf "$EVENTS"
 mv "$EVENTS.saved" "$EVENTS"
 

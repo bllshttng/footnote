@@ -322,6 +322,27 @@ def test_ledger_json_pinned_global_ignores_relative_state_dir(
     assert tmp_path not in result.parents
 
 
+def test_global_events_json_pinned_global_ignores_relative_state_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "clone-a"
+    second = tmp_path / "clone-b"
+    first.mkdir()
+    second.mkdir()
+    _set_settings(
+        monkeypatch, tmp_path, "schema_version: 1\nconfig:\n  state_dir: .fno/\n"
+    )
+
+    from fno.paths import global_events_json
+
+    monkeypatch.chdir(first)
+    first_path = global_events_json()
+    monkeypatch.chdir(second)
+    second_path = global_events_json()
+
+    assert first_path == second_path == (Path.home() / ".fno" / "events.jsonl").resolve()
+
+
 def test_evals_history_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """evals_history() returns ~/.fno/evals-history.jsonl (cross-project)."""
     _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
@@ -763,6 +784,7 @@ def test_all_global_dirs_derive_from_custom_state_dir(
 
     from fno.paths import (
         fleet_dir,
+        global_events_json,
         ledger_json,
         memory_dir,
         postmortems_dir,
@@ -775,6 +797,7 @@ def test_all_global_dirs_derive_from_custom_state_dir(
     assert worktrees_base() == base / "worktrees"
     assert memory_dir() == base / "memory"
     assert ledger_json() == base / "ledger.json"
+    assert global_events_json() == base / "events.jsonl"
 
 
 # ---------------------------------------------------------------------------

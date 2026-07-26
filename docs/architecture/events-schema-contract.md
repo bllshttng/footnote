@@ -207,6 +207,7 @@ The parity corpus includes fractional UTC timestamps and bounded-command failure
 
 `scripts/ci/preflight.sh` remains the authority for actual local execution and constructs, schema-validates, and appends each receipt inside the process that holds the shared preflight lock for the exact candidate SHA.
 It commits the canonical event to the global journal first and mirrors the same event best-effort to the delivery-root journal, so unregistered worktrees and independent local clones share one durable generation floor without a split-brain second commit point.
+The canonical journal is pinned beside the cross-project ledger, so a supported relative `state_dir` cannot fork it by checkout.
 No CLI accepts caller-authored trusted receipt fields, and the generic event emitter refuses `verification_receipt`.
 Its required deterministic scope is `smoke`, both Rust format checks, and both Rust test suites; the squads leak guard joins the full scope only when squads exist to measure, while a not-configured guard is recorded separately as advisory evidence.
 The two cargo-audit scopes are also separate advisory evidence, and every receipt counts only steps that actually executed.
@@ -214,14 +215,15 @@ Setup failures emit a zero-executed void/unavailable receipt instead of manufact
 The preflight attestation is only a cache carrier and never substitutes for the event receipt.
 
 Ship-gate consumers accept only the newest exact-SHA full/passed receipt from the trusted preflight producer with the canonical command, runner, host-bound producer identity, and complete deterministic scope.
-Before every append, preflight derives the next generation as one above the highest exact-SHA generation across project, global, delivery-root, and salvage journals; missing, malformed, unreadable, or exhausted generation evidence blocks the append.
+Before every append, preflight derives the next generation as one above the highest exact-SHA generation across readable project, global, delivery-root, and salvage journals.
+Until the canonical journal contains exact-SHA evidence, malformed or unreadable discovery blocks the append; afterward, an unavailable best-effort mirror cannot overrule the canonical floor, while every readable mirror remains part of deduplication and conflict detection.
+Reducers expose skipped carrier failures as `coverage.unavailable_mirrors` instead of conflating them with an absent journal or a complete canonical failure.
 This makes lost local state safe across clones, while simultaneous cross-clone allocation creates an explicit same-generation conflict rather than an arbitrary winner.
 Journals may be concatenated in any order, so consumers parse RFC3339 timestamps, deduplicate canonical event objects, and select the highest exact-candidate generation.
 Timestamps retain at most six fractional digits and remain observational metadata; future-dated receipts and distinct receipts tied for the highest generation are unavailable rather than arbitrarily ordered.
-Starting a new preflight atomically creates a per-candidate revocation marker until the new final receipt is durably appended, so a failed append, interrupted run, or concurrent run for another SHA cannot expose stale success.
-Python and Rust both reduce an exact candidate's revocation as absent, revoked, or unavailable; malformed and unreadable marker state fails closed.
-Ship-gate readers take the same repository lock while reducing journals and revocation, so they cannot observe half of an append-and-clear transition.
-Malformed rows, unreadable journals, live revocation markers, or errors while discovering delivery journals mark coverage incomplete and prevent satisfaction even when another journal contains a plausible pass.
+Starting a new preflight appends a canonical pending receipt before execution, so a failed final append or interrupted run leaves every checkout on the same non-passing generation without a mutable revocation authority.
+Ship-gate readers take the repository lock while reducing journals, and the append-only pending-to-final transition keeps the receipt journal as the sole verdict authority.
+Malformed canonical rows, unreadable canonical journals, malformed readable mirrors, or errors while discovering delivery journals mark coverage incomplete and prevent satisfaction even when another journal contains a plausible pass.
 An older valid receipt for a different SHA is reported as stale rather than absent.
 Local ship paths apply one shared requirement policy: explicit skip, documentation-only changes, and repositories without a configured preflight runner remain distinct exemptions; every other candidate must present trusted receipt evidence.
 

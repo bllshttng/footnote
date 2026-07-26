@@ -650,13 +650,6 @@ fn gate_eligible_receipt(event: &Value) -> bool {
         })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RevocationState {
-    Absent,
-    Revoked,
-    Unavailable,
-}
-
 fn git_common_dir(git_bin: &str) -> Option<PathBuf> {
     let output = Command::new(git_bin)
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
@@ -667,30 +660,6 @@ fn git_common_dir(git_bin: &str) -> Option<PathBuf> {
     }
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!path.is_empty()).then(|| PathBuf::from(path))
-}
-
-fn preflight_revocation(common_dir: Option<&Path>, candidate_sha: &str) -> RevocationState {
-    let Some(common_dir) = common_dir else {
-        return RevocationState::Unavailable;
-    };
-    let root = common_dir.join(".preflight-revoked");
-    match std::fs::symlink_metadata(&root) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return RevocationState::Unavailable;
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return RevocationState::Absent;
-        }
-        Err(_) => return RevocationState::Unavailable,
-    }
-    let marker = root.join(candidate_sha.to_ascii_lowercase());
-    match std::fs::read_to_string(marker) {
-        Ok(value) if value.trim().eq_ignore_ascii_case(candidate_sha) => RevocationState::Revoked,
-        Ok(_) => RevocationState::Unavailable,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => RevocationState::Absent,
-        Err(_) => RevocationState::Unavailable,
-    }
 }
 
 struct VerificationReadLock {
@@ -762,7 +731,7 @@ impl Drop for VerificationReadLock {
     }
 }
 
-fn receipt_decision(candidate_sha: &str, paths: &[String], revocation: RevocationState) -> Value {
+fn receipt_decision_all(candidate_sha: &str, paths: &[String]) -> Value {
     let mut seen = std::collections::HashSet::new();
     let mut receipts: Vec<(DateTime<Utc>, String, Value)> = Vec::new();
     let mut malformed = 0u64;
@@ -808,16 +777,11 @@ fn receipt_decision(candidate_sha: &str, paths: &[String], revocation: Revocatio
     }
     receipts.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
     let mut coverage = json!({
-        "complete": malformed == 0 && unreadable == 0 && revocation == RevocationState::Absent,
+        "complete": malformed == 0 && unreadable == 0,
         "malformed_lines": malformed,
         "unreadable_paths": unreadable,
         "deduped_events": receipts.len(),
     });
-    if revocation == RevocationState::Revoked {
-        coverage["revoked"] = Value::Bool(true);
-    } else if revocation == RevocationState::Unavailable {
-        coverage["revocation_error"] = Value::String("revocation state unavailable".to_string());
-    }
     let exact: Vec<&(DateTime<Utc>, String, Value)> = receipts
         .iter()
         .filter(|(_, _, event)| {
@@ -861,7 +825,6 @@ fn receipt_decision(candidate_sha: &str, paths: &[String], revocation: Revocatio
         return json!({
             "satisfied": malformed == 0
                 && unreadable == 0
-                && revocation == RevocationState::Absent
                 && mode == "full"
                 && result == "passed"
                 && gate_eligible_receipt(event),
@@ -887,6 +850,34 @@ fn receipt_decision(candidate_sha: &str, paths: &[String], revocation: Revocatio
         "receipt": Value::Null,
         "coverage": coverage,
     })
+}
+
+fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
+    if let Some(canonical_path) = paths.first() {
+        let canonical = receipt_decision_all(candidate_sha, std::slice::from_ref(canonical_path));
+        let exact = canonical
+            .pointer("/receipt/data/candidate_sha")
+            .and_then(Value::as_str)
+            .is_some_and(|receipt_sha| receipt_sha.eq_ignore_ascii_case(candidate_sha));
+        let conflict = canonical.pointer("/coverage/conflicting_latest").is_some();
+        if exact || conflict {
+            let mut readable = vec![canonical_path.clone()];
+            let mut unavailable_mirrors = 0u64;
+            for path in &paths[1..] {
+                match std::fs::read_to_string(path) {
+                    Ok(_) => readable.push(path.clone()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => unavailable_mirrors += 1,
+                }
+            }
+            let mut decision = receipt_decision_all(candidate_sha, &readable);
+            if unavailable_mirrors > 0 {
+                decision["coverage"]["unavailable_mirrors"] = json!(unavailable_mirrors);
+            }
+            return decision;
+        }
+    }
+    receipt_decision_all(candidate_sha, paths)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1146,8 +1137,7 @@ fn run(args: &[String]) -> (i32, String, String) {
                     return (1, format!("{decision}\n"), String::new());
                 }
             };
-            let revocation = preflight_revocation(Some(&common_dir), &rest[0]);
-            let decision = receipt_decision(&rest[0], &rest[1..], revocation);
+            let decision = receipt_decision(&rest[0], &rest[1..]);
             if let Err(error) = guard.release() {
                 let unavailable = json!({
                     "satisfied": false,
@@ -1327,7 +1317,6 @@ mod tests {
         let decision = receipt_decision(
             &sha.to_ascii_uppercase(),
             &[first.display().to_string(), second.display().to_string()],
-            RevocationState::Absent,
         );
 
         assert_eq!(decision["satisfied"], true);
@@ -1345,15 +1334,60 @@ mod tests {
         writeln!(journal, "{passed}").unwrap();
         writeln!(journal, "{failed}").unwrap();
 
-        let decision = receipt_decision(
-            sha,
-            &[journal.path().display().to_string()],
-            RevocationState::Absent,
-        );
+        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
 
         assert_eq!(decision["satisfied"], false);
         assert_eq!(decision["result"], "failed");
         assert_eq!(decision["receipt"]["data"]["generation"], 2);
+    }
+
+    #[test]
+    fn pending_generation_supersedes_older_pass() {
+        let mut journal = tempfile::NamedTempFile::new().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let passed = receipt_event("2026-07-26T01:00:00Z", sha, "full", "passed");
+        let mut pending = receipt_event("2026-07-26T02:00:00Z", sha, "void", "pending");
+        pending["data"]["generation"] = json!(2);
+        pending["data"]["scope"] = json!(["preflight-execution"]);
+        pending["data"]["steps_expected"] = json!(1);
+        pending["data"]["steps_executed"] = json!(0);
+        writeln!(journal, "{passed}").unwrap();
+        writeln!(journal, "{pending}").unwrap();
+
+        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
+
+        assert_eq!(decision["satisfied"], false);
+        assert_eq!(decision["mode"], "void");
+        assert_eq!(decision["result"], "pending");
+    }
+
+    #[test]
+    fn canonical_receipt_ignores_unreadable_optional_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("global.jsonl");
+        let mirror = dir.path().join("delivery.jsonl");
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        std::fs::write(
+            &canonical,
+            format!(
+                "{}\n",
+                receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed")
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir(&mirror).unwrap();
+
+        let decision = receipt_decision(
+            sha,
+            &[
+                canonical.display().to_string(),
+                mirror.display().to_string(),
+            ],
+        );
+
+        assert_eq!(decision["satisfied"], true);
+        assert_eq!(decision["coverage"]["unreadable_paths"], 0);
+        assert_eq!(decision["coverage"]["unavailable_mirrors"], 1);
     }
 
     #[test]
@@ -1368,11 +1402,7 @@ mod tests {
         )
         .unwrap();
 
-        let decision = receipt_decision(
-            sha,
-            &[journal.path().display().to_string()],
-            RevocationState::Absent,
-        );
+        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
 
         assert_eq!(decision["mode"], "full");
         assert_eq!(decision["result"], "passed");
@@ -1397,11 +1427,7 @@ mod tests {
         )
         .unwrap();
 
-        let decision = receipt_decision(
-            sha,
-            &[journal.path().display().to_string()],
-            RevocationState::Absent,
-        );
+        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
 
         assert_eq!(decision["satisfied"], false);
         assert_eq!(decision["result"], "unavailable");
@@ -1419,60 +1445,10 @@ mod tests {
         )
         .unwrap();
 
-        let decision = receipt_decision(
-            sha,
-            &[journal.path().display().to_string()],
-            RevocationState::Absent,
-        );
+        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
 
         assert_eq!(decision["satisfied"], false);
         assert_eq!(decision["coverage"]["malformed_lines"], 1);
-    }
-
-    #[test]
-    fn receipt_decision_applies_revoked_and_unavailable_states() {
-        let mut journal = tempfile::NamedTempFile::new().unwrap();
-        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        writeln!(
-            journal,
-            "{}",
-            receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed")
-        )
-        .unwrap();
-        let paths = [journal.path().display().to_string()];
-
-        let revoked = receipt_decision(sha, &paths, RevocationState::Revoked);
-        assert_eq!(revoked["satisfied"], false);
-        assert_eq!(revoked["coverage"]["revoked"], true);
-
-        let unavailable = receipt_decision(sha, &paths, RevocationState::Unavailable);
-        assert_eq!(unavailable["satisfied"], false);
-        assert_eq!(unavailable["coverage"]["complete"], false);
-        assert_eq!(
-            unavailable["coverage"]["revocation_error"],
-            "revocation state unavailable"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn broken_revocation_symlink_is_unavailable() {
-        use std::os::unix::fs::symlink;
-
-        let common = tempfile::tempdir().unwrap();
-        symlink(
-            common.path().join("missing"),
-            common.path().join(".preflight-revoked"),
-        )
-        .unwrap();
-
-        assert_eq!(
-            preflight_revocation(
-                Some(common.path()),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            ),
-            RevocationState::Unavailable
-        );
     }
 
     #[test]

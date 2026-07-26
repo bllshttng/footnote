@@ -168,6 +168,10 @@ emit_setup_unavailable() {
     emit_verification_receipt void unavailable "$setup_scope" 1 0 "$RECEIPT_STARTED_AT" "$reason"
 }
 
+next_receipt_generation() {
+    candidate_fno pr next-receipt-generation --candidate-sha "$CANDIDATE_SHA"
+}
+
 # --- attestation: reuse a prior FULL run's GREEN verdict --------------------
 # A (full SHA, host) pair is a complete cache key: preflight hard-resets a
 # dedicated worktree to CANDIDATE_SHA, clean -fdx's it, and scrubs the env, so
@@ -286,24 +290,9 @@ acquire_lock() {
 }
 acquire_lock
 
-REVOCATION_DIR="$COMMON_DIR/.preflight-revoked"
-REVOCATION="$REVOCATION_DIR/$CANDIDATE_SHA"
-next_receipt_generation() {
-    candidate_fno pr next-receipt-generation --candidate-sha "$CANDIDATE_SHA"
-}
-mark_revoked() {
-    local tmp="${REVOCATION}.$$"
-    mkdir -p "$REVOCATION_DIR" 2>/dev/null \
-        && printf '%s\n' "$CANDIDATE_SHA" > "$tmp" 2>/dev/null \
-        && mv -f "$tmp" "$REVOCATION" 2>/dev/null
-}
-clear_revocation() {
-    [[ "$(cat "$REVOCATION" 2>/dev/null || true)" == "$CANDIDATE_SHA" ]] || return 1
-    rm -f "$REVOCATION" && rmdir "$REVOCATION_DIR" 2>/dev/null || true
-    [[ ! -e "$REVOCATION" ]]
-}
-if ! mark_revoked; then
-    echo "preflight: cannot persist fail-closed revocation at $REVOCATION" >&2
+PENDING_SCOPE="$(_json_array "preflight-execution")"
+if ! emit_verification_receipt void pending "$PENDING_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "preflight execution started"; then
+    echo "preflight: cannot persist canonical pending receipt" >&2
     exit 1
 fi
 
@@ -690,10 +679,6 @@ RECEIPT_RESULT=passed
 [[ $FAIL -ne 0 ]] && RECEIPT_RESULT=failed
 if ! emit_verification_receipt "$RECEIPT_MODE" "$RECEIPT_RESULT" "$REQUIRED_SCOPE" "$REQUIRED_COUNT" "$REQUIRED_EXECUTED" "$RECEIPT_STARTED_AT" "preflight suite verdict"; then
     echo "preflight: verification receipt append failed; verdict is unavailable" >&2
-    FAIL=1
-    invalidate_attestation
-elif ! clear_revocation; then
-    echo "preflight: verification receipt appended but revocation could not be cleared" >&2
     FAIL=1
     invalidate_attestation
 elif [[ $RETRY_FAILED -eq 0 && $FAIL -eq 0 ]]; then

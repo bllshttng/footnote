@@ -499,6 +499,11 @@ def ledger_json() -> Path:
     return _resolve("~/.fno/") / "ledger.json"
 
 
+def global_events_json() -> Path:
+    """Return the cross-checkout event journal beside the global ledger."""
+    return ledger_json().parent / "events.jsonl"
+
+
 def evals_history() -> Path:
     """Return the path to evals-history.jsonl (one row per bank task-run).
 

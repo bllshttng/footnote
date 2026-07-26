@@ -156,7 +156,7 @@ def hosted_workflow_state(cwd: Path) -> str:
         return "unavailable"
 
 
-def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
+def _verification_decision_all(candidate_sha: str, event_paths: list[Path]) -> dict:
     """Select the newest valid receipt across deduped, unordered journals."""
     from fno.events import ValidationError, validate
 
@@ -281,9 +281,41 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
     }
 
 
+def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
+    """Prefer an exact receipt in the first, canonical journal."""
+    if event_paths:
+        canonical = _verification_decision_all(candidate_sha, event_paths[:1])
+        receipt = canonical.get("receipt")
+        receipt_sha = (
+            receipt.get("data", {}).get("candidate_sha")
+            if isinstance(receipt, dict)
+            else None
+        )
+        if (
+            isinstance(receipt_sha, str)
+            and receipt_sha.lower() == candidate_sha.lower()
+        ) or canonical["coverage"].get("conflicting_latest"):
+            readable = [event_paths[0]]
+            unavailable_mirrors = 0
+            for path in event_paths[1:]:
+                try:
+                    Path(path).expanduser().read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    continue
+                except (OSError, UnicodeError):
+                    unavailable_mirrors += 1
+                    continue
+                readable.append(path)
+            decision = _verification_decision_all(candidate_sha, readable)
+            if unavailable_mirrors:
+                decision["coverage"]["unavailable_mirrors"] = unavailable_mirrors
+            return decision
+    return _verification_decision_all(candidate_sha, event_paths)
+
+
 def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], list[str]]:
     """Return event journals plus discovery errors that make coverage uncertain."""
-    from fno.paths import ledger_json, state_dir
+    from fno.paths import global_events_json, ledger_json
 
     repo = Path(cwd or os.getcwd()).resolve()
     errors: list[str] = []
@@ -293,7 +325,7 @@ def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], 
     except (OSError, ValueError) as exc:
         root = repo
         errors.append(f"repository root discovery failed: {exc}")
-    paths = [root / ".fno" / "events.jsonl", state_dir() / "events.jsonl"]
+    paths = [global_events_json(), root / ".fno" / "events.jsonl"]
     try:
         raw = json.loads(ledger_json().read_text(encoding="utf-8"))
         rows = raw.get("entries", raw) if isinstance(raw, dict) else raw
@@ -322,45 +354,59 @@ def next_verification_generation(*, cwd: str, candidate_sha: str) -> int:
     paths, errors = verification_event_paths(cwd=cwd)
     if errors:
         raise ValueError("; ".join(errors))
-    seen_paths: set[str] = set()
-    highest = 0
-    for raw_path in paths:
-        path = Path(raw_path).expanduser()
-        try:
-            key = str(path.resolve())
-        except OSError:
-            key = os.path.abspath(path)
-        if key in seen_paths:
-            continue
-        seen_paths.add(key)
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except FileNotFoundError:
-            continue
-        except (OSError, UnicodeError) as exc:
-            raise ValueError(f"receipt journal unreadable: {path}: {exc}") from exc
-        for line in lines:
-            if not line.strip():
-                continue
+    def highest_generation(
+        scan_paths: list[Path], *, skip_unreadable: bool = False
+    ) -> tuple[int, bool]:
+        seen_paths: set[str] = set()
+        highest = 0
+        found = False
+        for raw_path in scan_paths:
+            path = Path(raw_path).expanduser()
             try:
-                event = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"receipt journal malformed: {path}: {exc}") from exc
-            if not isinstance(event, dict) or event.get("type") != "verification_receipt":
+                key = str(path.resolve())
+            except OSError:
+                key = os.path.abspath(path)
+            if key in seen_paths:
                 continue
-            data = event.get("data")
-            if not isinstance(data, dict):
-                raise ValueError(f"receipt journal malformed: {path}: data must be an object")
-            raw_candidate = data.get("candidate_sha")
-            if not isinstance(raw_candidate, str):
-                raise ValueError(f"receipt journal malformed: {path}: candidate SHA missing")
-            if raw_candidate.lower() != candidate_sha.lower():
-                continue
+            seen_paths.add(key)
             try:
-                validate(event)
-            except ValidationError as exc:
-                raise ValueError(f"receipt journal malformed: {path}: {exc}") from exc
-            highest = max(highest, int(event["data"]["generation"]))
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except FileNotFoundError:
+                continue
+            except (OSError, UnicodeError) as exc:
+                if skip_unreadable:
+                    continue
+                raise ValueError(f"receipt journal unreadable: {path}: {exc}") from exc
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"receipt journal malformed: {path}: {exc}") from exc
+                if not isinstance(event, dict) or event.get("type") != "verification_receipt":
+                    continue
+                data = event.get("data")
+                if not isinstance(data, dict):
+                    raise ValueError(f"receipt journal malformed: {path}: data must be an object")
+                raw_candidate = data.get("candidate_sha")
+                if not isinstance(raw_candidate, str):
+                    raise ValueError(f"receipt journal malformed: {path}: candidate SHA missing")
+                if raw_candidate.lower() != candidate_sha.lower():
+                    continue
+                try:
+                    validate(event)
+                except ValidationError as exc:
+                    raise ValueError(f"receipt journal malformed: {path}: {exc}") from exc
+                found = True
+                highest = max(highest, int(event["data"]["generation"]))
+        return highest, found
+
+    highest, found = highest_generation(paths[:1])
+    if found:
+        highest, _ = highest_generation(paths, skip_unreadable=True)
+    else:
+        highest, _ = highest_generation(paths)
     if highest >= MAX_SAFE_EVENT_INTEGER:
         raise ValueError("receipt generation exhausted")
     return highest + 1
@@ -401,15 +447,6 @@ def check_verification_evidence(
             if discovery_errors:
                 decision["coverage"]["complete"] = False
                 decision["coverage"]["discovery_errors"] = discovery_errors
-                decision["satisfied"] = False
-            revocation, revocation_error = _preflight_revocation(repo, candidate_sha)
-            if revocation == "revoked":
-                decision["coverage"]["complete"] = False
-                decision["coverage"]["revoked"] = True
-                decision["satisfied"] = False
-            elif revocation == "unavailable":
-                decision["coverage"]["complete"] = False
-                decision["coverage"]["revocation_error"] = revocation_error
                 decision["satisfied"] = False
     except VerificationLockReleaseError as exc:
         return {
@@ -505,31 +542,6 @@ def _verification_read_lock(repo: str):
             raise VerificationLockReleaseError(
                 f"verification lock release failed: {lock}: {exc}"
             ) from exc
-
-
-def _preflight_revocation(repo: str, candidate_sha: str) -> tuple[str, Optional[str]]:
-    common = _git_common_dir(repo)
-    if common is None:
-        return "unavailable", "git common directory unavailable"
-    directory = common / ".preflight-revoked"
-    marker = directory / candidate_sha.lower()
-    try:
-        directory_mode = directory.lstat().st_mode
-    except FileNotFoundError:
-        return "absent", None
-    except OSError as exc:
-        return "unavailable", f"revocation directory unreadable: {exc}"
-    if stat.S_ISLNK(directory_mode) or not stat.S_ISDIR(directory_mode):
-        return "unavailable", f"revocation path is not a directory: {directory}"
-    try:
-        value = marker.read_text(encoding="utf-8").strip().lower()
-    except FileNotFoundError:
-        return "absent", None
-    except (OSError, UnicodeError) as exc:
-        return "unavailable", f"revocation marker unreadable: {exc}"
-    if value != candidate_sha.lower():
-        return "unavailable", "revocation marker is malformed"
-    return "revoked", None
 
 
 def run_evidence_check(*, cwd: Optional[str] = None) -> int:
