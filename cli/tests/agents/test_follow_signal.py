@@ -313,7 +313,14 @@ def test_subprocess_follow_clean_sigint_exit(tmp_path, monkeypatch):
         # startup is caught by the default handler and kills the process
         # (returncode 130) - the same load-sensitivity family the suite is
         # being hardened against.
-        deadline = time.monotonic() + 15.0
+        # The readiness wait has to be load-BEARING. Falling through on timeout
+        # and signalling anyway is what makes this test flaky: SIGINT lands
+        # during startup, the default handler kills the process (130), and the
+        # failure reads as "SIGINT handling is broken" when startup was merely
+        # slow. Distinguish the two, and give startup room - a genuine hang is
+        # still caught by the 5s post-signal communicate() timeout below.
+        deadline = time.monotonic() + 60.0
+        reached_loop = False
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 pytest.fail(
@@ -322,7 +329,16 @@ def test_subprocess_follow_clean_sigint_exit(tmp_path, monkeypatch):
                 )
             ready, _, _ = select.select([proc.stdout], [], [], 0.2)
             if ready and proc.stdout.readline():
+                reached_loop = True
                 break   # tail (seed) line written -> entering the follow loop
+        if not reached_loop:
+            proc.kill()
+            proc.communicate()
+            pytest.fail(
+                "follow never reached the loop within 60s, so SIGINT was never"
+                " sent; this is a startup-speed problem, NOT a SIGINT-handling"
+                " failure"
+            )
         proc.send_signal(signal.SIGINT)
         try:
             stdout, stderr = proc.communicate(timeout=5.0)
