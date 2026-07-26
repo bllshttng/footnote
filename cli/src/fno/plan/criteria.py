@@ -114,12 +114,18 @@ def _is_gwt(line: str) -> bool:
     return _GWT_PREFIX_RE.match(line) is not None
 
 
-_FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+_FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+
+
+def _fence_delim(line: str) -> str | None:
+    """The opening fence delimiter string (``` or ~~~) if the line is one."""
+    m = _FENCE_OPEN_RE.match(line)
+    return m.group(1) if m else None
 
 
 def _is_fence(line: str) -> bool:
     """A fenced-code-block delimiter line (``` or ~~~)."""
-    return _FENCE_RE.match(line) is not None
+    return _fence_delim(line) is not None
 
 
 def _is_anchor(line: str) -> bool:
@@ -289,12 +295,22 @@ def compile_criteria(
     raw: list[tuple[int, str | None, str, str]] = []
     i = 0
     in_fence = False
+    fence_close = ""
     while i < n:
         line = lines[i]
         # Skip fenced code blocks so a list-like example line ("- --verbose")
-        # inside a criterion's code block is not compiled as a criterion.
-        if _is_fence(line):
-            in_fence = not in_fence
+        # inside a criterion's code block is not compiled as a criterion. Track
+        # the opening delimiter: a closing fence must match its char and be at
+        # least as long, so a triple-backtick line inside a four-backtick block
+        # stays content (CommonMark).
+        delim = _fence_delim(line)
+        if delim is not None:
+            if not in_fence:
+                in_fence = True
+                fence_close = delim
+            elif delim[0] == fence_close[0] and len(delim) >= len(fence_close):
+                in_fence = False
+                fence_close = ""
             i += 1
             continue
         if in_fence or not line.strip():

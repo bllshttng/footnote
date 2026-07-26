@@ -274,10 +274,11 @@ class TestExecutableDraftLifecycle:
         assert refused.returncode == 2
         assert "AC9" in refused.stderr
 
-    def test_rewrite_clears_stale_compiled_v1_contract(self, tmp_path):
-        """A --rewrite regenerates placeholder acceptance, so the prior
-        compiled-v1 stamp is demoted (not preserved) until re-finalize, and an
-        interrupted rewrite never leaves a ready plan violating its contract."""
+    def test_finalize_revalidates_after_rewrite(self, tmp_path):
+        """A --rewrite regenerates placeholder acceptance while keeping the
+        compiled-v1 stamp; finalize then revalidates and refuses until the
+        placeholders are enriched, so a rewritten plan cannot ship violating its
+        own contract."""
         doc = _copy_fixture(GREENFIELD_FIXTURE, tmp_path)
         assert _run_mutate(doc, "--mode", "greenfield", "--draft").returncode == 0
         text = doc.read_text(encoding="utf-8")
@@ -289,12 +290,13 @@ class TestExecutableDraftLifecycle:
         text = text.replace("acceptance: []", "acceptance: [AC1-HP]")
         doc.write_text(text, encoding="utf-8")
         assert _run_mutate(doc, "--finalize").returncode == 0
-        assert _load_frontmatter(doc).get("acceptance_contract") == "compiled-v1"
 
-        rewritten = _run_mutate(doc, "--rewrite")
-
-        assert rewritten.returncode == 0, rewritten.stderr
-        assert _load_frontmatter(doc).get("acceptance_contract") is None
+        # Rewrite regenerates placeholder acceptance; the stamp stays, so the
+        # next finalize revalidates and refuses the now-violating plan.
+        assert _run_mutate(doc, "--rewrite").returncode == 0
+        refused = _run_mutate(doc, "--finalize")
+        assert refused.returncode == 2
+        assert "acceptance" in refused.stderr
 
 
 # ---------------------------------------------------------------------------

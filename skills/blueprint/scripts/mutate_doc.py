@@ -858,17 +858,6 @@ def mutate(
         except OwnershipViolation as exc:
             return 2, str(exc)
 
-    # A regenerated Execution Strategy carries placeholder acceptance that no
-    # longer matches any compiled criteria, so a prior compiled-v1 stamp is
-    # stale. Drop it; re-finalize re-stamps after enrichment. Without this a
-    # --rewrite interrupted before --finalize would leave the graph exposing a
-    # ready plan whose acceptance contract is already invalid (x-f905 P1).
-    try:
-        assert_blueprint_can_write("acceptance_contract")
-    except OwnershipViolation as exc:
-        return 2, str(exc)
-    new_fm.pop("acceptance_contract", None)
-
     if not new_fm.get("kill_criteria"):
         new_fm["kill_criteria"] = copy.deepcopy(_DEFAULT_KILL_CRITERIA)
     if not new_fm.get("execution_mode"):

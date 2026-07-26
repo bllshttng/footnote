@@ -254,6 +254,20 @@ class TestBoundaries:
         assert criteria[0].text == "First behavior."
         assert criteria[1].text == "Second behavior."
 
+    def test_fence_delimiter_matched_by_char_and_length(self) -> None:
+        # A four-backtick block stays open across a literal triple-backtick
+        # content line (CommonMark), so an option line inside it is not compiled.
+        body = (
+            "1. First behavior.\n"
+            "   ````\n"
+            "   ```\n"
+            "   - --verbose\n"
+            "   ````\n"
+            "2. Second behavior.\n"
+        )
+        criteria = compile_criteria(body)
+        assert [c.code for c in criteria] == ["AC1", "AC2"]
+
 
 # ---------------------------------------------------------------------------
 # Criterion record shape + source_ref diagnostics
