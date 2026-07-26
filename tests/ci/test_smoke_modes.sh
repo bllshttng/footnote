@@ -113,6 +113,7 @@ NEW="$TMP/changedrepo"
 mkdir -p "$NEW/tests" "$NEW/docs"
 git -C "$NEW" init -q
 git -C "$NEW" config user.email t@t.t; git -C "$NEW" config user.name t
+printf '.fno/\n' > "$NEW/.gitignore"   # the receipt is runner output, not fixture content
 echo base > "$NEW/docs/base.md"
 git -C "$NEW" add -A; git -C "$NEW" commit -qm base
 BASE_SHA="$(git -C "$NEW" rev-parse HEAD)"
@@ -156,6 +157,24 @@ echo more > "$NEW/docs/only-docs.md"; git -C "$NEW" add -A; git -C "$NEW" commit
 out="$(changed --base "$NOSEL_BASE" --head HEAD 2>&1)"; rc=$?
 [[ $rc -eq 20 ]] && ok "exits 20 (nothing selected)" || fail "expected rc 20, got $rc"
 echo "$out" | grep -q "selected NOTHING" && ok "says the selector found nothing" || fail "silent zero-selection"
+
+echo "== a step exit colliding with a sentinel reports a failure, not a non-verdict =="
+# In-band signalling: if a child's own 20/21 were propagated, preflight would
+# read "nothing selected"/"unevaluated" and fall through to the full gate
+# instead of stopping - a real red downgraded to a non-verdict.
+for code in 20 21; do
+    mkdir -p "$NEW/tests"   # git drops the dir when the last tracked file leaves
+    printf '#!/usr/bin/env bash\nexit %s\n' "$code" > "$NEW/tests/test_collide.sh"
+    chmod +x "$NEW/tests/test_collide.sh"
+    git -C "$NEW" add -A; git -C "$NEW" commit -qm "collide $code"
+    COLLIDE_BASE="$(git -C "$NEW" rev-parse HEAD~1)"
+    out="$(changed --base "$COLLIDE_BASE" --head HEAD 2>&1)"; rc=$?
+    [[ $rc -eq 1 ]] && ok "child exit $code reported as 1" || fail "child exit $code leaked as rc $rc"
+    echo "$out" | grep -q "collides with a changed-mode sentinel" && ok "names the collision ($code)" \
+        || fail "collision not explained ($code)"
+    git -C "$NEW" rm -q tests/test_collide.sh; git -C "$NEW" commit -qm "drop collide $code"
+done
+
 
 echo ""
 if [[ $FAILS -eq 0 ]]; then echo "test_smoke_modes: ALL PASS"; exit 0

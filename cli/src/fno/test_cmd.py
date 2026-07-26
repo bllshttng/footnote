@@ -656,7 +656,6 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
 
 CHANGED_RC_UNSELECTED = 20   # nothing mapped: not a failure, and not a green verdict
 CHANGED_RC_UNEVALUATED = 21  # no trustworthy diff: fail closed, never partial-green
-CHANGED_FAILURE_RECORD_DEFAULT = ".fno/changed-last-failures.txt"
 CHANGED_RECEIPT_DEFAULT = ".fno/changed-last-receipt.json"
 
 # Broad infrastructure (rule 6): the runner, the selector, shared test config,
@@ -910,6 +909,16 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     e0 = time.monotonic()
     results, rc = _execute_steps(root, env, steps, keep_going=opts["keep_going"])
     exec_s = time.monotonic() - e0
+    if rc in (CHANGED_RC_UNSELECTED, CHANGED_RC_UNEVALUATED):
+        # In-band signalling hazard. Propagating a child code that happens to
+        # equal a sentinel would tell preflight "nothing selected" / "no
+        # trustworthy diff", and it would fall THROUGH to the full gate instead
+        # of stopping on a real failure - a red silently downgraded to a
+        # non-verdict. The sentinels have to stay unambiguous, so a genuine
+        # step failure that collides with one reports as a plain 1.
+        print(f"smoke: step exit {rc} collides with a changed-mode sentinel; "
+              f"reporting 1 (a failure, not a non-verdict)", flush=True)
+        rc = 1
     # Time to first signal: elapsed up to and including the first failing step,
     # or the whole packet when it is green. Summing every step would overstate
     # it under --keep-going, where execution continues past the first failure.
@@ -934,13 +943,9 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     receipt.update(verdict=verdict, execution_seconds=round(exec_s, 3),
                    first_signal_seconds=round(signal, 3),
                    failed=[n for n, s, _ in results if s == "fail"])
+    # The receipt is the changed mode's ONLY durable artifact, and it lives in
+    # its own namespace - the full runner's failure record is never touched.
     _write_changed_receipt(receipt_path, receipt)
-    # Own namespace: a partial run must never touch the full runner's record.
-    _write_failure_record(
-        os.environ.get("SMOKE_CHANGED_FAILURE_RECORD")
-        or str(root / CHANGED_FAILURE_RECORD_DEFAULT),
-        [n for n, s, _ in results if s == "fail"],
-    )
     return rc
 
 

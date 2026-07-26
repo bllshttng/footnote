@@ -73,7 +73,7 @@ Inference is best effort: roughly 40% of `cli/src` modules have a conventionally
 
 Three mechanisms keep a partial green from reading as a full one.
 The header says `CHANGED SUBSET` and never `FULL`.
-The failure record and the receipt live in their own namespace (`.fno/changed-last-*`), so a changed run cannot clear the full runner's failure record and cannot mint or satisfy a `mode=FULL` attestation, and a concurrent full run cannot overwrite the changed receipt.
+Its receipt is its only durable artifact and lives in its own namespace (`.fno/changed-last-receipt.json`), so a changed run cannot clear the full runner's failure record and cannot mint or satisfy a `mode=FULL` attestation, and a concurrent full run cannot overwrite the changed receipt.
 And the exit codes separate evidence quality:
 
 | Exit | Meaning |
