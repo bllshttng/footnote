@@ -176,6 +176,23 @@ def evidence_required(
     typer.echo(json.dumps({"required": required, "reason": reason}, separators=(",", ":")))
 
 
+@pr_app.command("next-receipt-generation", hidden=True)
+def next_receipt_generation(
+    candidate_sha: str = typer.Option(..., "--candidate-sha"),
+) -> None:
+    """Derive the next receipt generation from every discovered journal."""
+    from fno.pr import _preflight
+
+    try:
+        generation = _preflight.next_verification_generation(
+            cwd=os.getcwd(), candidate_sha=candidate_sha
+        )
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    typer.echo(str(generation))
+
+
 @pr_app.command(
     "sync-canonical",
     help=(

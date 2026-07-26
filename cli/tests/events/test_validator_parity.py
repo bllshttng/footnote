@@ -182,3 +182,44 @@ def test_verification_receipt_utf8_byte_cap_has_python_bash_parity() -> None:
 
     assert py_ok is False
     assert bash_ok is False
+
+
+@pytest.mark.parametrize(
+    ("generation", "expected"),
+    [
+        (9_007_199_254_740_991, True),
+        (9_007_199_254_740_992, False),
+    ],
+)
+def test_verification_receipt_generation_safe_integer_parity(
+    generation: int, expected: bool
+) -> None:
+    event = {
+        "ts": "2026-07-26T01:02:04Z",
+        "type": "verification_receipt",
+        "source": "target",
+        "data": {
+            "candidate_sha": "a" * 40,
+            "command": ["scripts/ci/preflight.sh"],
+            "environment": {
+                "host": "h",
+                "platform": "p",
+                "runner": "scripts/ci/preflight.sh",
+            },
+            "scope": ["smoke"],
+            "started_at": "2026-07-26T01:00:00Z",
+            "finished_at": "2026-07-26T01:02:03Z",
+            "mode": "full",
+            "result": "failed",
+            "producer": {"kind": "preflight", "id": "h:1"},
+            "generation": generation,
+            "steps_expected": 1,
+            "steps_executed": 1,
+        },
+    }
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is expected
+    assert bash_ok is expected

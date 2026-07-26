@@ -14,6 +14,7 @@ from fno.pr._preflight import (
     hosted_ci_decision,
     hosted_workflow_state,
     local_verification_required,
+    next_verification_generation,
     verification_decision,
 )
 
@@ -256,6 +257,35 @@ def test_generation_supersedes_timestamp_after_clock_rollback(tmp_path: Path) ->
     assert decision["receipt"]["data"]["generation"] == 2
 
 
+def test_next_generation_uses_every_discovered_exact_sha_journal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    project = tmp_path / "project.jsonl"
+    delivery = tmp_path / "delivery.jsonl"
+    write(project, receipt(generation=2))
+    write(delivery, receipt(generation=5), receipt(candidate_sha=OTHER_SHA, generation=9))
+    monkeypatch.setattr(
+        "fno.pr._preflight.verification_event_paths",
+        lambda **_kwargs: ([project, delivery], []),
+    )
+
+    assert next_verification_generation(cwd=str(tmp_path), candidate_sha=SHA) == 6
+
+
+def test_next_generation_fails_closed_on_uncertain_journal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    corrupt = tmp_path / "events.jsonl"
+    corrupt.write_text("not json\n")
+    monkeypatch.setattr(
+        "fno.pr._preflight.verification_event_paths",
+        lambda **_kwargs: ([corrupt], []),
+    )
+
+    with pytest.raises(ValueError, match="malformed"):
+        next_verification_generation(cwd=str(tmp_path), candidate_sha=SHA)
+
+
 def test_future_dated_receipt_fails_closed(tmp_path: Path) -> None:
     journal = tmp_path / "events.jsonl"
     write(journal, receipt(ts="2099-01-01T00:00:00Z"))
@@ -380,6 +410,33 @@ def test_reader_refuses_during_preflight_transition(
     assert decision["satisfied"] is False
     assert decision["result"] == "unavailable"
     assert decision["coverage"]["lock_error"] == "preflight transition in progress"
+
+
+def test_reader_release_failure_invalidates_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    common = tmp_path / ".git"
+    common.mkdir()
+    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
+    monkeypatch.setattr(
+        "fno.pr._preflight._preflight_revocation",
+        lambda _repo, _sha: ("absent", None),
+    )
+    monkeypatch.setattr(
+        Path,
+        "rmdir",
+        lambda _path: (_ for _ in ()).throw(OSError("simulated release failure")),
+    )
+    journal = tmp_path / "events.jsonl"
+    write(journal, receipt())
+
+    decision = check_verification_evidence(
+        cwd=str(tmp_path), candidate_sha=SHA, event_paths=[journal]
+    )
+
+    assert decision["satisfied"] is False
+    assert decision["result"] == "unavailable"
+    assert "release failed" in decision["coverage"]["lock_error"]
 
 
 def test_revocation_markers_are_candidate_scoped(

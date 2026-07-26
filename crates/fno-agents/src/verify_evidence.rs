@@ -602,7 +602,7 @@ fn valid_receipt(event: &Value) -> bool {
             "not_configured" | "unavailable" | "pending" | "failed" | "passed" | "stale"
         )
         && executed <= expected
-        && generation >= 1.0
+        && (1.0..=9_007_199_254_740_991.0).contains(&generation)
         && scope_len == Some(expected)
         && (mode != "full" || result != "passed" || (expected > 0.0 && executed == expected))
         && (mode != "void" || result != "passed")
@@ -707,6 +707,7 @@ fn preflight_revocation(
 struct VerificationReadLock {
     path: PathBuf,
     stamp: String,
+    released: bool,
 }
 
 impl VerificationReadLock {
@@ -718,12 +719,34 @@ impl VerificationReadLock {
             let _ = std::fs::remove_dir(&path);
             return None;
         }
-        Some(Self { path, stamp })
+        Some(Self {
+            path,
+            stamp,
+            released: false,
+        })
+    }
+
+    fn release(mut self) -> Result<(), String> {
+        let holder = self.path.join("holder");
+        let observed = std::fs::read_to_string(&holder)
+            .map_err(|error| format!("verification lock release failed: {error}"))?;
+        if observed.trim() != self.stamp {
+            return Err("verification lock ownership changed".to_string());
+        }
+        std::fs::remove_file(&holder)
+            .map_err(|error| format!("verification lock release failed: {error}"))?;
+        std::fs::remove_dir(&self.path)
+            .map_err(|error| format!("verification lock release failed: {error}"))?;
+        self.released = true;
+        Ok(())
     }
 }
 
 impl Drop for VerificationReadLock {
     fn drop(&mut self) {
+        if self.released {
+            return;
+        }
         let holder = self.path.join("holder");
         if std::fs::read_to_string(&holder)
             .is_ok_and(|value| value.trim() == self.stamp)
@@ -1112,7 +1135,7 @@ fn run(args: &[String]) -> (i32, String, String) {
                 });
                 return (1, format!("{decision}\n"), String::new());
             };
-            let Some(_guard) = VerificationReadLock::acquire(&common_dir) else {
+            let Some(guard) = VerificationReadLock::acquire(&common_dir) else {
                 let decision = json!({
                     "satisfied": false,
                     "mode": Value::Null,
@@ -1124,6 +1147,16 @@ fn run(args: &[String]) -> (i32, String, String) {
             };
             let revocation = preflight_revocation(Some(&common_dir), &rest[0]);
             let decision = receipt_decision(&rest[0], &rest[1..], revocation);
+            if let Err(error) = guard.release() {
+                let unavailable = json!({
+                    "satisfied": false,
+                    "mode": Value::Null,
+                    "result": "unavailable",
+                    "receipt": Value::Null,
+                    "coverage": {"complete": false, "lock_error": error},
+                });
+                return (1, format!("{unavailable}\n"), String::new());
+            }
             let code = if decision["satisfied"] == Value::Bool(true) {
                 0
             } else {
@@ -1242,6 +1275,10 @@ mod tests {
             "passed",
         );
         event["data"]["generation"] = json!(0);
+        assert!(!valid_receipt(&event));
+        event["data"]["generation"] = json!(9_007_199_254_740_991_u64);
+        assert!(valid_receipt(&event));
+        event["data"]["generation"] = json!(9_007_199_254_740_992_u64);
         assert!(!valid_receipt(&event));
     }
 
@@ -1436,6 +1473,21 @@ mod tests {
             ),
             RevocationState::Unavailable
         );
+    }
+
+    #[test]
+    fn reader_lock_release_failure_is_reported() {
+        let common = tempfile::tempdir().unwrap();
+        let guard = VerificationReadLock::acquire(common.path()).unwrap();
+        std::fs::write(
+            common.path().join(".preflight.lock.d").join("unexpected"),
+            "x",
+        )
+        .unwrap();
+
+        let error = guard.release().unwrap_err();
+
+        assert!(error.contains("verification lock release failed"));
     }
 
     #[test]

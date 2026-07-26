@@ -188,7 +188,7 @@ the operator's signal of substrate degradation.
 ### `verification_receipt`
 
 A verification receipt is the append-only, schema-owned record of what was actually executed against one candidate commit.
-It binds a full 40-hex `candidate_sha`, the exact command argument vector, host/platform/runner environment, named scope, start and finish timestamps, evidence mode, result, producer identity, a positive lock-serialized per-candidate generation, and expected versus executed step counts.
+It binds a full 40-hex `candidate_sha`, the exact command argument vector, host/platform/runner environment, named scope, start and finish timestamps, evidence mode, result, producer identity, a positive journal-derived per-candidate generation, and expected versus executed step counts.
 The command, scope, payload, and string sizes are bounded before the receipt can enter a journal.
 
 Modes and results remain orthogonal and explicit:
@@ -213,7 +213,9 @@ Setup failures emit a zero-executed void/unavailable receipt instead of manufact
 The preflight attestation is only a cache carrier and never substitutes for the event receipt.
 
 Ship-gate consumers accept only the newest exact-SHA full/passed receipt from the trusted preflight producer with the canonical command, runner, host-bound producer identity, and complete deterministic scope.
-Project, global, delivery-root, and salvage journals may be concatenated in any order, so consumers parse RFC3339 timestamps, deduplicate canonical event objects, and select the highest exact-candidate generation.
+Before every append, preflight derives the next generation as one above the highest exact-SHA generation across project, global, delivery-root, and salvage journals; missing, malformed, unreadable, or exhausted generation evidence blocks the append.
+This makes lost local state safe across clones, while simultaneous cross-clone allocation creates an explicit same-generation conflict rather than an arbitrary winner.
+Journals may be concatenated in any order, so consumers parse RFC3339 timestamps, deduplicate canonical event objects, and select the highest exact-candidate generation.
 Timestamps retain at most six fractional digits and remain observational metadata; future-dated receipts and distinct receipts tied for the highest generation are unavailable rather than arbitrarily ordered.
 Starting a new preflight atomically creates a per-candidate revocation marker until the new final receipt is durably appended, so a failed append, interrupted run, or concurrent run for another SHA cannot expose stale success.
 Python and Rust both reduce an exact candidate's revocation as absent, revoked, or unavailable; malformed and unreadable marker state fails closed.

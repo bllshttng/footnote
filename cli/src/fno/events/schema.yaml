@@ -180,7 +180,8 @@ event_types:
           description: "Structured producer kind and unique id."
         generation:
           type: integer
-          description: "Positive lock-serialized per-candidate receipt generation; authoritative for supersession."
+          maximum: 9007199254740991
+          description: "Positive journal-derived per-candidate receipt generation; authoritative for supersession and capped at the largest exactly represented IEEE-754 integer."
         steps_expected:
           type: integer
         steps_executed:

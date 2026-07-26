@@ -149,6 +149,9 @@ except SchemaUnavailableError as _exc:
     _schema_load_error = _exc
 
 
+MAX_SAFE_EVENT_INTEGER = 9_007_199_254_740_991
+
+
 def _require_schema() -> None:
     """Raise the deferred SchemaUnavailableError if module import couldn't load."""
     if _schema_load_error is not None:
@@ -368,6 +371,7 @@ def validate(event: dict[str, Any]) -> None:
         if (
             not _is_nonnegative_integral_number(generation)
             or int(generation) < 1
+            or int(generation) > MAX_SAFE_EVENT_INTEGER
             or not _is_nonnegative_integral_number(expected)
             or not _is_nonnegative_integral_number(executed)
             or int(executed) > int(expected)

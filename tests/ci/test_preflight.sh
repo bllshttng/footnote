@@ -38,6 +38,25 @@ if [[ "\$*" == *"paths.worktrees_base"* ]]; then
     echo "$WT_BASE"
     exit 0
 fi
+if [[ "\${1:-} \${2:-}" == "pr next-receipt-generation" ]]; then
+    shift 2
+    sha=''
+    while [[ \$# -gt 0 ]]; do
+        case "\$1" in
+            --candidate-sha) sha="\$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    events="\$(git rev-parse --show-toplevel)/.fno/events.jsonl"
+    if [[ -s "\$events" ]]; then
+        jq -sr --arg sha "\$sha" \
+            '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha) | .data.generation] | (max // 0) + 1' \
+            "\$events"
+    else
+        echo 1
+    fi
+    exit 0
+fi
 if [[ "\${1:-} \${2:-}" == "pr evidence-check" ]]; then
     sha="\$(git rev-parse HEAD)"
     events="\$(git rev-parse --show-toplevel)/.fno/events.jsonl"

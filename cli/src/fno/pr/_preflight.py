@@ -39,6 +39,10 @@ OK = 0
 REFUSED_STALE = 3
 UNRELATED = 4
 
+
+class VerificationLockReleaseError(RuntimeError):
+    """A reader lock could not be released, so its verdict is unavailable."""
+
 _PREFLIGHT_GATE_SCOPE = frozenset(
     {
         "smoke",
@@ -309,6 +313,56 @@ def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], 
     return paths, errors
 
 
+def next_verification_generation(*, cwd: str, candidate_sha: str) -> int:
+    """Return one above every discovered valid exact-SHA receipt generation."""
+    from fno.events import MAX_SAFE_EVENT_INTEGER, ValidationError, validate
+
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha, re.IGNORECASE) is None:
+        raise ValueError("candidate_sha must be a full 40-hex commit")
+    paths, errors = verification_event_paths(cwd=cwd)
+    if errors:
+        raise ValueError("; ".join(errors))
+    seen_paths: set[str] = set()
+    highest = 0
+    for raw_path in paths:
+        path = Path(raw_path).expanduser()
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = os.path.abspath(path)
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError) as exc:
+            raise ValueError(f"receipt journal unreadable: {path}: {exc}") from exc
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"receipt journal malformed: {path}: {exc}") from exc
+            if not isinstance(event, dict) or event.get("type") != "verification_receipt":
+                continue
+            raw_candidate = event.get("data", {}).get("candidate_sha")
+            if not isinstance(raw_candidate, str):
+                raise ValueError(f"receipt journal malformed: {path}: candidate SHA missing")
+            if raw_candidate.lower() != candidate_sha.lower():
+                continue
+            try:
+                validate(event)
+            except ValidationError as exc:
+                raise ValueError(f"receipt journal malformed: {path}: {exc}") from exc
+            highest = max(highest, int(event["data"]["generation"]))
+    if highest >= MAX_SAFE_EVENT_INTEGER:
+        raise ValueError("receipt generation exhausted")
+    return highest + 1
+
+
 def check_verification_evidence(
     *,
     cwd: Optional[str] = None,
@@ -327,33 +381,42 @@ def check_verification_evidence(
             "receipt": None,
             "coverage": {"complete": False, "error": "candidate SHA unavailable"},
         }
-    with _verification_read_lock(repo) as lock_error:
-        if lock_error is not None:
-            return {
-                "satisfied": False,
-                "mode": None,
-                "result": "unavailable",
-                "receipt": None,
-                "coverage": {"complete": False, "lock_error": lock_error},
-            }
-        discovery_errors: list[str] = []
-        if event_paths is None:
-            event_paths, discovery_errors = verification_event_paths(cwd=repo)
-        decision = verification_decision(candidate_sha, event_paths)
-        if discovery_errors:
-            decision["coverage"]["complete"] = False
-            decision["coverage"]["discovery_errors"] = discovery_errors
-            decision["satisfied"] = False
-        revocation, revocation_error = _preflight_revocation(repo, candidate_sha)
-        if revocation == "revoked":
-            decision["coverage"]["complete"] = False
-            decision["coverage"]["revoked"] = True
-            decision["satisfied"] = False
-        elif revocation == "unavailable":
-            decision["coverage"]["complete"] = False
-            decision["coverage"]["revocation_error"] = revocation_error
-            decision["satisfied"] = False
-        return decision
+    try:
+        with _verification_read_lock(repo) as lock_error:
+            if lock_error is not None:
+                return {
+                    "satisfied": False,
+                    "mode": None,
+                    "result": "unavailable",
+                    "receipt": None,
+                    "coverage": {"complete": False, "lock_error": lock_error},
+                }
+            discovery_errors: list[str] = []
+            if event_paths is None:
+                event_paths, discovery_errors = verification_event_paths(cwd=repo)
+            decision = verification_decision(candidate_sha, event_paths)
+            if discovery_errors:
+                decision["coverage"]["complete"] = False
+                decision["coverage"]["discovery_errors"] = discovery_errors
+                decision["satisfied"] = False
+            revocation, revocation_error = _preflight_revocation(repo, candidate_sha)
+            if revocation == "revoked":
+                decision["coverage"]["complete"] = False
+                decision["coverage"]["revoked"] = True
+                decision["satisfied"] = False
+            elif revocation == "unavailable":
+                decision["coverage"]["complete"] = False
+                decision["coverage"]["revocation_error"] = revocation_error
+                decision["satisfied"] = False
+    except VerificationLockReleaseError as exc:
+        return {
+            "satisfied": False,
+            "mode": None,
+            "result": "unavailable",
+            "receipt": None,
+            "coverage": {"complete": False, "lock_error": str(exc)},
+        }
+    return decision
 
 
 def local_verification_required(
@@ -419,11 +482,19 @@ def _verification_read_lock(repo: str):
         yield None
     finally:
         try:
-            if (lock / "holder").read_text(encoding="utf-8").strip() == stamp:
-                (lock / "holder").unlink()
-                lock.rmdir()
-        except OSError:
-            pass
+            observed = (lock / "holder").read_text(encoding="utf-8").strip()
+            if observed != stamp:
+                raise VerificationLockReleaseError(
+                    f"verification lock ownership changed: {lock}"
+                )
+            (lock / "holder").unlink()
+            lock.rmdir()
+        except VerificationLockReleaseError:
+            raise
+        except OSError as exc:
+            raise VerificationLockReleaseError(
+                f"verification lock release failed: {lock}: {exc}"
+            ) from exc
 
 
 def _preflight_revocation(repo: str, candidate_sha: str) -> tuple[str, Optional[str]]:

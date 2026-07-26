@@ -279,21 +279,8 @@ acquire_lock
 
 REVOCATION_DIR="$COMMON_DIR/.preflight-revoked"
 REVOCATION="$REVOCATION_DIR/$CANDIDATE_SHA"
-GENERATION_DIR="$COMMON_DIR/.preflight-generations"
-GENERATION_FILE="$GENERATION_DIR/$CANDIDATE_SHA"
 next_receipt_generation() {
-    local current=0 next tmp
-    if [[ -e "$GENERATION_FILE" ]]; then
-        current="$(cat "$GENERATION_FILE" 2>/dev/null)" || return 1
-        [[ "$current" =~ ^[0-9]+$ ]] || return 1
-    fi
-    next=$((current + 1))
-    [[ "$next" -gt "$current" ]] || return 1
-    mkdir -p "$GENERATION_DIR" 2>/dev/null || return 1
-    tmp="${GENERATION_FILE}.$$"
-    printf '%s\n' "$next" > "$tmp" 2>/dev/null || return 1
-    mv -f "$tmp" "$GENERATION_FILE" 2>/dev/null || return 1
-    printf '%s\n' "$next"
+    candidate_fno pr next-receipt-generation --candidate-sha "$CANDIDATE_SHA"
 }
 mark_revoked() {
     local tmp="${REVOCATION}.$$"

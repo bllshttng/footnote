@@ -375,7 +375,8 @@ validate_event() {
                 and ($d.producer | type == "object"
                     and all(["kind", "id"][];
                         . as $f | ($d.producer[$f] | type == "string" and test("[^[:space:]]"))))
-                and ($d.generation | type == "number" and floor == . and . >= 1)
+                and ($d.generation | type == "number" and floor == .
+                    and . >= 1 and . <= 9007199254740991)
                 and ($d.steps_expected | type == "number" and floor == . and . >= 0)
                 and ($d.steps_executed | type == "number" and floor == . and . >= 0)
                 and ($d.steps_executed <= $d.steps_expected)
