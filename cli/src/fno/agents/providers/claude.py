@@ -214,6 +214,84 @@ def _build_argv(
     return argv
 
 
+def _claude_project_slug(cwd: Path) -> str:
+    """Claude's projects-dir slug for a launch cwd.
+
+    Delegates to the canonical encoder in provenance.resolver (confirmed
+    against the real ~/.claude layout): only '/' and '.' become '-', every
+    other char (including '_') is preserved. A local regex that folded all
+    non-alphanumerics would diverge on underscore-bearing paths and point the
+    receipt at a directory that does not exist.
+    """
+    from fno.provenance.resolver import _slug
+
+    return _slug(str(cwd))
+
+
+def _claude_projects_dir(env: Mapping[str, str]) -> Path:
+    """The projects root claude writes transcripts under for this spawn.
+
+    An ``--account`` spawn relocates the whole config tree via
+    ``CLAUDE_CONFIG_DIR`` (see account_env), and claude writes ``projects/``
+    beneath that relocated root, not ``~/.claude/projects``. Deriving the
+    locator from the effective env keeps the receipt pointing where the
+    transcript will actually land instead of a dir it will never appear in.
+    """
+    cfg = env.get("CLAUDE_CONFIG_DIR")
+    root = Path(cfg) if cfg else Path.home() / ".claude"
+    return root / "projects"
+
+
+def _resolved_request_model(
+    model: Optional[str], env: Mapping[str, str]
+) -> Optional[str]:
+    """The model claude will actually serve, best-effort from argv + env.
+
+    An explicit argv model pin (``claude --model``) wins over a role's
+    ``ANTHROPIC_MODEL`` env (the provider contract: the pin is more specific),
+    but a tier alias still remaps to its ``ANTHROPIC_DEFAULT_<ALIAS>_MODEL``
+    when set. When the argv model is None the model comes from
+    ``ANTHROPIC_MODEL`` if the spawn was routed that way: cli.py's
+    ``--provider/--model`` path clears the argv token and routes via env, so
+    treating a missing argv model as "no model" would misreport a routed spawn.
+    """
+    if model:
+        alias = str(model).strip().lower()
+        return env.get(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL") or model
+    return env.get("ANTHROPIC_MODEL")
+
+
+def _emit_headless_receipt(
+    *, name: Optional[str], cwd: Path, model: Optional[str], env: Mapping[str, str]
+) -> None:
+    """Write one compact JSON receipt line to stderr and flush it, before the
+    blocking call.
+
+    stderr (not stdout): headless stdout IS claude's reply stream, and a
+    structured consumer like pr_watch runs ``json.loads`` on the full stdout
+    under ``--output-format json``, so a receipt line there corrupts the
+    envelope. A progress receipt belongs on stderr; stdout stays the clean
+    reply channel.
+
+    Promises only what is knowable at this synchronous pre-block boundary:
+    substrate, name, the effective cwd, the resolved request model, and the
+    transcript locator directory. It deliberately does NOT name an exact
+    transcript file, session UUID, or PID - none exist yet, and inventing them
+    would repeat the receipt-can-lie failure the receipt exists to close.
+    """
+    receipt = {
+        "substrate": "headless",
+        "name": name,
+        "cwd": str(cwd),
+        "model": _resolved_request_model(model, env),
+        "transcript_dir": f"{_claude_projects_dir(env) / _claude_project_slug(cwd)}/",
+        "lifecycle": "ephemeral",
+        "roster": "unbound",
+    }
+    sys.stderr.write(json.dumps(receipt) + "\n")
+    sys.stderr.flush()
+
+
 def headless_create(
     message: str,
     cwd: Path,
@@ -228,8 +306,15 @@ def headless_create(
     output_format: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
     route_env: Optional[Mapping[str, str]] = None,
+    name: Optional[str] = None,
 ) -> ProviderResult:
-    """Run a one-shot ``claude -p`` without creating a background session."""
+    """Run a one-shot ``claude -p`` without creating a background session.
+
+    Emits one compact JSON receipt line to stdout and flushes it before the
+    blocking ``claude -p`` call, so a watcher sees the worker started without
+    waiting for the one-shot to return. ``name`` labels that receipt; it does
+    not reach the claude argv.
+    """
     if route_env:
         from fno.agents.model_routing import resolve_spawn_route
 
@@ -288,6 +373,17 @@ def headless_create(
     }
     if spawn_env is not None:
         run_kwargs["env"] = spawn_env
+    # Emit the spawn receipt BEFORE the synchronous blocking claude -p. A
+    # one-shot holds this process until claude -p returns (potentially long),
+    # so without an up-front line a watcher sees nothing and may assume the
+    # worker never started. Names the effective cwd + transcript locator so a
+    # canonical-dir liveness check does not miss a worktree-rooted transcript.
+    _emit_headless_receipt(
+        name=name,
+        cwd=cwd,
+        model=model,
+        env=spawn_env if spawn_env is not None else os.environ,
+    )
     try:
         result = _subprocess_run(argv, **run_kwargs)
     except subprocess.TimeoutExpired as exc:

@@ -512,3 +512,220 @@ def test_headless_create_routed_scrubs_ambient_creds(tmp_path: Path, monkeypatch
     assert env["ANTHROPIC_AUTH_TOKEN"] == "zk-routed"
     assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
     assert "--settings" in captured["argv"]
+
+
+def test_headless_receipt_emitted_before_blocking_subprocess(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The headless spawn receipt is flushed to stderr BEFORE the synchronous
+    blocking claude -p runs, and names the passed worktree cwd + transcript
+    locator. Without an up-front receipt a long one-shot looks dead to a
+    watcher (the twin-spawn failure mode this closes)."""
+    import json
+
+    from fno.agents.providers import claude as claude_mod
+    from fno.provenance.resolver import _slug
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        # Snapshot stderr AT the moment the blocking subprocess is invoked:
+        # the receipt must already be flushed here, not written after.
+        captured["stderr_at_call"] = capsys.readouterr().err
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd, name="wk-zzz")
+
+    snap = captured.get("stderr_at_call")
+    assert snap, "no receipt was flushed before the blocking subprocess call"
+    rec = json.loads(snap.strip().splitlines()[-1])
+    assert rec["substrate"] == "headless"
+    assert rec["name"] == "wk-zzz"
+    assert rec["cwd"] == str(cwd)
+    assert rec["lifecycle"] == "ephemeral"
+    assert rec["roster"] == "unbound"
+    # transcript locator slug derived from the effective cwd (canonical encoding)
+    assert _slug(str(cwd)) in rec["transcript_dir"]
+    # promises nothing that does not exist yet at this synchronous boundary
+    assert "session_id" not in rec
+    assert "pid" not in rec
+
+
+def test_headless_receipt_goes_to_stderr_not_stdout(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The receipt goes to stderr so stdout stays the clean reply stream. A
+    structured consumer (pr_watch under --output-format json) does json.loads on
+    the full headless stdout; a receipt line there would corrupt the envelope."""
+    import json
+
+    from fno.agents.providers import claude as claude_mod
+
+    envelope = '{"is_error":false,"result":"ok"}'
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = envelope
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    res = claude_mod.headless_create(
+        message="hi", cwd=cwd, name="wk", output_format="json"
+    )
+    captured = capsys.readouterr()
+    # the reply returned to the caller is the clean envelope, unmodified
+    assert json.loads(res.stdout) == json.loads(envelope)
+    # the receipt landed on stderr, never on stdout
+    rec = json.loads(captured.err.strip().splitlines()[-1])
+    assert rec["substrate"] == "headless"
+    assert "headless" not in captured.out
+
+
+def test_headless_receipt_resolves_remapped_model(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The receipt prints the RESOLVED request model when a DEFAULT_*_MODEL env
+    var remaps the alias, so an operator is not misled into thinking the
+    spawn serves 'opus' when the routed secondary model actually wins."""
+    import json
+
+    from fno.agents.providers import claude as claude_mod
+
+    # Clear ambient overrides so the alias-remap path is exercised
+    # deterministically (this test process may itself run routed, with
+    # ANTHROPIC_MODEL set as a global override that would otherwise win).
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "glm-5.2")
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["stderr_at_call"] = capsys.readouterr().err
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd, name="wk", model="opus")
+
+    rec = json.loads(captured["stderr_at_call"].strip().splitlines()[-1])
+    assert rec["model"] == "glm-5.2"
+
+
+def test_headless_receipt_reports_routed_model_without_argv_pin(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """cli.py's --provider/--model path clears the argv model token and routes
+    via ANTHROPIC_MODEL env instead; the receipt must still report that routed
+    model, not null."""
+    import json
+
+    from fno.agents.providers import claude as claude_mod
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["stderr_at_call"] = capsys.readouterr().err
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(
+        message="hi",
+        cwd=cwd,
+        name="wk",
+        route_env={
+            "ANTHROPIC_BASE_URL": "https://z",
+            "ANTHROPIC_AUTH_TOKEN": "t",
+            "ANTHROPIC_MODEL": "glm-5.2",
+        },
+    )
+
+    rec = json.loads(captured["stderr_at_call"].strip().splitlines()[-1])
+    assert rec["model"] == "glm-5.2"
+
+
+def test_headless_receipt_transcript_dir_follows_account_config_dir(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """An --account spawn relocates claude's config tree via CLAUDE_CONFIG_DIR;
+    the transcript locator must point under that root, not ~/.claude/projects
+    where the transcript would never appear (which would recreate the
+    false-dead failure this receipt exists to prevent)."""
+    import json
+
+    from fno.agents.providers import claude as claude_mod
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["stderr_at_call"] = capsys.readouterr().err
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(
+        message="hi",
+        cwd=cwd,
+        name="wk",
+        account_env={"CLAUDE_CONFIG_DIR": "/x/.claude-alt"},
+    )
+
+    rec = json.loads(captured["stderr_at_call"].strip().splitlines()[-1])
+    assert rec["transcript_dir"].startswith("/x/.claude-alt/projects/")
+
+
+def test_headless_receipt_slug_preserves_underscore(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The transcript slug uses claude's canonical encoding (provenance
+    resolver): underscores are preserved, not folded to dashes, so the locator
+    points at the real projects dir for an underscore-bearing cwd."""
+    import json
+
+    from fno.agents.providers import claude as claude_mod
+    from fno.provenance.resolver import _slug
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["stderr_at_call"] = capsys.readouterr().err
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "my_repo"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd, name="wk")
+
+    rec = json.loads(captured["stderr_at_call"].strip().splitlines()[-1])
+    assert _slug(str(cwd)) in rec["transcript_dir"]
+    assert "my_repo" in rec["transcript_dir"]
+    assert "my-repo" not in rec["transcript_dir"]
