@@ -51,8 +51,18 @@ exit 0
 EOF
 # preflight calls `uv run --project cli fno-py test smoke [flags]`; stub uv to
 # behave like the retired smoke.sh stub (red iff POISON is checked out).
+# The changed packet is a distinct invocation (--changed) and must be stubbable
+# independently of the full run: several cases below turn one red while the
+# other stays green, which is the whole ordering contract.
 cat > "$BIN/uv" <<'EOF'
 #!/usr/bin/env bash
+case " $* " in
+  *" --changed "*)
+    [[ -f CHANGED_UNEVAL ]] && { echo "smoke: CHANGED SUBSET UNEVALUATED"; exit 21; }
+    [[ -f CHANGED_NONE ]]   && { echo "smoke: CHANGED SUBSET selected NOTHING"; exit 20; }
+    [[ -f CHANGED_POISON ]] && { echo "smoke: CHANGED SUBSET verdict=red"; exit 1; }
+    echo "smoke: CHANGED SUBSET verdict=green"; exit 0 ;;
+esac
 if [[ -f POISON ]]; then echo "smoke: POISON step failed"; exit 1; fi
 echo "smoke: all green (stub)"; exit 0
 EOF
@@ -70,6 +80,9 @@ echo x > "$FIX/crates/fno-agents/.keep"; echo x > "$FIX/crates/fno/.keep"
 git -C "$FIX" add -A; git -C "$FIX" commit -qm "green base"
 GREEN_SHA="$(git -C "$FIX" rev-parse --short HEAD)"
 GREEN_FULL="$(git -C "$FIX" rev-parse HEAD)"
+# The changed packet resolves its base as merge-base origin/main; without this
+# ref preflight skips the leg, so the fixture would never exercise it.
+git -C "$FIX" update-ref refs/remotes/origin/main "$GREEN_FULL"
 # The fixture is a plain repo, so its git-common-dir is $FIX/.git; the lock and
 # the attestation are siblings under it.
 LOCKDIR="$FIX/.git/.preflight.lock.d"
@@ -176,6 +189,46 @@ echo "$out" | grep -q "RED - fix" && ok "reports RED" || fail "no RED line"
 echo "$out" | grep -q "fail.*smoke suite" && ok "smoke suite marked fail" || fail "smoke not failed in summary"
 # back to green for remaining tests
 ( cd "$FIX" && git rm -q POISON && git commit -qm "unpoison" )
+
+echo "== changed packet: a red packet stops the run BEFORE the full gate =="
+rm -f "$ATT"
+( cd "$FIX" && touch CHANGED_POISON && git add -A && git commit -qm "changed-packet red" )
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 1 ]] && ok "exit 1 on a red changed packet" || fail "expected 1 got $rc: $out"
+echo "$out" | grep -q "RED (changed packet)" && ok "names the changed packet as the cause" || fail "no changed-packet RED line: $out"
+echo "$out" | grep -q "all green (stub)" && fail "full smoke ran after a red changed packet" || ok "full gate not started (earliest signal)"
+echo "$out" | grep -q "the full gate has NOT run" && ok "says the full gate did not run" || fail "no full-gate caveat"
+[[ ! -f "$ATT" ]] && ok "a red changed packet mints no attestation" || fail "changed packet wrote an attestation"
+( cd "$FIX" && git rm -q CHANGED_POISON && git commit -qm "unpoison changed" )
+
+echo "== AC7: a green changed packet cannot rescue a red full gate =="
+rm -f "$ATT"
+( cd "$FIX" && touch POISON && git add -A && git commit -qm "full red, changed green" )
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && ok "exit non-zero when an unselected full step fails" || fail "expected non-zero got $rc"
+echo "$out" | grep -q "pass.*changed packet (CHANGED SUBSET)" && ok "changed packet passed" || fail "changed leg not green: $out"
+echo "$out" | grep -q "fail.*smoke suite" && ok "full smoke marked fail" || fail "full smoke not failed"
+[[ ! -f "$ATT" ]] && ok "no FULL attestation minted (AC7)" || fail "minted a full attestation on a red run"
+( cd "$FIX" && git rm -q POISON && git commit -qm "unpoison full" )
+
+echo "== AC4/AC5: unselected and unevaluated packets fall through to the full gate =="
+for sentinel in CHANGED_NONE CHANGED_UNEVAL; do
+    rm -f "$ATT"
+    ( cd "$FIX" && touch "$sentinel" && git add -A && git commit -qm "$sentinel" )
+    out="$(run_pf 2>&1)"; rc=$?
+    [[ $rc -eq 0 ]] && ok "$sentinel: full gate ran and passed" || fail "$sentinel: expected 0 got $rc: $out"
+    echo "$out" | grep -q "all green (stub)" && ok "$sentinel: full smoke still ran" || fail "$sentinel: full smoke skipped"
+    echo "$out" | grep -q "GREEN - safe to push" && ok "$sentinel: verdict came from the full gate" || fail "$sentinel: no GREEN"
+    ( cd "$FIX" && git rm -q "$sentinel" && git commit -qm "drop $sentinel" )
+done
+echo "$out" | grep -q "UNEVALUATED" && ok "unevaluated state is stated, not swallowed" || fail "no UNEVALUATED note"
+
+echo "== --retry-failed skips the changed packet (a different subset mode) =="
+rm -f "$ATT"
+out="$(run_pf --retry-failed 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "retry-failed still passes" || fail "expected 0 got $rc"
+echo "$out" | grep -q "changed packet" && fail "retry-failed ran the changed packet" || ok "changed packet skipped"
+rm -f "$ATT"
 
 echo "== AC2-ERR: dirty invoking tree refused (exit 4), nothing touched =="
 ( cd "$FIX" && echo dirt > dirty.txt )

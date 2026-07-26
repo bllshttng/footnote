@@ -28,4 +28,20 @@ grep -Fq 'hardcoded fallback list' "$PF" \
 grep -Fq '&& [[ -n "$HARNESS_MARKERS" ]]; then' "$PF" \
   || fail "fallback not keyed on fetch exit status (partial-stdout+nonzero would slip past)"
 
-echo "PASS: hermetic env scrubs harness markers + drops canonical config"
+# The changed packet must run through run_hermetic like every other leg, and
+# with an EXPLICIT base/head. Local mode inside the preflight worktree would
+# read its preserved untracked caches (target/, cli/.venv) as changed paths.
+grep -Fq 'run_hermetic uv run --project cli fno-py test smoke --changed \' "$PF" \
+  || fail "changed packet does not run inside run_hermetic"
+grep -Fqe '--base "$CHANGED_BASE" --head "$CANDIDATE_SHA"' "$PF" \
+  || fail "changed packet does not pin an explicit base/head"
+
+# Only the full legs may mint FULL evidence. record_attestation must stay gated
+# on the full path; the changed leg may only ever invalidate.
+grep -Fq 'if [[ $RETRY_FAILED -eq 0 && $FAIL -eq 0 ]]; then' "$PF" \
+  || fail "attestation is no longer gated on a full, non-subset, all-green run"
+awk '/^CHANGED_BASE=""/,/^echo ""$/' "$PF" | grep -Fq 'record_attestation' \
+  && fail "the changed leg can mint a FULL attestation" || true
+
+echo "PASS: hermetic env scrubs harness markers + drops canonical config;"
+echo "      changed packet is hermetic, base-pinned, and cannot mint FULL evidence"
