@@ -1930,6 +1930,7 @@ def dispatch_spawn(
                                 output_format=output_format,
                                 account_env=account_env,
                                 route_env=route_env,
+                                name=name,
                             )
                         except claude_mod.ProviderSubprocessError as exc:
                             _emit_ev(

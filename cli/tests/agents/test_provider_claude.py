@@ -512,3 +512,81 @@ def test_headless_create_routed_scrubs_ambient_creds(tmp_path: Path, monkeypatch
     assert env["ANTHROPIC_AUTH_TOKEN"] == "zk-routed"
     assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
     assert "--settings" in captured["argv"]
+
+
+def test_headless_receipt_emitted_before_blocking_subprocess(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The headless spawn receipt is flushed to stdout BEFORE the synchronous
+    blocking claude -p runs, and names the passed worktree cwd + transcript
+    locator. Without an up-front receipt a long one-shot looks dead to a
+    watcher (the twin-spawn failure mode this closes)."""
+    import json
+    import re
+
+    from fno.agents.providers import claude as claude_mod
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        # Snapshot stdout AT the moment the blocking subprocess is invoked:
+        # the receipt must already be flushed here, not printed after.
+        captured["stdout_at_call"] = capsys.readouterr().out
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd, name="wk-zzz")
+
+    snap = captured.get("stdout_at_call")
+    assert snap, "no receipt was flushed before the blocking subprocess call"
+    rec = json.loads(snap.strip().splitlines()[-1])
+    assert rec["substrate"] == "headless"
+    assert rec["name"] == "wk-zzz"
+    assert rec["cwd"] == str(cwd)
+    assert rec["lifecycle"] == "ephemeral"
+    assert rec["roster"] == "unbound"
+    # transcript locator slug derived from the effective cwd
+    assert re.sub(r"[^A-Za-z0-9]", "-", str(cwd)) in rec["transcript_dir"]
+    # promises nothing that does not exist yet at this synchronous boundary
+    assert "session_id" not in rec
+    assert "pid" not in rec
+
+
+def test_headless_receipt_resolves_remapped_model(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The receipt prints the RESOLVED request model when a DEFAULT_*_MODEL env
+    var remaps the alias, so an operator is not misled into thinking the
+    spawn serves 'opus' when the routed secondary model actually wins."""
+    import json
+
+    from fno.agents.providers import claude as claude_mod
+
+    # Clear ambient overrides so the alias-remap path is exercised
+    # deterministically (this test process may itself run routed, with
+    # ANTHROPIC_MODEL set as a global override that would otherwise win).
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "glm-5.2")
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["stdout_at_call"] = capsys.readouterr().out
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd, name="wk", model="opus")
+
+    rec = json.loads(captured["stdout_at_call"].strip().splitlines()[-1])
+    assert rec["model"] == "glm-5.2"

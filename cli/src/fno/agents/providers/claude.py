@@ -214,6 +214,64 @@ def _build_argv(
     return argv
 
 
+_CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+
+def _claude_project_slug(cwd: Path) -> str:
+    """Fold a launch cwd into claude's ``~/.claude/projects/<slug>/`` slug.
+
+    claude replaces every non-alphanumeric char with ``-`` (verified against
+    real projects dirs on disk). Naming this locator at spawn time is what
+    stops a liveness check of the canonical project dir from missing a
+    transcript that landed under the worktree's own dir.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+
+
+def _resolved_request_model(
+    model: Optional[str], env: Mapping[str, str]
+) -> Optional[str]:
+    """The model claude will actually serve, after env alias remap.
+
+    ``ANTHROPIC_MODEL`` overrides every tier. Otherwise a request that named a
+    tier alias (opus/sonnet/haiku/...) remaps to its
+    ``ANTHROPIC_DEFAULT_<ALIAS>_MODEL`` when that env var is set (the routed
+    secondary model). Falls back to the requested model when no remap applies,
+    and to None when no model was requested.
+    """
+    if not model:
+        return None
+    override = env.get("ANTHROPIC_MODEL")
+    if override:
+        return override
+    alias = str(model).strip().lower()
+    return env.get(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL") or model
+
+
+def _emit_headless_receipt(
+    *, name: Optional[str], cwd: Path, model: Optional[str], env: Mapping[str, str]
+) -> None:
+    """Print one compact JSON receipt line and flush it, before the blocking call.
+
+    Promises only what is knowable at this synchronous pre-block boundary:
+    substrate, name, the effective cwd, the resolved request model, and the
+    transcript locator directory. It deliberately does NOT name an exact
+    transcript file, session UUID, or PID - none exist yet, and inventing them
+    would repeat the receipt-can-lie failure the receipt exists to close.
+    """
+    receipt = {
+        "substrate": "headless",
+        "name": name,
+        "cwd": str(cwd),
+        "model": _resolved_request_model(model, env),
+        "transcript_dir": f"{_CLAUDE_PROJECTS_DIR / _claude_project_slug(cwd)}/",
+        "lifecycle": "ephemeral",
+        "roster": "unbound",
+    }
+    sys.stdout.write(json.dumps(receipt) + "\n")
+    sys.stdout.flush()
+
+
 def headless_create(
     message: str,
     cwd: Path,
@@ -228,8 +286,15 @@ def headless_create(
     output_format: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
     route_env: Optional[Mapping[str, str]] = None,
+    name: Optional[str] = None,
 ) -> ProviderResult:
-    """Run a one-shot ``claude -p`` without creating a background session."""
+    """Run a one-shot ``claude -p`` without creating a background session.
+
+    Emits one compact JSON receipt line to stdout and flushes it before the
+    blocking ``claude -p`` call, so a watcher sees the worker started without
+    waiting for the one-shot to return. ``name`` labels that receipt; it does
+    not reach the claude argv.
+    """
     if route_env:
         from fno.agents.model_routing import resolve_spawn_route
 
@@ -288,6 +353,17 @@ def headless_create(
     }
     if spawn_env is not None:
         run_kwargs["env"] = spawn_env
+    # Emit the spawn receipt BEFORE the synchronous blocking claude -p. A
+    # one-shot holds this process until claude -p returns (potentially long),
+    # so without an up-front line a watcher sees nothing and may assume the
+    # worker never started. Names the effective cwd + transcript locator so a
+    # canonical-dir liveness check does not miss a worktree-rooted transcript.
+    _emit_headless_receipt(
+        name=name,
+        cwd=cwd,
+        model=model,
+        env=spawn_env if spawn_env is not None else os.environ,
+    )
     try:
         result = _subprocess_run(argv, **run_kwargs)
     except subprocess.TimeoutExpired as exc:
