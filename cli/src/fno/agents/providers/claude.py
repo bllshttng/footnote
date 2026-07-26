@@ -214,11 +214,8 @@ def _build_argv(
     return argv
 
 
-_CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
-
-
 def _claude_project_slug(cwd: Path) -> str:
-    """Fold a launch cwd into claude's ``~/.claude/projects/<slug>/`` slug.
+    """Fold a launch cwd into claude's ``projects/<slug>/`` slug.
 
     claude replaces every non-alphanumeric char with ``-`` (verified against
     real projects dirs on disk). Naming this locator at spawn time is what
@@ -228,30 +225,50 @@ def _claude_project_slug(cwd: Path) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
 
 
+def _claude_projects_dir(env: Mapping[str, str]) -> Path:
+    """The projects root claude writes transcripts under for this spawn.
+
+    An ``--account`` spawn relocates the whole config tree via
+    ``CLAUDE_CONFIG_DIR`` (see account_env), and claude writes ``projects/``
+    beneath that relocated root, not ``~/.claude/projects``. Deriving the
+    locator from the effective env keeps the receipt pointing where the
+    transcript will actually land instead of a dir it will never appear in.
+    """
+    cfg = env.get("CLAUDE_CONFIG_DIR")
+    root = Path(cfg) if cfg else Path.home() / ".claude"
+    return root / "projects"
+
+
 def _resolved_request_model(
     model: Optional[str], env: Mapping[str, str]
 ) -> Optional[str]:
-    """The model claude will actually serve, after env alias remap.
+    """The model claude will actually serve, best-effort from argv + env.
 
-    ``ANTHROPIC_MODEL`` overrides every tier. Otherwise a request that named a
-    tier alias (opus/sonnet/haiku/...) remaps to its
-    ``ANTHROPIC_DEFAULT_<ALIAS>_MODEL`` when that env var is set (the routed
-    secondary model). Falls back to the requested model when no remap applies,
-    and to None when no model was requested.
+    An explicit argv model pin (``claude --model``) wins over a role's
+    ``ANTHROPIC_MODEL`` env (the provider contract: the pin is more specific),
+    but a tier alias still remaps to its ``ANTHROPIC_DEFAULT_<ALIAS>_MODEL``
+    when set. When the argv model is None the model comes from
+    ``ANTHROPIC_MODEL`` if the spawn was routed that way: cli.py's
+    ``--provider/--model`` path clears the argv token and routes via env, so
+    treating a missing argv model as "no model" would misreport a routed spawn.
     """
-    if not model:
-        return None
-    override = env.get("ANTHROPIC_MODEL")
-    if override:
-        return override
-    alias = str(model).strip().lower()
-    return env.get(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL") or model
+    if model:
+        alias = str(model).strip().lower()
+        return env.get(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL") or model
+    return env.get("ANTHROPIC_MODEL")
 
 
 def _emit_headless_receipt(
     *, name: Optional[str], cwd: Path, model: Optional[str], env: Mapping[str, str]
 ) -> None:
-    """Print one compact JSON receipt line and flush it, before the blocking call.
+    """Write one compact JSON receipt line to stderr and flush it, before the
+    blocking call.
+
+    stderr (not stdout): headless stdout IS claude's reply stream, and a
+    structured consumer like pr_watch runs ``json.loads`` on the full stdout
+    under ``--output-format json``, so a receipt line there corrupts the
+    envelope. A progress receipt belongs on stderr; stdout stays the clean
+    reply channel.
 
     Promises only what is knowable at this synchronous pre-block boundary:
     substrate, name, the effective cwd, the resolved request model, and the
@@ -264,12 +281,12 @@ def _emit_headless_receipt(
         "name": name,
         "cwd": str(cwd),
         "model": _resolved_request_model(model, env),
-        "transcript_dir": f"{_CLAUDE_PROJECTS_DIR / _claude_project_slug(cwd)}/",
+        "transcript_dir": f"{_claude_projects_dir(env) / _claude_project_slug(cwd)}/",
         "lifecycle": "ephemeral",
         "roster": "unbound",
     }
-    sys.stdout.write(json.dumps(receipt) + "\n")
-    sys.stdout.flush()
+    sys.stderr.write(json.dumps(receipt) + "\n")
+    sys.stderr.flush()
 
 
 def headless_create(
