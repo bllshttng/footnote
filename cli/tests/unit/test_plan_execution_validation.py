@@ -194,6 +194,9 @@ def test_quick_plan_verification_stays_representation_tolerant(tmp_path: Path) -
         "1. `fno worktree ensure`",
         "1. `npm run check`",
         "1. `test -f out.txt`",
+        "1. `make all`",
+        # Segment splitting is quoting-blind; a quoted pipe is not a separator.
+        "1. `rg -n 'foo|bar' src/`",
     ):
         plan = _write_plan(tmp_path, _quick_plan(verification=verification))
 

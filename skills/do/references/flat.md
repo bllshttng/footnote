@@ -24,7 +24,7 @@ PLAN_PATH="$1"
 bash "${SKILL_DIR:-skills/do}/scripts/validate-plan.sh" "$PLAN_PATH"
 ```
 
-On any nonzero exit, stop and report the field-level errors.
+On any nonzero exit, stop. Exit 1 reports field-level errors to fix in the plan; exit 2 means the validator itself could not run, so the plan was never judged and the tooling is what needs fixing.
 Do not execute a quick plan that has empty sections, template placeholders, or no concrete verification command.
 
 ## 1b. Resolve the executor — don't let frontend work skip the craft pass

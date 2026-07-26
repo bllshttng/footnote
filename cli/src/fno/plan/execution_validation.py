@@ -38,12 +38,12 @@ _QUICK_PLACEHOLDERS = (
 )
 _RUNNABLE_COMMANDS = frozenset(
     """
-    [ bash bun bundle cargo cd composer ctest curl deno docker dotnet eslint fno
-    fno-agents flutter git go gradle grep gh helm java javac jest jq just
-    kubectl make mvn mypy node npm npx php pip pip3 pipenv pnpm podman poetry
-    pre-commit psql pytest python python3 rake rg rspec ruby ruff rustc sh
-    shellcheck swift terraform test tofu tox tsc uv vitest wget xcodebuild yarn
-    yq zsh
+    [ bash bazel black bun bundle cargo cd cmake composer ctest curl deno diff
+    docker dotnet eslint fno fno-agents flutter git go gradle grep gh helm java
+    javac jest jq just kubectl make mvn mypy node npm npx php pip pip3 pipenv
+    pnpm podman poetry pre-commit prettier psql pytest python python3 rake rg
+    rspec ruby ruff rustc sh shellcheck swift terraform test tofu tox tsc uv
+    vitest wget xcodebuild yarn yq zsh
     """.split()
 )
 # Command names that are also ordinary English verbs, so a prose line can lead
@@ -51,8 +51,10 @@ _RUNNABLE_COMMANDS = frozenset(
 # invocation. Matching the PAIR is what keeps `cargo check` and `make test`
 # runnable while `make sure the button works` is not.
 _AMBIGUOUS_COMMANDS = frozenset("cd go java just make node test".split())
+# No `all`: `make all` is a real default target, and it outranks `make all the
+# tests pass` as a thing an author writes.
 _PROSE_FOLLOWERS = frozenset(
-    "a all an each every it its my that the this to into your sure".split()
+    "a an each every it its my that the this to into your sure".split()
 )
 _COMMAND_WRAPPERS = frozenset({"command", "env", "gtimeout", "sudo", "timeout"})
 _CONVENTIONAL_FILENAMES = frozenset(
@@ -86,13 +88,41 @@ def _is_placeholder_verify(value: str) -> bool:
     )
 
 
+def _runs_a_command(tokens: list[str]) -> bool:
+    while tokens and (tokens[0] == "!" or _ENV_ASSIGNMENT_RE.match(tokens[0])):
+        tokens.pop(0)
+    while tokens and tokens[0] in _COMMAND_WRAPPERS:
+        wrapper = tokens.pop(0)
+        while tokens and (tokens[0].startswith("-") or _ENV_ASSIGNMENT_RE.match(tokens[0])):
+            tokens.pop(0)
+        # `timeout`/`gtimeout` take a positional duration before the command,
+        # and `-k` takes one of its own, so drop the whole leading run.
+        while tokens and wrapper.endswith("timeout") and _DURATION_RE.match(tokens[0]):
+            tokens.pop(0)
+    if not tokens:
+        return False
+    command = tokens[0]
+    if (
+        command in _AMBIGUOUS_COMMANDS
+        and len(tokens) > 1
+        and tokens[1].lower() in _PROSE_FOLLOWERS
+    ):
+        return False
+    if command in _RUNNABLE_COMMANDS:
+        return True
+    # A path-shaped first token is a command only if it could be executed;
+    # `docs/verify.md describes the check` is prose that happens to lead with a
+    # path.
+    return "/" in command and not command.lower().endswith(_NON_EXECUTABLE_SUFFIXES)
+
+
 def _is_runnable_verify(value: str) -> bool:
     if _is_placeholder_verify(value):
         return False
     try:
         # Whole-value parse first: a well-formed segment must not rescue a value
         # bash itself would reject, such as `pytest tests/ && echo "unclosed`.
-        shlex.split(value, comments=False, posix=True)
+        whole = shlex.split(value, comments=False, posix=True)
     except ValueError:
         return False
     for segment in _SHELL_SEGMENT_RE.split(value):
@@ -100,33 +130,11 @@ def _is_runnable_verify(value: str) -> bool:
             tokens = shlex.split(segment, comments=False, posix=True)
         except ValueError:
             continue
-        while tokens and (tokens[0] == "!" or _ENV_ASSIGNMENT_RE.match(tokens[0])):
-            tokens.pop(0)
-        while tokens and tokens[0] in _COMMAND_WRAPPERS:
-            wrapper = tokens.pop(0)
-            while tokens and (tokens[0].startswith("-") or _ENV_ASSIGNMENT_RE.match(tokens[0])):
-                tokens.pop(0)
-            # `timeout`/`gtimeout` take a positional duration before the command,
-            # and `-k` takes one of its own, so drop the whole leading run.
-            while tokens and wrapper.endswith("timeout") and _DURATION_RE.match(tokens[0]):
-                tokens.pop(0)
-        if not tokens:
-            continue
-        command = tokens[0]
-        if (
-            command in _AMBIGUOUS_COMMANDS
-            and len(tokens) > 1
-            and tokens[1].lower() in _PROSE_FOLLOWERS
-        ):
-            continue
-        if command in _RUNNABLE_COMMANDS:
+        if _runs_a_command(tokens):
             return True
-        # A path-shaped first token is a command only if it could be executed;
-        # `docs/verify.md describes the check` is prose that happens to lead
-        # with a path.
-        if "/" in command and not command.lower().endswith(_NON_EXECUTABLE_SUFFIXES):
-            return True
-    return False
+    # Segment splitting is quoting-blind, so `rg -n 'a|b' src/` shreds into two
+    # unparseable halves. The whole value already parsed; judge that instead.
+    return _runs_a_command(whole)
 
 
 def _normalize_refs(value: object) -> list[str] | None:

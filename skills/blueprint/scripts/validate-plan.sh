@@ -68,7 +68,7 @@ _semantic_validate() {
         # in PyYAML, so a narrower probe passes and the real call still crashes.
         if [[ -n "$python_bin" ]]; then
             probe_error=$(PYTHONPATH="$source_pythonpath" \
-                "$python_bin" -c 'import fno.cli, fno.plan.execution_validation' 2>&1) && {
+                "$python_bin" -c 'import fno.cli, fno.plan.cli, fno.plan.schema, fno.plan.execution_validation' 2>&1) && {
                 PYTHONPATH="$source_pythonpath" \
                     "$python_bin" -m fno.cli plan validate "$PLAN_DIR" --execution
                 return
@@ -76,7 +76,7 @@ _semantic_validate() {
         fi
         if command -v uv >/dev/null 2>&1; then
             probe_error=$(uv run --project "$source_root/cli" \
-                python -c 'import fno.cli, fno.plan.execution_validation' 2>&1) && {
+                python -c 'import fno.cli, fno.plan.cli, fno.plan.schema, fno.plan.execution_validation' 2>&1) && {
                 uv run --project "$source_root/cli" \
                     python -m fno.cli plan validate "$PLAN_DIR" --execution
                 return

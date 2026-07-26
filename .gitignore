@@ -99,3 +99,6 @@ cli/.venv/
 
 # Local secrets (z.ai / model-routing keys, etc.) - never commit
 .env
+
+# Coverage runs land here; never a commit candidate
+.coverage
