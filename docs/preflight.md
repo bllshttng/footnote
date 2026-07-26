@@ -82,8 +82,9 @@ And the exit codes separate evidence quality:
 | the child's own code | a selected step failed (propagated, not flattened) |
 | 20 | nothing mapped: evidence about the selector, not that the change is safe |
 | 21 | UNEVALUATED - missing base, shallow checkout, or an untrustworthy diff |
+| 22 | the packet could not run at all (missing tool) - deliberately outside the child exit-code space |
 
-Every run writes `.fno/changed-last-receipt.json` with the candidate and base identity, the selections and their rules, the unmapped paths, the verdict, and the timings (selection, execution, time to first signal).
+Every executing run (not `--list`, which is a dry run) writes `.fno/changed-last-receipt.json` with the candidate and base identity, the selections and their rules, the unmapped paths, the verdict, and the timings (selection, execution, time to first signal).
 
 Sharding the full suite is deliberately out of scope until those receipts show that final merge latency, rather than first feedback, is the remaining bottleneck.
 

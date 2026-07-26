@@ -390,10 +390,11 @@ if [[ -n "$CHANGED_BASE" ]]; then
             echo "preflight: changed packet mapped nothing - not coverage; the full gate decides" ;;
         21) record_leg "changed packet" "unevaluated" $(( SECONDS - c0 ))
             echo "preflight: changed packet UNEVALUATED - continuing to the full gate" ;;
-        2)  # The runner's documented "bad usage / missing prerequisite" code.
-            # Reporting it as 1 would send the caller hunting a test failure that
-            # never happened, and preflight promises 2 for exactly this.
-            echo "preflight: changed packet could not run (missing prerequisite or bad usage)" >&2
+        22) # The packet could not run at all. A dedicated code, not the child
+            # exit-code space: several selectable lint steps exit 2 on a genuine
+            # failure and pytest exits 2 on an interrupt, so keying this on 2
+            # would report a real failure as a usage error and skip the gate.
+            echo "preflight: changed packet could not run (missing prerequisite)" >&2
             exit 2 ;;
         *)  # Verdict-bearing exit, so it owes the same ownership check the full
             # path does: a packet that failed while the shared worktree was reset

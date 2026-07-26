@@ -677,6 +677,7 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
 
 CHANGED_RC_UNSELECTED = 20   # nothing mapped: not a failure, and not a green verdict
 CHANGED_RC_UNEVALUATED = 21  # no trustworthy diff: fail closed, never partial-green
+CHANGED_RC_PREREQ = 22       # the packet could not run at all (missing tool)
 CHANGED_RECEIPT_DEFAULT = ".fno/changed-last-receipt.json"
 
 # Broad infrastructure (rule 6): the runner, the selector, shared test config,
@@ -777,7 +778,11 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
     diagnosable from the receipt. Selection is deterministic and intentionally
     incomplete: an unmapped path stays visible instead of becoming "green".
     """
-    harnesses = set(discover_shell_harnesses(root))
+    # Subtract the quarantine, exactly as _run_smoke does. These harnesses are
+    # pre-existing rot the full gate refuses to run; selecting one turns an
+    # ordinary edit into a red packet that aborts preflight BEFORE the real
+    # gate, on a test CI would never have run.
+    harnesses = set(discover_shell_harnesses(root)) - _DISCOVERY_DEFERRED
     edges = _source_edges(root)
     selections: list[dict] = []
     unmapped: list[str] = []
@@ -965,12 +970,26 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
         receipt.update(verdict="unevaluated", reason=f"missing prerequisite: {miss}")
         _write_changed_receipt(receipt_path, receipt)
         sys.stderr.write(f"smoke: missing prerequisite: {miss}\n")
-        return 2
+        return CHANGED_RC_PREREQ
+
+    # Same faithful-ordering guard the full run applies: the pytest step must
+    # see NO fno-agents binary so the @requires_rust parity tests skip, as they
+    # do in CI. preflight deliberately preserves target/ across runs, so without
+    # this the packet runs ~15 tests the full gate skips - and a failure there
+    # aborts preflight on a discrepancy the gate would never report. Any journey
+    # harness that needs the binary is preceded by its build step (above).
+    if any(n.startswith("Pytest (changed subset") for n, _, _ in steps):
+        for rel in ("crates/fno-agents/target/debug/fno-agents",
+                    "crates/fno-agents/target/release/fno-agents"):
+            try:
+                (root / rel).unlink()
+            except OSError:
+                pass
 
     e0 = time.monotonic()
     results, rc = _execute_steps(root, env, steps, keep_going=opts["keep_going"])
     exec_s = time.monotonic() - e0
-    if rc in (CHANGED_RC_UNSELECTED, CHANGED_RC_UNEVALUATED):
+    if rc in (CHANGED_RC_UNSELECTED, CHANGED_RC_UNEVALUATED, CHANGED_RC_PREREQ):
         # In-band signalling hazard. Propagating a child code that happens to
         # equal a sentinel would tell preflight "nothing selected" / "no
         # trustworthy diff", and it would fall THROUGH to the full gate instead
@@ -1153,7 +1172,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     miss = _smoke_prereqs([steps[i][2] for i in selected])
     if miss:
         sys.stderr.write(f"smoke: missing prerequisite: {miss}\n")
-        return 2
+        return CHANGED_RC_PREREQ
 
     # Faithful-ordering guard: the main pytest step runs with the fno-agents
     # binary absent so @requires_rust parity tests skip (they need a provider

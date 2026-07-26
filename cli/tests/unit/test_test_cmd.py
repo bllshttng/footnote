@@ -276,3 +276,36 @@ def test_parent_dir_source_ref_resolves_to_the_real_helper(tmp_path: Path) -> No
     assert [(s["rule"], s["target"]) for s in sel] == [
         ("shell-helper-reverse", "scripts/tests/test_uses_shared.sh")]
     assert unmapped == []
+
+
+def test_quarantined_harnesses_are_never_selected(tmp_path: Path) -> None:
+    """The full gate refuses to run these; the packet must not either.
+
+    Selecting one turns an ordinary edit into a red packet that aborts
+    preflight BEFORE the real gate, on a test CI would never have run.
+    """
+    import fno.test_cmd as tc
+    _repo(tmp_path)
+    _write(tmp_path / "scripts/lib/shared.sh", "#!/usr/bin/env bash\n:\n")
+    for name in ("test_rotten.sh", "test_healthy.sh"):
+        _write(tmp_path / f"scripts/tests/{name}",
+               '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+               'source "$SCRIPT_DIR/../lib/shared.sh"\n', executable=True)
+    original = tc._DISCOVERY_DEFERRED
+    tc._DISCOVERY_DEFERRED = frozenset({"scripts/tests/test_rotten.sh"})
+    try:
+        sel, _ = select_changed(tmp_path, ["scripts/lib/shared.sh"])
+    finally:
+        tc._DISCOVERY_DEFERRED = original
+    targets = [s["target"] for s in sel]
+    assert "scripts/tests/test_healthy.sh" in targets
+    assert "scripts/tests/test_rotten.sh" not in targets
+
+
+def test_changed_pytest_step_is_preceded_by_the_binary_scrub() -> None:
+    """The packet must skip @requires_rust exactly as the full gate does."""
+    import inspect
+
+    import fno.test_cmd as tc
+    src = inspect.getsource(tc._run_changed)
+    assert "Pytest (changed subset" in src and "target/debug/fno-agents" in src

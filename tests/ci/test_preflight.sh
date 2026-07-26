@@ -58,7 +58,7 @@ cat > "$BIN/uv" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
   *" --changed "*)
-    [[ -f CHANGED_PREREQ ]] && { echo "smoke: missing prerequisite: uv"; exit 2; }
+    [[ -f CHANGED_PREREQ ]] && { echo "smoke: missing prerequisite: uv"; exit 22; }
     [[ -f CHANGED_UNEVAL ]] && { echo "smoke: CHANGED SUBSET UNEVALUATED"; exit 21; }
     [[ -f CHANGED_NONE ]]   && { echo "smoke: CHANGED SUBSET selected NOTHING"; exit 20; }
     [[ -f CHANGED_POISON ]] && { echo "smoke: CHANGED SUBSET verdict=red"; exit 1; }
