@@ -35,8 +35,8 @@ use std::time::{Duration, Instant};
 
 use crate::proto::{
     self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, LayoutScope,
-    PanePlacement, PaneTarget, ServerMsg, TabSel, WaitOutcome, BUILD_VERSION, DEFAULT_SESSION,
-    PROTO_VERSION,
+    PanePlacement, PaneTarget, PlacementFallback, ServerMsg, TabSel, WaitOutcome, BUILD_VERSION,
+    DEFAULT_SESSION, PROTO_VERSION,
 };
 use crate::tree::Dir;
 
@@ -1672,6 +1672,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     here: false,
                     tab,
                     at,
+                    fallback: PlacementFallback::NewTab,
                 },
             },
         });
@@ -2535,7 +2536,7 @@ fn render_reply(
             }
             EXIT_OK
         }
-        ServerMsg::PaneSpawned { pane_id } => {
+        ServerMsg::PaneSpawned { pane_id, .. } => {
             // AC4-UI: stdout is EXACTLY the machine-readable pane id.
             if json {
                 println!("{}", serde_json::json!({ "pane_id": pane_id }));

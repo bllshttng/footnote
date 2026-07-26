@@ -39,9 +39,9 @@ use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
     BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
     Frame, LayoutScope, LayoutSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
-    PanePlacement, PaneTarget, ProtoError, ServerMsg, SlotBinding, SlotOutcome, SlotResult,
-    SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta, TabSel, WaitOutcome, MAX_SQUAD_NAME,
-    MAX_TAB_NAME,
+    PanePlacement, PaneTarget, PlacementFallback, ProtoError, ServerMsg, SlotBinding, SlotOutcome,
+    SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta, TabSel, WaitOutcome,
+    MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
@@ -7556,7 +7556,10 @@ impl Core {
                 let rows = rows.unwrap_or(vt::DEFAULT_ROWS);
                 let cols = cols.unwrap_or(vt::DEFAULT_COLS);
                 let msg = match self.run_pane(squad_key, cwd, argv, rows, cols, claim, placement) {
-                    Ok(pane_id) => ServerMsg::PaneSpawned { pane_id },
+                    Ok(pane_id) => ServerMsg::PaneSpawned {
+                        pane_id,
+                        placement: None,
+                    },
                     Err((code, msg)) => ServerMsg::Err { code, msg },
                 };
                 let _ = reply.send(msg);
@@ -7682,7 +7685,10 @@ impl Core {
                 reply,
             } => {
                 let msg = match self.split_pane_script(pane, direction, no_focus) {
-                    Ok(pane_id) => ServerMsg::PaneSpawned { pane_id },
+                    Ok(pane_id) => ServerMsg::PaneSpawned {
+                        pane_id,
+                        placement: None,
+                    },
                     Err((code, msg)) => ServerMsg::Err { code, msg },
                 };
                 let _ = reply.send(msg);
@@ -7698,7 +7704,10 @@ impl Core {
             }
             CoreMsg::TabCreate { squad, name, reply } => {
                 let msg = match self.tab_create(&squad, name) {
-                    Ok(pane_id) => ServerMsg::PaneSpawned { pane_id },
+                    Ok(pane_id) => ServerMsg::PaneSpawned {
+                        pane_id,
+                        placement: None,
+                    },
                     Err((code, msg)) => ServerMsg::Err { code, msg },
                 };
                 let _ = reply.send(msg);
@@ -11116,6 +11125,7 @@ mod tests {
                     here: false,
                     tab: Some(TabSel::Id(10)),
                     at: Some(2),
+                    fallback: PlacementFallback::NewTab,
                 },
             )
             .unwrap();
@@ -11146,6 +11156,7 @@ mod tests {
                     here: false,
                     tab: Some(TabSel::Id(10)),
                     at: Some(999),
+                    fallback: PlacementFallback::NewTab,
                 },
             )
             .unwrap_err();
@@ -12379,6 +12390,7 @@ mod tests {
                     target: PaneTarget::SquadName("ghost".into()),
                     split: None,
                     here: false,
+                    fallback: PlacementFallback::NewTab,
                 },
             },
         );
@@ -13322,6 +13334,7 @@ mod tests {
                     target: PaneTarget::CurrentRoute,
                     split: Some(Dir::Right),
                     here: false,
+                    fallback: PlacementFallback::NewTab,
                 },
             },
         );
@@ -15516,6 +15529,7 @@ mod tests {
                     target: PaneTarget::SquadName("review".into()),
                     split: None,
                     here: false,
+                    fallback: PlacementFallback::NewTab,
                 },
             )
             .unwrap();
@@ -15569,6 +15583,7 @@ mod tests {
                     target: PaneTarget::SquadName("readyrule".into()),
                     split: None,
                     here: false,
+                    fallback: PlacementFallback::NewTab,
                 },
             )
             .unwrap()
@@ -15625,6 +15640,7 @@ mod tests {
                     target: PaneTarget::SquadName("   ".into()),
                     split: None,
                     here: false,
+                    fallback: PlacementFallback::NewTab,
                 },
             )
             .unwrap_err();

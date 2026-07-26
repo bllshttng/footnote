@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::tree::{Dir, Node, PaneId, Rect, TabId};
+use crate::tree::{Axis, Dir, Node, PaneId, Rect, TabId};
 
 /// `#[serde(default = ...)]` helper for a field whose omitted default is `true`
 /// rather than serde's `bool` default of `false` (x-d865, `PaneSplit.no_focus`).
@@ -239,7 +239,7 @@ fn default_true() -> bool {
 /// deserialize a `BreakPane` and an unbumped client would lose its connection on
 /// the first pane-break drag rather than at handshake. Rides on top of the x-c4d4
 /// layout-template v42 bump (independent additive wire deltas, one version each).
-pub const PROTO_VERSION: u32 = 43;
+pub const PROTO_VERSION: u32 = 44;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -466,6 +466,32 @@ pub enum TabSel {
     New,
 }
 
+/// What a [`PanePlacement`] does when the resolved anchor cannot take the
+/// split (minimum size, stale anchor, selector conflict). The shipped default
+/// `NewTab` preserves the legacy focused-relative fallback; `--at current`
+/// (v44, x-6928) sets `Refuse` so exact origin placement never silently lands
+/// in a fresh tab. `#[serde(default)]` keeps v43 placements wire-tolerant.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementFallback {
+    #[default]
+    NewTab,
+    Refuse,
+}
+
+/// Server-authored exact-placement receipt (v44, x-6928). Carries the
+/// committed anchor/direction/fallback plus the squad/tab the split landed in,
+/// so a `--at current` caller captures real identities instead of predicting
+/// pane ids (AC1-UI). `None` on legacy focused-relative spawns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedPlacement {
+    pub anchor: u64,
+    pub direction: Dir,
+    pub fallback: PlacementFallback,
+    pub squad: u64,
+    pub tab: TabId,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct PanePlacement {
     #[serde(default)]
@@ -486,6 +512,11 @@ pub struct PanePlacement {
     /// [`err_code::BAD_REQUEST`]. `None` keeps the pre-v41 whole-tab placement.
     #[serde(default)]
     pub at: Option<u64>,
+    /// (v44, x-6928) Strict-placement policy. Default `NewTab` keeps the legacy
+    /// fallback; `Refuse` (set by `--at current`) fails closed instead of
+    /// substituting focus or minting a tab.
+    #[serde(default)]
+    pub fallback: PlacementFallback,
 }
 
 /// The script-API verbs (`fno mux pane ls|read|run|send|wait|kill`), each a
@@ -726,6 +757,60 @@ pub enum SlotOutcome {
     /// Reserved for a future spawn-into-slot (roles group); never emitted by
     /// this arrange-only node. Present so the wire shape is forward-stable.
     Bound,
+}
+
+/// A recursive topology whose leaves name slots (v44, x-6928). The canonical
+/// arbitrary layout representation; named templates compile into one (AC3-HP),
+/// and the compact `H[..]`/`V[..]` CLI syntax is deferred beyond v1 (Locked
+/// Decision 8). Weights are positive/finite and normalized before geometry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutTreeSpec {
+    /// A leaf bound to slot `name` (resolved via [`AnchoredLayoutSpec::slots`]).
+    Slot(String),
+    /// An axis split of weighted children; a split must have >= 2 children.
+    Split {
+        axis: Axis,
+        children: Vec<LayoutTreeChild>,
+    },
+}
+
+/// One weighted child of a [`LayoutTreeSpec::Split`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LayoutTreeChild {
+    pub weight: f32,
+    pub tree: LayoutTreeSpec,
+}
+
+/// What a layout slot binds to (v44, x-6928). Exactly one slot binds `Anchor`
+/// (the calling pane the subtree replaces); `Fno` reuses a live session's pane;
+/// `Shell` is an intentional empty pane. Raw commands are out of scope (Locked
+/// Decision 9) - launch stays in the agents subsystem.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutBinding {
+    Anchor,
+    Fno(String),
+    Shell,
+}
+
+/// A named slot + its binding (v44, x-6928). A `Vec`, not a map: TOML cannot
+/// distinguish two empty-table bindings (`Anchor` vs `Shell`) under one key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LayoutSlot {
+    pub name: String,
+    pub binding: LayoutBinding,
+}
+
+/// A versioned anchored layout (v44, x-6928): a typed [`LayoutTreeSpec`] plus
+/// the per-slot bindings. The graft surface accepts this (a `--spec` file) or a
+/// named template plus ordered slots (compiled into the same representation).
+/// Local/session-only; never persisted in the whole-tab template store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnchoredLayoutSpec {
+    pub version: u32,
+    pub tree: LayoutTreeSpec,
+    pub slots: Vec<LayoutSlot>,
 }
 
 /// One sideline agent row inside [`ServerMsg::Layout`] (v5, brief US2). The
@@ -1451,8 +1536,15 @@ pub enum ServerMsg {
         block: Option<BlockMeta>,
     },
     /// Answer to [`ControlVerb::PaneRun`]: the fresh pane's id, machine-read
-    /// by the CLI so scripts compose.
-    PaneSpawned { pane_id: u64 },
+    /// by the CLI so scripts compose. `placement` (v44, x-6928) carries the
+    /// server-authored exact-placement receipt on `--at current` spawns; `None`
+    /// on legacy focused-relative spawns (omitted on the wire via skip-if-none,
+    /// so a v43 reader is unaffected).
+    PaneSpawned {
+        pane_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placement: Option<ResolvedPlacement>,
+    },
     /// A verb that carries no payload succeeded (`PaneSend`, `PaneKill`).
     Ok,
     /// Answer to [`ControlVerb::PaneWait`].
@@ -2421,10 +2513,11 @@ mod tests {
         // variants that ride the 43 bump. Externally-tagged, so a v42 server
         // cannot decode them at all - the PROTO_VERSION handshake is what stops
         // the skew (a mismatched client is told to restart the server), NOT a
-        // serde default. What we assert here is (a) the canonical version and
-        // (b) the new variants survive the codec losslessly, exactly the
-        // discipline every prior new-verb bump followed.
-        assert_eq!(PROTO_VERSION, 43);
+        // serde default. The anchored-layout node (x-6928) bumped 43 -> 44;
+        // what we assert here is (a) the canonical version and (b) the new
+        // variants survive the codec losslessly, exactly the discipline every
+        // prior new-verb bump followed.
+        assert_eq!(PROTO_VERSION, 44);
         for msg in [
             ClientMsg::Command(Command::BreakPane { pane: 7 }),
             ClientMsg::Command(Command::JoinTab {
@@ -2466,12 +2559,13 @@ mod tests {
     }
 
     #[test]
-    fn agent_row_crown_fields_are_serde_default_tolerant_and_proto_is_43() {
+    fn agent_row_crown_fields_are_serde_default_tolerant_and_proto_is_44() {
         // The mux-crown wire lift bumped PROTO_VERSION 40 -> 41; the templates
         // node (x-c4d4) bumped it 41 -> 42; the US9 drag faces (x-d6a8) bumped it
-        // 42 -> 43. The two additive crown fields stay skew-tolerant both ways
-        // regardless of the version number.
-        assert_eq!(PROTO_VERSION, 43);
+        // 42 -> 43; the anchored-layout node (x-6928) bumped it 43 -> 44. The two
+        // additive crown fields stay skew-tolerant both ways regardless of the
+        // version number.
+        assert_eq!(PROTO_VERSION, 44);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
                       "badge":null,"reason":null,"exited":false}"#;
@@ -2491,6 +2585,114 @@ mod tests {
         assert!(
             !serde_json::to_string(&row).unwrap().contains("crown_level"),
             "un-crowned row omits crown on the wire"
+        );
+    }
+
+    #[test]
+    fn proto_v44_placement_fallback_and_anchored_spec_roundtrip() {
+        // x-6928: the 43 -> 44 bump adds the serde-defaulted placement fallback
+        // and the typed anchored-layout spec. A v43 PanePlacement omits
+        // `fallback`; a v44 reader decodes it as NewTab (the shipped default),
+        // never a failure - the skew window the handshake holds. An exact
+        // placement sets Refuse, and the receipt carries it losslessly.
+        assert_eq!(PROTO_VERSION, 44);
+        let v43 = r#"{"target":"CurrentRoute"}"#;
+        let legacy: PanePlacement = serde_json::from_str(v43).unwrap();
+        assert_eq!(legacy.fallback, PlacementFallback::NewTab);
+        let mut exact = PanePlacement::default();
+        exact.fallback = PlacementFallback::Refuse;
+        let wire = serde_json::to_string(&exact).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PanePlacement>(&wire)
+                .unwrap()
+                .fallback,
+            PlacementFallback::Refuse
+        );
+        // A legacy PaneSpawned (placement None) omits the field on the wire via
+        // skip_serializing_if, so it round-trips losslessly and a v43 reader is
+        // unaffected; an exact-placement receipt carries it losslessly.
+        let legacy = ServerMsg::PaneSpawned {
+            pane_id: 7,
+            placement: None,
+        };
+        let legacy_wire = serde_json::to_string(&legacy).unwrap();
+        assert!(
+            !legacy_wire.contains("placement"),
+            "None placement omitted on the wire"
+        );
+        let ServerMsg::PaneSpawned { pane_id, placement } =
+            serde_json::from_str::<ServerMsg>(&legacy_wire).unwrap()
+        else {
+            panic!("not PaneSpawned");
+        };
+        assert_eq!(pane_id, 7);
+        assert_eq!(placement, None);
+        let resolved = ResolvedPlacement {
+            anchor: 4,
+            direction: Dir::Down,
+            fallback: PlacementFallback::Refuse,
+            squad: 1,
+            tab: 10,
+        };
+        let exact_receipt = ServerMsg::PaneSpawned {
+            pane_id: 9,
+            placement: Some(resolved.clone()),
+        };
+        let exact_wire = serde_json::to_string(&exact_receipt).unwrap();
+        let ServerMsg::PaneSpawned { pane_id, placement } =
+            serde_json::from_str::<ServerMsg>(&exact_wire).unwrap()
+        else {
+            panic!("not PaneSpawned");
+        };
+        assert_eq!(pane_id, 9);
+        assert_eq!(placement, Some(resolved));
+        // An anchored spec round-trips losslessly through TOML and JSON.
+        let spec = AnchoredLayoutSpec {
+            version: 1,
+            tree: LayoutTreeSpec::Split {
+                axis: Axis::Vertical,
+                children: vec![
+                    LayoutTreeChild {
+                        weight: 0.5,
+                        tree: LayoutTreeSpec::Slot("anchor".into()),
+                    },
+                    LayoutTreeChild {
+                        weight: 0.5,
+                        tree: LayoutTreeSpec::Split {
+                            axis: Axis::Horizontal,
+                            children: vec![
+                                LayoutTreeChild {
+                                    weight: 0.5,
+                                    tree: LayoutTreeSpec::Slot("reviewer".into()),
+                                },
+                                LayoutTreeChild {
+                                    weight: 0.5,
+                                    tree: LayoutTreeSpec::Slot("tester".into()),
+                                },
+                            ],
+                        },
+                    },
+                ],
+            },
+            slots: vec![
+                LayoutSlot {
+                    name: "anchor".into(),
+                    binding: LayoutBinding::Anchor,
+                },
+                LayoutSlot {
+                    name: "reviewer".into(),
+                    binding: LayoutBinding::Fno("abcd1234".into()),
+                },
+                LayoutSlot {
+                    name: "tester".into(),
+                    binding: LayoutBinding::Shell,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AnchoredLayoutSpec>(&json).unwrap(),
+            spec
         );
     }
 
@@ -2786,6 +2988,7 @@ mod tests {
             target: PaneTarget::SquadId(42),
             split: Some(Dir::Up),
             here: false,
+            fallback: PlacementFallback::NewTab,
         };
         for msg in [
             ClientMsg::Control {
@@ -2842,7 +3045,10 @@ mod tests {
                     implicit: false,
                 }),
             },
-            ServerMsg::PaneSpawned { pane_id: 9 },
+            ServerMsg::PaneSpawned {
+                pane_id: 9,
+                placement: None,
+            },
             ServerMsg::Ok,
             ServerMsg::WaitDone {
                 outcome: WaitOutcome::Quiet,

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use common::{connect_with_retry, spawn_server, FakeClient};
 use fno::proto::{
     read_msg_sync, write_msg_sync, ClientMsg, Command, ControlVerb, PanePlacement, PaneTarget,
-    ServerMsg, BUILD_VERSION, PROTO_VERSION,
+    PlacementFallback, ServerMsg, BUILD_VERSION, PROTO_VERSION,
 };
 use fno::tree::Dir;
 
@@ -73,7 +73,7 @@ fn run_pane(scratch: &Scratch, cwd: &Path, placement: PanePlacement) -> Result<u
     )
     .unwrap();
     match read_msg_sync(&mut stream).unwrap() {
-        ServerMsg::PaneSpawned { pane_id } => Ok(pane_id),
+        ServerMsg::PaneSpawned { pane_id, .. } => Ok(pane_id),
         ServerMsg::Err { msg, .. } => Err(msg),
         other => panic!("unexpected pane-run reply: {other:?}"),
     }
@@ -103,6 +103,7 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
             target: PaneTarget::CurrentRoute,
             split: Some(Dir::Left),
             here: false,
+            fallback: PlacementFallback::NewTab,
         },
     )
     .unwrap();
@@ -140,6 +141,7 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
             target: PaneTarget::CurrentRoute,
             split: Some(Dir::Right),
             here: false,
+            fallback: PlacementFallback::NewTab,
         },
     )
     .unwrap();

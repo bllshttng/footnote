@@ -30,9 +30,9 @@ use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
     self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentRow,
     AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg, Color,
-    Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget, ProtoError,
-    ServerMsg, SquadMeta, BUILD_VERSION, MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME,
-    PROTO_VERSION,
+    Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget,
+    PlacementFallback, ProtoError, ServerMsg, SquadMeta, BUILD_VERSION, MAX_MAIL_TEXT,
+    MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
 use crate::tree::{Axis, Dir, Rect, TabId};
 use crate::view_store::{self, next_view, AgentSort, Density, SectionKey, SectionView};
@@ -9073,6 +9073,7 @@ async fn execute_row_menu_action(
                         here: false,
                         tab: None,
                         at: None,
+                        fallback: PlacementFallback::NewTab,
                     },
                 }),
             )
@@ -10356,6 +10357,7 @@ async fn attach_place_keys(
                     here,
                     tab: None,
                     at: None,
+                    fallback: PlacementFallback::NewTab,
                 },
             }),
         )
@@ -18553,6 +18555,7 @@ mod tests {
                     target: PaneTarget::SquadId(2),
                     split: Some(Dir::Left),
                     here: false,
+                    fallback: PlacementFallback::NewTab,
                 },
             })
         );
@@ -18591,6 +18594,7 @@ mod tests {
                     target: PaneTarget::SquadId(1),
                     split: None,
                     here: false,
+                    fallback: PlacementFallback::NewTab,
                 },
             })
         );
@@ -18627,6 +18631,7 @@ mod tests {
                         target: PaneTarget::CurrentRoute,
                         split: None,
                         here: true,
+                        fallback: PlacementFallback::NewTab,
                     },
                 }),
                 "key {key:?} sends here"
