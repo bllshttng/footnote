@@ -1,6 +1,10 @@
 """Evidence-backed pre-design closure classification."""
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from fno.graph.relatedness import classify_closure
 
 
@@ -29,8 +33,20 @@ def merged(**overrides: object) -> dict[str, object]:
     return value
 
 
+@pytest.fixture(autouse=True)
+def resolved_main(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("fno.graph.relatedness._resolve_main_sha", lambda _repo: SHA)
+    monkeypatch.setattr(
+        "fno.graph.relatedness._commit_on_main", lambda _repo, commit, main: commit == SHA and main == SHA
+    )
+
+
+def classify(**kwargs: object) -> dict[str, object]:
+    return classify_closure(repo=Path("/repo"), **kwargs)
+
+
 def test_passing_current_main_probe_proves_already_shipped() -> None:
-    result = classify_closure(
+    result = classify(
         behavior="login accepts a valid session",
         current_main_probe=probe("passed"),
     )
@@ -42,7 +58,7 @@ def test_passing_current_main_probe_proves_already_shipped() -> None:
 
 
 def test_reachable_merged_commit_proves_already_shipped() -> None:
-    result = classify_closure(
+    result = classify(
         behavior="login accepts a valid session",
         merged_history=merged(),
     )
@@ -53,7 +69,7 @@ def test_reachable_merged_commit_proves_already_shipped() -> None:
 
 
 def test_failed_current_main_probe_keeps_work_live_even_with_old_merge() -> None:
-    result = classify_closure(
+    result = classify(
         behavior="login accepts a valid session",
         current_main_probe=probe("failed"),
         merged_history=merged(),
@@ -65,7 +81,7 @@ def test_failed_current_main_probe_keeps_work_live_even_with_old_merge() -> None
 
 def test_uncertainty_never_closes_work() -> None:
     for status in ("unavailable", "error", "pending", "stale"):
-        result = classify_closure(
+        result = classify(
             behavior="login accepts a valid session",
             current_main_probe=probe(status),
         )
@@ -75,14 +91,14 @@ def test_uncertainty_never_closes_work() -> None:
 def test_malformed_or_unreachable_delivery_evidence_is_unknown() -> None:
     specimens = (
         merged(commit="short"),
-        merged(on_current_main=False),
+        merged(commit="b" * 40),
         merged(status="closed"),
         {"status": "merged", "title": "fix login"},
         {"status": "passed", "receipt": "preflight green"},
     )
 
     for evidence in specimens:
-        result = classify_closure(
+        result = classify(
             behavior="login accepts a valid session",
             merged_history=evidence,
         )
@@ -98,7 +114,7 @@ def test_positive_probe_must_bind_behavior_command_and_full_head() -> None:
     )
 
     for evidence in specimens:
-        result = classify_closure(
+        result = classify(
             behavior="login accepts a valid session",
             current_main_probe=evidence,
         )
@@ -106,8 +122,26 @@ def test_positive_probe_must_bind_behavior_command_and_full_head() -> None:
 
 
 def test_absent_behavior_is_unknown_even_with_positive_carrier_evidence() -> None:
-    assert classify_closure(
+    assert classify(
         behavior="",
         current_main_probe=probe("passed"),
         merged_history=merged(),
+    )["state"] == "unknown"
+
+
+def test_arbitrary_full_sha_cannot_claim_current_main() -> None:
+    result = classify(
+        behavior="login accepts a valid session",
+        current_main_probe=probe("passed", head="b" * 40),
+    )
+
+    assert result["state"] == "unknown"
+
+
+def test_unresolved_main_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("fno.graph.relatedness._resolve_main_sha", lambda _repo: None)
+
+    assert classify(
+        behavior="login accepts a valid session",
+        current_main_probe=probe("passed"),
     )["state"] == "unknown"

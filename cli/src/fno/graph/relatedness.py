@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
@@ -42,9 +43,39 @@ _EPIC_BONUS = 0.25
 _DEDUP_MIN_SCORE = 0.30
 
 
+def _resolve_main_sha(repo: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "origin/main"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    sha = result.stdout.strip()
+    return sha.lower() if result.returncode == 0 and _FULL_SHA_RE.fullmatch(sha) else None
+
+
+def _commit_on_main(repo: Path, commit: str, main_sha: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", commit, main_sha],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def classify_closure(
     *,
     behavior: str,
+    repo: Path | None = None,
     current_main_probe: dict[str, Any] | None = None,
     merged_history: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -62,6 +93,11 @@ def classify_closure(
     }
     if not behavior:
         return unknown
+    if repo is None:
+        return unknown
+    main_sha = _resolve_main_sha(repo)
+    if main_sha is None:
+        return unknown
 
     if current_main_probe is not None:
         status = current_main_probe.get("status")
@@ -74,6 +110,7 @@ def classify_closure(
             or not command.strip()
             or not isinstance(head, str)
             or _FULL_SHA_RE.fullmatch(head) is None
+            or head.lower() != main_sha
             or not isinstance(observed, str)
             or observed.strip() != behavior
         ):
@@ -87,6 +124,7 @@ def classify_closure(
                 "head": head.lower(),
                 "observed": observed.strip(),
                 "result": status,
+                "main_head": main_sha,
             },
         }
 
@@ -95,9 +133,9 @@ def classify_closure(
         observed = merged_history.get("observed")
         if (
             merged_history.get("status") != "merged"
-            or merged_history.get("on_current_main") is not True
             or not isinstance(commit, str)
             or _FULL_SHA_RE.fullmatch(commit) is None
+            or not _commit_on_main(repo, commit, main_sha)
             or not isinstance(observed, str)
             or observed.strip() != behavior
         ):
@@ -110,6 +148,7 @@ def classify_closure(
                 "commit": commit.lower(),
                 "observed": observed.strip(),
                 "on_current_main": True,
+                "main_head": main_sha,
             },
         }
 
