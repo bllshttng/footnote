@@ -240,12 +240,31 @@ fi
 # --- lock (atomic mkdir; steal a dead holder) -------------------------------
 LOCAL_LOCKDIR="$COMMON_DIR/.preflight.lock.d"
 GLOBAL_LOCKDIR="$(dirname "$GLOBAL_EVENTS_PATH")/.preflight-receipt-locks/$CANDIDATE_SHA.d"
+LOCAL_LOCK_ACQUIRED=0
+GLOBAL_LOCK_ACQUIRED=0
+LOCAL_LOCK_STAMP=""
+GLOBAL_LOCK_STAMP=""
 LOCKDIR="$LOCAL_LOCKDIR"
 stamp_holder() {
-    printf 'pid=%s started=%s host=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(hostname 2>/dev/null || echo unknown)" "$CANDIDATE_SHA" > "$LOCKDIR/holder"
+    local stamp
+    stamp="pid=$$ started=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown) host=$(hostname 2>/dev/null || echo unknown) sha=$CANDIDATE_SHA"
+    printf '%s\n' "$stamp" > "$LOCKDIR/holder" || return 1
+    if [[ "$LOCKDIR" == "$LOCAL_LOCKDIR" ]]; then
+        LOCAL_LOCK_STAMP="$stamp"
+    else
+        GLOBAL_LOCK_STAMP="$stamp"
+    fi
+}
+finish_lock_acquire() {
+    if stamp_holder; then
+        return 0
+    fi
+    rm -rf "$LOCKDIR"
+    echo "preflight: cannot stamp lock ownership at $LOCKDIR" >&2
+    exit 3
 }
 acquire_lock() {
-    if mkdir "$LOCKDIR" 2>/dev/null; then stamp_holder; return 0; fi
+    if mkdir "$LOCKDIR" 2>/dev/null; then finish_lock_acquire; return 0; fi
     local holder_pid holder_line
     holder_line="$(cat "$LOCKDIR/holder" 2>/dev/null || echo '')"
     holder_pid="$(printf '%s' "$holder_line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
@@ -268,7 +287,7 @@ acquire_lock() {
             reaped="$(cat "$LOCKDIR.reap.$$/holder" 2>/dev/null || echo '')"
             if [[ "$reaped" == "$holder_line" ]]; then
                 rm -rf "$LOCKDIR.reap.$$"
-                mkdir "$LOCKDIR" 2>/dev/null && { stamp_holder; return 0; }
+                mkdir "$LOCKDIR" 2>/dev/null && { finish_lock_acquire; return 0; }
             elif [[ -e "$LOCKDIR" ]] || ! mv "$LOCKDIR.reap.$$" "$LOCKDIR" 2>/dev/null; then
                 # Someone already re-took the path. Renaming onto an existing
                 # directory NESTS inside it rather than replacing it, which would
@@ -298,21 +317,18 @@ acquire_lock() {
     exit 3
 }
 TMPHOME=""
-holder_pid_at() { sed -n 's/.*pid=\([0-9]*\).*/\1/p' "$1/holder" 2>/dev/null; }
 # Release only a lock we still hold: if ours was stolen, the lockdir at this
-# path now belongs to the stealer. An unreadable holder still releases - that is
-# our own stamp having failed, and leaving it would wedge every later run.
-# Parse the pid rather than matching the stamp's layout, so reordering the
-# fields in stamp_holder cannot silently stop every run from releasing.
+# path now belongs to the stealer. Exact stamp matching prevents a loser from
+# deleting a winner's lock during the mkdir-to-holder window.
 cleanup_lock() {
-    local path="$1" pid_now
-    [[ -n "$path" ]] || return 0
-    pid_now="$(holder_pid_at "$path")"
-    [[ -z "$pid_now" || "$pid_now" == "$$" ]] && rm -rf "$path"
+    local path="$1" expected="$2" observed
+    [[ -n "$path" && -n "$expected" ]] || return 0
+    observed="$(cat "$path/holder" 2>/dev/null || true)"
+    [[ "$observed" == "$expected" ]] && rm -rf "$path"
 }
 cleanup() {
-    cleanup_lock "${LOCAL_LOCKDIR:-}"
-    cleanup_lock "${GLOBAL_LOCKDIR:-}"
+    [[ "${LOCAL_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${LOCAL_LOCKDIR:-}" "${LOCAL_LOCK_STAMP:-}"
+    [[ "${GLOBAL_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${GLOBAL_LOCKDIR:-}" "${GLOBAL_LOCK_STAMP:-}"
     [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"
 }
 trap cleanup EXIT
@@ -325,12 +341,14 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 acquire_lock
+LOCAL_LOCK_ACQUIRED=1
 mkdir -p "$(dirname "$GLOBAL_LOCKDIR")" || {
     echo "preflight: cannot create canonical receipt lock directory" >&2
     exit 1
 }
 LOCKDIR="$GLOBAL_LOCKDIR"
 acquire_lock
+GLOBAL_LOCK_ACQUIRED=1
 LOCKDIR="$LOCAL_LOCKDIR"
 
 PENDING_SCOPE="$(_json_array "preflight-execution")"
@@ -447,9 +465,9 @@ exit_if_void() {
         VOID_REASON="cannot read the preflight worktree at $PREFLIGHT_WT"
     elif [[ "$WT_HEAD_NOW" != "$CANDIDATE_SHA" ]]; then
         VOID_REASON="worktree moved off our candidate mid-run (now ${WT_HEAD_NOW:0:12}, expected $CANDIDATE_SHORT)"
-    elif [[ "$(holder_pid_at "$LOCAL_LOCKDIR")" != "$$" ]]; then
+    elif [[ "$(cat "$LOCAL_LOCKDIR/holder" 2>/dev/null || true)" != "$LOCAL_LOCK_STAMP" ]]; then
         VOID_REASON="another preflight took our lock mid-run"
-    elif [[ "$(holder_pid_at "$GLOBAL_LOCKDIR")" != "$$" ]]; then
+    elif [[ "$(cat "$GLOBAL_LOCKDIR/holder" 2>/dev/null || true)" != "$GLOBAL_LOCK_STAMP" ]]; then
         VOID_REASON="another preflight took our canonical receipt lock mid-run"
     fi
     [[ -n "$VOID_REASON" ]] || return 0

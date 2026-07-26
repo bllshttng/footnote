@@ -364,6 +364,13 @@ after="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_recei
 [[ "$after" == "$before" ]] && ok "refused run appended no unmatched pending" || fail "receipt count changed: $before -> $after"
 rm -rf "$GLOBAL_RECEIPT_LOCKDIR"
 
+echo "== canonical lock window: a loser preserves the winner's unstamped lock =="
+mkdir -p "$GLOBAL_RECEIPT_LOCKDIR"
+out="$(run_pf --force 2>&1)"; rc=$?
+[[ $rc -eq 3 ]] && ok "unstamped canonical lock refuses the loser" || fail "expected 3 got $rc: $out"
+[[ -d "$GLOBAL_RECEIPT_LOCKDIR" ]] && ok "loser cleanup preserves the winner's lock" || fail "loser deleted the winner's lock"
+rm -rf "$GLOBAL_RECEIPT_LOCKDIR"
+
 echo "== AC1-FR: a stale lock (dead holder) is stolen, run proceeds =="
 mkdir -p "$LOCKDIR"; printf 'pid=%s started=OLD host=x sha=deadbee\n' 999999 > "$LOCKDIR/holder"  # dead pid
 out="$(run_pf 2>&1)"; rc=$?
