@@ -1072,6 +1072,7 @@ def test_context_observer_threads_the_timeout_override(tmp_path: Path) -> None:
         text=True,
         capture_output=True,
         check=False,
+        timeout=15,
     )
 
     assert result.returncode == 7
@@ -1085,6 +1086,7 @@ def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> No
     fast_bin = tmp_path / "fast-bin"
     hung_bin = tmp_path / "hung-bin"
     term_marker = tmp_path / "observer-terminated"
+    calls = tmp_path / "python-calls"
     fast_bin.mkdir()
     hung_bin.mkdir()
     for bin_dir, uv_body in (
@@ -1100,6 +1102,15 @@ def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> No
         fno = bin_dir / "fno"
         fno.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
         fno.chmod(0o755)
+        python = bin_dir / "python3"
+        python.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '<%s>' \"$@\" >>\"$FNO_PYTHON_CALLS\"\n"
+            "printf '\\n' >>\"$FNO_PYTHON_CALLS\"\n"
+            "exec \"$FNO_REAL_PYTHON\" \"$@\"\n",
+            encoding="utf-8",
+        )
+        python.chmod(0o755)
 
     def invoke(bin_dir: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -1114,6 +1125,8 @@ def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> No
                 "FNO_PLATFORM": "gemini",
                 "FNO_REPO_ROOT": str(tmp_path),
                 "FNO_OBSERVER_TERM_MARKER": str(term_marker),
+                "FNO_PYTHON_CALLS": str(calls),
+                "FNO_REAL_PYTHON": sys.executable,
             },
             input='{"session_id":"hung-session-start","source":"startup"}',
             text=True,
@@ -1129,6 +1142,9 @@ def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> No
 
     assert baseline.returncode == hung.returncode == 0
     assert term_marker.is_file()
+    assert "<run-bounded><--timeout><0.2><--><uv>" in calls.read_text(
+        encoding="utf-8"
+    )
     assert json.loads(hung.stdout) == json.loads(baseline.stdout)
     assert (
         hung.stdout
