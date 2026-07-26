@@ -119,4 +119,7 @@ def test_shared_session_start_does_not_duplicate_claude_registration(
         stdout=subprocess.DEVNULL,
     )
 
-    assert not capture.exists()
+    argv = capture.read_text(encoding="utf-8").splitlines()
+    assert any(item.endswith("context_observation.py") for item in argv)
+    assert "agents" not in argv
+    assert "register" not in argv

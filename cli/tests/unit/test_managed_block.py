@@ -14,6 +14,7 @@ from pathlib import Path
 
 from fno.setup.managed_block import (
     BLOCK_VERSION,
+    extract_block,
     marker_state,
     offer_managed_block,
     render_block,
@@ -147,7 +148,11 @@ def test_resolve_target_prefers_existing_agents_then_claude(tmp_path: Path) -> N
 
 def test_render_block_is_a_wellformed_pair() -> None:
     assert marker_state(render_block()) == "both"
+    assert marker_state("<!-- fno:end -->\n<!-- fno:begin v=1 -->") == "malformed"
+    assert marker_state(render_block() + "\n" + render_block()) == "malformed"
     assert stamped_version(render_block(7)) == 7
+    assert extract_block("before\n" + render_block(7) + "\nafter") == render_block(7)
+    assert extract_block("<!-- fno:begin v=1 -->\nbroken") is None
 
 
 def test_doctor_managed_block_flags_stale(tmp_path: Path, monkeypatch) -> None:

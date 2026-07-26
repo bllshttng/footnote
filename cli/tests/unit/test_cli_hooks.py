@@ -12,6 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.setup.cli_hooks import (
+    SESSION_START_CONTEXT_CARRIERS,
     inspect_codex_hooks,
     install_claude_worktree_remove_hook,
     install_codex_hook,
@@ -19,6 +20,22 @@ from fno.setup.cli_hooks import (
 )
 
 CMD = "/opt/footnote/hooks/session-start.sh"
+
+
+def test_context_carriers_describe_codex_and_gemini_without_postcompact() -> None:
+    assert {
+        carrier.harness: (carrier.script, carrier.entry_states)
+        for carrier in SESSION_START_CONTEXT_CARRIERS
+    } == {
+        "codex": (
+            "hooks/session-start.sh",
+            ("startup", "resume", "clear"),
+        ),
+        "gemini": (
+            "hooks/session-start.sh",
+            ("startup", "resume", "clear"),
+        ),
+    }
 
 
 # --- Gemini -----------------------------------------------------------------

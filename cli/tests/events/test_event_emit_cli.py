@@ -128,6 +128,54 @@ def test_ac1_hp_no_state_file_defaults_to_test(runner: CliRunner, tmp_path: Path
     assert event["source"] == "test"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("session_id", ""),
+        ("harness", "bogus"),
+        ("entry_state", "bogus"),
+    ],
+)
+def test_context_snapshot_generic_emit_rejects_invalid_identity(
+    runner: CliRunner,
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    events = _events_path(tmp_path)
+    data = {
+        "session_id": "session",
+        "harness": "codex",
+        "entry_state": "startup",
+        "context_bytes": 0,
+        "estimated_tokens": 0,
+        "context_hash": None,
+        "source_hashes": [],
+        "source_manifest": [],
+        "measurement_complete": False,
+        "measurement_errors": ["missing"],
+    }
+    data[field] = value
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit",
+            "--type",
+            "context_snapshot",
+            "--source",
+            "test",
+            "--data",
+            json.dumps(data),
+            "--events",
+            str(events),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert not events.exists()
+
+
 # ---------------------------------------------------------------------------
 # AC1-ERR: Unknown event type rejected; no line appended
 # ---------------------------------------------------------------------------

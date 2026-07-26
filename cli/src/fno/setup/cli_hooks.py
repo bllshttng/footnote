@@ -42,6 +42,29 @@ _GEMINI_HOOK_NAME = "fno-session-start"
 _WORKTREE_REMOVE_SUFFIX = "hooks/worktree-remove.sh"
 
 
+@dataclass(frozen=True)
+class SessionStartContextCarrier:
+    """Static carrier metadata consumed by the read-only context census."""
+
+    harness: str
+    script: str
+    entry_states: tuple[str, ...]
+
+
+SESSION_START_CONTEXT_CARRIERS = (
+    SessionStartContextCarrier(
+        harness="codex",
+        script=_HOOK_SUFFIX,
+        entry_states=("startup", "resume", "clear"),
+    ),
+    SessionStartContextCarrier(
+        harness="gemini",
+        script=_HOOK_SUFFIX,
+        entry_states=("startup", "resume", "clear"),
+    ),
+)
+
+
 def _wrapped_command(command: str, cli: str) -> str:
     """Prefix the hook command with an explicit ``FNO_PLATFORM`` so the wrapper
     detects the right platform. Codex/Gemini do NOT set their plugin-root env

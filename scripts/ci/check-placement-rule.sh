@@ -43,6 +43,8 @@
 #      is Claude Code config, not footnote state - nothing accumulates there.
 #      This is a large, actively-developed surface (multi-provider agent
 #      discovery) - allowlisted by file below rather than re-derived here.
+#      context_audit.py reads project-owned .claude/rules/*.md to census the
+#      exact progressive instructions Claude loads; it never writes there.
 #      The mux Connections UI (crates/fno/src/connections_view.rs) belongs
 #      here too: its login-wizard default config dir `~/.claude-<id>` is a
 #      per-account CLAUDE_CONFIG_DIR (a Claude Code config dir, not footnote
@@ -150,6 +152,7 @@ cli/src/fno/claims/session_pid.py
 cli/src/fno/cost/_register.py
 cli/src/fno/cost/_session_cost.py
 cli/src/fno/cost/cost_tracker.py
+cli/src/fno/context_audit.py
 cli/src/fno/doctor.py
 cli/src/fno/graph/cli.py
 cli/src/fno/graph/maintain.py

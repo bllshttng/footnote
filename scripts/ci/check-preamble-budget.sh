@@ -12,6 +12,7 @@ set -euo pipefail
 CEILING_BYTES=37326
 RATCHET_NUDGE_BYTES=2000
 QUIET=0
+JSON_MODE=0
 REPO_ROOT="."
 REPO_ROOT_SET=0
 
@@ -19,6 +20,9 @@ for arg in "$@"; do
   case "$arg" in
     -q|--quiet)
       QUIET=1
+      ;;
+    --json)
+      JSON_MODE=1
       ;;
     -*)
       echo "check-preamble-budget: unknown option: $arg" >&2
@@ -34,6 +38,11 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+if (( QUIET && JSON_MODE )); then
+  echo "check-preamble-budget: --quiet and --json are mutually exclusive" >&2
+  exit 1
+fi
 
 if [[ ! "$CEILING_BYTES" =~ ^[0-9]+$ ]]; then
   echo "check-preamble-budget: CEILING_BYTES must be a non-negative integer" >&2
@@ -66,6 +75,14 @@ shopt -u nullglob
 
 TOTAL_BYTES=0
 RECORDS=""
+MANIFEST_RECORDS=""
+hash_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"
+  fi
+}
 for path in "${FILES[@]}"; do
   relative="${path#"$REPO_ROOT"/}"
   [[ -f "$path" ]] || {
@@ -78,15 +95,44 @@ for path in "${FILES[@]}"; do
   }
   bytes=$(LC_ALL=C wc -c < "$path")
   bytes=$((bytes))
+  content_hash=$(hash_file "$path")
   TOTAL_BYTES=$((TOTAL_BYTES + bytes))
   RECORDS+="${bytes}"$'\t'"${relative}"$'\n'
+  MANIFEST_RECORDS+="${bytes}"$'\t'"${content_hash}"$'\t'"${relative}"$'\n'
 done
 
 APPROX_TOKENS=$((TOTAL_BYTES / 4))
 SPARE_BYTES=$((CEILING_BYTES - TOTAL_BYTES))
 APPROX_TOKEN_K=$(awk -v bytes="$TOTAL_BYTES" 'BEGIN { printf "%.1f", bytes / 4000 }')
 
-if (( QUIET )); then
+if (( JSON_MODE )); then
+  printf '%s' "$MANIFEST_RECORDS" | python3 -c '
+import json
+import sys
+
+total = int(sys.argv[1])
+ceiling = int(sys.argv[2])
+sources = []
+for raw in sys.stdin:
+    raw = raw.rstrip("\n")
+    if not raw:
+        continue
+    size, content_hash, path = raw.split("\t", 2)
+    size = int(size)
+    sources.append({
+        "path": path,
+        "bytes": size,
+        "estimated_tokens": (size + 3) // 4,
+        "content_hash": content_hash,
+    })
+print(json.dumps({
+    "total_bytes": total,
+    "estimated_tokens": (total + 3) // 4,
+    "ceiling_bytes": ceiling,
+    "sources": sources,
+}, separators=(",", ":")))
+' "$TOTAL_BYTES" "$CEILING_BYTES"
+elif (( QUIET )); then
   echo "preamble: ${TOTAL_BYTES} / ${CEILING_BYTES} B (~${APPROX_TOKEN_K}K tok/turn)"
 else
   if (( SPARE_BYTES >= 0 )); then
@@ -104,7 +150,7 @@ else
 fi
 
 if (( TOTAL_BYTES <= CEILING_BYTES )); then
-  if (( ! QUIET && SPARE_BYTES > RATCHET_NUDGE_BYTES )); then
+  if (( ! QUIET && ! JSON_MODE && SPARE_BYTES > RATCHET_NUDGE_BYTES )); then
     echo "check-preamble-budget: advisory: lower CEILING_BYTES; more than ${RATCHET_NUDGE_BYTES} bytes are unused"
   fi
   exit 0
@@ -113,7 +159,7 @@ fi
 OVERAGE=$((TOTAL_BYTES - CEILING_BYTES))
 OVERAGE_TOKENS=$(((OVERAGE + 3) / 4))
 
-if (( ! QUIET )); then
+if (( ! QUIET && ! JSON_MODE )); then
   LARGEST=""
   count=0
   while IFS=$'\t' read -r bytes relative; do
