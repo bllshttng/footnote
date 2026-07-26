@@ -263,6 +263,8 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
 
 def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], list[str]]:
     """Return event journals plus discovery errors that make coverage uncertain."""
+    from fno.paths import ledger_json, state_dir
+
     repo = Path(cwd or os.getcwd()).resolve()
     errors: list[str] = []
     try:
@@ -271,10 +273,8 @@ def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], 
     except (OSError, ValueError) as exc:
         root = repo
         errors.append(f"repository root discovery failed: {exc}")
-    paths = [root / ".fno" / "events.jsonl", Path.home() / ".fno" / "events.jsonl"]
+    paths = [root / ".fno" / "events.jsonl", state_dir() / "events.jsonl"]
     try:
-        from fno.paths import ledger_json
-
         raw = json.loads(ledger_json().read_text(encoding="utf-8"))
         rows = raw.get("entries", raw) if isinstance(raw, dict) else raw
         for row in rows if isinstance(rows, list) else []:

@@ -182,12 +182,6 @@ def validate(event: dict[str, Any]) -> None:
         raise ValidationError(f"unknown event type: {type_name}")
 
     type_spec = EVENT_TYPES[type_name]
-    type_sources = type_spec.get("sources")
-    if isinstance(type_sources, list) and source not in type_sources:
-        raise ValidationError(
-            f"event type {type_name} does not allow source {source!r} "
-            f"(allowed: {sorted(type_sources)})"
-        )
     raw_data = event.get("data")
     if raw_data is not None and not isinstance(raw_data, dict):
         raise ValidationError("event data must be an object")
@@ -313,6 +307,12 @@ def validate(event: dict[str, Any]) -> None:
             )
 
     if type_name == "verification_receipt":
+        type_sources = type_spec.get("sources", [])
+        if source not in type_sources:
+            raise ValidationError(
+                f"verification_receipt does not allow source {source!r} "
+                f"(allowed: {sorted(type_sources)})"
+            )
         type_props = type_spec["data"]["properties"]
         mode = data.get("mode")
         result = data.get("result")

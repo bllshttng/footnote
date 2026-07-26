@@ -209,7 +209,6 @@ validate_event() {
         _ev_warn "unknown event type: $type"
         return 1
     fi
-
     # Required data fields per type, with conditional-gate handling for
     # phase_transition. We read required fields one per line (bash 3.2 compat:
     # no associative arrays, no process substitution).
@@ -337,6 +336,52 @@ validate_event() {
         ' <<<"$payload" 2>/dev/null)
         if [[ "$actual_hash" != "$expected_hash" ]]; then
             _ev_warn "context_snapshot context_hash disagrees with source_hashes"
+            return 1
+        fi
+    fi
+
+    if [[ "$type" == "verification_receipt" ]]; then
+        local receipt_ok
+        receipt_ok=$(jq -r --arg src "$src" --slurpfile schema "$EVENTS_SCHEMA_CACHE" '
+            def utc_epoch:
+                if type != "string" then null
+                else (
+                    capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.[0-9]+)?(?:Z|\\+00:00)$")?
+                    | if . == null then null else (.whole + "Z" | fromdateiso8601?) end
+                ) end;
+            .data as $d
+            | ($schema[0].event_types[]
+                | select(.name == "verification_receipt")
+                | .data.properties) as $p
+            | ($d.started_at | utc_epoch) as $started
+            | ($d.finished_at | utc_epoch) as $finished
+            | (($schema[0].event_types[] | select(.name == "verification_receipt") | .sources) as $sources
+                | ($sources | index($src)) != null)
+                and (($d.candidate_sha | type == "string")
+                and ($d.candidate_sha | test("^[0-9A-Fa-f]{40}$")))
+                and ($d.command | type == "array" and length > 0 and length <= 4096
+                    and all(.[]; type == "string" and length > 0 and length <= 4096))
+                and ($d.environment | type == "object"
+                    and all(["host", "platform", "runner"][];
+                        . as $f | ($d.environment[$f] | type == "string" and length > 0)))
+                and ($d.scope | type == "array" and length > 0 and length <= 128
+                    and all(.[]; type == "string" and length > 0 and length <= 512))
+                and ($started != null and $finished != null and $finished >= $started)
+                and ($p.mode.enum | index($d.mode) != null)
+                and ($p.result.enum | index($d.result) != null)
+                and ($d.producer | type == "object"
+                    and all(["kind", "id"][];
+                        . as $f | ($d.producer[$f] | type == "string" and length > 0)))
+                and ($d.steps_expected | type == "number" and floor == . and . >= 0)
+                and ($d.steps_executed | type == "number" and floor == . and . >= 0)
+                and ($d.steps_executed <= $d.steps_expected)
+                and ($d.steps_expected == ($d.scope | length))
+                and (($d.mode != "full" or $d.result != "passed")
+                    or ($d.steps_expected > 0 and $d.steps_executed == $d.steps_expected))
+                and ($d.mode != "void" or $d.result != "passed")
+        ' <<<"$payload" 2>/dev/null || true)
+        if [[ "$receipt_ok" != "true" ]]; then
+            _ev_warn "verification_receipt fields are malformed or contradictory"
             return 1
         fi
     fi

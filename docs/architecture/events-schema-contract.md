@@ -65,8 +65,6 @@ phase boundaries (no gate flip happened).
 
 The 64KB cap on `data` payload is enforced by both validators.
 
-Each event type also owns its allowed producers through `event_types[].sources`, and Python and Bash reject a globally known source when that specific type does not allow it.
-
 `schemas/events-v3.json` is the JSON-Schema mirror of this envelope,
 used by the cross-language parity gate; `cli/src/fno/events/schema.yaml`
 is the source of truth both validators load.

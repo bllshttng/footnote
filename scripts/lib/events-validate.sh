@@ -209,15 +209,6 @@ validate_event() {
         _ev_warn "unknown event type: $type"
         return 1
     fi
-    local type_source_allowed
-    type_source_allowed=$(jq -r --arg t "$type" --arg s "$src" '
-        any(.event_types[] | select(.name == $t) | .sources[]?; . == $s)
-    ' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
-    if [[ "$type_source_allowed" != "true" ]]; then
-        _ev_warn "event type $type does not allow source $src"
-        return 1
-    fi
-
     # Required data fields per type, with conditional-gate handling for
     # phase_transition. We read required fields one per line (bash 3.2 compat:
     # no associative arrays, no process substitution).
@@ -351,7 +342,7 @@ validate_event() {
 
     if [[ "$type" == "verification_receipt" ]]; then
         local receipt_ok
-        receipt_ok=$(jq -r --slurpfile schema "$EVENTS_SCHEMA_CACHE" '
+        receipt_ok=$(jq -r --arg src "$src" --slurpfile schema "$EVENTS_SCHEMA_CACHE" '
             def utc_epoch:
                 if type != "string" then null
                 else (
@@ -364,7 +355,9 @@ validate_event() {
                 | .data.properties) as $p
             | ($d.started_at | utc_epoch) as $started
             | ($d.finished_at | utc_epoch) as $finished
-            | (($d.candidate_sha | type == "string")
+            | (($schema[0].event_types[] | select(.name == "verification_receipt") | .sources) as $sources
+                | ($sources | index($src)) != null)
+                and (($d.candidate_sha | type == "string")
                 and ($d.candidate_sha | test("^[0-9A-Fa-f]{40}$")))
                 and ($d.command | type == "array" and length > 0 and length <= 4096
                     and all(.[]; type == "string" and length > 0 and length <= 4096))
