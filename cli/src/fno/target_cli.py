@@ -769,6 +769,19 @@ def init(
         if announce:
             typer.echo(announce, err=True)
 
+    # Carry the resolved node's bound plan_path into the manifest when the caller
+    # gave a node input but no --plan-path. init-target-state.sh sources plan_path
+    # only from TARGET_PLAN_PATH (= --plan-path), so without this a `start <node>`
+    # whose node already has a plan bound writes plan_path: "" to the immutable
+    # manifest and the orienter reports "plan: none" (x-39c0), forcing a manual
+    # first-fill. An explicit --plan-path wins; an idea-first free-text input
+    # resolves no node and stays empty for the legitimate blueprint-then-first-fill
+    # flow. Reuses the same fail-safe node->plan resolver the blast read uses.
+    if not plan_path:
+        resolved_plan = _resolve_plan_for_blast(None, input_)
+        if resolved_plan:
+            plan_path = resolved_plan
+
     env = dict(os.environ)
     env["TARGET_START"] = "1"
     # Change D (x-a7be): resolve `attended` from the substrate before the bash
