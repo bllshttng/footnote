@@ -39,6 +39,9 @@
 #   skipped-done     <node> reason="already done|superseded"
 #   failed           <node> reason="<why>"
 #   deferred-cap     <node> reason="--max <N> reached"
+#   degraded-name    <node> reason="canonical naming unavailable (rc=<n>); ..."
+#                    (advisory, precedes a launched line: the canonical name owner
+#                     was unreachable and the fallback assembly named this worker)
 # Summary (last line):
 #   summary: launched=<n> parked=<n> already=<n> skipped=<n> done=<n> failed=<n> capped=<n>[ nothing-up-next]
 #
@@ -311,29 +314,46 @@ for id in "${NODES[@]}"; do
   # x-3218: the canonical owner (`fno.agents.naming`) sanitizes the slug AND
   # budgets the assembled name against the runtime's 64-char limit; this site
   # used to assemble it uncapped, so a long configured node id produced a name
-  # `fno agents spawn` rejected - the dispatch vanished with no session and no
-  # event. Exit 2 is a typed refusal and skips the node loudly.
+  # the runtime rejects - the dispatch vanished with no session and no event.
   # FNO_AGENTS_RUNTIME=python pins the Python dispatch: an ambient `=rust` routes
   # EVERY `fno agents` verb to the binary, which has no `name` port. Exit 3 (not
   # 2) is the naming refusal - Click spends 2 on usage errors including "no such
   # command", so an `fno` too old to know this verb would otherwise read as
   # "unrepresentable" and refuse the whole fleet.
-  agent_name="$(FNO_AGENTS_RUNTIME=python fno agents name target "$id" --slug "$node_slug" 2>/dev/null)"
+  # Streams are merged so a refusal's cause survives; the exit code disambiguates
+  # which stream it came from. A name is only ever adopted after it matches the
+  # runtime contract, so a stray warning on stderr degrades rather than poisons.
+  name_out="$(FNO_AGENTS_RUNTIME=python fno agents name target "$id" --slug "$node_slug" 2>&1)"
   name_rc=$?
+  agent_name=""
+  [[ "$name_rc" -eq 0 ]] && printf '%s' "$name_out" | grep -qE '^[A-Za-z0-9_-]{1,64}$' && agent_name="$name_out"
   if [[ "$name_rc" -eq 3 ]]; then
-    echo "failed $id reason=\"node id cannot be represented as an agent name within 64 chars\""
+    # Exit 3 covers every refusal cause (over-budget identity, invalid
+    # characters, empty identity), so relay the real message rather than
+    # asserting a length problem the operator may not actually have.
+    echo "failed $id reason=\"${name_out:-agent name cannot be represented}\""
     n_failed=$((n_failed + 1))
     continue
   elif [[ "$name_rc" -ne 0 || -z "$agent_name" ]]; then
     # Degraded: fno unreachable or too old for this verb. Keep the historical
-    # assembly; the daemon still refuses an over-long name loudly at the spawn
-    # boundary.
+    # assembly, and say so - an invisible degrade means the whole fleet can be
+    # named by the fallback with nothing in the receipt to show it.
+    echo "degraded-name $id reason=\"canonical naming unavailable (rc=$name_rc); using the fallback assembly\""
     node_slug="$(printf '%s' "$node_slug" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
       | sed -E 's/-+/-/g; s/^-+//; s/-+$//' | cut -c1-30 | sed -E 's/-+$//')"
     if [[ -n "$node_slug" ]]; then
       agent_name="target-${id}-${node_slug}"
     else
       agent_name="target-${id}"
+    fi
+    # The fallback is uncapped, and nothing downstream enforces 64 here: this
+    # spawn passes --node, which forces the Python path (_NAME_MAX_LEN = 128),
+    # so the daemon's 64-char validator is never reached. Refuse rather than
+    # launch a worker under a name the runtime contract does not allow.
+    if [[ "${#agent_name}" -gt 64 ]]; then
+      echo "failed $id reason=\"fallback name is ${#agent_name} chars, over the 64-char runtime limit\""
+      n_failed=$((n_failed + 1))
+      continue
     fi
   fi
 

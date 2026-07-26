@@ -182,7 +182,11 @@ def _spawn_target_worker(node_id: str, cwd: Optional[str]) -> bool:
     try:
         name = agent_name("keepgo", node_id)
     except AgentNameError as exc:
-        _LOG.debug("keep_going: unrepresentable worker name for %s: %s", node_id, exc)
+        # warning, not debug: the caller only prints "dispatch failed", so at
+        # default level the operator cannot tell a permanent unrepresentable name
+        # (which fails identically on every future merge) from a transient spawn
+        # error worth retrying.
+        _LOG.warning("keep_going: unrepresentable worker name for %s: %s", node_id, exc)
         return False
     cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn",
            "--harness", "claude", "--substrate", "bg"]

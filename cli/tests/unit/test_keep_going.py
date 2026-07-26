@@ -268,3 +268,46 @@ def test_triage_pr_skips_keep_going_when_disabled(tmp_path, monkeypatch):
         session_ids=["S1"], comments=[], create_fn=lambda **kw: "node-b",
     )
     assert report.followups == [] and called == []
+
+
+# ---------------------------------------------------------------------------
+# x-3218: the keep-going worker name comes from the canonical owner
+# ---------------------------------------------------------------------------
+
+
+def test_keepgo_name_preserves_the_full_node_id():
+    """The old `keepgo-{_name_slug(node_id)}` cut the id to 30 chars.
+
+    That silently collapsed two distinct long ids onto one name, and the name is
+    the spawn dedup token - the exact collision class x-3218 exists to remove.
+    The canonical owner keeps the full identity and refuses when it cannot.
+    """
+    from fno.agents.naming import AgentNameError, agent_name
+
+    long_id = "regready-pipeline-2c4f9a1b3d4e5f"
+    assert len(long_id) > 30
+    name = agent_name("keepgo", long_id)
+    assert name == f"keepgo-{long_id}"
+    assert len(name) <= 64
+
+    # Two ids sharing a 30-char prefix stay distinct (they used to collide).
+    a = agent_name("keepgo", long_id + "aa")
+    b = agent_name("keepgo", long_id + "bb")
+    assert a != b
+
+    # Ordinary ids are unchanged from the old form.
+    assert agent_name("keepgo", "x-3218") == "keepgo-x-3218"
+
+    # An id that cannot fit refuses rather than being shaved to a colliding stub.
+    with pytest.raises(AgentNameError):
+        agent_name("keepgo", "n-" + "z" * 70)
+
+
+def test_keepgo_spawn_refuses_an_unrepresentable_node(monkeypatch):
+    """AC5/AC6 on the retro arm: no subprocess, and the failure is not silent."""
+    from fno.retro import keep_going as kg
+
+    monkeypatch.setattr(
+        kg.subprocess, "run", lambda *a, **k: pytest.fail("must not spawn")
+    )
+    assert kg._spawn_target_worker("n-" + "z" * 70, None) is False

@@ -531,29 +531,39 @@ elif [[ -n "$NODE" ]]; then
   # x-3218: delegate to the canonical owner (`fno.agents.naming`) rather than
   # assembling a fourth copy of the policy here. The owner budgets the ASSEMBLED
   # name against the runtime's 64-char limit and spends that budget on the slug,
-  # which a local `cut -c1-64` cannot do. Exit 2 is a typed refusal (the required
-  # identity does not fit) and must surface, never degrade into a silently
-  # altered name.
+  # which a local `cut -c1-64` cannot do.
   # FNO_AGENTS_RUNTIME=python pins the Python dispatch: an ambient `=rust` routes
   # EVERY `fno agents` verb to the binary, which has no `name` port. Exit 3 (not
   # 2) is the naming refusal - Click spends 2 on usage errors including "no such
   # command", so an `fno` too old to know this verb would otherwise read as
   # "unrepresentable" and refuse every node.
-  agent_name="$(FNO_AGENTS_RUNTIME=python fno agents name "$verb" "$NODE" --slug "$_node_slug" 2>/dev/null)"
+  # Streams are merged so a refusal's cause survives; the exit code says which
+  # stream it came from, and a name is adopted only after it matches the runtime
+  # contract, so a stray warning on stderr degrades rather than poisons.
+  _name_out="$(FNO_AGENTS_RUNTIME=python fno agents name "$verb" "$NODE" --slug "$_node_slug" 2>&1)"
   _name_rc=$?
+  agent_name=""
+  [[ "$_name_rc" -eq 0 ]] && printf '%s' "$_name_out" | grep -qE '^[A-Za-z0-9_-]{1,64}$' && agent_name="$_name_out"
   if [[ "$_name_rc" -eq 3 ]]; then
-    emit_error "node $NODE cannot be represented as an agent name within 64 chars"
+    # Exit 3 covers every refusal cause (over-budget identity, invalid
+    # characters, empty identity), so relay the real message rather than
+    # asserting a length problem the operator may not actually have.
+    emit_error "${_name_out:-node $NODE cannot be represented as an agent name}"
   elif [[ "$_name_rc" -ne 0 || -z "$agent_name" ]]; then
     # Degraded: fno unreachable or too old for this verb (the same condition that
     # empties the slug via resolve_node_slug, so this normally yields
-    # <verb>-<node>). Uncapped by design - the daemon still refuses an over-long
-    # name loudly at the spawn boundary, which beats inventing a fifth local
-    # budget here.
+    # <verb>-<node>).
     if [[ -n "$_node_slug" ]]; then
       agent_name="${verb}-${NODE}-${_node_slug}"
     else
       agent_name="${verb}-${NODE}"
     fi
+    # Nothing downstream enforces 64 for a node spawn: it passes --node, which
+    # forces the Python path (_NAME_MAX_LEN = 128), so the daemon's 64-char
+    # validator is never reached. Refuse rather than emit a name the runtime
+    # contract does not allow. The tier-1 node-id detector bounds this well under
+    # 64 today; the guard is here so a wider id shape cannot reopen the hole.
+    [[ "${#agent_name}" -gt 64 ]] && emit_error "fallback agent name is ${#agent_name} chars, over the 64-char runtime limit"
   fi
 else
   # Free-form name source. For handoff, slug the doc BASENAME (sans extension),
