@@ -238,7 +238,7 @@ def test_doctor_reports_plugin_drift_without_staling_cli(
         "cache_version": "0.3.0",
         "source_digest": "a" * 64,
         "cache_digest": "b" * 64,
-        "enabled_plugin_ids": ["fno@footnote-dev"],
+        "enabled_plugin_ids": ["fno@footnote"],
         "remedy": "fno setup codex-plugin --channel dev --refresh",
     }
     monkeypatch.setattr(
@@ -255,7 +255,7 @@ def test_doctor_reports_plugin_drift_without_staling_cli(
     assert "fno setup codex-plugin --channel dev --refresh" in result.stderr
 
 
-def test_doctor_reports_wrong_or_simultaneous_channel_without_freshness(
+def test_doctor_reports_ambiguous_duplicate_state_without_freshness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _stub_signals(
@@ -271,7 +271,7 @@ def test_doctor_reports_wrong_or_simultaneous_channel_without_freshness(
         lambda: {
             "codex_plugin": {
                 "status": "conflict",
-                "issue": "simultaneous-channels",
+                "issue": "ambiguous-duplicate-state",
                 "enabled_plugin_ids": ["fno@footnote", "fno@footnote-dev"],
                 "remedy": "fno setup codex-plugin --channel dev --refresh",
             }

@@ -1,6 +1,7 @@
 # Codex Provider Guide
 
-footnote ships a native Codex plugin plus a local-development fallback.
+footnote ships one native Codex marketplace identity, `footnote`, and one plugin identity, `fno@footnote`.
+The release and dev channels select the source behind that identity; they never install side-by-side plugin names.
 
 ## Plugin Channels
 
@@ -12,7 +13,7 @@ fno setup codex-plugin --channel release
 ```
 
 Use the dev channel while changing plugin content locally.
-It installs `fno@footnote-dev` from the durable canonical checkout rather than a disposable feature worktree.
+It installs `fno@footnote` from the durable canonical checkout rather than a disposable feature worktree.
 
 ```bash
 fno setup codex-plugin --channel dev
@@ -25,18 +26,22 @@ Refresh removes and re-adds the selected copy through Codex, which deterministic
 fno setup codex-plugin --channel dev --refresh
 ```
 
-Setup removes the other installed Footnote channel before installing the selected one and verifies that exactly one Footnote plugin is enabled.
+Setup first validates the requested marketplace and plugin in an isolated temporary `CODEX_HOME`, leaving the working channel untouched when the candidate is invalid.
+It then replaces the source behind `footnote`, verifies the installed version and complete loadable payload, and writes the channel marker only after that verification succeeds.
+Every failed live switch restores the previous marketplace registration, plugin, and exact marker bytes; a rollback failure is persisted and reported distinctly by `fno doctor`.
+Setup also migrates and removes legacy `footnote-dev` registrations, `fno@footnote-dev`, and their cache.
 An already-correct selection is a no-op unless `--refresh` is present.
 Every mutation can require hook approval and takes effect in a new Codex session.
 
 `fno doctor` reports Codex plugin freshness separately from Python and Rust CLI freshness.
 It compares the selected channel's loadable source payload with `CODEX_HOME/plugins/cache/<marketplace>/fno/<version>` and gives the exact refresh command for wrong-channel, missing-cache, version-mismatch, and payload-drift findings.
 
-The plugin manifest exposes:
+The verified payload preserves one loaded set of:
 
 - skills from `skills/`
+- agents from `agents/` and `.codex/agents/`
+- commands from `commands/`
 - plugin-bundled Codex lifecycle hooks through `hooks/codex-hooks.json`
-- project custom agents from tracked `.codex/agents/*.toml`
 
 Codex treats plugin hooks as untrusted until you approve them. Approve the footnote
 hooks when prompted. `SessionStart` injects project vision, `fno whoami`, worktree

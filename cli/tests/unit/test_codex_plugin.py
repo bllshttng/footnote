@@ -825,7 +825,7 @@ def test_freshness_detects_same_version_payload_drift(tmp_path: Path) -> None:
     assert report["remedy"] == "fno setup codex-plugin --channel dev --refresh"
 
 
-def test_freshness_refuses_conflicting_channels_before_digest(tmp_path: Path) -> None:
+def test_freshness_refuses_legacy_duplicate_state_before_digest(tmp_path: Path) -> None:
     source = _source(tmp_path)
     dev_marketplace = _dev_marketplace(source)
     home = tmp_path / "codex-home"
@@ -865,8 +865,27 @@ def test_freshness_refuses_conflicting_channels_before_digest(tmp_path: Path) ->
 
     report = inspect_freshness(runner=runner, codex_home=home, source_root=source)
     assert report["status"] == "conflict"
-    assert report["issue"] == "simultaneous-channels"
+    assert report["issue"] == "ambiguous-duplicate-state"
     assert "source_digest" not in report
+
+
+def test_freshness_prioritizes_persisted_rollback_failure(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    receipt = home / "footnote" / "rollback-failure.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(
+        json.dumps({"stage": "plugin-add", "detail": "rollback add failed"}),
+        encoding="utf-8",
+    )
+
+    report = inspect_freshness(
+        runner=lambda *_args, **_kwargs: pytest.fail("state collection must not run"),
+        codex_home=home,
+    )
+
+    assert report["status"] == "error"
+    assert report["issue"] == "rollback-failure"
+    assert report["detail"] == "rollback add failed"
 
 
 def test_payload_digest_is_stable_and_ignores_non_plugin_files(tmp_path: Path) -> None:

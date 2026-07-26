@@ -371,9 +371,20 @@ def _owned_marketplace(marketplace: Marketplace) -> bool:
     return marketplace.name in {MARKETPLACE, LEGACY_DEV_MARKETPLACE}
 
 
+def _normalized_source(source_type: str, source: str) -> tuple[str, str]:
+    if _same_release_source(source_type, source):
+        return "git", RELEASE_SOURCE
+    if source_type == "local":
+        try:
+            return "local", str(Path(source).expanduser().resolve())
+        except OSError:
+            pass
+    return source_type, source
+
+
 def _owned_state_fingerprint(state: CodexState) -> tuple[tuple[object, ...], ...]:
     marketplaces = sorted(
-        ("marketplace", item.name, item.source_type, item.source)
+        ("marketplace", item.name, *_normalized_source(item.source_type, item.source))
         for item in state.marketplaces
         if _owned_marketplace(item)
     )
@@ -385,8 +396,7 @@ def _owned_state_fingerprint(state: CodexState) -> tuple[tuple[object, ...], ...
             item.version,
             item.installed,
             item.enabled,
-            item.source_type,
-            item.marketplace_source,
+            *_normalized_source(item.source_type, item.marketplace_source),
         )
         for item in state.plugins
         if item.plugin_id in OWNED_PLUGIN_IDS
@@ -545,7 +555,23 @@ def inspect_freshness(
     """Return an advisory plugin verdict independent of CLI freshness."""
     home = resolve_codex_home(codex_home)
     marker_path = home / "footnote" / "plugin-channel.json"
+    rollback_path = home / "footnote" / "rollback-failure.json"
     remedy_channel = "dev"
+    if rollback_path.is_file():
+        try:
+            rollback = _object(
+                json.loads(rollback_path.read_text(encoding="utf-8")),
+                "rollback-failure",
+            )
+            detail = str(rollback.get("detail", "rollback did not complete"))
+        except (OSError, ValueError, TypeError, CodexPluginError) as exc:
+            detail = str(exc)
+        return {
+            "status": "error",
+            "issue": "rollback-failure",
+            "detail": detail[-_OUTPUT_LIMIT:],
+            "remedy": "fno setup codex-plugin --channel release --refresh",
+        }
     try:
         marker = _object(
             json.loads(marker_path.read_text(encoding="utf-8")), "desired-channel-marker"
@@ -579,6 +605,9 @@ def inspect_freshness(
 
     installed = [p for p in state.plugins if p.installed and p.plugin_id in OWNED_PLUGIN_IDS]
     enabled = [p for p in installed if p.enabled]
+    owned_marketplaces = [
+        marketplace for marketplace in state.marketplaces if _owned_marketplace(marketplace)
+    ]
     base: dict[str, object] = {
         "channel": channel,
         "marketplace": expected_marketplace,
@@ -587,8 +616,22 @@ def inspect_freshness(
         "enabled_plugin_ids": [p.plugin_id for p in enabled],
         "remedy": f"fno setup codex-plugin --channel {channel} --refresh",
     }
-    if len(enabled) > 1:
-        return {**base, "status": "conflict", "issue": "simultaneous-channels"}
+    ambiguous = (
+        len(installed) > 1
+        or len(enabled) > 1
+        or any(plugin.plugin_id != PLUGIN_ID for plugin in installed)
+        or len(owned_marketplaces) > 1
+        or any(
+            marketplace.name == LEGACY_DEV_MARKETPLACE
+            for marketplace in owned_marketplaces
+        )
+    )
+    if ambiguous:
+        return {
+            **base,
+            "status": "conflict",
+            "issue": "ambiguous-duplicate-state",
+        }
     if not enabled:
         return {**base, "status": "missing", "issue": "plugin-missing"}
     selected = enabled[0]
