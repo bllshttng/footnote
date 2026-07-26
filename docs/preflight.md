@@ -86,7 +86,8 @@ And the exit codes separate evidence quality:
 
 Every executing run (not `--list`, which is a dry run) writes `.fno/changed-last-receipt.json` with the candidate and base identity, the selections and their rules, the unmapped paths, the verdict, and the timings (selection, execution, time to first signal).
 
-Sharding the full suite is deliberately out of scope until those receipts show that final merge latency, rather than first feedback, is the remaining bottleneck.
+Sharding the full suite is out of scope *here*, not ruled out: this node targets first-signal latency, and the merge gate is a separate lever with its own node.
+The workflow guard permits a sharded smoke job, but requires an aggregating job that `needs` it, because each shard reports its own check and branch protection pointed at one of them would pass on a fraction of the suite.
 
 ### `scripts/ci/preflight.sh` - the hermetic runner
 

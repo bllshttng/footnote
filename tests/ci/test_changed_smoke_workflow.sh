@@ -93,8 +93,23 @@ check("uv run --project cli fno-py test smoke" in smoke_run,
 narrowed = [f for f in ("--changed", "--only", "--retry-failed") if f in smoke_run]
 check(not narrowed, "smoke runs no subset mode",
       f"the merge gate was narrowed to a subset ({', '.join(narrowed)})")
-check("strategy" not in smoke, "smoke is not sharded (deferred until measured)",
-      "the full suite was sharded - out of scope until the packet is measured")
+# Sharding the full suite is allowed. What must never happen is a single shard
+# standing in for the whole gate: with a matrix, each shard reports its own
+# check, so branch protection pointed at one of them would pass on a fraction of
+# the suite. If smoke is sharded, some job must depend on it and aggregate.
+if "strategy" in smoke:
+    aggregators = [
+        name for name, job in jobs.items()
+        if name != "smoke" and "smoke" in (
+            [job["needs"]] if isinstance(job.get("needs"), str) else job.get("needs") or []
+        )
+    ]
+    check(bool(aggregators),
+          f"sharded smoke has an aggregating gate job ({', '.join(aggregators)})",
+          "smoke is sharded with no job depending on it - branch protection would "
+          "then gate on a single shard, i.e. a fraction of the suite")
+else:
+    ok("smoke is unsharded (a single job is its own gate)")
 
 sys.exit(1 if fails else 0)
 PY
