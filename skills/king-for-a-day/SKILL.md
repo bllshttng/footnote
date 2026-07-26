@@ -62,8 +62,10 @@ Grooming stays on a small model because it is daily and levers-only; a reign is 
 
 ```bash
 fno agents spawn --name king-<epic> "<brief>" --effort high --model <your frontier model> \
-  --crown level=<N>,scope=<epic> --workspace <epic>
+  --crown level=<N>,scope=<epic> --substrate pane --workspace <epic>
 ```
+
+`--substrate pane` is explicit here rather than assumed. `pane` is the built-in default, but `config.agents.defaults.substrate` sits above it and is injected whenever the flag is absent, so an operator who set `bg` there turns this command into a placement flag on a non-pane substrate, which exits 2 - the crowning fails on config you did not write and cannot see from here.
 
 **Place the king in the mission workspace too, and for a court that is not optional.** Court teammates anchor to the king's own pane, so wherever the king sits IS the court. Pass `--workspace <epic>` at coronation and again when you anoint a sub-king, and the naming stays legible; skip it and the court still coheres around you, just under a cwd-routed name. A pass does not need it at all, having abdicated before layout matters.
 
