@@ -215,14 +215,17 @@ def _build_argv(
 
 
 def _claude_project_slug(cwd: Path) -> str:
-    """Fold a launch cwd into claude's ``projects/<slug>/`` slug.
+    """Claude's projects-dir slug for a launch cwd.
 
-    claude replaces every non-alphanumeric char with ``-`` (verified against
-    real projects dirs on disk). Naming this locator at spawn time is what
-    stops a liveness check of the canonical project dir from missing a
-    transcript that landed under the worktree's own dir.
+    Delegates to the canonical encoder in provenance.resolver (confirmed
+    against the real ~/.claude layout): only '/' and '.' become '-', every
+    other char (including '_') is preserved. A local regex that folded all
+    non-alphanumerics would diverge on underscore-bearing paths and point the
+    receipt at a directory that does not exist.
     """
-    return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+    from fno.provenance.resolver import _slug
+
+    return _slug(str(cwd))
 
 
 def _claude_projects_dir(env: Mapping[str, str]) -> Path:

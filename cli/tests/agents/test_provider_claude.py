@@ -522,9 +522,9 @@ def test_headless_receipt_emitted_before_blocking_subprocess(
     locator. Without an up-front receipt a long one-shot looks dead to a
     watcher (the twin-spawn failure mode this closes)."""
     import json
-    import re
 
     from fno.agents.providers import claude as claude_mod
+    from fno.provenance.resolver import _slug
 
     captured: dict[str, object] = {}
 
@@ -551,8 +551,8 @@ def test_headless_receipt_emitted_before_blocking_subprocess(
     assert rec["cwd"] == str(cwd)
     assert rec["lifecycle"] == "ephemeral"
     assert rec["roster"] == "unbound"
-    # transcript locator slug derived from the effective cwd
-    assert re.sub(r"[^A-Za-z0-9]", "-", str(cwd)) in rec["transcript_dir"]
+    # transcript locator slug derived from the effective cwd (canonical encoding)
+    assert _slug(str(cwd)) in rec["transcript_dir"]
     # promises nothing that does not exist yet at this synchronous boundary
     assert "session_id" not in rec
     assert "pid" not in rec
@@ -697,3 +697,35 @@ def test_headless_receipt_transcript_dir_follows_account_config_dir(
 
     rec = json.loads(captured["stderr_at_call"].strip().splitlines()[-1])
     assert rec["transcript_dir"].startswith("/x/.claude-alt/projects/")
+
+
+def test_headless_receipt_slug_preserves_underscore(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The transcript slug uses claude's canonical encoding (provenance
+    resolver): underscores are preserved, not folded to dashes, so the locator
+    points at the real projects dir for an underscore-bearing cwd."""
+    import json
+
+    from fno.agents.providers import claude as claude_mod
+    from fno.provenance.resolver import _slug
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["stderr_at_call"] = capsys.readouterr().err
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "my_repo"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd, name="wk")
+
+    rec = json.loads(captured["stderr_at_call"].strip().splitlines()[-1])
+    assert _slug(str(cwd)) in rec["transcript_dir"]
+    assert "my_repo" in rec["transcript_dir"]
+    assert "my-repo" not in rec["transcript_dir"]
