@@ -120,6 +120,14 @@ def _plugin(plugin_id: str, *, source: str, source_type: str) -> dict[str, objec
     }
 
 
+def _marketplace_row(name: str, source: str, source_type: str) -> dict[str, object]:
+    return {
+        "name": name,
+        "root": source,
+        "marketplaceSource": {"sourceType": source_type, "source": source},
+    }
+
+
 def _source(tmp_path: Path) -> Path:
     root = tmp_path / "source"
     (root / ".codex-plugin").mkdir(parents=True)
@@ -143,6 +151,8 @@ class _StatefulCodex:
         self.plugins: list[dict[str, object]] = []
         self.fail_git_plugin_once = False
         self.fail_local_marketplace = False
+        self.fail_plugin_remove_after_mutation_once = False
+        self.retain_removed_plugin_disabled_once = False
 
     def add_marketplace(self, *, name: str, source: str, source_type: str) -> None:
         self.marketplaces.append(
@@ -183,7 +193,16 @@ class _StatefulCodex:
         if argv[1:4] == ["plugin", "marketplace", "upgrade"]:
             return _cp(argv, {})
         if argv[1:3] == ["plugin", "remove"]:
+            if self.retain_removed_plugin_disabled_once:
+                self.retain_removed_plugin_disabled_once = False
+                for row in self.plugins:
+                    if row["pluginId"] == argv[3]:
+                        row["enabled"] = False
+                return _cp(argv, {})
             self.plugins[:] = [row for row in self.plugins if row["pluginId"] != argv[3]]
+            if self.fail_plugin_remove_after_mutation_once:
+                self.fail_plugin_remove_after_mutation_once = False
+                return _cp(argv, {}, rc=17, err="injected post-mutation remove failure")
             return _cp(argv, {})
         if argv[1:3] == ["plugin", "add"]:
             plugin_id = argv[3]
@@ -297,6 +316,7 @@ def test_release_convergence_removes_dev_then_installs_and_verifies(tmp_path: Pa
     result = converge(
         channel="release",
         refresh=False,
+        validate_candidate=False,
         runner=runner,
         codex_home=codex_home,
         source_root=source,
@@ -358,6 +378,7 @@ def test_release_convergence_is_source_aware_noop(tmp_path: Path) -> None:
 
     result = converge(
         channel="release",
+        validate_candidate=False,
         runner=runner,
         codex_home=tmp_path / "codex-home",
         source_root=source,
@@ -429,6 +450,7 @@ def test_empty_selected_version_is_repaired_instead_of_verified_noop(
 
     result = converge(
         channel="release",
+        validate_candidate=False,
         runner=runner,
         codex_home=tmp_path / "codex-home",
         source_root=source,
@@ -496,6 +518,7 @@ def test_packaged_release_install_does_not_require_local_plugin_source(
 
     result = converge(
         channel="release",
+        validate_candidate=False,
         runner=runner,
         codex_home=tmp_path / "codex-home",
         source_root=source,
@@ -547,6 +570,7 @@ def test_convergence_preserves_unrelated_fno_named_plugins(tmp_path: Path) -> No
 
     result = converge(
         channel="release",
+        validate_candidate=False,
         runner=runner,
         codex_home=tmp_path / "codex-home",
         source_root=source,
@@ -614,6 +638,7 @@ def test_dev_convergence_switches_from_release_and_writes_requested_marker(
 
     result = converge(
         channel="dev",
+        validate_candidate=False,
         runner=runner,
         codex_home=codex_home,
         source_root=source,
@@ -666,7 +691,7 @@ def test_dev_refresh_replaces_same_version_cache_without_release_sync(tmp_path: 
             return _cp(argv, {"installed": plugins, "available": []})
         if argv == ["codex", "plugin", "remove", DEV_PLUGIN_ID, "--json"]:
             plugins.clear()
-            shutil.rmtree(cache)
+            shutil.rmtree(cache, ignore_errors=True)
             return _cp(argv, {"removed": True})
         if argv == ["codex", "plugin", "add", DEV_PLUGIN_ID, "--json"]:
             shutil.copytree(source / ".codex-plugin", cache / ".codex-plugin")
@@ -679,6 +704,7 @@ def test_dev_refresh_replaces_same_version_cache_without_release_sync(tmp_path: 
     result = converge(
         channel="dev",
         refresh=True,
+        validate_candidate=False,
         runner=runner,
         codex_home=codex_home,
         source_root=source,
@@ -738,6 +764,7 @@ def test_dev_convergence_is_source_aware_noop_and_records_authority(
 
     result = converge(
         channel="dev",
+        validate_candidate=False,
         runner=runner,
         codex_home=codex_home,
         source_root=source,
@@ -869,6 +896,74 @@ def test_freshness_refuses_legacy_duplicate_state_before_digest(tmp_path: Path) 
     assert "source_digest" not in report
 
 
+def test_freshness_reports_duplicate_state_even_without_marker(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "marketplace" in argv:
+            return _cp(
+                argv,
+                {
+                    "marketplaces": [
+                        _marketplace_row(MARKETPLACE, str(source), "local"),
+                        _marketplace_row(
+                            LEGACY_DEV_MARKETPLACE,
+                            str(tmp_path / LEGACY_DEV_MARKETPLACE),
+                            "local",
+                        ),
+                    ]
+                },
+            )
+        return _cp(
+            argv,
+            {
+                "installed": [
+                    _plugin(PLUGIN_ID, source=str(source), source_type="local"),
+                    _plugin(
+                        LEGACY_DEV_PLUGIN_ID,
+                        source=str(tmp_path / LEGACY_DEV_MARKETPLACE),
+                        source_type="local",
+                    ),
+                ]
+            },
+        )
+
+    report = inspect_freshness(runner=runner, codex_home=home, source_root=source)
+
+    assert report["status"] == "conflict"
+    assert report["issue"] == "ambiguous-duplicate-state"
+    assert report["channel"] == "unknown"
+
+
+def test_freshness_rejects_release_marker_with_nonrelease_source(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    marker = home / "footnote/plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "channel": "release",
+                "marketplace": MARKETPLACE,
+                "source": str(source),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "marketplace" in argv:
+            return _cp(argv, {"marketplaces": []})
+        return _cp(argv, {"installed": []})
+
+    report = inspect_freshness(runner=runner, codex_home=home, source_root=source)
+
+    assert report["status"] == "unknown"
+    assert report["issue"] == "state-unreadable"
+    assert "channel contract does not match marker" in str(report["detail"])
+
+
 def test_freshness_prioritizes_persisted_rollback_failure(tmp_path: Path) -> None:
     home = tmp_path / "codex-home"
     receipt = home / "footnote" / "rollback-failure.json"
@@ -953,6 +1048,7 @@ def test_failed_switch_restores_working_channel_and_marker_bytes(tmp_path: Path)
     with pytest.raises(CodexPluginError) as caught:
         converge(
             channel="release",
+            validate_candidate=False,
             runner=fake,
             codex_home=home,
             source_root=source,
@@ -965,6 +1061,65 @@ def test_failed_switch_restores_working_channel_and_marker_bytes(tmp_path: Path)
     assert isinstance(marketplace_source, dict)
     assert marketplace_source == {"sourceType": "local", "source": str(source)}
     assert [row["pluginId"] for row in fake.plugins] == [PLUGIN_ID]
+
+
+def test_mutating_subprocess_failure_still_rolls_back(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    marker = home / "footnote" / "plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker_bytes = b'{"channel":"dev","marketplace":"footnote","source":"working"}\n'
+    marker.write_bytes(marker_bytes)
+    fake.fail_plugin_remove_after_mutation_once = True
+
+    with pytest.raises(CodexPluginError) as caught:
+        converge(
+            channel="release",
+            validate_candidate=False,
+            runner=fake,
+            codex_home=home,
+            source_root=source,
+        )
+
+    assert caught.value.stage == "plugin-remove"
+    assert marker.read_bytes() == marker_bytes
+    assert [row["pluginId"] for row in fake.plugins] == [PLUGIN_ID]
+    marketplace_source = fake.marketplaces[0]["marketplaceSource"]
+    assert isinstance(marketplace_source, dict)
+    assert marketplace_source["sourceType"] == "local"
+
+
+def test_disabled_legacy_install_cannot_survive_final_verification(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    legacy = tmp_path / LEGACY_DEV_MARKETPLACE
+    legacy.mkdir()
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(
+        name=LEGACY_DEV_MARKETPLACE,
+        source=str(legacy),
+        source_type="local",
+    )
+    fake.plugins.append(
+        _plugin(LEGACY_DEV_PLUGIN_ID, source=str(legacy), source_type="local")
+    )
+    fake.retain_removed_plugin_disabled_once = True
+
+    with pytest.raises(CodexPluginError) as caught:
+        converge(
+            channel="dev",
+            validate_candidate=False,
+            runner=fake,
+            codex_home=home,
+            source_root=source,
+        )
+
+    assert caught.value.stage == "final-verify"
+    assert [row["pluginId"] for row in fake.plugins] == [LEGACY_DEV_PLUGIN_ID]
+    assert fake.plugins[0]["enabled"] is True
 
 
 def test_marker_failure_after_write_rolls_back_exact_previous_marker(
@@ -989,6 +1144,7 @@ def test_marker_failure_after_write_rolls_back_exact_previous_marker(
     with pytest.raises(CodexPluginError) as caught:
         converge(
             channel="release",
+            validate_candidate=False,
             runner=fake,
             codex_home=home,
             source_root=source,
@@ -996,6 +1152,110 @@ def test_marker_failure_after_write_rolls_back_exact_previous_marker(
 
     assert caught.value.stage == "desired-channel-marker"
     assert marker.read_bytes() == marker_bytes
+    marketplace_source = fake.marketplaces[0]["marketplaceSource"]
+    assert isinstance(marketplace_source, dict)
+    assert marketplace_source["sourceType"] == "local"
+
+
+def test_noop_marker_failure_restores_marker_without_losing_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    cache = home / "plugins/cache/footnote/fno/0.3.0"
+    cache.mkdir(parents=True)
+    cache_bytes = b"working cache\n"
+    (cache / "payload").write_bytes(cache_bytes)
+    marker = home / "footnote/plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker_bytes = b'{"preexisting":true}\n'
+    marker.write_bytes(marker_bytes)
+    write_marker = codex_plugin._write_marker
+
+    def fail_after_write(*args: object, **kwargs: object) -> Path:
+        write_marker(*args, **kwargs)
+        raise CodexPluginError("desired-channel-marker", "injected post-write failure")
+
+    monkeypatch.setattr(codex_plugin, "_write_marker", fail_after_write)
+    with pytest.raises(CodexPluginError) as caught:
+        converge(
+            channel="dev",
+            validate_candidate=False,
+            runner=fake,
+            codex_home=home,
+            source_root=source,
+        )
+
+    assert caught.value.stage == "desired-channel-marker"
+    assert marker.read_bytes() == marker_bytes
+    assert (cache / "payload").read_bytes() == cache_bytes
+
+
+def test_marker_failure_restores_quarantined_legacy_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    legacy = tmp_path / LEGACY_DEV_MARKETPLACE
+    legacy.mkdir()
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(
+        name=LEGACY_DEV_MARKETPLACE,
+        source=str(legacy),
+        source_type="local",
+    )
+    fake.plugins.append(
+        _plugin(LEGACY_DEV_PLUGIN_ID, source=str(legacy), source_type="local")
+    )
+    legacy_cache = home / "plugins/cache/footnote-dev/fno/0.3.0"
+    legacy_cache.mkdir(parents=True)
+    legacy_bytes = b"working legacy cache\n"
+    (legacy_cache / "payload").write_bytes(legacy_bytes)
+
+    def fail_marker(*_args: object, **_kwargs: object) -> Path:
+        raise CodexPluginError("desired-channel-marker", "injected marker failure")
+
+    monkeypatch.setattr(codex_plugin, "_write_marker", fail_marker)
+    with pytest.raises(CodexPluginError) as caught:
+        converge(
+            channel="dev",
+            validate_candidate=False,
+            runner=fake,
+            codex_home=home,
+            source_root=source,
+        )
+
+    assert caught.value.stage == "desired-channel-marker"
+    assert (legacy_cache / "payload").read_bytes() == legacy_bytes
+    assert [row["pluginId"] for row in fake.plugins] == [LEGACY_DEV_PLUGIN_ID]
+
+
+def test_rollback_receipt_clear_failure_rolls_back_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+
+    def fail_clear(_home: Path) -> None:
+        raise CodexPluginError("rollback-receipt-clear", "injected clear failure")
+
+    monkeypatch.setattr(codex_plugin, "_clear_rollback_receipt", fail_clear)
+    with pytest.raises(CodexPluginError) as caught:
+        converge(
+            channel="release",
+            validate_candidate=False,
+            runner=fake,
+            codex_home=home,
+            source_root=source,
+        )
+
+    assert caught.value.stage == "rollback-receipt-clear"
     marketplace_source = fake.marketplaces[0]["marketplaceSource"]
     assert isinstance(marketplace_source, dict)
     assert marketplace_source["sourceType"] == "local"
@@ -1013,6 +1273,7 @@ def test_rollback_failure_is_persisted_and_named(tmp_path: Path) -> None:
     with pytest.raises(CodexPluginError) as caught:
         converge(
             channel="release",
+            validate_candidate=False,
             runner=fake,
             codex_home=home,
             source_root=source,
@@ -1046,6 +1307,7 @@ def test_dev_migrates_legacy_identity_and_removes_legacy_cache(tmp_path: Path) -
 
     result = converge(
         channel="dev",
+        validate_candidate=False,
         runner=fake,
         codex_home=home,
         source_root=source,
@@ -1102,6 +1364,7 @@ def test_dev_refresh_fails_when_codex_does_not_rebuild_cache(tmp_path: Path) -> 
         converge(
             channel="dev",
             refresh=True,
+            validate_candidate=False,
             runner=runner,
             codex_home=tmp_path / "codex-home",
             source_root=source,
@@ -1117,6 +1380,7 @@ def test_external_failure_is_named_and_bounded(tmp_path: Path) -> None:
     with pytest.raises(CodexPluginError) as caught:
         converge(
             channel="release",
+            validate_candidate=False,
             runner=runner,
             codex_home=tmp_path / "codex-home",
             source_root=source,
