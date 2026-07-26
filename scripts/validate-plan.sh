@@ -69,6 +69,18 @@ _semantic_validate() {
                 "$python_bin" -m fno.cli plan validate "$PLAN_DIR" --execution
             return
         fi
+        if command -v uv >/dev/null 2>&1 &&
+            uv run --project "$source_root/cli" python -c 'import fno.cli' >/dev/null 2>&1; then
+            uv run --project "$source_root/cli" \
+                python -m fno.cli plan validate "$PLAN_DIR" --execution
+            return
+        fi
+        # Refuse rather than delegate: an installed fno older than this checkout
+        # advertises --execution while missing the guards this source defines,
+        # so falling back would pass a plan this tree rejects.
+        echo "source fno CLI at $source_root/cli/src is not runnable: no usable interpreter" >&2
+        echo "run 'uv sync --project $source_root/cli' or set FNO_PYTHON to an interpreter with the CLI deps" >&2
+        return 2
     fi
     if ! command -v fno >/dev/null 2>&1; then
         echo "fno CLI not found; install or update it before validating executable plans" >&2

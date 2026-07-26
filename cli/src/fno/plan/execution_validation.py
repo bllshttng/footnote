@@ -53,7 +53,8 @@ _CONVENTIONAL_FILENAMES = frozenset(
 )
 # Brackets stay legal: `app/[slug]/page.tsx` is a routing convention, not a glob.
 _FILE_REJECT_RE = re.compile(r"""[\s`$&|;<>(){}*?"'!]""")
-_FILE_EXTENSION_RE = re.compile(r"[\w.+-]+\.[A-Za-z0-9]{1,8}")
+_FILE_EXTENSION_RE = re.compile(r"[\w.+-]+\.[A-Za-z0-9]+")
+_DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SHELL_SEGMENT_RE = re.compile(r"(?:&&|\|\||[;|])")
 
@@ -83,8 +84,12 @@ def _is_runnable_verify(value: str) -> bool:
         while tokens and (tokens[0] == "!" or _ENV_ASSIGNMENT_RE.match(tokens[0])):
             tokens.pop(0)
         while tokens and tokens[0] in _COMMAND_WRAPPERS:
-            tokens.pop(0)
+            wrapper = tokens.pop(0)
             while tokens and (tokens[0].startswith("-") or _ENV_ASSIGNMENT_RE.match(tokens[0])):
+                tokens.pop(0)
+            # `timeout`/`gtimeout` take a positional duration before the command,
+            # and `-k` takes one of its own, so drop the whole leading run.
+            while tokens and wrapper.endswith("timeout") and _DURATION_RE.match(tokens[0]):
                 tokens.pop(0)
         if not tokens:
             continue
@@ -119,6 +124,11 @@ def _is_concrete_file(value: str) -> bool:
     if not token or _has_quick_placeholder(token):
         return False
     if _FILE_REJECT_RE.search(token) or "://" in token or token.startswith("-"):
+        return False
+    # Directory syntax names no file. `cli/src` stays accepted because an
+    # extensionless path is a legal file (`bin/mycli`) and nothing lexical
+    # separates the two; only unambiguous directory shapes are refused.
+    if token.endswith("/") or token.rsplit("/", 1)[-1] in {"", ".", ".."}:
         return False
     if "/" in token:
         return True

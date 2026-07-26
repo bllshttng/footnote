@@ -182,6 +182,8 @@ def test_quick_plan_verification_stays_representation_tolerant(tmp_path: Path) -
         "- fno test cli/tests/unit/test_a.py",
         "Run the check first.\n\n1. env FNO_DEBUG=1 fno test cli/tests/unit/test_a.py",
         "1. `./scripts/ci/preflight.sh`",
+        "1. `timeout 30 pytest cli/tests/unit/test_a.py`",
+        "1. `timeout -k 5 1m fno test cli/tests/unit/test_a.py`",
     ):
         plan = _write_plan(tmp_path, _quick_plan(verification=verification))
 
@@ -199,6 +201,8 @@ def test_quick_plan_accepts_concrete_paths_without_touching_the_filesystem(
         "AGENTS.md",
         "Dockerfile",
         ".gitignore",
+        "gradle.properties",
+        "site.webmanifest",
     ):
         plan = _write_plan(tmp_path, _quick_plan(files=f"- `{token}`"))
         doc = load_plan(plan)
@@ -214,6 +218,10 @@ def test_quick_plan_rejects_non_path_tokens(tmp_path: Path) -> None:
         "--dry-run",
         "cli/**/*.py",
         "backend service",
+        "cli/src/",
+        "/",
+        "~/.fno/",
+        "..",
     ):
         plan = _write_plan(tmp_path, _quick_plan(files=f"- `{token}`"))
 

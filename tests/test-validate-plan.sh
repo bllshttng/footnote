@@ -431,6 +431,17 @@ else
     fail "AC8d: Portable invocation used a stale installed CLI: $OUTPUT"
 fi
 
+# An installed fno older than this checkout advertises --execution while missing
+# the guards this source defines, so an unrunnable source tree must refuse rather
+# than hand the plan to it. PATH is stripped so uv is unreachable too.
+OUTPUT=$(PATH=/usr/bin:/bin FNO_PYTHON=/usr/bin/python3 bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1) \
+    && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -ne 0 ]] && echo "$OUTPUT" | grep -q "is not runnable"; then
+    pass "AC8e: Unrunnable source refuses instead of delegating to an installed CLI"
+else
+    fail "AC8e: Unrunnable source did not refuse (exit $EXIT_CODE): $OUTPUT"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Test Results ==="
