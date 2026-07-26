@@ -540,7 +540,14 @@ def _read_failure_record(path: str, known: set[str]) -> set[str]:
 
 
 def _write_failure_record(path: str, failed_names: Sequence[str]) -> None:
+    # The parent (.fno/) may not exist in a fresh checkout / preflight worktree;
+    # the retired smoke.sh did `mkdir -p "$(dirname "$FAILURE_RECORD")"`. Without
+    # this the open() raises OSError, is swallowed, and no record is written, so
+    # the next --retry-failed falls back to the full suite instead of the failures.
+    parent = os.path.dirname(path)
     try:
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             for n in failed_names:
                 fh.write(n + "\n")
