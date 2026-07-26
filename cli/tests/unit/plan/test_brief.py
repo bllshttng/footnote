@@ -291,6 +291,27 @@ class TestParseAcceptanceCriteria:
         assert hp["text"]
         assert isinstance(hp["tags"], list)
 
+    def test_adapter_routes_non_bold_shapes_through_canonical_compiler(self) -> None:
+        # AC7-INV: the brief reads criteria through the same compiler mutation
+        # and validation use, so a numbered-shape section (no bold AC token)
+        # yields synthesized AC{n} codes rather than being invisible.
+        from fno.plan.brief import parse_acceptance_criteria
+        body = (
+            "1. Given a numbered criterion, when compiled, then it is visible.\n"
+            "2. A second numbered criterion.\n"
+        )
+        entries = parse_acceptance_criteria(body)
+        assert [e["code"] for e in entries] == ["AC1", "AC2"]
+        assert all(e["ac_type"] == "GENERAL" for e in entries)
+        assert all(e["text"] for e in entries)
+
+    def test_adapter_swallows_malformed_section(self) -> None:
+        # The adapter never crashes the brief generator: a malformed non-empty
+        # section degrades to [] (strict refusal is finalization's job).
+        from fno.plan.brief import parse_acceptance_criteria
+        body = "Just prose with no criterion shape at all.\nMore prose.\n"
+        assert parse_acceptance_criteria(body) == []
+
     def test_filter_by_task_acceptance(self) -> None:
         from fno.plan.brief import parse_acceptance_criteria, filter_acs_for_task
         entries = parse_acceptance_criteria(SAMPLE_AC_SECTION)

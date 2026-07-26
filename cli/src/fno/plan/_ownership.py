@@ -21,6 +21,10 @@ BLUEPRINT_WRITE_ALLOWLIST: frozenset[str] = frozenset(
         "kill_criteria",
         "execution_mode",
         "waves",
+        # The compiled-v1 acceptance-contract stamp (x-f905): set at finalize
+        # when a design promotes to ready, marking the plan as carrying strict
+        # reference-resolved acceptance criteria.
+        "acceptance_contract",
     }
 )
 

@@ -911,7 +911,16 @@ def mutate(
 
 
 def finalize(doc_path: Path, no_emit: bool = False) -> tuple[int, str]:
-    """Promote a semantically valid Blueprint draft from design to ready."""
+    """Promote a semantically valid Blueprint draft from design to ready.
+
+    A design->ready promotion also stamps ``acceptance_contract: compiled-v1``:
+    the plan's Acceptance Criteria were compiled and every task acceptance
+    reference resolves. Validation runs against that proposed contract so a
+    half-promoted plan (ready status without resolving references) never lands.
+    An already-ready doc finalizes to itself unchanged; it is not re-stamped or
+    re-validated, so a historical unstamped ready plan keeps its permissive
+    legacy read (AC3-COMPAT).
+    """
     try:
         resolved = doc_path.expanduser().resolve(strict=True)
         plan = load_plan(resolved)
@@ -926,7 +935,11 @@ def finalize(doc_path: Path, no_emit: bool = False) -> tuple[int, str]:
     if current_status not in {"design", "ready"}:
         return 1, f"cannot finalize Blueprint draft from status {current_status!r}"
 
-    result = validate_execution(plan)
+    if current_status == "ready":
+        return 0, resolved.read_text(encoding="utf-8")
+
+    # Validate the proposed ready + compiled-v1 contract before writing.
+    result = validate_execution(plan, acceptance_contract="compiled-v1")
     if result.violations:
         report = "\n".join(
             f"  {violation.field}: {violation.message}"
@@ -934,15 +947,20 @@ def finalize(doc_path: Path, no_emit: bool = False) -> tuple[int, str]:
         )
         return 2, "Execution Strategy is not ready:\n" + report
 
-    if current_status == "ready":
-        return 0, resolved.read_text(encoding="utf-8")
-
     try:
         validate_transition(current_status, "ready")
     except StatusTransitionError as exc:
         return 3, str(exc)
+    try:
+        assert_blueprint_can_write("acceptance_contract")
+    except OwnershipViolation as exc:
+        return 2, str(exc)
     frontmatter = dict(plan.frontmatter)
     frontmatter["status"] = "ready"
+    frontmatter["acceptance_contract"] = "compiled-v1"
+    schema_err = _validate_proposed_frontmatter(frontmatter)
+    if schema_err is not None:
+        return 3, schema_err
     original = resolved.read_text(encoding="utf-8")
     proposed = _replace_frontmatter(original, frontmatter)
     if no_emit:
