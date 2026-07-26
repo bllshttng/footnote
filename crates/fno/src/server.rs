@@ -39,9 +39,9 @@ use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
     BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
     Frame, LayoutScope, LayoutSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
-    PanePlacement, PaneTarget, PlacementFallback, ProtoError, ServerMsg, SlotBinding, SlotOutcome,
-    SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta, TabSel, WaitOutcome,
-    MAX_SQUAD_NAME, MAX_TAB_NAME,
+    PanePlacement, PaneTarget, PlacementFallback, ProtoError, ResolvedPlacement, ServerMsg,
+    SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta,
+    TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
@@ -2361,6 +2361,14 @@ impl Core {
         pid: u64,
         placement: &PanePlacement,
     ) -> Result<(u64, TabId, bool), (u32, String)> {
+        // Strict origin placement (--at current, fallback=Refuse): locate the
+        // anchor pane, infer its squad+tab, refuse a conflicting explicit
+        // selector, and never fall back to a new tab. Handled before the
+        // selector-resolved path, which assumes the active tab rather than the
+        // anchor's real location.
+        if placement.at.is_some() && placement.fallback == PlacementFallback::Refuse {
+            return self.place_strict_at_anchor(pid, placement);
+        }
         if placement.tab.is_none() && placement.at.is_none() {
             return self
                 .place_spawned_pane(dest, squad_key, pid, placement.split)
@@ -2421,8 +2429,18 @@ impl Core {
         match res {
             Ok(()) => Ok((sid, tid, false)),
             // Min-size refusal falls back to a fresh tab, never a dead-end -
-            // mirroring place_spawned_pane.
+            // mirroring place_spawned_pane. Strict placement never reaches here
+            // (it routes through place_strict_at_anchor), but a Refuse policy on
+            // any selector-resolved path still fails closed rather than minting.
             Err(tree::SplitError::TooSmall { .. }) => {
+                if placement.fallback == PlacementFallback::Refuse {
+                    self.reap_pane(pid);
+                    return Err((
+                        err_code::BAD_REQUEST,
+                        "placement cannot fit: a resulting pane would be below the minimum size"
+                            .into(),
+                    ));
+                }
                 let ntid = self.session.mint_tab_id();
                 self.session.squads[si].tabs.push(Tab {
                     name: None,
@@ -2431,6 +2449,85 @@ impl Core {
                     focus: pid,
                 });
                 Ok((sid, ntid, true))
+            }
+            Err(e) => {
+                self.reap_pane(pid);
+                Err((err_code::BAD_REQUEST, e.to_string()))
+            }
+        }
+    }
+
+    /// Strict origin placement for `--at current` (v44, x-6928): the anchor is
+    /// pinned to the calling pane id, so focus races cannot redirect it. The
+    /// server locates the anchor once inside this (serialized) turn, infers its
+    /// squad+tab, refuses a conflicting explicit selector, splits beside it, and
+    /// never creates a tab or moves focus. Any failure reaps the pre-spawned
+    /// child and leaves the tree, focus, and registry untouched.
+    fn place_strict_at_anchor(
+        &mut self,
+        pid: u64,
+        placement: &PanePlacement,
+    ) -> Result<(u64, TabId, bool), (u32, String)> {
+        let anchor = placement.at.expect("strict placement carries an anchor");
+        let dir = placement.split.unwrap_or(Dir::Down);
+        let (sid, ti) = match self.session.find_pane(anchor) {
+            Some(loc) => loc,
+            None => {
+                self.reap_pane(pid);
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("anchor pane {anchor} no longer exists"),
+                ));
+            }
+        };
+        // An explicit workspace/tab selector must name the anchor's actual
+        // location; anything else is refused rather than redirecting placement.
+        if !matches!(placement.target, PaneTarget::CurrentRoute) {
+            let ok = matches!(self.resolve_placement_target(&placement.target, None), Ok(s) if s == Some(sid));
+            if !ok {
+                self.reap_pane(pid);
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("anchor pane {anchor} is not in the requested workspace"),
+                ));
+            }
+        }
+        if let Some(sel) = placement.tab.as_ref() {
+            if !matches!(sel, TabSel::New) {
+                let ok = matches!(self.resolve_tab_index(sid, sel), Ok(rti) if rti == ti);
+                if !ok {
+                    self.reap_pane(pid);
+                    return Err((
+                        err_code::BAD_REQUEST,
+                        format!("anchor pane {anchor} is not in the requested tab"),
+                    ));
+                }
+            }
+        }
+        let tid = self
+            .session
+            .squad(sid)
+            .expect("find_pane returned a live squad")
+            .tabs[ti]
+            .id;
+        let vp = self.tab_rect(tid);
+        let res = {
+            let tab = &mut self
+                .session
+                .squad_mut(sid)
+                .expect("find_pane returned a live squad")
+                .tabs[ti];
+            tree::split_at(tab, vp, anchor, dir, pid)
+        };
+        match res {
+            Ok(()) => Ok((sid, tid, false)),
+            Err(tree::SplitError::TooSmall { .. }) => {
+                self.reap_pane(pid);
+                Err((
+                    err_code::BAD_REQUEST,
+                    "exact placement cannot fit: a resulting pane would be below the minimum size"
+                        .into(),
+                ))
             }
             Err(e) => {
                 self.reap_pane(pid);
@@ -7555,11 +7652,40 @@ impl Core {
             } => {
                 let rows = rows.unwrap_or(vt::DEFAULT_ROWS);
                 let cols = cols.unwrap_or(vt::DEFAULT_COLS);
+                // Capture the exact-placement intent before `placement` moves
+                // into run_pane, so the receipt can echo the committed context.
+                let exact =
+                    placement.at.is_some() && placement.fallback == PlacementFallback::Refuse;
+                let (anchor, direction) = (placement.at, placement.split);
                 let msg = match self.run_pane(squad_key, cwd, argv, rows, cols, claim, placement) {
-                    Ok(pane_id) => ServerMsg::PaneSpawned {
-                        pane_id,
-                        placement: None,
-                    },
+                    Ok(pane_id) => {
+                        let resolved = if exact {
+                            // The new pane now sits beside the anchor in the
+                            // anchor's squad+tab; read its real location back.
+                            let (sid, tid) = self
+                                .session
+                                .find_pane(pane_id)
+                                .and_then(|(sid, ti)| {
+                                    self.session
+                                        .squad(sid)
+                                        .and_then(|s| s.tabs.get(ti).map(|t| (sid, t.id)))
+                                })
+                                .unwrap_or((0, 0));
+                            Some(ResolvedPlacement {
+                                anchor: anchor.unwrap(),
+                                direction: direction.unwrap_or(Dir::Down),
+                                fallback: PlacementFallback::Refuse,
+                                squad: sid,
+                                tab: tid,
+                            })
+                        } else {
+                            None
+                        };
+                        ServerMsg::PaneSpawned {
+                            pane_id,
+                            placement: resolved,
+                        }
+                    }
                     Err((code, msg)) => ServerMsg::Err { code, msg },
                 };
                 let _ = reply.send(msg);
@@ -11167,6 +11293,42 @@ mod tests {
             "a bad anchor reaps the pre-spawned pane (no orphan)"
         );
         let _ = before_panes;
+    }
+
+    #[test]
+    fn exact_current_refuses_conflicting_tab_selector() {
+        // AC1-EDGE: --at current pins pane 1 (tab 10); an explicit --tab id:20
+        // names a tab the anchor is NOT in. Strict placement refuses rather than
+        // redirecting, reaps the pre-spawned child, and changes no tree.
+        let mut core = two_tab_core();
+        core.shells = vec!["/bin/cat".into()];
+        let err = core
+            .run_pane(
+                "/a".into(),
+                "/a".into(),
+                vec!["/bin/cat".into()],
+                24,
+                80,
+                false,
+                PanePlacement {
+                    target: PaneTarget::SquadId(1),
+                    split: Some(Dir::Down),
+                    here: false,
+                    tab: Some(TabSel::Id(20)),
+                    at: Some(1),
+                    fallback: PlacementFallback::Refuse,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.0, err_code::BAD_REQUEST);
+        assert!(
+            err.1.contains("not in the requested tab"),
+            "conflict message: {}",
+            err.1
+        );
+        let s = core.session.squad(1).unwrap();
+        assert_eq!(s.tabs.len(), 2, "no new tab minted");
+        assert!(tree::leaves(&s.tabs.iter().find(|t| t.id == 10).unwrap().root).contains(&1));
     }
 
     /// A client with a LIVE reliable receiver, so `push_layout` never drops it

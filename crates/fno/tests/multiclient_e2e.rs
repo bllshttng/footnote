@@ -468,3 +468,84 @@ fn multiclient_nested_same_session_attach_refused_pre_raw_mode() {
         "the terminal must never enter the alternate screen on a refusal"
     );
 }
+
+// -- x-6928: concurrent strict spawns serialize; only one fits ---------------
+
+#[test]
+fn concurrent_strict_spawn_only_one_commits() {
+    // AC3-FR: two exact down-splits at the same origin pane, with geometry for
+    // only one, are serialized by the core loop. Exactly one commits beside the
+    // anchor; the other refuses (no new-tab fallback, no orphan pane, no extra
+    // tab). A 5-row viewport admits one MIN_ROWS split but not a second.
+    use common::connect_with_retry;
+    use fno::proto::{
+        read_msg_sync, write_msg_sync, ClientMsg, ControlVerb, PanePlacement, PaneTarget,
+        PlacementFallback, ServerMsg, BUILD_VERSION, PROTO_VERSION,
+    };
+    use fno::tree::Dir;
+
+    let scratch = Scratch::new("concurrent-strict");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+    let mut c = FakeClient::attach(&scratch.sock(), 5, 80, cwd.to_str().unwrap());
+    let layout = c.wait_layout(10, "first layout", |l| l.panes.len() == 1);
+    let pane1 = layout.focus;
+    let tabs_before: usize = c
+        .layout
+        .as_ref()
+        .unwrap()
+        .squads
+        .iter()
+        .map(|s| s.tabs.len())
+        .sum();
+
+    let req = ClientMsg::Control {
+        proto: PROTO_VERSION,
+        build: BUILD_VERSION.into(),
+        verb: ControlVerb::PaneRun {
+            cwd: cwd.to_string_lossy().into_owned(),
+            argv: vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()],
+            cols: None,
+            rows: None,
+            claim: false,
+            placement: PanePlacement {
+                tab: None,
+                at: Some(pane1),
+                target: PaneTarget::CurrentRoute,
+                split: Some(Dir::Down),
+                here: false,
+                fallback: PlacementFallback::Refuse,
+            },
+        },
+    };
+    // Queue both before reading either: the server serializes them in arrival
+    // order, so the first splits pane1 (fits) and the second finds pane1 now too
+    // short and refuses.
+    let mut s1 = connect_with_retry(&scratch.sock());
+    s1.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write_msg_sync(&mut s1, &req).unwrap();
+    let mut s2 = connect_with_retry(&scratch.sock());
+    s2.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write_msg_sync(&mut s2, &req).unwrap();
+    let r1 = read_msg_sync(&mut s1).unwrap();
+    let r2 = read_msg_sync(&mut s2).unwrap();
+
+    let ok = matches!(r1, ServerMsg::PaneSpawned { .. }) as usize
+        + matches!(r2, ServerMsg::PaneSpawned { .. }) as usize;
+    assert_eq!(
+        ok, 1,
+        "exactly one strict spawn commits (got {r1:?}, {r2:?})"
+    );
+    let refuse_msg = match (&r1, &r2) {
+        (ServerMsg::Err { msg, .. }, _) | (_, ServerMsg::Err { msg, .. }) => msg.clone(),
+        _ => String::new(),
+    };
+    assert!(
+        refuse_msg.contains("cannot fit"),
+        "the losing spawn refuses on min-size, not a fallback: {refuse_msg}"
+    );
+
+    let layout = c.wait_layout(10, "settled to two panes", |l| l.panes.len() == 2);
+    let tabs_after: usize = layout.squads.iter().map(|s| s.tabs.len()).sum();
+    assert_eq!(tabs_after, tabs_before, "no new tab minted by the refusal");
+}

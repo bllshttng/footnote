@@ -1613,6 +1613,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         let mut split = None;
         let mut tab = None;
         let mut at = None;
+        let mut at_current = false;
         let mut i = 1;
         while i < args.len() {
             let tok = args[i]
@@ -1640,7 +1641,14 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 // (x-d865) exact placement: land in a named tab, adjacent to an
                 // anchor pane.
                 "--tab" => tab = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?),
-                "--at" => at = Some(parse_u64(&flag_value(args, &mut i, "--at")?, "--at")?),
+                "--at" => {
+                    let v = flag_value(args, &mut i, "--at")?;
+                    if v == "current" {
+                        at_current = true;
+                    } else {
+                        at = Some(parse_u64(&v, "--at")?);
+                    }
+                }
                 t if t.starts_with("--") => return Err(format!("unknown flag: {t}")),
                 _ => break, // first bare token begins the command argv
             }
@@ -1657,6 +1665,28 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         if argv.is_empty() {
             return Err("pane run needs a command".to_string());
         }
+        let mut fallback = PlacementFallback::NewTab;
+        if at_current {
+            // `--at current` resolves the calling pane from FNO_PANE here in the
+            // one parser both high- and low-level callers route through, and opts
+            // into strict placement (Refuse). FNO_SESSION selects the server via
+            // resolve_session; a missing/invalid FNO_PANE is a usage error before
+            // any process is spawned (AC1-ERR).
+            if split.is_none() {
+                return Err("--at current requires --split".to_string());
+            }
+            let fno_pane = std::env::var("FNO_PANE")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse::<u64>().ok())
+                .ok_or_else(|| {
+                    "--at current requires a numeric FNO_PANE (run it inside a mux pane)"
+                        .to_string()
+                })?;
+            at = Some(fno_pane);
+            fallback = PlacementFallback::Refuse;
+        }
         return Ok(ParsedPane {
             session,
             json,
@@ -1672,7 +1702,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     here: false,
                     tab,
                     at,
-                    fallback: PlacementFallback::NewTab,
+                    fallback,
                 },
             },
         });
@@ -2536,12 +2566,30 @@ fn render_reply(
             }
             EXIT_OK
         }
-        ServerMsg::PaneSpawned { pane_id, .. } => {
-            // AC4-UI: stdout is EXACTLY the machine-readable pane id.
+        ServerMsg::PaneSpawned { pane_id, placement } => {
+            // AC4-UI: stdout is EXACTLY the machine-readable pane id. The
+            // server-authored exact-placement receipt (anchor/direction/fallback)
+            // rides the JSON object and a stderr line, never stdout.
             if json {
-                println!("{}", serde_json::json!({ "pane_id": pane_id }));
+                let mut obj = serde_json::json!({ "pane_id": pane_id });
+                if let Some(p) = &placement {
+                    obj["placement"] = serde_json::json!({
+                        "anchor": p.anchor,
+                        "direction": p.direction,
+                        "fallback": p.fallback,
+                        "squad": p.squad,
+                        "tab": p.tab,
+                    });
+                }
+                println!("{obj}");
             } else {
                 println!("{pane_id}");
+                if let Some(p) = placement {
+                    eprintln!(
+                        "anchor={} direction={:?} fallback={:?} squad={} tab={}",
+                        p.anchor, p.direction, p.fallback, p.squad, p.tab
+                    );
+                }
             }
             EXIT_OK
         }
