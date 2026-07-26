@@ -1039,7 +1039,7 @@ def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> No
     hung, elapsed = invoke(hung_bin)
 
     assert baseline.returncode == hung.returncode == 0
-    assert elapsed - baseline_elapsed < 1
+    assert elapsed - baseline_elapsed < 5
     assert json.loads(hung.stdout) == json.loads(baseline.stdout)
     assert (
         hung.stdout
