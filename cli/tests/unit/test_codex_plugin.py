@@ -1884,8 +1884,6 @@ def test_stable_release_noop_skips_offline_preflight_and_only_collects_live_stat
 
     def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
-        # If the release-version-check preflight ever ran, fail to model an
-        # offline or version-drift host. A true no-op must never reach it.
         if argv == [str(source / "scripts/release/sync-version.sh"), "--check"]:
             return _cp(argv, {}, rc=1, err="simulated offline preflight failure")
         if argv == ["codex", "plugin", "marketplace", "list", "--json"]:
@@ -1933,3 +1931,86 @@ def test_stable_release_noop_skips_offline_preflight_and_only_collects_live_stat
         ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
     ]
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+def test_interrupt_after_mutation_restores_exact_state_before_reraise(
+    tmp_path: Path, exc_type: type[BaseException]
+) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    config = home / "config.toml"
+    config.parent.mkdir(parents=True)
+    config_bytes = (
+        f'[marketplaces.footnote]\nsource_type = "local"\nsource = "{source}"\n\n'
+        '[plugins."fno@footnote"]\nenabled = true\n'
+    ).encode()
+    config.write_bytes(config_bytes)
+    marker = home / "footnote" / "plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker_bytes = b'{"channel":"dev","marketplace":"footnote","source":"prior"}\n'
+    marker.write_bytes(marker_bytes)
+    cache = home / "plugins" / "cache" / "footnote" / "fno" / "0.3.0"
+    cache.mkdir(parents=True)
+    cache_bytes = b"working cache\n"
+    (cache / "payload").write_bytes(cache_bytes)
+
+    def runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        result = fake(argv, **kwargs)
+        if argv[1:3] == ["plugin", "remove"] and argv[3] == PLUGIN_ID:
+            raise exc_type("simulated termination after mutation")
+        return result
+
+    with pytest.raises(exc_type):
+        converge(
+            channel="release",
+            validate_candidate=False,
+            runner=runner,
+            codex_home=home,
+            source_root=source,
+        )
+
+    assert marker.read_bytes() == marker_bytes
+    assert config.read_bytes() == config_bytes
+    assert (cache / "payload").read_bytes() == cache_bytes
+    assert [row["name"] for row in fake.marketplaces] == [MARKETPLACE]
+    marketplace_source = fake.marketplaces[0]["marketplaceSource"]
+    assert isinstance(marketplace_source, dict)
+    assert marketplace_source["sourceType"] == "local"
+    assert [row["pluginId"] for row in fake.plugins] == [PLUGIN_ID]
+
+
+def test_system_exit_during_rollback_persists_failure_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    fake.fail_git_plugin_once = True
+
+    def fail_rollback(*_args: object, **_kwargs: object) -> None:
+        raise SystemExit("simulated termination during rollback")
+
+    monkeypatch.setattr(codex_plugin, "_restore_snapshot", fail_rollback)
+    with pytest.raises(CodexPluginError) as caught:
+        converge(
+            channel="release",
+            validate_candidate=False,
+            runner=fake,
+            codex_home=home,
+            source_root=source,
+        )
+
+    assert caught.value.stage == "rollback-failure"
+    assert isinstance(caught.value.__cause__, SystemExit)
+    receipt = json.loads(
+        (home / "footnote" / "rollback-failure.json").read_text(encoding="utf-8")
+    )
+    assert receipt["channel"] == "release"
+    assert receipt["stage"] == "plugin-add"
+    assert "termination during rollback" in receipt["detail"]

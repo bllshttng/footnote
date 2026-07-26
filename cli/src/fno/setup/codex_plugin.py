@@ -1323,14 +1323,16 @@ def converge(
             return ConvergenceResult(
                 channel, action, enabled[0].plugin_id, enabled[0].version or version
             )
-        except (OSError, ValueError, TypeError, CodexPluginError) as raw_error:
+        except BaseException as raw_error:  # noqa: BLE001 - rollback on any abort
             original = (
                 raw_error
                 if isinstance(raw_error, CodexPluginError)
                 else CodexPluginError("transaction", str(raw_error))
             )
             if not changed:
-                raise original
+                if isinstance(raw_error, Exception):
+                    raise original
+                raise
             try:
                 _restore_snapshot(
                     runner,
@@ -1339,7 +1341,7 @@ def converge(
                     tuple(cache_quarantines),
                     env=live_env,
                 )
-            except Exception as raw_rollback:  # noqa: BLE001 - receipt must cover every rollback failure
+            except BaseException as raw_rollback:  # noqa: BLE001 - any rollback failure earns a receipt
                 rollback_error = (
                     raw_rollback
                     if isinstance(raw_rollback, CodexPluginError)
@@ -1351,4 +1353,6 @@ def converge(
                 except CodexPluginError as receipt_error:
                     detail = f"{detail}; receipt failed: {receipt_error}"
                 raise CodexPluginError("rollback-failure", detail) from raw_rollback
-            raise original
+            if isinstance(raw_error, Exception):
+                raise original
+            raise
