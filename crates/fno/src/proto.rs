@@ -282,8 +282,9 @@ pub enum ProtoError {
 // Messages
 // ---------------------------------------------------------------------------
 
-/// Client -> server. Everything here rides the reliable channel.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Client -> server. Everything here rides the reliable channel. `Eq` is NOT
+/// derived: a `Control` verb may carry an [`AnchoredLayoutSpec`] (`f32` weights).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ClientMsg {
     /// First message on a fresh connection. `proto`/`build` drive the version
     /// handshake; `rows`/`cols` are the client's CONTENT-AREA viewport (its
@@ -522,7 +523,9 @@ pub struct PanePlacement {
 /// The script-API verbs (`fno mux pane ls|read|run|send|wait|kill`), each a
 /// one-shot request answered by exactly one [`ServerMsg`] reply. Versioned as
 /// part of `Control` (v4); a new verb or a shape change bumps `PROTO_VERSION`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// `Eq` is intentionally NOT derived: `LayoutGraft` carries an
+/// [`AnchoredLayoutSpec`] whose split weights are `f32` (never `Eq`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ControlVerb {
     /// Every pane across every squad -> [`ServerMsg::PaneList`].
     PaneLs,
@@ -665,6 +668,20 @@ pub enum ControlVerb {
         /// Opt-in focus move to slot 0's pane; default never steals a viewer's
         /// focus (Locked Decision 2). `#[serde(default)]` keeps a v41 reader
         /// (which never sends this verb) irrelevant and a hand-authored spec terse.
+        #[serde(default)]
+        focus: bool,
+    },
+    /// (v44, x-6928) Realize a typed [`AnchoredLayoutSpec`] as a LOCAL subtree
+    /// at `anchor` -> [`ServerMsg::LayoutGrafted`]. Resolves the Anchor + Fno
+    /// bindings, spawns Shell slots, and replaces the anchor leaf with the
+    /// subtree in one atomic turn, preserving the enclosing tab and every live
+    /// bound PTY. Session-local; never persisted. `--at current` resolves the
+    /// anchor client-side before this verb, so `anchor` is a real pane id.
+    LayoutGraft {
+        #[serde(default)]
+        squad: PaneTarget,
+        anchor: u64,
+        spec: AnchoredLayoutSpec,
         #[serde(default)]
         focus: bool,
     },
@@ -1607,6 +1624,36 @@ pub enum ServerMsg {
     /// fit / unknown template) means nothing was mutated; a `LayoutApplied` with
     /// a `SpawnFailed` slot is a reported partial success.
     LayoutApplied { results: Vec<SlotResult> },
+    /// (v44, x-6928) Answer to [`ControlVerb::LayoutGraft`]: the committed
+    /// anchor/squad/tab and one outcome per named slot. Graft is all-or-nothing,
+    /// so every slot is filled on this receipt; a refusal is a top-level `Err`.
+    LayoutGrafted {
+        anchor: u64,
+        squad: u64,
+        tab: TabId,
+        results: Vec<GraftSlotResult>,
+    },
+}
+
+/// One named slot's outcome in a [`ServerMsg::LayoutGrafted`] receipt (v44,
+/// x-6928). Graft never partially succeeds, so `pane_id` is always present.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraftSlotResult {
+    pub slot: String,
+    pub pane_id: u64,
+    pub outcome: GraftOutcome,
+}
+
+/// How a graft slot was filled (v44, x-6928).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GraftOutcome {
+    /// The anchor pane, relocated into the subtree (PTY untouched).
+    Anchor,
+    /// A reused live fno pane (PTY untouched, only its tree location changed).
+    Fno,
+    /// A freshly spawned shell.
+    Shell,
 }
 
 /// One tab in a [`ServerMsg::TabList`] (v41, layout-api). `pane_ids` are the

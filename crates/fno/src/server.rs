@@ -37,11 +37,11 @@ use crate::agents_view::{self, RegistryAgent};
 use crate::backlog_view;
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
-    BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb,
-    Frame, LayoutScope, LayoutSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
-    PanePlacement, PaneTarget, PlacementFallback, ProtoError, ResolvedPlacement, ServerMsg,
-    SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta,
-    TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg,
+    Command, ControlVerb, Frame, LayoutScope, LayoutSpec, MouseButton, MouseEvent, MouseKind,
+    PaneInfo, PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError,
+    ResolvedPlacement, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta,
+    TabInfo, TabLayout, TabMeta, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
@@ -478,6 +478,14 @@ enum CoreMsg {
         squad: PaneTarget,
         tab: TabSel,
         spec: LayoutSpec,
+        focus: bool,
+        reply: ControlReply,
+    },
+    /// (v44, x-6928) Local anchored layout graft: realize `spec` at `anchor`.
+    LayoutGraft {
+        squad: PaneTarget,
+        anchor: u64,
+        spec: AnchoredLayoutSpec,
         focus: bool,
         reply: ControlReply,
     },
@@ -3113,6 +3121,190 @@ impl Core {
     ) -> Result<Vec<SlotResult>, (u32, String)> {
         let sid = self.resolve_squad(squad)?;
         self.apply_spec(sid, tab_sel, spec, focus)
+    }
+
+    /// Realize an [`AnchoredLayoutSpec`] as a local subtree at `anchor`
+    /// (v44, x-6928). Atomic: validate -> resolve bindings -> spawn shells ->
+    /// detach reused panes -> swap the candidate in, all in one serialized turn.
+    /// No partial success (a refusal is a top-level `Err`); no live PTY killed.
+    fn layout_graft(
+        &mut self,
+        squad: &PaneTarget,
+        anchor: u64,
+        spec: &AnchoredLayoutSpec,
+        _focus: bool,
+    ) -> Result<ServerMsg, (u32, String)> {
+        use crate::proto::{GraftOutcome, GraftSlotResult, LayoutBinding};
+        use std::collections::HashMap;
+
+        // 1. Pure topology + slot-integrity validation, pre-mutation.
+        crate::templates::validate_anchored_spec(spec)
+            .map_err(|e| (err_code::BAD_REQUEST, e.to_string()))?;
+
+        // 2. Locate the anchor; refuse stale + a conflicting workspace selector.
+        let (sid, ti) = match self.session.find_pane(anchor) {
+            Some(loc) => loc,
+            None => {
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("anchor pane {anchor} no longer exists"),
+                ));
+            }
+        };
+        if !matches!(squad, PaneTarget::CurrentRoute) {
+            let ok = matches!(self.resolve_placement_target(squad, None), Ok(s) if s == Some(sid));
+            if !ok {
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("anchor pane {anchor} is not in the requested workspace"),
+                ));
+            }
+        }
+        let tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
+        let vp = self.tab_rect(tid);
+
+        // 3. Resolve Anchor + Fno bindings to live pane ids; collect Shell slots.
+        //    An unavailable Fno is REFUSED, never degraded to a shell. Duplicates
+        //    (two bindings -> one pane, or Fno -> the anchor) are refused.
+        let mut resolved: HashMap<String, u64> = HashMap::new();
+        let mut shell_slots: Vec<String> = Vec::new();
+        let mut results: Vec<GraftSlotResult> = Vec::new();
+        for slot in &spec.slots {
+            let (pid, outcome) = match &slot.binding {
+                LayoutBinding::Anchor => (anchor, GraftOutcome::Anchor),
+                LayoutBinding::Fno(id) => {
+                    let p = self.resolve_local_pane(id).ok_or_else(|| {
+                        (
+                            err_code::BAD_REQUEST,
+                            format!("fno binding {:?} has no live pane", slot.name),
+                        )
+                    })?;
+                    (p, GraftOutcome::Fno)
+                }
+                LayoutBinding::Shell => {
+                    shell_slots.push(slot.name.clone());
+                    continue;
+                }
+            };
+            if resolved.values().any(|&v| v == pid) {
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("two graft slots resolve to the same pane {pid}"),
+                ));
+            }
+            resolved.insert(slot.name.clone(), pid);
+            results.push(GraftSlotResult {
+                slot: slot.name.clone(),
+                pane_id: pid,
+                outcome,
+            });
+        }
+
+        // 4. Pre-spawn fit probe: realize the subtree with placeholder shell ids
+        //    and confirm the candidate fits, so a too-small graft refuses BEFORE
+        //    any shell spawns (AC4-EDGE-MINIMUM-FIT).
+        let mut fit_map = resolved.clone();
+        for (i, name) in shell_slots.iter().enumerate() {
+            fit_map.insert(name.clone(), u64::MAX - i as u64);
+        }
+        let probe_tab = self.session.squad(sid).expect("live").tabs[ti].clone();
+        let probe_subtree = crate::templates::realize_spec_tree(&spec.tree, &fit_map);
+        if tree::replace_anchor_with_candidate(&probe_tab, vp, anchor, probe_subtree).is_err() {
+            return Err((
+                err_code::BAD_REQUEST,
+                "graft cannot fit: a resulting pane would be below the minimum size".into(),
+            ));
+        }
+
+        // 5. Spawn Shell slots AFTER pure validation. All-or-nothing: a failed
+        //    spawn reaps every shell spawned so far (no detach happened yet, so
+        //    rollback is shell-only - AC4-EDGE-SHELL-ROLLBACK).
+        let cwd = self
+            .session
+            .squad(sid)
+            .map(|s| s.canonical_cwd().to_string())
+            .unwrap_or_default();
+        let mut spawned: Vec<u64> = Vec::new();
+        for name in &shell_slots {
+            match self.spawn_pane(vt::DEFAULT_ROWS, vt::DEFAULT_COLS, &cwd) {
+                Ok(p) => {
+                    spawned.push(p);
+                    resolved.insert(name.clone(), p);
+                    results.push(GraftSlotResult {
+                        slot: name.clone(),
+                        pane_id: p,
+                        outcome: GraftOutcome::Shell,
+                    });
+                }
+                Err(_) => {
+                    for p in &spawned {
+                        self.reap_pane(*p);
+                    }
+                    return Err((
+                        err_code::SPAWN_FAILED,
+                        format!("graft shell slot {name:?} failed to spawn; rolled back"),
+                    ));
+                }
+            }
+        }
+
+        // 6. Detach reused Fno panes from their current leaves (PTY kept) so the
+        //    candidate's substitution is their only occurrence. The anchor stays;
+        //    it is the substitution site and lives at its Anchor slot.
+        for slot in &spec.slots {
+            if let LayoutBinding::Fno(_) = slot.binding {
+                let p = resolved[&slot.name];
+                if p != anchor {
+                    self.detach_pane_keep_pty(p);
+                }
+            }
+        }
+
+        // 7. Commit: realize the subtree with real ids and swap it in. The fit
+        //    probe already passed; this re-validates on the live (post-detach)
+        //    tab and swaps the candidate in one turn.
+        let subtree = crate::templates::realize_spec_tree(&spec.tree, &resolved);
+        let si = self
+            .session
+            .squads
+            .iter()
+            .position(|s| s.id == sid)
+            .expect("squad live");
+        let commit = {
+            let tab = &mut self.session.squads[si].tabs[ti];
+            match tree::replace_anchor_with_candidate(tab, vp, anchor, subtree) {
+                Ok(node) => {
+                    tab.root = node;
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        };
+        if let Err(e) = commit {
+            // A race only (the probe passed); reap the shells and refuse.
+            for p in &spawned {
+                self.reap_pane(*p);
+            }
+            return Err((
+                err_code::BAD_REQUEST,
+                format!("graft commit failed: {e}; rolled back spawned shells"),
+            ));
+        }
+
+        self.push_layout(true);
+        // Order results by the tree's slot traversal for a stable receipt.
+        results.sort_by_key(|r| {
+            spec.slots
+                .iter()
+                .position(|s| s.name == r.slot)
+                .unwrap_or(usize::MAX)
+        });
+        Ok(ServerMsg::LayoutGrafted {
+            anchor,
+            squad: sid,
+            tab: tid,
+            results,
+        })
     }
 
     /// The sid-resolved core of [`Self::layout_apply`], shared with US8 restore
@@ -7906,6 +8098,20 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
+            CoreMsg::LayoutGraft {
+                squad,
+                anchor,
+                spec,
+                focus,
+                reply,
+            } => {
+                let msg = match self.layout_graft(&squad, anchor, &spec, focus) {
+                    Ok(msg) => msg,
+                    Err((code, msg)) => ServerMsg::Err { code, msg },
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
             CoreMsg::AgentTails { tails } => {
                 self.tail_by_session = tails;
                 self.push_layout(false);
@@ -9052,6 +9258,22 @@ async fn handle_control(
                 .send(CoreMsg::LayoutApply {
                     squad,
                     tab,
+                    spec,
+                    focus,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::LayoutGraft {
+            squad,
+            anchor,
+            spec,
+            focus,
+        } => {
+            core_tx
+                .send(CoreMsg::LayoutGraft {
+                    squad,
+                    anchor,
                     spec,
                     focus,
                     reply: reply_tx,
@@ -11329,6 +11551,79 @@ mod tests {
         let s = core.session.squad(1).unwrap();
         assert_eq!(s.tabs.len(), 2, "no new tab minted");
         assert!(tree::leaves(&s.tabs.iter().find(|t| t.id == 10).unwrap().root).contains(&1));
+    }
+
+    #[test]
+    fn graft_materialization_rollback_preserves_tree_on_shell_failure() {
+        // AC4-EDGE-SHELL-ROLLBACK / AC2-FR: when a Shell slot cannot spawn, the
+        // graft refuses - no shell, no tree mutation, no focus change survives,
+        // and the anchor's tab is byte-unchanged. Forced by an empty
+        // shell-candidate list so spawn_pane fails.
+        use crate::proto::{
+            AnchoredLayoutSpec, LayoutBinding, LayoutSlot, LayoutTreeChild, LayoutTreeSpec,
+        };
+        use crate::tree::Axis;
+
+        let mut core = two_tab_core();
+        core.shells = Vec::new(); // every spawn_pane fails
+        let tab10_before = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 10)
+            .unwrap()
+            .clone();
+        let spec = AnchoredLayoutSpec {
+            version: 1,
+            tree: LayoutTreeSpec::Split {
+                axis: Axis::Vertical,
+                children: vec![
+                    LayoutTreeChild {
+                        weight: 0.5,
+                        tree: LayoutTreeSpec::Slot("a".into()),
+                    },
+                    LayoutTreeChild {
+                        weight: 0.5,
+                        tree: LayoutTreeSpec::Slot("b".into()),
+                    },
+                ],
+            },
+            slots: vec![
+                LayoutSlot {
+                    name: "a".into(),
+                    binding: LayoutBinding::Anchor,
+                },
+                LayoutSlot {
+                    name: "b".into(),
+                    binding: LayoutBinding::Shell,
+                },
+            ],
+        };
+        let err = core
+            .layout_graft(&PaneTarget::SquadId(1), 1, &spec, false)
+            .unwrap_err();
+        assert!(
+            err.1.contains("failed to spawn") && err.1.contains("rolled back"),
+            "rollback message: {}",
+            err.1
+        );
+        let tab10_after = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 10)
+            .unwrap()
+            .clone();
+        assert_eq!(tab10_after.root, tab10_before.root, "tree byte-unchanged");
+        assert_eq!(tab10_after.focus, tab10_before.focus, "focus unchanged");
+        // No leaked pane id: only the original 1 and 2 remain.
+        let mut leaves = tree::leaves(&tab10_after.root);
+        leaves.sort_unstable();
+        assert_eq!(leaves, vec![1, 2]);
     }
 
     /// A client with a LIVE reliable receiver, so `push_layout` never drops it

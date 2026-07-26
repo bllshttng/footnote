@@ -167,6 +167,36 @@ fn node_to_spec(node: &Node, slot_names: &[String]) -> LayoutTreeSpec {
     }
 }
 
+/// Realize a [`LayoutTreeSpec`] into a concrete pane tree, substituting each
+/// slot name with its resolved pane id and normalizing the split weights to
+/// sum 1.0. Caller guarantees every referenced slot is in `panes`
+/// ([`validate_anchored_spec`] ran first). Pure: no I/O, no id minting.
+pub fn realize_spec_tree(spec: &LayoutTreeSpec, panes: &HashMap<String, u64>) -> Node {
+    match spec {
+        LayoutTreeSpec::Slot(name) => {
+            Node::Leaf(*panes.get(name).expect("validated spec resolves every slot"))
+        }
+        LayoutTreeSpec::Split { axis, children } => {
+            let sum: f32 = children.iter().map(|c| c.weight).sum();
+            let each = if sum > 0.0 {
+                1.0 / children.len() as f32
+            } else {
+                0.0
+            };
+            Node::Branch {
+                axis: *axis,
+                children: children
+                    .iter()
+                    .map(|c| {
+                        let w = if sum > 0.0 { c.weight / sum } else { each };
+                        (w, realize_spec_tree(&c.tree, panes))
+                    })
+                    .collect(),
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SpecError {
     #[error("layout tree must have 1..={MAX} leaves, got {got}", MAX = MAX_LAYOUT_LEAVES)]

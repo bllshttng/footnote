@@ -10,10 +10,11 @@ use std::time::{Duration, Instant};
 
 use common::{connect_with_retry, spawn_server, FakeClient};
 use fno::proto::{
-    read_msg_sync, write_msg_sync, ClientMsg, Command, ControlVerb, PanePlacement, PaneTarget,
+    read_msg_sync, write_msg_sync, AnchoredLayoutSpec, ClientMsg, Command, ControlVerb,
+    LayoutBinding, LayoutSlot, LayoutTreeChild, LayoutTreeSpec, PanePlacement, PaneTarget,
     PlacementFallback, ResolvedPlacement, ServerMsg, BUILD_VERSION, PROTO_VERSION,
 };
-use fno::tree::Dir;
+use fno::tree::{Axis, Dir};
 
 struct Scratch(PathBuf);
 
@@ -838,4 +839,154 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
         t == tabs_before + 1
     });
     let _ = pane1;
+}
+
+// -- x-6928: local anchored layout graft -------------------------------------
+
+/// Send `LayoutGraft` at `anchor`; return the per-slot (name, pane) results or
+/// the server's error message.
+fn graft_at(
+    scratch: &Scratch,
+    anchor: u64,
+    spec: AnchoredLayoutSpec,
+) -> Result<Vec<(String, u64)>, String> {
+    let mut stream = connect_with_retry(&scratch.sock());
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write_msg_sync(
+        &mut stream,
+        &ClientMsg::Control {
+            proto: PROTO_VERSION,
+            build: BUILD_VERSION.into(),
+            verb: ControlVerb::LayoutGraft {
+                squad: PaneTarget::CurrentRoute,
+                anchor,
+                spec,
+                focus: false,
+            },
+        },
+    )
+    .unwrap();
+    match read_msg_sync(&mut stream).unwrap() {
+        ServerMsg::LayoutGrafted { results, .. } => {
+            Ok(results.into_iter().map(|r| (r.slot, r.pane_id)).collect())
+        }
+        ServerMsg::Err { msg, .. } => Err(msg),
+        other => panic!("unexpected graft reply: {other:?}"),
+    }
+}
+
+#[test]
+fn layout_graft_replaces_anchor_and_preserves_enclosing_tab() {
+    // AC2-HP / AC4-EDGE-ENCLOSING-TREE / AC4-EDGE-NO-FOCUS: a typed V[anchor,
+    // shell] subtree replaces the anchor leaf; the enclosing sibling and the
+    // viewer's focus are untouched; the receipt names every slot's pane.
+    let scratch = Scratch::new("graft");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+    let (mut c, pane1) = attach_settled(&scratch, &cwd);
+    let pane2 = run_pane(
+        &scratch,
+        &cwd,
+        PanePlacement {
+            tab: None,
+            at: None,
+            target: PaneTarget::CurrentRoute,
+            split: Some(Dir::Right),
+            here: false,
+            fallback: PlacementFallback::NewTab,
+        },
+    )
+    .unwrap();
+    let layout = c.wait_layout(10, "two panes", |l| l.panes.len() == 2 && l.focus == pane2);
+    let r2_before = layout.panes.iter().find(|(id, _)| *id == pane2).unwrap().1;
+
+    let spec = AnchoredLayoutSpec {
+        version: 1,
+        tree: LayoutTreeSpec::Split {
+            axis: Axis::Vertical,
+            children: vec![
+                LayoutTreeChild {
+                    weight: 0.5,
+                    tree: LayoutTreeSpec::Slot("anchor".into()),
+                },
+                LayoutTreeChild {
+                    weight: 0.5,
+                    tree: LayoutTreeSpec::Slot("fresh".into()),
+                },
+            ],
+        },
+        slots: vec![
+            LayoutSlot {
+                name: "anchor".into(),
+                binding: LayoutBinding::Anchor,
+            },
+            LayoutSlot {
+                name: "fresh".into(),
+                binding: LayoutBinding::Shell,
+            },
+        ],
+    };
+    let results = graft_at(&scratch, pane1, spec).expect("graft succeeds");
+    let shell = results
+        .iter()
+        .find(|(n, _)| n == "fresh")
+        .map(|(_, p)| *p)
+        .unwrap();
+
+    let layout = c.wait_layout(10, "graft lands three panes", |l| l.panes.len() == 3);
+    let r1 = layout.panes.iter().find(|(id, _)| *id == pane1).unwrap().1;
+    let rs = layout.panes.iter().find(|(id, _)| *id == shell).unwrap().1;
+    let r2 = layout.panes.iter().find(|(id, _)| *id == pane2).unwrap().1;
+    // The anchor leaf is replaced by V[pane1, shell] in pane1's column.
+    assert_eq!(r1.x, rs.x, "anchor + shell share the anchor's column");
+    assert!(rs.y > r1.y, "the shell lands below the anchor");
+    assert!(
+        rs.x < r2.x,
+        "the subtree stays in the anchor's column, not pane2's"
+    );
+    // AC4-EDGE-ENCLOSING-TREE: the enclosing sibling is byte-unchanged.
+    assert_eq!(r2, r2_before, "the enclosing pane2 is untouched");
+    // AC4-EDGE-NO-FOCUS: scripted graft never steals focus.
+    assert_eq!(layout.focus, pane2, "graft did not move the viewer's focus");
+}
+
+#[test]
+fn layout_graft_refuses_unavailable_fno_and_duplicate_binding() {
+    // AC4-EDGE-FNO-UNAVAILABLE / AC2-EDGE: an fno binding with no live pane is
+    // refused (never degraded to a shell); two slots resolving to one pane too.
+    let scratch = Scratch::new("graft-refuse");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+    let (_c, pane1) = attach_settled(&scratch, &cwd);
+
+    let spec = AnchoredLayoutSpec {
+        version: 1,
+        tree: LayoutTreeSpec::Split {
+            axis: Axis::Vertical,
+            children: vec![
+                LayoutTreeChild {
+                    weight: 0.5,
+                    tree: LayoutTreeSpec::Slot("a".into()),
+                },
+                LayoutTreeChild {
+                    weight: 0.5,
+                    tree: LayoutTreeSpec::Slot("b".into()),
+                },
+            ],
+        },
+        slots: vec![
+            LayoutSlot {
+                name: "a".into(),
+                binding: LayoutBinding::Anchor,
+            },
+            LayoutSlot {
+                name: "b".into(),
+                binding: LayoutBinding::Fno("no-such-session".into()),
+            },
+        ],
+    };
+    let err = graft_at(&scratch, pane1, spec).expect_err("unavailable fno refused");
+    assert!(err.contains("no live pane"), "{err}");
 }
