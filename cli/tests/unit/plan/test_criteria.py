@@ -238,6 +238,22 @@ class TestBoundaries:
         assert "Then c" in criteria[0].text
         assert "Second scenario" in criteria[1].text
 
+    def test_fenced_code_block_does_not_yield_spurious_criteria(self) -> None:
+        # A list-like line inside a criterion's fenced code example is not a
+        # criterion; the two real numbered items compile as AC1 and AC2.
+        body = (
+            "1. First behavior.\n"
+            "   ```\n"
+            "   - --verbose\n"
+            "   2. also not a criterion\n"
+            "   ```\n"
+            "2. Second behavior.\n"
+        )
+        criteria = compile_criteria(body)
+        assert [c.code for c in criteria] == ["AC1", "AC2"]
+        assert criteria[0].text == "First behavior."
+        assert criteria[1].text == "Second behavior."
+
 
 # ---------------------------------------------------------------------------
 # Criterion record shape + source_ref diagnostics

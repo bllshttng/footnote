@@ -274,6 +274,28 @@ class TestExecutableDraftLifecycle:
         assert refused.returncode == 2
         assert "AC9" in refused.stderr
 
+    def test_rewrite_clears_stale_compiled_v1_contract(self, tmp_path):
+        """A --rewrite regenerates placeholder acceptance, so the prior
+        compiled-v1 stamp is demoted (not preserved) until re-finalize, and an
+        interrupted rewrite never leaves a ready plan violating its contract."""
+        doc = _copy_fixture(GREENFIELD_FIXTURE, tmp_path)
+        assert _run_mutate(doc, "--mode", "greenfield", "--draft").returncode == 0
+        text = doc.read_text(encoding="utf-8")
+        text = text.replace("surface: []", "surface: [src/generated.py]")
+        text = text.replace(
+            "verify: '# fill in verify command'",
+            "verify: pytest tests/test_generated.py",
+        )
+        text = text.replace("acceptance: []", "acceptance: [AC1-HP]")
+        doc.write_text(text, encoding="utf-8")
+        assert _run_mutate(doc, "--finalize").returncode == 0
+        assert _load_frontmatter(doc).get("acceptance_contract") == "compiled-v1"
+
+        rewritten = _run_mutate(doc, "--rewrite")
+
+        assert rewritten.returncode == 0, rewritten.stderr
+        assert _load_frontmatter(doc).get("acceptance_contract") is None
+
 
 # ---------------------------------------------------------------------------
 # W2 (x-408f / ab-638f9066): projectable frontmatter block-lists

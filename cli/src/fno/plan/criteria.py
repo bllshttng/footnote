@@ -114,6 +114,14 @@ def _is_gwt(line: str) -> bool:
     return _GWT_PREFIX_RE.match(line) is not None
 
 
+_FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+
+
+def _is_fence(line: str) -> bool:
+    """A fenced-code-block delimiter line (``` or ~~~)."""
+    return _FENCE_RE.match(line) is not None
+
+
 def _is_anchor(line: str) -> bool:
     """A line that opens a new criterion (so it ends the previous one's block)."""
     return _is_heading(line) or _is_bold_ac(line) or _is_table(line) or _is_list(line)
@@ -150,7 +158,7 @@ def _gather_until_break(lines: list[str], start: int) -> tuple[list[str], int]:
     j = start
     while j < len(lines):
         s = lines[j]
-        if not s.strip() or _is_anchor(s):
+        if not s.strip() or _is_anchor(s) or _is_fence(s):
             break
         out.append(s.strip())
         j += 1
@@ -163,7 +171,7 @@ def _gather_gwt(lines: list[str], start: int) -> tuple[list[str], int]:
     j = start
     while j < len(lines):
         s = lines[j]
-        if not s.strip() or not _is_gwt(s):
+        if not s.strip() or not _is_gwt(s) or _is_fence(s):
             break
         out.append(s.strip())
         j += 1
@@ -280,9 +288,16 @@ def compile_criteria(
     n = len(lines)
     raw: list[tuple[int, str | None, str, str]] = []
     i = 0
+    in_fence = False
     while i < n:
         line = lines[i]
-        if not line.strip():
+        # Skip fenced code blocks so a list-like example line ("- --verbose")
+        # inside a criterion's code block is not compiled as a criterion.
+        if _is_fence(line):
+            in_fence = not in_fence
+            i += 1
+            continue
+        if in_fence or not line.strip():
             i += 1
             continue
 
