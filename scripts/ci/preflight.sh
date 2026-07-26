@@ -93,6 +93,18 @@ _json_array() {
     jq -cn --args '$ARGS.positional' -- "$@"
 }
 
+candidate_fno() {
+    if [[ -x "$INVOKING_ROOT/cli/.venv/bin/python" ]]; then
+        PYTHONPATH="$INVOKING_ROOT/cli/src" \
+            "$INVOKING_ROOT/cli/.venv/bin/python" -m fno.cli "$@"
+    elif [[ -f "$INVOKING_ROOT/cli/pyproject.toml" ]] && command -v uv >/dev/null 2>&1; then
+        PYTHONPATH="$INVOKING_ROOT/cli/src" \
+            uv run --project "$INVOKING_ROOT/cli" fno-py "$@"
+    else
+        fno "$@"
+    fi
+}
+
 emit_verification_receipt() {
     local mode="$1" result="$2" scope_json="$3" expected="$4" executed="$5" started_at="$6" detail="$7"
     local finished_at command_json environment_json producer_json data
@@ -122,7 +134,7 @@ emit_verification_receipt() {
         --arg detail "$detail" \
         '{candidate_sha:$candidate_sha,command:$command,environment:$environment,scope:$scope,started_at:$started_at,finished_at:$finished_at,mode:$mode,result:$result,producer:$producer,steps_expected:$steps_expected,steps_executed:$steps_executed,detail:$detail}')" || return 1
     mkdir -p "$(dirname "$EVENTS_PATH")" || return 1
-    fno event emit \
+    candidate_fno event emit \
         --type verification_receipt \
         --source target \
         --events "$EVENTS_PATH" \
@@ -163,7 +175,7 @@ reuse_attestation() {
     # The text file is only a fast cache carrier. Authority stays in the typed
     # event journal, so a matching carrier with missing, malformed, subset,
     # void, stale, or otherwise non-passing evidence cannot bless this SHA.
-    if ! fno pr evidence-check >/dev/null 2>&1; then
+    if ! candidate_fno pr evidence-check >/dev/null 2>&1; then
         echo "preflight: matching attestation has no exact full/passed event evidence - running full suite"
         return 1
     fi
