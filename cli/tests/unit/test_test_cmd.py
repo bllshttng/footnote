@@ -201,3 +201,12 @@ def test_python_source_selects_the_suffixed_test_family(tmp_path: Path) -> None:
     assert sorted(s["target"] for s in sel) == [
         "cli/tests/unit/test_claims_core.py", "cli/tests/unit/test_claims_io.py"]
     assert unmapped == []
+
+
+def test_orchestrated_subtree_maps_to_its_runner_step(tmp_path: Path) -> None:
+    """cli/tests/smoke/ is excluded from discovery; its runner step owns it."""
+    _repo(tmp_path)
+    sel, unmapped = select_changed(tmp_path, ["cli/tests/smoke/test_thing.sh"])
+    assert [(s["rule"], s["target"]) for s in sel] == [
+        ("shell-registry-step", "Smoke tests")]
+    assert unmapped == []

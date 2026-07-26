@@ -673,6 +673,10 @@ _INFRA_SELECTS = (
 )
 
 
+# (path prefix, the registry step whose runner orchestrates that whole tree).
+_ORCHESTRATED_SUBTREES = (("cli/tests/smoke/", "Smoke tests"),)
+
+
 def _lines(text: str) -> list[str]:
     return [ln.strip() for ln in text.splitlines() if ln.strip()]
 
@@ -796,6 +800,11 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
             # Outside the auto-discovery globs but wired into a registry step
             # by hand (tests/ci/*.sh, scripts/lib/paths.sh): run the owning step.
             steps = [name for name, _, cmd in _STRUCTURAL_STEPS if rel in cmd]
+            # An orchestrated subtree names only its runner in the registry, so
+            # the substring match above cannot see the individual file. This is
+            # the mirror of discover_shell_harnesses() excluding the same tree.
+            steps += [owner for prefix, owner in _ORCHESTRATED_SUBTREES
+                      if rel.startswith(prefix)]
             if steps:
                 for name in steps:
                     add("shell-registry-step", rel, "step", name)
