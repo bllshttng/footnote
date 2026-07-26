@@ -33,6 +33,11 @@ Modes:
 | `fno test smoke --only '<glob>'` | Run only steps whose name matches the shell glob. |
 | `fno test smoke --retry-failed` | Re-run only the steps recorded by the last `--keep-going` run; full run if the record is missing or corrupt. |
 | `fno test smoke --list [--verbose]` | Print the registry (names; with `--verbose`, working dir + command) and exit. |
+| `fno test smoke --changed [--base REV --head REV]` | Run only the work the changed paths map to. Explicitly partial: see below. |
+
+The three subset modes (`--changed`, `--only`, `--retry-failed`) are mutually
+exclusive and the runner refuses a combination rather than letting one silently
+win and mislabel the evidence.
 
 Prerequisites (`uv`, `python3` with `yaml` importable, `cargo` when a selected
 step needs it) are asserted up front and named on failure with exit 2. The
@@ -43,12 +48,61 @@ records a `mode=FULL verdict=green` attestation only on a full, all-green run,
 so a subset pass can never mint or satisfy one; a run that executes zero steps
 exits non-zero rather than reading as green.
 
+### `--changed` - the changed-surface packet
+
+Early feedback, and partial by construction.
+It maps the changed paths to a subset of the same steps the full runner owns, so there is no second runner and no CI-only implementation.
+
+Where the paths come from: with explicit `--base`/`--head` it diffs exactly those two revisions, so selection never depends on a mutable remote-tracking ref (this is what CI and preflight pass).
+With neither, it takes one snapshot of the merge-base with `origin/main` plus untracked files, which a commit-to-commit diff cannot see but which are part of local changed intent.
+
+Selection is deterministic and every hit names the rule that produced it, so a bad mapping is diagnosable from the receipt rather than from the source:
+
+| Rule | Changed path | Selects |
+|---|---|---|
+| `test-file-self` | a test file | itself |
+| `python-source-stem` | `cli/src/**.py` | `test_<stem>.py` and the `test_<stem>_*.py` family |
+| `shell-harness-self` | a discovered harness | itself |
+| `shell-helper-reverse` | a sourced helper | every harness that sources it |
+| `shell-registry-step` | a `.sh` wired into a registry step by hand | that step |
+| `rust-family` | `crates/<crate>/**` | the registry steps that own the crate |
+| `infra-broad` | the runner, the selector, shared test config, a workflow | the selector's own contract tests |
+
+Anything else is listed as `unmapped` and selects nothing.
+Inference is best effort: roughly 40% of `cli/src` modules have a conventionally-named test, and the full gate, not the selector, is the completeness backstop.
+
+Three mechanisms keep a partial green from reading as a full one.
+The header says `CHANGED SUBSET` and never `FULL`.
+The failure record and the receipt live in their own namespace (`.fno/changed-last-*`), so a changed run cannot clear the full runner's failure record and cannot mint or satisfy a `mode=FULL` attestation, and a concurrent full run cannot overwrite the changed receipt.
+And the exit codes separate evidence quality:
+
+| Exit | Meaning |
+|---|---|
+| 0 | the selected packet passed - that claim only |
+| the child's own code | a selected step failed (propagated, not flattened) |
+| 20 | nothing mapped: evidence about the selector, not that the change is safe |
+| 21 | UNEVALUATED - missing base, shallow checkout, or an untrustworthy diff |
+
+Every run writes `.fno/changed-last-receipt.json` with the candidate and base identity, the selections and their rules, the unmapped paths, the verdict, and the timings (selection, execution, time to first signal).
+
+Sharding the full suite is deliberately out of scope until those receipts show that final merge latency, rather than first feedback, is the remaining bottleneck.
+
 ### `scripts/ci/preflight.sh` - the hermetic runner
 
 One command to run before pushing. It validates the invoking checkout's
 **committed HEAD** inside a persistent, hermetic preflight worktree, then runs
-`fno-py test smoke --keep-going` plus the rust-ci legs (pinned `cargo +1.94.1 fmt
---check`, `cargo test --all-targets` for both crates, advisory `cargo audit`).
+the changed packet, `fno-py test smoke --keep-going`, and the rust-ci legs
+(pinned `cargo +1.94.1 fmt --check`, `cargo test --all-targets` for both crates,
+advisory `cargo audit`).
+
+The changed packet goes first and stops the whole run on its own failure, so a
+broken nearest-neighbour test costs seconds rather than a full suite. It is
+given an explicit base (merge-base with `origin/main`) and head (the candidate
+SHA) because local mode inside the preflight worktree would read its
+deliberately preserved untracked caches as changed paths. A packet that maps
+nothing or cannot trust its diff falls through to the full gate instead of
+reporting a verdict it did not earn, and `--retry-failed` skips it as a
+different subset mode. Only the full legs can mint `mode=FULL`.
 
 Why a separate worktree with a scrubbed environment: the canonical checkout's
 `.fno/config.toml` otherwise leaks into the config reader's candidate chain and
@@ -156,6 +210,8 @@ scripts/ci/preflight.sh                 # full run; reuses a matching attestatio
 scripts/ci/preflight.sh --force         # ignore the cached attestation, run every suite
 scripts/ci/preflight.sh --retry-failed  # fast: only last run's failures
 fno test smoke --keep-going             # non-hermetic, in your working tree
+fno test smoke --changed                # earliest signal: only what your diff maps to
+fno test smoke --changed --list         # what it would run, and what it could not map
 fno test smoke --list                   # what CI actually runs
 ```
 

@@ -723,9 +723,17 @@ def changed_snapshot(root: Path, base: str = "", head: str = "") -> tuple[list[s
 
 
 def _conventional_tests(root: Path, stem: str) -> list[str]:
-    hits = sorted(p.relative_to(root).as_posix()
-                  for p in (root / "cli" / "tests").rglob(f"test_{stem}.py"))
-    return hits
+    """Same-stem tests: `test_<stem>.py` plus the `test_<stem>_*.py` family.
+
+    The suffixed family is not decoration - it is how a third of this repo's
+    covered modules are actually named (claims.py -> test_claims_core.py,
+    test_claims_io.py, ...), so exact-match alone leaves them unmapped. The
+    widest family here is 19 files, still seconds against the full pytest step.
+    """
+    tests = root / "cli" / "tests"
+    hits = {p.relative_to(root).as_posix() for p in tests.rglob(f"test_{stem}.py")}
+    hits |= {p.relative_to(root).as_posix() for p in tests.rglob(f"test_{stem}_*.py")}
+    return sorted(hits)
 
 
 def _rust_family(rel: str) -> list[str]:

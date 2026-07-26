@@ -189,3 +189,15 @@ def test_snapshot_refuses_a_half_specified_range(tmp_path: Path) -> None:
     paths, reason = changed_snapshot(tmp_path, "HEAD", "")
     assert paths == []
     assert "both --base and --head" in reason
+
+
+def test_python_source_selects_the_suffixed_test_family(tmp_path: Path) -> None:
+    """The repo's real convention: claims.py is covered by test_claims_*.py."""
+    _repo(tmp_path)
+    _write(tmp_path / "cli/src/fno/claims.py", "x = 1\n")
+    _write(tmp_path / "cli/tests/unit/test_claims_core.py", "def test_a(): pass\n")
+    _write(tmp_path / "cli/tests/unit/test_claims_io.py", "def test_b(): pass\n")
+    sel, unmapped = select_changed(tmp_path, ["cli/src/fno/claims.py"])
+    assert sorted(s["target"] for s in sel) == [
+        "cli/tests/unit/test_claims_core.py", "cli/tests/unit/test_claims_io.py"]
+    assert unmapped == []
