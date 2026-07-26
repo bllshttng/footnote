@@ -22,6 +22,7 @@ import datetime as dt
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
@@ -48,6 +49,96 @@ def _event_timestamp(value: object) -> Optional[dt.datetime]:
     if parsed.tzinfo is None:
         return None
     return parsed.astimezone(dt.timezone.utc)
+
+
+def hosted_ci_decision(
+    *,
+    declared_none: bool,
+    workflow_state: str,
+    candidate_sha: str,
+    observed_sha: Optional[str],
+    checks: Optional[list[dict]],
+) -> dict:
+    """Reduce hosted-CI policy and observations without collapsing uncertainty."""
+    counts = {"total": 0, "passed": 0, "failed": 0, "pending": 0}
+    base = {
+        "declared_none": declared_none,
+        "workflow_state": workflow_state,
+        "counts": counts,
+    }
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha, re.IGNORECASE) is None:
+        return {**base, "satisfied": False, "result": "unavailable"}
+    if workflow_state not in {"present", "absent", "unavailable"}:
+        return {**base, "satisfied": False, "result": "unavailable"}
+    if workflow_state == "unavailable" or checks is None:
+        return {**base, "satisfied": False, "result": "unavailable"}
+    if checks and observed_sha is None:
+        return {**base, "satisfied": False, "result": "unavailable"}
+    if observed_sha is not None:
+        if re.fullmatch(r"[0-9a-f]{40}", observed_sha, re.IGNORECASE) is None:
+            return {**base, "satisfied": False, "result": "unavailable"}
+        if observed_sha.lower() != candidate_sha.lower():
+            return {**base, "satisfied": False, "result": "stale"}
+    for check in checks:
+        if not isinstance(check, dict):
+            return {**base, "satisfied": False, "result": "unavailable"}
+        counts["total"] += 1
+        bucket = str(check.get("bucket") or "").lower()
+        status = str(check.get("status") or "").upper()
+        conclusion = str(check.get("conclusion") or check.get("state") or "").upper()
+        if bucket in {"fail", "cancel"} or conclusion in {
+            "FAILURE",
+            "TIMED_OUT",
+            "CANCELLED",
+            "ACTION_REQUIRED",
+            "STARTUP_FAILURE",
+            "STALE",
+            "ERROR",
+        }:
+            counts["failed"] += 1
+        elif (
+            bucket in {"pass", "skipping"}
+            or (status in {"", "COMPLETED"} and conclusion in {"SUCCESS", "NEUTRAL", "SKIPPED"})
+        ):
+            counts["passed"] += 1
+        else:
+            counts["pending"] += 1
+    if counts["failed"]:
+        return {**base, "satisfied": False, "result": "failed"}
+    if counts["pending"]:
+        return {**base, "satisfied": False, "result": "pending"}
+    if counts["total"]:
+        return {**base, "satisfied": True, "result": "passed"}
+    if declared_none and workflow_state == "absent":
+        return {**base, "satisfied": True, "result": "not_configured"}
+    return {**base, "satisfied": False, "result": "pending"}
+
+
+def hosted_workflow_state(cwd: Path) -> str:
+    """Return present, absent, or unavailable for hosted workflow discovery."""
+    workflows = cwd / ".github" / "workflows"
+    try:
+        workflows.stat()
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "unavailable"
+    try:
+        if not workflows.is_dir():
+            return "unavailable"
+        for child in workflows.iterdir():
+            if child.suffix.lower() not in {".yml", ".yaml"}:
+                continue
+            try:
+                if stat.S_ISREG(child.stat().st_mode):
+                    return "present"
+            except OSError:
+                return "unavailable"
+        return "absent"
+    except FileNotFoundError:
+        return "unavailable"
+    except OSError:
+        return "unavailable"
 
 
 def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:

@@ -678,6 +678,165 @@ fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkflowState {
+    Present,
+    Absent,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostedCiResult {
+    NotConfigured,
+    Unavailable,
+    Pending,
+    Failed,
+    Passed,
+    Stale,
+}
+
+#[cfg(test)]
+impl HostedCiResult {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotConfigured => "not_configured",
+            Self::Unavailable => "unavailable",
+            Self::Pending => "pending",
+            Self::Failed => "failed",
+            Self::Passed => "passed",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+pub(crate) fn hosted_workflow_state(cwd: &Path) -> WorkflowState {
+    let workflows = cwd.join(".github/workflows");
+    let metadata = match std::fs::metadata(&workflows) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return WorkflowState::Absent;
+        }
+        Err(_) => return WorkflowState::Unavailable,
+    };
+    if !metadata.is_dir() {
+        return WorkflowState::Unavailable;
+    }
+    let entries = match std::fs::read_dir(workflows) {
+        Ok(entries) => entries,
+        Err(_) => return WorkflowState::Unavailable,
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return WorkflowState::Unavailable;
+        };
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("yml") || extension.eq_ignore_ascii_case("yaml")
+            })
+        {
+            match std::fs::metadata(path) {
+                Ok(metadata) if metadata.is_file() => return WorkflowState::Present,
+                Ok(_) => continue,
+                Err(_) => return WorkflowState::Unavailable,
+            }
+        }
+    }
+    WorkflowState::Absent
+}
+
+fn hosted_ci_result(
+    declared_none: bool,
+    workflow_state: WorkflowState,
+    candidate_sha: &str,
+    observed_sha: Option<&str>,
+    checks: Option<&Value>,
+) -> HostedCiResult {
+    if !full_sha(candidate_sha) || workflow_state == WorkflowState::Unavailable {
+        return HostedCiResult::Unavailable;
+    }
+    let Some(checks) = checks.and_then(Value::as_array) else {
+        return HostedCiResult::Unavailable;
+    };
+    if !checks.is_empty() && observed_sha.is_none() {
+        return HostedCiResult::Unavailable;
+    }
+    if let Some(observed) = observed_sha {
+        if !full_sha(observed) {
+            return HostedCiResult::Unavailable;
+        }
+        if !observed.eq_ignore_ascii_case(candidate_sha) {
+            return HostedCiResult::Stale;
+        }
+    }
+    let mut failed = false;
+    let mut pending = false;
+    for check in checks {
+        let bucket = check
+            .get("bucket")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let status = check
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let conclusion = check
+            .get("conclusion")
+            .or_else(|| check.get("state"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        if matches!(bucket.as_str(), "fail" | "cancel")
+            || matches!(
+                conclusion.as_str(),
+                "FAILURE"
+                    | "TIMED_OUT"
+                    | "CANCELLED"
+                    | "ACTION_REQUIRED"
+                    | "STARTUP_FAILURE"
+                    | "STALE"
+                    | "ERROR"
+            )
+        {
+            failed = true;
+        } else if !matches!(bucket.as_str(), "pass" | "skipping")
+            && !((status.is_empty() || status == "COMPLETED")
+                && matches!(conclusion.as_str(), "SUCCESS" | "NEUTRAL" | "SKIPPED"))
+        {
+            pending = true;
+        }
+    }
+    if failed {
+        HostedCiResult::Failed
+    } else if pending {
+        HostedCiResult::Pending
+    } else if !checks.is_empty() {
+        HostedCiResult::Passed
+    } else if declared_none && workflow_state == WorkflowState::Absent {
+        HostedCiResult::NotConfigured
+    } else {
+        HostedCiResult::Pending
+    }
+}
+
+pub(crate) fn hosted_ci_not_configured(
+    declared_none: bool,
+    cwd: &Path,
+    candidate_sha: &str,
+) -> bool {
+    hosted_ci_result(
+        declared_none,
+        hosted_workflow_state(cwd),
+        candidate_sha,
+        None,
+        Some(&json!([])),
+    ) == HostedCiResult::NotConfigured
+}
+
 // ── public dispatch entry ─────────────────────────────────────────────────────
 
 /// Internal: run the requested sub-verb, returning (code, stdout, stderr).
@@ -906,5 +1065,62 @@ mod tests {
         assert_eq!(decision["result"], "passed");
         assert_eq!(decision["coverage"]["complete"], false);
         assert_eq!(decision["satisfied"], false);
+    }
+
+    #[test]
+    fn hosted_ci_states_preserve_policy_observation_and_sha_distinctions() {
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let empty = json!([]);
+        let pending = json!([{"status": "IN_PROGRESS", "conclusion": ""}]);
+        let failed = json!([{"status": "COMPLETED", "conclusion": "FAILURE"}]);
+        let passed = json!([{"status": "COMPLETED", "conclusion": "SUCCESS"}]);
+        let cases = [
+            (true, WorkflowState::Absent, None, &empty, "not_configured"),
+            (false, WorkflowState::Absent, None, &empty, "pending"),
+            (true, WorkflowState::Present, None, &empty, "pending"),
+            (
+                false,
+                WorkflowState::Unavailable,
+                None,
+                &empty,
+                "unavailable",
+            ),
+            (false, WorkflowState::Present, Some(other), &empty, "stale"),
+            (false, WorkflowState::Present, None, &passed, "unavailable"),
+            (
+                false,
+                WorkflowState::Present,
+                Some(sha),
+                &pending,
+                "pending",
+            ),
+            (false, WorkflowState::Present, Some(sha), &failed, "failed"),
+            (false, WorkflowState::Present, Some(sha), &passed, "passed"),
+        ];
+        for (declared, workflow, observed, checks, expected) in cases {
+            assert_eq!(
+                hosted_ci_result(declared, workflow, sha, observed, Some(checks)).as_str(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn hosted_workflow_detection_revokes_declared_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(hosted_ci_not_configured(true, dir.path(), sha));
+        let workflows = dir.path().join(".github/workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("ci.yml"), "name: ci\n").unwrap();
+        assert!(!hosted_ci_not_configured(true, dir.path(), sha));
+        std::fs::remove_dir_all(dir.path().join(".github")).unwrap();
+        std::fs::create_dir(dir.path().join(".github")).unwrap();
+        std::fs::write(&workflows, "not a directory\n").unwrap();
+        assert_eq!(
+            hosted_workflow_state(dir.path()),
+            WorkflowState::Unavailable
+        );
     }
 }

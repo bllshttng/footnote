@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from fno.events import ValidationError, validate
-from fno.pr._preflight import verification_decision
+from fno.pr._preflight import hosted_ci_decision, hosted_workflow_state, verification_decision
 
 
 SHA = "a" * 40
@@ -170,3 +170,79 @@ def test_latest_exact_receipt_wins_even_when_file_order_disagrees(tmp_path: Path
 
     assert decision["satisfied"] is False
     assert decision["result"] == "pending"
+
+
+@pytest.mark.parametrize(
+    ("declared_none", "workflow_state", "observed_sha", "checks", "result", "satisfied"),
+    [
+        (True, "absent", None, [], "not_configured", True),
+        (False, "absent", None, [], "pending", False),
+        (True, "present", None, [], "pending", False),
+        (False, "unavailable", None, [], "unavailable", False),
+        (False, "present", OTHER_SHA, [], "stale", False),
+        (
+            False,
+            "present",
+            None,
+            [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+            "unavailable",
+            False,
+        ),
+        (
+            False,
+            "present",
+            SHA,
+            [{"name": "ci", "status": "IN_PROGRESS", "conclusion": ""}],
+            "pending",
+            False,
+        ),
+        (
+            False,
+            "present",
+            SHA,
+            [{"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}],
+            "failed",
+            False,
+        ),
+        (
+            False,
+            "present",
+            SHA,
+            [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+            "passed",
+            True,
+        ),
+    ],
+)
+def test_hosted_ci_states_remain_distinct(
+    declared_none: bool,
+    workflow_state: str,
+    observed_sha: str | None,
+    checks: list[dict],
+    result: str,
+    satisfied: bool,
+) -> None:
+    decision = hosted_ci_decision(
+        declared_none=declared_none,
+        workflow_state=workflow_state,
+        candidate_sha=SHA,
+        observed_sha=observed_sha,
+        checks=checks,
+    )
+
+    assert decision["result"] == result
+    assert decision["satisfied"] is satisfied
+
+
+def test_hosted_workflow_discovery_distinguishes_absent_present_and_unavailable(
+    tmp_path: Path,
+) -> None:
+    assert hosted_workflow_state(tmp_path) == "absent"
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text("name: ci\n")
+    assert hosted_workflow_state(tmp_path) == "present"
+    (workflows / "ci.yml").unlink()
+    workflows.rmdir()
+    workflows.write_text("not a directory\n")
+    assert hosted_workflow_state(tmp_path) == "unavailable"
