@@ -313,15 +313,21 @@ for id in "${NODES[@]}"; do
   # used to assemble it uncapped, so a long configured node id produced a name
   # `fno agents spawn` rejected - the dispatch vanished with no session and no
   # event. Exit 2 is a typed refusal and skips the node loudly.
-  agent_name="$(fno agents name target "$id" --slug "$node_slug" 2>/dev/null)"
+  # FNO_AGENTS_RUNTIME=python pins the Python dispatch: an ambient `=rust` routes
+  # EVERY `fno agents` verb to the binary, which has no `name` port. Exit 3 (not
+  # 2) is the naming refusal - Click spends 2 on usage errors including "no such
+  # command", so an `fno` too old to know this verb would otherwise read as
+  # "unrepresentable" and refuse the whole fleet.
+  agent_name="$(FNO_AGENTS_RUNTIME=python fno agents name target "$id" --slug "$node_slug" 2>/dev/null)"
   name_rc=$?
-  if [[ "$name_rc" -eq 2 ]]; then
+  if [[ "$name_rc" -eq 3 ]]; then
     echo "failed $id reason=\"node id cannot be represented as an agent name within 64 chars\""
     n_failed=$((n_failed + 1))
     continue
   elif [[ "$name_rc" -ne 0 || -z "$agent_name" ]]; then
-    # Degraded (no reachable fno): keep the historical assembly. The daemon still
-    # refuses an over-long name loudly at the spawn boundary.
+    # Degraded: fno unreachable or too old for this verb. Keep the historical
+    # assembly; the daemon still refuses an over-long name loudly at the spawn
+    # boundary.
     node_slug="$(printf '%s' "$node_slug" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
       | sed -E 's/-+/-/g; s/^-+//; s/-+$//' | cut -c1-30 | sed -E 's/-+$//')"
     if [[ -n "$node_slug" ]]; then

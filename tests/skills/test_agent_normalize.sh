@@ -583,6 +583,18 @@ print(agent_name('spawn', 'ab-deadbeef', slug='path consolidation wave 0 delegat
     && pass "x-3218 ordinary node names are unchanged by the bridge" \
     || fail "x-3218 ordinary name drifted: $OUT"
 
+  # A stale installed fno (no `name` verb) exits 2 like any Click usage error.
+  # That must DEGRADE, never read as "unrepresentable" - misreading it would
+  # refuse every node on an out-of-date install.
+  STALE_DIR="$TMP/stale-fno"; mkdir -p "$STALE_DIR"
+  printf '#!/usr/bin/env bash\n[[ "${1:-}" == "agents" && "${2:-}" == "name" ]] && { echo "Usage: fno agents" >&2; exit 2; }\nexit 1\n' > "$STALE_DIR/fno"
+  chmod +x "$STALE_DIR/fno"
+  OUT="$(NODE_SLUG_RESOLVER="$STUB_SLUG" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" \
+         PATH="$STALE_DIR:$PATH" bash "$NORM" --input "ab-deadbeef")"
+  [[ "$(field "$OUT" status)" == "ok" && "$(field "$OUT" name)" == "spawn-ab-deadbeef-dashless-spawn" ]] \
+    && pass "x-3218 a stale fno (exit 2) degrades to the historical name, not a refusal" \
+    || fail "x-3218 stale-fno degradation: $OUT"
+
   # No slug -> the id-only degradation, same as before.
   OUT="$(NODE_SLUG_RESOLVER="$STUB_EMPTY" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" \
          PATH="$REAL_FNO_DIR:$PATH" bash "$NORM" --input "ab-deadbeef")"

@@ -534,15 +534,21 @@ elif [[ -n "$NODE" ]]; then
   # which a local `cut -c1-64` cannot do. Exit 2 is a typed refusal (the required
   # identity does not fit) and must surface, never degrade into a silently
   # altered name.
-  agent_name="$(fno agents name "$verb" "$NODE" --slug "$_node_slug" 2>/dev/null)"
+  # FNO_AGENTS_RUNTIME=python pins the Python dispatch: an ambient `=rust` routes
+  # EVERY `fno agents` verb to the binary, which has no `name` port. Exit 3 (not
+  # 2) is the naming refusal - Click spends 2 on usage errors including "no such
+  # command", so an `fno` too old to know this verb would otherwise read as
+  # "unrepresentable" and refuse every node.
+  agent_name="$(FNO_AGENTS_RUNTIME=python fno agents name "$verb" "$NODE" --slug "$_node_slug" 2>/dev/null)"
   _name_rc=$?
-  if [[ "$_name_rc" -eq 2 ]]; then
+  if [[ "$_name_rc" -eq 3 ]]; then
     emit_error "node $NODE cannot be represented as an agent name within 64 chars"
   elif [[ "$_name_rc" -ne 0 || -z "$agent_name" ]]; then
-    # Degraded: no reachable fno (the same condition that empties the slug via
-    # resolve_node_slug, so this normally yields <verb>-<node>). Uncapped by
-    # design - the daemon still refuses an over-long name loudly at the spawn
-    # boundary, which beats inventing a fifth local budget here.
+    # Degraded: fno unreachable or too old for this verb (the same condition that
+    # empties the slug via resolve_node_slug, so this normally yields
+    # <verb>-<node>). Uncapped by design - the daemon still refuses an over-long
+    # name loudly at the spawn boundary, which beats inventing a fifth local
+    # budget here.
     if [[ -n "$_node_slug" ]]; then
       agent_name="${verb}-${NODE}-${_node_slug}"
     else

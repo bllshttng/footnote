@@ -861,6 +861,23 @@ if "$NAME_BRIDGE" target x-1 >/dev/null 2>&1; then
     && pass "x-3218 refused dispatch launches no worker" \
     || fail "x-3218 refused dispatch still spawned: $(ask_count)"
 
+  # A stale installed fno (no `name` verb) exits 2 like any Click usage error.
+  # That must DEGRADE to the historical assembly, never read as "unrepresentable"
+  # - misreading it would refuse the entire fleet on an out-of-date install.
+  reset_mock
+  set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+  echo "cargo bootstrapper" > "$MOCKSTATE/slug_ab-aaaa1111"
+  STALE_BRIDGE="$TMP/stale-bridge"
+  printf '#!/usr/bin/env bash\necho "Usage: fno agents [OPTIONS] COMMAND" >&2\nexit 2\n' > "$STALE_BRIDGE"
+  chmod +x "$STALE_BRIDGE"
+  out="$(NAME_BRIDGE="$STALE_BRIDGE" bash "$DISPATCH" ab-aaaa1111 2>&1)"
+  echo "$out" | grep -q "^launched ab-aaaa1111 name=target-ab-aaaa1111-cargo-bootstrapper " \
+    && pass "x-3218 a stale fno (exit 2) degrades to the historical name, not a refusal" \
+    || fail "x-3218 stale-fno degradation: $out"
+  [[ "$(ask_count)" == "1" ]] \
+    && pass "x-3218 stale fno still dispatches its worker" \
+    || fail "x-3218 stale fno lost the dispatch: $(ask_count)"
+
   # Ordinary names are byte-for-byte unchanged.
   reset_mock
   set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
