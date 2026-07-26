@@ -187,6 +187,13 @@ def test_quick_plan_verification_stays_representation_tolerant(tmp_path: Path) -
         "1. `gtimeout 30 pytest cli/tests/unit/test_a.py`",
         "1. `poetry run pytest -q`",
         "1. `tsc --noEmit`",
+        # Command words that are also English verbs stay runnable when what
+        # follows is an argument rather than a determiner.
+        "1. `cargo check`",
+        "1. `make test`",
+        "1. `fno worktree ensure`",
+        "1. `npm run check`",
+        "1. `test -f out.txt`",
     ):
         plan = _write_plan(tmp_path, _quick_plan(verification=verification))
 

@@ -46,13 +46,13 @@ _RUNNABLE_COMMANDS = frozenset(
     yq zsh
     """.split()
 )
-# Command names that are also ordinary English words, so a prose line can lead
-# with one. A candidate carrying any of these reads as a sentence, not a command.
-_PROSE_TOKENS = frozenset(
-    """
-    a an the this that then sure manually into it its correctly works work
-    should verify check ensure confirm page button screen flow
-    """.split()
+# Command names that are also ordinary English verbs, so a prose line can lead
+# with one, plus the determiners that follow them in a sentence but never in an
+# invocation. Matching the PAIR is what keeps `cargo check` and `make test`
+# runnable while `make sure the button works` is not.
+_AMBIGUOUS_COMMANDS = frozenset("cd go java just make node test".split())
+_PROSE_FOLLOWERS = frozenset(
+    "a all an each every it its my that the this to into your sure".split()
 )
 _COMMAND_WRAPPERS = frozenset({"command", "env", "gtimeout", "sudo", "timeout"})
 _CONVENTIONAL_FILENAMES = frozenset(
@@ -92,12 +92,8 @@ def _is_runnable_verify(value: str) -> bool:
     try:
         # Whole-value parse first: a well-formed segment must not rescue a value
         # bash itself would reject, such as `pytest tests/ && echo "unclosed`.
-        whole = shlex.split(value, comments=False, posix=True)
+        shlex.split(value, comments=False, posix=True)
     except ValueError:
-        return False
-    # `make`, `test`, `go` and `cd` are English words, so `make sure the button
-    # works` would otherwise parse as a runnable `make` invocation.
-    if any(token.lower() in _PROSE_TOKENS for token in whole):
         return False
     for segment in _SHELL_SEGMENT_RE.split(value):
         try:
@@ -117,6 +113,12 @@ def _is_runnable_verify(value: str) -> bool:
         if not tokens:
             continue
         command = tokens[0]
+        if (
+            command in _AMBIGUOUS_COMMANDS
+            and len(tokens) > 1
+            and tokens[1].lower() in _PROSE_FOLLOWERS
+        ):
+            continue
         if command in _RUNNABLE_COMMANDS:
             return True
         # A path-shaped first token is a command only if it could be executed;
