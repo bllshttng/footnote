@@ -208,5 +208,33 @@ def test_orchestrated_subtree_maps_to_its_runner_step(tmp_path: Path) -> None:
     _repo(tmp_path)
     sel, unmapped = select_changed(tmp_path, ["cli/tests/smoke/test_thing.sh"])
     assert [(s["rule"], s["target"]) for s in sel] == [
-        ("shell-registry-step", "Smoke tests")]
+        ("registry-step", "Smoke tests")]
+    assert unmapped == []
+
+
+def test_deleted_test_file_is_not_handed_to_pytest(tmp_path: Path) -> None:
+    """A delete shows up in the diff; running the missing file would just error."""
+    _repo(tmp_path)
+    sel, unmapped = select_changed(tmp_path, ["cli/tests/unit/test_deleted.py"])
+    assert sel == []
+    assert unmapped == ["cli/tests/unit/test_deleted.py"]
+
+
+def test_deleted_source_still_selects_its_surviving_tests(tmp_path: Path) -> None:
+    """Deleting widget.py must still run test_widget.py, which outlives it."""
+    _repo(tmp_path)
+    (tmp_path / "cli/src/fno/widget.py").unlink()
+    sel, unmapped = select_changed(tmp_path, ["cli/src/fno/widget.py"])
+    assert [s["target"] for s in sel] == ["cli/tests/unit/test_widget.py"]
+    assert unmapped == []
+
+
+def test_root_level_test_maps_to_the_registry_step_that_runs_it(tmp_path: Path) -> None:
+    """Root tests/*.py are owned by a step's python3 invocation, not by /tests/."""
+    from fno.test_cmd import _STRUCTURAL_STEPS
+    owned = [c for _, _, c in _STRUCTURAL_STEPS if "tests/metrics/" in c]
+    assert owned, "expected a registry step invoking a root tests/metrics file"
+    sel, unmapped = select_changed(
+        tmp_path, ["tests/metrics/test_session_cost_dedup.py"])
+    assert [s["rule"] for s in sel] == ["registry-step"]
     assert unmapped == []

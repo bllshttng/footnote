@@ -64,7 +64,7 @@ Selection is deterministic and every hit names the rule that produced it, so a b
 | `python-source-stem` | `cli/src/**.py` | `test_<stem>.py` and the `test_<stem>_*.py` family |
 | `shell-harness-self` | a discovered harness | itself |
 | `shell-helper-reverse` | a sourced helper | every harness that sources it |
-| `shell-registry-step` | a `.sh` wired into a registry step by hand | that step |
+| `registry-step` | any path a registry step names by hand, or an orchestrated subtree | that step |
 | `rust-family` | `crates/<crate>/**` | the registry steps that own the crate |
 | `infra-broad` | the runner, the selector, shared test config, a workflow | the selector's own contract tests |
 

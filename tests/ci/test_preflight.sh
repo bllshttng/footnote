@@ -58,6 +58,7 @@ cat > "$BIN/uv" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
   *" --changed "*)
+    [[ -f CHANGED_PREREQ ]] && { echo "smoke: missing prerequisite: uv"; exit 2; }
     [[ -f CHANGED_UNEVAL ]] && { echo "smoke: CHANGED SUBSET UNEVALUATED"; exit 21; }
     [[ -f CHANGED_NONE ]]   && { echo "smoke: CHANGED SUBSET selected NOTHING"; exit 20; }
     [[ -f CHANGED_POISON ]] && { echo "smoke: CHANGED SUBSET verdict=red"; exit 1; }
@@ -222,6 +223,15 @@ for sentinel in CHANGED_NONE CHANGED_UNEVAL; do
     ( cd "$FIX" && git rm -q "$sentinel" && git commit -qm "drop $sentinel" )
 done
 echo "$out" | grep -q "UNEVALUATED" && ok "unevaluated state is stated, not swallowed" || fail "no UNEVALUATED note"
+
+echo "== a missing prerequisite keeps preflight's documented exit 2 =="
+rm -f "$ATT"
+( cd "$FIX" && touch CHANGED_PREREQ && git add -A && git commit -qm "changed prereq missing" )
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && ok "exit 2 (not 1) when the packet cannot run" || fail "expected 2 got $rc: $out"
+echo "$out" | grep -q "RED (changed packet)" && fail "reported a test failure for a prerequisite gap" \
+    || ok "not reported as a suite failure"
+( cd "$FIX" && git rm -q CHANGED_PREREQ && git commit -qm "drop prereq sentinel" )
 
 echo "== --retry-failed skips the changed packet (a different subset mode) =="
 rm -f "$ATT"

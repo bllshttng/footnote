@@ -30,6 +30,7 @@ import fnmatch
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -707,7 +708,7 @@ def changed_snapshot(root: Path, base: str = "", head: str = "") -> tuple[list[s
             if rc != 0 or not out:
                 return [], f"revision {rev!r} does not resolve here (shallow checkout or missing ref)"
             shas.append(out)
-        rc, out = _git(root, "diff", "--name-only", "--diff-filter=d", f"{shas[0]}...{shas[1]}")
+        rc, out = _git(root, "diff", "--name-only", f"{shas[0]}...{shas[1]}")
         if rc != 0:
             return [], f"git diff {base}...{head} failed: {out}"
         return sorted(set(_lines(out))), ""
@@ -716,7 +717,7 @@ def changed_snapshot(root: Path, base: str = "", head: str = "") -> tuple[list[s
     if rc != 0 or not mb:
         return [], "cannot resolve merge-base with origin/main (fetch it, or pass --base/--head)"
     paths: set[str] = set()
-    for args in (("diff", "--name-only", "--diff-filter=d", mb),
+    for args in (("diff", "--name-only", mb),
                  ("ls-files", "--others", "--exclude-standard")):
         rc, out = _git(root, *args)
         if rc != 0:
@@ -768,6 +769,23 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
         seen.add((kind, target))
         selections.append({"rule": rule, "path": path, "kind": kind, "target": target})
 
+    def fallback(rel: str) -> None:
+        """Last resort before unmapped: a registry step that names this path.
+
+        Applies to every path shape, not just shell: root-level `tests/*.py`
+        run by a step's python3 invocation are owned exactly this way. An
+        orchestrated subtree names only its runner in the registry, so the
+        substring match cannot see the individual file - that prefix map is the
+        mirror of discover_shell_harnesses() excluding the same tree.
+        """
+        owners = [name for name, _, cmd in _STRUCTURAL_STEPS if rel in cmd]
+        owners += [o for prefix, o in _ORCHESTRATED_SUBTREES if rel.startswith(prefix)]
+        if not owners:
+            unmapped.append(rel)
+            return
+        for owner in dict.fromkeys(owners):
+            add("registry-step", rel, "step", owner)
+
     for rel in paths:
         base = os.path.basename(rel)
         if (rel in _INFRA_EXACT or base in _INFRA_BASENAME
@@ -777,15 +795,22 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
                     add("infra-broad", rel, "pytest" if target.endswith(".py") else "shell", target)
             continue
         if rel.endswith(".py") and base.startswith("test_") and "/tests/" in rel:
-            add("test-file-self", rel, "pytest", rel)
+            # A deleted test cannot be run. The path stays visible rather than
+            # being handed to pytest, which would fail on the missing file.
+            if (root / rel).exists():
+                add("test-file-self", rel, "pytest", rel)
+            else:
+                fallback(rel)
             continue
         if rel.startswith("cli/src/") and rel.endswith(".py"):
+            # rglob only returns files that exist, so a deleted source still
+            # correctly selects its surviving test family.
             hits = _conventional_tests(root, base[:-3])
             if hits:
-                for t in hits:
-                    add("python-source-stem", rel, "pytest", t)
+                for hit in hits:
+                    add("python-source-stem", rel, "pytest", hit)
                 continue
-            unmapped.append(rel)
+            fallback(rel)
             continue
         if rel.endswith(".sh"):
             if rel in harnesses:
@@ -796,19 +821,7 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
                 for o in owners:
                     add("shell-helper-reverse", rel, "shell", o)
                 continue
-            # Outside the auto-discovery globs but wired into a registry step
-            # by hand (tests/ci/*.sh, scripts/lib/paths.sh): run the owning step.
-            steps = [name for name, _, cmd in _STRUCTURAL_STEPS if rel in cmd]
-            # An orchestrated subtree names only its runner in the registry, so
-            # the substring match above cannot see the individual file. This is
-            # the mirror of discover_shell_harnesses() excluding the same tree.
-            steps += [owner for prefix, owner in _ORCHESTRATED_SUBTREES
-                      if rel.startswith(prefix)]
-            if steps:
-                for name in steps:
-                    add("shell-registry-step", rel, "step", name)
-                continue
-            unmapped.append(rel)
+            fallback(rel)
             continue
         if rel.startswith("crates/"):
             fam = _rust_family(rel)
@@ -816,9 +829,9 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
                 for name in fam:
                     add("rust-family", rel, "step", name)
                 continue
-            unmapped.append(rel)
+            fallback(rel)
             continue
-        unmapped.append(rel)
+        fallback(rel)
     return selections, unmapped
 
 
@@ -831,9 +844,10 @@ def _changed_steps(selections: Sequence[dict]) -> list[tuple[str, str, str]]:
         # xdist costs more than it saves on a handful of files.
         par = " -n auto" if len(targets) > 3 else ""
         steps.append((f"Pytest (changed subset, {len(targets)} file(s))", ".",
-                      f"uv run --project cli pytest --tb=short -q{par} " + " ".join(targets)))
+                      f"uv run --project cli pytest --tb=short -q{par} "
+                      + " ".join(shlex.quote(t) for t in targets)))
     for rel in sorted({s["target"] for s in selections if s["kind"] == "shell"}):
-        steps.append((rel, ".", f"bash {rel}"))
+        steps.append((rel, ".", f"bash {shlex.quote(rel)}"))
     by_name = {name: (name, cwd, cmd) for name, cwd, cmd in _STRUCTURAL_STEPS}
     shell_targets = {s["target"] for s in selections if s["kind"] == "shell"}
     for name in sorted({s["target"] for s in selections if s["kind"] == "step"}):
@@ -866,6 +880,13 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     print("smoke: mode=CHANGED SUBSET - partial evidence; the full "
           "'fno test smoke' gate still decides merge readiness", flush=True)
     if reason:
+        # Overwrite any earlier receipt: leaving the previous run's green in
+        # place would let a stale verdict outlive the candidate it described.
+        _write_changed_receipt(
+            os.environ.get("SMOKE_CHANGED_RECEIPT") or str(root / CHANGED_RECEIPT_DEFAULT),
+            {"mode": "CHANGED SUBSET", "candidate": candidate, "verdict": "unevaluated",
+             "reason": reason, "base": opts["base"], "head": opts["head"]},
+        )
         sys.stderr.write(f"smoke: CHANGED SUBSET UNEVALUATED - {reason}\n")
         sys.stderr.write("smoke: no changed verdict was earned (this is not a green result)\n")
         return CHANGED_RC_UNEVALUATED
@@ -903,6 +924,8 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
 
     miss = _smoke_prereqs([c for _, _, c in steps])
     if miss:
+        receipt.update(verdict="unevaluated", reason=f"missing prerequisite: {miss}")
+        _write_changed_receipt(receipt_path, receipt)
         sys.stderr.write(f"smoke: missing prerequisite: {miss}\n")
         return 2
 

@@ -88,8 +88,11 @@ check(not bare_full, "changed-smoke never runs an unlabelled full smoke",
 check("uv run --project cli fno-py test smoke" in smoke_run,
       "smoke keeps the canonical full runner invocation",
       "the full smoke command changed")
-check("--changed" not in smoke_run, "smoke runs no subset mode",
-      "the merge gate was narrowed to a subset")
+# Every subset flag, not just --changed: swapping the gate to --only or
+# --retry-failed narrows it exactly as much and must red here too.
+narrowed = [f for f in ("--changed", "--only", "--retry-failed") if f in smoke_run]
+check(not narrowed, "smoke runs no subset mode",
+      f"the merge gate was narrowed to a subset ({', '.join(narrowed)})")
 check("strategy" not in smoke, "smoke is not sharded (deferred until measured)",
       "the full suite was sharded - out of scope until the packet is measured")
 

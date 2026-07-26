@@ -300,6 +300,33 @@ run_hermetic() {
     )
 }
 
+# --- verdict tripwire (shared by every exit path that reports a verdict) -----
+# Belt-and-braces over the lock: re-verify we still own both the worktree and
+# the lock before attributing a verdict to our candidate. Any residual clobber -
+# a future lock bug, a hand-run `git reset` in the shared worktree - becomes a
+# loud VOID instead of a GREEN or RED silently earned by another checkout.
+# Compare shas only; the preflight worktree is always detached HEAD.
+#
+# This is a function, not a straight-line block, because the changed packet can
+# exit before the full legs run: a packet that failed while the worktree was
+# being reset under it earned nothing, so it must VOID rather than report RED.
+exit_if_void() {
+    local VOID_REASON="" WT_HEAD_NOW
+    # 2>/dev/null, never 2>&1: merging stderr into the value means any benign git
+    # warning makes the captured string differ from the sha and VOIDs a good run.
+    if ! WT_HEAD_NOW="$(git -C "$PREFLIGHT_WT" rev-parse HEAD 2>/dev/null)"; then
+        VOID_REASON="cannot read the preflight worktree at $PREFLIGHT_WT"
+    elif [[ "$WT_HEAD_NOW" != "$CANDIDATE_SHA" ]]; then
+        VOID_REASON="worktree moved off our candidate mid-run (now ${WT_HEAD_NOW:0:12}, expected $CANDIDATE_SHORT)"
+    elif [[ "$(holder_pid_now)" != "$$" ]]; then
+        VOID_REASON="another preflight took our lock mid-run"
+    fi
+    [[ -n "$VOID_REASON" ]] || return 0
+    echo "preflight: VOID - $VOID_REASON." >&2
+    echo "preflight: verdict discarded - nothing here was earned by $CANDIDATE_SHORT. Re-run; this is not a code failure." >&2
+    exit 5
+}
+
 # --- attestation verdict (recorded after the tripwire, below) ----------------
 # VOID exited 5 above, so it reaches neither write nor delete and any
 # pre-existing attestation is left untouched (AC2-ERR). A FULL GREEN records;
@@ -363,7 +390,16 @@ if [[ -n "$CHANGED_BASE" ]]; then
             echo "preflight: changed packet mapped nothing - not coverage; the full gate decides" ;;
         21) record_leg "changed packet" "unevaluated" $(( SECONDS - c0 ))
             echo "preflight: changed packet UNEVALUATED - continuing to the full gate" ;;
-        *)  record_leg "changed packet (CHANGED SUBSET)" fail $(( SECONDS - c0 ))
+        2)  # The runner's documented "bad usage / missing prerequisite" code.
+            # Reporting it as 1 would send the caller hunting a test failure that
+            # never happened, and preflight promises 2 for exactly this.
+            echo "preflight: changed packet could not run (missing prerequisite or bad usage)" >&2
+            exit 2 ;;
+        *)  # Verdict-bearing exit, so it owes the same ownership check the full
+            # path does: a packet that failed while the shared worktree was reset
+            # under it earned nothing and must VOID rather than accuse this SHA.
+            exit_if_void
+            record_leg "changed packet (CHANGED SUBSET)" fail $(( SECONDS - c0 ))
             invalidate_attestation
             echo ""
             echo "preflight: SUMMARY  repo=$REPO_NAME  candidate=$CANDIDATE_SHORT  mode=CHANGED-SUBSET"
@@ -467,21 +503,7 @@ fi
 # a future lock bug, a hand-run `git reset` in the shared worktree - becomes a
 # loud VOID instead of a GREEN or RED silently earned by another checkout.
 # Compare shas only; the preflight worktree is always detached HEAD.
-VOID_REASON=""
-# 2>/dev/null, never 2>&1: merging stderr into the value means any benign git
-# warning makes the captured string differ from the sha and VOIDs a good run.
-if ! WT_HEAD_NOW="$(git -C "$PREFLIGHT_WT" rev-parse HEAD 2>/dev/null)"; then
-    VOID_REASON="cannot read the preflight worktree at $PREFLIGHT_WT"
-elif [[ "$WT_HEAD_NOW" != "$CANDIDATE_SHA" ]]; then
-    VOID_REASON="worktree moved off our candidate mid-run (now ${WT_HEAD_NOW:0:12}, expected $CANDIDATE_SHORT)"
-elif [[ "$(holder_pid_now)" != "$$" ]]; then
-    VOID_REASON="another preflight took our lock mid-run"
-fi
-if [[ -n "$VOID_REASON" ]]; then
-    echo "preflight: VOID - $VOID_REASON." >&2
-    echo "preflight: verdict discarded - nothing here was earned by $CANDIDATE_SHORT. Re-run; this is not a code failure." >&2
-    exit 5
-fi
+exit_if_void
 
 if [[ $RETRY_FAILED -eq 0 && $FAIL -eq 0 ]]; then
     record_attestation
