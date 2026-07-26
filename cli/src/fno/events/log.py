@@ -61,6 +61,47 @@ def _read_state_fields(state_path: Path) -> Dict[str, Any]:
     return data
 
 
+# -- Envelope normalization --
+
+
+def normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Project canonical and legacy envelopes into one read-only join shape."""
+    canonical = event.get("data")
+    legacy = event.get("payload")
+    data = canonical if isinstance(canonical, dict) else (legacy if isinstance(legacy, dict) else {})
+    session_id = event.get("session_id") or data.get("session_id")
+    holder = data.get("holder")
+    holder_session_id = None
+    if isinstance(holder, str) and holder.startswith("target-session:"):
+        holder_session_id = holder.split(":", 1)[1]
+    node_id = (
+        event.get("node_id")
+        or event.get("graph_node_id")
+        or data.get("node_id")
+        or data.get("graph_node_id")
+        or data.get("node")
+    )
+    key = data.get("key")
+    if node_id is None and isinstance(key, str) and key.startswith("node:"):
+        node_id = key.split(":", 1)[1]
+    pr_number = event.get("pr_number") or data.get("pr_number")
+    if isinstance(pr_number, str) and pr_number.isdigit():
+        pr_number = int(pr_number)
+    return {
+        "type": event.get("type") or event.get("kind"),
+        "ts": event.get("ts") or event.get("timestamp"),
+        "source": event.get("source"),
+        "session_id": session_id,
+        "holder_session_id": holder_session_id,
+        "node_id": node_id,
+        "pr_number": pr_number,
+        "short_id": event.get("short_id") or data.get("short_id"),
+        "head_sha": event.get("head_sha") or data.get("head_sha"),
+        "data": data,
+        "raw": event,
+    }
+
+
 # -- Append --
 
 def emit_event(
@@ -178,7 +219,11 @@ def read_events(
                 f"Corrupted events.jsonl at line {lineno}: {exc}. "
                 "Repair or truncate the file before continuing."
             ) from exc
-        if session_id is None or event.get("session_id") == session_id:
+        normalized = normalize_event(event)
+        if session_id is None or session_id in {
+            normalized["session_id"],
+            normalized["holder_session_id"],
+        }:
             results.append(event)
 
     return results

@@ -11,12 +11,15 @@ never mistaken for a real trend.
 from __future__ import annotations
 
 import json
+import math
+import os
 import re
 import time
 from collections import Counter
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
+from statistics import median
 
 import yaml
 
@@ -94,14 +97,27 @@ def load_ledger_rows(path: Path, *, _retry: bool = True) -> list[dict]:
     return [r for r in rows if isinstance(r, dict)]
 
 
-def read_jsonl_events(paths: list[Path], kinds: set[str]) -> list[dict]:
-    """Best-effort jsonl reader: skip a corrupt/partial line rather than crash
-    (a trailing partial line during append is expected, not an error)."""
+def read_jsonl_events_with_coverage(paths: list[Path], kinds: set[str]) -> dict:
+    """Read and deduplicate journals while retaining input-integrity coverage."""
     out: list[dict] = []
+    seen_events: set[str] = set()
+    seen_paths: set[str] = set()
+    path_coverage: list[dict] = []
+    malformed_lines = 0
+    unreadable_paths = 0
     for p in paths:
-        p = Path(p)
-        if not p.exists():
+        p = Path(p).expanduser()
+        try:
+            path_key = str(p.resolve())
+        except OSError:
+            path_key = os.path.abspath(p)
+        if path_key in seen_paths:
             continue
+        seen_paths.add(path_key)
+        if not p.exists():
+            path_coverage.append({"path": path_key, "status": "missing", "malformed_lines": 0})
+            continue
+        path_malformed = 0
         try:
             with p.open(encoding="utf-8") as f:
                 for line in f:
@@ -111,12 +127,60 @@ def read_jsonl_events(paths: list[Path], kinds: set[str]) -> list[dict]:
                     try:
                         e = json.loads(line)
                     except json.JSONDecodeError:
+                        path_malformed += 1
+                        malformed_lines += 1
                         continue
+                    if not isinstance(e, dict):
+                        path_malformed += 1
+                        malformed_lines += 1
+                        continue
+                    if (e.get("kind") or e.get("type")) == "context_snapshot":
+                        from fno.events import ValidationError, validate
+
+                        try:
+                            validate(e)
+                        except ValidationError:
+                            path_malformed += 1
+                            malformed_lines += 1
+                            continue
                     if (e.get("kind") or e.get("type")) in kinds:
-                        out.append(e)
-        except OSError:
+                        signature = json.dumps(e, sort_keys=True, separators=(",", ":"))
+                        if signature not in seen_events:
+                            seen_events.add(signature)
+                            out.append(e)
+            path_coverage.append(
+                {
+                    "path": path_key,
+                    "status": "ok" if path_malformed == 0 else "malformed",
+                    "malformed_lines": path_malformed,
+                }
+            )
+        except (OSError, UnicodeError) as exc:
+            unreadable_paths += 1
+            path_coverage.append(
+                {
+                    "path": path_key,
+                    "status": "unreadable",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "malformed_lines": 0,
+                }
+            )
             continue
-    return out
+    out.sort(key=_event_sort_key)
+    return {
+        "events": out,
+        "coverage": {
+            "complete": malformed_lines == 0 and unreadable_paths == 0,
+            "malformed_lines": malformed_lines,
+            "unreadable_paths": unreadable_paths,
+            "paths": path_coverage,
+        },
+    }
+
+
+def read_jsonl_events(paths: list[Path], kinds: set[str]) -> list[dict]:
+    """Compatibility reader for views that do not consume integrity coverage."""
+    return read_jsonl_events_with_coverage(paths, kinds)["events"]
 
 
 def read_graph_nodes(path: Path) -> list[dict]:
@@ -155,6 +219,20 @@ def _parse_ts(raw) -> datetime | None:
     return dt
 
 
+def _event_sort_key(event: dict) -> tuple[bool, datetime, bool, str]:
+    """Sort canonical observations by their timestamp, not journal path order."""
+    parsed = _parse_ts(event.get("ts") or event.get("timestamp"))
+    signature_source = event.get("raw") if isinstance(event.get("raw"), dict) else event
+    signature = json.dumps(signature_source, sort_keys=True, separators=(",", ":"))
+    raw_data = event.get("data")
+    data: dict = raw_data if isinstance(raw_data, dict) else {}
+    complete_context = (
+        (event.get("type") or event.get("kind")) == "context_snapshot"
+        and data.get("measurement_complete") is True
+    )
+    return parsed is not None, parsed or datetime.min, complete_context, signature
+
+
 def _pct(n: int, d: int) -> int:
     return round(100 * n / d) if d else 0
 
@@ -172,12 +250,13 @@ def _num_opt(v) -> float | None:
     an unmeasurable metric (finalize records None when transcript cost extraction
     is unavailable) stays distinct from a measured zero and is excluded from
     distributions rather than faking a zero-token/zero-minute session."""
-    if v is None or v == "":
+    if v is None or v == "" or isinstance(v, bool):
         return None
     try:
-        return float(v)
-    except (TypeError, ValueError):
+        value = float(v)
+    except (OverflowError, TypeError, ValueError):
         return None
+    return value if math.isfinite(value) and value >= 0 else None
 
 
 def build_scoreboard(
@@ -1084,6 +1163,637 @@ def build_efficiency(
     }
 
 
+# ── context-to-outcome trace (x-2e3c) ───────────────────────────────────────
+
+CONTEXT_TRACE_EVENT_KINDS = {
+    "claim_acquired",
+    "claim_force_overridden",
+    "claim_idempotent_reacquired",
+    "claim_refreshed",
+    "claim_released",
+    "claim_stale_reclaimed",
+    "context_comparison_declared",
+    "context_snapshot",
+    "delegated",
+    "handoff_failed",
+    "handoff_probe_unreadable",
+    "loop_check",
+    "recovery_capped",
+    "recovery_nudge",
+    "recovery_skipped",
+    "review_attestation",
+    "review_finding",
+    "review_finding_resolved",
+    "run_summary",
+    "session_satisfied",
+    "termination",
+    "transcript_audit_failed",
+}
+
+_CONTEXT_TRACE_FIELDS = (
+    ("objective", "graph, ledger", "Objective or node title attributed to the delivery."),
+    ("plan_node", "ledger, graph", "Canonical backlog node identifier."),
+    ("worker_session", "ledger, events", "Session that produced the delivered commit."),
+    ("claim", "claim events", "Historical claim observations; never current ownership truth."),
+    ("commit", "ledger, loop_check", "Exact delivered commit when observed."),
+    ("evidence_receipt", "ledger", "Existing receipt reference; the trace never invents one."),
+    ("pr", "ledger", "Pull request number and URL."),
+    (
+        "context",
+        "context_snapshot event",
+        "Harness, entry state, delivered bytes, tokens, source hashes, and measurement completeness.",
+    ),
+    ("outcomes.ci", "loop_check events", "Latest observed CI state."),
+    ("outcomes.review", "review events, loop_check", "Review verdict and finding observations."),
+    ("outcomes.merge", "events, graph", "Observed merge outcome."),
+    ("outcomes.revert", "events, graph", "Observed revert outcome."),
+    (
+        "outcomes.recovery",
+        "recovery and handoff events",
+        "Recovery observations without changing resume behavior.",
+    ),
+    ("outcomes.latency_minutes", "ledger", "Recorded delivery latency."),
+    ("outcomes.spend_usd", "ledger", "Recorded delivery spend."),
+    (
+        "falsifiable",
+        "derived",
+        "True only when at least one downstream observation can disprove a claim.",
+    ),
+    ("provenance", "derived", "Canonical inputs that contributed to the trace."),
+)
+
+
+def render_context_trace_field_docs() -> str:
+    """Render the field table from the parser-owned contract."""
+    lines = [
+        "| Field | Derived from | Meaning |",
+        "|---|---|---|",
+    ]
+    lines.extend(
+        f"| `{field}` | {owner} | {meaning} |" for field, owner, meaning in _CONTEXT_TRACE_FIELDS
+    )
+    return "\n".join(lines)
+
+
+def _normalized_events(events: Sequence[dict]) -> list[dict]:
+    from fno.events.log import normalize_event
+
+    normalized = [
+        normalize_event(event) for event in events if isinstance(event, dict)
+    ]
+    normalized.sort(key=_event_sort_key)
+    return normalized
+
+
+def _event_matches(event: dict, delivery: dict, *, commit: str | None = None) -> bool:
+    session_ids = _row_session_ids(delivery)
+    node_id = delivery.get("graph_node_id")
+    pr_number = delivery.get("pr_number")
+    matched = False
+    if event.get("session_id"):
+        if session_ids and event["session_id"] not in session_ids:
+            return False
+        matched = matched or event["session_id"] in session_ids
+    if event.get("holder_session_id"):
+        if session_ids and event["holder_session_id"] not in session_ids:
+            return False
+        matched = matched or event["holder_session_id"] in session_ids
+    if event.get("short_id"):
+        short_id = str(event["short_id"])
+        short_matches = any(
+            session == short_id or session.startswith(short_id) for session in session_ids
+        )
+        if session_ids and not short_matches:
+            return False
+        matched = matched or short_matches
+    if event.get("node_id"):
+        if node_id and event["node_id"] != node_id:
+            return False
+        matched = matched or bool(node_id and event["node_id"] == node_id)
+    if event.get("pr_number") is not None:
+        try:
+            pr_matches = pr_number is not None and int(event["pr_number"]) == int(pr_number)
+        except (TypeError, ValueError):
+            return False
+        if pr_number is not None and not pr_matches:
+            return False
+        matched = matched or pr_matches
+    if event.get("head_sha"):
+        head_matches = bool(commit and event["head_sha"] == commit)
+        if commit and not head_matches:
+            return False
+        matched = matched or head_matches
+    return matched
+
+
+def _context_observation(events: Sequence[dict]) -> dict | None:
+    for event in reversed(events):
+        if event.get("type") != "context_snapshot":
+            continue
+        data: dict = event["data"] if isinstance(event.get("data"), dict) else {}
+        compiled_value = data.get("compiled")
+        compiled: dict = compiled_value if isinstance(compiled_value, dict) else {}
+        packet_value = compiled.get("packet")
+        packet: dict = packet_value if isinstance(packet_value, dict) else {}
+        manifest_value = compiled.get("source_manifest")
+        manifest: list = manifest_value if isinstance(manifest_value, list) else []
+        source_hashes = data.get("source_hashes")
+        if not isinstance(source_hashes, list):
+            source_hashes = [
+                item.get("content_hash")
+                for item in manifest
+                if isinstance(item, dict) and item.get("content_hash")
+            ]
+        context_bytes = data.get("context_bytes", packet.get("bytes"))
+        estimated = data.get("estimated_tokens", packet.get("estimated_tokens"))
+        if estimated is None and isinstance(context_bytes, (int, float)):
+            estimated = (int(context_bytes) + 3) // 4
+        context_hash = data.get("context_hash")
+        if context_hash is None:
+            kernel = compiled.get("kernel")
+            if isinstance(kernel, dict):
+                context_hash = kernel.get("content_hash")
+        measurement_errors = data.get("measurement_errors")
+        if not isinstance(measurement_errors, list):
+            measurement_errors = [
+                str(item.get("source_id") or "unknown")
+                for item in manifest
+                if isinstance(item, dict)
+                and item.get("status") not in {"observed", "reachable"}
+            ]
+        measurement_complete = data.get("measurement_complete")
+        if not isinstance(measurement_complete, bool):
+            measurement_complete = not measurement_errors
+        return {
+            "harness": data.get("harness"),
+            "entry_state": data.get("entry_state"),
+            "bytes": context_bytes,
+            "estimated_tokens": estimated,
+            "context_hash": context_hash,
+            "source_hashes": [str(item) for item in source_hashes if item],
+            "measurement_complete": measurement_complete,
+            "measurement_errors": [str(item) for item in measurement_errors],
+        }
+    return None
+
+
+def _commit_from_loop_check(events: Sequence[dict]) -> str | None:
+    for event in reversed(events):
+        if event.get("type") != "loop_check":
+            continue
+        fingerprint = event["data"].get("fingerprint")
+        if isinstance(fingerprint, str):
+            commit = fingerprint.split("|", 1)[0].strip()
+            if commit:
+                return commit
+    return None
+
+
+def build_context_outcome_trace(
+    delivery: dict,
+    graph_node: dict | None,
+    events: Sequence[dict],
+) -> dict:
+    """Join canonical observations without persisting a second authority."""
+    graph_node = graph_node or {}
+    normalized = _normalized_events(events)
+    identity_matching = [
+        event for event in normalized if _event_matches(event, delivery)
+    ]
+    delivered_commit = (
+        delivery.get("commit_sha")
+        or delivery.get("head_sha")
+        or delivery.get("sha")
+        or _commit_from_loop_check(identity_matching)
+    )
+    matching = [
+        event
+        for event in normalized
+        if _event_matches(event, delivery, commit=delivered_commit)
+    ]
+    completed_at = _parse_ts(delivery.get("completed") or delivery.get("completed_at"))
+    context_events = [
+        event
+        for event in matching
+        if event.get("type") == "context_snapshot"
+        and (
+            completed_at is None
+            or (
+                (event_at := _parse_ts(event.get("ts") or event.get("timestamp")))
+                is not None
+                and event_at <= completed_at
+            )
+        )
+    ]
+    context = _context_observation(context_events)
+    loop_checks = [event for event in matching if event.get("type") == "loop_check"]
+    latest_loop = loop_checks[-1] if loop_checks else None
+    loop_data = latest_loop["data"] if latest_loop else {}
+
+    ci_state = loop_data.get("ci")
+    ci_observed = ci_state not in (None, "", "none", "unknown")
+    attestations = sum(1 for event in matching if event.get("type") == "review_attestation")
+    findings = sum(1 for event in matching if event.get("type") == "review_finding")
+    reviewed = loop_data.get("reviewed")
+    review_observed = isinstance(reviewed, bool) or attestations > 0 or findings > 0
+    if reviewed is None and attestations:
+        reviewed = any(
+            event["data"].get("verdict") == "pass"
+            for event in matching
+            if event.get("type") == "review_attestation"
+        )
+
+    merge_events = [
+        event
+        for event in matching
+        if (event.get("type") == "session_satisfied" and event["data"].get("source") == "pr_merge")
+        or event.get("type") in {"pr_merged", "merged"}
+    ]
+    merged_at = graph_node.get("merged_at")
+    merged = (
+        loop_data.get("pr_state") == "MERGED"
+        or bool(merge_events)
+        or bool(merged_at)
+        or graph_node.get("merge_status") == "merged"
+    )
+    merge_status = graph_node.get("merge_status")
+    pr_state = loop_data.get("pr_state")
+    merge_state = (
+        "merged"
+        if merged
+        else merge_status
+        if isinstance(merge_status, str) and merge_status
+        else pr_state.lower()
+        if pr_state in {"OPEN", "CLOSED", "MERGED"}
+        else None
+    )
+    merge_observed = (
+        pr_state in {"OPEN", "CLOSED", "MERGED"}
+        or bool(merge_events)
+        or bool(merged_at)
+        or merge_status in {"queued", "failed", "merged"}
+    )
+    if merged_at is None and merge_events:
+        merged_at = merge_events[-1].get("ts")
+
+    revert_events = [event for event in matching if "revert" in str(event.get("type") or "")]
+    reverted_at = graph_node.get("reverted_at")
+    if reverted_at is None and revert_events:
+        reverted_at = revert_events[-1].get("ts")
+    reverted_value = graph_node.get("reverted")
+    revert_observed = (
+        bool(revert_events) or bool(reverted_at) or isinstance(reverted_value, bool)
+    )
+    reverted = (
+        bool(revert_events) or reverted_value is True or bool(reverted_at)
+    )
+    recovery = [
+        {
+            "type": event["type"],
+            "at": event.get("ts"),
+            "reason": event["data"].get("reason"),
+        }
+        for event in matching
+        if str(event.get("type") or "").startswith(("recovery_", "handoff_"))
+        or event.get("type") == "delegated"
+    ]
+    claim_events = [
+        event for event in matching if str(event.get("type") or "").startswith("claim_")
+    ]
+    claim = {
+        "observed": bool(claim_events),
+        "events": [
+            {
+                "type": event["type"],
+                "at": event.get("ts"),
+                "key": event["data"].get("key"),
+                "holder": event["data"].get("holder"),
+            }
+            for event in claim_events
+        ],
+    }
+
+    latency = _num_opt(delivery.get("duration_minutes"))
+    spend = _num_opt(delivery.get("cost_usd"))
+    falsifiable = any(
+        (
+            ci_observed,
+            review_observed,
+            merge_observed,
+            revert_observed,
+            bool(recovery),
+            latency is not None,
+            spend is not None,
+        )
+    )
+    missing = []
+    if context is None:
+        missing.append("context_snapshot")
+    if not falsifiable:
+        missing.append("downstream_outcome")
+
+    receipt = next(
+        (
+            delivery.get(key)
+            for key in ("evidence_receipt", "verification_receipt", "preflight_receipt")
+            if delivery.get(key) is not None
+        ),
+        None,
+    )
+    pr_number = delivery.get("pr_number")
+    if isinstance(pr_number, str) and pr_number.isdigit():
+        pr_number = int(pr_number)
+    provenance = ["ledger"]
+    if graph_node:
+        provenance.append("graph")
+    if matching:
+        provenance.append("events")
+    return {
+        "objective": graph_node.get("title") or delivery.get("objective") or delivery.get("title"),
+        "plan_node": delivery.get("graph_node_id") or graph_node.get("id"),
+        "plan_path": delivery.get("plan_path"),
+        "worker_session": delivery.get("session_id"),
+        "claim": claim,
+        "commit": delivered_commit,
+        "evidence_receipt": receipt,
+        "pr": {"number": pr_number, "url": delivery.get("pr_url")},
+        "context": context,
+        "outcomes": {
+            "ci": {
+                "state": ci_state,
+                "observed_at": latest_loop.get("ts") if ci_observed and latest_loop else None,
+            },
+            "review": {
+                "reviewed": reviewed,
+                "attestations": attestations,
+                "findings": findings,
+                "observed": review_observed,
+            },
+            "merge": {
+                "observed": merge_observed,
+                "state": merge_state,
+                "merged": merged if merge_observed else None,
+                "at": merged_at,
+            },
+            "revert": {
+                "observed": revert_observed,
+                "reverted": reverted if revert_observed else None,
+                "at": reverted_at,
+            },
+            "recovery": recovery,
+            "latency_minutes": latency,
+            "spend_usd": spend,
+        },
+        "completed_at": delivery.get("completed"),
+        "falsifiable": falsifiable,
+        "missing": missing,
+        "provenance": provenance,
+    }
+
+
+def _finite_nonnegative_float(value: object) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+        return None
+    try:
+        normalized = float(value)
+    except OverflowError:
+        return None
+    return normalized if math.isfinite(normalized) else None
+
+
+def _finite_nonnegative_number(value: object) -> bool:
+    return _finite_nonnegative_float(value) is not None
+
+
+def _median_metric(traces: Sequence[dict], path: tuple[str, ...]) -> float | None:
+    values: list[float] = []
+    for trace in traces:
+        value: object = trace
+        for key in path:
+            value = value.get(key) if isinstance(value, dict) else None
+        normalized = _finite_nonnegative_float(value)
+        if normalized is None:
+            return None
+        values.append(normalized)
+    result = median(values) if values else None
+    return result if result is not None and math.isfinite(result) else None
+
+
+def evaluate_context_comparison(
+    traces: Sequence[dict],
+    contract: dict | None,
+    *,
+    observation_complete: bool = True,
+) -> dict:
+    """Label a comparison only after its falsifiable contract is complete."""
+    if not isinstance(contract, dict):
+        return {"label": "rejected", "reason": "comparison_contract_missing"}
+    if not observation_complete:
+        return {"label": "rejected", "reason": "event_observation_incomplete"}
+    required = {
+        "declared_at",
+        "recorded_at",
+        "cohorts",
+        "window",
+        "exclusions",
+        "budgets",
+    }
+    if not required.issubset(contract):
+        return {"label": "rejected", "reason": "comparison_contract_incomplete"}
+    cohorts = contract.get("cohorts")
+    window = contract.get("window")
+    exclusions = contract.get("exclusions")
+    budgets = contract.get("budgets")
+    if (
+        not isinstance(cohorts, dict)
+        or not isinstance(window, dict)
+        or not isinstance(exclusions, list)
+        or not isinstance(budgets, dict)
+        or not budgets
+    ):
+        return {"label": "rejected", "reason": "comparison_contract_invalid"}
+    baseline_ids = cohorts.get("baseline")
+    candidate_ids = cohorts.get("candidate")
+    if not isinstance(baseline_ids, list) or not isinstance(candidate_ids, list):
+        return {"label": "rejected", "reason": "comparison_contract_invalid"}
+    if not baseline_ids or not candidate_ids:
+        return {"label": "rejected", "reason": "cohort_members_missing"}
+    if (
+        any(not isinstance(item, str) or not item for item in baseline_ids + candidate_ids)
+        or len(set(baseline_ids)) != len(baseline_ids)
+        or len(set(candidate_ids)) != len(candidate_ids)
+    ):
+        return {"label": "rejected", "reason": "comparison_cohorts_invalid"}
+    declared = _parse_ts(contract.get("declared_at"))
+    recorded = _parse_ts(contract.get("recorded_at"))
+    start = _parse_ts(window.get("start"))
+    end = _parse_ts(window.get("end"))
+    if declared is None or recorded is None or start is None or end is None or start > end:
+        return {"label": "rejected", "reason": "comparison_window_invalid"}
+    if declared > recorded or recorded > start:
+        return {"label": "rejected", "reason": "comparison_not_predeclared"}
+    if not all(
+        _finite_nonnegative_number(value)
+        for value in budgets.values()
+    ):
+        return {"label": "rejected", "reason": "comparison_budgets_invalid"}
+    supported_budgets = {
+        "max_candidate_latency_minutes",
+        "max_candidate_review_findings",
+        "max_candidate_reverts",
+        "max_candidate_spend_usd",
+    }
+    if set(budgets) - supported_budgets:
+        return {"label": "rejected", "reason": "comparison_budgets_unsupported"}
+
+    excluded = {str(item) for item in exclusions}
+
+    def _members(ids: list) -> tuple[list[dict], set[str], bool]:
+        wanted = {str(item) for item in ids} - excluded
+        result: list[dict] = []
+        realized: set[str] = set()
+        duplicate = False
+        for trace in traces:
+            sid = str(trace.get("worker_session") or "")
+            completed = _parse_ts(trace.get("completed_at"))
+            if sid in wanted and completed and start <= completed <= end:
+                if sid in realized:
+                    duplicate = True
+                realized.add(sid)
+                result.append(trace)
+        return result, realized, duplicate
+
+    baseline, baseline_realized, baseline_duplicate = _members(baseline_ids)
+    candidate, candidate_realized, candidate_duplicate = _members(candidate_ids)
+    if set(map(str, baseline_ids)) & set(map(str, candidate_ids)):
+        return {"label": "rejected", "reason": "cohorts_overlap"}
+    if baseline_duplicate or candidate_duplicate:
+        return {"label": "rejected", "reason": "cohort_members_ambiguous"}
+    if (
+        baseline_realized != set(baseline_ids) - excluded
+        or candidate_realized != set(candidate_ids) - excluded
+        or not baseline
+        or not candidate
+    ):
+        return {"label": "rejected", "reason": "cohort_members_missing"}
+    if not all(trace.get("falsifiable") is True for trace in baseline + candidate):
+        return {
+            "label": "rejected",
+            "reason": "no_falsifiable_downstream_observation",
+        }
+    if not all(
+        not isinstance(trace.get("context"), dict)
+        or trace["context"].get("measurement_complete", True) is True
+        for trace in baseline + candidate
+    ):
+        return {"label": "rejected", "reason": "context_measurement_incomplete"}
+
+    base_bytes = _median_metric(baseline, ("context", "bytes"))
+    cand_bytes = _median_metric(candidate, ("context", "bytes"))
+    base_latency = _median_metric(baseline, ("outcomes", "latency_minutes"))
+    cand_latency = _median_metric(candidate, ("outcomes", "latency_minutes"))
+    budget_observations: dict[str, float] = {}
+    if "max_candidate_spend_usd" in budgets:
+        spend = [
+            _finite_nonnegative_float(trace["outcomes"].get("spend_usd"))
+            for trace in candidate
+        ]
+        if any(value is None for value in spend):
+            return {"label": "rejected", "reason": "comparison_budget_measurement_missing"}
+        try:
+            total_spend = math.fsum(value for value in spend if value is not None)
+        except OverflowError:
+            return {"label": "rejected", "reason": "comparison_budget_measurement_missing"}
+        if not math.isfinite(total_spend):
+            return {"label": "rejected", "reason": "comparison_budget_measurement_missing"}
+        budget_observations["max_candidate_spend_usd"] = total_spend
+    if "max_candidate_latency_minutes" in budgets:
+        latency = [trace["outcomes"].get("latency_minutes") for trace in candidate]
+        if not all(_finite_nonnegative_number(value) for value in latency):
+            return {"label": "rejected", "reason": "comparison_budget_measurement_missing"}
+        budget_observations["max_candidate_latency_minutes"] = float(max(latency))
+    if "max_candidate_review_findings" in budgets:
+        review = [trace["outcomes"].get("review", {}) for trace in candidate]
+        if not all(
+            item.get("observed")
+            and type(item.get("findings")) is int
+            and item["findings"] >= 0
+            for item in review
+        ):
+            return {"label": "rejected", "reason": "comparison_budget_measurement_missing"}
+        findings = _finite_nonnegative_float(
+            sum(item["findings"] for item in review)
+        )
+        if findings is None:
+            return {"label": "rejected", "reason": "comparison_budget_measurement_missing"}
+        budget_observations["max_candidate_review_findings"] = findings
+    if "max_candidate_reverts" in budgets:
+        revert = [trace["outcomes"].get("revert", {}) for trace in candidate]
+        if not all(item.get("observed") and isinstance(item.get("reverted"), bool) for item in revert):
+            return {"label": "rejected", "reason": "comparison_budget_measurement_missing"}
+        budget_observations["max_candidate_reverts"] = float(
+            sum(item["reverted"] for item in revert)
+        )
+    budget_satisfied = all(
+        budget_observations[key] <= limit for key, limit in budgets.items()
+    )
+    claim = contract.get("claim") or "context_pruning"
+    if claim == "context_pruning":
+        if base_bytes is None or cand_bytes is None:
+            return {"label": "rejected", "reason": "context_measurement_missing"}
+        improved = cand_bytes < base_bytes
+    elif claim == "graph_widening":
+        if base_latency is None or cand_latency is None:
+            return {"label": "rejected", "reason": "latency_measurement_missing"}
+        improved = cand_latency < base_latency
+    else:
+        return {"label": "rejected", "reason": "comparison_claim_invalid"}
+
+    reduction = None
+    if base_bytes is not None and base_bytes != 0 and cand_bytes is not None:
+        reduction_value = (1 - cand_bytes / base_bytes) * 100
+        if not math.isfinite(reduction_value):
+            return {"label": "rejected", "reason": "context_measurement_missing"}
+        reduction = round(reduction_value)
+    return {
+        "label": "improvement" if improved and budget_satisfied else "no_improvement",
+        "claim": claim,
+        "cohorts": {"baseline": len(baseline), "candidate": len(candidate)},
+        "window": {"start": window["start"], "end": window["end"]},
+        "exclusions": exclusions,
+        "budgets": budgets,
+        "context_bytes": {
+            "baseline_median": base_bytes,
+            "candidate_median": cand_bytes,
+            "reduction_pct": reduction,
+        },
+        "latency_minutes": {
+            "baseline_median": base_latency,
+            "candidate_median": cand_latency,
+        },
+        "budget_observations": budget_observations,
+        "budget_satisfied": budget_satisfied,
+    }
+
+
+def _comparison_contract_from_events(events: Sequence[dict]) -> dict | None:
+    contracts: list[tuple[dict, str | None]] = []
+    for event in _normalized_events(events):
+        if event.get("type") not in {
+            "context_comparison_declared",
+            "context_snapshot",
+        }:
+            continue
+        contract = event["data"].get("comparison_contract")
+        if isinstance(contract, dict):
+            contracts.append((contract, event.get("ts")))
+    if not contracts:
+        return None
+    declared = dict(contracts[-1][0])
+    declared["recorded_at"] = contracts[-1][1]
+    return declared
+
+
 # ── plan fidelity (x-ed6b3294) ───────────────────────────────────────────────
 # Grades PLANNING quality, not build quality: join each planning thread's plan
 # doc to its delivery (PR diff + SUMMARY.md) and score how well the plan held up.
@@ -1266,6 +1976,9 @@ def build_plan_fidelity(
     read_summary=None,
     read_diff=None,
     loop_check_events: list[dict] | None = None,
+    trace_events: list[dict] | None = None,
+    comparison_contract: dict | None = None,
+    event_coverage: dict | None = None,
 ) -> dict:
     """Join each `planned` row (W1) to its delivery and score plan fidelity.
 
@@ -1276,6 +1989,13 @@ def build_plan_fidelity(
     read_summary = read_summary or _default_read_summary
     read_diff = read_diff or _default_read_diff
     loop_check_events = loop_check_events or []
+    trace_events = trace_events or []
+    event_coverage = event_coverage or {
+        "complete": True,
+        "malformed_lines": 0,
+        "unreadable_paths": 0,
+        "paths": [],
+    }
 
     cutoff = now - timedelta(days=since_days)
 
@@ -1302,6 +2022,7 @@ def build_plan_fidelity(
                 shipped_by_plan.setdefault(key, []).append(r)
 
     results: list[dict] = []
+    context_traces: list[dict] = []
     joined = 0
     for r in windowed:
         if not _is_planned_row(r):
@@ -1328,6 +2049,8 @@ def build_plan_fidelity(
                 "declared": len(declared),
                 "passed": sum(1 for c in declared if evidence.get(c) == "pass"),
             }
+        trace = build_context_outcome_trace(d, by_id.get(nid), trace_events)
+        context_traces.append(trace)
         results.append({
             "session_id": sid,
             "plan_path": plan_path,
@@ -1335,15 +2058,23 @@ def build_plan_fidelity(
             "pr_number": d.get("pr_number"),
             "outcome": _node_outcome(nid, _parse_ts(d.get("completed")), by_id, fixes) if nid and nid in by_id else None,
             "probes": probes,
+            "context_outcome_trace": trace,
             **score,
         })
 
     planned_total = len(results)
+    declared_contract = comparison_contract or _comparison_contract_from_events(trace_events)
     return {
         "state": "ok",
         "since_days": since_days,
         "results": results,
         "coverage": {"planned_rows": planned_total, "joined_pct": _pct(joined, planned_total)},
+        "event_coverage": event_coverage,
+        "context_comparison": evaluate_context_comparison(
+            context_traces,
+            declared_contract,
+            observation_complete=event_coverage.get("complete") is True,
+        ),
     }
 
 

@@ -8,11 +8,13 @@ from __future__ import annotations
 import json as _json
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import typer
 
 from fno.scoreboard.fold import (
     BrokenLedger,
+    CONTEXT_TRACE_EVENT_KINDS,
     build_calibration,
     build_efficiency,
     build_plan_fidelity,
@@ -22,7 +24,25 @@ from fno.scoreboard.fold import (
     load_ledger_rows,
     read_graph_nodes,
     read_jsonl_events,
+    read_jsonl_events_with_coverage,
 )
+
+
+def _delivery_event_paths(rows: list[dict], canonical_root: Path) -> list[Path]:
+    paths: list[Path] = []
+    canonical_roots = {canonical_root.resolve()}
+    for row in rows:
+        root_path = row.get("root_path")
+        if isinstance(root_path, str) and root_path and Path(root_path).exists():
+            paths.append(Path(root_path) / ".fno" / "events.jsonl")
+        row_canonical = row.get("canonical_root_path")
+        if isinstance(row_canonical, str) and row_canonical:
+            canonical_roots.add(Path(row_canonical).expanduser().resolve())
+    for root in sorted(canonical_roots):
+        salvage_root = root / ".fno" / "salvage"
+        if salvage_root.is_dir():
+            paths.extend(sorted(salvage_root.glob("*/events.jsonl")))
+    return paths
 
 
 def scoreboard_command(
@@ -162,12 +182,27 @@ def scoreboard_command(
         return
 
     if plan_fidelity:
+        trace_paths = [*events_paths, _paths.project_log("events.jsonl")]
+        project_root = _paths.resolve_repo_root()
+        canonical_root = (
+            _paths.resolve_canonical_worktree(project_root, timeout=2)
+            or project_root
+        )
+        trace_paths.extend(_delivery_event_paths(rows, canonical_root))
+        trace_read = read_jsonl_events_with_coverage(
+            trace_paths, CONTEXT_TRACE_EVENT_KINDS
+        )
+        trace_events = trace_read["events"]
         pf = build_plan_fidelity(
             rows,
             read_graph_nodes(graph_path),
             since_days=since,
             now=datetime.now(),
-            loop_check_events=read_jsonl_events(events_paths, {"loop_check"}),
+            loop_check_events=[
+                event for event in trace_events if event.get("type") == "loop_check"
+            ],
+            trace_events=trace_events,
+            event_coverage=trace_read["coverage"],
         )
         if json_out:
             typer.echo(_json.dumps(pf, indent=2))
@@ -302,12 +337,21 @@ def _render_plan_fidelity(pf: dict) -> None:
         drift = len(r["scope_drift"]["unplanned"]) if r["scope_drift"] else "n/a"
         pr = r.get("probes")
         probes_s = f"{pr['passed']}/{pr['declared']}" if pr else "n/a"
+        context = (r.get("context_outcome_trace") or {}).get("context")
+        context_s = (
+            f"{context['bytes']}B" if context and context.get("bytes") is not None else "n/a"
+        )
         out(
             f"  {r.get('session_id') or '?':<24} PR#{r.get('pr_number') or '?'} "
             f"AC {ac_s} | drift {drift} | data-model-surprise {dm} | "
             f"deviations {_fmt(r['deviation_load'])} | probes {probes_s} | "
-            f"outcome {r.get('outcome') or 'n/a'}\n"
+            f"context {context_s} | outcome {r.get('outcome') or 'n/a'}\n"
         )
+    comparison = pf.get("context_comparison") or {}
+    out(
+        f"\n  context comparison: {comparison.get('label', 'rejected')}"
+        f" ({comparison.get('reason', comparison.get('claim', 'no contract'))})\n"
+    )
 
 
 def _render_by_skill(sb: dict) -> None:

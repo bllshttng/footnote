@@ -283,6 +283,12 @@ def build_entry(
     # emission, and target-state.md reads all anchor here.
     worktree_top = git_cmd("rev-parse", "--show-toplevel")
     root_path = worktree_top or ""
+    canonical_root = (
+        _paths.resolve_canonical_worktree(Path(root_path), timeout=2)
+        if root_path
+        else None
+    )
+    canonical_root_path = str((canonical_root or Path(root_path)).resolve()) if root_path else None
     cwd = os.getcwd()
 
     # PR number (ab-a933adf4). The immutable manifest no longer carries
@@ -347,17 +353,18 @@ def build_entry(
     # Sessions
     # The caller passes `session_id` as the Claude transcript UUID (from
     # the stop hook's run_completion_accounting). State also carries a
-    # stable target-minted session_id (immutable across accounting runs as
-    # of gate-provenance phase 01b) plus an optional claude_transcript_id
-    # field. Include every distinct identifier we have so cost lookups by
-    # either ID keep working after the stop hook stops overwriting
-    # session_id with the transcript UUID.
+    # stable target-minted session_id (immutable across accounting runs) plus
+    # the generic harness identity and one-release provider aliases. Include
+    # every distinct identifier so hook observations and cost lookups join on
+    # every harness.
     target_sid = state.get("fno_id") or state.get("session_id") or ""
+    harness_sid = state.get("harness_session_id") or ""
     # Current key is claude_session_id; old-key fallback for one release.
     claude_tid = state.get("claude_session_id") or state.get("claude_transcript_id") or ""
+    codex_tid = state.get("codex_thread_id") or ""
     _seen: set[str] = set()
     sessions: list[str] = []
-    for candidate in (session_id, target_sid, claude_tid):
+    for candidate in (session_id, target_sid, harness_sid, claude_tid, codex_tid):
         if candidate and candidate not in _seen:
             sessions.append(candidate)
             _seen.add(candidate)
@@ -428,6 +435,7 @@ def build_entry(
         "branch": branch or None,
         "project": project or None,
         "root_path": root_path or None,
+        "canonical_root_path": canonical_root_path,
         # worktree key kept (rendered as null) for legacy JSON readers that
         # still look it up; root_path is now the authoritative worktree path.
         "worktree": None,

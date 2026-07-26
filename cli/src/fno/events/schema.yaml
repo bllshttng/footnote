@@ -133,6 +133,16 @@ event_types:
           type: string
     consumers: [fno scoreboard --plan-fidelity]
 
+  - name: context_comparison_declared
+    description: "A predeclared context-pruning or graph-widening comparison contract. The derived scoreboard reads it but never mutates or persists a comparison result."
+    sources: [target, hook, test]
+    data:
+      required: [comparison_contract]
+      properties:
+        comparison_contract:
+          type: object
+    consumers: [fno scoreboard --plan-fidelity]
+
   - name: review_attestation
     description: "A local reviewer (sigma | code-review | declare) completed a head-pinned review pass. loop-check reads this as gate evidence for a config.review.reviewers entry (x-e703, Phase 2): the entry is satisfied when reviewer matches, head_sha == current HEAD, and verdict == pass. Head-pinning is mandatory - a pass on an old commit must not count after new commits land."
     sources: [target, subagent, hook, test]
