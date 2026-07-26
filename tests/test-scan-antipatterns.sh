@@ -121,6 +121,35 @@ else
     fail "AC5: Should exit 0 for clean directory (got $CLEAN_EXIT)"
 fi
 
+# --- AC6: Truncated output preserves the documented exit code ---
+echo ""
+echo "--- AC6: Many Findings Exit Code ---"
+
+mkdir -p "$TMPDIR_TEST/many"
+for index in $(seq 1 5000); do
+    echo "// TODO: finding $index with enough detail to overflow the output pipe" >> "$TMPDIR_TEST/many/findings.ts"
+done
+
+bash "$SCAN" "$TMPDIR_TEST/many" > /dev/null 2>&1 && MANY_EXIT=0 || MANY_EXIT=$?
+if [[ $MANY_EXIT -eq 1 ]]; then
+    pass "AC6: More than 20 findings still exit with documented code 1"
+else
+    fail "AC6: Expected exit 1 for many findings (got $MANY_EXIT)"
+fi
+
+# --- AC7: Installed dependencies are outside the scan surface ---
+echo ""
+echo "--- AC7: Virtual Environment Exclusion ---"
+
+mkdir -p "$TMPDIR_TEST/dependencies/.venv/lib"
+echo "# TODO: third-party package note" > "$TMPDIR_TEST/dependencies/.venv/lib/vendor.py"
+bash "$SCAN" "$TMPDIR_TEST/dependencies" > /dev/null 2>&1 && DEPS_EXIT=0 || DEPS_EXIT=$?
+if [[ $DEPS_EXIT -eq 0 ]]; then
+    pass "AC7: Ignores installed virtual-environment dependencies"
+else
+    fail "AC7: Should ignore virtual-environment dependencies (got $DEPS_EXIT)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Test Results ==="

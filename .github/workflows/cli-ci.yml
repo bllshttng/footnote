@@ -52,6 +52,40 @@ on:
       - .github/workflows/cli-ci.yml
 
 jobs:
+  real-codex-0145:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Install Codex 0.145
+        run: npm install -g @openai/codex@0.145.0
+
+      - name: Sync CLI
+        working-directory: cli
+        run: uv sync
+
+      - name: Real Codex 0.145 plugin boundary
+        env:
+          FNO_REAL_CODEX_PLUGIN_TEST: "1"
+        run: cli/.venv/bin/fno-py test -q cli/tests/integration/test_codex_plugin_real_boundary.py
+
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 20

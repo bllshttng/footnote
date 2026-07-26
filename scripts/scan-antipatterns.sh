@@ -20,13 +20,13 @@ scan() {
         --include="*.py" --include="*.sh" \
         --exclude-dir=node_modules --exclude-dir=.git \
         --exclude-dir=dist --exclude-dir=__pycache__ \
-        --exclude-dir=.next --exclude-dir=coverage \
+        --exclude-dir=.next --exclude-dir=coverage --exclude-dir=.venv \
         --exclude="*.test.*" --exclude="*.spec.*" \
         2>/dev/null || true)
 
     if [[ -n "$results" ]]; then
         echo "[$severity] $label:"
-        echo "$results" | head -20
+        head -20 <<< "$results"
         echo ""
         local count
         count=$(echo "$results" | wc -l | tr -d ' ')

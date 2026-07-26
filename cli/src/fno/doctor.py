@@ -1659,9 +1659,12 @@ def _harness_surface_report() -> dict[str, Any]:
         pass
 
     codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
-    plugin_state_exists = (codex_home / "footnote" / "plugin-channel.json").is_file() or (
-        codex_home / "plugins" / "cache" / "footnote"
-    ).exists() or (codex_home / "plugins" / "cache" / "footnote-dev").exists()
+    plugin_state_exists = (
+        (codex_home / "footnote" / "plugin-channel.json").is_file()
+        or (codex_home / "footnote" / "rollback-failure.json").is_file()
+        or (codex_home / "plugins" / "cache" / "footnote").exists()
+        or (codex_home / "plugins" / "cache" / "footnote-dev").exists()
+    )
     if shutil.which("codex") is not None or plugin_state_exists:
         try:
             from fno.setup.codex_plugin import inspect_freshness
