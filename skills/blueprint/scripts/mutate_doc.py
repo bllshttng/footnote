@@ -936,6 +936,20 @@ def finalize(doc_path: Path, no_emit: bool = False) -> tuple[int, str]:
         return 1, f"cannot finalize Blueprint draft from status {current_status!r}"
 
     if current_status == "ready":
+        # An unstamped ready doc finalizes to itself (historical permissive
+        # read, AC3-COMPAT). A compiled-v1 ready doc must still satisfy its
+        # contract: a --rewrite that regenerated the Execution Strategy with
+        # placeholder acceptance would otherwise leave a stamped plan that
+        # violates it, and finalize must surface that, not hide it.
+        if str(plan.frontmatter.get("acceptance_contract") or "").strip() != "compiled-v1":
+            return 0, resolved.read_text(encoding="utf-8")
+        result = validate_execution(plan, acceptance_contract="compiled-v1")
+        if result.violations:
+            report = "\n".join(
+                f"  {violation.field}: {violation.message}"
+                for violation in result.violations
+            )
+            return 2, "Execution Strategy is not ready:\n" + report
         return 0, resolved.read_text(encoding="utf-8")
 
     # Validate the proposed ready + compiled-v1 contract before writing.

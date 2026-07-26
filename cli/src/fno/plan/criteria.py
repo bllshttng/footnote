@@ -78,8 +78,12 @@ _AC_ANY_RE = rf"(?:{_AC_TYPED_RE}|{_AC_BARE_RE})"
 _LEADING_CODE_RE = re.compile(rf"^({_AC_ANY_RE})\b[\s:.\-]*")
 _CODE_NUMBER_RE = re.compile(r"AC(\d+)")
 
-# A bold AC marker opening a line: ``**AC1-HP:** text`` or ``**AC1:** text``.
-_BOLD_AC_LINE_RE = re.compile(rf"^\s*\*\*({_AC_ANY_RE})\s*:?\s*\*\*\s*(.*)$")
+# A bold AC marker opening a line: ``**AC1-HP:** text``, ``**AC1:** text``, or
+# the documented tagged legacy form ``**AC1-HP (api):** text`` (the ``(api)``
+# suffix is metadata, not part of the code or kind).
+_BOLD_AC_LINE_RE = re.compile(
+    rf"^\s*\*\*({_AC_ANY_RE})(?:\s*\([^)\n]*\))?\s*:?\s*\*\*\s*(.*)$"
+)
 
 # A Given/When/Then scenario line. Case-insensitive on the keyword so a hand-
 # written spec's lowercase "when" still attaches; the word boundary keeps
@@ -221,7 +225,16 @@ def _finalize(
     *,
     source: str,
 ) -> list[Criterion]:
-    """Assign synthesized codes, detect duplicate explicit identifiers."""
+    """Assign synthesized codes, detect duplicate explicit identifiers.
+
+    A marker that matched but yielded no statement (a bare ``**AC1-HP:**`` or
+    ``### AC1-HP`` with nothing after it) is not a valid criterion: the design
+    contract is that a candidate is valid when it yields a non-empty statement.
+    Dropping it here means a task that references that code fails resolution
+    (caught at compiled-v1 validation) rather than stamping ready against a
+    criterion that carries no behavior at all.
+    """
+    raw = [record for record in raw if record[3].strip()]
     explicit_numbers: set[int] = set()
     for _line, code, _kind, _text in raw:
         if code is not None:

@@ -72,6 +72,25 @@ class TestLegacyBold:
         assert criteria[0].text == "First criterion behavior."
         assert criteria[1].text == "Second criterion behavior."
 
+    def test_legacy_bold_tagged_suffix_preserved(self) -> None:
+        # The documented legacy form ``**AC1-HP (api):** ...`` keeps the base
+        # code and kind; the ``(api)`` tag is metadata, not part of either.
+        body = "**AC1-HP (api):** Given valid input, the module returns the result.\n"
+        criteria = compile_criteria(body)
+        assert len(criteria) == 1
+        assert criteria[0].code == "AC1-HP"
+        assert criteria[0].kind == "HP"
+        assert criteria[0].text == "Given valid input, the module returns the result."
+
+    def test_bare_marker_with_no_statement_is_dropped(self) -> None:
+        # A marker that yields no statement is not a criterion; a task that
+        # references its code then fails resolution rather than stamping ready
+        # against empty behavior.
+        body = "**AC1-HP:** Real behavior.\n**AC2-ERR:**\n"
+        criteria = compile_criteria(body)
+        assert [c.code for c in criteria] == ["AC1-HP"]
+        assert criteria[0].text == "Real behavior."
+
 
 # ---------------------------------------------------------------------------
 # AC9-UX + AC2-HP: numbered items, synthesized identifiers, determinism

@@ -246,6 +246,34 @@ class TestExecutableDraftLifecycle:
         assert _load_frontmatter(doc).get("status") == "design"
         assert _load_frontmatter(doc).get("acceptance_contract") is None
 
+    def test_finalize_revalidates_compiled_v1_ready_doc(self, tmp_path):
+        """A stamped ready doc is re-validated: a --rewrite or hand-edit that
+        left it violating compiled-v1 is refused, not silently re-stamped."""
+        doc = _copy_fixture(GREENFIELD_FIXTURE, tmp_path)
+        assert _run_mutate(doc, "--mode", "greenfield", "--draft").returncode == 0
+        text = doc.read_text(encoding="utf-8")
+        text = text.replace("surface: []", "surface: [src/generated.py]")
+        text = text.replace(
+            "verify: '# fill in verify command'",
+            "verify: pytest tests/test_generated.py",
+        )
+        text = text.replace("acceptance: []", "acceptance: [AC1-HP]")
+        doc.write_text(text, encoding="utf-8")
+        # Promote to ready + compiled-v1.
+        assert _run_mutate(doc, "--finalize").returncode == 0
+        assert _load_frontmatter(doc).get("acceptance_contract") == "compiled-v1"
+
+        # Corrupt the already-stamped plan: reference a missing criterion.
+        corrupted = doc.read_text(encoding="utf-8").replace(
+            "acceptance: [AC1-HP]", "acceptance: [AC9]"
+        )
+        doc.write_text(corrupted, encoding="utf-8")
+
+        refused = _run_mutate(doc, "--finalize")
+
+        assert refused.returncode == 2
+        assert "AC9" in refused.stderr
+
 
 # ---------------------------------------------------------------------------
 # W2 (x-408f / ab-638f9066): projectable frontmatter block-lists
