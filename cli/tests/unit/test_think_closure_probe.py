@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -12,7 +11,7 @@ from fno.graph.relatedness import _resolve_main_sha, _run_main_probe, classify_c
 
 SHA = "a" * 40
 BEHAVIOR = "login accepts a valid session"
-COMMAND = ["fno", "test", "cli/tests/unit/test_login.py"]
+COMMAND = ["scripts/probe.sh"]
 
 
 @pytest.fixture(autouse=True)
@@ -108,7 +107,11 @@ def test_main_probe_executes_archived_candidate_source(tmp_path: Path) -> None:
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
     (tmp_path / "marker.txt").write_text("current-main\n")
-    subprocess.run(["git", "add", "marker.txt"], cwd=tmp_path, check=True)
+    runner = tmp_path / "scripts" / "probe.sh"
+    runner.parent.mkdir()
+    runner.write_text("#!/bin/sh\ntest \"$(cat marker.txt)\" = current-main\n")
+    runner.chmod(0o755)
+    subprocess.run(["git", "add", "marker.txt", "scripts/probe.sh"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-qm", BEHAVIOR], cwd=tmp_path, check=True)
     sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
@@ -117,7 +120,24 @@ def test_main_probe_executes_archived_candidate_source(tmp_path: Path) -> None:
     observed = _run_main_probe(
         tmp_path,
         sha,
-        [sys.executable, "-c", "from pathlib import Path; assert Path('marker.txt').read_text() == 'current-main\\n'"],
+        ["scripts/probe.sh"],
     )
 
     assert observed == {"status": "passed", "exit_code": 0}
+
+
+@pytest.mark.parametrize("command", [["/usr/bin/true"], ["../outside"], ["missing"]])
+def test_main_probe_rejects_executable_outside_archived_candidate(
+    tmp_path: Path, command: list[str]
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    (tmp_path / "marker").write_text("x")
+    subprocess.run(["git", "add", "marker"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", BEHAVIOR], cwd=tmp_path, check=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    assert _run_main_probe(tmp_path, sha, command) is None

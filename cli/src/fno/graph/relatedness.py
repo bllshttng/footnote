@@ -88,6 +88,9 @@ def _run_main_probe(repo: Path, main_sha: str, command: list[str]) -> dict[str, 
         or not all(isinstance(arg, str) and arg and len(arg) <= 4096 for arg in command)
     ):
         return None
+    runner = Path(command[0])
+    if runner.is_absolute() or ".." in runner.parts:
+        return None
     try:
         archive = subprocess.run(
             ["git", "archive", "--format=tar", main_sha],
@@ -103,8 +106,16 @@ def _run_main_probe(repo: Path, main_sha: str, command: list[str]) -> dict[str, 
         with tempfile.TemporaryDirectory(prefix="fno-closure-") as temp_dir:
             with tarfile.open(fileobj=BytesIO(archive.stdout), mode="r:") as snapshot:
                 snapshot.extractall(temp_dir, filter="data")
+            snapshot_root = Path(temp_dir).resolve()
+            executable = (snapshot_root / runner).resolve()
+            if (
+                snapshot_root not in executable.parents
+                or not executable.is_file()
+                or not os.access(executable, os.X_OK)
+            ):
+                return None
             observed = subprocess.run(
-                command,
+                [str(executable), *command[1:]],
                 cwd=temp_dir,
                 capture_output=True,
                 text=True,
