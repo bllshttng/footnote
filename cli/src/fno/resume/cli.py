@@ -183,10 +183,19 @@ def _git_head_and_branch(worktree: Path) -> tuple[str, str]:
     return _run("rev-parse", "HEAD"), _run("rev-parse", "--abbrev-ref", "HEAD")
 
 
-def _live_claim_holder(node: str, claims_root: Optional[Path]) -> Optional[str]:
+def _live_claim_status(node: str, claims_root: Optional[Path]) -> dict:
+    """Live claim status for node:<id>. Never raises.
+
+    Returns the raw claim_status dict (state in free|live|suspect|stale|
+    corrupted). The caller fails CLOSED on corrupted (an unreadable lockfile
+    cannot confirm ownership) rather than collapsing it to a free claim.
+    """
     from fno.claims.core import claim_status
 
-    status = claim_status(f"node:{node}", root=claims_root)
+    return claim_status(f"node:{node}", root=claims_root)
+
+
+def _holder_of(status: dict) -> Optional[str]:
     if status.get("state") in {"free", "corrupted"}:
         return None
     holder = status.get("holder")
@@ -231,7 +240,21 @@ def validate_cmd(
     wt = Path(worktree) if worktree else Path(receipt.worktree)
     live_head, live_branch = _git_head_and_branch(wt) if wt.exists() else ("", "")
     croot = Path(claims_root).expanduser() if claims_root else None
-    live_holder = _live_claim_holder(node, croot)
+    claim = _live_claim_status(node, croot)
+    # Fail CLOSED on a corrupted lockfile: an unreadable claim cannot confirm
+    # ownership, so it must not collapse to "free" and grant an ok verdict
+    # (live-lockfile revalidation means the lockfile's own state is load-bearing).
+    if claim.get("state") == "corrupted":
+        typer.echo(json.dumps({
+            "ok": False,
+            "reason": "corrupted_claim",
+            "node": node,
+            "receipt": str(latest),
+            "claim_error": claim.get("error"),
+            "checked": {"live_claim_state": "corrupted"},
+        }))
+        raise typer.Exit(code=1)
+    live_holder = _holder_of(claim)
 
     events_path = Path(events_file) if events_file else (wt / ".fno" / "events.jsonl")
     node_events = [
@@ -250,6 +273,8 @@ def validate_cmd(
         node_events=node_events,
         harness=harness,
     )
+    checked = dict(res.checked)
+    checked["live_claim_state"] = claim.get("state")
     out = {
         "ok": res.ok,
         "reason": res.reason,
@@ -257,7 +282,7 @@ def validate_cmd(
         "receipt": str(latest),
         "next_action": {"verb": receipt.next_action.verb, "target": receipt.next_action.target},
         "idempotency_keys": list(receipt.idempotency_keys),
-        "checked": res.checked,
+        "checked": checked,
     }
     typer.echo(json.dumps(out))
     raise typer.Exit(code=0 if res.ok else 1)

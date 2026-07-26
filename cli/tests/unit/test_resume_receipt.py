@@ -371,6 +371,28 @@ def test_revalidate_undated_late_event_does_not_falsely_fail():
     assert res.ok is True
 
 
+def test_revalidate_own_delegation_does_not_supersede():
+    # handoff.sh writes the receipt (Step 2) then emits its OWN `delegated` event
+    # (Step 8); that own continuation must not supersede the receipt it produced.
+    # Only a FOREIGN later event is stale authority reviving.
+    own_delegation = [
+        {"type": "delegated", "ts": "2031-12-31T23:59:59Z",
+         "data": {"node_id": "x-c3a2", "from_session": "s1", "generation": 2, "harness": "claude"}},
+    ]
+    res = revalidate(_receipt(), **_ok_kwargs(node_events=own_delegation))
+    assert res.ok is True
+
+
+def test_revalidate_foreign_later_delegation_supersedes():
+    # A FOREIGN session's later delegation for the node is stale authority.
+    res = revalidate(_receipt(), **_ok_kwargs(node_events=[
+        {"type": "delegated", "ts": "2031-12-31T23:59:59Z",
+         "data": {"node_id": "x-c3a2", "from_session": "other-session", "generation": 9, "harness": "claude"}},
+    ]))
+    assert res.ok is False
+    assert res.reason.startswith("superseded_by_later_event")
+
+
 def test_revalidate_is_read_only_does_not_mutate_inputs():
     # revalidate must preserve predecessor state: it neither acquires/releases
     # claims nor writes. Asserting it takes no repo/claims-root and returns a

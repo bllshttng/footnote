@@ -816,6 +816,7 @@ def init(
         _print_orientation_report()
         _maybe_dispatch_work_start()
         _maybe_reconcile_lane_slot()
+        _maybe_check_resume_receipt()
     raise typer.Exit(code=propagate_returncode(proc.returncode))
 
 
@@ -894,6 +895,99 @@ def _maybe_reconcile_lane_slot() -> None:
         reconcile_lane_slot(node_id, pid=resolve_session_pid())
     except Exception:  # noqa: BLE001 - additive; never affect the init exit code
         pass
+
+
+def _maybe_check_resume_receipt() -> None:
+    """Best-effort resume-receipt gate on the successor entry path (x-c3a2).
+
+    When a prior session left a durable receipt for this node, revalidate it
+    against live claim/HEAD/worktree state and surface the verdict. Non-blocking:
+    prints a verdict line to stderr (a warning on fail-closed) but never affects
+    the init exit code. Hard fail-closed enforcement - which must order the gate
+    BEFORE claim acquisition, a succession-protocol change - is tracked as
+    follow-up; this makes the gate run on every resume so a stale/foreign
+    receipt is observable rather than silently bypassed.
+    """
+    try:
+        from fno.paths import resolve_repo_root
+
+        root = resolve_repo_root()
+        manifest = root / ".fno" / "target-state.md"
+        text = manifest.read_text(encoding="utf-8")
+        node_m = re.search(r"^graph_node_id\s*:\s*(\S+)", text, re.MULTILINE)
+        if not node_m:
+            return
+        node = node_m.group(1).strip().strip("\"'")
+        if not node or node == "null":
+            return
+        from fno.resume.cli import (
+            _artifacts_dir,
+            _find_latest_receipt,
+            _git_head_and_branch,
+            _holder_of,
+            _live_claim_status,
+        )
+        from fno.resume.receipt import (
+            MalformedReceiptError,
+            load_receipt,
+            read_node_events,
+            revalidate,
+        )
+
+        latest = _find_latest_receipt(node, _artifacts_dir(root))
+        if latest is None:
+            return  # fresh node: no predecessor receipt to revalidate
+        try:
+            receipt = load_receipt(latest)
+        except MalformedReceiptError as exc:
+            typer.echo(f"target: resume receipt for {node} is malformed: {exc}", err=True)
+            return
+        sid_m = re.search(r"^session_id\s*:\s*(\S+)", text, re.MULTILINE)
+        own_session = sid_m.group(1).strip().strip("\"'") if sid_m else receipt.identity.session
+        live_head, live_branch = _git_head_and_branch(root)
+        claim = _live_claim_status(node, None)
+        events_path = root / ".fno" / "events.jsonl"
+        node_events = (
+            [e for e in read_node_events([events_path]) if _receipt_event_node(e) == node]
+            if events_path.exists() else []
+        )
+        res = revalidate(
+            receipt,
+            live_head=live_head,
+            live_branch=live_branch,
+            worktree_exists=root.exists(),
+            live_claim_holder=_holder_of(claim),
+            own_session=own_session,
+            node_events=node_events,
+        )
+        if res.ok:
+            typer.echo(
+                f"target: resume receipt for {node} revalidated ok "
+                f"(gen {receipt.identity.generation}, head {receipt.head[:8]})",
+                err=True,
+            )
+        else:
+            typer.echo(
+                f"target: resume receipt for {node} FAIL-CLOSED ({res.reason}) - "
+                "revalidate before proceeding; see `fno resume receipt validate`",
+                err=True,
+            )
+    except Exception:  # noqa: BLE001 - additive; never affect the init exit code
+        pass
+
+
+def _receipt_event_node(e: dict) -> Optional[str]:
+    for key in ("node_id", "graph_node_id"):
+        v = e.get(key)
+        if isinstance(v, str) and v:
+            return v
+    data = e.get("data")
+    if isinstance(data, dict):
+        for key in ("node_id", "graph_node_id"):
+            v = data.get(key)
+            if isinstance(v, str) and v:
+                return v
+    return None
 
 
 def _print_orientation_report() -> None:

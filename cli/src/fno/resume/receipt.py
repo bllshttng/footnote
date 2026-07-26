@@ -481,11 +481,33 @@ def _event_node(e: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _event_session(e: dict[str, Any]) -> Optional[str]:
+    """The session an event belongs to.
+
+    `delegated` carries from_session (the delegating predecessor); other kinds
+    carry session_id. Used to exclude a receipt's OWN continuation events
+    (its own later delegation/loop_check) from supersession - those are the
+    receipt's own succession, not a foreign later authority.
+    """
+    data = e.get("data")
+    if isinstance(data, dict):
+        for key in ("from_session", "session_id"):
+            v = data.get(key)
+            if isinstance(v, str) and v:
+                return v
+    for key in ("from_session", "session_id"):
+        v = e.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return None
+
+
 def _superseded_by_later_event(
     events: Sequence[dict[str, Any]],
     *,
     node: str,
     receipt_written_at: str,
+    own_session: Optional[str] = None,
 ) -> Optional[str]:
     """A node event strictly after the receipt's write means stale authority.
 
@@ -500,6 +522,12 @@ def _superseded_by_later_event(
         if (e.get("type") or e.get("kind")) not in _SUPERSEDED_KINDS:
             continue
         if _event_node(e) != node:
+            continue
+        # Exclude the receipt's own continuation: its own later delegation
+        # (handoff.sh emits `delegated` at Step 8, after writing the receipt at
+        # Step 2) and its own loop_check are this receipt's succession, not a
+        # foreign later authority reviving. Only a FOREIGN later event supersedes.
+        if own_session and _event_session(e) == own_session:
             continue
         at = _parse_ts(e.get("ts") or e.get("timestamp"))
         if at is not None and at > written:
@@ -581,7 +609,10 @@ def revalidate(
 
     # superseded: a later node event means the receipt is stale authority.
     late = _superseded_by_later_event(
-        node_events, node=ident.node, receipt_written_at=receipt.written_at
+        node_events,
+        node=ident.node,
+        receipt_written_at=receipt.written_at,
+        own_session=own,
     )
     if late:
         return RevalidationResult(False, late, checked)

@@ -196,5 +196,20 @@ else
   fail "S9: idempotency keys missing (got '$KEYS')"
 fi
 
+# ── S10: corrupted claim fails closed (not collapsed to free) ────────────────
+# A garbage lockfile cannot confirm ownership; validate must fail closed with
+# corrupted_claim rather than treat it as a free claim and grant ok.
+CLAIM_FILE="$CLAIMS_HOME/.fno/claims/node%3A${NODE}.lock"
+mkdir -p "$(dirname "$CLAIM_FILE")"
+printf 'not a valid claim lockfile' > "$CLAIM_FILE"
+run_validate
+REASON="$(printf '%s' "$VAL" | field reason)"
+if [[ "$VAL_RC" -ne 0 && "$REASON" == "corrupted_claim" ]]; then
+  pass "S10: corrupted_claim fails closed"
+else
+  fail "S10: expected corrupted_claim, got rc=$VAL_RC reason='$REASON'"
+fi
+rm -f "$CLAIM_FILE"
+
 printf '[self-handoff] RESULTS: %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP_COUNT"
 [[ "$FAIL" -eq 0 ]]
