@@ -114,6 +114,12 @@ elif len(args) == 4 and args[:2] == ["plugin", "remove"] and args[3] == "--json"
     if is_live and os.environ.get("FNO_TEST_FAIL_LIVE_PLUGIN_REMOVE_AFTER_MUTATION") and not failure_marker.exists():
         failure_marker.touch()
         state_path.write_text(json.dumps(state))
+        if os.environ.get("FNO_TEST_MUTATE_CONFIG_ON_FAILURE"):
+            config = home / "config.toml"
+            config.write_text(
+                "[unrelated]\\nvalue = 1\\n\\n"
+                "[marketplaces.footnote]\\nsource_type = \\\"git\\\"\\nsource = \\\"bllshttng/footnote\\\"\\n"
+            )
         print("injected post-mutation plugin remove failure", file=sys.stderr)
         raise SystemExit(17)
     print(json.dumps({{"removed": True}}))
@@ -346,8 +352,21 @@ def test_post_mutation_process_failure_rolls_back_state_and_marker(tmp_path: Pat
     marker.parent.mkdir(parents=True)
     marker_bytes = b'{"channel":"dev","marketplace":"footnote","source":"working"}\n'
     marker.write_bytes(marker_bytes)
+    config = home / "config.toml"
+    config_bytes = (
+        b"# preserve this user heading\n"
+        b"[unrelated]\n"
+        b"value = 1 # preserve this user comment\n\n"
+        b"[marketplaces.footnote]\n"
+        b'source_type = "local"\n'
+        + f'source = "{source}"\n\n'.encode()
+        + b'[plugins."fno@footnote"]\n'
+        b"enabled = true\n"
+    )
+    config.write_bytes(config_bytes)
     env = _environment(tmp_path, source, state_path)
     env["FNO_TEST_FAIL_LIVE_PLUGIN_REMOVE_AFTER_MUTATION"] = "1"
+    env["FNO_TEST_MUTATE_CONFIG_ON_FAILURE"] = "1"
 
     result = _run_setup(env, "--channel", "release")
 
@@ -360,6 +379,7 @@ def test_post_mutation_process_failure_rolls_back_state_and_marker(tmp_path: Pat
         "source": str(source),
     }
     assert marker.read_bytes() == marker_bytes
+    assert config.read_bytes() == config_bytes
 
 
 def test_candidate_payload_change_never_commits_live_switch(tmp_path: Path) -> None:

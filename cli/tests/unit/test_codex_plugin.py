@@ -361,9 +361,13 @@ def test_release_convergence_is_source_aware_noop(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     calls: list[list[str]] = []
+    command_homes: list[Path] = []
 
-    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
+        env = kwargs.get("env")
+        assert isinstance(env, dict)
+        command_homes.append(Path(str(env["CODEX_HOME"])))
         if "marketplace" in argv:
             return _cp(
                 argv,
@@ -408,6 +412,7 @@ def test_release_convergence_is_source_aware_noop(tmp_path: Path) -> None:
         ["codex", "plugin", "marketplace", "list", "--json"],
         ["codex", "plugin", "list", "--json"],
     ]
+    assert command_homes == [home] * len(calls)
 
 
 def test_empty_selected_version_is_repaired_instead_of_verified_noop(
@@ -1444,6 +1449,63 @@ def test_legacy_cache_symlink_is_refused_without_mutation(tmp_path: Path) -> Non
     assert [row["pluginId"] for row in fake.plugins] == [PLUGIN_ID]
 
 
+def test_dangling_legacy_cache_symlink_is_refused_without_mutation(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    marker = home / "footnote/plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {"channel": "dev", "marketplace": MARKETPLACE, "source": str(source)}
+        ),
+        encoding="utf-8",
+    )
+    legacy_cache = home / "plugins/cache/footnote-dev"
+    legacy_cache.parent.mkdir(parents=True)
+    legacy_cache.symlink_to(tmp_path / "missing-cache", target_is_directory=True)
+
+    with pytest.raises(CodexPluginError) as caught:
+        converge(
+            channel="dev",
+            validate_candidate=False,
+            runner=fake,
+            codex_home=home,
+            source_root=source,
+        )
+
+    assert caught.value.stage == "cache-quarantine"
+    assert legacy_cache.is_symlink()
+    assert [row["pluginId"] for row in fake.plugins] == [PLUGIN_ID]
+
+
+def test_rollback_failure_remedy_preserves_requested_channel(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    receipt = home / "footnote/rollback-failure.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(
+        json.dumps(
+            {
+                "channel": "dev",
+                "stage": "plugin-add",
+                "detail": "rollback did not complete",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = inspect_freshness(
+        runner=lambda *_args, **_kwargs: _cp([], {}), codex_home=home
+    )
+
+    assert report["status"] == "error"
+    assert report["remedy"] == "fno setup codex-plugin --channel dev --refresh"
+
+
 def test_legacy_plugin_restore_falls_back_to_exact_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1491,7 +1553,13 @@ def test_legacy_plugin_restore_falls_back_to_exact_config(
 
     monkeypatch.setattr(codex_plugin, "_restore_owned_config", restore_and_reload)
 
-    codex_plugin._restore_snapshot(fake, home, snapshot, ())
+    codex_plugin._restore_snapshot(
+        fake,
+        home,
+        snapshot,
+        (),
+        env={"CODEX_HOME": str(home)},
+    )
 
     assert config.read_bytes() == config_bytes
     assert [row["name"] for row in fake.marketplaces] == [LEGACY_DEV_MARKETPLACE]
@@ -1520,6 +1588,7 @@ def test_rollback_failure_is_persisted_and_named(tmp_path: Path) -> None:
     receipt = json.loads(
         (home / "footnote" / "rollback-failure.json").read_text(encoding="utf-8")
     )
+    assert receipt["channel"] == "release"
     assert receipt["stage"] == "plugin-add"
     assert "rollback failed" in receipt["detail"]
 
@@ -1548,9 +1617,11 @@ def test_unexpected_rollback_exception_is_persisted_and_named(
         )
 
     assert caught.value.stage == "rollback-failure"
+    assert isinstance(caught.value.__cause__, OSError)
     receipt = json.loads(
         (home / "footnote/rollback-failure.json").read_text(encoding="utf-8")
     )
+    assert receipt["channel"] == "release"
     assert receipt["stage"] == "plugin-add"
     assert "unexpected rollback failure" in receipt["detail"]
 
