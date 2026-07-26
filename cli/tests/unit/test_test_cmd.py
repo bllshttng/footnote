@@ -8,9 +8,10 @@ subtree, files without a shell shebang, and source-only helpers.
 """
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
-from fno.test_cmd import discover_shell_harnesses
+from fno.test_cmd import changed_snapshot, discover_shell_harnesses, select_changed
 
 
 def _write(path: Path, body: str, *, executable: bool = False) -> None:
@@ -69,3 +70,122 @@ def test_discovers_new_harness_and_excludes_non_harnesses(tmp_path: Path) -> Non
     assert "scripts/lib/libthing.sh" not in found         # library excluded
     assert "cli/tests/smoke/test_smoke_one.sh" not in found  # orchestrated subtree excluded
     assert "tests/hooks/not_shell.sh" not in found        # non-shell shebang excluded
+
+
+# --- changed-surface selection (fno test smoke --changed) -------------------
+
+
+def _repo(root: Path) -> None:
+    """Minimal shape select_changed() reads: a cli/tests tree + owned harnesses."""
+    _write(root / "cli/src/fno/widget.py", "x = 1\n")
+    _write(root / "cli/tests/unit/test_widget.py", "def test_x(): pass\n")
+    _write(root / "cli/tests/unit/test_test_cmd.py", "def test_y(): pass\n")
+    _write(root / "tests/lib/helper.sh", "#!/usr/bin/env bash\n:\n", executable=True)
+    for name in ("test_a", "test_b"):
+        _write(root / f"tests/lib/{name}.sh",
+               '#!/usr/bin/env bash\nsource "$(dirname "$0")/helper.sh"\n:\n',
+               executable=True)
+
+
+def test_python_source_selects_conventional_test_and_names_the_rule(tmp_path: Path) -> None:
+    """AC2: the receipt names the selected test AND the rule that selected it."""
+    _repo(tmp_path)
+    sel, unmapped = select_changed(tmp_path, ["cli/src/fno/widget.py"])
+    assert [(s["rule"], s["target"]) for s in sel] == [
+        ("python-source-stem", "cli/tests/unit/test_widget.py")
+    ]
+    assert unmapped == []
+
+
+def test_changed_test_file_selects_itself(tmp_path: Path) -> None:
+    """AC1: a changed test file is its own selection (no inference needed)."""
+    _repo(tmp_path)
+    sel, _ = select_changed(tmp_path, ["cli/tests/unit/test_widget.py"])
+    assert sel == [{"rule": "test-file-self", "path": "cli/tests/unit/test_widget.py",
+                    "kind": "pytest", "target": "cli/tests/unit/test_widget.py"}]
+
+
+def test_shell_helper_selects_both_owning_harnesses_once(tmp_path: Path) -> None:
+    """AC3: reverse source-reference rule, each owner exactly once."""
+    _repo(tmp_path)
+    sel, unmapped = select_changed(tmp_path, ["tests/lib/helper.sh"])
+    assert sorted(s["target"] for s in sel) == ["tests/lib/test_a.sh", "tests/lib/test_b.sh"]
+    assert {s["rule"] for s in sel} == {"shell-helper-reverse"}
+    assert unmapped == []
+
+
+def test_unknown_path_is_unmapped_and_selects_nothing(tmp_path: Path) -> None:
+    """AC4: an unknown path is visible as unmapped, never silently green."""
+    _repo(tmp_path)
+    sel, unmapped = select_changed(tmp_path, ["docs/some-note.md"])
+    assert sel == []
+    assert unmapped == ["docs/some-note.md"]
+
+
+def test_python_source_without_a_conventional_test_is_unmapped(tmp_path: Path) -> None:
+    """AC4: best-effort inference that finds nothing admits it."""
+    _repo(tmp_path)
+    _write(tmp_path / "cli/src/fno/lonely.py", "x = 1\n")
+    sel, unmapped = select_changed(tmp_path, ["cli/src/fno/lonely.py"])
+    assert sel == []
+    assert unmapped == ["cli/src/fno/lonely.py"]
+
+
+def test_infra_change_selects_the_selector_contract_tests(tmp_path: Path) -> None:
+    """Rule 6: a change to the runner itself falls back to its contract tests."""
+    _repo(tmp_path)
+    sel, unmapped = select_changed(tmp_path, ["cli/src/fno/test_cmd.py"])
+    assert [s["rule"] for s in sel] == ["infra-broad"]
+    assert sel[0]["target"] == "cli/tests/unit/test_test_cmd.py"
+    assert unmapped == []
+
+
+def test_duplicate_selection_is_emitted_once(tmp_path: Path) -> None:
+    """Two changed paths that map to one test select it once, not twice."""
+    _repo(tmp_path)
+    sel, _ = select_changed(
+        tmp_path, ["cli/src/fno/widget.py", "cli/tests/unit/test_widget.py"])
+    assert len(sel) == 1
+
+
+def _git_repo(root: Path) -> None:
+    for args in (("init", "-q"), ("config", "user.email", "t@t.t"),
+                 ("config", "user.name", "t")):
+        subprocess.run(["git", "-C", str(root), *args], check=True)
+
+
+def test_snapshot_diffs_explicit_base_and_head(tmp_path: Path) -> None:
+    """The CI path diffs the given revisions, not a mutable remote ref."""
+    _git_repo(tmp_path)
+    _write(tmp_path / "a.txt", "one\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+    base = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    _write(tmp_path / "b.txt", "two\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "head"], check=True)
+
+    paths, reason = changed_snapshot(tmp_path, base, "HEAD")
+    assert reason == ""
+    assert paths == ["b.txt"]
+
+
+def test_snapshot_fails_closed_on_an_unresolvable_base(tmp_path: Path) -> None:
+    """AC5: a missing base is an explicit unevaluated result, not an empty diff."""
+    _git_repo(tmp_path)
+    _write(tmp_path / "a.txt", "one\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+
+    paths, reason = changed_snapshot(tmp_path, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD")
+    assert paths == []
+    assert "does not resolve" in reason
+
+
+def test_snapshot_refuses_a_half_specified_range(tmp_path: Path) -> None:
+    """AC5: --base without --head cannot silently fall back to local mode."""
+    _git_repo(tmp_path)
+    paths, reason = changed_snapshot(tmp_path, "HEAD", "")
+    assert paths == []
+    assert "both --base and --head" in reason

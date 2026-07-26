@@ -27,6 +27,7 @@ uses it verbatim, giving `UNPROCESSED` passthrough: every pytest flag (`-x`,
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import re
 import shutil
@@ -354,7 +355,14 @@ _SMOKE_HARNESS_GLOBS = (
 )
 
 _SH_PATH_RE = re.compile(r"[\w./@{}$+-]*\.sh\b")
-_SOURCE_RE = re.compile(r"(?:^|[\s;|&(])(?:source|\.)\s+(?:\./)?(\S+\.sh)")
+# A source target may contain a command substitution with its own spaces
+# (`source "$(dirname "$0")/x.sh"`), so the token cannot be a bare \S+ - that
+# stops at the space inside $( ) and the ref is missed entirely. The alternation
+# swallows a whole $(...) group but still refuses to cross unrelated whitespace,
+# so `source "$X"  # see helper.sh` does not read as a ref to helper.sh.
+_SOURCE_RE = re.compile(
+    r"""(?:^|[\s;|&(])(?:source|\.)\s+["']?((?:\$\([^)]*\)|[\w./@{}$+-])*\.sh)"""
+)
 
 
 def _has_shell_shebang(path: Path) -> bool:
@@ -392,16 +400,15 @@ def _resolve_source_ref(sourcer_rel: str, target: str) -> Optional[str]:
     return f"{base}/{t}" if base else t
 
 
-def _sourced_helpers(root: Path, candidates: set[str]) -> set[str]:
-    """Candidates that a sibling sources (`. x` / `source x`) -> helpers.
+def _source_edges(root: Path) -> dict[str, set[str]]:
+    """Reverse source-reference map: helper path -> the files that source it.
 
-    A sourced file is a helper, not a standalone harness; running it directly
-    produces a spurious failure (it expects to inherit a caller's state).
+    Read forward by discovery (a sourced file is a helper, not a standalone
+    harness; running it directly produces a spurious failure) and backward by
+    changed-selection (a touched helper must select its owning harnesses).
     """
-    if not candidates:
-        return set()
     scan_dirs = [root / "tests", root / "scripts" / "tests", root / "skills"]
-    sourced: set[str] = set()
+    edges: dict[str, set[str]] = {}
     for d in scan_dirs:
         if not d.exists():
             continue
@@ -416,9 +423,15 @@ def _sourced_helpers(root: Path, candidates: set[str]) -> set[str]:
                     continue
                 for m in _SOURCE_RE.finditer(line):
                     resolved = _resolve_source_ref(sourcer_rel, m.group(1))
-                    if resolved is not None and resolved in candidates:
-                        sourced.add(resolved)
-    return sourced
+                    if resolved is not None and resolved != sourcer_rel:
+                        edges.setdefault(resolved, set()).add(sourcer_rel)
+    return edges
+
+
+def _sourced_helpers(root: Path, candidates: set[str]) -> set[str]:
+    if not candidates:
+        return set()
+    return {h for h in _source_edges(root) if h in candidates}
 
 
 def discover_shell_harnesses(root: Path) -> list[str]:
@@ -579,36 +592,372 @@ def _smoke_prereqs(selected_cmds: Sequence[str]) -> Optional[str]:
     return None
 
 
-def _parse_smoke_args(args: Sequence[str]) -> tuple:
-    """Parse smoke flags; returns (list_mode, keep_going, retry_failed, verbose, only_glob).
+def _parse_smoke_args(args: Sequence[str]) -> dict:
+    """Parse smoke flags into an options dict.
 
-    Raises ValueError on a bad/unknown argument; the caller prints it and
-    exits 2. `--help`/`-h` is handled by the caller before parsing.
+    Raises ValueError on a bad/unknown/contradictory argument; the caller
+    prints it and exits 2. `--help`/`-h` is handled by the caller first.
     """
-    list_mode = keep_going = retry_failed = verbose = False
-    only_glob = ""
-    need_only = False
+    opts: dict = {
+        "list": False, "keep_going": False, "retry_failed": False,
+        "verbose": False, "only": "", "changed": False, "base": "", "head": "",
+    }
+    valued = {"--only": "only", "--base": "base", "--head": "head"}
+    pending = ""
     for a in args:
-        if a == "--list":
-            list_mode = True
+        if pending:
+            opts[pending] = a
+            pending = ""
+        elif a in valued:
+            pending = valued[a]
+        elif "=" in a and a.split("=", 1)[0] in valued:
+            flag, val = a.split("=", 1)
+            opts[valued[flag]] = val
+        elif a == "--list":
+            opts["list"] = True
         elif a == "--verbose":
-            verbose = True
+            opts["verbose"] = True
         elif a == "--keep-going":
-            keep_going = True
+            opts["keep_going"] = True
         elif a == "--retry-failed":
-            retry_failed = True
-        elif a == "--only":
-            need_only = True
-        elif a.startswith("--only="):
-            only_glob = a[len("--only="):]
-        elif need_only:
-            only_glob = a
-            need_only = False
+            opts["retry_failed"] = True
+        elif a == "--changed":
+            opts["changed"] = True
         else:
             raise ValueError(f"smoke: unknown arg {a!r}")
-    if need_only:
+    if pending:
+        raise ValueError(f"smoke: --{pending.replace('_', '-')} needs a value")
+    if opts["only"] == "" and "--only" in args:
         raise ValueError("smoke: --only needs a glob")
-    return list_mode, keep_going, retry_failed, verbose, only_glob
+    # Three subset modes with no defined precedence: refuse rather than let one
+    # silently win and mislabel the evidence.
+    subsets = [n for n, on in
+               (("--changed", opts["changed"]), ("--only", bool(opts["only"])),
+                ("--retry-failed", opts["retry_failed"])) if on]
+    if len(subsets) > 1:
+        raise ValueError(f"smoke: {' and '.join(subsets)} are separate subset modes - pick one")
+    if (opts["base"] or opts["head"]) and not opts["changed"]:
+        raise ValueError("smoke: --base/--head only apply to --changed")
+    return opts
+
+
+# ---------------------------------------------------------------------------
+# Changed-surface packet (`fno test smoke --changed`).
+#
+# Partial evidence, never full. The selector maps changed paths to a subset of
+# the same work the full runner owns; execution, step naming and exit semantics
+# stay with the runner. Three separate mechanisms stop a partial green from
+# reading as a full one: the CHANGED SUBSET label (never FULL), a failure
+# record and receipt in their own namespace (so a partial run cannot clear the
+# full record or mint a mode=FULL attestation), and typed exit codes that let a
+# caller distinguish "passed" from "nothing mapped" from "no trustworthy diff".
+# ---------------------------------------------------------------------------
+
+CHANGED_RC_UNSELECTED = 20   # nothing mapped: not a failure, and not a green verdict
+CHANGED_RC_UNEVALUATED = 21  # no trustworthy diff: fail closed, never partial-green
+CHANGED_FAILURE_RECORD_DEFAULT = ".fno/changed-last-failures.txt"
+CHANGED_RECEIPT_DEFAULT = ".fno/changed-last-receipt.json"
+
+# Broad infrastructure (rule 6): the runner, the selector, shared test config,
+# and the workflows. A change here invalidates the mapping itself, so it selects
+# the selector's own contract tests rather than trusting an inferred subset.
+_INFRA_EXACT = ("cli/src/fno/test_cmd.py", "scripts/ci/preflight.sh", "cli/pyproject.toml")
+_INFRA_PREFIX = (".github/workflows/",)
+_INFRA_BASENAME = ("conftest.py",)
+_INFRA_SELECTS = (
+    "cli/tests/unit/test_test_cmd.py",
+    "tests/ci/test_smoke_modes.sh",
+    "tests/ci/test_preflight.sh",
+    "tests/ci/test_changed_smoke_workflow.sh",
+)
+
+
+def _lines(text: str) -> list[str]:
+    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+
+def _git(root: Path, *args: str) -> tuple[int, str]:
+    try:
+        p = subprocess.run(["git", "-C", str(root), *args],
+                           capture_output=True, text=True)
+    except OSError as exc:
+        return 127, str(exc)
+    return p.returncode, (p.stdout if p.returncode == 0 else p.stderr).strip()
+
+
+def changed_snapshot(root: Path, base: str = "", head: str = "") -> tuple[list[str], str]:
+    """One deterministic changed-path snapshot -> (paths, unevaluated reason).
+
+    Explicit base+head (CI) diffs those exact revisions, so behavior never
+    depends on a mutable remote-tracking ref. Local mode diffs the merge-base
+    with origin/main and adds untracked files, which a commit-to-commit diff
+    cannot see but which are part of local changed intent. A non-empty reason
+    means the result is UNEVALUATED, never an empty changeset.
+    """
+    if bool(base) != bool(head):
+        return [], "--changed takes both --base and --head, or neither (local mode)"
+    if base:
+        shas = []
+        for rev in (base, head):
+            rc, out = _git(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}")
+            if rc != 0 or not out:
+                return [], f"revision {rev!r} does not resolve here (shallow checkout or missing ref)"
+            shas.append(out)
+        rc, out = _git(root, "diff", "--name-only", "--diff-filter=d", f"{shas[0]}...{shas[1]}")
+        if rc != 0:
+            return [], f"git diff {base}...{head} failed: {out}"
+        return sorted(set(_lines(out))), ""
+
+    rc, mb = _git(root, "merge-base", "origin/main", "HEAD")
+    if rc != 0 or not mb:
+        return [], "cannot resolve merge-base with origin/main (fetch it, or pass --base/--head)"
+    paths: set[str] = set()
+    for args in (("diff", "--name-only", "--diff-filter=d", mb),
+                 ("ls-files", "--others", "--exclude-standard")):
+        rc, out = _git(root, *args)
+        if rc != 0:
+            return [], f"git {' '.join(args)} failed: {out}"
+        paths.update(_lines(out))
+    return sorted(paths), ""
+
+
+def _conventional_tests(root: Path, stem: str) -> list[str]:
+    hits = sorted(p.relative_to(root).as_posix()
+                  for p in (root / "cli" / "tests").rglob(f"test_{stem}.py"))
+    return hits
+
+
+def _rust_family(rel: str) -> list[str]:
+    """Registry step names that own the crate `rel` lives in."""
+    parts = rel.split("/")
+    if len(parts) < 2:
+        return []
+    crate = f"{parts[0]}/{parts[1]}"
+    return [name for name, cwd, cmd in _STRUCTURAL_STEPS
+            if cwd == crate or crate in cmd]
+
+
+def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[str]]:
+    """Map changed paths to work, in rule order -> (selections, unmapped).
+
+    Each selection names the rule that produced it, so a bad mapping is
+    diagnosable from the receipt. Selection is deterministic and intentionally
+    incomplete: an unmapped path stays visible instead of becoming "green".
+    """
+    harnesses = set(discover_shell_harnesses(root))
+    edges = _source_edges(root)
+    selections: list[dict] = []
+    unmapped: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(rule: str, path: str, kind: str, target: str) -> bool:
+        if (kind, target) in seen:
+            return True
+        seen.add((kind, target))
+        selections.append({"rule": rule, "path": path, "kind": kind, "target": target})
+        return True
+
+    for rel in paths:
+        base = os.path.basename(rel)
+        if (rel in _INFRA_EXACT or base in _INFRA_BASENAME
+                or rel.startswith(_INFRA_PREFIX)):
+            for target in _INFRA_SELECTS:
+                if (root / target).exists():
+                    add("infra-broad", rel, "pytest" if target.endswith(".py") else "shell", target)
+            continue
+        if rel.endswith(".py") and base.startswith("test_") and "/tests/" in rel:
+            add("test-file-self", rel, "pytest", rel)
+            continue
+        if rel.startswith("cli/src/") and rel.endswith(".py"):
+            hits = _conventional_tests(root, base[:-3])
+            if hits:
+                for t in hits:
+                    add("python-source-stem", rel, "pytest", t)
+                continue
+            unmapped.append(rel)
+            continue
+        if rel.endswith(".sh"):
+            if rel in harnesses:
+                add("shell-harness-self", rel, "shell", rel)
+                continue
+            owners = sorted(s for s in edges.get(rel, ()) if s in harnesses)
+            if owners:
+                for o in owners:
+                    add("shell-helper-reverse", rel, "shell", o)
+                continue
+            # Outside the auto-discovery globs but wired into a registry step
+            # by hand (tests/ci/*.sh, scripts/lib/paths.sh): run the owning step.
+            steps = [name for name, _, cmd in _STRUCTURAL_STEPS if rel in cmd]
+            if steps:
+                for name in steps:
+                    add("shell-registry-step", rel, "step", name)
+                continue
+            unmapped.append(rel)
+            continue
+        if rel.startswith("crates/"):
+            fam = _rust_family(rel)
+            if fam:
+                for name in fam:
+                    add("rust-family", rel, "step", name)
+                continue
+            unmapped.append(rel)
+            continue
+        unmapped.append(rel)
+    return selections, unmapped
+
+
+def _changed_steps(selections: Sequence[dict]) -> list[tuple[str, str, str]]:
+    """Turn selections into runner steps, fastest-signal first."""
+    pytest_targets = [s["target"] for s in selections if s["kind"] == "pytest"]
+    steps: list[tuple[str, str, str]] = []
+    if pytest_targets:
+        targets = sorted(set(pytest_targets))
+        # xdist costs more than it saves on a handful of files.
+        par = " -n auto" if len(targets) > 3 else ""
+        steps.append((f"Pytest (changed subset, {len(targets)} file(s))", ".",
+                      f"uv run --project cli pytest --tb=short -q{par} " + " ".join(targets)))
+    for rel in sorted({s["target"] for s in selections if s["kind"] == "shell"}):
+        steps.append((rel, ".", f"bash {rel}"))
+    by_name = {name: (name, cwd, cmd) for name, cwd, cmd in _STRUCTURAL_STEPS}
+    shell_targets = {s["target"] for s in selections if s["kind"] == "shell"}
+    for name in sorted({s["target"] for s in selections if s["kind"] == "step"}):
+        step = by_name[name]
+        refs = {t.strip("./") for t in _SH_PATH_RE.findall(step[2])}
+        if refs and refs <= shell_targets:
+            continue  # every harness it wraps is already selected directly
+        steps.append(step)
+    return steps
+
+
+def _write_changed_receipt(path: str, payload: dict) -> None:
+    """Receipt in the changed-mode namespace; never the full record's path."""
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+    except OSError:
+        pass  # a receipt we cannot write is not a reason to fail the packet
+
+
+def _run_changed(root: Path, opts: dict, env: dict) -> int:
+    t0 = time.monotonic()
+    paths, reason = changed_snapshot(root, opts["base"], opts["head"])
+    rc_head, head_sha = _git(root, "rev-parse", "HEAD")
+    candidate = head_sha if rc_head == 0 else "unknown"
+    print("smoke: mode=CHANGED SUBSET - partial evidence; the full "
+          "'fno test smoke' gate still decides merge readiness", flush=True)
+    if reason:
+        sys.stderr.write(f"smoke: CHANGED SUBSET UNEVALUATED - {reason}\n")
+        sys.stderr.write("smoke: no changed verdict was earned (this is not a green result)\n")
+        return CHANGED_RC_UNEVALUATED
+
+    selections, unmapped = select_changed(root, paths)
+    steps = _changed_steps(selections)
+    select_s = time.monotonic() - t0
+
+    print(f"smoke: base={opts['base'] or 'merge-base origin/main'} "
+          f"head={opts['head'] or candidate[:12]} changed={len(paths)} "
+          f"selected={len(steps)} unmapped={len(unmapped)}", flush=True)
+    for s in selections:
+        print(f"  select  {s['rule']:20} {s['path']} -> {s['target']}", flush=True)
+    for u in unmapped:
+        print(f"  unmapped {u}  (no rule; covered only by the full gate)", flush=True)
+
+    receipt = {
+        "mode": "CHANGED SUBSET", "candidate": candidate,
+        "base": opts["base"] or "merge-base:origin/main", "head": opts["head"] or candidate,
+        "changed_paths": paths, "unmapped_paths": unmapped,
+        "selections": selections, "selected_count": len(steps),
+        "unmapped_count": len(unmapped),
+        "selection_seconds": round(select_s, 3),
+    }
+    receipt_path = os.environ.get("SMOKE_CHANGED_RECEIPT") or str(root / CHANGED_RECEIPT_DEFAULT)
+
+    if opts["list"]:
+        return 0
+    if not steps:
+        receipt.update(verdict="unselected", execution_seconds=0.0, first_signal_seconds=None)
+        _write_changed_receipt(receipt_path, receipt)
+        sys.stderr.write("smoke: CHANGED SUBSET selected NOTHING - that is evidence about the "
+                         "selector, not that the change is safe\n")
+        return CHANGED_RC_UNSELECTED
+
+    miss = _smoke_prereqs([c for _, _, c in steps])
+    if miss:
+        sys.stderr.write(f"smoke: missing prerequisite: {miss}\n")
+        return 2
+
+    e0 = time.monotonic()
+    results, rc = _execute_steps(root, env, steps, keep_going=opts["keep_going"])
+    exec_s = time.monotonic() - e0
+    signal = sum(d for _, _, d in results)
+
+    print("", flush=True)
+    print(f"smoke: summary (changed-subset, {len(results)} steps)", flush=True)
+    for step_name, status, dur in results:
+        print(f"  {status:6} {dur:4.0f}s  {step_name}", flush=True)
+    verdict = "red" if rc != 0 else "green"
+    print(f"smoke: CHANGED SUBSET verdict={verdict} selected={len(steps)} "
+          f"unmapped={len(unmapped)} select={select_s:.1f}s exec={exec_s:.1f}s "
+          f"first_signal={signal:.1f}s", flush=True)
+    if verdict == "green":
+        print("smoke: CHANGED SUBSET green means the selected packet passed - run "
+              "'fno test smoke' full before the settle-green push", flush=True)
+
+    receipt.update(verdict=verdict, execution_seconds=round(exec_s, 3),
+                   first_signal_seconds=round(signal, 3),
+                   failed=[n for n, s, _ in results if s == "fail"])
+    _write_changed_receipt(receipt_path, receipt)
+    # Own namespace: a partial run must never touch the full runner's record.
+    _write_failure_record(
+        os.environ.get("SMOKE_CHANGED_FAILURE_RECORD")
+        or str(root / CHANGED_FAILURE_RECORD_DEFAULT),
+        [n for n, s, _ in results if s == "fail"],
+    )
+    return rc
+
+
+def _execute_steps(
+    root: Path, env: dict, steps: Sequence[tuple[str, str, str]], keep_going: bool
+) -> tuple[list[tuple[str, str, float]], int]:
+    """Run steps in order -> (per-step results, first non-zero child rc).
+
+    The child's real return code is propagated, never a pipe's or a `tail`'s.
+    """
+    in_ci = bool(os.environ.get("GITHUB_ACTIONS"))
+    results: list[tuple[str, str, float]] = []
+    first_rc = 0
+    for name, cwd, cmd in steps:
+        if in_ci:
+            print(f"::group::{name}", flush=True)
+        else:
+            print(f"\n=== {name} ===", flush=True)
+        t0 = time.monotonic()
+        try:
+            proc = subprocess.run(
+                ["bash", "-eo", "pipefail", "-c", cmd],
+                cwd=str(root / cwd) if cwd != "." else str(root),
+                env=env,
+            )
+            rc = proc.returncode
+        except OSError as exc:
+            sys.stderr.write(f"smoke: failed to run step: {exc}\n")
+            rc = 127
+        dur = time.monotonic() - t0
+        if in_ci:
+            print("::endgroup::", flush=True)
+        results.append((name, "pass" if rc == 0 else "fail", dur))
+        print(f"smoke: {'pass' if rc == 0 else 'fail'}  {dur:4.0f}s  {name}", flush=True)
+        if rc != 0:
+            if first_rc == 0:
+                first_rc = rc
+            if not keep_going:
+                sys.stderr.write(f"smoke: step failed, stopping (fail-fast): {name}\n")
+                break
+    return results, first_rc
 
 
 def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
@@ -618,18 +967,29 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     failures, and aggregates a non-zero exit. The exit code is the child's
     actual rc (no pipe/tail masking), so preflight's attestation gate reads the
     truth.
+
+    Flags: --list [--verbose], --keep-going, --only <glob>, --retry-failed,
+    and --changed [--base REV --head REV] for the changed-surface packet (a
+    CHANGED SUBSET; exits 20 when nothing mapped, 21 when the diff is not
+    trustworthy - neither is a green verdict, and the full run still gates).
+    The three subset modes are mutually exclusive.
     """
     root = _repo_root(Path.cwd()) or Path.cwd()
     if any(a in ("-h", "--help") for a in args):
         print(_run_smoke.__doc__)
         return 0
     try:
-        list_mode, keep_going, retry_failed, verbose, only_glob = _parse_smoke_args(args)
+        opts = _parse_smoke_args(args)
     except ValueError as exc:
         sys.stderr.write(str(exc) + "\n")
         return 2
+    list_mode, keep_going = opts["list"], opts["keep_going"]
+    retry_failed, verbose, only_glob = opts["retry_failed"], opts["verbose"], opts["only"]
 
     env = _smoke_env(root)
+
+    if opts["changed"]:
+        return _run_changed(root, opts, env)
 
     reg_file = os.environ.get("SMOKE_REGISTRY_FILE")
     if reg_file:
@@ -720,42 +1080,11 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         sys.stderr.write("smoke: zero steps selected - never green\n")
         return 1
 
-    in_ci = bool(os.environ.get("GITHUB_ACTIONS"))
-
-    def _run_step(cmd: str, cwd: str) -> int:
-        try:
-            proc = subprocess.run(
-                ["bash", "-eo", "pipefail", "-c", cmd],
-                cwd=str(root / cwd) if cwd != "." else str(root),
-                env=env,
-            )
-        except OSError as exc:
-            sys.stderr.write(f"smoke: failed to run step: {exc}\n")
-            return 127
-        return proc.returncode
-
-    results: list[tuple[str, str, float]] = []
-    failed = 0
-    for i in selected:
-        name, cwd, cmd = steps[i]
-        if in_ci:
-            print(f"::group::{name}", flush=True)
-        else:
-            print(f"\n=== {name} ===", flush=True)
-        t0 = time.monotonic()
-        rc = _run_step(cmd, cwd)
-        dur = time.monotonic() - t0
-        if in_ci:
-            print("::endgroup::", flush=True)
-        status = "pass" if rc == 0 else "fail"
-        if rc != 0:
-            failed += 1
-        results.append((name, status, dur))
-        print(f"smoke: {status}  {dur:4.0f}s  {name}", flush=True)
-        if not keep_going and rc != 0:
-            sys.stderr.write(f"smoke: step failed, stopping (fail-fast): {name}\n")
-            _write_failure_record(failure_record, [n for n, s, _ in results if s == "fail"])
-            return 1
+    results, first_rc = _execute_steps(root, env, [steps[i] for i in selected], keep_going)
+    failed = sum(1 for _, s, _ in results if s == "fail")
+    if first_rc != 0 and not keep_going:
+        _write_failure_record(failure_record, [n for n, s, _ in results if s == "fail"])
+        return 1
 
     print("", flush=True)
     kind = ("retry-subset" if retry_failed else "only-subset" if only_glob else "full")
