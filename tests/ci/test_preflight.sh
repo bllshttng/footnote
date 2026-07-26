@@ -49,7 +49,14 @@ cat > "$BIN/rustup" <<'EOF'
 [[ "$*" == "toolchain list"* ]] && { echo "1.94.1-x86_64-apple-darwin (default)"; exit 0; }
 exit 0
 EOF
-chmod +x "$BIN/fno" "$BIN/cargo" "$BIN/rustup"
+# preflight calls `uv run --project cli fno-py test smoke [flags]`; stub uv to
+# behave like the retired smoke.sh stub (red iff POISON is checked out).
+cat > "$BIN/uv" <<'EOF'
+#!/usr/bin/env bash
+if [[ -f POISON ]]; then echo "smoke: POISON step failed"; exit 1; fi
+echo "smoke: all green (stub)"; exit 0
+EOF
+chmod +x "$BIN/fno" "$BIN/cargo" "$BIN/rustup" "$BIN/uv"
 export PATH="$BIN:$PATH"
 
 # --- build the fixture repo -------------------------------------------------
@@ -57,12 +64,6 @@ FIX="$TMP/repo"; mkdir -p "$FIX/scripts/ci"
 git -C "$FIX" init -q
 git -C "$FIX" config user.email t@t.t; git -C "$FIX" config user.name t
 cp "$PREFLIGHT_SRC" "$FIX/scripts/ci/preflight.sh"
-# stub smoke.sh: exit 1 iff a POISON file is present at the checked-out HEAD
-cat > "$FIX/scripts/ci/smoke.sh" <<'EOF'
-#!/usr/bin/env bash
-if [[ -f POISON ]]; then echo "smoke: POISON step failed"; exit 1; fi
-echo "smoke: all green (stub)"; exit 0
-EOF
 # crate dirs so preflight's `cd crates/fno*` legs run (cargo is stubbed).
 mkdir -p "$FIX/crates/fno-agents" "$FIX/crates/fno"
 echo x > "$FIX/crates/fno-agents/.keep"; echo x > "$FIX/crates/fno/.keep"
@@ -219,12 +220,13 @@ echo "== tripwire: a stolen LOCK also VOIDs, and the stealer's lock survives =="
 # The tripwire's other arm. The worktree stays put here; only the holder changes,
 # so this pins the lock comparison rather than the sha one, and proves cleanup
 # does not delete a lock that now belongs to the stealer.
-cat > "$FIX/scripts/ci/smoke.sh" <<EOF
+cat > "$BIN/uv" <<EOF
 #!/usr/bin/env bash
 printf 'pid=424242 started=NOW host=x sha=cafe123\n' > "$LOCKDIR/holder"
 echo "smoke: all green (stub, stole the lock)"; exit 0
 EOF
-( cd "$FIX" && git add -A && git commit -qm "lock-stealing smoke stub" )
+chmod +x "$BIN/uv"
+( cd "$FIX" && git commit -q --allow-empty -m "lock-stealing smoke stub" )
 write_attest "$(git -C "$FIX" rev-parse HEAD)"   # AC2-ERR: a prior attestation for this SHA
 # --force bypasses reuse so the planted attestation does not short-circuit; the
 # run must actually execute to reach the VOID tripwire.
@@ -243,12 +245,13 @@ echo "== tripwire: a hijacked worktree VOIDs the verdict instead of reporting it
 # Move the shared worktree off our candidate mid-run, as a second preflight's
 # `reset --hard` would. The stub smoke.sh is the hook: it fires inside the run.
 PF_WT="$WT_BASE/repo/preflight"
-cat > "$FIX/scripts/ci/smoke.sh" <<EOF
+cat > "$BIN/uv" <<EOF
 #!/usr/bin/env bash
 git -C "$PF_WT" reset --hard HEAD~1 >/dev/null 2>&1
 echo "smoke: all green (stub, hijacked the worktree)"; exit 0
 EOF
-( cd "$FIX" && git add -A && git commit -qm "hijacking smoke stub" )
+chmod +x "$BIN/uv"
+( cd "$FIX" && git commit -q --allow-empty -m "hijacking smoke stub" )
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 5 ]] && ok "exit 5 (VOID), distinct from RED's 1" || fail "expected 5 got $rc: $out"
 echo "$out" | grep -q "VOID - worktree moved off our candidate" && ok "names the cause" || fail "no VOID line: $out"

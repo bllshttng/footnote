@@ -101,12 +101,13 @@ jobs:
             ${{ runner.os }}-cargo-journey-
 
       - name: Smoke (test + lint registry)
-        # The ~40 test/lint steps that used to be spelled out here live in
-        # scripts/ci/smoke.sh so "run what CI runs" is one command and
+        # The test/lint steps live in the code-owned `fno test smoke` runner
+        # (cli/src/fno/test_cmd.py) so "run what CI runs" is one command and
         # local/CI parity is structural. Default (no flag) = fail-fast, the
-        # pre-extraction semantics. The script emits ::group:: markers so the
-        # single step keeps per-step folding in the CI log.
-        run: bash scripts/ci/smoke.sh
+        # pre-extraction semantics; ::group:: markers keep per-step folding in
+        # the CI log. Bootstrapped via `uv run --project cli` (no repo-root
+        # pyproject, no global fno-py in a fresh checkout); uv auto-syncs.
+        run: uv run --project cli fno-py test smoke
 
   # TODO: graduate to blocking in the next release - remove continue-on-error
   prompt-drift:
