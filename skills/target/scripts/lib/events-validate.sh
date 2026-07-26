@@ -353,6 +353,7 @@ validate_event() {
                       end
                 ) end;
             .data as $d
+            | (.ts | utc_epoch) as $envelope_ts
             | ($schema[0].event_types[]
                 | select(.name == "verification_receipt")
                 | .data.properties) as $p
@@ -360,6 +361,7 @@ validate_event() {
             | ($d.finished_at | utc_epoch) as $finished
             | (($schema[0].event_types[] | select(.name == "verification_receipt") | .sources) as $sources
                 | ($sources | index($src)) != null)
+                and ($envelope_ts != null)
                 and (($d.candidate_sha | type == "string")
                 and ($d.candidate_sha | test("^[0-9A-Fa-f]{40}$")))
                 and ($d.command | type == "array" and length > 0 and length <= 4096

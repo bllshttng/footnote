@@ -315,6 +315,10 @@ def validate(event: dict[str, Any]) -> None:
             )
 
     if type_name == "verification_receipt":
+        if _utc_timestamp(event["ts"]) is None:
+            raise ValidationError(
+                "verification_receipt envelope ts must be RFC3339 UTC"
+            )
         type_sources = type_spec.get("sources", [])
         if source not in type_sources:
             raise ValidationError(

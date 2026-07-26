@@ -376,6 +376,8 @@ def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], 
                 salvage = Path(canonical).expanduser() / ".fno" / "salvage"
                 if salvage.is_dir():
                     paths.extend(sorted(salvage.glob("*/events.jsonl")))
+    except FileNotFoundError:
+        pass
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         errors.append(f"delivery journal discovery failed: {exc}")
     return paths, errors

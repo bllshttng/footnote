@@ -405,6 +405,17 @@ def test_unregistered_checkouts_share_the_global_generation_floor(
     assert next_verification_generation(cwd=str(second), candidate_sha=SHA) == 5
 
 
+def test_fresh_install_without_ledger_starts_generation_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "fno.paths.global_events_json", lambda: tmp_path / "global-events.jsonl"
+    )
+    monkeypatch.setattr("fno.paths.ledger_json", lambda: tmp_path / "ledger.json")
+
+    assert next_verification_generation(cwd=str(tmp_path), candidate_sha=SHA) == 1
+
+
 def test_canonical_generation_ignores_unreadable_optional_mirror(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
