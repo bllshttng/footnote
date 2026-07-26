@@ -3,18 +3,20 @@
 The operations manual for [court mode](../SKILL.md#court-mode-reign-over-the-wave).
 The skill carries the *contract* (what a court king owes its wave); this reference carries the *hands* (which verb does each job, what each lifecycle state means, and the copy-paste recipes).
 
-Court needs exactly four pane-layer primitives: **place** a teammate near the king, **inject** a next-phase prompt into a live session, **wait** on lifecycle, and **read** recent output.
+Court needs five pane-layer primitives: **place** a teammate near the king, **inject** a next-phase prompt into a live session, **sweep** at a boundary, **wait** on lifecycle, and **read** recent output.
+Sweep and wait are separate on purpose: sweeping is a nonblocking look at a teammate you are already awake to check, waiting is the only one of the five that will wake you.
 The verbs below are fno's own.
 In an environment whose pane layer is something other than fno mux, the crowning brief names that layer's equivalents; the *duties* are identical either way, and every ruling still lands in the graph via `fno backlog` verbs and every node is still claimed through `/fno:target`.
 The pane layer owns placement, lifecycle, and I/O; fno stays the authority for identity, claims, the graph, and dispatch.
 
-## The four primitives
+## The five primitives
 
 | Duty | Verb | Notes |
 |---|---|---|
 | **Place** a teammate near the king | `fno agents spawn --name <n> "<payload>" --substrate pane --workspace <w> --split <dir>` | Splits the target workspace's active tab; min-size refusal falls back to a tab in the same workspace. Read the receipt for which one landed. Pane substrate only - `bg` and `headless` refuse placement flags. |
 | **Inject** the next phase into a live session | `fno mail send <handle> "<ruling + /fno:verb>" --from-self` | A direct send to a live pane injects as a notification it acts on this turn. Receipt-gated - see delivery truth below. Auto-wrapped in the `<fno_mail>` envelope; a raw pane-layer prompt is not - see the envelope rule below. |
-| **Wait** on lifecycle | `fno agents top` + `fno agents peek <handle>` at a boundary | Push-first (the teammate's report mail); this is the backstop sweep, run at a named boundary while you are already awake, not on a repeating timer. A quiet teammate that owes you no event gets one armed bounded wait, so you never stop with nothing left to wake you. `top` = who is alive; `peek` = is a quiet pane done/blocked/dead. `fno-agents needs --json` is a separate loop-wedge signal, not pane completion. |
+| **Sweep** at a boundary (nonblocking) | `fno agents top` + `fno agents peek <handle>` | Push-first (the teammate's report mail); this is the backstop sweep, run at a named boundary while you are already awake, not on a repeating timer. `top` = who is alive; `peek` = is a quiet pane done/blocked/dead. Both return immediately and wake nobody. `fno-agents needs --json` is a separate loop-wedge signal, not pane completion. |
+| **Wait** on lifecycle (blocking) | `fno-agents wait --agent <name> --state idle\|blocked\|done --timeout-ms <n>` | The actual wake source, and the only verb here that is one. Arm it the way your harness tracks background work; a detached process exits without waking anyone. Use it before ending a turn when a live teammate owes you no event, so you never stop with nothing left to wake you. On timeout with the teammate still live, re-arm. |
 | **Read / triage** | `fno agents peek <handle>` | Read-only. Full-screen agents render in the alternate screen, so scrolled-off rows are unrecoverable - reads are triage, results live in artifacts and the graph. |
 
 ## The `<fno_mail>` envelope, on every lane
@@ -33,7 +35,8 @@ Every agent-to-agent payload carries the `<fno_mail>` envelope - king to teammat
 | Job | Verb |
 |---|---|
 | Spawn a teammate pane | `fno agents spawn --name <n> "<payload>" --substrate pane --workspace <w> --split <dir> --effort <e>` |
-| Move a running pane into another workspace | unsupported - no `fno mux pane` verb does it; `break` only detaches to a new tab in the same session |
+| Move a running pane into another workspace | no CLI path - no `fno mux pane` verb does it (`break` only detaches to a new tab in the same session); the TUI's own move-pane / move-tab is a human's, not yours |
+| Arm a wake before you stop | `fno-agents wait --agent <name> --state idle\|blocked\|done --timeout-ms <n>` (harness-tracked) |
 | Anoint a sub-king at spawn | `fno agents spawn --name <n> "<payload>" --substrate pane --crown level=<N>,scope=<scope>` |
 | Coronate a running session in place | `fno agents crown <handle> --scope <scope> [--level N]` (scope = epic/project/node id; level 0..2) |
 | Read your own crown | `fno whoami` (prints a `crown:` line when your row holds one) |
@@ -126,7 +129,7 @@ fno backlog update x-b3a8 --add-blocker x-7a53   # if a merge-order constraint a
 - **`--workspace` is the canonical spelling.** A deprecated alias still resolves, which is the trap: a stale command runs clean in a manual test and teaches the wrong flag anyway. The migration note is in the [spawn guide](../../../docs/guides/fno-agents-spawn.md#place-a-pane-in-a-mux-workspace).
 - **Placement is pane-only.** `--workspace`/`-s`, `--split`/`-x`, and `--at` are refused for `bg` and `headless`, which have no mux geometry. A court teammate is a pane, so this never binds court; it binds a pass that dispatches unattended, which carries mission provenance in the graph instead.
 - **You never create a workspace first.** The first placement into a name creates it; there is no create verb. A blank name is a CLI error, not a fallback to the default.
-- **A running pane cannot be moved to another workspace.** No `fno mux pane` verb migrates one - `break` detaches a pane into a new tab in the same session. Grid recruitment (`m` in the agents grid) builds a *view*: membership is a reference, never a move, so a recruited agent still sits where its pane always sat. Adopt an already-running worker logically (claim + mail), never physically, and do not kill a healthy one for layout.
+- **You cannot move a running pane between workspaces from the CLI.** No `fno mux pane` verb migrates one - `break` detaches a pane into a new tab in the same session. Grid recruitment (`m` in the agents grid) builds a *view*: membership is a reference, never a move, so a recruited agent still sits where its pane always sat. The mux itself is not the limit - a human at the TUI can move a pane, and the move-tab picker sends a whole tab to another workspace - but a king drives CLIs and has no scripted path to either. So adopt an already-running worker logically (claim + mail), and do not kill a healthy one for layout.
 - **Sweep at boundaries, not on a repeating clock.** A heartbeat poll costs a context re-read every pass and surfaces nothing the teammate's own projected events would not. But never stop with a live teammate and no wake pending: a report can land `queued (durable)` and a pane can die reporting nothing, so a quiet teammate that owes you no event gets one armed bounded wait. One armed wait is a backstop; a timer that fires regardless is the poll.
 - **Qualified verbs, always.** Bare `/do`, `/think`, `/blueprint` in a mixed-plugin session can resolve to a different plugin. Use `/fno:...` in every payload, routing mail, and `--dispatch-verb`.
 - **`/fno:target` is the execution verb, all sizes.** Raw `/fno:do` has no claim, no gates, no ship, no finalize. A small PR is not an exemption.
