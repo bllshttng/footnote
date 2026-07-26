@@ -108,9 +108,18 @@ candidate_fno() {
     fi
 }
 
+GLOBAL_EVENTS_PATH="$(candidate_fno pr global-receipt-events-path)" || {
+    echo "preflight: canonical receipt journal path unavailable" >&2
+    exit 1
+}
+[[ -n "$GLOBAL_EVENTS_PATH" ]] || {
+    echo "preflight: canonical receipt journal path is empty" >&2
+    exit 1
+}
+
 emit_verification_receipt() {
     local mode="$1" result="$2" scope_json="$3" expected="$4" executed="$5" started_at="$6" detail="$7"
-    local command_json finished_at environment_json producer_json data event generation global_events
+    local command_json finished_at environment_json producer_json data event generation
     command_json="$(_json_array "${RECEIPT_COMMAND[@]}")" || return 1
     generation="$(next_receipt_generation)" || return 1
     finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || return 1
@@ -149,11 +158,9 @@ emit_verification_receipt() {
         source "$INVOKING_ROOT/scripts/lib/events-validate.sh"
         validate_event verification_receipt "$event"
     ) || return 1
-    global_events="$(candidate_fno pr global-receipt-events-path)" || return 1
-    [[ -n "$global_events" ]] || return 1
-    mkdir -p "$(dirname "$global_events")" || return 1
-    printf '%s\n' "$event" >> "$global_events" || return 1
-    if [[ "$global_events" != "$EVENTS_PATH" ]]; then
+    mkdir -p "$(dirname "$GLOBAL_EVENTS_PATH")" || return 1
+    printf '%s\n' "$event" >> "$GLOBAL_EVENTS_PATH" || return 1
+    if [[ "$GLOBAL_EVENTS_PATH" != "$EVENTS_PATH" ]]; then
         if ! mkdir -p "$(dirname "$EVENTS_PATH")" \
             || ! printf '%s\n' "$event" >> "$EVENTS_PATH"; then
             echo "preflight: note: global receipt committed; delivery-root mirror unavailable at $EVENTS_PATH" >&2
@@ -231,7 +238,9 @@ if [[ $FORCE_RUN -eq 0 ]]; then
 fi
 
 # --- lock (atomic mkdir; steal a dead holder) -------------------------------
-LOCKDIR="$COMMON_DIR/.preflight.lock.d"
+LOCAL_LOCKDIR="$COMMON_DIR/.preflight.lock.d"
+GLOBAL_LOCKDIR="$(dirname "$GLOBAL_EVENTS_PATH")/.preflight-receipt-locks/$CANDIDATE_SHA.d"
+LOCKDIR="$LOCAL_LOCKDIR"
 stamp_holder() {
     printf 'pid=%s started=%s host=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(hostname 2>/dev/null || echo unknown)" "$CANDIDATE_SHA" > "$LOCKDIR/holder"
 }
@@ -288,24 +297,22 @@ acquire_lock() {
     fi
     exit 3
 }
-acquire_lock
-
-PENDING_SCOPE="$(_json_array "preflight-execution")"
-if ! emit_verification_receipt void pending "$PENDING_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "preflight execution started"; then
-    echo "preflight: cannot persist canonical pending receipt" >&2
-    exit 1
-fi
-
 TMPHOME=""
-holder_pid_now() { sed -n 's/.*pid=\([0-9]*\).*/\1/p' "$LOCKDIR/holder" 2>/dev/null; }
+holder_pid_at() { sed -n 's/.*pid=\([0-9]*\).*/\1/p' "$1/holder" 2>/dev/null; }
 # Release only a lock we still hold: if ours was stolen, the lockdir at this
 # path now belongs to the stealer. An unreadable holder still releases - that is
 # our own stamp having failed, and leaving it would wedge every later run.
 # Parse the pid rather than matching the stamp's layout, so reordering the
 # fields in stamp_holder cannot silently stop every run from releasing.
+cleanup_lock() {
+    local path="$1" pid_now
+    [[ -n "$path" ]] || return 0
+    pid_now="$(holder_pid_at "$path")"
+    [[ -z "$pid_now" || "$pid_now" == "$$" ]] && rm -rf "$path"
+}
 cleanup() {
-    local pid_now; pid_now="$(holder_pid_now)"
-    [[ -z "$pid_now" || "$pid_now" == "$$" ]] && rm -rf "$LOCKDIR"
+    cleanup_lock "${LOCAL_LOCKDIR:-}"
+    cleanup_lock "${GLOBAL_LOCKDIR:-}"
     [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"
 }
 trap cleanup EXIT
@@ -316,6 +323,21 @@ trap cleanup EXIT
 # trap do the single cleanup: calling cleanup here too would run it twice, and
 # the second pass (our lockdir already gone) could delete a successor's lock.
 trap 'exit 130' INT TERM
+
+acquire_lock
+mkdir -p "$(dirname "$GLOBAL_LOCKDIR")" || {
+    echo "preflight: cannot create canonical receipt lock directory" >&2
+    exit 1
+}
+LOCKDIR="$GLOBAL_LOCKDIR"
+acquire_lock
+LOCKDIR="$LOCAL_LOCKDIR"
+
+PENDING_SCOPE="$(_json_array "preflight-execution")"
+if ! emit_verification_receipt void pending "$PENDING_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "preflight execution started"; then
+    echo "preflight: cannot persist canonical pending receipt" >&2
+    exit 1
+fi
 
 # --- ensure / reset the preflight worktree ----------------------------------
 echo "preflight: repo=$REPO_NAME candidate=$CANDIDATE_SHORT worktree=$PREFLIGHT_WT"
@@ -425,8 +447,10 @@ exit_if_void() {
         VOID_REASON="cannot read the preflight worktree at $PREFLIGHT_WT"
     elif [[ "$WT_HEAD_NOW" != "$CANDIDATE_SHA" ]]; then
         VOID_REASON="worktree moved off our candidate mid-run (now ${WT_HEAD_NOW:0:12}, expected $CANDIDATE_SHORT)"
-    elif [[ "$(holder_pid_now)" != "$$" ]]; then
+    elif [[ "$(holder_pid_at "$LOCAL_LOCKDIR")" != "$$" ]]; then
         VOID_REASON="another preflight took our lock mid-run"
+    elif [[ "$(holder_pid_at "$GLOBAL_LOCKDIR")" != "$$" ]]; then
+        VOID_REASON="another preflight took our canonical receipt lock mid-run"
     fi
     [[ -n "$VOID_REASON" ]] || return 0
     if [[ -n "$VOID_SCOPE_NAME" ]]; then

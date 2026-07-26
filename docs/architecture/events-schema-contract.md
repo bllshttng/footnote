@@ -203,6 +203,7 @@ A void receipt can never be passed.
 Explicit false, absent, pending, unavailable, stale, and advisory observations are therefore not interchangeable, and unknown evidence fails closed.
 
 Python validation in `fno.events`, Bash validation in `scripts/lib/events-validate.sh`, and Rust validation in `fno-agents verify-evidence receipt` enforce the same receipt vocabulary and invariants.
+The Rust reducer takes the canonical journal first and any diagnostic mirror journals afterward.
 The parity corpus includes fractional UTC timestamps and bounded-command failures so wire-compatible RFC3339 values and size limits do not drift between implementations.
 
 `scripts/ci/preflight.sh` remains the authority for actual local execution and constructs, schema-validates, and appends each receipt inside the process that holds the shared preflight lock for the exact candidate SHA.
@@ -217,11 +218,12 @@ The preflight attestation is only a cache carrier and never substitutes for the 
 Ship-gate consumers accept only the newest exact-SHA full/passed receipt from the trusted preflight producer with the canonical command, runner, host-bound producer identity, and complete deterministic scope.
 Before every append, preflight derives the next generation as one above the highest exact-SHA generation across readable project, global, delivery-root, and salvage journals.
 Until the canonical journal contains exact-SHA evidence, malformed or unreadable discovery blocks the append; afterward, an unavailable best-effort mirror cannot overrule the canonical floor, while every readable mirror remains part of deduplication and conflict detection.
+Mirrors never originate satisfaction or supersede canonical evidence; a missing exact-SHA canonical receipt is unavailable, and a readable mirror ahead of the canonical generation is explicit drift that fails closed.
 Reducers expose skipped carrier failures as `coverage.unavailable_mirrors` instead of conflating them with an absent journal or a complete canonical failure.
 This makes lost local state safe across clones, while simultaneous cross-clone allocation creates an explicit same-generation conflict rather than an arbitrary winner.
 Journals may be concatenated in any order, so consumers parse RFC3339 timestamps, deduplicate canonical event objects, and select the highest exact-candidate generation.
 Timestamps retain at most six fractional digits and remain observational metadata; future-dated receipts and distinct receipts tied for the highest generation are unavailable rather than arbitrarily ordered.
-Starting a new preflight appends a canonical pending receipt before execution, so a failed final append or interrupted run leaves every checkout on the same non-passing generation without a mutable revocation authority.
+Starting a new preflight holds a pinned cross-checkout lock for the exact candidate and appends a canonical pending receipt before execution, so concurrent clones cannot create unmatched transitions and a failed final append or interrupted run leaves every checkout on the same non-passing generation without a mutable revocation authority.
 Ship-gate readers take the repository lock while reducing journals, and the append-only pending-to-final transition keeps the receipt journal as the sole verdict authority.
 Malformed canonical rows, unreadable canonical journals, malformed readable mirrors, or errors while discovering delivery journals mark coverage incomplete and prevent satisfaction even when another journal contains a plausible pass.
 An older valid receipt for a different SHA is reported as stale rather than absent.

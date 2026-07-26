@@ -240,10 +240,29 @@ def test_latest_exact_receipt_wins_even_when_file_order_disagrees(tmp_path: Path
     write(first, pending)
     write(second, passed)
 
-    decision = verification_decision(SHA, [second, first])
+    decision = verification_decision(SHA, [first, second])
 
     assert decision["satisfied"] is False
     assert decision["result"] == "pending"
+
+
+@pytest.mark.parametrize("canonical_state", ["missing", "empty", "wrong-sha"])
+def test_mirror_cannot_originate_satisfaction(
+    canonical_state: str, tmp_path: Path
+) -> None:
+    canonical = tmp_path / "global.jsonl"
+    mirror = tmp_path / "delivery.jsonl"
+    if canonical_state == "empty":
+        canonical.write_text("")
+    elif canonical_state == "wrong-sha":
+        write(canonical, receipt(candidate_sha=OTHER_SHA))
+    write(mirror, receipt())
+
+    decision = verification_decision(SHA, [canonical, mirror])
+
+    assert decision["satisfied"] is False
+    assert decision["coverage"]["canonical_required"] is True
+    assert decision["result"] in {"unavailable", "stale"}
 
 
 def test_equal_timestamp_conflict_is_unavailable_not_lexical_green(tmp_path: Path) -> None:
@@ -294,12 +313,36 @@ def test_void_pending_generation_supersedes_older_pass(tmp_path: Path) -> None:
     assert decision["result"] == "pending"
 
 
+def test_mirror_ahead_cannot_supersede_canonical_pending(tmp_path: Path) -> None:
+    canonical = tmp_path / "global.jsonl"
+    mirror = tmp_path / "delivery.jsonl"
+    write(
+        canonical,
+        receipt(generation=4),
+        receipt(
+            mode="void",
+            result="pending",
+            generation=5,
+            scope=["preflight-execution"],
+            steps_expected=1,
+            steps_executed=0,
+        ),
+    )
+    write(mirror, receipt(generation=100))
+
+    decision = verification_decision(SHA, [canonical, mirror])
+
+    assert decision["satisfied"] is False
+    assert decision["result"] == "unavailable"
+    assert decision["coverage"]["mirror_ahead"] is True
+
+
 def test_next_generation_uses_every_discovered_exact_sha_journal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     project = tmp_path / "project.jsonl"
     delivery = tmp_path / "delivery.jsonl"
-    write(project, receipt(generation=2))
+    project.write_text("")
     write(delivery, receipt(generation=5), receipt(candidate_sha=OTHER_SHA, generation=9))
     monkeypatch.setattr(
         "fno.pr._preflight.verification_event_paths",
@@ -307,6 +350,22 @@ def test_next_generation_uses_every_discovered_exact_sha_journal(
     )
 
     assert next_verification_generation(cwd=str(tmp_path), candidate_sha=SHA) == 6
+
+
+def test_next_generation_refuses_mirror_ahead_of_canonical(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    canonical = tmp_path / "global.jsonl"
+    mirror = tmp_path / "delivery.jsonl"
+    write(canonical, receipt(generation=4))
+    write(mirror, receipt(generation=100))
+    monkeypatch.setattr(
+        "fno.pr._preflight.verification_event_paths",
+        lambda **_kwargs: ([canonical, mirror], []),
+    )
+
+    with pytest.raises(ValueError, match="mirror generation exceeds"):
+        next_verification_generation(cwd=str(tmp_path), candidate_sha=SHA)
 
 
 def test_next_generation_fails_closed_on_uncertain_journal(

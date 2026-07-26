@@ -853,31 +853,61 @@ fn receipt_decision_all(candidate_sha: &str, paths: &[String]) -> Value {
 }
 
 fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
-    if let Some(canonical_path) = paths.first() {
-        let canonical = receipt_decision_all(candidate_sha, std::slice::from_ref(canonical_path));
-        let exact = canonical
-            .pointer("/receipt/data/candidate_sha")
-            .and_then(Value::as_str)
-            .is_some_and(|receipt_sha| receipt_sha.eq_ignore_ascii_case(candidate_sha));
-        let conflict = canonical.pointer("/coverage/conflicting_latest").is_some();
-        if exact || conflict {
-            let mut readable = vec![canonical_path.clone()];
-            let mut unavailable_mirrors = 0u64;
-            for path in &paths[1..] {
-                match std::fs::read_to_string(path) {
-                    Ok(_) => readable.push(path.clone()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(_) => unavailable_mirrors += 1,
-                }
-            }
-            let mut decision = receipt_decision_all(candidate_sha, &readable);
-            if unavailable_mirrors > 0 {
-                decision["coverage"]["unavailable_mirrors"] = json!(unavailable_mirrors);
-            }
-            return decision;
+    let Some(canonical_path) = paths.first() else {
+        return receipt_decision_all(candidate_sha, paths);
+    };
+    let mut canonical = receipt_decision_all(candidate_sha, std::slice::from_ref(canonical_path));
+    if canonical.pointer("/coverage/conflicting_latest").is_some() {
+        return canonical;
+    }
+    let exact = canonical
+        .pointer("/receipt/data/candidate_sha")
+        .and_then(Value::as_str)
+        .is_some_and(|receipt_sha| receipt_sha.eq_ignore_ascii_case(candidate_sha));
+    if !exact {
+        canonical["coverage"]["canonical_required"] = Value::Bool(true);
+        canonical["satisfied"] = Value::Bool(false);
+        return canonical;
+    }
+
+    let mut readable = vec![canonical_path.clone()];
+    let mut unavailable_mirrors = 0u64;
+    for path in &paths[1..] {
+        match std::fs::read_to_string(path) {
+            Ok(_) => readable.push(path.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => unavailable_mirrors += 1,
         }
     }
-    receipt_decision_all(candidate_sha, paths)
+    let mut combined = receipt_decision_all(candidate_sha, &readable);
+    let canonical_generation = canonical
+        .pointer("/receipt/data/generation")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let combined_generation = combined
+        .pointer("/receipt/data/generation")
+        .and_then(Value::as_f64);
+    if combined.pointer("/coverage/conflicting_latest").is_some()
+        || combined_generation.is_some_and(|generation| generation > canonical_generation)
+    {
+        combined["satisfied"] = Value::Bool(false);
+        combined["mode"] = Value::Null;
+        combined["result"] = Value::String("unavailable".to_string());
+        combined["receipt"] = Value::Null;
+        combined["coverage"]["mirror_ahead"] = Value::Bool(true);
+        if unavailable_mirrors > 0 {
+            combined["coverage"]["unavailable_mirrors"] = json!(unavailable_mirrors);
+        }
+        return combined;
+    }
+    canonical["coverage"] = combined["coverage"].clone();
+    if combined["coverage"]["complete"] != Value::Bool(true) {
+        canonical["satisfied"] = Value::Bool(false);
+    }
+    if unavailable_mirrors > 0 {
+        canonical["coverage"]["unavailable_mirrors"] = json!(unavailable_mirrors);
+    }
+    canonical
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1110,7 +1140,7 @@ fn run(args: &[String]) -> (i32, String, String) {
                 return (
                     2,
                     String::new(),
-                    "verify-evidence receipt: requires full CANDIDATE_SHA EVENTS_FILE...\n"
+                    "verify-evidence receipt: requires full CANDIDATE_SHA CANONICAL_EVENTS [MIRROR_EVENTS...]\n"
                         .to_string(),
                 );
             }
@@ -1388,6 +1418,71 @@ mod tests {
         assert_eq!(decision["satisfied"], true);
         assert_eq!(decision["coverage"]["unreadable_paths"], 0);
         assert_eq!(decision["coverage"]["unavailable_mirrors"], 1);
+    }
+
+    #[test]
+    fn mirror_cannot_originate_satisfaction_without_canonical_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("global.jsonl");
+        let mirror_path = dir.path().join("delivery.jsonl");
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        std::fs::write(&canonical, "").unwrap();
+        std::fs::write(
+            &mirror_path,
+            format!(
+                "{}\n",
+                receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed")
+            ),
+        )
+        .unwrap();
+
+        let decision = receipt_decision(
+            sha,
+            &[
+                canonical.display().to_string(),
+                mirror_path.display().to_string(),
+            ],
+        );
+
+        assert_eq!(decision["satisfied"], false);
+        assert_eq!(decision["result"], "unavailable");
+        assert_eq!(decision["coverage"]["canonical_required"], true);
+    }
+
+    #[test]
+    fn mirror_ahead_cannot_supersede_canonical_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("global.jsonl");
+        let mirror_path = dir.path().join("delivery.jsonl");
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut pending = receipt_event("2026-07-26T02:00:00Z", sha, "void", "pending");
+        pending["data"]["generation"] = json!(5);
+        pending["data"]["scope"] = json!(["preflight-execution"]);
+        pending["data"]["steps_expected"] = json!(1);
+        pending["data"]["steps_executed"] = json!(0);
+        std::fs::write(
+            &canonical,
+            format!(
+                "{}\n{pending}\n",
+                receipt_event("2026-07-26T01:00:00Z", sha, "full", "passed")
+            ),
+        )
+        .unwrap();
+        let mut mirror = receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed");
+        mirror["data"]["generation"] = json!(100);
+        std::fs::write(&mirror_path, format!("{mirror}\n")).unwrap();
+
+        let decision = receipt_decision(
+            sha,
+            &[
+                canonical.display().to_string(),
+                mirror_path.display().to_string(),
+            ],
+        );
+
+        assert_eq!(decision["satisfied"], false);
+        assert_eq!(decision["result"], "unavailable");
+        assert_eq!(decision["coverage"]["mirror_ahead"], true);
     }
 
     #[test]

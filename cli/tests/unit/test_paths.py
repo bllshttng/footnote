@@ -343,6 +343,33 @@ def test_global_events_json_pinned_global_ignores_relative_state_dir(
     assert first_path == second_path == (Path.home() / ".fno" / "events.jsonl").resolve()
 
 
+def test_global_events_json_pins_relative_ledger_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "clone-a"
+    second = tmp_path / "clone-b"
+    first.mkdir()
+    second.mkdir()
+    _set_settings(
+        monkeypatch,
+        tmp_path,
+        "schema_version: 1\nconfig:\n  paths:\n    ledger_json: state/ledger.json\n",
+    )
+
+    from fno.paths import global_events_json, ledger_json
+
+    monkeypatch.chdir(first)
+    first_paths = (ledger_json(), global_events_json())
+    monkeypatch.chdir(second)
+    second_paths = (ledger_json(), global_events_json())
+
+    expected_ledger = (Path.home() / ".fno" / "state" / "ledger.json").resolve()
+    assert first_paths == second_paths == (
+        expected_ledger,
+        expected_ledger.parent / "events.jsonl",
+    )
+
+
 def test_evals_history_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """evals_history() returns ~/.fno/evals-history.jsonl (cross-project)."""
     _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")

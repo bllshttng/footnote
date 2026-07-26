@@ -352,6 +352,18 @@ out="$(run_pf 2>&1)"; rc=$?
 echo "$out" | grep -q "lock held" && ok "prints holder info" || fail "no holder info"
 rm -rf "$LOCKDIR"
 
+echo "== canonical concurrency: a second clone cannot append pending for the same SHA =="
+lock_sha="$(git -C "$FIX" rev-parse HEAD)"
+GLOBAL_RECEIPT_LOCKDIR="$TMP/.preflight-receipt-locks/$lock_sha.d"
+mkdir -p "$GLOBAL_RECEIPT_LOCKDIR"
+printf 'pid=%s started=NOW host=x sha=%s\n' "$$" "$lock_sha" > "$GLOBAL_RECEIPT_LOCKDIR/holder"
+before="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+out="$(run_pf --force 2>&1)"; rc=$?
+after="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+[[ $rc -eq 3 ]] && ok "same-candidate global lock refuses the second run" || fail "expected 3 got $rc: $out"
+[[ "$after" == "$before" ]] && ok "refused run appended no unmatched pending" || fail "receipt count changed: $before -> $after"
+rm -rf "$GLOBAL_RECEIPT_LOCKDIR"
+
 echo "== AC1-FR: a stale lock (dead holder) is stolen, run proceeds =="
 mkdir -p "$LOCKDIR"; printf 'pid=%s started=OLD host=x sha=deadbee\n' 999999 > "$LOCKDIR/holder"  # dead pid
 out="$(run_pf 2>&1)"; rc=$?

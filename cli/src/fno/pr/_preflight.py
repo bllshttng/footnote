@@ -282,35 +282,63 @@ def _verification_decision_all(candidate_sha: str, event_paths: list[Path]) -> d
 
 
 def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
-    """Prefer an exact receipt in the first, canonical journal."""
-    if event_paths:
-        canonical = _verification_decision_all(candidate_sha, event_paths[:1])
-        receipt = canonical.get("receipt")
-        receipt_sha = (
-            receipt.get("data", {}).get("candidate_sha")
-            if isinstance(receipt, dict)
-            else None
-        )
-        if (
-            isinstance(receipt_sha, str)
-            and receipt_sha.lower() == candidate_sha.lower()
-        ) or canonical["coverage"].get("conflicting_latest"):
-            readable = [event_paths[0]]
-            unavailable_mirrors = 0
-            for path in event_paths[1:]:
-                try:
-                    Path(path).expanduser().read_text(encoding="utf-8")
-                except FileNotFoundError:
-                    continue
-                except (OSError, UnicodeError):
-                    unavailable_mirrors += 1
-                    continue
-                readable.append(path)
-            decision = _verification_decision_all(candidate_sha, readable)
-            if unavailable_mirrors:
-                decision["coverage"]["unavailable_mirrors"] = unavailable_mirrors
-            return decision
-    return _verification_decision_all(candidate_sha, event_paths)
+    """Require the first journal to originate exact-candidate authority."""
+    if not event_paths:
+        return _verification_decision_all(candidate_sha, event_paths)
+    canonical = _verification_decision_all(candidate_sha, event_paths[:1])
+    if canonical["coverage"].get("conflicting_latest"):
+        return canonical
+    receipt = canonical.get("receipt")
+    receipt_sha = (
+        receipt.get("data", {}).get("candidate_sha")
+        if isinstance(receipt, dict)
+        else None
+    )
+    if not (
+        isinstance(receipt_sha, str)
+        and receipt_sha.lower() == candidate_sha.lower()
+    ):
+        canonical["coverage"]["canonical_required"] = True
+        canonical["satisfied"] = False
+        return canonical
+
+    readable = [event_paths[0]]
+    unavailable_mirrors = 0
+    for path in event_paths[1:]:
+        try:
+            Path(path).expanduser().read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError):
+            unavailable_mirrors += 1
+            continue
+        readable.append(path)
+    combined = _verification_decision_all(candidate_sha, readable)
+    canonical_generation = receipt["data"]["generation"]
+    combined_receipt = combined.get("receipt")
+    combined_generation = (
+        combined_receipt.get("data", {}).get("generation")
+        if isinstance(combined_receipt, dict)
+        else None
+    )
+    if combined["coverage"].get("conflicting_latest") or (
+        isinstance(combined_generation, int)
+        and combined_generation > canonical_generation
+    ):
+        combined["satisfied"] = False
+        combined["mode"] = None
+        combined["result"] = "unavailable"
+        combined["receipt"] = None
+        combined["coverage"]["mirror_ahead"] = True
+        if unavailable_mirrors:
+            combined["coverage"]["unavailable_mirrors"] = unavailable_mirrors
+        return combined
+    canonical["coverage"] = combined["coverage"]
+    if not combined["coverage"]["complete"]:
+        canonical["satisfied"] = False
+    if unavailable_mirrors:
+        canonical["coverage"]["unavailable_mirrors"] = unavailable_mirrors
+    return canonical
 
 
 def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], list[str]]:
@@ -404,7 +432,9 @@ def next_verification_generation(*, cwd: str, candidate_sha: str) -> int:
 
     highest, found = highest_generation(paths[:1])
     if found:
-        highest, _ = highest_generation(paths, skip_unreadable=True)
+        discovered_highest, _ = highest_generation(paths, skip_unreadable=True)
+        if discovered_highest > highest:
+            raise ValueError("mirror generation exceeds canonical authority")
     else:
         highest, _ = highest_generation(paths)
     if highest >= MAX_SAFE_EVENT_INTEGER:
