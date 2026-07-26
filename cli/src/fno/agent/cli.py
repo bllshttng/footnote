@@ -52,6 +52,60 @@ def _mail_handle() -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _attested_model(session_id: str) -> Optional[str]:
+    """The EXPLICITLY routed model, from the SessionStart attestation sidecar."""
+    from fno import paths
+
+    side = paths.state_dir() / "attest" / f"{session_id}.json"
+    try:
+        return (json.loads(side.read_text(encoding="utf-8")).get("model") or "").strip() or None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _transcript_model(session_id: str) -> Optional[str]:
+    """The model actually answering, from the tail of the session transcript.
+
+    Read backwards: a mid-session `/model` switch leaves both names in the file,
+    so the LAST stamp is the live one and the first would be stale. `<synthetic>`
+    marks harness-authored messages that carry no real model.
+    """
+    from fno.relay.registry import transcript_path_for
+
+    path = transcript_path_for(session_id)
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            window = min(fh.tell(), 262_144)
+            fh.seek(-window, os.SEEK_END)
+            tail = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            model = (json.loads(line).get("message") or {}).get("model")
+        except (ValueError, AttributeError):
+            continue
+        if model and model != "<synthetic>":
+            return model
+    return None
+
+
+def _session_model(session_id: Optional[str]) -> Optional[str]:
+    """What model am I? Sidecar first, then the transcript.
+
+    The sidecar only records an explicitly ROUTED model (`ANTHROPIC_MODEL`), so
+    it is empty for an ordinary session -- 236 of 1376 sidecars on a real host
+    carried one. Falling back to the transcript is what makes this answerable at
+    all for the other 83%, which is the whole point of surfacing it.
+    """
+    if not session_id:
+        return None
+    return _attested_model(session_id) or _transcript_model(session_id)
+
+
 def _mail_unread_count(
     handle: Optional[str], agent_self: str, session_id: Optional[str], project_root: Path
 ) -> int:
@@ -242,6 +296,7 @@ def whoami_command(
         payload = _ctx_to_jsonable(state)
         payload["mail_handle"] = mail
         payload["harness_session_id"] = harness_sid
+        payload["model"] = _session_model(harness_sid)
         if mail_unread:
             payload["mail_unread"] = mail_unread
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
@@ -282,6 +337,12 @@ def whoami_command(
         # SessionStart context - a collidable prefix invites copying the count.
         typer.echo(f"mail_unread: {mail_unread}")
     typer.echo(f"provider: {state.provider}")
+    # Deliberately its own line, not appended to `provider:` - sigma's reviewer
+    # bootstrap seds `^provider:` for the invoking harness and a suffix would
+    # corrupt what it reads.
+    model = _session_model(harness_sid)
+    if model:
+        typer.echo(f"model:    {model}")
     # x-301a: opportunistic mesh-name pointer. `fno whoami` reports operating
     # CONTEXT and does not otherwise surface the registered mesh name; when this
     # process IS a mesh worker (the spawn path injected FNO_AGENT_SELF), echo it

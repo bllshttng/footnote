@@ -510,3 +510,95 @@ class TestReadOnlyInvariant:
             assert result.exit_code in (0, 2), result.stdout + result.stderr
         after = _state_hashes(project)
         assert before == after, f"{verb} mutated state: {before} -> {after}"
+
+
+# --- model resolution: "what model am I actually running?" -------------------
+
+
+def _write_transcript(home: Path, session_id: str, stamps: List[str]) -> None:
+    """A claude transcript jsonl whose assistant rows carry `stamps` in order."""
+    d = home / ".claude" / "projects" / "-some-cwd"
+    d.mkdir(parents=True, exist_ok=True)
+    d.joinpath(f"{session_id}.jsonl").write_text(
+        "".join(
+            json.dumps({"type": "assistant", "message": {"model": m}}) + "\n" for m in stamps
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_sidecar(home: Path, session_id: str, model: str) -> None:
+    d = home / ".fno" / "attest"
+    d.mkdir(parents=True, exist_ok=True)
+    d.joinpath(f"{session_id}.json").write_text(
+        json.dumps({"model": model, "provider": "claude"}), encoding="utf-8"
+    )
+
+
+def test_session_model_prefers_attested_routing(tmp_path: Path, monkeypatch) -> None:
+    """An explicitly ROUTED model is authoritative over the transcript stamp."""
+    from fno.agent import cli as agent_cli
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("FNO_HOME", str(tmp_path / ".fno"))
+    _write_sidecar(tmp_path, "sid-1", "glm-5.2")
+    _write_transcript(tmp_path, "sid-1", ["claude-opus-5"])
+
+    assert agent_cli._session_model("sid-1") == "glm-5.2"
+
+
+def test_session_model_falls_back_to_transcript_when_unrouted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The common case: no ANTHROPIC_MODEL, so the sidecar's model is empty and
+    only the transcript can answer."""
+    from fno.agent import cli as agent_cli
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("FNO_HOME", str(tmp_path / ".fno"))
+    _write_sidecar(tmp_path, "sid-2", "")
+    _write_transcript(tmp_path, "sid-2", ["claude-opus-5"])
+
+    assert agent_cli._session_model("sid-2") == "claude-opus-5"
+
+
+def test_session_model_last_stamp_wins_after_midsession_switch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A `/model` switch leaves both names in the transcript; the LAST is live.
+
+    This is the case that makes the session preamble unreliable: it is rendered
+    once at startup and still names the pre-switch model.
+    """
+    from fno.agent import cli as agent_cli
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("FNO_HOME", str(tmp_path / ".fno"))
+    _write_transcript(
+        tmp_path, "sid-3", ["claude-opus-4-8", "claude-opus-4-8", "claude-opus-5"]
+    )
+
+    assert agent_cli._session_model("sid-3") == "claude-opus-5"
+
+
+def test_session_model_skips_synthetic_stamps(tmp_path: Path, monkeypatch) -> None:
+    """`<synthetic>` marks a harness-authored row carrying no real model."""
+    from fno.agent import cli as agent_cli
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("FNO_HOME", str(tmp_path / ".fno"))
+    _write_transcript(tmp_path, "sid-4", ["claude-opus-5", "<synthetic>"])
+
+    assert agent_cli._session_model("sid-4") == "claude-opus-5"
+
+
+def test_session_model_absent_degrades_to_none(tmp_path: Path, monkeypatch) -> None:
+    """No sidecar and no transcript is not a failure - whoami is the
+    confused-agent recovery verb and must never gain a failure mode."""
+    from fno.agent import cli as agent_cli
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("FNO_HOME", str(tmp_path / ".fno"))
+
+    assert agent_cli._session_model("sid-missing") is None
+    assert agent_cli._session_model(None) is None
