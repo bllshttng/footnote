@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 import fno.paths as paths
-import tomli_w
 
 MARKETPLACE = "footnote"
 PLUGIN_ID = "fno@footnote"
@@ -73,6 +72,7 @@ class ConvergenceResult:
 class _Snapshot:
     state: CodexState
     marker: bytes | None
+    rollback_receipt: bytes | None
     config: _OwnedConfig
     cache_names: frozenset[str]
 
@@ -81,6 +81,8 @@ class _Snapshot:
 class _OwnedConfig:
     marketplaces: dict[str, object]
     plugins: dict[str, object]
+    document: dict[str, object]
+    payload: bytes | None
 
 
 @dataclass(frozen=True)
@@ -371,16 +373,21 @@ def _marker_bytes(home: Path) -> bytes | None:
 
 def _restore_marker(home: Path, payload: bytes | None) -> None:
     marker = home / "footnote" / "plugin-channel.json"
-    if payload is None:
-        marker.unlink(missing_ok=True)
-        return
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    temp = marker.parent / f".{marker.name}.rollback.{uuid.uuid4().hex}.tmp"
+    temp: Path | None = None
     try:
+        if payload is None:
+            marker.unlink(missing_ok=True)
+            return
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        temp = marker.parent / f".{marker.name}.rollback.{uuid.uuid4().hex}.tmp"
         temp.write_bytes(payload)
         os.replace(temp, marker)
     except OSError as exc:
-        temp.unlink(missing_ok=True)
+        try:
+            if temp is not None:
+                temp.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise CodexPluginError("rollback-marker", str(exc)) from exc
 
 
@@ -407,10 +414,41 @@ def _clear_rollback_receipt(home: Path) -> None:
         raise CodexPluginError("rollback-receipt-clear", str(exc)) from exc
 
 
+def _rollback_receipt_bytes(home: Path) -> bytes | None:
+    path = home / "footnote" / "rollback-failure.json"
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise CodexPluginError("rollback-receipt-snapshot", str(exc)) from exc
+
+
+def _restore_rollback_receipt(home: Path, payload: bytes | None) -> None:
+    path = home / "footnote" / "rollback-failure.json"
+    temp: Path | None = None
+    try:
+        if payload is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.parent / f".{path.name}.rollback.{uuid.uuid4().hex}.tmp"
+        temp.write_bytes(payload)
+        os.replace(temp, path)
+    except OSError as exc:
+        try:
+            if temp is not None:
+                temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise CodexPluginError("rollback-receipt-restore", str(exc)) from exc
+
+
 def _read_owned_config(home: Path) -> _OwnedConfig:
     path = home / "config.toml"
     try:
-        document = tomllib.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        payload = path.read_bytes() if path.is_file() else None
+        document = tomllib.loads(payload.decode("utf-8")) if payload is not None else {}
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise CodexPluginError("codex-config-snapshot", str(exc)) from exc
     marketplaces = document.get("marketplaces", {})
@@ -428,28 +466,69 @@ def _read_owned_config(home: Path) -> _OwnedConfig:
         plugins=copy.deepcopy(
             {key: value for key, value in plugins.items() if key in OWNED_PLUGIN_IDS}
         ),
+        document=copy.deepcopy(document),
+        payload=payload,
     )
+
+
+def _without_owned_config(document: dict[str, object]) -> dict[str, object]:
+    result = copy.deepcopy(document)
+    marketplaces = result.get("marketplaces")
+    if isinstance(marketplaces, dict):
+        for key in {MARKETPLACE, LEGACY_DEV_MARKETPLACE}:
+            marketplaces.pop(key, None)
+        if not marketplaces:
+            result.pop("marketplaces", None)
+    plugins = result.get("plugins")
+    if isinstance(plugins, dict):
+        for key in OWNED_PLUGIN_IDS:
+            plugins.pop(key, None)
+        if not plugins:
+            result.pop("plugins", None)
+    return result
 
 
 def _restore_owned_config(home: Path, snapshot: _OwnedConfig) -> None:
     path = home / "config.toml"
     temp: Path | None = None
     try:
-        document = tomllib.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-        marketplaces = document.setdefault("marketplaces", {})
-        plugins = document.setdefault("plugins", {})
+        current_payload = path.read_bytes() if path.is_file() else None
+        document = (
+            tomllib.loads(current_payload.decode("utf-8"))
+            if current_payload is not None
+            else {}
+        )
+        marketplaces = document.get("marketplaces", {})
+        plugins = document.get("plugins", {})
         if not isinstance(marketplaces, dict) or not isinstance(plugins, dict):
             raise TypeError("owned tables are not objects")
-        for key in {MARKETPLACE, LEGACY_DEV_MARKETPLACE}:
-            marketplaces.pop(key, None)
-        marketplaces.update(copy.deepcopy(snapshot.marketplaces))
-        for key in OWNED_PLUGIN_IDS:
-            plugins.pop(key, None)
-        plugins.update(copy.deepcopy(snapshot.plugins))
+        current_marketplaces = {
+            key: value
+            for key, value in marketplaces.items()
+            if key in {MARKETPLACE, LEGACY_DEV_MARKETPLACE}
+        }
+        current_plugins = {
+            key: value
+            for key, value in plugins.items()
+            if key in OWNED_PLUGIN_IDS
+        }
+        if (
+            current_marketplaces == snapshot.marketplaces
+            and current_plugins == snapshot.plugins
+        ):
+            return
+        if _without_owned_config(document) != _without_owned_config(snapshot.document):
+            raise CodexPluginError(
+                "rollback-config", "non-Footnote config changed during convergence"
+            )
+        if snapshot.payload is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.parent / f".{path.name}.rollback.{uuid.uuid4().hex}.tmp"
-        temp.write_text(tomli_w.dumps(document), encoding="utf-8")
+        temp.write_bytes(snapshot.payload)
         os.replace(temp, path)
-    except (OSError, TypeError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeError, TypeError, tomllib.TOMLDecodeError) as exc:
         try:
             if temp is not None:
                 temp.unlink(missing_ok=True)
@@ -543,8 +622,16 @@ def _restore_snapshot(
         for item in cache_quarantines:
             _restore_cache(item)
         _restore_marker(home, snapshot.marker)
+        _restore_rollback_receipt(home, snapshot.rollback_receipt)
+        restored = _collect(runner)
+        if _owned_state_fingerprint(restored) != expected:
+            raise CodexPluginError(
+                "rollback-final-verify", "owned state changed during rollback"
+            )
         if _marker_bytes(home) != snapshot.marker:
             raise CodexPluginError("rollback-final-verify", "marker bytes differ")
+        if _rollback_receipt_bytes(home) != snapshot.rollback_receipt:
+            raise CodexPluginError("rollback-final-verify", "rollback receipt bytes differ")
         return
     for plugin in current.plugins:
         if plugin.installed and plugin.plugin_id in OWNED_PLUGIN_IDS:
@@ -616,6 +703,7 @@ def _restore_snapshot(
     for item in cache_quarantines:
         _restore_cache(item)
     _restore_marker(home, snapshot.marker)
+    _restore_rollback_receipt(home, snapshot.rollback_receipt)
     restored = _collect(runner)
     found = _owned_state_fingerprint(restored)
     if found != expected:
@@ -624,6 +712,8 @@ def _restore_snapshot(
         )
     if _marker_bytes(home) != snapshot.marker:
         raise CodexPluginError("rollback-final-verify", "marker bytes differ")
+    if _rollback_receipt_bytes(home) != snapshot.rollback_receipt:
+        raise CodexPluginError("rollback-final-verify", "rollback receipt bytes differ")
 
 
 @contextmanager
@@ -920,6 +1010,7 @@ def converge(
         snapshot = _Snapshot(
             state=state,
             marker=_marker_bytes(home),
+            rollback_receipt=_rollback_receipt_bytes(home),
             config=_read_owned_config(home),
             cache_names=frozenset(
                 name
@@ -955,7 +1046,31 @@ def converge(
             and footnote_plugins[0].plugin_id == plugin_id
             and not legacy_marketplaces
         )
-        no_op = marketplace_ok and selected_ok and only_selected and not refresh
+        channel_stable = marketplace_ok and selected_ok and only_selected and not refresh
+        marker_matches = False
+        if snapshot.marker is not None:
+            try:
+                marker = _object(
+                    json.loads(snapshot.marker.decode("utf-8")),
+                    "desired-channel-marker",
+                )
+                marker_matches = (
+                    marker.get("channel") == channel
+                    and marker.get("marketplace") == marketplace_name
+                    and marker.get("source") == marketplace_source
+                )
+            except (UnicodeError, ValueError, TypeError, CodexPluginError):
+                pass
+        legacy_cache_present = (
+            home / "plugins" / "cache" / LEGACY_DEV_MARKETPLACE
+        ).exists()
+        no_op = (
+            channel_stable
+            and marker_matches
+            and not legacy_cache_present
+            and snapshot.rollback_receipt is None
+        )
+        needs_install = selected is None or refresh or not selected_ok or not marketplace_ok
         changed = False
         cache_quarantines: list[_CacheQuarantine] = []
         try:
@@ -967,9 +1082,12 @@ def converge(
                     raise CodexPluginError(
                         "candidate-recheck", "dev source changed after candidate validation"
                     )
+            if snapshot.rollback_receipt is not None:
+                changed = True
+                _clear_rollback_receipt(home)
             for cache_name in (
                 LEGACY_DEV_MARKETPLACE,
-                *(() if no_op else (MARKETPLACE,)),
+                *(() if not needs_install else (MARKETPLACE,)),
             ):
                 quarantine = _quarantine_cache(home, cache_name)
                 if quarantine is None:
@@ -1007,7 +1125,6 @@ def converge(
                     ],
                 )
 
-            needs_install = selected is None or refresh or not selected_ok or not marketplace_ok
             if needs_install:
                 if marketplace is not None and not marketplace_ok:
                     changed = True
@@ -1125,6 +1242,10 @@ def converge(
                     raise CodexPluginError(
                         "final-verify", "live payload differs from validated candidate"
                     )
+            if no_op:
+                return ConvergenceResult(
+                    channel, "no-op", enabled[0].plugin_id, enabled[0].version or version
+                )
             changed = True
             _write_marker(
                 home,
@@ -1144,13 +1265,10 @@ def converge(
                 raise CodexPluginError(
                     "desired-channel-marker", "marker readback differs after write"
                 )
-            _clear_rollback_receipt(home)
             for item in cache_quarantines:
                 _discard_cache_backup_best_effort(item)
             action = (
-                "no-op"
-                if no_op
-                else "refreshed"
+                "refreshed"
                 if refresh
                 else "installed"
                 if selected is None
@@ -1169,7 +1287,12 @@ def converge(
                 raise original
             try:
                 _restore_snapshot(runner, home, snapshot, tuple(cache_quarantines))
-            except CodexPluginError as rollback_error:
+            except Exception as raw_rollback:  # noqa: BLE001 - receipt must cover every rollback failure
+                rollback_error = (
+                    raw_rollback
+                    if isinstance(raw_rollback, CodexPluginError)
+                    else CodexPluginError("rollback", str(raw_rollback))
+                )
                 detail = f"{original}; rollback failed: {rollback_error}"
                 try:
                     _rollback_receipt(home, original, detail)
