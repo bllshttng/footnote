@@ -629,7 +629,7 @@ def extract_migrations(migrations_dir=None, root="."):
 def _has_content(schema):
     return bool(
         schema.enums or schema.constraints or schema.triggers
-        or schema.fks or schema.tables
+        or schema.fks or schema.tables or schema.source_note
     )
 
 

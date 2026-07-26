@@ -148,6 +148,49 @@ def test_corrupt_graph_is_not_recast_as_empty(tmp_path: Path) -> None:
     assert error and "not valid JSON" in error
 
 
+def test_receipt_resolves_paths_from_requested_repository(monkeypatch, tmp_path: Path) -> None:
+    from fno.think_inspect import build_receipt
+
+    repo = tmp_path / "target-repo"
+    (repo / ".fno").mkdir(parents=True)
+    (repo / ".fno" / "config.toml").write_text(
+        'plans_dir = "target-plans"\n'
+        '[paths]\n'
+        'graph_json = "target-state/graph.json"\n'
+    )
+    graph_path = repo / "target-state" / "graph.json"
+    graph_path.parent.mkdir()
+    graph_path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "x-target",
+                        "slug": "target-feature",
+                        "title": "Target feature",
+                        "status": "ready",
+                    }
+                ]
+            }
+        )
+    )
+    plans = repo / "target-plans"
+    plans.mkdir()
+    retro = plans / "20260725-retro-synthesis-x-target.md"
+    retro.write_text("# Retro\n")
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
+
+    receipt = build_receipt(
+        "x-target",
+        repo=repo,
+        home=tmp_path,
+        run=_result_without_title_assertion,
+    )
+
+    assert receipt["graph"]["resolved"]["id"] == "x-target"
+    assert receipt["pitfalls"]["retro_syntheses"] == [str(retro)]
+
+
 def test_schema_artifact_older_than_schema_source_is_stale(tmp_path: Path) -> None:
     from fno.think_inspect import build_receipt
 

@@ -328,14 +328,28 @@ def build_receipt(
     run: Run = _default_run,
 ) -> dict[str, Any]:
     """Collect a deterministic, read-only design-discovery receipt."""
-    from fno.paths import graph_archive_json, graph_json, plans_dir
+    from fno.config import load_settings_for_repo
+    from fno.paths import resolve_configured_path
 
     repo = Path(repo).resolve()
+    settings = load_settings_for_repo(repo)
+    graph_override = settings.paths.graph_json
+    graph_path = (
+        resolve_configured_path(graph_override, project_root=repo, settings=settings)
+        if graph_override is not None
+        else resolve_configured_path(settings.state_dir, project_root=repo, settings=settings)
+        / "graph.json"
+    )
+    archive_path = graph_path.parent / "graph-archive.json"
+    configured_plans_path = resolve_configured_path(
+        settings.plans_dir,
+        project_root=repo,
+        settings=settings,
+    )
     if graph_entries is _UNSET:
-        graph_entries, graph_error = _load_graph(Path(graph_json()))
+        graph_entries, graph_error = _load_graph(graph_path)
     archive_error = None
     if archive_entries is _UNSET:
-        archive_path = Path(graph_archive_json())
         if archive_path.exists():
             archive_entries, archive_error = _load_graph(archive_path)
         else:
@@ -353,7 +367,7 @@ def build_receipt(
     pr_seed: str = resolved["title"] if isinstance(resolved.get("title"), str) else seed
     pull_requests = _pull_requests(pr_seed, repo, run)
     database = _database(repo)
-    pitfalls = _pitfalls(repo, plans_path or Path(plans_dir(repo)), home or Path.home())
+    pitfalls = _pitfalls(repo, plans_path or configured_plans_path, home or Path.home())
     warnings: list[str] = []
     if repository["status"] != "ok":
         warnings.append("repository evidence is incomplete")

@@ -213,6 +213,26 @@ def test_parsed_markdown_carries_no_live_note(tmp_path):
     assert "Parsed from migration files (no live DB detected)" in md
 
 
+@pytest.mark.parametrize(
+    ("name", "content", "source"),
+    [
+        ("schema.prisma", "model User {\n  id String @id\n}\n", "Prisma schema"),
+        ("schema.ts", "export const users = pgTable('users', {});\n", "Drizzle schema"),
+    ],
+)
+def test_enum_free_declarative_schema_emits_successful_schema_marker(
+    tmp_path, name, content, source
+):
+    """A detected schema is grounded even when the fallback extracts no enums."""
+    schema = tmp_path / name
+    schema.write_text(content)
+
+    md = db.format_markdown(db.extract_migrations(str(schema)))
+
+    assert "## Database Schema" in md
+    assert f"Parsed from {source} (no live DB detected)" in md
+
+
 def test_live_table_rows_normalized_before_filter():
     """A live TABLE_QUERY row is `schema.table`; an unqualified --tables filter
     must still match after schema-qualifier normalization (codex P2 on #509)."""
