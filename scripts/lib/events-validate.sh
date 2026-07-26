@@ -86,7 +86,7 @@ _ev_resolve_schema_path() {
     printf '%s' "$project_path"
 }
 EVENTS_SCHEMA_PATH="$(_ev_resolve_schema_path)"
-EVENTS_SCHEMA_CACHE="${EVENTS_SCHEMA_CACHE:-/tmp/events-schema-$$.cache}"
+EVENTS_SCHEMA_CACHE="${EVENTS_SCHEMA_CACHE:-${TMPDIR:-/tmp}/events-schema-${BASHPID:-$$}-${RANDOM:-0}.cache}"
 
 _ev_warn() { printf '%s\n' "$*" >&2; }
 

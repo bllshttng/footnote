@@ -67,6 +67,12 @@ def _bash_verdict(event: dict, type_hint: str | None = None) -> tuple[bool, str]
 _RECORDS = list(_records())
 
 
+def test_bash_schema_cache_identity_is_not_pid_only() -> None:
+    script = BASH_VALIDATOR.read_text(encoding="utf-8")
+
+    assert "${BASHPID:-$$}-${RANDOM:-0}" in script
+
+
 def test_corpus_minimum_size() -> None:
     """The corpus must include at least the 12 hand-crafted records.
 
