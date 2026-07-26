@@ -58,7 +58,10 @@ class IntegrationAdapter:
 
 
 def _run(
-    cmd: list[str], timeout: int = 120, cwd: Path | None = None
+    cmd: list[str],
+    timeout: int = 120,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> "subprocess.CompletedProcess[str]":
     """Run a command, capturing output, never raising.
 
@@ -75,6 +78,7 @@ def _run(
             timeout=timeout,
             check=False,
             cwd=cwd,
+            env=env,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr=str(exc))
