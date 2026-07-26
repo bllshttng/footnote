@@ -163,6 +163,20 @@ def evidence_check() -> None:
     raise typer.Exit(code=_preflight.run_evidence_check())
 
 
+@pr_app.command("evidence-required", hidden=True)
+def evidence_required(
+    base: str = typer.Option("origin/main", "--base"),
+) -> None:
+    """Expose the one local-verification policy to shell-based ship paths."""
+    from fno.pr import _preflight
+
+    required, reason = _preflight.local_verification_required(
+        cwd=os.getcwd(), base_ref=base
+    )
+    typer.echo(json.dumps({"required": required, "reason": reason}, separators=(",", ":")))
+    raise typer.Exit(code=0 if required else 1)
+
+
 @pr_app.command("record-preflight-receipt", hidden=True)
 def record_preflight_receipt(
     mode: str = typer.Option(...),
@@ -174,6 +188,7 @@ def record_preflight_receipt(
     command_json: str = typer.Option(..., "--command-json"),
     events_path: Path = typer.Option(..., "--events"),
     detail: str = typer.Option(""),
+    capability: str = typer.Option(..., "--capability", hidden=True),
 ) -> None:
     from fno.pr import _preflight
 
@@ -193,6 +208,7 @@ def record_preflight_receipt(
             steps_executed=steps_executed,
             command=command,
             detail=detail,
+            capability=capability,
         )
     except (ValueError, json.JSONDecodeError) as exc:
         typer.echo(str(exc), err=True)

@@ -122,6 +122,7 @@ emit_verification_receipt() {
         --steps-executed "$executed" \
         --command-json "$command_json" \
         --events "$EVENTS_PATH" \
+        --capability "$PREFLIGHT_CAPABILITY" \
         --detail "$detail" >/dev/null
 }
 
@@ -191,8 +192,16 @@ fi
 
 # --- lock (atomic mkdir; steal a dead holder) -------------------------------
 LOCKDIR="$COMMON_DIR/.preflight.lock.d"
+PREFLIGHT_CAPABILITY="$(
+    openssl rand -hex 32 2>/dev/null \
+        || od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n'
+)"
+if [[ ! "$PREFLIGHT_CAPABILITY" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "preflight: cannot create an opaque receipt capability" >&2
+    exit 1
+fi
 stamp_holder() {
-    printf 'pid=%s started=%s host=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(hostname 2>/dev/null || echo unknown)" "$CANDIDATE_SHA" > "$LOCKDIR/holder"
+    printf 'pid=%s started=%s host=%s sha=%s token=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(hostname 2>/dev/null || echo unknown)" "$CANDIDATE_SHA" "$PREFLIGHT_CAPABILITY" > "$LOCKDIR/holder"
 }
 acquire_lock() {
     if mkdir "$LOCKDIR" 2>/dev/null; then stamp_holder; return 0; fi
@@ -249,14 +258,18 @@ acquire_lock() {
 }
 acquire_lock
 
-REVOCATION="$COMMON_DIR/.preflight-revoked"
+REVOCATION_DIR="$COMMON_DIR/.preflight-revoked"
+REVOCATION="$REVOCATION_DIR/$CANDIDATE_SHA"
 mark_revoked() {
     local tmp="${REVOCATION}.$$"
-    printf '%s\n' "$CANDIDATE_SHA" > "$tmp" 2>/dev/null && mv -f "$tmp" "$REVOCATION" 2>/dev/null
+    mkdir -p "$REVOCATION_DIR" 2>/dev/null \
+        && printf '%s\n' "$CANDIDATE_SHA" > "$tmp" 2>/dev/null \
+        && mv -f "$tmp" "$REVOCATION" 2>/dev/null
 }
 clear_revocation() {
     [[ "$(cat "$REVOCATION" 2>/dev/null || true)" == "$CANDIDATE_SHA" ]] || return 1
-    rm -f "$REVOCATION"
+    rm -f "$REVOCATION" && rmdir "$REVOCATION_DIR" 2>/dev/null || true
+    [[ ! -e "$REVOCATION" ]]
 }
 if ! mark_revoked; then
     echo "preflight: cannot persist fail-closed revocation at $REVOCATION" >&2

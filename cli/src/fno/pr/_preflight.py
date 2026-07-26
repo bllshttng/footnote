@@ -19,6 +19,7 @@ Exit-code contract (callers branch on codes, not text):
 from __future__ import annotations
 
 import datetime as dt
+import hmac
 import json
 import os
 import platform
@@ -51,9 +52,6 @@ _PREFLIGHT_GATE_SCOPE = frozenset(
     }
 )
 _PREFLIGHT_BASE_SCOPE = _PREFLIGHT_GATE_SCOPE - {"squads-leak-guard:fno"}
-_MAX_RECEIPT_FUTURE_SKEW = dt.timedelta(minutes=5)
-
-
 def _event_timestamp(value: object) -> Optional[dt.datetime]:
     if not isinstance(value, str) or not value:
         return None
@@ -200,10 +198,7 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
                 malformed += 1
                 continue
             parsed_ts = _event_timestamp(event.get("ts"))
-            if (
-                parsed_ts is None
-                or parsed_ts > dt.datetime.now(dt.timezone.utc) + _MAX_RECEIPT_FUTURE_SKEW
-            ):
+            if parsed_ts is None or parsed_ts > dt.datetime.now(dt.timezone.utc):
                 malformed += 1
                 continue
             signature = json.dumps(event, sort_keys=True, separators=(",", ":"))
@@ -338,10 +333,14 @@ def check_verification_evidence(
         decision["coverage"]["complete"] = False
         decision["coverage"]["discovery_errors"] = discovery_errors
         decision["satisfied"] = False
-    revocation = _preflight_revocation(repo)
-    if revocation == candidate_sha.lower():
+    revocation, revocation_error = _preflight_revocation(repo, candidate_sha)
+    if revocation == "revoked":
         decision["coverage"]["complete"] = False
         decision["coverage"]["revoked"] = True
+        decision["satisfied"] = False
+    elif revocation == "unavailable":
+        decision["coverage"]["complete"] = False
+        decision["coverage"]["revocation_error"] = revocation_error
         decision["satisfied"] = False
     return decision
 
@@ -353,7 +352,17 @@ def local_verification_required(
     root = Path(cwd).resolve()
     if environment.get("FNO_SKIP_PREFLIGHT") == "1":
         return False, "explicit-skip"
-    if not (root / "scripts" / "ci" / "preflight.sh").is_file():
+    runner = root / "scripts" / "ci" / "preflight.sh"
+    base_runner = _git(
+        ["ls-tree", base_ref, "--", "scripts/ci/preflight.sh"], str(root)
+    )
+    if base_runner.returncode != 0:
+        return True, "base-policy-unavailable"
+    base_configured = bool(base_runner.stdout.strip())
+    candidate_configured = runner.is_file() and os.access(runner, os.X_OK)
+    if base_configured and not candidate_configured:
+        return True, "runner-removed"
+    if not candidate_configured:
         return False, "runner-not-configured"
     changed = _git(["diff", "--name-only", f"{base_ref}...HEAD"], str(root))
     if changed.returncode != 0:
@@ -373,15 +382,29 @@ def _git_common_dir(repo: str) -> Optional[Path]:
     return Path(result.stdout.strip()).resolve()
 
 
-def _preflight_revocation(repo: str) -> Optional[str]:
+def _preflight_revocation(repo: str, candidate_sha: str) -> tuple[str, Optional[str]]:
     common = _git_common_dir(repo)
     if common is None:
-        return None
+        return "unavailable", "git common directory unavailable"
+    directory = common / ".preflight-revoked"
+    marker = directory / candidate_sha.lower()
     try:
-        value = (common / ".preflight-revoked").read_text(encoding="utf-8").strip().lower()
-    except OSError:
-        return None
-    return value if re.fullmatch(r"[0-9a-f]{40}", value) else None
+        value = marker.read_text(encoding="utf-8").strip().lower()
+    except FileNotFoundError:
+        try:
+            directory_mode = directory.stat().st_mode
+        except FileNotFoundError:
+            return "absent", None
+        except OSError as exc:
+            return "unavailable", f"revocation directory unreadable: {exc}"
+        if not stat.S_ISDIR(directory_mode):
+            return "unavailable", f"revocation path is not a directory: {directory}"
+        return "absent", None
+    except (OSError, UnicodeError) as exc:
+        return "unavailable", f"revocation marker unreadable: {exc}"
+    if value != candidate_sha.lower():
+        return "unavailable", "revocation marker is malformed"
+    return "revoked", None
 
 
 def record_preflight_receipt(
@@ -396,6 +419,7 @@ def record_preflight_receipt(
     steps_executed: int,
     command: list[str],
     detail: str,
+    capability: str,
 ) -> dict:
     from fno.events import _build, append_event
 
@@ -408,12 +432,23 @@ def record_preflight_receipt(
     except OSError as exc:
         raise ValueError(f"preflight receipt refused: lock holder unavailable: {exc}") from exc
     match = re.search(r"(?:^| )pid=([0-9]+)(?: |$)", holder)
-    if match is None or int(match.group(1)) != os.getppid():
+    token_match = re.search(r"(?:^| )token=([0-9a-f]{64})(?: |$)", holder)
+    sha_match = re.search(r"(?:^| )sha=([0-9a-f]{40})(?: |$)", holder)
+    if (
+        match is None
+        or token_match is None
+        or sha_match is None
+        or int(match.group(1)) != os.getppid()
+        or re.fullmatch(r"[0-9a-f]{64}", capability) is None
+        or not hmac.compare_digest(token_match.group(1), capability)
+    ):
         raise ValueError("preflight receipt refused: caller does not own the preflight lock")
     candidate = _git(["rev-parse", "HEAD"], cwd)
     candidate_sha = candidate.stdout.strip().lower() if candidate.returncode == 0 else ""
     if re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
         raise ValueError("preflight receipt refused: candidate SHA unavailable")
+    if not hmac.compare_digest(sha_match.group(1), candidate_sha):
+        raise ValueError("preflight receipt refused: lock candidate does not match HEAD")
     host = socket.gethostname() or "unknown"
     finished_at = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
     event = _build(

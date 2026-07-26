@@ -333,11 +333,13 @@ def validate(event: dict[str, Any]) -> None:
         command = data.get("command")
         scope = data.get("scope")
         if not isinstance(command, list) or not command or len(command) > 4096 or not all(
-            isinstance(item, str) and item and len(item) <= 4096 for item in command
+            isinstance(item, str) and item and len(item.encode("utf-8")) <= 4096
+            for item in command
         ):
             raise ValidationError("verification_receipt command must contain bounded argv strings")
         if not isinstance(scope, list) or not scope or len(scope) > 128 or not all(
-            isinstance(item, str) and item and len(item) <= 512 for item in scope
+            isinstance(item, str) and item and len(item.encode("utf-8")) <= 512
+            for item in scope
         ):
             raise ValidationError("verification_receipt scope must contain bounded step names")
         environment = data.get("environment")

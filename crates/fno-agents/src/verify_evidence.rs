@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 // ── shared helpers ────────────────────────────────────────────────────────────
@@ -634,7 +634,56 @@ fn gate_eligible_receipt(event: &Value) -> bool {
         })
 }
 
-fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevocationState {
+    Absent,
+    Revoked,
+    Unavailable,
+}
+
+fn git_common_dir(git_bin: &str) -> Option<PathBuf> {
+    let output = Command::new(git_bin)
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+fn preflight_revocation(
+    common_dir: Option<&Path>,
+    candidate_sha: &str,
+) -> RevocationState {
+    let Some(common_dir) = common_dir else {
+        return RevocationState::Unavailable;
+    };
+    let marker = common_dir
+        .join(".preflight-revoked")
+        .join(candidate_sha.to_ascii_lowercase());
+    match std::fs::read_to_string(marker) {
+        Ok(value) if value.trim().eq_ignore_ascii_case(candidate_sha) => {
+            RevocationState::Revoked
+        }
+        Ok(_) => RevocationState::Unavailable,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            RevocationState::Absent
+        }
+        Err(_) => RevocationState::Unavailable,
+    }
+}
+
+fn receipt_decision(
+    candidate_sha: &str,
+    paths: &[String],
+    revocation: RevocationState,
+) -> Value {
     let mut seen = std::collections::HashSet::new();
     let mut receipts: Vec<(DateTime<Utc>, String, Value)> = Vec::new();
     let mut malformed = 0u64;
@@ -668,7 +717,7 @@ fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
                 continue;
             }
             let ts = receipt_timestamp(event.get("ts").unwrap()).unwrap();
-            if ts > Utc::now() + Duration::minutes(5) {
+            if ts > Utc::now() {
                 malformed += 1;
                 continue;
             }
@@ -679,12 +728,17 @@ fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
         }
     }
     receipts.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-    let coverage = json!({
-        "complete": malformed == 0 && unreadable == 0,
+    let mut coverage = json!({
+        "complete": malformed == 0 && unreadable == 0 && revocation == RevocationState::Absent,
         "malformed_lines": malformed,
         "unreadable_paths": unreadable,
         "deduped_events": receipts.len(),
     });
+    if revocation == RevocationState::Revoked {
+        coverage["revoked"] = Value::Bool(true);
+    } else if revocation == RevocationState::Unavailable {
+        coverage["revocation_error"] = Value::String("revocation state unavailable".to_string());
+    }
     let exact = receipts.iter().rev().find(|(_, _, event)| {
         event
             .pointer("/data/candidate_sha")
@@ -703,18 +757,14 @@ fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
             })
             .count();
         if conflicting_latest != 1 {
+            coverage["complete"] = Value::Bool(false);
+            coverage["conflicting_latest"] = json!(conflicting_latest);
             return json!({
                 "satisfied": false,
                 "mode": Value::Null,
                 "result": "unavailable",
                 "receipt": Value::Null,
-                "coverage": {
-                    "complete": false,
-                    "malformed_lines": malformed,
-                    "unreadable_paths": unreadable,
-                    "deduped_events": receipts.len(),
-                    "conflicting_latest": conflicting_latest,
-                },
+                "coverage": coverage,
             });
         }
         let mode = event
@@ -728,6 +778,7 @@ fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
         return json!({
             "satisfied": malformed == 0
                 && unreadable == 0
+                && revocation == RevocationState::Absent
                 && mode == "full"
                 && result == "passed"
                 && gate_eligible_receipt(event),
@@ -851,6 +902,9 @@ fn hosted_ci_result(
     let mut failed = false;
     let mut pending = false;
     for check in checks {
+        if !check.is_object() {
+            return HostedCiResult::Unavailable;
+        }
         let bucket = check
             .get("bucket")
             .and_then(Value::as_str)
@@ -986,7 +1040,9 @@ fn run(args: &[String]) -> (i32, String, String) {
                         .to_string(),
                 );
             }
-            let decision = receipt_decision(&rest[0], &rest[1..]);
+            let common_dir = git_common_dir(&git_bin);
+            let revocation = preflight_revocation(common_dir.as_deref(), &rest[0]);
+            let decision = receipt_decision(&rest[0], &rest[1..], revocation);
             let code = if decision["satisfied"] == Value::Bool(true) {
                 0
             } else {
@@ -1137,6 +1193,7 @@ mod tests {
         let decision = receipt_decision(
             &sha.to_ascii_uppercase(),
             &[first.display().to_string(), second.display().to_string()],
+            RevocationState::Absent,
         );
 
         assert_eq!(decision["satisfied"], true);
@@ -1156,7 +1213,11 @@ mod tests {
         )
         .unwrap();
 
-        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
+        let decision = receipt_decision(
+            sha,
+            &[journal.path().display().to_string()],
+            RevocationState::Absent,
+        );
 
         assert_eq!(decision["mode"], "full");
         assert_eq!(decision["result"], "passed");
@@ -1181,7 +1242,11 @@ mod tests {
         )
         .unwrap();
 
-        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
+        let decision = receipt_decision(
+            sha,
+            &[journal.path().display().to_string()],
+            RevocationState::Absent,
+        );
 
         assert_eq!(decision["satisfied"], false);
         assert_eq!(decision["result"], "unavailable");
@@ -1199,10 +1264,39 @@ mod tests {
         )
         .unwrap();
 
-        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
+        let decision = receipt_decision(
+            sha,
+            &[journal.path().display().to_string()],
+            RevocationState::Absent,
+        );
 
         assert_eq!(decision["satisfied"], false);
         assert_eq!(decision["coverage"]["malformed_lines"], 1);
+    }
+
+    #[test]
+    fn receipt_decision_applies_revoked_and_unavailable_states() {
+        let mut journal = tempfile::NamedTempFile::new().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        writeln!(
+            journal,
+            "{}",
+            receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed")
+        )
+        .unwrap();
+        let paths = [journal.path().display().to_string()];
+
+        let revoked = receipt_decision(sha, &paths, RevocationState::Revoked);
+        assert_eq!(revoked["satisfied"], false);
+        assert_eq!(revoked["coverage"]["revoked"], true);
+
+        let unavailable = receipt_decision(sha, &paths, RevocationState::Unavailable);
+        assert_eq!(unavailable["satisfied"], false);
+        assert_eq!(unavailable["coverage"]["complete"], false);
+        assert_eq!(
+            unavailable["coverage"]["revocation_error"],
+            "revocation state unavailable"
+        );
     }
 
     #[test]
@@ -1229,6 +1323,7 @@ mod tests {
         let pending = json!([{"status": "IN_PROGRESS", "conclusion": ""}]);
         let failed = json!([{"status": "COMPLETED", "conclusion": "FAILURE"}]);
         let passed = json!([{"status": "COMPLETED", "conclusion": "SUCCESS"}]);
+        let malformed = json!(["not-an-object"]);
         let cases = [
             (true, WorkflowState::Absent, None, &empty, "not_configured"),
             (false, WorkflowState::Absent, None, &empty, "pending"),
@@ -1251,6 +1346,13 @@ mod tests {
             ),
             (false, WorkflowState::Present, Some(sha), &failed, "failed"),
             (false, WorkflowState::Present, Some(sha), &passed, "passed"),
+            (
+                false,
+                WorkflowState::Present,
+                Some(sha),
+                &malformed,
+                "unavailable",
+            ),
         ];
         for (declared, workflow, observed, checks, expected) in cases {
             assert_eq!(

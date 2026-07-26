@@ -98,8 +98,7 @@ candidate_fno pr base-check --base "$BASE" || {
   # 3 = stale, 4 = unrelated histories, 127 = missing CLI; all refuse.
   [ "$rc" -ge 3 ] && { echo "refusing to open a PR from a bad base (see above)."; exit "$rc"; }
 }
-non_docs="$(git diff --name-only "$BASE"...HEAD | grep -vE '^(docs/|internal/|.*\.md$)' || true)"
-if [ "${FNO_SKIP_PREFLIGHT:-0}" != "1" ] && [ -x "$ROOT/scripts/ci/preflight.sh" ] && [ -n "$non_docs" ]; then
+if candidate_fno pr evidence-required --base "$BASE"; then
   candidate_fno pr evidence-check || {
     echo "PR creation refused: current HEAD has no full/passed verification receipt." >&2
     exit 1

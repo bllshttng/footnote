@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import datetime as dt
 from pathlib import Path
 
 import pytest
 
 from fno.events import ValidationError, validate
 from fno.pr._preflight import (
+    _preflight_revocation,
     check_verification_evidence,
     hosted_ci_decision,
     hosted_workflow_state,
@@ -247,6 +249,20 @@ def test_future_dated_receipt_fails_closed(tmp_path: Path) -> None:
     assert decision["coverage"]["malformed_lines"] == 1
 
 
+def test_future_pass_cannot_shadow_later_appended_failure(tmp_path: Path) -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    future = (now + dt.timedelta(minutes=4)).isoformat().replace("+00:00", "Z")
+    current = now.isoformat().replace("+00:00", "Z")
+    journal = tmp_path / "events.jsonl"
+    write(journal, receipt(ts=future), receipt(ts=current, result="failed"))
+
+    decision = verification_decision(SHA, [journal])
+
+    assert decision["satisfied"] is False
+    assert decision["result"] == "failed"
+    assert decision["coverage"]["malformed_lines"] == 1
+
+
 def test_optional_squads_guard_absence_keeps_actual_five_step_scope_eligible(
     tmp_path: Path,
 ) -> None:
@@ -283,7 +299,10 @@ def test_live_revocation_blocks_older_pass(
 ) -> None:
     journal = tmp_path / "events.jsonl"
     write(journal, receipt())
-    monkeypatch.setattr("fno.pr._preflight._preflight_revocation", lambda _repo: SHA)
+    monkeypatch.setattr(
+        "fno.pr._preflight._preflight_revocation",
+        lambda _repo, _sha: ("revoked", None),
+    )
 
     decision = check_verification_evidence(
         cwd=str(tmp_path), candidate_sha=SHA, event_paths=[journal]
@@ -294,36 +313,106 @@ def test_live_revocation_blocks_older_pass(
     assert decision["satisfied"] is False
 
 
+def test_unavailable_revocation_state_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    journal = tmp_path / "events.jsonl"
+    write(journal, receipt())
+    monkeypatch.setattr(
+        "fno.pr._preflight._preflight_revocation",
+        lambda _repo, _sha: ("unavailable", "marker unreadable"),
+    )
+
+    decision = check_verification_evidence(
+        cwd=str(tmp_path), candidate_sha=SHA, event_paths=[journal]
+    )
+
+    assert decision["coverage"]["complete"] is False
+    assert decision["coverage"]["revocation_error"] == "marker unreadable"
+    assert decision["satisfied"] is False
+
+
+def test_revocation_markers_are_candidate_scoped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    common = tmp_path / ".git"
+    directory = common / ".preflight-revoked"
+    directory.mkdir(parents=True)
+    (directory / SHA).write_text(SHA + "\n")
+    (directory / OTHER_SHA).write_text(OTHER_SHA + "\n")
+    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
+
+    assert _preflight_revocation(str(tmp_path), SHA) == ("revoked", None)
+    assert _preflight_revocation(str(tmp_path), OTHER_SHA) == ("revoked", None)
+
+
+def test_malformed_revocation_marker_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    common = tmp_path / ".git"
+    marker = common / ".preflight-revoked" / SHA
+    marker.parent.mkdir(parents=True)
+    marker.write_text("not-a-sha\n")
+    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
+
+    state, error = _preflight_revocation(str(tmp_path), SHA)
+
+    assert state == "unavailable"
+    assert error == "revocation marker is malformed"
+
+
 def test_local_verification_policy_preserves_explicit_exemptions(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     runner = tmp_path / "scripts" / "ci" / "preflight.sh"
     runner.parent.mkdir(parents=True)
     runner.write_text("#!/bin/sh\n")
+    runner.chmod(0o755)
 
-    monkeypatch.setattr(
-        "fno.pr._preflight._git",
-        lambda *_args, **_kwargs: type("Result", (), {"returncode": 0, "stdout": "docs/readme.md\n"})(),
-    )
+    def docs_git(args, *_args, **_kwargs):
+        output = "100755 blob abc\tscripts/ci/preflight.sh\n" if args[0] == "ls-tree" else "docs/readme.md\n"
+        return type("Result", (), {"returncode": 0, "stdout": output})()
+
+    monkeypatch.setattr("fno.pr._preflight._git", docs_git)
     assert local_verification_required(cwd=str(tmp_path)) == (False, "docs-only")
     assert local_verification_required(
         cwd=str(tmp_path), env={"FNO_SKIP_PREFLIGHT": "1"}
     ) == (False, "explicit-skip")
 
+    def code_git(args, *_args, **_kwargs):
+        output = "100755 blob abc\tscripts/ci/preflight.sh\n" if args[0] == "ls-tree" else "cli/code.py\n"
+        return type("Result", (), {"returncode": 0, "stdout": output})()
+
+    monkeypatch.setattr("fno.pr._preflight._git", code_git)
+    assert local_verification_required(cwd=str(tmp_path)) == (True, "required")
+
+
+def test_base_configured_runner_removal_requires_verification(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(
         "fno.pr._preflight._git",
-        lambda *_args, **_kwargs: type("Result", (), {"returncode": 0, "stdout": "cli/code.py\n"})(),
+        lambda *_args, **_kwargs: type(
+            "Result",
+            (),
+            {
+                "returncode": 0,
+                "stdout": "100755 blob abc\tscripts/ci/preflight.sh\n",
+            },
+        )(),
     )
-    assert local_verification_required(cwd=str(tmp_path)) == (True, "required")
+
+    assert local_verification_required(cwd=str(tmp_path)) == (True, "runner-removed")
 
 
 def test_preflight_owned_recorder_derives_producer_and_candidate(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    capability = "c" * 64
     common = tmp_path / ".git"
     holder = common / ".preflight.lock.d" / "holder"
     holder.parent.mkdir(parents=True)
-    holder.write_text(f"pid=4242 sha={SHA}\n")
+    holder.write_text(f"pid=4242 sha={SHA} token={capability}\n")
     monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _cwd: common)
     monkeypatch.setattr("fno.pr._preflight.os.getppid", lambda: 4242)
     monkeypatch.setattr("fno.pr._preflight.socket.gethostname", lambda: "builder-1")
@@ -344,11 +433,38 @@ def test_preflight_owned_recorder_derives_producer_and_candidate(
         steps_executed=5,
         command=["scripts/ci/preflight.sh", "--force"],
         detail="green",
+        capability=capability,
     )
 
     assert event["data"]["candidate_sha"] == SHA
     assert event["data"]["producer"] == {"kind": "preflight", "id": "builder-1:4242"}
     assert json.loads(events.read_text())["data"] == event["data"]
+
+
+def test_preflight_recorder_rejects_wrong_capability(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    common = tmp_path / ".git"
+    holder = common / ".preflight.lock.d" / "holder"
+    holder.parent.mkdir(parents=True)
+    holder.write_text(f"pid=4242 sha={SHA} token={'c' * 64}\n")
+    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _cwd: common)
+    monkeypatch.setattr("fno.pr._preflight.os.getppid", lambda: 4242)
+
+    with pytest.raises(ValueError, match="does not own"):
+        record_preflight_receipt(
+            cwd=str(tmp_path),
+            events_path=tmp_path / "events.jsonl",
+            mode="full",
+            result="passed",
+            scope=PREFLIGHT_SCOPE[:-1],
+            started_at="2026-07-26T01:00:00Z",
+            steps_expected=5,
+            steps_executed=5,
+            command=["scripts/ci/preflight.sh", "--force"],
+            detail="green",
+            capability="d" * 64,
+        )
 
 
 @pytest.mark.parametrize(

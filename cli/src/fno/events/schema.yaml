@@ -155,14 +155,14 @@ event_types:
         command:
           type: array
           items: { type: string }
-          description: "Exact argv executed; never a prose summary."
+          description: "Exact argv executed; never a prose summary. Each item is capped at 4096 UTF-8 bytes."
         environment:
           type: object
           description: "Structured host, platform, and runner identity."
         scope:
           type: array
           items: { type: string }
-          description: "Exact verification legs covered by this result."
+          description: "Exact verification legs covered by this result. Each item is capped at 512 UTF-8 bytes."
         started_at:
           type: string
           format: rfc3339-utc

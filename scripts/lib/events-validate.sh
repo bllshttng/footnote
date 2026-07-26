@@ -346,8 +346,11 @@ validate_event() {
             def utc_epoch:
                 if type != "string" then null
                 else (
-                    capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.[0-9]+)?(?:Z|\\+00:00)$")?
-                    | if . == null then null else (.whole + "Z" | fromdateiso8601?) end
+                    capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<frac>[0-9]+))?(?:Z|\\+00:00)$")?
+                    | if . == null then null
+                      else ((.whole + "Z" | fromdateiso8601?)
+                        + (("0." + (.frac // "0")) | tonumber))
+                      end
                 ) end;
             .data as $d
             | ($schema[0].event_types[]
@@ -360,12 +363,12 @@ validate_event() {
                 and (($d.candidate_sha | type == "string")
                 and ($d.candidate_sha | test("^[0-9A-Fa-f]{40}$")))
                 and ($d.command | type == "array" and length > 0 and length <= 4096
-                    and all(.[]; type == "string" and length > 0 and length <= 4096))
+                    and all(.[]; type == "string" and utf8bytelength > 0 and utf8bytelength <= 4096))
                 and ($d.environment | type == "object"
                     and all(["host", "platform", "runner"][];
                         . as $f | ($d.environment[$f] | type == "string" and test("[^[:space:]]"))))
                 and ($d.scope | type == "array" and length > 0 and length <= 128
-                    and all(.[]; type == "string" and length > 0 and length <= 512))
+                    and all(.[]; type == "string" and utf8bytelength > 0 and utf8bytelength <= 512))
                 and ($started != null and $finished != null and $finished >= $started)
                 and ($p.mode.enum | index($d.mode) != null)
                 and ($p.result.enum | index($d.result) != null)
