@@ -13,7 +13,6 @@ HEAD, foreign claim, dead worktree, duplicate generation, superseded-by-later.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 

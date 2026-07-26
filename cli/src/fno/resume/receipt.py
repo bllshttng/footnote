@@ -449,13 +449,17 @@ def detect_duplicate_generation(
     for e in canonicalize_node_events(events):
         if (e.get("type") or e.get("kind")) != "delegated":
             continue
-        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        raw_data = e.get("data")
+        data: dict = raw_data if isinstance(raw_data, dict) else {}
         if data.get("node_id") != node:
             continue
         if harness is not None and data.get("harness") != harness:
             continue
+        raw_gen = data.get("generation")
+        if raw_gen is None:
+            continue
         try:
-            gen = int(data.get("generation"))
+            gen = int(raw_gen)
         except (TypeError, ValueError):
             continue
         if gen == generation and data.get("from_session") != own_session:

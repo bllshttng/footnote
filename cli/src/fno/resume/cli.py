@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import re
-import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -28,7 +27,6 @@ from .receipt import (
     build_receipt,
     load_receipt,
     read_node_events,
-    receipt_path,
     revalidate,
     write_receipt,
 )
@@ -113,7 +111,7 @@ def write_cmd(
     try:
         receipt = build_receipt(
             node=node,
-            session=session,
+            session=session or "",
             phase=phase,
             generation=generation,
             repo=repo,
