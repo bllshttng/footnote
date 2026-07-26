@@ -118,6 +118,23 @@ for f in "${ALL_SURFACES[@]}"; do
     done < <(join_continuations "$f")
 done
 
+# --- 5. The skill and its operations reference must not disagree -------------
+# Three separate review findings on this contract were the same shape: a rule
+# corrected in SKILL.md while court-operations.md kept teaching the old one.
+# The split is deliberate (contract vs hands) and nothing mechanically ties the
+# two, so pin the load-bearing wait invariants in both.
+COURT_OPS=skills/king-for-a-day/references/court-operations.md
+for f in skills/king-for-a-day/SKILL.md "$COURT_OPS"; do
+    grep -q 'fno-agents wait' "$f" ||
+        note "$f does not name the lifecycle wait primitive"
+    # `idle` is wait.rs's DEFAULT verdict (lapsed hook / unknown / absent
+    # screen state), so prescribing it spins the re-arm loop.
+    grep -qE -- '--state[[:space:]=]+idle|state[[:space:]]+<?idle' "$f" &&
+        note "$f prescribes a --state idle wait; it is level-triggered on the default verdict"
+    grep -q 'per live teammate' "$f" ||
+        note "$f does not state the one-wait-per-live-teammate rule"
+done
+
 if [[ $fail -eq 0 ]]; then
     echo "PASS: king-for-a-day workspace contract"
     exit 0
