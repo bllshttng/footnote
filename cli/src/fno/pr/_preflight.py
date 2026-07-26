@@ -364,10 +364,15 @@ def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], 
     paths = [global_events_json(), root / ".fno" / "events.jsonl"]
     try:
         raw = json.loads(ledger_json().read_text(encoding="utf-8"))
-        rows = raw.get("entries", raw) if isinstance(raw, dict) else raw
-        for row in rows if isinstance(rows, list) else []:
-            if not isinstance(row, dict):
-                continue
+        if isinstance(raw, list):
+            rows = raw
+        elif isinstance(raw, dict) and isinstance(raw.get("entries"), list):
+            rows = raw["entries"]
+        else:
+            raise ValueError("ledger must be a list or an object with an entries list")
+        if not all(isinstance(row, dict) for row in rows):
+            raise ValueError("ledger entries must be objects")
+        for row in rows:
             delivery_root = row.get("root_path")
             if isinstance(delivery_root, str) and delivery_root:
                 paths.append(Path(delivery_root).expanduser() / ".fno" / "events.jsonl")

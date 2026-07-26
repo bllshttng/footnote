@@ -21,9 +21,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use serde_json::{json, Value};
+
+// Mirrors cli/src/fno/events/schema.yaml limits.max_data_bytes.
+const MAX_RECEIPT_DATA_BYTES: usize = 65_536;
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
@@ -528,7 +533,17 @@ fn nonnegative_integer(value: &Value) -> Option<f64> {
 }
 
 fn receipt_timestamp(value: &Value) -> Option<DateTime<Utc>> {
+    static UTC_TIMESTAMP: OnceLock<Regex> = OnceLock::new();
+    let pattern = UTC_TIMESTAMP.get_or_init(|| {
+        Regex::new(
+            r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)$",
+        )
+        .expect("receipt timestamp regex is valid")
+    });
     let raw = value.as_str()?;
+    if !pattern.is_match(raw) {
+        return None;
+    }
     let without_zone = raw
         .strip_suffix('Z')
         .or_else(|| raw.strip_suffix("+00:00"))?;
@@ -562,6 +577,12 @@ fn valid_receipt(event: &Value) -> bool {
     let Some(data) = root.get("data") else {
         return false;
     };
+    if serde_json::to_vec(data)
+        .map(|encoded| encoded.len() > MAX_RECEIPT_DATA_BYTES)
+        .unwrap_or(true)
+    {
+        return false;
+    }
     let Some(candidate) = data.get("candidate_sha").and_then(Value::as_str) else {
         return false;
     };
@@ -1300,6 +1321,37 @@ mod tests {
         event["data"]["generation"] = json!(9_007_199_254_740_991_u64);
         assert!(valid_receipt(&event));
         event["data"]["generation"] = json!(9_007_199_254_740_992_u64);
+        assert!(!valid_receipt(&event));
+    }
+
+    #[test]
+    fn receipt_validation_requires_literal_t_in_every_timestamp() {
+        let mut event = receipt_event(
+            "2026-07-26T01:00:00Z",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "full",
+            "passed",
+        );
+        event["ts"] = json!("2026-07-26 01:00:00+00:00");
+        assert!(!valid_receipt(&event));
+        event["ts"] = json!("2026-07-26T01:00:00Z");
+        event["data"]["started_at"] = json!("2026-07-26 01:00:00+00:00");
+        assert!(!valid_receipt(&event));
+        event["data"]["started_at"] = json!("2026-07-26T01:00:00Z");
+        event["data"]["finished_at"] = json!("2026-07-26 01:00:01+00:00");
+        assert!(!valid_receipt(&event));
+    }
+
+    #[test]
+    fn receipt_validation_rejects_oversized_data() {
+        let mut event = receipt_event(
+            "2026-07-26T01:00:00Z",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "full",
+            "passed",
+        );
+        event["data"]["detail"] = Value::String("x".repeat(70_000));
+
         assert!(!valid_receipt(&event));
     }
 

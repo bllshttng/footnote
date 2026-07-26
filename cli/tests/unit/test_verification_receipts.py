@@ -416,6 +416,26 @@ def test_fresh_install_without_ledger_starts_generation_one(
     assert next_verification_generation(cwd=str(tmp_path), candidate_sha=SHA) == 1
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"entries": null}\n',
+        '{"wrong": []}\n',
+        '"not-a-ledger"\n',
+        '[null]\n',
+    ],
+)
+def test_present_structurally_invalid_ledger_fails_closed(
+    body: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(body)
+    monkeypatch.setattr("fno.paths.ledger_json", lambda: ledger)
+
+    with pytest.raises(ValueError, match="ledger"):
+        next_verification_generation(cwd=str(tmp_path), candidate_sha=SHA)
+
+
 def test_canonical_generation_ignores_unreadable_optional_mirror(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
