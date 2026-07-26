@@ -101,6 +101,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "bundle": ("fno.bundle:bundle_app", "Skill bundle build + lint.", {"hidden": True}),
     "lint": ("fno.lint_cli:app", "Repository lint checks", {"hidden": True}),
     "claim": ("fno.claims.cli:cli", "Work-claim coordination primitive", {"hidden": True}),
+    "resume": (
+        "fno.resume.cli:cli",
+        "Durable typed resume receipts (evidence, never write authority)",
+        {"hidden": True},
+    ),
     "carveout": (
         "fno.carveout:carveout_app",
         "Capture left-out work (deferred decisions, out-of-scope bugs) for retro-triage.",

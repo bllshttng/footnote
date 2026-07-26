@@ -429,6 +429,39 @@ Successor name: tgt-${NODE_ID:3:8}-${_HARNESS}-g${CHILD_GEN}
 BRIEFEOF
 fi
 
+# Durable resume receipt (x-c3a2): write the typed, immutable, versioned
+# receipt alongside the brief. The brief is human-readable succession context;
+# the receipt is the machine-readable EVIDENCE a successor revalidates against
+# live claim/HEAD/worktree before any write. Best-effort: a receipt write
+# failure (fno unavailable, identity already written) must NOT abort the
+# handoff - the brief + `delegated` event remain the primary succession path.
+# The receipt reuses the event-journal reducers, so it stores no second copy.
+_RECEIPT_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+_RECEIPT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+_RECEIPT_REPO="$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || true)"
+_TMP_RECEIPT_ERR="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/fno-receipt-err.$$")"
+if fno resume receipt write \
+      --node "$NODE_ID" \
+      --session "$SESSION_ID" \
+      --phase "$BOUNDARY" \
+      --generation "$CHILD_GEN" \
+      --repo "${_RECEIPT_REPO:-footnote}" \
+      --worktree "$PWD" \
+      --branch "${_RECEIPT_BRANCH:-}" \
+      --head "${_RECEIPT_HEAD:-}" \
+      --next-verb "/fno:target" \
+      --next-target "$NODE_ID" \
+      >/dev/null 2>"$_TMP_RECEIPT_ERR"; then
+  :
+else
+  # already_exists is benign on a re-handoff for the same identity; anything
+  # else is a warning so a broken receipt writer is greppable, not silent.
+  if ! grep -q '"already_exists"' "$_TMP_RECEIPT_ERR" 2>/dev/null; then
+    echo "handoff: resume receipt write failed (non-fatal; brief+delegated remain authoritative): $(cat "$_TMP_RECEIPT_ERR" 2>/dev/null)" >&2
+  fi
+fi
+rm -f "$_TMP_RECEIPT_ERR" 2>/dev/null || true
+
 # Builder crumb trail (x-4852): the worktree-local events.jsonl is single-node,
 # so no node filter is needed. Summarize the tail for the delegation receipt and
 # append the last crumbs to the successor's brief so it picks up from the trail
