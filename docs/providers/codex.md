@@ -32,6 +32,7 @@ Every failed live switch restores the previous marketplace registration, plugin,
 Setup also migrates and removes legacy `footnote-dev` registrations, `fno@footnote-dev`, and their cache.
 An already-correct selection is a no-op unless `--refresh` is present.
 Every mutation can require hook approval and takes effect in a new Codex session.
+Blocking `cli-ci` installs Codex 0.145 and runs the isolated real-binary containment and rollback regressions on every affected pull request.
 
 `fno doctor` reports Codex plugin freshness separately from Python and Rust CLI freshness.
 It compares the selected channel's loadable source payload with `CODEX_HOME/plugins/cache/<marketplace>/fno/<version>` and gives the exact refresh command for wrong-channel, missing-cache, version-mismatch, and payload-drift findings.

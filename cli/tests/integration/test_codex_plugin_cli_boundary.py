@@ -303,6 +303,41 @@ def test_invalid_candidate_never_replaces_live_channel(tmp_path: Path) -> None:
     assert calls and all(not call["live"] for call in calls)
 
 
+def test_malformed_live_codex_state_fails_before_mutation(tmp_path: Path) -> None:
+    source = _source_fixture(tmp_path)
+    home = tmp_path / "codex-home"
+    state_path = tmp_path / "state.json"
+    _write_state(
+        state_path,
+        marketplaces=[_marketplace(source=str(source), source_type="local")],
+        plugins=[_plugin(source=str(source), source_type="local")],
+    )
+    marker = home / "footnote/plugin-channel.json"
+    marker.parent.mkdir(parents=True)
+    marker_bytes = b'{"channel":"dev","marketplace":"footnote","source":"working"}\n'
+    marker.write_bytes(marker_bytes)
+    before = state_path.read_bytes()
+    env = _environment(tmp_path, source, state_path)
+    env["FNO_TEST_CODEX_MALFORMED"] = "1"
+
+    result = _run_setup(env, "--channel", "release")
+
+    assert result.returncode == 1
+    assert "marketplace-list: malformed JSON" in result.stderr
+    assert state_path.read_bytes() == before
+    assert marker.read_bytes() == marker_bytes
+    calls = [
+        json.loads(line)
+        for line in Path(env["FNO_TEST_CODEX_CALLS"]).read_text().splitlines()
+    ]
+    assert any(call["live"] for call in calls)
+    assert not any(
+        call["live"]
+        and call["args"][:2] in (["plugin", "remove"], ["plugin", "add"])
+        for call in calls
+    )
+
+
 def test_failed_live_switch_rolls_back_state_and_marker(tmp_path: Path) -> None:
     source = _source_fixture(tmp_path)
     home = tmp_path / "codex-home"

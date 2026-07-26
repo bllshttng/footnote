@@ -395,9 +395,11 @@ def _rollback_receipt(
     home: Path, original: CodexPluginError, detail: str, *, channel: str
 ) -> None:
     path = home / "footnote" / "rollback-failure.json"
+    temp: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        temp = path.parent / f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        temp.write_text(
             json.dumps(
                 {
                     "channel": channel,
@@ -409,7 +411,13 @@ def _rollback_receipt(
             + "\n",
             encoding="utf-8",
         )
+        os.replace(temp, path)
     except OSError as exc:
+        try:
+            if temp is not None:
+                temp.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise CodexPluginError("rollback-receipt", str(exc)) from exc
 
 
@@ -683,6 +691,7 @@ def _restore_snapshot(
                 env=env,
             )
     config_restore_needed = False
+    legacy_restore_error: CodexPluginError | None = None
     for plugin in snapshot.state.plugins:
         if plugin.installed and plugin.plugin_id in OWNED_PLUGIN_IDS:
             try:
@@ -692,10 +701,11 @@ def _restore_snapshot(
                     ["codex", "plugin", "add", plugin.plugin_id, "--json"],
                     env=env,
                 )
-            except CodexPluginError:
+            except CodexPluginError as exc:
                 if plugin.plugin_id != LEGACY_DEV_PLUGIN_ID:
                     raise
                 config_restore_needed = True
+                legacy_restore_error = exc
     if (
         snapshot.config.marketplaces
         or snapshot.config.plugins
@@ -725,8 +735,11 @@ def _restore_snapshot(
     restored = _collect(runner, env=env)
     found = _owned_state_fingerprint(restored)
     if found != expected:
+        detail = f"expected state={expected}; found={found}"
+        if legacy_restore_error is not None:
+            detail = f"{detail}; legacy plugin restore failed: {legacy_restore_error}"
         raise CodexPluginError(
-            "rollback-final-verify", f"expected state={expected}; found={found}"
+            "rollback-final-verify", detail
         )
     if _marker_bytes(home) != snapshot.marker:
         raise CodexPluginError("rollback-final-verify", "marker bytes differ")

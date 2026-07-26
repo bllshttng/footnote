@@ -1593,6 +1593,66 @@ def test_rollback_failure_is_persisted_and_named(tmp_path: Path) -> None:
     assert "rollback failed" in receipt["detail"]
 
 
+def test_rollback_failure_receipt_is_replaced_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "codex-home"
+    destination = home / "footnote/rollback-failure.json"
+    replacements: list[tuple[Path, Path]] = []
+    replace = codex_plugin.os.replace
+
+    def record_replace(source: Path, target: Path) -> None:
+        replacements.append((source, target))
+        replace(source, target)
+
+    monkeypatch.setattr(codex_plugin.os, "replace", record_replace)
+
+    codex_plugin._rollback_receipt(
+        home,
+        CodexPluginError("plugin-add", "switch failed"),
+        "rollback failed after mutation",
+        channel="release",
+    )
+
+    assert len(replacements) == 1
+    temporary, target = replacements[0]
+    assert target == destination
+    assert temporary.parent == destination.parent
+    assert not temporary.exists()
+    assert json.loads(destination.read_text(encoding="utf-8")) == {
+        "channel": "release",
+        "detail": "rollback failed after mutation",
+        "stage": "plugin-add",
+    }
+
+
+def test_rollback_failure_receipt_replace_error_preserves_previous_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "codex-home"
+    destination = home / "footnote/rollback-failure.json"
+    destination.parent.mkdir(parents=True)
+    previous = b'{"detail":"previous rollback failure"}\n'
+    destination.write_bytes(previous)
+
+    def fail_replace(_source: Path, _target: Path) -> None:
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(codex_plugin.os, "replace", fail_replace)
+
+    with pytest.raises(CodexPluginError) as caught:
+        codex_plugin._rollback_receipt(
+            home,
+            CodexPluginError("plugin-add", "switch failed"),
+            "new rollback failure",
+            channel="release",
+        )
+
+    assert caught.value.stage == "rollback-receipt"
+    assert destination.read_bytes() == previous
+    assert list(destination.parent.glob(".rollback-failure.json.*.tmp")) == []
+
+
 def test_unexpected_rollback_exception_is_persisted_and_named(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1624,6 +1684,55 @@ def test_unexpected_rollback_exception_is_persisted_and_named(
     assert receipt["channel"] == "release"
     assert receipt["stage"] == "plugin-add"
     assert "unexpected rollback failure" in receipt["detail"]
+
+
+def test_legacy_plugin_restore_failure_is_preserved_when_final_verify_fails(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path)
+    home = tmp_path / "codex-home"
+    legacy = tmp_path / LEGACY_DEV_MARKETPLACE
+    legacy.mkdir()
+    config = home / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        f'[marketplaces.footnote-dev]\nsource_type = "local"\nsource = "{legacy}"\n\n'
+        '[plugins."fno@footnote-dev"]\nenabled = true\n',
+        encoding="utf-8",
+    )
+    fake = _StatefulCodex(source)
+    fake.add_marketplace(
+        name=LEGACY_DEV_MARKETPLACE,
+        source=str(legacy),
+        source_type="local",
+    )
+    fake.plugins.append(
+        _plugin(LEGACY_DEV_PLUGIN_ID, source=str(legacy), source_type="local")
+    )
+    snapshot = codex_plugin._Snapshot(
+        state=codex_plugin._collect(fake),
+        marker=None,
+        rollback_receipt=None,
+        config=codex_plugin._read_owned_config(home),
+        cache_names=frozenset(),
+    )
+    fake.marketplaces.clear()
+    fake.plugins.clear()
+    fake.add_marketplace(name=MARKETPLACE, source=str(source), source_type="local")
+    fake.plugins.append(_plugin(PLUGIN_ID, source=str(source), source_type="local"))
+    fake.fail_legacy_plugin_once = True
+
+    with pytest.raises(CodexPluginError) as caught:
+        codex_plugin._restore_snapshot(
+            fake,
+            home,
+            snapshot,
+            (),
+            env={"CODEX_HOME": str(home)},
+        )
+
+    assert caught.value.stage == "rollback-final-verify"
+    assert "legacy identity cannot be re-added" in caught.value.detail
 
 
 def test_dev_migrates_legacy_identity_and_removes_legacy_cache(tmp_path: Path) -> None:
