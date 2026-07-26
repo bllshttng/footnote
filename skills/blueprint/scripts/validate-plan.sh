@@ -59,13 +59,16 @@ _semantic_validate() {
         elif command -v python >/dev/null 2>&1; then
             python_bin=$(command -v python)
         fi
-        if [[ -z "$python_bin" ]]; then
-            echo "source fno CLI found at $source_root/cli/src but no Python interpreter is available" >&2
-            return 2
+        # A source checkout whose interpreter lacks the CLI deps (a fresh
+        # worktree has no cli/.venv, so this lands on a bare python3) would
+        # otherwise surface an ImportError traceback as a plan violation.
+        local source_pythonpath="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}"
+        if [[ -n "$python_bin" ]] &&
+            PYTHONPATH="$source_pythonpath" "$python_bin" -c 'import fno.cli' >/dev/null 2>&1; then
+            PYTHONPATH="$source_pythonpath" \
+                "$python_bin" -m fno.cli plan validate "$PLAN_DIR" --execution
+            return
         fi
-        PYTHONPATH="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
-            "$python_bin" -m fno.cli plan validate "$PLAN_DIR" --execution
-        return
     fi
     if ! command -v fno >/dev/null 2>&1; then
         echo "fno CLI not found; install or update it before validating executable plans" >&2
