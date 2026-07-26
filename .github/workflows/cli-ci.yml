@@ -76,17 +76,17 @@ jobs:
         # imports yaml for frontmatter validation. Install at system level so
         # the freshness check + lint scripts (run outside the cli venv) can
         # import yaml from the same python3 that setup-python installed. This
-        # stays in the yml (not smoke.sh): smoke.sh only ASSERTS python3-yaml
-        # and names it if missing - the CI/local install divergence is
-        # deliberate (locally you install pyyaml once, by hand).
+        # stays in the yml (not the smoke runner): the runner only ASSERTS
+        # python3-yaml and names it if missing, the CI/local install divergence
+        # is deliberate (locally you install pyyaml once, by hand).
         run: python3 -m pip install --upgrade pyyaml
 
       - name: Install stable Rust toolchain (for journey tests)
         # Journey tests (e2e, emission-schema, backstop-subprocess) and the
-        # claims compat matrix invoke the REAL fno-agents binary, which
-        # smoke.sh builds mid-run. Provision the toolchain + cargo cache here
-        # (CI-runner concern); the debug build itself moved into smoke.sh so
-        # local runs build it too.
+        # claims compat matrix invoke the REAL fno-agents binary, which the
+        # smoke runner builds mid-run. Provision the toolchain + cargo cache
+        # here (CI-runner concern); the debug build itself lives in the runner
+        # so local runs build it too.
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo registry + build artifacts (journey tests)

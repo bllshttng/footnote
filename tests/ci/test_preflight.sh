@@ -146,11 +146,17 @@ out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "non-green attestation -> full run -> GREEN" || fail "expected 0 got $rc"
 echo "$out" | grep -q "reused attestation" && fail "trusted a non-green attestation" || ok "non-green attestation not trusted"
 
-echo "== AC1-ERR: a --retry-failed (subset) pass mints no attestation =="
+echo "== AC1-ERR: a --retry-failed (subset) pass mints no FULL attestation; reuse then full-runs =="
 rm -f "$ATT"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "retry-failed subset passes" || fail "expected 0 got $rc: $out"
 [[ ! -f "$ATT" ]] && ok "subset run wrote no attestation" || fail "subset run minted a full-run attestation"
+# The load-bearing half: a subsequent caller on the same SHA finds no FULL
+# attestation, so reuse MISSES and it full-runs (a subset green can never
+# satisfy the gate).
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "subsequent full run passes" || fail "expected 0 got $rc: $out"
+echo "$out" | grep -q "reused attestation" && fail "reused a subset-only green" || ok "no FULL attestation to reuse -> full run"
 
 echo "== AC3-ERR: a RED run deletes a matching attestation =="
 ( cd "$FIX" && touch POISON && git add -A && git commit -qm "poison for AC3-ERR" )

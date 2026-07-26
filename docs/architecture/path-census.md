@@ -115,9 +115,9 @@ The dispatcher is reachable, so this PR does not partially delete it or `scripts
 
 | # | Path | Entry | Disposition | Closing PR |
 |---|---|---|---|---|
-| 1 | `fno test` / `fno test rust` | `cli/src/fno/test_cmd.py:228,178` | KEEP, canonical | — |
-| 2 | CI `uv run pytest` inside `smoke.sh` | `.github/workflows/cli-ci.yml:108` -> `scripts/ci/smoke.sh:67` | RETIRE divergence | OPEN |
-| 3 | Hand-enumerated shell tests | `smoke.sh:69-93` | RETIRE registry; auto-discover | OPEN |
+| 1 | `fno test` / `fno test rust` / `fno test smoke` | `cli/src/fno/test_cmd.py` | KEEP, canonical | — |
+| 2 | CI smoke job | `.github/workflows/cli-ci.yml` -> `uv run fno-py test smoke` | DONE (was pytest-in-smoke.sh; one entry now) | — |
+| 3 | Shell test registry | `cli/src/fno/test_cmd.py` (`_STRUCTURAL_STEPS` + `discover_shell_harnesses`) | DONE (auto-discover owned trees; smoke.sh retired) | — |
 | 4 | Bare `pytest` | user-invoked | KEEP external tool; warn in worktrees | OPEN |
 | 5 | RTK wrappers | RTK config | KEEP bypass guard | — |
 
