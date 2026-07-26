@@ -1072,6 +1072,12 @@ fn write_handoff(
         .or_else(|| git_capture(cwd, &["log", "--oneline", "-10"]))
         .unwrap_or_else(|| "(log unavailable)".into());
     let cost = handoff_cost_line(cwd, transcript_uuid);
+    // Completed commit + idempotency keys (x-c3a2): a worker that died after
+    // shipping but before the terminal journal write is reconcilable from this
+    // artifact. The keys are derived from the delivered HEAD so a resumed worker
+    // checking them skips a replayed publish/PR-create/comment/merge.
+    let head = git_capture(cwd, &["rev-parse", "HEAD"]).unwrap_or_else(|| "-".into());
+    let head_short: String = head.chars().take(7).collect();
 
     let body = format!(
         "# Session handoff: {title}\n\n\
@@ -1079,6 +1085,8 @@ fn write_handoff(
          - node: `{node}`\n\
          - plan: `{plan}`\n\
          - PR: {pr}\n\
+         - completed_commit: `{head}`\n\
+         - idempotency_keys: `pr_create:{head_short}`, `merge:{head_short}`\n\
          - cost: {cost}\n\
          - generated: {generated} (mechanical, by `fno-agents finalize`)\n\n\
          ## Files changed (origin/main...HEAD)\n\n```\n{diffstat}\n```\n\n\
