@@ -17,10 +17,10 @@ The result is reproducible and idempotent: re-applying the same spec is a no-op 
 ```
 fno mux layout apply --template main-left \
     --slot fno:af4dac55 --slot - --slot - --slot - \
-    [--squad <s>] [--tab <sel>] [--focus] [--json]
+    [--workspace <w>] [--tab <sel>] [--focus] [--json]
 
 # or from a persisted spec file (the same LayoutSpec):
-fno mux layout apply --spec path/to/layout.toml [--squad <s>] [--tab <sel>] [--json]
+fno mux layout apply --spec path/to/layout.toml [--workspace <w>] [--tab <sel>] [--json]
 ```
 
 `--slot fno:<id>` (or a bare `<id>`) binds a session; `--slot -` is an explicit empty shell.

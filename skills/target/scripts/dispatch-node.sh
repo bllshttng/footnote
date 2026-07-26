@@ -370,9 +370,9 @@ for id in "${NODES[@]}"; do
     role_hint="--role build "
     [[ -n "$ROUTE" ]] && route_args=("--route" "$ROUTE")
   fi
-  # x-9f75: group pane workers by project - pass --squad <node.project> so
+  # x-9f75: group pane workers by project - pass --workspace <node.project> so
   # same-project dispatches converge into one workspace (create-if-absent lives
-  # server-side in run_pane). --squad is pane-only (the CLI rejects it for
+  # server-side in run_pane). --workspace is pane-only (the CLI rejects it for
   # bg/headless), so gate on the substrate; a bg worker is a detached thread
   # with no tab to group. Best-effort: an empty project just omits the flag.
   squad_args=()
@@ -382,8 +382,8 @@ for id in "${NODES[@]}"; do
     # `//` treats "" as truthy, so filter empties explicitly before the fallback.
     node_project="$(printf '%s' "$node_json" | jq -r '.project | select(. != "") // empty' 2>/dev/null)"
     if [[ -n "$node_project" ]]; then
-      squad_args=("--squad" "$node_project")
-      squad_hint="--squad $node_project "
+      squad_args=("--workspace" "$node_project")
+      squad_hint="--workspace $node_project "
     fi
   fi
   # Receipt route= token, resolved PER NODE (not once before the loop) so a
