@@ -149,6 +149,19 @@ def base_check(
 
 
 @pr_app.command(
+    "evidence-check",
+    help=(
+        "Require a newest exact-HEAD full/passed verification receipt across "
+        "project, global, and known delivery-root event journals."
+    ),
+)
+def evidence_check() -> None:
+    from fno.pr import _preflight
+
+    raise typer.Exit(code=_preflight.run_evidence_check())
+
+
+@pr_app.command(
     "sync-canonical",
     help=(
         "Post-merge canonical-checkout sync (x-47be). Runs "

@@ -9,6 +9,18 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _verified_head(monkeypatch):
+    monkeypatch.setattr(
+        "fno.pr._preflight.check_verification_evidence",
+        lambda **_kwargs: {
+            "satisfied": True,
+            "mode": "full",
+            "result": "passed",
+        },
+    )
+
+
 # ---- Helpers ----
 
 def _make_state(tmp_path: Path, extra: dict | None = None) -> Path:
@@ -332,6 +344,36 @@ def test_stale_base_refusal_blocks_pr_create(tmp_path, monkeypatch):
     # gh pr create was never invoked (only git rev-parse + gh pr list ran).
     assert mock_run.call_count == 2
     assert not any("create" in str(c) for c in mock_run.call_args_list)
+
+
+def test_non_full_verification_refuses_pr_create(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    state_path = _make_state(tmp_path)
+    mock_run = MagicMock()
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="feature/test\n", stderr=""),
+        MagicMock(returncode=0, stdout="[]", stderr=""),
+    ]
+    monkeypatch.setattr(
+        "fno.pr._preflight.check_verification_evidence",
+        lambda **_kwargs: {"satisfied": False, "mode": "subset", "result": "passed"},
+    )
+
+    with patch("subprocess.run", mock_run), patch(
+        "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ):
+        from fno.worker.ship import ship
+
+        result = ship(
+            state_path=state_path,
+            title="feat: unverified",
+            body="body",
+            artifacts_dir=tmp_path / ".fno" / "artifacts",
+        )
+
+    assert result["action"] == "error"
+    assert "mode=subset result=passed" in result["error"]
+    assert mock_run.call_count == 2
 
 
 # ---- F2: incarnation fence blocks PR creation ----

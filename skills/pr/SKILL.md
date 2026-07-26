@@ -86,6 +86,10 @@ if command -v fno >/dev/null 2>&1; then
     # 3 = stale, 4 = unrelated histories (both refuse); fresh/bypass/fail-open exit 0.
     [ "$rc" -ge 3 ] && { echo "refusing to open a PR from a bad base (see above)."; exit "$rc"; }
   }
+  fno pr evidence-check || {
+    echo "PR creation refused: current HEAD has no full/passed verification receipt." >&2
+    exit 1
+  }
 fi
 ```
 

@@ -44,6 +44,10 @@ PINNED_FMT="1.94.1"   # keep in lockstep with rust-ci.yml RUSTFMT_TOOLCHAIN
 
 RETRY_FAILED=0
 FORCE_RUN=0
+RECEIPT_COMMAND=("$0")
+for original_arg in "$@"; do
+    RECEIPT_COMMAND+=("$original_arg")
+done
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --retry-failed) RETRY_FAILED=1 ;;
@@ -82,6 +86,49 @@ if [[ -n "$DIRTY" ]]; then
 fi
 CANDIDATE_SHA="$(git -C "$INVOKING_ROOT" rev-parse HEAD)"
 CANDIDATE_SHORT="$(git -C "$INVOKING_ROOT" rev-parse --short HEAD)"
+RECEIPT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 1970-01-01T00:00:00Z)"
+EVENTS_PATH="$INVOKING_ROOT/.fno/events.jsonl"
+
+_json_array() {
+    jq -cn --args '$ARGS.positional' -- "$@"
+}
+
+emit_verification_receipt() {
+    local mode="$1" result="$2" scope_json="$3" expected="$4" executed="$5" started_at="$6" detail="$7"
+    local finished_at command_json environment_json producer_json data
+    finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 1970-01-01T00:00:00Z)"
+    command_json="$(_json_array "${RECEIPT_COMMAND[@]}")" || return 1
+    environment_json="$(jq -nc \
+        --arg host "$(_this_host)" \
+        --arg platform "$(uname -sm 2>/dev/null || echo unknown)" \
+        --arg runner "scripts/ci/preflight.sh" \
+        '{host:$host,platform:$platform,runner:$runner}')" || return 1
+    producer_json="$(jq -nc \
+        --arg kind preflight \
+        --arg id "$(_this_host):$$" \
+        '{kind:$kind,id:$id}')" || return 1
+    data="$(jq -nc \
+        --arg candidate_sha "$CANDIDATE_SHA" \
+        --argjson command "$command_json" \
+        --argjson environment "$environment_json" \
+        --argjson scope "$scope_json" \
+        --arg started_at "$started_at" \
+        --arg finished_at "$finished_at" \
+        --arg mode "$mode" \
+        --arg result "$result" \
+        --argjson producer "$producer_json" \
+        --argjson steps_expected "$expected" \
+        --argjson steps_executed "$executed" \
+        --arg detail "$detail" \
+        '{candidate_sha:$candidate_sha,command:$command,environment:$environment,scope:$scope,started_at:$started_at,finished_at:$finished_at,mode:$mode,result:$result,producer:$producer,steps_expected:$steps_expected,steps_executed:$steps_executed,detail:$detail}')" || return 1
+    mkdir -p "$(dirname "$EVENTS_PATH")" || return 1
+    fno event emit \
+        --type verification_receipt \
+        --source target \
+        --events "$EVENTS_PATH" \
+        --state "$INVOKING_ROOT/.fno/target-state.md" \
+        --data "$data" >/dev/null
+}
 
 # --- attestation: reuse a prior FULL run's GREEN verdict --------------------
 # A (full SHA, host) pair is a complete cache key: preflight hard-resets a
@@ -112,6 +159,13 @@ reuse_attestation() {
     if [[ "$att_host" != "$(_this_host)" ]]; then
         echo "preflight: attestation for $CANDIDATE_SHORT rejected (foreign host: recorded=$att_host) - running full suite"
         return 1   # AC3-EDGE: a cross-environment green never satisfies the gate
+    fi
+    # The text file is only a fast cache carrier. Authority stays in the typed
+    # event journal, so a matching carrier with missing, malformed, subset,
+    # void, stale, or otherwise non-passing evidence cannot bless this SHA.
+    if ! fno pr evidence-check >/dev/null 2>&1; then
+        echo "preflight: matching attestation has no exact full/passed event evidence - running full suite"
+        return 1
     fi
     att_pid="$(_attest_field "$line" pid)"
     att_at="$(_attest_field "$line" at)"; att_at="${att_at//[!0-9]/}"; att_at="${att_at:-0}"
@@ -311,7 +365,8 @@ run_hermetic() {
 # exit before the full legs run: a packet that failed while the worktree was
 # being reset under it earned nothing, so it must VOID rather than report RED.
 exit_if_void() {
-    local VOID_REASON="" WT_HEAD_NOW
+    local VOID_REASON="" WT_HEAD_NOW VOID_SCOPE_NAME="${1:-}"
+    local REQUIRED_COUNT REQUIRED_SCOPE VOID_RESULT
     # 2>/dev/null, never 2>&1: merging stderr into the value means any benign git
     # warning makes the captured string differ from the sha and VOIDs a good run.
     if ! WT_HEAD_NOW="$(git -C "$PREFLIGHT_WT" rev-parse HEAD 2>/dev/null)"; then
@@ -322,6 +377,18 @@ exit_if_void() {
         VOID_REASON="another preflight took our lock mid-run"
     fi
     [[ -n "$VOID_REASON" ]] || return 0
+    if [[ -n "$VOID_SCOPE_NAME" ]]; then
+        REQUIRED_COUNT=1
+        REQUIRED_SCOPE="$(_json_array "$VOID_SCOPE_NAME")"
+    else
+        REQUIRED_COUNT=$((${#LEG_NAMES[@]} - 1))
+        (( REQUIRED_COUNT < 0 )) && REQUIRED_COUNT=0
+        REQUIRED_SCOPE="$(_json_array "${LEG_NAMES[@]:0:$REQUIRED_COUNT}")"
+    fi
+    VOID_RESULT=unavailable
+    [[ "$VOID_REASON" == worktree\ moved\ off* ]] && VOID_RESULT=stale
+    emit_verification_receipt void "$VOID_RESULT" "$REQUIRED_SCOPE" "$REQUIRED_COUNT" "$REQUIRED_COUNT" "$RECEIPT_STARTED_AT" "$VOID_REASON" \
+        || echo "preflight: WARN could not append VOID verification receipt" >&2
     echo "preflight: VOID - $VOID_REASON." >&2
     echo "preflight: verdict discarded - nothing here was earned by $CANDIDATE_SHORT. Re-run; this is not a code failure." >&2
     exit 5
@@ -399,7 +466,7 @@ if [[ -n "$CHANGED_BASE" ]]; then
         *)  # Verdict-bearing exit, so it owes the same ownership check the full
             # path does: a packet that failed while the shared worktree was reset
             # under it earned nothing and must VOID rather than accuse this SHA.
-            exit_if_void
+            exit_if_void "changed packet (CHANGED SUBSET)"
             record_leg "changed packet (CHANGED SUBSET)" fail $(( SECONDS - c0 ))
             invalidate_attestation
             echo ""
@@ -487,6 +554,7 @@ fi
 # advisory: never flips the exit code
 echo ""
 echo "preflight: === cargo audit (ADVISORY) ==="
+ADVISORY_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 1970-01-01T00:00:00Z)"
 if run_hermetic bash -c "command -v cargo-audit >/dev/null 2>&1"; then
     a0="$SECONDS"
     if run_hermetic bash -c "cd crates/fno-agents && cargo audit" && run_hermetic bash -c "cd crates/fno && cargo audit"; then
@@ -496,6 +564,16 @@ if run_hermetic bash -c "command -v cargo-audit >/dev/null 2>&1"; then
     fi
 else
     record_leg "cargo audit (ADVISORY)" "skipped (not installed)" 0
+fi
+ADVISORY_STATUS="${LEG_STATUS[${#LEG_STATUS[@]}-1]}"
+case "$ADVISORY_STATUS" in
+    pass) ADVISORY_RESULT=passed ;;
+    advisory-fail) ADVISORY_RESULT=failed ;;
+    *) ADVISORY_RESULT=unavailable ;;
+esac
+ADVISORY_SCOPE="$(_json_array "cargo audit (fno-agents)" "cargo audit (fno)")"
+if ! emit_verification_receipt advisory "$ADVISORY_RESULT" "$ADVISORY_SCOPE" 2 "$([[ "$ADVISORY_RESULT" == unavailable ]] && echo 0 || echo 2)" "$ADVISORY_STARTED_AT" "$ADVISORY_STATUS"; then
+    echo "preflight: WARN could not append advisory verification receipt" >&2
 fi
 
 # --- verdict tripwire --------------------------------------------------------
@@ -507,9 +585,23 @@ fi
 exit_if_void
 
 if [[ $RETRY_FAILED -eq 0 && $FAIL -eq 0 ]]; then
-    record_attestation
+    : # receipt first; the carrier is recorded only after evidence is durable
 elif [[ $FAIL -ne 0 ]]; then
     invalidate_attestation
+fi
+
+REQUIRED_COUNT=$((${#LEG_NAMES[@]} - 1))
+REQUIRED_SCOPE="$(_json_array "${LEG_NAMES[@]:0:$REQUIRED_COUNT}")"
+RECEIPT_MODE=full
+[[ $RETRY_FAILED -eq 1 ]] && RECEIPT_MODE=subset
+RECEIPT_RESULT=passed
+[[ $FAIL -ne 0 ]] && RECEIPT_RESULT=failed
+if ! emit_verification_receipt "$RECEIPT_MODE" "$RECEIPT_RESULT" "$REQUIRED_SCOPE" "$REQUIRED_COUNT" "$REQUIRED_COUNT" "$RECEIPT_STARTED_AT" "preflight suite verdict"; then
+    echo "preflight: verification receipt append failed; verdict is unavailable" >&2
+    FAIL=1
+    invalidate_attestation
+elif [[ $RETRY_FAILED -eq 0 && $FAIL -eq 0 ]]; then
+    record_attestation
 fi
 
 # --- summary -----------------------------------------------------------------

@@ -143,6 +143,49 @@ event_types:
           type: object
     consumers: [fno scoreboard --plan-fidelity]
 
+  - name: verification_receipt
+    description: "Commit-bound deterministic verification evidence. Mode describes coverage; result describes the observed state. Only an exact-SHA full/passed receipt with every expected step executed may satisfy a full-evidence gate."
+    sources: [target, hook, test]
+    data:
+      required: [candidate_sha, command, environment, scope, started_at, finished_at, mode, result, producer, steps_expected, steps_executed]
+      properties:
+        candidate_sha:
+          type: string
+          description: "Full 40-hex candidate commit SHA."
+        command:
+          type: array
+          items: { type: string }
+          description: "Exact argv executed; never a prose summary."
+        environment:
+          type: object
+          description: "Structured host, platform, and runner identity."
+        scope:
+          type: array
+          items: { type: string }
+          description: "Exact verification legs covered by this result."
+        started_at:
+          type: string
+          format: rfc3339-utc
+        finished_at:
+          type: string
+          format: rfc3339-utc
+        mode:
+          type: string
+          enum: [full, subset, void, advisory]
+        result:
+          type: string
+          enum: [not_configured, unavailable, pending, failed, passed, stale]
+        producer:
+          type: object
+          description: "Structured producer kind and unique id."
+        steps_expected:
+          type: integer
+        steps_executed:
+          type: integer
+        detail:
+          type: string
+    consumers: [scripts/ci/preflight.sh, fno pr, fno worker ship, fno-agents verify-evidence]
+
   - name: review_attestation
     description: "A local reviewer (sigma | code-review | declare) completed a head-pinned review pass. loop-check reads this as gate evidence for a config.review.reviewers entry (x-e703, Phase 2): the entry is satisfied when reviewer matches, head_sha == current HEAD, and verdict == pass. Head-pinning is mandatory - a pass on an old commit must not count after new commits land."
     sources: [target, subagent, hook, test]

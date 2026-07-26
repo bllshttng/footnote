@@ -22,6 +22,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use chrono::{DateTime, Utc};
+use serde_json::{json, Value};
+
 // ── shared helpers ────────────────────────────────────────────────────────────
 
 /// Parse `agents_dispatched: [a, b, c]` from the artifact, preserving order and
@@ -493,6 +496,188 @@ fn git_show_toplevel(git_bin: &str) -> Option<PathBuf> {
     }
 }
 
+fn full_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn bounded_strings(value: &Value, max_items: usize, max_len: usize) -> bool {
+    let Some(items) = value.as_array() else {
+        return false;
+    };
+    !items.is_empty()
+        && items.len() <= max_items
+        && items.iter().all(|item| {
+            item.as_str()
+                .is_some_and(|text| !text.is_empty() && text.len() <= max_len)
+        })
+}
+
+fn required_strings(value: &Value, fields: &[&str]) -> bool {
+    value.as_object().is_some()
+        && fields.iter().all(|field| {
+            value
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        })
+}
+
+fn nonnegative_integer(value: &Value) -> Option<f64> {
+    let number = value.as_f64()?;
+    (number.is_finite() && number >= 0.0 && number.fract() == 0.0).then_some(number)
+}
+
+fn receipt_timestamp(value: &Value) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value.as_str()?)
+        .ok()
+        .filter(|parsed| parsed.offset().local_minus_utc() == 0)
+        .map(|parsed| parsed.with_timezone(&Utc))
+}
+
+fn valid_receipt(event: &Value) -> bool {
+    let Some(root) = event.as_object() else {
+        return false;
+    };
+    if root.get("type").and_then(Value::as_str) != Some("verification_receipt")
+        || !matches!(
+            root.get("source").and_then(Value::as_str),
+            Some("target" | "hook" | "test")
+        )
+        || receipt_timestamp(root.get("ts").unwrap_or(&Value::Null)).is_none()
+    {
+        return false;
+    }
+    let Some(data) = root.get("data") else {
+        return false;
+    };
+    let Some(candidate) = data.get("candidate_sha").and_then(Value::as_str) else {
+        return false;
+    };
+    let mode = data.get("mode").and_then(Value::as_str).unwrap_or("");
+    let result = data.get("result").and_then(Value::as_str).unwrap_or("");
+    let started = data.get("started_at").and_then(receipt_timestamp);
+    let finished = data.get("finished_at").and_then(receipt_timestamp);
+    let Some(expected) = data.get("steps_expected").and_then(nonnegative_integer) else {
+        return false;
+    };
+    let Some(executed) = data.get("steps_executed").and_then(nonnegative_integer) else {
+        return false;
+    };
+    full_sha(candidate)
+        && bounded_strings(data.get("command").unwrap_or(&Value::Null), 4096, 4096)
+        && bounded_strings(data.get("scope").unwrap_or(&Value::Null), 128, 512)
+        && required_strings(
+            data.get("environment").unwrap_or(&Value::Null),
+            &["host", "platform", "runner"],
+        )
+        && required_strings(
+            data.get("producer").unwrap_or(&Value::Null),
+            &["kind", "id"],
+        )
+        && started.is_some()
+        && finished.is_some()
+        && finished >= started
+        && matches!(mode, "full" | "subset" | "void" | "advisory")
+        && matches!(
+            result,
+            "not_configured" | "unavailable" | "pending" | "failed" | "passed" | "stale"
+        )
+        && executed <= expected
+        && (mode != "full" || result != "passed" || (expected > 0.0 && executed == expected))
+        && (mode != "void" || result != "passed")
+}
+
+fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
+    let mut seen = std::collections::HashSet::new();
+    let mut receipts: Vec<(DateTime<Utc>, String, Value)> = Vec::new();
+    let mut malformed = 0u64;
+    let mut unreadable = 0u64;
+    for path in paths {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                unreadable += 1;
+                continue;
+            }
+        };
+        for line in content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let event: Value = match serde_json::from_str(line) {
+                Ok(event) => event,
+                Err(_) => {
+                    malformed += 1;
+                    continue;
+                }
+            };
+            if event.get("type").and_then(Value::as_str) != Some("verification_receipt") {
+                continue;
+            }
+            if !valid_receipt(&event) {
+                malformed += 1;
+                continue;
+            }
+            let ts = receipt_timestamp(event.get("ts").unwrap()).unwrap();
+            let signature = serde_json::to_string(&event).unwrap_or_default();
+            if seen.insert(signature.clone()) {
+                receipts.push((ts, signature, event));
+            }
+        }
+    }
+    receipts.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    let coverage = json!({
+        "complete": malformed == 0 && unreadable == 0,
+        "malformed_lines": malformed,
+        "unreadable_paths": unreadable,
+        "deduped_events": receipts.len(),
+    });
+    let exact = receipts.iter().rev().find(|(_, _, event)| {
+        event
+            .pointer("/data/candidate_sha")
+            .and_then(Value::as_str)
+            .is_some_and(|receipt_sha| receipt_sha.eq_ignore_ascii_case(candidate_sha))
+    });
+    if let Some((_, _, event)) = exact {
+        let mode = event
+            .pointer("/data/mode")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let result = event
+            .pointer("/data/result")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        return json!({
+            "satisfied": malformed == 0
+                && unreadable == 0
+                && mode == "full"
+                && result == "passed",
+            "mode": mode,
+            "result": result,
+            "receipt": event,
+            "coverage": coverage,
+        });
+    }
+    if let Some((_, _, event)) = receipts.last() {
+        return json!({
+            "satisfied": false,
+            "mode": event.pointer("/data/mode").and_then(Value::as_str),
+            "result": "stale",
+            "receipt": event,
+            "coverage": coverage,
+        });
+    }
+    json!({
+        "satisfied": false,
+        "mode": Value::Null,
+        "result": "unavailable",
+        "receipt": Value::Null,
+        "coverage": coverage,
+    })
+}
+
 // ── public dispatch entry ─────────────────────────────────────────────────────
 
 /// Internal: run the requested sub-verb, returning (code, stdout, stderr).
@@ -503,7 +688,8 @@ fn run(args: &[String]) -> (i32, String, String) {
         return (
             2,
             String::new(),
-            "verify-evidence: missing subcommand (event|child-promise|has-nonclaude)\n".to_string(),
+            "verify-evidence: missing subcommand (event|child-promise|has-nonclaude|receipt)\n"
+                .to_string(),
         );
     };
     let rest = &args[1..];
@@ -555,6 +741,23 @@ fn run(args: &[String]) -> (i32, String, String) {
             let r = resolve_has_nonclaud_agent(Path::new(&rest[0]), settings.as_deref(), &git_bin);
             (r.code, String::new(), r.stderr)
         }
+        "receipt" => {
+            if rest.len() < 2 || !full_sha(&rest[0]) {
+                return (
+                    2,
+                    String::new(),
+                    "verify-evidence receipt: requires full CANDIDATE_SHA EVENTS_FILE...\n"
+                        .to_string(),
+                );
+            }
+            let decision = receipt_decision(&rest[0], &rest[1..]);
+            let code = if decision["satisfied"] == Value::Bool(true) {
+                0
+            } else {
+                1
+            };
+            (code, format!("{decision}\n"), String::new())
+        }
         other => (
             2,
             String::new(),
@@ -583,6 +786,7 @@ pub fn run_verify_evidence_capture(args: &[String]) -> (i32, String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn clean_name_strips_quotes_and_spaces() {
@@ -617,5 +821,90 @@ mod tests {
             Some("codex")
         );
         assert_eq!(parse_provider_cli(cfg, "nonexistent"), None);
+    }
+
+    #[test]
+    fn receipt_validation_rejects_zero_step_full_pass() {
+        let event = json!({
+            "ts": "2026-07-26T01:00:00Z",
+            "type": "verification_receipt",
+            "source": "target",
+            "data": {
+                "candidate_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "command": ["preflight"],
+                "environment": {"host": "h", "platform": "p", "runner": "r"},
+                "scope": ["smoke"],
+                "started_at": "2026-07-26T01:00:00Z",
+                "finished_at": "2026-07-26T01:00:01Z",
+                "mode": "full",
+                "result": "passed",
+                "producer": {"kind": "preflight", "id": "h:1"},
+                "steps_expected": 0,
+                "steps_executed": 0
+            }
+        });
+        assert!(!valid_receipt(&event));
+    }
+
+    fn receipt_event(ts: &str, candidate_sha: &str, mode: &str, result: &str) -> Value {
+        json!({
+            "ts": ts,
+            "type": "verification_receipt",
+            "source": "target",
+            "data": {
+                "candidate_sha": candidate_sha,
+                "command": ["scripts/ci/preflight.sh", "--force"],
+                "environment": {"host": "h", "platform": "p", "runner": "preflight"},
+                "scope": ["smoke"],
+                "started_at": "2026-07-26T01:00:00Z",
+                "finished_at": "2026-07-26T01:00:01Z",
+                "mode": mode,
+                "result": result,
+                "producer": {"kind": "preflight", "id": "h:1"},
+                "steps_expected": 1,
+                "steps_executed": 1
+            }
+        })
+    }
+
+    #[test]
+    fn receipt_decision_dedupes_unordered_journals_and_selects_parsed_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("global.jsonl");
+        let second = dir.path().join("delivery.jsonl");
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let failed = receipt_event("2026-07-26T01:00:00Z", sha, "full", "failed");
+        let passed = receipt_event("2026-07-26T03:00:00+00:00", sha, "full", "passed");
+        std::fs::write(&first, format!("{passed}\n{failed}\n")).unwrap();
+        std::fs::write(&second, format!("{failed}\n{passed}\n")).unwrap();
+
+        let decision = receipt_decision(
+            &sha.to_ascii_uppercase(),
+            &[first.display().to_string(), second.display().to_string()],
+        );
+
+        assert_eq!(decision["satisfied"], true);
+        assert_eq!(decision["coverage"]["deduped_events"], 2);
+        assert_eq!(decision["receipt"]["ts"], "2026-07-26T03:00:00+00:00");
+    }
+
+    #[test]
+    fn receipt_decision_fails_closed_when_journal_coverage_is_corrupt() {
+        let mut journal = tempfile::NamedTempFile::new().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        writeln!(journal, "not json").unwrap();
+        writeln!(
+            journal,
+            "{}",
+            receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed")
+        )
+        .unwrap();
+
+        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
+
+        assert_eq!(decision["mode"], "full");
+        assert_eq!(decision["result"], "passed");
+        assert_eq!(decision["coverage"]["complete"], false);
+        assert_eq!(decision["satisfied"], false);
     }
 }

@@ -341,6 +341,46 @@ validate_event() {
         fi
     fi
 
+    if [[ "$type" == "verification_receipt" ]]; then
+        local receipt_ok
+        receipt_ok=$(jq -r --slurpfile schema "$EVENTS_SCHEMA_CACHE" '
+            def utc_epoch:
+                if type != "string" then null
+                else (sub("\\+00:00$"; "Z") | fromdateiso8601?) end;
+            .data as $d
+            | ($schema[0].event_types[]
+                | select(.name == "verification_receipt")
+                | .data.properties) as $p
+            | ($d.started_at | utc_epoch) as $started
+            | ($d.finished_at | utc_epoch) as $finished
+            | (($d.candidate_sha | type == "string")
+                and ($d.candidate_sha | test("^[0-9A-Fa-f]{40}$")))
+                and ($d.command | type == "array" and length > 0
+                    and all(.[]; type == "string" and length > 0 and length <= 4096))
+                and ($d.environment | type == "object"
+                    and all(["host", "platform", "runner"][];
+                        . as $f | ($d.environment[$f] | type == "string" and length > 0)))
+                and ($d.scope | type == "array" and length > 0 and length <= 128
+                    and all(.[]; type == "string" and length > 0 and length <= 512))
+                and ($started != null and $finished != null and $finished >= $started)
+                and ($p.mode.enum | index($d.mode) != null)
+                and ($p.result.enum | index($d.result) != null)
+                and ($d.producer | type == "object"
+                    and all(["kind", "id"][];
+                        . as $f | ($d.producer[$f] | type == "string" and length > 0)))
+                and ($d.steps_expected | type == "number" and floor == . and . >= 0)
+                and ($d.steps_executed | type == "number" and floor == . and . >= 0)
+                and ($d.steps_executed <= $d.steps_expected)
+                and (($d.mode != "full" or $d.result != "passed")
+                    or ($d.steps_expected > 0 and $d.steps_executed == $d.steps_expected))
+                and ($d.mode != "void" or $d.result != "passed")
+        ' <<<"$payload" 2>/dev/null || true)
+        if [[ "$receipt_ok" != "true" ]]; then
+            _ev_warn "verification_receipt fields are malformed or contradictory"
+            return 1
+        fi
+    fi
+
     # skill_eval_finding: dimension + verdict enum checks (observer harness,
     # x-57a5) - same chokepoint rationale as mission_complete/human_touch above.
     if [[ "$type" == "skill_eval_finding" ]]; then

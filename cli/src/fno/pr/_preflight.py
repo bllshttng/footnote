@@ -18,8 +18,12 @@ Exit-code contract (callers branch on codes, not text):
 """
 from __future__ import annotations
 
+import datetime as dt
+import json
 import os
+import re
 import sys
+from pathlib import Path
 from typing import Mapping, Optional, Tuple
 
 from fno.pr._proc import ToolMissing, run
@@ -32,6 +36,170 @@ BYPASS_VALUE = "stale-acknowledged"
 OK = 0
 REFUSED_STALE = 3
 UNRELATED = 4
+
+
+def _event_timestamp(value: object) -> Optional[dt.datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
+    """Select the newest valid receipt across deduped, unordered journals."""
+    from fno.events import ValidationError, validate
+
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha, re.IGNORECASE) is None:
+        raise ValueError("candidate_sha must be a full 40-hex commit")
+    seen_paths: set[str] = set()
+    seen_events: set[str] = set()
+    receipts: list[tuple[dt.datetime, str, dict]] = []
+    malformed = 0
+    unreadable = 0
+    for raw_path in event_paths:
+        path = Path(raw_path).expanduser()
+        try:
+            path_key = str(path.resolve())
+        except OSError:
+            path_key = os.path.abspath(path)
+        if path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            unreadable += 1
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                malformed += 1
+                continue
+            if not isinstance(event, dict) or event.get("type") != "verification_receipt":
+                continue
+            try:
+                validate(event)
+            except ValidationError:
+                malformed += 1
+                continue
+            parsed_ts = _event_timestamp(event.get("ts"))
+            if parsed_ts is None:
+                malformed += 1
+                continue
+            signature = json.dumps(event, sort_keys=True, separators=(",", ":"))
+            if signature in seen_events:
+                continue
+            seen_events.add(signature)
+            receipts.append((parsed_ts, signature, event))
+    coverage = {
+        "complete": malformed == 0 and unreadable == 0,
+        "malformed_lines": malformed,
+        "unreadable_paths": unreadable,
+        "deduped_events": len(receipts),
+    }
+    receipts.sort(key=lambda item: (item[0], item[1]))
+    exact = [item for item in receipts if item[2]["data"]["candidate_sha"].lower() == candidate_sha.lower()]
+    if exact:
+        event = exact[-1][2]
+        data = event["data"]
+        return {
+            "satisfied": (
+                coverage["complete"]
+                and data["mode"] == "full"
+                and data["result"] == "passed"
+            ),
+            "mode": data["mode"],
+            "result": data["result"],
+            "receipt": event,
+            "coverage": coverage,
+        }
+    if receipts:
+        event = receipts[-1][2]
+        return {
+            "satisfied": False,
+            "mode": event["data"]["mode"],
+            "result": "stale",
+            "receipt": event,
+            "coverage": coverage,
+        }
+    return {
+        "satisfied": False,
+        "mode": None,
+        "result": "unavailable",
+        "receipt": None,
+        "coverage": coverage,
+    }
+
+
+def verification_event_paths(*, cwd: Optional[str] = None) -> list[Path]:
+    """Return project, global, and known delivery-root event journals."""
+    repo = Path(cwd or os.getcwd()).resolve()
+    try:
+        discovered = _git(["rev-parse", "--show-toplevel"], str(repo))
+        root = Path(discovered.stdout.strip()).resolve() if discovered.returncode == 0 else repo
+    except Exception:
+        root = repo
+    paths = [root / ".fno" / "events.jsonl", Path.home() / ".fno" / "events.jsonl"]
+    try:
+        from fno.paths import ledger_json
+
+        raw = json.loads(ledger_json().read_text(encoding="utf-8"))
+        rows = raw.get("entries", raw) if isinstance(raw, dict) else raw
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            delivery_root = row.get("root_path")
+            if isinstance(delivery_root, str) and delivery_root:
+                paths.append(Path(delivery_root).expanduser() / ".fno" / "events.jsonl")
+            canonical = row.get("canonical_root_path")
+            if isinstance(canonical, str) and canonical:
+                salvage = Path(canonical).expanduser() / ".fno" / "salvage"
+                if salvage.is_dir():
+                    paths.extend(sorted(salvage.glob("*/events.jsonl")))
+    except (OSError, ValueError):
+        pass
+    return paths
+
+
+def check_verification_evidence(
+    *,
+    cwd: Optional[str] = None,
+    candidate_sha: Optional[str] = None,
+    event_paths: Optional[list[Path]] = None,
+) -> dict:
+    repo = cwd or os.getcwd()
+    if candidate_sha is None:
+        result = _git(["rev-parse", "HEAD"], repo)
+        candidate_sha = result.stdout.strip() if result.returncode == 0 else ""
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha, re.IGNORECASE) is None:
+        return {
+            "satisfied": False,
+            "mode": None,
+            "result": "unavailable",
+            "receipt": None,
+            "coverage": {"complete": False, "error": "candidate SHA unavailable"},
+        }
+    return verification_decision(
+        candidate_sha,
+        event_paths if event_paths is not None else verification_event_paths(cwd=repo),
+    )
+
+
+def run_evidence_check(*, cwd: Optional[str] = None) -> int:
+    decision = check_verification_evidence(cwd=cwd)
+    print(json.dumps(decision, separators=(",", ":")))
+    return 0 if decision["satisfied"] else 1
 
 
 def _git(args, cwd: str):

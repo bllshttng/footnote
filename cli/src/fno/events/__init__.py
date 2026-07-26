@@ -54,6 +54,18 @@ def _is_nonnegative_integral_number(value: Any) -> TypeGuard[int | float]:
     return False
 
 
+def _utc_timestamp(value: Any) -> _dt.datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() != _dt.timedelta(0):
+        return None
+    return parsed
+
+
 def _resolve_manifest_path() -> Path:
     """Find the schema YAML: the sibling ``schema.yaml`` in this package.
 
@@ -293,6 +305,66 @@ def validate(event: dict[str, Any]) -> None:
             raise ValidationError(
                 "context_snapshot completeness disagrees with manifest and errors"
             )
+
+    if type_name == "verification_receipt":
+        type_props = type_spec["data"]["properties"]
+        mode = data.get("mode")
+        result = data.get("result")
+        if mode not in type_props["mode"]["enum"]:
+            raise ValidationError(f"unknown verification_receipt data.mode: {mode!r}")
+        if result not in type_props["result"]["enum"]:
+            raise ValidationError(f"unknown verification_receipt data.result: {result!r}")
+        candidate_sha = data.get("candidate_sha")
+        if not isinstance(candidate_sha, str) or _re.fullmatch(
+            r"[0-9a-f]{40}", candidate_sha, _re.IGNORECASE
+        ) is None:
+            raise ValidationError("verification_receipt candidate_sha must be full 40-hex")
+        command = data.get("command")
+        scope = data.get("scope")
+        if not isinstance(command, list) or not command or not all(
+            isinstance(item, str) and item and len(item) <= 4096 for item in command
+        ):
+            raise ValidationError("verification_receipt command must contain bounded argv strings")
+        if not isinstance(scope, list) or not scope or len(scope) > 128 or not all(
+            isinstance(item, str) and item and len(item) <= 512 for item in scope
+        ):
+            raise ValidationError("verification_receipt scope must contain bounded step names")
+        environment = data.get("environment")
+        if not isinstance(environment, dict) or not all(
+            isinstance(environment.get(field), str) and environment[field].strip()
+            for field in ("host", "platform", "runner")
+        ):
+            raise ValidationError(
+                "verification_receipt environment requires host, platform, and runner"
+            )
+        producer = data.get("producer")
+        if not isinstance(producer, dict) or not all(
+            isinstance(producer.get(field), str) and producer[field].strip()
+            for field in ("kind", "id")
+        ):
+            raise ValidationError("verification_receipt producer requires kind and id")
+        started = _utc_timestamp(data.get("started_at"))
+        finished = _utc_timestamp(data.get("finished_at"))
+        if started is None or finished is None or finished < started:
+            raise ValidationError(
+                "verification_receipt timestamps must be ordered RFC3339 UTC"
+            )
+        expected = data.get("steps_expected")
+        executed = data.get("steps_executed")
+        if (
+            not _is_nonnegative_integral_number(expected)
+            or not _is_nonnegative_integral_number(executed)
+            or int(executed) > int(expected)
+        ):
+            raise ValidationError("verification_receipt step counts are invalid")
+        if mode == "full" and result == "passed" and (
+            int(expected) == 0 or int(executed) != int(expected)
+        ):
+            raise ValidationError(
+                "verification_receipt full pass requires every nonzero step"
+            )
+        if mode == "void" and result == "passed":
+            raise ValidationError("verification_receipt void mode cannot pass")
 
     if type_name == "phase_transition" and data.get("gate") and data["gate"] not in ALLOWED_GATES:
         raise ValidationError(

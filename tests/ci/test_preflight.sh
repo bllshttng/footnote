@@ -34,8 +34,34 @@ WT_BASE="$TMP/wtbase"; mkdir -p "$WT_BASE"
 
 cat > "$BIN/fno" <<EOF
 #!/usr/bin/env bash
-# stub: only 'config get paths.worktrees_base' is used by preflight
-[[ "\$*" == *"paths.worktrees_base"* ]] && echo "$WT_BASE"
+if [[ "\$*" == *"paths.worktrees_base"* ]]; then
+    echo "$WT_BASE"
+    exit 0
+fi
+if [[ "\${1:-} \${2:-}" == "event emit" ]]; then
+    shift 2
+    data='{}'; events=''
+    while [[ \$# -gt 0 ]]; do
+        case "\$1" in
+            --data) data="\$2"; shift 2 ;;
+            --events) events="\$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    mkdir -p "\$(dirname "\$events")"
+    jq -nc --arg ts "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson data "\$data" \
+        '{ts:\$ts,type:"verification_receipt",source:"target",data:\$data}' >> "\$events"
+    exit 0
+fi
+if [[ "\${1:-} \${2:-}" == "pr evidence-check" ]]; then
+    sha="\$(git rev-parse HEAD)"
+    events="\$(git rev-parse --show-toplevel)/.fno/events.jsonl"
+    [[ -s "\$events" ]] || exit 1
+    jq -se --arg sha "\$sha" \
+        '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha)] | sort_by(.ts) | last | .data.mode == "full" and .data.result == "passed"' \
+        "\$events" >/dev/null
+    exit \$?
+fi
 exit 0
 EOF
 cat > "$BIN/cargo" <<'EOF'
@@ -75,6 +101,7 @@ FIX="$TMP/repo"; mkdir -p "$FIX/scripts/ci"
 git -C "$FIX" init -q
 git -C "$FIX" config user.email t@t.t; git -C "$FIX" config user.name t
 cp "$PREFLIGHT_SRC" "$FIX/scripts/ci/preflight.sh"
+echo '.fno/' > "$FIX/.gitignore"
 # crate dirs so preflight's `cd crates/fno*` legs run (cargo is stubbed).
 mkdir -p "$FIX/crates/fno-agents" "$FIX/crates/fno"
 echo x > "$FIX/crates/fno-agents/.keep"; echo x > "$FIX/crates/fno/.keep"
@@ -88,6 +115,7 @@ git -C "$FIX" update-ref refs/remotes/origin/main "$GREEN_FULL"
 # the attestation are siblings under it.
 LOCKDIR="$FIX/.git/.preflight.lock.d"
 ATT="$FIX/.git/.preflight-attestation"
+EVENTS="$FIX/.fno/events.jsonl"
 HOST="$(hostname 2>/dev/null || echo unknown)"
 # Plant an attestation line for a given full SHA (defaulting to this host).
 write_attest() { printf 'sha=%s mode=FULL verdict=green at=%s iso=now host=%s pid=4242\n' "$1" "$(date +%s)" "${2:-$HOST}" > "$ATT"; }
@@ -101,6 +129,11 @@ echo "$out" | grep -q "GREEN - safe to push" && ok "reports GREEN" || fail "no G
 echo "$out" | grep -q "cargo fmt --check (fno-agents" && ok "fmt leg in summary (AC3-HP)" || fail "no fmt leg"
 echo "$out" | grep -q "cargo test --all-targets (fno-agents)" && ok "cargo test leg in summary (AC3-HP)" || fail "no test leg"
 echo "$out" | grep -q "ADVISORY" && ok "audit ADVISORY row present" || fail "no ADVISORY row"
+jq -se --arg sha "$GREEN_FULL" \
+    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "full" and .data.result == "passed"' \
+    "$EVENTS" >/dev/null \
+    && ok "full green emits exact-SHA full/passed evidence" \
+    || fail "missing exact-SHA full/passed event receipt"
 
 echo "== attestation: a FULL GREEN records one (sha + host pinned) =="
 [[ -f "$ATT" ]] && ok "attestation written on full green" || fail "no attestation file after green"
@@ -165,6 +198,11 @@ rm -f "$ATT"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "retry-failed subset passes" || fail "expected 0 got $rc: $out"
 [[ ! -f "$ATT" ]] && ok "subset run wrote no attestation" || fail "subset run minted a full-run attestation"
+jq -se --arg sha "$GREEN_FULL" \
+    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "subset" and .data.result == "passed"' \
+    "$EVENTS" >/dev/null \
+    && ok "subset run records subset evidence distinctly" \
+    || fail "subset run did not emit subset/passed evidence"
 # The load-bearing half: a subsequent caller on the same SHA finds no FULL
 # attestation, so reuse MISSES and it full-runs (a subset green can never
 # satisfy the gate).
