@@ -812,8 +812,8 @@ def cmd_spawn(
         help=(
             "Exact origin placement (x-6928): pin the new pane next to the calling "
             "pane. `--at current` resolves the caller from FNO_PANE (run inside a "
-            "mux pane) and fails closed instead of falling back; a numeric anchor "
-            "pins that pane id. Requires --split and --substrate pane."
+            "mux pane) and fails closed instead of falling back. Requires --split "
+            "and --substrate pane."
         ),
     ),
     crown: str | None = typer.Option(
@@ -1070,13 +1070,14 @@ def cmd_spawn(
         )
         raise typer.Exit(code=2)
     if at is not None:
-        # `--at current` (resolved from FNO_PANE inside the mux) or a numeric
-        # anchor; anything else is a usage error before spawn. Requires --split.
-        if at != "current" and not at.isdigit():
-            print(
-                f"--at must be `current` or a numeric pane id (got {at!r})",
-                file=sys.stderr,
-            )
+        # `--at current` is the exact-anchor spelling: the mux CLI resolves the
+        # calling pane from FNO_PANE and sets the strict (Refuse) policy, so the
+        # spawn always carries the placement receipt and the readiness gate. A
+        # numeric anchor is a low-level `mux pane run` concern (it keeps the
+        # legacy new-tab fallback) and is intentionally not exposed here, where
+        # every `--at` value implies the exact-placement contract.
+        if at != "current":
+            print("--at must be `current` (the exact-anchor spelling)", file=sys.stderr)
             raise typer.Exit(code=2)
         if split is None:
             print("--at requires --split (the side to place on)", file=sys.stderr)

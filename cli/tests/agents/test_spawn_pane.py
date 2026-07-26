@@ -1062,6 +1062,9 @@ def test_exact_at_current_forwards_token_runs_json_and_reads_receipt(
     assert "--json" in run_call, "exact placement requests the server receipt"
     assert run_call.index("at") < run_call.index("--"), "token rides before the argv fence"
     assert result.placement == placement, "receipt is server-authored, not synthesized"
+    # The readiness gate probes the spawn's own session, not the default.
+    wait_call = next(c for c in runner.calls if c[1:4] == ["mux", "pane", "wait"])
+    assert "--session" in wait_call, "readiness probe targets the spawn's session"
     assert [r.name for r in load_registry()] == ["peer"], "a ready spawn writes the row"
     assert runner.kill_calls == [], "no reap on a successful readiness gate"
 
@@ -1089,7 +1092,10 @@ def test_exact_at_current_kills_pane_and_writes_no_row_on_early_exit(
             runner=runner,
         )
     assert len(runner.kill_calls) == 1, "the transaction-owned pane was reaped"
-    assert runner.kill_calls[0][1:5] == ["mux", "pane", "kill", "7"]
+    kill = runner.kill_calls[0]
+    assert kill[1:4] == ["mux", "pane", "kill"]
+    assert "--session" in kill and "main" in kill, "cleanup targets the spawn's session"
+    assert "7" in kill, "the placed pane id is reaped"
     assert load_registry() == [], "no registry row on launch failure"
 
 

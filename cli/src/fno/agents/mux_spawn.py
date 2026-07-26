@@ -850,10 +850,14 @@ def _await_interactive_readiness(
     ``pane read`` (non-empty == painted) for the ready/live label. Only FAILED
     stops the spawn (AC5-ERR); READY and LIVE both proceed to the registry row.
     """
-    probe = _run_mux(["mux", "pane", "wait", str(pane_id), "--timeout", "1"], runner)
+    probe = _run_mux(
+        ["mux", "pane", "wait", "--session", session, str(pane_id), "--timeout", "1"], runner
+    )
     if probe.returncode == _WAIT_EXITED:
         return "failed"
-    painted = _run_mux(["mux", "pane", "read", str(pane_id), "--lines", "1"], runner)
+    painted = _run_mux(
+        ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "1"], runner
+    )
     return "ready" if (painted.stdout or "").strip() else "live"
 
 
@@ -1079,7 +1083,7 @@ def dispatch_spawn_pane(
             # collapses the split, the viewer's focus and any later sibling split
             # survive (AC5-FR/AC6-FR), and no registry row is written.
             if _await_interactive_readiness(session, pane_id, runner) == "failed":
-                _run_mux(["mux", "pane", "kill", str(pane_id)], runner)
+                _run_mux(["mux", "pane", "kill", "--session", session, str(pane_id)], runner)
                 raise DispatchAskError(
                     f"agent {name!r} provider exited before readiness in session "
                     f"{session!r}; pane {pane_id} reaped, no registry row written",

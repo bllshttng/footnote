@@ -2501,15 +2501,23 @@ impl Core {
             }
         }
         if let Some(sel) = placement.tab.as_ref() {
-            if !matches!(sel, TabSel::New) {
-                let ok = matches!(self.resolve_tab_index(sid, sel), Ok(rti) if rti == ti);
-                if !ok {
-                    self.reap_pane(pid);
-                    return Err((
-                        err_code::BAD_REQUEST,
-                        format!("anchor pane {anchor} is not in the requested tab"),
-                    ));
-                }
+            if matches!(sel, TabSel::New) {
+                // Strict placement pins the anchor's tab and never mints one;
+                // `--tab new` asks for the opposite, so the combination is
+                // refused rather than silently dropping the new-tab request.
+                self.reap_pane(pid);
+                return Err((
+                    err_code::BAD_REQUEST,
+                    "exact placement cannot combine --at with a new-tab selector".into(),
+                ));
+            }
+            let ok = matches!(self.resolve_tab_index(sid, sel), Ok(rti) if rti == ti);
+            if !ok {
+                self.reap_pane(pid);
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("anchor pane {anchor} is not in the requested tab"),
+                ));
             }
         }
         let tid = self
@@ -3262,7 +3270,9 @@ impl Core {
 
         // 7. Commit: realize the subtree with real ids and swap it in. The fit
         //    probe already passed; this re-validates on the live (post-detach)
-        //    tab and swaps the candidate in one turn.
+        //    tab and swaps the candidate in one turn. Re-resolve the anchor's tab
+        //    by its stable id: a detached single-pane source tab earlier in the
+        //    squad shifts `ti`, so the pre-detach index can no longer name it.
         let subtree = crate::templates::realize_spec_tree(&spec.tree, &resolved);
         let si = self
             .session
@@ -3270,6 +3280,21 @@ impl Core {
             .iter()
             .position(|s| s.id == sid)
             .expect("squad live");
+        let ti = self.session.squads[si]
+            .tabs
+            .iter()
+            .position(|t| t.id == tid)
+            .ok_or_else(|| {
+                // The anchor's own tab vanished mid-turn (a concurrent close);
+                // reap the shells and refuse rather than graft into the void.
+                for p in &spawned {
+                    self.reap_pane(*p);
+                }
+                (
+                    err_code::BAD_REQUEST,
+                    format!("anchor pane {anchor} tab vanished during graft"),
+                )
+            })?;
         let commit = {
             let tab = &mut self.session.squads[si].tabs[ti];
             match tree::replace_anchor_with_candidate(tab, vp, anchor, subtree) {
@@ -11624,6 +11649,98 @@ mod tests {
         let mut leaves = tree::leaves(&tab10_after.root);
         leaves.sort_unstable();
         assert_eq!(leaves, vec![1, 2]);
+    }
+
+    #[test]
+    fn graft_re_resolves_anchor_tab_after_detaching_earlier_source_tab() {
+        // P1 (codex review): an Fno binding whose pane lives in an EARLIER
+        // single-pane tab than the anchor's. Detaching it removes that source
+        // tab and shifts the anchor's tab index; the graft must re-resolve the
+        // anchor's tab by stable id, or it grafts into the wrong tab / panics.
+        use crate::proto::{
+            AnchoredLayoutSpec, LayoutBinding, LayoutSlot, LayoutTreeChild, LayoutTreeSpec,
+            ServerMsg,
+        };
+        use crate::tree::Axis;
+
+        let (mut core, p1) = template_core(); // p1 lives alone in tab 5
+        core.agents = vec![bound_agent("S1", p1)];
+        // A second tab holding the anchor; squad tabs are now [5, anchor_tid],
+        // so the Fno pane's tab 5 is EARLIER than the anchor's.
+        let anchor_tid = core.create_tab_in(1, Some("anchor-tab".into())).unwrap();
+        core.tab_areas.insert(anchor_tid, (24, 80));
+        let anchor_pane = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == anchor_tid)
+            .unwrap()
+            .focus;
+
+        let spec = AnchoredLayoutSpec {
+            version: 1,
+            tree: LayoutTreeSpec::Split {
+                axis: Axis::Vertical,
+                children: vec![
+                    LayoutTreeChild {
+                        weight: 0.5,
+                        tree: LayoutTreeSpec::Slot("a".into()),
+                    },
+                    LayoutTreeChild {
+                        weight: 0.5,
+                        tree: LayoutTreeSpec::Slot("b".into()),
+                    },
+                ],
+            },
+            slots: vec![
+                LayoutSlot {
+                    name: "a".into(),
+                    binding: LayoutBinding::Anchor,
+                },
+                LayoutSlot {
+                    name: "b".into(),
+                    binding: LayoutBinding::Fno("S1".into()),
+                },
+            ],
+        };
+        let msg = core
+            .layout_graft(&PaneTarget::SquadId(1), anchor_pane, &spec, false)
+            .expect("graft commits into the anchor's tab");
+        let ServerMsg::LayoutGrafted { tab, .. } = msg else {
+            panic!("not LayoutGrafted");
+        };
+        assert_eq!(
+            tab, anchor_tid,
+            "grafted into the anchor's tab, not the removed source"
+        );
+        // Source tab 5 emptied (p1 relocated) -> removed.
+        assert!(
+            core.session
+                .squad(1)
+                .unwrap()
+                .tabs
+                .iter()
+                .all(|t| t.id != 5),
+            "the earlier single-pane source tab was removed"
+        );
+        let anchor_tab = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == anchor_tid)
+            .unwrap();
+        let mut leaves = tree::leaves(&anchor_tab.root);
+        leaves.sort_unstable();
+        let mut expected = vec![anchor_pane, p1];
+        expected.sort_unstable();
+        assert_eq!(
+            leaves, expected,
+            "the anchor + the relocated fno pane, no stale index"
+        );
     }
 
     /// A client with a LIVE reliable receiver, so `push_layout` never drops it
