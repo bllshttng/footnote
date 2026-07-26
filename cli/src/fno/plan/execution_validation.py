@@ -51,7 +51,8 @@ _CONVENTIONAL_FILENAMES = frozenset(
     notice procfile rakefile readme vagrantfile
     """.split()
 )
-_FILE_REJECT_RE = re.compile(r"""[\s`$&|;<>(){}\[\]*?"'!]""")
+# Brackets stay legal: `app/[slug]/page.tsx` is a routing convention, not a glob.
+_FILE_REJECT_RE = re.compile(r"""[\s`$&|;<>(){}*?"'!]""")
 _FILE_EXTENSION_RE = re.compile(r"[\w.+-]+\.[A-Za-z0-9]{1,8}")
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SHELL_SEGMENT_RE = re.compile(r"(?:&&|\|\||[;|])")

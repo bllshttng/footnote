@@ -195,6 +195,7 @@ def test_quick_plan_accepts_concrete_paths_without_touching_the_filesystem(
         "cli/src/fno/plan/does_not_exist_yet.py",
         "/etc/hosts",
         "~/.fno/config.toml",
+        "app/[slug]/page.tsx",
         "AGENTS.md",
         "Dockerfile",
         ".gitignore",
