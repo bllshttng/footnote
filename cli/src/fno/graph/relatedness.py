@@ -14,7 +14,9 @@ import json
 import os
 import re
 import subprocess
+import tarfile
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Optional
 
@@ -46,7 +48,7 @@ _DEDUP_MIN_SCORE = 0.30
 def _resolve_main_sha(repo: Path) -> str | None:
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--verify", "origin/main"],
+            ["git", "ls-remote", "--exit-code", "origin", "refs/heads/main"],
             cwd=repo,
             capture_output=True,
             text=True,
@@ -54,8 +56,15 @@ def _resolve_main_sha(repo: Path) -> str | None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    sha = result.stdout.strip()
-    return sha.lower() if result.returncode == 0 and _FULL_SHA_RE.fullmatch(sha) else None
+    fields = result.stdout.strip().split()
+    if (
+        result.returncode != 0
+        or len(fields) != 2
+        or fields[1] != "refs/heads/main"
+        or _FULL_SHA_RE.fullmatch(fields[0]) is None
+    ):
+        return None
+    return fields[0].lower()
 
 
 def _commit_on_main(repo: Path, commit: str, main_sha: str) -> bool:
@@ -72,12 +81,63 @@ def _commit_on_main(repo: Path, commit: str, main_sha: str) -> bool:
     return result.returncode == 0
 
 
+def _run_main_probe(repo: Path, main_sha: str, command: list[str]) -> dict[str, Any] | None:
+    if (
+        not command
+        or len(command) > 128
+        or not all(isinstance(arg, str) and arg and len(arg) <= 4096 for arg in command)
+    ):
+        return None
+    try:
+        archive = subprocess.run(
+            ["git", "archive", "--format=tar", main_sha],
+            cwd=repo,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if archive.returncode != 0:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="fno-closure-") as temp_dir:
+            with tarfile.open(fileobj=BytesIO(archive.stdout), mode="r:") as snapshot:
+                snapshot.extractall(temp_dir, filter="data")
+            observed = subprocess.run(
+                command,
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+    except (OSError, subprocess.TimeoutExpired, tarfile.TarError):
+        return None
+    return {
+        "status": "passed" if observed.returncode == 0 else "failed",
+        "exit_code": observed.returncode,
+    }
+
+
+def _commit_names_behavior(repo: Path, commit: str, behavior: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "show", "-s", "--format=%B", commit],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and behavior.casefold() in result.stdout.casefold()
+
+
 def classify_closure(
     *,
     behavior: str,
     repo: Path | None = None,
-    current_main_probe: dict[str, Any] | None = None,
-    merged_history: dict[str, Any] | None = None,
+    probe_command: list[str] | None = None,
+    merged_commit: str | None = None,
 ) -> dict[str, Any]:
     """Classify pre-design closure without treating carriers as evidence.
 
@@ -99,45 +159,30 @@ def classify_closure(
     if main_sha is None:
         return unknown
 
-    if current_main_probe is not None:
-        status = current_main_probe.get("status")
-        command = current_main_probe.get("command")
-        head = current_main_probe.get("head")
-        observed = current_main_probe.get("observed")
-        if (
-            status not in {"passed", "failed"}
-            or not isinstance(command, str)
-            or not command.strip()
-            or not isinstance(head, str)
-            or _FULL_SHA_RE.fullmatch(head) is None
-            or head.lower() != main_sha
-            or not isinstance(observed, str)
-            or observed.strip() != behavior
-        ):
+    if probe_command is not None:
+        observation = _run_main_probe(repo, main_sha, probe_command)
+        if observation is None:
             return unknown
+        status = observation["status"]
         return {
             "state": "already_shipped" if status == "passed" else "live",
             "behavior": behavior,
             "proof": {
                 "kind": "current_main_probe",
-                "command": command.strip(),
-                "head": head.lower(),
-                "observed": observed.strip(),
+                "command": list(probe_command),
+                "head": main_sha,
                 "result": status,
+                "exit_code": observation["exit_code"],
                 "main_head": main_sha,
             },
         }
 
-    if merged_history is not None:
-        commit = merged_history.get("commit")
-        observed = merged_history.get("observed")
+    if merged_commit is not None:
         if (
-            merged_history.get("status") != "merged"
-            or not isinstance(commit, str)
-            or _FULL_SHA_RE.fullmatch(commit) is None
-            or not _commit_on_main(repo, commit, main_sha)
-            or not isinstance(observed, str)
-            or observed.strip() != behavior
+            not isinstance(merged_commit, str)
+            or _FULL_SHA_RE.fullmatch(merged_commit) is None
+            or not _commit_on_main(repo, merged_commit, main_sha)
+            or not _commit_names_behavior(repo, merged_commit, behavior)
         ):
             return unknown
         return {
@@ -145,8 +190,8 @@ def classify_closure(
             "behavior": behavior,
             "proof": {
                 "kind": "merged_commit",
-                "commit": commit.lower(),
-                "observed": observed.strip(),
+                "commit": merged_commit.lower(),
+                "observed": behavior,
                 "on_current_main": True,
                 "main_head": main_sha,
             },

@@ -43,8 +43,8 @@ It contains:
 - typed warnings for sources that were not actually checked.
 
 Before expanding a likely duplicate into design, run one cheap read-only behavior probe against the exact current-main HEAD and inspect merged history.
-Classify the result as `live`, `already_shipped`, or `unknown` using the existing `fno.graph.relatedness.classify_closure` contract.
-`already_shipped` requires the named behavior plus either a passing command bound to the full current-main SHA or a full merged commit proven reachable from current main.
+Classify the result as `live`, `already_shipped`, or `unknown` using `fno.graph.relatedness.classify_closure` with an argv probe that the classifier executes against an archived snapshot of the live remote main SHA.
+`already_shipped` requires the named behavior plus either that mechanically passing command or a reachable full merged commit whose recorded commit message names the behavior.
 A failing current-main behavior probe means `live`; unavailable, malformed, pending, stale, or contradictory evidence means `unknown` and continues through ordinary design.
 A receipt, merged title, delivery record, or stale manifest is carrier evidence and cannot close or supersede work by itself.
 
