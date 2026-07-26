@@ -341,10 +341,12 @@ The one reason to mint a new session is **context pressure**. Every teammate rep
   The wait is a real command, not a resolution - `top` and `peek` return immediately and wake nobody, so ending a turn on them is the wedge:
 
   ```bash
-  fno-agents wait --agent <teammate-name> --state done --timeout-ms 900000
+  fno-agents wait --agent <teammate-name> --state <idle|done> --timeout-ms 900000
   ```
 
-  `--state` takes `idle|blocked|done`. It must be armed the way your harness tracks background work (on claude, a background Bash call), because a detached process exits without waking anyone and the session idles forever. When it fires, sweep that teammate and either reconcile it or arm the next one; if it timed out and the teammate is still live, re-arm. One armed wait per quiet teammate is a wake source. Re-running `top` on a timer while events are already pending is the poll, and that is what costs context for nothing.
+  **Pick the state by what the pane can actually emit, or the wait degrades into the timer you were avoiding.** `done` is only reachable two ways: the pane exits, or a live inside-leg hook reports it. Only claude and codex wire that hook, so a gemini, opencode, or agy teammate can finish its turn and still never read `done` - its completion surfaces as `idle`, and a `--state done` wait on it just burns the full timeout. Use `done` for a claude or codex teammate; use `idle` for any other provider. `idle` is also what a lapsed hook reads as, so it can wake you early - which is harmless here, because every wake is followed by a sweep that tells you the truth.
+
+  Arm it the way your harness tracks background work (on claude, a background Bash call): a detached process exits without waking anyone and the session idles forever. When it fires, sweep that teammate and either reconcile it or arm the next one; if it timed out and the teammate is still live, re-arm. One armed wait per quiet teammate is a wake source. Re-running `top` on a timer while events are already pending is the poll, and that is what costs context for nothing.
 - **Delivery truth:** treat any mail receipt other than `delivered (hosted)` as undelivered. `peek` the handle (both for liveness and to confirm the report did not already land - a busy-but-alive recipient must not be double-delivered), and only on a confirmed miss re-resolve it from `fno agents discovered-json` / `top` and re-send before processing the next report. Never park a miss as a "check later" note.
 - **Silence is not death.** Before declaring a teammate dead, `peek` the pane and check its node claim and open PRs - a worker once had shipped a PR unregistered, and a reflex respawn built a duplicate. Respawn only from the last graph-encoded artifact, or `<help>` if that artifact is missing.
 

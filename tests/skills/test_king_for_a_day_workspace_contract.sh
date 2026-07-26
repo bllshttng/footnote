@@ -75,15 +75,36 @@ done
 
 # --- 4. Placement flags never ride a bg/headless example ---------------------
 # The CLI refuses --workspace/-s/--split/--at outside --substrate pane, so
-# such a line documents a command that exits nonzero.
+# such a command documents an invocation that exits nonzero.
+#
+# This folds backslash continuations into one logical command first: the
+# guides split real commands across lines, and a per-line check never sees
+# `--substrate bg` and `--workspace` together. It also catches the positional
+# substrate form (`fno agents spawn "..." bg ...`), which carries no
+# `--substrate` flag at all.
+join_continuations() {
+    awk '
+      { line = $0
+        if (cont) { buf = buf " " line } else { start = NR; buf = line }
+        if (line ~ /\\[ \t]*$/) { cont = 1; sub(/\\[ \t]*$/, "", buf); next }
+        cont = 0; print start ":" buf; buf = "" }
+      END { if (buf != "") print start ":" buf }
+    ' "$1"
+}
+
+NONPANE_RE='--substrate[[:space:]]+(bg|headless)|--headless|(^|[[:space:]])(--once|-o|-p)([[:space:]]|$)'
+POSITIONAL_RE='fno[[:space:]]+agents[[:space:]]+spawn[[:space:]].*[[:space:]](bg|headless)([[:space:]]|$)'
+PLACEMENT_RE='--workspace|(^|[[:space:]])-s[[:space:]]|--split|(^|[[:space:]])-x[[:space:]]|--at[[:space:]]'
+
 for f in "${ALL_SURFACES[@]}"; do
-    while IFS= read -r line; do
-        [[ -n "$line" ]] || continue
-        is_command_line "$line" || continue
-        grep -qE -- '--workspace|(^|[[:space:]])-s[[:space:]]|--split|(^|[[:space:]])-x[[:space:]]|--at[[:space:]]' \
-            <<<"$line" || continue
-        note "$f puts placement flags on a non-pane substrate: $line"
-    done < <(grep -nE -- '--substrate[[:space:]]+(bg|headless)|--headless|(^|[[:space:]])--once' "$f" || true)
+    while IFS= read -r cmd; do
+        [[ -n "$cmd" ]] || continue
+        is_command_line "$cmd" || continue
+        grep -qE -- "$NONPANE_RE" <<<"$cmd" ||
+            grep -qE -- "$POSITIONAL_RE" <<<"$cmd" || continue
+        grep -qE -- "$PLACEMENT_RE" <<<"$cmd" || continue
+        note "$f puts placement flags on a non-pane substrate: $cmd"
+    done < <(join_continuations "$f")
 done
 
 if [[ $fail -eq 0 ]]; then
