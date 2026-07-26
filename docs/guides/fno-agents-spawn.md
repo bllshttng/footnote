@@ -79,7 +79,9 @@ It still resolves, so rewrite the flag and move on.
 Do not pass both: the two runtimes disagree about which wins, and the default one is not the forgiving one.
 The Python fallback prefers `--workspace` regardless of order, while the default Rust runtime parses both spellings into the same slot, so whichever appears **last** takes effect and a trailing alias silently places the worker in the wrong workspace.
 
-The lower-level equivalent avoids option punctuation entirely: `fno mux pane run workspace reviews split right echo ready`. It also accepts `--workspace` / `-s` and `--split` / `-x`. A missing workspace or a split that would make a pane too small fails without leaving a child process or layout mutation behind.
+The lower-level equivalent avoids option punctuation entirely: `fno mux pane run workspace reviews split right echo ready`. It also accepts `--workspace` / `-s` and `--split` / `-x`.
+
+**The two verbs differ on an absent workspace, and only here.** `fno agents spawn` creates it, as above. `fno mux pane run` does not: it resolves the name against existing workspaces and fails when none matches, so the lower-level verb places into a workspace that already exists. Both refuse a blank name, both refuse an ambiguous one (two or more matches, never a silent pick), and on either verb a split that would make a pane too small fails without leaving a child process or layout mutation behind.
 
 ## Place a pane next to the calling pane (`--at current`)
 
