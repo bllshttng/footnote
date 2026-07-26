@@ -80,13 +80,23 @@ A branch cut from a stale local HEAD ships a PR full of phantom deletions (chang
 
 ```bash
 BASE="${BASE:-origin/main}"   # re-default: this block may run standalone
-if command -v fno >/dev/null 2>&1; then
-  fno pr base-check --base "$BASE" || {
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+candidate_fno() {
+  if [ -x "$ROOT/cli/.venv/bin/python" ]; then
+    PYTHONPATH="$ROOT/cli/src" "$ROOT/cli/.venv/bin/python" -m fno.cli "$@"
+  elif [ -f "$ROOT/cli/pyproject.toml" ] && command -v uv >/dev/null 2>&1; then
+    PYTHONPATH="$ROOT/cli/src" uv run --project "$ROOT/cli" fno-py "$@"
+  else
+    fno "$@"
+  fi
+}
+if command -v fno >/dev/null 2>&1 || [ -f "$ROOT/cli/pyproject.toml" ]; then
+  candidate_fno pr base-check --base "$BASE" || {
     rc=$?
     # 3 = stale, 4 = unrelated histories (both refuse); fresh/bypass/fail-open exit 0.
     [ "$rc" -ge 3 ] && { echo "refusing to open a PR from a bad base (see above)."; exit "$rc"; }
   }
-  fno pr evidence-check || {
+  candidate_fno pr evidence-check || {
     echo "PR creation refused: current HEAD has no full/passed verification receipt." >&2
     exit 1
   }
