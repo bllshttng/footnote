@@ -806,6 +806,16 @@ def cmd_spawn(
             "squad's focused pane instead of a new tab. --substrate pane only."
         ),
     ),
+    at: str | None = typer.Option(
+        None,
+        "--at",
+        help=(
+            "Exact origin placement (x-6928): pin the new pane next to the calling "
+            "pane. `--at current` resolves the caller from FNO_PANE (run inside a "
+            "mux pane) and fails closed instead of falling back; a numeric anchor "
+            "pins that pane id. Requires --split and --substrate pane."
+        ),
+    ),
     crown: str | None = typer.Option(
         None,
         "--crown",
@@ -1042,14 +1052,14 @@ def cmd_spawn(
     # x-3e38 pane placement: squad/split name mux geometry, which only the
     # pane substrate has. bg/headless have no pane tree, so the controls are
     # refused fail-closed before any spawn (mirrors the tier-3 guard shape above).
-    placement_requested = squad is not None or split is not None
+    placement_requested = squad is not None or split is not None or at is not None
     if squad is not None and not squad.strip():
         print("--workspace/-s needs a nonblank workspace name", file=sys.stderr)
         raise typer.Exit(code=2)
     if placement_requested and (substrate != "pane" or once):
         print(
-            "--workspace/-s and --split/-x apply only to --substrate pane (bg/headless have "
-            "no pane geometry)",
+            "--workspace/-s, --split/-x, and --at apply only to --substrate pane "
+            "(bg/headless have no pane geometry)",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
@@ -1059,6 +1069,18 @@ def cmd_spawn(
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
+    if at is not None:
+        # `--at current` (resolved from FNO_PANE inside the mux) or a numeric
+        # anchor; anything else is a usage error before spawn. Requires --split.
+        if at != "current" and not at.isdigit():
+            print(
+                f"--at must be `current` or a numeric pane id (got {at!r})",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if split is None:
+            print("--at requires --split (the side to place on)", file=sys.stderr)
+            raise typer.Exit(code=2)
 
     # --crown level=N,scope=X (US9): parse + validate now; the grantor is stamped
     # ambiently at spawn from this session, so the child's row records who
@@ -1254,6 +1276,7 @@ def cmd_spawn(
                     deny_tools=deny_tools,
                     squad=squad,
                     split=split,
+                    at=at,
                     crown_level=crown_level,
                     crown_scope=crown_scope,
                     provenance=prov_env,
@@ -1281,6 +1304,10 @@ def cmd_spawn(
             effective_message = getattr(pane_result, "effective_message", None)
             if effective_message is not None:
                 receipt_obj["effective_message"] = effective_message
+            if pane_result.placement is not None:
+                # Server-authored exact-placement receipt (anchor/direction/
+                # fallback/squad/tab); never synthesized from the request.
+                receipt_obj["placement"] = pane_result.placement
             # Locked Decision 5: name the applied mode so an audit of "why did
             # this worker have edit rights" has a durable answer. Only when set,
             # so the unset receipt is unchanged.
