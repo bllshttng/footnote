@@ -1469,7 +1469,7 @@ mod tests {
         )
         .unwrap();
         let mut mirror = receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed");
-        mirror["data"]["generation"] = json!(100);
+        mirror["data"]["generation"] = json!(100.0);
         std::fs::write(&mirror_path, format!("{mirror}\n")).unwrap();
 
         let decision = receipt_decision(

@@ -322,7 +322,8 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
         else None
     )
     if combined["coverage"].get("conflicting_latest") or (
-        isinstance(combined_generation, int)
+        isinstance(combined_generation, (int, float))
+        and not isinstance(combined_generation, bool)
         and combined_generation > canonical_generation
     ):
         combined["satisfied"] = False

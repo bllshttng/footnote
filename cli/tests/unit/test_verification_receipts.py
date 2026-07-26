@@ -38,7 +38,7 @@ def receipt(
     result: str = "passed",
     steps_expected: int = 6,
     steps_executed: int = 6,
-    generation: int = 1,
+    generation: int | float = 1,
     scope: list[str] | None = None,
 ) -> dict:
     return {
@@ -313,7 +313,10 @@ def test_void_pending_generation_supersedes_older_pass(tmp_path: Path) -> None:
     assert decision["result"] == "pending"
 
 
-def test_mirror_ahead_cannot_supersede_canonical_pending(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mirror_generation", [100, 100.0])
+def test_mirror_ahead_cannot_supersede_canonical_pending(
+    mirror_generation: int | float, tmp_path: Path
+) -> None:
     canonical = tmp_path / "global.jsonl"
     mirror = tmp_path / "delivery.jsonl"
     write(
@@ -328,7 +331,7 @@ def test_mirror_ahead_cannot_supersede_canonical_pending(tmp_path: Path) -> None
             steps_executed=0,
         ),
     )
-    write(mirror, receipt(generation=100))
+    write(mirror, receipt(generation=mirror_generation))
 
     decision = verification_decision(SHA, [canonical, mirror])
 
