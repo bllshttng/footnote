@@ -77,9 +77,8 @@ will block exit in all of them until the target session completes.
 Pick ONE:
 
   1) Worktree (recommended for /target M, L, or cross-project):
-       git worktree add ~/conductor/workspaces/$(basename "$REPO_ROOT")/<slug> -b feature/<slug>
-       cd ~/conductor/workspaces/$(basename "$REPO_ROOT")/<slug>
-       bash scripts/setup/setup-worktree.sh  # if present
+       wt=\$(fno worktree ensure --repo "$REPO_ROOT" --name <slug> --harness <yours>)
+       cd "\$wt" && bash scripts/setup/setup-worktree.sh  # if present
        # then re-run your target command
 
   2) Feature branch on this checkout (OK for /target S, single terminal):

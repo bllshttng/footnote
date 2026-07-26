@@ -210,7 +210,7 @@ if [[ -f "$hygiene_helper" ]]; then
         loc_nested="$(printf '%s\n' "$loc_out" | sed -n 's/^nested_count=//p' | head -1)"
         hygiene_notes=""
         if [[ "$loc_verdict" == "canonical-protected" ]]; then
-            hygiene_notes="- You are on canonical \`${loc_branch:-main}\` in the shared checkout. Implementation work should run in a worktree under \`~/conductor/workspaces/\` (sibling terminals share \`.fno/\`)."
+            hygiene_notes="- You are on canonical \`${loc_branch:-main}\` in the shared checkout. Implementation work should run in a worktree (\`fno worktree ensure --repo . --name <slug> --harness <yours>\` picks the location your policy resolves to); sibling terminals share \`.fno/\`."
         fi
         if [[ -n "$loc_nested" && "$loc_nested" != "0" ]]; then
             loc_path="$(printf '%s\n' "$loc_out" | sed -n 's/^nested_path=//p' | head -1)"

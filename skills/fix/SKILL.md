@@ -33,7 +33,7 @@ If the output carries `verdict=canonical-protected` AND `TARGET_LOCATION_OK` is 
 
 ```
 /fix refused: canonical checkout on '<branch>' (sibling terminals share .fno/).
-  worktree:  git worktree add ~/conductor/workspaces/<repo>/<slug> -b feature/<slug>
+  worktree:  wt=$(fno worktree ensure --repo . --name <slug> --harness <yours>) && cd "$wt"
   branch:    git checkout -b feature/<slug>
   override:  re-run with TARGET_LOCATION_OK=main-acknowledged
 ```

@@ -238,8 +238,8 @@ esac
 # A bg /target|/do|/fix launched into a repo's MAIN checkout lands on the
 # canonical (often protected) branch and relies on the soft skill instruction
 # "a bg /target self-creates its worktree before building." Do it
-# deterministically here instead: create ~/conductor/workspaces/<repo>/<name>
-# on a fresh feature branch and launch THERE, so the worker is born isolated
+# deterministically here instead: `fno worktree ensure` (policy-resolved base,
+# see the call below) on a fresh feature branch, launching THERE so it is born isolated
 # (location verdict ok from line one) regardless of whether the cwd came from
 # -P, a node's _resolved_cwd, or the caller sitting on canonical main.
 #
