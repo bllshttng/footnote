@@ -904,6 +904,34 @@ struct PrInfo {
     /// `required_bots: []`). Recorded in loop_check events so the skip is
     /// observable, not silently absent (AC3-UI).
     review_skipped: bool,
+    /// Configured `config.review.reviewers` with no head-pinned attestation.
+    /// The sole failing term whenever the login gate is vacuous, and the reason
+    /// the block message can name real local work instead of an absent bot.
+    unattested_reviewers: Vec<UnattestedReviewer>,
+}
+
+/// The non-interactive invocation that satisfies each local reviewer, mirroring
+/// the `invocation` field of `_RESOLVABLE_REVIEWERS` in
+/// `cli/src/fno/config/__init__.py`. A block message that names a reviewer
+/// without naming how to run it is only half a remedy.
+///
+/// Two languages, one table: kept honest by
+/// `scripts/ci/check-reviewer-descriptor-parity.sh`, not by a comment asking a
+/// human to remember.
+const REVIEWER_INVOCATIONS: &[(&str, &str)] = &[
+    ("sigma", "/fno:review sigma"),
+    (
+        "code-review",
+        "/code-review, then bash skills/review/scripts/emit-attestation.sh code-review",
+    ),
+    ("declare", "/fno:review declare"),
+];
+
+fn reviewer_invocation(name: &str) -> Option<&'static str> {
+    REVIEWER_INVOCATIONS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, inv)| *inv)
 }
 
 fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
@@ -946,24 +974,50 @@ fn stderr_tail(bytes: &[u8]) -> String {
     }
 }
 
-/// True iff EVERY reviewer is satisfied by a head-pinned `review_attestation`
-/// event (x-e703, Phase 2). A reviewer is satisfied when events.jsonl carries a
-/// line with `type == "review_attestation"`, `data.reviewer` matching (leading
-/// '/' stripped on both sides), `data.head_sha == head_sha`, and
-/// `data.verdict == "pass"`. This is the trust-core seam: today loop-check reads
-/// events.jsonl only for prior `loop_check` fires; here it reads a local
-/// attestation into the `reviewed` decision.
+/// A configured local reviewer with no head-pinned `pass` attestation.
+#[derive(Debug, Clone, PartialEq)]
+struct UnattestedReviewer {
+    name: String,
+    /// A head this reviewer DID attest at, which is no longer HEAD. Without it
+    /// the block message reads as "you never ran sigma" to a session that ran
+    /// sigma and then pushed a commit, which is how a run loses turns twice.
+    superseded_head: Option<String>,
+}
+
+/// The `config.review.reviewers` entries NOT satisfied by a head-pinned
+/// `review_attestation` event (x-e703 Phase 2; list form added by x-cdc7). A
+/// reviewer is satisfied when events.jsonl carries a line with
+/// `type == "review_attestation"`, `data.reviewer` matching (leading '/'
+/// stripped on both sides), `data.head_sha == head_sha`, and
+/// `data.verdict == "pass"`.
+///
+/// The gate reads `.is_empty()` and the block message reads the names, so the
+/// decision and the explanation come from ONE scan. When they came from two,
+/// the message told sessions to wait on a bot that was never required.
 ///
 /// Fail closed everywhere: an empty/unreadable events file, a stale head_sha
 /// (attestation for a prior commit), or a `fail` verdict leaves the reviewer
 /// UNSATISFIED, mirroring how a missing bot review holds the login gate. An
 /// empty reviewer list is vacuously satisfied (no reviewers gate).
-fn reviewers_all_attested(events_path: &Path, reviewers: &[String], head_sha: &str) -> bool {
+fn unattested_reviewers(
+    events_path: &Path,
+    reviewers: &[String],
+    head_sha: &str,
+) -> Vec<UnattestedReviewer> {
+    let unsatisfied_all = || -> Vec<UnattestedReviewer> {
+        reviewers
+            .iter()
+            .map(|r| UnattestedReviewer {
+                name: r.trim_start_matches('/').to_string(),
+                superseded_head: None,
+            })
+            .collect()
+    };
     if reviewers.is_empty() {
-        return true;
+        return Vec::new();
     }
     let Ok(content) = std::fs::read_to_string(events_path) else {
-        return false; // no evidence file -> gate unmet (fail closed)
+        return unsatisfied_all(); // no evidence file -> gate unmet (fail closed)
     };
     // Single pass (gemini review): record the LATEST verdict per reviewer at the
     // current head. events.jsonl is append-ordered, so a later attestation
@@ -972,6 +1026,8 @@ fn reviewers_all_attested(events_path: &Path, reviewers: &[String], head_sha: &s
     // (codex peer review P1: a later fail was previously ignored). A reviewer is
     // satisfied iff its latest head-pinned verdict is exactly `pass`. O(lines).
     let mut latest_pass: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    let mut latest_other_head: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for line in content.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -979,17 +1035,30 @@ fn reviewers_all_attested(events_path: &Path, reviewers: &[String], head_sha: &s
         if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
             continue;
         }
-        if val.pointer("/data/head_sha").and_then(|v| v.as_str()) != Some(head_sha) {
+        let Some(r) = val.pointer("/data/reviewer").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let r = r.trim_start_matches('/').to_string();
+        let line_head = val
+            .pointer("/data/head_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if line_head != head_sha {
+            latest_other_head.insert(r, line_head.to_string());
             continue;
         }
-        if let Some(r) = val.pointer("/data/reviewer").and_then(|v| v.as_str()) {
-            let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
-            latest_pass.insert(r.trim_start_matches('/').to_string(), is_pass);
-        }
+        let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
+        latest_pass.insert(r, is_pass);
     }
     reviewers
         .iter()
-        .all(|entry| latest_pass.get(entry.trim_start_matches('/')) == Some(&true))
+        .map(|entry| entry.trim_start_matches('/'))
+        .filter(|name| latest_pass.get(*name) != Some(&true))
+        .map(|name| UnattestedReviewer {
+            name: name.to_string(),
+            superseded_head: latest_other_head.get(name).cloned(),
+        })
+        .collect()
 }
 
 /// An operator review finding (x-f8d4) still open: a `review_finding` event for
@@ -1140,6 +1209,7 @@ fn read_pr_info(
                 usage_limited: Vec::new(),
                 unaddressed_findings: Vec::new(),
                 review_skipped: false,
+                unattested_reviewers: Vec::new(),
             });
         }
         return Err(("pr_view".to_string(), stderr_tail(&pr_view_out.stderr)));
@@ -1194,6 +1264,7 @@ fn read_pr_info(
             usage_limited: Vec::new(),
             unaddressed_findings: Vec::new(),
             review_skipped: true,
+            unattested_reviewers: Vec::new(),
         });
     }
 
@@ -1248,7 +1319,10 @@ fn read_pr_info(
     // there and this changes nothing for them.
     let login_gate_active = !required_bots.is_empty() || !optional_bots.is_empty();
     let login_skipped = no_external || !login_gate_active;
-    let reviewers_ok = reviewers_all_attested(events_path, reviewers, head_sha);
+    // One scan feeds both the gate and its explanation, so the two cannot
+    // disagree the way the decision and the message did on PR #618.
+    let unattested = unattested_reviewers(events_path, reviewers, head_sha);
+    let reviewers_ok = unattested.is_empty();
     let (latest_review_ts, reviewed, missing_bots, usage_limited, unaddressed_findings) =
         if login_skipped {
             // No GitHub logins to poll (nothing configured, or no_external): skip
@@ -1409,6 +1483,7 @@ fn read_pr_info(
         // applied" = the login reads were skipped AND no local reviewers gate.
         // A reviewers-only config did gate, so it is NOT review_skipped.
         review_skipped: login_skipped && reviewers.is_empty(),
+        unattested_reviewers: unattested,
     })
 }
 
@@ -4511,10 +4586,52 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
                 pr.number, f.author, f.severity, f.path, f.line, more
             );
         }
+        if !pr.unattested_reviewers.is_empty() {
+            // The branch that was missing (x-cdc7). Without it a local-only
+            // reviewers gate fell through to the generic string below and told
+            // the session to wait on a bot that was never required.
+            //
+            // No arm_watch_hint here, deliberately: `async_wait_class` has
+            // ALREADY excluded this blocker from idling, because no GitHub
+            // reviewer will ever post the attestation and the session would park
+            // forever. Emitting the arm-and-tag ritual on a blocker the same
+            // file refuses to idle is the code contradicting itself, and a
+            // session did comply with it roughly ten times.
+            let head = &local_head[..8.min(local_head.len())];
+            let items: Vec<String> = pr
+                .unattested_reviewers
+                .iter()
+                .map(|r| {
+                    let stale = match &r.superseded_head {
+                        Some(h) if !h.is_empty() => format!(
+                            " (attested at {}, superseded by this head)",
+                            &h[..8.min(h.len())]
+                        ),
+                        _ => String::new(),
+                    };
+                    match reviewer_invocation(&r.name) {
+                        Some(inv) => format!("{}{} -> run `{}`", r.name, stale, inv),
+                        None => format!("{}{}", r.name, stale),
+                    }
+                })
+                .collect();
+            return format!(
+                "PR #{}: reviewers gate unmet - no head-pinned review_attestation at {} for {}. \
+                 This is local work to DO, not a wait: no GitHub reviewer posts these, \
+                 so do not arm a watcher.",
+                pr.number,
+                head,
+                items.join("; ")
+            );
+        }
+        // Reaching here means missing_bots is empty, which `async_wait_class`
+        // treats as non-idlable, so this must not teach the arm-and-tag ritual
+        // either (the two must never disagree about whether a wait is valid).
         return format!(
-            "PR #{} not yet reviewed by a bot reviewer.{}",
-            pr.number,
-            arm_watch_hint(pr.number, "review")
+            "PR #{} not yet reviewed and no reviewer is outstanding; \
+             re-check config.review (required_bots / reviewers) - nothing here will \
+             arrive on its own.",
+            pr.number
         );
     }
 
@@ -4559,6 +4676,14 @@ pub fn run_loop_check_capture(args: &[String]) -> (i32, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gate's boolean view of `unattested_reviewers`, exactly as
+    /// `read_pr_info` derives it. The pre-x-cdc7 predicate tests below are
+    /// unchanged on purpose: promoting the return value to a list must not
+    /// move the gate.
+    fn reviewers_all_attested(events_path: &Path, reviewers: &[String], head_sha: &str) -> bool {
+        unattested_reviewers(events_path, reviewers, head_sha).is_empty()
+    }
 
     #[test]
     fn parse_manifest_minimal() {
@@ -5051,6 +5176,7 @@ mod tests {
             usage_limited: vec![],
             unaddressed_findings: vec![],
             review_skipped: false,
+            unattested_reviewers: vec![],
         };
         let reason = build_block_reason(&pr, "abc");
         assert!(
@@ -5123,6 +5249,7 @@ mod tests {
             usage_limited: vec![],
             unaddressed_findings: vec![],
             review_skipped: false,
+            unattested_reviewers: vec![],
         }
     }
 
@@ -5185,6 +5312,137 @@ mod tests {
             ..watch_pr()
         };
         assert_eq!(async_wait_class(&pr, "abc", true), None);
+    }
+
+    /// The exact state PR #618 sat in for ~15 turns: CI green, no required
+    /// bots, no unaddressed findings, and a `reviewers: [sigma]` gate with no
+    /// head-pinned attestation. `reviewers_ok` was the sole failing term.
+    fn reviewers_gate_pr() -> PrInfo {
+        PrInfo {
+            ci_conclusion: CiConclusion::Success,
+            ci_has_pending: false,
+            reviewed: false,
+            review_skipped: false,
+            missing_bots: vec![],
+            unaddressed_findings: vec![],
+            unattested_reviewers: vec![UnattestedReviewer {
+                name: "sigma".to_string(),
+                superseded_head: None,
+            }],
+            ..watch_pr()
+        }
+    }
+
+    #[test]
+    fn block_reason_names_the_reviewers_gate_not_a_bot() {
+        // AC2: the old string claimed a bot had not reviewed while
+        // required_bots was empty and the real blocker was local.
+        let reason = build_block_reason(&reviewers_gate_pr(), "abc");
+        assert!(reason.contains("reviewers gate unmet"), "got: {reason}");
+        assert!(reason.contains("sigma"), "got: {reason}");
+        assert!(reason.contains("/fno:review sigma"), "got: {reason}");
+        assert!(!reason.contains("bot reviewer"), "got: {reason}");
+    }
+
+    #[test]
+    fn block_reason_reviewers_gate_emits_no_idle_ritual() {
+        // AC3: async_wait_class already excluded this blocker from idling
+        // (watch_idle_rejects_local_attestation_review_gate), so prescribing
+        // the arm-and-tag ritual here is the code contradicting itself.
+        let pr = reviewers_gate_pr();
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+        let reason = build_block_reason(&pr, "abc");
+        assert!(!reason.contains("<watching"), "got: {reason}");
+        assert!(
+            !reason.contains("Arm a harness-tracked watcher"),
+            "got: {reason}"
+        );
+        assert!(!reason.contains("gh pr checks"), "got: {reason}");
+    }
+
+    #[test]
+    fn block_reason_names_a_superseded_attestation_head() {
+        // A session that ran sigma and then pushed must not read "you never
+        // ran sigma"; name the head the pass is pinned to.
+        let pr = PrInfo {
+            unattested_reviewers: vec![UnattestedReviewer {
+                name: "sigma".to_string(),
+                superseded_head: Some("0123456789abcdef".to_string()),
+            }],
+            ..reviewers_gate_pr()
+        };
+        let reason = build_block_reason(&pr, "abc");
+        assert!(reason.contains("01234567"), "got: {reason}");
+        assert!(reason.contains("superseded"), "got: {reason}");
+    }
+
+    #[test]
+    fn block_reason_generic_review_fallback_has_no_idle_ritual() {
+        // The fallback is only reachable with an EMPTY missing_bots, which
+        // async_wait_class refuses to idle. It must not teach the ritual either.
+        let pr = PrInfo {
+            unattested_reviewers: vec![],
+            ..reviewers_gate_pr()
+        };
+        let reason = build_block_reason(&pr, "abc");
+        assert!(!reason.contains("<watching"), "got: {reason}");
+        assert!(!reason.contains("bot reviewer"), "got: {reason}");
+    }
+
+    #[test]
+    fn block_reason_missing_bot_still_teaches_the_ritual() {
+        // AC7-adjacent regression: a REAL outstanding GitHub bot is a valid
+        // async wait and keeps today's arm-and-tag message.
+        let pr = PrInfo {
+            missing_bots: vec!["chatgpt-codex-connector".into()],
+            ..reviewers_gate_pr()
+        };
+        let reason = build_block_reason(&pr, "abc");
+        assert!(reason.contains("chatgpt-codex-connector"), "got: {reason}");
+        assert!(reason.contains("<watching"), "got: {reason}");
+    }
+
+    #[test]
+    fn reviewers_gate_stays_fail_closed() {
+        // AC7: promoting the predicate's return value to a list must not move
+        // the gate. Missing file, missing event, stale head, and a `fail`
+        // verdict all still leave the reviewer unsatisfied.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("absent.jsonl");
+        let sigma = vec!["sigma".to_string()];
+        assert!(!unattested_reviewers(&missing, &sigma, "h").is_empty());
+
+        let stale = tmp.path().join("stale.jsonl");
+        std::fs::write(
+            &stale,
+            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass"}}"#,
+        )
+        .unwrap();
+        let out = unattested_reviewers(&stale, &sigma, "NEW");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].superseded_head.as_deref(), Some("OLD"));
+
+        let failed = tmp.path().join("fail.jsonl");
+        std::fs::write(
+            &failed,
+            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"h","verdict":"fail"}}"#,
+        )
+        .unwrap();
+        let out = unattested_reviewers(&failed, &sigma, "h");
+        assert_eq!(out.len(), 1);
+        // A head-pinned fail is not a superseded pass; do not offer a stale head.
+        assert_eq!(out[0].superseded_head, None);
+    }
+
+    #[test]
+    fn reviewer_invocations_cover_the_descriptor_table() {
+        // The parity script enforces this against the Python side in CI; this
+        // keeps the Rust half self-consistent at unit-test speed.
+        for (name, inv) in REVIEWER_INVOCATIONS {
+            assert!(!inv.is_empty(), "{name} has no invocation");
+            assert_eq!(reviewer_invocation(name), Some(*inv));
+        }
+        assert_eq!(reviewer_invocation("teleport"), None);
     }
 
     #[test]

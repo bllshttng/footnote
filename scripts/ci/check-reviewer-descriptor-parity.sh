@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+# scripts/ci/check-reviewer-descriptor-parity.sh
+#
+# Cross-language reviewer-descriptor parity check (node x-cdc7).
+#
+# The set of local reviewers, and the invocation that satisfies each one, is
+# declared twice:
+#
+#   - Python: _RESOLVABLE_REVIEWERS  in cli/src/fno/config/__init__.py
+#             (the config validator + the init capability refusal)
+#   - Rust  : REVIEWER_INVOCATIONS   in crates/fno-agents/src/loopcheck.rs
+#             (the stop gate's blocked reason)
+#
+# A name added on one side is a reviewer the other cannot explain. A drifted
+# invocation is worse: the blocked reason then tells a wedged session to run a
+# command that does not satisfy the gate, which is the failure class this whole
+# node exists to delete. The old constant's own comment conceded the shape -
+# "Kept in sync with the emit surfaces ... and the loop-check attestation read"
+# - which is a request that a human remember. This makes it mechanical.
+#
+# Pure text extraction (stdlib `ast` for Python, a regex for Rust). No build,
+# no venv, no Rust binary, so it is cheap enough to run on both the cli and
+# crates CI legs.
+#
+# Exit codes:
+#   0  the two tables declare the same names with the same invocations
+#   1  drift, or a table could not be extracted / is empty
+#   2  usage error
+#
+# Flags:
+#   --rust-file PATH    override the Rust source   (default: canonical path)
+#   --python-file PATH  override the Python source (default: canonical path)
+#   --selftest          run built-in fixtures proving the check detects
+#                       match / renamed / drifted-invocation / unextractable
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+RUST_FILE="${REPO_ROOT}/crates/fno-agents/src/loopcheck.rs"
+PYTHON_FILE="${REPO_ROOT}/cli/src/fno/config/__init__.py"
+SELFTEST=0
+
+# ── Extraction + comparison ────────────────────────────────────────────
+# One python3 pass reads both sides and diffs them. The Python side is parsed
+# with `ast` rather than regex because a descriptor's `invocation` may be an
+# implicitly-concatenated multi-line string, which no line-oriented extractor
+# reads correctly - and reading it WRONG here would report false parity, the
+# one outcome worse than no check.
+
+check_parity() {
+    python3 - "$1" "$2" <<'PY'
+import ast
+import re
+import sys
+
+rust_path, python_path = sys.argv[1], sys.argv[2]
+
+
+def fail(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def read(path, label):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError as exc:
+        fail(f"{label} source not readable: {path} ({exc})")
+
+
+def extract_python(src, path):
+    """{name: invocation} from the _RESOLVABLE_REVIEWERS dict literal."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as exc:
+        fail(f"cannot parse {path}: {exc}")
+    for node in ast.walk(tree):
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        if not any(
+            isinstance(t, ast.Name) and t.id == "_RESOLVABLE_REVIEWERS" for t in targets
+        ):
+            continue
+        value = node.value
+        if not isinstance(value, ast.Dict):
+            fail(f"_RESOLVABLE_REVIEWERS in {path} is not a dict literal")
+        out = {}
+        for key, val in zip(value.keys, value.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                fail(f"_RESOLVABLE_REVIEWERS in {path} has a non-literal key")
+            if not isinstance(val, ast.Call):
+                fail(f"reviewer {key.value!r} in {path} is not a ReviewerDescriptor(...)")
+            invocation = None
+            for kw in val.keywords:
+                if kw.arg == "invocation":
+                    try:
+                        invocation = ast.literal_eval(kw.value)
+                    except ValueError:
+                        fail(f"reviewer {key.value!r} in {path} has a non-literal invocation")
+            if not isinstance(invocation, str) or not invocation:
+                fail(f"reviewer {key.value!r} in {path} declares no invocation")
+            out[key.value] = invocation
+        return out
+    fail(f"_RESOLVABLE_REVIEWERS not found in {path}")
+
+
+def extract_rust(src, path):
+    """{name: invocation} from the REVIEWER_INVOCATIONS slice literal."""
+    m = re.search(
+        r"const\s+REVIEWER_INVOCATIONS\s*:\s*&\[\(&str,\s*&str\)\]\s*=\s*&\[(.*?)\n\];",
+        src,
+        re.S,
+    )
+    if not m:
+        fail(f"REVIEWER_INVOCATIONS not found in {path}")
+    # No escaped quotes are expected in these literals; if one ever appears the
+    # pair count goes odd and this refuses rather than mis-pairing.
+    literals = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
+    if not literals or len(literals) % 2:
+        fail(f"REVIEWER_INVOCATIONS in {path} did not extract as name/invocation pairs")
+    return {
+        literals[i].encode().decode("unicode_escape"): literals[i + 1]
+        .encode()
+        .decode("unicode_escape")
+        for i in range(0, len(literals), 2)
+    }
+
+
+py = extract_python(read(python_path, "Python"), python_path)
+rs = extract_rust(read(rust_path, "Rust"), rust_path)
+
+if not py:
+    fail(f"no reviewers extracted from {python_path}")
+
+problems = []
+for name in sorted(set(py) | set(rs)):
+    if name not in rs:
+        problems.append(f"  {name}: declared in Python, missing from Rust")
+    elif name not in py:
+        problems.append(f"  {name}: declared in Rust, missing from Python")
+    elif py[name] != rs[name]:
+        problems.append(
+            f"  {name}: invocation differs\n"
+            f"    Python: {py[name]!r}\n"
+            f"    Rust  : {rs[name]!r}"
+        )
+
+if problems:
+    print("ERROR: reviewer descriptor drift between Python and Rust.", file=sys.stderr)
+    print("\n".join(problems), file=sys.stderr)
+    print(
+        f"  Python: _RESOLVABLE_REVIEWERS in {python_path}\n"
+        f"  Rust  : REVIEWER_INVOCATIONS in {rust_path}\n"
+        "  A drifted invocation makes the stop gate name a command that does "
+        "not satisfy the gate.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+print(f"reviewer descriptor parity OK: {len(py)} reviewers ({', '.join(sorted(py))})")
+PY
+}
+
+# ── Selftest ───────────────────────────────────────────────────────────
+# A check that can only ever pass is worse than no check. Drives the real
+# script over synthetic fixtures and asserts the expected exit codes.
+
+run_selftest() {
+    local tmp rc fails=0
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/reviewer-parity-selftest.XXXXXX")
+    trap 'rm -rf "$tmp"' RETURN
+
+    _rust() {
+        cat > "$1" <<EOF
+const REVIEWER_INVOCATIONS: &[(&str, &str)] = &[
+    ("sigma", "$2"),
+    ("declare", "/fno:review declare"),
+];
+EOF
+    }
+    _python() {
+        cat > "$1" <<EOF
+_RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
+    "sigma": ReviewerDescriptor(
+        kind="local-attestation",
+        requires="subagent-dispatch",
+        invocation=(
+            "/fno:review "
+            "$2"
+        ),
+        asserts="review-evidence",
+    ),
+    "declare": ReviewerDescriptor(
+        kind="local-attestation",
+        requires="none",
+        invocation="/fno:review declare",
+        asserts="self-cert",
+    ),
+}
+EOF
+    }
+
+    _case() { # name expected_rc rust_file python_file
+        "${BASH_SOURCE[0]}" --rust-file "$3" --python-file "$4" >/dev/null 2>&1
+        rc=$?
+        if [[ "$rc" == "$2" ]]; then echo "  PASS: $1"
+        else echo "  FAIL: $1 (expected exit $2, got $rc)"; fails=$((fails + 1)); fi
+    }
+
+    # Case 1: the two tables agree, across an implicit multi-line Python
+    # concatenation - the exact shape a line-oriented extractor gets wrong.
+    _rust "$tmp/ok.rs" "/fno:review sigma"
+    _python "$tmp/ok.py" "sigma"
+    _case "matching tables accepted (multi-line invocation)" 0 "$tmp/ok.rs" "$tmp/ok.py"
+
+    # Case 2: same names, drifted invocation -> reject.
+    _rust "$tmp/drift.rs" "/fno:review sigma --wait"
+    _python "$tmp/drift.py" "sigma"
+    _case "drifted invocation rejected" 1 "$tmp/drift.rs" "$tmp/drift.py"
+
+    # Case 3: a reviewer added on one side only -> reject.
+    cat > "$tmp/extra.rs" <<'EOF'
+const REVIEWER_INVOCATIONS: &[(&str, &str)] = &[
+    ("sigma", "/fno:review sigma"),
+];
+EOF
+    _python "$tmp/extra.py" "sigma"
+    _case "one-sided reviewer rejected" 1 "$tmp/extra.rs" "$tmp/extra.py"
+
+    # Case 4: the Rust table absent -> reject, not a silent empty==empty pass.
+    printf '// no table here\n' > "$tmp/absent.rs"
+    _python "$tmp/absent.py" "sigma"
+    _case "missing Rust table rejected" 1 "$tmp/absent.rs" "$tmp/absent.py"
+
+    # Case 5: the Python table absent -> reject.
+    _rust "$tmp/nopy.rs" "/fno:review sigma"
+    printf '# no table here\n' > "$tmp/nopy.py"
+    _case "missing Python table rejected" 1 "$tmp/nopy.rs" "$tmp/nopy.py"
+
+    if [[ "$fails" -gt 0 ]]; then
+        echo "reviewer-descriptor-parity selftest: $fails failure(s)" >&2
+        return 1
+    fi
+    echo "reviewer-descriptor-parity selftest: all cases passed"
+    return 0
+}
+
+# ── Arg parsing ────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --rust-file)   RUST_FILE="$2"; shift 2 ;;
+        --python-file) PYTHON_FILE="$2"; shift 2 ;;
+        --selftest)    SELFTEST=1; shift ;;
+        -h|--help)     grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'; exit 0 ;;
+        *)             echo "ERROR: unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+if [[ "$SELFTEST" == "1" ]]; then
+    run_selftest
+    exit $?
+fi
+
+check_parity "$RUST_FILE" "$PYTHON_FILE"
+exit $?
