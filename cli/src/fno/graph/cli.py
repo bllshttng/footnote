@@ -1667,8 +1667,12 @@ def cmd_decompose(
     #         so the gate + attended-offer are overridden (mirrors the
     #         dispatch_conversational env-forcing); the caps still bound it. A spawn
     #         that does not fire leaves the child `idea` with its stub on disk.
-    #       - unflagged group -> today's opt-in born-with-why OFFER (gate-OFF
-    #         default => complete no-op).
+    #       - unflagged group -> nothing. `needs_think` is the SOLE consent for a
+    #         decompose-time /think (x-455e): the born-with-why lane that used to
+    #         run here spawned unconditionally on any autonomous decompose, because
+    #         its OFFER branch needs presence == attended and an autonomous session
+    #         always classifies `away`. The epic doc is a group child's design
+    #         authority; scaffold_separate_plan + why_digest already carry it.
     #     Only UNLINKED children are candidates (a re-decompose never re-designs a
     #     child that already has a plan). Strictly non-fatal: never wedge decompose.
     fanout: list[dict] = []
@@ -1678,11 +1682,7 @@ def cmd_decompose(
     spec_ids = [r["id"] for r in results]
     if spec_ids:
         try:
-            from fno.provenance.spawn_think import (
-                RunState,
-                maybe_spawn_think,
-                on_node_born,
-            )
+            from fno.provenance.spawn_think import RunState, maybe_spawn_think
 
             # Reuse the shared post-mutation re-read from 3c (by_id).
             born_rs = RunState()
@@ -1720,12 +1720,6 @@ def cmd_decompose(
                             f"to design it (child left idea with its stub)",
                             err=True,
                         )
-                elif cid in created_ids:
-                    # Already the persisted, slugged node -> skip the re-read.
-                    # quiet in --json mode: the offer stderr print would pollute a
-                    # captured JSON stream (test_json_output_shape).
-                    on_node_born(child, run_state=born_rs, persisted=True,
-                                 quiet=json_mode(ctx))
         except Exception:  # noqa: BLE001 - additive; never wedge the decompose
             pass
 

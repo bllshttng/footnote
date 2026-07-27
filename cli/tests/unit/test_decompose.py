@@ -935,8 +935,11 @@ def test_validate_needs_think_rejects_non_bool():
 
 
 def _spy_spawn(monkeypatch):
-    """Patch both spawn lanes; return (fanout_calls, offer_calls). Each fan-out
-    call records a kwargs dict and returns a `spawned` result by default."""
+    """Patch both spawn seams; return (fanout_calls, born_calls). Each fan-out
+    call records a kwargs dict and returns a `spawned` result by default.
+
+    `on_node_born` is patched to prove decompose never reaches it (x-455e): the
+    unflagged lane was deleted, so `needs_think` is the sole consent."""
     import fno.provenance.spawn_think as st
 
     fanout: list = []
@@ -954,9 +957,10 @@ def _spy_spawn(monkeypatch):
     return fanout, offers
 
 
-def test_flagged_group_forces_fanout_unflagged_offers(graph_env, monkeypatch, tmp_path):
+def test_flagged_group_forces_fanout_unflagged_silent(graph_env, monkeypatch, tmp_path):
+    """AC3-HP + AC4-HP: only a `needs_think` group reaches a spawn lane."""
     g, read_entries = graph_env
-    fanout, offers = _spy_spawn(monkeypatch)
+    fanout, born = _spy_spawn(monkeypatch)
     groups = [
         {"slug": "1", "title": "G1 spike", "waves": "1", "blocked_by_groups": [],
          "needs_think": True},
@@ -966,8 +970,8 @@ def test_flagged_group_forces_fanout_unflagged_offers(graph_env, monkeypatch, tm
     assert result.exit_code == 0, result.output
 
     # The flagged child took the fan-out lane with the gate + spawn forced on;
-    # the unflagged child got the born-with-why offer.
-    assert len(fanout) == 1 and len(offers) == 1
+    # the unflagged child reached no spawn seam at all (x-455e).
+    assert len(fanout) == 1 and born == []
     call = fanout[0]
     assert call["env"].get("FNO_THINK_SPAWN") == "1"
     assert call["env"].get("FNO_THINK_SPAWN_ATTENDED") == "spawn"
@@ -1013,6 +1017,28 @@ def test_fanout_non_spawn_prints_offer_fallback(graph_env, monkeypatch):
     assert child["plan_path"] is None and child["status"] == "idea"
 
 
+def test_fanout_raise_never_wedges_committed_mutation(graph_env, monkeypatch):
+    """AC5-ERR: a raising spawn leaves the already-committed graph mutation intact.
+
+    Step 4a runs after the graph write commits, so its `except Exception` wrapper
+    is what keeps a spawn crash from losing the decompose. Pinned here because
+    x-455e edits this block.
+    """
+    import fno.provenance.spawn_think as st
+
+    g, read_entries = graph_env
+
+    def boom(node, *, run_state=None, env=None, quiet=False, **k):
+        raise RuntimeError("spawn substrate unavailable")
+
+    monkeypatch.setattr(st, "maybe_spawn_think", boom)
+    groups = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": [],
+               "needs_think": True}]
+    result = _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+    assert _child(read_entries(), "1") is not None  # the child survived
+
+
 def test_json_mode_reports_fanout_outcome(graph_env, monkeypatch):
     # P2: a machine caller must see when a flagged child was left an unlinked idea
     # (the fallback stderr line is suppressed under --json), so the outcome rides
@@ -1035,6 +1061,28 @@ def test_json_mode_reports_fanout_outcome(graph_env, monkeypatch):
     assert len(payload["fanout"]) == 1
     assert payload["fanout"][0]["decision"] == "skipped"
     assert payload["fanout"][0]["reason"] == "cap-exceeded"
+
+
+def test_all_unflagged_spawns_nothing_even_with_gate_on(graph_env, monkeypatch):
+    """AC3-HP: the reported case - gate enabled, autonomous session, no flags.
+
+    This is exactly the x-f6bb repro: `think_spawn.enabled: true` is the common
+    install, and an autonomous decompose always classifies presence `away`, so
+    the old unflagged lane's "offer" spawned instead of offering.
+    """
+    g, read_entries = graph_env
+    fanout, born = _spy_spawn(monkeypatch)
+    monkeypatch.setenv("FNO_THINK_SPAWN", "1")
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "away")
+    groups = [
+        {"slug": "1", "title": "G1 rote", "waves": "1", "blocked_by_groups": []},
+        {"slug": "2", "title": "G2 rote", "waves": "2", "blocked_by_groups": ["1"]},
+    ]
+    result = _invoke(["backlog", "--json", "decompose", "ab-epic0001",
+                      "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+    assert fanout == [] and born == []
+    assert json.loads(result.output)["fanout"] == []
 
 
 def test_redecompose_reattempts_unlinked_flagged_skips_linked(graph_env, monkeypatch):
