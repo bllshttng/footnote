@@ -2,18 +2,21 @@
 # Emit a head-pinned review_attestation event (x-e703, Phase 2).
 #
 # This is the single producer surface for the config.review.reviewers gate: a
-# local reviewer (sigma | code-review | declare) that leaves NO GitHub review
-# object emits this event so `fno-agents loop-check` can read it as gate
-# evidence. loop-check head-pins on the CURRENT HEAD - a pass on a prior commit
+# local reviewer that leaves NO GitHub review object emits this event so
+# `fno-agents loop-check` can read it as gate evidence. The reviewer name is
+# NOT an allowlist here - a project-registered reviewer
+# (config.review.reviewer_registry, x-a534) attests through this same helper,
+# which is why the registry needed no new producer machinery. loop-check head-pins on the CURRENT HEAD - a pass on a prior commit
 # stops counting the moment a new commit lands, so this MUST run after the
 # reviewed commit is the tip.
 #
 # Usage: emit-attestation.sh <reviewer> [verdict]
-#   <reviewer>  sigma | code-review | declare  (a leading '/' is stripped)
+#   <reviewer>  a built-in (sigma | code-review | declare) or any name declared
+#               in config.review.reviewer_registry (a leading '/' is stripped)
 #   [verdict]   pass (default) | fail
 set -euo pipefail
 
-reviewer="${1:?reviewer name required (sigma|code-review|declare)}"
+reviewer="${1:?reviewer name required: a built-in (sigma|code-review|declare) or a config.review.reviewer_registry name}"
 verdict="${2:-pass}"
 while [[ "$reviewer" == /* ]]; do reviewer="${reviewer#/}"; done # strip ALL leading slashes (parity with both parsers' lstrip / trim_start_matches)
 

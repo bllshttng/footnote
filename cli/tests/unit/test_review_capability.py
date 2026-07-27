@@ -103,14 +103,13 @@ def test_a_non_claude_harness_is_unverifiable(isolated: Path):
     assert not v.blocks_autonomy
 
 
-def test_a_plugin_qualified_name_is_unverifiable(isolated: Path):
-    """The plugin cache is versioned and marketplace-shaped; footnote does not
-    read it, so a `plugin:skill` name degrades rather than being called absent."""
+def test_a_qualified_key_does_not_decide_resolvability(isolated: Path):
+    """The INVOCATION decides, not the key. A `:` in the registry key with a
+    plain, installed invocation must still resolve - the qualified-name
+    degradation keys off the command footnote would actually run."""
     _install(isolated / "project", "my-security-skill")
-    registry = {"fno:review": SKILL}
-    v = resolve_reviewers(["fno:review"], _claude(), registry)[0]
-    assert v.status == "unverifiable"
-    assert not v.blocks_autonomy
+    v = resolve_reviewers(["fno:review"], _claude(), {"fno:review": SKILL})[0]
+    assert v.status == "satisfiable", v.reason
 
 
 def test_the_invocation_rung_is_printed(isolated: Path):
@@ -120,6 +119,58 @@ def test_the_invocation_rung_is_printed(isolated: Path):
     line = _resolve().line()
     assert "[invocation:" in line
     assert "asserts nothing about its verdict" in line
+
+
+def test_the_skill_id_comes_from_the_invocation_not_the_registry_key(
+    isolated: Path,
+):
+    """codex P2: nothing constrains the key to equal the skill name, and
+    `invocation` is documented as the exact command. Keying the probe on the key
+    refuses a session over a skill that IS installed."""
+    _install(isolated / "project", "my-security-skill")
+    registry = {"security-review": SKILL}  # key != invocation
+    v = resolve_reviewers(["security-review"], _claude(), registry)[0]
+    assert v.status == "satisfiable", v.reason
+
+
+def test_an_argument_bearing_invocation_resolves_its_first_token(isolated: Path):
+    _install(isolated / "project", "my-security-skill")
+    d = ReviewerDescriptor(
+        kind="harness-skill",
+        requires="skill",
+        invocation="/my-security-skill --strict",
+        asserts="invocation",
+    )
+    v = resolve_reviewers(["sec"], _claude(), {"sec": d})[0]
+    assert v.status == "satisfiable", v.reason
+
+
+def test_a_plugin_qualified_invocation_under_a_plain_key_is_unverifiable(
+    isolated: Path,
+):
+    """The qualified form lives in the invocation, so a plain key must not make
+    it look locally resolvable."""
+    _install(isolated / "project", "my-security-skill")
+    d = ReviewerDescriptor(
+        kind="harness-skill",
+        requires="skill",
+        invocation="/fno:review",
+        asserts="invocation",
+    )
+    v = resolve_reviewers(["myreview"], _claude(), {"myreview": d})[0]
+    assert v.status == "unverifiable"
+    assert not v.blocks_autonomy
+
+
+def test_a_blank_invocation_falls_back_to_the_key(isolated: Path):
+    """A malformed descriptor degrades to the old behavior rather than
+    probing an empty skill name."""
+    _install(isolated / "project", "fallback-skill")
+    d = ReviewerDescriptor(
+        kind="harness-skill", requires="skill", invocation="  ", asserts="invocation"
+    )
+    v = resolve_reviewers(["fallback-skill"], _claude(), {"fallback-skill": d})[0]
+    assert v.status == "satisfiable", v.reason
 
 
 def test_an_unregistered_name_stays_unknown(isolated: Path):

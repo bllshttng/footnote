@@ -133,9 +133,14 @@ invocation = "/my-security-skill"
 asserts = "invocation"
 ```
 
-**Rung one: emit nothing.** `asserts = "invocation"` proves your skill ran at the reviewed commit and claims nothing about its verdict.
+**Rung one: emit no findings.** `asserts = "invocation"` proves your skill ran at the reviewed commit and claims nothing about its verdict.
 That is a forcing function, not a review.
 footnote does not parse skill output and will not pretend otherwise: a per-skill output contract it cannot enforce would fail by misreading a "PASS" and clearing a real gate.
+
+The attestation itself is still emitted - "emit nothing" means your skill reports no *findings*, not that the gate clears by itself.
+Nothing witnesses an invocation implicitly.
+The `/target` session runs your `invocation` and then `bash skills/review/scripts/emit-attestation.sh <name>` on the final HEAD, exactly as it does for `code-review` ([ship-and-promise.md](../target/references/ship-and-promise.md)).
+That helper takes any reviewer name, which is why a registered reviewer needs no producer machinery of its own.
 
 **Rung two: emit your findings.** Call `fno annotate add -m "<finding>" --node <id>` and the gate becomes real.
 An unaddressed blocking finding holds the loop until someone resolves it, independently of any attestation, and it needs no new footnote machinery on your side.

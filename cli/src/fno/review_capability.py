@@ -220,6 +220,23 @@ def _skill_roots(cwd: Optional[Path] = None) -> list[Path]:
     return [Path.home() / ".claude" / "skills", base / ".claude" / "skills"]
 
 
+def _skill_id(descriptor: ReviewerDescriptor, name: str) -> str:
+    """The skill name to resolve, derived from the descriptor's INVOCATION.
+
+    Not the registry key. `invocation` is documented as the exact command that
+    satisfies the gate and nothing constrains the key to match it, so a project
+    registering `security-review` with `invocation = "/my-security-skill"` would
+    otherwise have init glob `.claude/skills/security-review/SKILL.md` and refuse
+    a skill that IS installed under its real name. It also means a
+    plugin-qualified invocation is seen as qualified even under a plain key.
+
+    Falls back to the key for an invocation with no leading token, so a
+    malformed descriptor degrades to the old behavior rather than probing "".
+    """
+    head = descriptor.invocation.strip().split(maxsplit=1)
+    return head[0].lstrip("/") if head and head[0].strip("/") else name
+
+
 def _resolve_skill(name: str, session: SessionCapability) -> tuple[Status, str]:
     """`requires: skill` - is the named skill resolvable on this harness?
 
@@ -291,7 +308,7 @@ def _resolve_one(
         )
 
     if descriptor.requires == "skill":
-        return verdict(*_resolve_skill(name, session))
+        return verdict(*_resolve_skill(_skill_id(descriptor, name), session))
 
     if descriptor.requires == "subagent-dispatch":
         if session.harness in _SUBAGENT_DISPATCH_HARNESSES:
