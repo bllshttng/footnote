@@ -906,7 +906,7 @@ struct View {
     /// modal's set-active key; `None` = the default account (no flag).
     active_account: Option<String>,
     /// (x-84d7) The Connections modal (MENU -> connections): a stateful overlay
-    /// listing provider accounts + combos, driving the `fno providers` CLI.
+    /// listing provider accounts + combos, driving the `fno config accounts` CLI.
     /// `Some` while open; stdin diverts to [`connections_keys`]. Its reads run
     /// off the UI loop via the `conn_*` triad below (the needs-fold idiom).
     connections: Option<crate::connections_view::ConnectionsView>,

@@ -1,6 +1,6 @@
 //! The mux Connections modal (x-84d7): a stateful overlay listing managed
 //! provider accounts + combos, driving register/use/remove/add and combo-order
-//! edits through the `fno providers` CLI. The UI is a thin wrapper over that CLI
+//! edits through the `fno config accounts` CLI. The UI is a thin wrapper over that CLI
 //! - it never writes provider records, combos, or runtime state directly (one
 //! writer). Opened from the sideline MENU (`AuxAction::OpenConnections`).
 //!
@@ -23,7 +23,7 @@ use crate::server::fno_bin;
 /// never blocks the UI loop.
 const READ_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// One provider record, as emitted by `fno providers list -J` (task 1.1).
+/// One provider record, as emitted by `fno config accounts list -J` (task 1.1).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Account {
     pub id: String,
@@ -48,7 +48,7 @@ fn unknown_headroom() -> String {
     "unknown".to_string()
 }
 
-/// One combo, as emitted by `fno providers combos list -J` (task 1.1 added the
+/// One combo, as emitted by `fno config accounts combos list -J` (task 1.1 added the
 /// `active` field).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ComboRow {
@@ -559,7 +559,7 @@ impl ConnectionsView {
         self.acting = true;
         self.notice = None;
         ConnIntent::Run(vec![
-            "providers".into(),
+            "config".into(), "accounts".into(),
             "combos".into(),
             "update".into(),
             name,
@@ -591,7 +591,7 @@ impl ConnectionsView {
         self.acting = true;
         self.notice = None;
         ConnIntent::Run(vec![
-            "providers".into(),
+            "config".into(), "accounts".into(),
             "combos".into(),
             "use".into(),
             name,
@@ -610,7 +610,7 @@ impl ConnectionsView {
         let name = combo.name.clone();
         self.confirm = Some(PendingConfirm {
             label: format!("remove combo {name}? (Enter=yes, any key=no)"),
-            argv: vec!["providers".into(), "combos".into(), "remove".into(), name],
+            argv: vec!["config".into(), "accounts".into(), "combos".into(), "remove".into(), name],
         });
         ConnIntent::Redraw
     }
@@ -654,7 +654,7 @@ impl ConnectionsView {
                     self.acting = true;
                     self.notice = None;
                     ConnIntent::Run(vec![
-                        "providers".into(),
+                        "config".into(), "accounts".into(),
                         "combos".into(),
                         "add".into(),
                         ci.name,
@@ -691,7 +691,7 @@ impl ConnectionsView {
         let id = acct.id.clone();
         self.acting = true;
         self.notice = None;
-        ConnIntent::Run(vec!["providers".into(), "use".into(), id])
+        ConnIntent::Run(vec!["config".into(), "accounts".into(), "use".into(), id])
     }
 
     /// `s`: set the selected account as the session-local active account for
@@ -738,7 +738,7 @@ impl ConnectionsView {
         let id = acct.id.clone();
         self.confirm = Some(PendingConfirm {
             label: format!("remove account {id}? (Enter=yes, any key=no)"),
-            argv: vec!["providers".into(), "remove".into(), id],
+            argv: vec!["config".into(), "accounts".into(), "remove".into(), id],
         });
         ConnIntent::Redraw
     }
@@ -753,7 +753,7 @@ impl ConnectionsView {
         // A pending row: finalize its login into a managed record.
         if let Some(p) = self.selected_pending().cloned() {
             let argv = vec![
-                "providers".into(),
+                "config".into(), "accounts".into(),
                 "register".into(),
                 p.id.clone(),
                 "--cli".into(),
@@ -779,7 +779,7 @@ impl ConnectionsView {
             return ConnIntent::Redraw;
         }
         let argv = vec![
-            "providers".into(),
+            "config".into(), "accounts".into(),
             "register".into(),
             acct.id.clone(),
             "--cli".into(),
@@ -935,7 +935,7 @@ impl ConnectionsView {
         self.acting = true;
         self.notice = None;
         ConnIntent::Run(vec![
-            "providers".into(),
+            "config".into(), "accounts".into(),
             "add".into(),
             w.id,
             "--cli".into(),
@@ -1175,13 +1175,13 @@ fn pad_block(mut lines: Vec<String>) -> Vec<String> {
 
 // ── async reads (fail-open shell-outs, the needs_overlay idiom) ─────────────
 
-/// Parse `fno providers list -J` stdout. `None` on unparseable output (torn
+/// Parse `fno config accounts list -J` stdout. `None` on unparseable output (torn
 /// stdout degrades the read rather than crashing the modal).
 pub fn parse_accounts(stdout: &[u8]) -> Option<Vec<Account>> {
     serde_json::from_slice(stdout).ok()
 }
 
-/// Parse `fno providers combos list -J` stdout.
+/// Parse `fno config accounts combos list -J` stdout.
 pub fn parse_combos(stdout: &[u8]) -> Option<Vec<ComboRow>> {
     serde_json::from_slice(stdout).ok()
 }
@@ -1192,8 +1192,8 @@ pub fn parse_combos(stdout: &[u8]) -> Option<Vec<ComboRow>> {
 /// partial render would be a silent lie.
 pub async fn load_all() -> ReadOutcome {
     let (acc, com) = tokio::join!(
-        read_json(&["providers", "list", "-J"]),
-        read_json(&["providers", "combos", "list", "-J"]),
+        read_json(&["config", "accounts", "list", "-J"]),
+        read_json(&["config", "accounts", "combos", "list", "-J"]),
     );
     let accounts = match acc {
         Ok(bytes) => match parse_accounts(&bytes) {
@@ -1527,7 +1527,7 @@ mod tests {
         let intent = v.on_key(b'u');
         assert_eq!(
             intent,
-            ConnIntent::Run(vec!["providers".into(), "use".into(), "ccr".into()])
+            ConnIntent::Run(vec!["config".into(), "accounts".into(), "use".into(), "ccr".into()])
         );
         assert!(v.acting); // single-flight guard armed
     }
@@ -1564,7 +1564,7 @@ mod tests {
         let intent = v.on_key(b'\r');
         assert_eq!(
             intent,
-            ConnIntent::Run(vec!["providers".into(), "remove".into(), "ccr".into()])
+            ConnIntent::Run(vec!["config".into(), "accounts".into(), "remove".into(), "ccr".into()])
         );
         assert!(v.confirm.is_none());
     }
@@ -1711,7 +1711,7 @@ mod tests {
             intent,
             ConnIntent::RunEnv {
                 argv: vec![
-                    "providers".into(),
+                    "config".into(), "accounts".into(),
                     "register".into(),
                     "ccm2".into(),
                     "--cli".into(),
@@ -1753,7 +1753,7 @@ mod tests {
         let intent = v.on_key(b'\r');
         match intent {
             ConnIntent::Run(argv) => {
-                assert_eq!(argv[0..2], ["providers", "add"]);
+                assert_eq!(argv[0..3], ["config", "accounts", "add"]);
                 assert!(argv.contains(&"api_key".to_string()));
                 assert!(argv.iter().any(|a| a.contains("ANTHROPIC_BASE_URL=")));
                 assert!(argv.iter().any(|a| a == "ANTHROPIC_API_KEY=sk-abc"));
@@ -1808,7 +1808,7 @@ mod tests {
         assert_eq!(
             intent,
             ConnIntent::Run(vec![
-                "providers".into(),
+                "config".into(), "accounts".into(),
                 "combos".into(),
                 "update".into(),
                 "main".into(),
@@ -1855,7 +1855,7 @@ mod tests {
         assert_eq!(
             intent,
             ConnIntent::Run(vec![
-                "providers".into(),
+                "config".into(), "accounts".into(),
                 "combos".into(),
                 "use".into(),
                 "main".into()
@@ -1894,7 +1894,7 @@ mod tests {
         assert_eq!(
             intent,
             ConnIntent::Run(vec![
-                "providers".into(),
+                "config".into(), "accounts".into(),
                 "combos".into(),
                 "remove".into(),
                 "main".into()
@@ -1914,7 +1914,7 @@ mod tests {
         assert_eq!(
             intent,
             ConnIntent::Run(vec![
-                "providers".into(),
+                "config".into(), "accounts".into(),
                 "combos".into(),
                 "add".into(),
                 "backup".into(),
