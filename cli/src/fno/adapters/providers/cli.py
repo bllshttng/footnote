@@ -581,6 +581,26 @@ def register_provider(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
 
+    # Refuse a credential another account already holds, BEFORE writing a blob.
+    # Two captures taken while the same account was signed in file one credential
+    # under two ids, and every later per-account decision is then arithmetic on a
+    # duplicate. Digests only - no token or fragment reaches stdout/stderr.
+    holder = managed.duplicate_credential_holder(
+        managed._read_slot_blob(record.cli), exclude_id=record.id
+    )
+    if holder is not None:
+        typer.echo(
+            f"error: the current {record.cli} login is already registered as "
+            f"'{holder}'; registering it again as '{record.id}' would store one "
+            f"credential under two ids.\n"
+            f"  sign into the {record.id} account first:  {record.cli} /logout && "
+            f"{record.cli} /login\n"
+            f"  or give it its own dir:  fno providers register {record.id} "
+            f"--config-dir ~/.claude-{record.id}",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     # Snapshot the current login FIRST - refuse cleanly if nothing to capture.
     try:
         adir = managed.snapshot_current(record)
