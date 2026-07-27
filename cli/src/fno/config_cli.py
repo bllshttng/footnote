@@ -295,12 +295,79 @@ def _repo_root() -> Path:
     return Path.cwd()
 
 
+def _report_review_capability(json_out: bool = False) -> int:
+    """`fno config doctor --review`: the diagnostic twin of the init refusal.
+
+    Reports each configured reviewer as satisfiable, needs-operator, or
+    unavailable. Those three stay distinct on purpose: a `human`-kind reviewer
+    in an unattended run is correctly unsatisfiable, NOT a misconfiguration, and
+    collapsing the two would teach an operator to "fix" a valid config.
+
+    Exit 0 when every reviewer can run here, 1 otherwise. Diagnostic only - it
+    never writes, and it never proposes `declare` as the remedy.
+    """
+    import json as _json
+
+    from fno.config import load_settings
+    from fno.review_capability import detect_session, resolve_reviewers
+
+    session = detect_session()
+    reviewers = list(load_settings().review.reviewers or [])
+    verdicts = resolve_reviewers(reviewers, session)
+    blocked = [v for v in verdicts if v.blocks_autonomy]
+
+    if json_out:
+        typer.echo(
+            _json.dumps(
+                {
+                    "harness": session.harness,
+                    "substrate": session.substrate,
+                    "attended": session.attended,
+                    "reviewers": [
+                        {
+                            "name": v.name,
+                            "status": v.status,
+                            "kind": v.descriptor.kind,
+                            "requires": v.descriptor.requires,
+                            "asserts": v.descriptor.asserts,
+                            "invocation": v.descriptor.invocation,
+                            "reason": v.reason,
+                        }
+                        for v in verdicts
+                    ],
+                }
+            )
+        )
+        return 1 if blocked else 0
+
+    typer.echo(f"review gate: {session.describe()} attended={session.attended}")
+    if not reviewers:
+        typer.echo("  config.review.reviewers is empty - no local reviewers gate.")
+        return 0
+    for v in verdicts:
+        typer.echo(f"  {v.line()}")
+    if blocked:
+        typer.echo("")
+        typer.echo(
+            "This gate is fail-closed. Change config.review.reviewers, or run "
+            "attended; `declare` is never substituted for you."
+        )
+    return 1 if blocked else 0
+
+
 @app.command("doctor")
 def doctor_cmd(
     post_merge: bool = typer.Option(
         False,
         "--post-merge",
         help="Report this repo's post-merge config readiness (read-only).",
+    ),
+    review: bool = typer.Option(
+        False,
+        "--review",
+        help="Report whether every config.review.reviewers entry can actually "
+        "run in this session (read-only). Diagnostic twin of the refusal "
+        "`fno target init` performs.",
     ),
     json_out: bool = typer.Option(
         False,
@@ -313,10 +380,15 @@ def doctor_cmd(
 
     With ``--post-merge`` (or ``--json``), instead report whether
     ``config.post_merge.parking_lot_path`` is set for this repo - the gate the
-    /fno:pr merged ritual needs. Bare ``fno config doctor`` runs the path
-    diagnostic and appends a one-line post-merge readiness summary.
+    /fno:pr merged ritual needs. With ``--review``, report whether every
+    configured local reviewer can run in this session. Bare ``fno config
+    doctor`` runs the path diagnostic and appends a one-line post-merge
+    readiness summary.
     """
     import json as _json
+
+    if review:
+        raise typer.Exit(_report_review_capability(json_out=json_out))
 
     if post_merge or json_out:
         verdict = post_merge_readiness(_repo_root())

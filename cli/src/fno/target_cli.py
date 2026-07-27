@@ -73,6 +73,39 @@ def _resolve_init_script() -> Path:
     return resolve_plugin_script(_INIT_RELPATH)
 
 
+def _refuse_unsatisfiable_reviewers() -> None:
+    """Refuse a `config.review.reviewers` gate nothing here can satisfy (x-cdc7).
+
+    The gate is fail-closed, so a reviewer that cannot run in this harness and
+    substrate wedges the session at the stop gate AFTER the work is done. That
+    is where PR #618 lost fifteen turns. Resolving it here converts the wedge
+    into a refusal before anything is built. Read-only; no state is written.
+
+    Degrades to a no-op when the config cannot be read at all - a repo with no
+    reviewers configured must not be blocked by this check failing. That is
+    distinct from a capability probe that errors on a CONFIGURED reviewer, which
+    refuses (see `_resolve_one`): there, guessing "available" is the wedge.
+    """
+    try:
+        from fno.config import load_settings
+        from fno.review_capability import (
+            detect_session,
+            refusal_message,
+            resolve_reviewers,
+        )
+
+        reviewers = list(load_settings().review.reviewers or [])
+        if not reviewers:
+            return
+        session = detect_session()
+        message = refusal_message(resolve_reviewers(reviewers, session), session)
+    except Exception:  # noqa: BLE001 - a broken probe must not block bootstrap
+        return
+    if message:
+        typer.echo(message, err=True)
+        raise typer.Exit(code=2)
+
+
 _SIZE_ORDER = {"S": 0, "M": 1, "L": 2}
 
 
@@ -662,6 +695,8 @@ def init(
             err=True,
         )
         raise typer.Exit(code=2)
+
+    _refuse_unsatisfiable_reviewers()
 
     script_path = _resolve_init_script()
     if not script_path.is_file():

@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from fno.config import _RESOLVABLE_REVIEWERS, ReviewerDescriptor, load_settings
 
@@ -86,3 +87,52 @@ def test_validator_rejection_message_lists_the_names(
             "schema_version: 1\nconfig:\n  review:\n    reviewers: [teleport]\n",
         )
     assert "['code-review', 'declare', 'sigma']" in str(exc.value)
+
+
+# --- `fno config doctor --review`, the diagnostic twin of the init refusal ---
+
+
+def _doctor_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reviewers: str, env: dict):
+    cfg = tmp_path / "settings.yaml"
+    cfg.write_text(f"schema_version: 1\nconfig:\n  review:\n    reviewers: {reviewers}\n")
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID",
+                "GEMINI_SESSION_ID", "TARGET_UNATTENDED", "FNO_BG", "FNO_AGENT_SELF"):
+        monkeypatch.delenv(var, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    load_settings.cache_clear()
+    from fno.cli import app
+
+    return CliRunner().invoke(app, ["config", "doctor", "--review"])
+
+
+def test_doctor_review_reports_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    r = _doctor_review(tmp_path, monkeypatch, "[sigma]", {"CLAUDE_CODE_SESSION_ID": "s1"})
+    assert r.exit_code == 0
+    assert "satisfiable: sigma" in r.output
+
+
+def test_doctor_review_reports_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    r = _doctor_review(
+        tmp_path, monkeypatch, "[sigma]", {"CODEX_THREAD_ID": "t1", "TARGET_UNATTENDED": "1"}
+    )
+    assert r.exit_code == 1
+    assert "unavailable: sigma" in r.output
+    assert "harness=codex substrate=headless" in r.output
+    assert "`declare` is never substituted for you" in r.output
+
+
+def test_doctor_review_marks_declare_as_self_cert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC5: the surface that prints `declare` says what it asserts."""
+    r = _doctor_review(tmp_path, monkeypatch, "[declare]", {"CLAUDE_CODE_SESSION_ID": "s1"})
+    assert r.exit_code == 0
+    assert "asserts no review evidence" in r.output
+
+
+def test_doctor_review_empty_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    r = _doctor_review(tmp_path, monkeypatch, "[]", {"CLAUDE_CODE_SESSION_ID": "s1"})
+    assert r.exit_code == 0
+    assert "no local reviewers gate" in r.output
