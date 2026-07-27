@@ -141,15 +141,21 @@ fn prune_dry_run_writes_nothing() {
 /// dispatch, same flags, same output as the canonical family.
 #[test]
 fn retired_squad_spelling_prunes_identically() {
-    let canonical = Scratch::new("alias-canonical", ORPHAN_NAMED_SURVIVING);
-    let retired = Scratch::new("alias-retired", ORPHAN_NAMED_SURVIVING);
+    // One scratch for both spellings: --dry-run writes nothing, so the second
+    // run sees the same store as the first and any difference in output is the
+    // alias, not the fixture.
+    let s = Scratch::new("alias", ORPHAN_NAMED_SURVIVING);
     let args = ["prune", "--dry-run", "--include-named", "--json"];
 
-    let (ok, want, stderr) = canonical.run_family("workspace", &args, false);
+    let (ok, want, stderr) = s.run_family("workspace", &args, false);
     assert!(ok, "canonical spelling exited non-zero: {stderr}\n{want}");
-    let (ok, got, stderr) = retired.run_family("squad", &args, false);
+    let (ok, got, stderr) = s.run_family("squad", &args, false);
     assert!(ok, "retired spelling exited non-zero: {stderr}\n{got}");
     assert_eq!(got, want, "the alias must dispatch to the same prune");
+    assert!(
+        want.contains("\"pruned_count\":2"),
+        "the fixture must actually prune something, or equality is vacuous: {want}"
+    );
 }
 
 /// A bare family verb and an unknown verb are both usage (exit 2), and the
