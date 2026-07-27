@@ -469,12 +469,23 @@ def test_merge_lock_released_when_merge_body_raises(enabled, monkeypatch, tmp_pa
 # ---------------------------------------------------------------------------
 
 
+def _rollup(*conclusions):
+    return {
+        "state": "OPEN",
+        "statusCheckRollup": [
+            {"name": f"c{i}", "status": "COMPLETED", "conclusion": c}
+            for i, c in enumerate(conclusions)
+        ],
+    }
+
+
 class _AutoMergeRejectingRun(FakeRun):
     """gh rejects ``--auto`` (repo feature off) but accepts a plain merge."""
 
-    def __init__(self, **kw):
+    def __init__(self, *, rollup=None, **kw):
         super().__init__(**kw)
         self.merge_cmds: list[list[str]] = []
+        self.rollup = rollup if rollup is not None else _rollup("SUCCESS", "SUCCESS")
 
     def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
         cmd = list(cmd)
@@ -488,27 +499,32 @@ class _AutoMergeRejectingRun(FakeRun):
                     "(enablePullRequestAutoMerge)",
                 )
             return Result(0, "Merged pull request #42", "")
+        if cmd[:3] == ["gh", "pr", "view"] and "state,statusCheckRollup" in cmd:
+            return Result(0, json.dumps(self.rollup) + "\n", "")
         return super().__call__(
             cmd, cwd=cwd, env=env, input_text=input_text, timeout=timeout
         )
 
 
-def test_auto_merge_unsupported_repo_falls_back_to_an_immediate_merge(
-    enabled, monkeypatch, capsys, tmp_path
-):
-    """``--auto`` is a request to QUEUE; a repo without the feature rejects it.
-
-    ``require_checks_pass`` means "do not merge red", and the preflight already
-    verified the checks - so losing the queue is not a reason to refuse. Without
-    this fallback the verb cannot merge at all on such a repo, and the raw gh
-    escape hatch is hook-blocked by design, leaving no path.
-    """
-    (tmp_path / ".fno").mkdir()
+def _checks_enabled(monkeypatch):
     monkeypatch.setattr(
         _merge,
         "_load_auto_merge",
         lambda: AutoMergeBlock(enabled=True, require_checks_pass=True),
     )
+
+
+def test_auto_merge_unsupported_repo_merges_when_checks_are_green(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """``--auto`` is a request to QUEUE; a repo without the feature rejects it.
+
+    The retry is only safe because the checks are read here first - ``--auto``
+    is the ONLY thing enforcing require_checks_pass, so dropping it blind would
+    turn "do not merge red" into "merge anything".
+    """
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
     fake = _AutoMergeRejectingRun(toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
 
@@ -517,23 +533,72 @@ def test_auto_merge_unsupported_repo_falls_back_to_an_immediate_merge(
     assert obj["outcome"] == "merged"
     assert "auto-merge disabled" in obj["reason"]
 
-    # Exactly two attempts: the queueing one, then the immediate retry.
     assert len(fake.merge_cmds) == 2
     assert "--auto" in fake.merge_cmds[0]
     assert "--auto" not in fake.merge_cmds[1]
-    # The retry keeps every other flag (strategy, delete-branch).
     assert fake.merge_cmds[1] == [c for c in fake.merge_cmds[0] if c != "--auto"]
+
+
+def test_auto_merge_unsupported_repo_refuses_a_red_pr(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """The load-bearing case: losing the queue must not lose the red guard."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    fake = _AutoMergeRejectingRun(
+        rollup=_rollup("SUCCESS", "FAILURE"), toplevel=str(tmp_path)
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
+    obj = _last_json(capsys, stream="err")
+    assert obj["outcome"] == "failed"
+    assert "red" in obj["reason"]
+    # Only the queueing attempt ran; the immediate merge was never issued.
+    assert len(fake.merge_cmds) == 1
+    assert "--auto" in fake.merge_cmds[0]
+
+
+def test_auto_merge_unsupported_repo_holds_on_pending_checks(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """Pending is a hold, not a failure: the PR is still merge-eligible later."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    rollup = {
+        "state": "OPEN",
+        "statusCheckRollup": [
+            {"name": "a", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"name": "b", "status": "IN_PROGRESS", "conclusion": ""},
+        ],
+    }
+    fake = _AutoMergeRejectingRun(rollup=rollup, toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    assert _last_json(capsys)["outcome"] == "held"
+    assert len(fake.merge_cmds) == 1
+
+
+def test_auto_merge_unsupported_repo_fails_closed_on_an_unreadable_rollup(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """No verdict is not a green light."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    fake = _AutoMergeRejectingRun(rollup={}, toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
+    assert "unknown" in _last_json(capsys, stream="err")["reason"]
+    assert len(fake.merge_cmds) == 1
 
 
 def test_a_genuine_merge_failure_is_not_retried_without_auto(
     enabled, monkeypatch, capsys, tmp_path
 ):
     """Only the capability refusal retries; a real failure stands as-is."""
-    monkeypatch.setattr(
-        _merge,
-        "_load_auto_merge",
-        lambda: AutoMergeBlock(enabled=True, require_checks_pass=True),
-    )
+    _checks_enabled(monkeypatch)
     fake = FakeRun(gh_merge=Result(1, "", "branch is protected"), toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
 

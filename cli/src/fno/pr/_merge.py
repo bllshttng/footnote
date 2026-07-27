@@ -799,6 +799,33 @@ _AUTO_MERGE_UNSUPPORTED = re.compile(
 )
 
 
+def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict]:
+    """CI verdict for the PR, sharing `fno pr status`'s definition of green.
+
+    Borrows `verdict_for` rather than hand-rolling a statusCheckRollup read: a
+    second opinion on what "green" means is how two surfaces drift apart. The
+    fetch goes through this module's own `_gh` so it sits on the same process
+    seam as every other call here. An unreadable rollup is ``unknown``, which
+    the caller treats as not-green (fail closed).
+    """
+    from fno.pr._status import verdict_for
+
+    try:
+        res = _gh(
+            ["pr", "view", str(pr_number), "--json", "state,statusCheckRollup"], repo
+        )
+    except ToolMissing:
+        return ("unknown", {})
+    if not res.ok or not (res.stdout or "").strip():
+        return ("unknown", {})
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return ("unknown", {})
+    verdict, _exit, counts = verdict_for(data.get("statusCheckRollup") or [])
+    return (verdict, counts)
+
+
 def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
     """Steps (3)-(4): build + run the gh merge and classify the outcome."""
     # (3) Build command.
@@ -832,12 +859,25 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
     first_line = output.splitlines()[0][:200] if output.strip() else ""
     if _AUTO_MERGE_UNSUPPORTED.search(output) and "--auto" in cmd:
         # `--auto` asks GitHub to QUEUE the merge until checks go green, and a
-        # repo without auto-merge enabled rejects the request outright. That is
-        # not a reason to refuse: require_checks_pass means "do not merge red",
-        # and _preflight already verified the checks. Retry the same merge
-        # immediately - the guard is satisfied, only the queueing is unavailable.
-        # Without this, `fno pr merge` cannot merge at all on such a repo, and
-        # the raw `gh pr merge` escape hatch is hook-blocked by design.
+        # repo without the auto-merge feature rejects the request outright.
+        # That is a repo-capability answer, not a verdict on the PR - but it
+        # cannot simply be retried without the flag, because `--auto` IS how
+        # require_checks_pass is enforced: no other guard in this file reads CI.
+        # Dropping it silently would turn "do not merge red" into "merge
+        # anything". So do here what GitHub would have done: read the checks,
+        # merge only on green, and refuse otherwise.
+        verdict, counts = _checks_verdict(pr_number, repo)
+        if verdict != "green":
+            _emit(
+                pr_number,
+                "held" if verdict == "pending" else "failed",
+                f"repo has auto-merge disabled so the merge cannot be queued, "
+                f"and checks are {verdict} ({counts}); "
+                f"require_checks_pass forbids merging without green",
+                strategy,
+                err=verdict not in ("pending",),
+            )
+            return 2 if verdict == "pending" else 1
         cmd_now = [arg for arg in cmd if arg != "--auto"]
         try:
             res = _gh(cmd_now, repo)
