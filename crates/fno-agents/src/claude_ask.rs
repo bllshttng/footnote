@@ -121,7 +121,7 @@ fn family1_truth_failure_detail(stdout: &[u8], stderr: &str) -> String {
 /// resolve, and a reaped claude session no longer does. The volume caller is
 /// `daemon::handle_list`, which probes EVERY registry row on every
 /// `fno agents list` with no gate at all - one dead row there produced a warn
-/// line per sweep and buried the four failures below that DO mean something is
+/// line per sweep and buried the other failures below that DO mean something is
 /// broken. A resolver crash is deliberately NOT this string
 /// (`session_truth.py` reports `resolver-error`) so it survives the filter.
 ///
@@ -3892,12 +3892,11 @@ mod tests {
     }
 
     #[test]
-    fn family1_truth_not_found_is_quiet_but_still_unresolved() {
-        // A non-claude handle (opencode `ses_*`) or a reaped claude session
-        // answers not-found on exit 13. It must still fail to resolve - the
-        // caller falls back to TruthLiveInjectFailed - but it must not warn:
-        // the caller only probes after locate_session already missed, so "gone"
-        // is the expected answer, and warning on it drowned the real failures.
+    fn family1_truth_nonzero_exit_is_unresolved_either_way() {
+        // Both a routine not-found and a genuine refusal fail to resolve, so
+        // silencing one never changes the verdict. This pins only that; the
+        // quiet/loud split itself is pinned by the predicate test above, which
+        // is the seam that actually fails when the behavior is reverted.
         let mut not_found = std::process::Command::new("sh");
         not_found.args([
             "-c",
