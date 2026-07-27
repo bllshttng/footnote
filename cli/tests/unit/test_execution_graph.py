@@ -104,6 +104,20 @@ def test_fan_in_barrier_when_two_predecessors():
     assert just["t"] == "branching"
 
 
+def test_resource_edge_skipped_when_ordering_serializes():
+    # a depends on b and both own the same file: ordering already serializes
+    # them, so a contradicting resource edge (which would form a cycle) is NOT
+    # emitted.
+    entries = [_entry("b", owns_files=["shared.py"]),
+               _entry("a", blocked_by=["b"], owns_files=["shared.py"])]
+    g = compile_graph("a", entries)
+    assert [e.kind for e in g.edges] == ["ordering"]
+    assert g.edges[0].src == "b" and g.edges[0].dst == "a"
+    # no edge pair points both ways
+    pairs = {(e.src, e.dst) for e in g.edges}
+    assert not any((dst, src) in pairs for src, dst in pairs)
+
+
 def test_data_edge_from_evidence_producer():
     entries = [
         _entry("prod", produces_evidence=["receipt"]),
@@ -195,3 +209,27 @@ def test_compile_root_absent_falls_back_to_serial():
     g = compile_graph("missing", [_entry("other")])
     assert g.collapsed is True
     assert g.root == "missing"
+
+
+def test_relevant_scope_is_order_independent():
+    # chain root(c) <- b <- a; scope must be {a,b,c} regardless of dict order.
+    from fno.graph.cli import _relevant_exec_scope
+
+    nodes = [_entry("a"), _entry("b", blocked_by=["a"]), _entry("c", blocked_by=["b"])]
+    forward = {e["id"]: e for e in nodes}
+    reverse = {e["id"]: e for e in reversed(nodes)}
+    assert _relevant_exec_scope("c", forward) == {"a", "b", "c"}
+    assert _relevant_exec_scope("c", forward) == _relevant_exec_scope("c", reverse)
+
+
+def test_relevant_scope_pulls_verifier_and_evidence():
+    from fno.graph.cli import _relevant_exec_scope
+
+    by_id = {
+        "impl": _entry("impl", verifier="check", requires_evidence=["r"]),
+        "check": _entry("check"),
+        "prod": _entry("prod", produces_evidence=["r"]),
+        "unrelated": _entry("unrelated"),
+    }
+    scope = _relevant_exec_scope("impl", by_id)
+    assert scope == {"impl", "check", "prod"}  # unrelated stays out

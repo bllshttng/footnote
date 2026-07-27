@@ -438,14 +438,40 @@ def compile_graph(root: str, entries: Sequence[dict]) -> ExecGraph:
 
         # ordering edges from blocked_by (dependency -> dependent)
         preds: dict[str, list[str]] = {nid: [] for nid in ids}
+        ordering_adj: dict[str, set[str]] = {nid: set() for nid in ids}
         for nid, e in by_id.items():
             for dep in (e.get("blocked_by") or []):
                 if dep in ids:
                     edges.append(ExecEdge(dep, nid, "ordering",
                                           f"{dep} must reach a terminal state before {nid} starts"))
                     preds[nid].append(dep)
+                    ordering_adj[dep].add(nid)
+
+        def _ordering_connected(a: str, b: str) -> bool:
+            """True if an ordering PATH already serializes a and b (either way).
+
+            A resource edge added against an existing ordering path would flip
+            an edge and create a cycle no consumer can schedule; when ordering
+            already serializes the pair the resource edge is redundant anyway.
+            """
+            for src, dst in ((a, b), (b, a)):
+                seen = {src}
+                stack = [src]
+                while stack:
+                    cur = stack.pop()
+                    if cur == dst:
+                        return True
+                    for nxt in ordering_adj[cur]:
+                        if nxt not in seen:
+                            seen.add(nxt)
+                            stack.append(nxt)
+            return False
 
         # resource edges: any two nodes owning a common file must serialize.
+        # Oriented low->high lexicographically (a strict total order, so the
+        # resource edges alone are always acyclic) and skipped entirely when an
+        # ordering path already serializes the pair (else the two directions
+        # would contradict and form a cycle).
         files_by: dict[str, set[str]] = {
             nid: set(by_id[nid].get("owns_files") or []) for nid in ids
         }
@@ -453,7 +479,7 @@ def compile_graph(root: str, entries: Sequence[dict]) -> ExecGraph:
         for i, a in enumerate(sorted_ids):
             for b in sorted_ids[i + 1:]:
                 shared = files_by[a] & files_by[b]
-                if shared:
+                if shared and not _ordering_connected(a, b):
                     f = sorted(shared)[0]
                     edges.append(ExecEdge(a, b, "resource",
                                           f"shared file {f}: writes serialized to avoid collision"))
