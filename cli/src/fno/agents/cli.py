@@ -2064,7 +2064,7 @@ def cmd_whoami(
     Exit 0 when a name is resolved; exit 3 ("not a registered mesh agent")
     for a human / top-level session with no mesh identity. Distinct from
     ``fno whoami`` (top-level), which reports operating CONTEXT
-    (fleet -> walker -> session -> provider), not the mesh name.
+    (fleet -> walker -> session -> harness), not the mesh name.
     """
     from fno.agents import whoami as whoami_mod
     from fno.agents.registry import RegistryVersionError, load_registry

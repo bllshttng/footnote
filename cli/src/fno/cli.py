@@ -180,7 +180,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     # Individual commands (plain functions wrapped as single-command apps) -
     "whoami": (
         "fno.agent.cli:whoami_command",
-        "Operating-stack summary: project + fleet + walker + session + provider.",
+        "Operating-stack summary: project + fleet + walker + session + harness.",
     ),
     "status": (
         "fno.agent.cli:status_command",
