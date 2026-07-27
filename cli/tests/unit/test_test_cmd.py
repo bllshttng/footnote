@@ -420,3 +420,15 @@ def test_smoke_discovered_steps_excludes_deferred(tmp_path: Path) -> None:
         tc._DISCOVERY_DEFERRED = original
     assert "tests/healthy.sh" in rels
     assert "tests/rotten.sh" not in rels
+
+
+def test_run_smoke_routes_through_the_discovered_steps_helper() -> None:
+    """_run_smoke builds its discovered steps via _smoke_discovered_steps (the
+    helper test_smoke_discovered_steps_excludes_deferred covers), so a regression
+    that re-inlines the comprehension and drops the _DISCOVERY_DEFERRED clause
+    cannot pass while the full gate silently re-admits a drained harness."""
+    import inspect
+
+    import fno.test_cmd as tc
+
+    assert "_smoke_discovered_steps" in inspect.getsource(tc._run_smoke)
