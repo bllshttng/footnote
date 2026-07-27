@@ -556,6 +556,7 @@ def test_native_codex_initial_free_text_receipt_is_unclaimed(
         model=None,
         harness=None,
         beastmode=False,
+        no_merge=False,
     )
 
     assert "node=unclaimed" in capsys.readouterr().out
@@ -640,6 +641,7 @@ def test_native_codex_retry_fails_closed_when_setup_fails(monkeypatch, tmp_path)
             model=None,
             harness=None,
             beastmode=False,
+            no_merge=False,
         )
 
     assert exc.value.exit_code == 2
@@ -673,6 +675,7 @@ def test_native_codex_resume_refuses_manifest_without_exact_node(monkeypatch, tm
             model=None,
             harness=None,
             beastmode=False,
+            no_merge=False,
         )
 
     assert exc.value.exit_code == 1
@@ -723,6 +726,7 @@ def test_native_codex_resume_preserves_exact_node_claim(
         model=None,
         harness=None,
         beastmode=False,
+        no_merge=False,
     )
 
     assert expected in capsys.readouterr().out
@@ -761,6 +765,7 @@ def test_native_codex_resume_refuses_foreign_exact_node_claim(monkeypatch, tmp_p
             model=None,
             harness=None,
             beastmode=False,
+            no_merge=False,
         )
 
     assert exc.value.exit_code == 1
@@ -794,6 +799,7 @@ def test_native_codex_free_text_resume_stays_unclaimed(monkeypatch, tmp_path, ca
         model=None,
         harness=None,
         beastmode=False,
+        no_merge=False,
     )
 
     assert "node=unclaimed" in capsys.readouterr().out
@@ -825,6 +831,7 @@ def test_native_codex_free_text_resume_refuses_malformed_manifest(
             model=None,
             harness=None,
             beastmode=False,
+            no_merge=False,
         )
 
     assert exc.value.exit_code == 1
@@ -1596,3 +1603,57 @@ def test_successor_claim_holder_generated_form(monkeypatch):
     )
     h = target_cli._successor_claim_holder()
     assert h.startswith("target-session:") and "-cl4242-" in h
+
+
+def test_no_merge_reaches_init_argv_on_codex_native_path(monkeypatch, tmp_path):
+    """--no-merge must reach init on EVERY path start can exit through.
+
+    The codex-native branch builds its own `target init` argv. It carried
+    --beastmode but not --no-merge, so `fno target start --no-merge <node>`
+    inside an app-owned worktree exited 0 and wrote auto_merge_approved: true
+    whenever config enabled it - a silent grant against an explicit refusal.
+    """
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    native = tmp_path / "native"
+    native.mkdir()
+    seen: list[list[str]] = []
+
+    monkeypatch.setattr(
+        target_cli, "_prepare_codex_native_branch", lambda cwd, node: "origin/main"
+    )
+    monkeypatch.setattr(
+        "fno.worktree._run_setup_worktree_hook", lambda repo, wt: (0, "")
+    )
+    monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_node_model",
+        lambda node, explicit=None, provider=None: (None, "provider-default"),
+    )
+
+    def fake_run(args, **kwargs):
+        seen.append(list(args))
+        (native / ".fno").mkdir(exist_ok=True)
+        (native / ".fno" / "target-state.md").write_text("graph_node_id: null\n")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+
+    target_cli._start_codex_native(
+        canonical=canonical,
+        cwd=native,
+        node="x-e938",
+        plan_path=None,
+        size=None,
+        model=None,
+        harness=None,
+        beastmode=False,
+        no_merge=True,
+    )
+
+    init_argv = [a for a in seen if "init" in a]
+    assert init_argv, f"no target init invocation captured: {seen}"
+    assert any("--no-merge" in a for a in init_argv), (
+        f"--no-merge never reached target init: {init_argv}"
+    )
