@@ -75,9 +75,9 @@ fno agents spawn "review the current diff" --name reviewer \
 The workspace does not have to exist first: the first placement into a name creates it, so there is no separate create step. A blank name is an error rather than a silent fall back to the default.
 
 Migrating an older command: `--squad` is a hidden deprecated alias for `--workspace`.
-It still resolves, so rewrite the flag and move on.
-Do not pass both: the two runtimes disagree about which wins, and the default one is not the forgiving one.
-The Python fallback prefers `--workspace` regardless of order, while the default Rust runtime parses both spellings into the same slot, so whichever appears **last** takes effect and a trailing alias silently places the worker in the wrong workspace.
+It still resolves, and `--workspace` wins when both are passed, whatever the order.
+That holds on every path that can place a pane: a `--substrate pane` spawn is Python-owned, and a direct `fno-agents` pane spawn re-execs the Python CLI with the original arguments rather than resolving placement itself.
+Rewrite the flag anyway; passing both is just a half-finished migration.
 
 The lower-level equivalent avoids option punctuation entirely: `fno mux pane run workspace reviews split right echo ready`. It also accepts `--workspace` / `-s` and `--split` / `-x`.
 
