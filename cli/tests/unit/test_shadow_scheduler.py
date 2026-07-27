@@ -1,0 +1,175 @@
+"""Unit tests for the shadow-first bounded scheduler (x-24f7, Change 1).
+
+Covers `advance.schedule_shadow` and the shared `_classify_lane_candidate`: the
+read-only frontier decision report that emits selected / serialized / unevaluated
+verdicts with stable typed reasons and performs NO dispatch. The plan's ready-set
+shapes are each a test: empty, singleton, independent, file-colliding,
+same-domain, unknown-liveness (peer-lane), unevaluated (no file surface), and
+oversized (cap-bounded). `_ready_nodes` and the collision/in-flight seams are
+monkeypatched so the logic is tested without shelling `fno backlog ready`; the
+claims root is isolated to `tmp_path`.
+"""
+from __future__ import annotations
+
+import pytest
+
+from fno.backlog import advance
+from fno.claims.lanes import acquire_lane_slot
+
+
+def _nodes(*specs):
+    """Build ready-node summaries from (id, domain) pairs, each with a surface."""
+    return [
+        {"id": i, "domain": d, "title": i, "slug": i, "plan_path": f"/plans/{i}.md"}
+        for i, d in specs
+    ]
+
+
+class _Hit:
+    """Minimal stand-in for a collision hit (only with_node_id is read)."""
+
+    def __init__(self, with_node_id):
+        self.with_node_id = with_node_id
+
+
+@pytest.fixture(autouse=True)
+def _hermetic(monkeypatch):
+    """Default seams: every node has a real file surface, nothing collides, and
+    no live peer lanes or in-flight work. Each test overrides what it exercises.
+    """
+    import fno.graph.collision as collision
+
+    monkeypatch.setattr(collision, "has_file_surface", lambda p: True)
+    monkeypatch.setattr(collision, "resolve_plan_path", lambda p: p)
+    monkeypatch.setattr(advance, "_high_collision", lambda node, inflight: None)
+    monkeypatch.setattr(advance, "_live_lane_domains", lambda claims_root=None: set())
+    monkeypatch.setattr(advance, "_live_worked_entries", lambda claims_root=None: [])
+
+
+def _ready(monkeypatch, ready):
+    monkeypatch.setattr(
+        advance, "_ready_nodes", lambda project=None, mission=None: list(ready)
+    )
+
+
+def test_empty_ready_set(monkeypatch, tmp_path):
+    _ready(monkeypatch, [])
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert r["selected"] == [] and r["serialized"] == [] and r["unevaluated"] == []
+    assert r["decisions"] == []
+    assert r["effective_cap"] == 2
+
+
+def test_singleton_selected(monkeypatch, tmp_path):
+    _ready(monkeypatch, _nodes(("n-a", "code")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert [d["id"] for d in r["selected"]] == ["n-a"]
+    assert r["selected"][0]["verdict"] == "selected"
+    assert r["selected"][0]["reason"] == ""
+
+
+def test_independent_distinct_domains_up_to_cap(monkeypatch, tmp_path):
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs"), ("n-c", "infra")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert [d["id"] for d in r["selected"]] == ["n-a", "n-b"]
+    # third distinct-domain node is otherwise-selectable but past the cap
+    assert [(d["id"], d["reason"]) for d in r["serialized"]] == [("n-c", "cap-full")]
+
+
+def test_same_domain_is_serialized_with_reason(monkeypatch, tmp_path):
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "code")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert [d["id"] for d in r["selected"]] == ["n-a"]
+    assert r["serialized"] == [
+        {"id": "n-b", "slug": "n-b", "domain": "code",
+         "verdict": "serialized", "reason": "same-domain:code"}
+    ]
+
+
+def test_file_collision_is_serialized(monkeypatch, tmp_path):
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs")))
+    # n-b collides with in-flight n-a once n-a is selected.
+    monkeypatch.setattr(
+        advance, "_high_collision",
+        lambda node, inflight: _Hit("n-a") if node["id"] == "n-b" else None,
+    )
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert [d["id"] for d in r["selected"]] == ["n-a"]
+    assert [(d["id"], d["reason"]) for d in r["serialized"]] == [
+        ("n-b", "high-collision:n-a")
+    ]
+
+
+def test_no_file_surface_is_unevaluated(monkeypatch, tmp_path):
+    import fno.graph.collision as collision
+
+    # n-b states no comparable file surface -> its safety is unknown, so the
+    # conservative shadow report serializes it as unevaluated (not selected).
+    monkeypatch.setattr(
+        collision, "has_file_surface", lambda p: p != "/plans/n-b.md"
+    )
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert [d["id"] for d in r["selected"]] == ["n-a"]
+    assert [(d["id"], d["reason"]) for d in r["unevaluated"]] == [
+        ("n-b", "unevaluated:no-surface")
+    ]
+    assert r["serialized"] == []
+
+
+def test_missing_plan_path_is_unevaluated(monkeypatch, tmp_path):
+    ready = [{"id": "n-a", "domain": "code", "title": "n-a", "slug": "n-a"}]
+    _ready(monkeypatch, ready)
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert [(d["id"], d["reason"]) for d in r["unevaluated"]] == [
+        ("n-a", "unevaluated:no-surface")
+    ]
+
+
+def test_live_peer_lane_is_serialized(monkeypatch, tmp_path):
+    # A live peer lane already holds n-a -> it must not be re-selected.
+    acquire_lane_slot(max_lanes=3, lane_id="n-a", root=tmp_path)
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert [d["id"] for d in r["selected"]] == ["n-b"]
+    assert [(d["id"], d["reason"]) for d in r["serialized"]] == [("n-a", "peer-lane")]
+
+
+def test_oversized_ready_set_bounded_by_effective_cap(monkeypatch, tmp_path):
+    _ready(monkeypatch, _nodes(
+        ("n-a", "code"), ("n-b", "docs"), ("n-c", "infra"),
+        ("n-d", "ml"), ("n-e", "ops"),
+    ))
+    r = advance.schedule_shadow(99, claims_root=tmp_path)
+    assert r["effective_cap"] == 2  # hard-limited to the initial-rollout ceiling
+    assert r["requested_cap"] == 99
+    assert len(r["selected"]) == 2
+    assert all(d["reason"] == "cap-full" for d in r["serialized"])
+
+
+def test_cap_below_one_normalizes_to_one(monkeypatch, tmp_path):
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs")))
+    r = advance.schedule_shadow(0, claims_root=tmp_path)
+    assert r["effective_cap"] == 1
+    assert [d["id"] for d in r["selected"]] == ["n-a"]
+    assert [(d["id"], d["reason"]) for d in r["serialized"]] == [("n-b", "cap-full")]
+
+
+def test_ready_list_unreadable_fails_safe(monkeypatch, tmp_path):
+    def boom(project=None, mission=None):
+        raise RuntimeError("garbled backlog ready")
+
+    monkeypatch.setattr(advance, "_ready_nodes", boom)
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert r["note"] == "ready-unreadable"
+    assert r["selected"] == [] and r["decisions"] == []
+
+
+def test_decisions_cover_every_ready_node(monkeypatch, tmp_path):
+    ready = _nodes(("n-a", "code"), ("n-b", "code"), ("n-c", "docs"))
+    _ready(monkeypatch, ready)
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    # every ready node appears exactly once across the three buckets
+    assert len(r["decisions"]) == 3
+    ids = {d["id"] for d in r["decisions"]}
+    assert ids == {"n-a", "n-b", "n-c"}

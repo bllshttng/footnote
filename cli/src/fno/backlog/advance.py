@@ -558,20 +558,28 @@ def select_lane_fill(
                 nid = node["id"]
                 if nid in picked_ids:
                     continue
-                domain = node.get("domain") or _DOMAIN_UNSET
-                if domain in used_domains:
-                    continue
-                if find_lane_slot(nid, root=claims_root) is not None:
-                    continue  # a live peer lane already owns this node
-                hit = _high_collision(node, inflight)
-                if hit is not None:
-                    _LOG.warning(
-                        "lane-fill: skipping %s - high file collision with %s "
-                        "(shared: %s)",
-                        nid, hit.with_node_id, ", ".join(hit.shared_files[:5]),
-                    )
+                reason = _classify_lane_candidate(
+                    node, used_domains=used_domains, inflight=inflight,
+                    claims_root=claims_root,
+                )
+                # Live dispatch fails OPEN on an unevaluated node (no comparable
+                # file surface): it dispatches anyway, today's behavior. Only a
+                # concrete exclusion (same-domain / peer-lane / high-collision)
+                # holds it back. The shadow report is the conservative twin -
+                # it serializes the unevaluated node instead (schedule_shadow).
+                if reason is not None and not reason.startswith("unevaluated"):
+                    if reason.startswith("high-collision"):
+                        _LOG.warning("lane-fill: skipping %s - %s", nid, reason)
                     continue  # leave it ready; reversible, retried next round
-                candidate = (node, domain)
+                if reason is not None:
+                    # Unevaluated (no comparable file surface): dispatch anyway
+                    # (fail-open, today's behavior) but say so LOUDLY - a silent
+                    # pass would read as "gate clean" when it never ran.
+                    _LOG.warning(
+                        "lane-fill: %s file surface UNEVALUATED (%s) - "
+                        "dispatching anyway (fail-open)", nid, reason,
+                    )
+                candidate = (node, node.get("domain") or _DOMAIN_UNSET)
                 break
             if candidate is None:
                 break  # no distinct-domain, unclaimed node left
@@ -611,6 +619,173 @@ def select_lane_fill(
         raise
 
     return selected
+
+
+# The hard ceiling on live writers per project during the initial bounded
+# rollout (plan x-24f7 Change 3). Requested caps clamp up into [1, this]: a
+# value below one normalizes to one (never zero writers), and any larger
+# request is capped here until measured shadow evidence authorizes lifting it.
+# The shadow report applies and reports this bound so an operator sees exactly
+# the frontier the live scheduler will honor - it does NOT change live dispatch,
+# which still reads the raw configured cap (that gate is a separate change).
+_INITIAL_LIVE_CAP = 2
+
+
+def _classify_lane_candidate(
+    node: dict,
+    *,
+    used_domains: set[str],
+    inflight: list[dict],
+    claims_root: Optional[Path] = None,
+) -> Optional[str]:
+    """Classify one ready node for lane-fill. ``None`` = selectable, else a typed
+    exclusion reason. Read-only (acquires no slot): the SINGLE per-candidate
+    truth shared by :func:`select_lane_fill` (live) and :func:`schedule_shadow`
+    (the read-only report), so the two can never disagree about why a node is
+    held back. Duplicating this sequence into a second copy is the drift the
+    codebase's path-uniqueness rule exists to prevent.
+
+    Reason tokens (all stable, machine-readable):
+
+      ``same-domain:<domain>``   another live lane or an earlier pick this fill
+        already owns the node's domain (one lane per domain, LD#8).
+      ``peer-lane``              a live peer lane already holds this exact node.
+      ``high-collision:<id>``    a high-severity file overlap with in-flight work.
+      ``unevaluated:no-surface`` the plan states no comparable file surface, so
+        collision safety is UNKNOWN. This is a distinct class, not an exclusion:
+        live dispatch fails open on it (dispatches anyway); the shadow report is
+        conservative and serializes it with this diagnostic (plan Change 1).
+    """
+    from fno.claims.lanes import find_lane_slot
+
+    domain = node.get("domain") or _DOMAIN_UNSET
+    if domain in used_domains:
+        return f"same-domain:{domain}"
+    if find_lane_slot(node["id"], root=claims_root) is not None:
+        return "peer-lane"
+    # Unknown file state is its own verdict, not a silent pass: a node whose plan
+    # states no comparable surface cannot be collision-checked, so its safety is
+    # unevaluated rather than clean (plan Change 1: "serialize unknown ... state").
+    from fno.graph.collision import has_file_surface, resolve_plan_path
+
+    plan = node.get("plan_path")
+    if not plan or not has_file_surface(resolve_plan_path(plan)):
+        return "unevaluated:no-surface"
+    hit = _high_collision(node, inflight)
+    if hit is not None:
+        return f"high-collision:{hit.with_node_id}"
+    return None
+
+
+@dataclass(frozen=True)
+class ScheduleDecision:
+    """One node's verdict in a shadow schedule (plan x-24f7 Change 1)."""
+
+    id: str
+    slug: Optional[str]
+    domain: str
+    verdict: str  # "selected" | "serialized" | "unevaluated"
+    reason: str  # "" for selected; a typed token otherwise
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id, "slug": self.slug, "domain": self.domain,
+            "verdict": self.verdict, "reason": self.reason,
+        }
+
+
+def schedule_shadow(
+    max_lanes: int,
+    project: Optional[str] = None,
+    *,
+    mission: Optional[str] = None,
+    claims_root: Optional[Path] = None,
+) -> dict:
+    """Read-only bounded-frontier decision report - the shadow-first core (x-24f7).
+
+    Runs the SAME per-candidate classification as :func:`select_lane_fill` over
+    the guard-eligible ready set (``fno backlog ready`` already applies the
+    dependency / design-stage / stale guards, so those exclusions never reach
+    here), greedily filling up to the bounded effective cap across distinct
+    domains, and records a typed verdict for EVERY ready node. It acquires no
+    slot and spawns nothing - purely observational (plan: "perform no dispatch in
+    shadow mode").
+
+    ``effective_cap`` is the initial-rollout ceiling ``_INITIAL_LIVE_CAP``:
+    a request below one normalizes to one, larger requests clamp down. Reported
+    so the operator sees the bound the live scheduler will honor. Empty,
+    singleton, and packet-larger ready sets all produce bounded output.
+
+    Fail-safe: an unreadable ready list yields an empty frontier with a
+    ``ready-unreadable`` note rather than raising, and an in-flight / live-lane
+    read fault degrades the collision + domain seed to empty (fail-open, same as
+    live dispatch) rather than wedging the report.
+    """
+    effective_cap = min(max(max_lanes, 1), _INITIAL_LIVE_CAP)
+
+    try:
+        ready = _ready_nodes(project, mission)
+    except Exception as exc:  # noqa: BLE001 - a garbled ready list is not a crash
+        _LOG.warning("schedule shadow: ready list unreadable: %s", exc)
+        return {
+            "effective_cap": effective_cap, "requested_cap": max_lanes,
+            "note": "ready-unreadable", "selected": [], "serialized": [],
+            "unevaluated": [], "decisions": [],
+        }
+
+    # Seed the domain + in-flight sets from the live-claim world exactly as
+    # select_lane_fill does, so the shadow frontier reflects real peer lanes.
+    # Both reads fail open (an error just leaves the seed empty).
+    try:
+        used_domains: set[str] = _live_lane_domains(claims_root=claims_root)
+    except Exception:  # noqa: BLE001 - fail open, never wedge the report
+        used_domains = set()
+    try:
+        inflight: list[dict] = _live_worked_entries(claims_root=claims_root)
+    except Exception:  # noqa: BLE001 - fail open, never wedge the report
+        inflight = []
+
+    decisions: list[ScheduleDecision] = []
+    picked: set[str] = set()
+    selected_count = 0
+    for node in ready:
+        nid = node["id"]
+        if nid in picked:
+            continue
+        picked.add(nid)
+        domain = node.get("domain") or _DOMAIN_UNSET
+        reason = _classify_lane_candidate(
+            node, used_domains=used_domains, inflight=inflight, claims_root=claims_root,
+        )
+        if reason is not None:
+            verdict = "unevaluated" if reason.startswith("unevaluated") else "serialized"
+        elif selected_count >= effective_cap:
+            verdict, reason = "serialized", "cap-full"
+        else:
+            verdict, reason = "selected", ""
+            selected_count += 1
+            used_domains.add(domain)  # one lane per domain across the frontier
+            if node.get("plan_path"):
+                # so later picks collide against this one, like the live selector
+                inflight.append({
+                    "id": nid, "title": node.get("title", ""),
+                    "plan_path": node["plan_path"], "created_at": "", "status": "ready",
+                })
+        decisions.append(
+            ScheduleDecision(
+                id=nid, slug=node.get("slug"), domain=domain,
+                verdict=verdict, reason=reason,
+            )
+        )
+
+    return {
+        "effective_cap": effective_cap,
+        "requested_cap": max_lanes,
+        "selected": [d.as_dict() for d in decisions if d.verdict == "selected"],
+        "serialized": [d.as_dict() for d in decisions if d.verdict == "serialized"],
+        "unevaluated": [d.as_dict() for d in decisions if d.verdict == "unevaluated"],
+        "decisions": [d.as_dict() for d in decisions],
+    }
 
 
 def _worker_agent_name(

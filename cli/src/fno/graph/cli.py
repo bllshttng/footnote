@@ -3456,6 +3456,53 @@ def cmd_lane_fill(
     typer.echo(json.dumps(selected, indent=2))
 
 
+# -- schedule (shadow) --
+
+@cli.command("schedule", hidden=True)
+def cmd_schedule(
+    shadow: bool = typer.Option(
+        True,
+        "--shadow/--no-shadow",
+        help="Shadow (read-only) mode. Only mode today; live dispatch is a "
+        "later change gated on measured shadow evidence.",
+    ),
+    max_lanes: Optional[int] = typer.Option(
+        None, "--max", help="Requested cap (default: config.parallel.max_lanes)."
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Filter by project name"
+    ),
+    mission: Optional[str] = typer.Option(
+        None, "--mission", help="Restrict selection to this mission's nodes."
+    ),
+) -> None:
+    """Shadow-first bounded scheduler: a read-only frontier decision report (x-24f7).
+
+    Emits, for the current ready set, which nodes WOULD dispatch as concurrent
+    lanes and a typed reason for every node held back (serialized) or that could
+    not be assessed (unevaluated). Acquires no claim and spawns nothing. The
+    ``effective_cap`` is the bounded initial-rollout ceiling; ``requested_cap``
+    is what was asked. Live dispatch under this frontier is a separate change,
+    gated on measured shadow evidence per the plan's read-only-first sequence.
+    """
+    if not shadow:
+        typer.echo(
+            "Error: live scheduling is not enabled yet - only --shadow (read-only) "
+            "is supported. Live dispatch is gated on measured shadow evidence.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    from fno.backlog.advance import schedule_shadow
+
+    if max_lanes is None:
+        from fno.config import load_settings
+        max_lanes = load_settings().parallel.max_lanes
+
+    report = schedule_shadow(max_lanes, project, mission=mission)
+    typer.echo(json.dumps(report, indent=2))
+
+
 # -- dispatch-lanes --
 
 @cli.command("dispatch-lanes", hidden=True)
