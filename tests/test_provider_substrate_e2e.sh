@@ -62,25 +62,25 @@ run_py() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 1: fno providers add
+# Step 1: fno config accounts add
 # ---------------------------------------------------------------------------
-fno providers add claude-max-secondary \
-    --cli claude --auth oauth_dir \
+fno config accounts add claude-max-secondary \
+    --harness claude --auth oauth_dir \
     --credentials-source "$SECONDARY_CREDS" \
     --scope project
 
-echo "PASS: step 1 - fno providers add succeeded"
+echo "PASS: step 1 - fno config accounts add succeeded"
 
 # ---------------------------------------------------------------------------
-# Step 2: fno providers list shows the record
+# Step 2: fno config accounts list shows the record
 # ---------------------------------------------------------------------------
-LIST_OUT=$(fno providers list)
+LIST_OUT=$(fno config accounts list)
 if ! echo "$LIST_OUT" | grep -q "claude-max-secondary"; then
-    echo "FAIL: step 2 - claude-max-secondary not in providers list"
+    echo "FAIL: step 2 - claude-max-secondary not in accounts list"
     echo "  Output: $LIST_OUT"
     exit 1
 fi
-echo "PASS: step 2 - fno providers list shows claude-max-secondary"
+echo "PASS: step 2 - fno config accounts list shows claude-max-secondary"
 
 # ---------------------------------------------------------------------------
 # Step 3: stage the provider explicitly.
@@ -115,17 +115,17 @@ fi
 echo "PASS: step 3 - staged (symlink at $EXPECTED_LINK -> $(readlink "$EXPECTED_LINK"))"
 
 # ---------------------------------------------------------------------------
-# Step 4: fno providers use
+# Step 4: fno config accounts use
 # ---------------------------------------------------------------------------
-fno providers use claude-max-secondary --scope project
+fno config accounts use claude-max-secondary --scope project
 
-SHOW_OUT=$(fno providers show claude-max-secondary)
+SHOW_OUT=$(fno config accounts show claude-max-secondary)
 if ! echo "$SHOW_OUT" | grep -q "active:.*yes"; then
     echo "FAIL: step 4 - claude-max-secondary not marked active after 'use'"
     echo "  show output: $SHOW_OUT"
     exit 1
 fi
-echo "PASS: step 4 - fno providers use set claude-max-secondary as active"
+echo "PASS: step 4 - fno config accounts use set claude-max-secondary as active"
 
 # ---------------------------------------------------------------------------
 # Step 5: dispatch_env returns the right env dict
@@ -201,17 +201,17 @@ fi
 echo "PASS: step 6 - cost.update wrote provider_id + account_id to ledger"
 
 # ---------------------------------------------------------------------------
-# Step 7: fno providers remove
+# Step 7: fno config accounts remove
 # ---------------------------------------------------------------------------
-fno providers remove claude-max-secondary --force --scope project
+fno config accounts remove claude-max-secondary --force --scope project
 
-REMOVE_LIST=$(fno providers list)
+REMOVE_LIST=$(fno config accounts list)
 if echo "$REMOVE_LIST" | grep -q "claude-max-secondary"; then
     echo "FAIL: step 7 - claude-max-secondary still in list after remove"
     echo "  list output: $REMOVE_LIST"
     exit 1
 fi
-echo "PASS: step 7 - fno providers remove succeeded"
+echo "PASS: step 7 - fno config accounts remove succeeded"
 
 # ---------------------------------------------------------------------------
 # Done (trap handles cleanup of TEST_HOME and TEST_REPO)
