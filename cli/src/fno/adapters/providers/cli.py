@@ -483,7 +483,7 @@ def add_provider(
         typer.echo(f"error: failed to write settings.yaml: {exc}", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Provider '{record.id}' added (scope={scope}).")
+    typer.echo(f"Account '{record.id}' added (scope={scope}).")
 
 
 # ---------------------------------------------------------------------------
@@ -696,7 +696,7 @@ def test_provider(
             typer.echo(f"smoke test error: {exc}", err=True)
             raise typer.Exit(1)
 
-    typer.echo(f"Provider '{provider_id}' looks OK.")
+    typer.echo(f"Account '{provider_id}' looks OK.")
 
 
 # ---------------------------------------------------------------------------
@@ -800,7 +800,7 @@ def use_provider(
             typer.echo(f"error: failed to write settings.yaml: {exc}", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Active provider set to '{provider_id}' (scope={scope}).")
+    typer.echo(f"Active account set to '{provider_id}' (scope={scope}).")
 
 
 # ---------------------------------------------------------------------------
@@ -844,7 +844,7 @@ def remove_provider(
         typer.echo(f"error: failed to write settings.yaml: {exc}", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Provider '{provider_id}' removed (scope={scope}).")
+    typer.echo(f"Account '{provider_id}' removed (scope={scope}).")
 
 
 # ---------------------------------------------------------------------------
