@@ -11,10 +11,15 @@
 #   - Rust  : REVIEWER_INVOCATIONS   in crates/fno-agents/src/loopcheck.rs
 #             (the stop gate's blocked reason)
 #
+# Compared per reviewer: the invocation string, and whether it is a self-cert
+# (Python `asserts == "self-cert"`, Rust's third tuple element).
+#
 # A name added on one side is a reviewer the other cannot explain. A drifted
 # invocation is worse: the blocked reason then tells a wedged session to run a
 # command that does not satisfy the gate, which is the failure class this whole
-# node exists to delete. The old constant's own comment conceded the shape -
+# node exists to delete. A drifted self-cert flag is worse still: the stop gate
+# would name `declare` as an ordinary reviewer, inviting an operator to clear a
+# review gate with nothing behind it. The old constant's own comment conceded the shape -
 # "Kept in sync with the emit surfaces ... and the loop-check attestation read"
 # - which is a request that a human remember. This makes it mechanical.
 #
@@ -72,7 +77,7 @@ def read(path, label):
 
 
 def extract_python(src, path):
-    """{name: invocation} from the _RESOLVABLE_REVIEWERS dict literal."""
+    """{name: (invocation, is_self_cert)} from the _RESOLVABLE_REVIEWERS dict."""
     try:
         tree = ast.parse(src)
     except SyntaxError as exc:
@@ -96,39 +101,49 @@ def extract_python(src, path):
                 fail(f"_RESOLVABLE_REVIEWERS in {path} has a non-literal key")
             if not isinstance(val, ast.Call):
                 fail(f"reviewer {key.value!r} in {path} is not a ReviewerDescriptor(...)")
-            invocation = None
+            fields = {}
             for kw in val.keywords:
-                if kw.arg == "invocation":
+                if kw.arg in ("invocation", "asserts"):
                     try:
-                        invocation = ast.literal_eval(kw.value)
+                        fields[kw.arg] = ast.literal_eval(kw.value)
                     except ValueError:
-                        fail(f"reviewer {key.value!r} in {path} has a non-literal invocation")
+                        fail(f"reviewer {key.value!r} in {path} has a non-literal {kw.arg}")
+            invocation = fields.get("invocation")
+            asserts = fields.get("asserts")
             if not isinstance(invocation, str) or not invocation:
                 fail(f"reviewer {key.value!r} in {path} declares no invocation")
-            out[key.value] = invocation
+            if asserts not in ("review-evidence", "self-cert"):
+                fail(f"reviewer {key.value!r} in {path} declares no valid asserts")
+            out[key.value] = (invocation, asserts == "self-cert")
         return out
     fail(f"_RESOLVABLE_REVIEWERS not found in {path}")
 
 
 def extract_rust(src, path):
-    """{name: invocation} from the REVIEWER_INVOCATIONS slice literal."""
+    """{name: (invocation, is_self_cert)} from the REVIEWER_INVOCATIONS slice."""
     m = re.search(
-        r"const\s+REVIEWER_INVOCATIONS\s*:\s*&\[\(&str,\s*&str\)\]\s*=\s*&\[(.*?)\n\];",
+        r"const\s+REVIEWER_INVOCATIONS\s*:\s*&\[\(&str,\s*&str,\s*bool\)\]\s*=\s*&\[(.*?)\n\];",
         src,
         re.S,
     )
     if not m:
         fail(f"REVIEWER_INVOCATIONS not found in {path}")
-    # No escaped quotes are expected in these literals; if one ever appears the
-    # pair count goes odd and this refuses rather than mis-pairing.
-    literals = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
-    if not literals or len(literals) % 2:
-        fail(f"REVIEWER_INVOCATIONS in {path} did not extract as name/invocation pairs")
+    # Matched as whole tuples, not as a flat literal stream: positional pairing
+    # of quoted strings would silently mis-align the moment a field is added,
+    # and reporting false parity is the one outcome worse than no check.
+    entries = re.findall(
+        r'\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*(true|false)\s*,?\s*\)',
+        m.group(1),
+        re.S,
+    )
+    if not entries:
+        fail(f"REVIEWER_INVOCATIONS in {path} did not extract as (name, invocation, bool)")
     return {
-        literals[i].encode().decode("unicode_escape"): literals[i + 1]
-        .encode()
-        .decode("unicode_escape")
-        for i in range(0, len(literals), 2)
+        name.encode().decode("unicode_escape"): (
+            inv.encode().decode("unicode_escape"),
+            flag == "true",
+        )
+        for name, inv, flag in entries
     }
 
 
@@ -144,11 +159,17 @@ for name in sorted(set(py) | set(rs)):
         problems.append(f"  {name}: declared in Python, missing from Rust")
     elif name not in py:
         problems.append(f"  {name}: declared in Rust, missing from Python")
-    elif py[name] != rs[name]:
+    elif py[name][0] != rs[name][0]:
         problems.append(
             f"  {name}: invocation differs\n"
-            f"    Python: {py[name]!r}\n"
-            f"    Rust  : {rs[name]!r}"
+            f"    Python: {py[name][0]!r}\n"
+            f"    Rust  : {rs[name][0]!r}"
+        )
+    elif py[name][1] != rs[name][1]:
+        problems.append(
+            f"  {name}: self-cert flag differs\n"
+            f"    Python asserts self-cert: {py[name][1]}\n"
+            f"    Rust  self-cert        : {rs[name][1]}"
         )
 
 if problems:
@@ -176,11 +197,15 @@ run_selftest() {
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/reviewer-parity-selftest.XXXXXX")
     trap 'rm -rf "$tmp"' RETURN
 
-    _rust() {
+    _rust() { # file, sigma-invocation, declare-self-cert-flag
         cat > "$1" <<EOF
-const REVIEWER_INVOCATIONS: &[(&str, &str)] = &[
-    ("sigma", "$2"),
-    ("declare", "/fno:review declare"),
+const REVIEWER_INVOCATIONS: &[(&str, &str, bool)] = &[
+    ("sigma", "$2", false),
+    (
+        "declare",
+        "/fno:review declare",
+        ${3:-true},
+    ),
 ];
 EOF
     }
@@ -219,6 +244,12 @@ EOF
     _python "$tmp/ok.py" "sigma"
     _case "matching tables accepted (multi-line invocation)" 0 "$tmp/ok.rs" "$tmp/ok.py"
 
+    # Case 1b: the self-cert flag drifts while every invocation still matches.
+    # A positional literal-pairing extractor would call this parity.
+    _rust "$tmp/selfcert.rs" "/fno:review sigma" false
+    _python "$tmp/selfcert.py" "sigma"
+    _case "drifted self-cert flag rejected" 1 "$tmp/selfcert.rs" "$tmp/selfcert.py"
+
     # Case 2: same names, drifted invocation -> reject.
     _rust "$tmp/drift.rs" "/fno:review sigma --wait"
     _python "$tmp/drift.py" "sigma"
@@ -226,8 +257,8 @@ EOF
 
     # Case 3: a reviewer added on one side only -> reject.
     cat > "$tmp/extra.rs" <<'EOF'
-const REVIEWER_INVOCATIONS: &[(&str, &str)] = &[
-    ("sigma", "/fno:review sigma"),
+const REVIEWER_INVOCATIONS: &[(&str, &str, bool)] = &[
+    ("sigma", "/fno:review sigma", false),
 ];
 EOF
     _python "$tmp/extra.py" "sigma"

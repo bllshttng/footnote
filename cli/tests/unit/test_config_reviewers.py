@@ -115,11 +115,11 @@ def test_doctor_review_reports_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 def test_doctor_review_reports_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     r = _doctor_review(
-        tmp_path, monkeypatch, "[sigma]", {"CODEX_THREAD_ID": "t1", "TARGET_UNATTENDED": "1"}
+        tmp_path, monkeypatch, "[sigma]", {"GEMINI_SESSION_ID": "g1", "TARGET_UNATTENDED": "1"}
     )
     assert r.exit_code == 1
     assert "unavailable: sigma" in r.output
-    assert "harness=codex substrate=headless" in r.output
+    assert "harness=gemini substrate=headless" in r.output
     assert "`declare` is never substituted for you" in r.output
 
 

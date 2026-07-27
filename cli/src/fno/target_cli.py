@@ -95,9 +95,12 @@ def _refuse_unsatisfiable_reviewers() -> None:
 
         reviewers = list(load_settings().review.reviewers or [])
     except Exception as exc:  # noqa: BLE001 - report, never block bootstrap
+        # "settings", not "config.review.reviewers": load_settings validates the
+        # whole model, so the fault may be in an unrelated block. Naming the key
+        # we did not verify is the misattribution this PR exists to delete.
         typer.echo(
-            f"note target init: review capability check skipped "
-            f"(config.review.reviewers unreadable: {exc})",
+            f"WARN target init: review capability check skipped "
+            f"(settings unreadable: {exc})",
             err=True,
         )
         return

@@ -19,19 +19,31 @@ is missing is a green gate with no review behind it.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from typing import Literal, Mapping, Optional
 
 from fno.config import _RESOLVABLE_REVIEWERS, ReviewerDescriptor
 from fno.harness_identity import resolve_harness_identity
 
-# Harnesses whose sessions can dispatch review subagents. The sigma panel runs
-# its six reviewers through the Task/Agent tool (skills/review/SKILL.md: "it
-# dispatches review subagents via the Task/Agent tool"), which is Claude Code's.
-# A codex or gemini session has no path to a sigma attestation at all.
-_SUBAGENT_DISPATCH_HARNESSES = frozenset({"claude"})
+# Harnesses that can run the sigma panel to a verdict, and so can produce its
+# attestation. Claude dispatches the six reviewers through the Task/Agent tool;
+# Codex reaches the same panel through project custom agents / `spawn_agent`,
+# and a Codex surface lacking that primitive reports the downgrade and runs the
+# panel SEQUENTIALLY - slower, but it still reaches a verdict and still attests
+# (docs/HARNESSES.md "Parallel subagent dispatch", docs/SKILL-COMPAT-MATRIX.md
+# "CDX"). Refusing codex here would hard-exit `fno target init` on a
+# configuration the project documents as supported, which is a worse failure
+# than the one this check exists to prevent.
+#
+# Gemini stays out deliberately: its project-agent mode is experimental and
+# opt-in (AGENTS.md), so it resolves `unavailable` rather than being assumed.
+_SUBAGENT_DISPATCH_HARNESSES = frozenset({"claude", "codex"})
 
 Status = Literal["satisfiable", "needs-operator", "unavailable", "unverifiable"]
+
+# The allowlist half of the fail-closed default; see `blocks_autonomy`.
+_NON_BLOCKING_STATUSES: frozenset[str] = frozenset({"satisfiable", "unverifiable"})
 
 
 @dataclass(frozen=True)
@@ -70,8 +82,13 @@ class ReviewerVerdict:
         repo that configures a reviewer. The cost of guessing wrong is now
         bounded: if the gate does turn out to be unsatisfiable, the stop-gate
         message names the reviewer and its invocation instead of blaming a bot.
+
+        Written as "not in the non-blocking set" rather than "in the blocking
+        set" so a Status added later blocks until someone deliberately clears
+        it. The inverse would let an unclassified status run autonomously,
+        which is the wrong default for a gate whose whole point is fail-closed.
         """
-        return self.status in {"needs-operator", "unavailable"}
+        return self.status not in _NON_BLOCKING_STATUSES
 
     def line(self) -> str:
         """One report line. A self-cert always says so (AC5)."""
@@ -98,12 +115,25 @@ def _unattended_in_config() -> bool:
 
     try:
         candidates = config_read_candidates(_settings_yaml_locations())
-    except Exception:  # noqa: BLE001 - an unreadable config is not "unattended"
+    except Exception as exc:  # noqa: BLE001 - a broken probe must not block init
+        # False (attended) is the safe DIRECTION: guessing "unattended" would
+        # refuse a plain terminal run whenever the probe hiccups. But guessing
+        # silently is how an operator reviewer looks satisfiable and then wedges
+        # at the stop gate, so the guess is always announced.
+        print(
+            f"WARN review capability: attendedness probe degraded "
+            f"(settings unreadable: {exc}); assuming attended",
+            file=sys.stderr,
+        )
         return False
+    # Per KEY, not per block: `load_settings` deep-merges layers and the shell's
+    # get_config falls through on a null, so stopping at the first file that has
+    # an `unattended` table without `enabled` would answer differently from both
+    # authorities this claims parity with.
     for path in candidates:
         block = read_config_flat(path).get("unattended")
-        if isinstance(block, dict):
-            return block.get("enabled") is True
+        if isinstance(block, dict) and "enabled" in block:
+            return block["enabled"] is True
     return False
 
 

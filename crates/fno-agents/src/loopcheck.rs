@@ -918,20 +918,24 @@ struct PrInfo {
 /// Two languages, one table: kept honest by
 /// `scripts/ci/check-reviewer-descriptor-parity.sh`, not by a comment asking a
 /// human to remember.
-const REVIEWER_INVOCATIONS: &[(&str, &str)] = &[
-    ("sigma", "/fno:review sigma"),
+const REVIEWER_INVOCATIONS: &[(&str, &str, bool)] = &[
+    ("sigma", "/fno:review sigma", false),
     (
         "code-review",
         "/code-review, then bash skills/review/scripts/emit-attestation.sh code-review",
+        false,
     ),
-    ("declare", "/fno:review declare"),
+    ("declare", "/fno:review declare", true),
 ];
 
-fn reviewer_invocation(name: &str) -> Option<&'static str> {
+/// `(invocation, is_self_cert)`. The flag mirrors the Python descriptor's
+/// `asserts` field: a surface that names `declare` without saying it asserts
+/// nothing invites an operator to clear the gate with no review behind it.
+fn reviewer_invocation(name: &str) -> Option<(&'static str, bool)> {
     REVIEWER_INVOCATIONS
         .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, inv)| *inv)
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, inv, self_cert)| (*inv, *self_cert))
 }
 
 fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
@@ -978,10 +982,16 @@ fn stderr_tail(bytes: &[u8]) -> String {
 #[derive(Debug, Clone, PartialEq)]
 struct UnattestedReviewer {
     name: String,
-    /// A head this reviewer DID attest at, which is no longer HEAD. Without it
-    /// the block message reads as "you never ran sigma" to a session that ran
-    /// sigma and then pushed a commit, which is how a run loses turns twice.
+    /// A head this reviewer DID attest at, which is no longer HEAD. Always a
+    /// PASS and never empty - normalized at construction so `Some` means
+    /// "there is a real prior pass to name", not "check is_empty() first".
+    /// Without it the block message reads as "you never ran sigma" to a session
+    /// that ran sigma and then pushed a commit, losing turns twice.
     superseded_head: Option<String>,
+    /// This reviewer DID attest at the current head, and the verdict was not
+    /// `pass`. "No attestation exists" would be a lie to a session that ran the
+    /// reviewer and was told no.
+    failed_at_head: bool,
 }
 
 /// The `config.review.reviewers` entries NOT satisfied by a head-pinned
@@ -1010,6 +1020,7 @@ fn unattested_reviewers(
             .map(|r| UnattestedReviewer {
                 name: r.trim_start_matches('/').to_string(),
                 superseded_head: None,
+                failed_at_head: false,
             })
             .collect()
     };
@@ -1051,8 +1062,15 @@ fn unattested_reviewers(
             // Only a PASS is worth reporting as superseded. An old-head `fail`
             // rendered as "attested at X, superseded" would imply a prior
             // successful review that never happened (codex P2).
-            if is_pass {
+            // Empty is not a head. Normalizing here means `Some` always
+            // carries something worth printing.
+            if is_pass && !line_head.is_empty() {
                 latest_other_head.insert(r, line_head.to_string());
+            } else if latest_other_head.get(&r).map(String::as_str) == Some(line_head) {
+                // A later fail on the SAME old head revokes the pass recorded
+                // above. Keeping it would claim that head was successfully
+                // attested when its latest verdict retracted exactly that.
+                latest_other_head.remove(&r);
             }
             continue;
         }
@@ -1065,6 +1083,7 @@ fn unattested_reviewers(
         .map(|name| UnattestedReviewer {
             name: name.to_string(),
             superseded_head: latest_other_head.get(name).cloned(),
+            failed_at_head: latest_pass.get(name) == Some(&false),
         })
         .collect()
 }
@@ -4595,12 +4614,26 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
     }
 
     if !pr.reviewed {
-        // Local work outranks an async wait. When a bot AND a local reviewer are
-        // both outstanding, naming only the bot hides the half the session can
-        // act on now and parks it - and if the bot never posts, the local work
-        // never happens and the run dies on budget with the gate still unmet.
-        // That is the #618 shape. Run the reviewer first; the bot wait is still
-        // there on the next fire, and by then it is the sole blocker.
+        // Order: work you can do now, cheapest-to-invalidate first, then the
+        // async wait. An unaddressed finding leads because addressing it MOVES
+        // HEAD, which supersedes any attestation produced before it - naming
+        // the reviewer first would make a session run sigma twice. The bot
+        // wait comes last: naming only the bot hides the half the session can
+        // act on now, and if the bot never posts, the local work never happens
+        // and the run dies on budget with the gate still unmet.
+        if !pr.unaddressed_findings.is_empty() {
+            // AC2-UI: name the specific finding (path:line) and the remedy.
+            let f = &pr.unaddressed_findings[0];
+            let more = if pr.unaddressed_findings.len() > 1 {
+                format!(" [+{} more]", pr.unaddressed_findings.len() - 1)
+            } else {
+                String::new()
+            };
+            return format!(
+                "PR #{}: {} {} at {}:{} unaddressed (reply in-thread or wontfix:){}",
+                pr.number, f.author, f.severity, f.path, f.line, more
+            );
+        }
         if !pr.unattested_reviewers.is_empty() {
             // The branch that was missing (x-cdc7). Without it a local-only
             // reviewers gate fell through to the generic string below and told
@@ -4617,15 +4650,28 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                 .unattested_reviewers
                 .iter()
                 .map(|r| {
-                    let stale = match &r.superseded_head {
-                        Some(h) if !h.is_empty() => {
-                            format!(" (attested at {}, superseded by this head)", short_sha(h))
+                    // "no attestation" is a lie to a session that ran the
+                    // reviewer and got told no; name that case separately.
+                    let state = if r.failed_at_head {
+                        " (attested at this head, verdict NOT pass)".to_string()
+                    } else {
+                        match &r.superseded_head {
+                            Some(h) => {
+                                format!(" (passed at {}, superseded by this head)", short_sha(h))
+                            }
+                            None => String::new(),
                         }
-                        _ => String::new(),
                     };
                     match reviewer_invocation(&r.name) {
-                        Some(inv) => format!("{}{} -> run `{}`", r.name, stale, inv),
-                        None => format!("{}{}", r.name, stale),
+                        Some((inv, self_cert)) => {
+                            let mark = if self_cert {
+                                " [self-cert: asserts no review evidence]"
+                            } else {
+                                ""
+                            };
+                            format!("{}{} -> run `{}`{}", r.name, state, inv, mark)
+                        }
+                        None => format!("{}{}", r.name, state),
                     }
                 })
                 .collect();
@@ -4636,19 +4682,6 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                 pr.number,
                 head,
                 items.join("; ")
-            );
-        }
-        if !pr.unaddressed_findings.is_empty() {
-            // AC2-UI: name the specific finding (path:line) and the remedy.
-            let f = &pr.unaddressed_findings[0];
-            let more = if pr.unaddressed_findings.len() > 1 {
-                format!(" [+{} more]", pr.unaddressed_findings.len() - 1)
-            } else {
-                String::new()
-            };
-            return format!(
-                "PR #{}: {} {} at {}:{} unaddressed (reply in-thread or wontfix:){}",
-                pr.number, f.author, f.severity, f.path, f.line, more
             );
         }
         if !pr.missing_bots.is_empty() {
@@ -5366,6 +5399,7 @@ mod tests {
             unattested_reviewers: vec![UnattestedReviewer {
                 name: "sigma".to_string(),
                 superseded_head: None,
+                failed_at_head: false,
             }],
             ..watch_pr()
         }
@@ -5406,6 +5440,7 @@ mod tests {
             unattested_reviewers: vec![UnattestedReviewer {
                 name: "sigma".to_string(),
                 superseded_head: Some("0123456789abcdef".to_string()),
+                failed_at_head: false,
             }],
             ..reviewers_gate_pr()
         };
@@ -5483,6 +5518,7 @@ mod tests {
         let out = unattested_reviewers(&stale, &sigma, "NEW");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].superseded_head.as_deref(), Some("OLD"));
+        assert!(!out[0].failed_at_head);
 
         let failed = tmp.path().join("fail.jsonl");
         std::fs::write(
@@ -5530,6 +5566,47 @@ mod tests {
     }
 
     #[test]
+    fn a_later_fail_revokes_the_superseded_pass_for_that_head() {
+        // Append-ordered pass-then-fail on the SAME old head. The pass was
+        // recorded as superseded and the fail merely skipped, so the message
+        // kept claiming that head was successfully attested after its latest
+        // verdict retracted exactly that (codex P2 on this PR).
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("e.jsonl");
+        std::fs::write(
+            &p,
+            concat!(
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass"}}"#,
+                "\n",
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail"}}"#,
+            ),
+        )
+        .unwrap();
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].superseded_head, None,
+            "a retracted pass is not evidence"
+        );
+
+        // A re-run pass after the fail restores it: revocation is latest-wins,
+        // not a one-way latch.
+        std::fs::write(
+            &p,
+            concat!(
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass"}}"#,
+                "\n",
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail"}}"#,
+                "\n",
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass"}}"#,
+            ),
+        )
+        .unwrap();
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
+        assert_eq!(out[0].superseded_head.as_deref(), Some("OLD"));
+    }
+
+    #[test]
     fn short_sha_never_panics_on_multibyte() {
         // codex P2: `&s[..8]` panics when byte 8 lands inside a character, and
         // superseded_head comes from a user-writable events.jsonl.
@@ -5541,6 +5618,7 @@ mod tests {
             unattested_reviewers: vec![UnattestedReviewer {
                 name: "sigma".to_string(),
                 superseded_head: Some("1234567\u{e9}abc".to_string()),
+                failed_at_head: false,
             }],
             ..reviewers_gate_pr()
         };
@@ -5596,6 +5674,87 @@ mod tests {
     }
 
     #[test]
+    fn an_unaddressed_finding_is_named_before_the_reviewers_gate() {
+        // Sigma review of this PR: addressing an inline finding MOVES HEAD,
+        // which supersedes any attestation produced first. Naming the reviewer
+        // first would make the session run the panel twice.
+        let pr = PrInfo {
+            unaddressed_findings: vec![Finding {
+                id: 1,
+                author: "codex".into(),
+                path: "a.rs".into(),
+                line: 7,
+                created_at: "2026-07-27T00:00:00Z".into(),
+                severity: "P1",
+            }],
+            ..reviewers_gate_pr()
+        };
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("unaddressed"), "got: {reason}");
+        assert!(!reason.contains("reviewers gate unmet"), "got: {reason}");
+        // With the finding cleared, the reviewers gate is what is named.
+        let after = PrInfo {
+            unaddressed_findings: vec![],
+            ..pr
+        };
+        assert!(build_block_reason(&after, "abc", true).contains("reviewers gate unmet"));
+    }
+
+    #[test]
+    fn a_failed_attestation_at_this_head_is_not_reported_as_absent() {
+        // "no head-pinned review_attestation" reads as "you never ran it" to a
+        // session that ran the reviewer and was told no.
+        let pr = PrInfo {
+            unattested_reviewers: vec![UnattestedReviewer {
+                name: "sigma".to_string(),
+                superseded_head: None,
+                failed_at_head: true,
+            }],
+            ..reviewers_gate_pr()
+        };
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("verdict NOT pass"), "got: {reason}");
+    }
+
+    #[test]
+    fn the_stop_gate_marks_declare_as_a_self_cert() {
+        // AC5: every surface that prints `declare` says it asserts nothing.
+        // The Rust block message is such a surface.
+        let pr = PrInfo {
+            unattested_reviewers: vec![UnattestedReviewer {
+                name: "declare".to_string(),
+                superseded_head: None,
+                failed_at_head: false,
+            }],
+            ..reviewers_gate_pr()
+        };
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("self-cert"), "got: {reason}");
+        assert!(
+            reason.contains("asserts no review evidence"),
+            "got: {reason}"
+        );
+        // A real reviewer carries no such mark.
+        assert!(!build_block_reason(&reviewers_gate_pr(), "abc", true).contains("self-cert"));
+    }
+
+    #[test]
+    fn an_empty_head_sha_never_becomes_a_superseded_head() {
+        // Option<String> cannot say "non-empty", so normalize at construction
+        // rather than leaving is_empty() as a convention every reader re-derives.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("e.jsonl");
+        std::fs::write(
+            &p,
+            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"","verdict":"pass"}}"#,
+        )
+        .unwrap();
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].superseded_head, None);
+    }
+
+    #[test]
     fn an_outstanding_local_reviewer_is_never_an_idlable_wait() {
         // The classifier half of the same fix: with a bot AND a local reviewer
         // outstanding, a stray <watching> tag must not park the session on work
@@ -5611,11 +5770,14 @@ mod tests {
     fn reviewer_invocations_cover_the_descriptor_table() {
         // The parity script enforces this against the Python side in CI; this
         // keeps the Rust half self-consistent at unit-test speed.
-        for (name, inv) in REVIEWER_INVOCATIONS {
+        for (name, inv, self_cert) in REVIEWER_INVOCATIONS {
             assert!(!inv.is_empty(), "{name} has no invocation");
-            assert_eq!(reviewer_invocation(name), Some(*inv));
+            assert_eq!(reviewer_invocation(name), Some((*inv, *self_cert)));
         }
         assert_eq!(reviewer_invocation("teleport"), None);
+        // AC5: the ONE self-cert must stay visibly marked on this surface too.
+        assert_eq!(reviewer_invocation("declare").map(|(_, sc)| sc), Some(true));
+        assert_eq!(reviewer_invocation("sigma").map(|(_, sc)| sc), Some(false));
     }
 
     #[test]
