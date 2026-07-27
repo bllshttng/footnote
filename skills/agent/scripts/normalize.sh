@@ -30,7 +30,7 @@
 #   message=<final message to pass verbatim to the spawn/host verb>
 #
 # Locked decisions honored:
-#   4. provider = explicit -> config.providers (resolve_dispatch_target) -> claude
+#   4. provider = explicit -> config.accounts (resolve_dispatch_target) -> claude
 #   8. the message is one unit; the SKILL builds `fno agents spawn <name> "<msg>"`
 #      with name POSITIONAL.
 

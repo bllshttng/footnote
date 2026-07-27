@@ -15,11 +15,11 @@ The motivating use case is daily-driver reliability across Jason's accounts: 2x 
 
 ```mermaid
 graph TD
-    YAML["~/.fno/config.toml<br/>config.providers.records[]"] --> LOADER["loader.py<br/>load_providers()"]
+    YAML["~/.fno/config.toml<br/>config.accounts.records[]"] --> LOADER["loader.py<br/>load_providers()"]
     LOADER --> PR["ProviderRecord<br/>(Pydantic v2)"]
     LOADER --> PC["ProvidersConfig<br/>records + active"]
 
-    PC --> CLI_CMD["cli.py<br/>fno providers list/show/add/use/remove"]
+    PC --> CLI_CMD["cli.py<br/>fno config accounts list/show/add/use/remove"]
     PR --> STAGE["staging.py<br/>stage(record)"]
     STAGE --> FS["~/.fno/providers/&lt;id&gt;/<br/>&lt;cli-dir&gt; -> credentials_source"]
 
@@ -36,7 +36,7 @@ graph TD
 The substrate has four layers, each shipped in its own atomic commit:
 
 1. Config schema (`model.py`, `loader.py`) - typed records read from config.toml with project-local-over-global precedence.
-2. CLI surface (`cli.py`, `cli/src/fno/cli.py` registration) - `fno providers` Typer sub-app for human-driven management.
+2. CLI surface (`cli.py`, `cli/src/fno/cli.py` registration) - `fno config accounts` Typer sub-app for human-driven management.
 3. Credential staging + dispatch (`staging.py`, `dispatch.py`) - per-account directory with symlink to canonical OAuth dir, plus a pure dispatch_env helper.
 4. Ledger attribution (`cost.py`, `register-task.py`, `session-cost.py`) - cost entries gain `provider_id` and `account_id` fields tagged at write time.
 
@@ -65,7 +65,7 @@ The substrate package is `cli/src/fno/adapters/providers/`. No code outside this
 |--------|---------------|--------------|
 | `model.py` | ProviderRecord, ProvidersConfig, four exception classes | pydantic, pathlib |
 | `loader.py` | load_providers, save_providers | model, fno.state.io |
-| `cli.py` | `fno providers` Typer sub-app | model, loader, staging, dispatch |
+| `cli.py` | `fno config accounts` Typer sub-app | model, loader, staging, dispatch |
 | `staging.py` | stage, unstage, verify_staged | model, pathlib, shutil |
 | `dispatch.py` | dispatch_env, resolve_env_value | model, loader, staging, subprocess |
 

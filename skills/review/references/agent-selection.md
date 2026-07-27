@@ -229,7 +229,7 @@ If `pnpm test` or `pnpm typecheck` fails:
 ## Cross-Model Provider Routing
 
 Panel agents can be routed to a different coding model (`codex` / `gemini`) via
-`config.review.cross_model` / `config.review.agent_providers` in
+`config.review.cross_model` / `config.review.agent_harnesses` in
 `.fno/config.toml` - the SAME config the internal `fno review` panel honors,
 resolved by the same `provider_resolution` path. `/review sigma` reads it through
 `fno review --print-providers`, so the two surfaces never drift.
@@ -241,7 +241,7 @@ config:
   review:
     cross_model:
       enabled: true        # correctness agents cross-model by default
-    agent_providers:       # optional explicit pins (override the default)
+    agent_harnesses:       # optional explicit pins (override the default)
       code_reviewer: codex
       silent_failure_hunter: gemini
 ```

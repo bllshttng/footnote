@@ -307,7 +307,7 @@ The artifact remains authoritative if this comment call fails.
 - New UI states may need new error handling paths
 
 <!--
-  Cross-model review routing (config.review.agent_routes / legacy agent_providers) is
+  Cross-model review routing (config.review.agent_routes / legacy agent_harnesses) is
   documented in the "Cross-Model Review Routing" section below. It is resolved
   by `fno review --print-providers`, the SAME resolver the `fno review` panel
   uses, so /review sigma and fno review never drift.
@@ -334,7 +334,7 @@ recommendation: RECOMMEND RESTART". Honor sequence:
 
 By default every panel agent runs through `Task()` on the invoking harness.
 An operator can route specific agents through a full harness, route-provider, and model tuple for a genuine cross-model read by setting `config.review.agent_routes`.
-Legacy `config.review.cross_model` and `config.review.agent_providers` remain supported.
+Legacy `config.review.cross_model` and `config.review.agent_harnesses` remain supported.
 Configure them in `.fno/config.toml`, which is the same config the internal `fno review` panel honors.
 When none of these routing options is set, this whole section is a no-op and the panel is byte-for-byte today's harness-local run.
 
