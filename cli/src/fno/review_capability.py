@@ -21,9 +21,10 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Mapping, Optional
 
-from fno.config import _RESOLVABLE_REVIEWERS, _coerce_affirmative, ReviewerDescriptor
+from fno.config import _coerce_affirmative, resolvable_reviewers, ReviewerDescriptor
 from fno.harness_identity import resolve_harness_identity
 
 # Harnesses that can run the sigma panel to a verdict, and so can produce its
@@ -91,13 +92,22 @@ class ReviewerVerdict:
         return self.status not in _NON_BLOCKING_STATUSES
 
     def line(self) -> str:
-        """One report line. A self-cert always says so (AC5)."""
-        note = (
-            "  [self-cert: satisfies the gate, asserts no review evidence]"
-            if self.descriptor is not None and self.descriptor.asserts == "self-cert"
-            else ""
-        )
-        return f"{self.status}: {self.name} - {self.reason}{note}"
+        """One report line. A rung weaker than review-evidence always says so."""
+        asserts = self.descriptor.asserts if self.descriptor is not None else None
+        return f"{self.status}: {self.name} - {self.reason}{_RUNG_NOTES.get(asserts, '')}"
+
+
+# What each rung is allowed to claim, printed wherever a reviewer is reported.
+# `review-evidence` gets no note: it is the ordinary case. The two weaker rungs
+# are annotated so an operator learns what is behind their green checkmark here,
+# rather than at the stop gate.
+_RUNG_NOTES: dict[Optional[str], str] = {
+    "self-cert": "  [self-cert: satisfies the gate, asserts no review evidence]",
+    "invocation": (
+        "  [invocation: proves the reviewer ran at the reviewed commit, "
+        "asserts nothing about its verdict]"
+    ),
+}
 
 
 def _unattended_in_config() -> bool:
@@ -195,6 +205,72 @@ def detect_session(
     return SessionCapability(harness=harness, substrate=substrate, attended=attended)
 
 
+def _skill_roots(cwd: Optional[Path] = None) -> list[Path]:
+    """Where Claude resolves a BARE skill name: the user root and the project root.
+
+    Deliberately short. Plugin skills live under a versioned, marketplace-shaped
+    cache whose layout this repo cannot cite as an authority, and they carry a
+    `plugin:skill` qualified name - so a qualified name resolves `unverifiable`
+    rather than being reported absent. Reporting absence from a root set we are
+    not sure is complete would refuse a session over a reviewer that IS
+    installed, which is strictly worse than proceeding with the stop gate as
+    the backstop.
+    """
+    base = Path.cwd() if cwd is None else cwd
+    return [Path.home() / ".claude" / "skills", base / ".claude" / "skills"]
+
+
+def _resolve_skill(name: str, session: SessionCapability) -> tuple[Status, str]:
+    """`requires: skill` - is the named skill resolvable on this harness?
+
+    Three outcomes, all onto the existing Status enum: found -> satisfiable,
+    absent with at least one root readable -> unavailable (init refuses, naming
+    the roots searched), and anything we cannot answer -> unverifiable, which is
+    already non-blocking precisely so a bad root guess degrades rather than
+    bricking a run.
+    """
+    proceed = "Proceeding - if the gate does go unmet, run the skill by hand"
+    if session.harness != "claude":
+        return (
+            "unverifiable",
+            f"needs a resolvable skill; footnote only knows Claude's skill roots "
+            f"and this is {session.describe()}. {proceed}",
+        )
+    if ":" in name:
+        return (
+            "unverifiable",
+            f"{name!r} is a plugin-qualified skill; footnote does not read the "
+            f"plugin cache layout, so availability cannot be verified. {proceed}",
+        )
+    searched: list[str] = []
+    for root in _skill_roots():
+        try:
+            if not root.is_dir():
+                continue
+            searched.append(str(root))
+            if (root / name / "SKILL.md").is_file():
+                return ("satisfiable", f"skill resolves at {root / name}")
+        except OSError as exc:
+            return (
+                "unverifiable",
+                f"skill root {root} is unreadable ({exc}), so availability "
+                f"cannot be verified. {proceed}",
+            )
+    if not searched:
+        return (
+            "unverifiable",
+            f"no skill root exists on this host (looked for "
+            f"{', '.join(str(r) for r in _skill_roots())}), so availability "
+            f"cannot be verified. {proceed}",
+        )
+    return (
+        "unavailable",
+        f"skill {name!r} resolves in none of the roots searched "
+        f"({', '.join(searched)}); install it there or change "
+        f"config.review.reviewers",
+    )
+
+
 def _resolve_one(
     name: str, descriptor: ReviewerDescriptor, session: SessionCapability
 ) -> ReviewerVerdict:
@@ -213,6 +289,9 @@ def _resolve_one(
             f"unattended ({session.describe()}). Not a misconfiguration - run "
             f"attended, or configure a reviewer this session can drive",
         )
+
+    if descriptor.requires == "skill":
+        return verdict(*_resolve_skill(name, session))
 
     if descriptor.requires == "subagent-dispatch":
         if session.harness in _SUBAGENT_DISPATCH_HARNESSES:
@@ -236,18 +315,25 @@ def _resolve_one(
 
 
 def resolve_reviewers(
-    reviewers: list[str], session: Optional[SessionCapability] = None
+    reviewers: list[str],
+    session: Optional[SessionCapability] = None,
+    registry: Optional[Mapping[str, ReviewerDescriptor]] = None,
 ) -> list[ReviewerVerdict]:
     """Resolve every configured reviewer against this session. Read-only.
+
+    `registry` is `config.review.reviewer_registry`; it is unioned with the
+    built-ins by the same helper the config validator uses, so the two cannot
+    disagree about which names resolve.
 
     Never caches across sessions: two sessions on one repo resolve their own
     harness and substrate.
     """
     sess = detect_session() if session is None else session
+    known = resolvable_reviewers(registry)
     out: list[ReviewerVerdict] = []
     for entry in reviewers:
         name = entry.strip().lstrip("/")
-        descriptor = _RESOLVABLE_REVIEWERS.get(name)
+        descriptor = known.get(name)
         if descriptor is None:
             # The config validator already rejects these, so this is only
             # reachable when a caller hands in an unvalidated list.
@@ -287,7 +373,16 @@ def refusal_message(
     remedies = ["change config.review.reviewers"]
     if any(v.status == "needs-operator" for v in blocked):
         remedies.append("run attended so an operator can drive it")
-    if any(v.status == "unavailable" for v in blocked):
+    # Per-CAPABILITY, for the same reason the statuses are split: "run on a
+    # harness that dispatches subagents" is a remedy that provably cannot
+    # install a missing skill, and a remedy that cannot work is the failure
+    # class this check exists to delete. The roots searched are already in the
+    # verdict line printed above.
+    unavailable = [v for v in blocked if v.status == "unavailable"]
+    requires = {v.descriptor.requires for v in unavailable if v.descriptor is not None}
+    if "skill" in requires:
+        remedies.append("install the named skill in one of the roots listed above")
+    if unavailable and requires != {"skill"}:
         remedies.append(
             "run on a harness that dispatches subagents, or run the review by "
             "hand and attest with `bash skills/review/scripts/emit-attestation.sh "

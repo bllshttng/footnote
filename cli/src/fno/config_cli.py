@@ -312,8 +312,9 @@ def _report_review_capability(json_out: bool = False) -> int:
     from fno.review_capability import detect_session, resolve_reviewers
 
     session = detect_session()
-    reviewers = list(load_settings().review.reviewers or [])
-    verdicts = resolve_reviewers(reviewers, session)
+    review = load_settings().review
+    reviewers = list(review.reviewers or [])
+    verdicts = resolve_reviewers(reviewers, session, review.reviewer_registry)
     blocked = [v for v in verdicts if v.blocks_autonomy]
 
     if json_out:
