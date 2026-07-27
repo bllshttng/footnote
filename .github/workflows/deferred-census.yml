@@ -1,0 +1,90 @@
+name: deferred-census
+
+# Puts a clock on _DISCOVERY_DEFERRED (cli/src/fno/test_cmd.py).
+#
+# The quarantine list has no expiry of its own: a line goes in during a hurry
+# and nothing makes it come out. `fno test --census-deferred` is the mechanism
+# built to catch that - it runs every held entry bounded and exits non-zero the
+# moment one passes - and until this workflow existed it was a flag a human had
+# to remember to type. Ten entries were sitting green when it was first run by
+# hand, one of them a test whose repair had shipped and whose quarantine line
+# was never deleted.
+#
+# WEEKLY, not per-PR: the census costs ~4 minutes to police a list that changes
+# a few times a month, and the smoke job has only ~8 minutes of headroom under
+# its 20-minute cap. Weekly, not nightly: an entry sitting quarantined for six
+# days is not an incident, and a nightly red inbox gets muted.
+#
+# IF THIS FIRES RED FOR SEVERAL WEEKS RUNNING WITH NOBODY DRAINING, DELETE THE
+# WORKFLOW. A gate everyone has learned to ignore is worse than no gate: it
+# reads as coverage while providing none. Do not mute it, do not add
+# continue-on-error - either the drain happens or the clock comes off.
+
+on:
+  schedule:
+    # Mondays 09:00 UTC - lands in the working week, not on top of a weekend.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+  pull_request:
+    # A PR that edits the quarantine list or the runner re-censuses on the spot;
+    # this is the one case where per-PR cost is justified, because the list is
+    # exactly what changed.
+    paths:
+      - cli/src/fno/test_cmd.py
+      - .github/workflows/deferred-census.yml
+
+jobs:
+  census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      # The census shells out to each held harness, and those harnesses have the
+      # same ambient dependencies the smoke job provisions. Without them an
+      # entry fails for a missing-tool reason and reads as "still legitimately
+      # red", which is precisely the false negative this workflow exists to
+      # prevent.
+      - name: Install PyYAML
+        run: python3 -m pip install --upgrade pyyaml
+
+      - name: Assert yq (dotted-key config reads)
+        run: |
+          command -v yq >/dev/null 2>&1 || {
+            echo "yq missing: scripts/lib/config.sh cannot read dotted config keys" >&2
+            exit 1
+          }
+          yq --version
+
+      - name: Census the deferred set
+        # Exits non-zero when a held entry passes. That is the whole signal:
+        # a green entry is coverage that is quietly off, and the fix is to
+        # delete its line from _DISCOVERY_DEFERRED (discovery then covers it
+        # by shebang). Three entries are known macOS-green / Linux-red and are
+        # expected to stay red HERE - see the comment above the set.
+        run: uv run --project cli fno-py test --census-deferred
+
+      - name: Explain a red census
+        if: failure()
+        run: |
+          {
+            echo "### Deferred census: a quarantined harness is passing"
+            echo
+            echo "One or more entries in \`_DISCOVERY_DEFERRED\`"
+            echo "(\`cli/src/fno/test_cmd.py\`) passed. A green entry there is"
+            echo "silent coverage loss: the test works and nothing runs it."
+            echo
+            echo "Fix: delete the named line(s) from \`_DISCOVERY_DEFERRED\`."
+            echo "Discovery picks the file up by shebang; no other edit needed."
+          } >> "$GITHUB_STEP_SUMMARY"

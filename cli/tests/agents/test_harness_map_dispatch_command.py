@@ -180,3 +180,121 @@ def test_gemini_verb_path_refused():
 def test_normalize_command_opencode_renders_any_verb():
     assert normalize_command("/think {id}", "opencode") == "/fno:think {id}"
     assert normalize_command("/blueprint quick x", "opencode") == "/fno:blueprint quick x"
+
+
+# ---------------------------------------------------------------------------
+# x-8e59: the builtin rung reads config.dispatch.auto_merge
+#
+# x-4391 shipped the key to 2 of 3 dispatch paths. The builtin here was the
+# deaf one, so an operator who set the key still got `/target no-merge <id>`,
+# a manifest frozen at auto_merge_approved: false, and a refused `fno pr merge`.
+# The two callers that honored it did so by passing an explicit command around
+# the builtin rather than fixing it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "harness,expected",
+    [
+        ("claude", "/target x-abcd"),
+        ("agy", "/target x-abcd"),
+        ("codex", "$fno:target x-abcd"),
+        ("opencode", "/fno:target x-abcd"),
+    ],
+)
+def test_builtin_drops_no_merge_when_auto_merge_configured(harness, expected):
+    out = resolve_dispatch(
+        harness=harness, node_id="x-abcd", dispatch_cfg={"auto_merge": True}
+    )
+    assert out["command"] == expected
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "opencode", "agy"])
+def test_builtin_defaults_to_no_merge(harness):
+    """No key, no grant. The default posture is unchanged for a fresh install."""
+    out = resolve_dispatch(harness=harness, node_id="x-abcd", dispatch_cfg={})
+    assert " no-merge " in out["command"]
+
+
+@pytest.mark.parametrize("bad", ["true", "True", 1, [1], object()])
+def test_non_boolean_auto_merge_never_grants_merge(bad):
+    """Granting merge authority is the irreversible direction, so the read is a
+    strict identity check. Every one of these is truthy; none is a grant."""
+    out = resolve_dispatch(
+        harness="claude", node_id="x-abcd", dispatch_cfg={"auto_merge": bad}
+    )
+    assert out["command"] == "/target no-merge x-abcd"
+
+
+def test_unreadable_config_fails_safe_to_no_merge(monkeypatch):
+    import fno.config as _config
+
+    def _boom(*a, **k):
+        raise RuntimeError("config is a smoking crater")
+
+    monkeypatch.setattr(_config, "load_settings", _boom)
+    out = resolve_dispatch(harness="claude", node_id="x-abcd")
+    assert out["command"] == "/target no-merge x-abcd"
+
+
+def test_auto_merge_does_not_touch_an_explicit_command():
+    """The posture applies to the builtin only: an explicit command already says
+    what to run, and rewriting a caller's own template would be the surprise."""
+    out = resolve_dispatch(
+        harness="claude",
+        node_id="x-abcd",
+        command="/target no-merge --reconcile /tmp/m.md {id}",
+        dispatch_cfg={"auto_merge": True},
+    )
+    assert out["command"] == "/target no-merge --reconcile /tmp/m.md x-abcd"
+
+
+def test_auto_merge_does_not_touch_the_verb_rung():
+    out = resolve_dispatch(
+        harness="claude", node_id="x-abcd", verb="/think",
+        dispatch_cfg={"auto_merge": True},
+    )
+    assert out["command"] == "/think x-abcd"
+
+
+def test_decision_receipt_names_the_merge_posture():
+    """The receipt is how an operator confirms the key was read at all - the
+    bug this closes was invisible precisely because nothing said so."""
+    allow = resolve_dispatch(
+        harness="claude", node_id="x-abcd", dispatch_cfg={"auto_merge": True}
+    )
+    deny = resolve_dispatch(harness="claude", node_id="x-abcd", dispatch_cfg={})
+    assert "command=builtin(merge)" in allow["decision"]
+    assert "command=builtin(no-merge)" in deny["decision"]
+
+
+def test_partial_settings_object_does_not_drop_auto_merge():
+    """A settings stub carrying only `.dispatch.auto_merge` must still yield it.
+
+    Field access used to be one try block over `d.harness`/`d.substrate`/
+    `d.command`, so a settings object missing any one of them raised and threw
+    the WHOLE dict away - one absent key silently disabling every other. That is
+    the shape of the bug being fixed, so it gets its own test."""
+    import types
+
+    from fno.agents.harness_map import _load_dispatch_cfg
+
+    stub = types.SimpleNamespace(dispatch=types.SimpleNamespace(auto_merge=True))
+    assert _load_dispatch_cfg(stub)["auto_merge"] is True
+
+
+def test_settings_without_dispatch_section_yields_empty_cfg():
+    import types
+
+    from fno.agents.harness_map import _load_dispatch_cfg
+
+    assert _load_dispatch_cfg(types.SimpleNamespace()) == {}
+
+
+@pytest.mark.parametrize("allow,expected", [(True, "/target {id}"), (False, "/target no-merge {id}")])
+def test_dispatch_command_posture_argument(allow, expected):
+    assert dispatch_command("claude", allow_merge=allow) == expected
+
+
+def test_dispatch_command_defaults_to_no_merge():
+    assert dispatch_command("claude") == "/target no-merge {id}"

@@ -115,6 +115,38 @@ echo "--- Structure ---"
 if [[ -f "$PLAN_DIR" ]]; then
     if [[ "$PLAN_DIR" == *.md ]]; then
         ok "single-doc plan: $(basename "$PLAN_DIR")"
+        # Frontmatter that does not parse is the loudest failure this script can
+        # give it. Everything downstream fails OPEN by design: _read_plan_frontmatter
+        # raises, is_design_stage returns False (correct - plans live in a symlinked
+        # vault, so a read failure must not quarantine the backlog), the node skips
+        # the design rung and derives `ready`, and `/blueprint --finalize` exits 0
+        # having validated nothing. The whole chain's only trace is a warning line
+        # that scrolls past. An unquoted `title: verb X: qualifier` is how it
+        # happens in practice, since node titles here routinely carry a colon.
+        _fm_python=""
+        if [[ -n "${FNO_PYTHON:-}" && -x "${FNO_PYTHON}" ]]; then
+            _fm_python="$FNO_PYTHON"
+        elif command -v python3 >/dev/null 2>&1; then
+            _fm_python=$(command -v python3)
+        fi
+        if [[ -n "$_fm_python" ]] && "$_fm_python" -c 'import yaml' 2>/dev/null; then
+            _fm_err=$(awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
+                | "$_fm_python" -c 'import sys,yaml
+try:
+    yaml.safe_load(sys.stdin.read())
+except yaml.YAMLError as exc:
+    sys.stdout.write(" ".join(str(exc).split())[:200])' 2>/dev/null)
+            if [[ -n "$_fm_err" ]]; then
+                error "frontmatter is not valid YAML: $_fm_err"
+                error "  a title containing a colon must be quoted: title: \"verb X: qualifier\""
+            else
+                ok "frontmatter parses as YAML"
+            fi
+        else
+            # No PyYAML is a tooling gap, not a plan defect. Say so rather than
+            # passing silently, which would read as "the frontmatter is fine".
+            warn "frontmatter YAML parse not checked (no python3 with PyYAML)"
+        fi
         if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
                 | grep -qE '^[[:space:]]*project:'; then
             ok "has 'project:' field"
