@@ -196,7 +196,7 @@ jobs:
         # pre-extraction semantics; ::group:: markers keep per-step folding in
         # the CI log. Bootstrapped via `uv run --project cli` (no repo-root
         # pyproject, no global fno-py in a fresh checkout); uv auto-syncs.
-        run: uv run --project cli fno-py test smoke --keep-going
+        run: uv run --project cli fno-py test smoke
 
   # TODO: graduate to blocking in the next release - remove continue-on-error
   prompt-drift:
