@@ -151,32 +151,50 @@ is known):
    Leave it off (the default) for a group whose scope is already clear from the
    epic; that child takes the inline-fill path.
 
-7. **Inline-fill every unflagged child BEFORE linking (MANDATORY).** Decompose
-   births each child UNLINKED (`status: stub`, no `plan_path` -> derives `idea`),
-   so nothing dispatches against an empty scaffold. You hold the epic in context
-   right now - the warmest window there will ever be - so rewrite each unflagged
-   child's scaffold (the path decompose reported as `scaffolded plan:` - a
-   canonical `YYYYMMDD-<slug>-<id>.md` in the child's own project plans dir) into
-   a real quick-plan, then link it:
+7. **Inline-fill every child you own BEFORE linking (MANDATORY).** Decompose
+   births each child UNLINKED (`status: idea`, no `plan_path`), so nothing
+   dispatches against an empty scaffold. You hold the epic in context right now -
+   the warmest window there will ever be - so rewrite each scaffold you own (the
+   path decompose reported as `scaffolded plan:` - a canonical
+   `YYYYMMDD-<slug>-<id>.md` in the child's own project plans dir) into a real
+   quick-plan, then link it:
 
    - Fill `## Why (from epic)` (the seeded intent + Locked Decisions, narrowed to
      what binds THIS child - transcribed, never a pointer back at the epic).
    - Replace every stub marker: concrete `## Changes`, `## Files to Modify` (from
      the epic's File Ownership Map), `## Verification` (the checks that prove this
      slice), and a `kill_criteria`.
-   - Flip the frontmatter `status: stub` -> `status: ready` (`stub` is outside the
-     canonical PlanStatus vocabulary, so a linked-but-still-stub plan is later
-     archived by `fno plan reconcile-status`; the validator refuses to link one).
+   - Flip the frontmatter `status: idea` -> `status: ready`. The `idea` rung is
+     undispatchable on every surface, so an unfilled scaffold can never be picked
+     up; the validator also refuses to pass one (`fno plan rung` reports it).
    - Validate, THEN link (link LAST, after the content is real):
      ```bash
      bash "${SKILL_DIR}/scripts/validate-plan.sh" <child-plan> \
        && fno backlog update <child-id> --plan-path <child-plan>
      ```
-   The validator REFUSES a plan still carrying any stub marker or an empty
-   `## Why (from epic)`, so a half-filled child can never be linked. Linking flips
-   the child `ready` - that is the design-completion signal (there is no
-   `status: ready` to hand-write). A flagged (`needs_think`) child skips this: its
-   fan-out design pass produces the real doc and links it.
+   The validator REFUSES a plan still carrying any stub marker, an empty
+   `## Why (from epic)`, or an `idea` rung, so a half-filled child can never be
+   linked.
+
+   **Which children do you own?** Decompose's report answers it - do not infer it
+   from wave numbers. Every child it dispatched a design worker for appears in the
+   `fanout` list with `owned: true`; those are the ONLY ones you skip. Everything
+   else is yours, including a child that appears in `fanout` with `owned: false`
+   (its spawn did not fire, so it fell back to you).
+
+   Ownership keys on the observed spawn receipt rather than on which wave a child
+   landed in, and that is the whole point: a fan-out worker and this session must
+   never both write one scaffold, and a child whose spawn failed must not become
+   an orphan that neither lane fills. Two lanes can dispatch a worker - a
+   `needs_think` group (step 6) and, when `config.think_spawn.on_decompose_wave0`
+   is on, every wave-0 child (one with no intra-epic blocker). Both report through
+   the same `fanout` list, so you read one field and never reason about lanes.
+
+   That flag is OFF by default, and the default is usually right: one warm context
+   writing several coherent siblings beats several cold sessions each re-deriving
+   scope from the epic doc. Turn it on when the epic is large enough that
+   inline-filling every child would blow this session's context budget - the
+   failure it trades against is worse than the cost.
 
 **Slug stability.** Use stable slugs across re-decomposition so idempotency
 holds. Numeric (`1`, `2`, ...) is the simple default; named slugs
@@ -185,7 +203,7 @@ holds. Numeric (`1`, `2`, ...) is the simple default; named slugs
 **Packaging: `separate` only.** Every child gets its own self-contained
 quick-plan file - `plan == PR == node` for children too. Decompose scaffolds a
 stub per child (`## Why (from epic)` + Context / Changes / Files to Modify /
-Verification, born `status: stub`) at the canonical `fno plan path` name in the
+Verification, born `status: idea`) at the canonical `fno plan path` name in the
 child's own project plans dir (reported as `scaffolded plan:`; existing legacy
 `<stem>.group-<slug>.md` stubs are grandfathered in place), and births the
 child WITHOUT a `plan_path` - identity is the durable `group_slug` field, so the

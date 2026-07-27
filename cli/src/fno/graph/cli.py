@@ -1709,7 +1709,11 @@ def cmd_decompose(
     spec_ids = [r["id"] for r in results]
     if spec_ids:
         try:
-            from fno.provenance.spawn_think import RunState, maybe_spawn_think
+            from fno.provenance.spawn_think import (
+                RunState,
+                maybe_spawn_think,
+                think_spawn_on_decompose_wave0,
+            )
 
             # Reuse the shared post-mutation re-read from 3c (by_id).
             born_rs = RunState()
@@ -1721,11 +1725,25 @@ def cmd_decompose(
                 "FNO_THINK_SPAWN": "1",
                 "FNO_THINK_SPAWN_ATTENDED": "spawn",
             }
+            # x-3571 wave-2 lane: opt-in, default OFF. Wave 0 means "no
+            # intra-epic blocker", which `compute_waves` already derives (and
+            # already projects as `wave:`), so there is nothing new to compute -
+            # only a second reason to spawn beside the `needs_think` flag.
+            # Restricted to wave 0 deliberately: those children are genuinely
+            # independent, which is the only case where handing design to a cold
+            # worker beats one warm context writing several coherent siblings.
+            wave0_ids: set[str] = set()
+            if think_spawn_on_decompose_wave0(project_root=Path(epic_cwd_box[0])
+                                              if epic_cwd_box[0] else None):
+                from fno.plan._rollup import compute_waves
+
+                wave_by_id, _ = compute_waves(epic_resolved_id, list(by_id.values()))
+                wave0_ids = {cid for cid, w in wave_by_id.items() if w == 0}
             for cid in spec_ids:
                 child = by_id.get(cid)
                 if child is None or not _needs_design(child):
                     continue  # already designed; nothing for a /think to add
-                if slug_by_id.get(cid) in flagged_slugs:
+                if slug_by_id.get(cid) in flagged_slugs or cid in wave0_ids:
                     # chain_blueprint: the worker must continue /think -> /blueprint
                     # -> link, else the flagged child stays designless/idea forever
                     # (a bare /think never links plan_path). why_digest keeps it
@@ -1738,13 +1756,23 @@ def cmd_decompose(
                         why_digest=why_digest,
                         project_root=Path(child_root) if child_root else None,
                     )
+                    # `owned` resolves the inline-fill handoff (Open Question 3)
+                    # and is the field step 7 reads. Ownership is keyed on the
+                    # OBSERVED spawn receipt, never on predicted wave
+                    # membership: if the spawn did not fire, the child is still
+                    # inline-fill's, so a spawn failure degrades to today's
+                    # behavior instead of leaving an orphan nobody fills.
+                    # That is also what makes double-writing impossible (AC9-CON)
+                    # - exactly one lane can see `owned: true` for a child.
+                    lane = "wave0" if cid in wave0_ids else "needs_think"
                     fanout.append({"id": cid, "decision": res.decision,
-                                   "reason": res.reason})
+                                   "reason": res.reason, "lane": lane,
+                                   "owned": res.decision == "spawned"})
                     if res.decision != "spawned" and not json_mode(ctx):
                         typer.echo(
                             f"fan-out /think for {cid} did not spawn "
-                            f"({res.reason}); run `/think {cid}` then `/blueprint` "
-                            f"to design it (child left idea with its stub)",
+                            f"({res.reason}); it stays yours to inline-fill "
+                            f"(or run `/think {cid}` then `/blueprint`)",
                             err=True,
                         )
         except Exception:  # noqa: BLE001 - additive; never wedge the decompose
