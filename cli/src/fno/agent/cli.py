@@ -202,7 +202,7 @@ def _ctx_to_jsonable(ctx: AgentContext) -> Dict[str, Any]:
 
     return {
         "project_root": str(ctx.project_root),
-        "provider": ctx.provider,
+        "harness": ctx.harness,
         "fleet": _normalize(ctx.fleet) if ctx.fleet else None,
         "walker": _normalize(ctx.walker) if ctx.walker else None,
         "session": _normalize(ctx.session) if ctx.session else None,
@@ -302,10 +302,7 @@ def whoami_command(
         # reply handle to copy as --from-name, and this render is injected into
         # SessionStart context - a collidable prefix invites copying the count.
         typer.echo(f"mail_unread: {mail_unread}")
-    typer.echo(f"provider: {state.provider}")
-    # Deliberately its own line, not appended to `provider:` - sigma's reviewer
-    # bootstrap seds `^provider:` for the invoking harness and a suffix would
-    # corrupt what it reads.
+    typer.echo(f"harness:  {state.harness}")
     model = _session_model()
     if model:
         typer.echo(f"model:    {model}")

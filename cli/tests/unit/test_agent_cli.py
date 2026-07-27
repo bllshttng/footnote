@@ -112,7 +112,8 @@ class TestWhoami:
         assert "fleet-fixture-001" in out
         assert "walker:" in out
         assert "20260512T010101Z-99999-fixaaa" in out  # target session id
-        assert "provider:" in out
+        assert "harness:" in out
+        assert "provider:" not in out
 
     def test_ac2_err_malformed_target_state_fails_fast(self, tmp_path, runner, monkeypatch):
         project = _make_workspace(tmp_path, malformed=True)
@@ -130,7 +131,8 @@ class TestWhoami:
         assert "fleet" in payload and payload["fleet"] is None
         assert payload["walker"] is not None
         assert payload["session"] is not None
-        assert payload["provider"]
+        assert payload["harness"]
+        assert "provider" not in payload
 
     @pytest.mark.parametrize("global_flag", ["--json", "-J"])
     def test_global_json_flag_honored(self, tmp_path, runner, monkeypatch, global_flag):
@@ -176,7 +178,7 @@ class TestWhoami:
         result = _invoke(runner, project, monkeypatch, "whoami")
         assert result.exit_code == 0
         assert "project:" in result.stdout
-        assert "provider:" in result.stdout
+        assert "harness:" in result.stdout
         assert "session:" not in result.stdout
         assert "walker:" not in result.stdout
         assert "fleet:" not in result.stdout
@@ -241,7 +243,7 @@ class TestWhoami:
         result = _invoke(runner, project, monkeypatch, "whoami")
         assert result.exit_code == 0, result.stdout + result.stderr
         assert "mail:" not in result.stdout
-        assert "provider:" in result.stdout  # existing lines intact
+        assert "harness:" in result.stdout  # existing lines intact
         payload = json.loads(
             _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
         )

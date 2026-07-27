@@ -249,7 +249,7 @@ They detect three layers independently and report on all that are present:
 
 ### Commands
 
-- `fno whoami` - one-line per layer: project + fleet + walker + session + provider
+- `fno whoami` - one-line per layer: project + fleet + walker + session + harness
 - `fno status` - session phase + status + bounded events tail + inconsistency flags. The immutable post-wedge manifest carries no gate booleans, so phase shows `n/a (collapsed)` and status is derived from the latest `termination` event in `events.jsonl`; a legacy manifest with `*_passed`-style keys still prints a per-gate section
 
 ### Shared options

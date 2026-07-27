@@ -370,7 +370,7 @@ if [ -n "${SESSION_ID:-}" ]; then
 else
   ROUTING="$(fno review --print-providers)"
 fi
-INVOKING_HARNESS="$(fno whoami 2>/dev/null | sed -n 's/^provider:[[:space:]]*//p' | head -1 | xargs)"
+INVOKING_HARNESS="$(fno whoami 2>/dev/null | sed -n 's/^harness:[[:space:]]*//p' | head -1 | xargs)"
 [ -n "$INVOKING_HARNESS" ] || INVOKING_HARNESS=unknown
 ```
 
