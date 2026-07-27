@@ -159,18 +159,50 @@ fn retired_squad_spelling_prunes_identically() {
 }
 
 /// A bare family verb and an unknown verb are both usage (exit 2), and the
-/// message names the one verb that exists.
+/// message names the one verb that exists. The two take DIFFERENT paths and the
+/// assertions say which: a bare `mux workspace` fails main.rs's arity guard and
+/// lands on the global usage banner, while an unknown verb reaches the family
+/// parser. Asserting only "names prune" cannot tell them apart, because the
+/// global banner also contains the word.
 #[test]
 fn workspace_family_usage_names_prune() {
-    for (args, label) in [
-        (vec!["mux", "workspace"], "bare"),
-        (vec!["mux", "workspace", "bogus"], "unknown verb"),
+    for (args, label, want) in [
+        (
+            vec!["mux", "workspace"],
+            "bare",
+            "fno mux workspace prune [",
+        ),
+        (
+            vec!["mux", "workspace", "bogus"],
+            "unknown verb",
+            "fno mux workspace: unknown verb",
+        ),
     ] {
         let out = fno().args(&args).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "{label} is usage");
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("prune"), "{label} names prune: {stderr}");
+        assert!(
+            stderr.contains(want),
+            "{label} should emit {want:?}: {stderr}"
+        );
     }
+}
+
+/// The retired spelling is accepted but never advertised (AC2's second half).
+/// Without this, adding `squad` back to the usage banner is a silent
+/// un-deprecation that every other test stays green through.
+#[test]
+fn retired_squad_spelling_is_not_advertised() {
+    let out = fno().args(["mux", "workspace"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("fno mux workspace prune"),
+        "usage advertises the canonical spelling: {stderr}"
+    );
+    assert!(
+        !stderr.contains("mux squad"),
+        "usage must not advertise the retired spelling: {stderr}"
+    );
 }
 
 #[test]
