@@ -506,22 +506,20 @@ fn read_u64_cap(v: &toml::Value, ctx: &str) -> Option<Result<u64, String>> {
 /// gate, and the Err travels to the gate so it blocks with a reason instead of
 /// silently reading as no declaration at all.
 fn value_as_probe_list(v: &toml::Value) -> Result<Vec<String>, String> {
-    let Some(items) = v.as_array() else {
-        return Err(format!("it is a {}, not an array of strings", v.type_str()));
-    };
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        match item.as_str() {
-            Some(s) => out.push(s.to_string()),
-            None => {
-                return Err(format!(
+    let items = v
+        .as_array()
+        .ok_or_else(|| format!("it is a {}, not an array of strings", v.type_str()))?;
+    items
+        .iter()
+        .map(|i| {
+            i.as_str().map(str::to_string).ok_or_else(|| {
+                format!(
                     "it holds a {} where a command string was expected",
-                    item.type_str()
-                ))
-            }
-        }
-    }
-    Ok(out)
+                    i.type_str()
+                )
+            })
+        })
+        .collect()
 }
 
 /// Settings with the login gate pinned unsatisfiable - the fail-closed result
@@ -8621,30 +8619,11 @@ mod done_probe_tests {
         }
     }
 
-    #[test]
-    fn a_plan_cannot_silence_a_project_probe() {
-        // AC3-INV: an explicit `done_probes: []` in a plan is the obvious
-        // attempt, and it must not work - otherwise a repo policy is only as
-        // strong as the least careful plan doc.
-        let tmp = tempfile::tempdir().unwrap();
-        let plan = tmp.path().join("plan.md");
-        std::fs::write(&plan, fm("done_probes: []")).unwrap();
-        let events = tmp.path().join("events.jsonl");
-        assert!(
-            matches!(
-                evaluate_done_probes(
-                    plan.to_str(),
-                    Some(&project(&["false"])),
-                    tmp.path(),
-                    &events,
-                    "s1",
-                    Duration::from_secs(10)
-                ),
-                ProbeGate::Fail { .. }
-            ),
-            "a plan declaring [] must not disable the project's guardrail"
-        );
-    }
+    // AC3-INV (a plan declaring `done_probes: []` cannot silence the project's
+    // gate) is covered end to end by
+    // done_probes_ac3_inv_a_plan_cannot_silence_the_project_gate in
+    // tests/loop_check.rs, which drives the real settings merge rather than a
+    // hand-built probe list. A unit-level twin would assert strictly less.
 
     #[test]
     fn an_unparseable_project_declaration_blocks_rather_than_degrading() {
