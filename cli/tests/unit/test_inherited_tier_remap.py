@@ -7,6 +7,7 @@ reached Anthropic asking for a GLM model id.
 """
 
 import os
+from types import SimpleNamespace
 
 from fno.agents.account_env import SCRUB_AUTH_VARS
 from fno.agents.rust_runtime import _scrub_account_auth_at_seam, inherited_tier_remap
@@ -70,8 +71,50 @@ def test_account_spawn_scrubs_at_the_seam_so_rust_inherits_it(monkeypatch):
     # seam is the only edit that lane sees.
     for k, v in ZAI_ENV.items():
         monkeypatch.setenv(k, v)
+    monkeypatch.setattr(
+        "fno.agents.account_env.resolve_account_overlay",
+        lambda aid: SimpleNamespace(env={"CLAUDE_CONFIG_DIR": "/tmp/x"}),
+    )
     _scrub_account_auth_at_seam([*BASE, "--account", "makers", "--model", "opus"])
     assert not [k for k in SCRUB_AUTH_VARS if k in os.environ]
+    assert os.environ["CLAUDE_CONFIG_DIR"] == "/tmp/x"
+
+
+def test_seam_resolves_the_account_before_scrubbing(monkeypatch):
+    # An api_key record may reference the ambient env
+    # (ANTHROPIC_API_KEY = "${ENV:ANTHROPIC_API_KEY}") and resolve_env_value
+    # reads os.environ, so scrubbing first would delete the source value and
+    # make a previously valid --account spawn unresolvable.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-from-parent")
+    seen = {}
+
+    def fake_resolve(account_id):
+        seen["account"] = account_id
+        seen["key_at_resolve"] = os.environ.get("ANTHROPIC_API_KEY")
+        return SimpleNamespace(env={"ANTHROPIC_API_KEY": "sk-resolved"})
+
+    monkeypatch.setattr(
+        "fno.agents.account_env.resolve_account_overlay", fake_resolve
+    )
+    _scrub_account_auth_at_seam([*BASE, "--account=acct", "--model", "opus"])
+    assert seen["account"] == "acct"
+    assert seen["key_at_resolve"] == "sk-from-parent"
+    assert os.environ["ANTHROPIC_API_KEY"] == "sk-resolved"
+
+
+def test_seam_leaves_env_untouched_when_the_account_cannot_resolve(monkeypatch):
+    # The downstream resolver owns the refusal receipt; the seam must not
+    # pre-empt it by half-scrubbing on the way out.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-from-parent")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", ZAI_ENV["ANTHROPIC_BASE_URL"])
+
+    def boom(account_id):
+        raise ValueError("unresolvable")
+
+    monkeypatch.setattr("fno.agents.account_env.resolve_account_overlay", boom)
+    _scrub_account_auth_at_seam([*BASE, "--account", "acct", "--model", "opus"])
+    assert os.environ["ANTHROPIC_API_KEY"] == "sk-from-parent"
+    assert os.environ["ANTHROPIC_BASE_URL"] == ZAI_ENV["ANTHROPIC_BASE_URL"]
 
 
 def test_seam_scrub_leaves_a_non_account_spawn_alone(monkeypatch):

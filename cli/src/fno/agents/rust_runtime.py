@@ -590,14 +590,32 @@ def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
     execs with ``os.environ``, so scrubbing here is the one edit both runtimes
     see. The account overlay is still layered per-substrate afterwards, so an
     account record that legitimately pins any of these still wins.
-    """
-    head = list(_args_before_argv(args))
-    if not any(a == "--account" or a.startswith("--account=") for a in head):
-        return
-    from fno.agents.account_env import SCRUB_AUTH_VARS
 
-    for var in SCRUB_AUTH_VARS:
+    Order is load-bearing: the overlay is resolved BEFORE the scrub. An api_key
+    record may reference the ambient environment (``ANTHROPIC_API_KEY =
+    "${ENV:ANTHROPIC_API_KEY}"``) and ``resolve_env_value`` reads
+    ``os.environ``, so scrubbing first would delete the source value and make a
+    previously valid ``--account`` spawn unresolvable. Resolve, then scrub, then
+    re-apply the resolved values.
+
+    A resolution failure leaves the environment untouched and returns: the
+    downstream ``resolve_account_overlay_or_exit`` owns that refusal receipt,
+    and this seam must not pre-empt it with a different error.
+    """
+    account = _spawn_flag_value(args, "--account")
+    if not account:
+        return
+    from fno.agents import account_env as _account_env
+
+    try:
+        overlay = _account_env.resolve_account_overlay(account)
+    except Exception:
+        return
+    if overlay is None:
+        return
+    for var in _account_env.SCRUB_AUTH_VARS:
         os.environ.pop(var, None)
+    os.environ.update(overlay.env)
 
 
 def _refuse_inherited_tier_remap(args: Sequence[str]) -> None:
