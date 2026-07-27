@@ -98,9 +98,13 @@ def _refuse_unsatisfiable_reviewers() -> None:
         if not reviewers:
             return
         session = detect_session()
-        message = refusal_message(resolve_reviewers(reviewers, session), session)
+        verdicts = resolve_reviewers(reviewers, session)
+        message = refusal_message(verdicts, session)
+        unverifiable = [v for v in verdicts if v.status == "unverifiable"]
     except Exception:  # noqa: BLE001 - a broken probe must not block bootstrap
         return
+    for v in unverifiable:
+        typer.echo(f"note target init: {v.line()}", err=True)
     if message:
         typer.echo(message, err=True)
         raise typer.Exit(code=2)

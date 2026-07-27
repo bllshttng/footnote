@@ -31,7 +31,7 @@ from fno.harness_identity import resolve_harness_identity
 # A codex or gemini session has no path to a sigma attestation at all.
 _SUBAGENT_DISPATCH_HARNESSES = frozenset({"claude"})
 
-Status = Literal["satisfiable", "needs-operator", "unavailable"]
+Status = Literal["satisfiable", "needs-operator", "unavailable", "unverifiable"]
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,16 @@ class ReviewerVerdict:
 
     @property
     def blocks_autonomy(self) -> bool:
-        return self.status != "satisfiable"
+        """Whether this verdict should stop the run before it starts.
+
+        `unverifiable` does NOT block. A shell with no harness marker is not a
+        session that cannot dispatch subagents, it is one we cannot classify -
+        and refusing it would break a plain-terminal `fno target init` in every
+        repo that configures a reviewer. The cost of guessing wrong is now
+        bounded: if the gate does turn out to be unsatisfiable, the stop-gate
+        message names the reviewer and its invocation instead of blaming a bot.
+        """
+        return self.status in {"needs-operator", "unavailable"}
 
     def line(self) -> str:
         """One report line. A self-cert always says so (AC5)."""
@@ -119,9 +128,13 @@ def _resolve_one(
     if descriptor.requires == "subagent-dispatch":
         if session.harness in _SUBAGENT_DISPATCH_HARNESSES:
             return verdict("satisfiable", f"run `{descriptor.invocation}`")
-        # Unknown harness lands here too, and refuses. Guessing "available"
-        # reproduces exactly the wedge this check exists to kill, and the
-        # refusal names both remedies, so a false refusal is loud and cheap.
+        if session.harness == "unknown":
+            return verdict(
+                "unverifiable",
+                f"needs subagent-dispatch; no harness marker in this environment, "
+                f"so capability cannot be verified. Proceeding - if the gate does "
+                f"go unmet, run `{descriptor.invocation}`",
+            )
         return verdict(
             "unavailable",
             f"needs subagent-dispatch, unavailable on {session.describe()}",

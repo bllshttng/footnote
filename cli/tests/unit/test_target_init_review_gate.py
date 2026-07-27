@@ -155,9 +155,32 @@ def test_detect_session_reads_harness_and_substrate():
     assert (s.harness, s.substrate, s.attended) == ("claude", "bg", False)
 
 
-def test_detect_session_unknown_harness_refuses_subagent_dispatch():
-    """Guessing "available" on an unrecognized harness rebuilds the wedge."""
+def test_unclassifiable_session_is_unverifiable_not_unavailable():
+    """A plain terminal has no harness marker. Refusing it would break
+    `fno target init` outright in every repo that configures a reviewer, and it
+    is not the same claim as "this harness cannot dispatch subagents"."""
     s = detect_session({})
     assert s.harness == "unknown"
     (v,) = resolve_reviewers(["sigma"], s)
+    assert v.status == "unverifiable"
+    assert v.blocks_autonomy is False
+    assert "cannot be verified" in v.reason
+    assert refusal_message([v], s) is None
+
+
+def test_known_incapable_harness_still_refuses():
+    """AC1 is about a session that demonstrably cannot, not one we cannot read."""
+    (v,) = resolve_reviewers(["sigma"], CODEX_HEADLESS)
     assert v.status == "unavailable"
+    assert v.blocks_autonomy is True
+
+
+def test_unverifiable_session_does_not_refuse_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _config(tmp_path, monkeypatch, "[sigma]")
+    for var in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID",
+                "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "TARGET_UNATTENDED",
+                "FNO_BG", "FNO_AGENT_SELF"):
+        monkeypatch.delenv(var, raising=False)
+    _refuse_unsatisfiable_reviewers()  # no raise

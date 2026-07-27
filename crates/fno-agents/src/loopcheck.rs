@@ -1039,15 +1039,23 @@ fn unattested_reviewers(
             continue;
         };
         let r = r.trim_start_matches('/').to_string();
-        let line_head = val
-            .pointer("/data/head_sha")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        // An event with no `head_sha` is not head-pinned evidence and is
+        // skipped outright. Defaulting it to "" would make it MATCH a caller
+        // whose own head_sha is "", turning unpinned data into a pass (codex
+        // P1 on this PR).
+        let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
         if line_head != head_sha {
-            latest_other_head.insert(r, line_head.to_string());
+            // Only a PASS is worth reporting as superseded. An old-head `fail`
+            // rendered as "attested at X, superseded" would imply a prior
+            // successful review that never happened (codex P2).
+            if is_pass {
+                latest_other_head.insert(r, line_head.to_string());
+            }
             continue;
         }
-        let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
         latest_pass.insert(r, is_pass);
     }
     reviewers
@@ -3802,7 +3810,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         Some(TerminationReason::NoProgress),
                         &format!(
                             "fingerprint unchanged for {} fires; HEAD={}, PR={}, CI={}, reviewed={}",
-                            consecutive_after, &head_sha[..8.min(head_sha.len())],
+                            consecutive_after, short_sha(&head_sha),
                             pr_info.state.as_str(), pr_info.ci_conclusion.render(), pr_info.reviewed
                         ),
                         this_fire,
@@ -3815,9 +3823,9 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // A failed probe IS the blocker when everything else is green;
                 // build_block_reason would otherwise report a healthy PR.
                 let reason = crate::nudge::append_inbox_nudge(
-                    &probe_block
-                        .clone()
-                        .unwrap_or_else(|| build_block_reason(&pr_info, &head_sha)),
+                    &probe_block.clone().unwrap_or_else(|| {
+                        build_block_reason(&pr_info, &head_sha, open_findings.is_empty())
+                    }),
                     &cwd,
                     &session_id,
                 );
@@ -4008,11 +4016,27 @@ fn async_wait_class(
     // e.g. sigma) or an unaddressed finding - work the agent must DO, and no
     // GitHub reviewer will ever appear to wake it, so idling would park the
     // session forever. Require an outstanding bot (codex P1).
-    if pr.ci_conclusion.is_ok() && !pr.reviewed && !pr.review_skipped && !pr.missing_bots.is_empty()
+    //
+    // An outstanding LOCAL reviewer disqualifies the wait even when a bot is
+    // also outstanding (codex review of x-cdc7): the session has work it can do
+    // right now, and if the bot never posts, idling means that work never
+    // happens and the run dies on budget with the gate still unmet.
+    if pr.ci_conclusion.is_ok()
+        && !pr.reviewed
+        && !pr.review_skipped
+        && !pr.missing_bots.is_empty()
+        && pr.unattested_reviewers.is_empty()
     {
         return Some("review");
     }
     None
+}
+
+/// First 8 chars of a sha, never bytes. `&s[..8]` panics when byte offset 8
+/// lands inside a multibyte character, and one of these strings comes from a
+/// user-writable events.jsonl - a panic there takes the whole stop gate down.
+fn short_sha(s: &str) -> String {
+    s.chars().take(8).collect()
 }
 
 /// The arm-and-tag ritual (x-e2c8, US3) that converts an unwatched async wait
@@ -4519,7 +4543,20 @@ fn evaluate_done_probes(
     }
 }
 
-fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
+fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) -> String {
+    // The ONE predicate. A message that prescribes the arm-and-tag ritual for a
+    // blocker `async_wait_class` refuses to idle is the code contradicting
+    // itself, and a session complied with exactly that roughly ten times on
+    // #618. Deriving the hint from the classifier makes the two agree by
+    // construction rather than by two hand-kept branch orders.
+    let idlable = async_wait_class(pr, local_head, open_findings_empty);
+    let hint = |blocker: &str| -> String {
+        if idlable == Some(blocker) {
+            arm_watch_hint(pr.number, blocker)
+        } else {
+            String::new()
+        }
+    };
     if !pr.state.is_open_or_merged() {
         return format!(
             "no PR for HEAD (pr_state={}); keep working",
@@ -4531,8 +4568,8 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
         return format!(
             "PR #{} head {} != local HEAD {}: push the latest commits before completing",
             pr.number,
-            &pr.head_oid[..8.min(pr.head_oid.len())],
-            &local_head[..8.min(local_head.len())]
+            short_sha(&pr.head_oid),
+            short_sha(local_head)
         );
     }
 
@@ -4548,11 +4585,7 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
         // so a "CI failed" message here would mislead the blocked agent
         // into debugging a nonexistent failure on every quiet fire.
         if pr.ci_conclusion == CiConclusion::Pending {
-            return format!(
-                "CI still running on PR #{}.{}",
-                pr.number,
-                arm_watch_hint(pr.number, "ci")
-            );
+            return format!("CI still running on PR #{}.{}", pr.number, hint("ci"));
         }
         let check_name = match &pr.ci_conclusion {
             CiConclusion::Failure(Some(name)) => name.as_str(),
@@ -4579,16 +4612,15 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
             // forever. Emitting the arm-and-tag ritual on a blocker the same
             // file refuses to idle is the code contradicting itself, and a
             // session did comply with it roughly ten times.
-            let head = &local_head[..8.min(local_head.len())];
+            let head = short_sha(local_head);
             let items: Vec<String> = pr
                 .unattested_reviewers
                 .iter()
                 .map(|r| {
                     let stale = match &r.superseded_head {
-                        Some(h) if !h.is_empty() => format!(
-                            " (attested at {}, superseded by this head)",
-                            &h[..8.min(h.len())]
-                        ),
+                        Some(h) if !h.is_empty() => {
+                            format!(" (attested at {}, superseded by this head)", short_sha(h))
+                        }
                         _ => String::new(),
                     };
                     match reviewer_invocation(&r.name) {
@@ -4606,17 +4638,6 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
                 items.join("; ")
             );
         }
-        if !pr.missing_bots.is_empty() {
-            // AC1-UI: name the specific missing bot(s), not a generic
-            // "not reviewed". Awaiting a bot review is an async wait, so teach
-            // the arm-and-tag ritual (US3) rather than a bare "keep waiting".
-            return format!(
-                "PR #{}: {} has not reviewed.{}",
-                pr.number,
-                pr.missing_bots.join(", "),
-                arm_watch_hint(pr.number, "review")
-            );
-        }
         if !pr.unaddressed_findings.is_empty() {
             // AC2-UI: name the specific finding (path:line) and the remedy.
             let f = &pr.unaddressed_findings[0];
@@ -4628,6 +4649,17 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
             return format!(
                 "PR #{}: {} {} at {}:{} unaddressed (reply in-thread or wontfix:){}",
                 pr.number, f.author, f.severity, f.path, f.line, more
+            );
+        }
+        if !pr.missing_bots.is_empty() {
+            // AC1-UI: name the specific missing bot(s), not a generic
+            // "not reviewed". Awaiting a bot review is an async wait, so teach
+            // the arm-and-tag ritual (US3) rather than a bare "keep waiting".
+            return format!(
+                "PR #{}: {} has not reviewed.{}",
+                pr.number,
+                pr.missing_bots.join(", "),
+                hint("review")
             );
         }
         // Reaching here means missing_bots is empty, which `async_wait_class`
@@ -5184,7 +5216,7 @@ mod tests {
             review_skipped: false,
             unattested_reviewers: vec![],
         };
-        let reason = build_block_reason(&pr, "abc");
+        let reason = build_block_reason(&pr, "abc", true);
         assert!(
             reason.contains("still running"),
             "pending CI must not read as red; got: {reason}"
@@ -5202,7 +5234,7 @@ mod tests {
             ci_has_pending: true,
             ..watch_pr()
         };
-        let reason = build_block_reason(&pr, "abc");
+        let reason = build_block_reason(&pr, "abc", true);
         assert!(reason.contains("<watching"), "got: {reason}");
         assert!(reason.contains("timeout"), "got: {reason}");
         assert!(reason.contains("gh pr checks"), "got: {reason}");
@@ -5233,7 +5265,7 @@ mod tests {
             missing_bots: vec!["chatgpt-codex-connector".into()],
             ..watch_pr()
         };
-        let reason = build_block_reason(&pr, "abc");
+        let reason = build_block_reason(&pr, "abc", true);
         assert!(reason.contains("chatgpt-codex-connector"), "got: {reason}");
         assert!(reason.contains("<watching"), "got: {reason}");
     }
@@ -5343,7 +5375,7 @@ mod tests {
     fn block_reason_names_the_reviewers_gate_not_a_bot() {
         // AC2: the old string claimed a bot had not reviewed while
         // required_bots was empty and the real blocker was local.
-        let reason = build_block_reason(&reviewers_gate_pr(), "abc");
+        let reason = build_block_reason(&reviewers_gate_pr(), "abc", true);
         assert!(reason.contains("reviewers gate unmet"), "got: {reason}");
         assert!(reason.contains("sigma"), "got: {reason}");
         assert!(reason.contains("/fno:review sigma"), "got: {reason}");
@@ -5357,7 +5389,7 @@ mod tests {
         // the arm-and-tag ritual here is the code contradicting itself.
         let pr = reviewers_gate_pr();
         assert_eq!(async_wait_class(&pr, "abc", true), None);
-        let reason = build_block_reason(&pr, "abc");
+        let reason = build_block_reason(&pr, "abc", true);
         assert!(!reason.contains("<watching"), "got: {reason}");
         assert!(
             !reason.contains("Arm a harness-tracked watcher"),
@@ -5377,7 +5409,7 @@ mod tests {
             }],
             ..reviewers_gate_pr()
         };
-        let reason = build_block_reason(&pr, "abc");
+        let reason = build_block_reason(&pr, "abc", true);
         assert!(reason.contains("01234567"), "got: {reason}");
         assert!(reason.contains("superseded"), "got: {reason}");
     }
@@ -5390,7 +5422,7 @@ mod tests {
             unattested_reviewers: vec![],
             ..reviewers_gate_pr()
         };
-        let reason = build_block_reason(&pr, "abc");
+        let reason = build_block_reason(&pr, "abc", true);
         assert!(!reason.contains("<watching"), "got: {reason}");
         assert!(!reason.contains("bot reviewer"), "got: {reason}");
     }
@@ -5404,7 +5436,7 @@ mod tests {
             unattested_reviewers: vec![],
             ..reviewers_gate_pr()
         };
-        let reason = build_block_reason(&pr, "abc");
+        let reason = build_block_reason(&pr, "abc", true);
         assert!(reason.contains("chatgpt-codex-connector"), "got: {reason}");
         assert!(reason.contains("<watching"), "got: {reason}");
     }
@@ -5420,7 +5452,7 @@ mod tests {
             missing_bots: vec!["chatgpt-codex-connector".into()],
             ..reviewers_gate_pr()
         };
-        let reason = build_block_reason(&pr, "abc");
+        let reason = build_block_reason(&pr, "abc", true);
         assert!(reason.contains("reviewers gate unmet"), "got: {reason}");
         assert!(!reason.contains("<watching"), "got: {reason}");
         // Once the local half is attested, the bot wait is the sole blocker and
@@ -5429,7 +5461,7 @@ mod tests {
             unattested_reviewers: vec![],
             ..pr
         };
-        assert!(build_block_reason(&after, "abc").contains("<watching"));
+        assert!(build_block_reason(&after, "abc", true).contains("<watching"));
     }
 
     #[test]
@@ -5462,6 +5494,117 @@ mod tests {
         assert_eq!(out.len(), 1);
         // A head-pinned fail is not a superseded pass; do not offer a stale head.
         assert_eq!(out[0].superseded_head, None);
+    }
+
+    #[test]
+    fn unpinned_attestation_never_counts_as_evidence() {
+        // codex P1 on this PR: defaulting a missing head_sha to "" made an
+        // unpinned event MATCH a caller whose own head_sha is "", turning
+        // no-evidence into a pass.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("e.jsonl");
+        std::fs::write(
+            &p,
+            r#"{"type":"review_attestation","data":{"reviewer":"sigma","verdict":"pass"}}"#,
+        )
+        .unwrap();
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "");
+        assert_eq!(out.len(), 1, "unpinned evidence must not satisfy the gate");
+        assert_eq!(out[0].superseded_head, None);
+    }
+
+    #[test]
+    fn a_failed_old_head_is_not_reported_as_superseded() {
+        // codex P2: "attested at X, superseded" implies a prior PASS. An
+        // old-head fail rendered that way invents a review that never passed.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("e.jsonl");
+        std::fs::write(
+            &p,
+            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail"}}"#,
+        )
+        .unwrap();
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].superseded_head, None);
+    }
+
+    #[test]
+    fn short_sha_never_panics_on_multibyte() {
+        // codex P2: `&s[..8]` panics when byte 8 lands inside a character, and
+        // superseded_head comes from a user-writable events.jsonl.
+        assert_eq!(short_sha("0123456789ab"), "01234567");
+        assert_eq!(short_sha("abc"), "abc");
+        assert_eq!(short_sha(""), "");
+        assert_eq!(short_sha("1234567\u{e9}xyz"), "1234567\u{e9}");
+        let pr = PrInfo {
+            unattested_reviewers: vec![UnattestedReviewer {
+                name: "sigma".to_string(),
+                superseded_head: Some("1234567\u{e9}abc".to_string()),
+            }],
+            ..reviewers_gate_pr()
+        };
+        build_block_reason(&pr, "1234567\u{e9}abc", true);
+    }
+
+    #[test]
+    fn watcher_hint_never_contradicts_the_idle_classifier() {
+        // codex P1: the missing-bot branch emitted the ritual unconditionally,
+        // including for states async_wait_class refuses to idle (an unaddressed
+        // finding, or an open operator finding). The hint is now derived from
+        // that same classifier, so the two agree by construction.
+        let bot_only = PrInfo {
+            missing_bots: vec!["chatgpt-codex-connector".into()],
+            unattested_reviewers: vec![],
+            ..reviewers_gate_pr()
+        };
+        for (label, pr, open_empty) in [
+            (
+                "bot + unaddressed finding",
+                PrInfo {
+                    missing_bots: vec!["chatgpt-codex-connector".into()],
+                    unattested_reviewers: vec![],
+                    unaddressed_findings: vec![Finding {
+                        id: 1,
+                        author: "codex".into(),
+                        path: "a.rs".into(),
+                        line: 1,
+                        created_at: "2026-07-27T00:00:00Z".into(),
+                        severity: "P1",
+                    }],
+                    ..reviewers_gate_pr()
+                },
+                true,
+            ),
+            (
+                "bot + open operator finding",
+                PrInfo {
+                    missing_bots: vec!["chatgpt-codex-connector".into()],
+                    unattested_reviewers: vec![],
+                    ..reviewers_gate_pr()
+                },
+                false,
+            ),
+        ] {
+            let reason = build_block_reason(&pr, "abc", open_empty);
+            assert_eq!(async_wait_class(&pr, "abc", open_empty), None, "{label}");
+            assert!(!reason.contains("<watching"), "{label}: {reason}");
+        }
+        // The genuinely idlable state keeps the ritual.
+        assert_eq!(async_wait_class(&bot_only, "abc", true), Some("review"));
+        assert!(build_block_reason(&bot_only, "abc", true).contains("<watching"));
+    }
+
+    #[test]
+    fn an_outstanding_local_reviewer_is_never_an_idlable_wait() {
+        // The classifier half of the same fix: with a bot AND a local reviewer
+        // outstanding, a stray <watching> tag must not park the session on work
+        // it could do now.
+        let pr = PrInfo {
+            missing_bots: vec!["chatgpt-codex-connector".into()],
+            ..reviewers_gate_pr()
+        };
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
     }
 
     #[test]
