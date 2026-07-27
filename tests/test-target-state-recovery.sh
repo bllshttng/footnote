@@ -5,18 +5,28 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-# detect_provider checks session markers BEFORE the *_PLUGIN_ROOT hints, so an
-# ambient CLAUDE_CODE_SESSION_ID wins over the CODEX_PLUGIN_ROOT these cases set
-# and every harness assertion below detects "claude". Clearing the markers is
-# what makes this suite give the same verdict in a bare CI runner and inside a
-# live harness session.
-unset CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID CODEX_SESSION_ID GEMINI_SESSION_ID
+# Every ambient input to detect_provider and gemini_agents_opted_in has to go,
+# or a case inherits its verdict from the shell instead of from its fixture.
+# Each case sets the one hint it needs inside its own subshell, so nothing
+# cleared here is re-exported.
+#
+# Precedence is why the whole set matters and not just the session markers:
+# detect_provider checks session markers, THEN CODEX_PLUGIN_ROOT, THEN
+# GEMINI_PROJECT_DIR, so an ambient CLAUDE_CODE_SESSION_ID makes every case
+# detect "claude" and an ambient CODEX_PLUGIN_ROOT makes the gemini case detect
+# "codex". gemini_agents_opted_in checks its two env vars BEFORE any config
+# file, so a truthy ambient value greens the gemini case even when the fixture
+# migration is broken, and a falsey one reds a perfectly good fixture.
+unset CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID CODEX_SESSION_ID GEMINI_SESSION_ID \
+      CODEX_PLUGIN_ROOT GEMINI_PROJECT_DIR CLAUDE_PLUGIN_ROOT \
+      FNO_GEMINI_EXPERIMENTAL_AGENTS GEMINI_EXPERIMENTAL_AGENTS
 
-# Isolate HOME for the same reason. gemini_agents_opted_in falls back to
+# Isolate HOME for the same reason: gemini_agents_opted_in falls back to
 # $HOME/.fno/config.toml, so a developer who opted in globally would get a
-# green gemini case no matter what the fixture says. The opt-in must come from
-# the fixture alone, which reaches config_flag_is_true via the legacy
-# settings.yaml -> config.toml migration in fno.config.writer.
+# green gemini case no matter what the fixture says. With the env cleared
+# above, the fixture is now genuinely the only opt-in source; it reaches
+# config_flag_is_true via the legacy settings.yaml -> config.toml migration in
+# fno.config.writer.
 export HOME="$TMP_DIR/fake-home"
 mkdir -p "$HOME/.fno"
 
