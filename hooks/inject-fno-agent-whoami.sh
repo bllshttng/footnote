@@ -2,7 +2,7 @@
 # SessionStart hook: inject `fno whoami` output as orientation context.
 #
 # Gives every fresh session an at-a-glance view of its operating stack
-# (project + fleet + walker + session + provider) so the agent re-orients
+# (project + fleet + walker + session + harness) so the agent re-orients
 # without grepping state files. After a compaction or in a long session,
 # "I should run fno whoami to re-orient" is exactly the kind of
 # detail that disappears; this hook fires it automatically.

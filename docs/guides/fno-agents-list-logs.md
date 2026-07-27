@@ -134,7 +134,7 @@ Like `list`, it is a pure read (it never mutates the registry, writes state, or 
 | 0 | A name was resolved (from the env, or the session fallback). |
 | 3 | Not a registered mesh agent — a human shell or top-level session with no injected identity. The JSON shape carries `registered: false`. |
 
-If the registry is unreadable but `FNO_AGENT_SELF` is set, the name still comes back (with a `WARN:` line) — the env answer never depends on the registry. This verb reports your *mesh* identity; the top-level `fno whoami` reports operating context (fleet, walker, session, provider) and, when you are a mesh worker, now echoes your name on one extra `agent:` line as a pointer here.
+If the registry is unreadable but `FNO_AGENT_SELF` is set, the name still comes back (with a `WARN:` line) — the env answer never depends on the registry. This verb reports your *mesh* identity; the top-level `fno whoami` reports operating context (fleet, walker, session, harness) and, when you are a mesh worker, now echoes your name on one extra `agent:` line as a pointer here.
 
 ## `fno agents logs <name>` — tail an agent's output
 

@@ -66,7 +66,7 @@ Do not try to stop a loop by editing `.fno/target-state.md`. That file is an imm
 Do not grep state files. Ask the agent stack directly:
 
 ```bash
-fno whoami    # one line: fleet + walker + session + provider
+fno whoami    # one line: fleet + walker + session + harness
 fno status    # gate-by-gate satisfaction, recent events, flagged inconsistencies
 ```
 

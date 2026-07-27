@@ -23,7 +23,7 @@ import yaml
 
 from fno.harness_identity import resolve_harness_identity
 
-Provider = Literal["claude", "gemini", "codex"]
+Harness = Literal["claude", "gemini", "codex"]
 SessionKind = Literal["target", "session", "override"]
 FleetStatus = Literal["running", "paused"]
 
@@ -96,7 +96,7 @@ class SessionState:
 @dataclass
 class AgentContext:
     project_root: Path
-    provider: Provider
+    harness: Harness
     fleet: Optional[FleetState] = None
     walker: Optional[WalkerState] = None
     session: Optional[SessionState] = None
@@ -122,9 +122,10 @@ def _detect_project_root(warnings: List[str]) -> Path:
     return Path.cwd()
 
 
-def _detect_provider() -> Provider:
+def _detect_harness() -> Harness:
     """Resolve harness via shared session markers first, plugin-root hints
-    second, default 'claude'. Mirrors init-target-state.sh's detect_provider.
+    second, default 'claude'. Mirrors init-target-state.sh's detect_provider,
+    which keeps the old name because it writes the persisted manifest field.
 
     Session markers win because a real codex/gemini session sets its thread or
     session env but no ``*_PLUGIN_ROOT``; sniffing plugin roots alone silently
@@ -309,13 +310,13 @@ def load_agent_context(
         if project_root_override is not None
         else _detect_project_root(warnings)
     )
-    provider = _detect_provider()
+    harness = _detect_harness()
     fleet = _load_fleet_state(project_root, warnings, detected)
     walker = _load_walker_state(project_root, warnings, detected)
     session = _load_session_state(project_root, state_file_override, warnings, detected)
     return AgentContext(
         project_root=project_root,
-        provider=provider,
+        harness=harness,
         fleet=fleet,
         walker=walker,
         session=session,
