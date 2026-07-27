@@ -1178,3 +1178,36 @@ Probing and display are always on; only the autonomous *deferral* is gated,
 matching the opt-in posture of `backlog advance` and auto-merge. Cost-to-finish
 routing is out of scope for v1; the headroom seam is where cost data plugs in
 later.
+
+## Review policy and assurance (x-5f0c)
+
+`fno.review.policy` classifies how much assurance a change needs *before* the
+review runs, then resolves that against the capacity `available_provider_kinds`
+already discovered. It is a thin, pure layer over the substrate above, not a new
+provider list.
+
+`classify_review_policy(size, risk_surfaces)` is deterministic:
+
+| Input | Policy |
+|---|---|
+| a named high-assurance surface (`auth`, `security`, `secrets`, `merge-gate`, `review-gate`, `loopcheck`, `migration`, `money`, `payments`) | `high_assurance` |
+| size `L` | `full_sigma` |
+| size `M` | `diverse_preferred` |
+| size `S` / unknown | `portable` |
+
+`assess_assurance(policy, ...)` turns the resolved capacity into a verdict with a
+single load-bearing asymmetry:
+
+- **portable / diverse_preferred / full_sigma never block on capacity.** One
+  subscription always reviews via same-family fresh-context (`effective:
+  portable`); a different-family reviewer is used when present (`effective:
+  diverse`) but its absence is not a failure. Diversity is a preference, never a
+  paywall.
+- **`high_assurance` is the only blocker.** It stays `satisfied: false`,
+  `effective: unresolved` when the implementer family is unknown or no
+  different-family capacity exists - the review cannot silently pass.
+
+`fno review --assess-assurance --policy-size <S|M|L> [--risk-surface ...]` prints
+the verdict JSON and exits `3` when unsatisfied, so a direct CLI caller is
+blocked the same way the `/pr check` skill is (no skill-only guard). See
+`skills/pr/references/check.md` Step 0c.

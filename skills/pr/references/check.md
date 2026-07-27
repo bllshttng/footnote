@@ -118,6 +118,27 @@ who wants the gate itself to enforce per-peer coverage gives each peer its own
 `{provider, identity}` map entry. Never mark the gate met on a peer that did
 not actually post.
 
+## Step 0c: Assurance gate (`fno review --assess-assurance`)
+
+Before waiting on review, classify what assurance this change needs and check we
+can actually deliver it. Pass the bound node's size and any named risk surfaces:
+
+```bash
+# --policy-size from the backlog node (S/M/L); --risk-surface repeatable.
+fno review --assess-assurance --policy-size "$NODE_SIZE" ${RISK_SURFACES}
+```
+
+The verdict is JSON (`policy`, `satisfied`, `effective`, `reason`). Exit `3`
+means an unsatisfied **high-assurance** policy: the change touches a high-risk
+surface (a merge/review gate, auth, secrets, a migration, money) but no
+different-family reviewer can be established (unknown implementer identity or no
+diverse capacity). Do NOT treat that PR as clean - it is BLOCKED pending
+operator resolution: configure a different-family reviewer / provider account,
+or (if the risk classification is wrong) correct the node's risk surfaces. The
+portable / diverse-preferred / full-sigma policies always exit `0`: one
+subscription reviews via same-family fresh-context and different-family capacity
+is a preference, never a paywall.
+
 ## Philosophy
 
 - **Err on the side of implementation** - We won't do it later
