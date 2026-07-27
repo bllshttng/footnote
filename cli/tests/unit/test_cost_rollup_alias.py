@@ -6,9 +6,13 @@ to divide the row's cost by `len(sessions)`, so a run recorded under two names
 read as two sessions each costing half as much. Totals stayed right; the
 breakdown was fiction.
 
-These tests pin the collapse rule (drop a member equal to the row's own scalar
-id, fall back to the scalar when that empties the set) plus the upsert that
-keeps a re-reported session cost a level rather than an increment.
+These tests pin the rule that replaced the division - one ledger row yields one
+cost row carrying its whole cost, keyed by the scalar run id - plus the upsert
+that keeps a re-reported session cost a level rather than an increment.
+
+The totals-unchanged test is the reason this ships without a backfill, but note
+that it alone would not catch a reintroduced divisor: N rows of cost/N sum back
+to cost either way. The row-count assertions are what actually pin the model.
 """
 from __future__ import annotations
 
@@ -139,8 +143,7 @@ def test_totals_unchanged_across_every_row_shape(ledger):
     assert _rollup()["cost_usd"] == pytest.approx(expected)
 
 
-def test_scalar_id_alone_collapses_to_one_full_cost_row(ledger):
-    """Collapsing must never empty the set and divide by zero."""
+def test_scalar_id_as_the_only_alias_keeps_its_full_cost(ledger):
     _seed(ledger, [{
         "plan_path": "/p",
         "cost_usd": 7.5,
