@@ -1182,9 +1182,12 @@ later.
 ## Review policy and assurance
 
 `fno.review.policy` classifies how much assurance a change needs *before* the
-review runs, then resolves that against the capacity `available_provider_kinds`
-already discovered. It is a thin, pure layer over the substrate above, not a new
-provider list.
+review runs, then resolves that against the reviewer that will *actually* run -
+the resolved panel routing, not raw capacity. Cross-model being off, an
+all-claude pin, a degraded fallback, or an exhausted provider all mean a
+different-family review will not happen, so none of them can satisfy a
+high-assurance policy. It is a thin, pure layer over the substrate above, not a
+new provider list.
 
 `classify_review_policy(size, risk_surfaces)` is deterministic:
 
@@ -1195,8 +1198,9 @@ provider list.
 | size `M` | `diverse_preferred` |
 | size `S` / unknown | `portable` |
 
-`assess_assurance(policy, ...)` turns the resolved capacity into a verdict with a
-single load-bearing asymmetry:
+`assess_assurance(policy, ...)` turns the *effective reviewer kinds* (what the
+panel will genuinely dispatch to) into a verdict with a single load-bearing
+asymmetry:
 
 - **portable / diverse_preferred / full_sigma never block on capacity.** One
   subscription always reviews via same-family fresh-context (`effective:
