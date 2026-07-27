@@ -490,72 +490,35 @@ def _referenced_sh_files(steps: Sequence[tuple[str, str, str]]) -> set[str]:
     return referenced
 
 
-# Owned harnesses that lived in the trees when scripts/ci/smoke.sh retired but
-# were never wired into its hand registry. Running them is real coverage the
-# consolidation should eventually grow into, but it is NOT this node's job:
-# several are red (pre-existing rot), and wiring/fixing them trips this node's
-# files_outside kill criterion. Discovery still catches anything added AFTER
-# this snapshot, so the safety net is live; this set only parks the orphans
-# that pre-date the consolidation. Drain it one harness at a time as a
-# follow-up wires each (run it green, then drop its line here and rely on
-# discovery to keep it covered).
+# Shell harnesses discover_shell_harnesses finds but smoke must not run yet.
+# 17 entries held for two reasons, each verified by the 2026-07-26 census: 14
+# are RED (pre-existing rot; each its own debugging session, out of scope here),
+# and 3 are slow-but-green at 134s/97s/72s. Draining those three adds 303s to
+# every CI run and every local preflight, so they wait on smoke parallelism, not
+# a repair.
+#
+# A green-fast harness here is silent coverage loss no file edit surfaces.
+# `fno test --census-deferred` runs every entry bounded and exits non-zero the
+# moment one passes inside the 60s tranche, so the set cannot re-accumulate green.
+# Drain by deleting a line (discovery then covers it by shebang); _run_smoke and
+# select_changed both subtract this set, so dropping a line widens both gates.
 _DISCOVERY_DEFERRED: frozenset[str] = frozenset("""
-scripts/tests/test_config_auto_merge.sh
-scripts/tests/test_do_provenance_stamp.sh
-scripts/tests/test_git_protection_hook.sh
-scripts/tests/test_graph_resolve.sh
-scripts/tests/test_init_target_state_auto_merge.sh
 scripts/tests/test_megawalk_args.sh
 scripts/tests/test_provider_pricing.sh
 tests/events/test-check-pr-emits-polling.sh
-tests/events/test-polling-event-emission.sh
-tests/hooks/test_archive_artifacts_session_aware.sh
-tests/hooks/test_arm_handoff.sh
-tests/hooks/test_attest_model.sh
-tests/hooks/test_claim_heartbeat.sh
-tests/hooks/test_finalize_invocation.sh
-tests/hooks/test_frontdoor_nudge_session_start.sh
-tests/hooks/test_gc_dead_target_manifest.sh
-tests/hooks/test_groom_self_heal.sh
-tests/hooks/test_hook_events.sh
-tests/hooks/test_init_budget_lines.sh
 tests/hooks/test_init_claim_stderr_and_modern_claim.sh
-tests/hooks/test_init_contested_steal_guard.sh
-tests/hooks/test_init_has_ui_from_plan.sh
 tests/hooks/test_init_node_guard_tokenize.sh
-tests/hooks/test_init_target_state_mission_fields.sh
 tests/hooks/test_inject_fno_agent_whoami.sh
-tests/hooks/test_inject_mail_notify.sh
-tests/hooks/test_inside_leg_report_markers.sh
 tests/hooks/test_reconcile_session_start.sh
 tests/hooks/test_size_profile.sh
-tests/hooks/test_state_parser.sh
-tests/hooks/test_target_guard_claim_liveness.sh
-tests/hooks/verify-self-short-id-propagation.sh
-tests/skills/test_agent_confirm.sh
 tests/smoke-megatron-e2e.sh
 tests/smoke-target-shim.sh
 tests/test-autolaunch-gate.sh
 tests/test-backlog-aliases.sh
 tests/test-backlog-triage.sh
-tests/test-context-probe.sh
-tests/test-dynamic-parallelization.sh
-tests/test-ensure-fno-gitignored.sh
-tests/test-graph-resolve.sh
-tests/test-parallel-wave-conflicts.sh
-tests/test-quick-plan-sidecar.sh
-tests/test-register-task.sh
-tests/test-rename-plan-to-node-id.sh
-tests/test-scan-antipatterns.sh
-tests/test-ship-stamp-integration.sh
-tests/test-size-routing.sh
-tests/test-stamp-plan.sh
 tests/test-target-state-recovery.sh
 tests/test-worktree-inside-checkout-redirect.sh
-tests/test-worktree-setup-hook.sh
-tests/test_config.sh
 tests/test_emit_gate_transition.sh
-tests/test_provider_substrate_e2e.sh
 tests/test_register_task_provider_attribution.sh
 """.split())
 
