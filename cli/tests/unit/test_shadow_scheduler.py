@@ -189,7 +189,46 @@ def test_ready_list_unreadable_fails_safe(monkeypatch, tmp_path):
     monkeypatch.setattr(advance, "_ready_nodes", boom)
     r = advance.schedule_shadow(2, claims_root=tmp_path)
     assert r["note"] == "ready-unreadable"
+    assert r["degraded"] == ["ready"]
     assert r["selected"] == [] and r["decisions"] == []
+
+
+def test_healthy_run_reports_no_degradation(monkeypatch, tmp_path):
+    _ready(monkeypatch, _nodes(("n-a", "code")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert r["degraded"] == []
+
+
+def test_occupied_slot_read_failure_is_loud_not_silent(monkeypatch, tmp_path, caplog):
+    """The P1 capacity guard must not silently collapse: if active_lane_count
+    raises, occupied fails open to 0 (frontier may overstate), but the degrade is
+    logged AND surfaced in `degraded` so an operator gating on the JSON sees it.
+    """
+    import fno.claims.lanes as lanes
+
+    def boom(*a, **k):
+        raise RuntimeError("claims dir locked")
+
+    monkeypatch.setattr(lanes, "active_lane_count", boom)
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs")))
+    with caplog.at_level("WARNING"):
+        r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert "occupied-slots" in r["degraded"]
+    assert r["occupied_slots"] == 0
+    assert "remaining_capacity" in caplog.text.lower() or "slot count" in caplog.text.lower()
+
+
+def test_live_seed_read_failures_are_recorded(monkeypatch, tmp_path):
+    """Both live-claim seed reads (domains + in-flight) fail open visibly."""
+    def boom(*a, **k):
+        raise RuntimeError("read fault")
+
+    monkeypatch.setattr(advance, "_live_lane_domains", boom)
+    monkeypatch.setattr(advance, "_live_worked_entries", boom)
+    _ready(monkeypatch, _nodes(("n-a", "code")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert "live-lane-domains" in r["degraded"]
+    assert "inflight" in r["degraded"]
 
 
 def test_decisions_cover_every_ready_node(monkeypatch, tmp_path):

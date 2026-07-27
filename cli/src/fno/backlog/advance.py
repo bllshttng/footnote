@@ -43,7 +43,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
@@ -567,7 +567,7 @@ def select_lane_fill(
                 # concrete exclusion (same-domain / peer-lane / high-collision)
                 # holds it back. The shadow report is the conservative twin -
                 # it serializes the unevaluated node instead (schedule_shadow).
-                if reason is not None and not reason.startswith("unevaluated"):
+                if reason is not None and not reason.startswith(_UNEVALUATED_PREFIX):
                     if reason.startswith("high-collision"):
                         _LOG.warning("lane-fill: skipping %s - %s", nid, reason)
                     continue  # leave it ready; reversible, retried next round
@@ -630,6 +630,11 @@ def select_lane_fill(
 # which still reads the raw configured cap (that gate is a separate change).
 _INITIAL_LIVE_CAP = 2
 
+# The reason-token namespace for the "unknown collision safety" class, matched by
+# both consumers (select_lane_fill fails open on it, schedule_shadow serializes
+# it). Shared so the two prefix checks cannot drift if the token is ever renamed.
+_UNEVALUATED_PREFIX = "unevaluated:"
+
 
 def _classify_lane_candidate(
     node: dict,
@@ -684,7 +689,7 @@ class ScheduleDecision:
     id: str
     slug: Optional[str]
     domain: str
-    verdict: str  # "selected" | "serialized" | "unevaluated"
+    verdict: Literal["selected", "serialized", "unevaluated"]
     reason: str  # "" for selected; a typed token otherwise
 
     def as_dict(self) -> dict:
@@ -729,21 +734,37 @@ def schedule_shadow(
         _LOG.warning("schedule shadow: ready list unreadable: %s", exc)
         return {
             "effective_cap": effective_cap, "requested_cap": max_lanes,
-            "note": "ready-unreadable", "selected": [], "serialized": [],
-            "unevaluated": [], "decisions": [],
+            "note": "ready-unreadable", "degraded": ["ready"],
+            "selected": [], "serialized": [], "unevaluated": [], "decisions": [],
         }
 
     # Seed the domain + in-flight sets from the live-claim world exactly as
     # select_lane_fill does, so the shadow frontier reflects real peer lanes.
-    # Both reads fail open (an error just leaves the seed empty).
+    # Each read fails open (an error leaves the seed empty) but is LOUD about it -
+    # both logged AND recorded in `degraded`. A silently-collapsed seed produces a
+    # frontier byte-identical to a healthy one, and this report IS the evidence
+    # that gates live scheduling: an operator reading the JSON must be able to see
+    # that a seed threw, or they gate on an overstated frontier (codex P1 on #631
+    # is exactly this over-dispatch, silently reintroducible via a swallowed read).
+    degraded: list[str] = []
     try:
         used_domains: set[str] = _live_lane_domains(claims_root=claims_root)
-    except Exception:  # noqa: BLE001 - fail open, never wedge the report
+    except Exception as exc:  # noqa: BLE001 - fail open, but visibly
+        _LOG.warning(
+            "schedule shadow: live-lane domain seed unreadable, frontier may "
+            "understate same-domain holds: %s", exc,
+        )
         used_domains = set()
+        degraded.append("live-lane-domains")
     try:
         inflight: list[dict] = _live_worked_entries(claims_root=claims_root)
-    except Exception:  # noqa: BLE001 - fail open, never wedge the report
+    except Exception as exc:  # noqa: BLE001 - fail open, but visibly (parity with select_lane_fill)
+        _LOG.warning(
+            "schedule shadow: in-flight seed unreadable, frontier may miss "
+            "file collisions: %s", exc,
+        )
         inflight = []
+        degraded.append("inflight")
 
     # Slots already held by live lanes count AGAINST the cap: the real selector
     # calls acquire_lane_slot(cap), which grabs the first FREE of `cap` slots and
@@ -756,8 +777,13 @@ def schedule_shadow(
 
     try:
         occupied = active_lane_count(root=claims_root)
-    except Exception:  # noqa: BLE001 - fail open, never wedge the report
+    except Exception as exc:  # noqa: BLE001 - fail open, but visibly (this is the P1 capacity guard)
+        _LOG.warning(
+            "schedule shadow: live slot count unreadable, remaining_capacity "
+            "may OVERSTATE the frontier: %s", exc,
+        )
         occupied = 0
+        degraded.append("occupied-slots")
     remaining_capacity = max(0, effective_cap - occupied)
 
     decisions: list[ScheduleDecision] = []
@@ -773,7 +799,7 @@ def schedule_shadow(
             node, used_domains=used_domains, inflight=inflight, claims_root=claims_root,
         )
         if reason is not None:
-            verdict = "unevaluated" if reason.startswith("unevaluated") else "serialized"
+            verdict = "unevaluated" if reason.startswith(_UNEVALUATED_PREFIX) else "serialized"
         elif selected_count >= remaining_capacity:
             verdict, reason = "serialized", "cap-full"
         else:
@@ -798,6 +824,10 @@ def schedule_shadow(
         "requested_cap": max_lanes,
         "occupied_slots": occupied,
         "remaining_capacity": remaining_capacity,
+        # Non-empty => a live-claim seed threw and was failed open; the frontier
+        # may be inaccurate. A consumer gating live scheduling should refuse a
+        # degraded report rather than trust it.
+        "degraded": degraded,
         "selected": [d.as_dict() for d in decisions if d.verdict == "selected"],
         "serialized": [d.as_dict() for d in decisions if d.verdict == "serialized"],
         "unevaluated": [d.as_dict() for d in decisions if d.verdict == "unevaluated"],
