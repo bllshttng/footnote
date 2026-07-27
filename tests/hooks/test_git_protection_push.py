@@ -111,8 +111,104 @@ def test_force_with_lease_ref_value_to_feature_allowed():
         "git push --force-with-lease=origin/main origin feature/x") == (False, None)
 
 
+# ===========================================================================
+# Defect B: heredoc bodies are CONTENT, not command positions.
+#
+# _command_segments used to split on physical lines with no heredoc awareness,
+# so every line of a <<DELIM ... DELIM body was judged as a potential command.
+# A doc/test/filing command whose body quoted a guarded git invocation was
+# denied, with the refusal echoing a fragment of prose. These exercise the
+# segmentation layer directly via the same importlib load above; main()'s
+# PreToolUse path is never invoked, so they verify behavior without the live
+# guard in the loop.
+# ===========================================================================
+
+def _git_segments(cmd):
+    return git_protection._find_git_segments(git_protection._command_segments(cmd))
+
+
+def _merge_segment(cmd):
+    return git_protection._find_merge_segment(git_protection._command_segments(cmd))
+
+
+def test_heredoc_body_with_quoted_push_is_not_a_command():
+    assert _git_segments(
+        "python3 - <<'PY'\nprint('eg: cd /tmp && git push origin main')\nPY") == []
+
+
+def test_heredoc_body_unquoted_delimiter_is_not_a_command():
+    assert _git_segments(
+        "cat <<EOF\nnotes: git push --force origin main is blocked\nEOF") == []
+
+
+def test_heredoc_dash_delimiter_tab_terminator_is_not_a_command():
+    # <<- strips leading tabs from the terminator; the body line is still content.
+    assert _git_segments(
+        "cat <<-EOF\n\tsee: cd /tmp && git push origin main\n\tEOF") == []
+
+
+def test_real_push_after_separator_still_caught():
+    assert _git_segments("echo hi && git push origin main")
+
+
+def test_real_push_after_heredoc_close_still_caught():
+    assert _git_segments("cat <<EOF\nbody\nEOF\ngit push origin main")
+
+
+def test_real_push_on_continuation_line_still_caught():
+    assert _git_segments("git push \\\norigin main")
+
+
+def test_real_merge_invocation_still_caught():
+    assert _merge_segment("gh pr merge 123") is not None
+
+
+def test_unterminated_heredoc_fails_closed():
+    # No closing delimiter: the body exemption must NOT apply, so a guarded
+    # invocation in the unterminated body is still caught (deny), not hidden.
+    assert _git_segments("cat <<EOF\ngit push origin main")
+
+
+def test_merge_phrase_mention_in_quoted_arg_allowed():
+    assert _merge_segment(
+        'fno backlog update x --details "see gh pr merge notes"') is None
+
+
+def test_push_phrase_mention_in_quoted_arg_allowed():
+    assert _git_segments(
+        'echo "doc: run git push --force origin main to test"') == []
+
+
+def test_force_push_to_main_still_protected():
+    _on_main("feature/x")
+    assert _git_segments("git push --force origin main")
+    assert git_protection.is_push_to_protected_branch(
+        "git push --force origin main") == (True, "main")
+
+
+def test_force_with_lease_ref_push_to_main_still_protected():
+    _on_main("feature/x")
+    assert git_protection.is_push_to_protected_branch(
+        "git push --force-with-lease=refs/heads/main origin main") == (True, "main")
+
+
+def test_compound_cd_then_push_still_caught():
+    assert _git_segments("cd /tmp && git push origin main")
+
+
+def test_quoted_heredoc_opener_does_not_swallow_next_line():
+    # A << inside quotes is data, not an opener: the following real command
+    # must still be judged.
+    assert _git_segments('echo "use <<EOF here"\ngit push origin main')
+
+
+def test_opener_line_git_prefix_still_caught():
+    # The opener line's own command prefix is segmented normally.
+    assert _git_segments("git push origin main <<EOF\nbody\nEOF")
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_") and callable(_fn):
             _fn()
-    print("ok: all git-protection push scenarios pass")
+    print("ok: all git-protection scenarios pass")

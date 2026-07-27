@@ -560,15 +560,84 @@ _CMD_WRAPPERS = {"sudo", "env", "command", "time", "nice", "builtin", "exec",
 _ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 
+def _find_heredoc_opener(line):
+    """Return (delimiter, is_dash) for the first heredoc opener on `line` that
+    lies OUTSIDE a quoted region, else None.
+
+    A `<<DELIM` inside single/double quotes is data, not an opener, so `echo
+    "x <<EOF"` does not start a heredoc. Backslash and quote escaping are
+    honored while scanning. Ambiguous shapes (`<<<` here-string, `<<` with no
+    delimiter-like word after) yield None, so the line is segmented normally
+    (the deny-leaning default) rather than granted a body exemption.
+    """
+    i, n = 0, len(line)
+    quote = None
+    while i < n:
+        ch = line[i]
+        if quote:
+            # Inside double quotes a backslash escapes the next char; inside
+            # single quotes nothing escapes.
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            i += 2  # escaped char outside quotes: skip it
+            continue
+        if ch == "<" and i + 1 < n and line[i + 1] == "<":
+            opener = _parse_heredoc_at(line, i + 2)
+            if opener is not None:
+                return opener
+            i += 2  # `<<` but not an opener (e.g. `<<<`); keep scanning
+            continue
+        i += 1
+    return None
+
+
+def _parse_heredoc_at(line, j):
+    """Given `line` and index `j` just past `<<`, parse an optional `-`, an
+    optional quote, and the delimiter word. Return (delim, is_dash), or None if
+    no valid delimiter follows (so the `<<` was something else). The closing
+    quote, if any, is irrelevant: only the delimiter word is hunted as the
+    terminator."""
+    n = len(line)
+    dash = False
+    if j < n and line[j] == "-":
+        dash = True
+        j += 1
+    if j < n and line[j] in ("'", '"'):
+        j += 1  # opening quote on the delimiter; delimiter word follows
+    m = re.match(r"[A-Za-z_][A-Za-z0-9_-]*", line[j:])
+    if m is None:
+        return None
+    return m.group(0), dash
+
+
 def _command_segments(command):
     """Split a shell command into command-position segments (lists of tokens).
 
-    Collapses backslash line-continuations, then splits on physical lines
-    (shlex eats newlines), then each line into segments at shell separators.
+    Collapses backslash line-continuations, then walks physical lines with
+    HEREDOC awareness, then segments each command line at shell separators.
     Each segment is a token run that begins a command. Uses stdlib shlex in
     POSIX mode so quoted arguments stay single tokens and separators inside
-    quotes are not treated as separators. Raises ValueError on unbalanced quotes
-    (in any line); the caller then falls back to legacy whole-command matching.
+    quotes are not treated as separators. Raises ValueError on unbalanced
+    quotes in a command line; the caller then falls back to legacy whole-command
+    matching.
+
+    Heredoc bodies are CONTENT, not command positions (Defect B): a line inside
+    a `<<DELIM ... DELIM` body that merely quotes a guarded git invocation must
+    not be judged as one - this is what fired whenever a command carried prose
+    about git (documenting, testing, or filing a bug about these guards). An
+    opener with no matching terminator fails CLOSED: the body is re-judged as
+    commands (AC8-EDGE) so an unterminated body can never smuggle a real
+    invocation past the gate.
     """
     # A backslash immediately before a newline is a shell line-continuation:
     # the shell joins the two physical lines into one logical command. Collapse
@@ -578,10 +647,34 @@ def _command_segments(command):
     # review, PR #227). Removed (not spaced) to match shell semantics, so a
     # mid-token continuation like `git pu\<newline>sh` rejoins to `git push`.
     command = re.sub(r'\\\r?\n', '', command)
+    lines = command.split("\n")
     segments = []
-    for line in command.split("\n"):
+    heredoc_delim = None  # terminator to seek; None when not inside a body
+    heredoc_dash = False
+    for line in lines:
+        if heredoc_delim is not None:
+            # Body line. For <<- the shell strips leading TABS from the
+            # terminator (not spaces); match that so the exit test is faithful.
+            term = line.lstrip("\t") if heredoc_dash else line
+            if term == heredoc_delim:
+                heredoc_delim = None
+                heredoc_dash = False
+            continue  # body is content either way; never a command position
         if line.strip():
             segments.extend(_segments_one_line(line))
+        opener = _find_heredoc_opener(line)
+        if opener is not None:
+            # Body begins on the NEXT physical line; this opener line has
+            # already been segmented above (its command prefix is judged).
+            heredoc_delim, heredoc_dash = opener
+    if heredoc_delim is not None:
+        # Unterminated heredoc: fail CLOSED (AC8-EDGE). Drop the body exemption
+        # and re-judge every line as a command position, so a guarded
+        # invocation in an unterminated body is still caught rather than hidden.
+        segments = []
+        for line in lines:
+            if line.strip():
+                segments.extend(_segments_one_line(line))
     return segments
 
 
