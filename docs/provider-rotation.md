@@ -1179,7 +1179,7 @@ matching the opt-in posture of `backlog advance` and auto-merge. Cost-to-finish
 routing is out of scope for v1; the headroom seam is where cost data plugs in
 later.
 
-## Review policy and assurance (x-5f0c)
+## Review policy and assurance
 
 `fno.review.policy` classifies how much assurance a change needs *before* the
 review runs, then resolves that against the capacity `available_provider_kinds`
