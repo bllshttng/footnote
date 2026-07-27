@@ -789,6 +789,10 @@ def schedule_shadow(
     decisions: list[ScheduleDecision] = []
     picked: set[str] = set()
     selected_count = 0
+    # Declared so each branch assignment below is checked against the legal set
+    # (the tuple-unpack forms otherwise widen to plain str, which the Literal
+    # field on ScheduleDecision then rejects).
+    verdict: Literal["selected", "serialized", "unevaluated"]
     for node in ready:
         nid = node["id"]
         if nid in picked:
