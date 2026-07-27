@@ -85,6 +85,21 @@ It behaves the same as the option form on the two things worth knowing: an absen
 
 Note this non-strict fallback is exactly what `--at current` opts out of: strict placement refuses instead of minting a tab, which is what makes it safe for automation.
 
+## Place a watch-only agent from the mux sideline
+
+The flags above are the scripted form; the same placement is available interactively.
+In the `fno mux` sideline selector, plain Enter on an attachable agent row attaches it watch-only as a new tab.
+Press `p` on that row to choose the placement instead:
+
+1. Press a workspace number (`1` through `9`) to select the destination.
+2. Press `h`, `j`, `k`, or `l` to place the pane left, down, up, or right of that workspace's focused pane.
+3. Press `t` for a new tab in the selected workspace, or Enter/Space to attach *here*, repointing the calling pane's own focused pane.
+4. Press Esc or `q` to cancel without changing the layout.
+
+Enter/Space is route-anchored: it attaches at the current route and deliberately ignores the digit-selected workspace, so it is the one key that does not need a live target.
+Every other key revalidates before sending, and reports a notice rather than acting if the agent stopped being attachable or the target workspace disappeared.
+A repeated attach focuses the existing pane and reports `already attached`; it never creates a duplicate or moves the pane.
+
 ## Place a pane next to the calling pane (`--at current`)
 
 `--workspace`/`--split` place a pane relative to the workspace's *focused* pane, which is unsuitable for automation: another client can move focus between command construction and execution. `--at current` pins the new pane to the calling pane (the one the command runs inside), so focus races cannot redirect it.
