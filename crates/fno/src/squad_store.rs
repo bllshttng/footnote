@@ -299,15 +299,27 @@ pub fn valid_attach_id(id: &str) -> bool {
 }
 
 /// Load the store for restore. A missing/empty file is a fresh store (no
-/// notice). A corrupt file or unknown version is renamed aside
-/// (`squads.json.corrupt-<secs>`) and read as empty (AC1-ERR: never refuse to
-/// start). Members with a malformed `attach_id` are dropped with a notice
-/// (AC2-ERR).
+/// notice). An unreadable one also reads as empty, but says so. A corrupt file
+/// or unknown version is renamed aside (`squads.json.corrupt-<secs>`) and read
+/// as empty (AC1-ERR: never refuse to start). Members with a malformed
+/// `attach_id` are dropped with a notice (AC2-ERR).
 pub fn load() -> Loaded {
     let path = squads_path();
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => return Loaded::default(), // missing / unreadable: fresh
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Loaded::default(),
+        // Unreadable is NOT missing. Collapsing the two made a permission
+        // error or non-UTF-8 content render as an empty store, so prune
+        // reported nothing to do and restore brought back zero workspaces,
+        // both without a word. Still never refuses (AC1-ERR); it just says so.
+        Err(e) => {
+            return Loaded {
+                notice: Some(format!(
+                    "could not read squads.json ({e}); treating as empty"
+                )),
+                ..Loaded::default()
+            }
+        }
     };
     if raw.trim().is_empty() {
         return Loaded::default();

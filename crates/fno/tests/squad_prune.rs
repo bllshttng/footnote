@@ -205,6 +205,56 @@ fn retired_squad_spelling_is_not_advertised() {
     );
 }
 
+/// A dry run whose read already touched the filesystem must say so, on stderr
+/// AND in the receipt. Reporting "no changes written" while `load()` had just
+/// renamed the store aside is the one lie a dry run cannot tell, and a scripted
+/// caller capturing only stdout is the likeliest to miss the correction.
+#[test]
+fn prune_dry_run_reports_a_quarantined_store() {
+    let s = Scratch::new("corrupt", "{not json at all");
+    let (ok, stdout, stderr) = s.run(&["prune", "--dry-run", "--json"], false);
+    assert!(ok, "dry-run over a corrupt store must not refuse: {stderr}");
+    assert!(
+        stderr.contains("quarantined corrupt squads.json"),
+        "stderr names the quarantine: {stderr}"
+    );
+    assert!(
+        stdout.contains("\"notice\":\"quarantined corrupt squads.json"),
+        "the receipt carries the notice, not just stderr: {stdout}"
+    );
+}
+
+/// Unreadable is not missing. Non-UTF-8 content fails `read_to_string` before
+/// the corrupt-JSON quarantine can see it, and collapsing that into "fresh"
+/// made prune report an empty store it had never actually read.
+#[test]
+fn prune_dry_run_reports_an_unreadable_store() {
+    let s = Scratch::new("unreadable", r#"{"version":1,"squads":[]}"#);
+    std::fs::write(s.dir.join("squads.json"), [0x66, 0x6e, 0xff, 0xfe, 0x6f]).unwrap();
+    let (ok, stdout, stderr) = s.run(&["prune", "--dry-run", "--json"], false);
+    assert!(
+        ok,
+        "dry-run over an unreadable store must not refuse: {stderr}"
+    );
+    assert!(
+        stdout.contains("\"notice\":\"could not read squads.json"),
+        "an unreadable store is reported, never silently empty: {stdout}"
+    );
+}
+
+/// A clean store leaves the receipt's notice explicitly null, so a consumer can
+/// tell "nothing to report" from "this build predates the field".
+#[test]
+fn prune_receipt_notice_is_null_on_a_clean_store() {
+    let s = Scratch::new("nonotice", ORPHAN_NAMED_SURVIVING);
+    let (ok, stdout, stderr) = s.run(&["prune", "--dry-run", "--json"], false);
+    assert!(ok, "clean dry-run exited non-zero: {stderr}\n{stdout}");
+    assert!(
+        stdout.contains("\"notice\":null"),
+        "clean store reports a null notice: {stdout}"
+    );
+}
+
 #[test]
 fn prune_empty_store_says_nothing_to_prune() {
     let s = Scratch::new("empty", r#"{"version":1,"squads":[]}"#);

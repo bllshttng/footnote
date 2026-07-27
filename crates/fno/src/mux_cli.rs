@@ -1290,15 +1290,8 @@ fn squad_prune(args: &[OsString]) -> i32 {
     // Both paths produce the same receipt type. Dry-run builds it from a
     // read-only load (no lock, no write); the real run builds it from the
     // locked closure's actual removals (AC1-UI).
-    let (removed, kept_unknown, skipped_named, kept_protected, applied) = if dry_run {
+    let (removed, kept_unknown, skipped_named, kept_protected, applied, notice) = if dry_run {
         let loaded = crate::squad_store::load();
-        // `load()` can quarantine a corrupt store or drop malformed members
-        // before we see it. Reporting "no changes written" while staying silent
-        // about that would be a lie in the one direction a dry run must never
-        // lie: the read itself already moved the file aside.
-        if let Some(notice) = &loaded.notice {
-            eprintln!("fno mux workspace prune: {notice}");
-        }
         let mut removed: Vec<crate::squad_store::PrunedSquad> = Vec::new();
         let (mut ku, mut sn, mut kp) = (0usize, 0usize, 0usize);
         for sq in &loaded.squads {
@@ -1311,7 +1304,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
                 crate::squad_store::PruneDecision::Keep => kp += 1,
             }
         }
-        (removed, ku, sn, kp, false)
+        (removed, ku, sn, kp, false, loaded.notice)
     } else {
         match crate::squad_store::prune(decide) {
             Ok(o) => (
@@ -1320,6 +1313,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
                 o.skipped_named,
                 o.kept_protected,
                 true,
+                None,
             ),
             Err(e) => {
                 eprintln!("fno mux workspace prune: {e}");
@@ -1328,6 +1322,16 @@ fn squad_prune(args: &[OsString]) -> i32 {
         }
     };
 
+    // `load()` can quarantine a corrupt store, drop malformed members, or fail
+    // to read it at all before we see any of it. Reporting "no changes written"
+    // while staying silent about that is a lie in the one direction a dry run
+    // must never lie: the read itself already touched the filesystem. It rides
+    // the receipt as well as stderr, because a scripted caller captures stdout
+    // and would otherwise get the silent version.
+    if let Some(notice) = &notice {
+        eprintln!("fno mux workspace prune: {notice}");
+    }
+
     if json {
         render_prune_json(
             &removed,
@@ -1335,6 +1339,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
             kept_unknown,
             skipped_named,
             kept_protected,
+            notice.as_deref(),
         );
     } else {
         let verb = if applied { "pruned" } else { "would prune" };
@@ -1402,6 +1407,7 @@ fn render_prune_json(
     kept_unknown: usize,
     skipped_named: usize,
     kept_protected: usize,
+    notice: Option<&str>,
 ) {
     let pruned: Vec<_> = removed
         .iter()
@@ -1423,6 +1429,7 @@ fn render_prune_json(
             "kept_protected": kept_protected,
             "kept_unknown": kept_unknown,
             "skipped_named": skipped_named,
+            "notice": notice,
         })
     );
 }
