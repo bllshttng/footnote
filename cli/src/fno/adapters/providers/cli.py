@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, NamedTuple, Optional, cast
 
 import typer
 
@@ -639,6 +639,198 @@ def register_provider(
 
 
 # ---------------------------------------------------------------------------
+# pick (launch-time headroom picking, x-7d45)
+#
+# The ONE picker. No in-session credential swap is possible - a claude process
+# reads CLAUDE_CONFIG_DIR once at launch - so every switch has to happen at a
+# process boundary, and the only useful moment is just before one starts.
+#
+# Selection is the EXISTING `next_healthy_provider` walk over the active combo,
+# filtered to candidates footnote could actually launch on. No second ranking
+# function: combo order plus the existing EXHAUSTED skip is the policy, and the
+# operator expresses preference by combo order as they already do.
+# ---------------------------------------------------------------------------
+
+PICK_EXIT_NO_HEADROOM = 3
+PICK_EXIT_NO_CANDIDATE = 4
+
+
+class PickVerdict(NamedTuple):
+    """The picker's answer plus everything needed to explain it.
+
+    ``candidates`` is every considered id with its headroom or the reason it was
+    not launchable, so the receipt is readable whether or not the pick succeeded
+    - fail-open must not become fail-silent.
+    """
+
+    account: Optional[str]
+    reason: str
+    candidates: list[tuple[str, str]]
+    exit_code: int
+
+
+def _pick_candidate_ids(config: "ProvidersConfig", combo_name: Optional[str]) -> list[str]:
+    """Candidate ids in the operator's preferred order.
+
+    The active combo when one is configured, else the records in config order.
+    An unknown or empty combo degrades to config order rather than refusing: a
+    stale combo name must not wedge a launch.
+    """
+    from fno.adapters.providers.loader import load_active_combo, load_combos
+    from fno.adapters.providers.rotation import ComboNotFoundError
+
+    repo_root = _get_repo_root()
+    name = combo_name or load_active_combo(repo_root=repo_root)
+    if name:
+        try:
+            combo = load_combos(repo_root=repo_root).get(name)
+        except (ProviderConfigError, ComboNotFoundError):
+            combo = None
+        if combo is not None and combo.providers:
+            return list(combo.providers)
+    return [r.id for r in config.records]
+
+
+def pick_account(
+    *,
+    combo_name: Optional[str] = None,
+    exclude: tuple[str, ...] = (),
+) -> PickVerdict:
+    """Choose an account with headroom that footnote can actually launch on.
+
+    The launchability filter is what keeps the verb honest: a managed account
+    that is not the slot occupant has no correct env overlay, so offering it as
+    a choice would promise a spawn that cannot happen. Filtering it out here is
+    also why exit 4 exists - "no launchable candidate" is a setup instruction,
+    not a quota condition, and collapsing the two would hide it.
+    """
+    from fno.adapters.providers.loader import load_quota_config
+    from fno.adapters.providers.rotation import Combo, next_healthy_provider
+    from fno.adapters.providers.runtime_state import headroom, refresh_usage
+    from fno.agents.account_env import (
+        AccountResolutionError,
+        resolve_account_overlay,
+    )
+
+    config = _load()
+    quota = load_quota_config(repo_root=_get_repo_root())
+    excluded = set(exclude)
+
+    ordered = _pick_candidate_ids(config, combo_name)
+    rows: list[tuple[str, str]] = []
+    launchable: list[str] = []
+    for pid in ordered:
+        if pid in excluded:
+            rows.append((pid, "excluded"))
+            continue
+        try:
+            overlay = resolve_account_overlay(pid)
+        except AccountResolutionError as exc:
+            rows.append((pid, f"not launchable: {str(exc).splitlines()[0]}"))
+            continue
+        if overlay.lane == "managed-active":
+            # A managed account reaches a worker only through the daemon-wide
+            # ~/.claude slot, so two workers can never run on two such accounts
+            # at once and "picking" it just names the default. Excluded on
+            # purpose: the exit-4 receipt below is the setup instruction that
+            # turns this invisible degradation into an actionable one.
+            rows.append((
+                pid,
+                "not a picker candidate: managed, rides the shared ~/.claude slot",
+            ))
+            continue
+        launchable.append(pid)
+
+    if not launchable:
+        named = ", ".join(pid for pid, _ in rows) or "(no records)"
+        return PickVerdict(
+            None,
+            f"no launchable candidate among {named}: only an account with its "
+            "own config dir can be pinned to a worker. Register one with "
+            "`fno providers register <id> --config-dir <path>` (a full second "
+            "login in its own dir)",
+            rows,
+            PICK_EXIT_NO_CANDIDATE,
+        )
+
+    # Fill the TTL cache once per candidate before reading headroom, so a pick
+    # acts on fresh numbers. refresh_usage is a no-op inside probe_ttl_seconds.
+    for pid in launchable:
+        refresh_usage(pid, ttl_seconds=quota.probe_ttl_seconds)
+    for pid in launchable:
+        rows.append((pid, headroom(
+            pid,
+            ttl_seconds=quota.probe_ttl_seconds,
+            threshold_pct=quota.defer_threshold_pct,
+        ).state.value))
+
+    chosen = next_healthy_provider(
+        Combo(name="pick", providers=tuple(launchable)), quota=quota
+    )
+    if chosen is None:
+        return PickVerdict(
+            None,
+            "every launchable candidate is exhausted",
+            rows,
+            PICK_EXIT_NO_HEADROOM,
+        )
+    return PickVerdict(chosen, "first launchable candidate with headroom", rows, 0)
+
+
+@cli.command("pick")
+def pick_provider(
+    combo: Optional[str] = typer.Option(
+        None, "--combo", help="Combo to pick from (default: config.providers.active_combo)."
+    ),
+    exclude: list[str] = typer.Option(
+        [], "--exclude", help="Account id to skip (repeatable, e.g. one just seen exhausted)."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit the full verdict as one JSON object."
+    ),
+    print_env: bool = typer.Option(
+        False, "--print-env", help="Emit CLAUDE_CONFIG_DIR=<path> instead of the bare id."
+    ),
+) -> None:
+    """Print the account to launch on: the first with headroom footnote can use.
+
+    stdout is the bare account id (machine-readable); stderr always carries the
+    reason and every candidate's headroom. Exit 0 chose one, 3 means every
+    launchable candidate is exhausted, 4 means there is no launchable candidate
+    at all - a setup problem, not a quota one.
+    """
+    import json as _json
+
+    verdict = pick_account(combo_name=combo, exclude=tuple(exclude))
+
+    for pid, state in verdict.candidates:
+        typer.echo(f"  {pid}: {state}", err=True)
+    typer.echo(f"pick: {verdict.reason}", err=True)
+
+    if json_output:
+        typer.echo(_json.dumps({
+            "account": verdict.account,
+            "reason": verdict.reason,
+            "candidates": [{"id": p, "state": s} for p, s in verdict.candidates],
+        }))
+    elif verdict.account is not None:
+        if print_env:
+            typer.echo(f"CLAUDE_CONFIG_DIR={_pick_config_dir(verdict.account)}")
+        else:
+            typer.echo(verdict.account)
+
+    if verdict.exit_code:
+        raise typer.Exit(verdict.exit_code)
+
+
+def _pick_config_dir(account_id: str) -> str:
+    """The CLAUDE_CONFIG_DIR a picked account's overlay carries."""
+    from fno.agents.account_env import resolve_account_overlay
+
+    return resolve_account_overlay(account_id).env.get("CLAUDE_CONFIG_DIR", "")
+
+
+# ---------------------------------------------------------------------------
 # doctor (store integrity)
 # ---------------------------------------------------------------------------
 
@@ -990,7 +1182,11 @@ benchmarks_cli = typer.Typer(
     help="Cache + view the OpenRouter coding benchmark snapshot (routing source of truth).",
     no_args_is_help=True,
 )
-cli.add_typer(benchmarks_cli, name="benchmarks")
+# Hidden, not removed: a cache-refresh for OpenRouter's coding benchmarks is a
+# maintenance chore, not something an operator reaches for at the menu. It stays
+# fully invocable (`fno providers benchmarks refresh`, `fno help providers --all`)
+# and yields its advertised slot to `pick` / `doctor`, which are.
+cli.add_typer(benchmarks_cli, name="benchmarks", hidden=True)
 
 
 @benchmarks_cli.command("refresh")

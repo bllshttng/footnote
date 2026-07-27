@@ -1259,3 +1259,148 @@ class TestDoctor:
         result = _invoke(["doctor"], cwd=tmp_path, home=tmp_path)
         assert result.exit_code != 0, result.output
         assert "no-login-in-config-dir" in result.output
+
+
+# ---------------------------------------------------------------------------
+# fno providers pick (launch-time headroom picking)
+# ---------------------------------------------------------------------------
+
+
+def _config_dir_pair(tmp_path: Path, active: str = "readyrule") -> dict:
+    for name in ("claude-alt", "claude-main"):
+        d = tmp_path / name
+        d.mkdir(exist_ok=True)
+        (d / ".credentials.json").write_text("{}")
+    return {
+        "config": {
+            "providers": {
+                "active": active,
+                "records": [
+                    {"id": "readyrule", "name": "readyrule", "cli": "claude",
+                     "auth": "managed", "config_dir": str(tmp_path / "claude-alt")},
+                    {"id": "makers", "name": "makers", "cli": "claude",
+                     "auth": "managed", "config_dir": str(tmp_path / "claude-main")},
+                ],
+            }
+        }
+    }
+
+
+def _pick_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cfg: dict) -> Path:
+    _write_settings(tmp_path / ".fno" / "config.toml", cfg)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PWD", str(tmp_path))
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+    monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime-state.json"))
+    return tmp_path
+
+
+class TestPick:
+    def test_no_launchable_candidate_exits_4_with_the_setup_instruction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC9-EDGE: an invisible degradation becomes an actionable instruction.
+
+        Both accounts managed with no config_dir: the non-active one has no
+        correct overlay at all, and the active one only rides the shared slot,
+        so neither can be pinned to a worker.
+        """
+        _pick_env(tmp_path, monkeypatch, _managed_pair_config("readyrule"))
+        from fno.adapters.providers import managed
+
+        managed.stamp_active_slot("claude", "readyrule")
+
+        result = _invoke(["pick"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 4, result.output
+        assert "readyrule" in result.output and "makers" in result.output
+        assert "--config-dir" in result.output
+
+    def test_picks_the_first_candidate_with_headroom(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.adapters.providers.runtime_state import write_usage_snapshot
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        import time as _time
+
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        now = _time.time()  # headroom reads against the wall clock, not a fixture epoch
+        write_usage_snapshot(
+            UsageSnapshot("readyrule", (UsageWindow("5h", 100.0, now + 3600),), now, "t"),
+            now=now,
+        )
+        write_usage_snapshot(
+            UsageSnapshot("makers", (UsageWindow("5h", 4.0, now + 3600),), now, "t"),
+            now=now,
+        )
+        verdict = _pick_verdict(tmp_path)
+        assert verdict.account == "makers"
+        assert verdict.exit_code == 0
+
+    def test_every_launchable_candidate_exhausted_exits_3(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.adapters.providers.runtime_state import write_usage_snapshot
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        import time as _time
+
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        now = _time.time()
+        for rid in ("readyrule", "makers"):
+            write_usage_snapshot(
+                UsageSnapshot(rid, (UsageWindow("5h", 100.0, now + 3600),), now, "t"),
+                now=now,
+            )
+        result = _invoke(["pick"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 3, result.output
+        assert "exhausted" in result.output
+
+    def test_unprobeable_set_keeps_combo_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC14-EDGE: with no snapshots at all, ordering is unchanged.
+
+        UNKNOWN never reads as EXHAUSTED and never blocks a launch, so the
+        answer is the first launchable candidate in the operator's configured
+        order - byte-identical to what the pre-existing walk returns.
+        """
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        from fno.adapters.providers.rotation import Combo, next_healthy_provider
+
+        verdict = _pick_verdict(tmp_path)
+        expected = next_healthy_provider(
+            Combo(name="pick", providers=("readyrule", "makers"))
+        )
+        assert verdict.account == expected == "readyrule"
+        assert dict(verdict.candidates)["readyrule"] == "unknown"
+
+    def test_exclude_skips_a_known_dead_account(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        verdict = _pick_verdict(tmp_path, exclude=("readyrule",))
+        assert verdict.account == "makers"
+
+    def test_print_env_emits_the_picked_config_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        result = _invoke(["pick", "--print-env"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        assert f"CLAUDE_CONFIG_DIR={tmp_path / 'claude-alt'}" in result.stdout
+
+    def test_stderr_carries_a_reason_even_on_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Fail-open must not become fail-silent: every verdict is explained.
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        verdict = _pick_verdict(tmp_path)
+        assert verdict.reason
+        assert len(verdict.candidates) == 2
+
+
+def _pick_verdict(cwd: Path, exclude: tuple[str, ...] = ()):
+    from fno.adapters.providers.cli import pick_account
+
+    return pick_account(exclude=exclude)
