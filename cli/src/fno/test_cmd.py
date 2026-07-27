@@ -523,6 +523,13 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 # A green-fast harness here is silent coverage loss no file edit surfaces.
 # `fno test --census-deferred` runs every entry bounded and exits non-zero the
 # moment one passes inside the 60s tranche, so the set cannot re-accumulate green.
+#
+# Check an entry with the census, NOT with a bare `bash tests/foo.sh`. The census
+# runs under _smoke_env (cli/.venv/bin on PATH), which is the environment smoke
+# itself uses; a bare run resolves python3 to whatever the shell has and fails on
+# a missing `typer` that CI would never hit. Both directions of that mismatch are
+# a wrong conclusion: a spurious red reads as "correctly quarantined" and leaves
+# working coverage off.
 # Drain by deleting a line (discovery then covers it by shebang); _run_smoke and
 # select_changed both subtract this set, so dropping a line widens both gates.
 # The census only bites if something runs it: .github/workflows/deferred-census.yml
