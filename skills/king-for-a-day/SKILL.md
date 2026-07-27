@@ -71,7 +71,7 @@ fno agents spawn --name king-<epic> "<brief>" --effort high --model <your fronti
 
 **Coronating in place does not place you, and usually you should not care.** `fno agents crown <handle>` writes the crown onto an existing row and has no workspace option, so a session coronated where it already sits stays there. Usually that is fine: a workspace is an identity, not a location, so declare the one you are already in to be the mission workspace, name it in your opening line, and let teammates anchor to you with `--at current`. The court is then co-located with its king, which is the property that actually matters, from whatever workspace you woke up in.
 
-Relocate only when the mission workspace already exists and you must join *it* - a sub-king anointed into an epic a superior already opened, say. `fno mux layout apply --workspace <epic> --tab new --slot fno:<your-session-id>` rebinds your live pane into that workspace with the PTY intact. It reshapes the destination tab, so do it once at coronation before teammates exist, never mid-wave with a court arranged around you.
+Relocation is possible but is not a one-flag move: `fno mux layout apply` rebinds a bound live pane into a target tab with its PTY intact, and it requires a full template or spec plus that template's whole slot set, not a lone `--slot`. If you genuinely must join a mission workspace a superior already opened, read [mux-layout-templates](../../docs/architecture/mux-layout-templates.md) and apply a real shape. Do it once at coronation before teammates exist, never mid-wave with a court arranged around you.
 
 What a reign actually requires is a frontier-class model at high reasoning effort, in a session that can run many steps.
 How you spell that depends on your provider, so take the requirement and not this line's defaults.
@@ -355,13 +355,12 @@ The one reason to mint a new session is **context pressure**. Every teammate rep
   The wait is a real command, not a resolution - `top` and `peek` return immediately and wake nobody, so ending a turn on them is the wedge:
 
   ```bash
-  fno-agents wait --agent <teammate-name> --state done    --timeout-ms 900000
-  fno-agents wait --agent <teammate-name> --state blocked --timeout-ms 900000
+  fno-agents wait --agent <teammate-name> --state done --timeout-ms 900000
   ```
 
-  **Two waits per teammate, because the verb takes one target and returns only on an exact match.** A `done`-only wait sleeps straight through a teammate that goes `blocked`, and `blocked` is the transition you most owe an answer to - the whole point of court is that a stuck teammate gets unstuck. Whichever fires first wakes you; the other is spent when you re-arm after reconciling.
+  **Launch it as a harness-tracked task, and never append `&`.** A trailing `&` hands the command back to the shell, so the call returns instantly, your harness records it as finished, and *nothing is left waiting* - the court then sleeps through the very transition the wait exists to catch. Same detached-process trap that makes a `nohup`'d watcher useless.
 
-  **Launch each as its own harness-tracked task. Never append `&`.** A trailing `&` hands the command back to the shell, so the call returns instantly, your harness records it as finished, and *nothing is left waiting* - the court then sleeps through the very transitions these waits exist to catch. That is the same detached-process trap that makes a `nohup`'d watcher useless. Two separate tracked background tasks are correct, because the harness tracks each one; one tracked call containing two `&`-backgrounded waits is not.
+  **This wait does not cover `blocked`, and no wait does.** The verb takes one target and returns only on an exact match, and `blocked` is a state the inside-leg hook never emits - it is in the contract but has no Claude Code trigger wired, so the hook reports `working` and `done` only. A `--state blocked` wait on a claude or codex teammate therefore never fires, which is worth knowing before you reach for it. A blocked teammate reaches you two other ways: its own report mail, which the minion clause requires it to send on blocking, and your sweep, where it shows as a `BlockedAnswerable` badge. So a block whose mail was lost waits out this timeout. That is the design's slowest path and the honest bound on it.
 
   **Always `done`, and never `idle`.** `idle` looks like the portable choice and is a trap: it is the *default* verdict, returned for a lapsed hook, an unrecognized screen state, and any live row with no screen state at all. So a wait on `idle` can return instantly while the teammate is still working, and since you re-arm every live teammate, that returns you to a tight wake-sweep-rearm loop burning context on every pass - worse than the heartbeat this replaced.
 
