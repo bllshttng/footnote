@@ -3,11 +3,9 @@
 //!
 //! A squad is born from a client's `Attach.cwd` and keyed by the canonical
 //! repo root, so a repo's main checkout and all of its worktrees converge on
-//! ONE squad (the fno-agents grid solved the same problem in
-//! `grid/repo.rs` (x-cb89); the resolution here is a copy-adaptation of that
-//! shipped code - copied, never a cross-crate dependency). A non-git cwd, a
-//! failing git, or a HANGING git (bounded timeout) all fall back to a squad
-//! keyed by the literal cwd - resolution problems can never refuse an attach.
+//! ONE squad. A non-git cwd, a failing git, or a HANGING git (bounded
+//! timeout) all fall back to a squad keyed by the literal cwd - resolution
+//! problems can never refuse an attach.
 //!
 //! The container model (`Session` -> `Squad` -> `tree::Tab`) is pure and
 //! I/O-free like `tree.rs`; only [`Resolver::resolve`] shells out (once per
@@ -415,8 +413,7 @@ fn canonical_root(git: &str, cwd: &str, timeout: Duration) -> Option<String> {
 }
 
 /// `<root>/.git` -> `<root>`; a bare repo's common-dir (no `.git` suffix) is
-/// used as-is rather than mis-rooting at its parent. (Copied from the shipped
-/// fno-agents `grid/repo.rs`.)
+/// used as-is rather than mis-rooting at its parent.
 fn root_from_common_dir(common_dir: &str) -> String {
     let trimmed = common_dir.trim_end_matches('/');
     match trimmed.rsplit_once('/') {
