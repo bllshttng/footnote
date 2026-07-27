@@ -1047,6 +1047,10 @@ fn socket_dir_check() -> Check {
     }
 }
 
+/// The fix doctor advertises for orphaned store residue. One const for both
+/// emitters, so the advertised spelling cannot drift from the verb that exists.
+const PRUNE_REMEDY: &str = "fno mux workspace prune";
+
 /// The squad-store orphan verdict (x-a572 US3), pure so the ok/warn/Na rendering
 /// is unit-testable without a store. `total` is the persisted squad count;
 /// `orphan` is how many the prune predicate would reap (unnamed, every origin
@@ -1072,7 +1076,7 @@ fn squad_store_verdict(total: usize, orphan: usize) -> Check {
             name: "squad store".into(),
             verdict: Verdict::Warn,
             detail: format!("{orphan} orphaned squad(s) (no surviving origin, no live member)"),
-            remedy: Some("fno mux workspace prune".into()),
+            remedy: Some(PRUNE_REMEDY.into()),
         }
     }
 }
@@ -1092,7 +1096,7 @@ fn squad_store_check() -> Check {
             name: "squad store".into(),
             verdict: Verdict::Warn,
             detail: "agent registry unreadable; orphan count unknown".into(),
-            remedy: Some("fno mux workspace prune".into()),
+            remedy: Some(PRUNE_REMEDY.into()),
         };
     };
     let origin_exists = |p: &str| std::path::Path::new(p).exists();
@@ -1194,11 +1198,15 @@ pub fn doctor(json: bool) -> i32 {
 /// migrates the store for a real reason, where the compatibility window and
 /// the migration already exist.
 pub fn workspace(args: &[OsString]) -> i32 {
-    let Some(sub) = args.first().and_then(|a| a.to_str()) else {
-        eprintln!("fno mux workspace: expected a verb (prune)");
-        return EXIT_USAGE;
-    };
-    match sub {
+    // main.rs routes here only with a token after the family verb, so a bare
+    // `mux workspace` never reaches this function - it is the global usage
+    // arm. That leaves exactly one failure shape here, an unknown verb, and a
+    // non-UTF-8 one is simply unknown rather than a second branch.
+    let sub = args
+        .first()
+        .map(|a| a.to_string_lossy())
+        .unwrap_or_default();
+    match sub.as_ref() {
         "prune" => squad_prune(&args[1..]),
         _ => {
             eprintln!("fno mux workspace: unknown verb {sub:?} (expected prune)");
@@ -1284,6 +1292,13 @@ fn squad_prune(args: &[OsString]) -> i32 {
     // locked closure's actual removals (AC1-UI).
     let (removed, kept_unknown, skipped_named, kept_protected, applied) = if dry_run {
         let loaded = crate::squad_store::load();
+        // `load()` can quarantine a corrupt store or drop malformed members
+        // before we see it. Reporting "no changes written" while staying silent
+        // about that would be a lie in the one direction a dry run must never
+        // lie: the read itself already moved the file aside.
+        if let Some(notice) = &loaded.notice {
+            eprintln!("fno mux workspace prune: {notice}");
+        }
         let mut removed: Vec<crate::squad_store::PrunedSquad> = Vec::new();
         let (mut ku, mut sn, mut kp) = (0usize, 0usize, 0usize);
         for sq in &loaded.squads {
