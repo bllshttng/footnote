@@ -253,6 +253,16 @@ FIELD_META: dict[str, Meta] = {
     "think_spawn.attended": Meta(
         "advanced", "Attended born-with-why behavior: 'offer' (default, handoff line) or 'spawn' (real bg /think)."
     ),
+    "think_spawn.on_decompose_wave0": Meta(
+        "advanced",
+        "Dispatch a /think for each WAVE-0 child at `fno backlog decompose` (default OFF; "
+        "inherits max_per_run and daily_cap). Worth it only when the epic is large enough "
+        "that inline-filling every child blows one session's context budget.",
+    ),
+    "think_spawn.substrate": Meta(
+        "advanced",
+        "Substrate for every /think spawn: 'bg' (default, claude-only), 'pane', or 'headless'.",
+    ),
     # --- config.active_backlog.* ---
     "active_backlog.enabled": Meta(
         "advanced",

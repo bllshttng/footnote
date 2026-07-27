@@ -227,6 +227,43 @@ def _daily_cap(project_root: Optional[Path]) -> int:
         return 20
 
 
+def _think_spawn_substrate(node_cwd: Optional[str]) -> str:
+    """Spawn substrate from the NODE's repo config, fail-safe to ``bg``.
+
+    ``bg`` was the hardcoded value before this was configurable, so the fallback
+    is byte-for-byte the old behavior on any settings read failure.
+    """
+    try:
+        root = Path(node_cwd) if node_cwd else None
+        return str(_settings_for(root).think_spawn.substrate) or "bg"
+    except Exception:  # noqa: BLE001 - fail-safe to the historical hardcode
+        return "bg"
+
+
+def think_spawn_on_decompose_wave0(
+    *,
+    project_root: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> bool:
+    """Is the wave-0 design fan-out armed for this repo?
+
+    Its own sub-flag, like ``on_work_start`` / ``on_retro``: ``enabled`` alone
+    never turns it on. ``FNO_THINK_SPAWN_WAVE0`` overrides for tests and for a
+    one-off run, mirroring the ``FNO_THINK_SPAWN`` seam.
+
+    Fail-safe to False: a spurious fan-out spends real tokens on cold sessions.
+    """
+    environ = os.environ if env is None else env
+    override = environ.get("FNO_THINK_SPAWN_WAVE0")
+    if override is not None:
+        return override.strip().lower() in _TRUTHY
+    try:
+        return bool(_settings_for(project_root).think_spawn.on_decompose_wave0)
+    except Exception as exc:  # noqa: BLE001 - fail-safe to disabled
+        _LOG.debug("on_decompose_wave0: settings read failed, defaulting off: %s", exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Per-day firehose ceiling (Locked Decision 3) - global across projects/nodes
 # ---------------------------------------------------------------------------
@@ -699,13 +736,23 @@ def _spawn_think_worker(
     """
     agent_name = _worker_agent_name(node_id, node_slug, reason, invocation_suffix)
     # x-2c27: a conversational /think handoff is a DETACHED thread, so route it
-    # to the `claude --bg` substrate explicitly (the x-3ab8 default `pane` would
-    # land an owned-PTY pane that stalls a fire-and-forget dispatch).
-    # provider defaults to claude (the bg substrate is claude-only); a dispatch
+    # off the x-3ab8 default `pane`, which would land an owned-PTY pane that
+    # stalls a fire-and-forget dispatch.
+    # provider defaults to claude (the `bg` substrate is claude-only); a dispatch
     # flag overriding it rides through and fails loud downstream if the substrate
     # cannot host it, rather than being silently dropped.
+    #
+    # x-3571: `bg` was hardcoded here, which is the shared choke point for EVERY
+    # think spawn - so an install on a harness without `bg` had no way to
+    # dispatch a /think at all. Now `config.think_spawn.substrate`, read here so
+    # every spawn path gains the knob at once rather than growing a
+    # caller-local override each time one is needed.
     prov = (provider or "").strip() or "claude"
-    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--harness", prov, "--substrate", "bg"]
+    substrate = _think_spawn_substrate(node_cwd)
+    cmd = [
+        *_subprocess_util.fno_py_cmd(),
+        "agents", "spawn", "--harness", prov, "--substrate", substrate,
+    ]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:

@@ -111,6 +111,8 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `think_spawn.on_work_start` | bool | `false` | advanced | A2: dispatch a context /think when /target claims a node to work it (default OFF). |
 | `think_spawn.on_retro` | bool | `false` | advanced | A2: dispatch a context /think when `fno backlog done` closes a node (default OFF). |
 | `think_spawn.daily_cap` | int | `20` | advanced | Per-install per-day ceiling on /think spawns (firehose guard; 0 = off). |
+| `think_spawn.on_decompose_wave0` | bool | `false` | advanced | Dispatch a /think for each WAVE-0 child at `fno backlog decompose` (default OFF; inherits max_per_run and daily_cap). Worth it only when the epic is large enough that inline-filling every child blows one session's context budget. |
+| `think_spawn.substrate` | str | `bg` | advanced | Substrate for every /think spawn: 'bg' (default, claude-only), 'pane', or 'headless'. |
 | `think_spawn.attended` | str | `offer` | advanced | Attended born-with-why behavior: 'offer' (default, handoff line) or 'spawn' (real bg /think). |
 | `active_backlog.enabled` | bool | dict[str, bool] | `false` | advanced | Always-on backlog drain: true (every project) or a per-project map. |
 | `active_backlog.interval` | str | `5m` | advanced | Poll-floor cadence for the drain daemon (e.g. 5m, 30s). |
