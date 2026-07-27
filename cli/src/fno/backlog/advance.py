@@ -1728,9 +1728,9 @@ def _select_exhaustion_failover(
         if pid is None:
             return None
         rec = load_providers().by_id.get(pid)
-        harness = (getattr(rec, "cli", "") or "").strip()
+        harness = (getattr(rec, "harness", "") or "").strip()
         if not harness:
-            return None  # a record with no cli cannot pick a --provider
+            return None  # a record with no harness cannot pick a --provider
         # Stage the account env; an unstaged/unresolvable account -> defer (never
         # spawn onto a broken account).
         account_env = dispatch_env(

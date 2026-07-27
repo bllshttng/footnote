@@ -37,7 +37,7 @@ def _seed_settings(
         records.append({
             "id": rid,
             "name": rid,
-            "cli": "claude",
+            "harness": "claude",
             "auth": "oauth_dir",
             "credentials_source": "~/.claude",
         })
@@ -571,11 +571,11 @@ class TestPrioritySafety:
             "providers": {
                     "active": "a",
                     "records": [
-                        {"id": "a", "name": "a", "cli": "claude",
+                        {"id": "a", "name": "a", "harness": "claude",
                          "auth": "oauth_dir",
                          "credentials_source": "~/.claude",
                          "priority": "not-a-number"},
-                        {"id": "b", "name": "b", "cli": "claude",
+                        {"id": "b", "name": "b", "harness": "claude",
                          "auth": "oauth_dir",
                          "credentials_source": "~/.claude",
                          "priority": 50},

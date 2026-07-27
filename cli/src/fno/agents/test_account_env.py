@@ -45,7 +45,7 @@ def test_config_dir_lane(tmp_path: Path, providers_root: Path) -> None:
     (cfg / ".credentials.json").write_text("{}")  # login present on disk
     repo = _write_settings(
         tmp_path,
-        [{"id": "readyrule", "name": "ReadyRule", "cli": "claude",
+        [{"id": "readyrule", "name": "ReadyRule", "harness": "claude",
           "auth": "managed", "config_dir": str(cfg)}],
     )
     ov = resolve_account_overlay("readyrule", repo_root=repo, providers_root=providers_root)
@@ -56,7 +56,7 @@ def test_config_dir_lane(tmp_path: Path, providers_root: Path) -> None:
 def test_config_dir_missing_dir_refused(tmp_path: Path, providers_root: Path) -> None:
     repo = _write_settings(
         tmp_path,
-        [{"id": "readyrule", "name": "ReadyRule", "cli": "claude",
+        [{"id": "readyrule", "name": "ReadyRule", "harness": "claude",
           "auth": "managed", "config_dir": str(tmp_path / "nope")}],
     )
     with pytest.raises(AccountResolutionError, match="does not exist"):
@@ -68,7 +68,7 @@ def test_config_dir_no_login_refused(tmp_path: Path, providers_root: Path) -> No
     cfg.mkdir()  # dir exists, no login material
     repo = _write_settings(
         tmp_path,
-        [{"id": "readyrule", "name": "ReadyRule", "cli": "claude",
+        [{"id": "readyrule", "name": "ReadyRule", "harness": "claude",
           "auth": "managed", "config_dir": str(cfg)}],
     )
     # No darwin Keychain item for a throwaway tmp dir; on darwin _read_slot_blob
@@ -85,7 +85,7 @@ def test_config_dir_claude_json_only_refused(tmp_path: Path, providers_root: Pat
     (cfg / ".claude.json").write_text("{}")  # metadata only, no .credentials.json
     repo = _write_settings(
         tmp_path,
-        [{"id": "readyrule", "name": "ReadyRule", "cli": "claude",
+        [{"id": "readyrule", "name": "ReadyRule", "harness": "claude",
           "auth": "managed", "config_dir": str(cfg)}],
     )
     with pytest.raises(AccountResolutionError, match="no claude login"):
@@ -100,7 +100,7 @@ def test_nonactive_matching_account_id_not_treated_active(
     _stamp_active(providers_root, "makers")
     repo = _write_settings(
         tmp_path,
-        [{"id": "readyrule", "name": "R", "cli": "claude", "auth": "managed",
+        [{"id": "readyrule", "name": "R", "harness": "claude", "auth": "managed",
           "account_id": "makers"}],  # metadata collides with the active slot id
     )
     with pytest.raises(AccountResolutionError, match="not the active"):
@@ -112,7 +112,7 @@ def test_nonactive_matching_account_id_not_treated_active(
 def test_unknown_id_refused_lists_claude_accounts(tmp_path: Path, providers_root: Path) -> None:
     repo = _write_settings(
         tmp_path,
-        [{"id": "makers", "name": "Makers", "cli": "claude", "auth": "managed"}],
+        [{"id": "makers", "name": "Makers", "harness": "claude", "auth": "managed"}],
     )
     with pytest.raises(AccountResolutionError, match="not a registered provider.*makers"):
         resolve_account_overlay("nope", repo_root=repo, providers_root=providers_root)
@@ -121,7 +121,7 @@ def test_unknown_id_refused_lists_claude_accounts(tmp_path: Path, providers_root
 def test_non_claude_record_refused(tmp_path: Path, providers_root: Path) -> None:
     repo = _write_settings(
         tmp_path,
-        [{"id": "codex-main", "name": "Codex", "cli": "codex", "auth": "managed"}],
+        [{"id": "codex-main", "name": "Codex", "harness": "codex", "auth": "managed"}],
     )
     with pytest.raises(AccountResolutionError, match="claude-only"):
         resolve_account_overlay("codex-main", repo_root=repo, providers_root=providers_root)
@@ -135,7 +135,7 @@ def test_managed_active_pins_shared_slot(tmp_path: Path, providers_root: Path) -
     _stamp_active(providers_root, "makers")
     repo = _write_settings(
         tmp_path,
-        [{"id": "makers", "name": "Makers", "cli": "claude", "auth": "managed"}],
+        [{"id": "makers", "name": "Makers", "harness": "claude", "auth": "managed"}],
     )
     ov = resolve_account_overlay("makers", repo_root=repo, providers_root=providers_root)
     assert ov.lane == "managed-active"
@@ -152,7 +152,7 @@ def test_managed_nonactive_refused_points_at_config_dir(
     _stamp_active(providers_root, "makers")
     repo = _write_settings(
         tmp_path,
-        [{"id": "readyrule", "name": "ReadyRule", "cli": "claude", "auth": "managed"}],
+        [{"id": "readyrule", "name": "ReadyRule", "harness": "claude", "auth": "managed"}],
     )
     with pytest.raises(AccountResolutionError) as exc:
         resolve_account_overlay("readyrule", repo_root=repo, providers_root=providers_root)
@@ -172,7 +172,7 @@ def test_config_dir_wins_over_managed_nonactive(
     (cfg / ".credentials.json").write_text("{}")
     repo = _write_settings(
         tmp_path,
-        [{"id": "readyrule", "name": "R", "cli": "claude", "auth": "managed",
+        [{"id": "readyrule", "name": "R", "harness": "claude", "auth": "managed",
           "config_dir": str(cfg)}],
     )
     ov = resolve_account_overlay("readyrule", repo_root=repo, providers_root=providers_root)

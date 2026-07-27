@@ -47,7 +47,7 @@ def _valid_providers_block(active: str = "claude-primary") -> dict:
                     {
                         "id": "claude-primary",
                         "name": "Claude Primary",
-                        "cli": "claude",
+                        "harness": "claude",
                         "auth": "oauth_dir",
                         "credentials_source": "~/.claude",
                         "priority": 10,
@@ -55,7 +55,7 @@ def _valid_providers_block(active: str = "claude-primary") -> dict:
                     {
                         "id": "gemini-backup",
                         "name": "Gemini Backup",
-                        "cli": "gemini",
+                        "harness": "gemini",
                         "auth": "api_key",
                         "env": {"GEMINI_API_KEY": "key"},
                         "priority": 20,
@@ -106,7 +106,7 @@ class TestLoadProvidersValid:
 
         result = load_providers(repo_root=tmp_path)
         primary = result.by_id["claude-primary"]
-        assert primary.cli == "claude"
+        assert primary.harness == "claude"
         assert primary.auth == "oauth_dir"
         assert primary.priority == 10
 
@@ -267,7 +267,7 @@ class TestLoadProvidersInvalidRecord:
                         {
                             "id": "bad-record",
                             "name": "Bad",
-                            "cli": "claude",
+                            "harness": "claude",
                             "auth": "oauth_dir",
                             # missing credentials_source
                         }
@@ -298,7 +298,7 @@ class TestLoadProvidersInvalidRecord:
                         {
                             "id": "bad-api-key",
                             "name": "Bad API",
-                            "cli": "openclaw",
+                            "harness": "openclaw",
                             "auth": "api_key",
                             "env": {"SOME_RANDOM_KEY": "value"},
                         }
@@ -339,7 +339,7 @@ class TestLoadProvidersProjectLocalOverride:
                             {
                                 "id": "global-record",
                                 "name": "Global",
-                                "cli": "gemini",
+                                "harness": "gemini",
                                 "auth": "api_key",
                                 "env": {"GEMINI_API_KEY": "global-key"},
                             }
@@ -362,7 +362,7 @@ class TestLoadProvidersProjectLocalOverride:
                             {
                                 "id": "local-record",
                                 "name": "Local",
-                                "cli": "claude",
+                                "harness": "claude",
                                 "auth": "oauth_dir",
                                 "credentials_source": "~/.claude",
                             }
@@ -404,7 +404,7 @@ class TestLoadProvidersProjectLocalOverride:
                             {
                                 "id": "global-only",
                                 "name": "Global Only",
-                                "cli": "claude",
+                                "harness": "claude",
                                 "auth": "oauth_dir",
                                 "credentials_source": "~/.claude",
                             }
@@ -443,7 +443,7 @@ class TestLoadProvidersActiveNotFound:
                         {
                             "id": "claude-primary",
                             "name": "Claude Primary",
-                            "cli": "claude",
+                            "harness": "claude",
                             "auth": "oauth_dir",
                             "credentials_source": "~/.claude",
                         }
@@ -479,7 +479,7 @@ class TestSaveProviders:
         record = ProviderRecord(
             id="claude-saved",
             name="Saved",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source=Path("~/.claude"),
         )
@@ -490,7 +490,7 @@ class TestSaveProviders:
         output = tmp_path / ".fno" / "config.toml"
         assert output.exists()
         data = tomllib.loads(output.read_text())
-        providers = data["providers"]
+        providers = data["accounts"]
         assert providers["active"] == "claude-saved"
         assert len(providers["records"]) == 1
         assert providers["records"][0]["id"] == "claude-saved"
@@ -518,7 +518,7 @@ class TestSaveProviders:
         record = ProviderRecord(
             id="new-record",
             name="New",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source=Path("~/.claude"),
         )
@@ -531,8 +531,8 @@ class TestSaveProviders:
         assert data["v2_enabled"] is True
         assert data["some_other_setting"] == "preserved"
         # providers block updated
-        assert "providers" in data
-        assert len(data["providers"]["records"]) == 1
+        assert "accounts" in data
+        assert len(data["accounts"]["records"]) == 1
 
     def test_save_preserves_provider_subkeys(self, tmp_path: Path, monkeypatch):
         """save_providers keeps provider subkeys it does not rebuild (x-5d3e).
@@ -562,15 +562,15 @@ class TestSaveProviders:
         )
 
         record = ProviderRecord(
-            id="a", name="A", cli="claude", auth="oauth_dir",
+            id="a", name="A", harness="claude", auth="oauth_dir",
             credentials_source=Path("~/.claude"),
         )
         save_providers(ProvidersConfig(records=[record], active="a"), scope="project")
 
         data = tomllib.loads(existing.read_text())
-        assert data["providers"]["quota"] == {"defer_dispatch": True, "defer_threshold_pct": 80}
-        assert data["providers"]["combos"] == {"c1": {"providers": ["a"]}}
-        assert data["providers"]["active"] == "a"
+        assert data["accounts"]["quota"] == {"defer_dispatch": True, "defer_threshold_pct": 80}
+        assert data["accounts"]["combos"] == {"c1": {"providers": ["a"]}}
+        assert data["accounts"]["active"] == "a"
 
     def test_save_global_scope(self, tmp_path: Path, monkeypatch):
         """save_providers with scope='global' writes to home/.fno/settings.yaml."""
@@ -583,7 +583,7 @@ class TestSaveProviders:
         record = ProviderRecord(
             id="global-write",
             name="Global Write",
-            cli="gemini",
+            harness="gemini",
             auth="api_key",
             env={"GEMINI_API_KEY": "k"},
         )
@@ -594,7 +594,7 @@ class TestSaveProviders:
         output = fake_home / ".fno" / "config.toml"
         assert output.exists()
         data = tomllib.loads(output.read_text())
-        assert data["providers"]["active"] == "global-write"
+        assert data["accounts"]["active"] == "global-write"
 
 
 # ---------------------------------------------------------------------------
@@ -634,7 +634,7 @@ class TestSaveProvidersCorruptFile:
         record = ProviderRecord(
             id="new-provider",
             name="New Provider",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source=Path("~/.claude"),
         )
@@ -676,7 +676,7 @@ class TestLoadProvidersTildeExpansion:
                             {
                                 "id": "claude-tilde",
                                 "name": "Claude Tilde",
-                                "cli": "claude",
+                                "harness": "claude",
                                 "auth": "oauth_dir",
                                 "credentials_source": "~/.claude",
                             }
@@ -715,14 +715,14 @@ class TestLoadProvidersDuplicateIds:
                             {
                                 "id": "claude-dupe",
                                 "name": "Claude Dupe A",
-                                "cli": "claude",
+                                "harness": "claude",
                                 "auth": "oauth_dir",
                                 "credentials_source": "~/.claude",
                             },
                             {
                                 "id": "claude-dupe",  # same id - should be rejected
                                 "name": "Claude Dupe B",
-                                "cli": "claude",
+                                "harness": "claude",
                                 "auth": "oauth_dir",
                                 "credentials_source": "~/.claude",
                             },
@@ -760,7 +760,7 @@ class TestPWDRespected:
                             {
                                 "id": "claude-pwd-test",
                                 "name": "Claude PWD Test",
-                                "cli": "claude",
+                                "harness": "claude",
                                 "auth": "oauth_dir",
                                 "credentials_source": "~/.claude",
                             },
@@ -792,7 +792,7 @@ class TestPWDRespected:
         record = ProviderRecord(
             id="save-pwd-test",
             name="Save PWD Test",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source=Path.home() / ".claude",
         )
@@ -1032,7 +1032,7 @@ class TestAtomicRead:
                         {
                             "id": "claude-primary",
                             "name": "Claude Primary",
-                            "cli": "claude",
+                            "harness": "claude",
                             "auth": "oauth_dir",
                             "credentials_source": "~/.claude",
                             "priority": 10,
@@ -1041,7 +1041,7 @@ class TestAtomicRead:
                         {
                             "id": "claude-secondary",
                             "name": "Claude Secondary",
-                            "cli": "claude",
+                            "harness": "claude",
                             "auth": "api_key",
                             "env": {"ANTHROPIC_API_KEY": "key-B"},
                             "priority": 20,
@@ -1064,7 +1064,7 @@ class TestAtomicRead:
 
         assert isinstance(snap, ActiveProviderSnapshot)
         assert snap.id == "claude-primary"
-        assert snap.cli == "claude"
+        assert snap.harness == "claude"
         assert snap.auth == "oauth_dir"
         assert snap.base_url == "https://api.anthropic.com"
         # Snapshot is frozen
@@ -1209,7 +1209,7 @@ class TestAtomicRead:
                         {
                             "id": "claude-primary",
                             "name": "Claude Primary",
-                            "cli": "claude",
+                            "harness": "claude",
                             "auth": "oauth_dir",
                             "credentials_source": "~/.claude",
                         },
@@ -1254,7 +1254,7 @@ class TestAtomicRead:
                         {
                             "id": "claude-primary",
                             "name": "Claude Primary",
-                            "cli": "claude",
+                            "harness": "claude",
                             "auth": "oauth_dir",
                             "credentials_source": "~/.claude",
                             "pricing": {"input_per_million": 3.0, "output_per_million": 15.0},

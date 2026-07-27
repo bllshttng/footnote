@@ -77,7 +77,7 @@ def _two_record_config(active: str = "claude-primary") -> dict:
                     {
                         "id": "claude-primary",
                         "name": "Claude Primary",
-                        "cli": "claude",
+                        "harness": "claude",
                         "auth": "oauth_dir",
                         "credentials_source": str(Path.home() / ".claude"),
                         "priority": 10,
@@ -85,7 +85,7 @@ def _two_record_config(active: str = "claude-primary") -> dict:
                     {
                         "id": "gemini-backup",
                         "name": "Gemini Backup",
-                        "cli": "gemini",
+                        "harness": "gemini",
                         "auth": "api_key",
                         "env": {"GEMINI_API_KEY": "test-key"},
                         "priority": 20,
@@ -189,7 +189,7 @@ class TestAdd:
         result = _invoke(
             [
                 "add", "claude-secondary",
-                "--cli", "claude",
+                "--harness", "claude",
                 "--auth", "oauth_dir",
                 "--credentials-source", str(creds),
                 "--scope", "global",
@@ -213,7 +213,7 @@ class TestAdd:
         _invoke(
             [
                 "add", "claude-max-secondary",
-                "--cli", "claude",
+                "--harness", "claude",
                 "--auth", "oauth_dir",
                 "--credentials-source", str(creds),
                 "--scope", "global",
@@ -232,7 +232,7 @@ class TestAdd:
     def test_add_missing_credentials_source_for_oauth(self, tmp_path: Path):
         """AC02.2-ERR: add with oauth_dir but no --credentials-source exits non-zero with auth_strategy_mismatch."""
         result = _invoke(
-            ["add", "bad-provider", "--cli", "claude", "--auth", "oauth_dir"],
+            ["add", "bad-provider", "--harness", "claude", "--auth", "oauth_dir"],
             cwd=tmp_path,
             home=tmp_path,
         )
@@ -247,7 +247,7 @@ class TestAdd:
         creds.mkdir()
         args = [
             "add", "my-provider",
-            "--cli", "claude",
+            "--harness", "claude",
             "--auth", "oauth_dir",
             "--credentials-source", str(creds),
             "--scope", "global",
@@ -262,7 +262,7 @@ class TestAdd:
         creds.mkdir()
         args = [
             "add", "my-provider",
-            "--cli", "claude",
+            "--harness", "claude",
             "--auth", "oauth_dir",
             "--credentials-source", str(creds),
             "--scope", "global",
@@ -276,7 +276,7 @@ class TestAdd:
         result = _invoke(
             [
                 "add", "api-provider",
-                "--cli", "claude",
+                "--harness", "claude",
                 "--auth", "api_key",
                 "--env", "BADKEY",  # missing =VALUE
                 "--scope", "global",
@@ -309,7 +309,7 @@ class TestAtomicWrite:
             result = _invoke(
                 [
                     "add", "fail-provider",
-                    "--cli", "claude",
+                    "--harness", "claude",
                     "--auth", "oauth_dir",
                     "--credentials-source", str(creds),
                     "--scope", "global",
@@ -349,7 +349,7 @@ class TestTestCommand:
                         {
                             "id": "claude-test",
                             "name": "Claude Test",
-                            "cli": "claude",
+                            "harness": "claude",
                             "auth": "oauth_dir",
                             "credentials_source": str(creds),
                             "priority": 10,
@@ -374,7 +374,7 @@ class TestTestCommand:
                         {
                             "id": "hermes-test",
                             "name": "Hermes Test",
-                            "cli": "hermes",
+                            "harness": "hermes",
                             "auth": "oauth_dir",
                             "credentials_source": str(creds),
                             "priority": 10,
@@ -402,7 +402,7 @@ class TestTestCommand:
                         {
                             "id": "claude-missing-creds",
                             "name": "Claude Missing Creds",
-                            "cli": "claude",
+                            "harness": "claude",
                             "auth": "oauth_dir",
                             "credentials_source": str(tmp_path / "nonexistent-creds"),
                             "priority": 10,
@@ -429,7 +429,7 @@ class TestUse:
         _invoke(
             [
                 "add", "my-provider",
-                "--cli", "claude",
+                "--harness", "claude",
                 "--auth", "oauth_dir",
                 "--credentials-source", str(creds),
                 "--scope", "global",
@@ -465,7 +465,7 @@ class TestRemove:
             _invoke(
                 [
                     "add", pid,
-                    "--cli", "claude",
+                    "--harness", "claude",
                     "--auth", "oauth_dir",
                     "--credentials-source", str(creds),
                     "--scope", "global",
@@ -488,7 +488,7 @@ class TestRemove:
         _invoke(
             [
                 "add", "active-provider",
-                "--cli", "claude",
+                "--harness", "claude",
                 "--auth", "oauth_dir",
                 "--credentials-source", str(creds),
                 "--scope", "global",
@@ -508,7 +508,7 @@ class TestRemove:
         _invoke(
             [
                 "add", "active-provider",
-                "--cli", "claude",
+                "--harness", "claude",
                 "--auth", "oauth_dir",
                 "--credentials-source", str(creds),
                 "--scope", "global",
@@ -531,7 +531,7 @@ class TestRemove:
         _invoke(
             [
                 "add", "active-provider",
-                "--cli", "claude",
+                "--harness", "claude",
                 "--auth", "oauth_dir",
                 "--credentials-source", str(creds),
                 "--scope", "global",
@@ -560,7 +560,7 @@ class TestRemove:
         _invoke(
             [
                 "add", "active-provider",
-                "--cli", "claude",
+                "--harness", "claude",
                 "--auth", "oauth_dir",
                 "--credentials-source", str(creds),
                 "--scope", "global",
@@ -613,7 +613,7 @@ class TestSmokeDispatchEnv:
                             {
                                 "id": "gemini-smoke-test",
                                 "name": "Gemini Smoke Test",
-                                "cli": "gemini",
+                                "harness": "gemini",
                                 "auth": "api_key",
                                 "env": {"GEMINI_API_KEY": "test-smoke-key"},
                             }
@@ -697,11 +697,11 @@ class TestCombosAdd:
         data = tomllib.loads(
             (combos_cli_env / ".fno" / "config.toml").read_text()
         )
-        combos = data["providers"]["combos"]
+        combos = data["accounts"]["combos"]
         assert "my-stack" in combos
         assert combos["my-stack"]["strategy"] == "round_robin"
         assert combos["my-stack"]["sticky_limit"] == 3
-        assert combos["my-stack"]["providers"] == ["claude-primary", "gemini-backup"]
+        assert combos["my-stack"]["accounts"] == ["claude-primary", "gemini-backup"]
 
     def test_add_unknown_provider_id_fails_without_mutation(
         self, combos_cli_env: Path
@@ -803,8 +803,8 @@ class TestCombosRemove:
         data = tomllib.loads(
             (combos_cli_env / ".fno" / "config.toml").read_text()
         )
-        assert data["providers"].get("active_combo") is None
-        assert "my-stack" not in data["providers"].get("combos", {})
+        assert data["accounts"].get("active_combo") is None
+        assert "my-stack" not in data["accounts"].get("combos", {})
 
     def test_remove_unknown_combo_fails(self, combos_cli_env: Path):
         result = _invoke(
@@ -858,7 +858,7 @@ class TestCombosUse:
         data = tomllib.loads(
             (combos_cli_env / ".fno" / "config.toml").read_text()
         )
-        assert data["providers"]["active_combo"] == "my-stack"
+        assert data["accounts"]["active_combo"] == "my-stack"
 
     def test_use_unknown_combo_fails(self, combos_cli_env: Path):
         result = _invoke(
@@ -894,7 +894,7 @@ class TestListJson:
         by_id = {r["id"]: r for r in rows}
         assert set(by_id) == {"claude-primary", "gemini-backup"}
         cp = by_id["claude-primary"]
-        assert cp["cli"] == "claude"
+        assert cp["harness"] == "claude"
         assert cp["auth"] == "oauth_dir"
         assert cp["priority"] == 10
         assert cp["active"] is True
@@ -958,7 +958,7 @@ class TestCombosUpdate:
         data = tomllib.loads(
             (combos_cli_env / ".fno" / "config.toml").read_text()
         )
-        assert data["providers"]["combos"]["main"]["providers"] == [
+        assert data["accounts"]["combos"]["main"]["accounts"] == [
             "gemini-backup", "claude-primary",
         ]
 
@@ -1011,10 +1011,10 @@ class TestCombosUpdate:
         assert result.exit_code == 0, result.output
         combo = tomllib.loads(
             (combos_cli_env / ".fno" / "config.toml").read_text()
-        )["providers"]["combos"]["main"]
+        )["accounts"]["combos"]["main"]
         assert combo["strategy"] == "round_robin"  # preserved
         assert combo["sticky_limit"] == 3           # preserved
-        assert combo["providers"] == ["gemini-backup", "claude-primary"]
+        assert combo["accounts"] == ["gemini-backup", "claude-primary"]
 
     def test_update_can_change_strategy(self, combos_cli_env: Path):
         """--strategy on update replaces the stored strategy."""
@@ -1039,7 +1039,7 @@ class TestCombosUpdate:
         data = tomllib.loads(
             (combos_cli_env / ".fno" / "config.toml").read_text()
         )
-        combo = data["providers"]["combos"]["main"]
+        combo = data["accounts"]["combos"]["main"]
         assert combo["strategy"] == "round_robin"
         assert combo["sticky_limit"] == 2
 

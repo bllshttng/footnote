@@ -288,8 +288,8 @@ def _provider_id_to_kind(provider_id: str) -> tuple[str, bool]:
         from fno.adapters.providers.loader import load_providers
 
         record = load_providers().by_id.get(provider_id)
-        if record is not None and record.cli in DISPATCHABLE_PROVIDERS:
-            return record.cli, True
+        if record is not None and record.harness in DISPATCHABLE_PROVIDERS:
+            return record.harness, True
     except Exception as exc:  # noqa: BLE001
         log.warning("cross-model: provider_id->kind lookup failed: %s", exc)
     return CLAUDE, False
@@ -327,7 +327,7 @@ def available_provider_kinds(
         return kinds
 
     for record in records:
-        kind = record.cli
+        kind = record.harness
         if kind not in DISPATCHABLE_PROVIDERS or kind in kinds:
             continue
         try:
@@ -348,7 +348,7 @@ def available_provider_kinds(
 
         by_kind: dict[str, list[str]] = {}
         for record in records:
-            by_kind.setdefault(record.cli, []).append(record.id)
+            by_kind.setdefault(record.harness, []).append(record.id)
 
         def _kind_exhausted(kind: str) -> bool:
             ids = by_kind.get(kind, [])
@@ -397,8 +397,8 @@ def exhausted_provider_kinds(*, repo_root: Path | None = None) -> set[str] | Non
         records = load_providers(repo_root).records
         by_kind: dict[str, list[str]] = {}
         for record in records:
-            if record.cli in DISPATCHABLE_PROVIDERS:
-                by_kind.setdefault(record.cli, []).append(record.id)
+            if record.harness in DISPATCHABLE_PROVIDERS:
+                by_kind.setdefault(record.harness, []).append(record.id)
         return {
             kind
             for kind, ids in by_kind.items()

@@ -140,16 +140,16 @@ def resolve_account_overlay(
 
     record = by_id.get(account_id)
     if record is None:
-        claude_ids = sorted(r.id for r in config.records if r.cli == "claude")
+        claude_ids = sorted(r.id for r in config.records if r.harness == "claude")
         listing = ", ".join(claude_ids) or "(none registered)"
         raise AccountResolutionError(
             f"account {account_id!r} is not a registered provider. "
             f"claude accounts: {listing}"
         )
 
-    if record.cli != "claude":
+    if record.harness != "claude":
         raise AccountResolutionError(
-            f"account {account_id!r} is a {record.cli}/{record.auth} record; "
+            f"account {account_id!r} is a {record.harness}/{record.auth} record; "
             "--account is claude-only (codex has its own CODEX_HOME slot)"
         )
 

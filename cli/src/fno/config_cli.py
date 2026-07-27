@@ -14,6 +14,26 @@ import typer
 app = typer.Typer(help="Config inspection and diagnostics")
 
 
+def _register_accounts() -> None:
+    """Mount the account records sub-app as ``fno config accounts``.
+
+    Accounts ARE config (``config.accounts.records``), so the verb path mirrors
+    the config path. This replaced the top-level ``fno providers``, which was
+    hidden and therefore discoverable by nobody; as a visible `fno config`
+    subcommand the group shows up in `fno config --help` and gets its own page.
+
+    Imported lazily inside the function: the accounts sub-app pulls in the
+    provider loader, which runs its own bootstrap config read, and importing it
+    at module scope would drag that into every `fno config` invocation.
+    """
+    from fno.adapters.providers.cli import cli as accounts_app
+
+    app.add_typer(accounts_app, name="accounts", help="Manage account records.")
+
+
+_register_accounts()
+
+
 # ---------------------------------------------------------------------------
 # Post-merge config readiness oracle (ab-dba85fcc)
 #

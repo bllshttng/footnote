@@ -27,9 +27,9 @@ def _settings_with_records_and_combos(combos: dict) -> dict:
             "providers": {
                 "active": "a",
                 "records": [
-                    {"id": "a", "cli": "claude", "auth": "oauth_dir", "credentials_source": "~/.claude"},
-                    {"id": "b", "cli": "claude", "auth": "oauth_dir", "credentials_source": "~/.claude"},
-                    {"id": "c", "cli": "claude", "auth": "oauth_dir", "credentials_source": "~/.claude"},
+                    {"id": "a", "harness": "claude", "auth": "oauth_dir", "credentials_source": "~/.claude"},
+                    {"id": "b", "harness": "claude", "auth": "oauth_dir", "credentials_source": "~/.claude"},
+                    {"id": "c", "harness": "claude", "auth": "oauth_dir", "credentials_source": "~/.claude"},
                 ],
                 "combos": combos,
             }
@@ -123,7 +123,7 @@ class TestLoadCombosErrors:
             "config": {
                 "providers": {
                     "active": "a",
-                    "records": [{"id": "a", "cli": "claude", "auth": "oauth_dir", "credentials_source": "~/.claude"}],
+                    "records": [{"id": "a", "harness": "claude", "auth": "oauth_dir", "credentials_source": "~/.claude"}],
                     "combos": ["not", "a", "mapping"],
                 }
             }
@@ -201,7 +201,7 @@ class TestLoadCombosNoBlock:
                 "config": {
                     "providers": {
                         "active": "a",
-                        "records": [{"id": "a", "cli": "claude", "auth": "oauth_dir", "credentials_source": "~/.claude"}],
+                        "records": [{"id": "a", "harness": "claude", "auth": "oauth_dir", "credentials_source": "~/.claude"}],
                     }
                 }
             },
