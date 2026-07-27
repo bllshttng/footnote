@@ -93,7 +93,8 @@ def test_intake_no_size_frontmatter_leaves_null(tmp_path, monkeypatch):
     [
         ("bug", "bug"), ("BUG", "bug"), (" epic ", "epic"), ("roadmap", "roadmap"),
         ("feature", "feature"),
-        ("banana", "feature"), ("", "feature"), (None, "feature"), (0, "feature"),
+        ("banana", "feature"), ("think", "feature"), ("task", "feature"),
+        ("", "feature"), (None, "feature"), (0, "feature"),
     ],
 )
 def test_normalize_type(value, expected):
@@ -130,16 +131,31 @@ def test_intake_no_type_frontmatter_still_features(tmp_path, monkeypatch):
     assert _entries(g)[0]["type"] == "feature"
 
 
-def test_intake_bad_type_falls_back_without_raising(tmp_path, monkeypatch):
-    """AC8-ERR: an out-of-vocabulary type warns and degrades, never fails intake."""
+@pytest.mark.parametrize("declared", ["banana", "think", "design", "task", "refactor"])
+def test_intake_non_node_type_falls_back_silently(tmp_path, monkeypatch, declared):
+    """AC8-ERR: a value outside the graph vocabulary degrades and never raises.
+
+    Silent by design. Plan `type:` is an overloaded key: 88 of 607 real plans
+    carry a doc kind (`think`, `design`) or the plan-side vocabulary the graph
+    does not share (`task`, `refactor`), so warning would call documented
+    values typos on 13% of the corpus.
+    """
     g, _ = _route_graph(tmp_path, monkeypatch)
     plan = tmp_path / "plan.md"
-    plan.write_text("---\ncreated: 2026-05-05T04:35\ntype: banana\n---\n# Odd\n\nBody.\n")
+    plan.write_text(f"---\ncreated: 2026-05-05T04:35\ntype: {declared}\n---\n# Odd\n\nBody.\n")
 
     result = runner.invoke(app, ["backlog", "intake", str(plan)])
     assert result.exit_code == 0, result.output
     assert _entries(g)[0]["type"] == "feature"
-    assert "banana" in result.output  # the rejected value is named
+    assert "warning" not in result.output.lower()
+
+
+def test_create_paths_reject_an_invalid_type(tmp_path, monkeypatch):
+    """`add`/`idea` validate --type against the same set `update` does."""
+    _route_graph(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["backlog", "add", "T", "--type", "task"])
+    assert result.exit_code == 1
+    assert "invalid type 'task'" in result.output
 
 
 # -- backlog done stamps cost ledger->node ---------------------------------

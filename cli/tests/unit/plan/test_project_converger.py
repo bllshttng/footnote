@@ -290,6 +290,47 @@ def test_projection_keeps_a_plans_authored_wave_list(tmp_path):
     assert read_plan_file(plan)[1]["priority"] == "p0"  # projection still ran
 
 
+def test_mirror_type_is_scoped_to_the_named_node_not_the_fanout(tmp_path):
+    """`update <child> --type` must not carry the graph's default to siblings.
+
+    The converger expands one id into its ancestors and siblings, so a
+    call-scoped opt-in would write each sibling's mint-time `feature` over its
+    authored `type` - the exact corruption the opt-in exists to prevent.
+    """
+    epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN)
+    me = _plan(tmp_path, "me.md", _CHILD.format(nid="me").replace("type: feature", "type: bug"))
+    sib = _plan(tmp_path, "sib.md", _CHILD.format(nid="sib").replace("type: feature", "type: bug"))
+    entries = [
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "status": "ready"},
+        {"id": "x-me", "slug": "me", "type": "epic", "parent": "x-epic",
+         "plan_path": str(me), "blocked_by": [], "status": "ready"},
+        {"id": "x-sib", "slug": "sib", "type": "feature", "parent": "x-epic",
+         "plan_path": str(sib), "blocked_by": [], "status": "ready"},
+    ]
+
+    project_graph_nodes(entries, ["x-me"], root=str(tmp_path), mirror_type_for="x-me")
+
+    assert read_plan_file(me)[1]["type"] == "epic"  # the named node took it
+    assert read_plan_file(sib)[1]["type"] == "bug"  # the sibling kept its own
+
+
+def test_stale_scalar_waves_is_healed_on_an_epic(tmp_path):
+    """The retired derived int is dropped so /blueprint can repopulate `waves`.
+
+    A scalar can only be the old shared-key write; an authored value is a list.
+    """
+    epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN.replace("---\n\n", "waves: 3\n---\n\n", 1))
+    entries = [
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "status": "ready"},
+        {"id": "x-c", "slug": "c", "type": "feature", "parent": "x-epic", "plan_path": None, "blocked_by": []},
+    ]
+
+    project_graph_nodes(entries, ["x-epic"], root=str(tmp_path))
+    fields = read_plan_file(epic_doc)[1]
+    assert "waves" not in fields  # the stale scalar is gone
+    assert fields["waves_total"] == "1"  # the derived value lives under its own key
+
+
 def test_projection_keeps_an_epics_authored_wave_list(tmp_path):
     """The reported case: an epic's authored block is not replaced by the int.
 

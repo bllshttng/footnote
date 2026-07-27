@@ -802,6 +802,7 @@ def _create_node_impl(
     from fno.graph._constants import PRIORITY_ORDER, mint_node_id
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import (
+        VALID_NODE_TYPES,
         detect_project_from_settings,
         project_root_from_settings,
         repo_root,
@@ -811,6 +812,17 @@ def _create_node_impl(
         typer.echo(
             f"Error: invalid priority '{priority}'. "
             f"Must be: {', '.join(PRIORITY_ORDER.keys())}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # `update --type` has always validated; these birth paths never did, so
+    # `--type task` wrote an out-of-vocabulary value straight into the graph.
+    # Same set, same message - one vocabulary is the point.
+    if type_ not in VALID_NODE_TYPES:
+        typer.echo(
+            f"Error: invalid type '{type_}'. Must be one of: "
+            f"{', '.join(sorted(VALID_NODE_TYPES))}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -1025,7 +1037,7 @@ def cmd_add(
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
     blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
     parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
-    type_: str = typer.Option("feature", "--type", "-t", help="Node type: roadmap|feature|task"),
+    type_: str = typer.Option("feature", "--type", "-t", help="Node type: feature|epic|bug|roadmap"),
     project: Optional[str] = typer.Option(
         None,
         help=(
@@ -1102,7 +1114,7 @@ def cmd_idea(
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
     blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
     parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
-    type_: str = typer.Option("feature", "--type", "-t", help="Node type: roadmap|feature|task"),
+    type_: str = typer.Option("feature", "--type", "-t", help="Node type: feature|epic|bug|roadmap"),
     project: Optional[str] = typer.Option(
         None,
         help=(
@@ -1944,13 +1956,27 @@ def _intake_impl(
         claim_source = prep["claim_source"]
 
         def claim_mutator(es):
-            from fno.graph._intake import resolve_node_project_and_cwd
+            from fno.graph._intake import (
+                DEFAULT_NODE_TYPE,
+                _read_plan_frontmatter,
+                normalize_type,
+                resolve_node_project_and_cwd,
+            )
 
+            # Intake has TWO lanes; the create lane reads `type` doc->graph in
+            # _build_intake_node, so this one must too or the flow is a guard on
+            # one of N paths. Same rule as priority below: the doc only speaks
+            # when it declares a real, non-default value.
+            claimed_type = normalize_type(
+                (_read_plan_frontmatter(plan_path) or {}).get("type")
+            )
             for entry in es:
                 if entry.get("id") != claim_id:
                     continue
                 entry["plan_path"] = plan_path
                 entry["title"] = spec["title"]
+                if claimed_type != DEFAULT_NODE_TYPE:
+                    entry["type"] = claimed_type
                 if spec["deps"]:
                     merged = list(
                         dict.fromkeys([*entry.get("blocked_by", []), *spec["deps"]])
@@ -2793,10 +2819,11 @@ def cmd_update(
                 projected_node[0]["id"],
                 *([reparent_old_parent[0]] if reparent_old_parent[0] else []),
             ],
-            # The operator typed `--type`, so this value IS observed: write it
-            # through, or the graph and the doc disagree and Obsidian's
-            # `type == "epic"` view drops a node the graph is rolling up.
-            mirror_type=type_ is not None,
+            # The operator typed `--type`, so THIS node's value is observed:
+            # write it through, or the graph and the doc disagree and Obsidian's
+            # `type == "epic"` view drops a node the graph is rolling up. Scoped
+            # to this id - the repaint fan-out must not carry it to siblings.
+            mirror_type_for=(projected_node[0]["id"] if type_ is not None else None),
         )
 
 
@@ -5551,7 +5578,7 @@ def cmd_undefer(
 # -- done --
 
 def _project_plans_from_graph(
-    node_ids: list[str], *, mirror_type: bool = False
+    node_ids: list[str], *, mirror_type_for: str | None = None
 ) -> None:
     """Project each named node's mirror fields + forward status onto its plan.
 
@@ -5561,9 +5588,10 @@ def _project_plans_from_graph(
     epic parents that ``_stamp_and_graduate_plan`` never stamps. Best-effort per
     node: a missing or unreadable plan never fails the mutation.
 
-    ``mirror_type`` is set ONLY by the ``--type`` path, where the operator
-    supplied the value; everywhere else the graph's ``type`` is a mint-time
-    default and must not overwrite the doc's own.
+    ``mirror_type_for`` names the ONE node whose ``type`` may be written, set
+    only by the ``--type`` path where the operator supplied that node's value.
+    It is an id, not a flag: this projection repaints ancestors and siblings
+    too, and their ``type`` is still a mint-time default.
     """
     ids = [i for i in dict.fromkeys(node_ids) if i]
     if not ids:
@@ -5576,7 +5604,7 @@ def _project_plans_from_graph(
     except Exception as e:  # noqa: BLE001 - additive; never wedge the mutation
         sys.stderr.write(f"warning: plan projection setup failed: {e}\n")
         return
-    project_graph_nodes(entries, ids, mirror_type=mirror_type)
+    project_graph_nodes(entries, ids, mirror_type_for=mirror_type_for)
 
 
 def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) -> None:

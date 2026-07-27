@@ -128,6 +128,16 @@ def project_node_to_plan(
             fields[key] = value
             changed = True
 
+    # Heal the docs the old shared-key projection already damaged. The reader
+    # returns an authored block list as RawBlock and an inline one as list, so
+    # a plain str here can only be the retired derived int. The write that
+    # produced it destroyed the authored list, and /blueprint will not restore
+    # it (its default fires only when `waves` is falsy, and a stale `3` is
+    # truthy). Dropping the scalar lets the next /blueprint write repopulate.
+    if "waves_total" in node and isinstance(fields.get("waves"), str):
+        del fields["waves"]
+        changed = True
+
     # Status projection (x-f34f): map the graph derived `status` onto the plan,
     # forward-only. Kept out of MIRROR_KEYS because it is a mapped, monotonic
     # write (not a straight mirror) and stamps done_at on the terminal write.
@@ -153,7 +163,7 @@ def project_graph_nodes(
     node_ids: list[str],
     root: str | None = None,
     *,
-    mirror_type: bool = False,
+    mirror_type_for: str | None = None,
 ) -> int:
     """Project each named node's mirror fields onto its linked plan.
 
@@ -218,7 +228,14 @@ def project_graph_nodes(
                     _wid = node.get("id")
                     wave_val = wave_map.get(_wid) if isinstance(_wid, str) else None
             augmented["wave"] = wave_val
-            if project_node_to_plan(augmented, p, mirror_type=mirror_type):
+            # Node-scoped, NOT call-scoped: this converger expands one id into
+            # its ancestors and siblings (_expand_repaint_targets above), and a
+            # call-scoped flag would write the graph's mint-time default onto
+            # every one of those sibling docs - the exact corruption the opt-in
+            # exists to prevent. Only the node the operator named opts in.
+            if project_node_to_plan(
+                augmented, p, mirror_type=(nid == mirror_type_for)
+            ):
                 rewritten += 1
         except Exception as e:  # noqa: BLE001 - per-node best-effort
             sys.stderr.write(f"warning: plan projection failed for {nid}: {e}\n")
