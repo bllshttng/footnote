@@ -4324,3 +4324,91 @@ fn done_probes_ac3_inv_a_plan_cannot_silence_the_project_gate() {
         d.message
     );
 }
+
+/// AC6-HP (x-a534): a REGISTERED reviewer gates and is satisfied by its own
+/// attestation.
+///
+/// The design's claim is that the Rust side is already name-agnostic, so
+/// opening `config.review.reviewers` to a project-registered name needs zero
+/// Rust changes. That claim comes from reading `unattested_reviewers_scan`,
+/// and a guard verified only by reading is a guard verified on one of N paths.
+/// This runs it: a name footnote does not author must both HOLD the gate when
+/// unattested and CLEAR it when attested at HEAD.
+#[test]
+fn reviewers_gate_is_name_agnostic_for_a_registered_reviewer() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    std::env::set_var("FNO_NUDGE_DISABLED", "1");
+
+    // The registry block is Python-side config; Rust reads only the names.
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(
+        &settings_path,
+        "[review]\nreviewers = [\"my-security-skill\"]\n\n\
+         [review.reviewer_registry.my-security-skill]\n\
+         kind = \"harness-skill\"\nrequires = \"skill\"\n\
+         invocation = \"/my-security-skill\"\nasserts = \"invocation\"\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-rvw-registry", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::green();
+    let args = |cwd: &Path| -> Vec<String> {
+        vec![
+            "loop-check".into(),
+            "--state".into(),
+            manifest_path.to_str().unwrap().into(),
+            "--transcript".into(),
+            transcript_path.to_str().unwrap().into(),
+            "--cwd".into(),
+            cwd.to_str().unwrap().into(),
+            "--now".into(),
+            "2026-06-05T00:30:00Z".into(),
+            "--settings".into(),
+            settings_path.to_str().unwrap().into(),
+            format!("--gh-bin={}", mock.gh.display()),
+            format!("--git-bin={}", mock.git.display()),
+            "--global-settings".into(),
+            "/nonexistent".into(),
+        ]
+    };
+
+    // Unattested: the gate holds and names the reviewer.
+    let (_c, json_str) = fno_agents::loopcheck::run_loop_check_capture(&args(cwd));
+    let d: Decision = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(
+        d.decision, "block",
+        "an unattested registered reviewer must hold the gate: {json_str}"
+    );
+    assert!(
+        d.message.contains("my-security-skill"),
+        "the block must name the reviewer: {}",
+        d.message
+    );
+
+    // Attested at HEAD: the gate clears, with no Rust-side allowlist involved.
+    fs::write(
+        cwd.join(".fno/events.jsonl"),
+        format!(
+            "{{\"ts\":\"2026-06-05T00:10:00Z\",\"type\":\"review_attestation\",\"source\":\"target\",\"data\":{{\"reviewer\":\"my-security-skill\",\"head_sha\":\"{GREEN_HEAD}\",\"verdict\":\"pass\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    let (_c, json_str) = fno_agents::loopcheck::run_loop_check_capture(&args(cwd));
+    let d: Decision = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(
+        d.termination_reason.as_deref(),
+        Some("DonePRGreen"),
+        "a head-pinned attestation from a registered reviewer must clear the \
+         gate without any Rust-side table entry: {json_str}"
+    );
+}
