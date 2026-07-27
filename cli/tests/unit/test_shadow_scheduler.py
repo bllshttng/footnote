@@ -207,6 +207,9 @@ def test_cap_below_one_normalizes_to_one(monkeypatch, tmp_path):
 
 
 def test_ready_list_unreadable_fails_safe(monkeypatch, tmp_path):
+    _ready(monkeypatch, _nodes(("n-a", "code")))
+    healthy = advance.schedule_shadow(2, claims_root=tmp_path)
+
     def boom(project=None, mission=None):
         raise RuntimeError("garbled backlog ready")
 
@@ -215,6 +218,13 @@ def test_ready_list_unreadable_fails_safe(monkeypatch, tmp_path):
     assert r["note"] == "ready-unreadable"
     assert r["degraded"] == ["ready"]
     assert r["selected"] == [] and r["decisions"] == []
+    # Fail-closed capacity: this report authorizes no dispatch.
+    assert r["occupied_slots"] == 0 and r["remaining_capacity"] == 0
+    # Key-set parity with the healthy return, `note` aside (present only here).
+    # Asserted structurally so a field added to one path and forgotten on the
+    # other fails HERE, rather than as a KeyError in a consumer that reached the
+    # degraded path - the one path where it most needs a number, not a crash.
+    assert set(r) - {"note"} == set(healthy)
 
 
 def test_healthy_run_reports_no_degradation(monkeypatch, tmp_path):

@@ -568,7 +568,7 @@ def select_lane_fill(
                 # holds it back. The shadow report is the conservative twin -
                 # it serializes the unevaluated node instead (schedule_shadow).
                 if reason is not None and not reason.startswith(_UNEVALUATED_PREFIX):
-                    if reason.startswith("high-collision"):
+                    if reason.startswith(_HIGH_COLLISION_PREFIX):
                         _LOG.warning("lane-fill: skipping %s - %s", nid, reason)
                     continue  # leave it ready; reversible, retried next round
                 if reason is not None:
@@ -635,6 +635,10 @@ _INITIAL_LIVE_CAP = 2
 # it). Shared so the two prefix checks cannot drift if the token is ever renamed.
 _UNEVALUATED_PREFIX = "unevaluated:"
 
+# Same reasoning for the file-overlap token: the producer builds it and
+# select_lane_fill matches it to decide how loudly to log the skip.
+_HIGH_COLLISION_PREFIX = "high-collision:"
+
 
 def _classify_lane_candidate(
     node: dict,
@@ -678,7 +682,7 @@ def _classify_lane_candidate(
         return "unevaluated:no-surface"
     hit = _high_collision(node, inflight)
     if hit is not None:
-        return f"high-collision:{hit.with_node_id}"
+        return f"{_HIGH_COLLISION_PREFIX}{hit.with_node_id}"
     return None
 
 
@@ -732,8 +736,15 @@ def schedule_shadow(
         ready = _ready_nodes(project, mission)
     except Exception as exc:  # noqa: BLE001 - a garbled ready list is not a crash
         _LOG.warning("schedule shadow: ready list unreadable: %s", exc)
+        # Same key set as the healthy return, so a scripted consumer reading
+        # e.g. report["remaining_capacity"] gets a number on exactly the path
+        # where it most needs one instead of a KeyError. Both capacity fields
+        # are zero because this short-circuits BEFORE the slot read: nothing was
+        # measured, and zero remaining is the fail-closed value (this report
+        # authorizes no dispatch). `degraded` is what says not to trust them.
         return {
             "effective_cap": effective_cap, "requested_cap": max_lanes,
+            "occupied_slots": 0, "remaining_capacity": 0,
             "note": "ready-unreadable", "degraded": ["ready"],
             "selected": [], "serialized": [], "unevaluated": [], "decisions": [],
         }
