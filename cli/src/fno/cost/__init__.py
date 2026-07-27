@@ -249,8 +249,35 @@ def _append_to_ledger(ledger_path: Path, entry: dict[str, Any]) -> None:
         os.replace(tmp_path, ledger_path)
 
 
+def upsert_cost_session(
+    node: dict[str, Any], session_id: str, cost_usd: float, *, ndigits: int = 4
+) -> None:
+    """Record one session's cost on a graph node, replacing any prior row.
+
+    A session's cost is a LEVEL that gets re-reported (a resumed run, a second
+    `fno cost` call for the same session), not an increment to accumulate.
+    Appending and re-summing double-counts it, so the row for `session_id` is
+    replaced in place when it already exists. `cost_usd` is then re-derived
+    from the rows, never incremented.
+    """
+    row = {
+        "session_id": session_id,
+        "cost_usd": round(float(cost_usd), ndigits),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    rows = node.get("cost_sessions") or []
+    for existing in rows:
+        if existing.get("session_id") == session_id:
+            existing.update(row)
+            break
+    else:
+        rows.append(row)
+    node["cost_sessions"] = rows
+    node["cost_usd"] = round(sum(float(r.get("cost_usd") or 0) for r in rows), ndigits)
+
+
 def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd: float) -> None:
-    """Append cost session to graph node and update cumulative cost_usd."""
+    """Record this session's cost on the graph node (upsert, not append)."""
     from filelock import FileLock
     import tempfile
     import os
@@ -286,14 +313,7 @@ def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd
             if not isinstance(node, dict):
                 continue
             if node.get("id") == node_id:
-                sessions = node.get("cost_sessions", [])
-                sessions.append({
-                    "session_id": session_id,
-                    "cost_usd": round(float(cost_usd), 4),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-                node["cost_sessions"] = sessions
-                node["cost_usd"] = round(sum(s["cost_usd"] for s in sessions), 4)
+                upsert_cost_session(node, session_id, cost_usd)
                 break
 
         raw["entries"] = entries

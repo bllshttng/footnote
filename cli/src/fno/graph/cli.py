@@ -4915,16 +4915,11 @@ def cmd_cost(
         raise typer.Exit(code=1)
 
     def mutator(entries):
+        from fno.cost import upsert_cost_session
+
         for e in entries:
             if e.get("id") == task_id:
-                sessions = e.get("cost_sessions", [])
-                sessions.append({
-                    "session_id": session,
-                    "cost_usd": round(amount_f, 2),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-                e["cost_sessions"] = sessions
-                e["cost_usd"] = round(sum(s["cost_usd"] for s in sessions), 2)
+                upsert_cost_session(e, session, amount_f, ndigits=2)
                 return entries
         typer.echo(f"Error: feature {task_id} not found", err=True)
         raise typer.Exit(code=1)
