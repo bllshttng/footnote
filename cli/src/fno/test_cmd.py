@@ -510,35 +510,52 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 
 
 # Shell harnesses discover_shell_harnesses finds but smoke must not run yet.
-# 15 entries held. 10 are RED on both platforms (pre-existing rot; each its own
-# debugging session, out of scope here). The other 5 are macOS-green and
+# 16 entries held. 10 are RED on both platforms (pre-existing rot; each its own
+# debugging session, out of scope here). The other 6 are macOS-green and
 # Linux-red, so a developer census calls them drainable and CI does not:
 #
 #   tests/hooks/test_hook_events.sh - a non-portable perm check; GNU stat does
 #     not fail on -f, so the Linux fallback branch never runs.
 #
-#   THE `fno`-ON-PATH FAMILY - four harnesses, one cause:
+#   THE `fno`-ON-PATH FAMILY - five harnesses, one cause, TWO SHAPES.
+#   A fresh runner ships only the venv `fno-py`; a dev machine has a global
+#   `fno`. Every member passes locally for that reason alone.
+#
+#   Shape 1, declared - opens with `command -v fno || skip`, exits 77, and
+#   smoke counts a SKIP as a FAILURE, so it goes red at 0s having asserted
+#   nothing. Find these with `rg -l 'command -v fno' tests/`:
 #     tests/hooks/test_init_claim_stderr_and_modern_claim.sh
 #     tests/hooks/test_init_contested_steal_guard.sh
 #     tests/hooks/test_init_node_guard_tokenize.sh
 #     tests/test_provider_substrate_e2e.sh
-#   Each opens with `command -v fno || skip`, and a fresh runner ships only the
-#   venv `fno-py`. They exit 77 (SKIP), which smoke counts as a FAILURE, so
-#   draining one turns the gate red at 0s without a single assertion running.
-#   They are listed together because they were found one 12-minute CI run at a
-#   time, fail-fast surfacing exactly one per push. Enumerate the family with
-#   `rg -l 'command -v fno' tests/` before draining anything in it - one member
-#   is not one bug.
-#   A CI `fno` shim drains all four at once and is the actual fix. It is not
-#   done here: `scripts/ci/check-config-schema-drift.sh:24` also branches on
-#   `command -v fno`, so putting `fno` on the runner's PATH changes steps that
-#   have nothing to do with this list, and that deserves its own PR.
 #
-# A LOCAL GREEN IS NOT GROUNDS TO DRAIN ONE OF THESE FIVE. The census runs on
-# the developer's OS; CI's verdict is the one that counts, and it disagrees in
-# BOTH directions. Two of the family were drained on a macOS green and reverted
-# when CI went red. Two other harnesses went the other way - macOS-red,
-# Linux-green - and were drained on CI's word, not a laptop's.
+#   Shape 2, undeclared - no guard, no mention of `fno` anywhere. It just needs
+#   something `fno` does and dies on a bare `grep -q` under `set -e`, printing
+#   NO failure line at all. The grep is the tell, not the dependency:
+#     tests/test-target-state-recovery.sh - its gemini case needs the
+#       settings.yaml -> config.toml migration to have run, so
+#       `grep -q '^provider_mode: experimental_agents'` fails silently.
+#   Shape 2 is invisible to the rg above. There is no static detector for it;
+#   CI is the detector.
+#
+#   The graduating fix is a shared `fno`-then-`fno-py` resolver, not a PATH
+#   symlink. Eight files under scripts/lib/ and hooks/helpers/ open with
+#   `command -v fno` and only scripts/lib/reconcile-throttle.sh:31 has an
+#   ad-hoc fallback (and it points at ~/.local/bin, not the venv). That is one
+#   convention decision across eight call sites, and it deserves its own PR:
+#   scripts/ci/check-config-schema-drift.sh:24 branches on `command -v fno`
+#   too, so this changes steps unrelated to this list.
+#
+# A LOCAL GREEN IS NOT GROUNDS TO DRAIN. The census runs on the developer's OS
+# with the developer's PATH, and CI disagrees in BOTH directions: three of the
+# family were drained on a macOS green and reverted when CI went red, while two
+# other harnesses were macOS-red and Linux-green and were drained on CI's word.
+#
+# Simulating CI locally by stripping the global `fno` off PATH does NOT work
+# either - tests/hooks/test_inject_fno_agent_whoami.sh fails that way and
+# passes on CI, so the simulation manufactures failures of its own. Push and
+# read the smoke log. It is slower and it is the only source that has been
+# right every time.
 #
 # A green-fast harness here is silent coverage loss no file edit surfaces.
 # `fno test --census-deferred` runs every entry bounded and exits non-zero the
@@ -564,6 +581,7 @@ tests/hooks/test_init_node_guard_tokenize.sh
 tests/hooks/test_reconcile_session_start.sh
 tests/smoke-megatron-e2e.sh
 tests/smoke-target-shim.sh
+tests/test-target-state-recovery.sh
 tests/test-autolaunch-gate.sh
 tests/test-backlog-aliases.sh
 tests/test-backlog-triage.sh
