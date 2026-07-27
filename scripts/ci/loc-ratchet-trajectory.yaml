@@ -28,6 +28,11 @@ baseline:
   note: "pre-step-1 main; the collapse must end below this number"
 
 entries:
+  - date: 2026-07-26
+    pr: null
+    branch: feature/x-2e20
+    delta: 82
+    reason: 'verification evidence closure (x-2e20): +80 in scripts/lib/events-validate.sh and +2 in crates/fno-agents/src/loopcheck.rs, the only manifest-matched production files in the feature. The shell delta mirrors the schema-owned verification_receipt contract at the portable emitter boundary: exact candidate SHA, command, environment, scope, timestamps, evidence mode/result, producer, UTC calendar validation, canonical compact-JSON sizing, and the distinct full/subset/void/stale/advisory/not-configured/unavailable/pending/failed/passed states. Those checks cannot move off the manifest because scripts/lib/events-validate.sh is the Bash validator used by direct shell emitters; omitting them would let Bash accept evidence Python and Rust reject, creating a second truth contract. The two loopcheck lines preserve exact receipt attribution when projecting completion from the append-only event journal. Journal discovery, parsed-timestamp deduplication, typed builders, hosted-CI classification, and almost all tests live outside the ratchet manifest under cli/ and tests/. No new completion or merge authority is added: receipts remain schema-owned derived evidence, loop-check remains the existing consumer, and uncertainty fails closed.'
   - date: 2026-07-24
     pr: null
     branch: feature/x-0b3f

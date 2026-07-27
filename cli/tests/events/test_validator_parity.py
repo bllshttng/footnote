@@ -67,6 +67,12 @@ def _bash_verdict(event: dict, type_hint: str | None = None) -> tuple[bool, str]
 _RECORDS = list(_records())
 
 
+def test_bash_schema_cache_identity_is_not_pid_only() -> None:
+    script = BASH_VALIDATOR.read_text(encoding="utf-8")
+
+    assert "${BASHPID:-$$}-${RANDOM:-0}" in script
+
+
 def test_corpus_minimum_size() -> None:
     """The corpus must include at least the 12 hand-crafted records.
 
@@ -128,3 +134,207 @@ def test_overflow_exponent_is_rejected_on_the_raw_bash_wire() -> None:
     )
 
     assert result.returncode != 0
+
+
+def test_verification_receipt_command_count_cap_has_python_bash_parity() -> None:
+    event = {
+        "ts": "2026-07-26T01:02:04Z",
+        "type": "verification_receipt",
+        "source": "target",
+        "data": {
+            "candidate_sha": "a" * 40,
+            "command": ["x"] * 4097,
+            "environment": {"host": "h", "platform": "p", "runner": "r"},
+            "scope": ["smoke"],
+            "started_at": "2026-07-26T01:00:00Z",
+            "finished_at": "2026-07-26T01:02:03Z",
+            "mode": "full",
+            "result": "failed",
+            "producer": {"kind": "preflight", "id": "h:1"},
+            "steps_expected": 1,
+            "steps_executed": 1,
+        },
+    }
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is False
+    assert bash_ok is False
+
+
+def test_verification_receipt_utf8_byte_cap_has_python_bash_parity() -> None:
+    event = {
+        "ts": "2026-07-26T01:02:04Z",
+        "type": "verification_receipt",
+        "source": "target",
+        "data": {
+            "candidate_sha": "a" * 40,
+            "command": ["é" * 4096],
+            "environment": {"host": "h", "platform": "p", "runner": "r"},
+            "scope": ["smoke"],
+            "started_at": "2026-07-26T01:00:00Z",
+            "finished_at": "2026-07-26T01:02:03Z",
+            "mode": "full",
+            "result": "failed",
+            "producer": {"kind": "preflight", "id": "h:1"},
+            "steps_expected": 1,
+            "steps_executed": 1,
+        },
+    }
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is False
+    assert bash_ok is False
+
+
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [
+        ("é" * 10_000, True),
+        ("é" * 11_000, False),
+        ("\x7f" * 10_000, True),
+        ("\x7f" * 11_000, False),
+    ],
+)
+def test_event_data_cap_counts_compact_ascii_json_in_python_and_bash(
+    detail: str, expected: bool
+) -> None:
+    event = next(
+        json.loads(json.dumps(rec["event"]))
+        for rec in _RECORDS
+        if rec["reason"] == "verification_receipt full passed exact sha"
+    )
+    event["data"]["detail"] = detail
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is expected
+    assert bash_ok is expected
+
+
+def test_event_data_lone_surrogate_rejects_in_python_and_bash() -> None:
+    event = next(
+        json.loads(json.dumps(rec["event"]))
+        for rec in _RECORDS
+        if rec["reason"] == "verification_receipt full passed exact sha"
+    )
+    event["data"]["detail"] = "\ud800"
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is False
+    assert bash_ok is False
+
+
+@pytest.mark.parametrize("field", ["ts", "started_at", "finished_at"])
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2023-02-29T00:00:00Z",
+        "2016-12-31T23:59:60Z",
+        "0000-01-01T00:00:00Z",
+    ],
+)
+def test_verification_receipt_calendar_timestamp_parity(
+    field: str, timestamp: str
+) -> None:
+    event = next(
+        json.loads(json.dumps(rec["event"]))
+        for rec in _RECORDS
+        if rec["reason"] == "verification_receipt full passed exact sha"
+    )
+    target = event if field == "ts" else event["data"]
+    target[field] = timestamp
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is False
+    assert bash_ok is False
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "0001-01-01T00:00:00Z",
+        "1969-12-31T23:59:59.123456Z",
+    ],
+)
+def test_verification_receipt_pre_epoch_timestamp_parity(timestamp: str) -> None:
+    event = next(
+        json.loads(json.dumps(rec["event"]))
+        for rec in _RECORDS
+        if rec["reason"] == "verification_receipt full passed exact sha"
+    )
+    event["ts"] = timestamp
+    event["data"]["started_at"] = timestamp
+    event["data"]["finished_at"] = timestamp
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is True
+    assert bash_ok is True
+
+
+def test_verification_receipt_far_future_microsecond_ordering_parity() -> None:
+    event = next(
+        json.loads(json.dumps(rec["event"]))
+        for rec in _RECORDS
+        if rec["reason"] == "verification_receipt full passed exact sha"
+    )
+    event["ts"] = "9999-12-31T23:59:59.000003Z"
+    event["data"]["started_at"] = "9999-12-31T23:59:59.000002Z"
+    event["data"]["finished_at"] = "9999-12-31T23:59:59.000001Z"
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is False
+    assert bash_ok is False
+
+
+@pytest.mark.parametrize(
+    ("generation", "expected"),
+    [
+        (9_007_199_254_740_991, True),
+        (9_007_199_254_740_992, False),
+    ],
+)
+def test_verification_receipt_generation_safe_integer_parity(
+    generation: int, expected: bool
+) -> None:
+    event = {
+        "ts": "2026-07-26T01:02:04Z",
+        "type": "verification_receipt",
+        "source": "target",
+        "data": {
+            "candidate_sha": "a" * 40,
+            "command": ["scripts/ci/preflight.sh"],
+            "environment": {
+                "host": "h",
+                "platform": "p",
+                "runner": "scripts/ci/preflight.sh",
+            },
+            "scope": ["smoke"],
+            "started_at": "2026-07-26T01:00:00Z",
+            "finished_at": "2026-07-26T01:02:03Z",
+            "mode": "full",
+            "result": "failed",
+            "producer": {"kind": "preflight", "id": "h:1"},
+            "generation": generation,
+            "steps_expected": 1,
+            "steps_executed": 1,
+        },
+    }
+
+    py_ok, _ = _python_verdict(event)
+    bash_ok, _ = _bash_verdict(event)
+
+    assert py_ok is expected
+    assert bash_ok is expected

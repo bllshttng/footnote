@@ -52,3 +52,15 @@ def test_pr_merge_forwards_legacy_invoker_flag(monkeypatch):
     result = runner.invoke(app, ["pr", "merge", "--invoker=target", "42"])
     assert result.exit_code == 2
     assert captured["argv"] == ["--invoker=target", "42"]
+
+
+def test_global_receipt_path_uses_pinned_accessor(monkeypatch, tmp_path):
+    from fno import paths
+
+    expected = tmp_path / "events.jsonl"
+    monkeypatch.setattr(paths, "global_events_json", lambda: expected)
+
+    result = runner.invoke(app, ["pr", "global-receipt-events-path"])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == str(expected)

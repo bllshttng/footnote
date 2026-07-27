@@ -86,7 +86,7 @@ _ev_resolve_schema_path() {
     printf '%s' "$project_path"
 }
 EVENTS_SCHEMA_PATH="$(_ev_resolve_schema_path)"
-EVENTS_SCHEMA_CACHE="${EVENTS_SCHEMA_CACHE:-/tmp/events-schema-$$.cache}"
+EVENTS_SCHEMA_CACHE="${EVENTS_SCHEMA_CACHE:-${TMPDIR:-/tmp}/events-schema-${BASHPID:-$$}-${RANDOM:-0}.cache}"
 
 _ev_warn() { printf '%s\n' "$*" >&2; }
 
@@ -209,7 +209,6 @@ validate_event() {
         _ev_warn "unknown event type: $type"
         return 1
     fi
-
     # Required data fields per type, with conditional-gate handling for
     # phase_transition. We read required fields one per line (bash 3.2 compat:
     # no associative arrays, no process substitution).
@@ -341,6 +340,82 @@ validate_event() {
         fi
     fi
 
+    if [[ "$type" == "verification_receipt" ]]; then
+        local receipt_ok
+        receipt_ok=$(jq -r --arg src "$src" --slurpfile schema "$EVENTS_SCHEMA_CACHE" '
+            def leap_year($year):
+                ($year % 4 == 0)
+                and (($year % 100 != 0) or ($year % 400 == 0));
+            def days_in_month($year; $month):
+                if $month == 2 then
+                    if leap_year($year) then 29 else 28 end
+                elif ([4, 6, 9, 11] | index($month)) != null then 30
+                else 31
+                end;
+            def utc_order_key:
+                if type != "string" then null
+                else (
+                    capture("^(?<year>[0-9]{4})-(?<month>[0-9]{2})-(?<day>[0-9]{2})T(?<hour>[0-9]{2}):(?<minute>[0-9]{2}):(?<second>[0-9]{2})(?:\\.(?<frac>[0-9]{1,6}))?(?:Z|\\+00:00)$")?
+                    | if . == null then null
+                      else (. as $parts
+                        | ($parts.year | tonumber) as $year
+                        | ($parts.month | tonumber) as $month
+                        | ($parts.day | tonumber) as $day
+                        | ($parts.hour | tonumber) as $hour
+                        | ($parts.minute | tonumber) as $minute
+                        | ($parts.second | tonumber) as $second
+                        | if $year < 1
+                            or $month < 1 or $month > 12
+                            or $day < 1 or $day > days_in_month($year; $month)
+                            or $hour > 23 or $minute > 59 or $second > 59
+                          then null
+                          else ($parts.year + $parts.month + $parts.day
+                            + $parts.hour + $parts.minute + $parts.second
+                            + ((($parts.frac // "") + "000000")[0:6]))
+                          end)
+                      end
+                ) end;
+            .data as $d
+            | (.ts | utc_order_key) as $envelope_ts
+            | ($schema[0].event_types[]
+                | select(.name == "verification_receipt")
+                | .data.properties) as $p
+            | ($d.started_at | utc_order_key) as $started
+            | ($d.finished_at | utc_order_key) as $finished
+            | (($schema[0].event_types[] | select(.name == "verification_receipt") | .sources) as $sources
+                | ($sources | index($src)) != null)
+                and ($envelope_ts != null)
+                and (($d.candidate_sha | type == "string")
+                and ($d.candidate_sha | test("^[0-9A-Fa-f]{40}$")))
+                and ($d.command | type == "array" and length > 0 and length <= 4096
+                    and all(.[]; type == "string" and utf8bytelength > 0 and utf8bytelength <= 4096))
+                and ($d.environment | type == "object"
+                    and all(["host", "platform", "runner"][];
+                        . as $f | ($d.environment[$f] | type == "string" and test("[^[:space:]]"))))
+                and ($d.scope | type == "array" and length > 0 and length <= 128
+                    and all(.[]; type == "string" and utf8bytelength > 0 and utf8bytelength <= 512))
+                and ($started != null and $finished != null and $finished >= $started)
+                and ($p.mode.enum | index($d.mode) != null)
+                and ($p.result.enum | index($d.result) != null)
+                and ($d.producer | type == "object"
+                    and all(["kind", "id"][];
+                        . as $f | ($d.producer[$f] | type == "string" and test("[^[:space:]]"))))
+                and ($d.generation | type == "number" and floor == .
+                    and . >= 1 and . <= 9007199254740991)
+                and ($d.steps_expected | type == "number" and floor == . and . >= 0)
+                and ($d.steps_executed | type == "number" and floor == . and . >= 0)
+                and ($d.steps_executed <= $d.steps_expected)
+                and ($d.steps_expected == ($d.scope | length))
+                and (($d.mode != "full" or $d.result != "passed")
+                    or ($d.steps_expected > 0 and $d.steps_executed == $d.steps_expected))
+                and ($d.mode != "void" or $d.result != "passed")
+        ' <<<"$payload" 2>/dev/null || true)
+        if [[ "$receipt_ok" != "true" ]]; then
+            _ev_warn "verification_receipt fields are malformed or contradictory"
+            return 1
+        fi
+    fi
+
     # skill_eval_finding: dimension + verdict enum checks (observer harness,
     # x-57a5) - same chokepoint rationale as mission_complete/human_touch above.
     if [[ "$type" == "skill_eval_finding" ]]; then
@@ -435,11 +510,16 @@ validate_event() {
     fi
 
     # Size cap: encode data and check bytes.
-    local max_bytes data_size
+    local max_bytes data_size data_size_encoding
     max_bytes=$(jq -r '.limits.max_data_bytes // 65536' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
-    # `jq -c .data` gives compact JSON; -n removes trailing newline so wc -c
-    # counts only payload bytes.
-    data_size=$(jq -cn --argjson p "$payload" '$p.data' | tr -d '\n' | wc -c | tr -d ' ')
+    data_size_encoding=$(jq -r '.limits.data_size_encoding // empty' "$EVENTS_SCHEMA_CACHE" 2>/dev/null)
+    if [[ "$data_size_encoding" != "compact-json-ascii-v1" ]]; then
+        _ev_warn "unsupported limits.data_size_encoding: ${data_size_encoding:-missing}"
+        return 1
+    fi
+    # `jq -ac .data` gives compact ASCII JSON; -n removes the trailing newline
+    # so wc -c counts only payload bytes.
+    data_size=$(jq -acn --argjson p "$payload" '$p.data' | tr -d '\n' | wc -c | tr -d ' ')
     if (( data_size > max_bytes )); then
         _ev_warn "event data exceeds max_data_bytes (got $data_size, limit $max_bytes)"
         return 1

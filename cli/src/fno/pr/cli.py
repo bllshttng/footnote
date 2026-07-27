@@ -13,6 +13,7 @@ dependency. Each module preserves the bash exit-code / output contract.
 from __future__ import annotations
 
 import enum
+import json
 import os
 from typing import Optional
 
@@ -146,6 +147,57 @@ def base_check(
 
     rc = _preflight.run_base_check(base=base)
     raise typer.Exit(code=rc)
+
+
+@pr_app.command(
+    "evidence-check",
+    help=(
+        "Require a newest exact-HEAD full/passed verification receipt across "
+        "project, global, and known delivery-root event journals."
+    ),
+)
+def evidence_check() -> None:
+    from fno.pr import _preflight
+
+    raise typer.Exit(code=_preflight.run_evidence_check())
+
+
+@pr_app.command("evidence-required", hidden=True)
+def evidence_required(
+    base: str = typer.Option("origin/main", "--base"),
+) -> None:
+    """Expose the one local-verification policy to shell-based ship paths."""
+    from fno.pr import _preflight
+
+    required, reason = _preflight.local_verification_required(
+        cwd=os.getcwd(), base_ref=base
+    )
+    typer.echo(json.dumps({"required": required, "reason": reason}, separators=(",", ":")))
+
+
+@pr_app.command("next-receipt-generation", hidden=True)
+def next_receipt_generation(
+    candidate_sha: str = typer.Option(..., "--candidate-sha"),
+) -> None:
+    """Derive the next receipt generation from every discovered journal."""
+    from fno.pr import _preflight
+
+    try:
+        generation = _preflight.next_verification_generation(
+            cwd=os.getcwd(), candidate_sha=candidate_sha
+        )
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    typer.echo(str(generation))
+
+
+@pr_app.command("global-receipt-events-path", hidden=True)
+def global_receipt_events_path() -> None:
+    """Print the durable cross-checkout verification receipt journal."""
+    from fno.paths import global_events_json
+
+    typer.echo(str(global_events_json()))
 
 
 @pr_app.command(

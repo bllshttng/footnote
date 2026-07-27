@@ -7,13 +7,13 @@ import json
 import os
 import subprocess
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+from fno import context_observation
 from fno.cli import app
 from fno.context_audit import (
     ContextSource,
@@ -954,10 +954,103 @@ def test_nonreturning_observer_is_killed_without_changing_hook_result(
     fixture.chmod(0o755)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    term_marker = tmp_path / "observer-terminated"
     fake_uv = fake_bin / "uv"
-    fake_uv.write_text("#!/usr/bin/env bash\nsleep 30\n", encoding="utf-8")
+    fake_uv.write_text(
+        "#!/usr/bin/env bash\n"
+        "trap 'touch \"$FNO_OBSERVER_TERM_MARKER\"' TERM\n"
+        "sleep 30\n",
+        encoding="utf-8",
+    )
     fake_uv.chmod(0o755)
-    started = time.monotonic()
+    result = subprocess.run(
+        [
+            str(ROOT / "hooks" / "context-observe-hook.sh"),
+            "--source-id",
+            "fixture",
+            "--expected",
+            "fixture",
+            "--",
+            str(fixture),
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS": "2",
+            "FNO_PLATFORM": "codex",
+            "FNO_REPO_ROOT": str(tmp_path),
+            "FNO_OBSERVER_TERM_MARKER": str(term_marker),
+        },
+        input='{"session_id":"hung-observer","source":"startup"}',
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert term_marker.is_file()
+    assert result.returncode == 7
+    assert result.stdout == '{"session_id":"hung-observer","source":"startup"}::original'
+
+
+def test_run_bounded_uses_the_configured_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 123
+
+        def wait(self, *, timeout: float) -> int:
+            observed["timeout"] = timeout
+            return 0
+
+    def fake_popen(command: list[str], *, start_new_session: bool) -> FakeProcess:
+        observed["command"] = command
+        observed["start_new_session"] = start_new_session
+        return FakeProcess()
+
+    monkeypatch.setattr(context_observation.subprocess, "Popen", fake_popen)
+
+    assert (
+        context_observation._run_bounded(
+            ["--timeout", "0.2", "--", "observer", "--flag"]
+        )
+        == 0
+    )
+    assert observed == {
+        "command": ["observer", "--flag"],
+        "start_new_session": True,
+        "timeout": 0.2,
+    }
+
+
+def test_context_observer_threads_the_timeout_override(tmp_path: Path) -> None:
+    fixture = tmp_path / "original.sh"
+    fixture.write_text(
+        "#!/usr/bin/env bash\n"
+        "/bin/cat\n"
+        "printf '%s' '::original'\n"
+        "exit 7\n",
+        encoding="utf-8",
+    )
+    fixture.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "python-calls"
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '<%s>' \"$@\" >>\"$FNO_PYTHON_CALLS\"\n"
+        "printf '\\n' >>\"$FNO_PYTHON_CALLS\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_uv.chmod(0o755)
+
     result = subprocess.run(
         [
             str(ROOT / "hooks" / "context-observe-hook.sh"),
@@ -973,33 +1066,35 @@ def test_nonreturning_observer_is_killed_without_changing_hook_result(
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS": "0.2",
-            "FNO_PLATFORM": "codex",
-            "FNO_REPO_ROOT": str(tmp_path),
+            "FNO_PYTHON_CALLS": str(calls),
         },
-        input='{"session_id":"hung-observer","source":"startup"}',
+        input="exact stdin",
         text=True,
         capture_output=True,
         check=False,
-        timeout=10,
+        timeout=60,
     )
 
-    # The claim under test is "a hung observer does not stall the hook", and the
-    # hung stub sleeps 30 - so any bound well under 30 proves it. Sizing these at
-    # ~2x nominal instead made them report machine load: under `-n auto` this
-    # test failed a full smoke run while passing standalone.
-    assert time.monotonic() - started < 5
     assert result.returncode == 7
-    assert result.stdout == '{"session_id":"hung-observer","source":"startup"}::original'
+    assert result.stdout == "exact stdin::original"
+    assert "<run-bounded><--timeout><0.2><--><uv>" in calls.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> None:
     fast_bin = tmp_path / "fast-bin"
     hung_bin = tmp_path / "hung-bin"
+    term_marker = tmp_path / "observer-terminated"
+    calls = tmp_path / "python-calls"
     fast_bin.mkdir()
     hung_bin.mkdir()
     for bin_dir, uv_body in (
         (fast_bin, "exit 1"),
-        (hung_bin, "sleep 30"),
+        (
+            hung_bin,
+            "trap 'touch \"$FNO_OBSERVER_TERM_MARKER\"' TERM\nsleep 30",
+        ),
     ):
         uv = bin_dir / "uv"
         uv.write_text(f"#!/usr/bin/env bash\n{uv_body}\n", encoding="utf-8")
@@ -1007,10 +1102,18 @@ def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> No
         fno = bin_dir / "fno"
         fno.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
         fno.chmod(0o755)
+        python = bin_dir / "python3"
+        python.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '<%s>' \"$@\" >>\"$FNO_PYTHON_CALLS\"\n"
+            "printf '\\n' >>\"$FNO_PYTHON_CALLS\"\n"
+            "exec \"$FNO_REAL_PYTHON\" \"$@\"\n",
+            encoding="utf-8",
+        )
+        python.chmod(0o755)
 
-    def invoke(bin_dir: Path) -> tuple[subprocess.CompletedProcess[str], float]:
-        started = time.monotonic()
-        result = subprocess.run(
+    def invoke(bin_dir: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             [str(ROOT / "hooks" / "session-start.sh")],
             cwd=tmp_path,
             env={
@@ -1018,28 +1121,28 @@ def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> No
                 "HOME": str(tmp_path / "home"),
                 "FNO_HOME": str(tmp_path / "fno-home"),
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                "FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS": "0.2",
+                "FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS": "2",
                 "FNO_PLATFORM": "gemini",
                 "FNO_REPO_ROOT": str(tmp_path),
+                "FNO_OBSERVER_TERM_MARKER": str(term_marker),
+                "FNO_PYTHON_CALLS": str(calls),
+                "FNO_REAL_PYTHON": sys.executable,
             },
             input='{"session_id":"hung-session-start","source":"startup"}',
             text=True,
             capture_output=True,
             check=False,
-            # Only a hang-catcher, deliberately loose. What this test actually
-            # asserts is the DELTA below, which is load-robust; a tight absolute
-            # bound is not - nominal is ~2s, so under `-n auto` on a busy machine
-            # a 5s cap fired before the real assertion ever ran. Anything under
-            # the hung stub's `sleep 30` still catches a non-returning observer.
-            timeout=20,
+            timeout=60,
         )
-        return result, time.monotonic() - started
 
-    baseline, baseline_elapsed = invoke(fast_bin)
-    hung, elapsed = invoke(hung_bin)
+    baseline = invoke(fast_bin)
+    hung = invoke(hung_bin)
 
     assert baseline.returncode == hung.returncode == 0
-    assert elapsed - baseline_elapsed < 1
+    assert term_marker.is_file()
+    assert "<run-bounded><--timeout><2><--><uv>" in calls.read_text(
+        encoding="utf-8"
+    )
     assert json.loads(hung.stdout) == json.loads(baseline.stdout)
     assert (
         hung.stdout

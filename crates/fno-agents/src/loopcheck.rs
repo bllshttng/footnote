@@ -1201,7 +1201,9 @@ fn read_pr_info(
     // AND whether any check is still pending from the same payload (the set feeds
     // the DoneAwaitingMerge subset rule; the pending flag gates that terminal so
     // it never fires on partial CI).
-    let (ci_conclusion, failing_checks, ci_has_pending) = if ci_declared_none {
+    let no_hosted_ci =
+        crate::verify_evidence::hosted_ci_not_configured(ci_declared_none, cwd, head_sha);
+    let (ci_conclusion, failing_checks, ci_has_pending) = if no_hosted_ci {
         (CiConclusion::Skipped, Vec::new(), false)
     } else {
         let checks_out = Command::new(gh_bin)

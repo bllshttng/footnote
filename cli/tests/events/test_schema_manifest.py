@@ -62,6 +62,7 @@ def test_size_limit_declared() -> None:
     assert "max_data_bytes" in data["limits"]
     assert isinstance(data["limits"]["max_data_bytes"], int)
     assert data["limits"]["max_data_bytes"] >= 1024
+    assert data["limits"]["data_size_encoding"] == "compact-json-ascii-v1"
 
 
 def test_no_undocumented_deletions() -> None:

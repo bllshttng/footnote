@@ -213,7 +213,7 @@ fn multiclient_independent_views_frames_for_viewers_only_and_reanchor() {
     // stream must read ModeSync (mode reset) -> Layout -> frames, in that order,
     // and B's next keystroke lands in the re-anchored tab's focused pane.
     b.input(b"\x03");
-    std::thread::sleep(Duration::from_millis(300));
+    b.wait_prompt(pane_b);
     b.input(b"printf '\\033[?2004h'; cat\r");
     b.wait(10, "modes negotiated", |c| {
         c.modesyncs
@@ -457,6 +457,7 @@ fn multiclient_nested_same_session_attach_refused_pre_raw_mode() {
         !status.success(),
         "nested attach must refuse, got {status:?}"
     );
+    h.wait_screen(5, |screen| screen.contains("main"));
     let out = h.raw_output();
     assert!(out.contains("main"), "refusal names the session: {out}");
     assert!(

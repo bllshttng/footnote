@@ -80,11 +80,36 @@ A branch cut from a stale local HEAD ships a PR full of phantom deletions (chang
 
 ```bash
 BASE="${BASE:-origin/main}"   # re-default: this block may run standalone
-if command -v fno >/dev/null 2>&1; then
-  fno pr base-check --base "$BASE" || {
-    rc=$?
-    # 3 = stale, 4 = unrelated histories (both refuse); fresh/bypass/fail-open exit 0.
-    [ "$rc" -ge 3 ] && { echo "refusing to open a PR from a bad base (see above)."; exit "$rc"; }
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+candidate_fno() {
+  if [ -x "$ROOT/cli/.venv/bin/python" ]; then
+    PYTHONPATH="$ROOT/cli/src" "$ROOT/cli/.venv/bin/python" -m fno.cli "$@"
+  elif [ -f "$ROOT/cli/pyproject.toml" ] && command -v uv >/dev/null 2>&1; then
+    PYTHONPATH="$ROOT/cli/src" uv run --project "$ROOT/cli" fno-py "$@"
+  elif command -v fno >/dev/null 2>&1; then
+    fno "$@"
+  else
+    echo "PR creation refused: fno CLI is unavailable." >&2
+    return 127
+  fi
+}
+candidate_fno pr base-check --base "$BASE" || {
+  rc=$?
+  # 3 = stale, 4 = unrelated histories, 127 = missing CLI; all refuse.
+  [ "$rc" -ge 3 ] && { echo "refusing to open a PR from a bad base (see above)."; exit "$rc"; }
+}
+policy_json="$(candidate_fno pr evidence-required --base "$BASE")" || {
+  echo "PR creation refused: verification policy could not be evaluated." >&2
+  exit 1
+}
+policy_required="$(printf '%s' "$policy_json" | jq -er 'if .required == true then "true" elif .required == false then "false" else error("missing required state") end')" || {
+  echo "PR creation refused: verification policy returned malformed state." >&2
+  exit 1
+}
+if [ "$policy_required" = "true" ]; then
+  candidate_fno pr evidence-check || {
+    echo "PR creation refused: current HEAD has no full/passed verification receipt." >&2
+    exit 1
   }
 fi
 ```

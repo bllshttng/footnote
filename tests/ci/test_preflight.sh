@@ -31,23 +31,79 @@ fail() { echo "  FAIL: $1"; FAILS=$((FAILS+1)); }
 # --- build stub tool dir ----------------------------------------------------
 BIN="$TMP/bin"; mkdir -p "$BIN"
 WT_BASE="$TMP/wtbase"; mkdir -p "$WT_BASE"
+GLOBAL_EVENTS="$TMP/global-events.jsonl"
+: > "$GLOBAL_EVENTS"
 
 cat > "$BIN/fno" <<EOF
 #!/usr/bin/env bash
-# stub: only 'config get paths.worktrees_base' is used by preflight
-[[ "\$*" == *"paths.worktrees_base"* ]] && echo "$WT_BASE"
+if [[ "\$*" == *"paths.worktrees_base"* ]]; then
+    echo "$WT_BASE"
+    exit 0
+fi
+if [[ "\${1:-} \${2:-}" == "pr next-receipt-generation" ]]; then
+    shift 2
+    sha=''
+    while [[ \$# -gt 0 ]]; do
+        case "\$1" in
+            --candidate-sha) sha="\$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [[ -s "$GLOBAL_EVENTS" ]]; then
+        jq -sr --arg sha "\$sha" \
+            '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha) | .data.generation] | (max // 0) + 1' \
+            "$GLOBAL_EVENTS"
+    else
+        echo 1
+    fi
+    exit 0
+fi
+if [[ "\${1:-} \${2:-}" == "pr global-receipt-events-path" ]]; then
+    echo "$GLOBAL_EVENTS"
+    exit 0
+fi
+if [[ "\${1:-} \${2:-}" == "pr evidence-check" ]]; then
+    sha="\$(git rev-parse HEAD)"
+    events="$GLOBAL_EVENTS"
+    [[ -s "\$events" ]] || exit 1
+    jq -se --arg sha "\$sha" \
+        '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha)] | sort_by(.ts) | last | .data.mode == "full" and .data.result == "passed"' \
+        "\$events" >/dev/null
+    exit \$?
+fi
 exit 0
 EOF
 cat > "$BIN/cargo" <<'EOF'
 #!/usr/bin/env bash
 # stub cargo: drop a leading +toolchain, succeed on fmt/test
 [[ "${1:-}" == +* ]] && shift
+if [[ "${1:-}" == "audit" ]]; then
+    [[ -n "${PREFLIGHT_AUDIT_LOG:-}" ]] && printf '%s\n' "$PWD" >> "$PREFLIGHT_AUDIT_LOG"
+    if [[ "${PREFLIGHT_TEST_FAIL_AUDIT:-0}" == "1" && "$PWD" == */fno-agents ]]; then
+        exit 1
+    fi
+fi
+exit 0
+EOF
+cat > "$BIN/cargo-audit" <<'EOF'
+#!/usr/bin/env bash
 exit 0
 EOF
 cat > "$BIN/rustup" <<'EOF'
 #!/usr/bin/env bash
 [[ "$*" == "toolchain list"* ]] && { echo "1.94.1-x86_64-apple-darwin (default)"; exit 0; }
 exit 0
+EOF
+cat > "$BIN/mkdir" <<'EOF'
+#!/usr/bin/env bash
+/bin/mkdir "$@"
+rc=$?
+last="${!#}"
+if [[ $rc -eq 0 && "${PREFLIGHT_TEST_SIGNAL_LOCK:-0}" == "1" \
+      && "$last" == */.preflight-receipt-locks/*.d ]]; then
+    kill -TERM "$PPID"
+fi
+exit "$rc"
 EOF
 # preflight calls `uv run --project cli fno-py test smoke [flags]`; stub uv to
 # behave like the retired smoke.sh stub (red iff POISON is checked out).
@@ -67,14 +123,17 @@ esac
 if [[ -f POISON ]]; then echo "smoke: POISON step failed"; exit 1; fi
 echo "smoke: all green (stub)"; exit 0
 EOF
-chmod +x "$BIN/fno" "$BIN/cargo" "$BIN/rustup" "$BIN/uv"
+chmod +x "$BIN/fno" "$BIN/cargo" "$BIN/cargo-audit" "$BIN/rustup" "$BIN/mkdir" "$BIN/uv"
 export PATH="$BIN:$PATH"
 
 # --- build the fixture repo -------------------------------------------------
-FIX="$TMP/repo"; mkdir -p "$FIX/scripts/ci"
+FIX="$TMP/repo"; mkdir -p "$FIX/scripts/ci" "$FIX/scripts/lib" "$FIX/cli/src/fno/events"
 git -C "$FIX" init -q
 git -C "$FIX" config user.email t@t.t; git -C "$FIX" config user.name t
 cp "$PREFLIGHT_SRC" "$FIX/scripts/ci/preflight.sh"
+cp "$REPO_ROOT/scripts/lib/events-validate.sh" "$FIX/scripts/lib/events-validate.sh"
+cp "$REPO_ROOT/cli/src/fno/events/schema.yaml" "$FIX/cli/src/fno/events/schema.yaml"
+echo '.fno/' > "$FIX/.gitignore"
 # crate dirs so preflight's `cd crates/fno*` legs run (cargo is stubbed).
 mkdir -p "$FIX/crates/fno-agents" "$FIX/crates/fno"
 echo x > "$FIX/crates/fno-agents/.keep"; echo x > "$FIX/crates/fno/.keep"
@@ -88,6 +147,8 @@ git -C "$FIX" update-ref refs/remotes/origin/main "$GREEN_FULL"
 # the attestation are siblings under it.
 LOCKDIR="$FIX/.git/.preflight.lock.d"
 ATT="$FIX/.git/.preflight-attestation"
+EVENTS="$FIX/.fno/events.jsonl"
+export PREFLIGHT_AUDIT_LOG="$TMP/audit.log"
 HOST="$(hostname 2>/dev/null || echo unknown)"
 # Plant an attestation line for a given full SHA (defaulting to this host).
 write_attest() { printf 'sha=%s mode=FULL verdict=green at=%s iso=now host=%s pid=4242\n' "$1" "$(date +%s)" "${2:-$HOST}" > "$ATT"; }
@@ -101,11 +162,41 @@ echo "$out" | grep -q "GREEN - safe to push" && ok "reports GREEN" || fail "no G
 echo "$out" | grep -q "cargo fmt --check (fno-agents" && ok "fmt leg in summary (AC3-HP)" || fail "no fmt leg"
 echo "$out" | grep -q "cargo test --all-targets (fno-agents)" && ok "cargo test leg in summary (AC3-HP)" || fail "no test leg"
 echo "$out" | grep -q "ADVISORY" && ok "audit ADVISORY row present" || fail "no ADVISORY row"
+jq -se --arg sha "$GREEN_FULL" \
+    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "full" and .data.result == "passed" and .data.generation >= 1' \
+    "$EVENTS" >/dev/null \
+    && ok "full green emits exact-SHA full/passed evidence" \
+    || fail "missing exact-SHA full/passed event receipt"
+jq -se --arg sha "$GREEN_FULL" \
+    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.result == "passed"' \
+    "$GLOBAL_EVENTS" >/dev/null \
+    && ok "full green mirrors evidence to the global journal" \
+    || fail "missing global exact-SHA receipt"
+jq -se --arg sha "$GREEN_FULL" \
+    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] as $r
+     | any($r[]; .data.result == "pending")
+       and (($r | map(.data.generation) | max) == ($r | last | .data.generation))' \
+    "$GLOBAL_EVENTS" >/dev/null \
+    && ok "canonical pending receipt precedes the final verdict" \
+    || fail "missing canonical pending-to-final transition"
 
 echo "== attestation: a FULL GREEN records one (sha + host pinned) =="
 [[ -f "$ATT" ]] && ok "attestation written on full green" || fail "no attestation file after green"
 grep -q "^sha=$GREEN_FULL " "$ATT" && ok "attestation pins the full candidate SHA" || fail "attestation sha wrong: $(cat "$ATT")"
 grep -q " host=$HOST" "$ATT" && ok "attestation pins this host" || fail "attestation host wrong: $(cat "$ATT")"
+
+echo "== global authority: a failed delivery-root mirror stays GREEN everywhere =="
+mv "$EVENTS" "$EVENTS.saved"
+mkdir "$EVENTS"
+out="$(run_pf --force 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "global commit remains authoritative" || fail "mirror failure changed verdict rc=$rc: $out"
+echo "$out" | grep -q "delivery-root mirror unavailable" \
+    && ok "mirror failure is observable" || fail "mirror failure was silent"
+( cd "$FIX" && fno pr evidence-check >/dev/null 2>&1 ) \
+    && ok "canonical global receipt satisfies the producing checkout" \
+    || fail "producing checkout rejected canonical evidence"
+rm -rf "$EVENTS"
+mv "$EVENTS.saved" "$EVENTS"
 
 echo "== AC1-HP: a second call on the attested SHA reuses (exit 0, no lock) =="
 rm -rf "$LOCKDIR"   # a cache hit must create no lock
@@ -137,6 +228,18 @@ out="$(run_pf 2>&1)"; rc=$?
 echo "$out" | grep -q "reused attestation" && fail "dirty tree printed a reuse GREEN" || ok "dirty tree never reuses"
 ( cd "$FIX" && rm -f dirty.txt )
 
+echo "== advisory evidence: both audit scopes execute even when the first fails =="
+: > "$PREFLIGHT_AUDIT_LOG"
+out="$(PREFLIGHT_TEST_FAIL_AUDIT=1 run_pf --force 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "advisory audit failure stays non-blocking" || fail "expected green got $rc: $out"
+[[ "$(wc -l < "$PREFLIGHT_AUDIT_LOG" | tr -d ' ')" == "2" ]] \
+    && ok "both audit commands executed" || fail "audit short-circuited: $(cat "$PREFLIGHT_AUDIT_LOG")"
+jq -se --arg sha "$GREEN_FULL" \
+    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha and .data.mode == "advisory")] | last | .data.result == "failed" and .data.steps_executed == 2' \
+    "$EVENTS" >/dev/null \
+    && ok "advisory receipt records failed with two actual executions" \
+    || fail "advisory receipt execution count/result wrong"
+
 echo "== AC3-EDGE: an attestation from another host is rejected =="
 write_attest "$GREEN_FULL" foreign-box
 out="$(run_pf 2>&1)"; rc=$?
@@ -165,6 +268,11 @@ rm -f "$ATT"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "retry-failed subset passes" || fail "expected 0 got $rc: $out"
 [[ ! -f "$ATT" ]] && ok "subset run wrote no attestation" || fail "subset run minted a full-run attestation"
+jq -se --arg sha "$GREEN_FULL" \
+    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "subset" and .data.result == "passed"' \
+    "$EVENTS" >/dev/null \
+    && ok "subset run records subset evidence distinctly" \
+    || fail "subset run did not emit subset/passed evidence"
 # The load-bearing half: a subsequent caller on the same SHA finds no FULL
 # attestation, so reuse MISSES and it full-runs (a subset green can never
 # satisfy the gate).
@@ -254,6 +362,36 @@ out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 3 ]] && ok "exit 3 when lock held by a live pid" || fail "expected 3 got $rc"
 echo "$out" | grep -q "lock held" && ok "prints holder info" || fail "no holder info"
 rm -rf "$LOCKDIR"
+
+echo "== canonical concurrency: a second clone cannot append pending for the same SHA =="
+lock_sha="$(git -C "$FIX" rev-parse HEAD)"
+GLOBAL_RECEIPT_LOCKDIR="$TMP/.preflight-receipt-locks/$lock_sha.d"
+mkdir -p "$GLOBAL_RECEIPT_LOCKDIR"
+printf 'pid=%s started=NOW host=x sha=%s\n' "$$" "$lock_sha" > "$GLOBAL_RECEIPT_LOCKDIR/holder"
+before="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+out="$(run_pf --force 2>&1)"; rc=$?
+after="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+[[ $rc -eq 3 ]] && ok "same-candidate global lock refuses the second run" || fail "expected 3 got $rc: $out"
+[[ "$after" == "$before" ]] && ok "refused run appended no unmatched pending" || fail "receipt count changed: $before -> $after"
+rm -rf "$GLOBAL_RECEIPT_LOCKDIR"
+
+echo "== canonical lock window: a loser preserves the winner's unstamped lock =="
+mkdir -p "$GLOBAL_RECEIPT_LOCKDIR"
+out="$(run_pf --force 2>&1)"; rc=$?
+[[ $rc -eq 3 ]] && ok "unstamped canonical lock refuses the loser" || fail "expected 3 got $rc: $out"
+[[ -d "$GLOBAL_RECEIPT_LOCKDIR" ]] && ok "loser cleanup preserves the winner's lock" || fail "loser deleted the winner's lock"
+rm -rf "$GLOBAL_RECEIPT_LOCKDIR"
+
+echo "== canonical lock signal: cancellation after mkdir cleans both owned locks =="
+before="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+export PREFLIGHT_TEST_SIGNAL_LOCK=1
+out="$(run_pf --force 2>&1)"; rc=$?
+unset PREFLIGHT_TEST_SIGNAL_LOCK
+after="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+[[ $rc -eq 130 ]] && ok "deferred signal exits 130 after ownership is complete" || fail "expected 130 got $rc: $out"
+[[ ! -d "$LOCKDIR" && ! -d "$GLOBAL_RECEIPT_LOCKDIR" ]] \
+    && ok "signal cleanup releases both owned locks" || fail "signal left a lock behind"
+[[ "$after" == "$before" ]] && ok "cancelled run appended no pending receipt" || fail "receipt count changed: $before -> $after"
 
 echo "== AC1-FR: a stale lock (dead holder) is stolen, run proceeds =="
 mkdir -p "$LOCKDIR"; printf 'pid=%s started=OLD host=x sha=deadbee\n' 999999 > "$LOCKDIR/holder"  # dead pid

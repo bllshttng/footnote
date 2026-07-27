@@ -54,6 +54,23 @@ def _is_nonnegative_integral_number(value: Any) -> TypeGuard[int | float]:
     return False
 
 
+def _utc_timestamp(value: Any) -> _dt.datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if _re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)",
+        value,
+    ) is None:
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() != _dt.timedelta(0):
+        return None
+    return parsed
+
+
 def _resolve_manifest_path() -> Path:
     """Find the schema YAML: the sibling ``schema.yaml`` in this package.
 
@@ -89,6 +106,7 @@ SCHEMA: dict[str, Any] | None
 EVENT_TYPES: dict[str, dict[str, Any]] | None
 ENVELOPE_REQUIRED: list[str]
 MAX_DATA_BYTES: int
+DATA_SIZE_ENCODING: str
 ALLOWED_SOURCES: set[str]
 # x-2901: per-agent worker sources (worker:<id>, stream-worker:<id>) validate by
 # regex, not enum membership. Compiled from envelope.properties.source.patterns.
@@ -101,6 +119,12 @@ try:
     EVENT_TYPES = {e["name"]: e for e in SCHEMA.get("event_types", [])}
     ENVELOPE_REQUIRED = SCHEMA["envelope"]["required"]
     MAX_DATA_BYTES = SCHEMA.get("limits", {}).get("max_data_bytes", 65536)
+    DATA_SIZE_ENCODING = SCHEMA.get("limits", {}).get("data_size_encoding", "")
+    if DATA_SIZE_ENCODING != "compact-json-ascii-v1":
+        raise SchemaUnavailableError(
+            "unsupported limits.data_size_encoding: "
+            f"{DATA_SIZE_ENCODING!r}"
+        )
     ALLOWED_SOURCES = set(SCHEMA["envelope"]["properties"]["source"]["enum"])
     ALLOWED_SOURCE_PATTERNS = [
         _re.compile(p)
@@ -120,6 +144,7 @@ except SchemaUnavailableError as _exc:
     EVENT_TYPES = None
     ENVELOPE_REQUIRED = []
     MAX_DATA_BYTES = 65536
+    DATA_SIZE_ENCODING = ""
     ALLOWED_SOURCES = set()
     ALLOWED_SOURCE_PATTERNS = []
     ALLOWED_GATES = set()
@@ -130,6 +155,9 @@ except SchemaUnavailableError as _exc:
     PROTOCOL_OUTCOME_ENUM = set()
     PROTOCOL_OUTCOME_ON = set()
     _schema_load_error = _exc
+
+
+MAX_SAFE_EVENT_INTEGER = 9_007_199_254_740_991
 
 
 def _require_schema() -> None:
@@ -294,6 +322,83 @@ def validate(event: dict[str, Any]) -> None:
                 "context_snapshot completeness disagrees with manifest and errors"
             )
 
+    if type_name == "verification_receipt":
+        if _utc_timestamp(event["ts"]) is None:
+            raise ValidationError(
+                "verification_receipt envelope ts must be RFC3339 UTC"
+            )
+        type_sources = type_spec.get("sources", [])
+        if source not in type_sources:
+            raise ValidationError(
+                f"verification_receipt does not allow source {source!r} "
+                f"(allowed: {sorted(type_sources)})"
+            )
+        type_props = type_spec["data"]["properties"]
+        mode = data.get("mode")
+        result = data.get("result")
+        if mode not in type_props["mode"]["enum"]:
+            raise ValidationError(f"unknown verification_receipt data.mode: {mode!r}")
+        if result not in type_props["result"]["enum"]:
+            raise ValidationError(f"unknown verification_receipt data.result: {result!r}")
+        candidate_sha = data.get("candidate_sha")
+        if not isinstance(candidate_sha, str) or _re.fullmatch(
+            r"[0-9a-f]{40}", candidate_sha, _re.IGNORECASE
+        ) is None:
+            raise ValidationError("verification_receipt candidate_sha must be full 40-hex")
+        command = data.get("command")
+        scope = data.get("scope")
+        if not isinstance(command, list) or not command or len(command) > 4096 or not all(
+            isinstance(item, str) and item and len(item.encode("utf-8")) <= 4096
+            for item in command
+        ):
+            raise ValidationError("verification_receipt command must contain bounded argv strings")
+        if not isinstance(scope, list) or not scope or len(scope) > 128 or not all(
+            isinstance(item, str) and item and len(item.encode("utf-8")) <= 512
+            for item in scope
+        ):
+            raise ValidationError("verification_receipt scope must contain bounded step names")
+        environment = data.get("environment")
+        if not isinstance(environment, dict) or not all(
+            isinstance(environment.get(field), str) and environment[field].strip()
+            for field in ("host", "platform", "runner")
+        ):
+            raise ValidationError(
+                "verification_receipt environment requires host, platform, and runner"
+            )
+        producer = data.get("producer")
+        if not isinstance(producer, dict) or not all(
+            isinstance(producer.get(field), str) and producer[field].strip()
+            for field in ("kind", "id")
+        ):
+            raise ValidationError("verification_receipt producer requires kind and id")
+        started = _utc_timestamp(data.get("started_at"))
+        finished = _utc_timestamp(data.get("finished_at"))
+        if started is None or finished is None or finished < started:
+            raise ValidationError(
+                "verification_receipt timestamps must be ordered RFC3339 UTC"
+            )
+        expected = data.get("steps_expected")
+        executed = data.get("steps_executed")
+        generation = data.get("generation")
+        if (
+            not _is_nonnegative_integral_number(generation)
+            or int(generation) < 1
+            or int(generation) > MAX_SAFE_EVENT_INTEGER
+            or not _is_nonnegative_integral_number(expected)
+            or not _is_nonnegative_integral_number(executed)
+            or int(executed) > int(expected)
+            or int(expected) != len(scope)
+        ):
+            raise ValidationError("verification_receipt step counts are invalid")
+        if mode == "full" and result == "passed" and (
+            int(expected) == 0 or int(executed) != int(expected)
+        ):
+            raise ValidationError(
+                "verification_receipt full pass requires every nonzero step"
+            )
+        if mode == "void" and result == "passed":
+            raise ValidationError("verification_receipt void mode cannot pass")
+
     if type_name == "phase_transition" and data.get("gate") and data["gate"] not in ALLOWED_GATES:
         raise ValidationError(
             f"unknown gate: {data['gate']!r} (allowed: {sorted(ALLOWED_GATES)})"
@@ -405,7 +510,15 @@ def validate(event: dict[str, Any]) -> None:
                     f"{data.get(field)!r} (allowed: {allowed})"
                 )
 
-    serialized = _json.dumps(data, separators=(",", ":")).encode("utf-8")
+    try:
+        _json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        serialized = (
+            _json.dumps(data, separators=(",", ":"), ensure_ascii=True)
+            .replace("\x7f", "\\u007f")
+            .encode("ascii")
+        )
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise ValidationError(f"event data is not serializable: {exc}") from exc
     if len(serialized) > MAX_DATA_BYTES:
         raise ValidationError(
             f"event data exceeds max_data_bytes "

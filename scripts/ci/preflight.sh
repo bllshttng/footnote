@@ -44,6 +44,10 @@ PINNED_FMT="1.94.1"   # keep in lockstep with rust-ci.yml RUSTFMT_TOOLCHAIN
 
 RETRY_FAILED=0
 FORCE_RUN=0
+RECEIPT_COMMAND=("$0")
+for original_arg in "$@"; do
+    RECEIPT_COMMAND+=("$original_arg")
+done
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --retry-failed) RETRY_FAILED=1 ;;
@@ -82,6 +86,138 @@ if [[ -n "$DIRTY" ]]; then
 fi
 CANDIDATE_SHA="$(git -C "$INVOKING_ROOT" rev-parse HEAD)"
 CANDIDATE_SHORT="$(git -C "$INVOKING_ROOT" rev-parse --short HEAD)"
+if ! RECEIPT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
+   || [[ -z "$RECEIPT_STARTED_AT" ]]; then
+    echo "preflight: receipt start timestamp unavailable" >&2
+    exit 1
+fi
+if ! RECEIPT_HOST="$(hostname 2>/dev/null)" || [[ -z "$RECEIPT_HOST" ]]; then
+    echo "preflight: receipt host identity unavailable" >&2
+    exit 1
+fi
+if ! RECEIPT_PLATFORM="$(uname -sm 2>/dev/null)" || [[ -z "$RECEIPT_PLATFORM" ]]; then
+    echo "preflight: receipt platform identity unavailable" >&2
+    exit 1
+fi
+EVENTS_PATH="$INVOKING_ROOT/.fno/events.jsonl"
+_this_host() { printf '%s\n' "$RECEIPT_HOST"; }
+
+_json_array() {
+    jq -cn --args '$ARGS.positional' -- "$@"
+}
+
+candidate_fno() {
+    if [[ -x "$INVOKING_ROOT/cli/.venv/bin/python" ]]; then
+        PYTHONPATH="$INVOKING_ROOT/cli/src" \
+            "$INVOKING_ROOT/cli/.venv/bin/python" -m fno.cli "$@"
+    elif [[ -f "$INVOKING_ROOT/cli/pyproject.toml" ]]; then
+        if ! command -v uv >/dev/null 2>&1; then
+            echo "preflight: candidate CLI source exists but uv is unavailable" >&2
+            return 127
+        fi
+        PYTHONPATH="$INVOKING_ROOT/cli/src" uv run --project "$INVOKING_ROOT/cli" fno-py "$@"
+    else
+        fno "$@"
+    fi
+}
+
+candidate_python() {
+    if [[ -x "$INVOKING_ROOT/cli/.venv/bin/python" ]]; then
+        PYTHONPATH="$INVOKING_ROOT/cli/src" \
+            "$INVOKING_ROOT/cli/.venv/bin/python" "$@"
+    elif [[ -f "$INVOKING_ROOT/cli/pyproject.toml" ]]; then
+        if ! command -v uv >/dev/null 2>&1; then
+            echo "preflight: candidate CLI source exists but uv is unavailable" >&2
+            return 127
+        fi
+        PYTHONPATH="$INVOKING_ROOT/cli/src" \
+            uv run --project "$INVOKING_ROOT/cli" python "$@"
+    else
+        python3 "$@"
+    fi
+}
+
+GLOBAL_EVENTS_PATH="$(candidate_fno pr global-receipt-events-path)" || {
+    echo "preflight: canonical receipt journal path unavailable" >&2
+    exit 1
+}
+[[ -n "$GLOBAL_EVENTS_PATH" ]] || {
+    echo "preflight: canonical receipt journal path is empty" >&2
+    exit 1
+}
+
+emit_verification_receipt() {
+    local mode="$1" result="$2" scope_json="$3" expected="$4" executed="$5" started_at="$6" detail="$7"
+    local command_json finished_at environment_json producer_json data event generation
+    command_json="$(_json_array "${RECEIPT_COMMAND[@]}")" || return 1
+    generation="$(next_receipt_generation)" || return 1
+    finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || return 1
+    environment_json="$(jq -nc \
+        --arg host "$RECEIPT_HOST" \
+        --arg platform "$RECEIPT_PLATFORM" \
+        --arg runner "scripts/ci/preflight.sh" \
+        '{host:$host,platform:$platform,runner:$runner}')" || return 1
+    producer_json="$(jq -nc \
+        --arg kind preflight \
+        --arg id "$RECEIPT_HOST:$$" \
+        '{kind:$kind,id:$id}')" || return 1
+    data="$(jq -nc \
+        --arg candidate_sha "$CANDIDATE_SHA" \
+        --argjson command "$command_json" \
+        --argjson environment "$environment_json" \
+        --argjson scope "$scope_json" \
+        --arg started_at "$started_at" \
+        --arg finished_at "$finished_at" \
+        --arg mode "$mode" \
+        --arg result "$result" \
+        --argjson producer "$producer_json" \
+        --argjson generation "$generation" \
+        --argjson steps_expected "$expected" \
+        --argjson steps_executed "$executed" \
+        --arg detail "$detail" \
+        '{candidate_sha:$candidate_sha,command:$command,environment:$environment,scope:$scope,started_at:$started_at,finished_at:$finished_at,mode:$mode,result:$result,producer:$producer,generation:$generation,steps_expected:$steps_expected,steps_executed:$steps_executed,detail:$detail}')" || return 1
+    event="$(jq -nc \
+        --arg ts "$finished_at" \
+        --argjson data "$data" \
+        '{ts:$ts,type:"verification_receipt",source:"target",data:$data}')" || return 1
+    # Receipt construction stays inside this lock-holding process. There is no
+    # supported CLI that can mint a trusted receipt from caller-authored fields.
+    (
+        # shellcheck source=scripts/lib/events-validate.sh
+        source "$INVOKING_ROOT/scripts/lib/events-validate.sh"
+        validate_event verification_receipt "$event"
+    ) || return 1
+    append_receipt_journal "$GLOBAL_EVENTS_PATH" "$event" || return 1
+    if [[ "$GLOBAL_EVENTS_PATH" != "$EVENTS_PATH" ]]; then
+        if ! append_receipt_journal "$EVENTS_PATH" "$event"; then
+            echo "preflight: note: global receipt committed; delivery-root mirror unavailable at $EVENTS_PATH" >&2
+        fi
+    fi
+    return 0
+}
+
+append_receipt_journal() {
+    local events_path="$1" event="$2"
+    candidate_python -c '
+import json
+import sys
+from pathlib import Path
+from fno.events import append_event
+
+event = json.load(sys.stdin)
+append_event(event, events_path=Path(sys.argv[1]))
+' "$events_path" <<< "$event"
+}
+
+emit_setup_unavailable() {
+    local reason="$1" setup_scope
+    setup_scope="$(_json_array "preflight-setup")" || return 1
+    emit_verification_receipt void unavailable "$setup_scope" 1 0 "$RECEIPT_STARTED_AT" "$reason"
+}
+
+next_receipt_generation() {
+    candidate_fno pr next-receipt-generation --candidate-sha "$CANDIDATE_SHA"
+}
 
 # --- attestation: reuse a prior FULL run's GREEN verdict --------------------
 # A (full SHA, host) pair is a complete cache key: preflight hard-resets a
@@ -92,7 +228,6 @@ CANDIDATE_SHORT="$(git -C "$INVOKING_ROOT" rev-parse --short HEAD)"
 # the whole point: a second caller blocked behind a still-running preflight is
 # the 'exit 3' failure this exists to remove.
 ATTEST="$COMMON_DIR/.preflight-attestation"   # sibling of .preflight.lock.d
-_this_host() { hostname 2>/dev/null || echo unknown; }
 # Pull one space-separated `key=value` field out of the attestation line. Empty
 # on no match, which callers treat as "not a hit" (corrupt file -> full run).
 _attest_field() { printf '%s\n' "$1" | sed -n "s/.*$2=\([^ ]*\).*/\1/p"; }
@@ -112,6 +247,13 @@ reuse_attestation() {
     if [[ "$att_host" != "$(_this_host)" ]]; then
         echo "preflight: attestation for $CANDIDATE_SHORT rejected (foreign host: recorded=$att_host) - running full suite"
         return 1   # AC3-EDGE: a cross-environment green never satisfies the gate
+    fi
+    # The text file is only a fast cache carrier. Authority stays in the typed
+    # event journal, so a matching carrier with missing, malformed, subset,
+    # void, stale, or otherwise non-passing evidence cannot bless this SHA.
+    if ! candidate_fno pr evidence-check >/dev/null 2>&1; then
+        echo "preflight: matching attestation has no exact full/passed event evidence - running full suite"
+        return 1
     fi
     att_pid="$(_attest_field "$line" pid)"
     att_at="$(_attest_field "$line" at)"; att_at="${att_at//[!0-9]/}"; att_at="${att_at:-0}"
@@ -135,12 +277,33 @@ if [[ $FORCE_RUN -eq 0 ]]; then
 fi
 
 # --- lock (atomic mkdir; steal a dead holder) -------------------------------
-LOCKDIR="$COMMON_DIR/.preflight.lock.d"
+LOCAL_LOCKDIR="$COMMON_DIR/.preflight.lock.d"
+GLOBAL_LOCKDIR="$(dirname "$GLOBAL_EVENTS_PATH")/.preflight-receipt-locks/$CANDIDATE_SHA.d"
+LOCAL_LOCK_ACQUIRED=0
+GLOBAL_LOCK_ACQUIRED=0
+LOCAL_LOCK_STAMP=""
+GLOBAL_LOCK_STAMP=""
+LOCKDIR="$LOCAL_LOCKDIR"
 stamp_holder() {
-    printf 'pid=%s started=%s host=%s sha=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(hostname 2>/dev/null || echo unknown)" "$CANDIDATE_SHORT" > "$LOCKDIR/holder"
+    local stamp
+    stamp="pid=$$ started=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown) host=$(hostname 2>/dev/null || echo unknown) sha=$CANDIDATE_SHA"
+    printf '%s\n' "$stamp" > "$LOCKDIR/holder" || return 1
+    if [[ "$LOCKDIR" == "$LOCAL_LOCKDIR" ]]; then
+        LOCAL_LOCK_STAMP="$stamp"
+    else
+        GLOBAL_LOCK_STAMP="$stamp"
+    fi
+}
+finish_lock_acquire() {
+    if stamp_holder; then
+        return 0
+    fi
+    rm -rf "$LOCKDIR"
+    echo "preflight: cannot stamp lock ownership at $LOCKDIR" >&2
+    exit 3
 }
 acquire_lock() {
-    if mkdir "$LOCKDIR" 2>/dev/null; then stamp_holder; return 0; fi
+    if mkdir "$LOCKDIR" 2>/dev/null; then finish_lock_acquire; return 0; fi
     local holder_pid holder_line
     holder_line="$(cat "$LOCKDIR/holder" 2>/dev/null || echo '')"
     holder_pid="$(printf '%s' "$holder_line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
@@ -163,7 +326,7 @@ acquire_lock() {
             reaped="$(cat "$LOCKDIR.reap.$$/holder" 2>/dev/null || echo '')"
             if [[ "$reaped" == "$holder_line" ]]; then
                 rm -rf "$LOCKDIR.reap.$$"
-                mkdir "$LOCKDIR" 2>/dev/null && { stamp_holder; return 0; }
+                mkdir "$LOCKDIR" 2>/dev/null && { finish_lock_acquire; return 0; }
             elif [[ -e "$LOCKDIR" ]] || ! mv "$LOCKDIR.reap.$$" "$LOCKDIR" 2>/dev/null; then
                 # Someone already re-took the path. Renaming onto an existing
                 # directory NESTS inside it rather than replacing it, which would
@@ -192,28 +355,46 @@ acquire_lock() {
     fi
     exit 3
 }
-acquire_lock
-
 TMPHOME=""
-holder_pid_now() { sed -n 's/.*pid=\([0-9]*\).*/\1/p' "$LOCKDIR/holder" 2>/dev/null; }
 # Release only a lock we still hold: if ours was stolen, the lockdir at this
-# path now belongs to the stealer. An unreadable holder still releases - that is
-# our own stamp having failed, and leaving it would wedge every later run.
-# Parse the pid rather than matching the stamp's layout, so reordering the
-# fields in stamp_holder cannot silently stop every run from releasing.
+# path now belongs to the stealer. Exact stamp matching prevents a loser from
+# deleting a winner's lock during the mkdir-to-holder window.
+cleanup_lock() {
+    local path="$1" expected="$2" observed
+    [[ -n "$path" && -n "$expected" ]] || return 0
+    observed="$(cat "$path/holder" 2>/dev/null || true)"
+    [[ "$observed" == "$expected" ]] && rm -rf "$path"
+}
 cleanup() {
-    local pid_now; pid_now="$(holder_pid_now)"
-    [[ -z "$pid_now" || "$pid_now" == "$$" ]] && rm -rf "$LOCKDIR"
+    [[ "${LOCAL_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${LOCAL_LOCKDIR:-}" "${LOCAL_LOCK_STAMP:-}"
+    [[ "${GLOBAL_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${GLOBAL_LOCKDIR:-}" "${GLOBAL_LOCK_STAMP:-}"
     [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"
 }
 trap cleanup EXIT
-# Signals must EXIT, not just clean up. A bare `trap cleanup INT TERM` released
-# the lock and deleted the hermetic HOME, then let the script carry on through
-# the remaining suites unlocked - so a second preflight could enter the shared
-# worktree while this one was still reporting on it. Exit only, and let the EXIT
-# trap do the single cleanup: calling cleanup here too would run it twice, and
-# the second pass (our lockdir already gone) could delete a successor's lock.
+# Defer cancellation only across mkdir + holder stamping. Exiting between those
+# commands would leave an acquired lock without a complete cleanup token.
+LOCK_SIGNAL=0
+trap 'LOCK_SIGNAL=1' INT TERM
+acquire_lock
+LOCAL_LOCK_ACQUIRED=1
+mkdir -p "$(dirname "$GLOBAL_LOCKDIR")" || {
+    echo "preflight: cannot create canonical receipt lock directory" >&2
+    exit 1
+}
+LOCKDIR="$GLOBAL_LOCKDIR"
+acquire_lock
+GLOBAL_LOCK_ACQUIRED=1
+LOCKDIR="$LOCAL_LOCKDIR"
 trap 'exit 130' INT TERM
+if [[ "$LOCK_SIGNAL" -eq 1 ]]; then
+    exit 130
+fi
+
+PENDING_SCOPE="$(_json_array "preflight-execution")"
+if ! emit_verification_receipt void pending "$PENDING_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "preflight execution started"; then
+    echo "preflight: cannot persist canonical pending receipt" >&2
+    exit 1
+fi
 
 # --- ensure / reset the preflight worktree ----------------------------------
 echo "preflight: repo=$REPO_NAME candidate=$CANDIDATE_SHORT worktree=$PREFLIGHT_WT"
@@ -232,11 +413,13 @@ fi
 if ! is_registered; then
     mkdir -p "$(dirname "$PREFLIGHT_WT")"
     git -C "$INVOKING_ROOT" worktree add --detach "$PREFLIGHT_WT" "$CANDIDATE_SHA" >/dev/null 2>&1 || {
+        emit_setup_unavailable "git worktree add failed" || true
         echo "preflight: git worktree add failed" >&2; exit 1; }
 fi
 
 # Sync to candidate; keep caches. Worktrees share the object DB, so no fetch.
 if ! git -C "$PREFLIGHT_WT" reset --hard "$CANDIDATE_SHA" >/dev/null 2>&1; then
+    emit_setup_unavailable "git reset failed" || true
     echo "preflight: git reset --hard failed in the preflight worktree" >&2; exit 1
 fi
 # clean -fdx but preserve warm caches + the failure record ONLY. Excluding all
@@ -244,6 +427,7 @@ fi
 # reads) that could mask a regression a fresh CI checkout would catch, so we
 # scope the exclusion to the single retry-record file.
 git -C "$PREFLIGHT_WT" clean -fdx -e target -e cli/.venv -e .fno/preflight-last-failures.txt >/dev/null 2>&1 || {
+    emit_setup_unavailable "git clean failed" || true
     echo "preflight: git clean failed in the preflight worktree" >&2; exit 1; }
 
 # --- hermetic env ------------------------------------------------------------
@@ -311,17 +495,36 @@ run_hermetic() {
 # exit before the full legs run: a packet that failed while the worktree was
 # being reset under it earned nothing, so it must VOID rather than report RED.
 exit_if_void() {
-    local VOID_REASON="" WT_HEAD_NOW
+    local VOID_REASON="" WT_HEAD_NOW VOID_SCOPE_NAME="${1:-}"
+    local REQUIRED_COUNT REQUIRED_SCOPE VOID_RESULT EXECUTED_COUNT
+    local -a REQUIRED_SCOPE_NAMES
     # 2>/dev/null, never 2>&1: merging stderr into the value means any benign git
     # warning makes the captured string differ from the sha and VOIDs a good run.
     if ! WT_HEAD_NOW="$(git -C "$PREFLIGHT_WT" rev-parse HEAD 2>/dev/null)"; then
         VOID_REASON="cannot read the preflight worktree at $PREFLIGHT_WT"
     elif [[ "$WT_HEAD_NOW" != "$CANDIDATE_SHA" ]]; then
         VOID_REASON="worktree moved off our candidate mid-run (now ${WT_HEAD_NOW:0:12}, expected $CANDIDATE_SHORT)"
-    elif [[ "$(holder_pid_now)" != "$$" ]]; then
+    elif [[ "$(cat "$LOCAL_LOCKDIR/holder" 2>/dev/null || true)" != "$LOCAL_LOCK_STAMP" ]]; then
         VOID_REASON="another preflight took our lock mid-run"
+    elif [[ "$(cat "$GLOBAL_LOCKDIR/holder" 2>/dev/null || true)" != "$GLOBAL_LOCK_STAMP" ]]; then
+        VOID_REASON="another preflight took our canonical receipt lock mid-run"
     fi
     [[ -n "$VOID_REASON" ]] || return 0
+    if [[ -n "$VOID_SCOPE_NAME" ]]; then
+        REQUIRED_COUNT=1
+        REQUIRED_SCOPE="$(_json_array "$VOID_SCOPE_NAME")"
+        EXECUTED_COUNT=1
+    else
+        REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno)
+        [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
+        REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
+        REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
+        EXECUTED_COUNT=$REQUIRED_EXECUTED
+    fi
+    VOID_RESULT=unavailable
+    [[ "$VOID_REASON" == worktree\ moved\ off* ]] && VOID_RESULT=stale
+    emit_verification_receipt void "$VOID_RESULT" "$REQUIRED_SCOPE" "$REQUIRED_COUNT" "$EXECUTED_COUNT" "$RECEIPT_STARTED_AT" "$VOID_REASON" \
+        || echo "preflight: WARN could not append VOID verification receipt" >&2
     echo "preflight: VOID - $VOID_REASON." >&2
     echo "preflight: verdict discarded - nothing here was earned by $CANDIDATE_SHORT. Re-run; this is not a code failure." >&2
     exit 5
@@ -399,7 +602,7 @@ if [[ -n "$CHANGED_BASE" ]]; then
         *)  # Verdict-bearing exit, so it owes the same ownership check the full
             # path does: a packet that failed while the shared worktree was reset
             # under it earned nothing and must VOID rather than accuse this SHA.
-            exit_if_void
+            exit_if_void "changed packet (CHANGED SUBSET)"
             record_leg "changed packet (CHANGED SUBSET)" fail $(( SECONDS - c0 ))
             invalidate_attestation
             echo ""
@@ -418,12 +621,14 @@ echo ""
 echo "preflight: === smoke suite ($([[ $RETRY_FAILED -eq 1 ]] && echo retry-failed || echo keep-going)) ==="
 SMOKE_ARGS=(--keep-going); [[ $RETRY_FAILED -eq 1 ]] && SMOKE_ARGS=(--retry-failed --keep-going)
 s0="$SECONDS"
+REQUIRED_EXECUTED=0
 # Bootstrap via `uv run --project cli`: there is no repo-root pyproject and no
 # global fno-py in a hermetic env, so a bare `fno test smoke` is not on PATH
 # until uv syncs the cli project (uv auto-syncs). The attestation logic below
 # is unchanged: a FULL GREEN records, a RED deletes, a subset mints nothing.
 run_hermetic uv run --project cli fno-py test smoke "${SMOKE_ARGS[@]}"
 sreq=$?
+REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
 [[ $sreq -eq 0 ]] && record_leg "smoke suite" pass $(( SECONDS - s0 )) || { record_leg "smoke suite" fail $(( SECONDS - s0 )); FAIL=1; }
 
 # rust-ci legs (pinned fmt, cargo test, advisory audit) ----------------------
@@ -443,6 +648,7 @@ run_rust_leg() { # name status-var  cwd  cmd...
 if have_pinned_fmt; then
     run_rust_leg "cargo fmt --check (fno-agents, +$PINNED_FMT)" "crates/fno-agents" "cargo +$PINNED_FMT fmt --all --check"
     run_rust_leg "cargo fmt --check (fno, +$PINNED_FMT)" "crates/fno" "cargo +$PINNED_FMT fmt --all --check"
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 2))
 else
     echo "preflight: pinned rustfmt toolchain $PINNED_FMT not installed - fmt leg cannot match rust-ci" >&2
     echo "preflight: install it: rustup toolchain install $PINNED_FMT --component rustfmt" >&2
@@ -450,30 +656,55 @@ else
 fi
 
 run_rust_leg "cargo test --all-targets (fno-agents)" "crates/fno-agents" "cargo test --all-targets"
+REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
 
 # squads.json leak guard (x-e447 US3): snapshot the REAL store mtime around the
 # crates/fno cargo test leg. A test that bypasses run_hermetic's HOME redirect and
 # writes the real ~/.fno/squads.json would otherwise stay green; this is the
 # class-level assertion (PR #589's assert_writable closed the build-tree binary
 # arm; this catches every other path at once). Read-only, stdlib, degrade-to-skip
-# on absent/unreadable (AC-FR2); a concurrent real mux session is a valid writer,
-# so the message names that caveat rather than asserting exclusive ownership.
-_real_squads_mtime() {
+# only when absent; an unavailable stat fails closed. A concurrent real mux
+# session is a valid writer, so the message names that caveat rather than
+# asserting exclusive ownership.
+_real_squads_state() {
     python3 -c "
 import os
 p = os.path.expanduser('~/.fno/squads.json')
 try:
-    print(int(os.path.getmtime(p)))
-except Exception:
-    print('')
+    print(f'present:{os.stat(p).st_mtime_ns}')
+except FileNotFoundError:
+    print('absent')
+except OSError:
+    print('unavailable')
 " 2>/dev/null
 }
-_squads_before=$(_real_squads_mtime)
+_squads_before="$(_real_squads_state || printf '%s' unavailable)"
+case "$_squads_before" in
+    absent|unavailable|present:*) ;;
+    *) _squads_before=unavailable ;;
+esac
 run_rust_leg "cargo test --all-targets (fno)" "crates/fno" "cargo test --all-targets"
-_squads_after=$(_real_squads_mtime)
-if [[ -z "$_squads_before" || -z "$_squads_after" ]]; then
-    record_leg "squads.json leak guard (fno)" "skipped (no real store)" 0
+REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+_squads_after="$(_real_squads_state || printf '%s' unavailable)"
+case "$_squads_after" in
+    absent|unavailable|present:*) ;;
+    *) _squads_after=unavailable ;;
+esac
+SQUADS_INCLUDED=1
+RECEIPT_UNAVAILABLE=0
+if [[ "$_squads_before" == "absent" && "$_squads_after" == "absent" ]]; then
+    SQUADS_INCLUDED=0
+    record_leg "squads.json leak guard (fno)" "not configured (no real store)" 0
+    SQUADS_SCOPE="$(_json_array squads-leak-guard:fno)"
+    emit_verification_receipt advisory not_configured "$SQUADS_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "no real squads store" \
+        || echo "preflight: WARN could not append squads not-configured receipt" >&2
+elif [[ "$_squads_before" == "unavailable" || "$_squads_after" == "unavailable" ]]; then
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+    RECEIPT_UNAVAILABLE=1
+    FAIL=1
+    record_leg "squads.json leak guard (fno)" unavailable 0
 elif [[ "$_squads_after" != "$_squads_before" ]]; then
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
     echo "preflight: FAIL real ~/.fno/squads.json changed during crates/fno cargo test" \
          "(mtime $_squads_before -> $_squads_after)" >&2
     echo "  if a real mux session is running concurrently it is a valid writer;" >&2
@@ -481,21 +712,41 @@ elif [[ "$_squads_after" != "$_squads_before" ]]; then
     FAIL=1
     record_leg "squads.json leak guard (fno)" fail 0
 else
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
     record_leg "squads.json leak guard (fno)" pass 0
 fi
 
 # advisory: never flips the exit code
 echo ""
 echo "preflight: === cargo audit (ADVISORY) ==="
+ADVISORY_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+ADVISORY_EXECUTED=0
 if run_hermetic bash -c "command -v cargo-audit >/dev/null 2>&1"; then
     a0="$SECONDS"
-    if run_hermetic bash -c "cd crates/fno-agents && cargo audit" && run_hermetic bash -c "cd crates/fno && cargo audit"; then
+    ADVISORY_FAILED=0
+    run_hermetic bash -c "cd crates/fno-agents && cargo audit" || ADVISORY_FAILED=1
+    ADVISORY_EXECUTED=$((ADVISORY_EXECUTED + 1))
+    run_hermetic bash -c "cd crates/fno && cargo audit" || ADVISORY_FAILED=1
+    ADVISORY_EXECUTED=$((ADVISORY_EXECUTED + 1))
+    if [[ $ADVISORY_FAILED -eq 0 ]]; then
         record_leg "cargo audit (ADVISORY)" pass $(( SECONDS - a0 ))
     else
         record_leg "cargo audit (ADVISORY)" "advisory-fail" $(( SECONDS - a0 ))
     fi
 else
     record_leg "cargo audit (ADVISORY)" "skipped (not installed)" 0
+fi
+ADVISORY_STATUS="${LEG_STATUS[${#LEG_STATUS[@]}-1]}"
+case "$ADVISORY_STATUS" in
+    pass) ADVISORY_RESULT=passed ;;
+    advisory-fail) ADVISORY_RESULT=failed ;;
+    *) ADVISORY_RESULT=unavailable ;;
+esac
+ADVISORY_SCOPE="$(_json_array "cargo-audit:fno-agents" "cargo-audit:fno")"
+if [[ -z "$ADVISORY_STARTED_AT" ]]; then
+    echo "preflight: WARN advisory receipt timestamp unavailable" >&2
+elif ! emit_verification_receipt advisory "$ADVISORY_RESULT" "$ADVISORY_SCOPE" 2 "$ADVISORY_EXECUTED" "$ADVISORY_STARTED_AT" "$ADVISORY_STATUS"; then
+    echo "preflight: WARN could not append advisory verification receipt" >&2
 fi
 
 # --- verdict tripwire --------------------------------------------------------
@@ -507,9 +758,26 @@ fi
 exit_if_void
 
 if [[ $RETRY_FAILED -eq 0 && $FAIL -eq 0 ]]; then
-    record_attestation
+    : # receipt first; the carrier is recorded only after evidence is durable
 elif [[ $FAIL -ne 0 ]]; then
     invalidate_attestation
+fi
+
+REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno)
+[[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
+REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
+REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
+RECEIPT_MODE=full
+[[ $RETRY_FAILED -eq 1 ]] && RECEIPT_MODE=subset
+RECEIPT_RESULT=passed
+[[ $FAIL -ne 0 ]] && RECEIPT_RESULT=failed
+[[ $RECEIPT_UNAVAILABLE -eq 1 ]] && RECEIPT_RESULT=unavailable
+if ! emit_verification_receipt "$RECEIPT_MODE" "$RECEIPT_RESULT" "$REQUIRED_SCOPE" "$REQUIRED_COUNT" "$REQUIRED_EXECUTED" "$RECEIPT_STARTED_AT" "preflight suite verdict"; then
+    echo "preflight: verification receipt append failed; verdict is unavailable" >&2
+    FAIL=1
+    invalidate_attestation
+elif [[ $RETRY_FAILED -eq 0 && $FAIL -eq 0 ]]; then
+    record_attestation
 fi
 
 # --- summary -----------------------------------------------------------------

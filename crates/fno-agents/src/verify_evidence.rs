@@ -21,6 +21,15 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
+
+use chrono::{DateTime, Utc};
+use regex::Regex;
+use serde_json::{json, Value};
+
+// Mirrors cli/src/fno/events/schema.yaml limits.
+const MAX_RECEIPT_DATA_BYTES: usize = 65_536;
+const DATA_SIZE_ENCODING: &str = "compact-json-ascii-v1";
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
@@ -493,6 +502,622 @@ fn git_show_toplevel(git_bin: &str) -> Option<PathBuf> {
     }
 }
 
+fn full_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn bounded_strings(value: &Value, max_items: usize, max_len: usize) -> bool {
+    let Some(items) = value.as_array() else {
+        return false;
+    };
+    !items.is_empty()
+        && items.len() <= max_items
+        && items.iter().all(|item| {
+            item.as_str()
+                .is_some_and(|text| !text.is_empty() && text.len() <= max_len)
+        })
+}
+
+fn required_strings(value: &Value, fields: &[&str]) -> bool {
+    value.as_object().is_some()
+        && fields.iter().all(|field| {
+            value
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        })
+}
+
+fn nonnegative_integer(value: &Value) -> Option<f64> {
+    let number = value.as_f64()?;
+    (number.is_finite() && number >= 0.0 && number.fract() == 0.0).then_some(number)
+}
+
+fn receipt_timestamp(value: &Value) -> Option<DateTime<Utc>> {
+    static UTC_TIMESTAMP: OnceLock<Regex> = OnceLock::new();
+    let pattern = UTC_TIMESTAMP.get_or_init(|| {
+        Regex::new(
+            r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-5][0-9](?:\.[0-9]{1,6})?(?:Z|\+00:00)$",
+        )
+        .expect("receipt timestamp regex is valid")
+    });
+    let raw = value.as_str()?;
+    if !pattern.is_match(raw) || raw.starts_with("0000-") {
+        return None;
+    }
+    let without_zone = raw
+        .strip_suffix('Z')
+        .or_else(|| raw.strip_suffix("+00:00"))?;
+    if let Some((_, fraction)) = without_zone.rsplit_once('.') {
+        if fraction.is_empty()
+            || fraction.len() > 6
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+    }
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .filter(|parsed| parsed.offset().local_minus_utc() == 0)
+        .map(|parsed| parsed.with_timezone(&Utc))
+}
+
+fn compact_ascii_json_len(value: &Value) -> Option<usize> {
+    if DATA_SIZE_ENCODING != "compact-json-ascii-v1" {
+        return None;
+    }
+    serde_json::to_string(value).ok().map(|encoded| {
+        encoded
+            .chars()
+            .map(|ch| {
+                if ch == '\u{7f}' {
+                    6
+                } else if !ch.is_ascii() {
+                    if u32::from(ch) <= 0xffff {
+                        6
+                    } else {
+                        12
+                    }
+                } else {
+                    1
+                }
+            })
+            .sum()
+    })
+}
+
+fn valid_receipt(event: &Value) -> bool {
+    let Some(root) = event.as_object() else {
+        return false;
+    };
+    if root.get("type").and_then(Value::as_str) != Some("verification_receipt")
+        || !matches!(
+            root.get("source").and_then(Value::as_str),
+            Some("target" | "hook" | "test")
+        )
+        || receipt_timestamp(root.get("ts").unwrap_or(&Value::Null)).is_none()
+    {
+        return false;
+    }
+    let Some(data) = root.get("data") else {
+        return false;
+    };
+    if compact_ascii_json_len(data)
+        .map(|encoded_len| encoded_len > MAX_RECEIPT_DATA_BYTES)
+        .unwrap_or(true)
+    {
+        return false;
+    }
+    let Some(candidate) = data.get("candidate_sha").and_then(Value::as_str) else {
+        return false;
+    };
+    let mode = data.get("mode").and_then(Value::as_str).unwrap_or("");
+    let result = data.get("result").and_then(Value::as_str).unwrap_or("");
+    let started = data.get("started_at").and_then(receipt_timestamp);
+    let finished = data.get("finished_at").and_then(receipt_timestamp);
+    let Some(expected) = data.get("steps_expected").and_then(nonnegative_integer) else {
+        return false;
+    };
+    let Some(executed) = data.get("steps_executed").and_then(nonnegative_integer) else {
+        return false;
+    };
+    let Some(generation) = data.get("generation").and_then(nonnegative_integer) else {
+        return false;
+    };
+    let scope_len = data
+        .get("scope")
+        .and_then(Value::as_array)
+        .map(|scope| scope.len() as f64);
+    full_sha(candidate)
+        && bounded_strings(data.get("command").unwrap_or(&Value::Null), 4096, 4096)
+        && bounded_strings(data.get("scope").unwrap_or(&Value::Null), 128, 512)
+        && required_strings(
+            data.get("environment").unwrap_or(&Value::Null),
+            &["host", "platform", "runner"],
+        )
+        && required_strings(
+            data.get("producer").unwrap_or(&Value::Null),
+            &["kind", "id"],
+        )
+        && started.is_some()
+        && finished.is_some()
+        && finished >= started
+        && matches!(mode, "full" | "subset" | "void" | "advisory")
+        && matches!(
+            result,
+            "not_configured" | "unavailable" | "pending" | "failed" | "passed" | "stale"
+        )
+        && executed <= expected
+        && (1.0..=9_007_199_254_740_991.0).contains(&generation)
+        && scope_len == Some(expected)
+        && (mode != "full" || result != "passed" || (expected > 0.0 && executed == expected))
+        && (mode != "void" || result != "passed")
+}
+
+fn gate_eligible_receipt(event: &Value) -> bool {
+    const BASE_SCOPE: [&str; 5] = [
+        "smoke",
+        "rustfmt:fno-agents",
+        "rustfmt:fno",
+        "cargo-test:fno-agents",
+        "cargo-test:fno",
+    ];
+    let Some(data) = event.get("data") else {
+        return false;
+    };
+    let command_path = data
+        .get("command")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let environment = data.get("environment").unwrap_or(&Value::Null);
+    let producer = data.get("producer").unwrap_or(&Value::Null);
+    let scope = data.get("scope").and_then(Value::as_array);
+    event.get("source").and_then(Value::as_str) == Some("target")
+        && producer.get("kind").and_then(Value::as_str) == Some("preflight")
+        && producer
+            .get("id")
+            .and_then(Value::as_str)
+            .zip(environment.get("host").and_then(Value::as_str))
+            .is_some_and(|(id, host)| id.starts_with(&format!("{host}:")))
+        && environment.get("runner").and_then(Value::as_str) == Some("scripts/ci/preflight.sh")
+        && (command_path == "scripts/ci/preflight.sh"
+            || command_path.ends_with("/scripts/ci/preflight.sh"))
+        && scope.is_some_and(|items| {
+            matches!(items.len(), 5 | 6)
+                && BASE_SCOPE
+                    .iter()
+                    .all(|expected| items.iter().any(|item| item.as_str() == Some(expected)))
+                && (items.len() == 5
+                    || items
+                        .iter()
+                        .any(|item| item.as_str() == Some("squads-leak-guard:fno")))
+        })
+}
+
+fn git_common_dir(git_bin: &str) -> Option<PathBuf> {
+    let output = Command::new(git_bin)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+struct VerificationReadLock {
+    path: PathBuf,
+    stamp: String,
+    released: bool,
+}
+
+impl VerificationReadLock {
+    fn acquire(common_dir: &Path) -> Result<Self, String> {
+        let path = common_dir.join(".preflight.lock.d");
+        std::fs::create_dir(&path)
+            .map_err(|error| format!("verification lock unavailable: {error}"))?;
+        let stamp = format!("pid={} kind=evidence-reader", std::process::id());
+        if let Err(error) = std::fs::write(path.join("holder"), format!("{stamp}\n")) {
+            return Err(Self::cleanup_partial_acquisition(&path, &error.to_string()));
+        }
+        Ok(Self {
+            path,
+            stamp,
+            released: false,
+        })
+    }
+
+    fn cleanup_partial_acquisition(path: &Path, cause: &str) -> String {
+        let mut cleanup_errors = Vec::new();
+        if let Err(error) = std::fs::remove_file(path.join("holder")) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                cleanup_errors.push(error.to_string());
+            }
+        }
+        if let Err(error) = std::fs::remove_dir(path) {
+            cleanup_errors.push(error.to_string());
+        }
+        let mut detail = format!("verification lock unavailable: {cause}");
+        if !cleanup_errors.is_empty() {
+            detail.push_str("; partial acquisition cleanup failed: ");
+            detail.push_str(&cleanup_errors.join("; "));
+        }
+        detail
+    }
+
+    fn release(mut self) -> Result<(), String> {
+        let holder = self.path.join("holder");
+        let observed = std::fs::read_to_string(&holder)
+            .map_err(|error| format!("verification lock release failed: {error}"))?;
+        if observed.trim() != self.stamp {
+            return Err("verification lock ownership changed".to_string());
+        }
+        std::fs::remove_file(&holder)
+            .map_err(|error| format!("verification lock release failed: {error}"))?;
+        std::fs::remove_dir(&self.path)
+            .map_err(|error| format!("verification lock release failed: {error}"))?;
+        self.released = true;
+        Ok(())
+    }
+}
+
+impl Drop for VerificationReadLock {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        let holder = self.path.join("holder");
+        if std::fs::read_to_string(&holder).is_ok_and(|value| value.trim() == self.stamp) {
+            let _ = std::fs::remove_file(holder);
+            let _ = std::fs::remove_dir(&self.path);
+        }
+    }
+}
+
+fn receipt_decision_all(candidate_sha: &str, paths: &[String]) -> Value {
+    let mut seen = std::collections::HashSet::new();
+    let mut receipts: Vec<(DateTime<Utc>, String, Value)> = Vec::new();
+    let mut malformed = 0u64;
+    let mut unreadable = 0u64;
+    for path in paths {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                unreadable += 1;
+                continue;
+            }
+        };
+        for line in content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let event: Value = match serde_json::from_str(line) {
+                Ok(event) => event,
+                Err(_) => {
+                    malformed += 1;
+                    continue;
+                }
+            };
+            if event.get("type").and_then(Value::as_str) != Some("verification_receipt") {
+                continue;
+            }
+            if !valid_receipt(&event) {
+                malformed += 1;
+                continue;
+            }
+            let ts = receipt_timestamp(event.get("ts").unwrap()).unwrap();
+            if ts > Utc::now() {
+                malformed += 1;
+                continue;
+            }
+            let signature = serde_json::to_string(&event).unwrap_or_default();
+            if seen.insert(signature.clone()) {
+                receipts.push((ts, signature, event));
+            }
+        }
+    }
+    receipts.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    let mut coverage = json!({
+        "complete": malformed == 0 && unreadable == 0,
+        "malformed_lines": malformed,
+        "unreadable_paths": unreadable,
+        "deduped_events": receipts.len(),
+    });
+    let exact: Vec<&(DateTime<Utc>, String, Value)> = receipts
+        .iter()
+        .filter(|(_, _, event)| {
+            event
+                .pointer("/data/candidate_sha")
+                .and_then(Value::as_str)
+                .is_some_and(|receipt_sha| receipt_sha.eq_ignore_ascii_case(candidate_sha))
+        })
+        .collect();
+    if !exact.is_empty() {
+        let newest_generation = exact
+            .iter()
+            .filter_map(|(_, _, event)| event.pointer("/data/generation").and_then(Value::as_f64))
+            .fold(0.0_f64, f64::max);
+        let newest: Vec<&&(DateTime<Utc>, String, Value)> = exact
+            .iter()
+            .filter(|(_, _, event)| {
+                event.pointer("/data/generation").and_then(Value::as_f64) == Some(newest_generation)
+            })
+            .collect();
+        if newest.len() != 1 {
+            coverage["complete"] = Value::Bool(false);
+            coverage["conflicting_latest"] = json!(newest.len());
+            return json!({
+                "satisfied": false,
+                "mode": Value::Null,
+                "result": "unavailable",
+                "receipt": Value::Null,
+                "coverage": coverage,
+            });
+        }
+        let event = &newest[0].2;
+        let mode = event
+            .pointer("/data/mode")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let result = event
+            .pointer("/data/result")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        return json!({
+            "satisfied": malformed == 0
+                && unreadable == 0
+                && mode == "full"
+                && result == "passed"
+                && gate_eligible_receipt(event),
+            "mode": mode,
+            "result": result,
+            "receipt": event,
+            "coverage": coverage,
+        });
+    }
+    if let Some((_, _, event)) = receipts.last() {
+        return json!({
+            "satisfied": false,
+            "mode": event.pointer("/data/mode").and_then(Value::as_str),
+            "result": "stale",
+            "receipt": event,
+            "coverage": coverage,
+        });
+    }
+    json!({
+        "satisfied": false,
+        "mode": Value::Null,
+        "result": "unavailable",
+        "receipt": Value::Null,
+        "coverage": coverage,
+    })
+}
+
+fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
+    let Some(canonical_path) = paths.first() else {
+        return receipt_decision_all(candidate_sha, paths);
+    };
+    let mut canonical = receipt_decision_all(candidate_sha, std::slice::from_ref(canonical_path));
+    if canonical.pointer("/coverage/conflicting_latest").is_some() {
+        return canonical;
+    }
+    let exact = canonical
+        .pointer("/receipt/data/candidate_sha")
+        .and_then(Value::as_str)
+        .is_some_and(|receipt_sha| receipt_sha.eq_ignore_ascii_case(candidate_sha));
+    if !exact {
+        canonical["coverage"]["canonical_required"] = Value::Bool(true);
+        canonical["satisfied"] = Value::Bool(false);
+        return canonical;
+    }
+
+    let mut readable = vec![canonical_path.clone()];
+    let mut unavailable_mirrors = 0u64;
+    for path in &paths[1..] {
+        match std::fs::read_to_string(path) {
+            Ok(_) => readable.push(path.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => unavailable_mirrors += 1,
+        }
+    }
+    let mut combined = receipt_decision_all(candidate_sha, &readable);
+    let canonical_generation = canonical
+        .pointer("/receipt/data/generation")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let combined_generation = combined
+        .pointer("/receipt/data/generation")
+        .and_then(Value::as_f64);
+    if combined.pointer("/coverage/conflicting_latest").is_some()
+        || combined_generation.is_some_and(|generation| generation > canonical_generation)
+    {
+        combined["satisfied"] = Value::Bool(false);
+        combined["mode"] = Value::Null;
+        combined["result"] = Value::String("unavailable".to_string());
+        combined["receipt"] = Value::Null;
+        combined["coverage"]["mirror_ahead"] = Value::Bool(true);
+        if unavailable_mirrors > 0 {
+            combined["coverage"]["unavailable_mirrors"] = json!(unavailable_mirrors);
+        }
+        return combined;
+    }
+    canonical["coverage"] = combined["coverage"].clone();
+    if combined["coverage"]["complete"] != Value::Bool(true) {
+        canonical["satisfied"] = Value::Bool(false);
+    }
+    if unavailable_mirrors > 0 {
+        canonical["coverage"]["unavailable_mirrors"] = json!(unavailable_mirrors);
+    }
+    canonical
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkflowState {
+    Present,
+    Absent,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostedCiResult {
+    NotConfigured,
+    Unavailable,
+    Pending,
+    Failed,
+    Passed,
+    Stale,
+}
+
+#[cfg(test)]
+impl HostedCiResult {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotConfigured => "not_configured",
+            Self::Unavailable => "unavailable",
+            Self::Pending => "pending",
+            Self::Failed => "failed",
+            Self::Passed => "passed",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+pub(crate) fn hosted_workflow_state(cwd: &Path) -> WorkflowState {
+    let workflows = cwd.join(".github/workflows");
+    let metadata = match std::fs::metadata(&workflows) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return WorkflowState::Absent;
+        }
+        Err(_) => return WorkflowState::Unavailable,
+    };
+    if !metadata.is_dir() {
+        return WorkflowState::Unavailable;
+    }
+    let entries = match std::fs::read_dir(workflows) {
+        Ok(entries) => entries,
+        Err(_) => return WorkflowState::Unavailable,
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return WorkflowState::Unavailable;
+        };
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("yml") || extension.eq_ignore_ascii_case("yaml")
+            })
+        {
+            match std::fs::metadata(path) {
+                Ok(metadata) if metadata.is_file() => return WorkflowState::Present,
+                Ok(_) => continue,
+                Err(_) => return WorkflowState::Unavailable,
+            }
+        }
+    }
+    WorkflowState::Absent
+}
+
+fn hosted_ci_result(
+    declared_none: bool,
+    workflow_state: WorkflowState,
+    candidate_sha: &str,
+    observed_sha: Option<&str>,
+    checks: Option<&Value>,
+) -> HostedCiResult {
+    if !full_sha(candidate_sha) || workflow_state == WorkflowState::Unavailable {
+        return HostedCiResult::Unavailable;
+    }
+    let Some(checks) = checks.and_then(Value::as_array) else {
+        return HostedCiResult::Unavailable;
+    };
+    if !checks.is_empty() && observed_sha.is_none() {
+        return HostedCiResult::Unavailable;
+    }
+    if let Some(observed) = observed_sha {
+        if !full_sha(observed) {
+            return HostedCiResult::Unavailable;
+        }
+        if !observed.eq_ignore_ascii_case(candidate_sha) {
+            return HostedCiResult::Stale;
+        }
+    }
+    let mut failed = false;
+    let mut pending = false;
+    for check in checks {
+        if !check.is_object() {
+            return HostedCiResult::Unavailable;
+        }
+        let bucket = check
+            .get("bucket")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let status = check
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let conclusion = check
+            .get("conclusion")
+            .or_else(|| check.get("state"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        if matches!(bucket.as_str(), "fail" | "cancel")
+            || matches!(
+                conclusion.as_str(),
+                "FAILURE"
+                    | "TIMED_OUT"
+                    | "CANCELLED"
+                    | "ACTION_REQUIRED"
+                    | "STARTUP_FAILURE"
+                    | "STALE"
+                    | "ERROR"
+            )
+        {
+            failed = true;
+        } else if !matches!(bucket.as_str(), "pass" | "skipping")
+            && !((status.is_empty() || status == "COMPLETED")
+                && matches!(conclusion.as_str(), "SUCCESS" | "NEUTRAL" | "SKIPPED"))
+        {
+            pending = true;
+        }
+    }
+    if failed {
+        HostedCiResult::Failed
+    } else if pending {
+        HostedCiResult::Pending
+    } else if !checks.is_empty() {
+        HostedCiResult::Passed
+    } else if declared_none && workflow_state == WorkflowState::Absent {
+        HostedCiResult::NotConfigured
+    } else {
+        HostedCiResult::Pending
+    }
+}
+
+pub(crate) fn hosted_ci_not_configured(
+    declared_none: bool,
+    cwd: &Path,
+    candidate_sha: &str,
+) -> bool {
+    hosted_ci_result(
+        declared_none,
+        hosted_workflow_state(cwd),
+        candidate_sha,
+        None,
+        Some(&json!([])),
+    ) == HostedCiResult::NotConfigured
+}
+
 // ── public dispatch entry ─────────────────────────────────────────────────────
 
 /// Internal: run the requested sub-verb, returning (code, stdout, stderr).
@@ -503,7 +1128,8 @@ fn run(args: &[String]) -> (i32, String, String) {
         return (
             2,
             String::new(),
-            "verify-evidence: missing subcommand (event|child-promise|has-nonclaude)\n".to_string(),
+            "verify-evidence: missing subcommand (event|child-promise|has-nonclaude|receipt)\n"
+                .to_string(),
         );
     };
     let rest = &args[1..];
@@ -555,6 +1181,56 @@ fn run(args: &[String]) -> (i32, String, String) {
             let r = resolve_has_nonclaud_agent(Path::new(&rest[0]), settings.as_deref(), &git_bin);
             (r.code, String::new(), r.stderr)
         }
+        "receipt" => {
+            if rest.len() < 2 || !full_sha(&rest[0]) {
+                return (
+                    2,
+                    String::new(),
+                    "verify-evidence receipt: requires full CANDIDATE_SHA CANONICAL_EVENTS [MIRROR_EVENTS...]\n"
+                        .to_string(),
+                );
+            }
+            let Some(common_dir) = git_common_dir(&git_bin) else {
+                let decision = json!({
+                    "satisfied": false,
+                    "mode": Value::Null,
+                    "result": "unavailable",
+                    "receipt": Value::Null,
+                    "coverage": {"complete": false, "lock_error": "git common directory unavailable"},
+                });
+                return (1, format!("{decision}\n"), String::new());
+            };
+            let guard = match VerificationReadLock::acquire(&common_dir) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    let decision = json!({
+                        "satisfied": false,
+                        "mode": Value::Null,
+                        "result": "unavailable",
+                        "receipt": Value::Null,
+                        "coverage": {"complete": false, "lock_error": error},
+                    });
+                    return (1, format!("{decision}\n"), String::new());
+                }
+            };
+            let decision = receipt_decision(&rest[0], &rest[1..]);
+            if let Err(error) = guard.release() {
+                let unavailable = json!({
+                    "satisfied": false,
+                    "mode": Value::Null,
+                    "result": "unavailable",
+                    "receipt": Value::Null,
+                    "coverage": {"complete": false, "lock_error": error},
+                });
+                return (1, format!("{unavailable}\n"), String::new());
+            }
+            let code = if decision["satisfied"] == Value::Bool(true) {
+                0
+            } else {
+                1
+            };
+            (code, format!("{decision}\n"), String::new())
+        }
         other => (
             2,
             String::new(),
@@ -583,6 +1259,7 @@ pub fn run_verify_evidence_capture(args: &[String]) -> (i32, String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn clean_name_strips_quotes_and_spaces() {
@@ -617,5 +1294,485 @@ mod tests {
             Some("codex")
         );
         assert_eq!(parse_provider_cli(cfg, "nonexistent"), None);
+    }
+
+    #[test]
+    fn receipt_validation_rejects_zero_step_full_pass() {
+        let event = json!({
+            "ts": "2026-07-26T01:00:00Z",
+            "type": "verification_receipt",
+            "source": "target",
+            "data": {
+                "candidate_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "command": ["preflight"],
+                "environment": {"host": "h", "platform": "p", "runner": "r"},
+                "scope": ["smoke"],
+                "started_at": "2026-07-26T01:00:00Z",
+                "finished_at": "2026-07-26T01:00:01Z",
+                "mode": "full",
+                "result": "passed",
+                "producer": {"kind": "preflight", "id": "h:1"},
+                "generation": 1,
+                "steps_expected": 0,
+                "steps_executed": 0
+            }
+        });
+        assert!(!valid_receipt(&event));
+    }
+
+    #[test]
+    fn receipt_validation_rejects_excessive_command_arguments() {
+        let mut event = receipt_event(
+            "2026-07-26T01:00:00Z",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "full",
+            "passed",
+        );
+        event["data"]["command"] =
+            Value::Array((0..4097).map(|_| Value::String("x".to_string())).collect());
+        assert!(!valid_receipt(&event));
+    }
+
+    #[test]
+    fn receipt_validation_requires_positive_generation() {
+        let mut event = receipt_event(
+            "2026-07-26T01:00:00Z",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "full",
+            "passed",
+        );
+        event["data"]["generation"] = json!(0);
+        assert!(!valid_receipt(&event));
+        event["data"]["generation"] = json!(9_007_199_254_740_991_u64);
+        assert!(valid_receipt(&event));
+        event["data"]["generation"] = json!(9_007_199_254_740_992_u64);
+        assert!(!valid_receipt(&event));
+    }
+
+    #[test]
+    fn receipt_validation_requires_canonical_calendar_timestamps() {
+        for invalid in [
+            "2026-07-26 01:00:00+00:00",
+            "2023-02-29T00:00:00Z",
+            "2016-12-31T23:59:60Z",
+            "0000-01-01T00:00:00Z",
+        ] {
+            for pointer in ["/ts", "/data/started_at", "/data/finished_at"] {
+                let mut event = receipt_event(
+                    "2026-07-26T01:00:00Z",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "full",
+                    "passed",
+                );
+                *event.pointer_mut(pointer).unwrap() = json!(invalid);
+                assert!(
+                    !valid_receipt(&event),
+                    "{pointer} accepted invalid timestamp {invalid}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn receipt_validation_rejects_oversized_data() {
+        let mut event = receipt_event(
+            "2026-07-26T01:00:00Z",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "full",
+            "passed",
+        );
+        event["data"]["detail"] = Value::String("x".repeat(70_000));
+
+        assert!(!valid_receipt(&event));
+    }
+
+    #[test]
+    fn receipt_validation_counts_compact_ascii_json_bytes() {
+        for (detail, expected) in [
+            ("é".repeat(10_000), true),
+            ("é".repeat(11_000), false),
+            ("\u{7f}".repeat(10_000), true),
+            ("\u{7f}".repeat(11_000), false),
+        ] {
+            let mut event = receipt_event(
+                "2026-07-26T01:00:00Z",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "full",
+                "passed",
+            );
+            event["data"]["detail"] = Value::String(detail);
+
+            assert_eq!(valid_receipt(&event), expected);
+        }
+    }
+
+    #[test]
+    fn receipt_validation_accepts_pre_epoch_utc_timestamps() {
+        for timestamp in ["0001-01-01T00:00:00Z", "1969-12-31T23:59:59.123456Z"] {
+            let mut event = receipt_event(
+                timestamp,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "full",
+                "passed",
+            );
+            event["data"]["started_at"] = json!(timestamp);
+            event["data"]["finished_at"] = json!(timestamp);
+
+            assert!(
+                valid_receipt(&event),
+                "rejected valid pre-epoch timestamp {timestamp}"
+            );
+        }
+    }
+
+    fn receipt_event(ts: &str, candidate_sha: &str, mode: &str, result: &str) -> Value {
+        json!({
+            "ts": ts,
+            "type": "verification_receipt",
+            "source": "target",
+            "data": {
+                "candidate_sha": candidate_sha,
+                "command": ["scripts/ci/preflight.sh", "--force"],
+                "environment": {"host": "h", "platform": "p", "runner": "scripts/ci/preflight.sh"},
+                "scope": [
+                    "smoke",
+                    "rustfmt:fno-agents",
+                    "rustfmt:fno",
+                    "cargo-test:fno-agents",
+                    "cargo-test:fno",
+                    "squads-leak-guard:fno"
+                ],
+                "started_at": "2026-07-26T01:00:00Z",
+                "finished_at": "2026-07-26T01:00:01Z",
+                "mode": mode,
+                "result": result,
+                "producer": {"kind": "preflight", "id": "h:1"},
+                "generation": 1,
+                "steps_expected": 6,
+                "steps_executed": 6
+            }
+        })
+    }
+
+    #[test]
+    fn receipt_decision_dedupes_unordered_journals_and_selects_parsed_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("global.jsonl");
+        let second = dir.path().join("delivery.jsonl");
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let failed = receipt_event("2026-07-26T01:00:00Z", sha, "full", "failed");
+        let mut passed = receipt_event("2026-07-26T03:00:00+00:00", sha, "full", "passed");
+        passed["data"]["generation"] = json!(2);
+        std::fs::write(&first, format!("{passed}\n{failed}\n")).unwrap();
+        std::fs::write(&second, format!("{failed}\n{passed}\n")).unwrap();
+
+        let decision = receipt_decision(
+            &sha.to_ascii_uppercase(),
+            &[first.display().to_string(), second.display().to_string()],
+        );
+
+        assert_eq!(decision["satisfied"], true);
+        assert_eq!(decision["coverage"]["deduped_events"], 2);
+        assert_eq!(decision["receipt"]["ts"], "2026-07-26T03:00:00+00:00");
+    }
+
+    #[test]
+    fn receipt_generation_supersedes_timestamp_after_clock_rollback() {
+        let mut journal = tempfile::NamedTempFile::new().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let passed = receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed");
+        let mut failed = receipt_event("2026-07-26T02:00:00Z", sha, "full", "failed");
+        failed["data"]["generation"] = json!(2);
+        writeln!(journal, "{passed}").unwrap();
+        writeln!(journal, "{failed}").unwrap();
+
+        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
+
+        assert_eq!(decision["satisfied"], false);
+        assert_eq!(decision["result"], "failed");
+        assert_eq!(decision["receipt"]["data"]["generation"], 2);
+    }
+
+    #[test]
+    fn pending_generation_supersedes_older_pass() {
+        let mut journal = tempfile::NamedTempFile::new().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let passed = receipt_event("2026-07-26T01:00:00Z", sha, "full", "passed");
+        let mut pending = receipt_event("2026-07-26T02:00:00Z", sha, "void", "pending");
+        pending["data"]["generation"] = json!(2);
+        pending["data"]["scope"] = json!(["preflight-execution"]);
+        pending["data"]["steps_expected"] = json!(1);
+        pending["data"]["steps_executed"] = json!(0);
+        writeln!(journal, "{passed}").unwrap();
+        writeln!(journal, "{pending}").unwrap();
+
+        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
+
+        assert_eq!(decision["satisfied"], false);
+        assert_eq!(decision["mode"], "void");
+        assert_eq!(decision["result"], "pending");
+    }
+
+    #[test]
+    fn canonical_receipt_ignores_unreadable_optional_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("global.jsonl");
+        let mirror = dir.path().join("delivery.jsonl");
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        std::fs::write(
+            &canonical,
+            format!(
+                "{}\n",
+                receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed")
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir(&mirror).unwrap();
+
+        let decision = receipt_decision(
+            sha,
+            &[
+                canonical.display().to_string(),
+                mirror.display().to_string(),
+            ],
+        );
+
+        assert_eq!(decision["satisfied"], true);
+        assert_eq!(decision["coverage"]["unreadable_paths"], 0);
+        assert_eq!(decision["coverage"]["unavailable_mirrors"], 1);
+    }
+
+    #[test]
+    fn mirror_cannot_originate_satisfaction_without_canonical_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("global.jsonl");
+        let mirror_path = dir.path().join("delivery.jsonl");
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        std::fs::write(&canonical, "").unwrap();
+        std::fs::write(
+            &mirror_path,
+            format!(
+                "{}\n",
+                receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed")
+            ),
+        )
+        .unwrap();
+
+        let decision = receipt_decision(
+            sha,
+            &[
+                canonical.display().to_string(),
+                mirror_path.display().to_string(),
+            ],
+        );
+
+        assert_eq!(decision["satisfied"], false);
+        assert_eq!(decision["result"], "unavailable");
+        assert_eq!(decision["coverage"]["canonical_required"], true);
+    }
+
+    #[test]
+    fn mirror_ahead_cannot_supersede_canonical_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("global.jsonl");
+        let mirror_path = dir.path().join("delivery.jsonl");
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut pending = receipt_event("2026-07-26T02:00:00Z", sha, "void", "pending");
+        pending["data"]["generation"] = json!(5);
+        pending["data"]["scope"] = json!(["preflight-execution"]);
+        pending["data"]["steps_expected"] = json!(1);
+        pending["data"]["steps_executed"] = json!(0);
+        std::fs::write(
+            &canonical,
+            format!(
+                "{}\n{pending}\n",
+                receipt_event("2026-07-26T01:00:00Z", sha, "full", "passed")
+            ),
+        )
+        .unwrap();
+        let mut mirror = receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed");
+        mirror["data"]["generation"] = json!(100.0);
+        std::fs::write(&mirror_path, format!("{mirror}\n")).unwrap();
+
+        let decision = receipt_decision(
+            sha,
+            &[
+                canonical.display().to_string(),
+                mirror_path.display().to_string(),
+            ],
+        );
+
+        assert_eq!(decision["satisfied"], false);
+        assert_eq!(decision["result"], "unavailable");
+        assert_eq!(decision["coverage"]["mirror_ahead"], true);
+    }
+
+    #[test]
+    fn receipt_decision_fails_closed_when_journal_coverage_is_corrupt() {
+        let mut journal = tempfile::NamedTempFile::new().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        writeln!(journal, "not json").unwrap();
+        writeln!(
+            journal,
+            "{}",
+            receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed")
+        )
+        .unwrap();
+
+        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
+
+        assert_eq!(decision["mode"], "full");
+        assert_eq!(decision["result"], "passed");
+        assert_eq!(decision["coverage"]["complete"], false);
+        assert_eq!(decision["satisfied"], false);
+    }
+
+    #[test]
+    fn receipt_decision_rejects_equal_timestamp_conflicts() {
+        let mut journal = tempfile::NamedTempFile::new().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        writeln!(
+            journal,
+            "{}",
+            receipt_event("2026-07-26T03:00:00Z", sha, "full", "failed")
+        )
+        .unwrap();
+        writeln!(
+            journal,
+            "{}",
+            receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed")
+        )
+        .unwrap();
+
+        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
+
+        assert_eq!(decision["satisfied"], false);
+        assert_eq!(decision["result"], "unavailable");
+        assert_eq!(decision["coverage"]["conflicting_latest"], 2);
+    }
+
+    #[test]
+    fn receipt_decision_rejects_future_dated_evidence() {
+        let mut journal = tempfile::NamedTempFile::new().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        writeln!(
+            journal,
+            "{}",
+            receipt_event("2099-01-01T00:00:00Z", sha, "full", "passed")
+        )
+        .unwrap();
+
+        let decision = receipt_decision(sha, &[journal.path().display().to_string()]);
+
+        assert_eq!(decision["satisfied"], false);
+        assert_eq!(decision["coverage"]["malformed_lines"], 1);
+    }
+
+    #[test]
+    fn reader_lock_release_failure_is_reported() {
+        let common = tempfile::tempdir().unwrap();
+        let guard = VerificationReadLock::acquire(common.path()).unwrap();
+        std::fs::write(
+            common.path().join(".preflight.lock.d").join("unexpected"),
+            "x",
+        )
+        .unwrap();
+
+        let error = guard.release().unwrap_err();
+
+        assert!(error.contains("verification lock release failed"));
+    }
+
+    #[test]
+    fn reader_partial_acquisition_cleanup_failure_is_reported() {
+        let common = tempfile::tempdir().unwrap();
+        let lock = common.path().join(".preflight.lock.d");
+        std::fs::create_dir(&lock).unwrap();
+        std::fs::write(lock.join("unexpected"), "x").unwrap();
+
+        let error = VerificationReadLock::cleanup_partial_acquisition(&lock, "holder write failed");
+
+        assert!(error.contains("partial acquisition cleanup failed"));
+    }
+
+    #[test]
+    fn gate_accepts_actual_five_step_scope_without_optional_squads_guard() {
+        let mut event = receipt_event(
+            "2026-07-26T03:00:00Z",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "full",
+            "passed",
+        );
+        event["data"]["scope"].as_array_mut().unwrap().pop();
+        event["data"]["steps_expected"] = json!(5);
+        event["data"]["steps_executed"] = json!(5);
+
+        assert!(valid_receipt(&event));
+        assert!(gate_eligible_receipt(&event));
+    }
+
+    #[test]
+    fn hosted_ci_states_preserve_policy_observation_and_sha_distinctions() {
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let empty = json!([]);
+        let pending = json!([{"status": "IN_PROGRESS", "conclusion": ""}]);
+        let failed = json!([{"status": "COMPLETED", "conclusion": "FAILURE"}]);
+        let passed = json!([{"status": "COMPLETED", "conclusion": "SUCCESS"}]);
+        let malformed = json!(["not-an-object"]);
+        let cases = [
+            (true, WorkflowState::Absent, None, &empty, "not_configured"),
+            (false, WorkflowState::Absent, None, &empty, "pending"),
+            (true, WorkflowState::Present, None, &empty, "pending"),
+            (
+                false,
+                WorkflowState::Unavailable,
+                None,
+                &empty,
+                "unavailable",
+            ),
+            (false, WorkflowState::Present, Some(other), &empty, "stale"),
+            (false, WorkflowState::Present, None, &passed, "unavailable"),
+            (
+                false,
+                WorkflowState::Present,
+                Some(sha),
+                &pending,
+                "pending",
+            ),
+            (false, WorkflowState::Present, Some(sha), &failed, "failed"),
+            (false, WorkflowState::Present, Some(sha), &passed, "passed"),
+            (
+                false,
+                WorkflowState::Present,
+                Some(sha),
+                &malformed,
+                "unavailable",
+            ),
+        ];
+        for (declared, workflow, observed, checks, expected) in cases {
+            assert_eq!(
+                hosted_ci_result(declared, workflow, sha, observed, Some(checks)).as_str(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn hosted_workflow_detection_revokes_declared_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(hosted_ci_not_configured(true, dir.path(), sha));
+        let workflows = dir.path().join(".github/workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("ci.yml"), "name: ci\n").unwrap();
+        assert!(!hosted_ci_not_configured(true, dir.path(), sha));
+        std::fs::remove_dir_all(dir.path().join(".github")).unwrap();
+        std::fs::create_dir(dir.path().join(".github")).unwrap();
+        std::fs::write(&workflows, "not a directory\n").unwrap();
+        assert_eq!(
+            hosted_workflow_state(dir.path()),
+            WorkflowState::Unavailable
+        );
     }
 }

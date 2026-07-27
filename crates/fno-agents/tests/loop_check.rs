@@ -1420,6 +1420,72 @@ exit 1
     assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
 }
 
+/// x-2e20: a hosted workflow revokes declared no-CI before its first check exists.
+#[test]
+fn detected_workflow_revokes_declared_no_ci() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    fs::create_dir_all(cwd.join(".github/workflows")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-new-ci", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+    fs::write(&settings_path, "[ci]\ndeclared_none = true\n").unwrap();
+    fs::write(cwd.join(".github/workflows/ci.yml"), "name: ci\n").unwrap();
+
+    let dir = TempDir::new().unwrap();
+    let gh = make_script(
+        dir.path(),
+        "gh",
+        r#"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if echo "$*" | grep -q "headRefName"; then
+  echo '{"state":"OPEN","number":5,"headRefName":"main","headRefOid":"dddddddddddddddddddddddddddddddddddddddd"}'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then echo '[]'; exit 0; fi
+if echo "$*" | grep -q "pulls/"; then echo '[]'; exit 0; fi
+if echo "$*" | grep -q "reviews"; then
+  echo '{"reviews":[],"comments":[]}'
+  exit 0
+fi
+exit 1
+"#,
+    );
+    let git = make_script(
+        dir.path(),
+        "git",
+        r#"echo "dddddddddddddddddddddddddddddddddddddddd""#,
+    );
+
+    let (_, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings_path.to_str().unwrap(),
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+
+    assert_eq!(d.decision, "block");
+    assert!(d.message.contains("no CI checks found"));
+}
+
 /// AC5-HP (fail-closed): no CI flag + empty checks -> fail closed (block).
 #[test]
 fn ac5_hp_no_ci_flag_fails_closed() {

@@ -11,7 +11,12 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from fno.test_cmd import changed_snapshot, discover_shell_harnesses, select_changed
+from fno.test_cmd import (
+    _STRUCTURAL_STEPS,
+    changed_snapshot,
+    discover_shell_harnesses,
+    select_changed,
+)
 
 
 def _write(path: Path, body: str, *, executable: bool = False) -> None:
@@ -348,3 +353,14 @@ def test_empty_flag_values_are_refused(tmp_path: Path) -> None:
     # Real values still parse.
     opts = _parse_smoke_args(["--changed", "--base", "HEAD~1", "--head", "HEAD"])
     assert opts["changed"] and opts["base"] == "HEAD~1" and opts["head"] == "HEAD"
+
+
+def test_pytest_smoke_caps_auto_workers() -> None:
+    command = next(
+        command
+        for name, _cwd, command in _STRUCTURAL_STEPS
+        if name == "Pytest (unit + integration)"
+    )
+
+    assert "-n auto" in command
+    assert "--maxprocesses=4" in command

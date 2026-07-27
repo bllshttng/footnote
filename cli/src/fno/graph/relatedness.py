@@ -13,7 +13,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import tarfile
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Optional
 
@@ -28,6 +31,7 @@ _STOPWORDS = frozenset({
 })
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}", re.IGNORECASE)
 
 # Below this combined score a pair is dropped as unrelated.
 _MIN_SCORE = 0.15
@@ -39,6 +43,172 @@ _EPIC_BONUS = 0.25
 # real specimen duplicates score 0.568 and 0.447, the epic-sibling noise pair
 # sits at 0.234, and the floor is 0/1558 false positives on the live graph.
 _DEDUP_MIN_SCORE = 0.30
+
+
+def _resolve_main_sha(repo: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--exit-code", "origin", "refs/heads/main"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    fields = result.stdout.strip().split()
+    if (
+        result.returncode != 0
+        or len(fields) != 2
+        or fields[1] != "refs/heads/main"
+        or _FULL_SHA_RE.fullmatch(fields[0]) is None
+    ):
+        return None
+    return fields[0].lower()
+
+
+def _commit_on_main(repo: Path, commit: str, main_sha: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", commit, main_sha],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _run_main_probe(repo: Path, main_sha: str, command: list[str]) -> dict[str, Any] | None:
+    if (
+        not command
+        or len(command) > 128
+        or not all(isinstance(arg, str) and arg and len(arg) <= 4096 for arg in command)
+    ):
+        return None
+    runner = Path(command[0])
+    if runner.is_absolute() or ".." in runner.parts:
+        return None
+    try:
+        archive = subprocess.run(
+            ["git", "archive", "--format=tar", main_sha],
+            cwd=repo,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if archive.returncode != 0:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="fno-closure-") as temp_dir:
+            with tarfile.open(fileobj=BytesIO(archive.stdout), mode="r:") as snapshot:
+                snapshot.extractall(temp_dir, filter="data")
+            snapshot_root = Path(temp_dir).resolve()
+            executable = (snapshot_root / runner).resolve()
+            if (
+                snapshot_root not in executable.parents
+                or not executable.is_file()
+                or not os.access(executable, os.X_OK)
+            ):
+                return None
+            observed = subprocess.run(
+                [str(executable), *command[1:]],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+    except (OSError, subprocess.TimeoutExpired, tarfile.TarError):
+        return None
+    return {
+        "status": "passed" if observed.returncode == 0 else "failed",
+        "exit_code": observed.returncode,
+    }
+
+
+def _commit_names_behavior(repo: Path, commit: str, behavior: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "show", "-s", "--format=%B", commit],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and behavior.casefold() in result.stdout.casefold()
+
+
+def classify_closure(
+    *,
+    behavior: str,
+    repo: Path | None = None,
+    probe_command: list[str] | None = None,
+    merged_commit: str | None = None,
+) -> dict[str, Any]:
+    """Classify pre-design closure without treating carriers as evidence.
+
+    A current-main observation takes precedence over history. Positive and
+    negative probe results both bind the named behavior, command, and full HEAD;
+    every incomplete or unresolved specimen remains ``unknown``.
+    """
+    behavior = behavior.strip()
+    unknown = {
+        "state": "unknown",
+        "behavior": behavior or None,
+        "proof": None,
+    }
+    if not behavior:
+        return unknown
+    if repo is None:
+        return unknown
+    main_sha = _resolve_main_sha(repo)
+    if main_sha is None:
+        return unknown
+
+    if probe_command is not None:
+        observation = _run_main_probe(repo, main_sha, probe_command)
+        if observation is None:
+            return unknown
+        status = observation["status"]
+        return {
+            "state": "already_shipped" if status == "passed" else "live",
+            "behavior": behavior,
+            "proof": {
+                "kind": "current_main_probe",
+                "command": list(probe_command),
+                "head": main_sha,
+                "result": status,
+                "exit_code": observation["exit_code"],
+                "main_head": main_sha,
+            },
+        }
+
+    if merged_commit is not None:
+        if (
+            not isinstance(merged_commit, str)
+            or _FULL_SHA_RE.fullmatch(merged_commit) is None
+            or not _commit_on_main(repo, merged_commit, main_sha)
+            or not _commit_names_behavior(repo, merged_commit, behavior)
+        ):
+            return unknown
+        return {
+            "state": "already_shipped",
+            "behavior": behavior,
+            "proof": {
+                "kind": "merged_commit",
+                "commit": merged_commit.lower(),
+                "observed": behavior,
+                "on_current_main": True,
+                "main_head": main_sha,
+            },
+        }
+
+    return unknown
 
 
 class NoMapError(Exception):

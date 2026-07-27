@@ -167,6 +167,23 @@ def ship(
                 "branch": branch,
             }
 
+    from fno.pr._preflight import check_verification_evidence, local_verification_required
+
+    evidence_required, _policy_reason = local_verification_required(
+        cwd=str(Path.cwd()), base_ref=f"origin/{base_branch}"
+    )
+    if evidence_required:
+        evidence = check_verification_evidence()
+        if not evidence["satisfied"]:
+            return {
+                "action": "error",
+                "error": (
+                    "verification evidence refused ship: "
+                    f"mode={evidence['mode']} result={evidence['result']}"
+                ),
+                "branch": branch,
+            }
+
     if existing_prs:
         # Use existing PR - idempotent
         pr = existing_prs[0]

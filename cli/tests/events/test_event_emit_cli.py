@@ -442,3 +442,26 @@ def test_ac1_fr_invalid_json_in_data_rejected(runner: CliRunner, tmp_path: Path)
     assert result.exit_code != 0
     assert "json" in result.stderr.lower() or "invalid" in result.stderr.lower()
     assert not events.exists() or events.read_text() == ""
+
+
+def test_verification_receipt_is_refused_by_generic_emitter(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit",
+            "--type",
+            "verification_receipt",
+            "--source",
+            "target",
+            "--events",
+            str(tmp_path / "events.jsonl"),
+            "--data",
+            "{}",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "preflight-owned" in result.output
+    assert not (tmp_path / "events.jsonl").exists()

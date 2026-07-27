@@ -18,8 +18,14 @@ Exit-code contract (callers branch on codes, not text):
 """
 from __future__ import annotations
 
+import datetime as dt
+import json
 import os
+import re
+import stat
 import sys
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Mapping, Optional, Tuple
 
 from fno.pr._proc import ToolMissing, run
@@ -32,6 +38,595 @@ BYPASS_VALUE = "stale-acknowledged"
 OK = 0
 REFUSED_STALE = 3
 UNRELATED = 4
+
+
+class VerificationLockReleaseError(RuntimeError):
+    """A reader lock could not be released, so its verdict is unavailable."""
+
+_PREFLIGHT_GATE_SCOPE = frozenset(
+    {
+        "smoke",
+        "rustfmt:fno-agents",
+        "rustfmt:fno",
+        "cargo-test:fno-agents",
+        "cargo-test:fno",
+        "squads-leak-guard:fno",
+    }
+)
+_PREFLIGHT_BASE_SCOPE = _PREFLIGHT_GATE_SCOPE - {"squads-leak-guard:fno"}
+def _event_timestamp(value: object) -> Optional[dt.datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def hosted_ci_decision(
+    *,
+    declared_none: bool,
+    workflow_state: str,
+    candidate_sha: str,
+    observed_sha: Optional[str],
+    checks: Optional[list[dict]],
+) -> dict:
+    """Reduce hosted-CI policy and observations without collapsing uncertainty."""
+    counts = {"total": 0, "passed": 0, "failed": 0, "pending": 0}
+    base = {
+        "declared_none": declared_none,
+        "workflow_state": workflow_state,
+        "counts": counts,
+    }
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha, re.IGNORECASE) is None:
+        return {**base, "satisfied": False, "result": "unavailable"}
+    if workflow_state not in {"present", "absent", "unavailable"}:
+        return {**base, "satisfied": False, "result": "unavailable"}
+    if workflow_state == "unavailable" or checks is None:
+        return {**base, "satisfied": False, "result": "unavailable"}
+    if checks and observed_sha is None:
+        return {**base, "satisfied": False, "result": "unavailable"}
+    if observed_sha is not None:
+        if re.fullmatch(r"[0-9a-f]{40}", observed_sha, re.IGNORECASE) is None:
+            return {**base, "satisfied": False, "result": "unavailable"}
+        if observed_sha.lower() != candidate_sha.lower():
+            return {**base, "satisfied": False, "result": "stale"}
+    for check in checks:
+        if not isinstance(check, dict):
+            return {**base, "satisfied": False, "result": "unavailable"}
+        counts["total"] += 1
+        bucket = str(check.get("bucket") or "").lower()
+        status = str(check.get("status") or "").upper()
+        conclusion = str(check.get("conclusion") or check.get("state") or "").upper()
+        if bucket in {"fail", "cancel"} or conclusion in {
+            "FAILURE",
+            "TIMED_OUT",
+            "CANCELLED",
+            "ACTION_REQUIRED",
+            "STARTUP_FAILURE",
+            "STALE",
+            "ERROR",
+        }:
+            counts["failed"] += 1
+        elif (
+            bucket in {"pass", "skipping"}
+            or (status in {"", "COMPLETED"} and conclusion in {"SUCCESS", "NEUTRAL", "SKIPPED"})
+        ):
+            counts["passed"] += 1
+        else:
+            counts["pending"] += 1
+    if counts["failed"]:
+        return {**base, "satisfied": False, "result": "failed"}
+    if counts["pending"]:
+        return {**base, "satisfied": False, "result": "pending"}
+    if counts["total"]:
+        return {**base, "satisfied": True, "result": "passed"}
+    if declared_none and workflow_state == "absent":
+        return {**base, "satisfied": True, "result": "not_configured"}
+    return {**base, "satisfied": False, "result": "pending"}
+
+
+def hosted_workflow_state(cwd: Path) -> str:
+    """Return present, absent, or unavailable for hosted workflow discovery."""
+    workflows = cwd / ".github" / "workflows"
+    try:
+        workflows.stat()
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "unavailable"
+    try:
+        if not workflows.is_dir():
+            return "unavailable"
+        for child in workflows.iterdir():
+            if child.suffix.lower() not in {".yml", ".yaml"}:
+                continue
+            try:
+                if stat.S_ISREG(child.stat().st_mode):
+                    return "present"
+            except OSError:
+                return "unavailable"
+        return "absent"
+    except FileNotFoundError:
+        return "unavailable"
+    except OSError:
+        return "unavailable"
+
+
+def _verification_decision_all(candidate_sha: str, event_paths: list[Path]) -> dict:
+    """Select the newest valid receipt across deduped, unordered journals."""
+    from fno.events import ValidationError, validate
+
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha, re.IGNORECASE) is None:
+        raise ValueError("candidate_sha must be a full 40-hex commit")
+    seen_paths: set[str] = set()
+    seen_events: set[str] = set()
+    receipts: list[tuple[dt.datetime, str, dict]] = []
+    malformed = 0
+    unreadable = 0
+    for raw_path in event_paths:
+        path = Path(raw_path).expanduser()
+        try:
+            path_key = str(path.resolve())
+        except OSError:
+            path_key = os.path.abspath(path)
+        if path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            unreadable += 1
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                malformed += 1
+                continue
+            if not isinstance(event, dict) or event.get("type") != "verification_receipt":
+                continue
+            try:
+                validate(event)
+            except ValidationError:
+                malformed += 1
+                continue
+            parsed_ts = _event_timestamp(event.get("ts"))
+            if parsed_ts is None or parsed_ts > dt.datetime.now(dt.timezone.utc):
+                malformed += 1
+                continue
+            signature = json.dumps(event, sort_keys=True, separators=(",", ":"))
+            if signature in seen_events:
+                continue
+            seen_events.add(signature)
+            receipts.append((parsed_ts, signature, event))
+    coverage = {
+        "complete": malformed == 0 and unreadable == 0,
+        "malformed_lines": malformed,
+        "unreadable_paths": unreadable,
+        "deduped_events": len(receipts),
+    }
+    receipts.sort(key=lambda item: (item[0], item[1]))
+    exact = [item for item in receipts if item[2]["data"]["candidate_sha"].lower() == candidate_sha.lower()]
+    if exact:
+        newest_generation = max(item[2]["data"]["generation"] for item in exact)
+        newest = [
+            item
+            for item in exact
+            if item[2]["data"]["generation"] == newest_generation
+        ]
+        if len(newest) != 1:
+            coverage["complete"] = False
+            coverage["conflicting_latest"] = len(newest)
+            return {
+                "satisfied": False,
+                "mode": None,
+                "result": "unavailable",
+                "receipt": None,
+                "coverage": coverage,
+            }
+        event = newest[0][2]
+        data = event["data"]
+        command = data["command"]
+        environment = data["environment"]
+        producer = data["producer"]
+        command_path = Path(command[0]).as_posix()
+        trusted_producer = (
+            event["source"] == "target"
+            and producer["kind"] == "preflight"
+            and producer["id"].startswith(f"{environment['host']}:")
+            and environment["runner"] == "scripts/ci/preflight.sh"
+            and (
+                command_path == "scripts/ci/preflight.sh"
+                or command_path.endswith("/scripts/ci/preflight.sh")
+            )
+            and frozenset(data["scope"]) in {_PREFLIGHT_BASE_SCOPE, _PREFLIGHT_GATE_SCOPE}
+            and len(data["scope"]) == len(frozenset(data["scope"]))
+        )
+        return {
+            "satisfied": (
+                coverage["complete"]
+                and trusted_producer
+                and data["mode"] == "full"
+                and data["result"] == "passed"
+            ),
+            "mode": data["mode"],
+            "result": data["result"],
+            "receipt": event,
+            "coverage": coverage,
+        }
+    if receipts:
+        event = receipts[-1][2]
+        return {
+            "satisfied": False,
+            "mode": event["data"]["mode"],
+            "result": "stale",
+            "receipt": event,
+            "coverage": coverage,
+        }
+    return {
+        "satisfied": False,
+        "mode": None,
+        "result": "unavailable",
+        "receipt": None,
+        "coverage": coverage,
+    }
+
+
+def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
+    """Require the first journal to originate exact-candidate authority."""
+    if not event_paths:
+        return _verification_decision_all(candidate_sha, event_paths)
+    canonical = _verification_decision_all(candidate_sha, event_paths[:1])
+    if canonical["coverage"].get("conflicting_latest"):
+        return canonical
+    receipt = canonical.get("receipt")
+    receipt_data = receipt.get("data") if isinstance(receipt, dict) else None
+    receipt_sha = (
+        receipt_data.get("candidate_sha")
+        if isinstance(receipt_data, dict)
+        else None
+    )
+    canonical_generation = (
+        receipt_data.get("generation")
+        if isinstance(receipt_data, dict)
+        else None
+    )
+    if not (
+        isinstance(receipt_sha, str)
+        and receipt_sha.lower() == candidate_sha.lower()
+        and isinstance(canonical_generation, (int, float))
+        and not isinstance(canonical_generation, bool)
+    ):
+        canonical["coverage"]["canonical_required"] = True
+        canonical["satisfied"] = False
+        return canonical
+
+    readable = [event_paths[0]]
+    unavailable_mirrors = 0
+    for path in event_paths[1:]:
+        try:
+            Path(path).expanduser().read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError):
+            unavailable_mirrors += 1
+            continue
+        readable.append(path)
+    combined = _verification_decision_all(candidate_sha, readable)
+    combined_receipt = combined.get("receipt")
+    combined_generation = (
+        combined_receipt.get("data", {}).get("generation")
+        if isinstance(combined_receipt, dict)
+        else None
+    )
+    if combined["coverage"].get("conflicting_latest") or (
+        isinstance(combined_generation, (int, float))
+        and not isinstance(combined_generation, bool)
+        and combined_generation > canonical_generation
+    ):
+        combined["satisfied"] = False
+        combined["mode"] = None
+        combined["result"] = "unavailable"
+        combined["receipt"] = None
+        combined["coverage"]["mirror_ahead"] = True
+        if unavailable_mirrors:
+            combined["coverage"]["unavailable_mirrors"] = unavailable_mirrors
+        return combined
+    canonical["coverage"] = combined["coverage"]
+    if not combined["coverage"]["complete"]:
+        canonical["satisfied"] = False
+    if unavailable_mirrors:
+        canonical["coverage"]["unavailable_mirrors"] = unavailable_mirrors
+    return canonical
+
+
+def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], list[str]]:
+    """Return event journals plus discovery errors that make coverage uncertain."""
+    from fno.paths import global_events_json, ledger_json
+
+    repo = Path(cwd or os.getcwd()).resolve()
+    errors: list[str] = []
+    try:
+        discovered = _git(["rev-parse", "--show-toplevel"], str(repo))
+        root = Path(discovered.stdout.strip()).resolve() if discovered.returncode == 0 else repo
+    except (OSError, ValueError) as exc:
+        root = repo
+        errors.append(f"repository root discovery failed: {exc}")
+    paths = [global_events_json(), root / ".fno" / "events.jsonl"]
+    try:
+        raw = json.loads(ledger_json().read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            rows = raw
+        elif isinstance(raw, dict) and isinstance(raw.get("entries"), list):
+            rows = raw["entries"]
+        else:
+            raise ValueError("ledger must be a list or an object with an entries list")
+        if not all(isinstance(row, dict) for row in rows):
+            raise ValueError("ledger entries must be objects")
+        for row in rows:
+            normalized_roots: dict[str, Path] = {}
+            for field in ("root_path", "canonical_root_path"):
+                value = row.get(field)
+                if value is not None and (
+                    not isinstance(value, str) or not value.strip()
+                ):
+                    raise ValueError(f"ledger {field} must be a non-empty string or null")
+                if value is not None:
+                    try:
+                        normalized = Path(value).expanduser()
+                        if not normalized.is_absolute():
+                            raise ValueError("path must be absolute")
+                        normalized_roots[field] = normalized.resolve(strict=False)
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        raise ValueError(f"ledger {field} is invalid: {exc}") from exc
+            delivery_root = normalized_roots.get("root_path")
+            if delivery_root is not None:
+                paths.append(delivery_root / ".fno" / "events.jsonl")
+            canonical = normalized_roots.get("canonical_root_path")
+            if canonical is not None:
+                salvage = canonical / ".fno" / "salvage"
+                try:
+                    entries = list(os.scandir(salvage))
+                except FileNotFoundError:
+                    entries = []
+                except OSError as exc:
+                    raise ValueError(
+                        f"salvage journal discovery failed for {salvage}: {exc}"
+                    ) from exc
+                for entry in sorted(entries, key=lambda item: item.name):
+                    try:
+                        if not entry.is_dir():
+                            continue
+                        journal = Path(entry.path) / "events.jsonl"
+                        journal.stat()
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        raise ValueError(
+                            f"salvage journal discovery failed for {journal}: {exc}"
+                        ) from exc
+                    paths.append(journal)
+    except FileNotFoundError:
+        pass
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        errors.append(f"delivery journal discovery failed: {exc}")
+    return paths, errors
+
+
+def next_verification_generation(*, cwd: str, candidate_sha: str) -> int:
+    """Return one above every discovered valid exact-SHA receipt generation."""
+    from fno.events import MAX_SAFE_EVENT_INTEGER, ValidationError, validate
+
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha, re.IGNORECASE) is None:
+        raise ValueError("candidate_sha must be a full 40-hex commit")
+    paths, errors = verification_event_paths(cwd=cwd)
+    if errors:
+        raise ValueError("; ".join(errors))
+    def highest_generation(
+        scan_paths: list[Path], *, skip_unreadable: bool = False
+    ) -> tuple[int, bool]:
+        seen_paths: set[str] = set()
+        highest = 0
+        found = False
+        for raw_path in scan_paths:
+            path = Path(raw_path).expanduser()
+            try:
+                key = str(path.resolve())
+            except OSError:
+                key = os.path.abspath(path)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except FileNotFoundError:
+                continue
+            except (OSError, UnicodeError) as exc:
+                if skip_unreadable:
+                    continue
+                raise ValueError(f"receipt journal unreadable: {path}: {exc}") from exc
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"receipt journal malformed: {path}: {exc}") from exc
+                if not isinstance(event, dict) or event.get("type") != "verification_receipt":
+                    continue
+                data = event.get("data")
+                if not isinstance(data, dict):
+                    raise ValueError(f"receipt journal malformed: {path}: data must be an object")
+                raw_candidate = data.get("candidate_sha")
+                if not isinstance(raw_candidate, str):
+                    raise ValueError(f"receipt journal malformed: {path}: candidate SHA missing")
+                if raw_candidate.lower() != candidate_sha.lower():
+                    continue
+                try:
+                    validate(event)
+                except ValidationError as exc:
+                    raise ValueError(f"receipt journal malformed: {path}: {exc}") from exc
+                found = True
+                highest = max(highest, int(event["data"]["generation"]))
+        return highest, found
+
+    highest, found = highest_generation(paths[:1])
+    if found:
+        discovered_highest, _ = highest_generation(paths, skip_unreadable=True)
+        if discovered_highest > highest:
+            raise ValueError("mirror generation exceeds canonical authority")
+    else:
+        highest, _ = highest_generation(paths)
+    if highest >= MAX_SAFE_EVENT_INTEGER:
+        raise ValueError("receipt generation exhausted")
+    return highest + 1
+
+
+def check_verification_evidence(
+    *,
+    cwd: Optional[str] = None,
+    candidate_sha: Optional[str] = None,
+    event_paths: Optional[list[Path]] = None,
+) -> dict:
+    repo = cwd or os.getcwd()
+    if candidate_sha is None:
+        result = _git(["rev-parse", "HEAD"], repo)
+        candidate_sha = result.stdout.strip() if result.returncode == 0 else ""
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_sha, re.IGNORECASE) is None:
+        return {
+            "satisfied": False,
+            "mode": None,
+            "result": "unavailable",
+            "receipt": None,
+            "coverage": {"complete": False, "error": "candidate SHA unavailable"},
+        }
+    try:
+        with _verification_read_lock(repo) as lock_error:
+            if lock_error is not None:
+                return {
+                    "satisfied": False,
+                    "mode": None,
+                    "result": "unavailable",
+                    "receipt": None,
+                    "coverage": {"complete": False, "lock_error": lock_error},
+                }
+            discovery_errors: list[str] = []
+            if event_paths is None:
+                event_paths, discovery_errors = verification_event_paths(cwd=repo)
+            decision = verification_decision(candidate_sha, event_paths)
+            if discovery_errors:
+                decision["coverage"]["complete"] = False
+                decision["coverage"]["discovery_errors"] = discovery_errors
+                decision["satisfied"] = False
+    except VerificationLockReleaseError as exc:
+        return {
+            "satisfied": False,
+            "mode": None,
+            "result": "unavailable",
+            "receipt": None,
+            "coverage": {"complete": False, "lock_error": str(exc)},
+        }
+    return decision
+
+
+def local_verification_required(
+    *, cwd: str, base_ref: str = "origin/main", env: Optional[Mapping[str, str]] = None
+) -> tuple[bool, str]:
+    environment = os.environ if env is None else env
+    root = Path(cwd).resolve()
+    if environment.get("FNO_SKIP_PREFLIGHT") == "1":
+        return False, "explicit-skip"
+    runner = root / "scripts" / "ci" / "preflight.sh"
+    base_runner = _git(
+        ["ls-tree", base_ref, "--", "scripts/ci/preflight.sh"], str(root)
+    )
+    if base_runner.returncode != 0:
+        return True, "base-policy-unavailable"
+    base_configured = bool(base_runner.stdout.strip())
+    candidate_configured = runner.is_file() and os.access(runner, os.X_OK)
+    if base_configured and not candidate_configured:
+        return True, "runner-removed"
+    if not candidate_configured:
+        return False, "runner-not-configured"
+    changed = _git(["diff", "--name-only", f"{base_ref}...HEAD"], str(root))
+    if changed.returncode != 0:
+        return True, "diff-unavailable"
+    non_docs = [
+        path
+        for path in changed.stdout.splitlines()
+        if path and not path.startswith(("docs/", "internal/"))
+    ]
+    return (True, "required") if non_docs else (False, "docs-only")
+
+
+def _git_common_dir(repo: str) -> Optional[Path]:
+    result = _git(["rev-parse", "--path-format=absolute", "--git-common-dir"], repo)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return Path(result.stdout.strip()).resolve()
+
+
+@contextmanager
+def _verification_read_lock(repo: str):
+    common = _git_common_dir(repo)
+    if common is None:
+        yield "git common directory unavailable"
+        return
+    lock = common / ".preflight.lock.d"
+    stamp = f"pid={os.getpid()} kind=evidence-reader"
+    try:
+        lock.mkdir()
+        (lock / "holder").write_text(stamp + "\n", encoding="utf-8")
+    except FileExistsError:
+        yield "preflight transition in progress"
+        return
+    except OSError as exc:
+        cleanup_errors: list[str] = []
+        try:
+            (lock / "holder").unlink(missing_ok=True)
+        except OSError as cleanup_exc:
+            cleanup_errors.append(str(cleanup_exc))
+        try:
+            lock.rmdir()
+        except OSError as cleanup_exc:
+            cleanup_errors.append(str(cleanup_exc))
+        detail = f"verification lock unavailable: {exc}"
+        if cleanup_errors:
+            detail += f"; partial acquisition cleanup failed: {'; '.join(cleanup_errors)}"
+        yield detail
+        return
+    try:
+        yield None
+    finally:
+        try:
+            observed = (lock / "holder").read_text(encoding="utf-8").strip()
+            if observed != stamp:
+                raise VerificationLockReleaseError(
+                    f"verification lock ownership changed: {lock}"
+                )
+            (lock / "holder").unlink()
+            lock.rmdir()
+        except VerificationLockReleaseError:
+            raise
+        except OSError as exc:
+            raise VerificationLockReleaseError(
+                f"verification lock release failed: {lock}: {exc}"
+            ) from exc
+
+
+def run_evidence_check(*, cwd: Optional[str] = None) -> int:
+    decision = check_verification_evidence(cwd=cwd)
+    print(json.dumps(decision, separators=(",", ":")))
+    return 0 if decision["satisfied"] else 1
 
 
 def _git(args, cwd: str):

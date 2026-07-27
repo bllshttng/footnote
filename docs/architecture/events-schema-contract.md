@@ -1,3 +1,9 @@
+---
+created: 2026-06-18T11:54
+updated: 2026-07-26T10:55
+status: approved
+---
+
 # Events Schema Contract
 
 How `events.jsonl` rows are produced, validated, and consumed across footnote.
@@ -179,6 +185,50 @@ the operator's signal of substrate degradation.
   `cli/tests/integration/test_verify_child_promise.py::test_diagnostic_symmetry`
   pins the vocabulary so future refactors cannot drift the two apart.
 
+### `verification_receipt`
+
+A verification receipt is the append-only, schema-owned record of what was actually executed against one candidate commit.
+It binds a full 40-hex `candidate_sha`, the exact command argument vector, host/platform/runner environment, named scope, start and finish timestamps, evidence mode, result, producer identity, a positive journal-derived per-candidate generation, and expected versus executed step counts.
+The command, scope, payload, and string sizes are bounded before the receipt can enter a journal.
+
+Modes and results remain orthogonal and explicit:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `mode` | `full`, `subset`, `void`, `advisory` | The coverage class that was attempted. |
+| `result` | `not_configured`, `unavailable`, `pending`, `failed`, `passed`, `stale` | The observed outcome without collapsing absence or uncertainty into success. |
+
+A full passed receipt is structurally valid only when the scope is non-empty, `steps_expected` equals the number of named scope items, and every expected step executed.
+A void receipt can never be passed.
+Explicit false, absent, pending, unavailable, stale, and advisory observations are therefore not interchangeable, and unknown evidence fails closed.
+
+Python validation in `fno.events`, Bash validation in `scripts/lib/events-validate.sh`, and Rust validation in `fno-agents verify-evidence receipt` enforce the same receipt vocabulary and invariants.
+The Rust reducer takes the canonical journal first and any diagnostic mirror journals afterward.
+The parity corpus includes fractional UTC timestamps and bounded-command failures so wire-compatible RFC3339 values and size limits do not drift between implementations.
+
+`scripts/ci/preflight.sh` remains the authority for actual local execution and constructs, schema-validates, and appends each receipt inside the process that holds the shared preflight lock for the exact candidate SHA.
+It commits the canonical event to the global journal first and mirrors the same event best-effort to the delivery-root journal, so unregistered worktrees and independent local clones share one durable generation floor without a split-brain second commit point.
+The canonical journal is pinned beside the cross-project ledger, so a supported relative `state_dir` cannot fork it by checkout.
+No CLI accepts caller-authored trusted receipt fields, and the generic event emitter refuses `verification_receipt`.
+Its required deterministic scope is `smoke`, both Rust format checks, and both Rust test suites; the squads leak guard joins the full scope only when squads exist to measure, while a not-configured guard is recorded separately as advisory evidence.
+The two cargo-audit scopes are also separate advisory evidence, and every receipt counts only steps that actually executed.
+Setup failures emit a zero-executed void/unavailable receipt instead of manufacturing a verdict.
+The preflight attestation is only a cache carrier and never substitutes for the event receipt.
+
+Ship-gate consumers accept only the newest exact-SHA full/passed receipt from the trusted preflight producer with the canonical command, runner, host-bound producer identity, and complete deterministic scope.
+Before every append, preflight derives the next generation as one above the highest exact-SHA generation across readable project, global, delivery-root, and salvage journals.
+Until the canonical journal contains exact-SHA evidence, malformed or unreadable discovery blocks the append; afterward, an unavailable best-effort mirror cannot overrule the canonical floor, while every readable mirror remains part of deduplication and conflict detection.
+Mirrors never originate satisfaction or supersede canonical evidence; a missing exact-SHA canonical receipt is unavailable, and a readable mirror ahead of the canonical generation is explicit drift that fails closed.
+Reducers expose skipped carrier failures as `coverage.unavailable_mirrors` instead of conflating them with an absent journal or a complete canonical failure.
+This makes lost local state safe across clones, while simultaneous cross-clone allocation creates an explicit same-generation conflict rather than an arbitrary winner.
+Journals may be concatenated in any order, so consumers parse RFC3339 timestamps, deduplicate canonical event objects, and select the highest exact-candidate generation.
+Timestamps retain at most six fractional digits and remain observational metadata; future-dated receipts and distinct receipts tied for the highest generation are unavailable rather than arbitrarily ordered.
+Starting a new preflight holds a pinned cross-checkout lock for the exact candidate and appends a canonical pending receipt before execution, so concurrent clones cannot create unmatched transitions and a failed final append or interrupted run leaves every checkout on the same non-passing generation without a mutable revocation authority.
+Ship-gate readers take the repository lock while reducing journals, and the append-only pending-to-final transition keeps the receipt journal as the sole verdict authority.
+Malformed canonical rows, unreadable canonical journals, malformed readable mirrors, or errors while discovering delivery journals mark coverage incomplete and prevent satisfaction even when another journal contains a plausible pass.
+An older valid receipt for a different SHA is reported as stale rather than absent.
+Local ship paths apply one shared requirement policy: explicit skip, documentation-only changes, and repositories without a configured preflight runner remain distinct exemptions; every other candidate must present trusted receipt evidence.
+
 ### `mission_started` / `wave_advanced` / `mission_complete`
 
 Megatron lifecycle events. Emitted automatically from
@@ -252,8 +302,9 @@ Both validators load the same YAML manifest and enforce the same
 shape. Run them against the parity corpus on every PR:
 
 ```bash
-pytest cli/tests/events/test_validator_parity.py -v
+fno test cli/tests/events/test_validator_parity.py
 bash tests/events/test-bash-validator.sh
+cargo test --manifest-path crates/fno-agents/Cargo.toml verify_evidence::tests --lib
 ```
 
 Either side drifting fails the parity test with a side-by-side
