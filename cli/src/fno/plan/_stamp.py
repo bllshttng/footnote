@@ -50,6 +50,10 @@ from fno.plan.locking import plan_doc_lock
 
 _FRONT_RE = re.compile(r"^---\n(.*?)\n---(?:\n|$)", re.DOTALL)
 _INLINE_LIST_RE = re.compile(r"^\[(?P<body>.*)\]$")
+# Resolve the escapes `_serialize_item` emits inside a double-quoted item.
+_DQ_ESCAPE_RE = re.compile(r'\\(["\\])')
+# An inline item carrying either of these cannot be written bare.
+_NEEDS_QUOTE_RE = re.compile(r'[,"]')
 
 
 class RawBlock:
@@ -87,13 +91,52 @@ def _valid_count(value: Any) -> bool:
 
 
 def _parse_scalar(raw: str) -> str:
-    """Strip surrounding quotes (single or double) from a scalar value."""
+    """Strip surrounding quotes (single or double) from a scalar value.
+
+    A double-quoted value also has its `\\"` / `\\\\` escapes resolved, which is
+    what `_serialize_item` emits. Other backslash sequences are left verbatim -
+    this reader stores every scalar raw and is not a full YAML unescaper.
+    """
     raw = raw.strip()
-    if (raw.startswith('"') and raw.endswith('"')) or (
-        raw.startswith("'") and raw.endswith("'")
-    ):
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        return _DQ_ESCAPE_RE.sub(r"\1", raw[1:-1])
+    if len(raw) >= 2 and raw[0] == "'" and raw[-1] == "'":
         return raw[1:-1]
     return raw
+
+
+def _split_inline_items(body: str) -> list[str]:
+    """Split an inline-list body on commas that sit outside a double-quoted item.
+
+    Double quotes only. A bare apostrophe is ordinary text in a plan doc
+    (`don't`), so treating `'` as an opening quote here would swallow the rest
+    of the list; `_parse_scalar` still strips a surrounding single-quote pair
+    per item, exactly as before. `_serialize_item` only ever emits double
+    quotes, so everything this module writes reads back through this path.
+
+    An unterminated quote yields one long item rather than raising: a malformed
+    doc must degrade, because `project_node_to_plan` never raises.
+    """
+    items: list[str] = []
+    buf: list[str] = []
+    in_quote = False
+    escaped = False
+    for ch in body:
+        if escaped:
+            escaped = False
+        elif in_quote and ch == "\\":
+            escaped = True
+        elif in_quote:
+            in_quote = ch != '"'
+        elif ch == '"':
+            in_quote = True
+        elif ch == ",":
+            items.append("".join(buf))
+            buf = []
+            continue
+        buf.append(ch)
+    items.append("".join(buf))
+    return items
 
 
 def _parse_inline_list(raw: str) -> list[str]:
@@ -106,18 +149,31 @@ def _parse_inline_list(raw: str) -> list[str]:
     if not body:
         return []
     items = []
-    for item in body.split(","):
+    for item in _split_inline_items(body):
         item = item.strip()
         if item:
             items.append(_parse_scalar(item))
     return items
 
 
+def _serialize_item(item: str) -> str:
+    """Emit a list item, quoting it when the inline form would be ambiguous.
+
+    Quote-on-write is half of the round-trip; a quote-aware reader alone still
+    loses an unquoted comma item on the next read. A comma would split the
+    item, a quote character would open a run that swallows its neighbours, and
+    surrounding whitespace is eaten by the reader's `.strip()`.
+    """
+    if item and item == item.strip() and not _NEEDS_QUOTE_RE.search(item):
+        return item
+    return '"' + item.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def _serialize_inline_list(items: list[str]) -> str:
     """Serialize a list back to inline YAML format: [item1, item2]."""
     if not items:
         return "[]"
-    formatted = ", ".join(items)
+    formatted = ", ".join(_serialize_item(i) for i in items)
     return f"[{formatted}]"
 
 
