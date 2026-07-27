@@ -1229,8 +1229,13 @@ def _write_settings_combo_test(
     active_combo: str | None = None,
     combos: dict | None = None,
     agents: dict | None = None,
+    block_key: str = "providers",
 ):
-    """Helper: write a settings.yaml with three providers + optional combos/agents."""
+    """Helper: write a settings.yaml with three accounts + optional combos/agents.
+
+    ``block_key`` defaults to the pre-rename ``providers`` so the existing cases
+    keep exercising the back-compat path; pass ``accounts`` for the canonical one.
+    """
     import yaml
     settings = tmp_path / ".fno" / "settings.yaml"
     settings.parent.mkdir(parents=True, exist_ok=True)
@@ -1246,7 +1251,7 @@ def _write_settings_combo_test(
         providers_block["active_combo"] = active_combo
     if combos:
         providers_block["combos"] = combos
-    payload: dict = {"config": {"providers": providers_block}}
+    payload: dict = {"config": {block_key: providers_block}}
     if agents:
         payload["config"]["agents"] = agents
     settings.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
@@ -1316,6 +1321,23 @@ class TestResolveDispatchTargetPrecedence:
             repo_root=tmp_path,
             env={},
         )
+        assert target.combo_name == "my-stack"
+        assert target.source == "settings_combo"
+
+    def test_settings_active_combo_read_from_canonical_accounts_block(self, tmp_path: Path):
+        """The same case under `config.accounts`. This is a bootstrap reader that
+        never reaches the providers loader, and a miss returns active_combo=None,
+        which silently degrades routing instead of erroring - so both spellings
+        need a test rather than one standing in for the other."""
+        from fno.sigma_dispatch import resolve_dispatch_target
+
+        _write_settings_combo_test(
+            tmp_path,
+            active_combo="my-stack",
+            combos={"my-stack": {"providers": ["a", "b"]}},
+            block_key="accounts",
+        )
+        target = resolve_dispatch_target("any-agent", repo_root=tmp_path, env={})
         assert target.combo_name == "my-stack"
         assert target.source == "settings_combo"
 
