@@ -13,7 +13,7 @@ import pytest
 
 from fno.config import AutoMergeBlock
 from fno.pr import _merge
-from fno.pr._proc import Result
+from fno.pr._proc import Result, ToolMissing
 
 
 class FakeRun:
@@ -469,12 +469,28 @@ def test_merge_lock_released_when_merge_body_raises(enabled, monkeypatch, tmp_pa
 # ---------------------------------------------------------------------------
 
 
+def _rollup(*conclusions, head="deadbeefcafe"):
+    return {
+        "state": "OPEN",
+        "headRefOid": head,
+        "statusCheckRollup": [
+            {"name": f"c{i}", "status": "COMPLETED", "conclusion": c}
+            for i, c in enumerate(conclusions)
+        ],
+    }
+
+
 class _AutoMergeRejectingRun(FakeRun):
     """gh rejects ``--auto`` (repo feature off) but accepts a plain merge."""
 
-    def __init__(self, **kw):
+    def __init__(self, *, rollup=None, head_moved=False, live_head="pushed9999", **kw):
         super().__init__(**kw)
         self.merge_cmds: list[list[str]] = []
+        self.rollup = rollup if rollup is not None else _rollup("SUCCESS", "SUCCESS")
+        self.head_moved = head_moved
+        # The head as it exists server-side at merge time. head_moved=True means
+        # someone pushed after the rollup read, so this differs from the rollup's.
+        self.live_head = live_head
 
     def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
         cmd = list(cmd)
@@ -487,28 +503,47 @@ class _AutoMergeRejectingRun(FakeRun):
                     "GraphQL: Auto merge is not allowed for this repository "
                     "(enablePullRequestAutoMerge)",
                 )
+            if self.head_moved:
+                # Model gh's ACTUAL behaviour, so the test discriminates: the
+                # refusal happens only because a pin was sent and no longer
+                # matches. An unpinned merge succeeds - which is exactly the
+                # bug, so deleting the pin must turn this test red.
+                if "--match-head-commit" not in cmd:
+                    return Result(0, "Merged pull request #42", "")
+                sent = cmd[cmd.index("--match-head-commit") + 1]
+                if sent != self.live_head:
+                    return Result(
+                        1,
+                        "",
+                        "Head branch was modified. Review and try the merge again.",
+                    )
             return Result(0, "Merged pull request #42", "")
+        if cmd[:3] == ["gh", "pr", "view"] and any("statusCheckRollup" in a for a in cmd):
+            return Result(0, json.dumps(self.rollup) + "\n", "")
         return super().__call__(
             cmd, cwd=cwd, env=env, input_text=input_text, timeout=timeout
         )
 
 
-def test_auto_merge_unsupported_repo_falls_back_to_an_immediate_merge(
-    enabled, monkeypatch, capsys, tmp_path
-):
-    """``--auto`` is a request to QUEUE; a repo without the feature rejects it.
-
-    ``require_checks_pass`` means "do not merge red", and the preflight already
-    verified the checks - so losing the queue is not a reason to refuse. Without
-    this fallback the verb cannot merge at all on such a repo, and the raw gh
-    escape hatch is hook-blocked by design, leaving no path.
-    """
-    (tmp_path / ".fno").mkdir()
+def _checks_enabled(monkeypatch):
     monkeypatch.setattr(
         _merge,
         "_load_auto_merge",
         lambda: AutoMergeBlock(enabled=True, require_checks_pass=True),
     )
+
+
+def test_auto_merge_unsupported_repo_merges_when_checks_are_green(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """``--auto`` is a request to QUEUE; a repo without the feature rejects it.
+
+    The retry is only safe because the checks are read here first - ``--auto``
+    is the ONLY thing enforcing require_checks_pass, so dropping it blind would
+    turn "do not merge red" into "merge anything".
+    """
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
     fake = _AutoMergeRejectingRun(toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
 
@@ -517,26 +552,307 @@ def test_auto_merge_unsupported_repo_falls_back_to_an_immediate_merge(
     assert obj["outcome"] == "merged"
     assert "auto-merge disabled" in obj["reason"]
 
-    # Exactly two attempts: the queueing one, then the immediate retry.
     assert len(fake.merge_cmds) == 2
     assert "--auto" in fake.merge_cmds[0]
     assert "--auto" not in fake.merge_cmds[1]
-    # The retry keeps every other flag (strategy, delete-branch).
-    assert fake.merge_cmds[1] == [c for c in fake.merge_cmds[0] if c != "--auto"]
+
+
+def test_the_retry_pins_the_head_the_verdict_was_read_from(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """Without ``--auto`` nothing re-checks at merge time, so the SHA is pinned.
+
+    A verdict belongs to one commit; a push landing between the read and the
+    merge would otherwise slip an unverified head through (codex P1 on #623).
+    """
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    fake = _AutoMergeRejectingRun(
+        rollup=_rollup("SUCCESS", head="abc123def456"), toplevel=str(tmp_path)
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    retry = fake.merge_cmds[1]
+    assert "--match-head-commit" in retry
+    assert retry[retry.index("--match-head-commit") + 1] == "abc123def456"
+
+
+def test_a_racing_push_makes_the_pinned_retry_refuse(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """The pin's whole purpose: a moved head fails instead of merging.
+
+    The fake refuses ONLY a stale pin and merges an unpinned request, so
+    deleting the pin flips this test red rather than leaving it green on a
+    failure it did not cause.
+    """
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    fake = _AutoMergeRejectingRun(head_moved=True, toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
+    assert _last_json(capsys, stream="err")["outcome"] == "failed"
+
+
+def test_a_green_verdict_without_a_readable_head_refuses(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """Green but unpinnable is not mergeable - fail closed rather than unpinned."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    fake = _AutoMergeRejectingRun(
+        rollup=_rollup("SUCCESS", head=""), toplevel=str(tmp_path)
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
+    assert "unreadable" in _last_json(capsys, stream="err")["reason"]
+    assert len(fake.merge_cmds) == 1
+
+
+def test_auto_merge_unsupported_repo_refuses_a_red_pr(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """The load-bearing case: losing the queue must not lose the red guard."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    fake = _AutoMergeRejectingRun(
+        rollup=_rollup("SUCCESS", "FAILURE"), toplevel=str(tmp_path)
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
+    obj = _last_json(capsys, stream="err")
+    assert obj["outcome"] == "failed"
+    assert "red" in obj["reason"]
+    assert len(fake.merge_cmds) == 1
+    assert "--auto" in fake.merge_cmds[0]
+
+
+def test_auto_merge_unsupported_repo_holds_on_pending_checks(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """Pending is a hold, not a failure: the PR is still merge-eligible later."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    rollup = {
+        "state": "OPEN",
+        "headRefOid": "deadbeefcafe",
+        "statusCheckRollup": [
+            {"name": "a", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"name": "b", "status": "IN_PROGRESS", "conclusion": ""},
+        ],
+    }
+    fake = _AutoMergeRejectingRun(rollup=rollup, toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    assert _last_json(capsys)["outcome"] == "held"
+    assert len(fake.merge_cmds) == 1
+
+
+def test_auto_merge_unsupported_repo_fails_closed_on_an_unreadable_rollup(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """No verdict is not a green light."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    fake = _AutoMergeRejectingRun(rollup={}, toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
+    assert "unknown" in _last_json(capsys, stream="err")["reason"]
+    assert len(fake.merge_cmds) == 1
 
 
 def test_a_genuine_merge_failure_is_not_retried_without_auto(
     enabled, monkeypatch, capsys, tmp_path
 ):
     """Only the capability refusal retries; a real failure stands as-is."""
-    monkeypatch.setattr(
-        _merge,
-        "_load_auto_merge",
-        lambda: AutoMergeBlock(enabled=True, require_checks_pass=True),
-    )
+    _checks_enabled(monkeypatch)
     fake = FakeRun(gh_merge=Result(1, "", "branch is protected"), toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
 
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
     assert _last_json(capsys, stream="err")["reason"] == "branch protected"
     assert sum(1 for c in fake.calls if c[:3] == ["gh", "pr", "merge"]) == 1
+
+
+class _WorktreeFallbackRun(_AutoMergeRejectingRun):
+    """`--auto` rejected, then the pinned retry hits the worktree checkout error.
+
+    That drops into the server-side REST recovery, which is where the pin was
+    previously lost.
+    """
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.api_cmds: list[list[str]] = []
+
+    def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
+        cmd = list(cmd)
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            self.merge_cmds.append(cmd)
+            if "--auto" in cmd:
+                return Result(
+                    1,
+                    "",
+                    "GraphQL: Auto merge is not allowed for this repository "
+                    "(enablePullRequestAutoMerge)",
+                )
+            return Result(1, "", "fatal: 'feature/x' is already used by worktree at ...")
+        if cmd[:2] == ["gh", "api"] and any("/merge" in a for a in cmd):
+            self.api_cmds.append(cmd)
+            return Result(0, '{"merged":true}', "")
+        if cmd[:3] == ["gh", "pr", "view"] and "mergedAt" in " ".join(cmd):
+            return Result(0, "null\n", "")
+        if cmd[:3] == ["gh", "pr", "view"] and any("statusCheckRollup" in a for a in cmd):
+            return Result(0, json.dumps(self.rollup) + "\n", "")
+        return FakeRun.__call__(
+            self, cmd, cwd=cwd, env=env, input_text=input_text, timeout=timeout
+        )
+
+
+def test_worktree_server_side_recovery_carries_the_head_pin(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """The pin must survive into the REST fallback, not just the gh retry.
+
+    A worktree run is the COMMON path here, and the REST merge would otherwise
+    merge whatever the head is now - silently undoing the `--match-head-commit`
+    guard in exactly the case that reaches it.
+    """
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    fake = _WorktreeFallbackRun(
+        rollup=_rollup("SUCCESS", head="feed1234beef"), toplevel=str(tmp_path)
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+    assert len(fake.api_cmds) == 1
+    joined = " ".join(fake.api_cmds[0])
+    assert "sha=feed1234beef" in joined, joined
+
+
+def test_worktree_recovery_without_a_verified_head_sends_no_pin(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """When --auto was never used, this process vouched for nothing.
+
+    require_checks_pass off means the caller opted out of the CI gate entirely;
+    inventing a pin here would change behavior on a path this PR does not own.
+    """
+    (tmp_path / ".fno").mkdir()
+    monkeypatch.setattr(
+        _merge,
+        "_load_auto_merge",
+        lambda: AutoMergeBlock(enabled=True, require_checks_pass=False),
+    )
+    fake = _WorktreeFallbackRun(toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert len(fake.api_cmds) == 1
+    assert "sha=" not in " ".join(fake.api_cmds[0])
+
+
+def test_a_degraded_checks_read_names_why_it_could_not_tell(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """"unknown" alone cannot distinguish a broken gh from a PR with no checks.
+
+    The operator only ever sees the emitted reason, so the miss carries a why -
+    the same shape `_behind_by` already uses for its probe misses.
+    """
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+
+    class _BadRollup(_AutoMergeRejectingRun):
+        def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
+            cmd = list(cmd)
+            if cmd[:3] == ["gh", "pr", "view"] and any(
+                "statusCheckRollup" in a for a in cmd
+            ):
+                return Result(0, "not json at all", "")
+            return super().__call__(
+                cmd, cwd=cwd, env=env, input_text=input_text, timeout=timeout
+            )
+
+    fake = _BadRollup(toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
+    reason = _last_json(capsys, stream="err")["reason"]
+    assert "unparseable" in reason, reason
+
+
+def test_a_missing_gh_during_the_checks_read_keeps_exit_127(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """The module reserves 127 for a missing gh; the checks read must not
+    demote that to a generic exit-1 "checks are unknown"."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+
+    class _GhVanishes(_AutoMergeRejectingRun):
+        def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
+            cmd = list(cmd)
+            if cmd[:3] == ["gh", "pr", "view"] and any(
+                "statusCheckRollup" in a for a in cmd
+            ):
+                raise ToolMissing("gh")
+            return super().__call__(
+                cmd, cwd=cwd, env=env, input_text=input_text, timeout=timeout
+            )
+
+    fake = _GhVanishes(toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 127
+    assert _last_json(capsys, stream="err")["reason"] == "gh CLI not installed"
+
+
+def test_a_red_refusal_marks_the_node_failed_not_still_queued(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """A node left `queued` by an earlier attempt must not read queued after a
+    red refusal - the scoreboard consumes that field."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    seen: list[str] = []
+    monkeypatch.setattr(
+        _merge, "_sync_graph_merge_status", lambda status, pr, cwd="": seen.append(status)
+    )
+    fake = _AutoMergeRejectingRun(
+        rollup=_rollup("FAILURE"), toplevel=str(tmp_path)
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
+    assert seen == ["failed"], seen
+
+
+def test_a_pending_hold_does_not_mark_the_node_failed(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """Held is not failed: the PR is still merge-eligible once checks finish."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    seen: list[str] = []
+    monkeypatch.setattr(
+        _merge, "_sync_graph_merge_status", lambda status, pr, cwd="": seen.append(status)
+    )
+    rollup = {
+        "state": "OPEN",
+        "headRefOid": "deadbeefcafe",
+        "statusCheckRollup": [{"name": "a", "status": "IN_PROGRESS", "conclusion": ""}],
+    }
+    fake = _AutoMergeRejectingRun(rollup=rollup, toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    assert seen == [], seen
