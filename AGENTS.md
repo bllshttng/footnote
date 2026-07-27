@@ -50,6 +50,14 @@ A subprocess seeing only a tail of structured signals makes wrong calls with ful
 - graduates-to: a check that refuses to route a judgment call to a headless or bg subprocess.
 - added: 2026-07-23
 
+### An empty search result is a claim, and `rg` globs silently over-exclude
+
+Before concluding "no callers left", verify the search found something it should have. A ripgrep `--glob '!target/**'` is unanchored and matches at ANY depth, so it also excludes `skills/target/` - the most-referenced skill dir in this repo. Truncated match lists ("43 matches in 9 files", ~20 shown) read as complete and are not. Cross-check a load-bearing sweep with `grep -rn` over explicit trees, and confirm a known-present hit appears before trusting an empty result.
+
+- specimens: `skills/target/references/pre-promise.md:125` and `usage-detail.md:82` (two live `fno providers` callers that survived every `rg` sweep of a rename that removed the verb, caught only by an external reviewer).
+- graduates-to: a sweep helper that anchors its excludes (`!/target/**`) and fails when a search returns zero hits without a positive control.
+- added: 2026-07-27
+
 ## Repository
 
 ```
