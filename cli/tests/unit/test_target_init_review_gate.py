@@ -545,6 +545,25 @@ def test_github_apps_configured_nudge_login_is_satisfiable_without_probe():
     assert github_apps_refusal_message([v]) is None
 
 
+def test_github_apps_suffixed_typo_of_known_login_is_probed_not_recognized():
+    """A known login with EXTRA suffix (chatgpt-codex-connector-typo) can never be
+    satisfied by a real codex review (the Rust check is directional), so it must
+    be probed and refused as a typo, not waved through as recognized."""
+    (v,) = resolve_github_apps(["chatgpt-codex-connector-typo"], probe=_NEVER)
+    assert v.status == "unavailable"
+    assert v.blocks_autonomy is True
+
+
+def test_github_apps_short_alias_of_known_login_is_recognized():
+    """A genuine short alias (codex) IS recognized without a probe."""
+
+    def _explode(login, cwd=None):
+        raise AssertionError("a short alias must not be probed")
+
+    (v,) = resolve_github_apps(["codex"], probe=_explode)
+    assert v.status == "satisfiable"
+
+
 def test_github_apps_unknown_but_seen_is_satisfiable():
     """A login footnote does not recognize but that HAS commented/reviewed here
     is a real bot, not a typo - proceed."""

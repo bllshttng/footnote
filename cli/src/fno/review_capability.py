@@ -438,12 +438,17 @@ _KNOWN_REVIEW_APP_LOGINS: frozenset[str] = frozenset(
 
 
 def _app_is_recognized(login: str) -> bool:
-    """Whether `login` corresponds to a known review App, by the same
-    case-insensitive bidirectional substring rule the Rust `login_matches_bot`
-    uses (so a short name like "codex" and a "[bot]"-suffixed author both match).
+    """Whether a CONFIGURED `github_apps` login corresponds to a known review App.
+
+    Directional on purpose: the login is recognized only when it is a substring
+    of a known login (an exact login or an intentional short alias like "codex"),
+    NOT when a known login is a substring of it. The gate is satisfied by
+    `actual_author.contains(configured_login)` in Rust, so a suffixed typo like
+    "chatgpt-codex-connector-typo" can never be satisfied by a real review and
+    must NOT be waved through here - it should be probed and refused as a typo.
     """
     lo = login.lower()
-    return any(k in lo or lo in k for k in _KNOWN_REVIEW_APP_LOGINS)
+    return any(lo in k for k in _KNOWN_REVIEW_APP_LOGINS)
 
 
 def _app_ever_acted(login: str, cwd: Optional[str] = None) -> Optional[bool]:
@@ -537,7 +542,10 @@ def resolve_github_apps(
         if not login:
             continue
         lo = login.lower()
-        if _app_is_recognized(login) or any(k in lo or lo in k for k in nudge):
+        # Same directional rule as _app_is_recognized: the configured login must
+        # be a substring of a nudge key (an alias/exact match), never the reverse,
+        # so a suffixed typo is not waved through on an operator's nudge profile.
+        if _app_is_recognized(login) or any(lo in nk for nk in nudge):
             out.append(
                 AppVerdict(
                     login,
