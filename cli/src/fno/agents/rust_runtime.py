@@ -514,16 +514,17 @@ def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
-#: Claude tier aliases that ``ANTHROPIC_DEFAULT_<TIER>_MODEL`` remaps. Passing
-#: one to ``--model`` asks for "whatever this tier resolves to", which is exactly
-#: what an inherited remap redefines.
-_TIER_ALIASES = ("opus", "sonnet", "haiku")
-
-#: Flags by which an operator names the worker's vendor/credential explicitly.
-#: Any of them present means the route was composed on purpose, so an inherited
-#: remap is no longer ambiguous: ``-P``/``--route``/``--role`` re-set the model
-#: env as one unit, and ``--account`` scrubs it (see ``SCRUB_AUTH_VARS``).
-_ROUTE_NAMING_FLAGS = ("--route", "--provider", "-P", "--role", "--account")
+#: Flags that compose a COMPLETE route (endpoint + auth + model) before any
+#: worker is born, so an inherited tier remap is no longer ambiguous.
+#: ``-P``/``--provider``/``--route`` are fail-CLOSED at the CLI (an unresolvable
+#: route exits 2 before spawning) and ``--account`` is resolved and scrubbed by
+#: :func:`_scrub_account_auth_at_seam`.
+#:
+#: ``--role`` is deliberately NOT here: `resolve_route` is fail-SAFE, returning
+#: None for a protected role, a disabled block, an unconfigured provider, or a
+#: missing key, which leaves the ambient environment untouched. A role is
+#: exempted below only once it resolves to a real route.
+_ROUTE_NAMING_FLAGS = ("--route", "--provider", "-P", "--account")
 
 
 def _spawn_flag_value(args: Sequence[str], *names: str) -> Optional[str]:
@@ -543,25 +544,19 @@ def _spawn_flag_value(args: Sequence[str], *names: str) -> Optional[str]:
 def inherited_tier_remap(
     args: Sequence[str], env: Optional[Mapping[str, str]] = None
 ) -> Optional[tuple[str, str]]:
-    """Detect a spawn whose ``--model`` tier alias the ambient env silently
-    redefines, returning ``(alias, remapped_model)`` or None.
+    """Argv adapter over :func:`model_routing.tier_remap_conflict`, returning
+    ``(alias, remapped_model)`` for a spawn whose ``--model`` tier alias the
+    ambient env silently redefines, or None.
 
-    A ``claude --bg`` worker resolves the ``--model`` tier alias against the
-    CALLER's environment but resolves its endpoint and credential separately.
-    When a parent session exports another vendor's remap (a z.ai/GLM session
-    exports ``ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2[1m]``), an unrouted
-    ``--model opus`` reaches the API as that vendor's model id against an
-    Anthropic endpoint. The spawn receipt prints ``"status": "live"`` and the
-    session dies on its first turn with "issue with the selected model".
-
-    Only fires when the operator named NO route (:data:`_ROUTE_NAMING_FLAGS`) --
-    a named route composes endpoint, auth, and model together and is fine.
+    The shared checker owns the invariant; this only maps CLI flags onto it so
+    the same rule is enforced at the seam and at the in-process spawn APIs.
     """
-    if env is None:
-        env = os.environ
+    from fno.agents.model_routing import resolve_route, tier_remap_conflict
+
     head = list(_args_before_argv(args))
     if any(
-        a in _ROUTE_NAMING_FLAGS or a.startswith(("--route=", "--provider=", "--role=", "--account="))
+        a in _ROUTE_NAMING_FLAGS
+        or a.startswith(("--route=", "--provider=", "--account="))
         for a in head
     ):
         return None
@@ -569,13 +564,13 @@ def inherited_tier_remap(
     harness = (_spawn_flag_value(args, "--harness", "-H") or "claude").strip().lower()
     if harness != "claude":
         return None
-    alias = (_spawn_flag_value(args, "--model", "-m") or "").strip().lower()
-    if alias not in _TIER_ALIASES:
+    found = tier_remap_conflict(_spawn_flag_value(args, "--model", "-m"), env)
+    if found is None:
         return None
-    remapped = (env.get(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL") or "").strip()
-    if not remapped or remapped.lower() == alias:
+    role = _spawn_flag_value(args, "--role")
+    if role and resolve_route(role, env=env):
         return None
-    return alias, remapped
+    return found
 
 
 def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
@@ -620,29 +615,16 @@ def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
 
 def _refuse_inherited_tier_remap(args: Sequence[str]) -> None:
     """Exit 2 rather than launch a worker whose model alias the ambient env
-    redefines. Runs at the routing seam, BEFORE the Rust/Python fork, so the one
-    guard covers both runtimes (the Rust client has no ANTHROPIC_* handling at
-    all, so a Python-only guard would be decorative)."""
+    redefines. Runs at the routing seam, BEFORE the Rust/Python fork, so this
+    one call covers both runtimes (the Rust client has no ANTHROPIC_* handling
+    at all, so a Python-only guard would be decorative). The in-process spawn
+    APIs enforce the same invariant via ``check_spawn_tier_remap``."""
     found = inherited_tier_remap(args)
     if found is None:
         return
-    alias, remapped = found
-    var = f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL"
-    print(
-        f"fno agents spawn: --model {alias} is ambiguous here. This session "
-        f"exports {var}={remapped}, so {alias!r} resolves to that vendor's model "
-        "id, while the worker's endpoint and credential are resolved separately "
-        "and would not match it. The spawn would report \"live\" and then fail on "
-        "its first turn. No worker launched.\n"
-        "Name the route instead, so endpoint, auth, and model are chosen as one "
-        "unit:\n"
-        f"  --account <id> --model {alias}      # Anthropic's {alias} "
-        "(ids from `fno providers list`)\n"
-        f"  -P <vendor> --model {remapped}   # stay on the routed vendor "
-        "(vendors from `fno route ls`)\n"
-        f"Or unset {var} for this command.",
-        file=sys.stderr,
-    )
+    from fno.agents.model_routing import remap_conflict_message
+
+    print(f"fno agents spawn: {remap_conflict_message(*found)}", file=sys.stderr)
     raise SystemExit(2)
 
 

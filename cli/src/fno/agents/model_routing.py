@@ -158,6 +158,95 @@ _MODEL_ENV_KEYS = (
 )
 
 
+#: Claude tier aliases the ``ANTHROPIC_DEFAULT_<TIER>_MODEL`` vars redefine.
+#: Passing one as a model asks for "whatever this tier resolves to", which is
+#: exactly what an inherited remap redefines.
+TIER_ALIASES = ("opus", "sonnet", "haiku")
+
+
+class TierRemapConflict(ValueError):
+    """A claude spawn names a tier alias the ambient environment redefines.
+
+    ``claude --bg`` resolves the model tier alias against the CALLER's
+    environment but resolves its endpoint and credential separately, so a
+    worker born under another vendor's remap asks Anthropic for that vendor's
+    model id and dies on its first turn behind a ``"status": "live"`` receipt.
+    """
+
+
+def tier_remap_conflict(
+    model: Optional[str], env: Optional[Mapping[str, str]] = None
+) -> Optional[tuple[str, str]]:
+    """``(alias, remapped_model)`` when ``model`` is a claude tier alias that
+    ``env`` redefines, else ``None``. Pure and cheap: reads only the env."""
+    alias = (model or "").strip().lower()
+    if alias not in TIER_ALIASES:
+        return None
+    if env is None:
+        env = os.environ
+    remapped = (env.get(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL") or "").strip()
+    if not remapped or remapped.lower() == alias:
+        return None
+    return alias, remapped
+
+
+def remap_conflict_message(alias: str, remapped: str) -> str:
+    """The one refusal text, shared by the CLI seam and the in-process APIs."""
+    var = f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL"
+    return (
+        f"--model {alias} is ambiguous here. This session exports "
+        f"{var}={remapped}, so {alias!r} resolves to that vendor's model id, "
+        "while the worker's endpoint and credential are resolved separately "
+        'and would not match it. The spawn would report "live" and then fail '
+        "on its first turn. No worker launched.\n"
+        "Name the route instead, so endpoint, auth, and model are chosen as "
+        "one unit:\n"
+        f"  --account <id> --model {alias}      # Anthropic's {alias} "
+        "(ids from `fno providers list`)\n"
+        f"  -P <vendor> --model {remapped}   # stay on the routed vendor "
+        "(vendors from `fno route ls`)\n"
+        f"Or unset {var} for this command."
+    )
+
+
+def check_spawn_tier_remap(
+    provider: Optional[str],
+    model: Optional[str],
+    *,
+    role: Optional[str] = None,
+    route_env: Optional[Mapping[str, str]] = None,
+    account_env: Optional[Mapping[str, str]] = None,
+    env: Optional[Mapping[str, str]] = None,
+    settings: "Optional[SettingsModel]" = None,
+) -> None:
+    """Raise :class:`TierRemapConflict` when a claude spawn would launch with a
+    tier alias the ambient environment redefines and nothing composed a
+    complete route. No-op otherwise.
+
+    Called from the in-process spawn APIs as well as the CLI seam: the CLI is
+    one of several reachable paths, so a guard only there is decorative.
+
+    A resolved ``route_env`` or ``account_env`` composes endpoint, auth, and
+    model as one unit and is exempt. ``role`` is NOT exempt on mention alone:
+    :func:`resolve_route` is deliberately fail-SAFE (a protected role, a
+    disabled block, an unconfigured provider, or a missing key all return
+    ``None`` and leave the ambient environment untouched), so ``--role
+    implement --model opus`` under a foreign remap recreates the exact failure
+    this guards. Exempt a role only once it produced a real route.
+    """
+    if (provider or "claude") != "claude":
+        return
+    if route_env or account_env:
+        return
+    # Cheap env-only check first; the role resolution below reads config.
+    found = tier_remap_conflict(model, env)
+    if found is None:
+        return
+    if role and resolve_route(role, settings=settings, env=env):
+        return
+    raise TierRemapConflict(remap_conflict_message(*found))
+
+
 def _emit(notice: Optional[Callable[[str], object]], message: str) -> None:
     """Surface a one-line fail-safe notice; quiet when no sink is supplied."""
     if notice is not None:

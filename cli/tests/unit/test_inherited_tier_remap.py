@@ -9,7 +9,10 @@ reached Anthropic asking for a GLM model id.
 import os
 from types import SimpleNamespace
 
+import pytest
+
 from fno.agents.account_env import SCRUB_AUTH_VARS
+from fno.agents.model_routing import TierRemapConflict, check_spawn_tier_remap
 from fno.agents.rust_runtime import _scrub_account_auth_at_seam, inherited_tier_remap
 
 ZAI_ENV = {
@@ -30,16 +33,49 @@ def test_unrouted_tier_alias_under_a_remap_is_caught():
     assert inherited_tier_remap([*BASE, "--model=sonnet"], ZAI_ENV) is not None
 
 
-def test_a_named_route_is_never_ambiguous():
-    # Each of these composes endpoint+auth+model as one unit, so the ambient
-    # remap is irrelevant and the spawn must proceed.
+def test_a_composed_route_is_never_ambiguous():
+    # Each composes endpoint+auth+model as one unit before any worker is born
+    # (-P/--route are fail-closed at the CLI; --account is resolved+scrubbed at
+    # the seam), so the ambient remap is irrelevant and the spawn must proceed.
     for flags in (
         ["-P", "zai", "--model", "glm-5.2[1m]"],
         ["--route", "zai/glm-5.2", "--model", "opus"],
-        ["--role", "tidy", "--model", "opus"],
         ["--account", "makers", "--model", "opus"],
     ):
         assert inherited_tier_remap([*BASE, *flags], ZAI_ENV) is None, flags
+
+
+def test_a_role_exempts_only_once_it_resolves_to_a_real_route(monkeypatch):
+    # resolve_route is fail-SAFE: a protected role, a disabled block, an
+    # unconfigured provider or a missing key all return None and leave the
+    # ambient env untouched, so mentioning --role must not exempt on its own.
+    args = [*BASE, "--role", "tidy", "--model", "opus"]
+
+    monkeypatch.setattr(
+        "fno.agents.model_routing.resolve_route", lambda *a, **k: None
+    )
+    assert inherited_tier_remap(args, ZAI_ENV) == ("opus", "glm-5.2[1m]")
+
+    monkeypatch.setattr(
+        "fno.agents.model_routing.resolve_route",
+        lambda *a, **k: {"ANTHROPIC_MODEL": "glm-5.2"},
+    )
+    assert inherited_tier_remap(args, ZAI_ENV) is None
+
+
+def test_in_process_spawn_apis_enforce_the_same_invariant():
+    # The CLI seam is one of several reachable paths; dispatch_spawn and
+    # dispatch_spawn_pane accept `model` directly and must fail closed too.
+    with pytest.raises(TierRemapConflict):
+        check_spawn_tier_remap("claude", "opus", env=ZAI_ENV)
+    # A resolved route or account overlay composes the whole thing: exempt.
+    check_spawn_tier_remap("claude", "opus", env=ZAI_ENV, route_env={"A": "b"})
+    check_spawn_tier_remap("claude", "opus", env=ZAI_ENV, account_env={"A": "b"})
+    # Non-claude providers never read these vars.
+    check_spawn_tier_remap("codex", "opus", env=ZAI_ENV)
+    # A clean parent, and a vendor model id that is not a tier alias.
+    check_spawn_tier_remap("claude", "opus", env={})
+    check_spawn_tier_remap("claude", "glm-5.2[1m]", env=ZAI_ENV)
 
 
 def test_clean_parent_and_non_claude_harness_are_untouched():
