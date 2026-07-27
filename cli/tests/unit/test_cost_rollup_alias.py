@@ -55,12 +55,12 @@ def test_alias_of_scalar_id_is_not_a_second_session(ledger):
     rollup = _rollup()
     assert len(rollup["cost_sessions"]) == 1
     assert rollup["cost_sessions"][0]["cost_usd"] == 18.22
-    assert rollup["cost_sessions"][0]["session_id"] == "U"
+    assert rollup["cost_sessions"][0]["session_id"] == "R"
     assert rollup["cost_usd"] == 18.22
 
 
-def test_scalar_falls_back_to_session_id_when_fno_id_absent(ledger):
-    """Older rows carry only `session_id`; the alias must still collapse."""
+def test_row_is_keyed_by_session_id_when_fno_id_absent(ledger):
+    """Older rows carry only `session_id`."""
     _seed(ledger, [{
         "plan_path": "/p",
         "cost_usd": 4.0,
@@ -69,37 +69,50 @@ def test_scalar_falls_back_to_session_id_when_fno_id_absent(ledger):
     }])
     rollup = _rollup()
     assert len(rollup["cost_sessions"]) == 1
+    assert rollup["cost_sessions"][0]["session_id"] == "R"
     assert rollup["cost_sessions"][0]["cost_usd"] == 4.0
 
 
-# -- AC2: two genuinely distinct sessions still split --
+# -- aliases that do not match the scalar are still aliases --
 
 
-def test_two_real_sessions_still_split(ledger):
+def test_aliases_that_do_not_equal_the_scalar_still_do_not_divide(ledger):
+    """The codex shape: a rollout-log basename and the bare thread uuid.
+
+    Neither equals the scalar run id, so a rule that only dropped
+    scalar-equal members would still have halved this run's cost.
+    """
     _seed(ledger, [{
         "plan_path": "/p",
         "cost_usd": 10.0,
         "fno_id": "R",
         "session_id": "R",
-        "sessions": ["U1", "U2", "R"],
+        "sessions": ["rollout-2026-07-25T18-45-56-019f9c19", "019f9c19", "R"],
     }])
     rollup = _rollup()
-    assert [r["session_id"] for r in rollup["cost_sessions"]] == ["U1", "U2"]
-    assert all(r["cost_usd"] == 5.0 for r in rollup["cost_sessions"])
+    assert len(rollup["cost_sessions"]) == 1
+    assert rollup["cost_sessions"][0]["session_id"] == "R"
+    assert rollup["cost_sessions"][0]["cost_usd"] == 10.0
+
+
+def test_two_sessions_means_two_ledger_rows(ledger):
+    """Genuine multi-session work is multiple rows, never one row's aliases."""
+    _seed(ledger, [
+        {"plan_path": "/p", "cost_usd": 6.0, "fno_id": "R1", "sessions": ["U1", "R1"]},
+        {"plan_path": "/p", "cost_usd": 4.0, "fno_id": "R2", "sessions": ["U2", "R2"]},
+    ])
+    rollup = _rollup()
+    assert [r["session_id"] for r in rollup["cost_sessions"]] == ["R1", "R2"]
+    assert [r["cost_usd"] for r in rollup["cost_sessions"]] == [6.0, 4.0]
     assert rollup["cost_usd"] == 10.0
 
 
-def test_sessions_without_the_scalar_are_untouched(ledger):
-    """A row whose aliases were never polluted keeps today's behavior."""
-    _seed(ledger, [{
-        "plan_path": "/p",
-        "cost_usd": 9.0,
-        "fno_id": "R",
-        "sessions": ["U1", "U2", "U3"],
-    }])
+def test_row_with_aliases_but_no_scalar_keys_on_the_first_alias(ledger):
+    _seed(ledger, [{"plan_path": "/p", "cost_usd": 9.0, "sessions": ["U1", "U2", "U3"]}])
     rollup = _rollup()
-    assert len(rollup["cost_sessions"]) == 3
-    assert all(r["cost_usd"] == 3.0 for r in rollup["cost_sessions"])
+    assert len(rollup["cost_sessions"]) == 1
+    assert rollup["cost_sessions"][0]["session_id"] == "U1"
+    assert rollup["cost_sessions"][0]["cost_usd"] == 9.0
 
 
 # -- AC3: totals never drift, whatever the row shape --
@@ -110,7 +123,7 @@ def test_totals_unchanged_across_every_row_shape(ledger):
     rows = [
         # alias pair (the x-24f7 shape)
         {"plan_path": "/p", "cost_usd": 18.22, "fno_id": "R1", "sessions": ["U", "R1"]},
-        # two real sessions plus an alias
+        # three aliases of one run
         {"plan_path": "/p", "cost_usd": 10.0, "fno_id": "R2", "sessions": ["U1", "U2", "R2"]},
         # scalar id alone
         {"plan_path": "/p", "cost_usd": 7.5, "fno_id": "R3", "sessions": ["R3"]},

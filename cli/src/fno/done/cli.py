@@ -183,45 +183,33 @@ def _rollup_from_ledger(plan_path: Optional[str]) -> dict:
     if not matching:
         return {"session_id": None, "cost_usd": None, "cost_sessions": [], "points": None}
 
-    # One cost_sessions row per DISTINCT session, splitting the ledger's
-    # aggregate cost_usd evenly across them so sums stay faithful. A ledger
-    # row's `sessions` is an alias set for ONE run (transcript UUID + the
-    # scalar run id, per cost/_register.py), so a member equal to the row's
-    # own scalar id names the same run again and must not become a divisor.
-    # If a ledger entry has no sessions, emit one row with session_id=None
-    # so the cost still shows up.
+    # One cost_sessions row per ledger row, carrying that row's whole cost.
+    # A row's `sessions` is an ALIAS SET for ONE run, not a list of sessions:
+    # cost/_register.py records up to five identifier forms of the same
+    # session (the minted run id, the harness id, a claude transcript uuid, a
+    # codex thread id), and its only other writer emits a single-element list.
+    # So len(sessions) counts NAMES and dividing by it splits one run's cost
+    # across its own aliases. Two sessions on a node means two ledger rows,
+    # which `matching` already iterates.
+    # Key the row by the scalar run id - the identifier every other footnote
+    # surface joins on - falling back to the first alias, then to None so a
+    # row with no identity at all still reports its cost.
     cost_sessions: list[dict] = []
     for le in matching:
         sessions = le.get("sessions") or []
         if not isinstance(sessions, list):
             sessions = []
-        scalar = le.get("fno_id") or le.get("session_id")
-        if scalar:
-            # Fall back to the scalar when collapsing empties the set, so a
-            # row recorded only under its own id keeps its cost.
-            sessions = [s for s in sessions if s != scalar] or (
-                [scalar] if sessions else []
-            )
         cost = le.get("cost_usd")
         try:
             cost_f = float(cost) if cost is not None else 0.0
         except (TypeError, ValueError):
             cost_f = 0.0
-        ts = le.get("completed") or le.get("started")
-        if sessions:
-            per = cost_f / len(sessions)
-            for sid in sessions:
-                cost_sessions.append({
-                    "session_id": sid,
-                    "cost_usd": round(per, 4),
-                    "timestamp": ts,
-                })
-        else:
-            cost_sessions.append({
-                "session_id": None,
-                "cost_usd": round(cost_f, 4),
-                "timestamp": ts,
-            })
+        sid = le.get("fno_id") or le.get("session_id") or (sessions[0] if sessions else None)
+        cost_sessions.append({
+            "session_id": sid,
+            "cost_usd": round(cost_f, 4),
+            "timestamp": le.get("completed") or le.get("started"),
+        })
 
     # Latest session: pick the most-recent-completed ledger entry's last UUID.
     def _sort_key(le: dict) -> str:

@@ -399,12 +399,12 @@ def test_rollup_populates_cost_usd_from_ledger(tmp_graph, tmp_ledger, monkeypatc
     assert result.exit_code == 0, result.stdout
     entry = _read(tmp_graph)[0]
     assert entry["cost_usd"] == 9.5
-    # Two sessions -> two cost_sessions rows, split evenly.
-    assert len(entry["cost_sessions"]) == 2
-    cost_values = sorted(s["cost_usd"] for s in entry["cost_sessions"])
-    assert cost_values == [4.75, 4.75]
-    session_ids = {s["session_id"] for s in entry["cost_sessions"]}
-    assert session_ids == {"sess-aaa", "sess-bbb"}
+    # One ledger row -> one cost row carrying its whole cost. This entry's
+    # `sessions` list is two ALIASES of one run, not two sessions, so it must
+    # not be divided; genuine multi-session work arrives as two ledger rows.
+    assert len(entry["cost_sessions"]) == 1
+    assert entry["cost_sessions"][0]["cost_usd"] == 9.5
+    assert entry["cost_sessions"][0]["session_id"] == "sess-aaa"
     assert entry["points"] == 8
 
 

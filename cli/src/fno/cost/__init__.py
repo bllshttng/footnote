@@ -267,6 +267,11 @@ def upsert_cost_session(
     Appending and re-summing double-counts it, so the row for `session_id` is
     replaced in place when it already exists. `cost_usd` is then re-derived
     from the rows, never incremented.
+
+    `ndigits` rounds both this row and the recomputed node total: 4 for
+    internal accounting, 2 for the `fno graph cost` command whose receipt
+    prints cents. Passing different values for one node across writers leaves
+    the total's last digits dependent on which wrote last.
     """
     row = {
         "session_id": session_id,
