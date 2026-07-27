@@ -767,8 +767,8 @@ class ReviewBlock(BaseModel):
     agent_harnesses: dict[str, str] = Field(default_factory=dict)
     # Pre-rename spelling of `agent_harnesses`. The values are harnesses (which
     # CLI binary the agent runs on), never the model vendor that `provider`
-    # names elsewhere, so the field carried the same conflation x-2966 removed
-    # from `fno whoami`. Kept readable and synced by the validator below.
+    # names elsewhere, so the field carried the same conflation that was
+    # removed from `fno whoami`. Kept readable and synced by the validator below.
     agent_providers: dict[str, str] = Field(default_factory=dict)
     # Full route tuple. Unlike agent_harnesses, each configured entry spends a
     # separate named SessionStart and therefore remains explicit and opt-in.

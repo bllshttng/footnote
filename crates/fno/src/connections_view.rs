@@ -1215,9 +1215,9 @@ pub async fn load_all() -> ReadOutcome {
     let accounts = match acc {
         Ok(bytes) => match parse_accounts(&bytes) {
             Some(v) => v,
-            None => return ReadOutcome::Degraded("providers list: unparseable output".into()),
+            None => return ReadOutcome::Degraded("accounts list: unparseable output".into()),
         },
-        Err(e) => return ReadOutcome::Degraded(format!("providers list: {e}")),
+        Err(e) => return ReadOutcome::Degraded(format!("accounts list: {e}")),
     };
     let combos = match com {
         Ok(bytes) => match parse_combos(&bytes) {

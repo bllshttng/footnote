@@ -290,7 +290,7 @@ explicit staging + `CLAUDE_CONFIG_DIR` isolation.
 ```bash
 # One-time: register the secondary account
 fno config accounts add claude-max-secondary \
-    --cli claude --auth oauth_dir \
+    --harness claude --auth oauth_dir \
     --credentials-source ~/.claude.secondary \
     --scope global
 
@@ -313,7 +313,7 @@ If you keep a credentials backup (e.g., you copied `~/.claude/` to `~/.claude.ba
 ```bash
 # Register pointing at the backup dir
 fno config accounts add claude-backup \
-    --cli claude --auth oauth_dir \
+    --harness claude --auth oauth_dir \
     --credentials-source ~/.claude.backup \
     --scope global \
     --account-id my-backup-account
@@ -402,10 +402,10 @@ intent.
 
 **dispatch_env returns wrong env for the `claude` CLI kind**
 
-For `auth: oauth_dir` + `cli: claude`, `dispatch_env()` returns
+For `auth: oauth_dir` + `harness: claude`, `dispatch_env()` returns
 `{"CLAUDE_CONFIG_DIR": "..."}`. If the returned dict contains `HOME` instead,
 the record was added with a non-`claude` CLI value. Remove and re-add with
-`--cli claude`.
+`--harness claude`.
 
 For `auth: api_key`, `dispatch_env()` returns the resolved `env` dict directly.
 If `CLAUDE_CONFIG_DIR` is expected but absent, the record is using `oauth_dir`

@@ -11,27 +11,26 @@ from typing import Literal, Optional, Union
 
 import typer
 
-app = typer.Typer(help="Config inspection and diagnostics")
+from fno._lazy_group import make_lazy_group_cls
 
+# Mounted as ``fno config accounts``: accounts ARE config
+# (``config.accounts.records``), so the verb path mirrors the config path. This
+# replaced the top-level ``fno providers``, which was hidden and therefore
+# discoverable by nobody; as a `fno config` subcommand it shows up in
+# `fno config --help` and gets its own page.
+#
+# Lazy for the same reason the top-level map is: the sub-app drags in the
+# provider loader (~68ms), and `fno config get` is called from shell dozens of
+# times per phase. `providers` used to be a top-level LAZY_SUBCOMMANDS entry, so
+# mounting it eagerly here would have moved that cost onto every `fno config`.
+_LAZY_SUBCOMMANDS = {
+    "accounts": ("fno.adapters.providers.cli:cli", "Manage account records."),
+}
 
-def _register_accounts() -> None:
-    """Mount the account records sub-app as ``fno config accounts``.
-
-    Accounts ARE config (``config.accounts.records``), so the verb path mirrors
-    the config path. This replaced the top-level ``fno providers``, which was
-    hidden and therefore discoverable by nobody; as a visible `fno config`
-    subcommand the group shows up in `fno config --help` and gets its own page.
-
-    Imported lazily inside the function: the accounts sub-app pulls in the
-    provider loader, which runs its own bootstrap config read, and importing it
-    at module scope would drag that into every `fno config` invocation.
-    """
-    from fno.adapters.providers.cli import cli as accounts_app
-
-    app.add_typer(accounts_app, name="accounts", help="Manage account records.")
-
-
-_register_accounts()
+app = typer.Typer(
+    help="Config inspection and diagnostics",
+    cls=make_lazy_group_cls(_LAZY_SUBCOMMANDS),
+)
 
 
 # ---------------------------------------------------------------------------

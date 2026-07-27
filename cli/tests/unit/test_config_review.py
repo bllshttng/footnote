@@ -574,7 +574,7 @@ def test_reviewers_unresolvable_fails_loud(
     assert "teleport" in str(excinfo.value)
 
 
-# --- agent_harnesses rename + agent_providers alias (x-2599) ---
+# --- agent_harnesses rename + agent_providers alias ---
 
 
 def test_agent_harnesses_canonical_map(

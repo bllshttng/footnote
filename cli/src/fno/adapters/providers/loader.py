@@ -708,12 +708,12 @@ def read_active_provider_atomic(*, settings_path: Path) -> ActiveProviderSnapsho
     block = _extract_accounts_block(settings)
     if block is None:
         raise MissingActiveProvider(
-            "config.providers block is absent or invalid"
+            "config.accounts block is absent or invalid"
         )
     active_id = block.get("active")
     if not active_id:
         raise MissingActiveProvider(
-            "config.providers.active is unset (None or empty)"
+            "config.accounts.active is unset (None or empty)"
         )
     raw_records = block.get("records") or []
     record = next((r for r in raw_records if isinstance(r, dict) and r.get("id") == active_id), None)
