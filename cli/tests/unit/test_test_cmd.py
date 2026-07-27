@@ -364,3 +364,71 @@ def test_pytest_smoke_caps_auto_workers() -> None:
 
     assert "-n auto" in command
     assert "--maxprocesses=4" in command
+
+
+def test_census_green_is_failure_red_slow_killed_pass_empty_is_usage_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The inverted contract the feature exists to enforce: a green-fast deferred
+    harness is FAILURE (exit 1); RED / SLOW / killed all pass (exit 0); an empty
+    or unparseable set exits 2. Pinned so it cannot silently invert."""
+    import fno.test_cmd as tc
+
+    # GREEN: rc 0, fast, not killed -> exit 1.
+    monkeypatch.setattr(tc, "_census_entries", lambda: ["g.sh"])
+    monkeypatch.setattr(tc, "_run_bounded", lambda *a: (0, 5.0, False))
+    assert tc._run_census_deferred([]) == 1
+
+    # RED + SLOW(fast-but-over-tranche) + killed -> all non-green -> exit 0.
+    canned = iter([(1, 5.0, False), (0, 999.0, False), (0, 999.0, True)])
+    monkeypatch.setattr(tc, "_census_entries", lambda: ["r.sh", "s.sh", "k.sh"])
+    monkeypatch.setattr(tc, "_run_bounded", lambda *a: next(canned))
+    assert tc._run_census_deferred([]) == 0
+
+    # Empty / unparseable set -> exit 2.
+    monkeypatch.setattr(tc, "_census_entries", lambda: [])
+    assert tc._run_census_deferred([]) == 2
+
+
+def test_census_entries_override_dedups_sorts_and_skips_comments(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fno.test_cmd as tc
+
+    f = tmp_path / "deferred.txt"
+    f.write_text("# comment\n\ntests/b.sh\n tests/a.sh \ntests/b.sh\n")
+    monkeypatch.setenv("CENSUS_DEFERRED_FILE", str(f))
+    try:
+        assert tc._census_entries() == ["tests/a.sh", "tests/b.sh"]
+    finally:
+        monkeypatch.delenv("CENSUS_DEFERRED_FILE", raising=False)
+
+
+def test_smoke_discovered_steps_excludes_deferred(tmp_path: Path) -> None:
+    """The full-gate consumer (_run_smoke) subtracts _DISCOVERY_DEFERRED too, not
+    just select_changed; a dropped clause here would let a drained harness
+    re-enter the full gate while every test still passed."""
+    import fno.test_cmd as tc
+
+    _write(tmp_path / "tests/healthy.sh", "#!/usr/bin/env bash\n:\n", executable=True)
+    _write(tmp_path / "tests/rotten.sh", "#!/usr/bin/env bash\n:\n", executable=True)
+    original = tc._DISCOVERY_DEFERRED
+    tc._DISCOVERY_DEFERRED = frozenset({"tests/rotten.sh"})
+    try:
+        rels = [s[0] for s in tc._smoke_discovered_steps(tmp_path, referenced=set())]
+    finally:
+        tc._DISCOVERY_DEFERRED = original
+    assert "tests/healthy.sh" in rels
+    assert "tests/rotten.sh" not in rels
+
+
+def test_run_smoke_routes_through_the_discovered_steps_helper() -> None:
+    """_run_smoke builds its discovered steps via _smoke_discovered_steps (the
+    helper test_smoke_discovered_steps_excludes_deferred covers), so a regression
+    that re-inlines the comprehension and drops the _DISCOVERY_DEFERRED clause
+    cannot pass while the full gate silently re-admits a drained harness."""
+    import inspect
+
+    import fno.test_cmd as tc
+
+    assert "_smoke_discovered_steps" in inspect.getsource(tc._run_smoke)
