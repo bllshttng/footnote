@@ -1,4 +1,4 @@
-"""Tests for the pre-review risk classifier and assurance resolution (x-5f0c).
+"""Tests for the pre-review risk classifier and assurance resolution.
 
 Covers the two pure functions in ``fno.review.policy``:
 ``classify_review_policy`` (size + risk -> policy) and ``assess_assurance``
@@ -112,6 +112,7 @@ def test_high_assurance_satisfied_with_different_family() -> None:
         ReviewPolicy.HIGH_ASSURANCE,
         effective_reviewer_kinds=["claude", "codex"],
         implementer_provider="claude",
+        identity_known=True,
     )
     assert v.satisfied is True
     assert v.effective == "diverse"
@@ -123,9 +124,51 @@ def test_high_assurance_unresolved_when_only_same_family() -> None:
         ReviewPolicy.HIGH_ASSURANCE,
         effective_reviewer_kinds=["claude"],
         implementer_provider="claude",
+        identity_known=True,
     )
     assert v.satisfied is False
     assert v.effective == "unresolved"
+
+
+def test_high_assurance_default_identity_fails_closed() -> None:
+    """Omitting identity_known must default to unresolved, not a permissive pass."""
+    v = assess_assurance(
+        ReviewPolicy.HIGH_ASSURANCE,
+        effective_reviewer_kinds=["claude", "codex"],
+        implementer_provider="claude",
+    )
+    assert v.satisfied is False
+    assert v.effective == "unresolved"
+
+
+def test_non_dispatchable_kind_does_not_certify_diversity() -> None:
+    """A dead/unknown kind (not in DISPATCHABLE_PROVIDERS) is not different-family."""
+    v = assess_assurance(
+        ReviewPolicy.HIGH_ASSURANCE,
+        effective_reviewer_kinds=["claude", "grok"],
+        implementer_provider="claude",
+        identity_known=True,
+    )
+    assert v.satisfied is False
+    assert v.effective == "unresolved"
+
+
+def test_uppercase_risk_surface_still_escalates() -> None:
+    """Risk surfaces from config/CLI are normalized before matching."""
+    assert (
+        classify_review_policy(size="S", risk_surfaces=["  AUTH  "])
+        is ReviewPolicy.HIGH_ASSURANCE
+    )
+
+
+def test_assurance_verdict_rejects_inconsistent_state() -> None:
+    """The frozen verdict enforces satisfied <-> effective correlation."""
+    from fno.review.policy import AssuranceVerdict
+
+    with pytest.raises(ValueError):
+        AssuranceVerdict(ReviewPolicy.PORTABLE, satisfied=True, effective="unresolved", reason="x")
+    with pytest.raises(ValueError):
+        AssuranceVerdict(ReviewPolicy.PORTABLE, satisfied=False, effective="portable", reason="x")
 
 
 def test_high_assurance_unresolved_when_identity_unknown() -> None:
@@ -258,3 +301,94 @@ def test_review_assurance_degraded_route_does_not_count_as_diverse() -> None:
         v = review_mod.review_assurance("sess", size="S", risk_surfaces=["payments"])
     assert v["satisfied"] is False
     assert v["effective"] == "unresolved"
+
+
+def test_review_assurance_unreadable_headroom_fails_closed() -> None:
+    """exhausted_provider_kinds -> None (read error) must block high-assurance,
+    never let a possibly-exhausted codex certify diversity."""
+    with patch("fno.review.provider_resolution.load_implementer_identity", return_value=("claude", True)), patch(
+        "fno.review.provider_resolution.exhausted_provider_kinds", return_value=None
+    ), patch.object(
+        review_mod, "panel_provider_routing", return_value=_routing(a=("codex", False))
+    ):
+        v = review_mod.review_assurance("sess", size="S", risk_surfaces=["auth"])
+    assert v["satisfied"] is False
+    assert v["effective"] == "unresolved"
+    assert v["headroom_unknown"] is True
+
+
+# ---- real substrate bodies (F3/F4 live here; the accessor tests above mock them) ----
+
+import json  # noqa: E402
+
+from fno.review import provider_resolution as prov  # noqa: E402
+
+
+def test_load_implementer_identity_established_on_dispatchable_id(tmp_path) -> None:
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"entries": [{"session_id": "s1", "provider_id": "codex"}]}))
+    assert prov.load_implementer_identity("s1", ledger_path=ledger) == ("codex", True)
+
+
+def test_load_implementer_identity_unknown_when_id_unmappable(tmp_path) -> None:
+    """F3: a rotated-out id that maps to no real kind is unknown, not known-claude."""
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(
+        json.dumps({"entries": [{"session_id": "s1", "provider_id": "codex-acct-rotated-out"}]})
+    )
+    kind, established = prov.load_implementer_identity("s1", ledger_path=ledger)
+    assert kind == "claude"
+    assert established is False
+
+
+def test_load_implementer_identity_unknown_without_row(tmp_path) -> None:
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"entries": [{"session_id": "other", "provider_id": "codex"}]}))
+    assert prov.load_implementer_identity("s1", ledger_path=ledger) == ("claude", False)
+
+
+def test_load_implementer_identity_no_session_or_file(tmp_path) -> None:
+    assert prov.load_implementer_identity("") == ("claude", False)
+    assert prov.load_implementer_identity("s1", ledger_path=tmp_path / "absent.json") == (
+        "claude",
+        False,
+    )
+
+
+def _rec(rid: str, cli: str):
+    return SimpleNamespace(id=rid, cli=cli)
+
+
+def test_exhausted_provider_kinds_all_records_exhausted() -> None:
+    from fno.adapters.providers.runtime_state import HeadroomState
+
+    records = SimpleNamespace(records=[_rec("c1", "codex"), _rec("c2", "codex")])
+    with patch("fno.adapters.providers.loader.load_providers", return_value=records), patch(
+        "fno.adapters.providers.runtime_state.headroom",
+        return_value=SimpleNamespace(state=HeadroomState.EXHAUSTED),
+    ):
+        assert prov.exhausted_provider_kinds() == {"codex"}
+
+
+def test_exhausted_provider_kinds_not_when_one_record_has_headroom() -> None:
+    """F4 semantic: `all`, not `any` - one account with headroom keeps the kind up."""
+    from fno.adapters.providers.runtime_state import HeadroomState
+
+    records = SimpleNamespace(records=[_rec("c1", "codex"), _rec("c2", "codex")])
+
+    def _hr(pid):
+        return SimpleNamespace(
+            state=HeadroomState.EXHAUSTED if pid == "c1" else HeadroomState.UNKNOWN
+        )
+
+    with patch("fno.adapters.providers.loader.load_providers", return_value=records), patch(
+        "fno.adapters.providers.runtime_state.headroom", side_effect=_hr
+    ):
+        assert prov.exhausted_provider_kinds() == set()
+
+
+def test_exhausted_provider_kinds_returns_none_on_read_error() -> None:
+    with patch(
+        "fno.adapters.providers.loader.load_providers", side_effect=RuntimeError("boom")
+    ):
+        assert prov.exhausted_provider_kinds() is None

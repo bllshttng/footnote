@@ -455,7 +455,14 @@ def review_assurance(
     from fno.review.policy import assess_assurance, classify_review_policy
 
     implementer, identity_known = pr.load_implementer_identity(session_id or "")
+
+    # exhausted_provider_kinds returns None when the headroom read FAILED. For
+    # this gate an unreadable headroom fails CLOSED: we cannot trust a non-claude
+    # kind can actually serve, so it does not count toward diversity. Treating a
+    # read error as "nothing exhausted" would silently re-open the exact hole.
     exhausted = pr.exhausted_provider_kinds()
+    headroom_unknown = exhausted is None
+    exhausted = exhausted or set()
 
     # What will genuinely dispatch. panel_provider_routing() honors cross_model
     # on/off + per-agent pins; {} means all-claude. Degraded -> ran on claude.
@@ -464,6 +471,9 @@ def review_assurance(
     for rp in resolved.values():
         kind = "claude" if rp.degraded else str(rp.provider).strip().lower()
         if kind in exhausted:
+            continue
+        # Unreadable headroom -> only claude is a trusted-serveable reviewer.
+        if headroom_unknown and kind != "claude":
             continue
         effective_kinds.add(kind)
 
@@ -483,6 +493,7 @@ def review_assurance(
         "identity_known": identity_known,
         "effective_reviewer_kinds": sorted(effective_kinds),
         "exhausted_kinds": sorted(exhausted),
+        "headroom_unknown": headroom_unknown,
     }
 
 
@@ -580,11 +591,11 @@ def review(
     if not session_id:
         raise ValueError("session_id must be provided or present in state file")
 
-    # Classify assurance on EVERY panel run, not only under --assess-assurance,
-    # so a normal `fno review` cannot silently skip risk classification. This is
-    # advisory here (the block lives at /pr check Step 0c + the CLI exit code);
-    # emitting it means the classification always happens and travels in the
-    # result. Never raises.
+    # Classify assurance on EVERY panel run (size-only here: there is no
+    # diff->risk-surface detection, so the high-assurance trigger is reached only
+    # via /pr check Step 0c, which hand-derives --risk-surface). This is advisory
+    # (the block lives at /pr check + the CLI exit code); emitting it means the
+    # classification always happens and travels in the result. Never raises.
     assurance = review_assurance(session_id, size=_resolve_node_size(state_path))
     if not assurance.get("satisfied", True):
         print(

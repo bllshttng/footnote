@@ -1,4 +1,4 @@
-"""Pre-review risk classification and assurance resolution (x-5f0c).
+"""Pre-review risk classification and assurance resolution.
 
 A deterministic layer that sits on top of the capacity substrate in
 :mod:`fno.review.provider_resolution`. It answers two questions before a
@@ -29,7 +29,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Sequence
+from typing import Literal, Sequence
+
+Effective = Literal["diverse", "portable", "unresolved"]
 
 from fno.review.provider_resolution import CLAUDE, DISPATCHABLE_PROVIDERS
 
@@ -95,21 +97,34 @@ class AssuranceVerdict:
 
     policy: ReviewPolicy
     satisfied: bool
-    effective: str
+    effective: Effective
     reason: str
+
+    def __post_init__(self) -> None:
+        # satisfied and effective are correlated, not independent: unresolved iff
+        # not satisfied. Enforce it at construction so a future branch in
+        # assess_assurance that mixes them fails here, not silently downstream.
+        if (self.effective == "unresolved") == self.satisfied:
+            raise ValueError(
+                f"inconsistent verdict: satisfied={self.satisfied} "
+                f"effective={self.effective!r}"
+            )
 
 
 def _has_diverse_capacity(
     effective_reviewer_kinds: Sequence[str], implementer_provider: str
 ) -> bool:
-    """True when a reviewer that will ACTUALLY run differs from the implementer.
+    """True when a reviewer RESOLVED TO DISPATCH differs from the implementer.
 
-    ``effective_reviewer_kinds`` is what the panel will genuinely dispatch to -
+    ``effective_reviewer_kinds`` is what the panel is resolved to dispatch to -
     already excluding degraded fallbacks and exhausted providers (the accessor
     computes it from the resolved routing, not from raw capacity). This is the
     fix for the "certifies unused capacity" failure: a codex record that exists
     but is disabled, pinned away, or exhausted is NOT in this set, so it cannot
-    make a high-assurance verdict pass.
+    make a high-assurance verdict pass. This is an AVAILABILITY signal (preflight):
+    it does not prove the reviewer later completed cross-family - a dispatch that
+    times out and falls back is caught post-hoc by the observed-runtime
+    attestation, not here.
     """
     implementer = (implementer_provider or CLAUDE).strip().lower()
     for candidate in effective_reviewer_kinds:
@@ -124,12 +139,15 @@ def assess_assurance(
     *,
     effective_reviewer_kinds: Sequence[str],
     implementer_provider: str,
-    identity_known: bool = True,
+    identity_known: bool = False,
 ) -> AssuranceVerdict:
-    """Resolve ``policy`` against the reviewer that will actually run. Never raises.
+    """Resolve ``policy`` against the reviewer resolved to dispatch. Never raises.
 
-    ``effective_reviewer_kinds`` is the set of provider kinds a panel agent will
-    genuinely dispatch to for this run - degraded fallbacks collapsed to claude
+    This is a PREFLIGHT availability verdict, not a proof that a cross-family
+    review completed; the observed-runtime attestation gates completion.
+
+    ``effective_reviewer_kinds`` is the set of provider kinds a panel agent is
+    resolved to dispatch to for this run - degraded fallbacks collapsed to claude
     and exhausted kinds removed - NOT the raw capacity list. ``implementer_provider``
     is the kind that wrote the code; ``identity_known`` is False when that family
     could not be established from real provenance (no ledger row), which only

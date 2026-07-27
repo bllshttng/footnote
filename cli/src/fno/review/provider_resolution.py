@@ -220,7 +220,9 @@ def load_implementer_provider(
     looked up in ``config.providers.records`` by id and its ``cli`` is used.
 
     Absent ledger / no matching row / any error -> ``"claude"`` (OQ1: assume
-    claude). Never raises.
+    claude). Never raises. Do NOT use for a decision that must distinguish
+    known-claude from unknown-defaulted-claude (the high-assurance gate) - read
+    :func:`load_implementer_identity` for that, which returns the established flag.
     """
     return load_implementer_identity(session_id, ledger_path=ledger_path)[0]
 
@@ -261,26 +263,36 @@ def load_implementer_identity(
                     provider_id = pid  # latest match wins
         if not provider_id:
             return CLAUDE, False
-        return _provider_id_to_kind(provider_id), True
+        # established only when the id mapped to a REAL kind; a rotated-out or
+        # unmappable id defaults to claude but is NOT an established family.
+        return _provider_id_to_kind(provider_id)
     except Exception as exc:  # noqa: BLE001 - never let a bad ledger break review
         log.warning("cross-model: implementer-provider read failed: %s", exc)
         return CLAUDE, False
 
 
-def _provider_id_to_kind(provider_id: str) -> str:
-    """Map a ledger provider_id to a dispatchable kind. Best-effort -> claude."""
+def _provider_id_to_kind(provider_id: str) -> tuple[str, bool]:
+    """Map a ledger provider_id to a dispatchable kind and whether it RESOLVED.
+
+    Returns ``(kind, resolved)``. ``resolved`` is False when the id could not be
+    mapped to a real dispatchable kind - an unknown/rotated-out id or a lookup
+    error - in which case ``kind`` is the best-effort ``claude`` fallback but the
+    caller must NOT treat it as an established family. Collapsing "unmappable id"
+    into a confident ``claude`` is exactly the seam that let a same-family
+    reviewer certify diversity, so the resolution signal is load-bearing.
+    """
     pid = provider_id.strip().lower()
     if pid in DISPATCHABLE_PROVIDERS:
-        return pid
+        return pid, True
     try:
         from fno.adapters.providers.loader import load_providers
 
         record = load_providers().by_id.get(provider_id)
         if record is not None and record.cli in DISPATCHABLE_PROVIDERS:
-            return record.cli
+            return record.cli, True
     except Exception as exc:  # noqa: BLE001
         log.warning("cross-model: provider_id->kind lookup failed: %s", exc)
-    return CLAUDE
+    return CLAUDE, False
 
 
 def available_provider_kinds(
@@ -360,16 +372,20 @@ def available_provider_kinds(
     return kinds
 
 
-def exhausted_provider_kinds(*, repo_root: Path | None = None) -> set[str]:
+def exhausted_provider_kinds(*, repo_root: Path | None = None) -> set[str] | None:
     """Return the dispatchable kinds whose provider records are ALL exhausted.
 
     ``available_provider_kinds`` only *demotes* an exhausted kind (rotation
     order); it stays selectable. The assurance gate needs the stronger signal -
     a kind that cannot actually serve a review right now - so it excludes these
     from what counts as different-family capacity. A kind with no record (e.g.
-    the ``claude`` local fallback) is UNKNOWN, never exhausted. Cache-only read,
-    fail-open (any error -> empty set, never over-reports exhaustion). Never
-    raises.
+    the ``claude`` local fallback) is UNKNOWN, never exhausted.
+
+    Returns the exhausted-kind set on a successful read, or ``None`` when the
+    headroom read FAILED. ``None`` is not "nothing exhausted": for a
+    high-assurance gate, an unreadable headroom must fail CLOSED (the caller
+    cannot trust that a non-claude kind can actually serve), which returning an
+    empty set would silently defeat. Cache-only read, never raises.
     """
     try:
         from fno.adapters.providers.loader import load_providers
@@ -385,6 +401,6 @@ def exhausted_provider_kinds(*, repo_root: Path | None = None) -> set[str]:
             for kind, ids in by_kind.items()
             if ids and all(headroom(pid).state is HeadroomState.EXHAUSTED for pid in ids)
         }
-    except Exception as exc:  # noqa: BLE001 - a headroom read never blocks review
-        log.debug("cross-model: exhausted-kind read skipped: %s", exc)
-        return set()
+    except Exception as exc:  # noqa: BLE001 - a headroom read never raises; signals None
+        log.debug("cross-model: exhausted-kind read failed: %s", exc)
+        return None

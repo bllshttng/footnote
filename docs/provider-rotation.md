@@ -1182,12 +1182,15 @@ later.
 ## Review policy and assurance
 
 `fno.review.policy` classifies how much assurance a change needs *before* the
-review runs, then resolves that against the reviewer that will *actually* run -
-the resolved panel routing, not raw capacity. Cross-model being off, an
-all-claude pin, a degraded fallback, or an exhausted provider all mean a
-different-family review will not happen, so none of them can satisfy a
-high-assurance policy. It is a thin, pure layer over the substrate above, not a
-new provider list.
+review runs, then resolves that against the reviewer *resolved to dispatch* - the
+resolved panel routing, not raw capacity. Cross-model being off, an all-claude
+pin, a degraded fallback, or an exhausted provider all mean a different-family
+review will not happen, so none of them can satisfy a high-assurance policy. It
+is a thin, pure layer over the substrate above, not a new provider list. This is
+a **preflight availability** signal: it certifies a different-family reviewer is
+available to dispatch, not that one later completed cross-family (a dispatch that
+times out and falls back is caught by the observed-runtime attestation, a
+separate post-hoc layer).
 
 `classify_review_policy(size, risk_surfaces)` is deterministic:
 
