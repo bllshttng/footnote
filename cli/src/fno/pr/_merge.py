@@ -814,25 +814,27 @@ def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
     """
     from fno.pr._status import verdict_for
 
-    try:
-        res = _gh(
-            [
-                "pr",
-                "view",
-                str(pr_number),
-                "--json",
-                "state,statusCheckRollup,headRefOid",
-            ],
-            repo,
-        )
-    except ToolMissing:
-        return ("unknown", {}, "")
-    if not res.ok or not (res.stdout or "").strip():
-        return ("unknown", {}, "")
+    def _miss(why: str) -> tuple[str, dict, str]:
+        # Named, like _behind_by's own miss path: "checks are unknown" alone
+        # cannot tell a broken gh from a PR that simply has no checks, and the
+        # operator only ever sees the emitted reason.
+        return ("unknown", {"why": why}, "")
+
+    # ToolMissing is deliberately NOT caught: the module contract reserves 127
+    # for a missing gh, and both sibling handlers emit it. Swallowing it here
+    # would demote that to a generic exit-1 "checks are unknown".
+    res = _gh(
+        ["pr", "view", str(pr_number), "--json", "state,statusCheckRollup,headRefOid"],
+        repo,
+    )
+    if not res.ok:
+        return _miss(f"gh exited {res.returncode}")
+    if not (res.stdout or "").strip():
+        return _miss("gh returned no output")
     try:
         data = json.loads(res.stdout)
     except json.JSONDecodeError:
-        return ("unknown", {}, "")
+        return _miss("gh returned unparseable JSON")
     verdict, _exit, counts = verdict_for(data.get("statusCheckRollup") or [])
     return (verdict, counts, (data.get("headRefOid") or "").strip())
 
@@ -846,6 +848,10 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
         cmd.append("--delete-branch")
     if auto_merge.require_checks_pass:
         cmd.append("--auto")
+    # Set only on the no-auto fallback below, where THIS process is the one
+    # vouching for the checks. The worktree recovery path reads it so its
+    # server-side merge is pinned to the same SHA the verdict came from.
+    verified_head = ""
 
     # (4) Run + classify.
     try:
@@ -877,7 +883,12 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
         # Dropping it silently would turn "do not merge red" into "merge
         # anything". So do here what GitHub would have done: read the checks,
         # merge only on green, and refuse otherwise.
-        verdict, counts, verified_head = _checks_verdict(pr_number, repo)
+        try:
+            verdict, counts, head_read = _checks_verdict(pr_number, repo)
+        except ToolMissing:
+            _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
+            return 127
+        verified_head = head_read
         if verdict != "green":
             _emit(
                 pr_number,
@@ -888,6 +899,11 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
                 strategy,
                 err=verdict not in ("pending",),
             )
+            if verdict != "pending":
+                # Match the pre-existing failure path: a node left reading
+                # `queued` from an earlier attempt would otherwise stay queued
+                # after a red refusal, and the scoreboard consumes that field.
+                _sync_graph_merge_status("failed", pr_number)
             return 2 if verdict == "pending" else 1
         if not verified_head:
             _emit(
@@ -898,6 +914,7 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
                 strategy,
                 err=True,
             )
+            _sync_graph_merge_status("failed", pr_number)
             return 1
         # A verdict belongs to the SHA it was computed on. Between that read and
         # this merge, another actor can push - and `--auto` is gone, so GitHub is
@@ -945,17 +962,23 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
             _run_post_merge_followups(pr_number, strategy, repo)
             return 0
         # (b) Not merged yet -> merge SERVER-SIDE via the API (no local checkout).
-        api = _gh(
-            [
-                "api",
-                "--method",
-                "PUT",
-                f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/merge",
-                "-f",
-                f"merge_method={strategy}",
-            ],
-            repo,
-        )
+        # Carry the head pin when we have one. Reaching here from the no-auto
+        # fallback means THIS process vouched for the checks at a specific SHA,
+        # and this API call would otherwise merge whatever the head is now -
+        # silently undoing the pin on the `--match-head-commit` retry, in the
+        # very path a worktree run takes. `sha` is the endpoint's equivalent
+        # guard: the merge is refused unless the head still matches.
+        api_args = [
+            "api",
+            "--method",
+            "PUT",
+            f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/merge",
+            "-f",
+            f"merge_method={strategy}",
+        ]
+        if verified_head:
+            api_args += ["-f", f"sha={verified_head}"]
+        api = _gh(api_args, repo)
         if api.ok:
             _git(["fetch", "origin"], repo)
             _emit(
