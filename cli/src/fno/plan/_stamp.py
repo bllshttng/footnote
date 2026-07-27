@@ -77,6 +77,18 @@ class RawBlock:
         return f"RawBlock({first_line!r}...)"
 
 
+class BlockList(list):
+    """A list that arrived as a block sequence and is emitted as one.
+
+    Only a marker: it IS a list, so every consumer and every equality check
+    against a plain list is unaffected. Without it this writer flattens every
+    block list to inline while the vault's Obsidian stack re-expands it to
+    block on the next write, so a plan doc's frontmatter never settles. Keys
+    this writer ADDS are plain lists and stay inline.
+    """
+    __slots__ = ()
+
+
 def _valid_count(value: Any) -> bool:
     """True when value parses as an integer >= 1.
 
@@ -156,8 +168,13 @@ def _parse_inline_list(raw: str) -> list[str]:
     return items
 
 
+def _quote_item(item: str) -> str:
+    """Wrap an item in double quotes, escaping what `_parse_scalar` resolves."""
+    return '"' + item.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def _serialize_item(item: str) -> str:
-    """Emit a list item, quoting it when the inline form would be ambiguous.
+    """Emit an inline list item, quoting it when the form would be ambiguous.
 
     Quote-on-write is half of the round-trip; a quote-aware reader alone still
     loses an unquoted comma item on the next read. A comma would split the
@@ -166,7 +183,22 @@ def _serialize_item(item: str) -> str:
     """
     if item and item == item.strip() and not _NEEDS_QUOTE_RE.search(item):
         return item
-    return '"' + item.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return _quote_item(item)
+
+
+def _serialize_block_item(item: str) -> str:
+    """Emit a block sequence item, which carries a comma without quoting.
+
+    Deliberately laxer than `_serialize_item`: quoting a comma item here would
+    be undone by the vault's formatter (block form needs no quotes, so it
+    strips them) and re-added on the next projection, which is the oscillation
+    block-form preservation exists to stop. Only genuine ambiguity is quoted -
+    surrounding whitespace the reader would strip, and a leading quote
+    character the reader would try to unwrap.
+    """
+    if item and item == item.strip() and item[0] not in "\"'":
+        return item
+    return _quote_item(item)
 
 
 def _serialize_inline_list(items: list[str]) -> str:
@@ -301,7 +333,7 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
                     raw_lines.pop()
                 fields[key] = RawBlock("\n".join(raw_lines))
             elif saw_child:
-                fields[key] = items
+                fields[key] = BlockList(items)
             else:
                 fields[key] = ""
         else:
@@ -319,6 +351,11 @@ def serialize_frontmatter(fields: dict[str, Any]) -> str:
             lines.append(f"{key}:")
             if value.text:
                 lines.append(value.text)
+        elif isinstance(value, BlockList) and value:
+            # An empty block list has no children to carry it and would read
+            # back as a bare-key scalar, so it falls through to inline `[]`.
+            lines.append(f"{key}:")
+            lines.extend(f"  - {_serialize_block_item(item)}" for item in value)
         elif isinstance(value, list):
             lines.append(f"{key}: {_serialize_inline_list(value)}")
         else:

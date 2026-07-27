@@ -137,6 +137,58 @@ def test_no_frontmatter_returns_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
+# AC4-HP: block form survives the projection
+# ---------------------------------------------------------------------------
+
+
+def test_block_list_stays_block() -> None:
+    """AC4-HP: a block list must not be flattened to inline on rewrite.
+
+    Cosmetic on its own - the comma is already safe after the parse/serialize
+    fix - but it ends the block -> inline -> block oscillation between this
+    writer and the vault's formatter.
+    """
+    doc = "---\nsources:\n  - docs/a.md\n  - docs/b.md\n---\nbody\n"
+    fields, _block, _rest = parse_frontmatter(doc)
+    assert serialize_frontmatter(fields) == "sources:\n  - docs/a.md\n  - docs/b.md"
+
+
+def test_added_keys_stay_inline() -> None:
+    """Only keys READ as block keep block form; new ones stay inline."""
+    fields, _block, _rest = parse_frontmatter("---\ntitle: t\n---\nbody\n")
+    fields["session_ids"] = ["sess-1"]
+    assert "session_ids: [sess-1]" in serialize_frontmatter(fields)
+
+
+def test_empty_block_list_falls_back_to_inline() -> None:
+    """A childless block list would read back as a scalar, so it goes inline."""
+    fields, _block, _rest = parse_frontmatter(
+        "---\nsources:\n  - only.md\n---\nbody\n"
+    )
+    fields["sources"].clear()
+    assert "sources: []" in serialize_frontmatter(fields)
+
+
+def test_projection_preserves_block_form(tmp_path: Path) -> None:
+    """AC4-HP through the real call site: the graph -> doc projection."""
+    from fno.plan._project import project_node_to_plan
+
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        "---\ntitle: t\nstatus: ready\npriority: p2\n"
+        f"sources:\n  - {_COMMA_ITEM}\n  - docs/b.md\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+    assert project_node_to_plan({"priority": "p1"}, plan) is True
+
+    text = plan.read_text(encoding="utf-8")
+    assert f"sources:\n  - {_COMMA_ITEM}\n" in text
+    fields, _block, _rest = parse_frontmatter(text)
+    assert fields["sources"] == [_COMMA_ITEM, "docs/b.md"]
+
+
+# ---------------------------------------------------------------------------
 # AC7-ERR: malformed input degrades rather than raises
 # ---------------------------------------------------------------------------
 
