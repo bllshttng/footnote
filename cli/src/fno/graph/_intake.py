@@ -1148,6 +1148,31 @@ def normalize_size(value: object) -> Optional[str]:
     return s if s in {"S", "M", "L"} else None
 
 
+# The graph's node-type vocabulary. Lives here (the lower layer `graph.cli`
+# already imports from) so `backlog update --type` and the intake doc->graph
+# flow validate against ONE set rather than two that can drift.
+VALID_NODE_TYPES: frozenset[str] = frozenset({"feature", "epic", "bug", "roadmap"})
+DEFAULT_NODE_TYPE = "feature"
+
+
+def normalize_type(value: object) -> str:
+    """Coerce a plan-frontmatter type to the graph vocabulary, else the default.
+
+    Fail-soft like :func:`normalize_size`, but SILENT where that one is silent
+    too, and for a sharper reason: plan frontmatter `type:` is an overloaded
+    key. Measured over 607 real plans, 519 carry a node kind (feature/bug/epic)
+    while 88 carry something else - the plan-side vocabulary the graph does not
+    share (`task`, `refactor`) or a document kind (`design`, `think`, `plan`,
+    `handoff`, `quick-plan`). Warning on a non-match would fire on 13% of the
+    corpus and call a documented value a typo, so a value outside the graph
+    vocabulary simply is not a node type and leaves the default standing.
+    """
+    if not value:
+        return DEFAULT_NODE_TYPE
+    t = str(value).strip().lower()
+    return t if t in VALID_NODE_TYPES else DEFAULT_NODE_TYPE
+
+
 def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     from datetime import datetime, timezone
 
@@ -1179,7 +1204,10 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "id": mint_node_id({e.get("id") for e in entries if e.get("id")}),
         "parent": None,
         "title": spec["title"],
-        "type": "feature",
+        # Type flows doc->graph at intake, same as `size` below: the plan
+        # frontmatter is where it is declared. Hardcoding "feature" here is what
+        # made the graph's `type` an invented default nobody set.
+        "type": normalize_type(fm.get("type")),
         "project": project,
         "cwd": node_cwd,
         "priority": spec["priority"],

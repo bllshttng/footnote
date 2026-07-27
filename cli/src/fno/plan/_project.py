@@ -3,8 +3,8 @@
 One-way graph->doc mirror: the graph is the authority, the plan frontmatter
 carries a PROJECTION so the Obsidian Bases can order "Next up" by priority and
 show blockers without a second lookup. Written only by fno verbs (intake,
-`backlog update`); never read back into the graph here (`size` flows doc->graph
-at intake, a separate reverse path in `_intake`).
+`backlog update`); never read back into the graph here (`size` and `type` flow
+doc->graph at intake, a separate reverse path in `_intake`).
 
 Reuses `_stamp`'s byte-preserving frontmatter reader/writer so the projection
 never reorders keys or reformats opaque blocks like `kill_criteria`.
@@ -20,12 +20,18 @@ from fno.plan._stamp import read_plan_file, write_plan_file
 from fno.plan._status import project_plan_status
 from fno.plan._rollup import ROLLUP_KEYS, compute_rollup, compute_waves
 
-# Graph-authoritative fields mirrored into frontmatter. `type` is usually
-# already present; the projection keeps it in sync with the node. `parent_slug`
-# is not a native node field - the converger injects it (see project_graph_nodes).
+# Graph-authoritative fields mirrored into frontmatter. `parent_slug` is not a
+# native node field - the converger injects it (see project_graph_nodes).
+#
+# `type` is deliberately ABSENT: it is unconditionally mirrored by nothing,
+# because the graph's value is only sometimes observed. `decompose` mints every
+# child "feature" with no way to say otherwise, so an unconditional mirror
+# rewrote authored `type: bug` docs to `type: feature`. A caller that actually
+# supplied a type opts back in per call via `mirror_type=True`, which is the
+# distinction that matters: a defaulted type must never reach a doc, a
+# supplied one must.
 MIRROR_KEYS: tuple[str, ...] = (
     "priority",
-    "type",
     "blocked_by",
     "tags",
     "project",
@@ -46,13 +52,20 @@ LIST_MIRROR_KEYS: frozenset[str] = frozenset({"blocked_by", "tags"})
 CLEARABLE_KEYS: frozenset[str] = frozenset({"size", "parent", "parent_slug"})
 
 
-def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
+def project_node_to_plan(
+    node: dict[str, Any], plan_path: Path, *, mirror_type: bool = False
+) -> bool:
     """Upsert the mirror fields from ``node`` into ``plan_path``'s frontmatter.
 
     Returns True if the file was rewritten (a mirrored value changed), False on
     a no-op or when the plan file is missing/unreadable. Never raises: a graph
     mutation must not fail because its projected doc is absent or unreadable
     (warns to stderr instead).
+
+    ``mirror_type`` opts this call into writing ``type`` as well. Only a caller
+    that took the type from the operator (``backlog update --type``) may set it;
+    every other path leaves the doc's own ``type`` alone, because the graph's
+    value there is a mint-time default nobody chose.
     """
     try:
         target, fields, rest = read_plan_file(plan_path)
@@ -63,7 +76,7 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
         return False
 
     changed = False
-    for key in MIRROR_KEYS:
+    for key in (*MIRROR_KEYS, "type") if mirror_type else MIRROR_KEYS:
         if key not in node:
             continue
         value = node[key]
@@ -89,15 +102,20 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
     # stays clean. The frontmatter reader returns every scalar as a str, so
     # compare (and store) the str form or an int counter re-writes forever.
     # `children_total: 2` still serializes bareword, so Obsidian reads a number.
-    # Derived epic fields: rollup counters, the epic `waves` summary, and a
-    # child's `wave` stratum (x-6c2b). All computed views, repainted every
+    # Derived epic fields: rollup counters, the epic `waves_total` summary, and
+    # a child's `wave` stratum (x-6c2b). All computed views, repainted every
     # projection, never hand-set. The converger passes an explicit None when a
     # key no longer applies (a node demoted out of epic-hood, a child orphaned
     # off its epic) so the stale value is CLEARED, not left to rot - the
     # graph-authoritative contract (codex). Present str value => write; None =>
     # delete if present; absent => leave alone (a bare direct caller never
     # clears).
-    for key in (*ROLLUP_KEYS, "waves", "wave"):
+    #
+    # The summary is `waves_total`, NOT `waves`: `waves` is /blueprint's authored
+    # wave list (BLUEPRINT_WRITE_ALLOWLIST), and while the derived int shared that
+    # name every projection destroyed the list - an epic doc's `waves:\n  - wave:
+    # 1\n  - wave: 2` became `waves: 4`. One key, one owner.
+    for key in (*ROLLUP_KEYS, "waves_total", "wave"):
         if key not in node:
             continue
         if node[key] is None:
@@ -109,6 +127,24 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
         if fields.get(key) != value:
             fields[key] = value
             changed = True
+
+    # Heal the docs the old shared-key projection already damaged, and ONLY
+    # those. Two narrowings, both load-bearing: the old int was written only on
+    # the epic branch, so a non-epic's `waves` is authored and must not be
+    # touched (`waves_total` is present-but-None for a non-epic, so key
+    # membership is NOT the epic test); and the value must look like that int,
+    # since the reader also returns a plain str for an authored one-line scalar
+    # and for a bare `waves:` with no children. An authored list arrives as list
+    # or RawBlock and never matches. /blueprint cannot self-heal because its
+    # default fires only on a falsy `waves`, and a stale `3` is truthy.
+    stale_waves = fields.get("waves")
+    if (
+        node.get("waves_total") is not None
+        and isinstance(stale_waves, str)
+        and stale_waves.strip().isdigit()
+    ):
+        del fields["waves"]
+        changed = True
 
     # Status projection (x-f34f): map the graph derived `status` onto the plan,
     # forward-only. Kept out of MIRROR_KEYS because it is a mapped, monotonic
@@ -134,6 +170,8 @@ def project_graph_nodes(
     entries: list[dict[str, Any]],
     node_ids: list[str],
     root: str | None = None,
+    *,
+    mirror_type_for: str | None = None,
 ) -> int:
     """Project each named node's mirror fields onto its linked plan.
 
@@ -179,12 +217,12 @@ def project_graph_nodes(
                 # Epic-altitude wave summary: max child stratum + 1 (0 when
                 # childless). Derived from intra-epic blocked_by edges (AC4).
                 _, max_wave = compute_waves(node["id"], entries)
-                augmented["waves"] = max_wave + 1
+                augmented["waves_total"] = max_wave + 1
             else:
                 # Not an epic: clear any stale epic-only derived fields a prior
                 # projection left behind (a --type feature demotion) so the doc
                 # stays graph-authoritative (codex).
-                for k in (*ROLLUP_KEYS, "waves"):
+                for k in (*ROLLUP_KEYS, "waves_total"):
                     augmented[k] = None
             # A node's own stratum within its parent epic (mission or plain);
             # None (=> cleared) when it has no epic parent, e.g. after --parent
@@ -198,7 +236,14 @@ def project_graph_nodes(
                     _wid = node.get("id")
                     wave_val = wave_map.get(_wid) if isinstance(_wid, str) else None
             augmented["wave"] = wave_val
-            if project_node_to_plan(augmented, p):
+            # Node-scoped, NOT call-scoped: this converger expands one id into
+            # its ancestors and siblings (_expand_repaint_targets above), and a
+            # call-scoped flag would write the graph's mint-time default onto
+            # every one of those sibling docs - the exact corruption the opt-in
+            # exists to prevent. Only the node the operator named opts in.
+            if project_node_to_plan(
+                augmented, p, mirror_type=(nid == mirror_type_for)
+            ):
                 rewritten += 1
         except Exception as e:  # noqa: BLE001 - per-node best-effort
             sys.stderr.write(f"warning: plan projection failed for {nid}: {e}\n")

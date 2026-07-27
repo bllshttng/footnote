@@ -337,6 +337,138 @@ def test_intake_refuses_claim_when_plan_already_adopted_as_different_node(
     assert "ab-1dea1234" in err
 
 
+def test_claim_lane_flows_declared_type_doc_to_graph(tmp_path, monkeypatch):
+    """The claim lane reads `type` doc->graph, same as the create lane.
+
+    Intake has two lanes. `_build_intake_node` reads the doc's `type`; if this
+    one did not, the flow would be a guard on one of N reachable paths - a doc
+    declaring `type: bug` claimed onto an existing node would leave the graph
+    at its mint-time default and the two would silently disagree.
+    """
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    g = tmp_path / "graph.json"
+    g.write_text(json.dumps({"entries": [_node("ab-1dea1234", title="Idea", status="idea")]}) + "\n")
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text('{"entries": []}\n')
+    monkeypatch.setattr(gc, "GRAPH_JSON", g)
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
+
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\ncreated: 2026-05-05T04:35\ntype: bug\n---\n# Bug plan\n\nBody.\n")
+
+    result = CliRunner().invoke(
+        app, ["backlog", "intake", str(plan), "--claims", "ab-1dea1234"]
+    )
+    assert result.exit_code == 0, result.output
+    after = json.loads(g.read_text())["entries"]
+    assert next(e for e in after if e["id"] == "ab-1dea1234")["type"] == "bug"
+
+
+def test_claim_lane_respects_the_epic_nesting_cap(tmp_path, monkeypatch):
+    """A doc-declared `type: epic` cannot mint a third epic level.
+
+    `add` and `update` both refuse this; a frontmatter lane that skipped the cap
+    would be a guard on one of N reachable paths. This lane SKIPS with a warning
+    rather than refusing - the frontmatter is advisory and the claim is valid.
+    """
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    g = tmp_path / "graph.json"
+    # mission (epic) -> nested (epic) -> target. Promoting target = 3rd level.
+    entries = [
+        _node("ab-m1111111", title="Mission", type="epic"),
+        _node("ab-e2222222", title="Nested epic", type="epic", parent="ab-m1111111"),
+        _node("ab-1dea1234", title="Idea", status="idea", parent="ab-e2222222"),
+    ]
+    g.write_text(json.dumps({"entries": entries}) + "\n")
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text('{"entries": []}\n')
+    monkeypatch.setattr(gc, "GRAPH_JSON", g)
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
+
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\ncreated: 2026-05-05T04:35\ntype: epic\n---\n# Epic plan\n\nBody.\n")
+
+    result = CliRunner().invoke(
+        app, ["backlog", "intake", str(plan), "--claims", "ab-1dea1234"]
+    )
+    assert result.exit_code == 0, result.output  # the claim itself still lands
+    after = json.loads(g.read_text())["entries"]
+    target = next(e for e in after if e["id"] == "ab-1dea1234")
+    assert target["type"] == "feature"  # promotion refused
+    assert target["plan_path"] == str(plan)  # the rest of the claim applied
+    assert "epic-nesting cap" in result.output
+
+
+def test_claim_lane_allows_an_epic_under_a_top_level_mission(tmp_path, monkeypatch):
+    """The cap is two levels, so one epic under a top-level mission is legal."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    g = tmp_path / "graph.json"
+    entries = [
+        _node("ab-m1111111", title="Mission", type="epic"),
+        _node("ab-1dea1234", title="Idea", status="idea", parent="ab-m1111111"),
+    ]
+    g.write_text(json.dumps({"entries": entries}) + "\n")
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text('{"entries": []}\n')
+    monkeypatch.setattr(gc, "GRAPH_JSON", g)
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
+
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\ncreated: 2026-05-05T04:35\ntype: epic\n---\n# Epic plan\n\nBody.\n")
+
+    result = CliRunner().invoke(
+        app, ["backlog", "intake", str(plan), "--claims", "ab-1dea1234"]
+    )
+    assert result.exit_code == 0, result.output
+    after = json.loads(g.read_text())["entries"]
+    assert next(e for e in after if e["id"] == "ab-1dea1234")["type"] == "epic"
+
+
+def test_claim_lane_leaves_type_alone_when_doc_declares_none(tmp_path, monkeypatch):
+    """A doc with no node-kind `type` never demotes an operator-set node type."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    g = tmp_path / "graph.json"
+    seeded = _node("ab-1dea1234", title="Idea", status="idea")
+    seeded["type"] = "epic"  # an operator set this explicitly
+    g.write_text(json.dumps({"entries": [seeded]}) + "\n")
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text('{"entries": []}\n')
+    monkeypatch.setattr(gc, "GRAPH_JSON", g)
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
+
+    plan = _write_quick_plan(tmp_path, title="Untyped plan")
+    result = CliRunner().invoke(
+        app, ["backlog", "intake", str(plan), "--claims", "ab-1dea1234"]
+    )
+    assert result.exit_code == 0, result.output
+    after = json.loads(g.read_text())["entries"]
+    assert next(e for e in after if e["id"] == "ab-1dea1234")["type"] == "epic"
+
+
 def test_cli_runner_intake_with_claims_flag(tmp_path, monkeypatch):
     """End-to-end CliRunner test for the real Typer command wiring.
 

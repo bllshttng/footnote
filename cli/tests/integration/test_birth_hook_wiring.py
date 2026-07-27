@@ -1,9 +1,13 @@
 """Integration: the v2 A1 birth paths route through on_node_born.
 
 cmd_idea wiring lives in test_idea_think_spawn_wiring.py and the retro path in
-test_retro_land.py. This covers the two remaining named A1 paths - decompose
-child mint and intake - proving each invokes the shared hook for a real birth
-and NOT for a non-birth (an idempotent re-decompose that only updates).
+test_retro_land.py. This covers the remaining named A1 paths - intake and add -
+proving each invokes the shared hook for a real birth.
+
+Decompose is NOT one of them. It used to route unflagged children here,
+which spawned a /think on every autonomous decompose rather than offering one;
+`needs_think` is now the sole consent for a decompose-time design pass, and the
+inverse is pinned below.
 """
 from __future__ import annotations
 
@@ -44,7 +48,7 @@ def capture_born(monkeypatch: pytest.MonkeyPatch):
     return seen
 
 
-# -- decompose child mint --
+# -- decompose child mint: deliberately NOT a birth-hook path --
 
 _EPIC = {
     "id": "ab-epic0001", "parent": None, "title": "Epic", "type": "feature",
@@ -58,31 +62,23 @@ _GROUPS = json.dumps([
 ])
 
 
-def test_decompose_fires_birth_hook_per_created_child(tmp_path, monkeypatch, capture_born):
+def test_decompose_never_fires_birth_hook(tmp_path, monkeypatch, capture_born):
+    """An unflagged decompose child reaches no spawn seam, on any pass.
+
+    The epic doc is a group child's design authority (the blueprint session
+    inline-fills each scaffold), so a decompose-born child needs no /think of
+    its own unless the operator flags the group `needs_think`.
+    """
     g = tmp_path / "graph.json"
     g.write_text(json.dumps({"entries": [{**_EPIC, "cwd": str(tmp_path)}]}) + "\n")
     _route_graph(g, tmp_path, monkeypatch)
 
+    # First pass: 2 children created, still no births.
     r = _invoke("backlog", "decompose", "ab-epic0001", "--groups", _GROUPS)
     assert r.exit_code == 0, r.output
+    assert capture_born == []
 
-    assert len(capture_born) == 2
-    assert all(nid for nid, _ in capture_born)  # each carried a real child id
-    rss = [rs for _, rs in capture_born]
-    assert rss[0] is rss[1] is not None  # one shared RunState bounds the batch
-
-
-def test_redecompose_update_does_not_refire_birth_hook(tmp_path, monkeypatch, capture_born):
-    g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [{**_EPIC, "cwd": str(tmp_path)}]}) + "\n")
-    _route_graph(g, tmp_path, monkeypatch)
-
-    # First pass: 2 children created -> 2 births.
-    assert _invoke("backlog", "decompose", "ab-epic0001", "--groups", _GROUPS).exit_code == 0
-    assert len(capture_born) == 2
-    capture_born.clear()
-
-    # Identical re-run: every child is 'updated', none created -> no births.
+    # Identical re-run stays idempotent and equally silent.
     assert _invoke("backlog", "decompose", "ab-epic0001", "--groups", _GROUPS).exit_code == 0
     assert capture_born == []
 

@@ -15,7 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
-from fno.graph._intake import normalize_size
+from fno.graph._intake import VALID_NODE_TYPES, normalize_size, normalize_type
 
 runner = CliRunner()
 
@@ -79,6 +79,83 @@ def test_intake_no_size_frontmatter_leaves_null(tmp_path, monkeypatch):
     result = runner.invoke(app, ["backlog", "intake", str(plan)])
     assert result.exit_code == 0, result.output
     assert _entries(g)[0]["size"] is None
+
+
+# -- intake copies type doc->graph ----------------------------------------
+#
+# Same shape as size above. `type` used to be hardcoded "feature" sixteen lines
+# from the size read, which is what made the graph hold 1441 `feature` nodes
+# against 93 `bug` in a repo that files bugs constantly.
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("bug", "bug"), ("BUG", "bug"), (" epic ", "epic"), ("roadmap", "roadmap"),
+        ("feature", "feature"),
+        ("banana", "feature"), ("think", "feature"), ("task", "feature"),
+        ("", "feature"), (None, "feature"), (0, "feature"),
+    ],
+)
+def test_normalize_type(value, expected):
+    assert normalize_type(value) == expected
+
+
+def test_valid_node_types_is_the_one_vocabulary():
+    """`backlog update --type` validates against this same set, not a copy."""
+    assert VALID_NODE_TYPES == frozenset({"feature", "epic", "bug", "roadmap"})
+    result = runner.invoke(app, ["backlog", "update", "ab-nope0001", "--type", "banana"])
+    assert result.exit_code == 1
+    assert "invalid type 'banana'" in result.output
+
+
+def test_intake_copies_type_from_frontmatter(tmp_path, monkeypatch):
+    """AC7-HP: a plan declaring `type: bug` mints a bug node, not a feature."""
+    g, _ = _route_graph(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\ncreated: 2026-05-05T04:35\ntype: bug\n---\n# Bug\n\nBody.\n")
+
+    result = runner.invoke(app, ["backlog", "intake", str(plan)])
+    assert result.exit_code == 0, result.output
+    assert _entries(g)[0]["type"] == "bug"
+
+
+def test_intake_no_type_frontmatter_still_features(tmp_path, monkeypatch):
+    """AC7-HP (second half): existing type-less intakes are unchanged."""
+    g, _ = _route_graph(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\ncreated: 2026-05-05T04:35\n---\n# Untyped\n\nBody.\n")
+
+    result = runner.invoke(app, ["backlog", "intake", str(plan)])
+    assert result.exit_code == 0, result.output
+    assert _entries(g)[0]["type"] == "feature"
+
+
+@pytest.mark.parametrize("declared", ["banana", "think", "design", "task", "refactor"])
+def test_intake_non_node_type_falls_back_silently(tmp_path, monkeypatch, declared):
+    """AC8-ERR: a value outside the graph vocabulary degrades and never raises.
+
+    Silent by design. Plan `type:` is an overloaded key: 88 of 607 real plans
+    carry a doc kind (`think`, `design`) or the plan-side vocabulary the graph
+    does not share (`task`, `refactor`), so warning would call documented
+    values typos on 13% of the corpus.
+    """
+    g, _ = _route_graph(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.md"
+    plan.write_text(f"---\ncreated: 2026-05-05T04:35\ntype: {declared}\n---\n# Odd\n\nBody.\n")
+
+    result = runner.invoke(app, ["backlog", "intake", str(plan)])
+    assert result.exit_code == 0, result.output
+    assert _entries(g)[0]["type"] == "feature"
+    assert "warning" not in result.output.lower()
+
+
+def test_create_paths_reject_an_invalid_type(tmp_path, monkeypatch):
+    """`add`/`idea` validate --type against the same set `update` does."""
+    _route_graph(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["backlog", "add", "T", "--type", "task"])
+    assert result.exit_code == 1
+    assert "invalid type 'task'" in result.output
 
 
 # -- backlog done stamps cost ledger->node ---------------------------------

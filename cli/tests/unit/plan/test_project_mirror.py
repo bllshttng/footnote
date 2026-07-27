@@ -1,8 +1,8 @@
 """Unit tests for the graph->frontmatter mirror projection (Wave 1).
 
 Covers `fno.plan._project.project_node_to_plan`: the one-way projection that
-upserts a node's navigation fields (priority/type/blocked_by/project) into its
-plan doc's frontmatter, reusing the byte-preserving _stamp read/write path.
+upserts a node's navigation fields (priority/blocked_by/project) into its plan
+doc's frontmatter, reusing the byte-preserving _stamp read/write path.
 """
 from __future__ import annotations
 
@@ -221,3 +221,63 @@ def test_empty_tags_clears_stale_mirror(tmp_path):
     assert project_node_to_plan(node, plan) is True
     _, fields, _ = read_plan_file(plan)
     assert fields["tags"] == []
+
+
+# ---------------------------------------------------------------------------
+# `type` is NOT mirrored by default: decompose mints every child "feature", so a
+# graph-authoritative mirror rewrote authored `type: bug` docs to `type: feature`.
+# ---------------------------------------------------------------------------
+
+
+def test_type_never_rewritten_by_projection(tmp_path):
+    """AC1-HP: the graph's fabricated `type` never rewrites the doc's own."""
+    plan = _write_plan(tmp_path, _PLAN.replace("type: feature", "type: bug"))
+    before = plan.read_text(encoding="utf-8")
+
+    assert project_node_to_plan({"type": "feature"}, plan) is False
+    assert plan.read_text(encoding="utf-8") == before  # byte-identical
+
+
+def test_type_untouched_while_other_keys_project(tmp_path):
+    """AC2-HP: every other mirrored key still writes through on the same call."""
+    plan = _write_plan(tmp_path, _PLAN.replace("type: feature", "type: bug"))
+    node = {"type": "feature", "priority": "p1", "blocked_by": ["x-1"], "size": "L"}
+
+    assert project_node_to_plan(node, plan) is True
+    _, fields, _ = read_plan_file(plan)
+    assert fields["type"] == "bug"  # doc wins
+    assert fields["priority"] == "p1"
+    assert fields["blocked_by"] == ["x-1"]
+    assert fields["size"] == "L"
+
+
+def test_type_absent_from_doc_is_not_added(tmp_path):
+    """A doc that declares no `type` does not gain one from the graph."""
+    plan = _write_plan(tmp_path, _PLAN.replace("type: feature\n", ""))
+
+    assert project_node_to_plan({"type": "epic"}, plan) is False
+    _, fields, _ = read_plan_file(plan)
+    assert "type" not in fields
+
+
+def test_mirror_type_writes_an_operator_supplied_type(tmp_path):
+    """`backlog update --type` opts in, so an observed value reaches the doc.
+
+    Without this the graph and the doc disagree after an explicit --type: the
+    graph rolls the node up as an epic while Obsidian's `type == "epic"` view,
+    which reads the DOC, drops it.
+    """
+    plan = _write_plan(tmp_path, _PLAN.replace("type: feature", "type: bug"))
+
+    assert project_node_to_plan({"type": "epic"}, plan, mirror_type=True) is True
+    _, fields, _ = read_plan_file(plan)
+    assert fields["type"] == "epic"
+
+
+def test_mirror_type_default_off_keeps_the_doc_authoritative(tmp_path):
+    """The same node without the opt-in leaves the doc's `type` alone."""
+    plan = _write_plan(tmp_path, _PLAN.replace("type: feature", "type: bug"))
+
+    assert project_node_to_plan({"type": "epic"}, plan) is False
+    _, fields, _ = read_plan_file(plan)
+    assert fields["type"] == "bug"

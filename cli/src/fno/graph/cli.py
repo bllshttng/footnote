@@ -802,6 +802,7 @@ def _create_node_impl(
     from fno.graph._constants import PRIORITY_ORDER, mint_node_id
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import (
+        VALID_NODE_TYPES,
         detect_project_from_settings,
         project_root_from_settings,
         repo_root,
@@ -811,6 +812,17 @@ def _create_node_impl(
         typer.echo(
             f"Error: invalid priority '{priority}'. "
             f"Must be: {', '.join(PRIORITY_ORDER.keys())}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # `update --type` has always validated; these birth paths never did, so
+    # `--type task` wrote an out-of-vocabulary value straight into the graph.
+    # Same set, same message - one vocabulary is the point.
+    if type_ not in VALID_NODE_TYPES:
+        typer.echo(
+            f"Error: invalid type '{type_}'. Must be one of: "
+            f"{', '.join(sorted(VALID_NODE_TYPES))}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -1025,7 +1037,7 @@ def cmd_add(
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
     blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
     parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
-    type_: str = typer.Option("feature", "--type", "-t", help="Node type: roadmap|feature|task"),
+    type_: str = typer.Option("feature", "--type", "-t", help="Node type: feature|epic|bug|roadmap"),
     project: Optional[str] = typer.Option(
         None,
         help=(
@@ -1102,7 +1114,7 @@ def cmd_idea(
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
     blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
     parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
-    type_: str = typer.Option("feature", "--type", "-t", help="Node type: roadmap|feature|task"),
+    type_: str = typer.Option("feature", "--type", "-t", help="Node type: feature|epic|bug|roadmap"),
     project: Optional[str] = typer.Option(
         None,
         help=(
@@ -1667,8 +1679,12 @@ def cmd_decompose(
     #         so the gate + attended-offer are overridden (mirrors the
     #         dispatch_conversational env-forcing); the caps still bound it. A spawn
     #         that does not fire leaves the child `idea` with its stub on disk.
-    #       - unflagged group -> today's opt-in born-with-why OFFER (gate-OFF
-    #         default => complete no-op).
+    #       - unflagged group -> nothing. `needs_think` is the SOLE consent for a
+    #         decompose-time /think: the born-with-why lane that used to
+    #         run here spawned unconditionally on any autonomous decompose, because
+    #         its OFFER branch needs presence == attended and an autonomous session
+    #         always classifies `away`. The epic doc is a group child's design
+    #         authority; scaffold_separate_plan + why_digest already carry it.
     #     Only UNLINKED children are candidates (a re-decompose never re-designs a
     #     child that already has a plan). Strictly non-fatal: never wedge decompose.
     fanout: list[dict] = []
@@ -1678,11 +1694,7 @@ def cmd_decompose(
     spec_ids = [r["id"] for r in results]
     if spec_ids:
         try:
-            from fno.provenance.spawn_think import (
-                RunState,
-                maybe_spawn_think,
-                on_node_born,
-            )
+            from fno.provenance.spawn_think import RunState, maybe_spawn_think
 
             # Reuse the shared post-mutation re-read from 3c (by_id).
             born_rs = RunState()
@@ -1720,12 +1732,6 @@ def cmd_decompose(
                             f"to design it (child left idea with its stub)",
                             err=True,
                         )
-                elif cid in created_ids:
-                    # Already the persisted, slugged node -> skip the re-read.
-                    # quiet in --json mode: the offer stderr print would pollute a
-                    # captured JSON stream (test_json_output_shape).
-                    on_node_born(child, run_state=born_rs, persisted=True,
-                                 quiet=json_mode(ctx))
         except Exception:  # noqa: BLE001 - additive; never wedge the decompose
             pass
 
@@ -1950,13 +1956,56 @@ def _intake_impl(
         claim_source = prep["claim_source"]
 
         def claim_mutator(es):
-            from fno.graph._intake import resolve_node_project_and_cwd
+            from fno.graph._intake import (
+                DEFAULT_NODE_TYPE,
+                _find_node,
+                _read_plan_frontmatter,
+                _would_exceed_epic_depth,
+                normalize_type,
+                resolve_node_project_and_cwd,
+            )
 
+            # Intake has TWO lanes; the create lane reads `type` doc->graph in
+            # _build_intake_node, so this one must too or the flow is a guard on
+            # one of N paths. Same rule as priority below: the doc only speaks
+            # when it declares a real, non-default value.
+            claimed_type = normalize_type(
+                (_read_plan_frontmatter(plan_path) or {}).get("type")
+            )
             for entry in es:
                 if entry.get("id") != claim_id:
                     continue
                 entry["plan_path"] = plan_path
                 entry["title"] = spec["title"]
+                if (
+                    claimed_type != DEFAULT_NODE_TYPE
+                    and entry.get("type") != claimed_type
+                ):
+                    # `add` and `update` both refuse a write that would make a
+                    # third epic level; a doc-frontmatter lane that skips the cap
+                    # would be the decorative guard this whole change is about.
+                    # It SKIPS rather than refuses, unlike those two: there the
+                    # operator typed `--type` and deserves a hard error, here the
+                    # doc is advisory and the claim itself is still valid.
+                    parent_node = (
+                        _find_node(es, entry["parent"]) if entry.get("parent") else None
+                    )
+                    if (
+                        claimed_type == "epic"
+                        and parent_node is not None
+                        and _would_exceed_epic_depth(
+                            es, {**entry, "type": "epic"}, parent_node
+                        )
+                    ):
+                        typer.echo(
+                            f"warning: plan declares type: epic but {claim_id} sits "
+                            f"under {parent_node['id']}; promoting it would exceed "
+                            f"the epic-nesting cap - type left as "
+                            f"{entry.get('type')!r}",
+                            err=True,
+                        )
+                    else:
+                        entry["type"] = claimed_type
                 if spec["deps"]:
                     merged = list(
                         dict.fromkeys([*entry.get("blocked_by", []), *spec["deps"]])
@@ -2326,10 +2375,12 @@ def cmd_update(
                 err=True,
             )
             raise typer.Exit(code=1)
-    _VALID_TYPES = {"feature", "epic", "bug", "roadmap"}
-    if type_ is not None and type_ not in _VALID_TYPES:
+    from fno.graph._intake import VALID_NODE_TYPES
+
+    if type_ is not None and type_ not in VALID_NODE_TYPES:
         typer.echo(
-            f"Error: invalid type '{type_}'. Must be one of: {', '.join(sorted(_VALID_TYPES))}",
+            f"Error: invalid type '{type_}'. Must be one of: "
+            f"{', '.join(sorted(VALID_NODE_TYPES))}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -2796,7 +2847,12 @@ def cmd_update(
             [
                 projected_node[0]["id"],
                 *([reparent_old_parent[0]] if reparent_old_parent[0] else []),
-            ]
+            ],
+            # The operator typed `--type`, so THIS node's value is observed:
+            # write it through, or the graph and the doc disagree and Obsidian's
+            # `type == "epic"` view drops a node the graph is rolling up. Scoped
+            # to this id - the repaint fan-out must not carry it to siblings.
+            mirror_type_for=(projected_node[0]["id"] if type_ is not None else None),
         )
 
 
@@ -5550,7 +5606,9 @@ def cmd_undefer(
 
 # -- done --
 
-def _project_plans_from_graph(node_ids: list[str]) -> None:
+def _project_plans_from_graph(
+    node_ids: list[str], *, mirror_type_for: str | None = None
+) -> None:
     """Project each named node's mirror fields + forward status onto its plan.
 
     Re-reads the graph so every node carries its recomputed ``status`` (a claim
@@ -5558,6 +5616,11 @@ def _project_plans_from_graph(node_ids: list[str]) -> None:
     ``done_at``), then delegates to the shared converger. Covers cascade-closed
     epic parents that ``_stamp_and_graduate_plan`` never stamps. Best-effort per
     node: a missing or unreadable plan never fails the mutation.
+
+    ``mirror_type_for`` names the ONE node whose ``type`` may be written, set
+    only by the ``--type`` path where the operator supplied that node's value.
+    It is an id, not a flag: this projection repaints ancestors and siblings
+    too, and their ``type`` is still a mint-time default.
     """
     ids = [i for i in dict.fromkeys(node_ids) if i]
     if not ids:
@@ -5570,7 +5633,7 @@ def _project_plans_from_graph(node_ids: list[str]) -> None:
     except Exception as e:  # noqa: BLE001 - additive; never wedge the mutation
         sys.stderr.write(f"warning: plan projection setup failed: {e}\n")
         return
-    project_graph_nodes(entries, ids)
+    project_graph_nodes(entries, ids, mirror_type_for=mirror_type_for)
 
 
 def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) -> None:

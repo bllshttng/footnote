@@ -112,11 +112,13 @@ title: Intake Test Plan
 # Body
 EOF
 
+# The receipt reads `intake <id> -> backlog: "<title>"`. It said "adopted <id>"
+# before the adopt->intake rename, and this assertion outlived the verb.
 intake_out=$(run_fno backlog intake "$plan_a" 2>&1)
-if [[ "$intake_out" == *"adopted ab-"* ]]; then
+if [[ "$intake_out" == *"intake ab-"* ]]; then
     pass "intake creates a node"
 else
-    fail "intake did not report adoption: $intake_out"
+    fail "intake did not report a minted node: $intake_out"
 fi
 
 # --- Scenario 5: backlog adopt is gone (alias removed) ----------------------
