@@ -31,9 +31,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, Sequence
 
-Effective = Literal["diverse", "portable", "unresolved"]
-
 from fno.review.provider_resolution import CLAUDE, DISPATCHABLE_PROVIDERS
+
+Effective = Literal["diverse", "portable", "unresolved"]
 
 
 class ReviewPolicy(str, Enum):

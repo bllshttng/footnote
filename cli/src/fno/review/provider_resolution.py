@@ -376,16 +376,19 @@ def exhausted_provider_kinds(*, repo_root: Path | None = None) -> set[str] | Non
     """Return the dispatchable kinds whose provider records are ALL exhausted.
 
     ``available_provider_kinds`` only *demotes* an exhausted kind (rotation
-    order); it stays selectable. The assurance gate needs the stronger signal -
-    a kind that cannot actually serve a review right now - so it excludes these
-    from what counts as different-family capacity. A kind with no record (e.g.
-    the ``claude`` local fallback) is UNKNOWN, never exhausted.
+    order); it stays selectable. The assurance gate excludes an ALL-EXHAUSTED
+    kind from what counts as different-family capacity. Scope is deliberately
+    narrow: a kind is here only when every record reports ``EXHAUSTED``. A kind
+    that is merely UNKNOWN / unprobed (no fresh snapshot) is NOT excluded - the
+    preflight treats it as available, and whether it actually served
+    cross-family is the observed-runtime attestation's job, not this read's. A
+    kind with no record (e.g. the ``claude`` local fallback) is likewise UNKNOWN.
 
     Returns the exhausted-kind set on a successful read, or ``None`` when the
-    headroom read FAILED. ``None`` is not "nothing exhausted": for a
-    high-assurance gate, an unreadable headroom must fail CLOSED (the caller
-    cannot trust that a non-claude kind can actually serve), which returning an
-    empty set would silently defeat. Cache-only read, never raises.
+    headroom read FAILED entirely. ``None`` is not "nothing exhausted": for a
+    high-assurance gate, a total read failure must fail CLOSED (the caller cannot
+    trust that a non-claude kind can serve), which returning an empty set would
+    silently defeat. Cache-only read, never raises.
     """
     try:
         from fno.adapters.providers.loader import load_providers
