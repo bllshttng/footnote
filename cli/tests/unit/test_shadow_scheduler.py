@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from fno.backlog import advance
-from fno.claims.lanes import acquire_lane_slot, release_lane_slot
+from fno.claims.lanes import acquire_lane_slot, find_lane_slot, release_lane_slot
 
 
 def _nodes(*specs):
@@ -205,28 +205,34 @@ def test_all_slots_occupied_selects_nothing(monkeypatch, tmp_path):
     assert [d["reason"] for d in r["serialized"]] == ["cap-full", "cap-full"]
 
 
-def test_slot_above_the_cap_does_not_shrink_the_frontier(monkeypatch, tmp_path):
-    """A lane parked above the cap contends with nothing and must not be counted.
+def test_lane_above_the_cap_still_counts_against_the_writers_ceiling(monkeypatch, tmp_path):
+    """effective_cap bounds live WRITERS, not acquire's scan window.
 
-    acquire_lane_slot(2, ...) only ever scans slots 0 and 1, so a lane still
-    holding lane-slot:2 after the cap shrank leaves BOTH low slots acquirable.
-    Counting it (as a plain live-lane count does) reports one remaining slot where
-    the live selector can take two, gating live scheduling on evidence a whole
-    dispatch short of the truth.
+    This is the normal steady state, not a cap-shrink edge case: live dispatch
+    acquires with the raw configured max_lanes (3 in this repo) while the report
+    bounds itself to _INITIAL_LIVE_CAP (2), so a live lane routinely sits at
+    lane-slot:2. Counting only the slots acquire_lane_slot(2) would contend for
+    scores that lane as zero and lets a cap-two report authorize two more starts
+    beside it - three writers under a ceiling of two. That acquire_lane_slot(2)
+    would in fact grant the third is a shrink bug in the cap primitive; the
+    report must not launder it into the evidence that gates live scheduling.
     """
-    for lane in ("filler-0", "filler-1"):
+    for lane in ("live-a", "live-b", "live-c"):
         acquire_lane_slot(max_lanes=3, lane_id=lane, root=tmp_path)
-    parked = acquire_lane_slot(max_lanes=3, lane_id="parked", root=tmp_path)
-    assert parked is not None and parked.key == "lane-slot:2"
-    for lane in ("filler-0", "filler-1"):
-        release_lane_slot(lane, root=tmp_path)
+    release_lane_slot("live-a", root=tmp_path)
+    release_lane_slot("live-b", root=tmp_path)
+    assert find_lane_slot("live-c", root=tmp_path) == "lane-slot:2"
 
     _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs"), ("n-c", "infra")))
     r = advance.schedule_shadow(2, claims_root=tmp_path)
-    assert r["occupied_slots"] == 0
-    assert r["remaining_capacity"] == 2
-    assert [d["id"] for d in r["selected"]] == ["n-a", "n-b"]
-    assert [(d["id"], d["reason"]) for d in r["serialized"]] == [("n-c", "cap-full")]
+    assert r["occupied_slots"] == 1
+    assert r["remaining_capacity"] == 1
+    assert [d["id"] for d in r["selected"]] == ["n-a"]
+    # The invariant that matters: acting on this report never exceeds the cap.
+    assert r["occupied_slots"] + len(r["selected"]) <= r["effective_cap"]
+    assert [(d["id"], d["reason"]) for d in r["serialized"]] == [
+        ("n-b", "cap-full"), ("n-c", "cap-full"),
+    ]
 
 
 def test_oversized_ready_set_bounded_by_effective_cap(monkeypatch, tmp_path):
@@ -286,7 +292,7 @@ def test_occupied_slot_read_failure_is_loud_not_silent(monkeypatch, tmp_path, ca
     def boom(*a, **k):
         raise RuntimeError("claims dir locked")
 
-    monkeypatch.setattr(lanes, "occupied_slot_count", boom)
+    monkeypatch.setattr(lanes, "active_lane_count", boom)
     _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs")))
     with caplog.at_level("WARNING"):
         r = advance.schedule_shadow(2, claims_root=tmp_path)
@@ -316,3 +322,51 @@ def test_decisions_cover_every_ready_node(monkeypatch, tmp_path):
     assert len(r["decisions"]) == 3
     ids = {d["id"] for d in r["decisions"]}
     assert ids == {"n-a", "n-b", "n-c"}
+
+
+# -- CLI seam: `fno backlog schedule` --
+
+def test_cli_schedule_refuses_no_shadow(monkeypatch):
+    """The --no-shadow refusal is the ONLY interlock keeping this feature
+    read-only, so it gets a test rather than resting on a docstring promise.
+    It must refuse before reaching the report, and exit 2, not 0 or 1.
+    """
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as gcli
+
+    def must_not_run(*a, **k):
+        raise AssertionError("live scheduling ran despite the refusal")
+
+    monkeypatch.setattr(advance, "schedule_shadow", must_not_run)
+
+    res = CliRunner().invoke(gcli.cli, ["schedule", "--no-shadow"])
+
+    assert res.exit_code == 2, res.stdout
+    assert "not enabled yet" in res.output
+
+
+def test_cli_schedule_echoes_report_json(monkeypatch):
+    """Shadow mode is the default: no flag needed, and the report is the stdout."""
+    import json
+
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as gcli
+
+    seen = {}
+    report = {"effective_cap": 2, "requested_cap": 3, "selected": [], "degraded": []}
+
+    def fake_shadow(max_lanes, project=None, *, mission=None):
+        seen.update(max_lanes=max_lanes, project=project, mission=mission)
+        return report
+
+    monkeypatch.setattr(advance, "schedule_shadow", fake_shadow)
+
+    res = CliRunner().invoke(
+        gcli.cli, ["schedule", "--max", "3", "--project", "fno"]
+    )
+
+    assert res.exit_code == 0, res.stdout
+    assert json.loads(res.stdout) == report
+    assert seen == {"max_lanes": 3, "project": "fno", "mission": None}

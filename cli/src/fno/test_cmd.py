@@ -510,7 +510,7 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 
 
 # Shell harnesses discover_shell_harnesses finds but smoke must not run yet.
-# 22 entries held. 14 are RED (pre-existing rot; each its own debugging session,
+# 21 entries held. 13 are RED (pre-existing rot; each its own debugging session,
 # out of scope here). 3 are slow-but-green at 134s/97s/72s: draining them adds
 # 303s to every CI run, so they wait on smoke parallelism, not a repair. The
 # other 5 were drained then came back red in CI, each macOS-green and Linux-red:
@@ -545,7 +545,6 @@ tests/test-autolaunch-gate.sh
 tests/test-backlog-aliases.sh
 tests/test-backlog-triage.sh
 tests/test-graph-resolve.sh
-tests/test-target-state-recovery.sh
 tests/test-worktree-inside-checkout-redirect.sh
 tests/test_emit_gate_transition.sh
 tests/test_provider_substrate_e2e.sh
