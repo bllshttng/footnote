@@ -522,7 +522,7 @@ def select_lane_fill(
     distributed lock; do not run two ``--claim`` selectors concurrently outside
     the walker.
     """
-    from fno.claims.lanes import acquire_lane_slot, find_lane_slot, release_lane_slot
+    from fno.claims.lanes import acquire_lane_slot, release_lane_slot
 
     if max_lanes < 1:
         return []
