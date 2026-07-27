@@ -192,7 +192,7 @@ type: feature
 
 
 def test_wave_painted_on_children_and_epic(tmp_path):
-    """AC4 end-to-end: children carry derived `wave`, the epic carries `waves`."""
+    """AC4 end-to-end: children carry derived `wave`, the epic `waves_total`."""
     epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN)
     docs = {}
     for nid in ("a", "b", "d"):
@@ -209,7 +209,7 @@ def test_wave_painted_on_children_and_epic(tmp_path):
     assert read_plan_file(docs["a"])[1]["wave"] == "0"
     assert read_plan_file(docs["b"])[1]["wave"] == "1"
     assert read_plan_file(docs["d"])[1]["wave"] == "2"
-    assert read_plan_file(epic_doc)[1]["waves"] == "3"
+    assert read_plan_file(epic_doc)[1]["waves_total"] == "3"
 
 
 def test_edge_edit_restratifies_siblings(tmp_path):
@@ -226,11 +226,11 @@ def test_edge_edit_restratifies_siblings(tmp_path):
     project_graph_nodes(entries, ["x-d"], root=str(tmp_path))
     assert read_plan_file(d_doc)[1]["wave"] == "1"
     # Drop x-d's blocker; project only x-d, but x-a must also repaint (it stays 0)
-    # and x-d drops to 0 - and the epic waves shrink from 2 to 1.
+    # and x-d drops to 0 - and the epic waves_total shrinks from 2 to 1.
     entries[2]["blocked_by"] = []
     project_graph_nodes(entries, ["x-d"], root=str(tmp_path))
     assert read_plan_file(d_doc)[1]["wave"] == "0"
-    assert read_plan_file(epic_doc)[1]["waves"] == "1"
+    assert read_plan_file(epic_doc)[1]["waves_total"] == "1"
 
 
 def test_orphaning_child_clears_stale_wave(tmp_path):
@@ -250,14 +250,8 @@ def test_orphaning_child_clears_stale_wave(tmp_path):
     assert "wave" not in read_plan_file(child_doc)[1]
 
 
-def test_epic_demotion_clears_stale_rollup_but_not_waves(tmp_path):
-    """codex: demoting an epic to a feature clears its stale rollup counters.
-
-    `waves` is deliberately exempt. The key has two owners - an int summary at
-    epic altitude, and /blueprint's authored wave list on a plan - so clearing
-    it deleted authored content from every non-epic plan. A demoted epic keeping
-    a stale int is the cheaper wrong; the next /blueprint write corrects it.
-    """
+def test_epic_demotion_clears_stale_waves_total_and_rollup(tmp_path):
+    """codex: demoting an epic to a feature clears its stale derived keys."""
     epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN)
     entries = [
         {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "status": "ready"},
@@ -265,33 +259,51 @@ def test_epic_demotion_clears_stale_rollup_but_not_waves(tmp_path):
     ]
     project_graph_nodes(entries, ["x-epic"], root=str(tmp_path))
     fields = read_plan_file(epic_doc)[1]
-    assert fields.get("waves") == "1" and fields.get("children_total") == "1"
-    # Demote to feature -> rollup counters clear, waves survives.
+    assert fields.get("waves_total") == "1" and fields.get("children_total") == "1"
+    # Demote to feature -> derived epic keys clear.
     entries[0]["type"] = "feature"
     project_graph_nodes(entries, ["x-epic"], root=str(tmp_path))
     fields2 = read_plan_file(epic_doc)[1]
-    assert fields2.get("waves") == "1"
+    assert "waves_total" not in fields2
     assert "children_total" not in fields2
     assert "progress" not in fields2
 
 
-def test_projection_never_deletes_a_plans_authored_wave_list(tmp_path):
-    """A non-epic plan's /blueprint-authored `waves` block survives projection.
+# ---------------------------------------------------------------------------
+# `waves` belongs to /blueprint, not to the projection (x-455e). The derived
+# epic summary is `waves_total`; while the two shared a name, the int destroyed
+# the authored list on epics and the clear deleted it on everything else.
+# ---------------------------------------------------------------------------
 
-    `waves` is in BLUEPRINT_WRITE_ALLOWLIST, so the doc owns it on a plan. The
-    converger used to null it for every non-epic node, which deleted the block
-    on every projection.
-    """
-    plan = _plan(
-        tmp_path,
-        "child.md",
-        _PLAN.replace("---\n\n", "waves:\n  - wave: 1\n    mode: parallel\n---\n\n", 1),
-    )
-    assert "wave: 1" in plan.read_text(encoding="utf-8")
+_WAVES_BLOCK = "waves:\n  - wave: 1\n    mode: parallel\n  - wave: 2\n    mode: sequential\n"
+
+
+def test_projection_keeps_a_plans_authored_wave_list(tmp_path):
+    """A non-epic plan's authored `waves` block survives projection."""
+    plan = _plan(tmp_path, "child.md", _PLAN.replace("---\n\n", _WAVES_BLOCK + "---\n\n", 1))
     entries = [{"id": "x-c", "slug": "c", "type": "feature", "plan_path": str(plan),
                 "priority": "p0", "status": "ready"}]
 
     assert project_graph_nodes(entries, ["x-c"], root=str(tmp_path)) == 1
     text = plan.read_text(encoding="utf-8")
-    assert "waves:" in text and "wave: 1" in text  # the authored block survives
+    assert "wave: 1" in text and "wave: 2" in text  # the authored block survives
     assert read_plan_file(plan)[1]["priority"] == "p0"  # projection still ran
+
+
+def test_projection_keeps_an_epics_authored_wave_list(tmp_path):
+    """The reported case: an epic's authored block is not replaced by the int.
+
+    cv-2c7aaa5c watched a blueprinted wave list become a bare scalar (0, then 4)
+    because the epic-altitude summary was written under the same key.
+    """
+    epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN.replace("---\n\n", _WAVES_BLOCK + "---\n\n", 1))
+    entries = [
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "status": "ready"},
+        {"id": "x-c", "slug": "c", "type": "feature", "parent": "x-epic", "plan_path": None, "blocked_by": []},
+    ]
+    assert project_graph_nodes(entries, ["x-epic"], root=str(tmp_path)) == 1
+
+    text = epic_doc.read_text(encoding="utf-8")
+    assert "wave: 1" in text and "wave: 2" in text  # not collapsed to `waves: N`
+    fields = read_plan_file(epic_doc)[1]
+    assert fields["waves_total"] == "1"  # the derived summary landed beside it

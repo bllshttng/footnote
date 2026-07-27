@@ -46,7 +46,7 @@ properties:
     displayName: In flight
   children_blocked:
     displayName: Blocked
-  waves:
+  waves_total:
     displayName: Waves
   formula.prio:
     displayName: Priority
@@ -62,7 +62,7 @@ views:
       - children_total
       - children_in_flight
       - children_blocked
-      - waves
+      - waves_total
       - formula.prio
       - status
     sort:
@@ -82,7 +82,7 @@ views:
       - progress
       - children_done
       - children_total
-      - waves
+      - waves_total
       - formula.prio
 """
 

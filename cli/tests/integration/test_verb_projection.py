@@ -369,4 +369,4 @@ def test_add_blocker_repaints_derived_waves(tmp_graph, tmp_path):
     assert res.exit_code == 0, res.output
     assert read_plan_file(a_doc)[1]["wave"] == "0"
     assert read_plan_file(b_doc)[1]["wave"] == "1"  # now blocked by its sibling
-    assert read_plan_file(e_doc)[1]["waves"] == "2"
+    assert read_plan_file(e_doc)[1]["waves_total"] == "2"

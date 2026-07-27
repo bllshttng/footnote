@@ -93,15 +93,20 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
     # stays clean. The frontmatter reader returns every scalar as a str, so
     # compare (and store) the str form or an int counter re-writes forever.
     # `children_total: 2` still serializes bareword, so Obsidian reads a number.
-    # Derived epic fields: rollup counters, the epic `waves` summary, and a
-    # child's `wave` stratum (x-6c2b). All computed views, repainted every
+    # Derived epic fields: rollup counters, the epic `waves_total` summary, and
+    # a child's `wave` stratum (x-6c2b). All computed views, repainted every
     # projection, never hand-set. The converger passes an explicit None when a
     # key no longer applies (a node demoted out of epic-hood, a child orphaned
     # off its epic) so the stale value is CLEARED, not left to rot - the
     # graph-authoritative contract (codex). Present str value => write; None =>
     # delete if present; absent => leave alone (a bare direct caller never
     # clears).
-    for key in (*ROLLUP_KEYS, "waves", "wave"):
+    #
+    # The summary is `waves_total`, NOT `waves`: `waves` is /blueprint's authored
+    # wave list (BLUEPRINT_WRITE_ALLOWLIST), and while the derived int shared that
+    # name every projection destroyed the list - an epic doc's `waves:\n  - wave:
+    # 1\n  - wave: 2` became `waves: 4`. One key, one owner.
+    for key in (*ROLLUP_KEYS, "waves_total", "wave"):
         if key not in node:
             continue
         if node[key] is None:
@@ -183,20 +188,12 @@ def project_graph_nodes(
                 # Epic-altitude wave summary: max child stratum + 1 (0 when
                 # childless). Derived from intra-epic blocked_by edges (AC4).
                 _, max_wave = compute_waves(node["id"], entries)
-                augmented["waves"] = max_wave + 1
+                augmented["waves_total"] = max_wave + 1
             else:
                 # Not an epic: clear any stale epic-only derived fields a prior
                 # projection left behind (a --type feature demotion) so the doc
                 # stays graph-authoritative (codex).
-                #
-                # `waves` is NOT cleared here, despite being written above. The
-                # key has two owners with two types: an int summary at epic
-                # altitude, and /blueprint's authored wave list on a plan (it is
-                # in BLUEPRINT_WRITE_ALLOWLIST). Clearing deleted that list from
-                # every non-epic plan on every projection. A demoted epic keeping
-                # a stale int is the cheaper wrong: the next /blueprint write
-                # corrects it, whereas an authored list is gone for good.
-                for k in ROLLUP_KEYS:
+                for k in (*ROLLUP_KEYS, "waves_total"):
                     augmented[k] = None
             # A node's own stratum within its parent epic (mission or plain);
             # None (=> cleared) when it has no epic parent, e.g. after --parent
