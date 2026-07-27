@@ -4562,30 +4562,12 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
     }
 
     if !pr.reviewed {
-        if !pr.missing_bots.is_empty() {
-            // AC1-UI: name the specific missing bot(s), not a generic
-            // "not reviewed". Awaiting a bot review is an async wait, so teach
-            // the arm-and-tag ritual (US3) rather than a bare "keep waiting".
-            return format!(
-                "PR #{}: {} has not reviewed.{}",
-                pr.number,
-                pr.missing_bots.join(", "),
-                arm_watch_hint(pr.number, "review")
-            );
-        }
-        if !pr.unaddressed_findings.is_empty() {
-            // AC2-UI: name the specific finding (path:line) and the remedy.
-            let f = &pr.unaddressed_findings[0];
-            let more = if pr.unaddressed_findings.len() > 1 {
-                format!(" [+{} more]", pr.unaddressed_findings.len() - 1)
-            } else {
-                String::new()
-            };
-            return format!(
-                "PR #{}: {} {} at {}:{} unaddressed (reply in-thread or wontfix:){}",
-                pr.number, f.author, f.severity, f.path, f.line, more
-            );
-        }
+        // Local work outranks an async wait. When a bot AND a local reviewer are
+        // both outstanding, naming only the bot hides the half the session can
+        // act on now and parks it - and if the bot never posts, the local work
+        // never happens and the run dies on budget with the gate still unmet.
+        // That is the #618 shape. Run the reviewer first; the bot wait is still
+        // there on the next fire, and by then it is the sole blocker.
         if !pr.unattested_reviewers.is_empty() {
             // The branch that was missing (x-cdc7). Without it a local-only
             // reviewers gate fell through to the generic string below and told
@@ -4622,6 +4604,30 @@ fn build_block_reason(pr: &PrInfo, local_head: &str) -> String {
                 pr.number,
                 head,
                 items.join("; ")
+            );
+        }
+        if !pr.missing_bots.is_empty() {
+            // AC1-UI: name the specific missing bot(s), not a generic
+            // "not reviewed". Awaiting a bot review is an async wait, so teach
+            // the arm-and-tag ritual (US3) rather than a bare "keep waiting".
+            return format!(
+                "PR #{}: {} has not reviewed.{}",
+                pr.number,
+                pr.missing_bots.join(", "),
+                arm_watch_hint(pr.number, "review")
+            );
+        }
+        if !pr.unaddressed_findings.is_empty() {
+            // AC2-UI: name the specific finding (path:line) and the remedy.
+            let f = &pr.unaddressed_findings[0];
+            let more = if pr.unaddressed_findings.len() > 1 {
+                format!(" [+{} more]", pr.unaddressed_findings.len() - 1)
+            } else {
+                String::new()
+            };
+            return format!(
+                "PR #{}: {} {} at {}:{} unaddressed (reply in-thread or wontfix:){}",
+                pr.number, f.author, f.severity, f.path, f.line, more
             );
         }
         // Reaching here means missing_bots is empty, which `async_wait_class`
@@ -5391,15 +5397,39 @@ mod tests {
 
     #[test]
     fn block_reason_missing_bot_still_teaches_the_ritual() {
-        // AC7-adjacent regression: a REAL outstanding GitHub bot is a valid
-        // async wait and keeps today's arm-and-tag message.
+        // AC7-adjacent regression: a REAL outstanding GitHub bot, and nothing
+        // local outstanding, is a valid async wait and keeps today's message.
         let pr = PrInfo {
             missing_bots: vec!["chatgpt-codex-connector".into()],
+            unattested_reviewers: vec![],
             ..reviewers_gate_pr()
         };
         let reason = build_block_reason(&pr, "abc");
         assert!(reason.contains("chatgpt-codex-connector"), "got: {reason}");
         assert!(reason.contains("<watching"), "got: {reason}");
+    }
+
+    #[test]
+    fn block_reason_local_work_outranks_a_bot_wait() {
+        // Codex review of this PR: with a bot AND a local reviewer both
+        // outstanding, naming only the bot hides the half the session can act
+        // on now. Worse, if the bot never posts, the local work never happens
+        // and the run dies on budget with the gate still unmet - the #618 shape
+        // this node exists to delete.
+        let pr = PrInfo {
+            missing_bots: vec!["chatgpt-codex-connector".into()],
+            ..reviewers_gate_pr()
+        };
+        let reason = build_block_reason(&pr, "abc");
+        assert!(reason.contains("reviewers gate unmet"), "got: {reason}");
+        assert!(!reason.contains("<watching"), "got: {reason}");
+        // Once the local half is attested, the bot wait is the sole blocker and
+        // the arm-and-tag message returns.
+        let after = PrInfo {
+            unattested_reviewers: vec![],
+            ..pr
+        };
+        assert!(build_block_reason(&after, "abc").contains("<watching"));
     }
 
     #[test]
