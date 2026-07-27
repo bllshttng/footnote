@@ -312,8 +312,9 @@ def _report_review_capability(json_out: bool = False) -> int:
     from fno.review_capability import detect_session, resolve_reviewers
 
     session = detect_session()
-    reviewers = list(load_settings().review.reviewers or [])
-    verdicts = resolve_reviewers(reviewers, session)
+    review = load_settings().review
+    reviewers = list(review.reviewers or [])
+    verdicts = resolve_reviewers(reviewers, session, review.reviewer_registry)
     blocked = [v for v in verdicts if v.blocks_autonomy]
 
     if json_out:
@@ -357,6 +358,48 @@ def _report_review_capability(json_out: bool = False) -> int:
     return 1 if blocked else 0
 
 
+def _report_gates() -> None:
+    """Print the resolved ship gates: each probe with its source, each reviewer
+    with the rung it asserts.
+
+    This is where an operator should discover that their guardrail is only
+    WITNESSED - a skill gate proves the skill ran at the reviewed commit and
+    claims nothing about its verdict - rather than at the stop gate after the
+    work is done. Read-only: doctor reports the probes, it never runs them.
+
+    Only the project source is visible here; a plan's own `done_probes` is
+    resolved per session against its bound plan doc, which doctor has no
+    business guessing at.
+    """
+    from fno.config import load_settings
+    from fno.review_capability import detect_session, resolve_reviewers
+
+    settings = load_settings()
+    probes = list(settings.done_probes or [])
+    reviewers = list(settings.review.reviewers or [])
+    if not probes and not reviewers:
+        return
+
+    typer.echo("")
+    typer.echo("ship gates:")
+    for cmd in probes:
+        typer.echo(f"  probe (project): {cmd}")
+    if not probes:
+        typer.echo("  probe: none declared in config (a plan may still declare its own)")
+    for v in resolve_reviewers(
+        reviewers, detect_session(), settings.review.reviewer_registry
+    ):
+        rung = v.descriptor.asserts if v.descriptor else "unknown"
+        typer.echo(f"  reviewer: {v.name} - asserts {rung}{_RUNG_GLOSS.get(rung, '')}")
+
+
+_RUNG_GLOSS = {
+    "review-evidence": " (a reviewer ran and returned a verdict)",
+    "invocation": " (the reviewer ran at the reviewed commit; no claim about its verdict)",
+    "self-cert": " (nothing; satisfies the gate on its own say-so)",
+}
+
+
 @app.command("doctor")
 def doctor_cmd(
     post_merge: bool = typer.Option(
@@ -385,7 +428,8 @@ def doctor_cmd(
     /fno:pr merged ritual needs. With ``--review``, report whether every
     configured local reviewer can run in this session. Bare ``fno config
     doctor`` runs the path diagnostic and appends a one-line post-merge
-    readiness summary.
+    readiness summary plus the resolved ship gates (each probe with its source,
+    each reviewer with the rung it asserts).
     """
     import json as _json
 
@@ -409,6 +453,10 @@ def doctor_cmd(
     try:
         typer.echo(post_merge_readiness(_repo_root()).summary_line())
     except Exception:  # noqa: BLE001 - the summary is advisory, not the command
+        pass
+    try:
+        _report_gates()
+    except Exception:  # noqa: BLE001 - a report, not the diagnostic itself
         pass
     raise typer.Exit(rc)
 

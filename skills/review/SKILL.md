@@ -117,6 +117,43 @@ Head-pinning is mandatory: the helper stamps `git rev-parse HEAD`, and loop-chec
 
 Each reviewer also declares what it NEEDS in order to run - `sigma` needs subagent dispatch, `code-review` needs an operator, `declare` needs nothing - in `_RESOLVABLE_REVIEWERS` (`cli/src/fno/config/__init__.py`). `fno target init` resolves that against the running session and refuses a gate nothing here can satisfy; `fno config doctor --review` reports the same read-only. A reviewer that cannot run is never quietly swapped for `declare`: that would clear the gate with no review behind it.
 
+## Your skill can be someone's ship gate
+
+A project registers its own reviewer under `[review.reviewer_registry.<name>]` in `config.toml` and then names it in `config.review.reviewers`, at which point the loop refuses `DonePRGreen` until that reviewer has attested at the current HEAD.
+Two rungs are available to a third-party skill or plugin author, and the difference between them is what the gate is allowed to claim.
+
+```toml
+[review]
+reviewers = ["/my-security-skill"]
+
+[review.reviewer_registry.my-security-skill]
+kind = "harness-skill"
+requires = "skill"          # resolved against the harness's skill roots at init
+invocation = "/my-security-skill"
+asserts = "invocation"
+```
+
+**Rung one: emit no findings.** `asserts = "invocation"` proves your skill ran at the reviewed commit and claims nothing about its verdict.
+That is a forcing function, not a review.
+footnote does not parse skill output and will not pretend otherwise: a per-skill output contract it cannot enforce would fail by misreading a "PASS" and clearing a real gate.
+
+The attestation itself is still emitted - "emit nothing" means your skill reports no *findings*, not that the gate clears by itself.
+Nothing witnesses an invocation implicitly.
+The `/target` session runs your `invocation` and then `bash skills/review/scripts/emit-attestation.sh <name>` on the final HEAD, exactly as it does for `code-review` ([ship-and-promise.md](../target/references/ship-and-promise.md)).
+That helper takes any reviewer name, which is why a registered reviewer needs no producer machinery of its own.
+
+**Rung two: emit your findings.** Call `fno annotate add -m "<finding>" --node <id>` and the gate becomes real.
+An unaddressed blocking finding holds the loop until someone resolves it, independently of any attestation, and it needs no new footnote machinery on your side.
+
+`requires = "skill"` is checked at `fno target init`: a skill that resolves on none of the harness's skill roots refuses there, naming the roots searched, rather than wedging the stop gate after the work is done.
+When the probe cannot answer - a harness footnote does not know, an unreadable root, a `plugin:skill` qualified name whose cache layout footnote does not read - it resolves `unverifiable` and proceeds with one note, because refusing a session over a reviewer that is actually installed is the worse failure.
+
+A registered reviewer never enters `_RESOLVABLE_REVIEWERS`; the two are unioned at lookup time, and a built-in wins a name collision, so no project can redefine `sigma` into something weaker.
+
+For a guardrail that has an exit code, skip all of this and use a probe: top-level `done_probes` in `config.toml` is run by loop-check itself (60s each, cap 3 per source) and is the strongest rung available, because footnote verifies it rather than witnessing it.
+Both the project's list and any a plan declares must pass; a plan can add probes and can never silence the project's.
+A probe is an *observation* - one that mutates the repo races the session's own edits.
+
 ## Multi-CLI
 
 Claude-Code primary. All modes need `fno` and `gh`/`git`; peer mode additionally needs the `fno agents` daemon for the `codex`/`gemini` one-shot lane, and research mode needs the Task/Agent tool to dispatch its roster. If a dependency is missing, the mode fails loud and reports it - it never fakes a review.
