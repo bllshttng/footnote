@@ -1931,13 +1931,6 @@ const BOT_PROFILES: &[BotProfile] = &[
     },
 ];
 
-/// The profile for a CONFIGURED bot name (a `github_apps`/`required_bots` entry,
-/// which may be a short name like "codex" or a full login): the config name is a
-/// substring of the login, matching `login_matches_bot(profile.login, name)`.
-fn profile_by_config_name(name: &str) -> Option<&'static BotProfile> {
-    BOT_PROFILES.iter().find(|p| login_matches_bot(p.login, name))
-}
-
 /// The profile for an actual review/comment AUTHOR login (may carry gh's `[bot]`
 /// suffix or be the full login): the profile login is a substring of the author,
 /// matching `login_matches_bot(author, profile.login)`. Used to reach a finding
@@ -4464,11 +4457,19 @@ fn async_wait_class(
     // also outstanding (codex review of x-cdc7): the session has work it can do
     // right now, and if the bot never posts, idling means that work never
     // happens and the run dies on budget with the gate still unmet.
+    //
+    // x-b167: idle ONLY when every missing bot is in an idlable nudge state
+    // (Awaiting, a genuine async wait; or NotNudgeable, today's status quo). A
+    // NeedsNudge bot is work to DO (post its trigger) and an Unresponsive bot is
+    // a wait nobody ends - idling on either parks the session. This is the same
+    // rule x-cdc7 gave unattested_reviewers. An empty bot_nudges (not classified)
+    // means every-bot-idlable vacuously, preserving pre-x-b167 behavior.
     if pr.ci_conclusion.is_ok()
         && !pr.reviewed
         && !pr.review_skipped
         && !pr.missing_bots.is_empty()
         && pr.unattested_reviewers.is_empty()
+        && pr.bot_nudges.iter().all(|n| nudge_class_idlable(&n.class))
     {
         return Some("review");
     }
@@ -5053,9 +5054,15 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             } else {
                 String::new()
             };
+            // x-b167 AC14: "reply in-thread" alone is a half-remedy - a reply
+            // that does not address the bot by its full login never reaches it.
+            // Name the handle when the finding author is a known bot.
+            let reply_to = profile_by_author(&f.author)
+                .map(|p| format!(" addressed to {}", p.reply_handle))
+                .unwrap_or_default();
             return format!(
-                "PR #{}: {} {} at {}:{} unaddressed (reply in-thread or wontfix:){}",
-                pr.number, f.author, f.severity, f.path, f.line, more
+                "PR #{}: {} {} at {}:{} unaddressed (reply in-thread{} or wontfix:){}",
+                pr.number, f.author, f.severity, f.path, f.line, reply_to, more
             );
         }
         if !pr.unattested_reviewers.is_empty() {
@@ -5114,9 +5121,50 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             );
         }
         if !pr.missing_bots.is_empty() {
-            // AC1-UI: name the specific missing bot(s), not a generic
-            // "not reviewed". Awaiting a bot review is an async wait, so teach
-            // the arm-and-tag ritual (US3) rather than a bare "keep waiting".
+            // x-b167: render per nudge state. `hint("review")` is derived from
+            // async_wait_class, so it is EMPTY for NeedsNudge/Unresponsive (both
+            // non-idlable) and PRESENT for Awaiting/NotNudgeable by construction -
+            // the arm-and-tag ritual can never appear on a blocker the same file
+            // refuses to idle (the contradiction x-cdc7 removed). NeedsNudge and
+            // Unresponsive lead because they are work/decisions, not waits.
+            if let Some(n) = pr
+                .bot_nudges
+                .iter()
+                .find(|n| n.class == NudgeClass::NeedsNudge)
+            {
+                return format!(
+                    "PR #{}: {} reviews on mention, not on push, and has not been asked. Run:\n  \
+                     gh pr comment {} --body \"{}\"\nthen arm a watcher (nudge {} of {}).{}",
+                    pr.number,
+                    n.login,
+                    pr.number,
+                    n.review_handle,
+                    n.nudges + 1,
+                    n.ceiling,
+                    hint("review")
+                );
+            }
+            if let Some(n) = pr
+                .bot_nudges
+                .iter()
+                .find(|n| n.class == NudgeClass::Unresponsive)
+            {
+                return format!(
+                    "PR #{}: {} did not review after {} nudges over {}m. Nothing further \
+                     will arrive on its own. Either post the review by hand, or move this \
+                     login to config.review.optional_apps (honored-if-present, never waited \
+                     on). Not a wait: do not arm a watcher.{}",
+                    pr.number, n.login, n.nudges, n.span_min, hint("review")
+                );
+            }
+            if let Some(n) = pr.bot_nudges.iter().find(|n| n.class == NudgeClass::Awaiting) {
+                return format!(
+                    "PR #{}: {} nudged {}m ago ({} of {}), awaiting review.{}",
+                    pr.number, n.login, n.newest_age_min, n.nudges, n.ceiling, hint("review")
+                );
+            }
+            // All NotNudgeable (or not classified): today's exact string + hint
+            // (AC5 - a non-nudgeable required bot keeps the pre-x-b167 behavior).
             return format!(
                 "PR #{}: {} has not reviewed.{}",
                 pr.number,
@@ -5829,6 +5877,124 @@ mod tests {
             ..watch_pr()
         };
         assert_eq!(async_wait_class(&pr, "abc", true), None);
+    }
+
+    // ── x-b167 idle rule + message rendering ──────────────────────────────────
+
+    fn bn(login: &str, class: NudgeClass, nudges: usize, newest: i64, span: i64) -> BotNudge {
+        BotNudge {
+            login: login.into(),
+            class,
+            review_handle: "@codex review".into(),
+            ceiling: 3,
+            nudges,
+            newest_age_min: newest,
+            span_min: span,
+        }
+    }
+    fn bot_review_pr(login: &str, nudges: Vec<BotNudge>) -> PrInfo {
+        PrInfo {
+            number: 618,
+            ci_conclusion: CiConclusion::Success,
+            ci_has_pending: false,
+            reviewed: false,
+            review_skipped: false,
+            missing_bots: vec![login.into()],
+            bot_nudges: nudges,
+            ..watch_pr()
+        }
+    }
+
+    #[test]
+    fn nudge_needs_nudge_blocks_and_names_the_command() {
+        // AC1: not idlable; reason gives the exact gh command; no arm-and-tag hint.
+        let pr = bot_review_pr(
+            "chatgpt-codex-connector",
+            vec![bn("chatgpt-codex-connector", NudgeClass::NeedsNudge, 0, 0, 0)],
+        );
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(
+            reason.contains("gh pr comment 618 --body \"@codex review\""),
+            "{reason}"
+        );
+        assert!(!reason.contains("harness-tracked watcher"), "no arm hint: {reason}");
+    }
+
+    #[test]
+    fn nudge_awaiting_idles_with_the_arm_hint() {
+        // AC2: a genuine async wait - idlable, message says nudged + awaiting,
+        // and the arm-and-tag ritual is present.
+        let pr = bot_review_pr(
+            "chatgpt-codex-connector",
+            vec![bn("chatgpt-codex-connector", NudgeClass::Awaiting, 1, 3, 3)],
+        );
+        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("nudged"), "{reason}");
+        assert!(reason.contains("awaiting"), "{reason}");
+        assert!(reason.contains("harness-tracked watcher"), "arm hint present: {reason}");
+    }
+
+    #[test]
+    fn nudge_unresponsive_blocks_and_names_optional_apps() {
+        // AC3: not idlable; names the give-up + optional_apps; no arm-and-tag hint.
+        let pr = bot_review_pr(
+            "chatgpt-codex-connector",
+            vec![bn("chatgpt-codex-connector", NudgeClass::Unresponsive, 3, 20, 47)],
+        );
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("did not review after 3 nudges over 47m"), "{reason}");
+        assert!(reason.contains("config.review.optional_apps"), "{reason}");
+        assert!(reason.contains("do not arm a watcher"), "{reason}");
+        assert!(!reason.contains("harness-tracked watcher"), "no arm hint: {reason}");
+    }
+
+    #[test]
+    fn nudge_not_nudgeable_keeps_todays_behavior() {
+        // AC5: a non-nudgeable required bot keeps today's string + arm hint and
+        // stays idlable, regardless of comment history.
+        let pr = bot_review_pr(
+            "gemini-code-assist",
+            vec![bn("gemini-code-assist", NudgeClass::NotNudgeable, 0, 0, 0)],
+        );
+        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("gemini-code-assist has not reviewed"), "{reason}");
+        assert!(reason.contains("harness-tracked watcher"), "arm hint present: {reason}");
+    }
+
+    #[test]
+    fn nudge_empty_classification_is_status_quo() {
+        // A non-empty missing_bots with an EMPTY bot_nudges (not classified)
+        // behaves exactly as pre-x-b167: idlable, today's string.
+        let pr = bot_review_pr("chatgpt-codex-connector", vec![]);
+        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("has not reviewed"), "{reason}");
+    }
+
+    #[test]
+    fn finding_block_reason_names_the_reply_handle() {
+        // AC14: an unaddressed finding by a known bot names the handle a reply
+        // must address, not just "reply in-thread".
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Success,
+            ci_has_pending: false,
+            reviewed: false,
+            unaddressed_findings: vec![Finding {
+                id: 1,
+                author: "chatgpt-codex-connector".into(),
+                path: "a.rs".into(),
+                line: 10,
+                created_at: "2026-07-06T01:00:00Z".into(),
+                severity: "P1",
+            }],
+            ..watch_pr()
+        };
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("@chatgpt-codex-connector"), "{reason}");
     }
 
     /// The exact state PR #618 sat in for ~15 turns: CI green, no required
