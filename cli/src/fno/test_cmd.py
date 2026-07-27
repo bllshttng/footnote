@@ -33,6 +33,7 @@ import posixpath
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -1183,13 +1184,122 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     return 1 if failed else 0
 
 
+# --census-deferred: stop _DISCOVERY_DEFERRED from silently holding green
+# harnesses. A passing-fast entry here is coverage loss no file edit surfaces,
+# so this runs every entry bounded and fails the moment one passes inside the
+# tranche bound. It reads the set and reports; it never edits it.
+CENSUS_TRANCHE_BOUND_S = 60          # GREEN vs SLOW splitter: the drain tranche ceiling
+CENSUS_KILL_BOUND_S_DEFAULT = 300    # generous; slow-but-green harnesses finish and
+                                     # classify as SLOW, only true hangers get killed
+
+
+def _census_entries() -> list[str]:
+    """Deferred harness paths to census.
+
+    _DISCOVERY_DEFERRED is the source; CENSUS_DEFERRED_FILE (one path per line,
+    ``#`` comments allowed) overrides it for a targeted run or a cheap check.
+    Missing paths are returned as-is: bash reports them rc 127, recorded as RED.
+    """
+    override = os.environ.get("CENSUS_DEFERRED_FILE")
+    if override:
+        try:
+            with open(override, encoding="utf-8") as fh:
+                raw = [ln.strip() for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]
+        except OSError:
+            return []
+        return sorted(set(raw))
+    return sorted(_DISCOVERY_DEFERRED)
+
+
+def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) -> tuple[int, float, bool]:
+    """Run cmd; on exceeding kill_bound_s, kill the whole process group.
+
+    Returns (returncode, elapsed_seconds, killed). Uses subprocess.wait(timeout)
+    + os.killpg, never the `timeout` binary: that is absent on macOS (a recorded
+    trap) and exits 127, measuring nothing. start_new_session makes the child a
+    group leader so killpg reaches its grandchildren too, since a shell harness
+    spawns subprocesses a direct SIGKILL would orphan.
+    """
+    start = time.monotonic()
+    proc = subprocess.Popen(
+        cmd, env=env, cwd=str(cwd),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        rc = proc.wait(timeout=kill_bound_s)
+        killed = False
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
+        rc = proc.returncode if proc.returncode is not None else 124
+        killed = True
+    return rc, time.monotonic() - start, killed
+
+
+def _run_census_deferred(args: Sequence[str]) -> int:
+    """Run every _DISCOVERY_DEFERRED harness bounded; exit 1 if any is GREEN.
+
+    One tab-separated line per harness on stdout: verdict, rc, seconds, path.
+    Verdicts: GREEN (rc 0 and <= tranche bound), SLOW (over the tranche bound,
+    or killed by the run bound), RED (non-zero rc). Exit 1 if any GREEN, 0 if
+    all RED/SLOW, 2 if the deferred set is empty or unparseable. Costs about 12
+    minutes on the full set, so run it on a cadence, not on every PR; its
+    finding is never caused by the PR under review.
+    """
+    root = _repo_root(Path.cwd()) or Path.cwd()
+    tranche = CENSUS_TRANCHE_BOUND_S
+    try:
+        kill_bound = int(os.environ.get("CENSUS_KILL_BOUND_S", CENSUS_KILL_BOUND_S_DEFAULT))
+    except ValueError:
+        kill_bound = CENSUS_KILL_BOUND_S_DEFAULT
+    if kill_bound < tranche:
+        kill_bound = tranche  # below the tranche, a 60-70s-green harness is killed as SLOW
+
+    entries = _census_entries()
+    if not entries:
+        sys.stderr.write("census: deferred set is empty or unparseable\n")
+        return 2
+
+    env = _smoke_env(root)
+    green: list[tuple[str, float]] = []
+    print(f"census: {len(entries)} deferred entries, tranche={tranche}s kill={kill_bound}s", flush=True)
+    for rel in entries:
+        rc, secs, killed = _run_bounded(["bash", rel], env, root, kill_bound)
+        if killed:
+            verdict = "SLOW"
+        elif rc == 0:
+            verdict = "GREEN" if secs <= tranche else "SLOW"
+            if verdict == "GREEN":
+                green.append((rel, secs))
+        else:
+            verdict = "RED"
+        print(f"{verdict}\t{rc}\t{secs:.0f}\t{rel}", flush=True)
+
+    if green:
+        sys.stderr.write(
+            "census: GREEN deferred entries are silent coverage loss; "
+            "delete their lines from _DISCOVERY_DEFERRED (discovery then covers them):\n")
+        for rel, secs in green:
+            sys.stderr.write(f"  {rel}  ({secs:.0f}s)\n")
+        return 1
+    sys.stderr.write(f"census: no GREEN entries; {len(entries)} held as RED/SLOW\n")
+    return 0
+
+
 @click.command(
     name="test",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
         "Run the Python suite (default), or a sub-suite: `fno test rust ...` "
         "(crates) or `fno test smoke [flags]` (the full CI smoke: structural "
-        "steps plus auto-discovered shell harnesses). The real exit code is "
+        "steps plus auto-discovered shell harnesses). `fno test "
+        "--census-deferred` runs every _DISCOVERY_DEFERRED entry bounded and "
+        "exits non-zero if any passes inside the 60s tranche, so the quarantine "
+        "cannot silently hold working tests. The real exit code is "
         "propagated, rtk is bypassed (RTK_DISABLED=1), and PYTHONPATH is "
         "pinned to the worktree's cli/src. Use this, never a bare `pytest` in "
         "a worktree: that imports the canonical fno, lets rtk re-wrap the run, "
@@ -1206,4 +1316,6 @@ def test_command(stream: bool, runner_args: tuple[str, ...]) -> None:
         raise SystemExit(_run_rust(args[1:], stream=stream))
     if args and args[0] == "smoke":
         raise SystemExit(_run_smoke(args[1:], stream=stream))
+    if args and args[0] == "--census-deferred":
+        raise SystemExit(_run_census_deferred(args[1:]))
     raise SystemExit(_run(args, stream=stream))
