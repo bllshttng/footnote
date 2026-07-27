@@ -35,7 +35,7 @@ from typing import Any, TypeGuard
 import yaml as _yaml
 
 from ..mutex import acquire_dir_mutex, release_dir_mutex
-from .verify_child_promise import verify_child_promise
+from .verify_child_promise import FanInTally, tally_fan_in, verify_child_promise
 
 
 class ValidationError(Exception):
@@ -980,6 +980,8 @@ __all__ = [
     "phase_transition",
     "session_satisfied",
     "validate",
+    "FanInTally",
+    "tally_fan_in",
     "verify_child_promise",
     "wave_advanced",
 ]

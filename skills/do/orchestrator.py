@@ -846,6 +846,33 @@ def parse_task_result(output: str) -> Optional[TaskResult]:
     return _build_task_result(data, structured=False)
 
 
+# Barrier vocabulary: a worker return classified for the deterministic fan-in
+# count in fno.events.verify_child_promise.tally_fan_in. The two files connect
+# through this (task_id, kind) tuple, NOT a cross-package import - orchestrator
+# stays free of `fno.*` imports so `python skills/do/orchestrator.py --help`
+# runs under the ambient python that lacks the fno package.
+#   kind "completed" -> SUCCESS | DONE_WITH_CONCERNS
+#   kind "failed"    -> FAILED | BLOCKED (unresolved; the barrier must not release)
+#   (None, None)     -> unparseable/malformed; attributed to no node
+_COMPLETED_STATUSES = frozenset({"SUCCESS", "DONE_WITH_CONCERNS"})
+
+
+def classify_worker_return(output: str) -> tuple[Optional[str], Optional[str]]:
+    """Validate a worker return against the canonical contract and classify it.
+
+    Reuses ``parse_task_result`` (the single source of the status enum) so a
+    malformed or invalid-status return can never pose as complete. Returns a
+    ``(task_id, kind)`` pair for ``tally_fan_in``; ``(None, None)`` when the
+    return does not parse - the fan-in count treats that as malformed and
+    refuses synthesis rather than silently dropping an unresolved node.
+    """
+    result = parse_task_result(output)
+    if result is None:
+        return None, None
+    kind = "completed" if result.status in _COMPLETED_STATUSES else "failed"
+    return result.task_id, kind
+
+
 def emit_status_event(
     event_type: str,
     *,

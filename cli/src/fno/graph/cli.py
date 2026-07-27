@@ -8540,3 +8540,121 @@ def cmd_supersede(
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f"superseded {replaces} with {new_id}")
     _project_plans_from_graph([replaces, new_id])
+
+
+def _relevant_exec_scope(root: str, by_id: dict) -> set[str]:
+    """The node set the execution graph is compiled over, order-independent.
+
+    A fixpoint (not a single pass) so the result never depends on graph.json
+    row order: root, its transitive ``blocked_by`` ancestors, the transitive
+    dependents that name any in-scope node as a blocker, and the verifier /
+    evidence-producer nodes referenced by in-scope nodes (so verification and
+    data edges are not silently dropped for lack of a blocked_by link).
+    """
+    scope: set[str] = set()
+    if root in by_id:
+        scope.add(root)
+        stack = [root]
+        while stack:  # up: transitive blocked_by ancestors
+            for dep in (by_id[stack.pop()].get("blocked_by") or []):
+                if dep in by_id and dep not in scope:
+                    scope.add(dep)
+                    stack.append(dep)
+
+    changed = True
+    while changed:
+        changed = False
+        for nid, e in by_id.items():
+            if nid in scope:
+                # verifier + evidence producers referenced by an in-scope node
+                v = str(e.get("verifier") or "").strip()
+                if v and v in by_id and v not in scope:
+                    scope.add(v)
+                    changed = True
+                for ev in (e.get("requires_evidence") or []):
+                    for src, se in by_id.items():
+                        if src not in scope and ev in (se.get("produces_evidence") or []):
+                            scope.add(src)
+                            changed = True
+                continue
+            # down: a dependent of anything already in scope
+            if any(dep in scope for dep in (e.get("blocked_by") or [])):
+                scope.add(nid)
+                changed = True
+    return scope
+
+
+def _exec_liveness(state: str) -> str:
+    """Map a claim_status state to the ExecNode liveness enum."""
+    return {"live": "live", "suspect": "unknown", "stale": "unknown",
+            "corrupted": "unknown", "free": ""}.get(state, "")
+
+
+@cli.command("exec-graph", hidden=True)
+def cmd_exec_graph(
+    id: str = typer.Argument(..., help="Root node ab-id, slug, or bare hex."),
+    as_json: bool = typer.Option(True, "--json/--human", "-J", help="Emit stable JSON (default) or a human summary."),
+    validate: bool = typer.Option(False, "--validate", help="Round-trip the compiled graph through strict parse; exit 2 on any defect."),
+) -> None:
+    """Compile and inspect the derived execution graph for a node (read-only).
+
+    Derives a disposable typed topology from canonical state (blocked_by
+    ordering, file ownership, verifiers, evidence). Never mutates the graph;
+    compilation failure degrades to a collapsed serial graph rather than error.
+    """
+    from fno.graph.execution import MalformedGraphError, compile_graph, ExecGraph
+    from fno.graph.fuzzy import resolve_node
+
+    entries = _resolve_entries_or_exit(id)
+    match = resolve_node(id, entries)
+    if match.kind != "exact":
+        typer.echo(f"Error: could not resolve node {id!r} exactly", err=True)
+        raise typer.Exit(code=3)
+    root = match.candidates[0]["id"]
+
+    by_id = {e.get("id"): e for e in entries if e.get("id")}
+    scope = _relevant_exec_scope(root, by_id)
+
+    selected = []
+    for nid in scope:
+        e = dict(by_id[nid])
+        # Live-state truth from the lockfile, NOT the graph snapshot: a worker
+        # can hold node:<id> without updating locked_by, and a dead holder can
+        # linger in the graph (AGENTS.md: the live lockfile is the only
+        # ownership truth). Best-effort - a read-only surface never crashes on
+        # a claims-layer hiccup.
+        try:
+            from fno.claims.core import claim_status
+            from fno.claims.io import claims_root_for
+            key = f"node:{nid}"
+            st = claim_status(key, root=claims_root_for(key))
+            e["claim_holder"] = st.get("holder") or ""
+            e["liveness"] = _exec_liveness(str(st.get("state") or ""))
+        except Exception as exc:  # noqa: BLE001 - inspection must not fail on claims IO
+            # A probe failure is NOT "free": conflating "couldn't read" with
+            # "unclaimed" would render a live-held node as available. Mark it
+            # unknown and leave a trace rather than silently claiming free.
+            typer.echo(f"warning: claim probe failed for {nid}: {exc}", err=True)
+            e["claim_holder"] = ""
+            e["liveness"] = "unknown"
+        selected.append(e)
+
+    graph = compile_graph(root, selected)
+
+    if validate:
+        try:
+            ExecGraph.from_dict(graph.to_dict())
+        except MalformedGraphError as exc:
+            typer.echo(f"Error: compiled graph failed strict validation: {exc}", err=True)
+            raise typer.Exit(code=2)
+
+    if as_json:
+        typer.echo(graph.to_json())
+        return
+    kinds = ", ".join(sorted({e.kind for e in graph.edges})) or "none"
+    typer.echo(f"root={graph.root} collapsed={graph.collapsed}")
+    typer.echo(f"nodes={len(graph.nodes)} edges={len(graph.edges)} ({kinds}) barriers={len(graph.barriers)}")
+    for n in sorted(graph.nodes, key=lambda n: n.node_id):
+        typer.echo(f"  {n.node_id}  [{n.justification}] {n.objective}")
+    for b in sorted(graph.barriers, key=lambda b: b.at):
+        typer.echo(f"  barrier @ {b.at}: fan-in from {', '.join(b.expected)}")
