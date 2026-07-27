@@ -1245,6 +1245,16 @@ def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) ->
         proc.wait()
         rc = proc.returncode if proc.returncode is not None else 124
         killed = True
+    except KeyboardInterrupt:
+        # The harness runs in its own session (start_new_session), so it does not
+        # share the terminal's SIGINT and would outlive a Ctrl-C with all its
+        # grandchildren. Kill the group before re-raising so nothing is orphaned.
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
+        raise
     return rc, time.monotonic() - start, killed
 
 
