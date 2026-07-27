@@ -6199,13 +6199,19 @@ fn agent_hit(a: &AgentRow, _active_squad: u64) -> ChromeHit {
             // A not-yet-spawned watch-only attachable row opens the placement
             // picker (x-9c5f) so the operator chooses the split direction
             // (h/j/k/l or arrows) or a new tab, rather than a hardcoded
-            // same-workspace Right split / cross-workspace new tab. An exited row
-            // carries no attach_id, so it falls through to the notice.
-            Some(id) => ChromeHit::OpenAttachPlace {
+            // same-workspace Right split / cross-workspace new tab.
+            //
+            // The attach catalog gate is `attach_id && !exited`, and BOTH halves
+            // belong here: a tombstone row keeps its attach_id so the client can
+            // dismiss it, so testing attach_id alone offered the picker for a
+            // dead agent and only refused two keystrokes later, at the send-time
+            // recheck. This is the shared resolver for the click, the selector's
+            // Enter, the navigator goto, and peek, so the guard covers all four.
+            Some(id) if !a.exited => ChromeHit::OpenAttachPlace {
                 id: id.clone(),
                 squad: a.squad,
             },
-            None => ChromeHit::Notice("agent has no pane here".into()),
+            _ => ChromeHit::Notice("agent has no pane here".into()),
         },
     }
 }
@@ -11402,6 +11408,18 @@ mod tests {
             agent_hit(&bg, 2),
             ChromeHit::OpenAttachPlace { id, squad } if id == "job1" && squad == bg.squad
         ));
+        // A TOMBSTONE row keeps its attach_id (the client needs it to dismiss),
+        // so attach_id alone would offer the picker for a dead agent and only
+        // refuse at the send-time recheck. The catalog gate is attach_id AND
+        // !exited, and the `p` key already enforced both.
+        let dead = AgentRow {
+            pane_id: None,
+            attach_id: Some("job1".into()),
+            exited: true,
+            tombstone: true,
+            ..hosted.clone()
+        };
+        assert!(matches!(agent_hit(&dead, 2), ChromeHit::Notice(_)));
         let orphan = AgentRow {
             pane_id: None,
             attach_id: None,
