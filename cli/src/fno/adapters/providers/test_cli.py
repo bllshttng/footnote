@@ -1170,3 +1170,92 @@ class TestEffectiveActive:
         from fno.adapters.providers.loader import effective_active
 
         assert effective_active(repo_root=tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# AC4-HP: fno providers doctor reports the store's real condition
+# ---------------------------------------------------------------------------
+
+
+class TestDoctor:
+    """Reconstructs the live store defect: one credential under two ids, both
+    blobs expired, slot tainted. Each of those otherwise surfaces only as an
+    `unknown` somewhere downstream."""
+
+    @pytest.fixture()
+    def sick_store(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        import json as _json
+
+        _write_settings(tmp_path / ".fno" / "config.toml", _managed_pair_config("readyrule"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        from fno.adapters.providers import managed
+
+        # expiresAt in MILLISECONDS (the shape Claude Code writes), already past.
+        blob = _json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "one-shared-token",
+                "expiresAt": 1783352000000,
+            }
+        })
+        root = tmp_path / ".fno" / "providers"
+        for rid in ("readyrule", "makers"):
+            (root / rid).mkdir(parents=True)
+            (root / rid / "blob").write_text(blob)
+        managed._set_slot_taint("claude", root, True)
+        return tmp_path
+
+    def test_names_duplicate_expiry_and_taint_and_exits_nonzero(
+        self, sick_store: Path
+    ) -> None:
+        result = _invoke(["doctor"], cwd=sick_store, home=sick_store)
+        assert result.exit_code != 0, result.output
+        assert "duplicate-credential" in result.output
+        # The pair is named in both directions, so either row points at the other.
+        assert "readyrule" in result.output and "makers" in result.output
+        assert result.output.count("expired-credential") == 2
+        assert "tainted-slot" in result.output
+        assert "one-shared-token" not in result.output
+
+    def test_healthy_store_is_quiet_and_exits_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+
+        _write_settings(tmp_path / ".fno" / "config.toml", _managed_pair_config("readyrule"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        root = tmp_path / ".fno" / "providers"
+        for rid, tok in (("readyrule", "tok-a"), ("makers", "tok-b")):
+            (root / rid).mkdir(parents=True)
+            (root / rid / "blob").write_text(
+                _json.dumps({
+                    "claudeAiOauth": {"accessToken": tok, "expiresAt": 4102444800000}
+                })
+            )
+        result = _invoke(["doctor"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        assert "no problems found" in result.output
+
+    def test_config_dir_without_a_login_is_reported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A config_dir record whose dir holds no credential would spawn an
+        # auth-prompt zombie; doctor is where that becomes visible before then.
+        empty = tmp_path / "claude-alt"
+        empty.mkdir()
+        _write_settings(tmp_path / ".fno" / "config.toml", {
+            "config": {"providers": {"active": "alt", "records": [
+                {"id": "alt", "name": "alt", "cli": "claude", "auth": "managed",
+                 "config_dir": str(empty)},
+            ]}}
+        })
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        monkeypatch.setattr("fno.agents.account_env._login_present", lambda p: False)
+        result = _invoke(["doctor"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code != 0, result.output
+        assert "no-login-in-config-dir" in result.output

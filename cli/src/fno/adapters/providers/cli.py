@@ -7,6 +7,7 @@ Phase 03 will wire in staging.stage(record) inside the `add` command.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import shutil
 import subprocess
@@ -635,6 +636,118 @@ def register_provider(
         typer.echo(f"warning: registered but could not stamp active slot: {exc}", err=True)
 
     typer.echo(f"Registered managed account '{record.id}' (snapshot at {adir}, scope={scope}).")
+
+
+# ---------------------------------------------------------------------------
+# doctor (store integrity)
+# ---------------------------------------------------------------------------
+
+
+def _doctor_findings() -> list[dict]:
+    """Per-record + per-slot problems in the managed store. Read-only.
+
+    A stale capture, an expired blob, a config dir with no login, and a tainted
+    slot are four separate silent degradations that each surface only as
+    ``unknown`` somewhere downstream. This collects them into one answerable
+    question so the operator sees the store's real condition instead of a
+    symptom. Never mutates; never prints a secret.
+    """
+    import time as _time
+
+    config = _load()
+    findings: list[dict] = []
+    now = _time.time()
+
+    for record in config.records:
+        blob = managed.read_blob(record.id)
+        if blob is not None:
+            holder = managed.duplicate_credential_holder(blob, exclude_id=record.id)
+            if holder is not None:
+                findings.append({
+                    "record": record.id,
+                    "problem": "duplicate-credential",
+                    "detail": (
+                        f"holds the same credential as '{holder}'; one of them "
+                        f"was captured while the other account was signed in"
+                    ),
+                })
+            expires_at = managed.credential_expiry(blob)
+            if expires_at is not None and expires_at <= now:
+                stamp = _dt.datetime.fromtimestamp(
+                    expires_at, _dt.timezone.utc
+                ).strftime("%Y-%m-%dT%H:%MZ")
+                findings.append({
+                    "record": record.id,
+                    "problem": "expired-credential",
+                    "detail": f"stored credential expired {stamp}",
+                })
+
+        if record.config_dir is not None:
+            from fno.agents.account_env import _login_present
+
+            if not record.config_dir.exists():
+                findings.append({
+                    "record": record.id,
+                    "problem": "missing-config-dir",
+                    "detail": f"config_dir {record.config_dir} does not exist",
+                })
+            elif not _login_present(record.config_dir):
+                findings.append({
+                    "record": record.id,
+                    "problem": "no-login-in-config-dir",
+                    "detail": (
+                        f"config_dir {record.config_dir} holds no claude login "
+                        f"(run: CLAUDE_CONFIG_DIR={record.config_dir} claude /login)"
+                    ),
+                })
+
+    for cli_kind in sorted({r.cli for r in config.records}):
+        try:
+            tainted = managed.slot_tainted(cli_kind, managed.store_root())
+        except OSError:
+            continue
+        if tainted:
+            findings.append({
+                "record": f"slot:{cli_kind}",
+                "problem": "tainted-slot",
+                "detail": (
+                    "the active stamp was written while sessions were pinned, so "
+                    "the slot may hold a credential the stamp does not describe"
+                ),
+            })
+
+    return findings
+
+
+@cli.command("doctor")
+def doctor_providers(
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit a JSON array of findings."
+    ),
+) -> None:
+    """Report the managed store's real condition. Exits non-zero on any problem.
+
+    Read-only. Checks each record for a credential another account already
+    holds, an expired stored credential, and a config_dir that holds no login;
+    then checks each CLI's slot for taint. Usable as a check in a script.
+    """
+    import json as _json
+
+    findings = _doctor_findings()
+
+    if json_output:
+        typer.echo(_json.dumps(findings))
+    elif not findings:
+        typer.echo("providers doctor: no problems found.")
+    else:
+        for f in findings:
+            typer.echo(f"{f['record']}: {f['problem']}: {f['detail']}")
+        typer.echo("")
+        n = len(findings)
+        typer.echo(f"{n} problem{'' if n == 1 else 's'} found.")
+
+    if findings:
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------

@@ -571,6 +571,33 @@ def credential_digest(blob: Optional[str]) -> Optional[str]:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def credential_expiry(blob: Optional[str]) -> Optional[float]:
+    """``claudeAiOauth.expiresAt`` as epoch SECONDS, or None when absent.
+
+    Claude Code stores it in milliseconds; a value in that range is scaled here
+    so no caller has to guess the unit. A stored blob whose expiry has passed is
+    a dead credential: `fno providers use` would materialize it and the next
+    session would prompt for a login.
+    """
+    if not blob:
+        return None
+    try:
+        data = json.loads(blob)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    oauth = data.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return None
+    raw = oauth.get("expiresAt")
+    if not isinstance(raw, (int, float)):
+        return None
+    # Milliseconds since epoch is the shape Claude Code writes; anything past
+    # the year 33658 in seconds is really milliseconds.
+    return float(raw) / 1000.0 if raw > 1e12 else float(raw)
+
+
 def read_blob(record_id: str, root: Path | None = None) -> Optional[str]:
     """The stored credential blob for ``record_id``, or None when unregistered."""
     try:
