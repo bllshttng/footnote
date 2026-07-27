@@ -187,12 +187,9 @@ def test_cost_update_replaces_an_existing_session_row(tmp_path):
     assert node["cost_usd"] == 9.0
 
 
-def test_cost_update_rehashes_the_sidecar_it_invalidates(tmp_path):
-    """This writer bypasses locked_mutate_graph, so it owns the sidecar.
-
-    A stale sidecar makes the next load_graph raise GraphCorruptionError, and
-    cost attribution is silently skipped from then on.
-    """
+def test_cost_update_leaves_the_sidecar_valid(tmp_path):
+    """A stale sidecar makes the next load_graph raise GraphCorruptionError,
+    after which cost attribution is silently skipped from then on."""
     import hashlib
     from fno.cost import _update_graph_node
     from fno.graph.load import load_graph
@@ -204,6 +201,46 @@ def test_cost_update_rehashes_the_sidecar_it_invalidates(tmp_path):
     sidecar = Path(str(graph_path) + ".sha256")
     assert sidecar.read_text().strip() == hashlib.sha256(graph_path.read_bytes()).hexdigest()
     assert load_graph(graph_path)[0]["cost_usd"] == 4.0
+
+
+def test_cost_update_never_empties_a_legacy_root_list_graph(tmp_path):
+    """The whole backlog, not just this node's cost, rides on this.
+
+    A root-list graph.json read as `{"entries": []}` and written back is a
+    total loss of the graph. Refuse the write instead.
+    """
+    from fno.cost import _update_graph_node
+
+    graph_path = tmp_path / "graph.json"
+    original = json.dumps([{"id": "ab-12345678", "title": "T", "cost_sessions": []}])
+    graph_path.write_text(original)
+
+    assert _update_graph_node(graph_path, "ab-12345678", "S1", 4.0) is False
+    assert graph_path.read_text() == original
+
+
+def test_cost_update_reports_a_node_it_could_not_find(tmp_path):
+    from fno.cost import _update_graph_node
+
+    graph_path = _graph(tmp_path)
+    assert _update_graph_node(graph_path, "ab-99999999", "S1", 4.0) is False
+    assert _update_graph_node(graph_path, "ab-12345678", "S1", 4.0) is True
+
+
+def test_update_surfaces_whether_the_node_got_the_cost(tmp_path, monkeypatch):
+    """`ok: True` used to mean "the ledger row landed", never the attribution."""
+    from fno import cost as cost_mod
+
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text('{"entries": []}')
+    graph_path = _graph(tmp_path)
+    monkeypatch.setattr(cost_mod, "_run_session_cost", lambda *a, **k: None, raising=False)
+
+    result = cost_mod.update(
+        "S1", 100, 4.0, ledger_path=ledger, graph_path=graph_path, node_id="ab-99999999"
+    )
+    assert result["ok"] is True
+    assert result["graph_updated"] is False
 
 
 def test_cost_update_still_appends_a_distinct_session(tmp_path):

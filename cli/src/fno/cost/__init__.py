@@ -176,11 +176,19 @@ def update(
         if fallback_error is not None:
             raise fallback_error
 
-    # Update graph node if provided
+    # Update graph node if provided. `graph_updated` is None when no node was
+    # named; False means the ledger row landed but the node did not get it, a
+    # difference the caller could not previously see.
+    graph_updated = None
     if graph_path and node_id:
-        _update_graph_node(Path(graph_path), node_id, session_id, cost_usd)
+        graph_updated = _update_graph_node(Path(graph_path), node_id, session_id, cost_usd)
 
-    return {"ok": True, "ledger_path": str(ledger_path), "entry": entry}
+    return {
+        "ok": True,
+        "ledger_path": str(ledger_path),
+        "entry": entry,
+        "graph_updated": graph_updated,
+    }
 
 
 def _append_to_ledger(ledger_path: Path, entry: dict[str, Any]) -> None:
@@ -276,62 +284,58 @@ def upsert_cost_session(
     node["cost_usd"] = round(sum(float(r.get("cost_usd") or 0) for r in rows), ndigits)
 
 
-def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd: float) -> None:
-    """Record this session's cost on the graph node (upsert, not append)."""
-    from filelock import FileLock
-    import tempfile
-    import os
+def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd: float) -> bool:
+    """Record this session's cost on the graph node (upsert, not append).
+
+    Returns True when the cost landed on the node, False when it was skipped.
+    Cost attribution is best-effort and must never abort the caller, so every
+    failure degrades to stderr plus a False rather than an exception.
+
+    Goes through locked_mutate_graph rather than writing graph.json directly.
+    A hand-rolled writer here took a DIFFERENT lockfile than the canonical one
+    (which resolves symlinks first, and footnote's worktree setup symlinks
+    `.fno/`), so the two writers did not mutually exclude; it also rewrote a
+    legacy root-list graph.json as an empty `{"entries": []}` and left the
+    sha256 sidecar stale, which made the next reader raise and every later cost
+    attribution silently skip.
+    """
+    from fno.graph.store import locked_mutate_graph
 
     if not graph_path.exists():
-        return
+        return False
 
-    lock_path = str(graph_path) + ".lock"
-    with FileLock(lock_path, timeout=10):
-        try:
-            from fno.graph.load import load_graph, GraphCorruptionError
-            entries = load_graph(graph_path)
-            raw = {"entries": entries}
-        except GraphCorruptionError as e:
-            # Hash mismatch -- surface it but do not abort cost attribution entirely.
-            print(
-                f"cost._update_graph_node: {e}; "
-                "cost attribution skipped for this session",
-                file=sys.stderr,
-            )
-            return
-        except (json.JSONDecodeError, ValueError):
-            # Surface parse failure to stderr so corruption does not silently
-            # drop cost attribution. Do not overwrite the file.
-            print(
-                f"cost._update_graph_node: graph.json parse failed at {graph_path}; "
-                "cost attribution skipped for this session",
-                file=sys.stderr,
-            )
-            return
+    found = False
 
+    def mutator(entries):
+        nonlocal found
         for node in entries:
-            if not isinstance(node, dict):
-                continue
-            if node.get("id") == node_id:
+            if isinstance(node, dict) and node.get("id") == node_id:
                 upsert_cost_session(node, session_id, cost_usd)
+                found = True
                 break
+        return entries
 
-        raw["entries"] = entries
-        content = json.dumps(raw, indent=2)
-        with tempfile.NamedTemporaryFile(
-            mode="w", dir=graph_path.parent,
-            prefix=f".{graph_path.name}.", suffix=".tmp",
-            delete=False, encoding="utf-8",
-        ) as tmp:
-            tmp.write(content)
-            tmp_path = Path(tmp.name)
-        os.replace(tmp_path, graph_path)
-        # This writer bypasses locked_mutate_graph, so it must re-bless the
-        # sha256 sidecar itself. Without this the next load_graph raises
-        # GraphCorruptionError against the pre-write hash and every later cost
-        # attribution is silently skipped by the handler above.
-        from fno.graph.store import _write_sha256_sidecar
-        _write_sha256_sidecar(graph_path)
+    try:
+        locked_mutate_graph(graph_path, mutator)
+    except SystemExit:
+        # locked_mutate_graph exits on an unreadable graph. That is right for a
+        # backlog command and wrong here: a corrupt graph must not take down the
+        # session whose cost we are recording. It has already explained itself
+        # on stderr, and it leaves the file untouched.
+        print(
+            f"cost._update_graph_node: graph unreadable at {graph_path}; "
+            "cost attribution skipped for this session",
+            file=sys.stderr,
+        )
+        return False
+
+    if not found:
+        print(
+            f"cost._update_graph_node: node {node_id} not found in {graph_path}; "
+            "cost not attributed",
+            file=sys.stderr,
+        )
+    return found
 
 
 # ---- check_budget ----
