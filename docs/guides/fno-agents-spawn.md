@@ -88,8 +88,8 @@ Note this non-strict fallback is exactly what `--at current` opts out of: strict
 ## Place a watch-only agent from the mux sideline
 
 The flags above are the scripted form; the same placement is available interactively.
-In the `fno mux` sideline selector, plain Enter on an attachable agent row attaches it watch-only as a new tab.
-Press `p` on that row to choose the placement instead:
+In the `fno mux` sideline selector, either Enter or `p` on a watch-only agent row that has no pane yet opens the placement picker, so the operator chooses the geometry rather than getting a hardcoded split.
+Inside the picker:
 
 1. Press a workspace number (`1` through `9`) to select the destination.
 2. Press `h`, `j`, `k`, or `l` to place the pane left, down, up, or right of that workspace's focused pane.
@@ -97,7 +97,8 @@ Press `p` on that row to choose the placement instead:
 4. Press Esc or `q` to cancel without changing the layout.
 
 Enter/Space is route-anchored: it attaches at the current route and deliberately ignores the digit-selected workspace, so it is the one key that does not need a live target.
-Every other key revalidates before sending, and reports a notice rather than acting if the agent stopped being attachable or the target workspace disappeared.
+Every key revalidates that the agent is still attachable before sending; every key but Enter/Space also revalidates that the target workspace still exists.
+Either check failing reports a notice instead of acting.
 A repeated attach focuses the existing pane and reports `already attached`; it never creates a duplicate or moves the pane.
 
 ## Place a pane next to the calling pane (`--at current`)

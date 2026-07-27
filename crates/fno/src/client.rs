@@ -10027,9 +10027,22 @@ async fn selector_keys(
                     }
                     _ => None,
                 };
-                let squads: Vec<u64> = view.layout.squads.iter().map(|s| s.id).take(9).collect();
-                match picked.filter(|_| !squads.is_empty()) {
-                    Some((id, owner)) => {
+                // Enter resolves the same row to the same picker via
+                // `agent_hit`/`apply_hit`, so the synthetic mission squad has to
+                // be excluded on BOTH paths or the virtual id leaks in through
+                // this one and `place_spawned_pane` cannot route it. Same reason
+                // the two no-op cases stay distinct: "no workspace" and "not
+                // attachable" are different problems to report.
+                let squads: Vec<u64> = view
+                    .layout
+                    .squads
+                    .iter()
+                    .map(|s| s.id)
+                    .filter(|id| !is_mission_squad(*id))
+                    .take(9)
+                    .collect();
+                match picked {
+                    Some((id, owner)) if !squads.is_empty() => {
                         let target = owner
                             .filter(|sid| squads.contains(sid))
                             .or_else(|| {
@@ -10040,6 +10053,7 @@ async fn selector_keys(
                             .unwrap_or(squads[0]);
                         view.open_attach_place(id, target, squads);
                     }
+                    Some(_) => view.set_notice("no workspace to attach into".into()),
                     None => view.set_notice("placement requires an attachable agent".into()),
                 }
             }
