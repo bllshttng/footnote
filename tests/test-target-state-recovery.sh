@@ -5,6 +5,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+# detect_provider checks session markers BEFORE the *_PLUGIN_ROOT hints, so an
+# ambient CLAUDE_CODE_SESSION_ID wins over the CODEX_PLUGIN_ROOT these cases set
+# and every harness assertion below detects "claude". Clearing the markers is
+# what makes this suite give the same verdict in a bare CI runner and inside a
+# live harness session.
+unset CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID CODEX_SESSION_ID GEMINI_SESSION_ID
+
 run_recovery_case() {
   local case_name="$1"
   local fixture_content="$2"
@@ -24,10 +31,13 @@ run_recovery_case() {
   fi
 
   grep -q '^---$' "$case_dir/.fno/target-state.md"
-  grep -q '^status: IN_PROGRESS' "$case_dir/.fno/target-state.md"
+  # session_id, not status: the control-plane collapse removed `status`,
+  # `current_phase`, and `session_start_context_loaded` from the manifest.
+  # A real session_id is what proves init wrote a live manifest, not a stub.
+  grep -q '^session_id: ' "$case_dir/.fno/target-state.md"
+  grep -q '^harness: codex' "$case_dir/.fno/target-state.md"
   grep -q '^provider: codex' "$case_dir/.fno/target-state.md"
   grep -q '^provider_mode:' "$case_dir/.fno/target-state.md"
-  grep -q '^session_start_context_loaded: false' "$case_dir/.fno/target-state.md"
 }
 
 run_recovery_case "plain-malformed" $'status: IN_PROGRESS\ncurrent_phase: do'
@@ -49,6 +59,7 @@ done
   GEMINI_PROJECT_DIR="$GEMINI_CASE_DIR" TARGET_START=1 bash "$ROOT_DIR/hooks/helpers/init-target-state.sh" >/dev/null
 )
 
+grep -q '^harness: gemini' "$GEMINI_CASE_DIR/.fno/target-state.md"
 grep -q '^provider: gemini' "$GEMINI_CASE_DIR/.fno/target-state.md"
 grep -q '^provider_mode: experimental_agents' "$GEMINI_CASE_DIR/.fno/target-state.md"
 
