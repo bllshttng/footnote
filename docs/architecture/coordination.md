@@ -257,6 +257,18 @@ and nothing objects, producing duplicate work and conflicting commits. The
   worktree it names, while `FNO_WORKTREE_OK` frees every worktree for the whole
   session. It reports as its own verdict so a receipt distinguishes "the
   dispatcher routed this" from "an operator forced this".
+- **Invitation (the durable form).** `fno claim worktree-guard --invite <harness>`
+  records the guest on the claim the CALLER owns, and the guard admits any
+  harness listed there. `spawn.sh` runs it automatically when dispatching a peer
+  of another harness, so a review panel needs no manual step. The invitation
+  rides on the claim rather than the peer's environment because a claim is on
+  disk: it reaches the peer whatever substrate launched it, and needs no
+  per-provider env plumbing (the env form would have to be threaded through six
+  `cmd.env` sites in `crates/fno-agents` and still would not survive a substrate
+  that does not inherit env). Only the owner can invite, so a session cannot add
+  itself. The owner's own refresh carries the guest list forward - an idempotent
+  re-acquire rebuilds the claim from what it is handed, so refreshing without it
+  would drop the invitation on the owner's very next write.
 
   Note what this does **not** solve: ownership keys on harness, so N concurrent
   *same-harness* implementers in one worktree are already unguarded today. If

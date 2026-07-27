@@ -162,8 +162,20 @@ def guard_worktree(
         if owner_holder == my_holder or owner_harness == my_harness:
             # Keep my own claim fresh (TTL + acquired_at) on my next write. A
             # sibling same-harness holder is left untouched - not ours to refresh.
+            # Carry the existing metadata forward: an idempotent re-acquire
+            # REBUILDS the claim from what it is handed, so refreshing without it
+            # would silently drop any guest the owner invited - the invitation
+            # would work until the owner's very next write, then evaporate.
             if owner_holder == my_holder:
-                _try_acquire(key, my_holder, my_harness, session_pid, ttl_ms, root)
+                _try_acquire(
+                    key,
+                    my_holder,
+                    my_harness,
+                    session_pid,
+                    ttl_ms,
+                    root,
+                    metadata=status.get("metadata") or None,
+                )
             return WorktreeGuardResult(
                 verdict=VERDICT_OK,
                 worktree=wt,
@@ -174,7 +186,11 @@ def guard_worktree(
             )
         # A different (or untaggable) harness owns a live claim -> refuse,
         # unless the dispatcher routed us here (grant) or an operator forced it.
-        # Grant is checked first: it is the more specific provenance.
+        # Grant is checked first: it is the more specific provenance. An
+        # owner-recorded invitation counts as a grant - it IS the dispatcher
+        # saying so, just durably on the claim instead of in our environment.
+        if my_harness in claim_guests(status):
+            granted = True
         if granted:
             verdict = VERDICT_GRANTED
         elif override:
@@ -232,7 +248,7 @@ def guard_worktree(
     return WorktreeGuardResult(verdict=VERDICT_OK, worktree=wt, my_harness=my_harness)
 
 
-def _try_acquire(key, holder, harness, session_pid, ttl_ms, root):
+def _try_acquire(key, holder, harness, session_pid, ttl_ms, root, metadata=None):
     """acquire_claim, but a lost race (ClaimHeldByOther) returns None instead of
     raising - the guard re-reads to report the winner rather than crashing a
     hook on a benign concurrent entry."""
@@ -244,16 +260,67 @@ def _try_acquire(key, holder, harness, session_pid, ttl_ms, root):
             pid=session_pid,
             harness=harness,
             reason="worktree harness guard",
+            metadata=metadata,
             root=root,
         )
     except ClaimHeldByOther:
         return None
 
 
+def claim_guests(status: dict) -> list:
+    """Harnesses the OWNER invited into its worktree, from the claim metadata.
+
+    The invitation rides on the claim rather than the guest's environment on
+    purpose: a claim is on disk, so it reaches a peer no matter how it was
+    launched. Env would have to be threaded through every per-provider spawn
+    site and would still not survive a substrate that does not inherit it.
+    """
+    meta = status.get("metadata")
+    if not isinstance(meta, dict):
+        return []
+    guests = meta.get("guests")
+    return [g for g in guests if isinstance(g, str)] if isinstance(guests, list) else []
+
+
+def invite_guest(
+    worktree_root: Path,
+    guest_harness: str,
+    *,
+    my_harness: str,
+    my_holder: str,
+    session_pid: Optional[int] = None,
+    ttl_ms: Optional[int] = DEFAULT_TTL_MS,
+    root: Optional[Path] = None,
+) -> list:
+    """Add ``guest_harness`` to the claim this session owns; return the guest list.
+
+    Only the OWNER may invite, which is what keeps this from being a backdoor:
+    the invitation is an idempotent re-acquire of the caller's own claim, so a
+    session that does not hold the worktree cannot add itself. A no-op when the
+    worktree is unclaimed or held by someone else.
+    """
+    key = worktree_claim_key(worktree_root)
+    status = claim_status(key, root=root)
+    if status.get("state") not in ("live", "suspect"):
+        return []
+    if status.get("holder") != my_holder:
+        return []
+    guests = claim_guests(status)
+    if guest_harness in guests:
+        return guests
+    merged = dict(status.get("metadata") or {})
+    merged["guests"] = [*guests, guest_harness]
+    _try_acquire(key, my_holder, my_harness, session_pid, ttl_ms, root, metadata=merged)
+    return merged["guests"]
+
+
 __all__ = [
     "DEFAULT_TTL_MS",
+    "claim_guests",
+    "invite_guest",
     "VERDICT_ACQUIRED",
     "VERDICT_FOREIGN",
+    "VERDICT_GRANTED",
     "VERDICT_NO_WORKTREE",
     "VERDICT_OK",
     "VERDICT_OVERRIDE",

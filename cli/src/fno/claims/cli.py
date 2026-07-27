@@ -347,6 +347,12 @@ def worktree_guard_cmd(
         "--acquire/--no-acquire",
         help="Claim the worktree for this harness when free (default). --no-acquire only reads.",
     ),
+    invite: Optional[str] = typer.Option(
+        None,
+        "--invite",
+        help="Admit <harness> into the worktree THIS session owns, then exit. A "
+        "dispatcher calls this before sending a peer of another harness here.",
+    ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON to stdout"),
 ) -> None:
     """Consult (and, when free, acquire) the worktree/branch harness claim.
@@ -384,6 +390,26 @@ def worktree_guard_cmd(
         session_pid = None
 
     wt_root = resolve_worktree_root()
+
+    if invite:
+        # Exits here: inviting is a write to MY claim, not a consult, and must
+        # never be confused with a verdict. A non-owner gets an empty list back
+        # rather than an error - it simply had nothing to give away.
+        from .worktree_guard import invite_guest
+
+        guests = (
+            invite_guest(
+                wt_root,
+                invite.strip(),
+                my_harness=ident.harness or "",
+                my_holder=holder,
+                session_pid=session_pid,
+            )
+            if wt_root and ident.harness
+            else []
+        )
+        typer.echo(json.dumps({"worktree": str(wt_root or ""), "guests": guests}))
+        raise typer.Exit(code=0 if guests else 1)
     # A dispatcher stamps FNO_WORKTREE_GRANT with the worktree it sent us to.
     # Compare RESOLVED paths: the grant travels as the spawner saw it, and a
     # symlinked root (macOS /tmp -> /private/tmp) would defeat a string match

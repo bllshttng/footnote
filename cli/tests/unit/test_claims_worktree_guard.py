@@ -16,6 +16,8 @@ from pathlib import Path
 from fno.claims.core import acquire_claim, claim_status
 from fno.claims.worktree_guard import (
     VERDICT_ACQUIRED,
+    claim_guests,
+    invite_guest,
     VERDICT_FOREIGN,
     VERDICT_NO_WORKTREE,
     VERDICT_OK,
@@ -250,3 +252,62 @@ class TestOrchestratedGrant:
         _guard(tmp_path, "claude", "s1")
         r = _guard(tmp_path, "claude", "s2", granted=True)
         assert r.verdict == VERDICT_OK
+
+
+class TestOwnerInvitedGuests:
+    """The durable half of the grant: the OWNER records the invitation on its
+    own claim, so a peer is admitted no matter how it was launched. Env would
+    have to be threaded through every per-provider spawn site and would still
+    not survive a substrate that does not inherit it."""
+
+    def _own(self, tmp_path, harness="claude"):
+        _guard(tmp_path, harness, "s1")
+        return f"worktree-owner:{harness}"
+
+    def test_invited_guest_is_granted(self, tmp_path):
+        holder = self._own(tmp_path)
+        invite_guest(WT, "codex", my_harness="claude", my_holder=holder, root=tmp_path)
+        r = _guard(tmp_path, "codex", "s2")
+        assert r.verdict == VERDICT_GRANTED
+        assert not r.blocked
+
+    def test_uninvited_harness_still_refused(self, tmp_path):
+        holder = self._own(tmp_path)
+        invite_guest(WT, "codex", my_harness="claude", my_holder=holder, root=tmp_path)
+        r = _guard(tmp_path, "gemini", "s3")
+        assert r.verdict == VERDICT_FOREIGN
+        assert r.blocked
+
+    def test_invitation_survives_owner_next_write(self, tmp_path):
+        """Regression: an idempotent re-acquire REBUILDS the claim from what it
+        is handed, so refreshing without the existing metadata would drop the
+        guest - the invitation would work until the owner's next write."""
+        holder = self._own(tmp_path)
+        invite_guest(WT, "codex", my_harness="claude", my_holder=holder, root=tmp_path)
+        _guard(tmp_path, "claude", "s1")  # owner writes again -> refreshes its claim
+        assert _guard(tmp_path, "codex", "s2").verdict == VERDICT_GRANTED
+
+    def test_non_owner_cannot_invite_itself(self, tmp_path):
+        """The property that keeps this from being a backdoor."""
+        self._own(tmp_path)
+        invite_guest(
+            WT, "codex", my_harness="codex", my_holder="worktree-owner:codex", root=tmp_path
+        )
+        assert _guard(tmp_path, "codex", "s2").verdict == VERDICT_FOREIGN
+
+    def test_invite_is_idempotent(self, tmp_path):
+        holder = self._own(tmp_path)
+        invite_guest(WT, "codex", my_harness="claude", my_holder=holder, root=tmp_path)
+        guests = invite_guest(WT, "codex", my_harness="claude", my_holder=holder, root=tmp_path)
+        assert guests == ["codex"]
+
+    def test_invite_on_unclaimed_worktree_is_a_noop(self, tmp_path):
+        assert invite_guest(
+            WT, "codex", my_harness="claude", my_holder="worktree-owner:claude", root=tmp_path
+        ) == []
+
+    def test_claim_guests_tolerates_junk_metadata(self, tmp_path):
+        assert claim_guests({}) == []
+        assert claim_guests({"metadata": None}) == []
+        assert claim_guests({"metadata": {"guests": "codex"}}) == []
+        assert claim_guests({"metadata": {"guests": ["codex", 7]}}) == ["codex"]
