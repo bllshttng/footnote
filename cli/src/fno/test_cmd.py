@@ -510,15 +510,25 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 
 
 # Shell harnesses discover_shell_harnesses finds but smoke must not run yet.
-# 15 entries held. 12 are RED (pre-existing rot; each its own debugging session,
-# out of scope here). The other 3 are macOS-green and Linux-red, drained once
-# already and reverted: tests/hooks/test_hook_events.sh (a non-portable perm
-# check: GNU stat does not fail on -f, so the Linux fallback never runs), and
-# tests/hooks/test_init_contested_steal_guard.sh + tests/test_provider_substrate_e2e.sh,
-# which shell out to a global `fno` present on a dev machine but absent from CI's
-# fresh runner (it ships only the venv `fno-py`). All three stay deferred pending
-# test repair or a CI `fno` shim. A local green is NOT grounds to drain one of
-# these three - the census runs on the developer's OS, and CI's is the verdict.
+# 14 entries held. 10 are RED on both platforms (pre-existing rot; each its own
+# debugging session, out of scope here). The other 4 are macOS-green and
+# Linux-red, so a developer census calls them drainable and CI does not:
+#
+#   tests/hooks/test_hook_events.sh - a non-portable perm check; GNU stat does
+#     not fail on -f, so the Linux fallback branch never runs.
+#   tests/hooks/test_init_contested_steal_guard.sh
+#   tests/hooks/test_init_claim_stderr_and_modern_claim.sh
+#   tests/test_provider_substrate_e2e.sh
+#     - all three `command -v fno || skip`, and a fresh runner ships only the
+#       venv `fno-py`. They exit 77 (SKIP), which smoke counts as a failure, so
+#       draining one turns the gate red without a single assertion running.
+#       A CI `fno` shim would drain all three at once; that is the actual fix.
+#
+# A LOCAL GREEN IS NOT GROUNDS TO DRAIN ONE OF THESE FOUR. The census runs on
+# the developer's OS; CI's verdict is the one that counts, and it disagrees in
+# BOTH directions. test_init_claim_stderr_and_modern_claim.sh was drained on a
+# macOS green and reverted when CI went red. Two others went the other way -
+# macOS-red, Linux-green - and were drained on CI's word, not a laptop's.
 #
 # A green-fast harness here is silent coverage loss no file edit surfaces.
 # `fno test --census-deferred` runs every entry bounded and exits non-zero the
@@ -536,11 +546,10 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 # runs it weekly, which is the cadence this list actually drifts at.
 _DISCOVERY_DEFERRED: frozenset[str] = frozenset("""
 scripts/tests/test_graph_resolve.sh
-scripts/tests/test_provider_pricing.sh
 tests/events/test-check-pr-emits-polling.sh
 tests/hooks/test_hook_events.sh
+tests/hooks/test_init_claim_stderr_and_modern_claim.sh
 tests/hooks/test_init_contested_steal_guard.sh
-tests/hooks/test_inject_fno_agent_whoami.sh
 tests/hooks/test_reconcile_session_start.sh
 tests/smoke-megatron-e2e.sh
 tests/smoke-target-shim.sh
