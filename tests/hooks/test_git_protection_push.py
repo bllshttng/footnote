@@ -207,6 +207,12 @@ def test_opener_line_git_prefix_still_caught():
     assert _git_segments("git push origin main <<EOF\nbody\nEOF")
 
 
+def test_heredoc_opener_after_shell_comment_is_ignored():
+    # `# <<EOF` is a comment, not an opener; the shell executes the following
+    # push, so it must be judged as a real command, not hidden as heredoc body.
+    assert _git_segments("echo ok # <<EOF\ngit push --force origin main\nEOF")
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_") and callable(_fn):

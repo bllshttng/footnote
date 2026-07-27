@@ -103,7 +103,7 @@ while [[ $# -gt 0 ]]; do
   case "$tok" in
     --input)          INPUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -n|--name)        NAME="${2:-}"; NAME_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
-    -P|--harness|--provider) PROVIDER="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;  # -P mirrors the CLI (-P=provider, -p=headless); never reuse it for --project
+    -P|--harness|--provider) PROVIDER="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;  # -P is the --provider shorthand (selects the harness here); never reuse it for --project
     --model)          MODEL="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --effort)         EFFORT="${2:-}"; EFFORT_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;

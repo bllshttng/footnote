@@ -253,10 +253,14 @@ work in the forced repo). When you re-run normalize after resolving a slug/`next
 to an ab-id (see RESOLVE), carry `-C`/`-f` through so the conflict check fires on
 the real node.
 
-`-P` is the **provider** shorthand (`-P <harness>`, identical to `--provider`),
-matching `fno agents spawn` (where `-P`=`--provider` and `-p`=headless). It is not
-the project flag: an earlier `-P`=`--project` mapping silently misrouted `-P zai`
-to a cross-project hop, so project moved to `-C`.
+`-P` is the **provider** shorthand (`-P <harness>`, identical to `--provider`):
+it selects the harness in this layer - the axis `--harness` shares, which spawn
+forwards as `--harness`. It is not the project flag: an earlier `-P`=`--project`
+mapping silently misrouted `-P zai` to a cross-project hop, so project moved to
+`-C`. Note this is the skill-layer provider/harness axis, not the separate
+model-vendor `--provider` the `fno agents spawn` CLI exposes (where `-H` selects
+the harness and `-P` the vendor); z.ai is a model route selected via
+`--model glm-5.2`, so `-P zai` errors here because z.ai is not a harness.
 
 - If `status=error`, STOP. Report the `error=` line. Do NOT spawn.
 - Otherwise capture every field for RESOLVE/VALIDATE/CONFIRM/SPAWN.

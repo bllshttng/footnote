@@ -565,7 +565,10 @@ def _find_heredoc_opener(line):
     lies OUTSIDE a quoted region, else None.
 
     A `<<DELIM` inside single/double quotes is data, not an opener, so `echo
-    "x <<EOF"` does not start a heredoc. Backslash and quote escaping are
+    "x <<EOF"` does not start a heredoc. A `<<DELIM` after an unquoted `#` is a
+    comment, not an opener, so `echo ok # <<EOF` does not start one either
+    (without this, the following line would be hidden as body content and a real
+    command there would bypass the gate). Backslash and quote escaping are
     honored while scanning. Ambiguous shapes (`<<<` here-string, `<<` with no
     delimiter-like word after) yield None, so the line is segmented normally
     (the deny-leaning default) rather than granted a body exemption.
@@ -591,6 +594,12 @@ def _find_heredoc_opener(line):
         if ch == "\\" and i + 1 < n:
             i += 2  # escaped char outside quotes: skip it
             continue
+        # An unquoted `#` at a word boundary starts a shell comment: stop
+        # scanning, so a commented-out opener cannot start a hiding heredoc.
+        # Over-matching is safe - forgoing a real (non-comment) opener only
+        # forgets the body exemption, the deny-leaning direction.
+        if ch == "#" and (i == 0 or not (line[i - 1].isalnum() or line[i - 1] == "_")):
+            break
         if ch == "<" and i + 1 < n and line[i + 1] == "<":
             opener = _parse_heredoc_at(line, i + 2)
             if opener is not None:
