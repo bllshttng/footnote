@@ -541,3 +541,77 @@ def test_is_design_stage_is_now_one_rung_of_the_table(tmp_path):
 
     entry = _plan(tmp_path, DESIGN_FM)
     assert is_design_stage(entry) is (plan_rung(entry) is Rung.DESIGN) is True
+
+
+# selection re-probes every undesigned rung, not just `design` (codex P1) ------
+
+
+def _ready_row(plan_path: str) -> dict:
+    """A graph row PERSISTED as `ready` whose doc may say otherwise."""
+    from datetime import datetime, timezone
+
+    return {
+        "id": "x-stale01",
+        "status": "ready",
+        "plan_path": plan_path,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [("design", "design-stage"), ("idea", "idea-stage"), ("stub", "idea-stage")],
+)
+def test_a_stale_ready_row_is_re_probed_for_every_undesigned_rung(
+    tmp_path, status, expected
+):
+    """The persisted status can lie; the live doc decides.
+
+    `read_graph` does not recompute, so a doc rewritten down to `idea` (or an
+    old scaffold still spelled `stub`) sits behind a `ready` row. A DESIGN-only
+    probe waved those straight through to dispatch.
+    """
+    from datetime import datetime, timezone
+
+    from fno.backlog.advance import selection_guards
+
+    plan = tmp_path / "p.md"
+    plan.write_text(f"---\nstatus: {status}\n---\n")
+    node = _ready_row(str(plan))
+    verdict = selection_guards(
+        node, {node["id"]: node}, datetime.now(timezone.utc)
+    )
+    assert verdict == expected
+
+
+def test_a_stale_ready_row_with_a_real_plan_still_selects(tmp_path):
+    """The guard must not hold back a genuinely ready node."""
+    from datetime import datetime, timezone
+
+    from fno.backlog.advance import selection_guards
+
+    plan = tmp_path / "r.md"
+    plan.write_text("---\nstatus: ready\n---\n")
+    node = _ready_row(str(plan))
+    assert selection_guards(
+        node, {node["id"]: node}, datetime.now(timezone.utc)
+    ) is None
+
+
+def test_an_unreadable_plan_stays_selectable_through_the_guard(tmp_path):
+    """Fail-open survives the rewrite: a vault unmount must not quarantine."""
+    from datetime import datetime, timezone
+
+    from fno.backlog.advance import selection_guards
+
+    node = _ready_row(str(tmp_path / "gone.md"))
+    assert selection_guards(
+        node, {node["id"]: node}, datetime.now(timezone.utc)
+    ) is None
+
+
+def test_the_policy_set_is_the_one_selection_uses():
+    """One definition of "undesigned", shared by the bool and the reason path."""
+    from fno.graph.ladder import UNSELECTABLE_RUNGS, Rung
+
+    assert UNSELECTABLE_RUNGS == frozenset({Rung.IDEA, Rung.DESIGN})

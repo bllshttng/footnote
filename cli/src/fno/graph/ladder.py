@@ -108,7 +108,12 @@ _DISPATCHABLE: frozenset[Rung] = frozenset(
 
 # Rungs the daemon must NOT pick up on its own. Undesigned work needs a design
 # pass first; every other rung (including UNREADABLE) stays in the pool.
-_UNSELECTABLE: frozenset[Rung] = frozenset({Rung.IDEA, Rung.DESIGN})
+#
+# Public because ``selection_guards`` needs the SET, not the bool: it reports a
+# rung-specific reason and would otherwise pay a second filesystem read to
+# recover which rung it was. Sharing the set keeps one definition of the policy
+# across both shapes.
+UNSELECTABLE_RUNGS: frozenset[Rung] = frozenset({Rung.IDEA, Rung.DESIGN})
 
 
 def _read_status_scalar(probe: str) -> tuple[Optional[str], bool]:
@@ -215,7 +220,7 @@ def is_selectable(entry: object) -> bool:
     False only for the two undesigned rungs. An unreadable plan stays
     selectable on purpose: see the module docstring's fail-open argument.
     """
-    return plan_rung(entry) not in _UNSELECTABLE
+    return plan_rung(entry) not in UNSELECTABLE_RUNGS
 
 
 def is_dispatchable(entry: object) -> bool:

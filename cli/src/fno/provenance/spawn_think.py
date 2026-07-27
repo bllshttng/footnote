@@ -788,12 +788,26 @@ def _spawn_think_worker(
             f"{(stderr or proc.stdout or '').strip()[:200]}"
         )
     short_id = _parse_short_id(proc.stdout or "")
-    if not short_id:
-        raise SpawnError(
-            f"fno agents spawn exit 0 but no short_id receipt: "
-            f"{(proc.stdout or proc.stderr or '').strip()[:200]}"
-        )
-    return short_id
+    if short_id:
+        return short_id
+    if substrate != "bg":
+        # Only the bg receipt carries `short_id`. The pane receipt is a mux
+        # handle (`mux_session`/`pane_id`, agents/cli.py), and the headless
+        # `once` path writes the provider's reply verbatim - not JSON at all.
+        # Exit 0 on those substrates means the worker really launched (or, for
+        # headless, already finished), so raising here would report `skipped`
+        # for work that IS happening: decompose would then mark the child
+        # unowned and inline-fill it out from under a live pane worker, which
+        # is exactly the double-write the ownership receipt exists to prevent.
+        #
+        # `agent_name` is the durable, addressable handle on every substrate
+        # (`fno agents logs <name>` / `peek`), so the caller keeps a real
+        # pointer at the worker rather than a fabricated id.
+        return agent_name
+    raise SpawnError(
+        f"fno agents spawn exit 0 but no short_id receipt: "
+        f"{(proc.stdout or proc.stderr or '').strip()[:200]}"
+    )
 
 
 def _parse_short_id(stdout: str) -> str:

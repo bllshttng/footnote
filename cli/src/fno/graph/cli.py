@@ -3148,6 +3148,11 @@ def _starvation_receipts(
                 # Not starvation: planned but not blueprinted, so it reads as
                 # its own rung rather than the generic quarantine bucket.
                 reason = "design"
+            elif g == "idea-stage":
+                # Also not starvation: a linked-but-undesigned doc (a decompose
+                # scaffold, or a plan hand-edited back down). Named separately
+                # from `design` so the receipt says which pass it is waiting on.
+                reason = "idea"
             else:
                 reason = "quarantined"
         out.append((nid, reason))

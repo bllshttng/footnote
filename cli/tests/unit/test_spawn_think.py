@@ -1435,3 +1435,79 @@ def test_wave0_adds_no_new_ceiling(tmp_path):
     assert block.max_per_run == 5
     assert block.daily_cap == 20
     assert not [f for f in type(block).model_fields if "wave0_cap" in f]
+
+
+# non-bg spawn receipts (codex P1) --------------------------------------------
+
+
+def _capture_with_stdout(monkeypatch, stdout: str) -> dict:
+    """Patch subprocess.run with a scripted receipt; return the captured cmd."""
+    captured: dict = {}
+
+    class _Proc:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        p = _Proc()
+        p.stdout = stdout
+        return p
+
+    monkeypatch.setattr(st.subprocess, "run", fake_run)
+    return captured
+
+
+def test_a_pane_receipt_without_short_id_is_still_a_launch(monkeypatch, tmp_path):
+    """The pane receipt carries mux_session/pane_id, never short_id.
+
+    Raising here reported `skipped` for a worker that IS running, so decompose
+    marked the child unowned and inline-filled it out from under a live pane
+    worker - the exact double-write the ownership receipt prevents.
+    """
+    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"pane\"\n")
+    _capture_with_stdout(
+        monkeypatch, '{"status":"live","mux_session":"m1","pane_id":"%1"}\n'
+    )
+    handle = st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    assert handle, "a launched pane worker must return an addressable handle"
+
+
+def test_a_headless_verbatim_reply_is_still_a_launch(monkeypatch, tmp_path):
+    """The headless `once` path writes the provider reply verbatim, not JSON."""
+    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"headless\"\n")
+    _capture_with_stdout(monkeypatch, "I have finished the design pass.\n")
+    handle = st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    assert handle
+
+
+def test_the_non_bg_handle_is_the_agent_name_not_a_fabricated_id(
+    monkeypatch, tmp_path
+):
+    """It must address a real worker: `fno agents logs <name>` has to work."""
+    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"pane\"\n")
+    cap = _capture_with_stdout(monkeypatch, '{"pane_id":"%1"}\n')
+    handle = st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    assert handle == cap["cmd"][cap["cmd"].index("--name") + 1]
+
+
+def test_bg_still_REQUIRES_a_short_id_receipt(monkeypatch, tmp_path):
+    """Unchanged where the receipt contract holds - no blanket loosening."""
+    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"bg\"\n")
+    _capture_with_stdout(monkeypatch, "some banner with no receipt\n")
+    with pytest.raises(st.SpawnError):
+        st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+
+
+def test_a_nonzero_exit_still_raises_on_every_substrate(monkeypatch, tmp_path):
+    """Exit 0 is the launch signal; a real failure must still surface."""
+    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"pane\"\n")
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "substrate unavailable"
+
+    monkeypatch.setattr(st.subprocess, "run", lambda cmd, **kw: _Proc())
+    with pytest.raises(st.SpawnError):
+        st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")

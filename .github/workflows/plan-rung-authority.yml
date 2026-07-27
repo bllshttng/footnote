@@ -12,10 +12,14 @@ name: plan-rung-authority
 on:
   push:
     branches: [main]
+    # The check scans the WHOLE Python source tree, so the filter must not be
+    # narrower than what it inspects: a PR touching statuses.py, types.py,
+    # graph/cli.py or backlog/advance.py derives or consumes readiness and could
+    # introduce a second classifier while a path-scoped filter kept the guard
+    # from ever running. `cli/src/**` covers every current and future consumer;
+    # the check is pure text extraction and takes ~6s, so breadth is free.
     paths: &rung_paths
-      - cli/src/fno/graph/ladder.py
-      - cli/src/fno/plan/_status.py
-      - cli/src/fno/plan/cli.py
+      - cli/src/**
       - crates/**
       - skills/**
       - scripts/**
