@@ -9,8 +9,13 @@
 #
 # Flow: resolve the persistent preflight worktree -> refuse a dirty invoking
 # tree -> lock -> reset the worktree to the invoking HEAD (caches preserved) ->
-# build a hermetic env -> fno-py test smoke --keep-going -> rust-ci legs (pinned fmt,
-# cargo test, advisory audit) -> one summary + exit.
+# build a hermetic env -> changed packet (CHANGED SUBSET, fail-fast, partial) ->
+# fno-py test smoke --keep-going -> rust-ci legs (pinned fmt, cargo test,
+# advisory audit) -> one summary + exit.
+#
+# The changed packet is early feedback only: its failure stops the run at the
+# earliest actionable signal, and its green earns nothing. Only the unchanged
+# full legs can mint a mode=FULL attestation.
 #
 # Usage:
 #   scripts/ci/preflight.sh [--retry-failed] [--force]
@@ -295,10 +300,119 @@ run_hermetic() {
     )
 }
 
+# --- verdict tripwire (shared by every exit path that reports a verdict) -----
+# Belt-and-braces over the lock: re-verify we still own both the worktree and
+# the lock before attributing a verdict to our candidate. Any residual clobber -
+# a future lock bug, a hand-run `git reset` in the shared worktree - becomes a
+# loud VOID instead of a GREEN or RED silently earned by another checkout.
+# Compare shas only; the preflight worktree is always detached HEAD.
+#
+# This is a function, not a straight-line block, because the changed packet can
+# exit before the full legs run: a packet that failed while the worktree was
+# being reset under it earned nothing, so it must VOID rather than report RED.
+exit_if_void() {
+    local VOID_REASON="" WT_HEAD_NOW
+    # 2>/dev/null, never 2>&1: merging stderr into the value means any benign git
+    # warning makes the captured string differ from the sha and VOIDs a good run.
+    if ! WT_HEAD_NOW="$(git -C "$PREFLIGHT_WT" rev-parse HEAD 2>/dev/null)"; then
+        VOID_REASON="cannot read the preflight worktree at $PREFLIGHT_WT"
+    elif [[ "$WT_HEAD_NOW" != "$CANDIDATE_SHA" ]]; then
+        VOID_REASON="worktree moved off our candidate mid-run (now ${WT_HEAD_NOW:0:12}, expected $CANDIDATE_SHORT)"
+    elif [[ "$(holder_pid_now)" != "$$" ]]; then
+        VOID_REASON="another preflight took our lock mid-run"
+    fi
+    [[ -n "$VOID_REASON" ]] || return 0
+    echo "preflight: VOID - $VOID_REASON." >&2
+    echo "preflight: verdict discarded - nothing here was earned by $CANDIDATE_SHORT. Re-run; this is not a code failure." >&2
+    exit 5
+}
+
+# --- attestation verdict (recorded after the tripwire, below) ----------------
+# VOID exited 5 above, so it reaches neither write nor delete and any
+# pre-existing attestation is left untouched (AC2-ERR). A FULL GREEN records;
+# any RED deletes a matching attestation so a stale green cannot outlive a real
+# failure (AC3-ERR); a --retry-failed pass mints nothing (AC1-ERR: subset green
+# is not full green).
+record_attestation() {
+    local now iso tmp
+    now="$(date +%s 2>/dev/null || echo 0)"
+    iso="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
+    tmp="${ATTEST}.$$"
+    # Temp file + rename: a concurrent reader never sees a half line, and two
+    # runs finishing on the same SHA make the last writer's identical content
+    # harmless. An unwritable common dir warns and continues (AC1-ERR error
+    # boundary): the run is still green, reuse just stays off until writable.
+    if printf 'sha=%s mode=FULL verdict=green at=%s iso=%s host=%s pid=%s\n' \
+            "$CANDIDATE_SHA" "$now" "$iso" "$(_this_host)" "$$" > "$tmp" 2>/dev/null \
+       && mv -f "$tmp" "$ATTEST" 2>/dev/null; then
+        :
+    else
+        rm -f "$tmp" 2>/dev/null
+        echo "preflight: WARN attestation write failed ($ATTEST); reuse unavailable until writable" >&2
+    fi
+}
+invalidate_attestation() {
+    [[ -f "$ATTEST" ]] || return 0
+    local line att_sha
+    line="$(cat "$ATTEST" 2>/dev/null)" || return 0
+    att_sha="$(_attest_field "$line" sha)"
+    [[ "$att_sha" == "$CANDIDATE_SHA" ]] || return 0
+    rm -f "$ATTEST" && echo "preflight: invalidated a stale green attestation for $CANDIDATE_SHORT"
+}
 # --- suites ------------------------------------------------------------------
 LEG_NAMES=(); LEG_STATUS=(); LEG_SECS=()
 record_leg() { LEG_NAMES+=("$1"); LEG_STATUS+=("$2"); LEG_SECS+=("$3"); }
 FAIL=0
+
+# --- changed packet: earliest actionable signal, before the full gate --------
+# Partial evidence by construction, so it runs first and stops the run on its
+# own failure (a broken nearest-neighbour test should not cost a full suite to
+# learn about). It can neither mint nor reuse a FULL attestation: only the
+# unchanged full legs below do that. A packet that maps nothing, or cannot
+# trust its diff, falls THROUGH to the full gate rather than reporting a
+# verdict it did not earn. --retry-failed is a different subset mode and skips
+# this leg entirely. Base/head are explicit so selection never depends on the
+# preflight worktree's untracked caches or a mutable remote-tracking ref.
+CHANGED_BASE=""
+if [[ $RETRY_FAILED -eq 0 ]]; then
+    CHANGED_BASE="$(git -C "$INVOKING_ROOT" merge-base origin/main "$CANDIDATE_SHA" 2>/dev/null || true)"
+fi
+if [[ -n "$CHANGED_BASE" ]]; then
+    echo ""
+    echo "preflight: === changed packet (CHANGED SUBSET - partial, never the gate) ==="
+    c0="$SECONDS"
+    run_hermetic uv run --project cli fno-py test smoke --changed \
+        --base "$CHANGED_BASE" --head "$CANDIDATE_SHA"
+    creq=$?
+    case $creq in
+        0)  record_leg "changed packet (CHANGED SUBSET)" pass $(( SECONDS - c0 )) ;;
+        20) record_leg "changed packet" "unselected" $(( SECONDS - c0 ))
+            echo "preflight: changed packet mapped nothing - not coverage; the full gate decides" ;;
+        21) record_leg "changed packet" "unevaluated" $(( SECONDS - c0 ))
+            echo "preflight: changed packet UNEVALUATED - continuing to the full gate" ;;
+        22) # The packet could not run at all. A dedicated code, not the child
+            # exit-code space: several selectable lint steps exit 2 on a genuine
+            # failure and pytest exits 2 on an interrupt, so keying this on 2
+            # would report a real failure as a usage error and skip the gate.
+            echo "preflight: changed packet could not run (missing prerequisite)" >&2
+            exit 2 ;;
+        *)  # Verdict-bearing exit, so it owes the same ownership check the full
+            # path does: a packet that failed while the shared worktree was reset
+            # under it earned nothing and must VOID rather than accuse this SHA.
+            exit_if_void
+            record_leg "changed packet (CHANGED SUBSET)" fail $(( SECONDS - c0 ))
+            invalidate_attestation
+            echo ""
+            echo "preflight: SUMMARY  repo=$REPO_NAME  candidate=$CANDIDATE_SHORT  mode=CHANGED-SUBSET"
+            printf '  %-24s %5ss  %s\n' fail $(( SECONDS - c0 )) "changed packet (CHANGED SUBSET)"
+            echo ""
+            echo "preflight: RED (changed packet) - stopped at the earliest signal; the full gate has NOT run." >&2
+            echo "preflight: fix, commit, then re-run scripts/ci/preflight.sh" >&2
+            exit 1 ;;
+    esac
+elif [[ $RETRY_FAILED -eq 0 ]]; then
+    echo "preflight: no merge-base with origin/main - skipping the changed packet"
+fi
 
 echo ""
 echo "preflight: === smoke suite ($([[ $RETRY_FAILED -eq 1 ]] && echo retry-failed || echo keep-going)) ==="
@@ -390,54 +504,8 @@ fi
 # a future lock bug, a hand-run `git reset` in the shared worktree - becomes a
 # loud VOID instead of a GREEN or RED silently earned by another checkout.
 # Compare shas only; the preflight worktree is always detached HEAD.
-VOID_REASON=""
-# 2>/dev/null, never 2>&1: merging stderr into the value means any benign git
-# warning makes the captured string differ from the sha and VOIDs a good run.
-if ! WT_HEAD_NOW="$(git -C "$PREFLIGHT_WT" rev-parse HEAD 2>/dev/null)"; then
-    VOID_REASON="cannot read the preflight worktree at $PREFLIGHT_WT"
-elif [[ "$WT_HEAD_NOW" != "$CANDIDATE_SHA" ]]; then
-    VOID_REASON="worktree moved off our candidate mid-run (now ${WT_HEAD_NOW:0:12}, expected $CANDIDATE_SHORT)"
-elif [[ "$(holder_pid_now)" != "$$" ]]; then
-    VOID_REASON="another preflight took our lock mid-run"
-fi
-if [[ -n "$VOID_REASON" ]]; then
-    echo "preflight: VOID - $VOID_REASON." >&2
-    echo "preflight: verdict discarded - nothing here was earned by $CANDIDATE_SHORT. Re-run; this is not a code failure." >&2
-    exit 5
-fi
+exit_if_void
 
-# --- attestation verdict (after the tripwire, before the summary) ------------
-# VOID exited 5 above, so it reaches neither write nor delete and any
-# pre-existing attestation is left untouched (AC2-ERR). A FULL GREEN records;
-# any RED deletes a matching attestation so a stale green cannot outlive a real
-# failure (AC3-ERR); a --retry-failed pass mints nothing (AC1-ERR: subset green
-# is not full green).
-record_attestation() {
-    local now iso tmp
-    now="$(date +%s 2>/dev/null || echo 0)"
-    iso="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
-    tmp="${ATTEST}.$$"
-    # Temp file + rename: a concurrent reader never sees a half line, and two
-    # runs finishing on the same SHA make the last writer's identical content
-    # harmless. An unwritable common dir warns and continues (AC1-ERR error
-    # boundary): the run is still green, reuse just stays off until writable.
-    if printf 'sha=%s mode=FULL verdict=green at=%s iso=%s host=%s pid=%s\n' \
-            "$CANDIDATE_SHA" "$now" "$iso" "$(_this_host)" "$$" > "$tmp" 2>/dev/null \
-       && mv -f "$tmp" "$ATTEST" 2>/dev/null; then
-        :
-    else
-        rm -f "$tmp" 2>/dev/null
-        echo "preflight: WARN attestation write failed ($ATTEST); reuse unavailable until writable" >&2
-    fi
-}
-invalidate_attestation() {
-    [[ -f "$ATTEST" ]] || return 0
-    local line att_sha
-    line="$(cat "$ATTEST" 2>/dev/null)" || return 0
-    att_sha="$(_attest_field "$line" sha)"
-    [[ "$att_sha" == "$CANDIDATE_SHA" ]] || return 0
-    rm -f "$ATTEST" && echo "preflight: invalidated a stale green attestation for $CANDIDATE_SHORT"
-}
 if [[ $RETRY_FAILED -eq 0 && $FAIL -eq 0 ]]; then
     record_attestation
 elif [[ $FAIL -ne 0 ]]; then

@@ -35,7 +35,9 @@ VENVED="$REPO_ROOT/cli/.venv/bin/fno-py"
 if [[ -x "$VENVED" ]]; then
     RUNNER=("$VENVED" test smoke)
 else
-    RUNNER=(uv run --project cli fno-py test smoke)
+    # Absolute --project: the changed-mode cases below run from a throwaway repo,
+    # where a relative `cli` would not resolve.
+    RUNNER=(uv run --project "$REPO_ROOT/cli" fno-py test smoke)
 fi
 
 FAILS=0
@@ -94,6 +96,85 @@ STEPS = [("alpha pass", ".", "true"), ("bravo pass", ".", "true"),
 EOF
 out="$(SMOKE_REGISTRY_FILE="$PASS_REG" "${RUNNER[@]}" --list)"
 [[ "$(echo "$out" | wc -l | tr -d ' ')" == "4" ]] && ok "--list prints 4 names" || fail "--list count wrong"
+
+echo "== --changed: subset modes are mutually exclusive =="
+for combo in "--changed --only *pass" "--changed --retry-failed"; do
+    # shellcheck disable=SC2086
+    out="$(run $combo 2>&1)"; rc=$?
+    [[ $rc -eq 2 ]] && ok "refuses '$combo' (exit 2)" || fail "'$combo' should exit 2, got $rc"
+    echo "$out" | grep -q "separate subset modes" && ok "names the conflict" || fail "no conflict message for '$combo'"
+done
+out="$(run --base HEAD 2>&1)"; rc=$?
+[[ $rc -eq 2 ]] && ok "--base without --changed refused" || fail "--base without --changed should exit 2"
+
+# A throwaway repo with its own history: changed mode is exercised end to end
+# without running the real suite, and every artifact it writes lands there.
+NEW="$TMP/changedrepo"
+mkdir -p "$NEW/tests" "$NEW/docs"
+git -C "$NEW" init -q
+git -C "$NEW" config user.email t@t.t; git -C "$NEW" config user.name t
+printf '.fno/\n' > "$NEW/.gitignore"   # the receipt is runner output, not fixture content
+echo base > "$NEW/docs/base.md"
+git -C "$NEW" add -A; git -C "$NEW" commit -qm base
+BASE_SHA="$(git -C "$NEW" rev-parse HEAD)"
+printf '#!/usr/bin/env bash\necho boom\nexit 3\n' > "$NEW/tests/test_boom.sh"
+chmod +x "$NEW/tests/test_boom.sh"
+echo note > "$NEW/docs/unknown.md"
+git -C "$NEW" add -A; git -C "$NEW" commit -qm head
+
+FULL_REC="$TMP/full-record.txt"; rm -f "$FULL_REC"
+changed() { (cd "$NEW" && SMOKE_FAILURE_RECORD="$FULL_REC" "${RUNNER[@]}" --changed "$@"); }
+
+echo "== AC1: a failing selected harness exits with the child's own code =="
+out="$(changed --base "$BASE_SHA" --head HEAD 2>&1)"; rc=$?
+[[ $rc -eq 3 ]] && ok "propagates the child exit 3 (not a flattened 1)" || fail "expected rc 3, got $rc"
+echo "$out" | grep -q "CHANGED SUBSET" && ok "labelled CHANGED SUBSET" || fail "no CHANGED SUBSET label"
+echo "$out" | grep -q "mode=FULL" && fail "changed run claimed mode=FULL" || ok "never claims mode=FULL"
+echo "$out" | grep -q "shell-harness-self.*test_boom.sh" && ok "receipt names the selecting rule" || fail "no rule in receipt"
+
+echo "== AC4: an unmapped path stays visible and claims no coverage =="
+echo "$out" | grep -q "unmapped docs/unknown.md" && ok "unmapped path listed" || fail "unmapped path hidden"
+
+echo "== AC6/AC9: a changed run never writes the FULL failure record =="
+[[ ! -f "$FULL_REC" ]] && ok "full failure record untouched" || fail "changed run wrote the full record"
+[[ -f "$NEW/.fno/changed-last-receipt.json" ]] && ok "receipt written in the changed namespace" \
+    || fail "no changed-mode receipt"
+grep -q '"verdict": "red"' "$NEW/.fno/changed-last-receipt.json" && ok "receipt records the verdict" \
+    || fail "receipt verdict missing"
+grep -q '"first_signal_seconds"' "$NEW/.fno/changed-last-receipt.json" && ok "receipt records first-signal timing (AC10)" \
+    || fail "receipt missing AC10 metrics"
+
+echo "== AC5: an unresolvable base is UNEVALUATED, never a partial green =="
+out="$(changed --base 0000000000000000000000000000000000000000 --head HEAD 2>&1)"; rc=$?
+[[ $rc -eq 21 ]] && ok "exits 21 (unevaluated)" || fail "expected rc 21, got $rc"
+echo "$out" | grep -q "UNEVALUATED" && ok "says UNEVALUATED with the git cause" || fail "no UNEVALUATED line"
+echo "$out" | grep -qi "verdict=green" && fail "unevaluated run printed a green verdict" || ok "no green verdict"
+
+echo "== AC4: nothing selected is exit 20, not green =="
+git -C "$NEW" rm -q tests/test_boom.sh; git -C "$NEW" commit -qm "drop harness"
+NOSEL_BASE="$(git -C "$NEW" rev-parse HEAD)"
+echo more > "$NEW/docs/only-docs.md"; git -C "$NEW" add -A; git -C "$NEW" commit -qm docsonly
+out="$(changed --base "$NOSEL_BASE" --head HEAD 2>&1)"; rc=$?
+[[ $rc -eq 20 ]] && ok "exits 20 (nothing selected)" || fail "expected rc 20, got $rc"
+echo "$out" | grep -q "selected NOTHING" && ok "says the selector found nothing" || fail "silent zero-selection"
+
+echo "== a step exit colliding with a sentinel reports a failure, not a non-verdict =="
+# In-band signalling: if a child's own 20/21 were propagated, preflight would
+# read "nothing selected"/"unevaluated" and fall through to the full gate
+# instead of stopping - a real red downgraded to a non-verdict.
+for code in 20 21; do
+    mkdir -p "$NEW/tests"   # git drops the dir when the last tracked file leaves
+    printf '#!/usr/bin/env bash\nexit %s\n' "$code" > "$NEW/tests/test_collide.sh"
+    chmod +x "$NEW/tests/test_collide.sh"
+    git -C "$NEW" add -A; git -C "$NEW" commit -qm "collide $code"
+    COLLIDE_BASE="$(git -C "$NEW" rev-parse HEAD~1)"
+    out="$(changed --base "$COLLIDE_BASE" --head HEAD 2>&1)"; rc=$?
+    [[ $rc -eq 1 ]] && ok "child exit $code reported as 1" || fail "child exit $code leaked as rc $rc"
+    echo "$out" | grep -q "collides with a changed-mode sentinel" && ok "names the collision ($code)" \
+        || fail "collision not explained ($code)"
+    git -C "$NEW" rm -q tests/test_collide.sh; git -C "$NEW" commit -qm "drop collide $code"
+done
+
 
 echo ""
 if [[ $FAILS -eq 0 ]]; then echo "test_smoke_modes: ALL PASS"; exit 0

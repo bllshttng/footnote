@@ -980,10 +980,14 @@ def test_nonreturning_observer_is_killed_without_changing_hook_result(
         text=True,
         capture_output=True,
         check=False,
-        timeout=3,
+        timeout=10,
     )
 
-    assert time.monotonic() - started < 2
+    # The claim under test is "a hung observer does not stall the hook", and the
+    # hung stub sleeps 30 - so any bound well under 30 proves it. Sizing these at
+    # ~2x nominal instead made them report machine load: under `-n auto` this
+    # test failed a full smoke run while passing standalone.
+    assert time.monotonic() - started < 5
     assert result.returncode == 7
     assert result.stdout == '{"session_id":"hung-observer","source":"startup"}::original'
 
@@ -1022,7 +1026,12 @@ def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> No
             text=True,
             capture_output=True,
             check=False,
-            timeout=5,
+            # Only a hang-catcher, deliberately loose. What this test actually
+            # asserts is the DELTA below, which is load-robust; a tight absolute
+            # bound is not - nominal is ~2s, so under `-n auto` on a busy machine
+            # a 5s cap fired before the real assertion ever ran. Anything under
+            # the hung stub's `sleep 30` still catches a non-returning observer.
+            timeout=20,
         )
         return result, time.monotonic() - started
 
