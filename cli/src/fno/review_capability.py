@@ -23,7 +23,7 @@ import sys
 from dataclasses import dataclass
 from typing import Literal, Mapping, Optional
 
-from fno.config import _RESOLVABLE_REVIEWERS, ReviewerDescriptor
+from fno.config import _RESOLVABLE_REVIEWERS, _coerce_affirmative, ReviewerDescriptor
 from fno.harness_identity import resolve_harness_identity
 
 # Harnesses that can run the sigma panel to a verdict, and so can produce its
@@ -100,25 +100,6 @@ class ReviewerVerdict:
         return f"{self.status}: {self.name} - {self.reason}{note}"
 
 
-def _truthy(v: object) -> bool:
-    """The shell's notion of true, not Python's `is True`.
-
-    `config.unattended` has no model field, so nothing coerces or rejects a
-    non-bool. The shell authority compares `get_config` output to the STRING
-    "true", so a yq-rendered `enabled: "true"` (or `1`, or `yes`) makes the
-    manifest unattended while `is True` here said attended - and an attended
-    verdict clears an `operator` reviewer that the run then cannot satisfy.
-    Mirrors the coercion `config/__init__.py` already applies to its own bools.
-    """
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, int):  # bool already handled above
-        return v == 1
-    if isinstance(v, str):
-        return v.strip().lower() in {"1", "true", "yes", "on"}
-    return False
-
-
 def _unattended_in_config() -> bool:
     """`config.unattended.enabled` - the manifest's second `attended` input.
 
@@ -145,14 +126,22 @@ def _unattended_in_config() -> bool:
             file=sys.stderr,
         )
         return False
-    # Per KEY, not per block: `load_settings` deep-merges layers and the shell's
-    # get_config falls through on a null, so stopping at the first file that has
-    # an `unattended` table without `enabled` would answer differently from both
-    # authorities this claims parity with.
+    # Per USABLE VALUE, not per block or per key: `load_settings` deep-merges
+    # layers and the shell's get_config skips a candidate whose value is empty
+    # or null, so stopping at the first file that merely MENTIONS the key would
+    # answer differently from both authorities this claims parity with.
+    #
+    # `_coerce_affirmative` is the project's one bash-get_config truth table,
+    # imported rather than copied: a second copy of a cross-language truth table
+    # is the exact drift this node's own parity script exists to prevent.
     for path in candidates:
         block = read_config_flat(path).get("unattended")
-        if isinstance(block, dict) and "enabled" in block:
-            return _truthy(block["enabled"])
+        if not isinstance(block, dict) or "enabled" not in block:
+            continue
+        value = block["enabled"]
+        if value is None or value == "":
+            continue
+        return _coerce_affirmative(value, default=False)
     return False
 
 
@@ -173,12 +162,14 @@ def detect_session(
     unattended, and neither the shell nor this function may be the only one to
     know it.
 
-    One residual divergence is known and deliberately tolerated: the shell needs
-    `yq` to read a dotted key, so on a host without it the shell falls back to
-    its "false" default while this reads the file directly. That pushes only
-    toward UNATTENDED here, i.e. toward refusing - the safe direction. Closing
-    it properly means one reader for the key, which is a larger change than this
-    node.
+    Two residual divergences are known and deliberately tolerated, and BOTH push
+    only toward UNATTENDED here, i.e. toward refusing - never toward clearing a
+    gate. First, the shell needs `yq` to read a dotted key, so on a host without
+    it the shell falls back to its "false" default while this reads the file
+    directly. Second, the shell tests the rendered value against the literal
+    string "true", so it reads `1` / `yes` / `on` as attended while
+    `_coerce_affirmative` accepts them. Closing either properly means one reader
+    for the key, which is a larger change than this node.
     """
     environ = os.environ if env is None else env
     harness = resolve_harness_identity(environ).harness or "unknown"

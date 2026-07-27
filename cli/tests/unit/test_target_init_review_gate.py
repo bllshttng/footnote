@@ -272,6 +272,23 @@ def test_config_unattended_uses_the_shells_notion_of_true(
         assert detect_session({"CLAUDE_CODE_SESSION_ID": "s1"}).attended is True, value
 
 
+def test_unattended_empty_value_falls_through_like_the_shell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`scripts/lib/config.sh` skips a candidate whose value is empty or null
+    and reads the next layer. Stopping here instead would report attended for a
+    config the manifest reads as unattended - the fail-open direction."""
+    cfg = tmp_path / "settings.yaml"
+    for value in ('""', "null"):
+        cfg.write_text(
+            f"schema_version: 1\nconfig:\n  unattended:\n    enabled: {value}\n"
+        )
+        monkeypatch.setenv("FNO_CONFIG", str(cfg))
+        for var in ("TARGET_UNATTENDED", "FNO_BG", "FNO_AGENT_SELF"):
+            monkeypatch.delenv(var, raising=False)
+        assert detect_session({"CLAUDE_CODE_SESSION_ID": "s1"}).attended is True, value
+
+
 def test_unattended_table_without_enabled_falls_through(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

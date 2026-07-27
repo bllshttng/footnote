@@ -908,8 +908,10 @@ struct PrInfo {
     /// The sole failing term whenever the login gate is vacuous, and the reason
     /// the block message can name real local work instead of an absent bot.
     unattested_reviewers: Vec<UnattestedReviewer>,
-    /// Unparseable events.jsonl lines that look like attestations. Named in the
-    /// reason so "no attestation" is never asserted over a corrupt one.
+    /// Unparseable events.jsonl lines that carry the literal
+    /// `review_attestation`. Named in the reason so a corrupt attestation is
+    /// not silently dropped. Not exhaustive by construction: a write torn
+    /// before that token cannot be recognized at all.
     malformed_attestations: usize,
 }
 

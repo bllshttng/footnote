@@ -141,8 +141,11 @@ def extract_rust(src, path):
     # A PARTIAL extraction is the false-parity path: an entry whose formatting
     # the regex misses is skipped, and if it is Rust-only it produces no problem
     # at all - silently hiding the exact "declared in Rust, missing from Python"
-    # case this check advertises. Count the tuple openings independently and
-    # refuse any shortfall.
+    # case this check advertises. Counting tuple openings catches the realistic
+    # edit (a non-literal bool or invocation). It does NOT catch an entry whose
+    # NAME is a constant, since both patterns anchor on `("` and miss it equally
+    # - a coarser count would fire on any `(` in a comment and fail a valid
+    # table, which is the worse trade.
     opened = len(re.findall(r'\(\s*"', m.group(1)))
     if opened != len(entries):
         fail(
