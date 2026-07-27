@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import tempfile
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, Optional, cast
@@ -514,11 +515,65 @@ class CrossModelBlock(BaseModel):
         return False
 
 
+@dataclass(frozen=True)
+class ReviewerDescriptor:
+    """What a `config.review.reviewers` entry needs in order to actually run.
+
+    A name alone cannot answer "can this reviewer run unattended, here?" - the
+    question that made a `reviewers: [sigma]` gate unsatisfiable-by-construction
+    on a harness with no subagent dispatch, discovered only after the work was
+    done. These four fields are what the init capability check and the
+    loop-check blocked reason both render from, so neither can invent its own
+    story about a reviewer.
+    """
+
+    kind: Literal["local-attestation", "github-app", "external-cli", "human"]
+    # The capability the session must have for this reviewer to run at all.
+    requires: Literal["none", "subagent-dispatch", "operator"]
+    # The exact non-interactive invocation that satisfies the gate. A reviewer
+    # whose only invocation prompts is not autonomy-capable and says so via
+    # `requires: operator`.
+    invocation: str
+    # Whether the attestation carries review evidence. `self-cert` asserts
+    # nothing, so every surface that prints it must mark it as such.
+    asserts: Literal["review-evidence", "self-cert"]
+
+
 # Reviewer names that have a `review_attestation` emit path (x-e703 Change 4).
-# config.review.reviewers entries must resolve to one of these; a leading '/' is
-# stripped first (so `/code-review` == `code-review`). Kept in sync with the
-# emit surfaces in skills/review and the loop-check attestation read.
-_RESOLVABLE_REVIEWERS = frozenset({"sigma", "code-review", "declare"})
+# config.review.reviewers entries must resolve to one of these keys; a leading
+# '/' is stripped first (so `/code-review` == `code-review`). Kept in sync with
+# the emit surfaces in skills/review, the loop-check attestation read, and the
+# Rust-side invocation table - the last of those by
+# scripts/ci/check-reviewer-descriptor-parity.sh, not by remembering.
+#
+# Closed by design: a downstream project cannot register its own reviewer yet.
+# Opening it is a follow-up, and it forces the capability check to reason about
+# descriptors it did not author.
+_RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
+    "sigma": ReviewerDescriptor(
+        kind="local-attestation",
+        requires="subagent-dispatch",
+        invocation="/fno:review sigma",
+        asserts="review-evidence",
+    ),
+    # `/code-review` is user-triggered and billed; the model cannot launch it,
+    # so the operator runs the pass and then the emit helper.
+    "code-review": ReviewerDescriptor(
+        kind="human",
+        requires="operator",
+        invocation=(
+            "/code-review, then "
+            "bash skills/review/scripts/emit-attestation.sh code-review"
+        ),
+        asserts="review-evidence",
+    ),
+    "declare": ReviewerDescriptor(
+        kind="local-attestation",
+        requires="none",
+        invocation="/fno:review declare",
+        asserts="self-cert",
+    ),
+}
 
 _SIGMA_AGENT_NAMES = frozenset(
     {
