@@ -254,10 +254,8 @@ Run these checks after changing the Codex adapter or hook surface:
 
 ```bash
 python3 scripts/sync-codex-agents.py --check
-python3 scripts/sync-gemini-agents.py --check
 bash scripts/test-sync-codex-agents.sh
-bash scripts/test-sync-gemini-agents.sh
 bash scripts/test-parallel-wave-conflicts.sh
 bash scripts/test_stop_hook_events.sh
-bash scripts/test-target-state-recovery.sh
+bash tests/test-target-state-recovery.sh
 ```

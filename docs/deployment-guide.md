@@ -163,9 +163,6 @@ To keep agent definitions in sync across CLIs:
 ```bash
 # Sync agents to Codex format
 python scripts/sync-codex-agents.py
-
-# Sync agents to Gemini format
-python scripts/sync-gemini-agents.py
 ```
 
 ---
@@ -255,7 +252,6 @@ footnote/                          # Repository root
         validate-test-first.sh      # TDD validation
         validate-plan.sh            # Plan format validation
         sync-codex-agents.py        # Codex agent sync
-        sync-gemini-agents.py       # Gemini agent sync
         discovery-brief.py          # Codebase analysis
         roadmap-tasks.py            # Task lifecycle management
         metrics/                    # Metrics analysis scripts
@@ -403,8 +399,7 @@ The external loop runner (`scripts/run-target-loop.sh`) re-invokes the CLI until
 
 - **No stop blocking** - Gemini hooks cannot block session exit. The plugin falls back to soft enforcement (writing state to disk and relying on session-start to detect incomplete work).
 - **No native subagents** - all execution is sequential on the main thread. Parallel waves are downgraded to sequential.
-- **Dynamic agent upgrade** - if `config.gemini_experimental_agents` is enabled and `.gemini/agents/` exists, the runtime may elevate to project-agent mode.
-- **Agent sync required** - after updating agent definitions, run `python scripts/sync-gemini-agents.py`.
+- **Deprecated upstream** - Google has deprecated the Gemini CLI. Gemini stays supported in sequential mode but gets no new capability work; the successor harness is Antigravity (`agy`). The experimental project-agent upgrade was removed.
 
 ### Codex CLI
 

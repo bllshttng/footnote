@@ -207,7 +207,7 @@ For each wave in order:
 - Collect and merge results
 - Update STATE.md with all completed tasks
 
-**Gemini note:** Gemini should default to main-thread sequential execution. Only upgrade into project-agent dispatch when the runtime resolver confirms opt-in plus required `.gemini/agents/*.md` artifacts. If that proof is missing, record the downgrade reason and continue sequentially.
+**Gemini note:** Gemini always runs main-thread sequential; a parallel wave downgrades and records the reason. There is no project-agent upgrade path (the experimental mode was removed when Google deprecated the Gemini CLI).
 
 See [wave-patterns.md](wave-patterns.md) for the decision tree on sequential vs parallel.
 

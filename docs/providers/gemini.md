@@ -1,58 +1,30 @@
 # Gemini Provider Guide
 
-This repository supports Gemini through a two-tier adapter:
+> **Deprecated upstream.** Google has deprecated the Gemini CLI; its successor, Antigravity (`agy`), is a separate harness with its own adapter (see [HARNESSES.md](../HARNESSES.md)). Gemini remains supported here in sequential mode, but it receives no new capability work.
 
-- Stable mode: sequential fallback with Gemini hooks and shared skills
-- Experimental mode: project-scoped agents in `.gemini/agents/` for upgraded orchestration behavior
+Gemini runs sequentially: shared skills plus Gemini hooks, with no concurrent subagent dispatch.
 
-## What works in stable mode
+The experimental project-agent mode (`.gemini/agents/` + a `gemini_experimental_agents` opt-in, surfaced as `provider_mode: experimental_agents`) has been **removed**. It was an opt-in hedge on the Gemini CLI gaining subagent parity, and the CLI's deprecation settled that question. `harness_mode` / `provider_mode` are now constant `standard` for every harness.
+
+## What works
 
 - `GEMINI.md` project context
 - Gemini extension manifest via `gemini-extension.json`
 - SessionStart context hook (vision, `fno whoami`, worktree hygiene, first-run setup nudge), installed with `fno setup cli-hooks` into `~/.gemini/settings.json` (`hooks.SessionStart` -> `hooks/session-start.sh`). Idempotent, backs up first, never clobbers your other hooks.
 - Shared skills under `skills/`
-- Sequential `do`, `operator`, and `target` execution when agent upgrade prerequisites are missing
-
-## Experimental project-agent mode
-
-Gemini can upgrade beyond stable fallback when all of these are true:
-
-1. `config.gemini_experimental_agents: true` in `.fno/config.toml`, or `FNO_GEMINI_EXPERIMENTAL_AGENTS=1`
-2. Generated project agents exist in `.gemini/agents/`
-3. Gemini CLI has experimental agents enabled in its own settings
-
-Generate the repo-scoped Gemini agents with:
-
-```bash
-python3 scripts/sync-gemini-agents.py --write
-python3 scripts/sync-gemini-agents.py --check
-```
-
-Then refresh them inside Gemini CLI:
-
-```text
-/agents reload
-```
+- Sequential `do`, `operator`, and `target` execution
 
 ## Quick start
 
-Stable fallback works without any extra steps beyond the Gemini extension and hooks.
-
-For experimental project-agent mode:
-
-```bash
-python3 scripts/sync-gemini-agents.py --write
-bash scripts/test-sync-gemini-agents.sh
-```
+Nothing beyond the Gemini extension and hooks. There is no opt-in step.
 
 ## Behavior rules
 
-- The runtime must never silently assume Gemini agent support.
-- If opt-in or generated artifacts are missing, Gemini stays on sequential fallback with an explicit downgrade reason.
+- The runtime never assumes Gemini subagent support; parallel waves downgrade to sequential main-thread dispatch (`SEQUENTIAL_FALLBACK_PROVIDERS` in `skills/do/orchestrator.py`).
 - Hooks improve lifecycle continuity, but hooks alone do not enable agent-backed orchestration.
 
 ## Migration
 
-Existing Gemini users do not need to change anything to keep the current sequential flow.
+Nothing to do. If you previously set `config.gemini_experimental_agents` or `FNO_GEMINI_EXPERIMENTAL_AGENTS`, both are now inert and can be deleted; execution was already sequential in every case where the opt-in was not fully satisfied.
 
-The project-agent surface is additive. If you opt in, keep the generated `.gemini/agents/` files synced from the shared sources, just like `.codex/agents/` for Codex.
+`.gemini/agents/` files are no longer consulted by the runtime.
