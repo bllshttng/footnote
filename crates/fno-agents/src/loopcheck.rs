@@ -1782,8 +1782,66 @@ fn best_effort_notify(title: &str, body: &str) {
     let _ = Command::new(fno_bin).args(["notify", title, body]).spawn();
 }
 
-/// Known bot logins that count as reviewers when external_reviewers is not configured.
-const KNOWN_BOTS: &[&str] = &["chatgpt-codex-connector", "gemini-code-assist"];
+/// Per-bot knowledge, login-keyed: the ONE table the review-gate code reads for
+/// "what is this bot and how do we reach it". Replaces the scattered `KNOWN_BOTS`
+/// membership list and the `USAGE_LIMIT_MARKERS` body-string list.
+///
+/// One bot wears three names and they are NOT interchangeable at the three sites
+/// that use them:
+///   - `login`         the review author, what `login_matches_bot` compares against
+///   - `review_handle` what a PR comment must CONTAIN to trigger a fresh review
+///   - `reply_handle`  what an in-thread reply must ADDRESS to reach the bot
+/// A `github-app` reviewer that reviews on mention (not on push) is `nudgeable`:
+/// footnote may post its `review_handle` to un-stick a required gate that nobody
+/// mentioned (x-b167). Nudge timing (`wait_minutes`, `ceiling`, `enabled`) is
+/// config, not code - see `[review.nudge]` / `resolved_nudge_configs`.
+struct BotProfile {
+    login: &'static str,
+    review_handle: &'static str,
+    reply_handle: &'static str,
+    /// ISSUE-comment body markers this bot posts when it is rate-limited and will
+    /// never post a review object (PR #214). Empty for a bot never seen to do so.
+    usage_markers: &'static [&'static str],
+    nudgeable: bool,
+}
+
+/// The shipped bot table. `chatgpt-codex-connector` is characterized from PR #618
+/// (mention-triggered, ~4-7m latency, 5/5 mentions answered); `gemini-code-assist`
+/// stays `nudgeable: false` with an empty `review_handle` until its trigger is
+/// characterized (Evidence Gaps), which is strictly more than the old lists knew.
+const BOT_PROFILES: &[BotProfile] = &[
+    BotProfile {
+        login: "chatgpt-codex-connector",
+        review_handle: "@codex review",
+        reply_handle: "@chatgpt-codex-connector",
+        usage_markers: &["usage limits for code reviews", "codex usage limits"],
+        nudgeable: true,
+    },
+    BotProfile {
+        login: "gemini-code-assist",
+        review_handle: "",
+        reply_handle: "@gemini-code-assist",
+        usage_markers: &[],
+        nudgeable: false,
+    },
+];
+
+/// The profile for a CONFIGURED bot name (a `github_apps`/`required_bots` entry,
+/// which may be a short name like "codex" or a full login): the config name is a
+/// substring of the login, matching `login_matches_bot(profile.login, name)`.
+fn profile_by_config_name(name: &str) -> Option<&'static BotProfile> {
+    BOT_PROFILES.iter().find(|p| login_matches_bot(p.login, name))
+}
+
+/// The profile for an actual review/comment AUTHOR login (may carry gh's `[bot]`
+/// suffix or be the full login): the profile login is a substring of the author,
+/// matching `login_matches_bot(author, profile.login)`. Used to reach a finding
+/// author's `reply_handle` (x-b167 AC14).
+fn profile_by_author(author: &str) -> Option<&'static BotProfile> {
+    BOT_PROFILES
+        .iter()
+        .find(|p| login_matches_bot(author, p.login))
+}
 
 /// Default must-have-reviewed list when config.review.github_apps is absent.
 /// EMPTY for fresh installs: a clone with no review configuration completes on
@@ -2013,16 +2071,23 @@ fn is_bot_reviewer(login: &str, external_reviewers: &[String]) -> bool {
         // Configured list present but no entry matched: fall back to bot heuristic
         // so a configured-but-partial list doesn't make reviewed unreachable.
     }
-    // Default: endswith [bot] or known list
-    login.ends_with("[bot]") || KNOWN_BOTS.iter().any(|&b| login.contains(b))
+    // Default: endswith [bot] or a known profile login
+    login.ends_with("[bot]") || BOT_PROFILES.iter().any(|p| login.contains(p.login))
 }
 
-/// Pinned usage-limit markers a rate-limited review bot posts as an ISSUE
-/// comment when it never posts a review object (PR #214). Matched
-/// case-insensitively via `contains` against a lowercased body, mirroring the
-/// pinned-string approach in `blocking_severity`. Kept tight: an under-match
-/// degrades to the safe old block behavior; an over-match risks a false drop.
-const USAGE_LIMIT_MARKERS: &[&str] = &["usage limits for code reviews", "codex usage limits"];
+/// Every usage-limit marker across all bot profiles, unioned. A rate-limited
+/// review bot posts one of these as an ISSUE comment when it never posts a review
+/// object (PR #214). Matched case-insensitively via `contains` against a
+/// lowercased body, mirroring the pinned-string approach in `blocking_severity`.
+/// Unioned rather than scoped per-login to stay byte-identical to the old flat
+/// `USAGE_LIMIT_MARKERS` const it replaced: an under-match degrades to the safe
+/// old block behavior; an over-match risks a false drop.
+fn body_is_usage_limit(body: &str) -> bool {
+    BOT_PROFILES
+        .iter()
+        .flat_map(|p| p.usage_markers.iter())
+        .any(|m| body.contains(m))
+}
 
 /// Per-required-bot review verdict (grilled decision 5 / step 2).
 #[derive(Debug)]
@@ -2131,7 +2196,7 @@ fn compute_review_info(reviews_json: &Value, required_bots: &[String]) -> Review
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_lowercase();
-            USAGE_LIMIT_MARKERS.iter().any(|m| body.contains(m))
+            body_is_usage_limit(&body)
         });
         if rate_limited {
             usage_limited.push(bot.clone());
