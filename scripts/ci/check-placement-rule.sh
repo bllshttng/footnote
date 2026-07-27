@@ -45,6 +45,13 @@
 #      discovery) - allowlisted by file below rather than re-derived here.
 #      context_audit.py reads project-owned .claude/rules/*.md to census the
 #      exact progressive instructions Claude loads; it never writes there.
+#      review_capability.py's `requires: skill` predicate globs the two roots
+#      Claude resolves a bare skill name from (~/.claude/skills and
+#      <cwd>/.claude/skills) to answer "is this registered reviewer's skill
+#      installed here" at init. Read-only `is_dir`/`is_file` probes against
+#      Claude Code's OWN skill dirs; footnote stores nothing there, and an
+#      unreadable root resolves `unverifiable` rather than being reported
+#      absent.
 #      The mux Connections UI (crates/fno/src/connections_view.rs) belongs
 #      here too: its login-wizard default config dir `~/.claude-<id>` is a
 #      per-account CLAUDE_CONFIG_DIR (a Claude Code config dir, not footnote
@@ -168,6 +175,7 @@ cli/src/fno/review/confidence_scorer.py
 cli/src/fno/review/runners/agents_spawn_runner.py
 cli/src/fno/review/runners/claude_runner.py
 cli/src/fno/review/scorers/__init__.py
+cli/src/fno/review_capability.py
 cli/src/fno/runtime/cli.py
 cli/src/fno/runtime/probe.py
 cli/src/fno/runtime/worktree.py

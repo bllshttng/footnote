@@ -33,6 +33,7 @@ Design decisions (locked in 2026-05-14-path-config.md):
 """
 from __future__ import annotations
 
+import difflib
 import logging
 import os
 import re
@@ -40,11 +41,18 @@ import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal, Optional, cast
+from typing import Any, Literal, Mapping, Optional, cast
 
 import tomli_w
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 # Pure file-reader leaf, extracted to break the config<->graph cycle. Re-exported
 # here so every existing `from fno.config import read_config_flat` (etc.) caller
@@ -527,16 +535,26 @@ class ReviewerDescriptor:
     story about a reviewer.
     """
 
-    kind: Literal["local-attestation", "github-app", "external-cli", "human"]
+    # `harness-skill` is registry-only: a skill the operator's harness resolves,
+    # which footnote can witness running but cannot read a verdict from.
+    kind: Literal[
+        "local-attestation", "github-app", "external-cli", "human", "harness-skill"
+    ]
     # The capability the session must have for this reviewer to run at all.
-    requires: Literal["none", "subagent-dispatch", "operator"]
+    requires: Literal["none", "subagent-dispatch", "operator", "skill"]
     # The exact non-interactive invocation that satisfies the gate. A reviewer
     # whose only invocation prompts is not autonomy-capable and says so via
     # `requires: operator`.
     invocation: str
-    # Whether the attestation carries review evidence. `self-cert` asserts
-    # nothing, so every surface that prints it must mark it as such.
-    asserts: Literal["review-evidence", "self-cert"]
+    # What the attestation actually proves, weakest last. `self-cert` asserts
+    # nothing and `invocation` asserts only that the named thing ran at the
+    # reviewed commit, so every surface that prints either must mark it.
+    #
+    # `invocation` is REGISTRY-ONLY by invariant: no built-in uses it, which is
+    # what keeps the Rust `(name, invocation, bool)` encoding faithful (the bool
+    # means "is self-cert") and leaves check-reviewer-descriptor-parity.sh
+    # reading a two-valued axis.
+    asserts: Literal["review-evidence", "self-cert", "invocation"]
 
 
 # Reviewer names that have a `review_attestation` emit path (x-e703 Change 4).
@@ -546,9 +564,11 @@ class ReviewerDescriptor:
 # Rust-side invocation table - the last of those by
 # scripts/ci/check-reviewer-descriptor-parity.sh, not by remembering.
 #
-# Closed by design: a downstream project cannot register its own reviewer yet.
-# Opening it is a follow-up, and it forces the capability check to reason about
-# descriptors it did not author.
+# This table is exactly the reviewers footnote AUTHORS. A project registers its
+# own via `config.review.reviewer_registry`, which is unioned in at lookup time
+# by `resolvable_reviewers()` and is never written back here: the parity script
+# AST-parses this literal, so a config-dependent table would turn a build-time
+# CI check into one whose verdict varies per machine.
 _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
     "sigma": ReviewerDescriptor(
         kind="local-attestation",
@@ -574,6 +594,55 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
         asserts="self-cert",
     ),
 }
+
+def resolvable_reviewers(
+    registry: Optional[Mapping[str, ReviewerDescriptor]] = None,
+) -> dict[str, ReviewerDescriptor]:
+    """The lookup every reviewer consumer uses: built-ins union the registry.
+
+    THE INVARIANT: a registry entry is never written into
+    `_RESOLVABLE_REVIEWERS`. That constant stays footnote's own table so
+    `scripts/ci/check-reviewer-descriptor-parity.sh` keeps AST-parsing a
+    config-independent literal, and so the Rust `(name, invocation, is_self_cert)`
+    encoding stays a faithful two-valued axis.
+
+    Built-ins win a name collision. A project must not be able to redefine
+    `sigma` as a self-cert and thereby weaken a gate footnote ships.
+    """
+    if not registry:
+        return dict(_RESOLVABLE_REVIEWERS)
+    return {**registry, **_RESOLVABLE_REVIEWERS}
+
+
+# The reviewer vocabulary of the ADJACENT key: `config.review.external_reviewers`
+# names AI reviewers /pr requests a PR review from, and is the key an operator
+# writing `reviewers: [coderabbit]` almost always meant. Checked BEFORE difflib,
+# because `codex` is a valid value there and fuzzy matching would offer a worse
+# guess. A literal frozenset beside the validator, rather than a runtime read of
+# skills/pr/scripts/list-reviewers.sh, keeps this from becoming a second
+# cross-language parity obligation - drift here degrades a hint, not a gate.
+_EXTERNAL_REVIEWER_VOCABULARY: frozenset[str] = frozenset(
+    {"gemini", "codex", "coderabbit", "claude"}
+)
+
+
+def _reviewer_hint(name: str, known: Mapping[str, ReviewerDescriptor]) -> str:
+    """A trailing clause guessing what the operator meant, or "".
+
+    Wrong-KEY first, typo second: `codex` is a legitimate
+    `config.review.external_reviewers` value, so offering a fuzzy match for it
+    would send the operator to fix the wrong line. A name matching neither gets
+    no guess - inventing one is worse than the bare refusal.
+    """
+    if name.lower() in _EXTERNAL_REVIEWER_VOCABULARY:
+        return (
+            f". {name!r} is an AI reviewer name - you probably wanted "
+            f"config.review.external_reviewers, which names who to REQUEST a PR "
+            f"review from; config.review.reviewers is the local-attestation gate"
+        )
+    close = difflib.get_close_matches(name, sorted(known), n=1)
+    return f". Did you mean {close[0]!r}?" if close else ""
+
 
 _SIGMA_AGENT_NAMES = frozenset(
     {
@@ -656,6 +725,16 @@ class ReviewBlock(BaseModel):
     # never waits for them (their absence never blocks - kills the App-bot
     # usage-limit wedge), but a blocking finding from one still holds the gate.
     optional_apps: list[str] = Field(default_factory=list)
+    # Project-registered reviewers: name -> the same ReviewerDescriptor field
+    # vocabulary the built-ins use. Declared as `[review.reviewer_registry.<name>]`
+    # in the flat config.toml. Unioned with the built-ins at lookup time by
+    # `resolvable_reviewers()`; NEVER merged into `_RESOLVABLE_REVIEWERS`, and
+    # built-ins win a name collision so a project cannot weaken a shipped gate.
+    #
+    # Declared BEFORE `reviewers` on purpose: `coerce_and_resolve_reviewers`
+    # reads it off `ValidationInfo.data`, which only carries fields already
+    # validated, and pydantic validates in declaration order.
+    reviewer_registry: dict[str, ReviewerDescriptor] = Field(default_factory=dict)
     # Local-attestation reviewers (x-e703, Phase 2): skill/agent/command names
     # (sigma | /code-review | declare) that produce NO GitHub review object, so
     # loop-check accepts a head-pinned `review_attestation` event as gate
@@ -734,16 +813,17 @@ class ReviewBlock(BaseModel):
 
     @field_validator("reviewers", mode="before")
     @classmethod
-    def coerce_and_resolve_reviewers(cls, v: object) -> object:
+    def coerce_and_resolve_reviewers(cls, v: object, info: ValidationInfo) -> object:
         """Coerce scalar->list, strip a leading '/', and reject an unresolvable
         name loudly (AC2-ERR / AC3-ERR).
 
-        The resolvable set is exactly the reviewers that have a
-        `review_attestation` emit path in this repo (sigma / code-review /
-        declare). A name outside it names no producer, so its gate entry could
-        never be satisfied - raising at load beats a silent never-green gate.
-        Unlike optional_apps, this fails CLOSED-and-LOUD rather than fail-safe:
-        a reviewers typo is a mis-declared GATE, not a dropped optional.
+        The resolvable set is the reviewers that have a `review_attestation`
+        emit path (sigma / code-review / declare) UNION whatever the project
+        registered in `config.review.reviewer_registry`. A name outside it names
+        no producer, so its gate entry could never be satisfied - raising at
+        load beats a silent never-green gate. Unlike optional_apps, this fails
+        CLOSED-and-LOUD rather than fail-safe: a reviewers typo is a
+        mis-declared GATE, not a dropped optional.
         """
         if v is None:
             return []
@@ -752,6 +832,11 @@ class ReviewBlock(BaseModel):
                 f"config.review.reviewers must be a scalar or list of reviewer "
                 f"names (got {v!r})"
             )
+        # Absent from `info.data` only when reviewer_registry itself failed
+        # validation, which already raised; fall back to the built-ins so this
+        # reports the reviewers problem rather than a confusing second one.
+        registry = info.data.get("reviewer_registry") if info.data else None
+        known = resolvable_reviewers(registry)
         raw = [v] if isinstance(v, str) else v
         cleaned: list[str] = []
         for entry in raw:
@@ -760,11 +845,12 @@ class ReviewBlock(BaseModel):
                     f"config.review.reviewers entry must be a string (got {entry!r})"
                 )
             name = entry.strip().lstrip("/")
-            if name not in _RESOLVABLE_REVIEWERS:
+            if name not in known:
                 raise ValueError(
                     f"config.review.reviewers names an unresolvable reviewer "
-                    f"{entry!r} (expected one of {sorted(_RESOLVABLE_REVIEWERS)}); "
+                    f"{entry!r} (expected one of {sorted(known)}); "
                     f"a typo would leave the gate permanently unsatisfiable"
+                    f"{_reviewer_hint(name, known)}"
                 )
             cleaned.append(name)
         return cleaned
@@ -2714,6 +2800,18 @@ class ConfigBlock(BaseModel):
     post_merge: PostMergeBlock = Field(default_factory=PostMergeBlock)
     research: ResearchBlock = Field(default_factory=ResearchBlock)
     review: ReviewBlock = Field(default_factory=ReviewBlock)
+    # The repo-wide ship-gate probe list, TOP-LEVEL because the file is flat.
+    # ENFORCED by the Rust loop-check gate (crates/fno-agents/src/loopcheck.rs),
+    # which runs it alongside a plan's own `done_probes` and refuses DonePRGreen
+    # unless both pass. Declared here so the Python side is not blind to a key
+    # the gate enforces - `fno config doctor` reports it, and a wrong-typed
+    # value raises here just as it blocks there.
+    #
+    # A probe is an OBSERVATION. It runs `sh -c` in the session cwd, so the
+    # source must stay a gitignored, operator-authored file: a tracked probe
+    # list would make cloning a repo remote code execution on the next
+    # loop-check fire.
+    done_probes: list[str] = Field(default_factory=list)
     target: TargetConfig = Field(default_factory=TargetConfig)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)

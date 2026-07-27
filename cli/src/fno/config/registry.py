@@ -148,6 +148,9 @@ FIELD_META: dict[str, Meta] = {
         "Landing dir for the `fno research` doc deliverable (brief + sources sidecar); "
         "vault area, not repo-relative. Unset => ship fails loud (never guesses).",
     ),
+    "done_probes": Meta(
+        "advanced", "Repo-wide ship-gate probes: shell commands loop-check runs (60s each, cap 3 per source) before it will grant DonePRGreen, alongside any a plan declares. Both lists must pass; a plan can add probes and can never silence these. A probe is an OBSERVATION - one that mutates the repo races the session's own edits, and its only backstops are the timeout and the block reason.",
+    ),
     # --- config.review.* ---
     "review.github_apps": Meta(
         "advanced", "GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots.",
@@ -158,8 +161,11 @@ FIELD_META: dict[str, Meta] = {
     "review.optional_apps": Meta(
         "advanced", "Reviewer logins honored-if-present but NOT required: the gate never waits for them (kills the App-bot usage-limit wedge), but a blocking finding from one still holds it.",
     ),
+    "review.reviewer_registry": Meta(
+        "advanced", "Project-registered reviewers, as [review.reviewer_registry.<name>] tables with the built-in descriptor fields (kind, requires, invocation, asserts). Unioned with footnote's own reviewers so config.review.reviewers may name one; built-ins win a name collision. asserts=invocation is the honest rung for a harness skill: it proves the skill ran at the reviewed commit and claims nothing about its verdict.",
+    ),
     "review.reviewers": Meta(
-        "advanced", "Local-attestation reviewers (sigma | /code-review | declare) that produce no GitHub review: loop-check accepts a head-pinned review_attestation event as gate evidence. Lets a solo/claude-only harness express a real gate with no App bot.",
+        "advanced", "Local-attestation reviewers (sigma | /code-review | declare, or a name from review.reviewer_registry) that produce no GitHub review: loop-check accepts a head-pinned review_attestation event as gate evidence. Lets a solo/claude-only harness express a real gate with no App bot.",
     ),
     "review.peers": Meta(
         "advanced", "Harness peers (codex/gemini/...) run locally that post a real PR review under peer_identity and gate like github_apps. Scalar or {provider, identity, token_env} map entries.",

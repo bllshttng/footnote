@@ -510,35 +510,82 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 
 
 # Shell harnesses discover_shell_harnesses finds but smoke must not run yet.
-# 21 entries held. 13 are RED (pre-existing rot; each its own debugging session,
-# out of scope here). 3 are slow-but-green at 134s/97s/72s: draining them adds
-# 303s to every CI run, so they wait on smoke parallelism, not a repair. The
-# other 5 were drained then came back red in CI, each macOS-green and Linux-red:
-# the two graph-resolve tests (assertions drifted from the modern resolve_id
-# path), tests/hooks/test_hook_events.sh (a non-portable perm check: GNU stat
-# does not fail on -f, so the Linux fallback never runs), and
-# tests/hooks/test_init_contested_steal_guard.sh + tests/test_provider_substrate_e2e.sh,
-# which shell out to a global `fno` present on a dev machine but absent from CI's
-# fresh runner (it ships only the venv `fno-py`). All five stay deferred pending
-# test repair or a CI `fno` shim.
+# 16 entries held. 10 are RED on both platforms (pre-existing rot; each its own
+# debugging session, out of scope here). The other 6 are macOS-green and
+# Linux-red, so a developer census calls them drainable and CI does not:
+#
+#   tests/hooks/test_hook_events.sh - a non-portable perm check; GNU stat does
+#     not fail on -f, so the Linux fallback branch never runs.
+#
+#   THE `fno`-ON-PATH FAMILY - five live harnesses, one cause, TWO SHAPES.
+#   A fresh runner ships only the venv `fno-py`; a dev machine has a global
+#   `fno`. Every member passes locally for that reason alone.
+#
+#   Shape 1, declared - opens with `command -v fno || skip`, exits 77, and
+#   smoke counts a SKIP as a FAILURE, so it goes red at 0s having asserted
+#   nothing. Find these with `rg -l 'command -v fno' tests/`:
+#     tests/hooks/test_init_claim_stderr_and_modern_claim.sh
+#     tests/hooks/test_init_contested_steal_guard.sh
+#     tests/hooks/test_init_node_guard_tokenize.sh
+#     tests/test_provider_substrate_e2e.sh
+#
+#   Shape 2, undeclared - the test never mentions `fno`; the CODE UNDER TEST
+#   needs it, and that code FAILS OPEN when it is missing. So the harness does
+#   not skip, it runs and asserts against behavior that silently did not happen:
+#     tests/test-worktree-inside-checkout-redirect.sh - hooks/worktree-setup.sh:47
+#       gates the `policy = never` refusal on `command -v fno`. With no `fno`
+#       the guard never runs, the hook creates the worktree it should have
+#       refused, and 6 of 11 assertions fail. The fail-open is deliberate (a
+#       stale `fno` must not break interactive `claude --worktree`), so the test
+#       is right and the environment is wrong.
+#   A previous specimen, tests/test-target-state-recovery.sh, was repaired on
+#   main (its fixture now seeds config.toml directly instead of relying on a
+#   migration that fired as an init side effect) and is drained.
+#   Shape 2 is invisible to the rg above: grep the harness and you find nothing,
+#   because the dependency is one layer down in the code it exercises. There is
+#   no static detector for it. CI is the detector.
+#
+#   The graduating fix is a shared `fno`-then-`fno-py` resolver, not a PATH
+#   symlink. Eight files under scripts/lib/ and hooks/helpers/ open with
+#   `command -v fno` and only scripts/lib/reconcile-throttle.sh:31 has an
+#   ad-hoc fallback (and it points at ~/.local/bin, not the venv). That is one
+#   convention decision across eight call sites, and it deserves its own PR:
+#   scripts/ci/check-config-schema-drift.sh:24 branches on `command -v fno`
+#   too, so this changes steps unrelated to this list.
+#
+# A LOCAL GREEN IS NOT GROUNDS TO DRAIN. The census runs on the developer's OS
+# with the developer's PATH, and CI disagrees in BOTH directions: three of the
+# family were drained on a macOS green and reverted when CI went red, while two
+# other harnesses were macOS-red and Linux-green and were drained on CI's word.
+#
+# Simulating CI locally by stripping the global `fno` off PATH does NOT work
+# either - tests/hooks/test_inject_fno_agent_whoami.sh fails that way and
+# passes on CI, so the simulation manufactures failures of its own. Push and
+# read the smoke log. It is slower and it is the only source that has been
+# right every time.
 #
 # A green-fast harness here is silent coverage loss no file edit surfaces.
 # `fno test --census-deferred` runs every entry bounded and exits non-zero the
 # moment one passes inside the 60s tranche, so the set cannot re-accumulate green.
+#
+# Check an entry with the census, NOT with a bare `bash tests/foo.sh`. The census
+# runs under _smoke_env (cli/.venv/bin on PATH), which is the environment smoke
+# itself uses; a bare run resolves python3 to whatever the shell has and fails on
+# a missing `typer` that CI would never hit. Both directions of that mismatch are
+# a wrong conclusion: a spurious red reads as "correctly quarantined" and leaves
+# working coverage off.
 # Drain by deleting a line (discovery then covers it by shebang); _run_smoke and
 # select_changed both subtract this set, so dropping a line widens both gates.
+# The census only bites if something runs it: .github/workflows/deferred-census.yml
+# runs it weekly, which is the cadence this list actually drifts at.
 _DISCOVERY_DEFERRED: frozenset[str] = frozenset("""
 scripts/tests/test_graph_resolve.sh
-scripts/tests/test_megawalk_args.sh
-scripts/tests/test_provider_pricing.sh
 tests/events/test-check-pr-emits-polling.sh
 tests/hooks/test_hook_events.sh
 tests/hooks/test_init_claim_stderr_and_modern_claim.sh
 tests/hooks/test_init_contested_steal_guard.sh
 tests/hooks/test_init_node_guard_tokenize.sh
-tests/hooks/test_inject_fno_agent_whoami.sh
 tests/hooks/test_reconcile_session_start.sh
-tests/hooks/test_size_profile.sh
 tests/smoke-megatron-e2e.sh
 tests/smoke-target-shim.sh
 tests/test-autolaunch-gate.sh
@@ -548,7 +595,6 @@ tests/test-graph-resolve.sh
 tests/test-worktree-inside-checkout-redirect.sh
 tests/test_emit_gate_transition.sh
 tests/test_provider_substrate_e2e.sh
-tests/test_register_task_provider_attribution.sh
 """.split())
 
 
