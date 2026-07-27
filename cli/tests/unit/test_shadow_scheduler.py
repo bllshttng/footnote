@@ -135,6 +135,33 @@ def test_live_peer_lane_is_serialized(monkeypatch, tmp_path):
     assert [(d["id"], d["reason"]) for d in r["serialized"]] == [("n-a", "peer-lane")]
 
 
+def test_live_slot_reduces_remaining_capacity(monkeypatch, tmp_path):
+    """codex P1 (#631): a live lane occupies a slot even on a DISTINCT domain, so
+    a cap-two report with one lane live can start only ONE more node. The frontier
+    must not overstate what select_lane_fill(2) could actually acquire.
+    """
+    # A live lane holds a slot on a domain NOT present in the ready set, so the
+    # constraint is the SLOT count, not distinct-domain (which _hermetic zeroes).
+    acquire_lane_slot(max_lanes=3, lane_id="live-x", root=tmp_path)
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert r["occupied_slots"] == 1
+    assert r["remaining_capacity"] == 1
+    assert [d["id"] for d in r["selected"]] == ["n-a"]
+    assert [(d["id"], d["reason"]) for d in r["serialized"]] == [("n-b", "cap-full")]
+
+
+def test_all_slots_occupied_selects_nothing(monkeypatch, tmp_path):
+    """Two live lanes fill the cap-two frontier: nothing more can start."""
+    acquire_lane_slot(max_lanes=2, lane_id="live-x", root=tmp_path)
+    acquire_lane_slot(max_lanes=2, lane_id="live-y", root=tmp_path)
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert r["remaining_capacity"] == 0
+    assert r["selected"] == []
+    assert [d["reason"] for d in r["serialized"]] == ["cap-full", "cap-full"]
+
+
 def test_oversized_ready_set_bounded_by_effective_cap(monkeypatch, tmp_path):
     _ready(monkeypatch, _nodes(
         ("n-a", "code"), ("n-b", "docs"), ("n-c", "infra"),

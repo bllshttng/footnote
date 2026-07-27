@@ -745,6 +745,21 @@ def schedule_shadow(
     except Exception:  # noqa: BLE001 - fail open, never wedge the report
         inflight = []
 
+    # Slots already held by live lanes count AGAINST the cap: the real selector
+    # calls acquire_lane_slot(cap), which grabs the first FREE of `cap` slots and
+    # returns None once every slot is held. So a cap-two report with one lane
+    # already live can start only ONE more node. Deriving remaining capacity from
+    # the live slot claims (not a fresh count from zero) keeps the shadow frontier
+    # from overstating dispatch during fill-vacant-lanes runs - the exact evidence
+    # that gates live scheduling (codex P1 on PR #631).
+    from fno.claims.lanes import active_lane_count
+
+    try:
+        occupied = active_lane_count(root=claims_root)
+    except Exception:  # noqa: BLE001 - fail open, never wedge the report
+        occupied = 0
+    remaining_capacity = max(0, effective_cap - occupied)
+
     decisions: list[ScheduleDecision] = []
     picked: set[str] = set()
     selected_count = 0
@@ -759,7 +774,7 @@ def schedule_shadow(
         )
         if reason is not None:
             verdict = "unevaluated" if reason.startswith("unevaluated") else "serialized"
-        elif selected_count >= effective_cap:
+        elif selected_count >= remaining_capacity:
             verdict, reason = "serialized", "cap-full"
         else:
             verdict, reason = "selected", ""
@@ -781,6 +796,8 @@ def schedule_shadow(
     return {
         "effective_cap": effective_cap,
         "requested_cap": max_lanes,
+        "occupied_slots": occupied,
+        "remaining_capacity": remaining_capacity,
         "selected": [d.as_dict() for d in decisions if d.verdict == "selected"],
         "serialized": [d.as_dict() for d in decisions if d.verdict == "serialized"],
         "unevaluated": [d.as_dict() for d in decisions if d.verdict == "unevaluated"],
