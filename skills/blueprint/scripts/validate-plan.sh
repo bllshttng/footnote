@@ -36,6 +36,34 @@ error() { echo "  ERROR: $*"; ((ERRORS++)) || true; }
 warn()  { echo "  WARN:  $*"; ((WARNINGS++)) || true; }
 ok()    { echo "  OK:    $*"; }
 
+# Echo a plan's readiness rung, or `!<reason>` when the verb could not answer.
+# Never classifies statuses itself; the single authority is `fno plan rung`
+# (fno.graph.ladder).
+#
+# The reason rides in the return VALUE rather than a global, because every
+# caller reads this through `$(...)` - a global set inside that subshell dies
+# with it, and the caller silently prints an empty reason.
+#
+# Silence is reported, never swallowed. An installed `fno` predating the verb
+# exits 2 with no `rung=` line, indistinguishable from any other non-answer at
+# this layer - and a check that quietly passes on a stale binary is exactly the
+# decorative guard this consolidation exists to remove.
+_plan_rung() {
+    local _out=""
+    if ! command -v fno >/dev/null 2>&1; then
+        printf '!fno CLI not found'
+        return 0
+    fi
+    set +o pipefail
+    _out="$(fno plan rung "$1" 2>/dev/null | sed -n 's/^rung=//p' | head -1)"
+    set -o pipefail
+    if [[ -z "$_out" ]]; then
+        printf "!installed fno predates 'fno plan rung'; run 'fno update' or 'fno doctor --fix'"
+        return 0
+    fi
+    printf '%s' "$_out"
+}
+
 _semantic_validate() {
     local repo_root="" script_dir="" source_root="" candidate="" python_bin=""
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
@@ -164,12 +192,13 @@ fi
 # Check 1b: Group-child stub markers + why-digest (x-edf7 US1/US4)
 # -------------------------------------------------------------------
 # A `blueprint decompose` child is scaffolded with placeholder stub markers and
-# an empty-why sentinel; it is born `status: stub` and MUST be inline-filled (or
-# designed by a fan-out /think pass) before its plan_path is linked - a linked
-# child derives `ready` and dispatchers launch fresh-context workers against it.
-# This check refuses to pass a plan still carrying any stub marker, so the link
-# step (skill body) and this validator agree on "filled". Keep STUB_MARKERS in
-# sync with cli/src/fno/graph/_decompose.py.
+# an empty-why sentinel; it is born `status: idea` and MUST be inline-filled (or
+# designed by a fan-out /think pass) before it can be dispatched. Linking it is
+# no longer the thing that arms it - the `idea` rung is undispatchable on every
+# surface now - but an unfilled scaffold that reaches a builder is still wasted
+# work, so this check refuses to pass one and the link step (skill body) and
+# this validator agree on "filled". Keep STUB_MARKERS in sync with
+# cli/src/fno/graph/_decompose.py.
 echo ""
 echo "--- Stub Markers (decompose child) ---"
 if [[ -f "$PLAN_DIR" ]]; then
@@ -187,14 +216,16 @@ if [[ -f "$PLAN_DIR" ]]; then
         fi
     done
 
-    # A born scaffold carries `status: stub`, which is OUTSIDE the canonical
-    # PlanStatus vocabulary - `fno plan reconcile-status` would later archive a
-    # linked-but-still-stub plan off the board. So refuse to pass a plan still
-    # frontmatter-stamped `status: stub`: the fill step must flip it to `ready`.
-    if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-            | grep -E '^[[:space:]]*status:[[:space:]]*["'"'"']?stub' >/dev/null; then
-        error "$(basename "$PLAN_DIR") is still 'status: stub'; set 'status: ready' after filling (a non-canonical status is archived by reconcile-status)"
+    # A born scaffold sits at the `idea` rung (spelled `stub` before x-3571, still
+    # read as `idea`). Refuse to pass one: the fill step must flip it to `ready`,
+    # or the linked node derives `idea` and no dispatcher will ever pick it up.
+    # The rung comes from `fno plan rung` - this script does not parse `status:`.
+    _RUNG="$(_plan_rung "$PLAN_DIR")"
+    if [[ "$_RUNG" == "idea" ]]; then
+        error "$(basename "$PLAN_DIR") is still at the 'idea' rung; set 'status: ready' after filling"
         _found_stub=1
+    elif [[ "$_RUNG" == \!* ]]; then
+        warn "plan rung not checked: ${_RUNG#!}"
     fi
 
     # A group-child plan (frontmatter carries `parent_epic:`) must also carry a
@@ -888,11 +919,15 @@ if [[ -f "$PLAN_DIR" && "$PLAN_DIR" == *.md ]]; then
 fi
 
 if [[ -n "$target_file" ]]; then
-    # Scope to frontmatter only: extract lines between the first two --- delimiters.
-    FRONTMATTER=$(awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$target_file")
-    STATUS_FM=$(echo "$FRONTMATTER" | grep -oE "^status:[[:space:]]*(done|in_review|shipped)" 2>/dev/null | head -1 | sed 's/status:[[:space:]]*//' || true)
-    if [[ -n "$STATUS_FM" ]]; then
-        ok "INFO: plan is already shipped (status: $STATUS_FM) - stamp fields present and accepted"
+    # "Already shipped" is a rung question, so ask the rung authority rather than
+    # re-listing the terminal spellings here. The old grep hardcoded
+    # `done|in_review|shipped`, which silently rots every time a spelling
+    # retires - `shipped` is itself a retired spelling of `in_review`, and
+    # `fno plan rung` resolves it through the same alias table the Python side
+    # uses instead of a second copy that has to be remembered.
+    STATUS_FM="$(_plan_rung "$target_file")"
+    if [[ "$STATUS_FM" == "in_review" || "$STATUS_FM" == "done" ]]; then
+        ok "INFO: plan is already shipped (rung: $STATUS_FM) - stamp fields present and accepted"
     else
         ok "No stamp fields detected (plan not yet shipped)"
     fi
