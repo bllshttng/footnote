@@ -34,7 +34,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Callable, NoReturn, Optional, Sequence
+from typing import IO, TYPE_CHECKING, Callable, Mapping, NoReturn, Optional, Sequence
 
 if TYPE_CHECKING:
     import click
@@ -514,6 +514,120 @@ def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
+#: Claude tier aliases that ``ANTHROPIC_DEFAULT_<TIER>_MODEL`` remaps. Passing
+#: one to ``--model`` asks for "whatever this tier resolves to", which is exactly
+#: what an inherited remap redefines.
+_TIER_ALIASES = ("opus", "sonnet", "haiku")
+
+#: Flags by which an operator names the worker's vendor/credential explicitly.
+#: Any of them present means the route was composed on purpose, so an inherited
+#: remap is no longer ambiguous: ``-P``/``--route``/``--role`` re-set the model
+#: env as one unit, and ``--account`` scrubs it (see ``SCRUB_AUTH_VARS``).
+_ROUTE_NAMING_FLAGS = ("--route", "--provider", "-P", "--role", "--account")
+
+
+def _spawn_flag_value(args: Sequence[str], *names: str) -> Optional[str]:
+    """The value of the first of ``names`` present in ``args`` (``--f v`` or
+    ``--f=v``), or None. Scans only the fno-arg head, like every other flag scan
+    here, so a payload token can never masquerade as our flag."""
+    head = list(_args_before_argv(args))
+    for i, a in enumerate(head):
+        if a in names:
+            return head[i + 1] if i + 1 < len(head) else ""
+        for n in names:
+            if a.startswith(f"{n}="):
+                return a.split("=", 1)[1]
+    return None
+
+
+def inherited_tier_remap(
+    args: Sequence[str], env: Optional[Mapping[str, str]] = None
+) -> Optional[tuple[str, str]]:
+    """Detect a spawn whose ``--model`` tier alias the ambient env silently
+    redefines, returning ``(alias, remapped_model)`` or None.
+
+    A ``claude --bg`` worker resolves the ``--model`` tier alias against the
+    CALLER's environment but resolves its endpoint and credential separately.
+    When a parent session exports another vendor's remap (a z.ai/GLM session
+    exports ``ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2[1m]``), an unrouted
+    ``--model opus`` reaches the API as that vendor's model id against an
+    Anthropic endpoint. The spawn receipt prints ``"status": "live"`` and the
+    session dies on its first turn with "issue with the selected model".
+
+    Only fires when the operator named NO route (:data:`_ROUTE_NAMING_FLAGS`) --
+    a named route composes endpoint, auth, and model together and is fine.
+    """
+    if env is None:
+        env = os.environ
+    head = list(_args_before_argv(args))
+    if any(
+        a in _ROUTE_NAMING_FLAGS or a.startswith(("--route=", "--provider=", "--role=", "--account="))
+        for a in head
+    ):
+        return None
+    # The remap vars are claude-only; an explicit non-claude harness is unaffected.
+    harness = (_spawn_flag_value(args, "--harness", "-H") or "claude").strip().lower()
+    if harness != "claude":
+        return None
+    alias = (_spawn_flag_value(args, "--model", "-m") or "").strip().lower()
+    if alias not in _TIER_ALIASES:
+        return None
+    remapped = (env.get(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL") or "").strip()
+    if not remapped or remapped.lower() == alias:
+        return None
+    return alias, remapped
+
+
+def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
+    """Drop inherited vendor auth/model vars from ``os.environ`` for an
+    ``--account`` spawn, at the seam, so the Rust client inherits the scrub too.
+
+    The three Python substrate seams already scrub ``SCRUB_AUTH_VARS`` before
+    layering the account overlay, but an ``--account`` spawn on ``--substrate
+    bg`` auto-routes to the Rust client, which has no ``ANTHROPIC_*`` handling
+    at all -- so the Python scrub never ran for it and the pinned account
+    inherited the parent's vendor endpoint and tier remaps. ``route_to_rust``
+    execs with ``os.environ``, so scrubbing here is the one edit both runtimes
+    see. The account overlay is still layered per-substrate afterwards, so an
+    account record that legitimately pins any of these still wins.
+    """
+    head = list(_args_before_argv(args))
+    if not any(a == "--account" or a.startswith("--account=") for a in head):
+        return
+    from fno.agents.account_env import SCRUB_AUTH_VARS
+
+    for var in SCRUB_AUTH_VARS:
+        os.environ.pop(var, None)
+
+
+def _refuse_inherited_tier_remap(args: Sequence[str]) -> None:
+    """Exit 2 rather than launch a worker whose model alias the ambient env
+    redefines. Runs at the routing seam, BEFORE the Rust/Python fork, so the one
+    guard covers both runtimes (the Rust client has no ANTHROPIC_* handling at
+    all, so a Python-only guard would be decorative)."""
+    found = inherited_tier_remap(args)
+    if found is None:
+        return
+    alias, remapped = found
+    var = f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL"
+    print(
+        f"fno agents spawn: --model {alias} is ambiguous here. This session "
+        f"exports {var}={remapped}, so {alias!r} resolves to that vendor's model "
+        "id, while the worker's endpoint and credential are resolved separately "
+        "and would not match it. The spawn would report \"live\" and then fail on "
+        "its first turn. No worker launched.\n"
+        "Name the route instead, so endpoint, auth, and model are chosen as one "
+        "unit:\n"
+        f"  --account <id> --model {alias}      # Anthropic's {alias} "
+        "(ids from `fno providers list`)\n"
+        f"  -P <vendor> --model {remapped}   # stay on the routed vendor "
+        "(vendors from `fno route ls`)\n"
+        f"Or unset {var} for this command.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
 def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--node``/``--slug``/``--plan`` (x-84a8).
 
@@ -749,6 +863,11 @@ def make_agents_group_cls() -> type:
                     from fno.agents.spawn_defaults import inject_spawn_defaults
 
                     args = inject_spawn_defaults(args)
+                    # Same seam, same reason: these must see the post-defaults
+                    # args and must cover BOTH runtimes, so they run here rather
+                    # than in either spawn implementation.
+                    _scrub_account_auth_at_seam(args)
+                    _refuse_inherited_tier_remap(args)
                 mode = runtime_mode()
                 # A role-bearing spawn (x-d2fe) is Python-only: the Rust client
                 # cannot parse --role, so never route it to the binary in any

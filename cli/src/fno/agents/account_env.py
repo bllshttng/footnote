@@ -56,11 +56,25 @@ class AccountResolutionError(ValueError):
 # --account spawn scrubs these at the substrate apply site before layering the
 # overlay, so the pinned account's credential is the only live one (its overlay
 # re-sets any it needs). Public so the three substrate seams share one list.
+#
+# The tier-alias remaps belong here for the same reason the endpoint does:
+# endpoint, auth, and model are ONE provider route (the invariant
+# resolve_spawn_route refuses to half-compose). Scrubbing the endpoint but
+# leaving ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2[1m] behind sends the pinned
+# account a foreign vendor's model id -- the worker authenticates against
+# Anthropic and then asks it for a GLM model, which 404s on the first turn
+# after the spawn receipt has already printed "live". The overlay is applied
+# AFTER this scrub, so an account record that legitimately pins a model still
+# wins.
 SCRUB_AUTH_VARS = (
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 )
 
 
