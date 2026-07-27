@@ -1958,7 +1958,9 @@ def _intake_impl(
         def claim_mutator(es):
             from fno.graph._intake import (
                 DEFAULT_NODE_TYPE,
+                _find_node,
                 _read_plan_frontmatter,
+                _would_exceed_epic_depth,
                 normalize_type,
                 resolve_node_project_and_cwd,
             )
@@ -1976,7 +1978,31 @@ def _intake_impl(
                 entry["plan_path"] = plan_path
                 entry["title"] = spec["title"]
                 if claimed_type != DEFAULT_NODE_TYPE:
-                    entry["type"] = claimed_type
+                    # `add` and `update` both refuse a write that would make a
+                    # third epic level; a doc-frontmatter lane that skips the cap
+                    # would be the decorative guard this whole change is about.
+                    # It SKIPS rather than refuses, unlike those two: there the
+                    # operator typed `--type` and deserves a hard error, here the
+                    # doc is advisory and the claim itself is still valid.
+                    parent_node = (
+                        _find_node(es, entry["parent"]) if entry.get("parent") else None
+                    )
+                    if (
+                        claimed_type == "epic"
+                        and parent_node is not None
+                        and _would_exceed_epic_depth(
+                            es, {**entry, "type": "epic"}, parent_node
+                        )
+                    ):
+                        typer.echo(
+                            f"warning: plan declares type: epic but {claim_id} sits "
+                            f"under {parent_node['id']}; promoting it would exceed "
+                            f"the epic-nesting cap - type left as "
+                            f"{entry.get('type')!r}",
+                            err=True,
+                        )
+                    else:
+                        entry["type"] = claimed_type
                 if spec["deps"]:
                     merged = list(
                         dict.fromkeys([*entry.get("blocked_by", []), *spec["deps"]])

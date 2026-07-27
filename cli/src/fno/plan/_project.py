@@ -128,13 +128,21 @@ def project_node_to_plan(
             fields[key] = value
             changed = True
 
-    # Heal the docs the old shared-key projection already damaged. The reader
-    # returns an authored block list as RawBlock and an inline one as list, so
-    # a plain str here can only be the retired derived int. The write that
-    # produced it destroyed the authored list, and /blueprint will not restore
-    # it (its default fires only when `waves` is falsy, and a stale `3` is
-    # truthy). Dropping the scalar lets the next /blueprint write repopulate.
-    if "waves_total" in node and isinstance(fields.get("waves"), str):
+    # Heal the docs the old shared-key projection already damaged, and ONLY
+    # those. Two narrowings, both load-bearing: the old int was written only on
+    # the epic branch, so a non-epic's `waves` is authored and must not be
+    # touched (`waves_total` is present-but-None for a non-epic, so key
+    # membership is NOT the epic test); and the value must look like that int,
+    # since the reader also returns a plain str for an authored one-line scalar
+    # and for a bare `waves:` with no children. An authored list arrives as list
+    # or RawBlock and never matches. /blueprint cannot self-heal because its
+    # default fires only on a falsy `waves`, and a stale `3` is truthy.
+    stale_waves = fields.get("waves")
+    if (
+        node.get("waves_total") is not None
+        and isinstance(stale_waves, str)
+        and stale_waves.strip().isdigit()
+    ):
         del fields["waves"]
         changed = True
 

@@ -331,6 +331,32 @@ def test_stale_scalar_waves_is_healed_on_an_epic(tmp_path):
     assert fields["waves_total"] == "1"  # the derived value lives under its own key
 
 
+def test_heal_never_touches_a_non_epics_authored_scalar_waves(tmp_path):
+    """The retired int was only ever written on the epic branch.
+
+    `waves_total` is present-but-None for a non-epic, so key membership is not
+    the epic test - a leaf's authored `waves` must survive.
+    """
+    plan = _plan(tmp_path, "child.md", _PLAN.replace("---\n\n", "waves: 7\n---\n\n", 1))
+    entries = [{"id": "x-c", "slug": "c", "type": "feature", "plan_path": str(plan),
+                "priority": "p0", "status": "ready"}]
+
+    assert project_graph_nodes(entries, ["x-c"], root=str(tmp_path)) == 1
+    assert read_plan_file(plan)[1]["waves"] == "7"  # authored, untouched
+
+
+def test_heal_never_touches_a_non_numeric_scalar_on_an_epic(tmp_path):
+    """Only the retired int shape is dropped; other scalars are authored."""
+    epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN.replace("---\n\n", "waves: tbd\n---\n\n", 1))
+    entries = [
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "status": "ready"},
+        {"id": "x-c", "slug": "c", "type": "feature", "parent": "x-epic", "plan_path": None, "blocked_by": []},
+    ]
+
+    project_graph_nodes(entries, ["x-epic"], root=str(tmp_path))
+    assert read_plan_file(epic_doc)[1]["waves"] == "tbd"
+
+
 def test_projection_keeps_an_epics_authored_wave_list(tmp_path):
     """The reported case: an epic's authored block is not replaced by the int.
 
