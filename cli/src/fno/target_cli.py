@@ -637,6 +637,15 @@ def init(
         "and recorded to an Autonomous Decisions ledger instead. Never grants "
         "irreversibles - merge stays on the --auto-merge axis.",
     ),
+    no_merge: bool = typer.Option(
+        False,
+        "--no-merge",
+        help="Revoke auto-merge for this run (writes `auto_merge_approved: "
+        "false`). The deterministic carrier for the `no-merge` posture: it "
+        "survives `fno target start`, which forwards only the resolved node id "
+        "and so cannot pass the token through --input. There is deliberately no "
+        "--auto-merge twin; granting stays on config/TARGET_AUTO_MERGE.",
+    ),
 ) -> None:
     """Bootstrap a target session via the canonical init script.
 
@@ -808,6 +817,10 @@ def init(
     # Sole authority: an inherited TARGET_BEASTMODE must never self-grant (spawns
     # inherit the parent env wholesale, so per-provider scrubbing cannot cover it).
     env["TARGET_BEASTMODE"] = "1" if beastmode else ""
+    # Asymmetric on purpose: --no-merge SETS the refusal but never clears an
+    # inherited one, so a stray flag omission cannot upgrade a run to mergeable.
+    if no_merge:
+        env["TARGET_NO_MERGE"] = "1"
 
     proc = subprocess.run(["bash", str(script_path)], check=False, env=env)
     if proc.returncode == 0:
@@ -1913,6 +1926,12 @@ def start(
         False, "--beastmode", "--beast",
         help="Grant walk-away authority for this session (forwarded to init).",
     ),
+    no_merge: bool = typer.Option(
+        False, "--no-merge",
+        help="Revoke auto-merge for this run (forwarded to init). Needed because "
+        "start resolves its argument to a bare node id, so a `no-merge` token in "
+        "the original invocation cannot reach init through --input.",
+    ),
 ) -> None:
     """Cold-start a worktree-isolated target session in ONE verb.
 
@@ -2131,6 +2150,8 @@ def start(
     # 3. Init the session FROM the worktree (binds owner_cwd, claims the node
     #    exactly once - preserve the existing one-call claim).
     init_cmd = fno + ["target", "init", "--input", node]
+    if no_merge:
+        init_cmd += ["--no-merge"]
     if plan_path:
         init_cmd += ["--plan-path", plan_path]
     if size:

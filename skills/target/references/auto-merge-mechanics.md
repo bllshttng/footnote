@@ -50,7 +50,7 @@ A `failed` outcome does NOT block the promise. The PR was created successfully; 
 
 When deciding whether to auto-merge, resolve in this order (first match wins):
 
-1. **`TARGET_NO_MERGE=1`** - auto_merge_approved = false
+1. **`TARGET_NO_MERGE=1`** (set by `fno target init --no-merge`, or exported) - auto_merge_approved = false
 2. **`no-merge` as a whole token in the invocation** - auto_merge_approved = false
 3. **`TARGET_AUTO_MERGE=1`** - auto_merge_approved = true
 4. **Local `.fno/config.toml`** - `config.auto_merge.enabled`

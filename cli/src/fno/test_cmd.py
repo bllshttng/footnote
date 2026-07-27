@@ -504,7 +504,6 @@ scripts/tests/test_config_auto_merge.sh
 scripts/tests/test_do_provenance_stamp.sh
 scripts/tests/test_git_protection_hook.sh
 scripts/tests/test_graph_resolve.sh
-scripts/tests/test_init_target_state_auto_merge.sh
 scripts/tests/test_megawalk_args.sh
 scripts/tests/test_provider_pricing.sh
 tests/events/test-check-pr-emits-polling.sh
