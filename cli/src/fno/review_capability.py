@@ -141,7 +141,9 @@ def _unattended_in_config() -> bool:
         value = block["enabled"]
         if value is None or value == "":
             continue
-        return _coerce_affirmative(value, default=False)
+        #  is documentation-only in the shared helper; not passed, so a
+        # future edit to it cannot read as controlling a fallback here.
+        return _coerce_affirmative(value, False)
     return False
 
 
