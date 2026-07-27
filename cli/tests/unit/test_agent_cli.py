@@ -513,92 +513,91 @@ class TestReadOnlyInvariant:
 
 
 # --- model resolution: "what model am I actually running?" -------------------
+#
+# The parsing itself belongs to fno.agents.self_stamp (harness-aware, and it
+# already rejects sidechain / non-assistant rows). These cover the seam whoami
+# adds on top: surface it when known, stay silent when not, on EVERY harness.
 
 
-def _write_transcript(home: Path, session_id: str, stamps: List[str]) -> None:
-    """A claude transcript jsonl whose assistant rows carry `stamps` in order."""
-    d = home / ".claude" / "projects" / "-some-cwd"
+def _claude_transcript(home: Path, session_id: str, rows: List[dict]) -> None:
+    d = home / "projects" / "-some-cwd"
     d.mkdir(parents=True, exist_ok=True)
     d.joinpath(f"{session_id}.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
+    )
+
+
+def _codex_rollout(home: Path, session_id: str, models: List[str]) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    home.joinpath(f"rollout-{session_id}.jsonl").write_text(
         "".join(
-            json.dumps({"type": "assistant", "message": {"model": m}}) + "\n" for m in stamps
+            json.dumps({"type": "turn_context", "payload": {"model": m}}) + "\n" for m in models
         ),
         encoding="utf-8",
     )
 
 
-def _write_sidecar(home: Path, session_id: str, model: str) -> None:
-    d = home / ".fno" / "attest"
-    d.mkdir(parents=True, exist_ok=True)
-    d.joinpath(f"{session_id}.json").write_text(
-        json.dumps({"model": model, "provider": "claude"}), encoding="utf-8"
+def _only_harness(monkeypatch, marker: str, session: str) -> None:
+    for m in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(m, raising=False)
+    monkeypatch.setenv(marker, session)
+
+
+def test_session_model_reads_claude_transcript(tmp_path: Path, monkeypatch) -> None:
+    from fno.agent import cli as agent_cli
+
+    _only_harness(monkeypatch, "CLAUDE_CODE_SESSION_ID", "sid-c")
+    monkeypatch.setenv("FNO_CLAUDE_PROJECTS_DIR", str(tmp_path / "projects"))
+    _claude_transcript(
+        tmp_path,
+        "sid-c",
+        [{"type": "assistant", "message": {"model": "claude-opus-5"}}],
     )
+    assert agent_cli._session_model() == "claude-opus-5"
 
 
-def test_session_model_prefers_attested_routing(tmp_path: Path, monkeypatch) -> None:
-    """An explicitly ROUTED model is authoritative over the transcript stamp."""
+def test_session_model_resolves_for_a_codex_session(tmp_path: Path, monkeypatch) -> None:
+    """Codex records the model in turn_context.payload, not message.model. A
+    claude-shaped parser reported null here even though the model was present."""
     from fno.agent import cli as agent_cli
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("FNO_HOME", str(tmp_path / ".fno"))
-    _write_sidecar(tmp_path, "sid-1", "glm-5.2")
-    _write_transcript(tmp_path, "sid-1", ["claude-opus-5"])
-
-    assert agent_cli._session_model("sid-1") == "glm-5.2"
+    _only_harness(monkeypatch, "CODEX_THREAD_ID", "sid-x")
+    monkeypatch.setenv("FNO_CODEX_SESSIONS_DIR", str(tmp_path / "codex"))
+    _codex_rollout(tmp_path / "codex", "sid-x", ["gpt-5.6-luna"])
+    assert agent_cli._session_model() == "gpt-5.6-luna"
 
 
-def test_session_model_falls_back_to_transcript_when_unrouted(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """The common case: no ANTHROPIC_MODEL, so the sidecar's model is empty and
-    only the transcript can answer."""
+def test_session_model_ignores_sidechain_workers(tmp_path: Path, monkeypatch) -> None:
+    """A subagent's model is not this session's model, and a sidechain row can
+    be the newest model-bearing row in the file."""
     from fno.agent import cli as agent_cli
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("FNO_HOME", str(tmp_path / ".fno"))
-    _write_sidecar(tmp_path, "sid-2", "")
-    _write_transcript(tmp_path, "sid-2", ["claude-opus-5"])
-
-    assert agent_cli._session_model("sid-2") == "claude-opus-5"
-
-
-def test_session_model_last_stamp_wins_after_midsession_switch(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """A `/model` switch leaves both names in the transcript; the LAST is live.
-
-    This is the case that makes the session preamble unreliable: it is rendered
-    once at startup and still names the pre-switch model.
-    """
-    from fno.agent import cli as agent_cli
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("FNO_HOME", str(tmp_path / ".fno"))
-    _write_transcript(
-        tmp_path, "sid-3", ["claude-opus-4-8", "claude-opus-4-8", "claude-opus-5"]
+    _only_harness(monkeypatch, "CLAUDE_CODE_SESSION_ID", "sid-s")
+    monkeypatch.setenv("FNO_CLAUDE_PROJECTS_DIR", str(tmp_path / "projects"))
+    _claude_transcript(
+        tmp_path,
+        "sid-s",
+        [
+            {"type": "assistant", "message": {"model": "claude-opus-5"}},
+            {"type": "assistant", "isSidechain": True, "message": {"model": "claude-haiku-4-5"}},
+        ],
     )
-
-    assert agent_cli._session_model("sid-3") == "claude-opus-5"
-
-
-def test_session_model_skips_synthetic_stamps(tmp_path: Path, monkeypatch) -> None:
-    """`<synthetic>` marks a harness-authored row carrying no real model."""
-    from fno.agent import cli as agent_cli
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("FNO_HOME", str(tmp_path / ".fno"))
-    _write_transcript(tmp_path, "sid-4", ["claude-opus-5", "<synthetic>"])
-
-    assert agent_cli._session_model("sid-4") == "claude-opus-5"
+    assert agent_cli._session_model() == "claude-opus-5"
 
 
 def test_session_model_absent_degrades_to_none(tmp_path: Path, monkeypatch) -> None:
-    """No sidecar and no transcript is not a failure - whoami is the
-    confused-agent recovery verb and must never gain a failure mode."""
+    """whoami is the confused-agent recovery verb: an unresolvable model drops
+    the line rather than becoming a failure."""
     from fno.agent import cli as agent_cli
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("FNO_HOME", str(tmp_path / ".fno"))
+    _only_harness(monkeypatch, "CLAUDE_CODE_SESSION_ID", "sid-missing")
+    monkeypatch.setenv("FNO_CLAUDE_PROJECTS_DIR", str(tmp_path / "projects"))
+    assert agent_cli._session_model() is None
 
-    assert agent_cli._session_model("sid-missing") is None
-    assert agent_cli._session_model(None) is None
+
+def test_session_model_none_without_ambient_identity(monkeypatch) -> None:
+    from fno.agent import cli as agent_cli
+
+    for m in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(m, raising=False)
+    assert agent_cli._session_model() is None
