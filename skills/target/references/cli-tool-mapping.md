@@ -13,8 +13,8 @@ When this skill references Claude Code tools, use the equivalent on your platfor
 
 | Action | Claude Code | OpenClaw | Gemini CLI | Codex CLI |
 |--------|------------|----------|------------|-----------|
-| Spawn subagent | `Agent` tool with prompt + subagent_type | `process` tool with `action: "log"` for background, `action: "run"` for foreground | Default: sequential fallback. Optional: project agents in `.gemini/agents/` when experimental agents are enabled and opted in | `spawn_agent` / project-scoped custom agents in `.codex/agents/` |
-| Isolated worktree agent | `Agent` tool with `isolation: "worktree"` | `process` tool targeting worktree directory | Default: use manual git worktree. Experimental Gemini project agents are same-repo helpers, not worktree isolation | Use custom agents for same-repo work; use manual git worktree for isolation |
+| Spawn subagent | `Agent` tool with prompt + subagent_type | `process` tool with `action: "log"` for background, `action: "run"` for foreground | Sequential main-thread only (no project agents) | `spawn_agent` / project-scoped custom agents in `.codex/agents/` |
+| Isolated worktree agent | `Agent` tool with `isolation: "worktree"` | `process` tool targeting worktree directory | Use manual git worktree | Use custom agents for same-repo work; use manual git worktree for isolation |
 | Parallel dispatch | Multiple `Agent` calls with `run_in_background: true` | Multiple `process` calls with `action: "log"` | Not supported natively - execute sequentially | Limited - use `spawn_agent` |
 
 ## File Operations

@@ -89,8 +89,9 @@ budget_cost_cap_usd: 25.00           # hard cost cap; omitted if unconfigured
 
 ```yaml
 provider: claude                     # active provider at init time
-provider_mode: interactive           # interactive | autonomous | etc.
-provider_upgrade_reason: ""          # why provider was upgraded (if applicable)
+harness_mode: standard               # always `standard`; kept for schema compatibility
+provider_mode: standard              # always `standard`; kept for schema compatibility
+provider_upgrade_reason: ""          # always empty; kept for schema compatibility
 ```
 
 ### Session ownership (written by init; used by shim for foreign-session guard)

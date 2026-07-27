@@ -5,32 +5,20 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-# Every ambient input to detect_provider and gemini_agents_opted_in has to go,
-# or a case inherits its verdict from the shell instead of from its fixture.
-# Each case sets the one hint it needs inside its own subshell, so nothing
-# cleared here is re-exported.
+# Every ambient input to detect_provider has to go, or a case inherits its
+# verdict from the shell instead of from its fixture. Each case sets the one
+# hint it needs inside its own subshell, so nothing cleared here is re-exported.
 #
 # Precedence is why the whole set matters and not just the session markers:
 # detect_provider checks session markers, THEN CODEX_PLUGIN_ROOT, THEN
 # GEMINI_PROJECT_DIR, so an ambient CLAUDE_CODE_SESSION_ID makes every case
-# detect "claude" and an ambient CODEX_PLUGIN_ROOT makes the gemini case detect
-# "codex". gemini_agents_opted_in checks its two env vars BEFORE any config
-# file, so a truthy ambient value greens the gemini case even when the fixture
-# migration is broken, and a falsey one reds a perfectly good fixture.
+# detect "claude" and an ambient CODEX_PLUGIN_ROOT makes a gemini case detect
+# "codex".
 unset CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID CODEX_SESSION_ID GEMINI_SESSION_ID \
-      CODEX_PLUGIN_ROOT GEMINI_PROJECT_DIR CLAUDE_PLUGIN_ROOT \
-      FNO_GEMINI_EXPERIMENTAL_AGENTS GEMINI_EXPERIMENTAL_AGENTS
+      CODEX_PLUGIN_ROOT GEMINI_PROJECT_DIR CLAUDE_PLUGIN_ROOT
 
-# Isolate HOME for the same reason: gemini_agents_opted_in falls back to
-# $HOME/.fno/config.toml, so a developer who opted in globally would get a
-# green gemini case no matter what the fixture says. With the env cleared
-# above, the fixture is now genuinely the only opt-in source; the gemini case
-# seeds .fno/config.toml directly (the format config_flag_is_true reads), not
-# the legacy settings.yaml. Writing only settings.yaml made the case depend on
-# the settings.yaml -> config.toml migration firing as an init SIDE EFFECT,
-# which does not happen on this direct-script path (init shells no fno config
-# read), so under an isolated HOME the flag read false and the case flipped to
-# provider_mode: stable_fallback (codex P2 on PR #630).
+# Isolate HOME so init never touches the developer's real ~/.fno, and so no
+# global config can reach into a case's verdict.
 export HOME="$TMP_DIR/fake-home"
 mkdir -p "$HOME/.fno"
 
@@ -65,15 +53,12 @@ run_recovery_case() {
 run_recovery_case "plain-malformed" $'status: IN_PROGRESS\ncurrent_phase: do'
 run_recovery_case "partial-frontmatter" $'---\nstatus: IN_PROGRESS\ncurrent_phase: do'
 
-GEMINI_CASE_DIR="$TMP_DIR/gemini-upgrade"
-mkdir -p "$GEMINI_CASE_DIR/.fno" "$GEMINI_CASE_DIR/.gemini/agents"
-cat > "$GEMINI_CASE_DIR/.fno/config.toml" <<'EOF'
-gemini_experimental_agents = true
-EOF
-
-for agent in archer.md reviewer.md roadmap-generator.md verifier.md; do
-  printf -- '---\nname: sample\ndescription: sample\n---\nbody\n' > "$GEMINI_CASE_DIR/.gemini/agents/$agent"
-done
+# detect_provider's GEMINI_PROJECT_DIR branch, on a dir with no prior manifest.
+# harness_mode/provider_mode are constants now that the experimental
+# project-agent mode is retired, so `standard` here is asserting the field is
+# still emitted, not that a mode was resolved.
+GEMINI_CASE_DIR="$TMP_DIR/gemini-detect"
+mkdir -p "$GEMINI_CASE_DIR/.fno"
 
 (
   cd "$GEMINI_CASE_DIR"
@@ -82,6 +67,7 @@ done
 
 grep -q '^harness: gemini' "$GEMINI_CASE_DIR/.fno/target-state.md"
 grep -q '^provider: gemini' "$GEMINI_CASE_DIR/.fno/target-state.md"
-grep -q '^provider_mode: experimental_agents' "$GEMINI_CASE_DIR/.fno/target-state.md"
+grep -q '^harness_mode: standard' "$GEMINI_CASE_DIR/.fno/target-state.md"
+grep -q '^provider_mode: standard' "$GEMINI_CASE_DIR/.fno/target-state.md"
 
 echo "Target state recovery validation passed"

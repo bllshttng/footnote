@@ -421,8 +421,6 @@ def resolve_wave_execution_mode(
     resolved_provider = provider or detect_provider()
     decision: Dict[str, object] = {
         "provider": resolved_provider,
-        "provider_mode": "standard",
-        "provider_upgrade_reason": "",
         "requested_mode": wave.mode,
         "effective_mode": wave.mode,
         "dispatch": "main-thread",
@@ -444,7 +442,6 @@ def resolve_wave_execution_mode(
 
     if resolved_provider in SEQUENTIAL_FALLBACK_PROVIDERS:
         decision["effective_mode"] = "sequential"
-        decision["provider_mode"] = "stable_fallback"
         decision["reason"] = (
             f"Parallel wave downgraded: {resolved_provider} runs sequential "
             "main-thread (no concurrent Task-tool subagents)"

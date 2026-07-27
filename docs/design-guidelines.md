@@ -487,7 +487,7 @@ The footnote plugin supports three CLI platforms:
 | Platform | Skills | Hooks | Agents |
 |----------|--------|-------|--------|
 | Claude Code | Native | `hooks.json` | Native via Agent tool |
-| Gemini CLI | Portable | `hooks-gemini.json` | Synced via `sync-gemini-agents.py` |
+| Gemini CLI | Portable | `hooks-gemini.json` | Sequential only (no project agents) |
 | Codex CLI | Portable | `hooks-codex.json` | Synced via `sync-codex-agents.py` |
 
 ### Skills Are Portable
@@ -529,9 +529,6 @@ Agents are defined once in `agents/` (Claude Code format) and
 synced to other CLIs:
 
 ```bash
-# Sync to Gemini CLI format
-python scripts/sync-gemini-agents.py
-
 # Sync to Codex CLI format
 python scripts/sync-codex-agents.py
 ```

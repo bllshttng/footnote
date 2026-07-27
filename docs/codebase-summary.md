@@ -243,7 +243,7 @@ The plugin supports three CLI environments with platform-specific hook configura
 
 Skills (markdown-based) are portable across all three CLIs without modification. Hooks (shell scripts triggered by lifecycle events) require platform-specific configuration because each CLI has different lifecycle event names and invocation patterns.
 
-Agent sync scripts (`scripts/sync-gemini-agents.py`, `scripts/sync-codex-agents.py`) translate agent definitions from Claude Code format to the target CLI format.
+The agent sync script (`scripts/sync-codex-agents.py`) translates agent definitions from Claude Code format to the target CLI format.
 
 ## Testing
 

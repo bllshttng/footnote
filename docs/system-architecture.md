@@ -479,11 +479,7 @@ When a provider lacks a capability, the system degrades gracefully:
 - **Missing hooks**: Continue with manual lifecycle (hooks enhance but do not replace core semantics)
 - **Hidden shared outputs**: Downgrade parallel wave to sequential (prevents concurrent writes to shared state files)
 
-### Gemini Dynamic Upgrade
-
-Gemini CLI can optionally upgrade from sequential fallback to experimental project-agent mode when:
-1. `config.gemini_experimental_agents` is enabled
-2. `.gemini/agents/` directory exists with required agent files (archer.md, reviewer.md, roadmap-generator.md, verifier.md)
+Degradation is resolved per wave at dispatch time, not stamped into the session manifest: `harness_mode` / `provider_mode` are constant `standard` for every harness. The Gemini dynamic upgrade to experimental project-agent mode was removed along with the Gemini CLI's upstream deprecation.
 
 ---
 

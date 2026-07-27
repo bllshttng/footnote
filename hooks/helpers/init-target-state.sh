@@ -103,9 +103,6 @@ INITIAL_INPUT="${TARGET_INPUT:-}"
 INITIAL_PLAN_PATH="${TARGET_PLAN_PATH:-}"
 unset TARGET_INPUT TARGET_PLAN_PATH
 
-LOCAL_SETTINGS="$REPO_ROOT/.fno/config.toml"
-GLOBAL_SETTINGS="${HOME}/.fno/config.toml"
-
 # ── Provider detection ───────────────────────────────────────────────
 # Mirrors HARNESS_SESSION_MARKERS in cli/src/fno/harness_identity.py: session
 # markers first (non-blank-after-strip, so the *[![:space:]]* glob matches its
@@ -126,85 +123,6 @@ detect_provider() {
   else
     echo "claude"
   fi
-}
-
-# ── Gemini agent-mode helpers (provider_mode field) ──────────────────
-GEMINI_REQUIRED_AGENT_FILES=(archer.md reviewer.md roadmap-generator.md verifier.md)
-
-is_truthy() {
-  local value="${1:-}"
-  [[ "$value" == "true" || "$value" == "yes" || "$value" == "1" ]]
-}
-
-config_flag_is_true() {
-  local file="$1"
-  local key="$2"
-  [[ -f "$file" ]] || return 1
-  local value
-  # Flat config.toml: a top-level `${key} = value` line.
-  value=$(sed -n "s/^${key}[[:space:]]*=[[:space:]]*//p" "$file" 2>/dev/null \
-    | head -1 \
-    | tr -d '"' | tr -d "'")
-  [[ "$value" == "true" || "$value" == "yes" || "$value" == "1" ]]
-}
-
-gemini_agents_opted_in() {
-  if [[ -n "${FNO_GEMINI_EXPERIMENTAL_AGENTS:-}" || -n "${GEMINI_EXPERIMENTAL_AGENTS:-}" ]]; then
-    local env_value="${FNO_GEMINI_EXPERIMENTAL_AGENTS:-${GEMINI_EXPERIMENTAL_AGENTS:-}}"
-    is_truthy "$env_value"
-    return $?
-  fi
-  config_flag_is_true "$LOCAL_SETTINGS" "gemini_experimental_agents" \
-    || config_flag_is_true "$GLOBAL_SETTINGS" "gemini_experimental_agents"
-}
-
-gemini_missing_agent_files() {
-  local name
-  for name in "${GEMINI_REQUIRED_AGENT_FILES[@]}"; do
-    if [[ ! -f "$REPO_ROOT/.gemini/agents/${name}" ]]; then
-      printf '%s\n' "$name"
-    fi
-  done
-}
-
-gemini_agent_mode() {
-  local provider="$1"
-  if [[ "$provider" != "gemini" ]]; then
-    echo "standard"
-    return 0
-  fi
-  if ! gemini_agents_opted_in; then
-    echo "stable_fallback"
-    return 0
-  fi
-  local missing
-  missing="$(gemini_missing_agent_files)"
-  if [[ -n "$missing" ]]; then
-    echo "stable_fallback"
-    return 0
-  fi
-  echo "experimental_agents"
-}
-
-gemini_upgrade_reason() {
-  local provider="$1"
-  if [[ "$provider" != "gemini" ]]; then
-    echo ""
-    return 0
-  fi
-  if ! gemini_agents_opted_in; then
-    echo "Gemini experimental agents not opted in"
-    return 0
-  fi
-  local missing
-  missing="$(gemini_missing_agent_files)"
-  if [[ -n "$missing" ]]; then
-    missing="${missing//$'\n'/ }"
-    missing="${missing% }"
-    echo "Missing Gemini project agent files: $missing"
-    return 0
-  fi
-  echo "Gemini experimental project agents available"
 }
 
 # ── has_ui inference (predictive, from plan) ─────────────────────────
@@ -790,8 +708,6 @@ EOF
   # ── Provider + cross-project ──────────────────────────────────────
   CROSS_PROJECT="${TARGET_CROSS_PROJECT:-false}"
   PROVIDER="$(detect_provider)"
-  PROVIDER_MODE="$(gemini_agent_mode "$PROVIDER")"
-  PROVIDER_UPGRADE_REASON="$(gemini_upgrade_reason "$PROVIDER")"
 
   # ── Session identifiers ───────────────────────────────────────────
   local_owner_pid="${PPID:-$$}"
@@ -894,7 +810,6 @@ EOF
   # ── Escape helper values ──────────────────────────────────────────
   escaped_input="${INITIAL_INPUT//\"/\\\"}"
   escaped_plan_path="${INITIAL_PLAN_PATH//\"/\\\"}"
-  escaped_reason="${PROVIDER_UPGRADE_REASON//\"/\\\"}"
 
   # ── Write the manifest (atomic via temp + mv) ─────────────────────
   local_temp="$(mktemp "${STATE_FILE}.tmp.XXXXXX")"
@@ -928,13 +843,16 @@ cross_project: $CROSS_PROJECT
 # supersedes claude_session_id/codex_thread_id. Those legacy keys stay for one
 # release as aliases (removed next release).
 harness: $PROVIDER
-harness_mode: ${PROVIDER_MODE:-standard}
+# Constant since the Gemini experimental project-agent mode was retired: no
+# harness varies its mode any more. Kept as a field (not dropped) because the
+# schema and the loop-check readers still expect the key.
+harness_mode: standard
 harness_session_id: ${_HARNESS_SESSION:-null}
 harness_model: ${_HARNESS_MODEL:-}
 harness_effort: ${_HARNESS_EFFORT:-}
 provider: $PROVIDER
-provider_mode: ${PROVIDER_MODE:-standard}
-provider_upgrade_reason: "${escaped_reason:-}"
+provider_mode: standard
+provider_upgrade_reason: ""
 owner_pid: $local_owner_pid
 owner_started_at: $local_owner_started_at
 owner_cwd: "$local_owner_cwd"

@@ -177,7 +177,7 @@ flowchart TD
 | **Instructions file** | `CLAUDE.md` | `GEMINI.md` | `AGENTS.md` |
 | **Plugin manifest** | `.claude-plugin/plugin.json` | `gemini-extension.json` | `.codex-plugin/plugin.json` |
 | **Skill invocation** | `Skill` tool | `activate_skill` tool | `$skill-name` auto-loading |
-| **Subagent dispatch** | `Agent` tool | Stable: sequential fallback. Experimental: project agents in `.gemini/agents/*.md` when opted in and enabled | Project-scoped custom agents (`.codex/agents/*.toml`) |
+| **Subagent dispatch** | `Agent` tool | Sequential main-thread only | Project-scoped custom agents (`.codex/agents/*.toml`) |
 
 ## Architecture Decisions
 
@@ -226,7 +226,7 @@ The remaining build-time unknown is agy's exact `transcript.jsonl` line schema; 
 | Feature | Claude Code | Gemini/Codex |
 |---------|------------|--------------|
 | Autonomous looping (stop hook) | Full | Full when hooks are configured |
-| Parallel subagent waves | Full (Agent tool) | Codex: full via custom agents, Gemini: stable sequential fallback with optional experimental project-agent upgrade |
+| Parallel subagent waves | Full (Agent tool) | Codex: full via custom agents, Gemini: sequential main-thread only |
 | Cost tracking | Full (transcript parsing) | Partial (may lack transcript) |
 | Planning session detection | Full (transcript scan) | Not available (Claude JSONL format) |
 | Orphan session detection | Full (transcript scan) | Not available |
@@ -245,7 +245,7 @@ The remaining build-time unknown is agy's exact `transcript.jsonl` line schema; 
 2. **Orphan session detection** only works on Claude Code transcript format
 3. **Platform detection inconsistency** between `target-stop-hook.sh` (3 platforms) and `session-start.sh` (4 platforms including Cursor) still needs cleanup
 4. **Codex custom agents must be generated** before parity behavior is available: `python3 scripts/sync-codex-agents.py --write`
-5. **Gemini project-agent mode is experimental** and also depends on Gemini CLI enabling experimental agents in the client settings; the repo can only verify local opt-in and generated artifacts
+5. **Gemini has no project-agent dispatch.** The experimental mode was removed when Google deprecated the Gemini CLI, so a parallel wave always downgrades to sequential main-thread execution and records the reason
 6. **Inline Python with interpolated shell vars** (planning session title extraction, line 462) could break on paths with special characters
 
 ## Validation
@@ -254,10 +254,8 @@ Run these checks after changing the Codex adapter or hook surface:
 
 ```bash
 python3 scripts/sync-codex-agents.py --check
-python3 scripts/sync-gemini-agents.py --check
 bash scripts/test-sync-codex-agents.sh
-bash scripts/test-sync-gemini-agents.sh
 bash scripts/test-parallel-wave-conflicts.sh
 bash scripts/test_stop_hook_events.sh
-bash scripts/test-target-state-recovery.sh
+bash tests/test-target-state-recovery.sh
 ```

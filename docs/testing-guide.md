@@ -43,7 +43,6 @@ Located in `scripts/`, these shell test scripts cover core plugin features:
 | `test-parallel-wave-conflicts.sh` | Parallel wave conflict detection for shared outputs |
 | `test-scan-antipatterns.sh` | Antipattern scanning correctness in plans |
 | `test-sync-codex-agents.sh` | Codex agent synchronization from shared sources |
-| `test-sync-gemini-agents.sh` | Gemini agent synchronization from shared sources |
 | `test-validate-plan.sh` | Plan validation logic and format checking |
 
 All test scripts follow the same convention:
@@ -482,7 +481,6 @@ The plugin supports three CLI platforms. Provider capability tests verify behavi
 **Gemini CLI:**
 
 - Lifecycle hooks via `hooks-gemini.json`
-- Agent synchronization tested by `test-sync-gemini-agents.sh`
 
 **Codex CLI:**
 
