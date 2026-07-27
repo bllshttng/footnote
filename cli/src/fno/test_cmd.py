@@ -1112,7 +1112,6 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         with open(reg_file, encoding="utf-8") as fh:
             exec(fh.read(), ns)
         steps = list(ns["STEPS"])
-        discovered: list[tuple[str, str, str]] = []
     else:
         structural = list(_STRUCTURAL_STEPS)
         referenced = _referenced_sh_files(structural)
