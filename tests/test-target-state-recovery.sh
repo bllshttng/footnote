@@ -12,6 +12,14 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 # live harness session.
 unset CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID CODEX_SESSION_ID GEMINI_SESSION_ID
 
+# Isolate HOME for the same reason. gemini_agents_opted_in falls back to
+# $HOME/.fno/config.toml, so a developer who opted in globally would get a
+# green gemini case no matter what the fixture says. The opt-in must come from
+# the fixture alone, which reaches config_flag_is_true via the legacy
+# settings.yaml -> config.toml migration in fno.config.writer.
+export HOME="$TMP_DIR/fake-home"
+mkdir -p "$HOME/.fno"
+
 run_recovery_case() {
   local case_name="$1"
   local fixture_content="$2"
