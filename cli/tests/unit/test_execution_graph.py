@@ -211,6 +211,66 @@ def test_compile_root_absent_falls_back_to_serial():
     assert g.root == "missing"
 
 
+def test_compile_never_raises_on_malformed_budget():
+    # a bad budget in the root entry must degrade to serial, not escape
+    g = compile_graph("a", [_entry("a", budget={"max_attempts": 0})])
+    assert g.collapsed is True and g.root == "a"
+
+
+def test_compile_never_raises_on_bad_typed_owns_files():
+    # owns_files of the wrong type raised TypeError before the fix
+    g = compile_graph("a", [_entry("a", owns_files=5), _entry("b", blocked_by=["a"])])
+    assert g.root == "a"  # did not raise
+
+
+def test_self_referential_blocked_by_is_skipped_not_collapsed():
+    entries = [_entry("a", blocked_by=["a"]), _entry("b", blocked_by=["a"])]
+    g = compile_graph("b", entries)
+    # the a->a self edge is skipped; a->b ordering survives, no collapse
+    assert g.collapsed is False
+    assert [(e.src, e.dst) for e in g.edges] == [("a", "b")]
+
+
+def test_node_rejects_non_budget():
+    with pytest.raises(MalformedGraphError):
+        ExecNode(node_id="a", role="builder", justification="specialized",
+                 objective="o", repo="r", budget="not-a-budget")
+
+
+def test_from_dict_rejects_duplicate_node_ids():
+    n = ExecNode(node_id="a", role="builder", justification="specialized",
+                 objective="o", repo="r").to_dict()
+    with pytest.raises(MalformedGraphError):
+        ExecGraph.from_dict({"version": EXEC_GRAPH_VERSION, "root": "a", "nodes": [n, n]})
+
+
+def test_from_dict_rejects_root_not_in_nodes():
+    n = ExecNode(node_id="a", role="builder", justification="specialized",
+                 objective="o", repo="r").to_dict()
+    with pytest.raises(MalformedGraphError):
+        ExecGraph.from_dict({"version": EXEC_GRAPH_VERSION, "root": "ghost", "nodes": [n]})
+
+
+def test_from_dict_rejects_dangling_barrier():
+    n = ExecNode(node_id="a", role="builder", justification="specialized",
+                 objective="o", repo="r").to_dict()
+    d = {"version": EXEC_GRAPH_VERSION, "root": "a", "nodes": [n],
+         "barriers": [{"at": "a", "expected": ["ghost"]}]}
+    with pytest.raises(MalformedGraphError):
+        ExecGraph.from_dict(d)
+
+
+def test_exec_liveness_mapping():
+    from fno.graph.cli import _exec_liveness
+
+    assert _exec_liveness("live") == "live"
+    assert _exec_liveness("suspect") == "unknown"
+    assert _exec_liveness("stale") == "unknown"
+    assert _exec_liveness("corrupted") == "unknown"
+    assert _exec_liveness("free") == ""
+    assert _exec_liveness("anything-else") == ""
+
+
 def test_relevant_scope_is_order_independent():
     # chain root(c) <- b <- a; scope must be {a,b,c} regardless of dict order.
     from fno.graph.cli import _relevant_exec_scope

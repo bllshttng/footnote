@@ -172,6 +172,8 @@ class ExecNode:
             raise MalformedGraphError(f"node.access must be one of {sorted(_ACCESS)}, got {self.access!r}")
         if self.liveness not in _LIVENESS:
             raise MalformedGraphError(f"node.liveness must be one of {sorted(_LIVENESS)}, got {self.liveness!r}")
+        if not isinstance(self.budget, Budget):
+            raise MalformedGraphError(f"node.budget must be a Budget, got {type(self.budget).__name__}")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -339,12 +341,21 @@ class ExecGraph:
         edges = tuple(ExecEdge.from_dict(e, f"{origin}.edge") for e in (d.get("edges") or []))
         barriers = tuple(Barrier.from_dict(b, f"{origin}.barrier") for b in (d.get("barriers") or []))
         node_ids = {n.node_id for n in nodes}
+        if len(node_ids) != len(nodes):
+            raise MalformedGraphError(f"{origin}: duplicate node_id in nodes")
+        root = _req_str(d, "root", origin)
+        if root not in node_ids:
+            raise MalformedGraphError(f"{origin}: root {root!r} is not one of the graph's nodes")
         for e in edges:
             if e.src not in node_ids or e.dst not in node_ids:
                 raise MalformedGraphError(f"{origin}: edge {e.src}->{e.dst} references an unknown node")
+        for b in barriers:
+            unknown = {b.at, *b.expected} - node_ids
+            if unknown:
+                raise MalformedGraphError(f"{origin}: barrier at {b.at} references unknown node(s) {sorted(unknown)}")
         return ExecGraph(
             version=version,
-            root=_req_str(d, "root", origin),
+            root=root,
             nodes=nodes,
             edges=edges,
             barriers=barriers,
@@ -400,7 +411,14 @@ def _serial_fallback(root: str, entries: Sequence[dict]) -> ExecGraph:
     """
     match = next((e for e in entries if str(e.get("id") or "") == root), None)
     entry = match or {"id": root, "title": root, "project": "unknown"}
-    node = _entry_node(entry, justification="specialized")
+    try:
+        node = _entry_node(entry, justification="specialized")
+    except (MalformedGraphError, TypeError, ValueError):
+        # Last resort: even the fallback entry was malformed (bad budget /
+        # owns_files type). Build the minimal valid node from the id alone so
+        # the "never raises" contract holds no matter what the entry carried.
+        node = _entry_node({"id": root, "title": root, "project": "unknown"},
+                           justification="specialized")
     return ExecGraph(version=EXEC_GRAPH_VERSION, root=root, nodes=(node,), collapsed=True)
 
 
@@ -441,7 +459,10 @@ def compile_graph(root: str, entries: Sequence[dict]) -> ExecGraph:
         ordering_adj: dict[str, set[str]] = {nid: set() for nid in ids}
         for nid, e in by_id.items():
             for dep in (e.get("blocked_by") or []):
-                if dep in ids:
+                # dep != nid: a self-referential blocked_by is a backlog defect,
+                # not an edge - skip it (mirrors the verifier/data self-checks)
+                # rather than let the self-loop guard collapse the whole graph.
+                if dep in ids and dep != nid:
                     edges.append(ExecEdge(dep, nid, "ordering",
                                           f"{dep} must reach a terminal state before {nid} starts"))
                     preds[nid].append(dep)
@@ -535,8 +556,10 @@ def compile_graph(root: str, entries: Sequence[dict]) -> ExecGraph:
             version=EXEC_GRAPH_VERSION, root=root, nodes=nodes,
             edges=tuple(edges), barriers=barriers, collapsed=False,
         )
-    except MalformedGraphError:
-        # A schema defect in the derived topology is not fatal to the run:
-        # degrade to the serial loop rather than block. (Plan: compilation
-        # failure falls back to serial operation.)
+    except Exception:  # noqa: BLE001 - the "never raises" contract is load-bearing
+        # ANY defect in the derived topology (a MalformedGraphError from a bad
+        # field, or a TypeError from a bad-typed owns_files/budget in an entry)
+        # degrades to the serial loop rather than blocking. (Plan: compilation
+        # failure falls back to serial operation.) The fallback is itself
+        # defensive so this handler can never re-raise.
         return _serial_fallback(root, entries)

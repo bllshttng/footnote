@@ -8630,9 +8630,13 @@ def cmd_exec_graph(
             st = claim_status(key, root=claims_root_for(key))
             e["claim_holder"] = st.get("holder") or ""
             e["liveness"] = _exec_liveness(str(st.get("state") or ""))
-        except Exception:  # noqa: BLE001 - inspection must not fail on claims IO
+        except Exception as exc:  # noqa: BLE001 - inspection must not fail on claims IO
+            # A probe failure is NOT "free": conflating "couldn't read" with
+            # "unclaimed" would render a live-held node as available. Mark it
+            # unknown and leave a trace rather than silently claiming free.
+            typer.echo(f"warning: claim probe failed for {nid}: {exc}", err=True)
             e["claim_holder"] = ""
-            e["liveness"] = ""
+            e["liveness"] = "unknown"
         selected.append(e)
 
     graph = compile_graph(root, selected)

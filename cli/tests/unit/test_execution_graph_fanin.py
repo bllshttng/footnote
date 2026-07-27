@@ -75,6 +75,20 @@ def test_expected_set_deduplicated():
     assert t.complete is True
 
 
+def test_unexpected_id_is_ignored_not_counted():
+    # a return for an id outside the expected set must not skew the tally
+    t = tally_fan_in(["a"], [("a", "completed"), ("z", "completed")])
+    assert t == FanInTally(expected=1, completed=1, failed=0, duplicate=0, malformed=0, missing=0)
+    assert t.complete is True
+
+
+def test_fanintally_rejects_negative_fields():
+    import pytest
+
+    with pytest.raises(ValueError):
+        FanInTally(expected=-1, completed=0, failed=0, duplicate=0, malformed=0, missing=0)
+
+
 def test_to_dict_includes_complete_flag():
     d = tally_fan_in(["a"], [("a", "completed")]).to_dict()
     assert d["complete"] is True and d["expected"] == 1

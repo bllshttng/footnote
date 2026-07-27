@@ -153,6 +153,12 @@ class FanInTally:
     malformed: int
     missing: int
 
+    def __post_init__(self) -> None:
+        for name in ("expected", "completed", "failed", "duplicate", "malformed", "missing"):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise ValueError(f"FanInTally.{name} must be a non-negative int, got {v!r}")
+
     @property
     def complete(self) -> bool:
         """True only when every expected node completed with nothing unresolved.
@@ -192,12 +198,13 @@ def tally_fan_in(
             (FAILED/BLOCKED). A ``None`` node_id or ``None``/unknown kind is
             counted as ``malformed`` and attributed to no id.
 
-    Counting rules:
-        * ``duplicate``  - a second+ observation for an id already seen.
+    Counting rules (all scoped to ``expected`` - a return for an id outside the
+    expected set is ignored, since it belongs to no barrier this tally gates):
+        * ``duplicate``  - a second+ observation for an expected id already seen.
         * ``missing``    - an expected id with no attributed observation.
-        * ``completed``  - distinct ids observed completing.
-        * ``failed``     - attributed returns in a non-terminal-success state.
-        * ``malformed``  - returns that could not be parsed/attributed.
+        * ``completed``  - distinct expected ids observed completing.
+        * ``failed``     - attributed expected returns in a non-success state.
+        * ``malformed``  - returns that could not be parsed/attributed at all.
     """
     expected_set = {e for e in expected if e}
     seen: set[str] = set()
@@ -209,6 +216,12 @@ def tally_fan_in(
     for node_id, kind in observed:
         if not node_id or kind not in ("completed", "failed"):
             malformed += 1
+            continue
+        if node_id not in expected_set:
+            # A return for a node this barrier never expected (a stale id, a
+            # typo, a sibling barrier's return crossing streams) is irrelevant
+            # to THIS fan-in's completeness - ignore it rather than let it
+            # permanently skew `completed` and block the barrier with no flag.
             continue
         if node_id in seen:
             duplicate += 1
