@@ -48,23 +48,38 @@ ok()    { echo "  OK:    $*"; }
 # exits 2 with no `rung=` line, indistinguishable from any other non-answer at
 # this layer - and a check that quietly passes on a stale binary is exactly the
 # decorative guard this consolidation exists to remove.
+#
+# SOURCE FIRST, for the same reason `_semantic_validate` resolves that way: an
+# installed `fno` older than this checkout does not have verbs this source
+# defines. CI is exactly that case - it runs the repo's scripts against whatever
+# `fno` is on PATH - so an installed-only lookup degrades to a warning there and
+# the check never actually runs. Falls back to the installed binary so the
+# script still works from a plugin install with no source tree.
 _plan_rung() {
-    local _out=""
-    if ! command -v fno >/dev/null 2>&1; then
-        printf '!fno CLI not found'
-        return 0
-    fi
+    local _out="" _src=""
+    _src="$(_fno_source_python)"
     set +o pipefail
-    _out="$(fno plan rung "$1" 2>/dev/null | sed -n 's/^rung=//p' | head -1)"
+    if [[ -n "$_src" ]]; then
+        local _py="${_src%%|*}" _root="${_src##*|}"
+        _out="$(PYTHONPATH="$_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
+            "$_py" -m fno.cli plan rung "$1" 2>/dev/null \
+            | sed -n 's/^rung=//p' | head -1)"
+    fi
+    if [[ -z "$_out" ]] && command -v fno >/dev/null 2>&1; then
+        _out="$(fno plan rung "$1" 2>/dev/null | sed -n 's/^rung=//p' | head -1)"
+    fi
     set -o pipefail
     if [[ -z "$_out" ]]; then
-        printf "!installed fno predates 'fno plan rung'; run 'fno update' or 'fno doctor --fix'"
+        printf "!no fno CLI could answer 'plan rung' (installed fno may predate it; run 'fno update' or 'fno doctor --fix')"
         return 0
     fi
     printf '%s' "$_out"
 }
 
-_semantic_validate() {
+# Echo `<python>|<source_root>` for a checkout that can import the fno CLI, or
+# nothing. Shared by _plan_rung and _semantic_validate so the "which fno runs?"
+# question has ONE answer here rather than two that can drift apart.
+_fno_source_python() {
     local repo_root="" script_dir="" source_root="" candidate="" python_bin=""
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
     script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -77,16 +92,41 @@ _semantic_validate() {
             break
         fi
     done
+    [[ -z "$source_root" ]] && return 0
+    if [[ -n "${FNO_PYTHON:-}" && -x "${FNO_PYTHON}" ]]; then
+        python_bin="$FNO_PYTHON"
+    elif [[ -x "$source_root/cli/.venv/bin/python" ]]; then
+        python_bin="$source_root/cli/.venv/bin/python"
+    elif command -v python3 >/dev/null 2>&1; then
+        python_bin=$(command -v python3)
+    elif command -v python >/dev/null 2>&1; then
+        python_bin=$(command -v python)
+    fi
+    [[ -z "$python_bin" ]] && return 0
+    printf '%s|%s' "$python_bin" "$source_root"
+}
+
+_semantic_validate() {
+    local source_root="" python_bin="" _src=""
+    # Same resolver `_plan_rung` uses - one answer to "which fno runs?".
+    _src="$(_fno_source_python)"
+    if [[ -n "$_src" ]]; then
+        python_bin="${_src%%|*}"
+        source_root="${_src##*|}"
+    else
+        # No usable interpreter, but a source tree may still exist; the uv arm
+        # below can still run it, and the refusal message names the root.
+        local script_dir candidate repo_root
+        repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+        script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+        for candidate in "$repo_root" "$script_dir/.." "$script_dir/../../.."; do
+            if [[ -n "$candidate" && -d "$candidate/cli/src/fno" ]]; then
+                source_root=$(cd "$candidate" && pwd)
+                break
+            fi
+        done
+    fi
     if [[ -n "$source_root" ]]; then
-        if [[ -n "${FNO_PYTHON:-}" && -x "${FNO_PYTHON}" ]]; then
-            python_bin="$FNO_PYTHON"
-        elif [[ -x "$source_root/cli/.venv/bin/python" ]]; then
-            python_bin="$source_root/cli/.venv/bin/python"
-        elif command -v python3 >/dev/null 2>&1; then
-            python_bin=$(command -v python3)
-        elif command -v python >/dev/null 2>&1; then
-            python_bin=$(command -v python)
-        fi
         # A source checkout whose interpreter lacks the CLI deps (a fresh
         # worktree has no cli/.venv, so this lands on a bare python3) would
         # otherwise surface an ImportError traceback as a plan violation.
