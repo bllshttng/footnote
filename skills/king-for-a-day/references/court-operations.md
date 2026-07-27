@@ -35,7 +35,7 @@ Every agent-to-agent payload carries the `<fno_mail>` envelope - king to teammat
 | Job | Verb |
 |---|---|
 | Spawn a teammate pane | `fno agents spawn --name <n> "<payload>" --substrate pane --at current --split <dir> --effort <e>` |
-| Move a running pane into another workspace | `fno mux layout apply` rebinds a bound live pane into a target tab, PTY intact, but needs a full template/spec plus its whole slot set - see mux-layout-templates. No `fno mux pane` verb does it (`break` only detaches to a new tab in place). A coronation-time move, not a mid-wave shuffle |
+| Move a running pane into another workspace | `fno mux layout apply` rebinds a bound live pane into a target tab, PTY intact, but needs a full template (or a spec file) plus its whole slot set - see mux-layout-templates. No `fno mux pane` verb does it (`break` only detaches to a new tab in place). A coronation-time move, not a mid-wave shuffle |
 | Arm a wake before you stop | `fno-agents wait --agent <name> --state done --timeout-ms <n>` (harness-tracked, one per unreconciled teammate; never `idle`, never `&`) |
 | Anoint a sub-king at spawn | `fno agents spawn --name <n> "<payload>" --substrate pane --workspace <w> --split <dir> --crown level=<N>,scope=<scope>` (a king running a court belongs in its own mission workspace) |
 | Coronate a running session in place | `fno agents crown <handle> --scope <scope> [--level N]` (scope = epic/project/node id; level 0..2) |
