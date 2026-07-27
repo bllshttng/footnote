@@ -138,7 +138,6 @@ Hook events used:
 Key differences from Claude Code:
 - No native stop blocking (`supports_stop_blocking: false`)
 - No subagent dispatch - runs sequential on main thread
-- Supports experimental project-agent upgrade when `.gemini/agents/` directory exists
 - Requires soft hook fallback for loop enforcement
 
 ### Codex CLI
