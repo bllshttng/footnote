@@ -45,6 +45,7 @@ from fno.adapters.providers.dispatch import _env_for_api_key, _env_for_oauth
 from fno.adapters.providers.loader import load_providers
 from fno.adapters.providers.model import ProviderUnavailableError
 from fno.adapters.providers.staging import _default_providers_root, verify_staged
+from fno.agents.model_routing import MODEL_ENV_KEYS
 
 
 class AccountResolutionError(ValueError):
@@ -71,10 +72,9 @@ SCRUB_AUTH_VARS = (
     "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    # Reused, not restated: the routed-model set is the same set a route
+    # composes, so a new Claude tier lands in both at once.
+    *MODEL_ENV_KEYS,
 )
 
 

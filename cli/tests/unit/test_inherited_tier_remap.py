@@ -12,7 +12,12 @@ from types import SimpleNamespace
 import pytest
 
 from fno.agents.account_env import SCRUB_AUTH_VARS
-from fno.agents.model_routing import TierRemapConflict, check_spawn_tier_remap
+from fno.agents.model_routing import (
+    MODEL_ENV_KEYS,
+    TIER_ALIASES,
+    TierRemapConflict,
+    check_spawn_tier_remap,
+)
 from fno.agents.rust_runtime import _scrub_account_auth_at_seam, inherited_tier_remap
 
 ZAI_ENV = {
@@ -97,6 +102,29 @@ def test_a_coherent_anthropic_tier_pin_is_not_a_conflict():
         check_spawn_tier_remap("claude", "opus", env=env)
     # A foreign vendor id is still a conflict.
     assert inherited_tier_remap([*BASE, "--model", "opus"], ZAI_ENV) is not None
+
+
+def test_the_fable_tier_is_covered_everywhere():
+    # `fable` is a live alias here (fno agents spawn --model fable), and it has
+    # its own ANTHROPIC_DEFAULT_FABLE_MODEL. Missing it left the fable tier of a
+    # routed worker resolving at Anthropic while every other tier ran on the
+    # secondary provider, and let --model fable slip the guard.
+    assert "fable" in TIER_ALIASES
+    assert "ANTHROPIC_DEFAULT_FABLE_MODEL" in MODEL_ENV_KEYS
+    assert "ANTHROPIC_DEFAULT_FABLE_MODEL" in SCRUB_AUTH_VARS
+    env = {"ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.2[1m]"}
+    assert inherited_tier_remap([*BASE, "--model", "fable"], env) == (
+        "fable",
+        "glm-5.2[1m]",
+    )
+
+
+def test_routed_env_covers_every_tier_alias():
+    # The set a route composes must equal the set of tiers, or a worker leaks
+    # the uncovered tier back to Anthropic.
+    assert set(MODEL_ENV_KEYS) == {"ANTHROPIC_MODEL"} | {
+        f"ANTHROPIC_DEFAULT_{a.upper()}_MODEL" for a in TIER_ALIASES
+    }
 
 
 def test_payload_tokens_after_argv_are_not_read_as_flags():

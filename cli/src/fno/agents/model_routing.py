@@ -25,9 +25,9 @@ same vendors publish (z.ai's ``/api/coding/paas/v4``) are for OpenAI-SDK
 consumers and a future codex/openai lane, not for a claude worker. A provider
 whose ``protocol`` is not ``anthropic`` is skipped here with a notice.
 
-Claude Code internally requests opus/sonnet/haiku tiers (background tasks use
-haiku). Setting ``ANTHROPIC_MODEL`` + the three ``ANTHROPIC_DEFAULT_*`` tier
-vars to the routed model sends the WHOLE worker to the secondary provider, so no
+Claude Code internally requests the opus/sonnet/haiku/fable tiers (background
+tasks use haiku). Setting ``ANTHROPIC_MODEL`` + EVERY ``ANTHROPIC_DEFAULT_*`` tier
+var to the routed model sends the WHOLE worker to the secondary provider, so no
 Anthropic usage is recorded (AC1-HP). The background (haiku) tier defaults to
 the provider's cheaper ``haiku_model`` (zai -> ``glm-4.5-air``) so judgment-light
 background traffic runs cheap on the SAME secondary provider; opus/sonnet stay
@@ -147,21 +147,21 @@ def resolve_spawn_route(
 # autolaunch; unconfigured it fails safe to the primary Anthropic model.
 KNOWN_LANE_ROLES = ("build",)
 
+#: Claude tier aliases: the names Claude Code resolves through
+#: ``ANTHROPIC_DEFAULT_<TIER>_MODEL``. ``fable`` is one of them and is a live
+#: alias here (``fno agents spawn --model fable``); omitting it left the fable
+#: tier of a routed worker resolving at Anthropic while every other tier ran on
+#: the secondary provider.
+TIER_ALIASES = ("opus", "sonnet", "haiku", "fable")
+
 # Every tier Claude Code may request internally. Setting all of them to the
 # routed model keeps the entire worker (incl. background haiku) on the secondary
-# provider, so zero Anthropic usage is recorded.
-_MODEL_ENV_KEYS = (
+# provider, so zero Anthropic usage is recorded. Derived from TIER_ALIASES so a
+# future tier cannot be added in one place and forgotten in the other.
+MODEL_ENV_KEYS = (
     "ANTHROPIC_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    *(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL" for alias in TIER_ALIASES),
 )
-
-
-#: Claude tier aliases the ``ANTHROPIC_DEFAULT_<TIER>_MODEL`` vars redefine.
-#: Passing one as a model asks for "whatever this tier resolves to", which is
-#: exactly what an inherited remap redefines.
-TIER_ALIASES = ("opus", "sonnet", "haiku")
 
 
 class TierRemapConflict(ValueError):
@@ -459,7 +459,7 @@ def _route_for_target(
         return None
 
     route = {"ANTHROPIC_BASE_URL": base_url, "ANTHROPIC_AUTH_TOKEN": key}
-    for k in _MODEL_ENV_KEYS:
+    for k in MODEL_ENV_KEYS:
         route[k] = model
     # Item 1: route the background (haiku) tier to the provider's cheaper
     # haiku_model (zai -> glm-4.5-air). Still the SAME secondary provider
