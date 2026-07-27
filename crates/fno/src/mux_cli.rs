@@ -1072,7 +1072,7 @@ fn squad_store_verdict(total: usize, orphan: usize) -> Check {
             name: "squad store".into(),
             verdict: Verdict::Warn,
             detail: format!("{orphan} orphaned squad(s) (no surviving origin, no live member)"),
-            remedy: Some("fno mux squad prune".into()),
+            remedy: Some("fno mux workspace prune".into()),
         }
     }
 }
@@ -1092,7 +1092,7 @@ fn squad_store_check() -> Check {
             name: "squad store".into(),
             verdict: Verdict::Warn,
             detail: "agent registry unreadable; orphan count unknown".into(),
-            remedy: Some("fno mux squad prune".into()),
+            remedy: Some("fno mux workspace prune".into()),
         };
     };
     let origin_exists = |p: &str| std::path::Path::new(p).exists();
@@ -1175,21 +1175,33 @@ pub fn doctor(json: bool) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// `fno mux squad prune` - reap dead-origin residue (x-a572)
+// `fno mux workspace prune` - reap dead-origin residue (x-a572)
 // ---------------------------------------------------------------------------
 
-/// `fno mux squad <verb> ...`: the squad-store maintenance family. Only `prune`
-/// exists today; a bare `mux squad` or an unknown verb is usage. Carries the
-/// tokens after `mux squad` verbatim, like `pane`/`block`.
-pub fn squad(args: &[OsString]) -> i32 {
+/// `fno mux workspace <verb> ...`: the workspace-store maintenance family. Only
+/// `prune` exists today; a bare verb or an unknown verb is usage. Carries the
+/// tokens after the verb family verbatim, like `pane`/`block`.
+///
+/// The retired spelling `fno mux squad` still dispatches here (main.rs) and is
+/// deliberately unadvertised, mirroring how `--squad` is hidden-deprecated
+/// alongside the canonical `--workspace`. The user-facing/internal vocabulary
+/// split that leaves behind - `workspace` everywhere a person types, `squad`
+/// throughout this crate's identifiers - is a decision, not an unfinished
+/// rename: renaming ~2900 internal sites buys no user-visible change and
+/// collides with every in-flight mux branch. The two remaining user-adjacent
+/// spellings, the `squad` key in the `--json` placement receipt and
+/// `~/.fno/squads.json`, ride the next change that bumps `PROTO_VERSION` or
+/// migrates the store for a real reason, where the compatibility window and
+/// the migration already exist.
+pub fn workspace(args: &[OsString]) -> i32 {
     let Some(sub) = args.first().and_then(|a| a.to_str()) else {
-        eprintln!("fno mux squad: expected a verb (prune)");
+        eprintln!("fno mux workspace: expected a verb (prune)");
         return EXIT_USAGE;
     };
     match sub {
         "prune" => squad_prune(&args[1..]),
         _ => {
-            eprintln!("fno mux squad: unknown verb {sub:?} (expected prune)");
+            eprintln!("fno mux workspace: unknown verb {sub:?} (expected prune)");
             EXIT_USAGE
         }
     }
@@ -1232,7 +1244,7 @@ fn live_pane_cwds() -> Vec<String> {
     cwds
 }
 
-/// `fno mux squad prune [--dry-run] [--include-named] [--json]`: remove squads
+/// `fno mux workspace prune [--dry-run] [--include-named] [--json]`: remove squads
 /// whose every recorded origin is gone and which host no live member or pane
 /// (x-a572). Named squads require `--include-named`. The predicate is
 /// re-evaluated under the store lock against fresh fs state, and the receipt is
@@ -1248,11 +1260,11 @@ fn squad_prune(args: &[OsString]) -> i32 {
             Some("--include-named") => include_named = true,
             Some("--json") => json = true,
             Some(other) => {
-                eprintln!("fno mux squad prune: unknown argument {other:?}");
+                eprintln!("fno mux workspace prune: unknown argument {other:?}");
                 return EXIT_USAGE;
             }
             None => {
-                eprintln!("fno mux squad prune: non-UTF-8 argument");
+                eprintln!("fno mux workspace prune: non-UTF-8 argument");
                 return EXIT_USAGE;
             }
         }
@@ -1295,7 +1307,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
                 true,
             ),
             Err(e) => {
-                eprintln!("fno mux squad prune: {e}");
+                eprintln!("fno mux workspace prune: {e}");
                 return EXIT_ERROR;
             }
         }
@@ -4104,7 +4116,7 @@ mod tests {
         let c = squad_store_verdict(137, 124);
         assert_eq!(c.verdict, Verdict::Warn);
         assert!(c.detail.contains("124 orphaned"));
-        assert_eq!(c.remedy.as_deref(), Some("fno mux squad prune"));
+        assert_eq!(c.remedy.as_deref(), Some("fno mux workspace prune"));
     }
 
     #[test]

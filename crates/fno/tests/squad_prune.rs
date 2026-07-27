@@ -1,4 +1,4 @@
-//! `fno mux squad prune` end-to-end (x-a572 task 1.2): execs the real compiled
+//! `fno mux workspace prune` end-to-end (x-a572 task 1.2): execs the real compiled
 //! binary against a crafted store and asserts the dead-origin residue is reaped
 //! while named and surviving-origin squads stay. Also proves the build-tree
 //! write guard (task 1.1, AC2-HP) refuses the prune's OWN write when
@@ -41,12 +41,23 @@ impl Scratch {
         Scratch { dir }
     }
 
-    /// Run `fno mux squad ...` with a hermetic env: HOME + FNO_AGENTS_HOME at the
-    /// scratch, an empty mux dir, and `unset_agents` controlling FNO_AGENTS_HOME
-    /// (true -> the build-tree guard must refuse the write).
+    /// Run `fno mux workspace ...` with a hermetic env: HOME + FNO_AGENTS_HOME at
+    /// the scratch, an empty mux dir, and `unset_agents` controlling
+    /// FNO_AGENTS_HOME (true -> the build-tree guard must refuse the write).
     fn run(&self, squad_args: &[&str], unset_agents: bool) -> (bool, String, String) {
+        self.run_family("workspace", squad_args, unset_agents)
+    }
+
+    /// The same run, with the verb family spelled explicitly, so the retired
+    /// `squad` alias can be driven through the identical assertions.
+    fn run_family(
+        &self,
+        family: &str,
+        squad_args: &[&str],
+        unset_agents: bool,
+    ) -> (bool, String, String) {
         let mut cmd = fno();
-        cmd.args(["mux", "squad"]).args(squad_args);
+        cmd.args(["mux", family]).args(squad_args);
         cmd.env_clear()
             .env("HOME", &self.dir)
             .env("FNO_MUX_DIR", self.dir.join("mux"));
@@ -124,6 +135,36 @@ fn prune_dry_run_writes_nothing() {
         "dry-run trailer: {stdout}"
     );
     assert_eq!(s.store(), before, "dry-run must not change the store");
+}
+
+/// The retired `mux squad` spelling stays a working, unadvertised alias: same
+/// dispatch, same flags, same output as the canonical family.
+#[test]
+fn retired_squad_spelling_prunes_identically() {
+    let canonical = Scratch::new("alias-canonical", ORPHAN_NAMED_SURVIVING);
+    let retired = Scratch::new("alias-retired", ORPHAN_NAMED_SURVIVING);
+    let args = ["prune", "--dry-run", "--include-named", "--json"];
+
+    let (ok, want, stderr) = canonical.run_family("workspace", &args, false);
+    assert!(ok, "canonical spelling exited non-zero: {stderr}\n{want}");
+    let (ok, got, stderr) = retired.run_family("squad", &args, false);
+    assert!(ok, "retired spelling exited non-zero: {stderr}\n{got}");
+    assert_eq!(got, want, "the alias must dispatch to the same prune");
+}
+
+/// A bare family verb and an unknown verb are both usage (exit 2), and the
+/// message names the one verb that exists.
+#[test]
+fn workspace_family_usage_names_prune() {
+    for (args, label) in [
+        (vec!["mux", "workspace"], "bare"),
+        (vec!["mux", "workspace", "bogus"], "unknown verb"),
+    ] {
+        let out = fno().args(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{label} is usage");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("prune"), "{label} names prune: {stderr}");
+    }
 }
 
 #[test]
@@ -219,7 +260,7 @@ fn doctor_reports_orphaned_squads_with_the_prune_remedy() {
         "the orphan count is a warn: {stdout}"
     );
     assert!(
-        stdout.contains("fno mux squad prune"),
+        stdout.contains("fno mux workspace prune"),
         "the remedy points at prune: {stdout}"
     );
     // The orphan was only DETECTED, not removed - doctor is read-only.
