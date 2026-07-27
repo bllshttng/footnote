@@ -238,8 +238,8 @@ esac
 # A bg /target|/do|/fix launched into a repo's MAIN checkout lands on the
 # canonical (often protected) branch and relies on the soft skill instruction
 # "a bg /target self-creates its worktree before building." Do it
-# deterministically here instead: create ~/conductor/workspaces/<repo>/<name>
-# on a fresh feature branch and launch THERE, so the worker is born isolated
+# deterministically here instead: `fno worktree ensure` (policy-resolved base,
+# see the call below) on a fresh feature branch, launching THERE so it is born isolated
 # (location verdict ok from line one) regardless of whether the cwd came from
 # -P, a node's _resolved_cwd, or the caller sitting on canonical main.
 #
@@ -362,6 +362,18 @@ maybe_auto_worktree() {
   fi
 }
 maybe_auto_worktree   # self-gating: no-op unless code payload + main checkout
+
+# Admit the peer into a worktree WE own when it runs a different harness. The
+# guard refuses a foreign harness to catch an unaware human opening a second
+# CLI in live work; a peer we are deliberately dispatching is the opposite
+# case, and without this it is refused at its first Edit/Write/Bash. The
+# invitation rides on the claim rather than the peer's env because a claim is
+# on disk: it reaches the peer no matter which substrate launched it, and needs
+# no per-provider env plumbing. Best-effort - a non-owner writes nothing, and a
+# failure here must never block the spawn.
+if [[ -n "${CWD:-}" && -n "${PROVIDER:-}" ]]; then
+  ( cd "$CWD" 2>/dev/null && fno claim worktree-guard --invite "$PROVIDER" ) >/dev/null 2>&1 || true
+fi
 
 # ---- Spawn (subscription lane only) -------------------------------------
 # Run the GENUINE verb. claude `spawn` builds `claude --bg --name <name> <msg>`

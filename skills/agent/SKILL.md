@@ -442,10 +442,13 @@ follows the work-map root:
 3. else the caller's `cwd`.
 
 **Auto-worktree (x-9c4c).** When the payload writes code and the resolved
-`--cwd` is a repo's MAIN checkout, `spawn.sh` deterministically creates
-`~/conductor/workspaces/<repo>/<name>` on a fresh feature branch and launches the
-worker THERE - born isolated, location verdict `ok` from line one, no reliance on
-the worker self-creating a worktree. "Writes code" is keyed off `payload_mode`,
+`--cwd` is a repo's MAIN checkout, `spawn.sh` deterministically creates a
+worktree on a fresh feature branch and launches the worker THERE - born
+isolated, location verdict `ok` from line one, no reliance on the worker
+self-creating a worktree. It forwards the payload's harness to `fno worktree
+ensure`, so the location is whatever the per-project policy resolves to (a
+claude payload lands harness-native under `<repo>/.claude/worktrees/`); never
+assume a fixed base. "Writes code" is keyed off `payload_mode`,
 not the message text: a node `build` dispatch (claude `/target <id>`, opencode
 `/fno:target <id>`, or codex `$fno:target <id>`) and an explicit claude
 `/target`|`/do`|`/fix` passthrough all isolate; a `seed`/`handoff` and a non-code

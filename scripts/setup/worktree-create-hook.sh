@@ -64,7 +64,34 @@ fi
 MAIN_REPO="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')"
 [ -n "$MAIN_REPO" ] || { echo "WorktreeCreate hook: not in a git repo" >&2; exit 1; }
 REPO_NAME="$(basename "$MAIN_REPO")"
-WORKTREE_PATH="$HOME/conductor/workspaces/$REPO_NAME/$NAME"
+
+# Policy gate before any path decision: `never` means this project's working
+# tree IS the product, so the answer is no worktree at all.
+#
+# Refusal shape matters: a NON-ZERO exit makes Claude Code fall back to its
+# default worktree flow, which creates the worktree we are refusing. The
+# supported abort is exit 0 with NOTHING on stdout ("no successful output").
+# Fails open on anything but an affirmative `never` - this is the interactive
+# path and a stale fno must not break it.
+if command -v fno >/dev/null 2>&1; then
+    WT_POLICY="$(fno worktree policy --repo "$MAIN_REPO" 2>/dev/null | head -1 | tr -d '[:space:]')"
+    if [ "$WT_POLICY" = "never" ]; then
+        echo "worktree.policy=never for $REPO_NAME: refusing to create a worktree; work in place on the canonical checkout." >&2
+        exit 0
+    fi
+fi
+
+# Base comes from config, never a hardcoded allocator: this script is wired
+# user-globally into repos that have their own worktrees_base (or none).
+WT_BASE=""
+if command -v fno >/dev/null 2>&1; then
+    WT_BASE="$(fno config get config.paths.worktrees_base 2>/dev/null || true)"
+    [ "$WT_BASE" = "null" ] && WT_BASE=""
+fi
+WT_BASE="${WT_BASE/#\~/$HOME}"
+[ -n "$WT_BASE" ] || WT_BASE="$MAIN_REPO/.claude/worktrees"
+WORKTREE_PATH="$WT_BASE/$REPO_NAME/$NAME"
+[ "$WT_BASE" = "$MAIN_REPO/.claude/worktrees" ] && WORKTREE_PATH="$WT_BASE/$NAME"
 BRANCH_NAME="worktree-$NAME"
 
 echo "=== Creating worktree at $WORKTREE_PATH ===" >&2

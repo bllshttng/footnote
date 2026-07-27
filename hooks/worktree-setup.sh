@@ -38,6 +38,23 @@ if command -v jq >/dev/null 2>&1; then
     WORKTREE_PATH=$(printf '%s' "$HOOK_INPUT" | jq -r '.path // .worktree_path // empty' 2>/dev/null || true)
 fi
 [[ -z "$WORKTREE_PATH" ]] && WORKTREE_PATH="$(pwd)"
+# Policy gate, BEFORE the cd below. Two things force it here rather than later:
+# the cd exits non-zero when CC has not pre-created the path, and per the
+# Contract above a non-zero exit FALLS BACK to CC's default worktree flow -
+# i.e. it creates the very worktree we are refusing. The supported refusal is
+# exit 0 with NOTHING on stdout ("no successful output"), which aborts.
+_gate_repo="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')"
+if [[ -n "$_gate_repo" ]] && command -v fno >/dev/null 2>&1 \
+   && [[ "$(fno worktree policy --repo "$_gate_repo" 2>/dev/null | head -1 | tr -d '[:space:]')" == "never" ]]; then
+    # CC pre-creates the default-location worktree before firing this hook, so
+    # refusing without reaping it would leave exactly the stray we are refusing.
+    if [[ -n "$WORKTREE_PATH" && -d "$WORKTREE_PATH" ]]; then
+        git -C "$_gate_repo" worktree remove --force "$WORKTREE_PATH" 2>/dev/null || true
+    fi
+    echo "worktree.policy=never for $(basename "$_gate_repo"): refusing to create a worktree; work in place on the canonical checkout." >&2
+    exit 0
+fi
+
 # Normalize to an absolute path and cd into it. Subsequent checks (pnpm-lock.yaml,
 # node_modules, pyproject.toml, etc.) use relative paths, so they must run inside
 # the worktree even if CC invoked us from a different cwd.

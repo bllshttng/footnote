@@ -359,3 +359,37 @@ def test_worktree_guard_override_env(tmp_path, monkeypatch):
     r = runner.invoke(cli, ["worktree-guard", "--json"])
     assert r.exit_code == 0
     assert json.loads(r.stdout)["verdict"] == "override"
+
+
+def test_worktree_guard_grant_matching_worktree_is_granted(tmp_path, monkeypatch):
+    """A dispatcher stamped the worktree it sent this peer to -> proceed."""
+    _wt_env(monkeypatch, tmp_path, "CLAUDE_CODE_SESSION_ID", "s1")
+    runner.invoke(cli, ["worktree-guard", "--json"])
+    _wt_env(monkeypatch, tmp_path, "CODEX_THREAD_ID", "s2")
+    monkeypatch.setenv("FNO_WORKTREE_GRANT", "/w/repo/wt-a")
+    r = runner.invoke(cli, ["worktree-guard", "--json"])
+    assert r.exit_code == 0
+    assert json.loads(r.stdout)["verdict"] == "granted"
+
+
+def test_worktree_guard_grant_is_scoped_to_one_worktree(tmp_path, monkeypatch):
+    """The property that makes a grant safer than FNO_WORKTREE_OK: it frees the
+    worktree it names and NOTHING else. A peer granted wt-a wandering into wt-b
+    is still refused, where the blanket override would have freed both."""
+    _wt_env(monkeypatch, tmp_path, "CLAUDE_CODE_SESSION_ID", "s1", worktree="/w/repo/wt-b")
+    runner.invoke(cli, ["worktree-guard", "--json"])
+    _wt_env(monkeypatch, tmp_path, "CODEX_THREAD_ID", "s2", worktree="/w/repo/wt-b")
+    monkeypatch.setenv("FNO_WORKTREE_GRANT", "/w/repo/wt-a")
+    r = runner.invoke(cli, ["worktree-guard", "--json"])
+    assert r.exit_code == 1
+    assert json.loads(r.stdout)["verdict"] == "foreign"
+
+
+def test_worktree_guard_empty_grant_is_inert(tmp_path, monkeypatch):
+    _wt_env(monkeypatch, tmp_path, "CLAUDE_CODE_SESSION_ID", "s1")
+    runner.invoke(cli, ["worktree-guard", "--json"])
+    _wt_env(monkeypatch, tmp_path, "CODEX_THREAD_ID", "s2")
+    monkeypatch.setenv("FNO_WORKTREE_GRANT", "   ")
+    r = runner.invoke(cli, ["worktree-guard", "--json"])
+    assert r.exit_code == 1
+    assert json.loads(r.stdout)["verdict"] == "foreign"

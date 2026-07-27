@@ -510,3 +510,94 @@ class TestReadOnlyInvariant:
             assert result.exit_code in (0, 2), result.stdout + result.stderr
         after = _state_hashes(project)
         assert before == after, f"{verb} mutated state: {before} -> {after}"
+
+
+# --- model resolution: "what model am I actually running?" -------------------
+#
+# The parsing itself belongs to fno.agents.self_stamp (harness-aware, and it
+# already rejects sidechain / non-assistant rows). These cover the seam whoami
+# adds on top: surface it when known, stay silent when not, on EVERY harness.
+
+
+def _claude_transcript(home: Path, session_id: str, rows: List[dict]) -> None:
+    d = home / "projects" / "-some-cwd"
+    d.mkdir(parents=True, exist_ok=True)
+    d.joinpath(f"{session_id}.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
+    )
+
+
+def _codex_rollout(home: Path, session_id: str, models: List[str]) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    home.joinpath(f"rollout-{session_id}.jsonl").write_text(
+        "".join(
+            json.dumps({"type": "turn_context", "payload": {"model": m}}) + "\n" for m in models
+        ),
+        encoding="utf-8",
+    )
+
+
+def _only_harness(monkeypatch, marker: str, session: str) -> None:
+    for m in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(m, raising=False)
+    monkeypatch.setenv(marker, session)
+
+
+def test_session_model_reads_claude_transcript(tmp_path: Path, monkeypatch) -> None:
+    from fno.agent import cli as agent_cli
+
+    _only_harness(monkeypatch, "CLAUDE_CODE_SESSION_ID", "sid-c")
+    monkeypatch.setenv("FNO_CLAUDE_PROJECTS_DIR", str(tmp_path / "projects"))
+    _claude_transcript(
+        tmp_path,
+        "sid-c",
+        [{"type": "assistant", "message": {"model": "claude-opus-5"}}],
+    )
+    assert agent_cli._session_model() == "claude-opus-5"
+
+
+def test_session_model_resolves_for_a_codex_session(tmp_path: Path, monkeypatch) -> None:
+    """Codex records the model in turn_context.payload, not message.model. A
+    claude-shaped parser reported null here even though the model was present."""
+    from fno.agent import cli as agent_cli
+
+    _only_harness(monkeypatch, "CODEX_THREAD_ID", "sid-x")
+    monkeypatch.setenv("FNO_CODEX_SESSIONS_DIR", str(tmp_path / "codex"))
+    _codex_rollout(tmp_path / "codex", "sid-x", ["gpt-5.6-luna"])
+    assert agent_cli._session_model() == "gpt-5.6-luna"
+
+
+def test_session_model_ignores_sidechain_workers(tmp_path: Path, monkeypatch) -> None:
+    """A subagent's model is not this session's model, and a sidechain row can
+    be the newest model-bearing row in the file."""
+    from fno.agent import cli as agent_cli
+
+    _only_harness(monkeypatch, "CLAUDE_CODE_SESSION_ID", "sid-s")
+    monkeypatch.setenv("FNO_CLAUDE_PROJECTS_DIR", str(tmp_path / "projects"))
+    _claude_transcript(
+        tmp_path,
+        "sid-s",
+        [
+            {"type": "assistant", "message": {"model": "claude-opus-5"}},
+            {"type": "assistant", "isSidechain": True, "message": {"model": "claude-haiku-4-5"}},
+        ],
+    )
+    assert agent_cli._session_model() == "claude-opus-5"
+
+
+def test_session_model_absent_degrades_to_none(tmp_path: Path, monkeypatch) -> None:
+    """whoami is the confused-agent recovery verb: an unresolvable model drops
+    the line rather than becoming a failure."""
+    from fno.agent import cli as agent_cli
+
+    _only_harness(monkeypatch, "CLAUDE_CODE_SESSION_ID", "sid-missing")
+    monkeypatch.setenv("FNO_CLAUDE_PROJECTS_DIR", str(tmp_path / "projects"))
+    assert agent_cli._session_model() is None
+
+
+def test_session_model_none_without_ambient_identity(monkeypatch) -> None:
+    from fno.agent import cli as agent_cli
+
+    for m in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(m, raising=False)
+    assert agent_cli._session_model() is None

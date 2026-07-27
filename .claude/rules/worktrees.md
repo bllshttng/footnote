@@ -33,7 +33,11 @@ Precedence: per-project `work.workspaces.<slug>.projects[].worktree` > global `c
 
 The per-project policy outranks `worktrees_base`: setting the base alone does NOT relocate a claude default; you must also set `worktree.policy = "external"`. "conductor" is a `worktrees_base` value, not a policy value. A config parse error or out-of-enum value REFUSES creation (fail closed): ensure exits non-zero with empty stdout so the caller never auto-isolates on a misconfig.
 
-Note the two creation paths diverge when `worktrees_base` is set: autonomous dispatch (`fno worktree ensure`) stays harness-native unless `policy = "external"`; the `claude --worktree` `WorktreeCreate` hook relocates off `worktrees_base` directly and does not read the policy.
+Both creation paths honor `never`: the `WorktreeCreate` hook resolves the policy through `fno worktree policy` (one resolver, no second precedence impl) and refuses.
+
+The refusal SHAPE is load-bearing and counter-intuitive. Per the hook contract, a **non-zero exit falls back to Claude Code's default worktree flow**, so exiting non-zero creates the very worktree you meant to block. The supported abort is **exit 0 with nothing on stdout**, which CC reports as "no successful output". Claude Code also PRE-CREATES the worktree before firing the hook, so the refusal reaps that directory too or the stray survives. The gate runs before the hook's own `cd`, because an absent path would fail there first and take the fallback branch. It fails open on anything but an affirmative `never`, since a stale `fno` must not break interactive `claude --worktree`.
+
+The paths still diverge on WHERE, when `worktrees_base` is set: autonomous dispatch (`fno worktree ensure`) stays harness-native unless `policy = "external"`, while the hook relocates off `worktrees_base` directly.
 
 ## Removal
 
@@ -57,7 +61,7 @@ Three mechanisms share one read-only verdict helper, `hooks/helpers/check-impl-l
 
 - **SessionStart heads-up** (`hooks/session-start.sh`): non-blocking note when on the canonical protected branch.
 - **Implementation-entry refusal** (`/target`, `/do`, `/fix`): on `canonical-protected` they refuse before the first write, with the `TARGET_LOCATION_OK=main-acknowledged` escape.
-- **Config-driven relocation:** the `WorktreeCreate` hook (`hooks/worktree-setup.sh`) relocates `claude --worktree` to `<worktrees_base>/<repo>/<name>` when the knob is set; unset leaves harness-native.
+- **Config-driven relocation:** the `WorktreeCreate` hook (`hooks/worktree-setup.sh`) refuses outright on `policy = "never"`, else relocates `claude --worktree` to `<worktrees_base>/<repo>/<name>` when the knob is set; unset leaves harness-native. `scripts/setup/worktree-create-hook.sh` (the user-global wiring for non-footnote repos) does the same and reads its base from config rather than hardcoding one.
 
 Do not wire BOTH the plugin `WorktreeCreate` hook AND a user-global one for the same repo (hooks merge across levels and race). For non-footnote projects, wire `scripts/setup/worktree-create-hook.sh` into `~/.claude/settings.json` `WorktreeCreate`.
 

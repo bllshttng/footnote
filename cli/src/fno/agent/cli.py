@@ -52,6 +52,26 @@ def _mail_handle() -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _session_model() -> Optional[str]:
+    """What model is actually answering, or None.
+
+    Delegates to the one harness-aware resolver rather than parsing transcripts
+    here: it already knows claude's ``message.model`` rows from codex's
+    ``turn_context.payload.model``, and already rejects sidechain and
+    non-assistant rows, which a second parser would have to re-learn.
+
+    Deliberately NOT the attest sidecar. That records the model a session
+    intended to route to (``ANTHROPIC_MODEL``), and attest-model.sh exists
+    precisely because such a request can silently fall back to a different
+    model - so the sidecar states the ask, while the transcript states what
+    answered.
+    """
+    from fno.agents.self_stamp import resolve_self_model
+
+    model = resolve_self_model()
+    return model if model and model != "unknown" else None
+
+
 def _mail_unread_count(
     handle: Optional[str], agent_self: str, session_id: Optional[str], project_root: Path
 ) -> int:
@@ -242,6 +262,7 @@ def whoami_command(
         payload = _ctx_to_jsonable(state)
         payload["mail_handle"] = mail
         payload["harness_session_id"] = harness_sid
+        payload["model"] = _session_model()
         if mail_unread:
             payload["mail_unread"] = mail_unread
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
@@ -282,6 +303,12 @@ def whoami_command(
         # SessionStart context - a collidable prefix invites copying the count.
         typer.echo(f"mail_unread: {mail_unread}")
     typer.echo(f"provider: {state.provider}")
+    # Deliberately its own line, not appended to `provider:` - sigma's reviewer
+    # bootstrap seds `^provider:` for the invoking harness and a suffix would
+    # corrupt what it reads.
+    model = _session_model()
+    if model:
+        typer.echo(f"model:    {model}")
     # x-301a: opportunistic mesh-name pointer. `fno whoami` reports operating
     # CONTEXT and does not otherwise surface the registered mesh name; when this
     # process IS a mesh worker (the spawn path injected FNO_AGENT_SELF), echo it

@@ -16,9 +16,12 @@ from pathlib import Path
 from fno.claims.core import acquire_claim, claim_status
 from fno.claims.worktree_guard import (
     VERDICT_ACQUIRED,
+    claim_guests,
+    invite_guest,
     VERDICT_FOREIGN,
     VERDICT_NO_WORKTREE,
     VERDICT_OK,
+    VERDICT_GRANTED,
     VERDICT_OVERRIDE,
     guard_worktree,
     worktree_claim_key,
@@ -207,3 +210,104 @@ class TestStaleRecovery:
         r = _guard(tmp_path, "claude", "s1")
         assert r.verdict == VERDICT_ACQUIRED
         assert claim_status(key, root=tmp_path)["harness"] == "claude"
+
+
+class TestOrchestratedGrant:
+    """A dispatcher deliberately routing a peer into a foreign-owned worktree.
+
+    The guard exists to catch an UNAWARE human opening a second harness in a
+    live worktree. An orchestrated review panel is the opposite case and was
+    refused only because harness identity stood in for intent.
+    """
+
+    def test_grant_downgrades_foreign(self, tmp_path):
+        _guard(tmp_path, "claude", "s1")
+        r = _guard(tmp_path, "codex", "s2", granted=True)
+        assert r.verdict == VERDICT_GRANTED
+        assert not r.blocked
+        assert r.owner_harness == "claude"
+
+    def test_grant_reports_distinctly_from_operator_override(self, tmp_path):
+        """Provenance must stay legible: "the dispatcher routed this" is not the
+        same event as "an operator forced this", even though both proceed."""
+        _guard(tmp_path, "claude", "s1")
+        granted = _guard(tmp_path, "codex", "s2", granted=True)
+        forced = _guard(tmp_path, "codex", "s2", override=True)
+        assert granted.verdict == VERDICT_GRANTED
+        assert forced.verdict == VERDICT_OVERRIDE
+
+    def test_grant_wins_when_both_present(self, tmp_path):
+        """Grant is the more specific provenance, so it names the verdict."""
+        _guard(tmp_path, "claude", "s1")
+        r = _guard(tmp_path, "codex", "s2", granted=True, override=True)
+        assert r.verdict == VERDICT_GRANTED
+
+    def test_grant_does_not_affect_a_free_worktree(self, tmp_path):
+        """A grant is not a claim: entering a FREE worktree still acquires
+        normally, so the peer becomes a real owner rather than a permanent guest."""
+        r = _guard(tmp_path, "codex", "s2", granted=True)
+        assert r.verdict == VERDICT_ACQUIRED
+
+    def test_same_harness_unaffected_by_grant(self, tmp_path):
+        _guard(tmp_path, "claude", "s1")
+        r = _guard(tmp_path, "claude", "s2", granted=True)
+        assert r.verdict == VERDICT_OK
+
+
+class TestOwnerInvitedGuests:
+    """The durable half of the grant: the OWNER records the invitation on its
+    own claim, so a peer is admitted no matter how it was launched. Env would
+    have to be threaded through every per-provider spawn site and would still
+    not survive a substrate that does not inherit it."""
+
+    def _own(self, tmp_path, harness="claude"):
+        _guard(tmp_path, harness, "s1")
+        return f"worktree-owner:{harness}"
+
+    def test_invited_guest_is_granted(self, tmp_path):
+        holder = self._own(tmp_path)
+        invite_guest(WT, "codex", my_harness="claude", my_holder=holder, root=tmp_path)
+        r = _guard(tmp_path, "codex", "s2")
+        assert r.verdict == VERDICT_GRANTED
+        assert not r.blocked
+
+    def test_uninvited_harness_still_refused(self, tmp_path):
+        holder = self._own(tmp_path)
+        invite_guest(WT, "codex", my_harness="claude", my_holder=holder, root=tmp_path)
+        r = _guard(tmp_path, "gemini", "s3")
+        assert r.verdict == VERDICT_FOREIGN
+        assert r.blocked
+
+    def test_invitation_survives_owner_next_write(self, tmp_path):
+        """Regression: an idempotent re-acquire REBUILDS the claim from what it
+        is handed, so refreshing without the existing metadata would drop the
+        guest - the invitation would work until the owner's next write."""
+        holder = self._own(tmp_path)
+        invite_guest(WT, "codex", my_harness="claude", my_holder=holder, root=tmp_path)
+        _guard(tmp_path, "claude", "s1")  # owner writes again -> refreshes its claim
+        assert _guard(tmp_path, "codex", "s2").verdict == VERDICT_GRANTED
+
+    def test_non_owner_cannot_invite_itself(self, tmp_path):
+        """The property that keeps this from being a backdoor."""
+        self._own(tmp_path)
+        invite_guest(
+            WT, "codex", my_harness="codex", my_holder="worktree-owner:codex", root=tmp_path
+        )
+        assert _guard(tmp_path, "codex", "s2").verdict == VERDICT_FOREIGN
+
+    def test_invite_is_idempotent(self, tmp_path):
+        holder = self._own(tmp_path)
+        invite_guest(WT, "codex", my_harness="claude", my_holder=holder, root=tmp_path)
+        guests = invite_guest(WT, "codex", my_harness="claude", my_holder=holder, root=tmp_path)
+        assert guests == ["codex"]
+
+    def test_invite_on_unclaimed_worktree_is_a_noop(self, tmp_path):
+        assert invite_guest(
+            WT, "codex", my_harness="claude", my_holder="worktree-owner:claude", root=tmp_path
+        ) == []
+
+    def test_claim_guests_tolerates_junk_metadata(self, tmp_path):
+        assert claim_guests({}) == []
+        assert claim_guests({"metadata": None}) == []
+        assert claim_guests({"metadata": {"guests": "codex"}}) == []
+        assert claim_guests({"metadata": {"guests": ["codex", 7]}}) == ["codex"]
