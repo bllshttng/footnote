@@ -856,10 +856,12 @@ def test_canonical_child_plan_path_corrupt_created_at_degrades(capsys):
 # scaffold_separate_plan shape (US1 stub-proof + US4 why) ----------------------
 
 
-def test_scaffold_born_stub_not_ready():
-    # US1: the scaffold is born `status: stub`, never `ready` - the whole point.
+def test_scaffold_born_undesigned_not_ready():
+    # US1: the scaffold is born at a pre-design rung, never `ready` - the whole
+    # point. The rung is spelled `idea` now; `stub` was the same rung under a
+    # word no status vocabulary knew.
     text = scaffold_separate_plan(_grp(), "ab-epic0001", "big.md", why_digest="the why")
-    assert "status: stub\n" in text
+    assert "status: idea\n" in text
     assert "status: ready" not in text
 
 
@@ -1330,7 +1332,7 @@ def test_plans_separate_scaffolds_files_and_repoints(tmp_path, monkeypatch):
         assert f.name.endswith(f"-{c['group_slug']}-{c['id']}.md")
         assert not Path(separate_plan_path(str(doc), c["group_slug"])).exists()
         body = f.read_text()
-        assert "status: stub" in body       # born stub, never ready
+        assert "status: idea" in body       # born undesigned, never ready
         assert "kind: quick-plan" in body
         assert "parent_epic: ab-epic0001" in body
 

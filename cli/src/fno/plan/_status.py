@@ -3,15 +3,23 @@
 Enforces the monotonic progression:
     design -> ready -> in_progress -> in_review
 
-Speaks the same words as the graph `_status` ladder, one per rung. `idea` has
-no plan doc so it never appears here, and `done`/`superseded` are off-axis
+Speaks the same words as the graph `_status` ladder, one per rung. `idea` sits
+below `design` as the pre-design rung, and `done`/`superseded` are off-axis
 terminals. GRAPH_TO_PLAN_STATUS survives the unification because two of its
 rows are not renames at all: `blocked` and `deferred` map to None, the gate
 that keeps a graph-side pause from writing plan state.
 
+`idea` was originally absent here, justified by "`idea` has no plan doc so it
+never appears" - an assumption `scaffold_separate_plan` invalidated the moment
+decompose started writing a doc for a not-yet-designed child. That scaffold
+stamped `status: stub`, a word in no vocabulary, so `is_design_stage` read
+False for it and the graph derived `ready`: a linked, unfilled scaffold was
+fully dispatchable. `idea` is the rung `stub` was always naming.
+
 `shipped` and `archived` were the plan-side spellings of `in_review` and
-`superseded`. They are retired as status VALUES and accepted on read via
-STATUS_ALIASES; `shipped_at` is a timestamp field and is untouched.
+`superseded`; `stub` was the scaffold spelling of `idea`. All three are retired
+as status VALUES and accepted on read via STATUS_ALIASES; `shipped_at` is a
+timestamp field and is untouched.
 
 `reviewing`/`shipping` were pruned (x-f34f): they had zero consumers and the
 graph has no derived state that distinguishes them, so they never got written.
@@ -26,6 +34,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 STATUS_PROGRESSION: tuple[str, ...] = (
+    "idea",
     "design",
     "ready",
     "in_progress",
@@ -43,6 +52,7 @@ TERMINAL_STATUSES: tuple[str, ...] = ("done", "superseded")
 STATUS_ALIASES: dict[str, str] = {
     "shipped": "in_review",
     "archived": "superseded",
+    "stub": "idea",
 }
 
 # The full plan-status vocabulary the reconcile sweep leaves untouched: canonical
@@ -54,11 +64,12 @@ KNOWN_STATUSES: frozenset[str] = (
 
 # Graph derived `_status` -> plan `status` projection (x-f34f). Total over the
 # graph vocabulary; None means "no plan write" (a graph-side gate that must not
-# touch plan state). Identity on every rung since x-3ad5 unified the spellings -
-# it survives for `idea` (which has no plan doc) and the two None gates, which
-# are real behavior with no naming component.
+# touch plan state). Identity on every rung: x-3ad5 unified the spellings and
+# `idea`'s last non-identity row retired once `idea` became a plan-side rung. It
+# survives for the two None gates, which are real behavior with no naming
+# component.
 GRAPH_TO_PLAN_STATUS: dict[str, str | None] = {
-    "idea": "design",  # node exists, no plan doc yet
+    "idea": "idea",  # doc may exist (a decompose scaffold) but is undesigned
     "design": "design",  # doc exists but is still a design doc
     "ready": "ready",
     "in_progress": "in_progress",
@@ -73,8 +84,11 @@ GRAPH_TO_PLAN_STATUS: dict[str, str | None] = {
 # Forward-only ordering for the projection. Keyed by the plan vocabulary, so it
 # moves with any rename or the guard silently stops matching. `done` caps the
 # axis; `superseded` is a terminal reachable from any non-terminal state and is
-# never rank-compared.
+# never rank-compared. `idea` sits at -1, the same rank an unknown/absent status
+# gets from the `.get(cur, -1)` default below, so it is never a projection
+# TARGET: a graph-side `idea` can only leave a doc where it is, never demote one.
 _PROJECTION_RANK: dict[str, int] = {
+    "idea": -1,
     "design": 0,
     "ready": 1,
     "in_progress": 2,
