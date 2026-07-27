@@ -469,9 +469,10 @@ def test_merge_lock_released_when_merge_body_raises(enabled, monkeypatch, tmp_pa
 # ---------------------------------------------------------------------------
 
 
-def _rollup(*conclusions):
+def _rollup(*conclusions, head="deadbeefcafe"):
     return {
         "state": "OPEN",
+        "headRefOid": head,
         "statusCheckRollup": [
             {"name": f"c{i}", "status": "COMPLETED", "conclusion": c}
             for i, c in enumerate(conclusions)
@@ -482,10 +483,11 @@ def _rollup(*conclusions):
 class _AutoMergeRejectingRun(FakeRun):
     """gh rejects ``--auto`` (repo feature off) but accepts a plain merge."""
 
-    def __init__(self, *, rollup=None, **kw):
+    def __init__(self, *, rollup=None, head_moved=False, **kw):
         super().__init__(**kw)
         self.merge_cmds: list[list[str]] = []
         self.rollup = rollup if rollup is not None else _rollup("SUCCESS", "SUCCESS")
+        self.head_moved = head_moved
 
     def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
         cmd = list(cmd)
@@ -498,8 +500,13 @@ class _AutoMergeRejectingRun(FakeRun):
                     "GraphQL: Auto merge is not allowed for this repository "
                     "(enablePullRequestAutoMerge)",
                 )
+            if self.head_moved:
+                # What gh returns when --match-head-commit no longer matches.
+                return Result(
+                    1, "", "Head branch was modified. Review and try the merge again."
+                )
             return Result(0, "Merged pull request #42", "")
-        if cmd[:3] == ["gh", "pr", "view"] and "state,statusCheckRollup" in cmd:
+        if cmd[:3] == ["gh", "pr", "view"] and any("statusCheckRollup" in a for a in cmd):
             return Result(0, json.dumps(self.rollup) + "\n", "")
         return super().__call__(
             cmd, cwd=cwd, env=env, input_text=input_text, timeout=timeout
@@ -536,7 +543,56 @@ def test_auto_merge_unsupported_repo_merges_when_checks_are_green(
     assert len(fake.merge_cmds) == 2
     assert "--auto" in fake.merge_cmds[0]
     assert "--auto" not in fake.merge_cmds[1]
-    assert fake.merge_cmds[1] == [c for c in fake.merge_cmds[0] if c != "--auto"]
+
+
+def test_the_retry_pins_the_head_the_verdict_was_read_from(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """Without ``--auto`` nothing re-checks at merge time, so the SHA is pinned.
+
+    A verdict belongs to one commit; a push landing between the read and the
+    merge would otherwise slip an unverified head through (codex P1 on #623).
+    """
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    fake = _AutoMergeRejectingRun(
+        rollup=_rollup("SUCCESS", head="abc123def456"), toplevel=str(tmp_path)
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    retry = fake.merge_cmds[1]
+    assert "--match-head-commit" in retry
+    assert retry[retry.index("--match-head-commit") + 1] == "abc123def456"
+
+
+def test_a_racing_push_makes_the_pinned_retry_refuse(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """The pin's whole purpose: a moved head fails instead of merging."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    fake = _AutoMergeRejectingRun(head_moved=True, toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
+    assert _last_json(capsys, stream="err")["outcome"] == "failed"
+
+
+def test_a_green_verdict_without_a_readable_head_refuses(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """Green but unpinnable is not mergeable - fail closed rather than unpinned."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    fake = _AutoMergeRejectingRun(
+        rollup=_rollup("SUCCESS", head=""), toplevel=str(tmp_path)
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
+    assert "unreadable" in _last_json(capsys, stream="err")["reason"]
+    assert len(fake.merge_cmds) == 1
 
 
 def test_auto_merge_unsupported_repo_refuses_a_red_pr(
@@ -554,7 +610,6 @@ def test_auto_merge_unsupported_repo_refuses_a_red_pr(
     obj = _last_json(capsys, stream="err")
     assert obj["outcome"] == "failed"
     assert "red" in obj["reason"]
-    # Only the queueing attempt ran; the immediate merge was never issued.
     assert len(fake.merge_cmds) == 1
     assert "--auto" in fake.merge_cmds[0]
 
@@ -567,6 +622,7 @@ def test_auto_merge_unsupported_repo_holds_on_pending_checks(
     _checks_enabled(monkeypatch)
     rollup = {
         "state": "OPEN",
+        "headRefOid": "deadbeefcafe",
         "statusCheckRollup": [
             {"name": "a", "status": "COMPLETED", "conclusion": "SUCCESS"},
             {"name": "b", "status": "IN_PROGRESS", "conclusion": ""},

@@ -799,31 +799,42 @@ _AUTO_MERGE_UNSUPPORTED = re.compile(
 )
 
 
-def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict]:
-    """CI verdict for the PR, sharing `fno pr status`'s definition of green.
+def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
+    """CI verdict for the PR plus the head it describes.
 
     Borrows `verdict_for` rather than hand-rolling a statusCheckRollup read: a
     second opinion on what "green" means is how two surfaces drift apart. The
     fetch goes through this module's own `_gh` so it sits on the same process
     seam as every other call here. An unreadable rollup is ``unknown``, which
     the caller treats as not-green (fail closed).
+
+    ``headRefOid`` rides along because a verdict is only meaningful for the SHA
+    it was computed on: the caller pins the merge to that SHA so a push landing
+    between this read and the merge cannot slip an unverified head through.
     """
     from fno.pr._status import verdict_for
 
     try:
         res = _gh(
-            ["pr", "view", str(pr_number), "--json", "state,statusCheckRollup"], repo
+            [
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "state,statusCheckRollup,headRefOid",
+            ],
+            repo,
         )
     except ToolMissing:
-        return ("unknown", {})
+        return ("unknown", {}, "")
     if not res.ok or not (res.stdout or "").strip():
-        return ("unknown", {})
+        return ("unknown", {}, "")
     try:
         data = json.loads(res.stdout)
     except json.JSONDecodeError:
-        return ("unknown", {})
+        return ("unknown", {}, "")
     verdict, _exit, counts = verdict_for(data.get("statusCheckRollup") or [])
-    return (verdict, counts)
+    return (verdict, counts, (data.get("headRefOid") or "").strip())
 
 
 def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
@@ -866,7 +877,7 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
         # Dropping it silently would turn "do not merge red" into "merge
         # anything". So do here what GitHub would have done: read the checks,
         # merge only on green, and refuse otherwise.
-        verdict, counts = _checks_verdict(pr_number, repo)
+        verdict, counts, verified_head = _checks_verdict(pr_number, repo)
         if verdict != "green":
             _emit(
                 pr_number,
@@ -878,7 +889,24 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
                 err=verdict not in ("pending",),
             )
             return 2 if verdict == "pending" else 1
+        if not verified_head:
+            _emit(
+                pr_number,
+                "failed",
+                "checks read green but the PR head SHA was unreadable; refusing "
+                "to merge a head the verdict cannot be pinned to",
+                strategy,
+                err=True,
+            )
+            return 1
+        # A verdict belongs to the SHA it was computed on. Between that read and
+        # this merge, another actor can push - and `--auto` is gone, so GitHub is
+        # no longer re-checking on our behalf. Pin the merge to the verified head
+        # so a racing push makes gh refuse instead of merging an unverified (and
+        # possibly red) commit. Server-side required-check rules would cover this
+        # too, but require_checks_pass exists precisely for repos without them.
         cmd_now = [arg for arg in cmd if arg != "--auto"]
+        cmd_now += ["--match-head-commit", verified_head]
         try:
             res = _gh(cmd_now, repo)
         except ToolMissing:
