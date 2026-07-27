@@ -35,6 +35,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from fno.adapters.providers.managed import _claude_slot_config_dir
 from fno.adapters.providers.model import ProviderRecord
 
 logger = logging.getLogger(__name__)
@@ -138,18 +139,83 @@ def _token_from_blob(blob: str | None) -> str | None:
     return None
 
 
+def _record_credential_dir(record: ProviderRecord) -> Path | None:
+    """The record's OWN credential dir, or None when it has no per-record source.
+
+    ``config_dir`` (the x-d012 per-account login) outranks ``credentials_source``
+    (the oauth_dir staging lane) for the same reason ``resolve_account_overlay``
+    ranks them that way: a converged account always rides its own dir.
+    """
+    if record.config_dir is not None:
+        return Path(record.config_dir)
+    if record.credentials_source is not None:
+        return Path(record.credentials_source)
+    return None
+
+
+def _is_active_slot_occupant(record: ProviderRecord) -> bool:
+    """True when ``record`` is the account materialized in its CLI's shared slot.
+
+    The slot's credential provably belongs to the stamped account, so reading it
+    under that record's id is attributable. Any store read failure is False -
+    an unreadable stamp must never let a record borrow another's numbers.
+    """
+    try:
+        from fno.adapters.providers.managed import active_slot_id
+
+        return record.id == active_slot_id(record.cli)
+    except Exception:  # noqa: BLE001 - an unreadable store is "not attributable"
+        return False
+
+
+def _attributed_credential_dir(record: ProviderRecord) -> tuple[bool, Path | None]:
+    """``(probeable, dir)`` - whether a reading for ``record`` is attributable.
+
+    This is the invariant that keeps a probe from reporting one account's usage
+    under another's name: a snapshot is written under a record id only when the
+    bearer that produced it provably belongs to that record. Three shapes
+    qualify, and ``dir`` says where the credential lives:
+
+    - an own ``config_dir`` / ``credentials_source`` -> that dir (scoped only)
+    - a managed record that IS its CLI's active slot occupant -> ``None``,
+      meaning the shared slot (the unscoped Keychain item genuinely is its token)
+    - anything else (a non-active managed record, an api_key record) -> not
+      probeable, so the probe returns None and headroom degrades to UNKNOWN
+
+    The managed store's ``~/.fno/providers/<id>/blob`` is deliberately NOT a
+    source: it is a capture-time copy that goes stale and can duplicate across
+    ids, so a probe reading it would report a dead token's window or another
+    account's usage. Its job is slot materialization, not identity.
+    """
+    own = _record_credential_dir(record)
+    if own is not None:
+        return True, own
+    if record.auth == "managed" and _is_active_slot_occupant(record):
+        return True, None
+    return False, None
+
+
 def _claude_bearer_candidates(record: ProviderRecord) -> list[str]:
     """All candidate OAuth bearer tokens for ``record``, in preference order.
 
-    Claude Code stores the token in a ``<credentials_source>/.credentials.json``
-    file (Linux / symlinked setups) OR the macOS Keychain (the darwin default,
-    where no file exists - the reason a file-only read returned None here). The
-    Keychain item is scoped by config dir (``Claude Code-credentials-<sha256[:8]>``)
-    with the unscoped ``Claude Code-credentials`` as fallback. BOTH can exist,
-    and a stale scoped item yields a 401 while the unscoped one is live - so we
-    return every distinct token and let the probe try each until one works. All
-    read fresh per probe (tokens rotate); never cached, never logged.
+    Claude Code stores the token in a ``<dir>/.credentials.json`` file (Linux /
+    symlinked setups) OR the macOS Keychain (the darwin default, where no file
+    exists - the reason a file-only read returned None here).
+
+    The candidate set is bounded by attribution (see
+    :func:`_attributed_credential_dir`): a record with its own dir reads ONLY
+    that dir's scoped Keychain item, never the unscoped fallback, because the
+    unscoped item belongs to whoever occupies the shared ``~/.claude`` slot and
+    borrowing it would file the active account's usage under this record's name.
+    A record with no own dir is probed only when it IS the slot occupant, in
+    which case the unscoped item is its own token.
+
+    All read fresh per probe (tokens rotate); never cached, never logged.
     """
+    probeable, src = _attributed_credential_dir(record)
+    if not probeable:
+        return []
+
     tokens: list[str] = []
     seen: set[str] = set()
 
@@ -158,44 +224,43 @@ def _claude_bearer_candidates(record: ProviderRecord) -> list[str]:
             seen.add(tok)
             tokens.append(tok)
 
-    src = record.credentials_source
-    if src is not None:
-        try:
-            _add(_token_from_blob((Path(src) / ".credentials.json").read_text(encoding="utf-8")))
-        except OSError:
-            pass
+    creds_dir = src if src is not None else _claude_slot_config_dir()
+    try:
+        _add(_token_from_blob((creds_dir / ".credentials.json").read_text(encoding="utf-8")))
+    except OSError:
+        pass
     for blob in _read_claude_keychain_blobs(src):
         _add(_token_from_blob(blob))
     return tokens
 
 
 def _read_claude_keychain_blobs(config_dir: Path | None) -> list[str]:
-    """Return the raw credential blobs from every candidate Keychain item.
+    """Return the raw credential blob(s) attributable to ``config_dir``.
 
-    Tries the config-dir-scoped item first, then the unscoped one (orca's
-    ordering). Returns BOTH when both exist (a stale scoped + a live unscoped is
-    the observed reality). Non-darwin or a denied access prompt yields [].
+    A dir reads its SCOPED item (``Claude Code-credentials-<sha256[:8]>``) only;
+    ``None`` means the shared slot and reads the unscoped ``Claude
+    Code-credentials``. The two are never mixed: falling back from a stale scoped
+    item to the unscoped one is exactly how a per-account probe ends up reporting
+    the active account's numbers. Non-darwin or a denied access prompt yields [].
     """
     if sys.platform != "darwin":
         return []
     account = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
-    services: list[str] = []
     if config_dir is not None:
         suffix = hashlib.sha256(str(config_dir).encode()).hexdigest()[:8]
-        services.append(f"{_CLAUDE_KEYCHAIN_SERVICE}-{suffix}")
-    services.append(_CLAUDE_KEYCHAIN_SERVICE)
-    blobs: list[str] = []
-    for service in services:
-        try:
-            out = subprocess.run(
-                ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
-                capture_output=True, text=True, timeout=5,
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if out.returncode == 0 and out.stdout.strip():
-            blobs.append(out.stdout.strip())
-    return blobs
+        service = f"{_CLAUDE_KEYCHAIN_SERVICE}-{suffix}"
+    else:
+        service = _CLAUDE_KEYCHAIN_SERVICE
+    try:
+        out = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode == 0 and out.stdout.strip():
+        return [out.stdout.strip()]
+    return []
 
 
 def _iso_to_epoch(value: Any) -> float | None:
@@ -430,10 +495,17 @@ def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapsh
     probe is contained here (AC1-FR), logged once at debug, and mapped to None
     so a dispatch decision proceeds fail-open. api_key records and CLIs without
     a probe (gemini, glm, openclaw, hermes) return None in v1.
+
+    The gate is attribution, not auth strategy: a record is probeable when a
+    credential provably its own is resolvable (see
+    :func:`_attributed_credential_dir`). The old ``auth != "oauth_dir"`` refusal
+    made every ``managed`` account permanently UNKNOWN - the whole reason
+    ``fno providers usage`` printed ``unknown`` at exit 0 while the endpoint,
+    the bearer discovery, and the parser all worked.
     """
     if now is None:
         now = time.time()
-    if record.auth != "oauth_dir":
+    if not _attributed_credential_dir(record)[0]:
         return None
     probe = _PROBES.get(record.cli)
     if probe is None:
