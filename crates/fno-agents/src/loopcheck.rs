@@ -1037,7 +1037,13 @@ fn unattested_reviewers(
     // (codex peer review P1: a later fail was previously ignored). A reviewer is
     // satisfied iff its latest head-pinned verdict is exactly `pass`. O(lines).
     let mut latest_pass: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-    let mut latest_other_head: std::collections::HashMap<String, String> =
+    // reviewer -> every OLD head it attested at, in first-seen order, each
+    // carrying that head's LATEST verdict. A single-entry "most recent pass"
+    // map cannot survive a retraction: `pass A, pass B, fail B` overwrites A
+    // with B and then drops B, reporting no prior pass while A is still a real
+    // one (codex P2 on this PR). Multi-round review/fix cycles produce exactly
+    // that sequence.
+    let mut other_heads: std::collections::HashMap<String, Vec<(String, bool)>> =
         std::collections::HashMap::new();
     for line in content.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -1059,18 +1065,15 @@ fn unattested_reviewers(
         };
         let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
         if line_head != head_sha {
-            // Only a PASS is worth reporting as superseded. An old-head `fail`
-            // rendered as "attested at X, superseded" would imply a prior
-            // successful review that never happened (codex P2).
-            // Empty is not a head. Normalizing here means `Some` always
-            // carries something worth printing.
-            if is_pass && !line_head.is_empty() {
-                latest_other_head.insert(r, line_head.to_string());
-            } else if latest_other_head.get(&r).map(String::as_str) == Some(line_head) {
-                // A later fail on the SAME old head revokes the pass recorded
-                // above. Keeping it would claim that head was successfully
-                // attested when its latest verdict retracted exactly that.
-                latest_other_head.remove(&r);
+            // Empty is not a head; recording it would put a `Some` in the
+            // message with nothing to print.
+            if line_head.is_empty() {
+                continue;
+            }
+            let seen = other_heads.entry(r).or_default();
+            match seen.iter().position(|(h, _)| h == line_head) {
+                Some(i) => seen[i].1 = is_pass, // latest verdict wins for that head
+                None => seen.push((line_head.to_string(), is_pass)),
             }
             continue;
         }
@@ -1082,7 +1085,14 @@ fn unattested_reviewers(
         .filter(|name| latest_pass.get(*name) != Some(&true))
         .map(|name| UnattestedReviewer {
             name: name.to_string(),
-            superseded_head: latest_other_head.get(name).cloned(),
+            // The most recent old head whose LATEST verdict is still a pass.
+            // Only a pass is worth naming: an old-head `fail` rendered as
+            // "passed at X, superseded" would imply a successful review that
+            // never happened.
+            superseded_head: other_heads
+                .get(name)
+                .and_then(|heads| heads.iter().rev().find(|(_, ok)| *ok))
+                .map(|(h, _)| h.clone()),
             failed_at_head: latest_pass.get(name) == Some(&false),
         })
         .collect()
@@ -5562,6 +5572,59 @@ mod tests {
         .unwrap();
         let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
         assert_eq!(out.len(), 1);
+        assert_eq!(out[0].superseded_head, None);
+    }
+
+    #[test]
+    fn a_revoked_pass_falls_back_to_an_older_passing_head() {
+        // codex P2: `pass A, pass B, fail B` with HEAD C. A single "most recent
+        // pass" entry overwrites A with B and then drops B, so the message
+        // claims no prior pass while A is still a real one - the misleading
+        // guidance this whole node exists to delete, reappearing in exactly the
+        // multi-round review/fix cycle that produces this sequence.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("e.jsonl");
+        let line = |head: &str, verdict: &str| {
+            format!(
+                r#"{{"type":"review_attestation","data":{{"reviewer":"sigma","head_sha":"{head}","verdict":"{verdict}"}}}}"#
+            )
+        };
+        std::fs::write(
+            &p,
+            [
+                line("AAA", "pass"),
+                line("BBB", "pass"),
+                line("BBB", "fail"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC");
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].superseded_head.as_deref(),
+            Some("AAA"),
+            "a still-valid older pass must survive a newer head's retraction"
+        );
+
+        // The newest STILL-PASSING head wins when several are valid.
+        std::fs::write(&p, [line("AAA", "pass"), line("BBB", "pass")].join("\n")).unwrap();
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC");
+        assert_eq!(out[0].superseded_head.as_deref(), Some("BBB"));
+
+        // Every old head retracted -> nothing to name.
+        std::fs::write(
+            &p,
+            [
+                line("AAA", "pass"),
+                line("BBB", "pass"),
+                line("BBB", "fail"),
+                line("AAA", "fail"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC");
         assert_eq!(out[0].superseded_head, None);
     }
 
