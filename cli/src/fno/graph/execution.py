@@ -24,6 +24,7 @@ compiler upholds:
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -443,6 +444,8 @@ def compile_graph(root: str, entries: Sequence[dict]) -> ExecGraph:
     try:
         by_id: dict[str, dict] = {}
         for e in entries:
+            if not isinstance(e, dict):
+                continue  # a non-dict entry is not compilable; ignore it
             nid = str(e.get("id") or "").strip()
             if nid:
                 by_id[nid] = e
@@ -468,31 +471,41 @@ def compile_graph(root: str, entries: Sequence[dict]) -> ExecGraph:
                     preds[nid].append(dep)
                     ordering_adj[dep].add(nid)
 
-        def _ordering_connected(a: str, b: str) -> bool:
-            """True if an ordering PATH already serializes a and b (either way).
+        # Reachability over the edge set built so far, grown as each derived
+        # edge is committed. Ordering edges seed it (they encode declared deps;
+        # a cyclic blocked_by is a backlog defect, not ours to silently
+        # reorient). Every DERIVED edge (resource/verification/data) is then
+        # gated on it so it can never close a cycle - a pairwise check alone
+        # misses a transitive cycle formed by two derived edges plus a backward
+        # ordering edge (a->b, b->c resource + c->a ordering).
+        reach_adj: dict[str, set[str]] = {nid: set(ordering_adj[nid]) for nid in ids}
 
-            A resource edge added against an existing ordering path would flip
-            an edge and create a cycle no consumer can schedule; when ordering
-            already serializes the pair the resource edge is redundant anyway.
-            """
-            for src, dst in ((a, b), (b, a)):
-                seen = {src}
-                stack = [src]
-                while stack:
-                    cur = stack.pop()
-                    if cur == dst:
-                        return True
-                    for nxt in ordering_adj[cur]:
-                        if nxt not in seen:
-                            seen.add(nxt)
-                            stack.append(nxt)
+        def _reachable(src: str, dst: str) -> bool:
+            seen = {src}
+            stack = [src]
+            while stack:
+                cur = stack.pop()
+                if cur == dst:
+                    return True
+                for nxt in reach_adj[cur]:
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
             return False
 
-        # resource edges: any two nodes owning a common file must serialize.
-        # Oriented low->high lexicographically (a strict total order, so the
-        # resource edges alone are always acyclic) and skipped entirely when an
-        # ordering path already serializes the pair (else the two directions
-        # would contradict and form a cycle).
+        def _add_derived(src: str, dst: str, kind: str, invariant: str) -> bool:
+            # Skip if committing src->dst would close a cycle (dst already
+            # reaches src). Keeps the compiled graph a DAG by construction.
+            if _reachable(dst, src):
+                return False
+            edges.append(ExecEdge(src, dst, kind, invariant))
+            reach_adj[src].add(dst)
+            return True
+
+        # resource edges: two nodes owning a common file must serialize.
+        # Oriented low->high lexicographically; skipped when the pair is already
+        # serialized either way (an ordering path or a prior derived edge - the
+        # edge is then redundant) or when it would close a cycle.
         files_by: dict[str, set[str]] = {
             nid: set(by_id[nid].get("owns_files") or []) for nid in ids
         }
@@ -500,10 +513,11 @@ def compile_graph(root: str, entries: Sequence[dict]) -> ExecGraph:
         for i, a in enumerate(sorted_ids):
             for b in sorted_ids[i + 1:]:
                 shared = files_by[a] & files_by[b]
-                if shared and not _ordering_connected(a, b):
-                    f = sorted(shared)[0]
-                    edges.append(ExecEdge(a, b, "resource",
-                                          f"shared file {f}: writes serialized to avoid collision"))
+                if not shared or _reachable(a, b) or _reachable(b, a):
+                    continue
+                f = sorted(shared)[0]
+                if _add_derived(a, b, "resource",
+                                f"shared file {f}: writes serialized to avoid collision"):
                     justifications[a] = "resource"
                     justifications[b] = "resource"
 
@@ -511,9 +525,9 @@ def compile_graph(root: str, entries: Sequence[dict]) -> ExecGraph:
         for nid, e in by_id.items():
             v = str(e.get("verifier") or "").strip()
             if v and v in ids and v != nid:
-                edges.append(ExecEdge(nid, v, "verification",
-                                      f"{v} must attest {nid}'s output against its contract"))
-                justifications[v] = "verifier"
+                if _add_derived(nid, v, "verification",
+                                f"{v} must attest {nid}'s output against its contract"):
+                    justifications[v] = "verifier"
 
         # data edges: evidence producer -> consumer that requires it.
         produces: dict[str, set[str]] = {
@@ -523,8 +537,8 @@ def compile_graph(root: str, entries: Sequence[dict]) -> ExecGraph:
             for ev in (e.get("requires_evidence") or []):
                 for src in sorted_ids:
                     if src != nid and ev in produces[src]:
-                        edges.append(ExecEdge(src, nid, "data",
-                                              f"evidence {ev} flows from {src} to {nid}"))
+                        _add_derived(src, nid, "data",
+                                     f"evidence {ev} flows from {src} to {nid}")
 
         # justification: fan-in parents branch, parallel siblings parallelize.
         succ_count: dict[str, int] = {nid: 0 for nid in ids}
@@ -556,10 +570,15 @@ def compile_graph(root: str, entries: Sequence[dict]) -> ExecGraph:
             version=EXEC_GRAPH_VERSION, root=root, nodes=nodes,
             edges=tuple(edges), barriers=barriers, collapsed=False,
         )
-    except Exception:  # noqa: BLE001 - the "never raises" contract is load-bearing
+    except Exception as exc:  # noqa: BLE001 - the "never raises" contract is load-bearing
         # ANY defect in the derived topology (a MalformedGraphError from a bad
         # field, or a TypeError from a bad-typed owns_files/budget in an entry)
         # degrades to the serial loop rather than blocking. (Plan: compilation
         # failure falls back to serial operation.) The fallback is itself
-        # defensive so this handler can never re-raise.
+        # defensive so this handler can never re-raise. Leave a one-line trace
+        # so a degrade is auditable rather than an invisible collapse.
+        sys.stderr.write(
+            f"execution.compile_graph: degraded {root} to serial "
+            f"({type(exc).__name__}: {exc})\n"
+        )
         return _serial_fallback(root, entries)

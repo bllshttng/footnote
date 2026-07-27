@@ -260,6 +260,47 @@ def test_from_dict_rejects_dangling_barrier():
         ExecGraph.from_dict(d)
 
 
+def test_compile_never_raises_on_non_dict_entry_before_root():
+    # a non-dict entry ahead of the root must not escape (reproduced regression)
+    g = compile_graph("root1", [None, _entry("root1")])
+    assert g.root == "root1"  # did not raise
+
+
+def _has_cycle(graph) -> bool:
+    adj: dict = {n.node_id: [] for n in graph.nodes}
+    for e in graph.edges:
+        adj[e.src].append(e.dst)
+    WHITE, GREY, BLACK = 0, 1, 2
+    color = {n: WHITE for n in adj}
+
+    def visit(u):
+        color[u] = GREY
+        for v in adj[u]:
+            if color[v] == GREY:
+                return True
+            if color[v] == WHITE and visit(v):
+                return True
+        color[u] = BLACK
+        return False
+
+    return any(color[n] == WHITE and visit(n) for n in adj)
+
+
+def test_transitive_resource_cycle_is_avoided():
+    # a blocked_by c (ordering c->a); a&b share f1; b&c share f2; lex a<b<c.
+    # Naive lexicographic resource edges a->b, b->c + ordering c->a = cycle.
+    entries = [
+        _entry("a", blocked_by=["c"], owns_files=["f1"]),
+        _entry("b", owns_files=["f1", "f2"]),
+        _entry("c", owns_files=["f2"]),
+    ]
+    g = compile_graph("a", entries)
+    assert not _has_cycle(g)
+    # the b->c resource edge that would close the cycle is dropped (c already
+    # reaches b via c->a->b), so only c->a ordering + a->b resource survive
+    assert ("b", "c") not in {(e.src, e.dst) for e in g.edges}
+
+
 def test_exec_liveness_mapping():
     from fno.graph.cli import _exec_liveness
 
