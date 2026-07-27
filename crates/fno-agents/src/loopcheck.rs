@@ -255,6 +255,15 @@ struct Settings {
     /// Resolvability is validated Python-side; Rust fails closed by matching
     /// evidence, so an unresolvable name is simply never satisfied.
     reviewers: Vec<String>,
+    /// Top-level `done_probes` (x-a534): the repo-wide probe list, evaluated
+    /// alongside the plan's own. The file is FLAT, so this reads off the TOML
+    /// root, not out of a `config` table.
+    ///
+    /// None = key absent (no project gate). Some(Ok(list)) = the declaration.
+    /// Some(Err(why)) = present but not an array of strings, which maps to the
+    /// plan side's `Unparseable` and BLOCKS - a config key that degrades to
+    /// no-gate is a guardrail that disappears when you typo it.
+    done_probes: Option<Result<Vec<String>, String>>,
 }
 
 /// Normalize a config.review.reviewers entry / an event's reviewer name: strip a
@@ -491,6 +500,30 @@ fn read_u64_cap(v: &toml::Value, ctx: &str) -> Option<Result<u64, String>> {
     }
 }
 
+/// Classify a top-level `done_probes` value as a probe list or a reason it is
+/// unreadable. An empty array is a legitimate "no project probes"; a mapping,
+/// a scalar, or an array holding a non-string is NOT - it is a mis-declared
+/// gate, and the Err travels to the gate so it blocks with a reason instead of
+/// silently reading as no declaration at all.
+fn value_as_probe_list(v: &toml::Value) -> Result<Vec<String>, String> {
+    let Some(items) = v.as_array() else {
+        return Err(format!("it is a {}, not an array of strings", v.type_str()));
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item.as_str() {
+            Some(s) => out.push(s.to_string()),
+            None => {
+                return Err(format!(
+                    "it holds a {} where a command string was expected",
+                    item.type_str()
+                ))
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Settings with the login gate pinned unsatisfiable - the fail-closed result
 /// when config.toml cannot be parsed as TOML at all (x-81d9 (c)). The
 /// sentinel goes into BOTH github_apps and required_bots: resolved_required_bots
@@ -521,6 +554,13 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
     // Top-level flat budget cap.
     if let Some(v) = root.get("budget_cap") {
         s.flat_budget_cap = read_f64_cap(v, "budget_cap");
+    }
+
+    // Top-level flat `done_probes` (x-a534). Presence is recorded even when the
+    // value is junk: the Err arm blocks downstream rather than degrading to
+    // "no probes declared".
+    if let Some(v) = root.get("done_probes") {
+        s.done_probes = Some(value_as_probe_list(v));
     }
 
     // Flat config.toml: budget / ci / external_reviewers / review are top-level
@@ -2955,6 +2995,15 @@ pub fn decide(args: &[String]) -> (i32, String) {
             if local.peer_identity.is_some() {
                 merged.peer_identity = local.peer_identity;
             }
+            if local.done_probes.is_some() {
+                // Presence, not non-emptiness: a project-local `done_probes = []`
+                // is a deliberate "this repo declares none", same rule as
+                // required_bots. Omitting this line entirely is the silent
+                // guardrail bypass this list keeps re-inviting - the field would
+                // be read from the GLOBAL file only and the project's own gate
+                // would never run.
+                merged.done_probes = local.done_probes;
+            }
         }
         merged
     };
@@ -3569,6 +3618,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 if pr_open && ci_ok && pr_info.reviewed && head_shipped {
                     match evaluate_done_probes(
                         manifest.plan_path.as_deref(),
+                        settings.done_probes.as_ref(),
                         &cwd,
                         &project_events,
                         &session_id,
@@ -4495,15 +4545,18 @@ fn prior_fires_declared_probes(events_path: &Path, session_id: &str) -> bool {
     })
 }
 
-/// Evaluate the probe conjunct. Called ONLY once every other DonePRGreen
-/// conjunct already holds, so probes run at most once per would-be-done fire.
-fn evaluate_done_probes(
+/// Resolve the PLAN source to its probe list, or the gate that must block.
+///
+/// Split out from `evaluate_done_probes` so the project source can be resolved
+/// independently: a plan that declares nothing (or whose doc is missing on a
+/// probe-less session) must still let the project's own probes run, which a
+/// single early-return-Absent path cannot express.
+fn plan_declared_probes(
     plan_path: Option<&str>,
     cwd: &Path,
     events_path: &Path,
     session_id: &str,
-    timeout: std::time::Duration,
-) -> ProbeGate {
+) -> Result<Vec<String>, ProbeGate> {
     // Resolve a relative plan_path against the session's cwd, not the process
     // cwd: plan_path is repo-relative in practice, and reading nothing here
     // would degrade to Absent - a silent gate bypass.
@@ -4524,49 +4577,114 @@ fn evaluate_done_probes(
         // Fail closed only when probes were observed before; otherwise a stale
         // plan_path on a probe-less session must not start refusing done.
         if prior_fires_declared_probes(events_path, session_id) {
-            return ProbeGate::Fail {
+            return Err(ProbeGate::Fail {
                 reason: format!(
                     "done_probes undeterminable: plan {} is unreadable but a prior fire declared probes; restore the plan doc",
                     plan_path.unwrap_or("(unset)")
                 ),
                 results: undeterminable_marker("plan-unreadable"),
-            };
+            });
         }
-        return ProbeGate::Absent;
+        return Ok(Vec::new());
     };
 
     let probes = match parse_done_probes(&plan) {
-        ProbeDecl::None => return ProbeGate::Absent,
+        ProbeDecl::None => return Ok(Vec::new()),
         ProbeDecl::Unparseable => {
-            return ProbeGate::Fail {
+            return Err(ProbeGate::Fail {
                 reason: format!(
                     "done_probes undeterminable: plan {} declares the field but no probe could be read from it (use a block list, or a single-line inline list)",
                     plan_path.unwrap_or("(unset)")
                 ),
                 results: undeterminable_marker("unparseable-declaration"),
-            }
+            })
         }
         ProbeDecl::Probes(p) => p,
     };
     if probes.len() > PROBE_CAP {
+        return Err(ProbeGate::Fail {
+            reason: format!(
+                "plan declares {} done_probes; the cap is {PROBE_CAP} per source (a probe list is a gate, not a test suite)",
+                probes.len()
+            ),
+            results: undeterminable_marker("over-cap"),
+        });
+    }
+    Ok(probes)
+}
+
+/// Evaluate the probe conjunct across BOTH sources. Called ONLY once every
+/// other DonePRGreen conjunct already holds, so probes run at most once per
+/// would-be-done fire.
+///
+/// `config_probes` is the repo-wide `done_probes` off config.toml. Both lists
+/// run and both must pass: a plan can ADD guardrails and can never silence the
+/// project's, including via an explicit `done_probes: []`. A repo-wide guard a
+/// plan doc can switch off is a guard on one of two paths, which is decorative.
+fn evaluate_done_probes(
+    plan_path: Option<&str>,
+    config_probes: Option<&Result<Vec<String>, String>>,
+    cwd: &Path,
+    events_path: &Path,
+    session_id: &str,
+    timeout: std::time::Duration,
+) -> ProbeGate {
+    // The project source resolves first: a declaration this parser cannot read
+    // must block before anything runs, in the same vocabulary the plan side
+    // uses. A config key that degrades to no-gate is a guardrail that
+    // disappears when you typo it.
+    let project = match config_probes {
+        None => Vec::new(),
+        Some(Err(why)) => {
+            return ProbeGate::Fail {
+                reason: format!(
+                    "done_probes undeterminable: config.toml declares `done_probes` but {why}"
+                ),
+                results: undeterminable_marker("unparseable-config-declaration"),
+            }
+        }
+        Some(Ok(p)) => p.clone(),
+    };
+    // PROBE_CAP applies PER SOURCE, not to the union. The cap encodes
+    // per-declaration discipline ("a gate, not a test suite"); one shared
+    // budget would instead make two independent authors compete for one number
+    // and let a project's policy eat a plan's operational probes.
+    if project.len() > PROBE_CAP {
         return ProbeGate::Fail {
             reason: format!(
-                "plan declares {} done_probes; the cap is {PROBE_CAP} (a probe list is a gate, not a test suite)",
-                probes.len()
+                "config.toml declares {} done_probes; the cap is {PROBE_CAP} per source (a probe list is a gate, not a test suite)",
+                project.len()
             ),
             results: undeterminable_marker("over-cap"),
         };
     }
 
+    let plan_probes = match plan_declared_probes(plan_path, cwd, events_path, session_id) {
+        Ok(p) => p,
+        Err(gate) => return gate,
+    };
+
+    if project.is_empty() && plan_probes.is_empty() {
+        return ProbeGate::Absent;
+    }
+
     let mut results = serde_json::Map::new();
     let mut failures = Vec::new();
-    for cmd in &probes {
+    for (source, cmd) in project
+        .iter()
+        .map(|c| ("project", c))
+        .chain(plan_probes.iter().map(|c| ("plan", c)))
+    {
         let outcome = run_probe(cmd, cwd, timeout);
+        // Keyed by the BARE command: cli/src/fno/scoreboard/fold.py joins this
+        // map back to the plan's frontmatter by exact command string, so the
+        // source label belongs in the failure reason - which is what the
+        // operator reads to know which file to edit - and never in the key.
         results.insert(cmd.clone(), Value::String(outcome.render()));
         match &outcome {
             ProbeOutcome::Pass => {}
             ProbeOutcome::Timeout => failures.push(format!(
-                "probe `{cmd}` timed out after {}s (killed)",
+                "{source} probe `{cmd}` timed out after {}s (killed)",
                 timeout.as_secs()
             )),
             ProbeOutcome::Fail { code, stderr } => {
@@ -4576,7 +4694,7 @@ fn evaluate_done_probes(
                 } else {
                     format!(": {}", stderr.trim())
                 };
-                failures.push(format!("probe `{cmd}` exited {code}{tail}"));
+                failures.push(format!("{source} probe `{cmd}` exited {code}{tail}"));
             }
         }
     }
@@ -8210,6 +8328,7 @@ mod done_probe_tests {
         let events = tmp.path().join("events.jsonl");
         match evaluate_done_probes(
             plan.to_str(),
+            None,
             tmp.path(),
             &events,
             "s1",
@@ -8236,6 +8355,7 @@ mod done_probe_tests {
         assert!(matches!(
             evaluate_done_probes(
                 missing.to_str(),
+                None,
                 tmp.path(),
                 &events,
                 "s1",
@@ -8252,6 +8372,7 @@ mod done_probe_tests {
         .unwrap();
         match evaluate_done_probes(
             missing.to_str(),
+            None,
             tmp.path(),
             &events,
             "s1",
@@ -8279,6 +8400,7 @@ mod done_probe_tests {
         let events = tmp.path().join("events.jsonl");
         let ProbeGate::Fail { results, .. } = evaluate_done_probes(
             plan.to_str(),
+            None,
             tmp.path(),
             &events,
             "s1",
@@ -8314,6 +8436,7 @@ mod done_probe_tests {
             matches!(
                 evaluate_done_probes(
                     Some("plan.md"),
+                    None,
                     tmp.path(),
                     &events,
                     "s1",
@@ -8333,6 +8456,7 @@ mod done_probe_tests {
         let events = tmp.path().join("events.jsonl");
         match evaluate_done_probes(
             plan.to_str(),
+            None,
             tmp.path(),
             &events,
             "s1",
@@ -8410,6 +8534,7 @@ mod done_probe_tests {
             matches!(
                 evaluate_done_probes(
                     Some("plan.md#wave-1"),
+                    None,
                     tmp.path(),
                     &events,
                     "s1",
@@ -8434,5 +8559,208 @@ mod done_probe_tests {
             "a backgrounded descendant must not hold the drain open (took {:?})",
             start.elapsed()
         );
+    }
+
+    // ── project-level done_probes (x-a534) ────────────────────────────────
+    //
+    // A repo-wide guardrail must apply to every plan in the repo, and no plan
+    // doc may switch it off - a guard on one of two reachable paths is
+    // decorative.
+
+    fn project(cmds: &[&str]) -> Result<Vec<String>, String> {
+        Ok(cmds.iter().map(|c| c.to_string()).collect())
+    }
+
+    /// A plan doc that declares no probes of its own.
+    fn bare_plan(dir: &Path) -> std::path::PathBuf {
+        let plan = dir.join("plan.md");
+        std::fs::write(&plan, fm("title: p")).unwrap();
+        plan
+    }
+
+    #[test]
+    fn a_project_probe_gates_a_plan_that_declares_none() {
+        // AC1-HP: the repo-wide guardrail runs without being retyped per plan,
+        // and its result reaches the event payload.
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = bare_plan(tmp.path());
+        let events = tmp.path().join("events.jsonl");
+        match evaluate_done_probes(
+            plan.to_str(),
+            Some(&project(&["true"])),
+            tmp.path(),
+            &events,
+            "s1",
+            Duration::from_secs(10),
+        ) {
+            ProbeGate::Pass(results) => assert_eq!(results["true"], "pass"),
+            _ => panic!("a passing project probe must let the gate through"),
+        }
+    }
+
+    #[test]
+    fn a_failing_project_probe_blocks_and_names_its_source() {
+        // AC2-ERR: `probe X exited 1` is ambiguous once there are two
+        // declarations; the operator has to know which file to edit.
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = bare_plan(tmp.path());
+        let events = tmp.path().join("events.jsonl");
+        match evaluate_done_probes(
+            plan.to_str(),
+            Some(&project(&["false"])),
+            tmp.path(),
+            &events,
+            "s1",
+            Duration::from_secs(10),
+        ) {
+            ProbeGate::Fail { reason, .. } => assert!(
+                reason.contains("project probe `false`"),
+                "the reason must name the source: {reason}"
+            ),
+            _ => panic!("a failing project probe must block"),
+        }
+    }
+
+    #[test]
+    fn a_plan_cannot_silence_a_project_probe() {
+        // AC3-INV: an explicit `done_probes: []` in a plan is the obvious
+        // attempt, and it must not work - otherwise a repo policy is only as
+        // strong as the least careful plan doc.
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("plan.md");
+        std::fs::write(&plan, fm("done_probes: []")).unwrap();
+        let events = tmp.path().join("events.jsonl");
+        assert!(
+            matches!(
+                evaluate_done_probes(
+                    plan.to_str(),
+                    Some(&project(&["false"])),
+                    tmp.path(),
+                    &events,
+                    "s1",
+                    Duration::from_secs(10)
+                ),
+                ProbeGate::Fail { .. }
+            ),
+            "a plan declaring [] must not disable the project's guardrail"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_project_declaration_blocks_rather_than_degrading() {
+        // AC4-ERR: a config key that degrades to no-gate is a guardrail that
+        // disappears when you typo it.
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = bare_plan(tmp.path());
+        let events = tmp.path().join("events.jsonl");
+        let junk: Result<Vec<String>, String> = value_as_probe_list(
+            &"done_probes = { a = 1 }".parse::<toml::Value>().unwrap()["done_probes"],
+        );
+        assert!(junk.is_err(), "a mapping is not a probe list");
+        match evaluate_done_probes(
+            plan.to_str(),
+            Some(&junk),
+            tmp.path(),
+            &events,
+            "s1",
+            Duration::from_secs(10),
+        ) {
+            ProbeGate::Fail { reason, results } => {
+                assert!(
+                    reason.contains("undeterminable"),
+                    "must use the plan side's vocabulary: {reason}"
+                );
+                assert_eq!(results["_undeterminable"], "unparseable-config-declaration");
+            }
+            _ => panic!("an unreadable project declaration must block"),
+        }
+    }
+
+    #[test]
+    fn the_cap_is_per_source_not_per_union() {
+        // AC5-BOUND: 3 + 3 all run. Sharing one budget would make two
+        // independent authors compete for one number, so a project policy
+        // would eat a plan's operational probes.
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("plan.md");
+        std::fs::write(
+            &plan,
+            fm("done_probes:\n  - echo d\n  - echo e\n  - echo f"),
+        )
+        .unwrap();
+        let events = tmp.path().join("events.jsonl");
+        match evaluate_done_probes(
+            plan.to_str(),
+            Some(&project(&["echo a", "echo b", "echo c"])),
+            tmp.path(),
+            &events,
+            "s1",
+            Duration::from_secs(10),
+        ) {
+            ProbeGate::Pass(results) => assert_eq!(
+                results.as_object().unwrap().len(),
+                6,
+                "all six probes must run: {results}"
+            ),
+            other => panic!(
+                "3 + 3 is within the per-source cap: {}",
+                match other {
+                    ProbeGate::Fail { reason, .. } => reason,
+                    _ => "Absent".to_string(),
+                }
+            ),
+        }
+
+        // A 4th in the project declaration is still a loud refusal.
+        match evaluate_done_probes(
+            plan.to_str(),
+            Some(&project(&["true", "true", "true", "true"])),
+            tmp.path(),
+            &events,
+            "s1",
+            Duration::from_secs(10),
+        ) {
+            ProbeGate::Fail { reason, .. } => assert!(
+                reason.contains("config.toml declares 4") && reason.contains("per source"),
+                "an over-cap project list must refuse loudly: {reason}"
+            ),
+            _ => panic!("4 project probes must refuse"),
+        }
+    }
+
+    #[test]
+    fn no_declaration_on_either_source_stays_absent() {
+        // The zero-subprocess path must survive the second source.
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = bare_plan(tmp.path());
+        let events = tmp.path().join("events.jsonl");
+        assert!(matches!(
+            evaluate_done_probes(
+                plan.to_str(),
+                Some(&project(&[])),
+                tmp.path(),
+                &events,
+                "s1",
+                Duration::from_secs(10)
+            ),
+            ProbeGate::Absent
+        ));
+    }
+
+    #[test]
+    fn config_done_probes_parses_off_the_flat_root() {
+        // The file is flat: `done_probes` at the root, not nested under a
+        // `config` table.
+        let s = parse_settings("done_probes = [\"make a11y-check\"]\n");
+        assert_eq!(s.done_probes, Some(Ok(vec!["make a11y-check".to_string()])),);
+        assert_eq!(parse_settings("plans_dir = \"x\"\n").done_probes, None);
+        assert!(parse_settings("done_probes = \"nope\"\n")
+            .done_probes
+            .unwrap()
+            .is_err());
+        assert!(parse_settings("done_probes = [1]\n")
+            .done_probes
+            .unwrap()
+            .is_err());
     }
 }

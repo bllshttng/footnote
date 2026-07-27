@@ -4213,3 +4213,114 @@ fn done_probes_unparseable_declaration_refuses_done() {
         d.message
     );
 }
+
+/// AC13-INV (x-a534): a project-local `done_probes` must survive the
+/// global-plus-local merge.
+///
+/// That merge is a hand-written per-field list, so a field omitted from it is
+/// read from the GLOBAL file only and the project-local value is silently
+/// dropped. For a guardrail key that is a silent bypass: the operator declares
+/// a repo-wide probe, sees no error, and the gate never runs it. Driven through
+/// the real merge (not `fire`, which pins `--global-settings /nonexistent`)
+/// because the parser is not where that bug would live.
+#[test]
+fn done_probes_ac13_inv_project_local_survives_the_global_merge() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    // GLOBAL declares no probes at all - the value the merge would fall back to.
+    let global = cwd.join("global.toml");
+    fs::write(
+        &global,
+        "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
+    )
+    .unwrap();
+    // PROJECT-LOCAL declares the guardrail. Flat root, not a `config` table.
+    fs::write(
+        cwd.join(".fno/config.toml"),
+        "done_probes = [\"false\"]\n[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
+    )
+    .unwrap();
+
+    let manifest = cwd.join("target-state.md");
+    fs::write(
+        &manifest,
+        new_manifest("sess-probe-overlay", "2026-06-05T00:00:00Z", false),
+    )
+    .unwrap();
+    let transcript = cwd.join("transcript.jsonl");
+    fs::write(&transcript, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::green();
+    let args: Vec<String> = vec![
+        "loop-check".into(),
+        "--state".into(),
+        manifest.to_str().unwrap().into(),
+        "--transcript".into(),
+        transcript.to_str().unwrap().into(),
+        "--cwd".into(),
+        cwd.to_str().unwrap().into(),
+        "--now".into(),
+        "2026-06-05T00:30:00Z".into(),
+        format!("--gh-bin={}", mock.gh.display()),
+        format!("--git-bin={}", mock.git.display()),
+        "--global-settings".into(),
+        global.to_str().unwrap().into(),
+    ];
+    let (_code, json_str) = fno_agents::loopcheck::run_loop_check_capture(&args);
+    let d: Decision = serde_json::from_str(&json_str).unwrap();
+
+    assert_eq!(
+        d.decision, "block",
+        "a project-local probe list dropped by the merge is a silent guardrail \
+         bypass; got: {json_str}"
+    );
+    assert!(
+        d.message.contains("project probe `false`"),
+        "the block must name the failing project probe: {}",
+        d.message
+    );
+}
+
+/// AC3-INV (x-a534) end to end: a plan declaring `done_probes: []` must not
+/// switch off the repo-wide guardrail. A guard a plan doc can silence is a
+/// guard on one of two reachable paths.
+#[test]
+fn done_probes_ac3_inv_a_plan_cannot_silence_the_project_gate() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    std::env::set_var("FNO_NUDGE_DISABLED", "1");
+    fs::write(
+        cwd.join(".fno/config.toml"),
+        "done_probes = [\"false\"]\n[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
+    )
+    .unwrap();
+
+    let plan = cwd.join("plan.md");
+    fs::write(&plan, "---\ntitle: p\ndone_probes: []\n---\n\nbody\n").unwrap();
+    let manifest = cwd.join("target-state.md");
+    fs::write(
+        &manifest,
+        manifest_with_plan("sess-probe-silence", "2026-06-05T00:00:00Z", &plan),
+    )
+    .unwrap();
+    let transcript = cwd.join("transcript.jsonl");
+    fs::write(&transcript, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::green();
+    let d = fire_probe_gate(cwd, &manifest, &transcript, &mock);
+
+    assert_eq!(
+        d.decision, "block",
+        "an explicit `done_probes: []` in a plan must not disable the project's \
+         guardrail: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("project probe"),
+        "the block must name the project source: {}",
+        d.message
+    );
+}
