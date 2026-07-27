@@ -143,6 +143,37 @@ else
 fi
 rm -rf "$SANDBOX"
 
+# --- AC5: worktree.policy = "never" -> REFUSE creation, do not relocate ------
+# A project whose working tree IS the product (an Obsidian vault) wants no
+# worktree at all. The autonomous path (`fno worktree ensure`) already honored
+# this; the hook did not, so `claude --worktree` created one anyway.
+echo ""
+echo "--- AC5: policy=never refuses creation (not relocation) ---"
+OUT=$(setup_canonical)
+SANDBOX=$(echo "$OUT" | sed -n '1p')
+CANON_REPO=$(echo "$OUT" | sed -n '2p')
+printf '[worktree]\npolicy = "never"\n' > "$CANON_REPO/.fno/config.toml"
+TARGET="$CANON_REPO/.claude/worktrees/feat-never"
+STDIN_JSON=$(printf '{"session_id":"s5","name":"feat-never","path":"%s","hook_event_name":"WorktreeCreate"}' "$TARGET")
+STDERR=$( cd "$CANON_REPO" && HOME="$SANDBOX" bash "$HOOK" <<<"$STDIN_JSON" 2>&1 >/dev/null )
+RC=$?
+if [[ $RC -ne 0 ]]; then
+    pass "AC5: hook exits non-zero (aborts creation)"
+else
+    fail "AC5" "hook exited 0; creation would proceed despite policy=never"
+fi
+if [[ "$STDERR" == *"never"* ]]; then
+    pass "AC5: refusal names the policy"
+else
+    fail "AC5" "refusal did not mention the policy: $STDERR"
+fi
+if [[ ! -d "$TARGET" ]]; then
+    pass "AC5: no worktree materialized"
+else
+    fail "AC5" "worktree was created at $TARGET"
+fi
+rm -rf "$SANDBOX"
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]]
