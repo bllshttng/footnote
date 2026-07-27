@@ -23,13 +23,18 @@ use crate::server::fno_bin;
 /// never blocks the UI loop.
 const READ_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// One provider record, as emitted by `fno config accounts list -J` (task 1.1).
+/// One account record, as emitted by `fno config accounts list -J` (task 1.1).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Account {
     pub id: String,
     #[serde(default)]
     pub name: String,
-    pub cli: String,
+    /// The harness (CLI binary) this account is an instance of. `-J` emits
+    /// `harness`; the alias keeps a pre-rename `fno` on PATH deserializable,
+    /// since this struct is a wire contract with a separately-deployed binary
+    /// and the two are not upgraded atomically.
+    #[serde(rename = "harness", alias = "cli")]
+    pub harness: String,
     pub auth: String,
     #[serde(default)]
     pub priority: i64,
@@ -718,7 +723,7 @@ impl ConnectionsView {
         // provider="claude", and `resolve_account_overlay` is claude-only, so a
         // codex/gemini selection would reject every spawn until cleared (codex
         // P2). Refuse it here with visible feedback instead.
-        if acct.cli != "claude" {
+        if acct.harness != "claude" {
             self.notice = Some(format!("{} is not a claude account", acct.id));
             return ConnIntent::Redraw;
         }
@@ -766,7 +771,7 @@ impl ConnectionsView {
                 "accounts".into(),
                 "register".into(),
                 p.id.clone(),
-                "--cli".into(),
+                "--harness".into(),
                 p.cli.clone(),
             ];
             self.acting = true;
@@ -793,8 +798,8 @@ impl ConnectionsView {
             "accounts".into(),
             "register".into(),
             acct.id.clone(),
-            "--cli".into(),
-            acct.cli.clone(),
+            "--harness".into(),
+            acct.harness.clone(),
         ];
         self.acting = true;
         self.notice = None;
@@ -950,7 +955,7 @@ impl ConnectionsView {
             "accounts".into(),
             "add".into(),
             w.id,
-            "--cli".into(),
+            "--harness".into(),
             "claude".into(),
             "--auth".into(),
             "api_key".into(),
@@ -1049,7 +1054,7 @@ impl ConnectionsView {
             out.push(format!(
                 "{cursor}{badge}{spawn} {id}  [{cli}] {auth}  {headroom}{snap}",
                 id = a.id,
-                cli = a.cli,
+                cli = a.harness,
                 auth = a.auth,
                 headroom = a.headroom,
             ));
@@ -1325,6 +1330,25 @@ mod tests {
             ]"#,
         )
         .expect("valid accounts json")
+    }
+
+    /// The wire contract with `fno config accounts list -J`, which today emits
+    /// `harness`. `sample_accounts` above still sends the pre-rename `cli` and
+    /// must keep parsing: this struct and the `fno` binary are deployed
+    /// separately, so a mixed pair is a real state, not a hypothetical.
+    ///
+    /// `parse_accounts` returns `None` on a mismatch and `load_all` renders that
+    /// as "unparseable", so a broken field name degrades the whole Connections
+    /// modal without any error naming the field. That silence is why both
+    /// spellings are asserted rather than assumed.
+    #[test]
+    fn parse_accounts_reads_canonical_harness_key_and_legacy_cli() {
+        let canonical = parse_accounts(
+            br#"[{"id":"ccm","name":"CCM","harness":"claude","auth":"managed","priority":10,"active":true,"headroom":"ok","snapshot":"2h"}]"#,
+        )
+        .expect("canonical `harness` key must parse");
+        assert_eq!(canonical[0].harness, "claude");
+        assert_eq!(sample_accounts()[0].harness, "claude");
     }
 
     fn sample_combos() -> Vec<ComboRow> {
@@ -1737,7 +1761,7 @@ mod tests {
                     "accounts".into(),
                     "register".into(),
                     "ccm2".into(),
-                    "--cli".into(),
+                    "--harness".into(),
                     "claude".into()
                 ],
                 env: vec![("CLAUDE_CONFIG_DIR".into(), "~/.claude-ccm2".into())],
