@@ -100,6 +100,49 @@ def test_file_collision_is_serialized(monkeypatch, tmp_path):
     ]
 
 
+def test_raising_collision_gate_is_unevaluated_not_selected(monkeypatch, tmp_path):
+    """A collision gate that THREW must not report as a clean comparison.
+
+    This is the frontier's most dangerous silent degrade: a swallowed error one
+    frame down returns the same None a genuine non-overlap does, so the node
+    lands `selected` with an empty reason and nothing marks the report degraded.
+    An operator gating live scheduling then co-schedules two nodes whose file
+    overlap was never actually compared.
+    """
+    def boom(node, inflight):
+        raise RuntimeError("collision index unreadable")
+
+    monkeypatch.setattr(advance, "_high_collision", boom)
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert r["selected"] == [], "a node whose gate threw must not read as clean"
+    assert [(d["id"], d["reason"]) for d in r["unevaluated"]] == [
+        ("n-a", "unevaluated:collision-error"),
+        ("n-b", "unevaluated:collision-error"),
+    ]
+
+
+def test_unreadable_plan_path_does_not_escape_the_gate(monkeypatch, tmp_path):
+    """The surface probe is inside the guard, not hoisted above it.
+
+    `resolve_plan_path` reaches `Path.cwd()`, which raises when the cwd has been
+    deleted - a live scenario in a worktree-archiving system. Left outside the
+    fail-open guard it propagates through `select_lane_fill`, which re-raises
+    after releasing slots, wedging the live dispatcher the guard exists to protect.
+    """
+    import fno.graph.collision as collision
+
+    def boom(p):
+        raise FileNotFoundError("cwd has been archived")
+
+    monkeypatch.setattr(collision, "resolve_plan_path", boom)
+    _ready(monkeypatch, _nodes(("n-a", "code")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert [(d["id"], d["reason"]) for d in r["unevaluated"]] == [
+        ("n-a", "unevaluated:collision-error")
+    ]
+
+
 def test_no_file_surface_is_unevaluated(monkeypatch, tmp_path):
     import fno.graph.collision as collision
 

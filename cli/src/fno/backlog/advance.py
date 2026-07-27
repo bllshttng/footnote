@@ -422,30 +422,24 @@ def _live_worked_entries(claims_root: Optional[Path] = None) -> list[dict]:
 def _high_collision(node: dict, inflight: list[dict]):
     """The first high-severity file overlap between ``node`` and in-flight work.
 
-    Fails OPEN: any error resolving or parsing a plan returns None so dispatch
-    proceeds. A dedup check that can wedge the dispatcher is worse than the
-    duplicate work it prevents.
+    Raises on an unreadable plan rather than failing open here. The sole caller,
+    :func:`_classify_lane_candidate`, owns that guard, because a swallow at THIS
+    frame returns the same ``None`` as a clean comparison and the caller cannot
+    tell "compared, no overlap" from "never compared" - which is how a node whose
+    collision safety was never evaluated reaches the frontier reported as clean.
+    The caller has somewhere to put that distinction; this function does not.
+
+    Assumes the caller has already established a comparable file surface (it
+    checks ``has_file_surface`` before calling), so no second surface check here.
     """
     plan = node.get("plan_path")
     if not plan or not inflight:
         return None
-    try:
-        from fno.graph.collision import find_collisions, has_file_surface, resolve_plan_path
+    from fno.graph.collision import find_collisions, resolve_plan_path
 
-        resolved = resolve_plan_path(plan)
-        # An empty surface (missing plan file, or one with no file table) yields
-        # the same empty result as a genuine non-overlap. Say which one happened.
-        if not has_file_surface(resolved):
-            _LOG.warning(
-                "collision gate UNEVALUATED for %s: %s states no file surface",
-                node.get("id"), resolved,
-            )
-            return None
-        for c in find_collisions(resolved, inflight, self_id=node.get("id")):
-            if c.severity == "high":
-                return c
-    except Exception as exc:  # noqa: BLE001 - fail open, never wedge dispatch
-        _LOG.warning("collision check unavailable for %s: %s", node.get("id"), exc)
+    for c in find_collisions(resolve_plan_path(plan), inflight, self_id=node.get("id")):
+        if c.severity == "high":
+            return c
     return None
 
 
@@ -664,6 +658,10 @@ def _classify_lane_candidate(
         collision safety is UNKNOWN. This is a distinct class, not an exclusion:
         live dispatch fails open on it (dispatches anyway); the shadow report is
         conservative and serializes it with this diagnostic (plan Change 1).
+      ``unevaluated:collision-error`` the collision gate raised, so safety is
+        unknown for the same reason and gets the same fail-open treatment. It is
+        a stated verdict rather than a swallowed error precisely so it cannot
+        reach the frontier looking like a clean comparison.
     """
     from fno.claims.lanes import find_lane_slot
 
@@ -678,9 +676,22 @@ def _classify_lane_candidate(
     from fno.graph.collision import has_file_surface, resolve_plan_path
 
     plan = node.get("plan_path")
-    if not plan or not has_file_surface(resolve_plan_path(plan)):
-        return "unevaluated:no-surface"
-    hit = _high_collision(node, inflight)
+    # ONE guard over the whole collision evaluation - the path resolve, the
+    # surface probe, and the overlap scan. Fail-open lives here and nowhere
+    # below, because this is the only frame that can express "the gate did not
+    # run" as a verdict. A handler further down returns the same None a clean
+    # comparison does, so the node reports as `selected` with an empty reason and
+    # nothing in `degraded`: the frontier then OVERSTATES by co-scheduling nodes
+    # whose overlap was never actually compared.
+    try:
+        if not plan or not has_file_surface(resolve_plan_path(plan)):
+            return "unevaluated:no-surface"
+        hit = _high_collision(node, inflight)
+    except Exception as exc:  # noqa: BLE001 - fail open, but as a stated verdict
+        _LOG.warning(
+            "collision gate UNEVALUATED for %s: %s", node.get("id"), exc,
+        )
+        return f"{_UNEVALUATED_PREFIX}collision-error"
     if hit is not None:
         return f"{_HIGH_COLLISION_PREFIX}{hit.with_node_id}"
     return None
@@ -735,7 +746,10 @@ def schedule_shadow(
     try:
         ready = _ready_nodes(project, mission)
     except Exception as exc:  # noqa: BLE001 - a garbled ready list is not a crash
-        _LOG.warning("schedule shadow: ready list unreadable: %s", exc)
+        _LOG.warning(
+            "schedule shadow: ready list unreadable, empty frontier UNDERSTATES "
+            "dispatch (the safe direction): %s", exc,
+        )
         # Same key set as the healthy return, so a scripted consumer reading
         # e.g. report["remaining_capacity"] gets a number on exactly the path
         # where it most needs one instead of a KeyError. Both capacity fields
@@ -762,8 +776,8 @@ def schedule_shadow(
         used_domains: set[str] = _live_lane_domains(claims_root=claims_root)
     except Exception as exc:  # noqa: BLE001 - fail open, but visibly
         _LOG.warning(
-            "schedule shadow: live-lane domain seed unreadable, frontier may "
-            "understate same-domain holds: %s", exc,
+            "schedule shadow: live-lane domain seed unreadable, missed "
+            "same-domain holds mean the frontier may OVERSTATE dispatch: %s", exc,
         )
         used_domains = set()
         degraded.append("live-lane-domains")
@@ -771,8 +785,8 @@ def schedule_shadow(
         inflight: list[dict] = _live_worked_entries(claims_root=claims_root)
     except Exception as exc:  # noqa: BLE001 - fail open, but visibly (parity with select_lane_fill)
         _LOG.warning(
-            "schedule shadow: in-flight seed unreadable, frontier may miss "
-            "file collisions: %s", exc,
+            "schedule shadow: in-flight seed unreadable, missed file collisions "
+            "mean the frontier may OVERSTATE dispatch: %s", exc,
         )
         inflight = []
         degraded.append("inflight")
