@@ -43,7 +43,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
@@ -422,30 +422,24 @@ def _live_worked_entries(claims_root: Optional[Path] = None) -> list[dict]:
 def _high_collision(node: dict, inflight: list[dict]):
     """The first high-severity file overlap between ``node`` and in-flight work.
 
-    Fails OPEN: any error resolving or parsing a plan returns None so dispatch
-    proceeds. A dedup check that can wedge the dispatcher is worse than the
-    duplicate work it prevents.
+    Raises on an unreadable plan rather than failing open here. The sole caller,
+    :func:`_classify_lane_candidate`, owns that guard, because a swallow at THIS
+    frame returns the same ``None`` as a clean comparison and the caller cannot
+    tell "compared, no overlap" from "never compared" - which is how a node whose
+    collision safety was never evaluated reaches the frontier reported as clean.
+    The caller has somewhere to put that distinction; this function does not.
+
+    Assumes the caller has already established a comparable file surface (it
+    checks ``has_file_surface`` before calling), so no second surface check here.
     """
     plan = node.get("plan_path")
     if not plan or not inflight:
         return None
-    try:
-        from fno.graph.collision import find_collisions, has_file_surface, resolve_plan_path
+    from fno.graph.collision import find_collisions, resolve_plan_path
 
-        resolved = resolve_plan_path(plan)
-        # An empty surface (missing plan file, or one with no file table) yields
-        # the same empty result as a genuine non-overlap. Say which one happened.
-        if not has_file_surface(resolved):
-            _LOG.warning(
-                "collision gate UNEVALUATED for %s: %s states no file surface",
-                node.get("id"), resolved,
-            )
-            return None
-        for c in find_collisions(resolved, inflight, self_id=node.get("id")):
-            if c.severity == "high":
-                return c
-    except Exception as exc:  # noqa: BLE001 - fail open, never wedge dispatch
-        _LOG.warning("collision check unavailable for %s: %s", node.get("id"), exc)
+    for c in find_collisions(resolve_plan_path(plan), inflight, self_id=node.get("id")):
+        if c.severity == "high":
+            return c
     return None
 
 
@@ -522,7 +516,7 @@ def select_lane_fill(
     distributed lock; do not run two ``--claim`` selectors concurrently outside
     the walker.
     """
-    from fno.claims.lanes import acquire_lane_slot, find_lane_slot, release_lane_slot
+    from fno.claims.lanes import acquire_lane_slot, release_lane_slot
 
     if max_lanes < 1:
         return []
@@ -558,20 +552,33 @@ def select_lane_fill(
                 nid = node["id"]
                 if nid in picked_ids:
                     continue
-                domain = node.get("domain") or _DOMAIN_UNSET
-                if domain in used_domains:
-                    continue
-                if find_lane_slot(nid, root=claims_root) is not None:
-                    continue  # a live peer lane already owns this node
-                hit = _high_collision(node, inflight)
-                if hit is not None:
-                    _LOG.warning(
-                        "lane-fill: skipping %s - high file collision with %s "
-                        "(shared: %s)",
-                        nid, hit.with_node_id, ", ".join(hit.shared_files[:5]),
-                    )
+                reason = _classify_lane_candidate(
+                    node, used_domains=used_domains, inflight=inflight,
+                    claims_root=claims_root,
+                )
+                # Live dispatch fails OPEN on an unevaluated node (no comparable
+                # file surface): it dispatches anyway, today's behavior. Only a
+                # concrete exclusion (same-domain / peer-lane / high-collision)
+                # holds it back. The shadow report is the conservative twin -
+                # it serializes the unevaluated node instead (schedule_shadow).
+                if reason is not None and not reason.startswith(_UNEVALUATED_PREFIX):
+                    if reason.startswith(_HIGH_COLLISION_PREFIX):
+                        _LOG.warning("lane-fill: skipping %s - %s", nid, reason)
                     continue  # leave it ready; reversible, retried next round
-                candidate = (node, domain)
+                if reason is not None and inflight:
+                    # Unevaluated (no comparable file surface): dispatch anyway
+                    # (fail-open, today's behavior) but say so LOUDLY - a silent
+                    # pass would read as "gate clean" when it never ran.
+                    #
+                    # Only when something is actually in flight. With nothing to
+                    # collide against, an unknown surface risks nothing, and
+                    # every plan-less node (which is every `backlog idea` node)
+                    # would otherwise warn on every candidate of every tick.
+                    _LOG.warning(
+                        "lane-fill: %s file surface UNEVALUATED (%s) - "
+                        "dispatching anyway (fail-open)", nid, reason,
+                    )
+                candidate = (node, node.get("domain") or _DOMAIN_UNSET)
                 break
             if candidate is None:
                 break  # no distinct-domain, unclaimed node left
@@ -611,6 +618,271 @@ def select_lane_fill(
         raise
 
     return selected
+
+
+# The hard ceiling on live writers per project during the initial bounded
+# rollout (plan x-24f7 Change 3). Requested caps clamp up into [1, this]: a
+# value below one normalizes to one (never zero writers), and any larger
+# request is capped here until measured shadow evidence authorizes lifting it.
+# The shadow report applies and reports this bound so an operator sees exactly
+# the frontier the live scheduler will honor - it does NOT change live dispatch,
+# which still reads the raw configured cap (that gate is a separate change).
+_INITIAL_LIVE_CAP = 2
+
+# The reason-token namespace for the "unknown collision safety" class, matched by
+# both consumers (select_lane_fill fails open on it, schedule_shadow serializes
+# it). Shared so the two prefix checks cannot drift if the token is ever renamed.
+_UNEVALUATED_PREFIX = "unevaluated:"
+
+# Same reasoning for the file-overlap token: the producer builds it and
+# select_lane_fill matches it to decide how loudly to log the skip.
+_HIGH_COLLISION_PREFIX = "high-collision:"
+
+
+def _classify_lane_candidate(
+    node: dict,
+    *,
+    used_domains: set[str],
+    inflight: list[dict],
+    claims_root: Optional[Path] = None,
+) -> Optional[str]:
+    """Classify one ready node for lane-fill. ``None`` = selectable, else a typed
+    exclusion reason. Read-only (acquires no slot): the SINGLE per-candidate
+    truth shared by :func:`select_lane_fill` (live) and :func:`schedule_shadow`
+    (the read-only report), so the two can never disagree about why a node is
+    held back. Duplicating this sequence into a second copy is the drift the
+    codebase's path-uniqueness rule exists to prevent.
+
+    Reason tokens (all stable, machine-readable):
+
+      ``same-domain:<domain>``   another live lane or an earlier pick this fill
+        already owns the node's domain (one lane per domain, LD#8).
+      ``peer-lane``              a live peer lane already holds this exact node.
+      ``high-collision:<id>``    a high-severity file overlap with in-flight work.
+      ``unevaluated:no-surface`` the plan states no comparable file surface, so
+        collision safety is UNKNOWN. This is a distinct class, not an exclusion:
+        live dispatch fails open on it (dispatches anyway); the shadow report is
+        conservative and serializes it with this diagnostic (plan Change 1).
+      ``unevaluated:collision-error`` the collision gate raised, so safety is
+        unknown for the same reason and gets the same fail-open treatment. It is
+        a stated verdict rather than a swallowed error precisely so it cannot
+        reach the frontier looking like a clean comparison.
+    """
+    from fno.claims.lanes import find_lane_slot
+
+    domain = node.get("domain") or _DOMAIN_UNSET
+    if domain in used_domains:
+        return f"same-domain:{domain}"
+    if find_lane_slot(node["id"], root=claims_root) is not None:
+        return "peer-lane"
+    # Unknown file state is its own verdict, not a silent pass: a node whose plan
+    # states no comparable surface cannot be collision-checked, so its safety is
+    # unevaluated rather than clean (plan Change 1: "serialize unknown ... state").
+    from fno.graph.collision import has_file_surface, resolve_plan_path
+
+    plan = node.get("plan_path")
+    # ONE guard over the whole collision evaluation - the path resolve, the
+    # surface probe, and the overlap scan. Fail-open lives here and nowhere
+    # below, because this is the only frame that can express "the gate did not
+    # run" as a verdict. A handler further down returns the same None a clean
+    # comparison does, so the node reports as `selected` with an empty reason and
+    # nothing in `degraded`: the frontier then OVERSTATES by co-scheduling nodes
+    # whose overlap was never actually compared.
+    try:
+        if not plan or not has_file_surface(resolve_plan_path(plan)):
+            return "unevaluated:no-surface"
+        hit = _high_collision(node, inflight)
+    except Exception as exc:  # noqa: BLE001 - fail open, but as a stated verdict
+        _LOG.warning(
+            "collision gate UNEVALUATED for %s: %s", node.get("id"), exc,
+        )
+        return f"{_UNEVALUATED_PREFIX}collision-error"
+    if hit is not None:
+        return f"{_HIGH_COLLISION_PREFIX}{hit.with_node_id}"
+    return None
+
+
+@dataclass(frozen=True)
+class ScheduleDecision:
+    """One node's verdict in a shadow schedule (plan x-24f7 Change 1)."""
+
+    id: str
+    slug: Optional[str]
+    domain: str
+    verdict: Literal["selected", "serialized", "unevaluated"]
+    reason: str  # "" for selected; a typed token otherwise
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id, "slug": self.slug, "domain": self.domain,
+            "verdict": self.verdict, "reason": self.reason,
+        }
+
+
+def schedule_shadow(
+    max_lanes: int,
+    project: Optional[str] = None,
+    *,
+    mission: Optional[str] = None,
+    claims_root: Optional[Path] = None,
+) -> dict:
+    """Read-only bounded-frontier decision report - the shadow-first core (x-24f7).
+
+    Runs the SAME per-candidate classification as :func:`select_lane_fill` over
+    the guard-eligible ready set (``fno backlog ready`` already applies the
+    dependency / design-stage / stale guards, so those exclusions never reach
+    here), greedily filling up to the bounded effective cap across distinct
+    domains, and records a typed verdict for EVERY ready node. It acquires no
+    slot and spawns nothing - purely observational (plan: "perform no dispatch in
+    shadow mode").
+
+    ``effective_cap`` is the initial-rollout ceiling ``_INITIAL_LIVE_CAP``:
+    a request below one normalizes to one, larger requests clamp down. Reported
+    so the operator sees the bound the live scheduler will honor. Empty,
+    singleton, and packet-larger ready sets all produce bounded output.
+
+    Fail-safe: an unreadable ready list yields an empty frontier with a
+    ``ready-unreadable`` note rather than raising, and an in-flight / live-lane
+    read fault degrades the collision + domain seed to empty (fail-open, same as
+    live dispatch) rather than wedging the report.
+    """
+    effective_cap = min(max(max_lanes, 1), _INITIAL_LIVE_CAP)
+
+    try:
+        ready = _ready_nodes(project, mission)
+    except Exception as exc:  # noqa: BLE001 - a garbled ready list is not a crash
+        _LOG.warning(
+            "schedule shadow: ready list unreadable, empty frontier UNDERSTATES "
+            "dispatch (the safe direction): %s", exc,
+        )
+        # Same key set as the healthy return, so a scripted consumer reading
+        # e.g. report["remaining_capacity"] gets a number on exactly the path
+        # where it most needs one instead of a KeyError. Both capacity fields
+        # are zero because this short-circuits BEFORE the slot read: nothing was
+        # measured, and zero remaining is the fail-closed value (this report
+        # authorizes no dispatch). `degraded` is what says not to trust them.
+        return {
+            "effective_cap": effective_cap, "requested_cap": max_lanes,
+            "occupied_slots": 0, "remaining_capacity": 0,
+            "note": "ready-unreadable", "degraded": ["ready"],
+            "selected": [], "serialized": [], "unevaluated": [], "decisions": [],
+        }
+
+    # Seed the domain + in-flight sets from the live-claim world exactly as
+    # select_lane_fill does, so the shadow frontier reflects real peer lanes.
+    # Each read fails open (an error leaves the seed empty) but is LOUD about it -
+    # both logged AND recorded in `degraded`. A silently-collapsed seed produces a
+    # frontier byte-identical to a healthy one, and this report IS the evidence
+    # that gates live scheduling: an operator reading the JSON must be able to see
+    # that a seed threw, or they gate on an overstated frontier - and over-dispatch
+    # is silently reintroducible by any future swallowed read.
+    degraded: list[str] = []
+    try:
+        used_domains: set[str] = _live_lane_domains(claims_root=claims_root)
+    except Exception as exc:  # noqa: BLE001 - fail open, but visibly
+        _LOG.warning(
+            "schedule shadow: live-lane domain seed unreadable, missed "
+            "same-domain holds mean the frontier may OVERSTATE dispatch: %s", exc,
+        )
+        used_domains = set()
+        degraded.append("live-lane-domains")
+    try:
+        inflight: list[dict] = _live_worked_entries(claims_root=claims_root)
+    except Exception as exc:  # noqa: BLE001 - fail open, but visibly (parity with select_lane_fill)
+        _LOG.warning(
+            "schedule shadow: in-flight seed unreadable, missed file collisions "
+            "mean the frontier may OVERSTATE dispatch: %s", exc,
+        )
+        inflight = []
+        degraded.append("inflight")
+
+    # Slots already held by live lanes count AGAINST the cap, so a cap-two report
+    # with one lane already live can start only ONE more node. Counting from zero
+    # would overstate the frontier during fill-vacant-lanes runs.
+    #
+    # Count EVERY live lane, not just the ones at an index below the cap. It is
+    # tempting to count only what acquire_lane_slot(cap) would contend for, since
+    # that predicts the acquire call exactly - but effective_cap is a ceiling on
+    # live WRITERS, and the live selector still acquires with the raw configured
+    # max_lanes (3 here), so a lane routinely sits at lane-slot:2 while this
+    # report bounds itself to 2. Ignoring that lane would let a cap-two report
+    # authorize two more starts alongside it: three writers under a ceiling of
+    # two. That acquire_lane_slot(2) would in fact grant the third is a shrink
+    # bug in the cap primitive, not a truth this report should mirror into the
+    # evidence that authorizes live scheduling.
+    from fno.claims.lanes import active_lane_count
+
+    try:
+        occupied = active_lane_count(root=claims_root)
+    except Exception as exc:  # noqa: BLE001 - fail open, but visibly (this is the capacity guard)
+        _LOG.warning(
+            "schedule shadow: live slot count unreadable, remaining_capacity "
+            "may OVERSTATE the frontier: %s", exc,
+        )
+        occupied = 0
+        degraded.append("occupied-slots")
+    remaining_capacity = max(0, effective_cap - occupied)
+
+    decisions: list[ScheduleDecision] = []
+    picked: set[str] = set()
+    selected_count = 0
+    # Declared so each branch assignment below is checked against the legal set
+    # (the tuple-unpack forms otherwise widen to plain str, which the Literal
+    # field on ScheduleDecision then rejects).
+    verdict: Literal["selected", "serialized", "unevaluated"]
+    for node in ready:
+        nid = node["id"]
+        if nid in picked:
+            continue
+        picked.add(nid)
+        domain = node.get("domain") or _DOMAIN_UNSET
+        reason = _classify_lane_candidate(
+            node, used_domains=used_domains, inflight=inflight, claims_root=claims_root,
+        )
+        if reason is not None:
+            verdict = "unevaluated" if reason.startswith(_UNEVALUATED_PREFIX) else "serialized"
+        elif selected_count >= remaining_capacity:
+            verdict, reason = "serialized", "cap-full"
+        else:
+            verdict, reason = "selected", ""
+            selected_count += 1
+            used_domains.add(domain)  # one lane per domain across the frontier
+            if node.get("plan_path"):
+                # so later picks collide against this one, like the live selector
+                inflight.append({
+                    "id": nid, "title": node.get("title", ""),
+                    "plan_path": node["plan_path"], "created_at": "", "status": "ready",
+                })
+        decisions.append(
+            ScheduleDecision(
+                id=nid, slug=node.get("slug"), domain=domain,
+                verdict=verdict, reason=reason,
+            )
+        )
+
+    # Checked AFTER the loop, so it reflects the resolution the comparisons above
+    # actually used rather than a fresh probe. A cwd fallback makes collisions
+    # false-negative, which overstates the frontier in the same direction a
+    # swallowed seed read would - so it belongs in `degraded`, not only on stderr.
+    from fno.graph.collision import repo_root_resolution_degraded
+
+    if repo_root_resolution_degraded():
+        degraded.append("plan-path-resolution")
+
+    return {
+        "effective_cap": effective_cap,
+        "requested_cap": max_lanes,
+        "occupied_slots": occupied,
+        "remaining_capacity": remaining_capacity,
+        # Non-empty => a live-claim seed threw and was failed open; the frontier
+        # may be inaccurate. A consumer gating live scheduling should refuse a
+        # degraded report rather than trust it.
+        "degraded": degraded,
+        "selected": [d.as_dict() for d in decisions if d.verdict == "selected"],
+        "serialized": [d.as_dict() for d in decisions if d.verdict == "serialized"],
+        "unevaluated": [d.as_dict() for d in decisions if d.verdict == "unevaluated"],
+        "decisions": [d.as_dict() for d in decisions],
+    }
 
 
 def _worker_agent_name(

@@ -220,6 +220,13 @@ def active_lane_count(*, root: Optional[Path] = None) -> int:
 
     ``list_claims`` returns live claims only, so a crashed lane whose TTL has
     lapsed does not count against the cap and its slot is reclaimable.
+
+    Index-agnostic on purpose. A lane holding a slot at an index at or above a
+    caller's current cap is still a live writer, so it still counts against a
+    writers ceiling - even though ``acquire_lane_slot(cap)`` would not contend
+    for its slot. Deriving remaining capacity from acquire's scan window instead
+    lets a ceiling of N authorize an N+1st writer whenever a lane sits above N,
+    which the raw-vs-bounded cap split makes the normal case, not an edge one.
     """
     return len(list_claims(prefix=LANE_SLOT_PREFIX, root=root))
 

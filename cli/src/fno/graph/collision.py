@@ -317,13 +317,26 @@ def _find_repo_root() -> Path:
         pass
 
     fallback = Path.cwd()
-    _repo_root_cache = (False, fallback)
+    _repo_root_cache = (False, fallback)  # the bool IS the degrade signal; see below
     print(
         "Warning: git rev-parse failed; resolving plan paths against cwd "
         f"({fallback}). Cross-collision detection may produce false negatives.",
         file=sys.stderr,
     )
     return fallback
+
+
+def repo_root_resolution_degraded() -> bool:
+    """True once repo-root resolution has fallen back to the cwd.
+
+    That fallback resolves plan paths against the wrong root, so collision
+    comparisons can come back false-negative, and a frontier built on them
+    OVERSTATES what is safe to dispatch. The warning above says so on stderr
+    and dies there; a caller assembling gating evidence needs it as a value it
+    can put in a report. Reads the memo rather than re-probing, so it reflects
+    the resolution the comparisons in this process actually used.
+    """
+    return _repo_root_cache is not None and not _repo_root_cache[0]
 
 
 def _resolve_plan_path(plan_path: str, repo_root: Path) -> Path:
