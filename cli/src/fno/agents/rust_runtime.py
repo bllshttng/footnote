@@ -34,7 +34,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Callable, NoReturn, Optional, Sequence
+from typing import IO, TYPE_CHECKING, Callable, Mapping, NoReturn, Optional, Sequence
 
 if TYPE_CHECKING:
     import click
@@ -514,6 +514,120 @@ def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
+#: Flags that compose a COMPLETE route (endpoint + auth + model) before any
+#: worker is born, so an inherited tier remap is no longer ambiguous.
+#: ``-P``/``--provider``/``--route`` are fail-CLOSED at the CLI (an unresolvable
+#: route exits 2 before spawning) and ``--account`` is resolved and scrubbed by
+#: :func:`_scrub_account_auth_at_seam`.
+#:
+#: ``--role`` is deliberately NOT here: `resolve_route` is fail-SAFE, returning
+#: None for a protected role, a disabled block, an unconfigured provider, or a
+#: missing key, which leaves the ambient environment untouched. A role is
+#: exempted below only once it resolves to a real route.
+_ROUTE_NAMING_FLAGS = ("--route", "--provider", "-P", "--account")
+
+
+def _spawn_flag_value(args: Sequence[str], *names: str) -> Optional[str]:
+    """The value of the first of ``names`` present in ``args`` (``--f v`` or
+    ``--f=v``), or None. Scans only the fno-arg head, like every other flag scan
+    here, so a payload token can never masquerade as our flag."""
+    head = list(_args_before_argv(args))
+    for i, a in enumerate(head):
+        if a in names:
+            return head[i + 1] if i + 1 < len(head) else ""
+        for n in names:
+            if a.startswith(f"{n}="):
+                return a.split("=", 1)[1]
+    return None
+
+
+def inherited_tier_remap(
+    args: Sequence[str], env: Optional[Mapping[str, str]] = None
+) -> Optional[tuple[str, str]]:
+    """Argv adapter over :func:`model_routing.tier_remap_conflict`, returning
+    ``(alias, remapped_model)`` for a spawn whose ``--model`` tier alias the
+    ambient env silently redefines, or None.
+
+    The shared checker owns the invariant; this only maps CLI flags onto it so
+    the same rule is enforced at the seam and at the in-process spawn APIs.
+    """
+    from fno.agents.model_routing import resolve_route, tier_remap_conflict
+
+    head = list(_args_before_argv(args))
+    if any(
+        a in _ROUTE_NAMING_FLAGS
+        or a.startswith(("--route=", "--provider=", "--account="))
+        for a in head
+    ):
+        return None
+    # The remap vars are claude-only; an explicit non-claude harness is unaffected.
+    harness = (_spawn_flag_value(args, "--harness", "-H") or "claude").strip().lower()
+    if harness != "claude":
+        return None
+    found = tier_remap_conflict(_spawn_flag_value(args, "--model", "-m"), env)
+    if found is None:
+        return None
+    role = _spawn_flag_value(args, "--role")
+    if role and resolve_route(role, env=env):
+        return None
+    return found
+
+
+def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
+    """Drop inherited vendor auth/model vars from ``os.environ`` for an
+    ``--account`` spawn, at the seam, so the Rust client inherits the scrub too.
+
+    The three Python substrate seams already scrub ``SCRUB_AUTH_VARS`` before
+    layering the account overlay, but an ``--account`` spawn on ``--substrate
+    bg`` auto-routes to the Rust client, which has no ``ANTHROPIC_*`` handling
+    at all -- so the Python scrub never ran for it and the pinned account
+    inherited the parent's vendor endpoint and tier remaps. ``route_to_rust``
+    execs with ``os.environ``, so scrubbing here is the one edit both runtimes
+    see. The account overlay is still layered per-substrate afterwards, so an
+    account record that legitimately pins any of these still wins.
+
+    Order is load-bearing: the overlay is resolved BEFORE the scrub. An api_key
+    record may reference the ambient environment (``ANTHROPIC_API_KEY =
+    "${ENV:ANTHROPIC_API_KEY}"``) and ``resolve_env_value`` reads
+    ``os.environ``, so scrubbing first would delete the source value and make a
+    previously valid ``--account`` spawn unresolvable. Resolve, then scrub, then
+    re-apply the resolved values.
+
+    A resolution failure leaves the environment untouched and returns: the
+    downstream ``resolve_account_overlay_or_exit`` owns that refusal receipt,
+    and this seam must not pre-empt it with a different error.
+    """
+    account = _spawn_flag_value(args, "--account")
+    if not account:
+        return
+    from fno.agents import account_env as _account_env
+
+    try:
+        overlay = _account_env.resolve_account_overlay(account)
+    except Exception:
+        return
+    if overlay is None:
+        return
+    for var in _account_env.SCRUB_AUTH_VARS:
+        os.environ.pop(var, None)
+    os.environ.update(overlay.env)
+
+
+def _refuse_inherited_tier_remap(args: Sequence[str]) -> None:
+    """Exit 2 rather than launch a worker whose model alias the ambient env
+    redefines. Runs at the routing seam, BEFORE the Rust/Python fork, so this
+    one call covers both runtimes (the Rust client has no ANTHROPIC_* handling
+    at all, so a Python-only guard would be decorative). The in-process spawn
+    APIs enforce the same invariant via ``check_spawn_tier_remap``."""
+    found = inherited_tier_remap(args)
+    if found is None:
+        return
+    from fno.agents.model_routing import remap_conflict_message
+
+    print(f"fno agents spawn: {remap_conflict_message(*found)}", file=sys.stderr)
+    raise SystemExit(2)
+
+
 def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--node``/``--slug``/``--plan`` (x-84a8).
 
@@ -749,6 +863,11 @@ def make_agents_group_cls() -> type:
                     from fno.agents.spawn_defaults import inject_spawn_defaults
 
                     args = inject_spawn_defaults(args)
+                    # Same seam, same reason: these must see the post-defaults
+                    # args and must cover BOTH runtimes, so they run here rather
+                    # than in either spawn implementation.
+                    _scrub_account_auth_at_seam(args)
+                    _refuse_inherited_tier_remap(args)
                 mode = runtime_mode()
                 # A role-bearing spawn (x-d2fe) is Python-only: the Rust client
                 # cannot parse --role, so never route it to the binary in any

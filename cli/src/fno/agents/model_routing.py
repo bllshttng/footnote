@@ -25,9 +25,9 @@ same vendors publish (z.ai's ``/api/coding/paas/v4``) are for OpenAI-SDK
 consumers and a future codex/openai lane, not for a claude worker. A provider
 whose ``protocol`` is not ``anthropic`` is skipped here with a notice.
 
-Claude Code internally requests opus/sonnet/haiku tiers (background tasks use
-haiku). Setting ``ANTHROPIC_MODEL`` + the three ``ANTHROPIC_DEFAULT_*`` tier
-vars to the routed model sends the WHOLE worker to the secondary provider, so no
+Claude Code internally requests the opus/sonnet/haiku/fable tiers (background
+tasks use haiku). Setting ``ANTHROPIC_MODEL`` + EVERY ``ANTHROPIC_DEFAULT_*`` tier
+var to the routed model sends the WHOLE worker to the secondary provider, so no
 Anthropic usage is recorded (AC1-HP). The background (haiku) tier defaults to
 the provider's cheaper ``haiku_model`` (zai -> ``glm-4.5-air``) so judgment-light
 background traffic runs cheap on the SAME secondary provider; opus/sonnet stay
@@ -147,15 +147,118 @@ def resolve_spawn_route(
 # autolaunch; unconfigured it fails safe to the primary Anthropic model.
 KNOWN_LANE_ROLES = ("build",)
 
+#: Claude tier aliases: the names Claude Code resolves through
+#: ``ANTHROPIC_DEFAULT_<TIER>_MODEL``. ``fable`` is one of them and is a live
+#: alias here (``fno agents spawn --model fable``); omitting it left the fable
+#: tier of a routed worker resolving at Anthropic while every other tier ran on
+#: the secondary provider.
+TIER_ALIASES = ("opus", "sonnet", "haiku", "fable")
+
 # Every tier Claude Code may request internally. Setting all of them to the
 # routed model keeps the entire worker (incl. background haiku) on the secondary
-# provider, so zero Anthropic usage is recorded.
-_MODEL_ENV_KEYS = (
+# provider, so zero Anthropic usage is recorded. Derived from TIER_ALIASES so a
+# future tier cannot be added in one place and forgotten in the other.
+MODEL_ENV_KEYS = (
     "ANTHROPIC_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    *(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL" for alias in TIER_ALIASES),
 )
+
+
+class TierRemapConflict(ValueError):
+    """A claude spawn names a tier alias the ambient environment redefines.
+
+    ``claude --bg`` resolves the model tier alias against the CALLER's
+    environment but resolves its endpoint and credential separately, so a
+    worker born under another vendor's remap asks Anthropic for that vendor's
+    model id and dies on its first turn behind a ``"status": "live"`` receipt.
+    """
+
+
+def is_anthropic_model(model: str) -> bool:
+    """True for an Anthropic model id or tier alias.
+
+    Pinning a tier to a specific Anthropic model
+    (``ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-1``) is a supported Claude
+    Code customization, not a vendor conflict: endpoint and model still agree.
+    Only a FOREIGN vendor's id (``glm-5.2[1m]``, ``deepseek-...``) creates the
+    split this module guards against.
+    """
+    name = model.strip().lower()
+    return name.startswith("claude-") or name in TIER_ALIASES
+
+
+def tier_remap_conflict(
+    model: Optional[str], env: Optional[Mapping[str, str]] = None
+) -> Optional[tuple[str, str]]:
+    """``(alias, remapped_model)`` when ``model`` is a claude tier alias that
+    ``env`` redefines to a FOREIGN vendor's model id, else ``None``. Pure and
+    cheap: reads only the env."""
+    alias = (model or "").strip().lower()
+    if alias not in TIER_ALIASES:
+        return None
+    if env is None:
+        env = os.environ
+    remapped = (env.get(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL") or "").strip()
+    if not remapped or is_anthropic_model(remapped):
+        return None
+    return alias, remapped
+
+
+def remap_conflict_message(alias: str, remapped: str) -> str:
+    """The one refusal text, shared by the CLI seam and the in-process APIs."""
+    var = f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL"
+    return (
+        f"--model {alias} is ambiguous here. This session exports "
+        f"{var}={remapped}, so {alias!r} resolves to that vendor's model id, "
+        "while the worker's endpoint and credential are resolved separately "
+        'and would not match it. The spawn would report "live" and then fail '
+        "on its first turn. No worker launched.\n"
+        "Name the route instead, so endpoint, auth, and model are chosen as "
+        "one unit:\n"
+        f"  --account <id> --model {alias}      # Anthropic's {alias} "
+        "(ids from `fno providers list`)\n"
+        f"  -P <vendor> --model {remapped}   # stay on the routed vendor "
+        "(vendors from `fno route ls`)\n"
+        f"Or unset {var} for this command."
+    )
+
+
+def check_spawn_tier_remap(
+    provider: Optional[str],
+    model: Optional[str],
+    *,
+    role: Optional[str] = None,
+    route_env: Optional[Mapping[str, str]] = None,
+    account_env: Optional[Mapping[str, str]] = None,
+    env: Optional[Mapping[str, str]] = None,
+    settings: "Optional[SettingsModel]" = None,
+) -> None:
+    """Raise :class:`TierRemapConflict` when a claude spawn would launch with a
+    tier alias the ambient environment redefines and nothing composed a
+    complete route. No-op otherwise.
+
+    Called from the in-process spawn APIs as well as the CLI seam: the CLI is
+    one of several reachable paths, so a guard only there is decorative.
+
+    A resolved ``route_env`` or ``account_env`` composes endpoint, auth, and
+    model as one unit and is exempt. ``role`` is NOT exempt on mention alone:
+    :func:`resolve_route` is deliberately fail-SAFE (a protected role, a
+    disabled block, an unconfigured provider, or a missing key all return
+    ``None`` and leave the ambient environment untouched), so ``--role
+    implement --model opus`` under a foreign remap recreates the exact failure
+    this guards. Exempt a role only once it produced a real route.
+    """
+    if (provider or "claude") != "claude":
+        return
+    if route_env or account_env:
+        return
+    # Cheap env-only check first; the role resolution below reads config.
+    found = tier_remap_conflict(model, env)
+    if found is None:
+        return
+    if role and resolve_route(role, settings=settings, env=env):
+        return
+    raise TierRemapConflict(remap_conflict_message(*found))
 
 
 def _emit(notice: Optional[Callable[[str], object]], message: str) -> None:
@@ -356,7 +459,7 @@ def _route_for_target(
         return None
 
     route = {"ANTHROPIC_BASE_URL": base_url, "ANTHROPIC_AUTH_TOKEN": key}
-    for k in _MODEL_ENV_KEYS:
+    for k in MODEL_ENV_KEYS:
         route[k] = model
     # Item 1: route the background (haiku) tier to the provider's cheaper
     # haiku_model (zai -> glm-4.5-air). Still the SAME secondary provider

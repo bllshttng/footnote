@@ -900,6 +900,19 @@ def dispatch_spawn_pane(
        names the mux session; never a daemon-PTY fallback (AC1-ERR).
     5. registry row with ``mux: {session, pane_id}`` (create-after-spawn).
     """
+    # x: the tier-remap invariant must hold on every reachable spawn path, not
+    # just the CLI seam -- an in-process caller passing model="opus" under a
+    # foreign ANTHROPIC_DEFAULT_OPUS_MODEL would otherwise still launch a worker
+    # that dies on its first turn. Fail closed before anything is created.
+    from fno.agents.model_routing import check_spawn_tier_remap
+
+    check_spawn_tier_remap(
+        provider,
+        model,
+        role=role,
+        route_env=route_env,
+        account_env=account_env,
+    )
     validate_spawn_name(name)
     # x-8f7f: gate the PANE path on PANE_HOSTABLE_PROVIDERS, not KNOWN_PROVIDERS.
     # A pane host only needs an interactive argv (build_pane_argv) - not a full

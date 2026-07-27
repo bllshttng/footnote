@@ -1790,6 +1790,19 @@ def dispatch_spawn(
         :class:`DispatchAskError`: every documented failure mode.
     """
     # 1. Name validation. spawn allows empty message (default "").
+    # x: the tier-remap invariant must hold on every reachable spawn path, not
+    # just the CLI seam -- an in-process caller passing model="opus" under a
+    # foreign ANTHROPIC_DEFAULT_OPUS_MODEL would otherwise still launch a worker
+    # that dies on its first turn. Fail closed before anything is created.
+    from fno.agents.model_routing import check_spawn_tier_remap
+
+    check_spawn_tier_remap(
+        provider,
+        model,
+        role=role,
+        route_env=route_env,
+        account_env=account_env,
+    )
     validate_spawn_name(name)
     _validate_from_name(from_name)
 
