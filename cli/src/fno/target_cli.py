@@ -93,7 +93,9 @@ def _refuse_unsatisfiable_reviewers() -> None:
     try:
         from fno.config import load_settings
 
-        reviewers = list(load_settings().review.reviewers or [])
+        review = load_settings().review
+        reviewers = list(review.reviewers or [])
+        registry = review.reviewer_registry
     except Exception as exc:  # noqa: BLE001 - report, never block bootstrap
         # "settings", not "config.review.reviewers": load_settings validates the
         # whole model, so the fault may be in an unrelated block. Naming the key
@@ -114,7 +116,7 @@ def _refuse_unsatisfiable_reviewers() -> None:
     )
 
     session = detect_session()
-    verdicts = resolve_reviewers(reviewers, session)
+    verdicts = resolve_reviewers(reviewers, session, registry)
     message = refusal_message(verdicts, session)
     for v in [v for v in verdicts if v.status == "unverifiable"]:
         typer.echo(f"note target init: {v.line()}", err=True)

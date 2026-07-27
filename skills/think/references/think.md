@@ -194,11 +194,16 @@ For a node seed, reuse an existing design that already claims the node or whose 
 For prose without a node, omit `--node`; Blueprint can intake and rename it later.
 
 Use semantic line breaks: one complete prose sentence per physical line.
+
+**Quote the title.** Node titles here routinely take the shape `verb X: qualifier`, and a bare `title: Rename the provider: line` is invalid YAML.
+The failure is silent rather than loud: the whole frontmatter goes unreadable, `is_design_stage` fails open to `False` (correctly - plans live in a symlinked vault, so a read failure must not quarantine the backlog), the node skips the `design` rung and derives `ready`, and `/blueprint --finalize` then exits 0 having validated nothing and stamped no acceptance contract.
+The only trace is a `warning: could not parse frontmatter` line that scrolls past.
+
 The design should contain, as applicable:
 
 ```markdown
 ---
-title: <title>
+title: "<title>"
 status: design
 type: think
 think_depth: light|standard|deep

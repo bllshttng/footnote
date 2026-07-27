@@ -1043,10 +1043,11 @@ def _spawn_worker(
             allow_merge = False
 
     # x-0676: resolve substrate + normalized command. A node dispatch_verb takes the
-    # verb path (never a merge); with no verb, auto_merge routes the /target verb
-    # path (omits no-merge, byte-identical to x-4391's token drop on claude) while
-    # the default bakes no-merge via the builtin; reconcile stays explicit. A
-    # DispatchResolveError propagates to the caller's non-fatal spawn-failure path.
+    # verb path (never a merge); reconcile stays explicit and spells its own posture.
+    # With neither, the builtin rung reads config.dispatch.auto_merge itself (x-8e59),
+    # so this caller no longer routes a merge grant through the verb path to work
+    # around a builtin that ignored the key. A DispatchResolveError propagates to the
+    # caller's non-fatal spawn-failure path.
     from fno.agents import harness_map
 
     node_verb = (verb or "").strip() or None
@@ -1064,8 +1065,6 @@ def _spawn_worker(
         )
     elif node_verb:
         resolve_kwargs["verb"] = node_verb
-    elif allow_merge:
-        resolve_kwargs["verb"] = "/target"
     resolved = harness_map.resolve_dispatch(**resolve_kwargs)
     substrate = resolved["substrate"]
     target_cmd = resolved["command"]
