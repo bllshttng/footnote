@@ -491,6 +491,20 @@ def _referenced_sh_files(steps: Sequence[tuple[str, str, str]]) -> set[str]:
     return referenced
 
 
+def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str, str, str]]:
+    """Auto-discovered shell steps the full gate runs: a harness
+    discover_shell_harnesses finds that no structural step already references
+    and that is not quarantined. Extracted from _run_smoke so the
+    _DISCOVERY_DEFERRED subtraction on the full-gate side is unit-tested too
+    (select_changed's copy is covered by its own test; both must agree).
+    """
+    return [
+        (rel, ".", f"bash {rel}")
+        for rel in discover_shell_harnesses(root)
+        if rel not in referenced and rel not in _DISCOVERY_DEFERRED
+    ]
+
+
 # Shell harnesses discover_shell_harnesses finds but smoke must not run yet.
 # 22 entries held. 14 are RED (pre-existing rot; each its own debugging session,
 # out of scope here). 3 are slow-but-green at 134s/97s/72s: draining them adds
@@ -1102,12 +1116,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     else:
         structural = list(_STRUCTURAL_STEPS)
         referenced = _referenced_sh_files(structural)
-        discovered = [
-            (rel, ".", f"bash {rel}")
-            for rel in discover_shell_harnesses(root)
-            if rel not in referenced and rel not in _DISCOVERY_DEFERRED
-        ]
-        steps = structural + discovered
+        steps = structural + _smoke_discovered_steps(root, referenced)
 
     names = [s[0] for s in steps]
     total = len(steps)
@@ -1216,7 +1225,11 @@ def _census_entries() -> list[str]:
         try:
             with open(override, encoding="utf-8") as fh:
                 raw = [ln.strip() for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]
-        except OSError:
+        except OSError as exc:
+            # Name the path + error: a typo'd CENSUS_DEFERRED_FILE otherwise
+            # looks identical to a genuine empty set (both exit 2).
+            sys.stderr.write(
+                f"census: cannot read CENSUS_DEFERRED_FILE={override!r}: {exc}\n")
             return []
         return sorted(set(raw))
     return sorted(_DISCOVERY_DEFERRED)
@@ -1241,9 +1254,13 @@ def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) ->
         rc = proc.wait(timeout=kill_bound_s)
         killed = False
     except subprocess.TimeoutExpired:
+        # ProcessLookupError is the TOCTOU window where the child exited between
+        # the timeout and getpgid; wait() reaps it. PermissionError is NOT caught:
+        # start_new_session makes us own the group so it is near-impossible, and
+        # if it ever surfaces a loud crash beats a wedged proc.wait() with no kill.
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
             pass
         proc.wait()
         rc = proc.returncode if proc.returncode is not None else 124
@@ -1254,7 +1271,7 @@ def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) ->
         # grandchildren. Kill the group before re-raising so nothing is orphaned.
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
             pass
         proc.wait()
         raise
@@ -1273,9 +1290,15 @@ def _run_census_deferred(args: Sequence[str]) -> int:
     """
     root = _repo_root(Path.cwd()) or Path.cwd()
     tranche = CENSUS_TRANCHE_BOUND_S
+    raw_bound = os.environ.get("CENSUS_KILL_BOUND_S")
     try:
-        kill_bound = int(os.environ.get("CENSUS_KILL_BOUND_S", CENSUS_KILL_BOUND_S_DEFAULT))
+        kill_bound = int(raw_bound) if raw_bound is not None else CENSUS_KILL_BOUND_S_DEFAULT
     except ValueError:
+        # Surface the rejection: a typo'd bound silently runs at the default and
+        # the header prints kill=300s with no hint the operator's value was dropped.
+        sys.stderr.write(
+            f"census: ignoring non-integer CENSUS_KILL_BOUND_S={raw_bound!r}, "
+            f"using {CENSUS_KILL_BOUND_S_DEFAULT}\n")
         kill_bound = CENSUS_KILL_BOUND_S_DEFAULT
     if kill_bound < tranche:
         kill_bound = tranche  # below the tranche, a 60-70s-green harness is killed as SLOW
