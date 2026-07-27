@@ -187,6 +187,25 @@ def test_cost_update_replaces_an_existing_session_row(tmp_path):
     assert node["cost_usd"] == 9.0
 
 
+def test_cost_update_rehashes_the_sidecar_it_invalidates(tmp_path):
+    """This writer bypasses locked_mutate_graph, so it owns the sidecar.
+
+    A stale sidecar makes the next load_graph raise GraphCorruptionError, and
+    cost attribution is silently skipped from then on.
+    """
+    import hashlib
+    from fno.cost import _update_graph_node
+    from fno.graph.load import load_graph
+
+    graph_path = _graph(tmp_path)
+    load_graph(graph_path)  # first contact writes the sidecar
+    _update_graph_node(graph_path, "ab-12345678", "S1", 4.0)
+
+    sidecar = Path(str(graph_path) + ".sha256")
+    assert sidecar.read_text().strip() == hashlib.sha256(graph_path.read_bytes()).hexdigest()
+    assert load_graph(graph_path)[0]["cost_usd"] == 4.0
+
+
 def test_cost_update_still_appends_a_distinct_session(tmp_path):
     from fno.cost import _update_graph_node
 

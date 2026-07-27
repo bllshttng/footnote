@@ -326,6 +326,12 @@ def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd
             tmp.write(content)
             tmp_path = Path(tmp.name)
         os.replace(tmp_path, graph_path)
+        # This writer bypasses locked_mutate_graph, so it must re-bless the
+        # sha256 sidecar itself. Without this the next load_graph raises
+        # GraphCorruptionError against the pre-write hash and every later cost
+        # attribution is silently skipped by the handler above.
+        from fno.graph.store import _write_sha256_sidecar
+        _write_sha256_sidecar(graph_path)
 
 
 # ---- check_budget ----
