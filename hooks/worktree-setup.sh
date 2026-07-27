@@ -82,26 +82,14 @@ wt_config() {
     fi
 }
 
-# 0a. Per-project policy gate, BEFORE any relocation decision. `never` means
-# this project's working tree IS the product (an Obsidian vault, a notes repo):
-# the answer is no worktree at all, not a relocated one. A non-zero exit aborts
-# creation per Claude Code's hook contract.
-#
-# Read through `fno worktree policy` so this shares ONE resolver with `fno
-# worktree ensure`; a second precedence impl here is exactly how the two paths
-# drift apart. Harness is omitted deliberately: `never` short-circuits before
-# the harness-native degradation, so it resolves identically either way.
-#
-# Fail OPEN on anything other than an affirmative `never` (missing fno, a build
-# without the verb, a parse error). `ensure` fails closed because it runs
-# unattended, but this is the interactive path: hard-breaking `claude
-# --worktree` for a stale fno would cost more than the gap it closes.
-if command -v fno >/dev/null 2>&1; then
-    WT_POLICY="$(fno worktree policy --repo "$MAIN_REPO" 2>/dev/null | head -1 | tr -d '[:space:]')"
-    if [[ "$WT_POLICY" == "never" ]]; then
-        echo "Refusing to create a worktree: $(basename "$MAIN_REPO") sets worktree.policy = \"never\"; work in place on the canonical checkout." >&2
-        exit 1
-    fi
+# 0a. `never` = no worktree at all, so refuse rather than relocate (non-zero
+# aborts creation per the hook contract). Read via the verb so both creation
+# paths share ONE resolver. Fails open: unlike `ensure` this is the interactive
+# path, where a stale fno must not break `claude --worktree`.
+if command -v fno >/dev/null 2>&1 \
+   && [[ "$(fno worktree policy --repo "$MAIN_REPO" 2>/dev/null | head -1 | tr -d '[:space:]')" == "never" ]]; then
+    echo "Refusing to create a worktree: $(basename "$MAIN_REPO") sets worktree.policy = \"never\"; work in place on the canonical checkout." >&2
+    exit 1
 fi
 
 # 0. Worktree relocation: honor config.paths.worktrees_base (OSS-neutral).

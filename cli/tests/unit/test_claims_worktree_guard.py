@@ -19,6 +19,7 @@ from fno.claims.worktree_guard import (
     VERDICT_FOREIGN,
     VERDICT_NO_WORKTREE,
     VERDICT_OK,
+    VERDICT_GRANTED,
     VERDICT_OVERRIDE,
     guard_worktree,
     worktree_claim_key,
@@ -207,3 +208,45 @@ class TestStaleRecovery:
         r = _guard(tmp_path, "claude", "s1")
         assert r.verdict == VERDICT_ACQUIRED
         assert claim_status(key, root=tmp_path)["harness"] == "claude"
+
+
+class TestOrchestratedGrant:
+    """A dispatcher deliberately routing a peer into a foreign-owned worktree.
+
+    The guard exists to catch an UNAWARE human opening a second harness in a
+    live worktree. An orchestrated review panel is the opposite case and was
+    refused only because harness identity stood in for intent.
+    """
+
+    def test_grant_downgrades_foreign(self, tmp_path):
+        _guard(tmp_path, "claude", "s1")
+        r = _guard(tmp_path, "codex", "s2", granted=True)
+        assert r.verdict == VERDICT_GRANTED
+        assert not r.blocked
+        assert r.owner_harness == "claude"
+
+    def test_grant_reports_distinctly_from_operator_override(self, tmp_path):
+        """Provenance must stay legible: "the dispatcher routed this" is not the
+        same event as "an operator forced this", even though both proceed."""
+        _guard(tmp_path, "claude", "s1")
+        granted = _guard(tmp_path, "codex", "s2", granted=True)
+        forced = _guard(tmp_path, "codex", "s2", override=True)
+        assert granted.verdict == VERDICT_GRANTED
+        assert forced.verdict == VERDICT_OVERRIDE
+
+    def test_grant_wins_when_both_present(self, tmp_path):
+        """Grant is the more specific provenance, so it names the verdict."""
+        _guard(tmp_path, "claude", "s1")
+        r = _guard(tmp_path, "codex", "s2", granted=True, override=True)
+        assert r.verdict == VERDICT_GRANTED
+
+    def test_grant_does_not_affect_a_free_worktree(self, tmp_path):
+        """A grant is not a claim: entering a FREE worktree still acquires
+        normally, so the peer becomes a real owner rather than a permanent guest."""
+        r = _guard(tmp_path, "codex", "s2", granted=True)
+        assert r.verdict == VERDICT_ACQUIRED
+
+    def test_same_harness_unaffected_by_grant(self, tmp_path):
+        _guard(tmp_path, "claude", "s1")
+        r = _guard(tmp_path, "claude", "s2", granted=True)
+        assert r.verdict == VERDICT_OK

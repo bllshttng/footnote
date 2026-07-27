@@ -247,6 +247,21 @@ and nothing objects, producing duplicate work and conflicting commits. The
   non-silent `override` verdict (mirrors `TARGET_LOCATION_OK`). Fail-open
   throughout: no git checkout, no harness identity, or an `fno` too old to know
   the verb enforces nothing.
+- **Grant (the orchestrated case).** `FNO_WORKTREE_GRANT=<worktree-path>`
+  downgrades a foreign refusal to a `granted` verdict when the path names the
+  worktree the session is actually in. The guard exists to catch an *unaware*
+  human opening a second harness in a live worktree; a peer a dispatcher
+  deliberately routed there (a cross-model review panel converging on one
+  branch) is the opposite case, and was refused only because harness identity
+  was standing in for intent. Prefer it over the override: a grant frees the one
+  worktree it names, while `FNO_WORKTREE_OK` frees every worktree for the whole
+  session. It reports as its own verdict so a receipt distinguishes "the
+  dispatcher routed this" from "an operator forced this".
+
+  Note what this does **not** solve: ownership keys on harness, so N concurrent
+  *same-harness* implementers in one worktree are already unguarded today. If
+  concurrent implementers need real protection, the axis has to move from
+  harness to write-intent, which is a change to the invariant, not a flag.
 
 ## Operator runbook
 

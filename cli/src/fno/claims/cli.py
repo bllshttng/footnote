@@ -358,6 +358,7 @@ def worktree_guard_cmd(
     ``no-worktree`` (enforces nothing, exit 0).
     """
     import os
+    from pathlib import Path
 
     from ..harness_identity import resolve_harness_identity
     from .session_pid import resolve_session_pid
@@ -382,13 +383,28 @@ def worktree_guard_cmd(
     except Exception:
         session_pid = None
 
+    wt_root = resolve_worktree_root()
+    # A dispatcher stamps FNO_WORKTREE_GRANT with the worktree it sent us to.
+    # Compare RESOLVED paths: the grant travels as the spawner saw it, and a
+    # symlinked root (macOS /tmp -> /private/tmp) would defeat a string match
+    # and silently drop the grant back to a refusal. A grant naming a DIFFERENT
+    # worktree must not free this one, which is the whole point of scoping it.
+    grant_raw = os.environ.get("FNO_WORKTREE_GRANT", "").strip()
+    granted = False
+    if grant_raw and wt_root is not None:
+        try:
+            granted = Path(grant_raw).resolve() == Path(wt_root).resolve()
+        except OSError:
+            granted = False
+
     try:
         result = guard_worktree(
-            resolve_worktree_root(),
+            wt_root,
             my_harness=ident.harness,
             my_holder=holder,
             session_pid=session_pid,
             override=override,
+            granted=granted,
             acquire=acquire_if_free,
         )
     except Exception:

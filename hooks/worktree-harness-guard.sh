@@ -63,4 +63,4 @@ fi
 
 [[ "$VERDICT" == "foreign" ]] || _approve
 
-_block "Worktree ${WORKTREE:-here} is owned by a ${OWNER_HARNESS:-different} session (${OWNER_HOLDER:-unknown}); a second harness must not work it concurrently (x-193d). Use that session, a different worktree, or set FNO_WORKTREE_OK=1 to override."
+_block "Worktree ${WORKTREE:-here} is owned by a ${OWNER_HARNESS:-different} session (${OWNER_HOLDER:-unknown}); a second harness must not work it concurrently. Use that session, or a different worktree. If a dispatcher deliberately sent you here (a cross-model review converging on one branch), set FNO_WORKTREE_GRANT=${WORKTREE:-<worktree>} - it frees THIS worktree only. FNO_WORKTREE_OK=1 frees every worktree for the whole session; prefer the scoped grant."

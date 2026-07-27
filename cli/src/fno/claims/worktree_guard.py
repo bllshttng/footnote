@@ -47,6 +47,7 @@ VERDICT_ACQUIRED = "acquired"        # claim was free, now ours
 VERDICT_OK = "ok"                    # same harness owns it (re-entry) - never refuse
 VERDICT_FOREIGN = "foreign"          # a DIFFERENT harness owns it - refuse
 VERDICT_OVERRIDE = "override"        # foreign, but FNO_WORKTREE_OK bypassed the refusal
+VERDICT_GRANTED = "granted"          # foreign, but the dispatcher sent us HERE on purpose
 
 
 @dataclass
@@ -117,6 +118,7 @@ def guard_worktree(
     session_pid: Optional[int] = None,
     ttl_ms: Optional[int] = DEFAULT_TTL_MS,
     override: bool = False,
+    granted: bool = False,
     acquire: bool = True,
     root: Optional[Path] = None,
 ) -> WorktreeGuardResult:
@@ -134,6 +136,16 @@ def guard_worktree(
     ``override`` so the caller can proceed - never silent. ``acquire=False`` is
     the read-only path (the SessionStart advisory): report a foreign owner but
     never establish ownership.
+
+    ``granted`` is the ORCHESTRATED case this guard was never built for. The
+    uncovered path it does protect is an unaware human opening a second harness
+    in a live worktree; a peer that a dispatcher deliberately sent here (a
+    cross-model review panel converging on one branch) is the opposite, and was
+    refused only because harness identity was standing in for intent. A grant is
+    scoped to ONE worktree path by the spawner, so the peer is still refused
+    everywhere else - unlike ``override``, which frees the whole session. It
+    reports as its own verdict rather than reusing ``override`` so a receipt
+    distinguishes "an operator forced this" from "the dispatcher routed this".
     """
     if worktree_root is None or not my_harness:
         return WorktreeGuardResult(verdict=VERDICT_NO_WORKTREE, my_harness=my_harness)
@@ -160,8 +172,15 @@ def guard_worktree(
                 owner_holder=owner_holder,
                 owner_pid=status.get("pid"),
             )
-        # A different (or untaggable) harness owns a live claim -> refuse.
-        verdict = VERDICT_OVERRIDE if override else VERDICT_FOREIGN
+        # A different (or untaggable) harness owns a live claim -> refuse,
+        # unless the dispatcher routed us here (grant) or an operator forced it.
+        # Grant is checked first: it is the more specific provenance.
+        if granted:
+            verdict = VERDICT_GRANTED
+        elif override:
+            verdict = VERDICT_OVERRIDE
+        else:
+            verdict = VERDICT_FOREIGN
         return WorktreeGuardResult(
             verdict=verdict,
             worktree=wt,
