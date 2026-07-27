@@ -782,7 +782,7 @@ else
   echo "handoff: WARN: fno-agents binary not found; skipping delegated ledger record (non-blocking)" >&2
 fi
 
-# 8d. Best-effort: append session_id to plan frontmatter session_ids inline-list
+# 8d. Best-effort: append session_id to plan frontmatter session_ids (either form)
 python3 - "$PLAN_PATH" "$SESSION_ID" 2>/dev/null <<'PYEOF'
 import sys, re
 
@@ -806,14 +806,33 @@ try:
     if sids_match:
         current = sids_match.group(1).strip()
         # Parse inline list: [a, b] or just append
+        if current == '':
+            # Block form: a bare `session_ids:` header with indented `- id`
+            # children. Rewriting the header as an inline list would strand
+            # those children underneath it, which is malformed YAML AND drops
+            # every id already recorded. Append a sibling child instead; with
+            # no children this still produces a valid one-item block list.
+            fm_lines = fm.splitlines(True)
+            idx = fm[:sids_match.start()].count('\n')
+            end = idx + 1
+            while end < len(fm_lines) and (
+                fm_lines[end].startswith((' ', '\t')) or not fm_lines[end].strip()
+            ):
+                end += 1
+            while end > idx + 1 and not fm_lines[end - 1].strip():
+                end -= 1
+            fm_lines.insert(end, '  - ' + sid + '\n')
+            new_fm = ''.join(fm_lines)
+            new_content = '---\n' + new_fm + '---\n' + rest
+            with open(plan_path, 'w') as f:
+                f.write(new_content)
+            sys.exit(0)
         if current.startswith('[') and current.endswith(']'):
             inner = current[1:-1].strip()
             if inner:
                 new_val = '[' + inner + ', ' + sid + ']'
             else:
                 new_val = '[' + sid + ']'
-        elif current == '' or current == '[]':
-            new_val = '[' + sid + ']'
         else:
             # scalar or unknown: wrap both
             new_val = '[' + current.strip() + ', ' + sid + ']'
