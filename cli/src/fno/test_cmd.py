@@ -510,25 +510,35 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 
 
 # Shell harnesses discover_shell_harnesses finds but smoke must not run yet.
-# 14 entries held. 10 are RED on both platforms (pre-existing rot; each its own
-# debugging session, out of scope here). The other 4 are macOS-green and
+# 15 entries held. 10 are RED on both platforms (pre-existing rot; each its own
+# debugging session, out of scope here). The other 5 are macOS-green and
 # Linux-red, so a developer census calls them drainable and CI does not:
 #
 #   tests/hooks/test_hook_events.sh - a non-portable perm check; GNU stat does
 #     not fail on -f, so the Linux fallback branch never runs.
-#   tests/hooks/test_init_contested_steal_guard.sh
-#   tests/hooks/test_init_claim_stderr_and_modern_claim.sh
-#   tests/test_provider_substrate_e2e.sh
-#     - all three `command -v fno || skip`, and a fresh runner ships only the
-#       venv `fno-py`. They exit 77 (SKIP), which smoke counts as a failure, so
-#       draining one turns the gate red without a single assertion running.
-#       A CI `fno` shim would drain all three at once; that is the actual fix.
 #
-# A LOCAL GREEN IS NOT GROUNDS TO DRAIN ONE OF THESE FOUR. The census runs on
+#   THE `fno`-ON-PATH FAMILY - four harnesses, one cause:
+#     tests/hooks/test_init_claim_stderr_and_modern_claim.sh
+#     tests/hooks/test_init_contested_steal_guard.sh
+#     tests/hooks/test_init_node_guard_tokenize.sh
+#     tests/test_provider_substrate_e2e.sh
+#   Each opens with `command -v fno || skip`, and a fresh runner ships only the
+#   venv `fno-py`. They exit 77 (SKIP), which smoke counts as a FAILURE, so
+#   draining one turns the gate red at 0s without a single assertion running.
+#   They are listed together because they were found one 12-minute CI run at a
+#   time, fail-fast surfacing exactly one per push. Enumerate the family with
+#   `rg -l 'command -v fno' tests/` before draining anything in it - one member
+#   is not one bug.
+#   A CI `fno` shim drains all four at once and is the actual fix. It is not
+#   done here: `scripts/ci/check-config-schema-drift.sh:24` also branches on
+#   `command -v fno`, so putting `fno` on the runner's PATH changes steps that
+#   have nothing to do with this list, and that deserves its own PR.
+#
+# A LOCAL GREEN IS NOT GROUNDS TO DRAIN ONE OF THESE FIVE. The census runs on
 # the developer's OS; CI's verdict is the one that counts, and it disagrees in
-# BOTH directions. test_init_claim_stderr_and_modern_claim.sh was drained on a
-# macOS green and reverted when CI went red. Two others went the other way -
-# macOS-red, Linux-green - and were drained on CI's word, not a laptop's.
+# BOTH directions. Two of the family were drained on a macOS green and reverted
+# when CI went red. Two other harnesses went the other way - macOS-red,
+# Linux-green - and were drained on CI's word, not a laptop's.
 #
 # A green-fast harness here is silent coverage loss no file edit surfaces.
 # `fno test --census-deferred` runs every entry bounded and exits non-zero the
@@ -550,6 +560,7 @@ tests/events/test-check-pr-emits-polling.sh
 tests/hooks/test_hook_events.sh
 tests/hooks/test_init_claim_stderr_and_modern_claim.sh
 tests/hooks/test_init_contested_steal_guard.sh
+tests/hooks/test_init_node_guard_tokenize.sh
 tests/hooks/test_reconcile_session_start.sh
 tests/smoke-megatron-e2e.sh
 tests/smoke-target-shim.sh
