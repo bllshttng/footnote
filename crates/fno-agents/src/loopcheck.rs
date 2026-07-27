@@ -422,17 +422,13 @@ fn value_as_nudge_overrides(v: &toml::Value) -> Vec<NudgeOverride> {
                 // Upper-bounded so `chrono::Duration::minutes` (which panics
                 // above i64::MAX/60) can never take the stop gate down on an
                 // absurd config value; anything out of range is malformed.
-                Some(n) if (1..=MAX_NUDGE_WAIT_MINUTES).contains(&n) => {
-                    ov.wait_minutes = Some(n)
-                }
+                Some(n) if (1..=MAX_NUDGE_WAIT_MINUTES).contains(&n) => ov.wait_minutes = Some(n),
                 _ => ov.malformed = true, // non-int, non-positive, or absurd (AC8)
             }
         }
         if let Some(c) = map.get("ceiling") {
             match c.as_integer() {
-                Some(n) if (1..=MAX_NUDGE_CEILING).contains(&n) => {
-                    ov.ceiling = Some(n as usize)
-                }
+                Some(n) if (1..=MAX_NUDGE_CEILING).contains(&n) => ov.ceiling = Some(n as usize),
                 _ => ov.malformed = true,
             }
         }
@@ -1561,7 +1557,12 @@ fn read_pr_info(
                 .missing_bots
                 .iter()
                 .map(|bot| {
-                    classify_bot_nudge(bot, review_comments, nudge_config_for(nudge_configs, bot), now)
+                    classify_bot_nudge(
+                        bot,
+                        review_comments,
+                        nudge_config_for(nudge_configs, bot),
+                        now,
+                    )
                 })
                 .collect();
             // The "empty bot_nudges = not classified = status quo" contract that
@@ -1952,7 +1953,13 @@ fn post_nudge_comment(gh_bin: &str, cwd: &Path, pr_number: i64, review_handle: &
         return false;
     }
     Command::new(gh_bin)
-        .args(["pr", "comment", &pr_number.to_string(), "--body", review_handle])
+        .args([
+            "pr",
+            "comment",
+            &pr_number.to_string(),
+            "--body",
+            review_handle,
+        ])
         .current_dir(cwd)
         .output()
         .map(|o| o.status.success())
@@ -2082,7 +2089,10 @@ fn resolved_nudge_configs(settings: &Settings) -> Vec<NudgeConfig> {
         .collect();
 
     for ov in &settings.nudge_overrides {
-        let base = out.iter().find(|c| logins_correspond(&c.login, &ov.login)).cloned();
+        let base = out
+            .iter()
+            .find(|c| logins_correspond(&c.login, &ov.login))
+            .cloned();
         // Drop first so an override always replaces (or removes) its login.
         out.retain(|c| !logins_correspond(&c.login, &ov.login));
         if ov.malformed || !ov.enabled {
@@ -3426,6 +3436,14 @@ pub fn decide(args: &[String]) -> (i32, String) {
             if !local.reviewers.is_empty() {
                 merged.reviewers = local.reviewers;
             }
+            if !local.nudge_overrides.is_empty() {
+                // Without this line a project-local `[review.nudge]` (including
+                // `enabled = false`) is read from the GLOBAL file only and the
+                // repo's own overrides vanish - loop-check would post a nudge a
+                // repo explicitly opted out of. Same per-field-overlay trap the
+                // done_probes line below documents.
+                merged.nudge_overrides = local.nudge_overrides;
+            }
             if !local.peers.is_empty() {
                 merged.peers = local.peers;
             }
@@ -4351,12 +4369,35 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     // AC2-ERR head mismatch / finding).
                 }
 
+                // x-b167: a freshly-posted nudge sits in Awaiting until
+                // wait_minutes elapses. On a harness that cannot idle on a
+                // `<watching>` tag (a loop-run child, codex/gemini, or a failed
+                // lease renewal) the fingerprint is stable, so without this guard
+                // the generic backstop reaps the wait after backstop_n fires -
+                // before the nudge cycle reaches its ceiling, terminating with a
+                // generic NoProgress instead of the named give-up. Suppress the
+                // backstop ONLY when the sole unmet condition is a live Awaiting
+                // nudge: it is self-limiting (Awaiting -> Unresponsive after
+                // wait_minutes, when this guard clears and the backstop reaps it
+                // naming the bot), and the narrow scope keeps CI red, a finding,
+                // an unattested reviewer, or a failed probe tripping it as before.
+                let sole_blocker_is_awaiting = pr_open
+                    && ci_ok
+                    && probe_block.is_none()
+                    && !pr_info.reviewed
+                    && pr_info.unattested_reviewers.is_empty()
+                    && pr_info.unaddressed_findings.is_empty()
+                    && pr_info
+                        .bot_nudges
+                        .iter()
+                        .any(|n| n.class == NudgeClass::Awaiting);
                 // `probe_block.is_some()` keeps a probe that can never pass in
                 // this environment on the NoProgress escape rather than looping
                 // to the budget ceiling: PR+CI+review all hold, so without it
                 // none of the other disjuncts can ever fire.
                 if backstop_tripped
                     && (!pr_open || !ci_ok || !pr_info.reviewed || probe_block.is_some())
+                    && !sole_blocker_is_awaiting
                 {
                     // Backstop tripped + done() false -> NoProgress. x-b167 AC13:
                     // when a nudged bot never answered, the operator's question is
@@ -5402,13 +5443,26 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                      will arrive on its own. Either post the review by hand, or move this \
                      login to config.review.optional_apps (honored-if-present, never waited \
                      on). Not a wait: do not arm a watcher.{}",
-                    pr.number, n.login, n.nudges, n.span_min, hint("review")
+                    pr.number,
+                    n.login,
+                    n.nudges,
+                    n.span_min,
+                    hint("review")
                 );
             }
-            if let Some(n) = pr.bot_nudges.iter().find(|n| n.class == NudgeClass::Awaiting) {
+            if let Some(n) = pr
+                .bot_nudges
+                .iter()
+                .find(|n| n.class == NudgeClass::Awaiting)
+            {
                 return format!(
                     "PR #{}: {} nudged {}m ago ({} of {}), awaiting review.{}",
-                    pr.number, n.login, n.newest_age_min, n.nudges, n.ceiling, hint("review")
+                    pr.number,
+                    n.login,
+                    n.newest_age_min,
+                    n.nudges,
+                    n.ceiling,
+                    hint("review")
                 );
             }
             // All NotNudgeable (or not classified): today's exact string + hint
@@ -6158,7 +6212,13 @@ mod tests {
         // AC1: not idlable; reason gives the exact gh command; no arm-and-tag hint.
         let pr = bot_review_pr(
             "chatgpt-codex-connector",
-            vec![bn("chatgpt-codex-connector", NudgeClass::NeedsNudge, 0, 0, 0)],
+            vec![bn(
+                "chatgpt-codex-connector",
+                NudgeClass::NeedsNudge,
+                0,
+                0,
+                0,
+            )],
         );
         assert_eq!(async_wait_class(&pr, "abc", true), None);
         let reason = build_block_reason(&pr, "abc", true);
@@ -6166,7 +6226,10 @@ mod tests {
             reason.contains("gh pr comment 618 --body \"@codex review\""),
             "{reason}"
         );
-        assert!(!reason.contains("harness-tracked watcher"), "no arm hint: {reason}");
+        assert!(
+            !reason.contains("harness-tracked watcher"),
+            "no arm hint: {reason}"
+        );
     }
 
     #[test]
@@ -6181,7 +6244,10 @@ mod tests {
         let reason = build_block_reason(&pr, "abc", true);
         assert!(reason.contains("nudged"), "{reason}");
         assert!(reason.contains("awaiting"), "{reason}");
-        assert!(reason.contains("harness-tracked watcher"), "arm hint present: {reason}");
+        assert!(
+            reason.contains("harness-tracked watcher"),
+            "arm hint present: {reason}"
+        );
     }
 
     #[test]
@@ -6189,14 +6255,26 @@ mod tests {
         // AC3: not idlable; names the give-up + optional_apps; no arm-and-tag hint.
         let pr = bot_review_pr(
             "chatgpt-codex-connector",
-            vec![bn("chatgpt-codex-connector", NudgeClass::Unresponsive, 3, 20, 47)],
+            vec![bn(
+                "chatgpt-codex-connector",
+                NudgeClass::Unresponsive,
+                3,
+                20,
+                47,
+            )],
         );
         assert_eq!(async_wait_class(&pr, "abc", true), None);
         let reason = build_block_reason(&pr, "abc", true);
-        assert!(reason.contains("did not review after 3 nudges over 47m"), "{reason}");
+        assert!(
+            reason.contains("did not review after 3 nudges over 47m"),
+            "{reason}"
+        );
         assert!(reason.contains("config.review.optional_apps"), "{reason}");
         assert!(reason.contains("do not arm a watcher"), "{reason}");
-        assert!(!reason.contains("harness-tracked watcher"), "no arm hint: {reason}");
+        assert!(
+            !reason.contains("harness-tracked watcher"),
+            "no arm hint: {reason}"
+        );
     }
 
     #[test]
@@ -6209,8 +6287,14 @@ mod tests {
         );
         assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
         let reason = build_block_reason(&pr, "abc", true);
-        assert!(reason.contains("gemini-code-assist has not reviewed"), "{reason}");
-        assert!(reason.contains("harness-tracked watcher"), "arm hint present: {reason}");
+        assert!(
+            reason.contains("gemini-code-assist has not reviewed"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("harness-tracked watcher"),
+            "arm hint present: {reason}"
+        );
     }
 
     #[test]
@@ -6267,7 +6351,13 @@ mod tests {
         // elapsed time instead of a bare fingerprint streak.
         let pr = bot_review_pr(
             "chatgpt-codex-connector",
-            vec![bn("chatgpt-codex-connector", NudgeClass::Unresponsive, 3, 20, 47)],
+            vec![bn(
+                "chatgpt-codex-connector",
+                NudgeClass::Unresponsive,
+                3,
+                20,
+                47,
+            )],
         );
         let n = unresponsive_bot(&pr).expect("an unresponsive bot");
         let msg = nudge_giveup_message(n);
@@ -8476,7 +8566,12 @@ mod tests {
     fn nudge_awaiting_within_window() {
         let cfg = nudge_cfg();
         let comments = vec![mention("@codex review", "2026-07-06T01:58:00Z")];
-        let b = classify_bot_nudge("chatgpt-codex-connector", &comments, Some(&cfg), nudge_now());
+        let b = classify_bot_nudge(
+            "chatgpt-codex-connector",
+            &comments,
+            Some(&cfg),
+            nudge_now(),
+        );
         assert_eq!(b.class, NudgeClass::Awaiting);
         assert_eq!(b.nudges, 1);
         assert!(b.newest_age_min <= 2);
@@ -8491,7 +8586,12 @@ mod tests {
             mention("hey @codex review please", "2026-07-06T00:30:00Z"),
             mention("@codex review", "2026-07-06T01:00:00Z"),
         ];
-        let b = classify_bot_nudge("chatgpt-codex-connector", &comments, Some(&cfg), nudge_now());
+        let b = classify_bot_nudge(
+            "chatgpt-codex-connector",
+            &comments,
+            Some(&cfg),
+            nudge_now(),
+        );
         assert_eq!(b.class, NudgeClass::Unresponsive);
         assert_eq!(b.nudges, 3);
         assert!(b.span_min >= 120, "span was {}", b.span_min);
@@ -8502,7 +8602,12 @@ mod tests {
         // One mention 60m ago, ceiling 3: the previous nudge timed out, ask again.
         let cfg = nudge_cfg();
         let comments = vec![mention("@codex review", "2026-07-06T01:00:00Z")];
-        let b = classify_bot_nudge("chatgpt-codex-connector", &comments, Some(&cfg), nudge_now());
+        let b = classify_bot_nudge(
+            "chatgpt-codex-connector",
+            &comments,
+            Some(&cfg),
+            nudge_now(),
+        );
         assert_eq!(b.class, NudgeClass::NeedsNudge);
         assert_eq!(b.nudges, 1);
     }
@@ -8521,7 +8626,12 @@ mod tests {
         // A mention with an unparseable createdAt must not push toward Unresponsive.
         let cfg = nudge_cfg();
         let comments = vec![mention("@codex review", "not-a-date")];
-        let b = classify_bot_nudge("chatgpt-codex-connector", &comments, Some(&cfg), nudge_now());
+        let b = classify_bot_nudge(
+            "chatgpt-codex-connector",
+            &comments,
+            Some(&cfg),
+            nudge_now(),
+        );
         assert_eq!(b.class, NudgeClass::NeedsNudge);
         assert_eq!(b.nudges, 1);
     }
@@ -8557,7 +8667,8 @@ mod tests {
 
     #[test]
     fn nudge_override_disabled_removes_login() {
-        let s = parse_settings("[review.nudge]\n\"chatgpt-codex-connector\" = { enabled = false }\n");
+        let s =
+            parse_settings("[review.nudge]\n\"chatgpt-codex-connector\" = { enabled = false }\n");
         let cfgs = resolved_nudge_configs(&s);
         assert!(cfgs
             .iter()

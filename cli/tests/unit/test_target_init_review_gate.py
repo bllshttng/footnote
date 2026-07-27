@@ -530,6 +530,21 @@ def test_github_apps_typo_never_seen_is_refused_naming_optional_apps():
     assert "config.review.optional_apps" in msg
 
 
+def test_github_apps_configured_nudge_login_is_satisfiable_without_probe():
+    """A login the operator gave an explicit [review.nudge] profile is a named
+    real App, not a typo, so it is satisfiable at init even with no prior
+    activity - the documented first-use path for a custom mention-triggered App."""
+
+    def _explode(login, cwd=None):
+        raise AssertionError("a configured nudge login must not be probed")
+
+    (v,) = resolve_github_apps(
+        ["some-new-bot"], probe=_explode, nudge_logins=("some-new-bot",)
+    )
+    assert v.status == "satisfiable"
+    assert github_apps_refusal_message([v]) is None
+
+
 def test_github_apps_unknown_but_seen_is_satisfiable():
     """A login footnote does not recognize but that HAS commented/reviewed here
     is a real bot, not a typo - proceed."""

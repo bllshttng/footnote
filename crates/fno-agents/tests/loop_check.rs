@@ -2066,8 +2066,7 @@ fn ac1_err_missing_required_bot_blocks_naming_bot() {
     // reviewed". (The mock gh has no `pr comment` handler, so the runtime post
     // fails and the bot stays NeedsNudge with the post-by-hand command shown.)
     assert!(
-        d.message.contains("has not been asked")
-            && d.message.contains("gh pr comment"),
+        d.message.contains("has not been asked") && d.message.contains("gh pr comment"),
         "block message must render the NeedsNudge nudge instruction; got: {}",
         d.message
     );
@@ -4620,11 +4619,130 @@ fn nudge_unresponsive_bot_gives_up_on_backstop() {
     let (_c2, d2) = fire(&args);
     assert_eq!(d2.decision, "block", "fire 2: {}", d2.message);
     let (_c3, d3) = fire(&args);
-    assert_eq!(d3.decision, "allow", "fire 3 must trip the backstop: {}", d3.message);
+    assert_eq!(
+        d3.decision, "allow",
+        "fire 3 must trip the backstop: {}",
+        d3.message
+    );
     assert_eq!(d3.termination_reason.as_deref(), Some("NoProgress"));
     assert!(
         d3.message.contains("chatgpt-codex-connector") && d3.message.contains("3 nudges"),
         "the give-up termination must name the bot and the nudge count; got: {}",
         d3.message
+    );
+}
+
+/// Codex P1 (overlay): a project-local `[review.nudge]` override must reach the
+/// resolver via the global+local merge. `enabled = false` here opts the repo
+/// out, so the missing codex bot is NotNudgeable and NO comment is posted.
+#[test]
+fn nudge_project_local_disable_is_honored() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    std::env::set_var("FNO_NUDGE_DISABLED", "1");
+    fs::write(
+        cwd.join(".fno/config.toml"),
+        "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n\
+         [review.nudge]\n\"chatgpt-codex-connector\" = { enabled = false }\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let marker = cwd.join("posts.txt");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-nudge-optout", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = nudge_mock("[]", 0, Some(&marker));
+
+    let (_c, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(d.decision, "block", "got: {}", d.message);
+    assert!(
+        d.message.contains("has not reviewed"),
+        "an opted-out bot must render today's passive block, not a nudge; got: {}",
+        d.message
+    );
+    let posts = fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        posts.trim().is_empty(),
+        "enabled=false must suppress the post entirely; got: {posts:?}"
+    );
+}
+
+/// Codex P1 (backstop): a freshly-nudged bot in Awaiting must NOT be reaped by
+/// the generic NoProgress backstop before its wait window elapses, even on a
+/// harness that cannot idle - the nudge cycle would otherwise be cut short.
+#[test]
+fn nudge_awaiting_defers_the_backstop() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let events_path = cwd.join(".fno/events.jsonl");
+    // Unattended -> backstop N=3.
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-nudge-await", "2026-06-05T00:00:00Z", false),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    // One mention 5m before --now: newest is well inside the 15m wait -> Awaiting.
+    let comments = r#"[{"author":{"login":"human"},"body":"@codex review","createdAt":"2026-06-05T00:00:00Z"}]"#;
+    let mock = nudge_mock(comments, 0, None);
+
+    let args = [
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:05:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+        "--events",
+        events_path.to_str().unwrap(),
+    ];
+
+    let (_c1, d1) = fire(&args);
+    assert_eq!(d1.decision, "block", "fire 1: {}", d1.message);
+    let (_c2, d2) = fire(&args);
+    assert_eq!(d2.decision, "block", "fire 2: {}", d2.message);
+    let (_c3, d3) = fire(&args);
+    // Without the guard this would trip NoProgress on fire 3; the awaiting wait
+    // is self-limiting and must keep blocking until it turns Unresponsive.
+    assert_eq!(
+        d3.decision, "block",
+        "an awaiting nudge must defer the backstop: {}",
+        d3.message
+    );
+    assert!(
+        d3.termination_reason.is_none(),
+        "got: {:?}",
+        d3.termination_reason
     );
 }

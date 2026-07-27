@@ -512,6 +512,7 @@ def resolve_github_apps(
     *,
     probe=None,
     cwd: Optional[str] = None,
+    nudge_logins: "frozenset[str] | set[str] | tuple[str, ...] | None" = None,
 ) -> list[AppVerdict]:
     """Resolve every `github_apps` login against this repo. Read-only.
 
@@ -520,16 +521,23 @@ def resolve_github_apps(
     typo) if a clean search found nothing, and `unverifiable` if the probe could
     not run - which proceeds, never refuses.
 
+    `nudge_logins` are the keys of `config.review.nudge`: an operator who wrote an
+    explicit nudge profile for an App has named a real bot, not a typo, so it is
+    `satisfiable` at init even before it has ever acted here (loop-check will post
+    its trigger). This is the documented first-use path for a custom App.
+
     `probe` defaults to the module-level `_app_ever_acted` resolved at call time
     (so a test can monkeypatch it), or pass an explicit callable.
     """
     probe = probe or _app_ever_acted
+    nudge = {n.strip().lower() for n in (nudge_logins or ()) if n.strip()}
     out: list[AppVerdict] = []
     for entry in apps:
         login = entry.strip()
         if not login:
             continue
-        if _app_is_recognized(login):
+        lo = login.lower()
+        if _app_is_recognized(login) or any(k in lo or lo in k for k in nudge):
             out.append(
                 AppVerdict(
                     login,

@@ -138,7 +138,9 @@ def _refuse_unreachable_github_apps() -> None:
     try:
         from fno.config import load_settings
 
-        apps = list(load_settings().review.github_apps or [])
+        review = load_settings().review
+        apps = list(review.github_apps or [])
+        nudge_logins = tuple((review.nudge or {}).keys())
     except Exception as exc:  # noqa: BLE001 - report, never block bootstrap
         typer.echo(
             f"WARN target init: github_apps capability check skipped "
@@ -154,7 +156,7 @@ def _refuse_unreachable_github_apps() -> None:
         resolve_github_apps,
     )
 
-    verdicts = resolve_github_apps(apps)
+    verdicts = resolve_github_apps(apps, nudge_logins=nudge_logins)
     for v in [v for v in verdicts if v.status == "unverifiable"]:
         typer.echo(f"note target init: {v.line()}", err=True)
     message = github_apps_refusal_message(verdicts)
