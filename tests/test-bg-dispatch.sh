@@ -53,6 +53,9 @@ case "$sub $verb" in
       # x-a5e4: a node with dispatch_verb takes the verb/brief resolver path.
       verb_fragment=""
       [[ -f "$S/verb_$id" ]] && verb_fragment=",\"dispatch_verb\":\"$(cat "$S/verb_$id")\""
+      # x-3218: a title-derived slug feeds the agent-name budget. Omitted unless
+      # set, so every pre-existing scenario keeps its slugless <verb>-<id> name.
+      [[ -f "$S/slug_$id" ]] && verb_fragment="$verb_fragment,\"slug\":\"$(cat "$S/slug_$id")\""
       # Emit _resolved_cwd when set, otherwise omit the field (stale-fno sim).
       if [[ -f "$S/resolved_cwd_$id" ]]; then
         printf '{"id":"%s","status":"%s","_resolved_cwd":"%s","cwd":"%s"%s%s}\n' \
@@ -185,6 +188,13 @@ case "$sub $verb" in
       exit 0
     fi
     : ;;
+  "agents name")
+    # x-3218: the canonical agent-name bridge. Delegates to the REAL primitive
+    # (via NAME_BRIDGE) so the dispatcher's naming is proved against the shipped
+    # policy, not a mock's guess. Unset -> exit 0 with no output, which is the
+    # unreachable-fno signal the launcher degrades on.
+    [[ -n "${NAME_BRIDGE:-}" && -x "${NAME_BRIDGE:-}" ]] || exit 0
+    shift 2; exec "$NAME_BRIDGE" "$@" ;;
   "event emit") : ;;  # x-567d: fallback/fail telemetry; noop under the mock
   *) exit 0 ;;
 esac
@@ -193,13 +203,33 @@ chmod +x "$MOCKBIN/fno"
 export MOCK_STATE="$MOCKSTATE"
 export PATH="$MOCKBIN:$PATH"
 
+# x-3218: point the mock's `agents name` case at the REAL canonical owner for the
+# WHOLE suite. Production always has a working bridge, so leaving it unset would
+# run every scenario through the degraded fallback and certify a branch that only
+# fires on a broken or stale fno. Cases wanting the degraded, stale, or noisy
+# behaviour override NAME_BRIDGE per call.
+VENV_PY="$REPO_ROOT/cli/.venv/bin/python"
+if [[ ! -x "$VENV_PY" ]]; then
+  CANON="$(cd "$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd)"
+  [[ -n "$CANON" ]] && VENV_PY="$CANON/cli/.venv/bin/python"
+fi
+NAME_BRIDGE="$TMP/name-bridge"
+{
+  echo '#!/usr/bin/env bash'
+  echo "exec \"$VENV_PY\" -c 'import sys; sys.path.insert(0, \"$REPO_ROOT/cli/src\"); from fno.cli import app; app()' agents name \"\$@\""
+} > "$NAME_BRIDGE"
+chmod +x "$NAME_BRIDGE"
+"$NAME_BRIDGE" target x-1 >/dev/null 2>&1 \
+  || { echo "FATAL: canonical naming bridge unreachable at $VENV_PY" >&2; exit 1; }
+export NAME_BRIDGE
+
 set_status() { echo "$2" > "$MOCKSTATE/status_$1"; }
 set_claim()  { echo "$2" > "$MOCKSTATE/claim_$1"; }
 set_agent_live() { printf '{"agents":[{"name":"%s","status":"%s"}]}\n' "$1" "$2" > "$MOCKSTATE/agents_list.json"; }
 set_cwd() { echo "$2" > "$MOCKSTATE/cwd_$1"; }
 set_resolved_cwd() { echo "$2" > "$MOCKSTATE/resolved_cwd_$1"; }
 set_pr() { echo "$2" > "$MOCKSTATE/pr_$1"; }   # node carries an open (unmerged) PR
-reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err 2>/dev/null || true; }
+reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* "$MOCKSTATE"/slug_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err 2>/dev/null || true; }
 ask_count()  { [[ -f "$MOCKSTATE/ask.log" ]] && wc -l < "$MOCKSTATE/ask.log" | tr -d ' ' || echo 0; }
 
 echo "=============================================="
@@ -795,6 +825,94 @@ out_real="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
 echo "$out_real" | grep -q "^launched ab-aaaa1111 " && echo "$out_real" | grep -qE "cwd=" \
   && pass "AC1-UI: launched line contains cwd= token" \
   || fail "AC1-UI: launched line missing cwd= token: $out_real"
+
+echo ""
+echo "=============================================="
+echo "x-3218 - canonical agent-name bridge"
+echo "=============================================="
+# The launcher used to assemble target-<id>-<slug> locally with no cap on the
+# ASSEMBLED name, so a long configured node id emitted a name the runtime
+# rejects: no session, no event, a silently lost dispatch. It now delegates to
+# the canonical owner (wired suite-wide via NAME_BRIDGE above).
+if true; then
+
+  # A node id long enough that target-<id>-<slug30> overflows 64 chars.
+  reset_mock
+  LONGID="regready-pipeline-2c4f9a1b3d"
+  set_status "$LONGID" ready; set_claim "$LONGID" free
+  echo "path consolidation wave 0 delegate handoff" > "$MOCKSTATE/slug_$LONGID"
+  out="$(bash "$DISPATCH" "$LONGID" 2>&1)"
+  launched_name="$(printf '%s' "$out" | sed -n 's/.* name=\([^ ]*\).*/\1/p' | head -1)"
+  if [[ -n "$launched_name" && "${#launched_name}" -le 64 ]]; then
+    pass "x-3218 long node id yields a name within the 64-char runtime limit (${#launched_name})"
+  else
+    fail "x-3218 long node id name: ${#launched_name} chars: $out"
+  fi
+  [[ "$launched_name" == "target-$LONGID"* ]] \
+    && pass "x-3218 full node identity survives in the dispatched name" \
+    || fail "x-3218 node identity dropped: $launched_name"
+  [[ "$(ask_count)" == "1" ]] \
+    && pass "x-3218 exactly one worker launch requested" \
+    || fail "x-3218 launch count: $(ask_count)"
+
+  # An unrepresentable required identity refuses BEFORE spawn: a loud failure
+  # line, no launch. The old path emitted nothing at all.
+  reset_mock
+  HUGEID="n-$(printf 'z%.0s' $(seq 1 70))"
+  set_status "$HUGEID" ready; set_claim "$HUGEID" free
+  out="$(bash "$DISPATCH" "$HUGEID" 2>&1)"
+  echo "$out" | grep -q "^failed $HUGEID reason=.*64" \
+    && pass "x-3218 unrepresentable node id fails loudly with the naming cause" \
+    || fail "x-3218 refusal line: $out"
+  [[ "$(ask_count)" == "0" ]] \
+    && pass "x-3218 refused dispatch launches no worker" \
+    || fail "x-3218 refused dispatch still spawned: $(ask_count)"
+
+  # A stale installed fno (no `name` verb) exits 2 like any Click usage error.
+  # That must DEGRADE to the historical assembly, never read as "unrepresentable"
+  # - misreading it would refuse the entire fleet on an out-of-date install.
+  reset_mock
+  set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+  echo "cargo bootstrapper" > "$MOCKSTATE/slug_ab-aaaa1111"
+  STALE_BRIDGE="$TMP/stale-bridge"
+  printf '#!/usr/bin/env bash\necho "Usage: fno agents [OPTIONS] COMMAND" >&2\nexit 2\n' > "$STALE_BRIDGE"
+  chmod +x "$STALE_BRIDGE"
+  out="$(NAME_BRIDGE="$STALE_BRIDGE" bash "$DISPATCH" ab-aaaa1111 2>&1)"
+  echo "$out" | grep -q "^launched ab-aaaa1111 name=target-ab-aaaa1111-cargo-bootstrapper " \
+    && pass "x-3218 a stale fno (exit 2) degrades to the historical name, not a refusal" \
+    || fail "x-3218 stale-fno degradation: $out"
+  [[ "$(ask_count)" == "1" ]] \
+    && pass "x-3218 stale fno still dispatches its worker" \
+    || fail "x-3218 stale fno lost the dispatch: $(ask_count)"
+
+  # A bridge that emits a warning ahead of the name must NOT have that warning
+  # adopted into the name. Streams are merged, so the guard must match the WHOLE
+  # capture; a per-line `grep -q` passes here and poisons the spawn.
+  reset_mock
+  set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+  NOISY_BRIDGE="$TMP/noisy-bridge"
+  printf '#!/usr/bin/env bash\necho "DeprecationWarning: something" >&2\necho "target-ab-aaaa1111"\nexit 0\n' > "$NOISY_BRIDGE"
+  chmod +x "$NOISY_BRIDGE"
+  out="$(NAME_BRIDGE="$NOISY_BRIDGE" bash "$DISPATCH" ab-aaaa1111 2>&1)"
+  echo "$out" | grep -q "^launched ab-aaaa1111 name=target-ab-aaaa1111 " \
+    && pass "x-3218 a warning on stderr degrades instead of poisoning the name" \
+    || fail "x-3218 stderr poisoning: $out"
+  echo "$out" | grep -q "name=.*DeprecationWarning" \
+    && fail "x-3218 warning text reached the agent name: $out" \
+    || pass "x-3218 the stray warning never reaches the agent name"
+
+  # Ordinary names are byte-for-byte unchanged.
+  reset_mock
+  set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+  out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
+  echo "$out" | grep -q "^launched ab-aaaa1111 name=target-ab-aaaa1111 " \
+    && pass "x-3218 ordinary dispatch names are unchanged by the bridge" \
+    || fail "x-3218 ordinary name drifted: $out"
+
+  unset NAME_BRIDGE
+else
+  fail "x-3218 bridge unreachable: no cli venv at $VENV_PY"
+fi
 
 echo ""
 echo "================================"

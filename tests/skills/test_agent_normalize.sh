@@ -537,6 +537,76 @@ OUT="$(LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 DISPATCH_PROVIDER_RESOLVER="$STUB_EMP
 [[ "$(LC_ALL=C field "$OUT" status)" == "ok" && "$(LC_ALL=C field "$OUT" name)" == *text* ]] \
   && pass "invalid-utf8 byte does not abort or truncate" || fail "locale guard: $OUT"
 
+# --- x-3218: node-driven naming delegates to the canonical owner -------------
+# normalize.sh's node branch used to assemble <verb>-<node>-<slug> itself. It now
+# calls `fno agents name`, the single owner. Overflow is not reachable HERE (the
+# tier-1 detector bounds a node id at ~17 chars, so the worst assembly is ~57);
+# what matters at this seam is PARITY - the same name is the spawn dedup token,
+# so a shell caller and a Python caller disagreeing would double-dispatch a node.
+# The overflow and refusal paths are exercised where ids come from the graph
+# unbounded: tests/test-bg-dispatch.sh and cli/tests/unit/test_advance.py.
+VENV_PY="$REPO_ROOT/cli/.venv/bin/python"
+if [[ ! -x "$VENV_PY" ]]; then
+  CANON="$(cd "$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd)"
+  [[ -n "$CANON" ]] && VENV_PY="$CANON/cli/.venv/bin/python"
+fi
+# A REAL fno on PATH; the suite otherwise pins a failing one suite-wide.
+REAL_FNO_DIR="$TMP/real-fno"; mkdir -p "$REAL_FNO_DIR"
+{
+  echo '#!/usr/bin/env bash'
+  echo "exec \"$VENV_PY\" -c 'import sys; sys.path.insert(0, \"$REPO_ROOT/cli/src\"); from fno.cli import app; app()' \"\$@\""
+} > "$REAL_FNO_DIR/fno"
+chmod +x "$REAL_FNO_DIR/fno"
+
+if "$REAL_FNO_DIR/fno" agents name target x-1 >/dev/null 2>&1; then
+  LONGSLUG="$TMP/stub-longslug.sh"
+  printf '#!/usr/bin/env bash\necho "path consolidation wave 0 delegate handoff"\n' > "$LONGSLUG"
+  chmod +x "$LONGSLUG"
+  OUT="$(NODE_SLUG_RESOLVER="$LONGSLUG" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" \
+         PATH="$REAL_FNO_DIR:$PATH" bash "$NORM" --input "ab-deadbeef")"
+  SHELL_NAME="$(field "$OUT" name)"
+  PY_NAME="$("$VENV_PY" -c "
+import sys; sys.path.insert(0, '$REPO_ROOT/cli/src')
+from fno.agents.naming import agent_name
+print(agent_name('spawn', 'ab-deadbeef', slug='path consolidation wave 0 delegate handoff'))")"
+  [[ -n "$SHELL_NAME" && "$SHELL_NAME" == "$PY_NAME" ]] \
+    && pass "x-3218 shell bridge is byte-identical to direct Python generation" \
+    || fail "x-3218 parity: shell=$SHELL_NAME python=$PY_NAME"
+  # An exact expectation: "<= 64" would pass on a 20-char name and prove nothing
+  # about the budget (this fixture's name is 48 chars, well clear of the limit).
+  [[ "$SHELL_NAME" == "spawn-ab-deadbeef-path-consolidation-wave-0-dele" ]] \
+    && pass "x-3218 bridged name is the exact budgeted string" \
+    || fail "x-3218 exact name: got '$SHELL_NAME'"
+
+  # Ordinary names are byte-for-byte unchanged by the delegation.
+  OUT="$(NODE_SLUG_RESOLVER="$STUB_SLUG" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" \
+         PATH="$REAL_FNO_DIR:$PATH" bash "$NORM" --input "ab-deadbeef")"
+  [[ "$(field "$OUT" name)" == "spawn-ab-deadbeef-dashless-spawn" ]] \
+    && pass "x-3218 ordinary node names are unchanged by the bridge" \
+    || fail "x-3218 ordinary name drifted: $OUT"
+
+  # A stale installed fno (no `name` verb) exits 2 like any Click usage error.
+  # That must DEGRADE, never read as "unrepresentable" - misreading it would
+  # refuse every node on an out-of-date install.
+  STALE_DIR="$TMP/stale-fno"; mkdir -p "$STALE_DIR"
+  printf '#!/usr/bin/env bash\n[[ "${1:-}" == "agents" && "${2:-}" == "name" ]] && { echo "Usage: fno agents" >&2; exit 2; }\nexit 1\n' > "$STALE_DIR/fno"
+  chmod +x "$STALE_DIR/fno"
+  OUT="$(NODE_SLUG_RESOLVER="$STUB_SLUG" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" \
+         PATH="$STALE_DIR:$PATH" bash "$NORM" --input "ab-deadbeef")"
+  [[ "$(field "$OUT" status)" == "ok" && "$(field "$OUT" name)" == "spawn-ab-deadbeef-dashless-spawn" ]] \
+    && pass "x-3218 a stale fno (exit 2) degrades to the historical name, not a refusal" \
+    || fail "x-3218 stale-fno degradation: $OUT"
+
+  # No slug -> the id-only degradation, same as before.
+  OUT="$(NODE_SLUG_RESOLVER="$STUB_EMPTY" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" \
+         PATH="$REAL_FNO_DIR:$PATH" bash "$NORM" --input "ab-deadbeef")"
+  [[ "$(field "$OUT" name)" == "spawn-ab-deadbeef" ]] \
+    && pass "x-3218 slugless node still degrades to <verb>-<node>" \
+    || fail "x-3218 slugless: $OUT"
+else
+  fail "x-3218 bridge unreachable: no cli venv at $VENV_PY"
+fi
+
 echo ""
 echo "test_agent_normalize: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

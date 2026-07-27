@@ -186,6 +186,13 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # the Rust client, so it must never auto-route to the daemon (it would 404 /
     # be shadowed for installed users). Python owns it.
     "spawn-guard",
+    # x-3218: the canonical agent-name bridge, the shell twin of the Python
+    # dispatchers' direct `fno.agents.naming` import. Pure Python and purely
+    # computational (no daemon state); there is NO `name` on the Rust client, so
+    # it must never auto-route. The daemon stays the name VALIDATOR at the spawn
+    # boundary and must not become the generator - truncating there would make
+    # the name a caller reasons about differ from the one the runtime registers.
+    "name",
     # x-da8c: the registry-miss healer the Rust lifecycle verbs shell out to.
     # Pure Python (fno.agents.store_fallback); no Rust port. Staying out of
     # RUST_CLIENT_VERBS is the recursion guard for that shellout, so listing it

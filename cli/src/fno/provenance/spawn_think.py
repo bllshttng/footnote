@@ -44,6 +44,7 @@ from typing import Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
+from fno.agents.naming import agent_name
 from fno.harness_identity import resolve_harness_identity
 from fno.provenance.resolver import resolve_transcript
 
@@ -91,9 +92,6 @@ _VALID_DECISION_EVENTS = {
 # The discriminator `fno agents spawn` prints on a name collision (exit 2).
 _SPAWN_ALREADY_EXISTS = "already exists"
 
-# x-2c27: `fno agents spawn` enforces a 1-64 char agent name. The assembled
-# provenance name can overflow even with per-component slugging, so it is capped.
-_AGENT_NAME_MAX = 64
 
 # A2 (x-122a): non-birth dispatch reasons. The default birth reason keeps A1
 # byte-for-byte; the lifecycle reasons additionally require a RESOLVED transcript
@@ -652,18 +650,6 @@ def _think_output_path(
 # ---------------------------------------------------------------------------
 
 
-def _name_slug(raw: Optional[str]) -> str:
-    """Normalize a slug/title tail to a safe agent-name suffix.
-
-    Mirrors advance._name_slug / dispatch-node.sh: lowercase, non-[a-z0-9-]
-    runs -> hyphen, collapse repeats, strip, cut to 30, trim trailing hyphen.
-    """
-    if not raw:
-        return ""
-    s = re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]", "-", raw.lower())).strip("-")
-    return s[:30].rstrip("-")
-
-
 def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REASON_BIRTH, invocation_suffix: Optional[str] = None) -> str:
     """Provenance-carrying bg worker name, scoped by trigger reason.
 
@@ -673,31 +659,23 @@ def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REA
     is reason-scoped, and ``fno agents spawn`` rejects a duplicate NAME, so the
     name must be reason-scoped too or the second lifecycle trigger collides and
     is wrongly skipped (codex P2).
+
+    ``invocation_suffix`` is a per-invocation discriminator (the live session
+    id) so a REPEATABLE trigger (conversational) gets a DISTINCT name each
+    call; without it the constant name is rejected and a later conversation can
+    never re-dispatch the node even after the dedup TTL expires (codex P2). The
+    canonical owner treats reason and suffix as load-bearing and spends the
+    64-char budget on the human slug alone. x-3218 moved this budgeting policy
+    out of provenance-trigger code: an over-budget required identity now raises
+    instead of shaving the suffix onto a colliding name.
     """
-    base = f"think-{node_id}" if reason == REASON_BIRTH else f"think-{node_id}-{reason}"
-    slug = _name_slug(node_slug)
-    # An optional per-invocation discriminator (C/x-0a9c: the live session id) so a
-    # REPEATABLE trigger (conversational) gets a DISTINCT name each call. Without
-    # it `fno agents spawn` rejects the constant name and a later conversation can
-    # never re-dispatch the node even after the dedup TTL expires (codex P2).
-    suf = _name_slug(invocation_suffix)
-    # x-2c27 (AC2-ERR): each component is slugged to 30, but the ASSEMBLED name
-    # (think- + node-id + reason + slug + suffix) can exceed `fno agents spawn`'s
-    # 1-64 char limit and fail with "name must be 1-64 chars". `base` (id + reason
-    # scoping) and `suf` (the per-session uniqueness discriminator) are BOTH
-    # load-bearing, so cap only the human-readable `slug` to make room - trimming
-    # the assembled tail would shave the suffix and let two repeat dispatches
-    # collide on name (codex P2).
-    fixed = len(base) + (1 + len(suf) if suf else 0)  # +1 for the '-' before suf
-    if slug:
-        avail = _AGENT_NAME_MAX - fixed - 1  # -1 for the '-' before slug
-        slug = slug[:avail].rstrip("-") if avail > 0 else ""
-    name = "-".join(p for p in (base, slug, suf) if p)
-    # Pathological backstop: base + suf alone overflow (a very long id/suffix) ->
-    # cap the tail; the `think-<node-id>` lead still survives.
-    if len(name) > _AGENT_NAME_MAX:
-        name = name[:_AGENT_NAME_MAX].rstrip("-")
-    return name
+    return agent_name(
+        "think",
+        node_id,
+        qualifier=None if reason == REASON_BIRTH else reason,
+        slug=node_slug,
+        discriminator=invocation_suffix,
+    )
 
 
 def _spawn_think_worker(

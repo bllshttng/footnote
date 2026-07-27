@@ -1315,3 +1315,33 @@ def test_worker_name_unique_per_conversation():
     assert a.endswith("-sessaaaa") and b.endswith("-sessbbbb")
     # No suffix -> byte-for-byte the prior name (birth/lifecycle unchanged).
     assert st._worker_agent_name("x-1", "slug", st.REASON_BIRTH) == "think-x-1-slug"
+
+
+# ---------------------------------------------------------------------------
+# x-3218: provenance naming is now a caller of the canonical owner
+# ---------------------------------------------------------------------------
+
+
+def test_provenance_name_is_byte_identical_to_the_canonical_owner():
+    """AC3: same semantic components -> same name, whichever caller asks."""
+    from fno.agents.naming import agent_name
+
+    assert st._worker_agent_name("x-1", "slug") == agent_name("think", "x-1", slug="slug")
+    assert st._worker_agent_name("x-1", "slug", st.REASON_RETRO, "sessaaaa") == agent_name(
+        "think", "x-1", qualifier=st.REASON_RETRO, slug="slug", discriminator="sessaaaa"
+    )
+
+
+def test_over_budget_provenance_identity_fails_closed_instead_of_shaving():
+    """AC4 + AC5: the old backstop sliced the tail (shaving the discriminator).
+
+    Two dispatches differing only by their session suffix would collapse onto
+    one name and the second would be wrongly skipped as a duplicate. The
+    canonical owner refuses instead.
+    """
+    from fno.agents.naming import AgentNameError
+
+    long_id = "n-" + "z" * 50
+    with pytest.raises(AgentNameError) as exc:
+        st._worker_agent_name(long_id, "slug", st.REASON_WORK_START, "sessaaaa")
+    assert long_id in str(exc.value)

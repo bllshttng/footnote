@@ -103,7 +103,7 @@ pub fn family1_truth_state(handle: &str) -> Option<String> {
     command
         .args(["agents", "truth", handle, "--json"])
         .env("FNO_AGENTS_RUNTIME", "python");
-    family1_truth_state_with_command(command, Duration::from_secs(5))
+    family1_truth_state_with_command(command, Duration::from_secs(5), handle)
 }
 
 /// Diagnostic for a failed family-1 truth probe. truth writes its refusal
@@ -116,9 +116,33 @@ fn family1_truth_failure_detail(stdout: &[u8], stderr: &str) -> String {
     reason.unwrap_or_else(|| stderr.trim().to_owned())
 }
 
+/// truth's answer for a handle it has no transcript for. Not a malfunction:
+/// family-1 is CLAUDE transcript truth, so an opencode/codex handle can never
+/// resolve, and a reaped claude session no longer does. The volume caller is
+/// `daemon::handle_list`, which probes EVERY registry row on every
+/// `fno agents list` with no gate at all - one dead row there produced a warn
+/// line per sweep and buried the other failures below that DO mean something is
+/// broken. A resolver crash is deliberately NOT this string
+/// (`session_truth.py` reports `resolver-error`) so it survives the filter.
+///
+/// The tradeoff this accepts: on the `resume`/`attach` paths in `client_verbs`
+/// the probe is gated on a dead socket rather than a missing session, so a
+/// not-found there can also mean the registry and the transcript store
+/// disagree. That case loses its warn line. It is diagnostics-only - the
+/// verdict is `None` either way - and the gate would have to distinguish
+/// "locate_session missed" from "found but socket dead" to say more.
+const TRUTH_NOT_FOUND: &str = "not-found";
+
+/// Whether a non-zero truth exit is worth a warning. Routine "gone" is not;
+/// anything else is a probe or transcript malfunction the operator needs.
+fn truth_failure_is_routine(detail: &str) -> bool {
+    detail.trim() == TRUTH_NOT_FOUND
+}
+
 fn family1_truth_state_with_command(
     mut command: std::process::Command,
     timeout: Duration,
+    handle: &str,
 ) -> Option<String> {
     command
         .stdout(std::process::Stdio::piped())
@@ -126,7 +150,7 @@ fn family1_truth_state_with_command(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("WARN: family-1 truth probe failed to start: {error}");
+            eprintln!("WARN: family-1 truth probe for {handle} failed to start: {error}");
             return None;
         }
     };
@@ -140,13 +164,13 @@ fn family1_truth_state_with_command(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                eprintln!("WARN: family-1 truth probe timed out");
+                eprintln!("WARN: family-1 truth probe for {handle} timed out");
                 return None;
             }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                eprintln!("WARN: family-1 truth probe wait failed: {error}");
+                eprintln!("WARN: family-1 truth probe for {handle} wait failed: {error}");
                 return None;
             }
         }
@@ -154,17 +178,19 @@ fn family1_truth_state_with_command(
     let output = match child.wait_with_output() {
         Ok(output) => output,
         Err(error) => {
-            eprintln!("WARN: family-1 truth probe output failed: {error}");
+            eprintln!("WARN: family-1 truth probe for {handle} output failed: {error}");
             return None;
         }
     };
     if !output.status.success() {
         let detail =
             family1_truth_failure_detail(&output.stdout, &String::from_utf8_lossy(&output.stderr));
-        eprintln!(
-            "WARN: family-1 truth probe exited {}: {}",
-            output.status, detail
-        );
+        if !truth_failure_is_routine(&detail) {
+            eprintln!(
+                "WARN: family-1 truth probe for {handle} exited {}: {}",
+                output.status, detail
+            );
+        }
         return None;
     }
     let state = serde_json::from_slice::<serde_json::Value>(&output.stdout)
@@ -173,7 +199,7 @@ fn family1_truth_state_with_command(
     match state.as_deref() {
         Some("done" | "watching" | "your-move" | "working" | "stalled" | "unknown") => state,
         _ => {
-            eprintln!("WARN: family-1 truth probe returned malformed output");
+            eprintln!("WARN: family-1 truth probe for {handle} returned malformed output");
             None
         }
     }
@@ -3828,14 +3854,14 @@ mod tests {
         let mut valid = std::process::Command::new("sh");
         valid.args(["-c", "printf '{\"state\":\"watching\"}'"]);
         assert_eq!(
-            family1_truth_state_with_command(valid, Duration::from_secs(1)).as_deref(),
+            family1_truth_state_with_command(valid, Duration::from_secs(1), "h1").as_deref(),
             Some("watching")
         );
 
         let mut invalid = std::process::Command::new("sh");
         invalid.args(["-c", "printf '{\"state\":\"invented\"}'"]);
         assert_eq!(
-            family1_truth_state_with_command(invalid, Duration::from_secs(1)),
+            family1_truth_state_with_command(invalid, Duration::from_secs(1), "h1"),
             None
         );
 
@@ -3843,10 +3869,54 @@ mod tests {
         hung.args(["-c", "sleep 5"]);
         let started = Instant::now();
         assert_eq!(
-            family1_truth_state_with_command(hung, Duration::from_millis(50)),
+            family1_truth_state_with_command(hung, Duration::from_millis(50), "h1"),
             None
         );
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn only_a_routine_not_found_is_silenced() {
+        // The quiet/loud split, pinned directly rather than inferred from a
+        // return value both branches share.
+        assert!(truth_failure_is_routine("not-found"));
+        assert!(truth_failure_is_routine("  not-found\n"));
+        // Everything else still warns: these mean something is actually broken.
+        assert!(!truth_failure_is_routine("transcript-unreadable"));
+        // A crashing resolver reports its own reason precisely so this
+        // suppression cannot swallow it (cli/src/fno/agents/session_truth.py).
+        assert!(!truth_failure_is_routine("resolver-error"));
+        assert!(!truth_failure_is_routine("ambiguous"));
+        assert!(!truth_failure_is_routine(""));
+        assert!(!truth_failure_is_routine("not-found-ish"));
+    }
+
+    #[test]
+    fn family1_truth_nonzero_exit_is_unresolved_either_way() {
+        // Both a routine not-found and a genuine refusal fail to resolve, so
+        // silencing one never changes the verdict. This pins only that; the
+        // quiet/loud split itself is pinned by the predicate test above, which
+        // is the seam that actually fails when the behavior is reverted.
+        let mut not_found = std::process::Command::new("sh");
+        not_found.args([
+            "-c",
+            "printf '{\"state\":\"unknown\",\"reason\":\"not-found\"}'; exit 13",
+        ]);
+        assert_eq!(
+            family1_truth_state_with_command(not_found, Duration::from_secs(1), "ses_1d9e"),
+            None
+        );
+
+        // A genuine refusal on the same exit code still surfaces.
+        let mut broken = std::process::Command::new("sh");
+        broken.args([
+            "-c",
+            "printf '{\"state\":\"unknown\",\"reason\":\"transcript-unreadable\"}'; exit 13",
+        ]);
+        assert_eq!(
+            family1_truth_state_with_command(broken, Duration::from_secs(1), "abcd1234"),
+            None
+        );
     }
 
     #[test]

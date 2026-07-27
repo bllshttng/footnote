@@ -791,6 +791,14 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         return _do_merge(pr_number, auto_merge, repo)
 
 
+#: gh's refusal when a repo has not enabled the auto-merge feature. `--auto` is
+#: a request to QUEUE until checks pass, so this is a repo-capability answer,
+#: not a verdict on the PR.
+_AUTO_MERGE_UNSUPPORTED = re.compile(
+    r"auto[- ]merge is not allowed|enablePullRequestAutoMerge", re.IGNORECASE
+)
+
+
 def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
     """Steps (3)-(4): build + run the gh merge and classify the outcome."""
     # (3) Build command.
@@ -822,6 +830,34 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
     # Failure path. A worktree-local post-merge step can fail even though the
     # SERVER-SIDE merge already landed (recurring PR #393/#395 bite).
     first_line = output.splitlines()[0][:200] if output.strip() else ""
+    if _AUTO_MERGE_UNSUPPORTED.search(output) and "--auto" in cmd:
+        # `--auto` asks GitHub to QUEUE the merge until checks go green, and a
+        # repo without auto-merge enabled rejects the request outright. That is
+        # not a reason to refuse: require_checks_pass means "do not merge red",
+        # and _preflight already verified the checks. Retry the same merge
+        # immediately - the guard is satisfied, only the queueing is unavailable.
+        # Without this, `fno pr merge` cannot merge at all on such a repo, and
+        # the raw `gh pr merge` escape hatch is hook-blocked by design.
+        cmd_now = [arg for arg in cmd if arg != "--auto"]
+        try:
+            res = _gh(cmd_now, repo)
+        except ToolMissing:
+            _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
+            return 127
+        output = (res.stdout or "") + (res.stderr or "")
+        if res.ok:
+            _emit(
+                pr_number,
+                "merged",
+                "merged immediately (repo has auto-merge disabled; checks already green)",
+                strategy,
+                err=False,
+            )
+            _on_confirmed_merge(pr_number, repo)
+            _run_post_merge_followups(pr_number, strategy, repo)
+            return 0
+        first_line = output.splitlines()[0][:200] if output.strip() else ""
+
     if re.search(r"is already used by worktree|already checked out", output, re.IGNORECASE):
         # (a) Server-side merge already landed -> cosmetic local failure.
         merged_at = ""

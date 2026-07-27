@@ -189,7 +189,12 @@ def resolve_session_truth(
     try:
         session, suggestions = resolver(handle)
     except Exception:  # noqa: BLE001 — a broken resolver hands off, never crashes
-        return unknown("not-found")
+        # Distinct from not-found: a crashing resolver is a malfunction, while
+        # not-found is the routine answer for a reaped or non-claude handle.
+        # Callers suppress the routine one (see family1_truth_state_with_command
+        # in crates/fno-agents/src/claude_ask.rs), so sharing a reason here would
+        # silence the malfunction too.
+        return unknown("resolver-error")
     if session is None:
         return unknown("not-found", suggestions=suggestions)
 
