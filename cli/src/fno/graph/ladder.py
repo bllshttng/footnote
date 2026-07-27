@@ -1,11 +1,26 @@
-"""Design-stage probe: is a node's linked plan still pre-blueprint?
+"""The readiness authority: what rung is a node's linked plan on, and what
+may each caller do about it?
 
-The lifecycle ladder (idea -> design -> ready -> in-progress -> in-review ->
-done) is already derived twice in this codebase: ``recompute_statuses`` owns
-the graph vocabulary and ``fno.plan._status`` owns the plan-frontmatter
-vocabulary (``design -> ready -> in_progress -> shipped``). The only rung the
-graph side could not see is ``design`` - a node whose plan doc exists but is
-still a design doc, not a blueprint.
+Readiness used to be answered in seven places across three languages over four
+vocabularies, with two of the answers using opposite failure policies and no
+file referencing another. This module is the single Python answer; the shell
+callers reach it through ``fno plan rung`` rather than re-parsing ``^status:``.
+
+Three names, one read:
+
+- :func:`plan_rung` - the classification. Never raises.
+- :func:`is_selectable` - may the daemon pick this node up on its own? Fails
+  OPEN on :attr:`Rung.UNREADABLE`.
+- :func:`is_dispatchable` - may a fresh-context worker be launched against this
+  plan? Fails CLOSED on the same rung.
+
+**The two policies disagree on purpose, permanently.** Selection must fail open
+because plans live in a symlinked vault: demoting on a read failure would
+quarantine the entire backlog the moment it unmounts. Dispatch must fail closed
+because building against an unreadable plan is worse than parking. Both are
+correct; the defect this module fixes was that they were scattered and
+undocumented relative to each other, not that they differ. A test asserts they
+disagree on ``UNREADABLE`` so a future "simplification" fails loudly.
 
 Derived per read rather than persisted into ``status``. A plan doc is external
 mutable state that ``/blueprint`` rewrites WITHOUT touching the graph, and
@@ -18,6 +33,7 @@ same reason.
 from __future__ import annotations
 
 import os
+from enum import Enum
 from typing import Optional
 
 
@@ -51,36 +67,151 @@ def resolve_plan_probe(entry: dict) -> Optional[str]:
     return probe
 
 
-def is_design_stage(entry: object) -> bool:
-    """True only when the node's linked plan says ``status: design``.
+class Rung(Enum):
+    """Where a node's plan sits, or why we cannot tell.
+
+    ``NONE`` and ``IDEA`` are both undispatchable but stay distinct: only
+    ``NONE`` means there is nothing on disk to fill.
+    """
+
+    NONE = "none"  # no usable plan_path - nothing on disk
+    IDEA = "idea"  # doc exists, declares no design yet (or says so outright)
+    DESIGN = "design"
+    READY = "ready"
+    IN_PROGRESS = "in_progress"
+    IN_REVIEW = "in_review"
+    DONE = "done"
+    SUPERSEDED = "superseded"
+    UNREADABLE = "unreadable"  # cannot classify: see the two policies below
+
+
+# Plan-frontmatter vocabulary -> rung, after `canonical_status` has resolved any
+# retired spelling (`stub`->idea, `shipped`->in_review, `archived`->superseded).
+# Total over that vocabulary by construction: a word missing here is a word the
+# binary does not know, which routes to UNREADABLE.
+_STATUS_TO_RUNG: dict[str, Rung] = {
+    "idea": Rung.IDEA,
+    "design": Rung.DESIGN,
+    "ready": Rung.READY,
+    "in_progress": Rung.IN_PROGRESS,
+    "in_review": Rung.IN_REVIEW,
+    "done": Rung.DONE,
+    "superseded": Rung.SUPERSEDED,
+}
+
+# Rungs a fresh-context worker may be launched against. Exactly the set
+# `handoff.sh` accepted before it delegated here, so the verb is a drop-in for
+# its `grep | sed | tr` block rather than a new policy.
+_DISPATCHABLE: frozenset[Rung] = frozenset(
+    {Rung.READY, Rung.IN_PROGRESS, Rung.IN_REVIEW}
+)
+
+# Rungs the daemon must NOT pick up on its own. Undesigned work needs a design
+# pass first; every other rung (including UNREADABLE) stays in the pool.
+_UNSELECTABLE: frozenset[Rung] = frozenset({Rung.IDEA, Rung.DESIGN})
+
+
+def _read_status_scalar(probe: str) -> tuple[Optional[str], bool]:
+    """``(status_or_None, readable)`` for the plan at *probe*.
+
+    Deliberately NOT built on ``_read_plan_frontmatter``: that function returns
+    ``{}`` for missing, unreadable, malformed AND status-less alike (its
+    docstring calls the total collapse a feature, and for its own callers it
+    is). A rung resolver cannot inherit it, because "cannot read this file" and
+    "this file declares no status" must route to opposite failure policies.
+
+    ``readable`` is False only when we genuinely could not parse the document.
+    A readable doc with no frontmatter, or frontmatter with no ``status``,
+    returns ``(None, True)`` - an answer, not a failure.
+    """
+    try:
+        text = open(probe, encoding="utf-8").read()
+    except (OSError, UnicodeDecodeError, ValueError):
+        return (None, False)
+
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return (None, True)  # no frontmatter block: declares nothing, readably
+
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        return (None, False)  # opened a frontmatter block and never closed it
+
+    try:
+        import yaml
+
+        fm = yaml.safe_load("\n".join(lines[1:end]))
+    except Exception:  # noqa: BLE001 - malformed YAML or no PyYAML: cannot tell
+        return (None, False)
+
+    if fm is None:
+        return (None, True)  # empty frontmatter block
+    if not isinstance(fm, dict):
+        return (None, False)  # a scalar or list where a mapping belongs
+    if "status" not in fm:
+        return (None, True)
+    return (str(fm["status"] if fm["status"] is not None else ""), True)
+
+
+def plan_rung(entry: object) -> Rung:
+    """The rung a node's linked plan sits on. Never raises.
 
     Takes the whole entry, not a bare path, because resolving the path needs
-    the node's ``cwd`` (see ``resolve_plan_probe``).
+    the node's ``cwd`` (see :func:`resolve_plan_probe`).
 
-    Positive evidence only: an unreadable, frontmatter-less, or
-    differently-stamped plan reads False and the node stays armed. Failing
-    OPEN is deliberate and load-bearing - plans live in a symlinked vault, so
-    demoting on a read failure would quarantine the entire backlog the moment
-    that vault is unmounted. Mirrors the fail-open contract of
-    ``selection_guards``, its only selection-path caller.
+    An unrecognized-but-readable status is ``UNREADABLE``, not its own rung:
+    an unknown word is exactly the case ``handoff.sh`` parked on before this
+    verb existed, and folding it here keeps that behavior. The cost is that a
+    doc written by a NEWER binary (a vocabulary this one has not learned) is
+    indistinguishable from a corrupt one. Both park, which is the safe answer
+    in either case.
 
     Keys on frontmatter rather than a ``## Execution Strategy`` heading because
     `/blueprint quick` deliberately omits that heading (blueprint SKILL.md),
     so the heading would misread every quick-plan as unfinished.
     """
     if not isinstance(entry, dict):
-        return False
+        return Rung.NONE
     probe = resolve_plan_probe(entry)
     if not probe:
-        return False
-    from fno.graph._intake import _read_plan_frontmatter
+        return Rung.NONE
 
-    try:
-        raw = _read_plan_frontmatter(probe).get("status")
-    except Exception:  # noqa: BLE001 - fail OPEN; see the fail-open note above
-        # `_read_plan_frontmatter` now absorbs the read errors this was written
-        # for (including UnicodeDecodeError from a binary file at the plan path).
-        # Kept as a belt-and-braces net because `detect_stale_ready` has no outer
-        # catch, so any future escaping read error would abort a `maintain` run.
-        return False
-    return str(raw if raw is not None else "").strip().strip("'\"").lower() == "design"
+    raw, readable = _read_status_scalar(probe)
+    if not readable:
+        return Rung.UNREADABLE
+    if raw is None:
+        # Readable, but says nothing about its own rung. Not UNREADABLE - we
+        # read it fine - and not READY either: a doc that never claims to be
+        # blueprinted must not be dispatched on that silence.
+        return Rung.IDEA
+
+    from fno.plan._status import canonical_status
+
+    return _STATUS_TO_RUNG.get(canonical_status(raw), Rung.UNREADABLE)
+
+
+def is_selectable(entry: object) -> bool:
+    """May the daemon pick this node up on its own? FAILS OPEN.
+
+    False only for the two undesigned rungs. An unreadable plan stays
+    selectable on purpose: see the module docstring's fail-open argument.
+    """
+    return plan_rung(entry) not in _UNSELECTABLE
+
+
+def is_dispatchable(entry: object) -> bool:
+    """May a fresh-context worker be launched against this plan? FAILS CLOSED.
+
+    True only for :data:`_DISPATCHABLE`. Everything else parks, including an
+    unreadable plan - the deliberate disagreement with :func:`is_selectable`.
+    """
+    return plan_rung(entry) in _DISPATCHABLE
+
+
+def is_design_stage(entry: object) -> bool:
+    """True only when the node's linked plan says ``status: design``.
+
+    Kept as a name so its existing callers do not churn; the classification
+    now comes from :func:`plan_rung`.
+    """
+    return plan_rung(entry) is Rung.DESIGN

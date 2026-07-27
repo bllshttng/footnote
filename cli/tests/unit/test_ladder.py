@@ -381,3 +381,144 @@ def test_starvation_receipt_names_design_not_quarantined(tmp_path):
         [node], None, True, None, set(), datetime.now(timezone.utc), 21
     )
     assert out == [("x-aaaa", "design")]
+
+
+# ---------------------------------------------------------------------------
+# plan_rung + the two named policies (x-3571 wave 1)
+# ---------------------------------------------------------------------------
+
+
+def _undecodable(tmp_path, name: str = "bin.md"):
+    target = tmp_path / name
+    target.write_bytes(b"\xff\xfe\x00\x80not utf-8 at all")
+    return {"id": "x-test", "plan_path": str(target)}
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        ("idea", "IDEA"),
+        ("stub", "IDEA"),  # retired spelling, still on disk in old scaffolds
+        ("design", "DESIGN"),
+        ("ready", "READY"),
+        ("in_progress", "IN_PROGRESS"),
+        ("in_review", "IN_REVIEW"),
+        ("shipped", "IN_REVIEW"),  # retired spelling
+        ("done", "DONE"),
+        ("superseded", "SUPERSEDED"),
+        ("archived", "SUPERSEDED"),  # retired spelling
+    ],
+)
+def test_every_vocabulary_word_maps_to_its_rung(tmp_path, status, expected):
+    from fno.graph.ladder import Rung, plan_rung
+
+    entry = _plan(tmp_path, f"---\nstatus: {status}\n---\n")
+    assert plan_rung(entry) is getattr(Rung, expected)
+
+
+def test_no_plan_path_is_NONE_not_IDEA(tmp_path):
+    """Distinct on purpose: only NONE means there is nothing on disk to fill."""
+    from fno.graph.ladder import Rung, plan_rung
+
+    assert plan_rung({"id": "x-test"}) is Rung.NONE
+    assert plan_rung({"id": "x-test", "plan_path": ""}) is Rung.NONE
+    assert plan_rung(_plan(tmp_path, "---\nstatus: idea\n---\n")) is Rung.IDEA
+
+
+def test_AC4_ERR_unreadable_is_distinguished_from_status_less(tmp_path):
+    """The collapse `plan_rung` must not inherit.
+
+    `_read_plan_frontmatter` returns {} for missing, unreadable, malformed AND
+    status-less alike. Those last two must route to opposite failure policies,
+    so a resolver built on it would be unable to tell them apart at all.
+    """
+    from fno.graph.ladder import Rung, plan_rung
+
+    status_less = _plan(tmp_path, "---\ntitle: a plan\n---\n\n# Doc\n", name="q.md")
+    undecodable = _undecodable(tmp_path)
+
+    assert plan_rung(status_less) is not plan_rung(undecodable)
+    assert plan_rung(status_less) is Rung.IDEA
+    assert plan_rung(undecodable) is Rung.UNREADABLE
+
+
+def test_AC3_ERR_the_two_policies_disagree_on_unreadable(tmp_path):
+    """Permanent, deliberate disagreement - a future merge must fail here.
+
+    Selection fails OPEN because plans live in a symlinked vault and demoting
+    on a read failure would quarantine the backlog on unmount. Dispatch fails
+    CLOSED because building against an unreadable plan is worse than parking.
+    """
+    from fno.graph.ladder import Rung, is_dispatchable, is_selectable, plan_rung
+
+    entry = _undecodable(tmp_path)
+    assert plan_rung(entry) is Rung.UNREADABLE
+    assert is_selectable(entry) is True
+    assert is_dispatchable(entry) is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "---\nstatus: design\n",  # frontmatter opened, never closed
+        "---\nstatus: [unclosed\n---\n",  # malformed YAML
+        "---\njust a scalar\n---\n",  # not a mapping
+        "---\nstatus: brand_new_word\n---\n",  # newer vocabulary, or corrupt
+    ],
+)
+def test_uncertain_documents_park_but_stay_selectable(tmp_path, body):
+    from fno.graph.ladder import Rung, is_dispatchable, is_selectable, plan_rung
+
+    entry = _plan(tmp_path, body)
+    assert plan_rung(entry) is Rung.UNREADABLE
+    assert is_selectable(entry) is True
+    assert is_dispatchable(entry) is False
+
+
+def test_missing_file_is_unreadable_and_stays_selectable(tmp_path):
+    from fno.graph.ladder import Rung, is_dispatchable, is_selectable, plan_rung
+
+    entry = {"id": "x-test", "plan_path": str(tmp_path / "gone.md")}
+    assert plan_rung(entry) is Rung.UNREADABLE
+    assert is_selectable(entry) is True
+    assert is_dispatchable(entry) is False
+
+
+@pytest.mark.parametrize("status", ["idea", "stub", "design"])
+def test_AC2_EDGE_a_linked_pre_design_plan_is_not_dispatchable(tmp_path, status):
+    """The case that read `ready` before this change."""
+    from fno.graph.ladder import is_dispatchable, is_selectable
+
+    entry = _plan(tmp_path, f"---\nstatus: {status}\n---\n")
+    assert is_dispatchable(entry) is False
+    assert is_selectable(entry) is False
+
+
+@pytest.mark.parametrize("status", ["ready", "in_progress", "in_review", "shipped"])
+def test_dispatchable_set_matches_the_handoff_vocabulary(tmp_path, status):
+    """Exactly what handoff.sh accepted before it delegated to the verb."""
+    from fno.graph.ladder import is_dispatchable
+
+    assert is_dispatchable(_plan(tmp_path, f"---\nstatus: {status}\n---\n")) is True
+
+
+@pytest.mark.parametrize("status", ["done", "superseded"])
+def test_terminal_plans_are_not_dispatchable(tmp_path, status):
+    from fno.graph.ladder import is_dispatchable
+
+    assert is_dispatchable(_plan(tmp_path, f"---\nstatus: {status}\n---\n")) is False
+
+
+def test_plan_rung_never_raises_on_a_malformed_entry():
+    from fno.graph.ladder import Rung, plan_rung
+
+    for entry in (None, "a string", 42, [], {"plan_path": 7}):
+        assert plan_rung(entry) in set(Rung)
+
+
+def test_is_design_stage_is_now_one_rung_of_the_table(tmp_path):
+    """The old name survives so its four callers do not churn."""
+    from fno.graph.ladder import Rung, is_design_stage, plan_rung
+
+    entry = _plan(tmp_path, DESIGN_FM)
+    assert is_design_stage(entry) is (plan_rung(entry) is Rung.DESIGN) is True
