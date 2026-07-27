@@ -513,53 +513,45 @@ get_provider_pricing() {
             ;;
     esac
 
-    local file block
+    local file
     for file in "$LOCAL_SETTINGS" "$GLOBAL_SETTINGS"; do
         [[ -f "$file" ]] || continue
-        # Canonical `accounts` first, then the pre-rename `providers`. This
-        # reader parses config.toml directly and never passes through the
-        # Python loader's choke point, so it needs the fallback itself; a miss
-        # here returns empty + rc=1, which is indistinguishable from "no
-        # pricing configured".
-        for block in accounts providers; do
-            local value
-            # Prefer yq for robust YAML parsing (handles arbitrary indentation,
-            # quoted ids, flow-style maps). Fall back to awk if yq is missing -
-            # the awk path assumes 4-space indentation under records[].
-            if command -v yq &>/dev/null; then
-                value=$(yq -p toml -r \
-                    ".${block}.records[] | select(.id == \"$provider_id\") | .pricing.${key} // \"\"" \
-                    "$file" 2>/dev/null)
-                # yq prints "null" when a path is absent without `// \"\"`; guard anyway.
-                [[ "$value" == "null" ]] && value=""
-                if [[ -n "$value" ]]; then
-                    echo "$value"
-                    return 0
-                fi
-                continue
-            fi
-            _warn_no_yq_once "${block}.records[].pricing.${key}"
-            # Flat config.toml array-of-tables: each record is a
-            # [[<block>.records]] block with an id, and its pricing is a
-            # [<block>.records.pricing] sub-table.
-            value=$(awk -v target="$provider_id" -v want="$key" -v blk="$block" '
-                $0 ~ ("^\\[\\[" blk "\\.records\\]\\]") { cur_id=""; in_pricing=0; next }
-                $0 ~ ("^\\[" blk "\\.records\\.pricing\\]") { in_pricing = (cur_id == target); next }
-                /^\[/ { in_pricing=0; next }
-                cur_id == "" && /^[[:space:]]*id[[:space:]]*=/ {
-                    cur_id=$0; sub(/^[^=]*=[[:space:]]*/, "", cur_id)
-                    gsub(/["'\'' ]/, "", cur_id); next
-                }
-                in_pricing && $0 ~ ("^[[:space:]]*" want "[[:space:]]*=") {
-                    v=$0; sub(/^[^=]*=[[:space:]]*/, "", v)
-                    gsub(/["'\'' ]/, "", v); print v; exit
-                }
-            ' "$file" 2>/dev/null)
+        local value
+        # Canonical `accounts`, else pre-rename `providers`; never reaches the
+        # Python loader's choke point, and a miss is SILENT (empty + rc=1). Prefer
+        # yq; the awk fallback assumes 4-space indentation under records[].
+        if command -v yq &>/dev/null; then
+            value=$(yq -p toml -r \
+                "(.accounts // .providers).records[] | select(.id == \"$provider_id\") | .pricing.${key} // \"\"" \
+                "$file" 2>/dev/null)
+            # yq prints "null" when a path is absent without `// \"\"`; guard anyway.
+            [[ "$value" == "null" ]] && value=""
             if [[ -n "$value" ]]; then
                 echo "$value"
                 return 0
             fi
-        done
+            continue
+        fi
+        _warn_no_yq_once "accounts.records[].pricing.${key}"
+        # Flat config.toml array-of-tables: each record is an [[accounts.records]]
+        # block with an id, and its pricing is an [accounts.records.pricing] sub-table.
+        value=$(awk -v target="$provider_id" -v want="$key" '
+            /^\[\[(accounts|providers)\.records\]\]/ { cur_id=""; in_pricing=0; next }
+            /^\[(accounts|providers)\.records\.pricing\]/ { in_pricing = (cur_id == target); next }
+            /^\[/ { in_pricing=0; next }
+            cur_id == "" && /^[[:space:]]*id[[:space:]]*=/ {
+                cur_id=$0; sub(/^[^=]*=[[:space:]]*/, "", cur_id)
+                gsub(/["'\'' ]/, "", cur_id); next
+            }
+            in_pricing && $0 ~ ("^[[:space:]]*" want "[[:space:]]*=") {
+                v=$0; sub(/^[^=]*=[[:space:]]*/, "", v)
+                gsub(/["'\'' ]/, "", v); print v; exit
+            }
+        ' "$file" 2>/dev/null)
+        if [[ -n "$value" ]]; then
+            echo "$value"
+            return 0
+        fi
     done
     return 1
 }
