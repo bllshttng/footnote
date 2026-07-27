@@ -125,6 +125,46 @@ def _refuse_unsatisfiable_reviewers() -> None:
         raise typer.Exit(code=2)
 
 
+def _refuse_unreachable_github_apps() -> None:
+    """Refuse a `config.review.github_apps` login that cannot review here (x-b167).
+
+    Mirror of `_refuse_unsatisfiable_reviewers` on the App-bot axis: a required
+    App that footnote does not recognize AND has never acted in this repository
+    is a typo or an uninstalled App, and today it wedges the session at the
+    budget ceiling instead of failing loud at init. This moves that discovery to
+    the front of the run, in the same vocabulary and fail-open on any probe it
+    could not run. Read-only; no state is written.
+    """
+    try:
+        from fno.config import load_settings
+
+        review = load_settings().review
+        apps = list(review.github_apps or [])
+        nudge_logins = tuple((review.nudge or {}).keys())
+    except Exception as exc:  # noqa: BLE001 - report, never block bootstrap
+        typer.echo(
+            f"WARN target init: github_apps capability check skipped "
+            f"(settings unreadable: {exc})",
+            err=True,
+        )
+        return
+    if not apps:
+        return
+
+    from fno.review_capability import (
+        github_apps_refusal_message,
+        resolve_github_apps,
+    )
+
+    verdicts = resolve_github_apps(apps, nudge_logins=nudge_logins)
+    for v in [v for v in verdicts if v.status == "unverifiable"]:
+        typer.echo(f"note target init: {v.line()}", err=True)
+    message = github_apps_refusal_message(verdicts)
+    if message:
+        typer.echo(message, err=True)
+        raise typer.Exit(code=2)
+
+
 _SIZE_ORDER = {"S": 0, "M": 1, "L": 2}
 
 
@@ -716,6 +756,7 @@ def init(
         raise typer.Exit(code=2)
 
     _refuse_unsatisfiable_reviewers()
+    _refuse_unreachable_github_apps()
 
     script_path = _resolve_init_script()
     if not script_path.is_file():

@@ -412,3 +412,193 @@ def refusal_message(
         f"To proceed: {'; or '.join(remedies)}.",
     ]
     return "\n".join(lines)
+
+
+# ── github_apps axis (x-b167 section 6) ──────────────────────────────────────
+#
+# `config.review.reviewers` (above) refuses in two seconds when the LOCAL
+# attestation gate cannot be satisfied here. The `github_apps` gate had no
+# equivalent, so the same config block failed at two different times depending
+# on which half you got wrong: local reviewers instantly, App bots only at the
+# budget ceiling an hour later. This closes that asymmetry in the same
+# vocabulary: a `github_apps` login that footnote does not recognize AND has
+# never acted in this repository is a typo or an uninstalled App, and gets
+# refused before any work begins.
+
+# Mirror of the Rust `BOT_PROFILES` logins (crates/fno-agents/src/loopcheck.rs)
+# and the `_OPTIONAL_BOTS` tuple (cli/src/fno/pr/_reviews.py): the review Apps
+# footnote recognizes. A recognized login is `satisfiable` at init even before
+# it has acted on a fresh repo, because footnote knows it is a real bot (and for
+# the nudgeable ones, knows how to reach it). NOTE (x-b167): this is the third
+# copy of the bot-login set across two languages; folding all three behind one
+# parity-checked source is a follow-up the plan explicitly deferred.
+_KNOWN_REVIEW_APP_LOGINS: frozenset[str] = frozenset(
+    {"chatgpt-codex-connector", "gemini-code-assist"}
+)
+
+
+def _app_is_recognized(login: str) -> bool:
+    """Whether a CONFIGURED `github_apps` login corresponds to a known review App.
+
+    Directional on purpose: the login is recognized only when it is a substring
+    of a known login (an exact login or an intentional short alias like "codex"),
+    NOT when a known login is a substring of it. The gate is satisfied by
+    `actual_author.contains(configured_login)` in Rust, so a suffixed typo like
+    "chatgpt-codex-connector-typo" can never be satisfied by a real review and
+    must NOT be waved through here - it should be probed and refused as a typo.
+    """
+    lo = login.lower()
+    return any(lo in k for k in _KNOWN_REVIEW_APP_LOGINS)
+
+
+def _app_ever_acted(login: str, cwd: Optional[str] = None) -> Optional[bool]:
+    """True if `login` authored an issue/PR comment in this repo, False if a
+    clean search returned none, None if the probe could not run (no repo remote,
+    no token scope, rate limit, gh missing).
+
+    Fail-open by contract: None on ANY doubt so init never refuses on a probe it
+    could not run (section 6). A clean zero is the only False, and only a login
+    footnote does not recognize ever reaches this probe.
+    """
+    import subprocess
+
+    def _run(args: list[str]) -> Optional[str]:
+        try:
+            r = subprocess.run(
+                args, cwd=cwd, capture_output=True, text=True, timeout=30
+            )
+        except Exception:  # noqa: BLE001 - a failed probe is unverifiable, not False
+            return None
+        return r.stdout if r.returncode == 0 else None
+
+    slug = _run(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
+    if not slug or not slug.strip():
+        return None
+    total = _run(
+        [
+            "gh",
+            "api",
+            "-X",
+            "GET",
+            "search/issues",
+            "-f",
+            f"q=repo:{slug.strip()} commenter:{login}",
+            "--jq",
+            ".total_count",
+        ]
+    )
+    if total is None:
+        return None
+    try:
+        return int(total.strip()) > 0
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class AppVerdict:
+    """One configured `github_apps` login, resolved against this repository."""
+
+    login: str
+    status: Status  # satisfiable | unavailable | unverifiable
+    reason: str
+
+    @property
+    def blocks_autonomy(self) -> bool:
+        # Same fail-closed default as ReviewerVerdict: unverifiable proceeds.
+        return self.status not in _NON_BLOCKING_STATUSES
+
+    def line(self) -> str:
+        return f"{self.status}: {self.login} - {self.reason}"
+
+
+def resolve_github_apps(
+    apps: list[str],
+    *,
+    probe=None,
+    cwd: Optional[str] = None,
+    nudge_logins: "frozenset[str] | set[str] | tuple[str, ...] | None" = None,
+) -> list[AppVerdict]:
+    """Resolve every `github_apps` login against this repo. Read-only.
+
+    A recognized login is `satisfiable` with no probe. An unrecognized login is
+    probed: it is `satisfiable` if it has acted here, `unavailable` (a likely
+    typo) if a clean search found nothing, and `unverifiable` if the probe could
+    not run - which proceeds, never refuses.
+
+    `nudge_logins` are the keys of `config.review.nudge`: an operator who wrote an
+    explicit nudge profile for an App has named a real bot, not a typo, so it is
+    `satisfiable` at init even before it has ever acted here (loop-check will post
+    its trigger). This is the documented first-use path for a custom App.
+
+    `probe` defaults to the module-level `_app_ever_acted` resolved at call time
+    (so a test can monkeypatch it), or pass an explicit callable.
+    """
+    probe = probe or _app_ever_acted
+    nudge = {n.strip().lower() for n in (nudge_logins or ()) if n.strip()}
+    out: list[AppVerdict] = []
+    for entry in apps:
+        login = entry.strip()
+        if not login:
+            continue
+        lo = login.lower()
+        # Same directional rule as _app_is_recognized: the configured login must
+        # be a substring of a nudge key (an alias/exact match), never the reverse,
+        # so a suffixed typo is not waved through on an operator's nudge profile.
+        if _app_is_recognized(login) or any(lo in nk for nk in nudge):
+            out.append(
+                AppVerdict(
+                    login,
+                    "satisfiable",
+                    "recognized review App; footnote knows how to reach it",
+                )
+            )
+            continue
+        seen = probe(login, cwd)
+        if seen is True:
+            out.append(
+                AppVerdict(login, "satisfiable", "has reviewed or commented in this repo")
+            )
+        elif seen is False:
+            out.append(
+                AppVerdict(
+                    login,
+                    "unavailable",
+                    "never reviewed or commented in this repository - likely a typo, "
+                    "or a GitHub App not installed here",
+                )
+            )
+        else:
+            out.append(
+                AppVerdict(
+                    login,
+                    "unverifiable",
+                    "could not check whether this App has acted here (no repo remote, "
+                    "token scope, or rate limit); proceeding",
+                )
+            )
+    return out
+
+
+def github_apps_refusal_message(verdicts: list[AppVerdict]) -> Optional[str]:
+    """The init refusal for an unreachable `github_apps` login, or None.
+
+    Names the login, why it cannot review, and the two ways out: fix the login,
+    or move it to `config.review.optional_apps` (honored-if-present, never waited
+    on). Never widens or drops the gate on its own.
+    """
+    blocked = [v for v in verdicts if v.blocks_autonomy]
+    if not blocked:
+        return None
+    lines = [
+        "fno target init: config.review.github_apps names a bot that cannot review here.",
+    ]
+    lines += [f"  {v.line()}" for v in blocked]
+    lines += [
+        "",
+        "The gate is fail-closed: a required App that never reviews wedges the "
+        "session until the budget ceiling.",
+        "To proceed: fix the login in config.review.github_apps; or move it to "
+        "config.review.optional_apps (honored-if-present, never waited on).",
+    ]
+    return "\n".join(lines)

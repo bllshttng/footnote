@@ -255,6 +255,11 @@ struct Settings {
     /// Resolvability is validated Python-side; Rust fails closed by matching
     /// evidence, so an unresolvable name is simply never satisfied.
     reviewers: Vec<String>,
+    /// config.review.nudge (x-b167): per-login overrides for the bot-review
+    /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
+    /// no overrides (the built-in profiles alone decide nudgeability). A
+    /// malformed entry degrades that login to non-nudgeable, never panics (AC8).
+    nudge_overrides: Vec<NudgeOverride>,
     /// Top-level `done_probes` (x-a534): the repo-wide probe list, evaluated
     /// alongside the plan's own. The file is FLAT, so this reads off the TOML
     /// root, not out of a `config` table.
@@ -366,6 +371,76 @@ fn value_as_login_list(v: &toml::Value) -> Option<Vec<String>> {
         // Table / other: not a login gate -> None (Python parity).
         _ => None,
     }
+}
+
+/// One `[review.nudge]` per-login override (x-b167). Every field is optional in
+/// TOML; a value of the wrong type sets `malformed` so that login degrades to
+/// non-nudgeable rather than panicking - the stop gate must never panic (AC8).
+#[derive(Debug, Clone, Default)]
+struct NudgeOverride {
+    login: String,
+    review_handle: Option<String>,
+    wait_minutes: Option<i64>,
+    ceiling: Option<usize>,
+    /// Defaults to true; `enabled = false` opts a repo out (back to plain
+    /// block-and-wait, NOT a faster give-up).
+    enabled: bool,
+    /// Any field of the wrong type: the whole login drops to non-nudgeable.
+    malformed: bool,
+}
+
+/// Parse the `[review.nudge]` table (`login -> { review_handle, wait_minutes,
+/// ceiling, enabled }`). Lenient by construction, matching `value_as_login_list`:
+/// a non-table value, or any field of the wrong type / a non-positive integer,
+/// marks that login `malformed`. Never panics (AC8).
+fn value_as_nudge_overrides(v: &toml::Value) -> Vec<NudgeOverride> {
+    let Some(table) = v.as_table() else {
+        // The whole `nudge` value is not a table (scalar/list): no overrides.
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (login, entry) in table {
+        let mut ov = NudgeOverride {
+            login: login.clone(),
+            enabled: true,
+            ..Default::default()
+        };
+        let Some(map) = entry.as_table() else {
+            // A scalar or list where an inline table was expected (AC8).
+            ov.malformed = true;
+            out.push(ov);
+            continue;
+        };
+        if let Some(rh) = map.get("review_handle") {
+            match rh.as_str() {
+                Some(s) => ov.review_handle = Some(s.to_string()),
+                None => ov.malformed = true,
+            }
+        }
+        if let Some(wm) = map.get("wait_minutes") {
+            match wm.as_integer() {
+                // Upper-bounded so `chrono::Duration::minutes` (which panics
+                // above i64::MAX/60) can never take the stop gate down on an
+                // absurd config value; anything out of range is malformed.
+                Some(n) if (1..=MAX_NUDGE_WAIT_MINUTES).contains(&n) => ov.wait_minutes = Some(n),
+                _ => ov.malformed = true, // non-int, non-positive, or absurd (AC8)
+            }
+        }
+        if let Some(c) = map.get("ceiling") {
+            match c.as_integer() {
+                Some(n) if (1..=MAX_NUDGE_CEILING).contains(&n) => ov.ceiling = Some(n as usize),
+                _ => ov.malformed = true,
+            }
+        }
+        if let Some(en) = map.get("enabled") {
+            match en.as_bool() {
+                Some(b) => ov.enabled = b,
+                None => ov.malformed = true,
+            }
+        }
+        out.push(ov);
+    }
+    out
 }
 
 /// Classify a config.review.reviewers value (x-e703 local-attestation gate).
@@ -608,6 +683,9 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
         }
         if let Some(v) = review.get("reviewers") {
             s.reviewers = value_as_reviewers(v);
+        }
+        if let Some(v) = review.get("nudge") {
+            s.nudge_overrides = value_as_nudge_overrides(v);
         }
         if let Some(v) = review.get("peers") {
             s.peers = value_as_peers(v);
@@ -931,6 +1009,12 @@ struct PrInfo {
     /// Required bots with no completed review pass (names the gap in the
     /// block message, AC1-UI).
     missing_bots: Vec<String>,
+    /// Per-missing-bot nudge classification for this fire (x-b167), same order
+    /// as `missing_bots`. Empty when the review reads were skipped or there is no
+    /// PR. `missing_bots` stays the gate; this only changes idling and messaging.
+    /// An EMPTY list with a non-empty `missing_bots` means "not classified" and
+    /// is treated exactly like today (every missing bot idlable, today's string).
+    bot_nudges: Vec<BotNudge>,
     /// Required bots dropped from the gate because they are rate-limited (a
     /// usage-limit comment, no review). Named in the terminal-allow message so
     /// an operator sees why the gate proceeded without them (AC1-UI).
@@ -1269,6 +1353,7 @@ fn read_pr_info(
     optional_bots: &[String],
     external_reviewers: &[String],
     reviewers: &[String],
+    nudge_configs: &[NudgeConfig],
     head_sha: &str,
     events_path: &Path,
 ) -> Result<PrInfo, (String, String)> {
@@ -1300,6 +1385,7 @@ fn read_pr_info(
                 latest_review_ts: "none".to_string(),
                 reviewed: false,
                 missing_bots: Vec::new(),
+                bot_nudges: Vec::new(),
                 usage_limited: Vec::new(),
                 unaddressed_findings: Vec::new(),
                 review_skipped: false,
@@ -1356,6 +1442,7 @@ fn read_pr_info(
             latest_review_ts: "none".to_string(),
             reviewed: true,
             missing_bots: Vec::new(),
+            bot_nudges: Vec::new(),
             usage_limited: Vec::new(),
             unaddressed_findings: Vec::new(),
             review_skipped: true,
@@ -1420,7 +1507,7 @@ fn read_pr_info(
     let (unattested, malformed_attestations) =
         unattested_reviewers_scan(events_path, reviewers, head_sha);
     let reviewers_ok = unattested.is_empty();
-    let (latest_review_ts, reviewed, missing_bots, usage_limited, unaddressed_findings) =
+    let (latest_review_ts, reviewed, missing_bots, bot_nudges, usage_limited, unaddressed_findings) =
         if login_skipped {
             // No GitHub logins to poll (nothing configured, or no_external): skip
             // the gh review reads entirely (fewer calls + no spurious gh-error
@@ -1430,6 +1517,7 @@ fn read_pr_info(
             (
                 "none".to_string(),
                 reviewers_ok,
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -1454,6 +1542,35 @@ fn read_pr_info(
             // an optional login's blocking P1 still holds the gate ("honor if
             // present"). A dedup keeps a login that is in both lists counted once.
             let info = compute_review_info(&reviews_json, required_bots);
+            // Per-missing-bot nudge classification (x-b167), computed AFTER the
+            // usage-limit retain (which happened inside compute_review_info) so
+            // the two give-up paths never compose (AC6): a usage_limited bot is
+            // already out of missing_bots and is never classified here. Derived
+            // from the same issue-comment list, fresh every fire.
+            let now = Utc::now();
+            let review_comments = reviews_json
+                .get("comments")
+                .and_then(|v| v.as_array())
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let bot_nudges: Vec<BotNudge> = info
+                .missing_bots
+                .iter()
+                .map(|bot| {
+                    classify_bot_nudge(
+                        bot,
+                        review_comments,
+                        nudge_config_for(nudge_configs, bot),
+                        now,
+                    )
+                })
+                .collect();
+            // The "empty bot_nudges = not classified = status quo" contract that
+            // async_wait_class and build_block_reason rely on holds only because
+            // this is an all-or-nothing map: bot_nudges is either empty or 1:1
+            // with missing_bots. A future partial classification would silently
+            // mis-idle, so pin the invariant here rather than let it drift.
+            debug_assert_eq!(bot_nudges.len(), info.missing_bots.len());
             let mut findings_bots: Vec<String> = required_bots.to_vec();
             for b in optional_bots {
                 if !findings_bots.iter().any(|x| x == b) {
@@ -1558,6 +1675,7 @@ fn read_pr_info(
                 activity_ts,
                 reviewed,
                 info.missing_bots,
+                bot_nudges,
                 info.usage_limited,
                 unaddressed,
             )
@@ -1574,6 +1692,7 @@ fn read_pr_info(
         latest_review_ts,
         reviewed,
         missing_bots,
+        bot_nudges,
         usage_limited,
         unaddressed_findings,
         // Telemetry only (no decision reads this): "no review gate of any kind
@@ -1820,8 +1939,331 @@ fn best_effort_notify(title: &str, body: &str) {
     let _ = Command::new(fno_bin).args(["notify", title, body]).spawn();
 }
 
-/// Known bot logins that count as reviewers when external_reviewers is not configured.
-const KNOWN_BOTS: &[&str] = &["chatgpt-codex-connector", "gemini-code-assist"];
+/// Post a bot's review trigger to the PR once, returning true on success (x-b167
+/// section 5). `FNO_LOOPCHECK_NO_COMMENT=1` suppresses the post so the test suite
+/// never comments on a real PR, mirroring `FNO_LOOPCHECK_NO_NOTIFY`.
+///
+/// Idempotency is the PR itself, not a counter: this fires only on a NeedsNudge
+/// classification, which means zero qualifying mentions exist within the wait
+/// window - the same read every participant makes. A sibling worktree, a
+/// `/fno:pr check` cron, a human, and a restarted-after-compaction session all
+/// see the same PR and reach the same decision, so there is nothing to double.
+fn post_nudge_comment(gh_bin: &str, cwd: &Path, pr_number: i64, review_handle: &str) -> bool {
+    if std::env::var("FNO_LOOPCHECK_NO_COMMENT").as_deref() == Ok("1") {
+        return false;
+    }
+    Command::new(gh_bin)
+        .args([
+            "pr",
+            "comment",
+            &pr_number.to_string(),
+            "--body",
+            review_handle,
+        ])
+        .current_dir(cwd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// The first missing bot that has been nudged to its ceiling and gone silent, if
+/// any. The NoProgress backstop names it instead of a bare fingerprint streak.
+fn unresponsive_bot(pr: &PrInfo) -> Option<&BotNudge> {
+    pr.bot_nudges
+        .iter()
+        .find(|n| n.class == NudgeClass::Unresponsive)
+}
+
+/// The give-up line for an unresponsive nudged bot (x-b167 AC13): the operator's
+/// two questions ("will it finish, must I act") answered in one line.
+fn nudge_giveup_message(n: &BotNudge) -> String {
+    format!(
+        "{} did not review after {} nudges over {}m; giving up (NoProgress). \
+         Move it to config.review.optional_apps or review by hand.",
+        n.login, n.nudges, n.span_min
+    )
+}
+
+/// Per-bot knowledge, login-keyed: the ONE table the review-gate code reads for
+/// "what is this bot and how do we reach it". Replaces the scattered `KNOWN_BOTS`
+/// membership list and the `USAGE_LIMIT_MARKERS` body-string list.
+///
+/// One bot wears three names and they are NOT interchangeable at the three sites
+/// that use them:
+///   - `login`         the review author, what `login_matches_bot` compares against
+///   - `review_handle` what a PR comment must CONTAIN to trigger a fresh review
+///   - `reply_handle`  what an in-thread reply must ADDRESS to reach the bot
+/// A `github-app` reviewer that reviews on mention (not on push) is `nudgeable`:
+/// footnote may post its `review_handle` to un-stick a required gate that nobody
+/// mentioned (x-b167). Nudge timing (`wait_minutes`, `ceiling`, `enabled`) is
+/// config, not code - see `[review.nudge]` / `resolved_nudge_configs`.
+struct BotProfile {
+    login: &'static str,
+    review_handle: &'static str,
+    reply_handle: &'static str,
+    /// ISSUE-comment body markers this bot posts when it is rate-limited and will
+    /// never post a review object (PR #214). Empty for a bot never seen to do so.
+    usage_markers: &'static [&'static str],
+    nudgeable: bool,
+}
+
+/// The shipped bot table. `chatgpt-codex-connector` is characterized from PR #618
+/// (mention-triggered, ~4-7m latency, 5/5 mentions answered); `gemini-code-assist`
+/// stays `nudgeable: false` with an empty `review_handle` until its trigger is
+/// characterized (Evidence Gaps), which is strictly more than the old lists knew.
+const BOT_PROFILES: &[BotProfile] = &[
+    BotProfile {
+        login: "chatgpt-codex-connector",
+        review_handle: "@codex review",
+        reply_handle: "@chatgpt-codex-connector",
+        usage_markers: &["usage limits for code reviews", "codex usage limits"],
+        nudgeable: true,
+    },
+    BotProfile {
+        login: "gemini-code-assist",
+        review_handle: "",
+        reply_handle: "@gemini-code-assist",
+        usage_markers: &[],
+        nudgeable: false,
+    },
+];
+
+/// The profile for an actual review/comment AUTHOR login (may carry gh's `[bot]`
+/// suffix or be the full login): the profile login is a substring of the author,
+/// matching `login_matches_bot(author, profile.login)`. Used to reach a finding
+/// author's `reply_handle` (x-b167 AC14).
+fn profile_by_author(author: &str) -> Option<&'static BotProfile> {
+    BOT_PROFILES
+        .iter()
+        .find(|p| login_matches_bot(author, p.login))
+}
+
+/// Two login strings name the same bot when either is a case-insensitive
+/// substring of the other (so a config short name "codex", a full login, and a
+/// "[bot]"-suffixed author all correspond). Symmetric superset of
+/// `login_matches_bot`.
+fn logins_correspond(a: &str, b: &str) -> bool {
+    login_matches_bot(a, b) || login_matches_bot(b, a)
+}
+
+/// Default nudge cadence (x-b167). 15 minutes is the observed 6m55s worst-case
+/// latency on PR #618 with headroom, not a guess; 3 nudges bounds the give-up at
+/// ~45 minutes of *asked-for* waiting versus the unbounded budget burn today.
+const DEFAULT_NUDGE_WAIT_MINUTES: i64 = 15;
+const DEFAULT_NUDGE_CEILING: usize = 3;
+
+/// Sanity ceilings for `[review.nudge]` override integers (x-b167). A value
+/// beyond these is a typo, not a cadence: `wait_minutes` is bounded well under
+/// `i64::MAX/60` so `chrono::Duration::minutes` can never overflow-panic in the
+/// stop gate, and a nudge cadence past a week / 1000 asks is meaningless anyway.
+const MAX_NUDGE_WAIT_MINUTES: i64 = 7 * 24 * 60; // one week
+const MAX_NUDGE_CEILING: i64 = 1000;
+
+/// A nudgeable bot login with its resolved cadence: BOT_PROFILES defaults
+/// overlaid with `[review.nudge]` overrides. ONLY nudgeable logins appear here
+/// (enabled, non-empty review_handle, not malformed); any other missing bot
+/// classifies `NotNudgeable`.
+#[derive(Debug, Clone)]
+struct NudgeConfig {
+    login: String,
+    review_handle: String,
+    wait_minutes: i64,
+    ceiling: usize,
+}
+
+/// Resolve the nudgeable-bot set for this repo: the built-in profiles, then the
+/// `[review.nudge]` overrides. A malformed or `enabled = false` override REMOVES
+/// its login from the set (opting out is never opting into a faster give-up);
+/// an override with no resolvable `review_handle` (neither its own nor a base
+/// profile's) is likewise dropped, since there is nothing to post.
+fn resolved_nudge_configs(settings: &Settings) -> Vec<NudgeConfig> {
+    let mut out: Vec<NudgeConfig> = BOT_PROFILES
+        .iter()
+        .filter(|p| p.nudgeable && !p.review_handle.is_empty())
+        .map(|p| NudgeConfig {
+            login: p.login.to_string(),
+            review_handle: p.review_handle.to_string(),
+            wait_minutes: DEFAULT_NUDGE_WAIT_MINUTES,
+            ceiling: DEFAULT_NUDGE_CEILING,
+        })
+        .collect();
+
+    for ov in &settings.nudge_overrides {
+        let base = out
+            .iter()
+            .find(|c| logins_correspond(&c.login, &ov.login))
+            .cloned();
+        // Drop first so an override always replaces (or removes) its login.
+        out.retain(|c| !logins_correspond(&c.login, &ov.login));
+        if ov.malformed || !ov.enabled {
+            continue; // opt-out / bad entry -> non-nudgeable
+        }
+        let handle = ov
+            .review_handle
+            .clone()
+            .or_else(|| base.as_ref().map(|b| b.review_handle.clone()))
+            .filter(|h| !h.is_empty());
+        let Some(review_handle) = handle else {
+            continue; // no trigger to post -> not nudgeable
+        };
+        out.push(NudgeConfig {
+            login: ov.login.clone(),
+            review_handle,
+            wait_minutes: ov
+                .wait_minutes
+                .or_else(|| base.as_ref().map(|b| b.wait_minutes))
+                .unwrap_or(DEFAULT_NUDGE_WAIT_MINUTES),
+            ceiling: ov
+                .ceiling
+                .or_else(|| base.as_ref().map(|b| b.ceiling))
+                .unwrap_or(DEFAULT_NUDGE_CEILING),
+        });
+    }
+    out
+}
+
+/// The nudge config for a configured missing-bot login, or None (non-nudgeable).
+fn nudge_config_for<'a>(configs: &'a [NudgeConfig], bot: &str) -> Option<&'a NudgeConfig> {
+    configs.iter().find(|c| logins_correspond(&c.login, bot))
+}
+
+/// A missing bot's nudge classification for this fire (x-b167). Derived fresh
+/// from PR comments every fire - no durable counter - so a mention posted by a
+/// human, `/fno:pr check`, or a sibling worktree counts identically and
+/// self-heals across restart / compaction / handoff.
+#[derive(Debug, Clone, PartialEq)]
+enum NudgeClass {
+    /// No mention within the wait window: work to DO (post the trigger). Never
+    /// idlable.
+    NeedsNudge,
+    /// Newest mention still inside the wait window: a genuine async wait. The
+    /// only idlable nudge state.
+    Awaiting,
+    /// Ceiling reached and the newest mention timed out: nobody will end this
+    /// wait. Never idlable, so the NoProgress backstop reaps it.
+    Unresponsive,
+    /// Login footnote cannot nudge (no profile/override, disabled, or a peer
+    /// sentinel): today's block-and-wait behavior, unchanged. Idlable (status
+    /// quo).
+    NotNudgeable,
+}
+
+/// One missing bot's classification plus the facts the block message renders.
+#[derive(Debug, Clone)]
+struct BotNudge {
+    login: String,
+    class: NudgeClass,
+    /// The trigger to post; "" when NotNudgeable.
+    review_handle: String,
+    ceiling: usize,
+    /// Mention count on the PR (every issue comment containing review_handle).
+    nudges: usize,
+    /// Minutes since the newest mention (0 when there is none).
+    newest_age_min: i64,
+    /// Minutes from the oldest mention to now (0 when there is none), for the
+    /// "did not review after N nudges over Mm" give-up line.
+    span_min: i64,
+}
+
+impl BotNudge {
+    fn not_nudgeable(login: &str) -> Self {
+        BotNudge {
+            login: login.to_string(),
+            class: NudgeClass::NotNudgeable,
+            review_handle: String::new(),
+            ceiling: 0,
+            nudges: 0,
+            newest_age_min: 0,
+            span_min: 0,
+        }
+    }
+}
+
+/// Whether this state may idle on a `<watching>` tag: only a genuine async wait
+/// (Awaiting) or a login we never nudge (NotNudgeable, status quo). NeedsNudge is
+/// work to do; Unresponsive is a wait nobody ends.
+fn nudge_class_idlable(class: &NudgeClass) -> bool {
+    matches!(class, NudgeClass::Awaiting | NudgeClass::NotNudgeable)
+}
+
+/// Classify one missing bot against the PR's issue comments. A mention is every
+/// issue comment whose body contains the trigger handle, author unrestricted (a
+/// mention is a request from anyone; only a usage-limit *claim* is scoped to the
+/// bot's own login). Reads NO review timestamp and NO `reviews[].commit`: the
+/// bot gate is PR-lifetime, and touching either silently re-pins it to head.
+fn classify_bot_nudge(
+    login: &str,
+    comments: &[Value],
+    cfg: Option<&NudgeConfig>,
+    now: DateTime<Utc>,
+) -> BotNudge {
+    let Some(cfg) = cfg else {
+        return BotNudge::not_nudgeable(login);
+    };
+    if cfg.review_handle.is_empty() {
+        return BotNudge::not_nudgeable(login);
+    }
+    let mut total = 0usize;
+    let mut times: Vec<DateTime<Utc>> = Vec::new();
+    for c in comments {
+        let body = c.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        if !body.contains(&cfg.review_handle) {
+            continue;
+        }
+        total += 1;
+        // A malformed/missing createdAt must NOT push toward Unresponsive:
+        // giving up on a parse error is not reversible, asking again is (AC-ERR).
+        if let Some(dt) = c
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+        {
+            times.push(dt);
+        }
+    }
+    if total == 0 {
+        return BotNudge {
+            login: login.to_string(),
+            class: NudgeClass::NeedsNudge,
+            review_handle: cfg.review_handle.clone(),
+            ceiling: cfg.ceiling,
+            nudges: 0,
+            newest_age_min: 0,
+            span_min: 0,
+        };
+    }
+    let (Some(newest), Some(oldest)) = (times.iter().max().copied(), times.iter().min().copied())
+    else {
+        // Mentions exist but none carried a usable timestamp: ask again (cheap).
+        return BotNudge {
+            login: login.to_string(),
+            class: NudgeClass::NeedsNudge,
+            review_handle: cfg.review_handle.clone(),
+            ceiling: cfg.ceiling,
+            nudges: total,
+            newest_age_min: 0,
+            span_min: 0,
+        };
+    };
+    let newest_age_min = (now - newest).num_minutes().max(0);
+    let span_min = (now - oldest).num_minutes().max(0);
+    let class = if (now - newest) < chrono::Duration::minutes(cfg.wait_minutes) {
+        NudgeClass::Awaiting
+    } else if total >= cfg.ceiling {
+        NudgeClass::Unresponsive
+    } else {
+        NudgeClass::NeedsNudge // previous mention timed out; ask again
+    };
+    BotNudge {
+        login: login.to_string(),
+        class,
+        review_handle: cfg.review_handle.clone(),
+        ceiling: cfg.ceiling,
+        nudges: total,
+        newest_age_min,
+        span_min,
+    }
+}
 
 /// Default must-have-reviewed list when config.review.github_apps is absent.
 /// EMPTY for fresh installs: a clone with no review configuration completes on
@@ -2051,16 +2493,23 @@ fn is_bot_reviewer(login: &str, external_reviewers: &[String]) -> bool {
         // Configured list present but no entry matched: fall back to bot heuristic
         // so a configured-but-partial list doesn't make reviewed unreachable.
     }
-    // Default: endswith [bot] or known list
-    login.ends_with("[bot]") || KNOWN_BOTS.iter().any(|&b| login.contains(b))
+    // Default: endswith [bot] or a known profile login
+    login.ends_with("[bot]") || BOT_PROFILES.iter().any(|p| login.contains(p.login))
 }
 
-/// Pinned usage-limit markers a rate-limited review bot posts as an ISSUE
-/// comment when it never posts a review object (PR #214). Matched
-/// case-insensitively via `contains` against a lowercased body, mirroring the
-/// pinned-string approach in `blocking_severity`. Kept tight: an under-match
-/// degrades to the safe old block behavior; an over-match risks a false drop.
-const USAGE_LIMIT_MARKERS: &[&str] = &["usage limits for code reviews", "codex usage limits"];
+/// Every usage-limit marker across all bot profiles, unioned. A rate-limited
+/// review bot posts one of these as an ISSUE comment when it never posts a review
+/// object (PR #214). Matched case-insensitively via `contains` against a
+/// lowercased body, mirroring the pinned-string approach in `blocking_severity`.
+/// Unioned rather than scoped per-login to stay byte-identical to the old flat
+/// `USAGE_LIMIT_MARKERS` const it replaced: an under-match degrades to the safe
+/// old block behavior; an over-match risks a false drop.
+fn body_is_usage_limit(body: &str) -> bool {
+    BOT_PROFILES
+        .iter()
+        .flat_map(|p| p.usage_markers.iter())
+        .any(|m| body.contains(m))
+}
 
 /// Per-required-bot review verdict (grilled decision 5 / step 2).
 #[derive(Debug)]
@@ -2169,7 +2618,7 @@ fn compute_review_info(reviews_json: &Value, required_bots: &[String]) -> Review
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_lowercase();
-            USAGE_LIMIT_MARKERS.iter().any(|m| body.contains(m))
+            body_is_usage_limit(&body)
         });
         if rate_limited {
             usage_limited.push(bot.clone());
@@ -2987,6 +3436,14 @@ pub fn decide(args: &[String]) -> (i32, String) {
             if !local.reviewers.is_empty() {
                 merged.reviewers = local.reviewers;
             }
+            if !local.nudge_overrides.is_empty() {
+                // Without this line a project-local `[review.nudge]` (including
+                // `enabled = false`) is read from the GLOBAL file only and the
+                // repo's own overrides vanish - loop-check would post a nudge a
+                // repo explicitly opted out of. Same per-field-overlay trap the
+                // done_probes line below documents.
+                merged.nudge_overrides = local.nudge_overrides;
+            }
             if !local.peers.is_empty() {
                 merged.peers = local.peers;
             }
@@ -3012,6 +3469,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
     let author_harness = crate::claims::resolve_harness();
     let required_bots = resolved_required_bots_for_author(&settings, author_harness.as_deref());
     let optional_bots = resolved_optional_bots(&settings);
+    let nudge_configs = resolved_nudge_configs(&settings);
 
     // Now timestamp
     let now: DateTime<Utc> = if let Some(ref s) = parsed.now_override {
@@ -3565,12 +4023,13 @@ pub fn decide(args: &[String]) -> (i32, String) {
             &optional_bots,
             &settings.external_reviewers,
             &settings.reviewers,
+            &nudge_configs,
             &head_sha,
             &project_events,
         );
 
         match done_result {
-            Ok(pr_info) => {
+            Ok(mut pr_info) => {
                 // Read 4's newest activity timestamp folds into the
                 // fingerprint's 4th component: a late inline finding advances
                 // the fingerprint (re-block, not NoProgress - the codex
@@ -3598,6 +4057,46 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     (fingerprint, consecutive_after)
                 };
                 let backstop_tripped = consecutive_after >= backstop_n;
+
+                // x-b167 section 5: post the trigger for any NeedsNudge bot ONCE,
+                // then treat it as Awaiting for this fire's messaging + idle read.
+                // A NeedsNudge state means !reviewed, so no terminal below can
+                // fire (they require reviewed=true); posting here is safe. A
+                // failed post keeps NeedsNudge so the block message tells the
+                // agent to post by hand (AC11) and the count is unchanged - a
+                // failed post is never counted as a nudge.
+                let nudge_pr_number = pr_info.number;
+                for n in pr_info.bot_nudges.iter_mut() {
+                    if n.class != NudgeClass::NeedsNudge {
+                        continue;
+                    }
+                    if post_nudge_comment(gh_bin, &cwd, nudge_pr_number, &n.review_handle) {
+                        emit(
+                            "loop_check_nudge_posted",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "pr": nudge_pr_number,
+                                "bot": n.login,
+                                "handle": n.review_handle,
+                                "nudge": n.nudges + 1,
+                                "ceiling": n.ceiling
+                            }),
+                        );
+                        n.nudges += 1;
+                        n.newest_age_min = 0;
+                        n.class = NudgeClass::Awaiting;
+                    } else {
+                        emit(
+                            "loop_check_nudge_post_failed",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "pr": nudge_pr_number,
+                                "bot": n.login,
+                                "handle": n.review_handle
+                            }),
+                        );
+                    }
+                }
 
                 let ci_ok = pr_info.ci_conclusion.is_ok();
                 let pr_open = pr_info.state.is_open_or_merged();
@@ -3870,20 +4369,66 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     // AC2-ERR head mismatch / finding).
                 }
 
+                // x-b167: a freshly-posted nudge sits in Awaiting until
+                // wait_minutes elapses. On a harness that cannot idle on a
+                // `<watching>` tag (a loop-run child, codex/gemini, or a failed
+                // lease renewal) the fingerprint is stable, so without this guard
+                // the generic backstop reaps the wait after backstop_n fires -
+                // before the nudge cycle reaches its ceiling, terminating with a
+                // generic NoProgress instead of the named give-up. Suppress the
+                // backstop ONLY when the sole unmet condition is a live Awaiting
+                // nudge: it is self-limiting (Awaiting -> Unresponsive after
+                // wait_minutes, when this guard clears and the backstop reaps it
+                // naming the bot), and the narrow scope keeps CI red, a finding,
+                // an unattested reviewer, or a failed probe tripping it as before.
+                let sole_blocker_is_awaiting = pr_open
+                    && ci_ok
+                    && probe_block.is_none()
+                    && !pr_info.reviewed
+                    && pr_info.unattested_reviewers.is_empty()
+                    && pr_info.unaddressed_findings.is_empty()
+                    && pr_info
+                        .bot_nudges
+                        .iter()
+                        .any(|n| n.class == NudgeClass::Awaiting);
                 // `probe_block.is_some()` keeps a probe that can never pass in
                 // this environment on the NoProgress escape rather than looping
                 // to the budget ceiling: PR+CI+review all hold, so without it
                 // none of the other disjuncts can ever fire.
                 if backstop_tripped
                     && (!pr_open || !ci_ok || !pr_info.reviewed || probe_block.is_some())
+                    && !sole_blocker_is_awaiting
                 {
+                    // Backstop tripped + done() false -> NoProgress. x-b167 AC13:
+                    // when a nudged bot never answered, the operator's question is
+                    // "is this going to finish, and must I do something" - so name
+                    // the bot + nudge count + elapsed instead of a bare fingerprint
+                    // streak, and reach the operator (who is not watching the pane)
+                    // with exactly one notification.
+                    let nudge_giveup = unresponsive_bot(&pr_info);
+                    let noprogress_msg = match nudge_giveup {
+                        Some(n) => nudge_giveup_message(n),
+                        None => format!(
+                            "fingerprint unchanged for {} consecutive fires; PR not done",
+                            consecutive_after
+                        ),
+                    };
+                    if let Some(n) = nudge_giveup {
+                        best_effort_notify(
+                            "target: bot review gave up",
+                            &format!(
+                                "PR #{}: {} did not review after {} nudges over {}m",
+                                pr_info.number, n.login, n.nudges, n.span_min
+                            ),
+                        );
+                    }
                     // Backstop tripped + done() false -> NoProgress
                     emit(
                         "termination",
                         serde_json::json!({
                             "session_id": session_id,
                             "reason": "NoProgress",
-                            "message": format!("fingerprint unchanged for {} consecutive fires; PR not done", consecutive_after)
+                            "message": noprogress_msg
                         }),
                     );
                     emit(
@@ -3905,17 +4450,27 @@ pub fn decide(args: &[String]) -> (i32, String) {
                             "done_probes": probe_results
                         }),
                     );
-                    return (0, allow_output(
-                        "allow",
-                        Some(TerminationReason::NoProgress),
-                        &format!(
+                    let return_msg = match nudge_giveup {
+                        Some(_) => noprogress_msg.clone(),
+                        None => format!(
                             "fingerprint unchanged for {} fires; HEAD={}, PR={}, CI={}, reviewed={}",
-                            consecutive_after, short_sha(&head_sha),
-                            pr_info.state.as_str(), pr_info.ci_conclusion.render(), pr_info.reviewed
+                            consecutive_after,
+                            short_sha(&head_sha),
+                            pr_info.state.as_str(),
+                            pr_info.ci_conclusion.render(),
+                            pr_info.reviewed
                         ),
-                        this_fire,
-                        Some(fingerprint),
-                    ));
+                    };
+                    return (
+                        0,
+                        allow_output(
+                            "allow",
+                            Some(TerminationReason::NoProgress),
+                            &return_msg,
+                            this_fire,
+                            Some(fingerprint),
+                        ),
+                    );
                 }
 
                 // done() false on promise -> block with named reason. P2
@@ -4041,6 +4596,7 @@ fn run_done(
     optional_bots: &[String],
     external_reviewers: &[String],
     reviewers: &[String],
+    nudge_configs: &[NudgeConfig],
     head_sha: &str,
     events_path: &Path,
 ) -> Result<PrInfo, (String, String)> {
@@ -4053,6 +4609,7 @@ fn run_done(
         optional_bots,
         external_reviewers,
         reviewers,
+        nudge_configs,
         head_sha,
         events_path,
     )
@@ -4121,11 +4678,19 @@ fn async_wait_class(
     // also outstanding (codex review of x-cdc7): the session has work it can do
     // right now, and if the bot never posts, idling means that work never
     // happens and the run dies on budget with the gate still unmet.
+    //
+    // x-b167: idle ONLY when every missing bot is in an idlable nudge state
+    // (Awaiting, a genuine async wait; or NotNudgeable, today's status quo). A
+    // NeedsNudge bot is work to DO (post its trigger) and an Unresponsive bot is
+    // a wait nobody ends - idling on either parks the session. This is the same
+    // rule x-cdc7 gave unattested_reviewers. An empty bot_nudges (not classified)
+    // means every-bot-idlable vacuously, preserving pre-x-b167 behavior.
     if pr.ci_conclusion.is_ok()
         && !pr.reviewed
         && !pr.review_skipped
         && !pr.missing_bots.is_empty()
         && pr.unattested_reviewers.is_empty()
+        && pr.bot_nudges.iter().all(|n| nudge_class_idlable(&n.class))
     {
         return Some("review");
     }
@@ -4778,9 +5343,15 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             } else {
                 String::new()
             };
+            // x-b167 AC14: "reply in-thread" alone is a half-remedy - a reply
+            // that does not address the bot by its full login never reaches it.
+            // Name the handle when the finding author is a known bot.
+            let reply_to = profile_by_author(&f.author)
+                .map(|p| format!(" addressed to {}", p.reply_handle))
+                .unwrap_or_default();
             return format!(
-                "PR #{}: {} {} at {}:{} unaddressed (reply in-thread or wontfix:){}",
-                pr.number, f.author, f.severity, f.path, f.line, more
+                "PR #{}: {} {} at {}:{} unaddressed (reply in-thread{} or wontfix:){}",
+                pr.number, f.author, f.severity, f.path, f.line, reply_to, more
             );
         }
         if !pr.unattested_reviewers.is_empty() {
@@ -4839,9 +5410,63 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             );
         }
         if !pr.missing_bots.is_empty() {
-            // AC1-UI: name the specific missing bot(s), not a generic
-            // "not reviewed". Awaiting a bot review is an async wait, so teach
-            // the arm-and-tag ritual (US3) rather than a bare "keep waiting".
+            // x-b167: render per nudge state. `hint("review")` is derived from
+            // async_wait_class, so it is EMPTY for NeedsNudge/Unresponsive (both
+            // non-idlable) and PRESENT for Awaiting/NotNudgeable by construction -
+            // the arm-and-tag ritual can never appear on a blocker the same file
+            // refuses to idle (the contradiction x-cdc7 removed). NeedsNudge and
+            // Unresponsive lead because they are work/decisions, not waits.
+            if let Some(n) = pr
+                .bot_nudges
+                .iter()
+                .find(|n| n.class == NudgeClass::NeedsNudge)
+            {
+                return format!(
+                    "PR #{}: {} reviews on mention, not on push, and has not been asked. Run:\n  \
+                     gh pr comment {} --body \"{}\"\nthen arm a watcher (nudge {} of {}).{}",
+                    pr.number,
+                    n.login,
+                    pr.number,
+                    n.review_handle,
+                    n.nudges + 1,
+                    n.ceiling,
+                    hint("review")
+                );
+            }
+            if let Some(n) = pr
+                .bot_nudges
+                .iter()
+                .find(|n| n.class == NudgeClass::Unresponsive)
+            {
+                return format!(
+                    "PR #{}: {} did not review after {} nudges over {}m. Nothing further \
+                     will arrive on its own. Either post the review by hand, or move this \
+                     login to config.review.optional_apps (honored-if-present, never waited \
+                     on). Not a wait: do not arm a watcher.{}",
+                    pr.number,
+                    n.login,
+                    n.nudges,
+                    n.span_min,
+                    hint("review")
+                );
+            }
+            if let Some(n) = pr
+                .bot_nudges
+                .iter()
+                .find(|n| n.class == NudgeClass::Awaiting)
+            {
+                return format!(
+                    "PR #{}: {} nudged {}m ago ({} of {}), awaiting review.{}",
+                    pr.number,
+                    n.login,
+                    n.newest_age_min,
+                    n.nudges,
+                    n.ceiling,
+                    hint("review")
+                );
+            }
+            // All NotNudgeable (or not classified): today's exact string + hint
+            // (AC5 - a non-nudgeable required bot keeps the pre-x-b167 behavior).
             return format!(
                 "PR #{}: {} has not reviewed.{}",
                 pr.number,
@@ -5408,6 +6033,7 @@ mod tests {
             latest_review_ts: "none".to_string(),
             reviewed: false,
             missing_bots: vec![],
+            bot_nudges: vec![],
             usage_limited: vec![],
             unaddressed_findings: vec![],
             review_skipped: false,
@@ -5461,6 +6087,7 @@ mod tests {
             ci_has_pending: false,
             reviewed: false,
             missing_bots: vec!["chatgpt-codex-connector".into()],
+            bot_nudges: vec![],
             ..watch_pr()
         };
         let reason = build_block_reason(&pr, "abc", true);
@@ -5482,6 +6109,7 @@ mod tests {
             latest_review_ts: "none".to_string(),
             reviewed: false,
             missing_bots: vec![],
+            bot_nudges: vec![],
             usage_limited: vec![],
             unaddressed_findings: vec![],
             review_skipped: false,
@@ -5518,6 +6146,7 @@ mod tests {
             reviewed: false,
             review_skipped: false,
             missing_bots: vec!["chatgpt-codex-connector".into()],
+            bot_nudges: vec![],
             ..watch_pr()
         };
         assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
@@ -5546,9 +6175,204 @@ mod tests {
             reviewed: false,
             review_skipped: false,
             missing_bots: vec![],
+            bot_nudges: vec![],
             ..watch_pr()
         };
         assert_eq!(async_wait_class(&pr, "abc", true), None);
+    }
+
+    // ── x-b167 idle rule + message rendering ──────────────────────────────────
+
+    fn bn(login: &str, class: NudgeClass, nudges: usize, newest: i64, span: i64) -> BotNudge {
+        BotNudge {
+            login: login.into(),
+            class,
+            review_handle: "@codex review".into(),
+            ceiling: 3,
+            nudges,
+            newest_age_min: newest,
+            span_min: span,
+        }
+    }
+    fn bot_review_pr(login: &str, nudges: Vec<BotNudge>) -> PrInfo {
+        PrInfo {
+            number: 618,
+            ci_conclusion: CiConclusion::Success,
+            ci_has_pending: false,
+            reviewed: false,
+            review_skipped: false,
+            missing_bots: vec![login.into()],
+            bot_nudges: nudges,
+            ..watch_pr()
+        }
+    }
+
+    #[test]
+    fn nudge_needs_nudge_blocks_and_names_the_command() {
+        // AC1: not idlable; reason gives the exact gh command; no arm-and-tag hint.
+        let pr = bot_review_pr(
+            "chatgpt-codex-connector",
+            vec![bn(
+                "chatgpt-codex-connector",
+                NudgeClass::NeedsNudge,
+                0,
+                0,
+                0,
+            )],
+        );
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(
+            reason.contains("gh pr comment 618 --body \"@codex review\""),
+            "{reason}"
+        );
+        assert!(
+            !reason.contains("harness-tracked watcher"),
+            "no arm hint: {reason}"
+        );
+    }
+
+    #[test]
+    fn nudge_awaiting_idles_with_the_arm_hint() {
+        // AC2: a genuine async wait - idlable, message says nudged + awaiting,
+        // and the arm-and-tag ritual is present.
+        let pr = bot_review_pr(
+            "chatgpt-codex-connector",
+            vec![bn("chatgpt-codex-connector", NudgeClass::Awaiting, 1, 3, 3)],
+        );
+        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("nudged"), "{reason}");
+        assert!(reason.contains("awaiting"), "{reason}");
+        assert!(
+            reason.contains("harness-tracked watcher"),
+            "arm hint present: {reason}"
+        );
+    }
+
+    #[test]
+    fn nudge_unresponsive_blocks_and_names_optional_apps() {
+        // AC3: not idlable; names the give-up + optional_apps; no arm-and-tag hint.
+        let pr = bot_review_pr(
+            "chatgpt-codex-connector",
+            vec![bn(
+                "chatgpt-codex-connector",
+                NudgeClass::Unresponsive,
+                3,
+                20,
+                47,
+            )],
+        );
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(
+            reason.contains("did not review after 3 nudges over 47m"),
+            "{reason}"
+        );
+        assert!(reason.contains("config.review.optional_apps"), "{reason}");
+        assert!(reason.contains("do not arm a watcher"), "{reason}");
+        assert!(
+            !reason.contains("harness-tracked watcher"),
+            "no arm hint: {reason}"
+        );
+    }
+
+    #[test]
+    fn nudge_not_nudgeable_keeps_todays_behavior() {
+        // AC5: a non-nudgeable required bot keeps today's string + arm hint and
+        // stays idlable, regardless of comment history.
+        let pr = bot_review_pr(
+            "gemini-code-assist",
+            vec![bn("gemini-code-assist", NudgeClass::NotNudgeable, 0, 0, 0)],
+        );
+        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(
+            reason.contains("gemini-code-assist has not reviewed"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("harness-tracked watcher"),
+            "arm hint present: {reason}"
+        );
+    }
+
+    #[test]
+    fn nudge_empty_classification_is_status_quo() {
+        // A non-empty missing_bots with an EMPTY bot_nudges (not classified)
+        // behaves exactly as pre-x-b167: idlable, today's string.
+        let pr = bot_review_pr("chatgpt-codex-connector", vec![]);
+        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("has not reviewed"), "{reason}");
+    }
+
+    #[test]
+    fn finding_block_reason_names_the_reply_handle() {
+        // AC14: an unaddressed finding by a known bot names the handle a reply
+        // must address, not just "reply in-thread".
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Success,
+            ci_has_pending: false,
+            reviewed: false,
+            unaddressed_findings: vec![Finding {
+                id: 1,
+                author: "chatgpt-codex-connector".into(),
+                path: "a.rs".into(),
+                line: 10,
+                created_at: "2026-07-06T01:00:00Z".into(),
+                severity: "P1",
+            }],
+            ..watch_pr()
+        };
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("@chatgpt-codex-connector"), "{reason}");
+    }
+
+    #[test]
+    fn nudge_post_is_suppressed_by_the_escape_hatch() {
+        // The test suite must never comment on a real PR. With the guard set,
+        // post_nudge_comment returns false without spawning gh (a bogus bin here
+        // would otherwise error, not silently succeed).
+        std::env::set_var("FNO_LOOPCHECK_NO_COMMENT", "1");
+        let posted = post_nudge_comment(
+            "/nonexistent/gh",
+            std::path::Path::new("/tmp"),
+            618,
+            "@codex review",
+        );
+        std::env::remove_var("FNO_LOOPCHECK_NO_COMMENT");
+        assert!(!posted);
+    }
+
+    #[test]
+    fn unresponsive_bot_drives_the_giveup_message() {
+        // AC13: the NoProgress message names the bot, the nudge count, and the
+        // elapsed time instead of a bare fingerprint streak.
+        let pr = bot_review_pr(
+            "chatgpt-codex-connector",
+            vec![bn(
+                "chatgpt-codex-connector",
+                NudgeClass::Unresponsive,
+                3,
+                20,
+                47,
+            )],
+        );
+        let n = unresponsive_bot(&pr).expect("an unresponsive bot");
+        let msg = nudge_giveup_message(n);
+        assert!(msg.contains("chatgpt-codex-connector"), "{msg}");
+        assert!(msg.contains("3 nudges over 47m"), "{msg}");
+        assert!(msg.contains("config.review.optional_apps"), "{msg}");
+    }
+
+    #[test]
+    fn no_giveup_for_an_awaiting_bot() {
+        let pr = bot_review_pr(
+            "chatgpt-codex-connector",
+            vec![bn("chatgpt-codex-connector", NudgeClass::Awaiting, 1, 3, 3)],
+        );
+        assert!(unresponsive_bot(&pr).is_none());
     }
 
     /// The exact state PR #618 sat in for ~15 turns: CI green, no required
@@ -5561,6 +6385,7 @@ mod tests {
             reviewed: false,
             review_skipped: false,
             missing_bots: vec![],
+            bot_nudges: vec![],
             unaddressed_findings: vec![],
             unattested_reviewers: vec![UnattestedReviewer {
                 name: "sigma".to_string(),
@@ -5634,6 +6459,7 @@ mod tests {
         // local outstanding, is a valid async wait and keeps today's message.
         let pr = PrInfo {
             missing_bots: vec!["chatgpt-codex-connector".into()],
+            bot_nudges: vec![],
             unattested_reviewers: vec![],
             ..reviewers_gate_pr()
         };
@@ -5651,6 +6477,7 @@ mod tests {
         // this node exists to delete.
         let pr = PrInfo {
             missing_bots: vec!["chatgpt-codex-connector".into()],
+            bot_nudges: vec![],
             ..reviewers_gate_pr()
         };
         let reason = build_block_reason(&pr, "abc", true);
@@ -5902,6 +6729,7 @@ mod tests {
         // that same classifier, so the two agree by construction.
         let bot_only = PrInfo {
             missing_bots: vec!["chatgpt-codex-connector".into()],
+            bot_nudges: vec![],
             unattested_reviewers: vec![],
             ..reviewers_gate_pr()
         };
@@ -5917,6 +6745,7 @@ mod tests {
                 "bot + unaddressed finding (renders as the finding)",
                 PrInfo {
                     missing_bots: vec!["chatgpt-codex-connector".into()],
+                    bot_nudges: vec![],
                     unattested_reviewers: vec![],
                     unaddressed_findings: vec![Finding {
                         id: 1,
@@ -5935,6 +6764,7 @@ mod tests {
                 "bot + open operator finding",
                 PrInfo {
                     missing_bots: vec!["chatgpt-codex-connector".into()],
+                    bot_nudges: vec![],
                     unattested_reviewers: vec![],
                     ..reviewers_gate_pr()
                 },
@@ -6038,6 +6868,7 @@ mod tests {
         // it could do now.
         let pr = PrInfo {
             missing_bots: vec!["chatgpt-codex-connector".into()],
+            bot_nudges: vec![],
             ..reviewers_gate_pr()
         };
         assert_eq!(async_wait_class(&pr, "abc", true), None);
@@ -7703,6 +8534,179 @@ mod tests {
         assert!(!info.all_required_passed());
         assert_eq!(info.missing_bots, vec!["gemini-code-assist".to_string()]);
         assert_eq!(info.latest_ts, "2026-06-05T01:00:00Z");
+    }
+
+    // ── x-b167 nudge state ────────────────────────────────────────────────────
+
+    fn nudge_cfg() -> NudgeConfig {
+        NudgeConfig {
+            login: "chatgpt-codex-connector".into(),
+            review_handle: "@codex review".into(),
+            wait_minutes: 15,
+            ceiling: 3,
+        }
+    }
+    fn nudge_now() -> DateTime<Utc> {
+        "2026-07-06T02:00:00Z".parse().unwrap()
+    }
+    fn mention(body: &str, created: &str) -> Value {
+        serde_json::json!({"body": body, "createdAt": created})
+    }
+
+    #[test]
+    fn nudge_needs_nudge_when_never_mentioned() {
+        let cfg = nudge_cfg();
+        let b = classify_bot_nudge("chatgpt-codex-connector", &[], Some(&cfg), nudge_now());
+        assert_eq!(b.class, NudgeClass::NeedsNudge);
+        assert_eq!(b.nudges, 0);
+        assert_eq!(b.review_handle, "@codex review");
+    }
+
+    #[test]
+    fn nudge_awaiting_within_window() {
+        let cfg = nudge_cfg();
+        let comments = vec![mention("@codex review", "2026-07-06T01:58:00Z")];
+        let b = classify_bot_nudge(
+            "chatgpt-codex-connector",
+            &comments,
+            Some(&cfg),
+            nudge_now(),
+        );
+        assert_eq!(b.class, NudgeClass::Awaiting);
+        assert_eq!(b.nudges, 1);
+        assert!(b.newest_age_min <= 2);
+    }
+
+    #[test]
+    fn nudge_unresponsive_after_ceiling() {
+        // AC3 building block: 3 mentions, newest older than wait_minutes.
+        let cfg = nudge_cfg();
+        let comments = vec![
+            mention("@codex review", "2026-07-06T00:00:00Z"),
+            mention("hey @codex review please", "2026-07-06T00:30:00Z"),
+            mention("@codex review", "2026-07-06T01:00:00Z"),
+        ];
+        let b = classify_bot_nudge(
+            "chatgpt-codex-connector",
+            &comments,
+            Some(&cfg),
+            nudge_now(),
+        );
+        assert_eq!(b.class, NudgeClass::Unresponsive);
+        assert_eq!(b.nudges, 3);
+        assert!(b.span_min >= 120, "span was {}", b.span_min);
+    }
+
+    #[test]
+    fn nudge_reask_after_timeout_below_ceiling() {
+        // One mention 60m ago, ceiling 3: the previous nudge timed out, ask again.
+        let cfg = nudge_cfg();
+        let comments = vec![mention("@codex review", "2026-07-06T01:00:00Z")];
+        let b = classify_bot_nudge(
+            "chatgpt-codex-connector",
+            &comments,
+            Some(&cfg),
+            nudge_now(),
+        );
+        assert_eq!(b.class, NudgeClass::NeedsNudge);
+        assert_eq!(b.nudges, 1);
+    }
+
+    #[test]
+    fn nudge_none_cfg_is_not_nudgeable() {
+        // AC7: a peer sentinel (or any login with no config) classifies NotNudgeable.
+        let b = classify_bot_nudge(UNRESOLVED_PEER_SENTINEL, &[], None, nudge_now());
+        assert_eq!(b.class, NudgeClass::NotNudgeable);
+        let b2 = classify_bot_nudge(SAME_MODEL_PEER_SENTINEL, &[], None, nudge_now());
+        assert_eq!(b2.class, NudgeClass::NotNudgeable);
+    }
+
+    #[test]
+    fn nudge_malformed_created_at_is_needs_nudge() {
+        // A mention with an unparseable createdAt must not push toward Unresponsive.
+        let cfg = nudge_cfg();
+        let comments = vec![mention("@codex review", "not-a-date")];
+        let b = classify_bot_nudge(
+            "chatgpt-codex-connector",
+            &comments,
+            Some(&cfg),
+            nudge_now(),
+        );
+        assert_eq!(b.class, NudgeClass::NeedsNudge);
+        assert_eq!(b.nudges, 1);
+    }
+
+    #[test]
+    fn resolved_nudge_configs_default_nudges_codex_only() {
+        let cfgs = resolved_nudge_configs(&Settings::default());
+        let codex = cfgs
+            .iter()
+            .find(|c| c.login == "chatgpt-codex-connector")
+            .expect("codex nudgeable by default");
+        assert_eq!(codex.review_handle, "@codex review");
+        assert_eq!(codex.wait_minutes, 15);
+        assert_eq!(codex.ceiling, 3);
+        // gemini ships with an empty review_handle -> not nudgeable.
+        assert!(cfgs.iter().all(|c| c.login != "gemini-code-assist"));
+    }
+
+    #[test]
+    fn nudge_override_sets_wait_and_ceiling_inheriting_handle() {
+        let s = parse_settings(
+            "[review.nudge]\n\"chatgpt-codex-connector\" = { wait_minutes = 30, ceiling = 5 }\n",
+        );
+        let cfgs = resolved_nudge_configs(&s);
+        let codex = cfgs
+            .iter()
+            .find(|c| logins_correspond(&c.login, "chatgpt-codex-connector"))
+            .unwrap();
+        assert_eq!(codex.wait_minutes, 30);
+        assert_eq!(codex.ceiling, 5);
+        assert_eq!(codex.review_handle, "@codex review");
+    }
+
+    #[test]
+    fn nudge_override_disabled_removes_login() {
+        let s =
+            parse_settings("[review.nudge]\n\"chatgpt-codex-connector\" = { enabled = false }\n");
+        let cfgs = resolved_nudge_configs(&s);
+        assert!(cfgs
+            .iter()
+            .all(|c| !logins_correspond(&c.login, "chatgpt-codex-connector")));
+    }
+
+    #[test]
+    fn nudge_override_new_login() {
+        let s = parse_settings(
+            "[review.nudge]\n\"some-bot\" = { review_handle = \"@somebot review\", wait_minutes = 10, ceiling = 2 }\n",
+        );
+        let cfgs = resolved_nudge_configs(&s);
+        let b = cfgs.iter().find(|c| c.login == "some-bot").unwrap();
+        assert_eq!(b.review_handle, "@somebot review");
+        assert_eq!(b.wait_minutes, 10);
+        assert_eq!(b.ceiling, 2);
+    }
+
+    #[test]
+    fn nudge_malformed_override_degrades_to_non_nudgeable() {
+        // AC8: a scalar, a list, and a non-integer wait_minutes each drop the
+        // login to non-nudgeable without panicking.
+        for body in [
+            "[review.nudge]\n\"chatgpt-codex-connector\" = \"scalar\"\n",
+            "[review.nudge]\n\"chatgpt-codex-connector\" = [1, 2]\n",
+            "[review.nudge]\n\"chatgpt-codex-connector\" = { wait_minutes = \"soon\" }\n",
+            // An absurd wait_minutes would overflow chrono::Duration::minutes and
+            // panic the stop gate; it must degrade to non-nudgeable, not panic.
+            "[review.nudge]\n\"chatgpt-codex-connector\" = { wait_minutes = 9999999999999999 }\n",
+        ] {
+            let s = parse_settings(body);
+            let cfgs = resolved_nudge_configs(&s);
+            assert!(
+                cfgs.iter()
+                    .all(|c| !logins_correspond(&c.login, "chatgpt-codex-connector")),
+                "malformed override must be non-nudgeable: {body}"
+            );
+        }
     }
 
     #[test]
