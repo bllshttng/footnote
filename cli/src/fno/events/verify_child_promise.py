@@ -42,8 +42,9 @@ promotion so the protocol is unified the moment that wiring flips on.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeAlias, Union
+from typing import Iterable, Literal, Optional, TypeAlias, Union
 
 ChildPromiseError: TypeAlias = Literal[
     "child_promise_missing",
@@ -122,3 +123,107 @@ def verify_child_promise(
     if matched_data.get("nonce") != nonce:
         return False, "child_promise_nonce_mismatch"
     return True, None
+
+
+# ── fan-in completeness ─────────────────────────────────────────────────────
+#
+# The deterministic completeness count a barrier consumes before it lets
+# synthesis proceed. Kept OUTSIDE any model-generated summary: a summary that
+# claims "all done" is not evidence; this tally is. It is contract-agnostic on
+# purpose - the caller classifies each worker return (via the canonical
+# ``parse_task_result``) into ``completed`` / ``failed`` / malformed and hands
+# the classified pairs here, so the single source of the status enum stays in
+# ``skills/do/orchestrator.py`` and this module does pure set math.
+
+FanInKind: TypeAlias = Literal["completed", "failed"]
+
+# One observed worker return: (node_id, kind). A ``None`` node_id OR a ``None``
+# kind means the return could not be attributed/classified - i.e. malformed.
+Observation: TypeAlias = tuple[Optional[str], Optional[FanInKind]]
+
+
+@dataclass(frozen=True)
+class FanInTally:
+    """Expected-versus-observed counts at a fan-in barrier."""
+
+    expected: int
+    completed: int
+    failed: int
+    duplicate: int
+    malformed: int
+    missing: int
+
+    @property
+    def complete(self) -> bool:
+        """True only when every expected node completed with nothing unresolved.
+
+        Refuses on ANY missing, failed, or malformed return: a barrier that
+        released on a partial fan-in is the exact bug this count prevents.
+        """
+        return (
+            self.missing == 0
+            and self.failed == 0
+            and self.malformed == 0
+            and self.completed == self.expected
+        )
+
+    def to_dict(self) -> dict[str, int | bool]:
+        return {
+            "expected": self.expected,
+            "completed": self.completed,
+            "failed": self.failed,
+            "duplicate": self.duplicate,
+            "malformed": self.malformed,
+            "missing": self.missing,
+            "complete": self.complete,
+        }
+
+
+def tally_fan_in(
+    expected: Iterable[str],
+    observed: Iterable[Observation],
+) -> FanInTally:
+    """Count observed worker returns against the expected node set.
+
+    Args:
+        expected: node ids that MUST resolve for the barrier to release.
+        observed: ``(node_id, kind)`` pairs, one per worker return. ``kind`` is
+            ``"completed"`` (SUCCESS/DONE_WITH_CONCERNS) or ``"failed"``
+            (FAILED/BLOCKED). A ``None`` node_id or ``None``/unknown kind is
+            counted as ``malformed`` and attributed to no id.
+
+    Counting rules:
+        * ``duplicate``  - a second+ observation for an id already seen.
+        * ``missing``    - an expected id with no attributed observation.
+        * ``completed``  - distinct ids observed completing.
+        * ``failed``     - attributed returns in a non-terminal-success state.
+        * ``malformed``  - returns that could not be parsed/attributed.
+    """
+    expected_set = {e for e in expected if e}
+    seen: set[str] = set()
+    completed_ids: set[str] = set()
+    failed = 0
+    duplicate = 0
+    malformed = 0
+
+    for node_id, kind in observed:
+        if not node_id or kind not in ("completed", "failed"):
+            malformed += 1
+            continue
+        if node_id in seen:
+            duplicate += 1
+            continue
+        seen.add(node_id)
+        if kind == "completed":
+            completed_ids.add(node_id)
+        else:
+            failed += 1
+
+    return FanInTally(
+        expected=len(expected_set),
+        completed=len(completed_ids),
+        failed=failed,
+        duplicate=duplicate,
+        malformed=malformed,
+        missing=len(expected_set - seen),
+    )
