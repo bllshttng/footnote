@@ -115,6 +115,8 @@ The event is pinned to the current HEAD; if a new commit lands afterward, the de
 
 Head-pinning is mandatory: the helper stamps `git rev-parse HEAD`, and loop-check only counts an attestation whose `head_sha` equals the current HEAD (a pass on a superseded commit is discarded). Absence holds the gate (fail closed).
 
+Each reviewer also declares what it NEEDS in order to run - `sigma` needs subagent dispatch, `code-review` needs an operator, `declare` needs nothing - in `_RESOLVABLE_REVIEWERS` (`cli/src/fno/config/__init__.py`). `fno target init` resolves that against the running session and refuses a gate nothing here can satisfy; `fno config doctor --review` reports the same read-only. A reviewer that cannot run is never quietly swapped for `declare`: that would clear the gate with no review behind it.
+
 ## Multi-CLI
 
 Claude-Code primary. All modes need `fno` and `gh`/`git`; peer mode additionally needs the `fno agents` daemon for the `codex`/`gemini` one-shot lane, and research mode needs the Task/Agent tool to dispatch its roster. If a dependency is missing, the mode fails loud and reports it - it never fakes a review.

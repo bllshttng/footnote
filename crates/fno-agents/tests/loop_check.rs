@@ -2702,6 +2702,33 @@ fn reviewers_gate_blocks_without_attestation() {
         d.message
     );
     assert!(d.termination_reason.is_none());
+
+    // The message, not just the verdict. Every unit test builds a PrInfo
+    // literal, so `read_pr_info` could stop threading the unattested list
+    // through (`unattested_reviewers: Vec::new()`) and every one of them would
+    // still pass while the reason silently reverted to the generic fallback -
+    // the exact failure this node exists to delete. This is the only assertion
+    // in the suite that runs the real wiring end to end.
+    assert!(
+        d.message.contains("reviewers gate unmet"),
+        "block reason must name the reviewers gate: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("sigma") && d.message.contains("/fno:review sigma"),
+        "block reason must name the reviewer and its invocation: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("bot reviewer"),
+        "block reason must not blame a bot: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("<watching"),
+        "an unmet local gate is work to do, never an idle: {}",
+        d.message
+    );
 }
 
 /// AC3-HP / AC8-HP: the gate clears once a head-pinned `review_attestation`

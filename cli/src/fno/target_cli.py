@@ -73,6 +73,56 @@ def _resolve_init_script() -> Path:
     return resolve_plugin_script(_INIT_RELPATH)
 
 
+def _refuse_unsatisfiable_reviewers() -> None:
+    """Refuse a `config.review.reviewers` gate nothing here can satisfy (x-cdc7).
+
+    The gate is fail-closed, so a reviewer that cannot run in this harness and
+    substrate wedges the session at the stop gate AFTER the work is done. That
+    is where PR #618 lost fifteen turns. Resolving it here converts the wedge
+    into a refusal before anything is built. Read-only; no state is written.
+
+    An unreadable config degrades to a no-op so a repo that configures no
+    reviewer is never blocked by this check failing - but it SAYS SO. Silence
+    was the original wedge: a typo'd reviewer name raises out of the config
+    validator, and swallowing that skipped the refusal entirely while the Rust
+    stop gate went live on a name no attestation can ever match.
+
+    Resolution errors are NOT swallowed. Once a reviewer is known to be
+    configured, guessing "available" is the wedge.
+    """
+    try:
+        from fno.config import load_settings
+
+        reviewers = list(load_settings().review.reviewers or [])
+    except Exception as exc:  # noqa: BLE001 - report, never block bootstrap
+        # "settings", not "config.review.reviewers": load_settings validates the
+        # whole model, so the fault may be in an unrelated block. Naming the key
+        # we did not verify is the misattribution this PR exists to delete.
+        typer.echo(
+            f"WARN target init: review capability check skipped "
+            f"(settings unreadable: {exc})",
+            err=True,
+        )
+        return
+    if not reviewers:
+        return
+
+    from fno.review_capability import (
+        detect_session,
+        refusal_message,
+        resolve_reviewers,
+    )
+
+    session = detect_session()
+    verdicts = resolve_reviewers(reviewers, session)
+    message = refusal_message(verdicts, session)
+    for v in [v for v in verdicts if v.status == "unverifiable"]:
+        typer.echo(f"note target init: {v.line()}", err=True)
+    if message:
+        typer.echo(message, err=True)
+        raise typer.Exit(code=2)
+
+
 _SIZE_ORDER = {"S": 0, "M": 1, "L": 2}
 
 
@@ -662,6 +712,8 @@ def init(
             err=True,
         )
         raise typer.Exit(code=2)
+
+    _refuse_unsatisfiable_reviewers()
 
     script_path = _resolve_init_script()
     if not script_path.is_file():

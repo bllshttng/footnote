@@ -22,6 +22,8 @@ on:
       - cli/src/fno/events/schema.yaml
       - scripts/check-event-schema-parity.sh
       - scripts/ci/check-registry-schema-parity.sh
+      - scripts/ci/check-reviewer-descriptor-parity.sh
+      - cli/src/fno/config/__init__.py
       - .github/workflows/rust-ci.yml
   pull_request:
     paths:
@@ -30,6 +32,8 @@ on:
       - cli/src/fno/events/schema.yaml
       - scripts/check-event-schema-parity.sh
       - scripts/ci/check-registry-schema-parity.sh
+      - scripts/ci/check-reviewer-descriptor-parity.sh
+      - cli/src/fno/config/__init__.py
       - .github/workflows/rust-ci.yml
 
 jobs:
@@ -153,6 +157,14 @@ jobs:
           echo "parity-diag: resolved fno-agents = $(command -v fno-agents || echo NONE)"
           echo "parity-diag: emits newest kind (inside_leg_completed) = $(fno-agents --emit-schema 2>/dev/null | grep -c inside_leg_completed) (fresh=1, stale=0)"
           bash scripts/check-event-schema-parity.sh
+
+      - name: Reviewer descriptor parity check
+        # The reviewer table is declared in Python (config validator + init
+        # capability refusal) and in Rust (the stop gate's blocked reason). A
+        # Rust-only invocation edit never touches cli/**, so cli-ci's smoke
+        # registry would not fire - this leg is what catches it. Pure text
+        # extraction; no binary needed.
+        run: bash scripts/ci/check-reviewer-descriptor-parity.sh
 
       - name: Registry schema parity check (ab-0baecaed)
         # Cross-language schema_version lockstep: catches a Rust-only bump of
