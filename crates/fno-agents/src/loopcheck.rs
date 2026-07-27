@@ -1887,6 +1887,45 @@ fn best_effort_notify(title: &str, body: &str) {
     let _ = Command::new(fno_bin).args(["notify", title, body]).spawn();
 }
 
+/// Post a bot's review trigger to the PR once, returning true on success (x-b167
+/// section 5). `FNO_LOOPCHECK_NO_COMMENT=1` suppresses the post so the test suite
+/// never comments on a real PR, mirroring `FNO_LOOPCHECK_NO_NOTIFY`.
+///
+/// Idempotency is the PR itself, not a counter: this fires only on a NeedsNudge
+/// classification, which means zero qualifying mentions exist within the wait
+/// window - the same read every participant makes. A sibling worktree, a
+/// `/fno:pr check` cron, a human, and a restarted-after-compaction session all
+/// see the same PR and reach the same decision, so there is nothing to double.
+fn post_nudge_comment(gh_bin: &str, cwd: &Path, pr_number: i64, review_handle: &str) -> bool {
+    if std::env::var("FNO_LOOPCHECK_NO_COMMENT").as_deref() == Ok("1") {
+        return false;
+    }
+    Command::new(gh_bin)
+        .args(["pr", "comment", &pr_number.to_string(), "--body", review_handle])
+        .current_dir(cwd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// The first missing bot that has been nudged to its ceiling and gone silent, if
+/// any. The NoProgress backstop names it instead of a bare fingerprint streak.
+fn unresponsive_bot(pr: &PrInfo) -> Option<&BotNudge> {
+    pr.bot_nudges
+        .iter()
+        .find(|n| n.class == NudgeClass::Unresponsive)
+}
+
+/// The give-up line for an unresponsive nudged bot (x-b167 AC13): the operator's
+/// two questions ("will it finish, must I act") answered in one line.
+fn nudge_giveup_message(n: &BotNudge) -> String {
+    format!(
+        "{} did not review after {} nudges over {}m; giving up (NoProgress). \
+         Move it to config.review.optional_apps or review by hand.",
+        n.login, n.nudges, n.span_min
+    )
+}
+
 /// Per-bot knowledge, login-keyed: the ONE table the review-gate code reads for
 /// "what is this bot and how do we reach it". Replaces the scattered `KNOWN_BOTS`
 /// membership list and the `USAGE_LIMIT_MARKERS` body-string list.
@@ -3905,7 +3944,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
         );
 
         match done_result {
-            Ok(pr_info) => {
+            Ok(mut pr_info) => {
                 // Read 4's newest activity timestamp folds into the
                 // fingerprint's 4th component: a late inline finding advances
                 // the fingerprint (re-block, not NoProgress - the codex
@@ -3933,6 +3972,46 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     (fingerprint, consecutive_after)
                 };
                 let backstop_tripped = consecutive_after >= backstop_n;
+
+                // x-b167 section 5: post the trigger for any NeedsNudge bot ONCE,
+                // then treat it as Awaiting for this fire's messaging + idle read.
+                // A NeedsNudge state means !reviewed, so no terminal below can
+                // fire (they require reviewed=true); posting here is safe. A
+                // failed post keeps NeedsNudge so the block message tells the
+                // agent to post by hand (AC11) and the count is unchanged - a
+                // failed post is never counted as a nudge.
+                let nudge_pr_number = pr_info.number;
+                for n in pr_info.bot_nudges.iter_mut() {
+                    if n.class != NudgeClass::NeedsNudge {
+                        continue;
+                    }
+                    if post_nudge_comment(gh_bin, &cwd, nudge_pr_number, &n.review_handle) {
+                        emit(
+                            "loop_check_nudge_posted",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "pr": nudge_pr_number,
+                                "bot": n.login,
+                                "handle": n.review_handle,
+                                "nudge": n.nudges + 1,
+                                "ceiling": n.ceiling
+                            }),
+                        );
+                        n.nudges += 1;
+                        n.newest_age_min = 0;
+                        n.class = NudgeClass::Awaiting;
+                    } else {
+                        emit(
+                            "loop_check_nudge_post_failed",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "pr": nudge_pr_number,
+                                "bot": n.login,
+                                "handle": n.review_handle
+                            }),
+                        );
+                    }
+                }
 
                 let ci_ok = pr_info.ci_conclusion.is_ok();
                 let pr_open = pr_info.state.is_open_or_merged();
@@ -4211,13 +4290,36 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 if backstop_tripped
                     && (!pr_open || !ci_ok || !pr_info.reviewed || probe_block.is_some())
                 {
+                    // Backstop tripped + done() false -> NoProgress. x-b167 AC13:
+                    // when a nudged bot never answered, the operator's question is
+                    // "is this going to finish, and must I do something" - so name
+                    // the bot + nudge count + elapsed instead of a bare fingerprint
+                    // streak, and reach the operator (who is not watching the pane)
+                    // with exactly one notification.
+                    let nudge_giveup = unresponsive_bot(&pr_info);
+                    let noprogress_msg = match nudge_giveup {
+                        Some(n) => nudge_giveup_message(n),
+                        None => format!(
+                            "fingerprint unchanged for {} consecutive fires; PR not done",
+                            consecutive_after
+                        ),
+                    };
+                    if let Some(n) = nudge_giveup {
+                        best_effort_notify(
+                            "target: bot review gave up",
+                            &format!(
+                                "PR #{}: {} did not review after {} nudges over {}m",
+                                pr_info.number, n.login, n.nudges, n.span_min
+                            ),
+                        );
+                    }
                     // Backstop tripped + done() false -> NoProgress
                     emit(
                         "termination",
                         serde_json::json!({
                             "session_id": session_id,
                             "reason": "NoProgress",
-                            "message": format!("fingerprint unchanged for {} consecutive fires; PR not done", consecutive_after)
+                            "message": noprogress_msg
                         }),
                     );
                     emit(
@@ -4239,17 +4341,27 @@ pub fn decide(args: &[String]) -> (i32, String) {
                             "done_probes": probe_results
                         }),
                     );
-                    return (0, allow_output(
-                        "allow",
-                        Some(TerminationReason::NoProgress),
-                        &format!(
+                    let return_msg = match nudge_giveup {
+                        Some(_) => noprogress_msg.clone(),
+                        None => format!(
                             "fingerprint unchanged for {} fires; HEAD={}, PR={}, CI={}, reviewed={}",
-                            consecutive_after, short_sha(&head_sha),
-                            pr_info.state.as_str(), pr_info.ci_conclusion.render(), pr_info.reviewed
+                            consecutive_after,
+                            short_sha(&head_sha),
+                            pr_info.state.as_str(),
+                            pr_info.ci_conclusion.render(),
+                            pr_info.reviewed
                         ),
-                        this_fire,
-                        Some(fingerprint),
-                    ));
+                    };
+                    return (
+                        0,
+                        allow_output(
+                            "allow",
+                            Some(TerminationReason::NoProgress),
+                            &return_msg,
+                            this_fire,
+                            Some(fingerprint),
+                        ),
+                    );
                 }
 
                 // done() false on promise -> block with named reason. P2
@@ -5995,6 +6107,46 @@ mod tests {
         };
         let reason = build_block_reason(&pr, "abc", true);
         assert!(reason.contains("@chatgpt-codex-connector"), "{reason}");
+    }
+
+    #[test]
+    fn nudge_post_is_suppressed_by_the_escape_hatch() {
+        // The test suite must never comment on a real PR. With the guard set,
+        // post_nudge_comment returns false without spawning gh (a bogus bin here
+        // would otherwise error, not silently succeed).
+        std::env::set_var("FNO_LOOPCHECK_NO_COMMENT", "1");
+        let posted = post_nudge_comment(
+            "/nonexistent/gh",
+            std::path::Path::new("/tmp"),
+            618,
+            "@codex review",
+        );
+        std::env::remove_var("FNO_LOOPCHECK_NO_COMMENT");
+        assert!(!posted);
+    }
+
+    #[test]
+    fn unresponsive_bot_drives_the_giveup_message() {
+        // AC13: the NoProgress message names the bot, the nudge count, and the
+        // elapsed time instead of a bare fingerprint streak.
+        let pr = bot_review_pr(
+            "chatgpt-codex-connector",
+            vec![bn("chatgpt-codex-connector", NudgeClass::Unresponsive, 3, 20, 47)],
+        );
+        let n = unresponsive_bot(&pr).expect("an unresponsive bot");
+        let msg = nudge_giveup_message(n);
+        assert!(msg.contains("chatgpt-codex-connector"), "{msg}");
+        assert!(msg.contains("3 nudges over 47m"), "{msg}");
+        assert!(msg.contains("config.review.optional_apps"), "{msg}");
+    }
+
+    #[test]
+    fn no_giveup_for_an_awaiting_bot() {
+        let pr = bot_review_pr(
+            "chatgpt-codex-connector",
+            vec![bn("chatgpt-codex-connector", NudgeClass::Awaiting, 1, 3, 3)],
+        );
+        assert!(unresponsive_bot(&pr).is_none());
     }
 
     /// The exact state PR #618 sat in for ~15 turns: CI green, no required
