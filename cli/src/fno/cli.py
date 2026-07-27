@@ -629,6 +629,21 @@ def review(
         "--inspect-sigma",
         help="Inspect the current node-bound sigma artifact without running a panel.",
     ),
+    assess_assurance: bool = typer.Option(
+        False,
+        "--assess-assurance",
+        help="Classify the review policy from --policy-size/--risk-surface and print "
+        "the assurance verdict as JSON, then exit. Exits 3 (unsatisfied) when a "
+        "high-assurance change has no different-family reviewer.",
+    ),
+    policy_size: Optional[str] = typer.Option(
+        None, "--policy-size", help="Plan size (S/M/L) for --assess-assurance."
+    ),
+    risk_surface: Optional[list[str]] = typer.Option(
+        None,
+        "--risk-surface",
+        help="Named risk surface for --assess-assurance (repeatable).",
+    ),
     sigma_node: Optional[str] = typer.Option(None, "--sigma-node", hidden=True),
     sigma_pr: Optional[int] = typer.Option(None, "--sigma-pr", hidden=True),
     sigma_head: Optional[str] = typer.Option(None, "--sigma-head", hidden=True),
@@ -686,6 +701,18 @@ def review(
         }
         typer.echo(json.dumps(routing))
         return
+
+    if assess_assurance:
+        from fno.worker.review import resolve_session_id, review_assurance
+
+        sid = resolve_session_id(session, state or Path(".fno/target-state.md"))
+        verdict = review_assurance(
+            sid, size=policy_size, risk_surfaces=list(risk_surface or [])
+        )
+        typer.echo(json.dumps(verdict))
+        # Fail closed so a direct CLI caller gets the same block the skill does:
+        # an unsatisfied high-assurance policy must not read as a clean pass.
+        raise typer.Exit(0 if verdict["satisfied"] else 3)
 
     if publish_sigma is not None or inspect_sigma:
         from fno.config import load_settings

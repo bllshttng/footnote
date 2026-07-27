@@ -429,6 +429,44 @@ def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
     return resolved
 
 
+def review_assurance(
+    session_id: Optional[str],
+    *,
+    size: Optional[str],
+    risk_surfaces: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Classify this review's policy and resolve it against real capacity.
+
+    The production accessor behind ``fno review --assess-assurance``: it reuses
+    the SAME implementer/available reads the panel and ``--print-providers`` use
+    (no parallel capacity list), then applies the pure policy layer. A missing
+    session means the implementer family cannot be established, which the
+    ``high_assurance`` policy treats as unresolved. Never raises.
+    """
+    from fno.review import provider_resolution as pr
+    from fno.review.policy import assess_assurance, classify_review_policy
+
+    identity_known = bool(session_id)
+    implementer = pr.load_implementer_provider(session_id or "")
+    available = pr.available_provider_kinds()
+    policy = classify_review_policy(size=size, risk_surfaces=risk_surfaces)
+    verdict = assess_assurance(
+        policy,
+        available_providers=available,
+        implementer_provider=implementer,
+        identity_known=identity_known,
+    )
+    return {
+        "policy": verdict.policy.value,
+        "satisfied": verdict.satisfied,
+        "effective": verdict.effective,
+        "reason": verdict.reason,
+        "implementer_provider": implementer,
+        "available_providers": available,
+        "identity_known": identity_known,
+    }
+
+
 def _resolve_cross_model_runner(
     session_id: str, *, worker_pids: list[int]
 ) -> tuple[Optional[Any], Optional[dict[str, str]], Optional[list[str]]]:
