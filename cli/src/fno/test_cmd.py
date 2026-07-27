@@ -510,14 +510,14 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 
 
 # Shell harnesses discover_shell_harnesses finds but smoke must not run yet.
-# 15 entries held. 10 are RED on both platforms (pre-existing rot; each its own
-# debugging session, out of scope here). The other 5 are macOS-green and
+# 16 entries held. 10 are RED on both platforms (pre-existing rot; each its own
+# debugging session, out of scope here). The other 6 are macOS-green and
 # Linux-red, so a developer census calls them drainable and CI does not:
 #
 #   tests/hooks/test_hook_events.sh - a non-portable perm check; GNU stat does
 #     not fail on -f, so the Linux fallback branch never runs.
 #
-#   THE `fno`-ON-PATH FAMILY - four live harnesses, one cause, TWO SHAPES.
+#   THE `fno`-ON-PATH FAMILY - five live harnesses, one cause, TWO SHAPES.
 #   A fresh runner ships only the venv `fno-py`; a dev machine has a global
 #   `fno`. Every member passes locally for that reason alone.
 #
@@ -529,16 +529,21 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 #     tests/hooks/test_init_node_guard_tokenize.sh
 #     tests/test_provider_substrate_e2e.sh
 #
-#   Shape 2, undeclared - no guard, no mention of `fno` anywhere. It just needs
-#   something `fno` does and dies on a bare `grep -q` under `set -e`, printing
-#   NO failure line at all. The grep is the tell, not the dependency.
-#   The only specimen found so far was tests/test-target-state-recovery.sh,
-#   whose gemini case needed the settings.yaml -> config.toml migration to have
-#   fired as an init side effect. It was REPAIRED on main (the fixture now seeds
-#   config.toml directly), so it is drained and no longer an example - but the
-#   shape is recorded because it cost a CI cycle to find and the next one will
-#   look exactly as innocent. Shape 2 is invisible to the rg above. There is no
-#   static detector for it; CI is the detector.
+#   Shape 2, undeclared - the test never mentions `fno`; the CODE UNDER TEST
+#   needs it, and that code FAILS OPEN when it is missing. So the harness does
+#   not skip, it runs and asserts against behavior that silently did not happen:
+#     tests/test-worktree-inside-checkout-redirect.sh - hooks/worktree-setup.sh:47
+#       gates the `policy = never` refusal on `command -v fno`. With no `fno`
+#       the guard never runs, the hook creates the worktree it should have
+#       refused, and 6 of 11 assertions fail. The fail-open is deliberate (a
+#       stale `fno` must not break interactive `claude --worktree`), so the test
+#       is right and the environment is wrong.
+#   A previous specimen, tests/test-target-state-recovery.sh, was repaired on
+#   main (its fixture now seeds config.toml directly instead of relying on a
+#   migration that fired as an init side effect) and is drained.
+#   Shape 2 is invisible to the rg above: grep the harness and you find nothing,
+#   because the dependency is one layer down in the code it exercises. There is
+#   no static detector for it. CI is the detector.
 #
 #   The graduating fix is a shared `fno`-then-`fno-py` resolver, not a PATH
 #   symlink. Eight files under scripts/lib/ and hooks/helpers/ open with
@@ -587,6 +592,7 @@ tests/test-autolaunch-gate.sh
 tests/test-backlog-aliases.sh
 tests/test-backlog-triage.sh
 tests/test-graph-resolve.sh
+tests/test-worktree-inside-checkout-redirect.sh
 tests/test_emit_gate_transition.sh
 tests/test_provider_substrate_e2e.sh
 """.split())
