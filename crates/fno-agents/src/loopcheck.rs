@@ -908,6 +908,9 @@ struct PrInfo {
     /// The sole failing term whenever the login gate is vacuous, and the reason
     /// the block message can name real local work instead of an absent bot.
     unattested_reviewers: Vec<UnattestedReviewer>,
+    /// Unparseable events.jsonl lines that look like attestations. Named in the
+    /// reason so "no attestation" is never asserted over a corrupt one.
+    malformed_attestations: usize,
 }
 
 /// The non-interactive invocation that satisfies each local reviewer, mirroring
@@ -1009,11 +1012,17 @@ struct UnattestedReviewer {
 /// (attestation for a prior commit), or a `fail` verdict leaves the reviewer
 /// UNSATISFIED, mirroring how a missing bot review holds the login gate. An
 /// empty reviewer list is vacuously satisfied (no reviewers gate).
-fn unattested_reviewers(
+/// `unattested_reviewers` plus the count of unparseable lines that LOOK like
+/// attestations. A torn write leaves a corrupt `review_attestation` in the file
+/// and the gate then reports "no head-pinned review_attestation", which is the
+/// same class of lie this node exists to delete - so the count is surfaced in
+/// the reason. Mirrors `open_review_findings`, which already does this for
+/// `review_finding`.
+fn unattested_reviewers_scan(
     events_path: &Path,
     reviewers: &[String],
     head_sha: &str,
-) -> Vec<UnattestedReviewer> {
+) -> (Vec<UnattestedReviewer>, usize) {
     let unsatisfied_all = || -> Vec<UnattestedReviewer> {
         reviewers
             .iter()
@@ -1025,11 +1034,13 @@ fn unattested_reviewers(
             .collect()
     };
     if reviewers.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let Ok(content) = std::fs::read_to_string(events_path) else {
-        return unsatisfied_all(); // no evidence file -> gate unmet (fail closed)
+        // no evidence file -> gate unmet (fail closed)
+        return (unsatisfied_all(), 0);
     };
+    let mut malformed = 0usize;
     // Single pass (gemini review): record the LATEST verdict per reviewer at the
     // current head. events.jsonl is append-ordered, so a later attestation
     // supersedes an earlier one for the same reviewer - a `fail` posted after a
@@ -1047,6 +1058,9 @@ fn unattested_reviewers(
         std::collections::HashMap::new();
     for line in content.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
+            if line.contains("review_attestation") {
+                malformed += 1;
+            }
             continue;
         };
         if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
@@ -1079,23 +1093,26 @@ fn unattested_reviewers(
         }
         latest_pass.insert(r, is_pass);
     }
-    reviewers
+    let out = reviewers
         .iter()
         .map(|entry| entry.trim_start_matches('/'))
         .filter(|name| latest_pass.get(*name) != Some(&true))
         .map(|name| UnattestedReviewer {
             name: name.to_string(),
-            // The most recent old head whose LATEST verdict is still a pass.
-            // Only a pass is worth naming: an old-head `fail` rendered as
-            // "passed at X, superseded" would imply a successful review that
-            // never happened.
+            // An old head whose LATEST verdict is still a pass. Heads keep
+            // first-seen order, so a head re-attested later keeps its original
+            // slot and this may name a slightly older one - both are real
+            // passes, so the line stays true either way. Only a pass is worth
+            // naming: an old-head `fail` rendered as "passed at X, superseded"
+            // would imply a successful review that never happened.
             superseded_head: other_heads
                 .get(name)
                 .and_then(|heads| heads.iter().rev().find(|(_, ok)| *ok))
                 .map(|(h, _)| h.clone()),
             failed_at_head: latest_pass.get(name) == Some(&false),
         })
-        .collect()
+        .collect();
+    (out, malformed)
 }
 
 /// An operator review finding (x-f8d4) still open: a `review_finding` event for
@@ -1247,6 +1264,7 @@ fn read_pr_info(
                 unaddressed_findings: Vec::new(),
                 review_skipped: false,
                 unattested_reviewers: Vec::new(),
+                malformed_attestations: 0,
             });
         }
         return Err(("pr_view".to_string(), stderr_tail(&pr_view_out.stderr)));
@@ -1302,6 +1320,7 @@ fn read_pr_info(
             unaddressed_findings: Vec::new(),
             review_skipped: true,
             unattested_reviewers: Vec::new(),
+            malformed_attestations: 0,
         });
     }
 
@@ -1358,7 +1377,8 @@ fn read_pr_info(
     let login_skipped = no_external || !login_gate_active;
     // One scan feeds both the gate and its explanation, so the two cannot
     // disagree the way the decision and the message did on PR #618.
-    let unattested = unattested_reviewers(events_path, reviewers, head_sha);
+    let (unattested, malformed_attestations) =
+        unattested_reviewers_scan(events_path, reviewers, head_sha);
     let reviewers_ok = unattested.is_empty();
     let (latest_review_ts, reviewed, missing_bots, usage_limited, unaddressed_findings) =
         if login_skipped {
@@ -1521,6 +1541,7 @@ fn read_pr_info(
         // A reviewers-only config did gate, so it is NOT review_skipped.
         review_skipped: login_skipped && reviewers.is_empty(),
         unattested_reviewers: unattested,
+        malformed_attestations,
     })
 }
 
@@ -4685,13 +4706,18 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                     }
                 })
                 .collect();
+            let corrupt = match pr.malformed_attestations {
+                0 => String::new(),
+                n => format!(" ({n} unparseable attestation line(s) ignored)"),
+            };
             return format!(
-                "PR #{}: reviewers gate unmet - no head-pinned review_attestation at {} for {}. \
+                "PR #{}: reviewers gate unmet - no head-pinned review_attestation at {} for {}{}. \
                  This is local work to DO, not a wait: no GitHub reviewer posts these, \
                  so do not arm a watcher.",
                 pr.number,
                 head,
-                items.join("; ")
+                items.join("; "),
+                corrupt
             );
         }
         if !pr.missing_bots.is_empty() {
@@ -4757,6 +4783,16 @@ pub fn run_loop_check_capture(args: &[String]) -> (i32, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The list half of the scan. Production reads the count too, so this
+    /// wrapper lives here rather than as an unused function in the binary.
+    fn unattested_reviewers(
+        events_path: &Path,
+        reviewers: &[String],
+        head_sha: &str,
+    ) -> Vec<UnattestedReviewer> {
+        unattested_reviewers_scan(events_path, reviewers, head_sha).0
+    }
 
     /// The gate's boolean view of `unattested_reviewers`, exactly as
     /// `read_pr_info` derives it. The pre-x-cdc7 predicate tests below are
@@ -5258,6 +5294,7 @@ mod tests {
             unaddressed_findings: vec![],
             review_skipped: false,
             unattested_reviewers: vec![],
+            malformed_attestations: 0,
         };
         let reason = build_block_reason(&pr, "abc", true);
         assert!(
@@ -5331,6 +5368,7 @@ mod tests {
             unaddressed_findings: vec![],
             review_skipped: false,
             unattested_reviewers: vec![],
+            malformed_attestations: 0,
         }
     }
 
@@ -5540,6 +5578,14 @@ mod tests {
         assert_eq!(out.len(), 1);
         // A head-pinned fail is not a superseded pass; do not offer a stale head.
         assert_eq!(out[0].superseded_head, None);
+        // ...but it IS an attestation at this head, and the message says so
+        // rather than claiming none exists. Pinned at the PARSER: the message
+        // test hand-builds the struct and never exercises this derivation, so
+        // `failed_at_head: false` survived the whole suite before this line.
+        assert!(
+            out[0].failed_at_head,
+            "a fail at HEAD must be reported as such"
+        );
     }
 
     #[test]
@@ -5573,6 +5619,48 @@ mod tests {
         let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].superseded_head, None);
+    }
+
+    #[test]
+    fn a_corrupt_attestation_line_is_counted_and_named() {
+        // A torn write leaves an unparseable review_attestation in the file.
+        // The gate must still fail closed, but reporting "no head-pinned
+        // review_attestation" over a corrupt one is the same class of lie this
+        // node deletes. The sibling review_finding scanner already counts its
+        // malformed lines; this one did not.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("e.jsonl");
+        std::fs::write(
+            &p,
+            concat!(
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","hea"#,
+                "\n",
+                r#"{"type":"loop_check","data":{}}"#,
+            ),
+        )
+        .unwrap();
+        let (out, malformed) = unattested_reviewers_scan(&p, &["sigma".to_string()], "h");
+        assert_eq!(out.len(), 1, "a corrupt line never satisfies the gate");
+        assert_eq!(malformed, 1, "and it is counted, not silently dropped");
+
+        let pr = PrInfo {
+            malformed_attestations: malformed,
+            ..reviewers_gate_pr()
+        };
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(
+            reason.contains("unparseable attestation line"),
+            "got: {reason}"
+        );
+
+        // A clean file adds nothing to the message.
+        std::fs::write(&p, r#"{"type":"loop_check","data":{}}"#).unwrap();
+        assert_eq!(
+            unattested_reviewers_scan(&p, &["sigma".to_string()], "h").1,
+            0
+        );
+        assert!(!build_block_reason(&reviewers_gate_pr(), "abc", true)
+            .contains("unparseable attestation line"));
     }
 
     #[test]
@@ -5700,8 +5788,15 @@ mod tests {
             ..reviewers_gate_pr()
         };
         for (label, pr, open_empty) in [
+            // Reaches the FINDINGS branch, not the bot branch: unaddressed
+            // findings render first. Kept because the invariant under test is
+            // "no hint for a non-idlable state", which holds branch-wide - but
+            // it is the case below that reaches `missing_bots`, so that one is
+            // what would catch a reintroduced unconditional `arm_watch_hint`
+            // there. A sigma round caught this test silently losing its teeth
+            // when the branch order moved out from under it.
             (
-                "bot + unaddressed finding",
+                "bot + unaddressed finding (renders as the finding)",
                 PrInfo {
                     missing_bots: vec!["chatgpt-codex-connector".into()],
                     unattested_reviewers: vec![],
@@ -5718,6 +5813,7 @@ mod tests {
                 true,
             ),
             (
+                // The one that DOES reach `missing_bots` while non-idlable.
                 "bot + open operator finding",
                 PrInfo {
                     missing_bots: vec!["chatgpt-codex-connector".into()],

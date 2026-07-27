@@ -138,6 +138,17 @@ def extract_rust(src, path):
     )
     if not entries:
         fail(f"REVIEWER_INVOCATIONS in {path} did not extract as (name, invocation, bool)")
+    # A PARTIAL extraction is the false-parity path: an entry whose formatting
+    # the regex misses is skipped, and if it is Rust-only it produces no problem
+    # at all - silently hiding the exact "declared in Rust, missing from Python"
+    # case this check advertises. Count the tuple openings independently and
+    # refuse any shortfall.
+    opened = len(re.findall(r'\(\s*"', m.group(1)))
+    if opened != len(entries):
+        fail(
+            f"REVIEWER_INVOCATIONS in {path}: {opened} entries present but only "
+            f"{len(entries)} parsed; an unmatched entry would be compared as absent"
+        )
     return {
         name.encode().decode("unicode_escape"): (
             inv.encode().decode("unicode_escape"),
@@ -263,6 +274,18 @@ const REVIEWER_INVOCATIONS: &[(&str, &str, bool)] = &[
 EOF
     _python "$tmp/extra.py" "sigma"
     _case "one-sided reviewer rejected" 1 "$tmp/extra.rs" "$tmp/extra.py"
+
+    # Case 3b: one Rust entry the regex cannot match (a non-literal bool).
+    # Without the count guard it is skipped and, being Rust-only, reported clean.
+    cat > "$tmp/partial.rs" <<'EOF'
+const REVIEWER_INVOCATIONS: &[(&str, &str, bool)] = &[
+    ("sigma", "/fno:review sigma", false),
+    ("declare", "/fno:review declare", true),
+    ("ghost", "/fno:review ghost", IS_SELF_CERT),
+];
+EOF
+    _python "$tmp/partial.py" "sigma"
+    _case "partially-extracted Rust table rejected" 1 "$tmp/partial.rs" "$tmp/partial.py"
 
     # Case 4: the Rust table absent -> reject, not a silent empty==empty pass.
     printf '// no table here\n' > "$tmp/absent.rs"

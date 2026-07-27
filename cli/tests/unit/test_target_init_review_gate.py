@@ -249,6 +249,43 @@ def test_detect_session_reads_config_unattended(
     assert detect_session({"CLAUDE_CODE_SESSION_ID": "s1"}).attended is True
 
 
+def test_config_unattended_uses_the_shells_notion_of_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`hooks/helpers/init-target-state.sh` compares get_config output to the
+    STRING "true", so a quoted or numeric value makes the MANIFEST unattended.
+    `is True` here answered attended, which clears an `operator` reviewer the
+    run then cannot satisfy - the #618 class, silently."""
+    cfg = tmp_path / "settings.yaml"
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    for var in ("TARGET_UNATTENDED", "FNO_BG", "FNO_AGENT_SELF"):
+        monkeypatch.delenv(var, raising=False)
+    for value in ('"true"', "'yes'", "1", "on", "TRUE"):
+        cfg.write_text(
+            f"schema_version: 1\nconfig:\n  unattended:\n    enabled: {value}\n"
+        )
+        assert detect_session({"CLAUDE_CODE_SESSION_ID": "s1"}).attended is False, value
+    for value in ('"false"', "0", "no", "nonsense", "[]"):
+        cfg.write_text(
+            f"schema_version: 1\nconfig:\n  unattended:\n    enabled: {value}\n"
+        )
+        assert detect_session({"CLAUDE_CODE_SESSION_ID": "s1"}).attended is True, value
+
+
+def test_unattended_table_without_enabled_falls_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The per-KEY guard is load-bearing, not defensive: without it this raises
+    KeyError, and the resolution path is deliberately NOT swallowed, so the
+    traceback escapes `fno target init`."""
+    cfg = tmp_path / "settings.yaml"
+    cfg.write_text("schema_version: 1\nconfig:\n  unattended:\n    reason: ci\n")
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    for var in ("TARGET_UNATTENDED", "FNO_BG", "FNO_AGENT_SELF"):
+        monkeypatch.delenv(var, raising=False)
+    assert detect_session({"CLAUDE_CODE_SESSION_ID": "s1"}).attended is True
+
+
 def test_unreadable_reviewers_config_is_reported_never_silent(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):

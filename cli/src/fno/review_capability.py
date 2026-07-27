@@ -100,6 +100,25 @@ class ReviewerVerdict:
         return f"{self.status}: {self.name} - {self.reason}{note}"
 
 
+def _truthy(v: object) -> bool:
+    """The shell's notion of true, not Python's `is True`.
+
+    `config.unattended` has no model field, so nothing coerces or rejects a
+    non-bool. The shell authority compares `get_config` output to the STRING
+    "true", so a yq-rendered `enabled: "true"` (or `1`, or `yes`) makes the
+    manifest unattended while `is True` here said attended - and an attended
+    verdict clears an `operator` reviewer that the run then cannot satisfy.
+    Mirrors the coercion `config/__init__.py` already applies to its own bools.
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):  # bool already handled above
+        return v == 1
+    if isinstance(v, str):
+        return v.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 def _unattended_in_config() -> bool:
     """`config.unattended.enabled` - the manifest's second `attended` input.
 
@@ -133,7 +152,7 @@ def _unattended_in_config() -> bool:
     for path in candidates:
         block = read_config_flat(path).get("unattended")
         if isinstance(block, dict) and "enabled" in block:
-            return block["enabled"] is True
+            return _truthy(block["enabled"])
     return False
 
 
@@ -153,6 +172,13 @@ def detect_session(
     gate. The env markers below are additive: a bg or spawned session is also
     unattended, and neither the shell nor this function may be the only one to
     know it.
+
+    One residual divergence is known and deliberately tolerated: the shell needs
+    `yq` to read a dotted key, so on a host without it the shell falls back to
+    its "false" default while this reads the file directly. That pushes only
+    toward UNATTENDED here, i.e. toward refusing - the safe direction. Closing
+    it properly means one reader for the key, which is a larger change than this
+    node.
     """
     environ = os.environ if env is None else env
     harness = resolve_harness_identity(environ).harness or "unknown"
