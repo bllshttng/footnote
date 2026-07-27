@@ -510,14 +510,14 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 
 
 # Shell harnesses discover_shell_harnesses finds but smoke must not run yet.
-# 16 entries held. 10 are RED on both platforms (pre-existing rot; each its own
-# debugging session, out of scope here). The other 6 are macOS-green and
+# 15 entries held. 10 are RED on both platforms (pre-existing rot; each its own
+# debugging session, out of scope here). The other 5 are macOS-green and
 # Linux-red, so a developer census calls them drainable and CI does not:
 #
 #   tests/hooks/test_hook_events.sh - a non-portable perm check; GNU stat does
 #     not fail on -f, so the Linux fallback branch never runs.
 #
-#   THE `fno`-ON-PATH FAMILY - five harnesses, one cause, TWO SHAPES.
+#   THE `fno`-ON-PATH FAMILY - four live harnesses, one cause, TWO SHAPES.
 #   A fresh runner ships only the venv `fno-py`; a dev machine has a global
 #   `fno`. Every member passes locally for that reason alone.
 #
@@ -531,12 +531,14 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 #
 #   Shape 2, undeclared - no guard, no mention of `fno` anywhere. It just needs
 #   something `fno` does and dies on a bare `grep -q` under `set -e`, printing
-#   NO failure line at all. The grep is the tell, not the dependency:
-#     tests/test-target-state-recovery.sh - its gemini case needs the
-#       settings.yaml -> config.toml migration to have run, so
-#       `grep -q '^provider_mode: experimental_agents'` fails silently.
-#   Shape 2 is invisible to the rg above. There is no static detector for it;
-#   CI is the detector.
+#   NO failure line at all. The grep is the tell, not the dependency.
+#   The only specimen found so far was tests/test-target-state-recovery.sh,
+#   whose gemini case needed the settings.yaml -> config.toml migration to have
+#   fired as an init side effect. It was REPAIRED on main (the fixture now seeds
+#   config.toml directly), so it is drained and no longer an example - but the
+#   shape is recorded because it cost a CI cycle to find and the next one will
+#   look exactly as innocent. Shape 2 is invisible to the rg above. There is no
+#   static detector for it; CI is the detector.
 #
 #   The graduating fix is a shared `fno`-then-`fno-py` resolver, not a PATH
 #   symlink. Eight files under scripts/lib/ and hooks/helpers/ open with
@@ -581,7 +583,6 @@ tests/hooks/test_init_node_guard_tokenize.sh
 tests/hooks/test_reconcile_session_start.sh
 tests/smoke-megatron-e2e.sh
 tests/smoke-target-shim.sh
-tests/test-target-state-recovery.sh
 tests/test-autolaunch-gate.sh
 tests/test-backlog-aliases.sh
 tests/test-backlog-triage.sh
