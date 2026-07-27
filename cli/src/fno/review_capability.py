@@ -48,10 +48,15 @@ class SessionCapability:
 
 @dataclass(frozen=True)
 class ReviewerVerdict:
-    """One configured reviewer, resolved against one session."""
+    """One configured reviewer, resolved against one session.
+
+    `descriptor` is None for a name absent from the table: borrowing another
+    reviewer's descriptor would render an unknown name with that reviewer's
+    kind, invocation, and self-cert note.
+    """
 
     name: str
-    descriptor: ReviewerDescriptor
+    descriptor: Optional[ReviewerDescriptor]
     status: Status
     reason: str
 
@@ -72,19 +77,52 @@ class ReviewerVerdict:
         """One report line. A self-cert always says so (AC5)."""
         note = (
             "  [self-cert: satisfies the gate, asserts no review evidence]"
-            if self.descriptor.asserts == "self-cert"
+            if self.descriptor is not None and self.descriptor.asserts == "self-cert"
             else ""
         )
         return f"{self.status}: {self.name} - {self.reason}{note}"
 
 
-def detect_session(env: Optional[Mapping[str, str]] = None) -> SessionCapability:
+def _unattended_in_config() -> bool:
+    """`config.unattended.enabled` - the manifest's second `attended` input.
+
+    The settings model is `extra: ignore`, so this key never survives
+    `load_settings()`; reading the file directly is the only way Python can see
+    what `hooks/helpers/init-target-state.sh` sees.
+    """
+    from fno.config import (
+        _settings_yaml_locations,
+        config_read_candidates,
+        read_config_flat,
+    )
+
+    try:
+        candidates = config_read_candidates(_settings_yaml_locations())
+    except Exception:  # noqa: BLE001 - an unreadable config is not "unattended"
+        return False
+    for path in candidates:
+        block = read_config_flat(path).get("unattended")
+        if isinstance(block, dict):
+            return block.get("enabled") is True
+    return False
+
+
+def detect_session(
+    env: Optional[Mapping[str, str]] = None,
+    unattended_configured: Optional[bool] = None,
+) -> SessionCapability:
     """Read harness + substrate from the ambient environment.
 
     Substrate is derived from the dispatch env a spawner sets, because a session
-    has no direct way to ask which substrate it was launched on. `attended`
-    reuses the exact read `fno target init` already performs, so the capability
-    check and the manifest can never disagree about it.
+    has no direct way to ask which substrate it was launched on.
+
+    `attended` must match the manifest's own derivation
+    (`hooks/helpers/init-target-state.sh`: `TARGET_UNATTENDED=1` OR
+    `config.unattended.enabled`) or the check clears a gate the run cannot
+    satisfy - an `operator` reviewer looks fine here and then wedges at the stop
+    gate. The env markers below are additive: a bg or spawned session is also
+    unattended, and neither the shell nor this function may be the only one to
+    know it.
     """
     environ = os.environ if env is None else env
     harness = resolve_harness_identity(environ).harness or "unknown"
@@ -92,7 +130,9 @@ def detect_session(env: Optional[Mapping[str, str]] = None) -> SessionCapability
     bg = bool(environ.get("FNO_BG"))
     unattended_flag = environ.get("TARGET_UNATTENDED") == "1"
     spawned = bool(environ.get("FNO_AGENT_SELF"))
-    attended = not (bg or unattended_flag or spawned)
+    if unattended_configured is None:
+        unattended_configured = _unattended_in_config()
+    attended = not (bg or unattended_flag or spawned or unattended_configured)
 
     if bg:
         substrate = "bg"
@@ -165,7 +205,7 @@ def resolve_reviewers(
             out.append(
                 ReviewerVerdict(
                     name,
-                    _RESOLVABLE_REVIEWERS["declare"],
+                    None,
                     "unavailable",
                     "unknown reviewer; not in the descriptor table",
                 )
@@ -191,10 +231,23 @@ def refusal_message(
         f"{session.describe()}.",
     ]
     lines += [f"  {v.line()}" for v in blocked]
+    # Per-status, because attendedness is irrelevant to `unavailable`: the
+    # subagent-dispatch branch never reads session.attended, so "run attended"
+    # there is a remedy that provably cannot work - the failure class this
+    # whole check exists to delete.
+    remedies = ["change config.review.reviewers"]
+    if any(v.status == "needs-operator" for v in blocked):
+        remedies.append("run attended so an operator can drive it")
+    if any(v.status == "unavailable" for v in blocked):
+        remedies.append(
+            "run on a harness that dispatches subagents, or run the review by "
+            "hand and attest with `bash skills/review/scripts/emit-attestation.sh "
+            "<reviewer>`"
+        )
     lines += [
         "",
         "The gate is fail-closed: without a head-pinned review_attestation the "
         "session will block at the stop gate after the work is done.",
-        "Change config.review.reviewers, or run attended.",
+        f"To proceed: {'; or '.join(remedies)}.",
     ]
     return "\n".join(lines)

@@ -327,10 +327,12 @@ def _report_review_capability(json_out: bool = False) -> int:
                         {
                             "name": v.name,
                             "status": v.status,
-                            "kind": v.descriptor.kind,
-                            "requires": v.descriptor.requires,
-                            "asserts": v.descriptor.asserts,
-                            "invocation": v.descriptor.invocation,
+                            "kind": v.descriptor.kind if v.descriptor else None,
+                            "requires": v.descriptor.requires if v.descriptor else None,
+                            "asserts": v.descriptor.asserts if v.descriptor else None,
+                            "invocation": (
+                                v.descriptor.invocation if v.descriptor else None
+                            ),
                             "reason": v.reason,
                         }
                         for v in verdicts

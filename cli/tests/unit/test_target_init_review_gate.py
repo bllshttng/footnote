@@ -54,9 +54,22 @@ def test_refusal_names_reviewer_capability_harness_substrate_and_remedies():
     assert "subagent-dispatch" in msg
     assert "harness=codex" in msg
     assert "substrate=headless" in msg
-    # Both ways out, and only those two.
-    assert "Change config.review.reviewers" in msg
+    assert "change config.review.reviewers" in msg
+    # The remedy must be reachable. `sigma` here is `unavailable`, and the
+    # subagent-dispatch branch never reads session.attended, so "run attended"
+    # would be a remedy that provably cannot clear this gate.
+    assert "run attended" not in msg
+    assert "emit-attestation.sh" in msg
+
+
+def test_needs_operator_keeps_the_run_attended_remedy():
+    """The other half of the split: attendedness IS the fix for an operator
+    reviewer, so that remedy must survive."""
+    verdicts = resolve_reviewers(["code-review"], CLAUDE_BG)
+    msg = refusal_message(verdicts, CLAUDE_BG)
+    assert msg is not None
     assert "run attended" in msg
+    assert "emit-attestation.sh" not in msg
 
 
 def test_init_exits_non_zero_before_touching_the_init_script(
@@ -184,3 +197,79 @@ def test_unverifiable_session_does_not_refuse_init(
                 "FNO_BG", "FNO_AGENT_SELF"):
         monkeypatch.delenv(var, raising=False)
     _refuse_unsatisfiable_reviewers()  # no raise
+
+
+# --- the capability check must not be the thing that silently does not fire ---
+
+
+def test_unknown_reviewer_does_not_borrow_declares_descriptor():
+    """A name absent from the table once rendered with `declare`'s descriptor,
+    so an unknown reviewer reported itself as a self-cert that satisfies the
+    gate - the exact opposite of its own `unavailable` verdict."""
+    (v,) = resolve_reviewers(["teleport"], CLAUDE_PANE)
+    assert v.status == "unavailable"
+    assert v.descriptor is None
+    assert "self-cert" not in v.line()
+    assert "/fno:review declare" not in v.line()
+
+
+def test_config_unattended_reaches_the_operator_verdict():
+    """`attended` has two inputs in the manifest (TARGET_UNATTENDED OR
+    config.unattended.enabled) and had only the env one here, so a
+    config-unattended run reported an operator reviewer as satisfiable and
+    wedged at the stop gate instead."""
+    s = detect_session({"CLAUDE_CODE_SESSION_ID": "s1"}, unattended_configured=True)
+    assert s.attended is False
+    (v,) = resolve_reviewers(["code-review"], s)
+    assert v.status == "needs-operator"
+    assert v.blocks_autonomy is True
+
+
+def test_detect_session_reads_config_unattended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The config read is wired, not just the parameter."""
+    cfg = tmp_path / "settings.yaml"
+    cfg.write_text("schema_version: 1\nconfig:\n  unattended:\n    enabled: true\n")
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    for var in ("TARGET_UNATTENDED", "FNO_BG", "FNO_AGENT_SELF"):
+        monkeypatch.delenv(var, raising=False)
+    assert detect_session({"CLAUDE_CODE_SESSION_ID": "s1"}).attended is False
+
+    cfg.write_text("schema_version: 1\nconfig:\n  unattended:\n    enabled: false\n")
+    assert detect_session({"CLAUDE_CODE_SESSION_ID": "s1"}).attended is True
+
+
+def test_unreadable_reviewers_config_is_reported_never_silent(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """A typo'd reviewer name raises out of the config validator. Swallowing it
+    skipped the refusal in total silence while the Rust stop gate went live on a
+    name no attestation can match - the wedge this check exists to prevent."""
+    import fno.config as cfg_mod
+
+    def _boom():
+        raise ValueError("names an unresolvable reviewer 'sigmma'")
+
+    monkeypatch.setattr(cfg_mod, "load_settings", _boom)
+    _refuse_unsatisfiable_reviewers()  # degrades, but must not be silent
+    err = capsys.readouterr().err
+    assert "review capability check skipped" in err
+    assert "sigmma" in err
+
+
+def test_resolution_errors_are_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Only the config read degrades. Once a reviewer is known to be configured,
+    guessing "available" is the wedge, so a failing probe must propagate."""
+    import fno.review_capability as rc
+
+    _config(tmp_path, monkeypatch, "[sigma]")
+
+    def _boom() -> None:
+        raise RuntimeError("probe died")
+
+    monkeypatch.setattr(rc, "detect_session", _boom)
+    with pytest.raises(RuntimeError, match="probe died"):
+        _refuse_unsatisfiable_reviewers()

@@ -81,29 +81,39 @@ def _refuse_unsatisfiable_reviewers() -> None:
     is where PR #618 lost fifteen turns. Resolving it here converts the wedge
     into a refusal before anything is built. Read-only; no state is written.
 
-    Degrades to a no-op when the config cannot be read at all - a repo with no
-    reviewers configured must not be blocked by this check failing. That is
-    distinct from a capability probe that errors on a CONFIGURED reviewer, which
-    refuses (see `_resolve_one`): there, guessing "available" is the wedge.
+    An unreadable config degrades to a no-op so a repo that configures no
+    reviewer is never blocked by this check failing - but it SAYS SO. Silence
+    was the original wedge: a typo'd reviewer name raises out of the config
+    validator, and swallowing that skipped the refusal entirely while the Rust
+    stop gate went live on a name no attestation can ever match.
+
+    Resolution errors are NOT swallowed. Once a reviewer is known to be
+    configured, guessing "available" is the wedge.
     """
     try:
         from fno.config import load_settings
-        from fno.review_capability import (
-            detect_session,
-            refusal_message,
-            resolve_reviewers,
-        )
 
         reviewers = list(load_settings().review.reviewers or [])
-        if not reviewers:
-            return
-        session = detect_session()
-        verdicts = resolve_reviewers(reviewers, session)
-        message = refusal_message(verdicts, session)
-        unverifiable = [v for v in verdicts if v.status == "unverifiable"]
-    except Exception:  # noqa: BLE001 - a broken probe must not block bootstrap
+    except Exception as exc:  # noqa: BLE001 - report, never block bootstrap
+        typer.echo(
+            f"note target init: review capability check skipped "
+            f"(config.review.reviewers unreadable: {exc})",
+            err=True,
+        )
         return
-    for v in unverifiable:
+    if not reviewers:
+        return
+
+    from fno.review_capability import (
+        detect_session,
+        refusal_message,
+        resolve_reviewers,
+    )
+
+    session = detect_session()
+    verdicts = resolve_reviewers(reviewers, session)
+    message = refusal_message(verdicts, session)
+    for v in [v for v in verdicts if v.status == "unverifiable"]:
         typer.echo(f"note target init: {v.line()}", err=True)
     if message:
         typer.echo(message, err=True)
