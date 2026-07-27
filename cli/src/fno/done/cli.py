@@ -11,7 +11,9 @@ completed feature, not just the PR trio:
 
     session_id      - from $CLAUDECODE_SESSION_ID if set, else latest ledger
     cost_usd        - sum of all matching ledger entries' cost_usd
-    cost_sessions   - one row per (ledger entry, session UUID) combination
+    cost_sessions   - one row per (ledger entry, distinct session). A ledger
+                      row's `sessions` list is an alias set for one run, so
+                      members that merely rename that run are collapsed first.
     points          - from ledger.points if currently null in graph
 
 A --backfill flag runs ONLY the rollup (skipping status / completed_at
@@ -181,15 +183,25 @@ def _rollup_from_ledger(plan_path: Optional[str]) -> dict:
     if not matching:
         return {"session_id": None, "cost_usd": None, "cost_sessions": [], "points": None}
 
-    # One cost_sessions row per (ledger entry, session UUID). Split the
-    # ledger's aggregate cost_usd evenly across its session list so sums
-    # stay faithful. If a ledger entry has no sessions, emit one row with
-    # session_id=None so the cost still shows up.
+    # One cost_sessions row per DISTINCT session, splitting the ledger's
+    # aggregate cost_usd evenly across them so sums stay faithful. A ledger
+    # row's `sessions` is an alias set for ONE run (transcript UUID + the
+    # scalar run id, per cost/_register.py), so a member equal to the row's
+    # own scalar id names the same run again and must not become a divisor.
+    # If a ledger entry has no sessions, emit one row with session_id=None
+    # so the cost still shows up.
     cost_sessions: list[dict] = []
     for le in matching:
         sessions = le.get("sessions") or []
         if not isinstance(sessions, list):
             sessions = []
+        scalar = le.get("fno_id") or le.get("session_id")
+        if scalar:
+            # Fall back to the scalar when collapsing empties the set, so a
+            # row recorded only under its own id keeps its cost.
+            sessions = [s for s in sessions if s != scalar] or (
+                [scalar] if sessions else []
+            )
         cost = le.get("cost_usd")
         try:
             cost_f = float(cost) if cost is not None else 0.0
@@ -255,8 +267,13 @@ def _apply_rollup(
     Default: "fill if null" semantics - pre-existing values are preserved.
     When force_overwrite=True: overwrites session_id and points unconditionally
     (use with --backfill for explicit re-reconciliation of stale rollups).
-    Cost dedup logic (cost_sessions de-dupe by session_id + timestamp) still
-    applies regardless of force_overwrite so double-counting cannot occur.
+    Cost rows de-dupe on (session_id, timestamp) regardless of force_overwrite.
+    That key catches a re-run of the same rollup, which is what it is for. It
+    does NOT make double-counting impossible: two rows for one run recorded
+    under different identifier aliases pass as distinct, and one session
+    re-stamped at a later recording time passes as distinct too. The alias half
+    is handled upstream in `_rollup_from_ledger`; the timestamp-drift half is
+    still guarded ad hoc on the reconcile path in graph/cli.py.
     """
     tags: list[str] = []
 
