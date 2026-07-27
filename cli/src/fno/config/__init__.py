@@ -2800,6 +2800,18 @@ class ConfigBlock(BaseModel):
     post_merge: PostMergeBlock = Field(default_factory=PostMergeBlock)
     research: ResearchBlock = Field(default_factory=ResearchBlock)
     review: ReviewBlock = Field(default_factory=ReviewBlock)
+    # The repo-wide ship-gate probe list, TOP-LEVEL because the file is flat.
+    # ENFORCED by the Rust loop-check gate (crates/fno-agents/src/loopcheck.rs),
+    # which runs it alongside a plan's own `done_probes` and refuses DonePRGreen
+    # unless both pass. Declared here so the Python side is not blind to a key
+    # the gate enforces - `fno config doctor` reports it, and a wrong-typed
+    # value raises here just as it blocks there.
+    #
+    # A probe is an OBSERVATION. It runs `sh -c` in the session cwd, so the
+    # source must stay a gitignored, operator-authored file: a tracked probe
+    # list would make cloning a repo remote code execution on the next
+    # loop-check fire.
+    done_probes: list[str] = Field(default_factory=list)
     target: TargetConfig = Field(default_factory=TargetConfig)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)

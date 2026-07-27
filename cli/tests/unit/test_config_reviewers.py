@@ -306,6 +306,43 @@ def test_an_unregistered_name_still_refuses(
     assert "unresolvable reviewer" in str(exc.value)
 
 
+def test_a_project_probe_list_is_readable_python_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The Rust gate enforces this key; Python must not be blind to it. Flat
+    root, not nested under a `config` table."""
+    s = _toml_settings(
+        tmp_path, monkeypatch, 'done_probes = ["make a11y-check", "semgrep --error"]\n'
+    )
+    assert s.done_probes == ["make a11y-check", "semgrep --error"]
+    assert _toml_settings(tmp_path, monkeypatch, "plans_dir = 'x'\n").done_probes == []
+
+
+def test_a_wrong_typed_probe_list_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Mirrors the Rust side's Unparseable: a guardrail that disappears when you
+    typo it is not a guardrail."""
+    with pytest.raises(Exception):
+        _toml_settings(tmp_path, monkeypatch, '[done_probes]\na = "b"\n')
+
+
+def test_doctor_reports_the_resolved_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC14-UI: an operator learns their guardrail is only WITNESSED here,
+    rather than at the stop gate after the work is done."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('done_probes = ["make a11y-check"]\n\n' + _REGISTRY_TOML)
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s1")
+    load_settings.cache_clear()
+    from fno.cli import app
+
+    r = CliRunner().invoke(app, ["config", "doctor"])
+    assert "probe (project): make a11y-check" in r.output
+    assert "reviewer: my-security-skill - asserts invocation" in r.output
+    assert "no claim about its verdict" in r.output
+
+
 def test_a_registry_entry_with_a_bad_rung_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

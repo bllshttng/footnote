@@ -148,6 +148,9 @@ FIELD_META: dict[str, Meta] = {
         "Landing dir for the `fno research` doc deliverable (brief + sources sidecar); "
         "vault area, not repo-relative. Unset => ship fails loud (never guesses).",
     ),
+    "done_probes": Meta(
+        "advanced", "Repo-wide ship-gate probes: shell commands loop-check runs (60s each, cap 3 per source) before it will grant DonePRGreen, alongside any a plan declares. Both lists must pass; a plan can add probes and can never silence these. A probe is an OBSERVATION - one that mutates the repo races the session's own edits, and its only backstops are the timeout and the block reason.",
+    ),
     # --- config.review.* ---
     "review.github_apps": Meta(
         "advanced", "GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots.",
