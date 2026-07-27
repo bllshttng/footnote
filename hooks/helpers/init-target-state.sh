@@ -361,14 +361,15 @@ if declare -F get_auto_merge_enabled >/dev/null 2>&1; then
 fi
 if [[ "${TARGET_NO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="false"
+elif [[ " ${INITIAL_INPUT:-} " == *" no-merge "* ]]; then
+  # Reads INITIAL_INPUT because TARGET_INPUT is unset by here; keying on that
+  # parses fine and silently never fires. Sits above the TARGET_AUTO_MERGE
+  # grant because nothing sets that var, so it can only arrive inherited, and
+  # an inherited grant must not beat a refusal typed into this run (the trap
+  # `fno target init` scrubs for TARGET_BEASTMODE). Space-padded = whole token.
+  AUTO_MERGE_APPROVED="false"
 elif [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="true"
-elif [[ "${INITIAL_INPUT:-}" == *no-merge* ]]; then
-  # Autonomous dispatch bakes `no-merge` into the command string, so it arrives
-  # only as prose. Must read INITIAL_INPUT: TARGET_INPUT is unset by here, and
-  # keying on it parses fine but never fires. The `auto-merge` grant stays
-  # unparsed on purpose - only the refusal direction fails safe.
-  AUTO_MERGE_APPROVED="false"
 elif _is_true "$AUTO_MERGE_ENABLED"; then
   # The who-may-merge gate (allowed_invokers) was removed (x-04ab): auto-merge
   # is approved whenever it is `enabled`, gated further by the merge command's

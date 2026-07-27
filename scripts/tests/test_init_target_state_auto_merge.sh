@@ -167,15 +167,72 @@ rm -rf "$T"
 # ---- Test 3d: explicit env still outranks the input string ----
 
 echo ""
-echo "test_env_auto_merge_beats_no_merge_token_in_input"
+echo "test_no_merge_token_beats_inherited_auto_merge_grant"
 
+# No production code sets TARGET_AUTO_MERGE, so the only way it is ever set is
+# inheritance from an ancestor shell or spawning parent. An inherited grant must
+# not defeat a refusal typed into this run's invocation, or an autonomously
+# dispatched `/target no-merge <id>` worker merges anyway - the exact path this
+# guard exists to protect.
 T=$(setup_repo "[auto_merge]
 enabled = true")
 
 run_init_in "$T" "TARGET_AUTO_MERGE=1" "TARGET_INPUT=no-merge x-e938"
 STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
 
-assert_contains "TARGET_AUTO_MERGE=1 outranks input token" "auto_merge_approved: true" "$STATE"
+assert_contains "no-merge token beats an inherited TARGET_AUTO_MERGE" "auto_merge_approved: false" "$STATE"
+
+rm -rf "$T"
+
+# ---- Test 3d2: TARGET_NO_MERGE still outranks everything ----
+
+echo "test_explicit_no_merge_env_still_wins"
+
+T=$(setup_repo "[auto_merge]
+enabled = true")
+
+run_init_in "$T" "TARGET_NO_MERGE=1" "TARGET_AUTO_MERGE=1" "TARGET_INPUT=auto-merge x-e938"
+STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
+
+assert_contains "TARGET_NO_MERGE=1 outranks the grant env var" "auto_merge_approved: false" "$STATE"
+
+rm -rf "$T"
+
+# ---- Test 3d3: the grant env var still works without a refusal ----
+
+echo "test_auto_merge_env_grants_when_no_refusal"
+
+T=$(setup_repo "expertise = \"frontend\"")
+
+run_init_in "$T" "TARGET_AUTO_MERGE=1" "TARGET_INPUT=x-e938"
+STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
+
+assert_contains "TARGET_AUTO_MERGE=1 grants when nothing refuses" "auto_merge_approved: true" "$STATE"
+
+rm -rf "$T"
+
+# ---- Test 3d4: the token match is whole-token, not a substring ----
+# `no-merger` and a path containing no-merge must NOT revoke a configured grant.
+
+echo "test_token_match_is_whole_token"
+
+T=$(setup_repo "[auto_merge]
+enabled = true")
+
+run_init_in "$T" "TARGET_INPUT=plans/no-merge-notes.md"
+STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
+
+assert_contains "a path containing no-merge does not revoke" "auto_merge_approved: true" "$STATE"
+
+rm -rf "$T"
+
+T=$(setup_repo "[auto_merge]
+enabled = true")
+
+run_init_in "$T" "TARGET_INPUT=no-merger x-e938"
+STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
+
+assert_contains "no-merger does not revoke" "auto_merge_approved: true" "$STATE"
 
 rm -rf "$T"
 

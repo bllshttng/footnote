@@ -51,8 +51,8 @@ A `failed` outcome does NOT block the promise. The PR was created successfully; 
 When deciding whether to auto-merge, resolve in this order (first match wins):
 
 1. **`TARGET_NO_MERGE=1`** - auto_merge_approved = false
-2. **`TARGET_AUTO_MERGE=1`** - auto_merge_approved = true
-3. **`no-merge` in the invocation string** - auto_merge_approved = false
+2. **`no-merge` as a whole token in the invocation** - auto_merge_approved = false
+3. **`TARGET_AUTO_MERGE=1`** - auto_merge_approved = true
 4. **Local `.fno/config.toml`** - `config.auto_merge.enabled`
 5. **Global `~/.fno/config.toml`** - `config.auto_merge.enabled`
 6. **Default** - false
@@ -61,9 +61,11 @@ When deciding whether to auto-merge, resolve in this order (first match wins):
 
 FORBIDDEN: auto-merging based on any inference other than this chain.
 
-**The chain is deliberately asymmetric.** Rung 3 honors a `no-merge` token found anywhere in the invocation string, because autonomous dispatch bakes exactly that token into its command (`harness_map._AUTONOMOUS_COMMAND`) and it arrives as prose no flag parser sees. There is no matching rung for `auto-merge`: honoring a *grant* discovered in free text would let arbitrary prose manufacture merge authority, whereas honoring a refusal fails safe. A positional `auto-merge` therefore grants nothing on its own and needs `TARGET_AUTO_MERGE=1` or `config.auto_merge.enabled`.
+**The chain is deliberately asymmetric, and every refusal outranks every grant.** Rung 2 honors a `no-merge` token in the invocation because autonomous dispatch bakes exactly that token into its command (`harness_map._AUTONOMOUS_COMMAND`), where it arrives as prose no flag parser sees. There is no matching rung for `auto-merge`: honoring a *grant* discovered in free text would let arbitrary prose manufacture merge authority, whereas honoring a refusal fails safe. A positional `auto-merge` therefore grants nothing on its own and needs `TARGET_AUTO_MERGE=1` or `config.auto_merge.enabled`.
 
-If both tokens appear, `no-merge` wins, and any explicit env var outranks both.
+Rung 2 sits ABOVE the `TARGET_AUTO_MERGE` grant deliberately. Nothing in the codebase sets that variable, so the only way it is ever set is inheritance from an ancestor shell or a spawning parent - the same trap `fno target init` scrubs for `TARGET_BEASTMODE`. An inherited grant must not defeat a refusal typed into this run's invocation, or an autonomously dispatched `/target no-merge <id>` merges anyway.
+
+The token match is whole-token (space-padded), so `no-merger` or a path like `plans/no-merge-notes.md` does not revoke a configured grant. A standalone `no-merge` inside free text still matches and suppresses auto-merge, which is the safe direction.
 
 Log the resolved value + source at session start, e.g.:
 `target: auto_merge_approved=true (source: .fno/config.toml)`
