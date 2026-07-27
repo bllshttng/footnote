@@ -1,7 +1,7 @@
 """Per-agent provider resolution for the cross-model review panel (ab-6c8f4c61).
 
 Resolves which provider kind (``claude`` | ``codex`` | ``gemini``) each review
-agent runs on, given the operator's ``config.review.agent_providers`` map and
+agent runs on, given the operator's ``config.review.agent_harnesses`` map and
 the implementer's own provider (read from the ledger). The three correctness
 agents cross-model to a provider that *differs from the implementer's* by
 default; the operator can pin any agent to any provider.

@@ -183,7 +183,12 @@ FIELD_META: dict[str, Meta] = {
         "always", "Which AI reviewers /pr requests a review from (the INVOCATION list).",
         question="Which external reviewer(s) should review your PRs (gemini/codex/none)?",
     ),
-    "review.agent_providers": Meta("never", "Per-agent provider routing for the cross-model review panel."),
+    "review.agent_harnesses": Meta(
+        "never", "Per-agent harness routing (claude/codex/gemini) for the cross-model review panel. Legacy alias: agent_providers.",
+    ),
+    "review.agent_providers": Meta(
+        "never", "Legacy alias for config.review.agent_harnesses (a straight rename); agent_harnesses wins if both are set.",
+    ),
     "review.agent_routes": Meta("never", "Opt-in per-agent harness/provider/model routes for named sigma sessions."),
     "review.cross_model.enabled": Meta("advanced", "Enable cross-model (codex/gemini) second-opinion review."),
     # --- config.target.* ---
