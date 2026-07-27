@@ -364,13 +364,10 @@ if [[ "${TARGET_NO_MERGE:-}" == "1" ]]; then
 elif [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="true"
 elif [[ "${INITIAL_INPUT:-}" == *no-merge* ]]; then
-  # The dispatch template bakes `no-merge` into the command string
-  # (harness_map._AUTONOMOUS_COMMAND), so it arrives only as input prose.
-  # Reads INITIAL_INPUT because input resolution unsets TARGET_INPUT; keying
-  # this on TARGET_INPUT compiles fine and silently never fires.
-  # Asymmetric on purpose: the `auto-merge` grant token stays unparsed, because
-  # honoring a grant found in free text would let arbitrary prose manufacture
-  # merge authority. Only the refusal direction fails safe.
+  # Autonomous dispatch bakes `no-merge` into the command string, so it arrives
+  # only as prose. Must read INITIAL_INPUT: TARGET_INPUT is unset by here, and
+  # keying on it parses fine but never fires. The `auto-merge` grant stays
+  # unparsed on purpose - only the refusal direction fails safe.
   AUTO_MERGE_APPROVED="false"
 elif _is_true "$AUTO_MERGE_ENABLED"; then
   # The who-may-merge gate (allowed_invokers) was removed (x-04ab): auto-merge
