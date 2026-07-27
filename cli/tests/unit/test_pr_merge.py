@@ -462,3 +462,81 @@ def test_merge_lock_released_when_merge_body_raises(enabled, monkeypatch, tmp_pa
         _merge.run_merge(["42"], cwd=str(tmp_path))
     # the lock was released on the way out, not leaked
     acquire_claim(_lock_key(), "pr-merge:next", reason="post-raise probe")
+
+
+# ---------------------------------------------------------------------------
+# Repo without auto-merge enabled (x-3218 side-fix)
+# ---------------------------------------------------------------------------
+
+
+class _AutoMergeRejectingRun(FakeRun):
+    """gh rejects ``--auto`` (repo feature off) but accepts a plain merge."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.merge_cmds: list[list[str]] = []
+
+    def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
+        cmd = list(cmd)
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            self.merge_cmds.append(cmd)
+            if "--auto" in cmd:
+                return Result(
+                    1,
+                    "",
+                    "GraphQL: Auto merge is not allowed for this repository "
+                    "(enablePullRequestAutoMerge)",
+                )
+            return Result(0, "Merged pull request #42", "")
+        return super().__call__(
+            cmd, cwd=cwd, env=env, input_text=input_text, timeout=timeout
+        )
+
+
+def test_auto_merge_unsupported_repo_falls_back_to_an_immediate_merge(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """``--auto`` is a request to QUEUE; a repo without the feature rejects it.
+
+    ``require_checks_pass`` means "do not merge red", and the preflight already
+    verified the checks - so losing the queue is not a reason to refuse. Without
+    this fallback the verb cannot merge at all on such a repo, and the raw gh
+    escape hatch is hook-blocked by design, leaving no path.
+    """
+    (tmp_path / ".fno").mkdir()
+    monkeypatch.setattr(
+        _merge,
+        "_load_auto_merge",
+        lambda: AutoMergeBlock(enabled=True, require_checks_pass=True),
+    )
+    fake = _AutoMergeRejectingRun(toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "merged"
+    assert "auto-merge disabled" in obj["reason"]
+
+    # Exactly two attempts: the queueing one, then the immediate retry.
+    assert len(fake.merge_cmds) == 2
+    assert "--auto" in fake.merge_cmds[0]
+    assert "--auto" not in fake.merge_cmds[1]
+    # The retry keeps every other flag (strategy, delete-branch).
+    assert fake.merge_cmds[1] == [c for c in fake.merge_cmds[0] if c != "--auto"]
+
+
+def test_a_genuine_merge_failure_is_not_retried_without_auto(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """Only the capability refusal retries; a real failure stands as-is."""
+    monkeypatch.setattr(
+        _merge,
+        "_load_auto_merge",
+        lambda: AutoMergeBlock(enabled=True, require_checks_pass=True),
+    )
+    fake = FakeRun(gh_merge=Result(1, "", "branch is protected"), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
+    assert _last_json(capsys, stream="err")["reason"] == "branch protected"
+    assert sum(1 for c in fake.calls if c[:3] == ["gh", "pr", "merge"]) == 1
