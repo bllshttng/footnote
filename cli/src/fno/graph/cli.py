@@ -8540,3 +8540,74 @@ def cmd_supersede(
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f"superseded {replaces} with {new_id}")
     _project_plans_from_graph([replaces, new_id])
+
+
+@cli.command("exec-graph", hidden=True)
+def cmd_exec_graph(
+    id: str = typer.Argument(..., help="Root node ab-id, slug, or bare hex."),
+    as_json: bool = typer.Option(True, "--json/--human", help="Emit stable JSON (default) or a human summary."),
+    validate: bool = typer.Option(False, "--validate", help="Round-trip the compiled graph through strict parse; exit 2 on any defect."),
+) -> None:
+    """Compile and inspect the derived execution graph for a node (read-only).
+
+    Derives a disposable typed topology from canonical state (blocked_by
+    ordering, file ownership, verifiers, evidence). Never mutates the graph;
+    compilation failure degrades to a collapsed serial graph rather than error.
+    """
+    from fno.graph.execution import MalformedGraphError, compile_graph, ExecGraph
+    from fno.graph.fuzzy import resolve_node
+
+    entries = _resolve_entries_or_exit(id)
+    match = resolve_node(id, entries)
+    if match.kind != "exact":
+        typer.echo(f"Error: could not resolve node {id!r} exactly", err=True)
+        raise typer.Exit(code=3)
+    root = match.candidates[0]["id"]
+
+    by_id = {e.get("id"): e for e in entries if e.get("id")}
+
+    # Minimal relevant subgraph: root + its transitive blocked_by deps + the
+    # direct dependents that name any of those as a blocker. The compiler emits
+    # the ordering/resource/verification/data edges among exactly this set.
+    scope: set[str] = set()
+    frontier = [root]
+    while frontier:
+        nid = frontier.pop()
+        if nid in scope or nid not in by_id:
+            continue
+        scope.add(nid)
+        frontier.extend(by_id[nid].get("blocked_by") or [])
+    for nid, e in by_id.items():
+        if any(dep in scope for dep in (e.get("blocked_by") or [])):
+            scope.add(nid)
+
+    selected = []
+    for nid in scope:
+        e = dict(by_id[nid])
+        # Best-effort live-state enrichment: the entry's own lock holder, and a
+        # conservative "unknown" liveness (a read-only surface does not probe
+        # session liveness). The compiler tolerates missing keys.
+        holder = e.get("locked_by") or e.get("session_id")
+        e["claim_holder"] = holder or ""
+        e["liveness"] = "unknown" if holder else ""
+        selected.append(e)
+
+    graph = compile_graph(root, selected)
+
+    if validate:
+        try:
+            ExecGraph.from_dict(graph.to_dict())
+        except MalformedGraphError as exc:
+            typer.echo(f"Error: compiled graph failed strict validation: {exc}", err=True)
+            raise typer.Exit(code=2)
+
+    if as_json:
+        typer.echo(graph.to_json())
+        return
+    kinds = ", ".join(sorted({e.kind for e in graph.edges})) or "none"
+    typer.echo(f"root={graph.root} collapsed={graph.collapsed}")
+    typer.echo(f"nodes={len(graph.nodes)} edges={len(graph.edges)} ({kinds}) barriers={len(graph.barriers)}")
+    for n in sorted(graph.nodes, key=lambda n: n.node_id):
+        typer.echo(f"  {n.node_id}  [{n.justification}] {n.objective}")
+    for b in sorted(graph.barriers, key=lambda b: b.at):
+        typer.echo(f"  barrier @ {b.at}: fan-in from {', '.join(b.expected)}")
