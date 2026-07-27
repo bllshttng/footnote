@@ -33,8 +33,12 @@ same reason.
 from __future__ import annotations
 
 import os
+import sys
 from enum import Enum
 from typing import Optional
+
+#: One-shot latch so a missing PyYAML warns once per process, not once per plan.
+_WARNED_NO_YAML = False
 
 
 def resolve_plan_probe(entry: dict) -> Optional[str]:
@@ -134,8 +138,14 @@ def _read_status_scalar(probe: str) -> tuple[Optional[str], bool]:
     except (OSError, UnicodeDecodeError, ValueError):
         return (None, False)
 
+    if not text.strip():
+        # An empty file is a truncated write or a stray `touch`, not a plan that
+        # predates the status vocabulary. Silence means READY below, which would
+        # make a 0-byte file dispatchable; "cannot classify" is the honest read.
+        return (None, False)
+
     lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    if lines[0].strip() != "---":
         return (None, True)  # no frontmatter block: declares nothing, readably
 
     end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
@@ -144,9 +154,24 @@ def _read_status_scalar(probe: str) -> tuple[Optional[str], bool]:
 
     try:
         import yaml
+    except ImportError:
+        # A tooling gap, not a plan defect - and it parks EVERY plan at once,
+        # so say so rather than letting the operator read "malformed
+        # frontmatter" nine times about nine healthy docs. Warned once per
+        # process; the verdict is still UNREADABLE (fail closed for dispatch).
+        global _WARNED_NO_YAML
+        if not _WARNED_NO_YAML:
+            _WARNED_NO_YAML = True
+            print(
+                "ladder: PyYAML missing - every plan reads UNREADABLE "
+                "(undispatchable). Install it to restore rung classification.",
+                file=sys.stderr,
+            )
+        return (None, False)
 
+    try:
         fm = yaml.safe_load("\n".join(lines[1:end]))
-    except Exception:  # noqa: BLE001 - malformed YAML or no PyYAML: cannot tell
+    except Exception:  # noqa: BLE001 - malformed YAML: genuinely cannot tell
         return (None, False)
 
     if fm is None:

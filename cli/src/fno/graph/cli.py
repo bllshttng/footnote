@@ -1775,8 +1775,22 @@ def cmd_decompose(
                             f"(or run `/think {cid}` then `/blueprint`)",
                             err=True,
                         )
-        except Exception:  # noqa: BLE001 - additive; never wedge the decompose
-            pass
+        except Exception as exc:  # noqa: BLE001 - additive; never wedge the decompose
+            # Non-fatal by design (the graph mutation already committed), but
+            # NOT silent: an empty `fanout` is indistinguishable from "no
+            # children needed designing", so a crash here would read as a clean
+            # no-op to both the operator and a --json consumer. Name it and say
+            # which children fell back to inline-fill.
+            _unowned = [c for c in spec_ids if not any(
+                f["id"] == c and f.get("owned") for f in fanout
+            )]
+            if not json_mode(ctx):
+                typer.echo(
+                    f"warning: design fan-out failed ({exc}); "
+                    f"{len(_unowned)} child(ren) stay yours to inline-fill"
+                    + (f": {', '.join(_unowned)}" if _unowned else ""),
+                    err=True,
+                )
 
     # 4b. Report what happened (AC1-UI).
     if json_mode(ctx):
@@ -3128,12 +3142,18 @@ def _starvation_receipts(
             reason = "container"
         elif nid in claimed:
             reason = "claimed"
-        elif e.get("status") == "design":
+        elif e.get("status") in ("design", "idea"):
             # Read off the persisted rung, not the guard: the guard only fires
             # for the stale window (graph still says `ready`, doc since edited
-            # to design), so a node already ON the rung would fall through and
-            # report nothing at all.
-            reason = "design"
+            # down a rung), so a node already ON the rung would fall through to
+            # `selection_guards`, get None (it is gated on a persisted `ready`),
+            # and be dropped by the `continue` - reporting nothing at all.
+            #
+            # `idea` is the COMMON case for a linked decompose scaffold, since
+            # recomputation persists that rung directly; without this arm a
+            # backlog of nothing but undesigned children prints a bare `null`
+            # instead of naming what each one is waiting on.
+            reason = e["status"]
         elif e.get("status") == "ready" and (
             _has_unmerged_open_pr(e) or _is_batched_member(e)
         ):

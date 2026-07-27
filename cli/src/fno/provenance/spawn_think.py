@@ -747,12 +747,22 @@ def _spawn_think_worker(
     # dispatch a /think at all. Now `config.think_spawn.substrate`, read here so
     # every spawn path gains the knob at once rather than growing a
     # caller-local override each time one is needed.
-    prov = (provider or "").strip() or "claude"
+    prov = (provider or "").strip()
     substrate = _think_spawn_substrate(node_cwd)
-    cmd = [
-        *_subprocess_util.fno_py_cmd(),
-        "agents", "spawn", "--harness", prov, "--substrate", substrate,
-    ]
+    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn"]
+    # An explicit node pin always wins. Absent one, only `bg` implies claude -
+    # that substrate IS claude-only, which is why the default was hardcoded here
+    # before it was configurable. Carrying that default onto `pane`/`headless`
+    # would defeat the point of making substrate configurable: a codex or gemini
+    # install choosing a substrate its own harness supports would still be
+    # dispatched at `--harness claude` and fail every spawn when claude is not
+    # installed. Omitting the flag lets `fno agents spawn` resolve the invoking
+    # harness itself.
+    if not prov and substrate == "bg":
+        prov = "claude"
+    if prov:
+        cmd += ["--harness", prov]
+    cmd += ["--substrate", substrate]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
@@ -790,20 +800,28 @@ def _spawn_think_worker(
     short_id = _parse_short_id(proc.stdout or "")
     if short_id:
         return short_id
-    if substrate != "bg":
-        # Only the bg receipt carries `short_id`. The pane receipt is a mux
-        # handle (`mux_session`/`pane_id`, agents/cli.py), and the headless
-        # `once` path writes the provider's reply verbatim - not JSON at all.
-        # Exit 0 on those substrates means the worker really launched (or, for
-        # headless, already finished), so raising here would report `skipped`
-        # for work that IS happening: decompose would then mark the child
-        # unowned and inline-fill it out from under a live pane worker, which
-        # is exactly the double-write the ownership receipt exists to prevent.
-        #
-        # `agent_name` is the durable, addressable handle on every substrate
-        # (`fno agents logs <name>` / `peek`), so the caller keeps a real
-        # pointer at the worker rather than a fabricated id.
+    # Only the bg receipt carries `short_id`. The pane receipt is a mux handle
+    # (`mux_session`/`pane_id`, agents/cli.py) and the headless `once` path
+    # writes the provider's reply verbatim - not JSON at all. Exit 0 on those
+    # substrates means the worker really launched, so raising would report
+    # `skipped` for work that IS happening: decompose would then mark the child
+    # unowned and inline-fill it out from under a live pane worker, the exact
+    # double-write the ownership receipt exists to prevent.
+    #
+    # What comes back differs by substrate, because a session pointer must
+    # RESOLVE or it is worse than absent:
+    #   pane     -> `agent_name`. The worker is live and registered, so the name
+    #               is addressable (`fno agents logs <name>` / `peek`).
+    #   headless -> "". The one-shot has already completed and torn down; there
+    #               is no session to point at. Returning the name here would
+    #               stamp `think_session_id` with a handle that resolves to
+    #               nothing - a fabricated provenance pointer on every
+    #               successful headless spawn. The `think_spawned` event still
+    #               carries `agent_name` separately, so nothing is lost.
+    if substrate == "pane":
         return agent_name
+    if substrate == "headless":
+        return ""
     raise SpawnError(
         f"fno agents spawn exit 0 but no short_id receipt: "
         f"{(proc.stdout or proc.stderr or '').strip()[:200]}"
@@ -904,7 +922,13 @@ def _stamp_forward(
         def mutator(entries):
             for e in entries:
                 if e.get("id") == node_id:
-                    e["think_session_id"] = think_session
+                    # Empty means the substrate exposes no resolvable session
+                    # (a completed headless one-shot). Leave the field alone
+                    # rather than blanking or faking it: a pointer that resolves
+                    # to nothing is worse than no pointer, and `output_path`
+                    # below is the durable artifact link that still works.
+                    if think_session:
+                        e["think_session_id"] = think_session
                     if output_path:
                         e["think_output_path"] = output_path
                     break

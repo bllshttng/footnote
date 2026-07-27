@@ -201,9 +201,21 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             e["status"] = "in_progress"
         else:
             # One rung read answers the rest. Persisted so every reader sees it
-            # (boards, `backlog get`, the Rust mux). Selection does NOT trust
-            # this value - it re-probes the file live - so a stale `design` can
-            # never block dispatch.
+            # (boards, `backlog get`, the Rust mux).
+            #
+            # Selection re-probes this value live, but ONLY IN THE DEMOTE
+            # DIRECTION: `selection_guards` runs on candidates already filtered
+            # to persisted `ready` (graph/cli.py `allowed`), so a row whose doc
+            # has since dropped a rung is caught, while a row persisted
+            # `design`/`idea` whose doc has since been PROMOTED is filtered out
+            # before any live read. That row re-arms on the next recompute -
+            # any `locked_mutate_graph`, and the `reconcile` that auto-fires at
+            # SessionStart - not on the next selection pass.
+            #
+            # Stated plainly because the previous wording here ("Selection does
+            # NOT trust this value") claimed a symmetry that does not exist, and
+            # a comment that overstates a guard is the failure this module was
+            # written to remove.
             e["status"] = rung_to_status[plan_rung(e)]
 
     return entries

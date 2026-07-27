@@ -55,22 +55,74 @@ echo "--- Bash: no plan-status re-parsing ---"
 # `sed -i` is excluded: an in-place substitution WRITES a status (test fixtures
 # stamping a plan at a chosen rung), it does not classify one. The defect is
 # reading a rung, not setting one.
-# The file set comes from `git ls-files`, never from a directory walk. ripgrep
-# layers .gitignore, ~/.ignore and .rgignore over any traversal, and one of
-# those legitimately carries `target/` for build output - which also swallows
-# `skills/target/`, the single most important directory this check covers. A
-# guard that silently searches nothing is the decorative guard this check
-# exists to prevent, and this one would have shipped green.
-bash_hits="$(
-    git ls-files -z -- '*.sh' 2>/dev/null \
-        | xargs -0 grep -nE '\^status:.*\$\{?(PLAN_PATH|PLAN_DIR|PLAN_FILE)' 2>/dev/null \
-        | grep -v 'sed -i' || true
-)"
-if [ -n "$bash_hits" ]; then
-    violation "a shell script classifies plan status itself; call \`fno plan rung\` instead" \
-        "$bash_hits"
+# ALLOWLIST BY FILE, not by pattern. An earlier version required `^status:` and
+# a `$PLAN_PATH`-shaped variable on the SAME physical line, which any of these
+# walk straight past:
+#
+#     grep '^status:' \
+#         "$PLAN_PATH"                 # line continuation
+#     plan="$1"; grep '^status:' "$plan"   # local variable name
+#
+# A guard a two-line reformat defeats is the decorative guard this check exists
+# to remove. So: flag EVERY shell `^status:` extraction, then subtract the files
+# known to read a different artifact. Adding a new reader now forces a choice -
+# route through `fno plan rung`, or add the file here with a reason - instead of
+# passing silently.
+#
+# `sed -i` is excluded: an in-place substitution WRITES a status (test fixtures
+# stamping a plan at a chosen rung), it does not classify one.
+#
+# Scoped to PRODUCTION shell - `tests/` is excluded on purpose. A test that
+# greps `^status: in_review` is asserting on output a stamper produced, not
+# classifying a plan for dispatch; folding those in would mean allowlisting a
+# dozen files today and one more per future test, which is how a guard becomes
+# noise and then gets switched off. The invariant worth enforcing is narrower
+# and sharper: no production shell script decides readiness for itself.
+#
+# Each allowlisted file reads a DIFFERENT status axis - `.fno/target-state.md`
+# (IN_PROGRESS / COMPLETE / BLOCKED) or the Plan-Mode sidecar (pending /
+# consumed) - so none is a second readiness implementation.
+ALLOWED_STATUS_READERS="
+hooks/target-stopfailure.sh
+hooks/target-postcompact-reinject.sh
+hooks/target-subagent-guard.sh
+hooks/worktree-remove.sh
+hooks/helpers/init-target-state.sh
+scripts/setup/archive-worktree.sh
+scripts/lib/archive-artifacts.sh
+scripts/lib/handoff-generator.sh
+scripts/lib/worktree-lifecycle.sh
+skills/target/scripts/detect-pending-plan.sh
+scripts/ci/check-plan-rung-authority.sh
+"
+offenders=""
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$ALLOWED_STATUS_READERS" in
+        *"$f"*) continue ;;
+    esac
+    offenders="${offenders}${f}
+"
+done <<EOF
+$(
+    git ls-files -z -- 'hooks/*.sh' 'scripts/*.sh' 'skills/*.sh' 2>/dev/null \
+        | xargs -0 grep -lE '\^status:' 2>/dev/null \
+        | while IFS= read -r cand; do
+              # Keep the file only if at least one `^status:` line is a READ.
+              if grep -E '\^status:' "$cand" 2>/dev/null | grep -qv 'sed -i'; then
+                  echo "$cand"
+              fi
+          done
+)
+EOF
+offenders="$(printf '%s' "$offenders" | grep -v '^$' || true)"
+if [ -n "$offenders" ]; then
+    violation "a shell script reads \`status:\` itself; call \`fno plan rung\` instead" \
+        "$offenders" \
+        "If this file reads a DIFFERENT status axis (the target-state manifest or" \
+        "the Plan-Mode sidecar), add it to ALLOWED_STATUS_READERS with its reason."
 else
-    note "OK: no shell script extracts \`status:\` from a plan path"
+    note "OK: no unlisted shell script extracts \`status:\`"
 fi
 
 # ---------------------------------------------------------------------------

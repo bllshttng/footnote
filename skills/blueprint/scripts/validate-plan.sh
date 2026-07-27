@@ -966,7 +966,12 @@ if [[ -n "$target_file" ]]; then
     # `fno plan rung` resolves it through the same alias table the Python side
     # uses instead of a second copy that has to be remembered.
     STATUS_FM="$(_plan_rung "$target_file")"
-    if [[ "$STATUS_FM" == "in_review" || "$STATUS_FM" == "done" ]]; then
+    if [[ "$STATUS_FM" == \!* ]]; then
+        # The verb could not answer. Saying "not yet shipped" here would be an
+        # affirmative claim built on a non-answer; the same reason is already
+        # warned about above, so keep this line honest and short.
+        ok "Stamp fields not checked (rung unavailable)"
+    elif [[ "$STATUS_FM" == "in_review" || "$STATUS_FM" == "done" ]]; then
         ok "INFO: plan is already shipped (rung: $STATUS_FM) - stamp fields present and accepted"
     else
         ok "No stamp fields detected (plan not yet shipped)"

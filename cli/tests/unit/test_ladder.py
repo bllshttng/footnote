@@ -615,3 +615,70 @@ def test_the_policy_set_is_the_one_selection_uses():
     from fno.graph.ladder import UNSELECTABLE_RUNGS, Rung
 
     assert UNSELECTABLE_RUNGS == frozenset({Rung.IDEA, Rung.DESIGN})
+
+
+# every readiness path re-probes the rung, not just `design` (sigma panel) -----
+
+
+def test_maintain_never_quarantines_an_undesigned_node(tmp_path):
+    """`maintain --apply` must not defer a scaffold off the board.
+
+    `is_stale_ready` exempted DESIGN only, so an `idea`-rung row aged into
+    stale-quarantine and got `deferred_at` stamped. Two of its three callers
+    never pass through `selection_guards`, so the rung probe has to live here.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from fno.graph.maintain import is_stale_ready
+
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=572)).isoformat()
+    for status in ("idea", "stub", "design"):
+        plan = tmp_path / f"{status}.md"
+        plan.write_text(f"---\nstatus: {status}\n---\n")
+        node = {
+            "id": f"x-{status[:4]}",
+            "status": "ready",
+            "plan_path": str(plan),
+            "created_at": old,
+        }
+        assert is_stale_ready(node, now, 21) is False, status
+
+
+def test_entry_status_uses_the_same_rung_table_as_recompute(tmp_path):
+    """`types._derive_status` was a second derivation and had gone divergent.
+
+    It reported `ready` for a linked `idea` scaffold - the very bug this node
+    removes, surviving on the pydantic read path - and made every such load emit
+    a spurious `graph_status_drift` event.
+    """
+    from fno.graph.statuses import recompute_statuses
+    from fno.graph.types import _derive_status
+
+    for status, expected in (("idea", "idea"), ("stub", "idea"),
+                             ("design", "design"), ("ready", "ready")):
+        plan = tmp_path / f"{status}.md"
+        plan.write_text(f"---\nstatus: {status}\n---\n")
+        row = {
+            "id": "x-derive1",
+            "title": "t",
+            "plan_path": str(plan),
+            "blocked_by": [],
+            "completed_at": None,
+            "session_id": None,
+            "claimed_at": None,
+            "status": "ready",
+        }
+        assert _derive_status(row) == expected, status
+        assert recompute_statuses([dict(row)])[0]["status"] == _derive_status(row)
+
+
+def test_an_empty_plan_file_is_unreadable_not_ready(tmp_path):
+    """A truncated write must not read as a plan that predates the vocabulary."""
+    from fno.graph.ladder import Rung, is_dispatchable, plan_rung
+
+    empty = tmp_path / "e.md"
+    empty.write_text("")
+    entry = {"id": "x-empty01", "plan_path": str(empty)}
+    assert plan_rung(entry) is Rung.UNREADABLE
+    assert is_dispatchable(entry) is False

@@ -1473,12 +1473,37 @@ def test_a_pane_receipt_without_short_id_is_still_a_launch(monkeypatch, tmp_path
     assert handle, "a launched pane worker must return an addressable handle"
 
 
-def test_a_headless_verbatim_reply_is_still_a_launch(monkeypatch, tmp_path):
-    """The headless `once` path writes the provider reply verbatim, not JSON."""
+def test_a_headless_reply_launches_but_stamps_no_session_pointer(
+    monkeypatch, tmp_path
+):
+    """The headless `once` path writes the provider reply verbatim, not JSON.
+
+    It must NOT raise (the work happened), and must NOT invent a session id: the
+    one-shot has already torn down, so a handle here would be stamped into
+    `think_session_id` and resolve to nothing on every successful spawn. Empty
+    is the honest answer; the `think_spawned` event still carries `agent_name`.
+    """
     _write_config(tmp_path, "[think_spawn]\nsubstrate = \"headless\"\n")
     _capture_with_stdout(monkeypatch, "I have finished the design pass.\n")
     handle = st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
-    assert handle
+    assert handle == ""
+
+
+def test_an_empty_session_is_not_stamped_over_the_node(monkeypatch, tmp_path):
+    """A pointer that resolves to nothing is worse than no pointer."""
+    captured: dict = {}
+
+    def fake_mutate(path, mutator, **kw):
+        entries = [{"id": "x-1", "think_session_id": "prior"}]
+        captured["out"] = mutator(entries)
+
+    monkeypatch.setattr(
+        "fno.graph.store.locked_mutate_graph", fake_mutate, raising=False
+    )
+    st._stamp_forward("x-1", "", None, output_path="/tmp/doc.md")
+    if "out" in captured:
+        assert captured["out"][0]["think_session_id"] == "prior"
+        assert captured["out"][0]["think_output_path"] == "/tmp/doc.md"
 
 
 def test_the_non_bg_handle_is_the_agent_name_not_a_fabricated_id(
