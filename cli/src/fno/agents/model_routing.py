@@ -174,18 +174,32 @@ class TierRemapConflict(ValueError):
     """
 
 
+def is_anthropic_model(model: str) -> bool:
+    """True for an Anthropic model id or tier alias.
+
+    Pinning a tier to a specific Anthropic model
+    (``ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-1``) is a supported Claude
+    Code customization, not a vendor conflict: endpoint and model still agree.
+    Only a FOREIGN vendor's id (``glm-5.2[1m]``, ``deepseek-...``) creates the
+    split this module guards against.
+    """
+    name = model.strip().lower()
+    return name.startswith("claude-") or name in TIER_ALIASES
+
+
 def tier_remap_conflict(
     model: Optional[str], env: Optional[Mapping[str, str]] = None
 ) -> Optional[tuple[str, str]]:
     """``(alias, remapped_model)`` when ``model`` is a claude tier alias that
-    ``env`` redefines, else ``None``. Pure and cheap: reads only the env."""
+    ``env`` redefines to a FOREIGN vendor's model id, else ``None``. Pure and
+    cheap: reads only the env."""
     alias = (model or "").strip().lower()
     if alias not in TIER_ALIASES:
         return None
     if env is None:
         env = os.environ
     remapped = (env.get(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL") or "").strip()
-    if not remapped or remapped.lower() == alias:
+    if not remapped or is_anthropic_model(remapped):
         return None
     return alias, remapped
 

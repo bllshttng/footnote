@@ -88,6 +88,17 @@ def test_clean_parent_and_non_claude_harness_are_untouched():
     )
 
 
+def test_a_coherent_anthropic_tier_pin_is_not_a_conflict():
+    # Pinning a tier to a specific Anthropic model is a supported Claude Code
+    # customization: endpoint and model still agree, so it must not refuse.
+    for pinned in ("claude-opus-4-1", "claude-opus-5", "Claude-Opus-4-1"):
+        env = {"ANTHROPIC_DEFAULT_OPUS_MODEL": pinned}
+        assert inherited_tier_remap([*BASE, "--model", "opus"], env) is None, pinned
+        check_spawn_tier_remap("claude", "opus", env=env)
+    # A foreign vendor id is still a conflict.
+    assert inherited_tier_remap([*BASE, "--model", "opus"], ZAI_ENV) is not None
+
+
 def test_payload_tokens_after_argv_are_not_read_as_flags():
     args = [*BASE, "--argv", "--model", "opus"]
     assert inherited_tier_remap(args, ZAI_ENV) is None
