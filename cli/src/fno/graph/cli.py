@@ -1977,7 +1977,10 @@ def _intake_impl(
                     continue
                 entry["plan_path"] = plan_path
                 entry["title"] = spec["title"]
-                if claimed_type != DEFAULT_NODE_TYPE:
+                if (
+                    claimed_type != DEFAULT_NODE_TYPE
+                    and entry.get("type") != claimed_type
+                ):
                     # `add` and `update` both refuse a write that would make a
                     # third epic level; a doc-frontmatter lane that skips the cap
                     # would be the decorative guard this whole change is about.
