@@ -3501,6 +3501,12 @@ def cmd_schedule(
 
     report = schedule_shadow(max_lanes, project, mission=mission)
     typer.echo(json.dumps(report, indent=2))
+    # A degraded report is still printed in full - a reader wanting the frontier
+    # anyway can have it - but it must not exit 0. This report is the evidence
+    # that authorizes live scheduling, and a shell gate keying on $? cannot see
+    # the `degraded` list. Exit 1 (2 is the not-enabled-yet refusal above).
+    if report["degraded"]:
+        raise typer.Exit(code=1)
 
 
 # -- dispatch-lanes --

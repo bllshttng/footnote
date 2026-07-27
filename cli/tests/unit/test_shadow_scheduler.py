@@ -11,6 +11,8 @@ claims root is isolated to `tmp_path`.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from fno.backlog import advance
@@ -41,6 +43,11 @@ def _hermetic(monkeypatch):
 
     monkeypatch.setattr(collision, "has_file_surface", lambda p: True)
     monkeypatch.setattr(collision, "resolve_plan_path", lambda p: p)
+    # Process-global memo: another test in the same session can leave it in the
+    # degraded (cwd-fallback) state, which would then show up in every report
+    # here as a `plan-path-resolution` degrade. Pin it healthy; the two tests
+    # that care override it.
+    monkeypatch.setattr(collision, "_repo_root_cache", (True, Path("/repo")))
     monkeypatch.setattr(advance, "_high_collision", lambda node, inflight: None)
     monkeypatch.setattr(advance, "_live_lane_domains", lambda claims_root=None: set())
     monkeypatch.setattr(advance, "_live_worked_entries", lambda claims_root=None: [])
@@ -410,3 +417,50 @@ def test_a_pick_becomes_a_collision_comparator_for_later_picks(monkeypatch, tmp_
     assert [(d["id"], d["reason"]) for d in r["serialized"]] == [
         ("n-b", "high-collision:n-a")
     ]
+
+
+def test_cli_schedule_exits_nonzero_on_a_degraded_report(monkeypatch):
+    """A degraded report still prints in full, but must not exit 0.
+
+    `degraded` is only visible to a reader that parses the JSON; a shell gate
+    keying on $? would treat a collapsed frontier as a clean one. Exit 1 keeps
+    it distinguishable from the --no-shadow refusal, which is 2.
+    """
+    import json
+
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as gcli
+
+    report = {"effective_cap": 2, "selected": [], "degraded": ["inflight"]}
+    monkeypatch.setattr(
+        advance, "schedule_shadow", lambda *a, **k: report
+    )
+
+    res = CliRunner().invoke(gcli.cli, ["schedule", "--max", "2"])
+
+    assert res.exit_code == 1, res.stdout
+    assert json.loads(res.stdout) == report, "the report must still be emitted"
+
+
+def test_degraded_plan_path_resolution_reaches_the_report(monkeypatch, tmp_path):
+    """A cwd fallback in repo-root resolution makes collisions false-negative.
+
+    That overstates the frontier in the same direction a swallowed seed read
+    would, so it has to land in `degraded` rather than dying on stderr.
+    """
+    import fno.graph.collision as collision
+
+    monkeypatch.setattr(collision, "_repo_root_cache", (False, tmp_path))
+    _ready(monkeypatch, _nodes(("n-a", "code")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert "plan-path-resolution" in r["degraded"]
+
+
+def test_healthy_plan_path_resolution_is_not_flagged(monkeypatch, tmp_path):
+    import fno.graph.collision as collision
+
+    monkeypatch.setattr(collision, "_repo_root_cache", (True, tmp_path))
+    _ready(monkeypatch, _nodes(("n-a", "code")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert r["degraded"] == []

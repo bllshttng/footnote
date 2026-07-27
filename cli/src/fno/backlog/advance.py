@@ -860,6 +860,15 @@ def schedule_shadow(
             )
         )
 
+    # Checked AFTER the loop, so it reflects the resolution the comparisons above
+    # actually used rather than a fresh probe. A cwd fallback makes collisions
+    # false-negative, which overstates the frontier in the same direction a
+    # swallowed seed read would - so it belongs in `degraded`, not only on stderr.
+    from fno.graph.collision import repo_root_resolution_degraded
+
+    if repo_root_resolution_degraded():
+        degraded.append("plan-path-resolution")
+
     return {
         "effective_cap": effective_cap,
         "requested_cap": max_lanes,
