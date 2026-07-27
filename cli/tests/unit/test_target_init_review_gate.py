@@ -484,3 +484,114 @@ def test_codex_can_satisfy_a_sigma_gate():
     assert v.status == "satisfiable"
     assert v.blocks_autonomy is False
     assert refusal_message([v], CODEX_HEADLESS) is None
+
+
+# --- AC12: github_apps axis (x-b167) -----------------------------------------
+#
+# The reviewers gate above refuses a LOCAL reviewer that cannot run here. The
+# github_apps gate had no init-time equivalent, so a typo or an uninstalled App
+# wedged the session at the budget ceiling instead. These pin the symmetric
+# refusal on the App-bot axis: fail loud at init, fail-open on an unrunnable
+# probe, and never on a login footnote recognizes.
+
+from fno.review_capability import (  # noqa: E402
+    github_apps_refusal_message,
+    resolve_github_apps,
+)
+from fno.target_cli import _refuse_unreachable_github_apps  # noqa: E402
+
+_NEVER = lambda login, cwd=None: False  # noqa: E731 - a probe that found nothing
+_SEEN = lambda login, cwd=None: True  # noqa: E731 - a probe that found activity
+_UNVERIFIABLE = lambda login, cwd=None: None  # noqa: E731 - a probe that could not run
+
+
+def test_github_apps_recognized_login_needs_no_probe():
+    """A login footnote knows (chatgpt-codex-connector, even before it has acted
+    on a fresh repo) is satisfiable without ever running the probe."""
+
+    def _explode(login, cwd=None):
+        raise AssertionError("recognized login must not be probed")
+
+    (v,) = resolve_github_apps(["chatgpt-codex-connector"], probe=_explode)
+    assert v.status == "satisfiable"
+    assert v.blocks_autonomy is False
+    assert github_apps_refusal_message([v]) is None
+
+
+def test_github_apps_typo_never_seen_is_refused_naming_optional_apps():
+    """AC12: a login absent from the profiles and never seen in the repo is a
+    likely typo. Refuse, naming the login and config.review.optional_apps."""
+    (v,) = resolve_github_apps(["typo-bot-name"], probe=_NEVER)
+    assert v.status == "unavailable"
+    assert v.blocks_autonomy is True
+    msg = github_apps_refusal_message([v])
+    assert msg is not None
+    assert "typo-bot-name" in msg
+    assert "config.review.optional_apps" in msg
+
+
+def test_github_apps_unknown_but_seen_is_satisfiable():
+    """A login footnote does not recognize but that HAS commented/reviewed here
+    is a real bot, not a typo - proceed."""
+    (v,) = resolve_github_apps(["some-real-bot"], probe=_SEEN)
+    assert v.status == "satisfiable"
+    assert github_apps_refusal_message([v]) is None
+
+
+def test_github_apps_unverifiable_probe_proceeds():
+    """A probe that could not run (no repo remote / token scope) is unverifiable,
+    which proceeds - never refuse on a probe we could not run (section 6)."""
+    (v,) = resolve_github_apps(["some-bot"], probe=_UNVERIFIABLE)
+    assert v.status == "unverifiable"
+    assert v.blocks_autonomy is False
+    assert github_apps_refusal_message([v]) is None
+
+
+def _invoke_init_apps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, github_apps: str, env: dict
+):
+    cfg = tmp_path / "settings.yaml"
+    cfg.write_text(
+        f"schema_version: 1\nconfig:\n  review:\n    github_apps: {github_apps}\n"
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    for var in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID",
+                "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "TARGET_UNATTENDED",
+                "FNO_BG", "FNO_AGENT_SELF"):
+        monkeypatch.delenv(var, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    load_settings.cache_clear()
+    from fno.cli import app
+
+    return CliRunner().invoke(app, ["target", "init", "--input", "some-feature"])
+
+
+def test_init_command_refuses_a_typo_github_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC12 end to end: a typo'd github_apps login never seen in the repo exits
+    non-zero from the real command, before any bootstrap script runs."""
+    import fno.review_capability as rc
+
+    monkeypatch.setattr(rc, "_app_ever_acted", _NEVER)
+    r = _invoke_init_apps(tmp_path, monkeypatch, "[typo-bot-name]", {})
+    assert r.exit_code == 2
+    assert "typo-bot-name" in r.output
+    assert "config.review.optional_apps" in r.output
+
+
+def test_init_command_allows_a_recognized_github_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A recognized App must pass the github_apps check (and then fail later on
+    the absent plugin root, proving it got past this gate, not that it refused)."""
+    import fno.review_capability as rc
+
+    def _explode(login, cwd=None):
+        raise AssertionError("recognized login must not be probed")
+
+    monkeypatch.setattr(rc, "_app_ever_acted", _explode)
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path / "empty-plugin-root"))
+    r = _invoke_init_apps(tmp_path, monkeypatch, "[chatgpt-codex-connector]", {})
+    assert "config.review.github_apps names a bot" not in r.output
