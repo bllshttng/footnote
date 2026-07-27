@@ -194,9 +194,14 @@ ERROR_RULES: tuple[ErrorRule, ...] = (
     ErrorRule(text="no credentials", cooldown_ms=COOLDOWN_LONG_MS),
     ErrorRule(text="request not allowed", cooldown_ms=COOLDOWN_SHORT_MS),
     ErrorRule(text="improperly formed request", cooldown_ms=COOLDOWN_LONG_MS),
-    ErrorRule(text="rate limit", backoff=True),
+    # Derived from _QUOTA_BODY_MARKERS rather than restated. Both lists answer
+    # the same question - "is this body a quota exhaustion?" - and they had
+    # already drifted: "usage limit", the claude CLI's own phrasing, reached the
+    # normalize() taxonomy but never earned a cooldown here, so a worker that
+    # died on its usage limit left that account eligible for the very next
+    # dispatch. One list, so a marker added for one path lands on both.
+    *(ErrorRule(text=marker, backoff=True) for marker in _QUOTA_BODY_MARKERS),
     ErrorRule(text="too many requests", backoff=True),
-    ErrorRule(text="quota exceeded", backoff=True),
     ErrorRule(text="capacity", backoff=True),
     ErrorRule(text="overloaded", backoff=True),
     # Status-based rules (priority 2: HTTP status fallback).

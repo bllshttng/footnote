@@ -82,6 +82,20 @@ class TestSwapTriggers:
             assert result.error_class is ErrorClass.PROVIDER_4XX_QUOTA, body
             assert result.triggers_swap is True, body
 
+    def test_every_quota_marker_also_earns_a_cooldown(self) -> None:
+        # The two lists answer the same question and drifted once: "usage limit"
+        # classified as a quota swap but produced no ErrorRule, so the account
+        # that just died on it stayed eligible for the very next dispatch.
+        from fno.adapters.providers.error_taxonomy import (
+            _QUOTA_BODY_MARKERS,
+            classify_error,
+        )
+
+        for marker in _QUOTA_BODY_MARKERS:
+            rule = classify_error(None, f"Claude {marker} reached. resets at 3pm")
+            assert rule is not None, marker
+            assert rule.backoff is True, marker
+
     def test_body_match_is_case_insensitive(self) -> None:
         for body in ("RATE LIMIT exceeded", "Quota Exceeded", "Rate Limit",
                       "QUOTA EXCEEDED"):
