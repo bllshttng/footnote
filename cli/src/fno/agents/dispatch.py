@@ -1736,6 +1736,99 @@ def _is_revival(
     return True
 
 
+def _picked_headroom_note(account_id: str) -> str:
+    """The picked account's worst window, for the receipt. Never raises."""
+    try:
+        from fno.adapters.providers.runtime_state import read_usage
+
+        snap = read_usage(account_id)
+        if snap is not None and snap.windows:
+            worst = max(snap.windows, key=lambda w: w.used_pct)
+            return f"{worst.label} {worst.used_pct:.0f}%"
+    except Exception:  # noqa: BLE001 - a receipt detail must never break a spawn
+        pass
+    return "headroom unknown"
+
+
+def _pick_account_env() -> Optional[Mapping[str, str]]:
+    """Consult the picker for a spawn that named no account, or None.
+
+    Advisory in every direction: opt-in via ``providers.quota.pick_on_launch``,
+    and any refusal or failure returns None so the spawn proceeds exactly as it
+    does today. The receipt is always printed, because a launch silently landing
+    on a different account than the operator expects is a billing surprise.
+    """
+    try:
+        from fno.adapters.providers.loader import load_quota_config
+
+        if not load_quota_config().pick_on_launch:
+            return None
+
+        from fno.adapters.providers.cli import pick_account
+        from fno.agents.account_env import resolve_account_overlay
+
+        verdict = pick_account()
+        if verdict.account is None:
+            print(
+                f"account: default (pick unavailable: {verdict.reason})",
+                file=sys.stderr,
+            )
+            return None
+        overlay = resolve_account_overlay(verdict.account)
+        print(
+            f"account: {verdict.account} (picked, {_picked_headroom_note(verdict.account)})",
+            file=sys.stderr,
+        )
+        return overlay.env
+    except Exception as exc:  # noqa: BLE001 - picking is advisory; never block a spawn
+        print(f"account: default (pick unavailable: {exc})", file=sys.stderr)
+        return None
+
+
+def note_quota_death(account_env: Optional[Mapping[str, str]], tail: str | None) -> None:
+    """Record a cooldown when a worker died with a quota marker in its tail.
+
+    The reactive half of quota survival: a snapshot can be up to
+    ``probe_ttl_seconds`` stale, so without this the next pick would hand the
+    successor the account that just died. Reuses the existing error taxonomy and
+    health writer rather than adding a second classifier. Best-effort - a
+    telemetry write must never turn a worker's death into a dispatch failure.
+    """
+    if not tail:
+        return
+    try:
+        from fno.adapters.providers.error_taxonomy import classify_error
+        from fno.adapters.providers.loader import effective_active
+        from fno.adapters.providers.runtime_state import update_provider_health
+
+        rule = classify_error(None, tail)
+        if rule is None:
+            return
+        provider_id = _account_id_for_env(account_env) or effective_active()
+        if provider_id:
+            update_provider_health(provider_id, rule)
+    except Exception:  # noqa: BLE001 - never let a health write break teardown
+        pass
+
+
+def _account_id_for_env(account_env: Optional[Mapping[str, str]]) -> Optional[str]:
+    """Which record an overlay pinned, by matching its CLAUDE_CONFIG_DIR."""
+    if not account_env:
+        return None
+    config_dir = account_env.get("CLAUDE_CONFIG_DIR")
+    if not config_dir:
+        return None
+    try:
+        from fno.adapters.providers.loader import load_providers
+
+        for record in load_providers().records:
+            if record.config_dir is not None and str(record.config_dir) == config_dir:
+                return record.id
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def dispatch_spawn(
     name: str,
     message: str,
@@ -1789,6 +1882,15 @@ def dispatch_spawn(
     Raises:
         :class:`DispatchAskError`: every documented failure mode.
     """
+    # 0. Launch-time headroom picking (x-7d45). An explicit --account always
+    # wins and is never second-guessed; this only fills the gap when none was
+    # given. Wired HERE rather than at agents/cli.py because cli.py is one of at
+    # least two reachable callers and a guard on one of N paths is decorative --
+    # every spawn crosses this function. It runs before the tier-remap check
+    # below so that check sees the overlay the worker will actually launch with.
+    if account_env is None and provider == "claude":
+        account_env = _pick_account_env()
+
     # 1. Name validation. spawn allows empty message (default "").
     # x: the tier-remap invariant must hold on every reachable spawn path, not
     # just the CLI seam -- an in-process caller passing model="opus" under a
@@ -1946,6 +2048,10 @@ def dispatch_spawn(
                                 name=name,
                             )
                         except claude_mod.ProviderSubprocessError as exc:
+                            # A quota death here is the freshest signal there is:
+                            # write the cooldown so the NEXT pick avoids this
+                            # account before its usage snapshot refreshes.
+                            note_quota_death(account_env, exc.stderr)
                             _emit_ev(
                                 "agent_ask_failed",
                                 stage="claude-headless",
