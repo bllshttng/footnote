@@ -361,6 +361,13 @@ if declare -F get_auto_merge_enabled >/dev/null 2>&1; then
 fi
 if [[ "${TARGET_NO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="false"
+elif [[ " ${INITIAL_INPUT:-} " == *" no-merge "* ]]; then
+  # Reads INITIAL_INPUT because TARGET_INPUT is unset by here; keying on that
+  # parses fine and silently never fires. Sits above the TARGET_AUTO_MERGE
+  # grant because nothing sets that var, so it can only arrive inherited, and
+  # an inherited grant must not beat a refusal typed into this run (the trap
+  # `fno target init` scrubs for TARGET_BEASTMODE). Space-padded = whole token.
+  AUTO_MERGE_APPROVED="false"
 elif [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="true"
 elif _is_true "$AUTO_MERGE_ENABLED"; then

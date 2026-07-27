@@ -30,29 +30,30 @@ The `strategy: merge` default preserves full commit history, which is important 
 `git bisect` and forensic analysis. Squash collapses context; only use it if your
 team policy requires it.
 
-## Enable Once via CLI
+## Disable Once via CLI
 
-Pass the positional modifier at invocation time to override settings for that run:
+Pass the positional `no-merge` modifier at invocation time to revoke merge authority for that run:
 
 ```
 # target
-/target L feature.md auto-merge
 /target M "add login page" no-merge
 
 # megawalk
-/megawalk auto-merge
 /megawalk once no-merge
 ```
 
+Enabling per-run is deliberately NOT symmetric. A positional `auto-merge` grants nothing on its own; to allow merging, set `auto_merge.enabled` in config or export `TARGET_AUTO_MERGE=1`.
+
 ## Resolution Order (First Match Wins)
 
-1. CLI positional `no-merge` - false
-2. CLI positional `auto-merge` - true
-3. Local `.fno/config.toml` `config.auto_merge.enabled`
-4. Global `~/.fno/config.toml` `config.auto_merge.enabled`
-5. Default - false
+1. `TARGET_NO_MERGE=1` - false
+2. Positional `no-merge` in the invocation - false
+3. `TARGET_AUTO_MERGE=1` - true
+4. Local `.fno/config.toml` `config.auto_merge.enabled`
+5. Global `~/.fno/config.toml` `config.auto_merge.enabled`
+6. Default - false
 
-If both `auto-merge` and `no-merge` appear in the same invocation, `no-merge` wins (safer).
+Every refusal outranks every grant, so `no-merge` wins whenever it appears. Rung 2 sits above rung 3 on purpose: nothing in the codebase sets `TARGET_AUTO_MERGE`, so the only way it is ever set is inheritance from an ancestor shell or a spawning parent, and an inherited grant must not defeat a refusal typed into this run. The match is whole-token, so `no-merger` or a path like `plans/no-merge-notes.md` does not revoke a configured grant.
 
 ## External Review Is Mandatory Under Auto-Merge
 

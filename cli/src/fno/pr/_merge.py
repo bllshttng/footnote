@@ -735,7 +735,9 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # `auto_merge.enabled` is standing policy; the manifest's
     # `auto_merge_approved` is what init resolved after folding in the per-run
     # modifiers, and a per-run `no-merge` (which `/target bg` injects by
-    # default) sets it false while `enabled` stays true. Without this the
+    # default, via harness_map._AUTONOMOUS_COMMAND) sets it false while
+    # `enabled` stays true. That fold is one-directional by design: the
+    # `auto-merge` token grants nothing on its own. Without this the
     # sanctioned verb is a WEAKER gate than raw `gh pr merge`, which the
     # git-protection hook already guards on this same field.
     # Absent manifest or absent field -> proceed: a manual `fno pr merge`

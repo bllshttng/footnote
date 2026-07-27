@@ -637,6 +637,15 @@ def init(
         "and recorded to an Autonomous Decisions ledger instead. Never grants "
         "irreversibles - merge stays on the --auto-merge axis.",
     ),
+    no_merge: bool = typer.Option(
+        False,
+        "--no-merge",
+        help="Revoke auto-merge for this run (writes `auto_merge_approved: "
+        "false`). The deterministic carrier for the `no-merge` posture: it "
+        "survives `fno target start`, which forwards only the resolved node id "
+        "and so cannot pass the token through --input. There is deliberately no "
+        "--auto-merge twin; granting stays on config/TARGET_AUTO_MERGE.",
+    ),
 ) -> None:
     """Bootstrap a target session via the canonical init script.
 
@@ -808,6 +817,10 @@ def init(
     # Sole authority: an inherited TARGET_BEASTMODE must never self-grant (spawns
     # inherit the parent env wholesale, so per-provider scrubbing cannot cover it).
     env["TARGET_BEASTMODE"] = "1" if beastmode else ""
+    # Asymmetric on purpose: --no-merge SETS the refusal but never clears an
+    # inherited one, so a stray flag omission cannot upgrade a run to mergeable.
+    if no_merge:
+        env["TARGET_NO_MERGE"] = "1"
 
     proc = subprocess.run(["bash", str(script_path)], check=False, env=env)
     if proc.returncode == 0:
@@ -818,6 +831,23 @@ def init(
         _maybe_reconcile_lane_slot()
         _maybe_check_resume_receipt()
     raise typer.Exit(code=propagate_returncode(proc.returncode))
+
+
+def _warn_no_merge_dropped() -> None:
+    """Name a --no-merge that did not take.
+
+    start's idempotent early returns create no manifest, and the manifest is
+    write-once, so the refusal has nowhere to land. Silence here reads as
+    "revoked" while `fno pr merge` still sees the old value.
+    """
+    typer.echo(
+        "WARNING: --no-merge did NOT take - this session wrote no manifest, and "
+        "the manifest is write-once. Merge posture is whatever the existing "
+        "manifest says. Verify with:\n"
+        "  sed -n 's/^auto_merge_approved:[[:space:]]*//p' .fno/target-state.md\n"
+        "and if it is not `false`, do not rely on this flag.",
+        err=True,
+    )
 
 
 def _warn_if_authority_not_granted(project_root: Optional[Path] = None) -> None:
@@ -1546,6 +1576,7 @@ def _start_codex_native(
     model: Optional[str],
     harness: Optional[str],
     beastmode: bool,
+    no_merge: bool,
 ) -> None:
     """Finish target bootstrap inside a worktree Codex Desktop already owns."""
     base = _prepare_codex_native_branch(cwd, node)
@@ -1629,6 +1660,8 @@ def _start_codex_native(
         cmd += ["--harness", harness]
     if beastmode:
         cmd += ["--beastmode"]
+    if no_merge:
+        cmd += ["--no-merge"]
     init = subprocess.run(cmd, cwd=str(cwd))
     if init.returncode != 0:
         typer.echo(
@@ -1913,6 +1946,12 @@ def start(
         False, "--beastmode", "--beast",
         help="Grant walk-away authority for this session (forwarded to init).",
     ),
+    no_merge: bool = typer.Option(
+        False, "--no-merge",
+        help="Revoke auto-merge for this run (forwarded to init). Needed because "
+        "start resolves its argument to a bare node id, so a `no-merge` token in "
+        "the original invocation cannot reach init through --input.",
+    ),
 ) -> None:
     """Cold-start a worktree-isolated target session in ONE verb.
 
@@ -1952,6 +1991,7 @@ def start(
                 model=model,
                 harness=harness,
                 beastmode=beastmode,
+                no_merge=no_merge,
             )
             return
         if _under_codex_worktrees(cwd):
@@ -1965,6 +2005,8 @@ def start(
         typer.echo(f"already isolated at {cwd}; nothing created.")
         if beastmode:
             _warn_if_authority_not_granted()
+        if no_merge:
+            _warn_no_merge_dropped()
         return
 
     repo_root_s = _git_out(cwd, "rev-parse", "--show-toplevel")
@@ -2100,6 +2142,8 @@ def start(
             )
             if beastmode:
                 _warn_if_authority_not_granted(wt_path)
+            if no_merge:
+                _warn_no_merge_dropped()
             return
         # verdict in {dead_predecessor, free}: a successor inheriting a
         # predecessor's worktree, or a stale-free claim. Re-acquire under this
@@ -2118,6 +2162,8 @@ def start(
         typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)
         if beastmode:
             _warn_if_authority_not_granted(wt_path)
+        if no_merge:
+            _warn_no_merge_dropped()
         return
 
     # Project the node's model pin / tier into init's dispatch pin so a bare
@@ -2131,6 +2177,8 @@ def start(
     # 3. Init the session FROM the worktree (binds owner_cwd, claims the node
     #    exactly once - preserve the existing one-call claim).
     init_cmd = fno + ["target", "init", "--input", node]
+    if no_merge:
+        init_cmd += ["--no-merge"]
     if plan_path:
         init_cmd += ["--plan-path", plan_path]
     if size:

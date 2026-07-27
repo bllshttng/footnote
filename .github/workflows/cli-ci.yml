@@ -170,6 +170,20 @@ jobs:
         # is deliberate (locally you install pyyaml once, by hand).
         run: python3 -m pip install --upgrade pyyaml
 
+      - name: Assert yq (dotted-key config reads)
+        # scripts/lib/config.sh reads dotted keys (auto_merge.*) through yq and
+        # has NO fallback: without it every nested lookup returns the default
+        # and any harness asserting configured behavior fails for an unrelated
+        # reason. ubuntu-latest happens to ship yq, so this dependency was
+        # satisfied incidentally and declared nowhere; assert it so a runner
+        # image change fails with one clear line instead of a cascade.
+        run: |
+          command -v yq >/dev/null 2>&1 || {
+            echo "yq missing: scripts/lib/config.sh cannot read dotted config keys" >&2
+            exit 1
+          }
+          yq --version
+
       - name: Install stable Rust toolchain (for journey tests)
         # Journey tests (e2e, emission-schema, backstop-subprocess) and the
         # claims compat matrix invoke the REAL fno-agents binary, which the
