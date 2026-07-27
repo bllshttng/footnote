@@ -1148,6 +1148,32 @@ def normalize_size(value: object) -> Optional[str]:
     return s if s in {"S", "M", "L"} else None
 
 
+# The graph's node-type vocabulary. Lives here (the lower layer `graph.cli`
+# already imports from) so `backlog update --type` and the intake doc->graph
+# flow validate against ONE set rather than two that can drift.
+VALID_NODE_TYPES: frozenset[str] = frozenset({"feature", "epic", "bug", "roadmap"})
+DEFAULT_NODE_TYPE = "feature"
+
+
+def normalize_type(value: object) -> str:
+    """Coerce a plan-frontmatter type to the graph vocabulary, else the default.
+
+    Fail-soft like :func:`normalize_size`: an unrecognized value degrades with a
+    warning rather than failing the intake, because a typo'd `type:` must not
+    cost the operator their node.
+    """
+    if not value:
+        return DEFAULT_NODE_TYPE
+    t = str(value).strip().lower()
+    if t in VALID_NODE_TYPES:
+        return t
+    sys.stderr.write(
+        f"warning: unrecognized type {value!r} in plan frontmatter; "
+        f"using {DEFAULT_NODE_TYPE} (valid: {', '.join(sorted(VALID_NODE_TYPES))})\n"
+    )
+    return DEFAULT_NODE_TYPE
+
+
 def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     from datetime import datetime, timezone
 
@@ -1179,7 +1205,10 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "id": mint_node_id({e.get("id") for e in entries if e.get("id")}),
         "parent": None,
         "title": spec["title"],
-        "type": "feature",
+        # Type flows doc->graph at intake, same as `size` below: the plan
+        # frontmatter is where it is declared. Hardcoding "feature" here is what
+        # made the graph's `type` an invented default nobody set (x-455e).
+        "type": normalize_type(fm.get("type")),
         "project": project,
         "cwd": node_cwd,
         "priority": spec["priority"],

@@ -15,7 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
-from fno.graph._intake import normalize_size
+from fno.graph._intake import VALID_NODE_TYPES, normalize_size, normalize_type
 
 runner = CliRunner()
 
@@ -79,6 +79,67 @@ def test_intake_no_size_frontmatter_leaves_null(tmp_path, monkeypatch):
     result = runner.invoke(app, ["backlog", "intake", str(plan)])
     assert result.exit_code == 0, result.output
     assert _entries(g)[0]["size"] is None
+
+
+# -- intake copies type doc->graph (x-455e) --------------------------------
+#
+# Same shape as size above. `type` used to be hardcoded "feature" sixteen lines
+# from the size read, which is what made the graph hold 1441 `feature` nodes
+# against 93 `bug` in a repo that files bugs constantly.
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("bug", "bug"), ("BUG", "bug"), (" epic ", "epic"), ("roadmap", "roadmap"),
+        ("feature", "feature"),
+        ("banana", "feature"), ("", "feature"), (None, "feature"), (0, "feature"),
+    ],
+)
+def test_normalize_type(value, expected):
+    assert normalize_type(value) == expected
+
+
+def test_valid_node_types_is_the_one_vocabulary():
+    """`backlog update --type` validates against this same set, not a copy."""
+    assert VALID_NODE_TYPES == frozenset({"feature", "epic", "bug", "roadmap"})
+    result = runner.invoke(app, ["backlog", "update", "ab-nope0001", "--type", "banana"])
+    assert result.exit_code == 1
+    assert "invalid type 'banana'" in result.output
+
+
+def test_intake_copies_type_from_frontmatter(tmp_path, monkeypatch):
+    """AC7-HP: a plan declaring `type: bug` mints a bug node, not a feature."""
+    g, _ = _route_graph(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\ncreated: 2026-05-05T04:35\ntype: bug\n---\n# Bug\n\nBody.\n")
+
+    result = runner.invoke(app, ["backlog", "intake", str(plan)])
+    assert result.exit_code == 0, result.output
+    assert _entries(g)[0]["type"] == "bug"
+
+
+def test_intake_no_type_frontmatter_still_features(tmp_path, monkeypatch):
+    """AC7-HP (second half): existing type-less intakes are unchanged."""
+    g, _ = _route_graph(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\ncreated: 2026-05-05T04:35\n---\n# Untyped\n\nBody.\n")
+
+    result = runner.invoke(app, ["backlog", "intake", str(plan)])
+    assert result.exit_code == 0, result.output
+    assert _entries(g)[0]["type"] == "feature"
+
+
+def test_intake_bad_type_falls_back_without_raising(tmp_path, monkeypatch):
+    """AC8-ERR: an out-of-vocabulary type warns and degrades, never fails intake."""
+    g, _ = _route_graph(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\ncreated: 2026-05-05T04:35\ntype: banana\n---\n# Odd\n\nBody.\n")
+
+    result = runner.invoke(app, ["backlog", "intake", str(plan)])
+    assert result.exit_code == 0, result.output
+    assert _entries(g)[0]["type"] == "feature"
+    assert "banana" in result.output  # the rejected value is named
 
 
 # -- backlog done stamps cost ledger->node ---------------------------------

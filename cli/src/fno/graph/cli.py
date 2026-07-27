@@ -2320,10 +2320,12 @@ def cmd_update(
                 err=True,
             )
             raise typer.Exit(code=1)
-    _VALID_TYPES = {"feature", "epic", "bug", "roadmap"}
-    if type_ is not None and type_ not in _VALID_TYPES:
+    from fno.graph._intake import VALID_NODE_TYPES
+
+    if type_ is not None and type_ not in VALID_NODE_TYPES:
         typer.echo(
-            f"Error: invalid type '{type_}'. Must be one of: {', '.join(sorted(_VALID_TYPES))}",
+            f"Error: invalid type '{type_}'. Must be one of: "
+            f"{', '.join(sorted(VALID_NODE_TYPES))}",
             err=True,
         )
         raise typer.Exit(code=1)
