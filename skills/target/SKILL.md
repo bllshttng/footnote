@@ -70,7 +70,7 @@ There are NO gate booleans, NO `current_phase`, NO `status` field, NO `quality_c
 
 > **Multi-CLI:** If not on Claude Code, see [references/cli-tool-mapping.md](references/cli-tool-mapping.md) for tool equivalents.
 
-Provider parity is hook-driven. The shared state machine and completion gates stay canonical; provider-specific behavior must come from the hooks layer and provider-scoped agent artifacts rather than from forked per-provider pipelines. Gemini's stable baseline is sequential fallback; it may upgrade into experimental project-agent mode only when the workspace explicitly opts in and `.gemini/agents/` is present.
+Provider parity is hook-driven. The shared state machine and completion gates stay canonical; provider-specific behavior must come from the hooks layer and provider-scoped agent artifacts rather than from forked per-provider pipelines. Gemini runs sequential main-thread only: a parallel wave downgrades and records the reason. There is no project-agent upgrade path, that mode was retired when Google deprecated the Gemini CLI.
 
 ## Gotchas
 
