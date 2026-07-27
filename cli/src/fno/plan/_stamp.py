@@ -173,17 +173,27 @@ def _quote_item(item: str) -> str:
     return '"' + item.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _bare_is_ambiguous(item: str) -> bool:
+    """True when an unquoted item would not read back as itself.
+
+    Shared by both list forms: surrounding whitespace is eaten by the reader's
+    `.strip()`, an empty item is dropped entirely, and a leading quote
+    character makes `_parse_scalar` try to unwrap the item.
+    """
+    return not item or item != item.strip() or item[0] in "\"'"
+
+
 def _serialize_item(item: str) -> str:
     """Emit an inline list item, quoting it when the form would be ambiguous.
 
     Quote-on-write is half of the round-trip; a quote-aware reader alone still
-    loses an unquoted comma item on the next read. A comma would split the
-    item, a quote character would open a run that swallows its neighbours, and
-    surrounding whitespace is eaten by the reader's `.strip()`.
+    loses an unquoted comma item on the next read. On top of the shared cases,
+    an inline item needs quoting when a comma would split it or an interior
+    quote character would open a run that swallows its neighbours.
     """
-    if item and item == item.strip() and not _NEEDS_QUOTE_RE.search(item):
-        return item
-    return _quote_item(item)
+    if _NEEDS_QUOTE_RE.search(item) or _bare_is_ambiguous(item):
+        return _quote_item(item)
+    return item
 
 
 def _serialize_block_item(item: str) -> str:
@@ -192,13 +202,9 @@ def _serialize_block_item(item: str) -> str:
     Deliberately laxer than `_serialize_item`: quoting a comma item here would
     be undone by the vault's formatter (block form needs no quotes, so it
     strips them) and re-added on the next projection, which is the oscillation
-    block-form preservation exists to stop. Only genuine ambiguity is quoted -
-    surrounding whitespace the reader would strip, and a leading quote
-    character the reader would try to unwrap.
+    block-form preservation exists to stop.
     """
-    if item and item == item.strip() and item[0] not in "\"'":
-        return item
-    return _quote_item(item)
+    return _quote_item(item) if _bare_is_ambiguous(item) else item
 
 
 def _serialize_inline_list(items: list[str]) -> str:

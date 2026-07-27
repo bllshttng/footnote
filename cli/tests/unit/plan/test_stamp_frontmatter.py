@@ -97,6 +97,12 @@ def test_apostrophe_item_roundtrips() -> None:
     assert _roundtrip({"sources": items})["sources"] == items
 
 
+def test_item_wrapped_in_apostrophes_keeps_them() -> None:
+    """An item that IS quote-wrapped text must not be silently unwrapped."""
+    items = ["'quoted'", "b.md"]
+    assert _roundtrip({"sources": items})["sources"] == items
+
+
 # ---------------------------------------------------------------------------
 # AC5-EDGE: nothing else about the output changes
 # ---------------------------------------------------------------------------
