@@ -725,6 +725,14 @@ class ReviewBlock(BaseModel):
     # never waits for them (their absence never blocks - kills the App-bot
     # usage-limit wedge), but a blocking finding from one still holds the gate.
     optional_apps: list[str] = Field(default_factory=list)
+    # Per-login bot-review nudge overrides, as `[review.nudge.<login>]` tables
+    # ({review_handle, wait_minutes, ceiling, enabled}). Consumed by the Rust
+    # stop gate (loop-check), which resolves it against its built-in bot
+    # profiles; kept permissively typed here (parity with the Rust parser, which
+    # degrades a malformed entry to non-nudgeable rather than rejecting the file)
+    # so this model documents the key without adding validation that could
+    # diverge. Absent = the built-in profiles alone decide nudgeability.
+    nudge: dict[str, Any] = Field(default_factory=dict)
     # Project-registered reviewers: name -> the same ReviewerDescriptor field
     # vocabulary the built-ins use. Declared as `[review.reviewer_registry.<name>]`
     # in the flat config.toml. Unioned with the built-ins at lookup time by
