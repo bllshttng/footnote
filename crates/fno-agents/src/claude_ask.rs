@@ -118,10 +118,19 @@ fn family1_truth_failure_detail(stdout: &[u8], stderr: &str) -> String {
 
 /// truth's answer for a handle it has no transcript for. Not a malfunction:
 /// family-1 is CLAUDE transcript truth, so an opencode/codex handle can never
-/// resolve, and a reaped claude session no longer does. Every caller reaches
-/// here only after `locate_session` already missed, so "gone" is the answer it
-/// expected - warning about it once per sweep buries the four failures below
-/// that DO mean something is broken.
+/// resolve, and a reaped claude session no longer does. The volume caller is
+/// `daemon::handle_list`, which probes EVERY registry row on every
+/// `fno agents list` with no gate at all - one dead row there produced a warn
+/// line per sweep and buried the four failures below that DO mean something is
+/// broken. A resolver crash is deliberately NOT this string
+/// (`session_truth.py` reports `resolver-error`) so it survives the filter.
+///
+/// The tradeoff this accepts: on the `resume`/`attach` paths in `client_verbs`
+/// the probe is gated on a dead socket rather than a missing session, so a
+/// not-found there can also mean the registry and the transcript store
+/// disagree. That case loses its warn line. It is diagnostics-only - the
+/// verdict is `None` either way - and the gate would have to distinguish
+/// "locate_session missed" from "found but socket dead" to say more.
 const TRUTH_NOT_FOUND: &str = "not-found";
 
 /// Whether a non-zero truth exit is worth a warning. Routine "gone" is not;
@@ -3874,6 +3883,9 @@ mod tests {
         assert!(truth_failure_is_routine("  not-found\n"));
         // Everything else still warns: these mean something is actually broken.
         assert!(!truth_failure_is_routine("transcript-unreadable"));
+        // A crashing resolver reports its own reason precisely so this
+        // suppression cannot swallow it (cli/src/fno/agents/session_truth.py).
+        assert!(!truth_failure_is_routine("resolver-error"));
         assert!(!truth_failure_is_routine("ambiguous"));
         assert!(!truth_failure_is_routine(""));
         assert!(!truth_failure_is_routine("not-found-ish"));

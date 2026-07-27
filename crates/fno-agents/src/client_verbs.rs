@@ -1306,7 +1306,10 @@ where
         && locate_session(claude_home, short_id)
             .map(|loc| liveness_probe(&loc.messaging_socket_path))
             .unwrap_or(false);
-    let truth_state = if socket_live || short_id.is_empty() {
+    // An empty uuid is a row that never recorded one, not a session to probe:
+    // `fno agents truth "" --json` can only answer not-found, and that answer is
+    // now filtered, so the spawn is pure cost with no reachable signal.
+    let truth_state = if socket_live || short_id.is_empty() || uuid.is_empty() {
         None
     } else {
         truth_fn(uuid)

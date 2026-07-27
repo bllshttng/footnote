@@ -2239,7 +2239,13 @@ def cmd_truth(
     else:
         sys.stdout.write(render_truth(result) + "\n")
     sys.stdout.flush()
-    if result.get("state") == "unknown" and result.get("reason") == "not-found":
+    # Both are unresolvable-handle exits (13, the lifecycle not-found code); the
+    # reason distinguishes the routine miss from a crashing resolver, which
+    # callers use to decide whether the failure is worth surfacing.
+    if result.get("state") == "unknown" and result.get("reason") in (
+        "not-found",
+        "resolver-error",
+    ):
         raise typer.Exit(code=13)
 
 

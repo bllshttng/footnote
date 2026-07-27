@@ -263,3 +263,21 @@ def test_render_states():
          "last_activity_age_s": None, "session_id": None, "suggestions": ["w1"]}
     )
     assert "unknown" in unk and "not-found" in unk and "w1" in unk
+
+
+def test_resolver_crash_is_distinct_from_a_routine_miss(tmp_path):
+    """A crashing resolver must not share not-found's reason.
+
+    Callers suppress the routine not-found (it is the expected answer for a
+    reaped or non-claude handle); sharing a reason would silence a malfunction
+    under the same label. Both still exit 13 - only the reason differs.
+    """
+    from fno.agents.session_truth import resolve_session_truth
+
+    def boom(_handle):
+        raise RuntimeError("registry unreadable")
+
+    result = resolve_session_truth("nope", resolve=boom, projects_root=tmp_path)
+    assert result["state"] == "unknown"
+    assert result["reason"] == "resolver-error"
+    assert result["reason"] != "not-found"
