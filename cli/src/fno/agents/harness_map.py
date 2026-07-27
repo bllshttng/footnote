@@ -48,7 +48,16 @@ _SLASH, _CODEX_SKILL, _REFUSED = "slash", "codex-skill", "refused"
 # The canonical (claude-syntax) autonomous dispatch command. normalize_command
 # maps it per-harness for the builtin `dispatch_command`, so the per-harness
 # spelling lives in ONE place (command_surface), not five literal strings.
+#
+# The `no-merge` token is the merge POSTURE, resolved from config.dispatch.auto_merge
+# rather than baked in. It was baked in until x-8e59, which made this the one
+# reader of that key that was deaf to it: the two callers that did honor it
+# (backlog/advance.py, skills/agent/scripts/normalize.sh) worked around the
+# builtin by passing an explicit command instead of fixing it, so an operator
+# who set the key still got `/target no-merge <id>` here, a manifest frozen at
+# auto_merge_approved: false, and a refusal from `fno pr merge`.
 _AUTONOMOUS_COMMAND = "/target no-merge {id}"
+_AUTONOMOUS_COMMAND_MERGE = "/target {id}"
 
 
 def _refused_reason(harness: str) -> str:
@@ -168,11 +177,18 @@ def normalize_command(command: str, harness: str) -> str:
     return cmd
 
 
-def dispatch_command(harness: str) -> str:
+def dispatch_command(harness: str, allow_merge: bool = False) -> str:
     """Builtin autonomous dispatch command for ``harness``: the per-harness
-    normalization of ``/target no-merge {id}``. ``config.dispatch.command`` and a
-    node ``dispatch_verb`` override this in :func:`resolve_dispatch`."""
-    return normalize_command(_AUTONOMOUS_COMMAND, harness)
+    normalization of ``/target no-merge {id}``, or of ``/target {id}`` when
+    ``allow_merge``. ``config.dispatch.command`` and a node ``dispatch_verb``
+    override this in :func:`resolve_dispatch`, which is also where
+    ``config.dispatch.auto_merge`` is read into ``allow_merge``.
+
+    The default is no-merge, and every error path must land on it: granting
+    merge authority is the irreversible direction, so an unreadable config
+    fails safe to withholding it, never to handing it out."""
+    template = _AUTONOMOUS_COMMAND_MERGE if allow_merge else _AUTONOMOUS_COMMAND
+    return normalize_command(template, harness)
 
 
 class DispatchResolveError(ValueError):
@@ -243,7 +259,9 @@ def resolve_dispatch(
     Precedence (each field independent):
       harness    : explicit > config.dispatch.harness > ``claude``
       substrate  : explicit > config.dispatch.substrate > per-harness default
-      command    : explicit > node ``verb`` > config.dispatch.command > ``/target no-merge {id}``
+      command    : explicit > node ``verb`` > config.dispatch.command > builtin
+      merge      : builtin rung only; ``config.dispatch.auto_merge`` picks
+                   ``/target {id}`` over the default ``/target no-merge {id}``
 
     ``verb`` is a node's ``dispatch_verb`` (US3): validated against the allowlist
     (``config.dispatch.allowed_verbs`` > built-in ``/target``, ``/think``) and
@@ -361,9 +379,23 @@ def resolve_dispatch(
         # Per-harness builtin (x-a5e4): the normalize of `/target no-merge {id}` -
         # codex `$fno:target`, claude/agy `/target`, opencode `/fno:target`, gemini
         # refused. config.dispatch.command overrides.
+        #
+        # The merge posture comes from config.dispatch.auto_merge (x-8e59). It
+        # applies to the builtin only: an explicit `command` or a node
+        # `dispatch_verb` already spells out what to run, and silently editing
+        # a caller's own template would be the surprising read.
         _cmd = cfg.get("command")
-        template = (_cmd if isinstance(_cmd, str) and _cmd else dispatch_command(chosen_harness)).strip()
-        decision.append("command=config" if cfg.get("command") else "command=builtin")
+        _allow_merge = cfg.get("auto_merge") is True
+        template = (
+            _cmd if isinstance(_cmd, str) and _cmd
+            else dispatch_command(chosen_harness, allow_merge=_allow_merge)
+        ).strip()
+        if cfg.get("command"):
+            decision.append("command=config")
+        else:
+            decision.append(
+                f"command=builtin({'merge' if _allow_merge else 'no-merge'})"
+            )
 
     if not template:
         raise DispatchResolveError("resolved command is empty")
@@ -424,8 +456,16 @@ def resolve_dispatch(
 
 
 def _load_dispatch_cfg(settings: object) -> dict:
-    """Read ``config.dispatch`` (harness/substrate/command) as a plain dict. A
-    missing/unreadable config yields ``{}`` so a resolve never bricks on config."""
+    """Read ``config.dispatch`` (harness/substrate/command/auto_merge) as a plain
+    dict. A missing/unreadable config yields ``{}`` so a resolve never bricks on
+    config.
+
+    Every field is read through ``getattr`` with a default, per field. Attribute
+    access on a partial settings object (a caller's stub, an older config model)
+    used to raise and drop the WHOLE dict on the floor, so one missing key
+    silently disabled every other one - the failure mode that let
+    ``dispatch.auto_merge`` be set and ignored. A field that is absent is now
+    just absent."""
     if settings is None:
         try:
             from fno.config import load_settings
@@ -433,13 +473,23 @@ def _load_dispatch_cfg(settings: object) -> dict:
             settings = load_settings()
         except Exception:  # noqa: BLE001 - a bad config must not brick resolution
             return {}
+    d = getattr(settings, "dispatch", None)
+    if d is None:
+        return {}
+
+    def _text(name: str) -> str:
+        return (getattr(d, name, None) or "").strip()
+
     try:
-        d = settings.dispatch  # type: ignore[attr-defined]
         return {
-            "harness": (d.harness or "").strip(),
-            "substrate": (d.substrate or "").strip(),
-            "command": (d.command or "").strip(),
+            "harness": _text("harness"),
+            "substrate": _text("substrate"),
+            "command": _text("command"),
             "allowed_verbs": list(getattr(d, "allowed_verbs", None) or []),
+            # Strict identity, not truthiness: a non-boolean here (a stray
+            # "false" string, which is truthy) must never read as a merge grant.
+            # Anything that is not exactly True is no.
+            "auto_merge": getattr(d, "auto_merge", None) is True,
         }
     except Exception:  # noqa: BLE001
         return {}
