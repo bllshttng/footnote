@@ -1,4 +1,4 @@
-//! `fno mux squad prune` end-to-end (x-a572 task 1.2): execs the real compiled
+//! `fno mux workspace prune` end-to-end (x-a572 task 1.2): execs the real compiled
 //! binary against a crafted store and asserts the dead-origin residue is reaped
 //! while named and surviving-origin squads stay. Also proves the build-tree
 //! write guard (task 1.1, AC2-HP) refuses the prune's OWN write when
@@ -41,12 +41,23 @@ impl Scratch {
         Scratch { dir }
     }
 
-    /// Run `fno mux squad ...` with a hermetic env: HOME + FNO_AGENTS_HOME at the
-    /// scratch, an empty mux dir, and `unset_agents` controlling FNO_AGENTS_HOME
-    /// (true -> the build-tree guard must refuse the write).
+    /// Run `fno mux workspace ...` with a hermetic env: HOME + FNO_AGENTS_HOME at
+    /// the scratch, an empty mux dir, and `unset_agents` controlling
+    /// FNO_AGENTS_HOME (true -> the build-tree guard must refuse the write).
     fn run(&self, squad_args: &[&str], unset_agents: bool) -> (bool, String, String) {
+        self.run_family("workspace", squad_args, unset_agents)
+    }
+
+    /// The same run, with the verb family spelled explicitly, so the retired
+    /// `squad` alias can be driven through the identical assertions.
+    fn run_family(
+        &self,
+        family: &str,
+        squad_args: &[&str],
+        unset_agents: bool,
+    ) -> (bool, String, String) {
         let mut cmd = fno();
-        cmd.args(["mux", "squad"]).args(squad_args);
+        cmd.args(["mux", family]).args(squad_args);
         cmd.env_clear()
             .env("HOME", &self.dir)
             .env("FNO_MUX_DIR", self.dir.join("mux"));
@@ -126,6 +137,124 @@ fn prune_dry_run_writes_nothing() {
     assert_eq!(s.store(), before, "dry-run must not change the store");
 }
 
+/// The retired `mux squad` spelling stays a working, unadvertised alias: same
+/// dispatch, same flags, same output as the canonical family.
+#[test]
+fn retired_squad_spelling_prunes_identically() {
+    // One scratch for both spellings: --dry-run writes nothing, so the second
+    // run sees the same store as the first and any difference in output is the
+    // alias, not the fixture.
+    let s = Scratch::new("alias", ORPHAN_NAMED_SURVIVING);
+    let args = ["prune", "--dry-run", "--include-named", "--json"];
+
+    let (ok, want, stderr) = s.run_family("workspace", &args, false);
+    assert!(ok, "canonical spelling exited non-zero: {stderr}\n{want}");
+    let (ok, got, stderr) = s.run_family("squad", &args, false);
+    assert!(ok, "retired spelling exited non-zero: {stderr}\n{got}");
+    assert_eq!(got, want, "the alias must dispatch to the same prune");
+    assert!(
+        want.contains("\"pruned_count\":2"),
+        "the fixture must actually prune something, or equality is vacuous: {want}"
+    );
+}
+
+/// A bare family verb and an unknown verb are both usage (exit 2), and the
+/// message names the one verb that exists. The two take DIFFERENT paths and the
+/// assertions say which: a bare `mux workspace` fails main.rs's arity guard and
+/// lands on the global usage banner, while an unknown verb reaches the family
+/// parser. Asserting only "names prune" cannot tell them apart, because the
+/// global banner also contains the word.
+#[test]
+fn workspace_family_usage_names_prune() {
+    for (args, label, want) in [
+        (
+            vec!["mux", "workspace"],
+            "bare",
+            "fno mux workspace prune [",
+        ),
+        (
+            vec!["mux", "workspace", "bogus"],
+            "unknown verb",
+            "fno mux workspace: unknown verb",
+        ),
+    ] {
+        let out = fno().args(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{label} is usage");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(want),
+            "{label} should emit {want:?}: {stderr}"
+        );
+    }
+}
+
+/// The retired spelling is accepted but never advertised (AC2's second half).
+/// Without this, adding `squad` back to the usage banner is a silent
+/// un-deprecation that every other test stays green through.
+#[test]
+fn retired_squad_spelling_is_not_advertised() {
+    let out = fno().args(["mux", "workspace"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("fno mux workspace prune"),
+        "usage advertises the canonical spelling: {stderr}"
+    );
+    assert!(
+        !stderr.contains("mux squad"),
+        "usage must not advertise the retired spelling: {stderr}"
+    );
+}
+
+/// A dry run whose read already touched the filesystem must say so, on stderr
+/// AND in the receipt. Reporting "no changes written" while `load()` had just
+/// renamed the store aside is the one lie a dry run cannot tell, and a scripted
+/// caller capturing only stdout is the likeliest to miss the correction.
+#[test]
+fn prune_dry_run_reports_a_quarantined_store() {
+    let s = Scratch::new("corrupt", "{not json at all");
+    let (ok, stdout, stderr) = s.run(&["prune", "--dry-run", "--json"], false);
+    assert!(ok, "dry-run over a corrupt store must not refuse: {stderr}");
+    assert!(
+        stderr.contains("quarantined corrupt squads.json"),
+        "stderr names the quarantine: {stderr}"
+    );
+    assert!(
+        stdout.contains("\"notice\":\"quarantined corrupt squads.json"),
+        "the receipt carries the notice, not just stderr: {stdout}"
+    );
+}
+
+/// Unreadable is not missing. Non-UTF-8 content fails `read_to_string` before
+/// the corrupt-JSON quarantine can see it, and collapsing that into "fresh"
+/// made prune report an empty store it had never actually read.
+#[test]
+fn prune_dry_run_reports_an_unreadable_store() {
+    let s = Scratch::new("unreadable", r#"{"version":1,"squads":[]}"#);
+    std::fs::write(s.dir.join("squads.json"), [0x66, 0x6e, 0xff, 0xfe, 0x6f]).unwrap();
+    let (ok, stdout, stderr) = s.run(&["prune", "--dry-run", "--json"], false);
+    assert!(
+        ok,
+        "dry-run over an unreadable store must not refuse: {stderr}"
+    );
+    assert!(
+        stdout.contains("\"notice\":\"could not read squads.json"),
+        "an unreadable store is reported, never silently empty: {stdout}"
+    );
+}
+
+/// A clean store leaves the receipt's notice explicitly null, so a consumer can
+/// tell "nothing to report" from "this build predates the field".
+#[test]
+fn prune_receipt_notice_is_null_on_a_clean_store() {
+    let s = Scratch::new("nonotice", ORPHAN_NAMED_SURVIVING);
+    let (ok, stdout, stderr) = s.run(&["prune", "--dry-run", "--json"], false);
+    assert!(ok, "clean dry-run exited non-zero: {stderr}\n{stdout}");
+    assert!(
+        stdout.contains("\"notice\":null"),
+        "clean store reports a null notice: {stdout}"
+    );
+}
+
 #[test]
 fn prune_empty_store_says_nothing_to_prune() {
     let s = Scratch::new("empty", r#"{"version":1,"squads":[]}"#);
@@ -171,6 +300,28 @@ fn prune_json_envelope_names_the_removed_set() {
     assert!(
         stdout.contains("\"key\":\"orphan\""),
         "json names the removed orphan: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"dry_run\":false"),
+        "a real prune reports dry_run false: {stdout}"
+    );
+}
+
+/// The receipt's `dry_run` flag reports the mode the caller asked for. It was
+/// fed the inverse (`applied`), so automation reading it saw every dry run as
+/// a real prune and every real prune as a rehearsal.
+#[test]
+fn prune_json_dry_run_flag_matches_the_mode() {
+    let s = Scratch::new("json-dryrun", ORPHAN_NAMED_SURVIVING);
+    let (ok, stdout, stderr) = s.run(&["prune", "--dry-run", "--json"], false);
+    assert!(ok, "dry-run json exited non-zero: {stderr}\n{stdout}");
+    assert!(
+        stdout.contains("\"dry_run\":true"),
+        "a dry run reports dry_run true: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"pruned_count\":1"),
+        "the dry run still names what it would remove: {stdout}"
     );
 }
 
@@ -219,7 +370,7 @@ fn doctor_reports_orphaned_squads_with_the_prune_remedy() {
         "the orphan count is a warn: {stdout}"
     );
     assert!(
-        stdout.contains("fno mux squad prune"),
+        stdout.contains("fno mux workspace prune"),
         "the remedy points at prune: {stdout}"
     );
     // The orphan was only DETECTED, not removed - doctor is read-only.
