@@ -565,10 +565,15 @@ def select_lane_fill(
                     if reason.startswith(_HIGH_COLLISION_PREFIX):
                         _LOG.warning("lane-fill: skipping %s - %s", nid, reason)
                     continue  # leave it ready; reversible, retried next round
-                if reason is not None:
+                if reason is not None and inflight:
                     # Unevaluated (no comparable file surface): dispatch anyway
                     # (fail-open, today's behavior) but say so LOUDLY - a silent
                     # pass would read as "gate clean" when it never ran.
+                    #
+                    # Only when something is actually in flight. With nothing to
+                    # collide against, an unknown surface risks nothing, and
+                    # every plan-less node (which is every `backlog idea` node)
+                    # would otherwise warn on every candidate of every tick.
                     _LOG.warning(
                         "lane-fill: %s file surface UNEVALUATED (%s) - "
                         "dispatching anyway (fail-open)", nid, reason,
@@ -769,8 +774,8 @@ def schedule_shadow(
     # both logged AND recorded in `degraded`. A silently-collapsed seed produces a
     # frontier byte-identical to a healthy one, and this report IS the evidence
     # that gates live scheduling: an operator reading the JSON must be able to see
-    # that a seed threw, or they gate on an overstated frontier (codex P1 on #631
-    # is exactly this over-dispatch, silently reintroducible via a swallowed read).
+    # that a seed threw, or they gate on an overstated frontier - and over-dispatch
+    # is silently reintroducible by any future swallowed read.
     degraded: list[str] = []
     try:
         used_domains: set[str] = _live_lane_domains(claims_root=claims_root)

@@ -370,3 +370,43 @@ def test_cli_schedule_echoes_report_json(monkeypatch):
     assert res.exit_code == 0, res.stdout
     assert json.loads(res.stdout) == report
     assert seen == {"max_lanes": 3, "project": "fno", "mission": None}
+
+
+def test_duplicate_ready_ids_are_decided_once(monkeypatch, tmp_path):
+    """A ready list repeating an id must not yield two decisions for it.
+
+    `fno backlog ready` is an external command; a duplicate entry is a garbled
+    input this report should absorb, not a reason to double-count a node against
+    the cap or emit two verdicts for one id.
+    """
+    dup = _nodes(("n-a", "code"))[0]
+    _ready(monkeypatch, [dup, dict(dup), *_nodes(("n-b", "docs"))])
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert [d["id"] for d in r["decisions"]] == ["n-a", "n-b"]
+    assert [d["id"] for d in r["selected"]] == ["n-a", "n-b"]
+
+
+def test_a_pick_becomes_a_collision_comparator_for_later_picks(monkeypatch, tmp_path):
+    """Each selection joins the in-flight set the NEXT candidate is compared to.
+
+    Without that accumulation the report happily co-schedules two nodes that
+    overlap each other, since neither was live when the frontier started. The
+    live selector does the same thing in its own loop; this is the shadow copy
+    of that accumulation, so it needs its own test.
+    """
+    seen_comparators = []
+
+    def collide_against_inflight(node, inflight):
+        seen_comparators.append((node["id"], [e["id"] for e in inflight]))
+        return _Hit(inflight[0]["id"]) if inflight else None
+
+    monkeypatch.setattr(advance, "_high_collision", collide_against_inflight)
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+
+    # n-a is compared against an empty set; n-b is compared against n-a.
+    assert seen_comparators == [("n-a", []), ("n-b", ["n-a"])]
+    assert [d["id"] for d in r["selected"]] == ["n-a"]
+    assert [(d["id"], d["reason"]) for d in r["serialized"]] == [
+        ("n-b", "high-collision:n-a")
+    ]
