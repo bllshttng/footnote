@@ -84,11 +84,26 @@ with open(path) as f:
 m = re.search(r'^---\n(.*?)\n---', content, re.DOTALL)
 if not m:
     sys.exit(1)
-# inline list format: key: [val1, val2]
-for line in m.group(1).splitlines():
-    if line.startswith(key + ':'):
-        print(line[len(key)+1:].strip())
+# Shape-agnostic: a list is `key: [v1, v2]` OR `key:` + indented `- v` children.
+# The assertions here are about VALUES, so the helper must not care which form
+# the writer chose - it preserves whichever form the doc arrived in.
+lines = m.group(1).splitlines()
+for i, line in enumerate(lines):
+    if not line.startswith(key + ':'):
+        continue
+    inline = line[len(key)+1:].strip()
+    if inline:
+        print(inline)
         sys.exit(0)
+    items = []
+    for child in lines[i+1:]:
+        if not child.strip() or child.strip().startswith('#'):
+            continue
+        if not child.startswith((' ', '\t')):
+            break
+        items.append(child.strip()[2:].strip() if child.strip().startswith('- ') else child.strip())
+    print(' '.join(items))
+    sys.exit(0)
 sys.exit(1)
 PYEOF
 }

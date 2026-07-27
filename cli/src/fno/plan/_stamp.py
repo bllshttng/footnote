@@ -50,6 +50,10 @@ from fno.plan.locking import plan_doc_lock
 
 _FRONT_RE = re.compile(r"^---\n(.*?)\n---(?:\n|$)", re.DOTALL)
 _INLINE_LIST_RE = re.compile(r"^\[(?P<body>.*)\]$")
+# Resolve the escapes `_serialize_item` emits inside a double-quoted item.
+_DQ_ESCAPE_RE = re.compile(r'\\(["\\])')
+# An inline item carrying either of these cannot be written bare.
+_NEEDS_QUOTE_RE = re.compile(r'[,"]')
 
 
 class RawBlock:
@@ -73,6 +77,18 @@ class RawBlock:
         return f"RawBlock({first_line!r}...)"
 
 
+class BlockList(list):
+    """A list that arrived as a block sequence and is emitted as one.
+
+    Only a marker: it IS a list, so every consumer and every equality check
+    against a plain list is unaffected. Without it this writer flattens every
+    block list to inline while the vault's Obsidian stack re-expands it to
+    block on the next write, so a plan doc's frontmatter never settles. Keys
+    this writer ADDS are plain lists and stay inline.
+    """
+    __slots__ = ()
+
+
 def _valid_count(value: Any) -> bool:
     """True when value parses as an integer >= 1.
 
@@ -87,13 +103,52 @@ def _valid_count(value: Any) -> bool:
 
 
 def _parse_scalar(raw: str) -> str:
-    """Strip surrounding quotes (single or double) from a scalar value."""
+    """Strip surrounding quotes (single or double) from a scalar value.
+
+    A double-quoted value also has its `\\"` / `\\\\` escapes resolved, which is
+    what `_serialize_item` emits. Other backslash sequences are left verbatim -
+    this reader stores every scalar raw and is not a full YAML unescaper.
+    """
     raw = raw.strip()
-    if (raw.startswith('"') and raw.endswith('"')) or (
-        raw.startswith("'") and raw.endswith("'")
-    ):
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        return _DQ_ESCAPE_RE.sub(r"\1", raw[1:-1])
+    if len(raw) >= 2 and raw[0] == "'" and raw[-1] == "'":
         return raw[1:-1]
     return raw
+
+
+def _split_inline_items(body: str) -> list[str]:
+    """Split an inline-list body on commas that sit outside a double-quoted item.
+
+    Double quotes only. A bare apostrophe is ordinary text in a plan doc
+    (`don't`), so treating `'` as an opening quote here would swallow the rest
+    of the list; `_parse_scalar` still strips a surrounding single-quote pair
+    per item, exactly as before. `_serialize_item` only ever emits double
+    quotes, so everything this module writes reads back through this path.
+
+    An unterminated quote yields one long item rather than raising: a malformed
+    doc must degrade, because `project_node_to_plan` never raises.
+    """
+    items: list[str] = []
+    buf: list[str] = []
+    in_quote = False
+    escaped = False
+    for ch in body:
+        if escaped:
+            escaped = False
+        elif in_quote and ch == "\\":
+            escaped = True
+        elif in_quote:
+            in_quote = ch != '"'
+        elif ch == '"':
+            in_quote = True
+        elif ch == ",":
+            items.append("".join(buf))
+            buf = []
+            continue
+        buf.append(ch)
+    items.append("".join(buf))
+    return items
 
 
 def _parse_inline_list(raw: str) -> list[str]:
@@ -106,18 +161,57 @@ def _parse_inline_list(raw: str) -> list[str]:
     if not body:
         return []
     items = []
-    for item in body.split(","):
+    for item in _split_inline_items(body):
         item = item.strip()
         if item:
             items.append(_parse_scalar(item))
     return items
 
 
+def _quote_item(item: str) -> str:
+    """Wrap an item in double quotes, escaping what `_parse_scalar` resolves."""
+    return '"' + item.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _bare_is_ambiguous(item: str) -> bool:
+    """True when an unquoted item would not read back as itself.
+
+    Shared by both list forms: surrounding whitespace is eaten by the reader's
+    `.strip()`, an empty item is dropped entirely, and a leading quote
+    character makes `_parse_scalar` try to unwrap the item.
+    """
+    return not item or item != item.strip() or item[0] in "\"'"
+
+
+def _serialize_item(item: str) -> str:
+    """Emit an inline list item, quoting it when the form would be ambiguous.
+
+    Quote-on-write is half of the round-trip; a quote-aware reader alone still
+    loses an unquoted comma item on the next read. On top of the shared cases,
+    an inline item needs quoting when a comma would split it or an interior
+    quote character would open a run that swallows its neighbours.
+    """
+    if _NEEDS_QUOTE_RE.search(item) or _bare_is_ambiguous(item):
+        return _quote_item(item)
+    return item
+
+
+def _serialize_block_item(item: str) -> str:
+    """Emit a block sequence item, which carries a comma without quoting.
+
+    Deliberately laxer than `_serialize_item`: quoting a comma item here would
+    be undone by the vault's formatter (block form needs no quotes, so it
+    strips them) and re-added on the next projection, which is the oscillation
+    block-form preservation exists to stop.
+    """
+    return _quote_item(item) if _bare_is_ambiguous(item) else item
+
+
 def _serialize_inline_list(items: list[str]) -> str:
     """Serialize a list back to inline YAML format: [item1, item2]."""
     if not items:
         return "[]"
-    formatted = ", ".join(items)
+    formatted = ", ".join(_serialize_item(i) for i in items)
     return f"[{formatted}]"
 
 
@@ -245,7 +339,7 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
                     raw_lines.pop()
                 fields[key] = RawBlock("\n".join(raw_lines))
             elif saw_child:
-                fields[key] = items
+                fields[key] = BlockList(items)
             else:
                 fields[key] = ""
         else:
@@ -263,6 +357,11 @@ def serialize_frontmatter(fields: dict[str, Any]) -> str:
             lines.append(f"{key}:")
             if value.text:
                 lines.append(value.text)
+        elif isinstance(value, BlockList) and value:
+            # An empty block list has no children to carry it and would read
+            # back as a bare-key scalar, so it falls through to inline `[]`.
+            lines.append(f"{key}:")
+            lines.extend(f"  - {_serialize_block_item(item)}" for item in value)
         elif isinstance(value, list):
             lines.append(f"{key}: {_serialize_inline_list(value)}")
         else:
