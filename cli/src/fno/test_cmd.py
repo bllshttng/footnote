@@ -510,45 +510,39 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 
 
 # Shell harnesses discover_shell_harnesses finds but smoke must not run yet.
-# 21 entries held. 13 are RED (pre-existing rot; each its own debugging session,
-# out of scope here). 3 are slow-but-green at 134s/97s/72s: draining them adds
-# 303s to every CI run, so they wait on smoke parallelism, not a repair. The
-# other 5 were drained then came back red in CI, each macOS-green and Linux-red:
-# the two graph-resolve tests (assertions drifted from the modern resolve_id
-# path), tests/hooks/test_hook_events.sh (a non-portable perm check: GNU stat
-# does not fail on -f, so the Linux fallback never runs), and
+# 15 entries held. 12 are RED (pre-existing rot; each its own debugging session,
+# out of scope here). The other 3 are macOS-green and Linux-red, drained once
+# already and reverted: tests/hooks/test_hook_events.sh (a non-portable perm
+# check: GNU stat does not fail on -f, so the Linux fallback never runs), and
 # tests/hooks/test_init_contested_steal_guard.sh + tests/test_provider_substrate_e2e.sh,
 # which shell out to a global `fno` present on a dev machine but absent from CI's
-# fresh runner (it ships only the venv `fno-py`). All five stay deferred pending
-# test repair or a CI `fno` shim.
+# fresh runner (it ships only the venv `fno-py`). All three stay deferred pending
+# test repair or a CI `fno` shim. A local green is NOT grounds to drain one of
+# these three - the census runs on the developer's OS, and CI's is the verdict.
 #
 # A green-fast harness here is silent coverage loss no file edit surfaces.
 # `fno test --census-deferred` runs every entry bounded and exits non-zero the
 # moment one passes inside the 60s tranche, so the set cannot re-accumulate green.
 # Drain by deleting a line (discovery then covers it by shebang); _run_smoke and
 # select_changed both subtract this set, so dropping a line widens both gates.
+# The census only bites if something runs it: .github/workflows/deferred-census.yml
+# runs it weekly, which is the cadence this list actually drifts at.
 _DISCOVERY_DEFERRED: frozenset[str] = frozenset("""
 scripts/tests/test_graph_resolve.sh
-scripts/tests/test_megawalk_args.sh
 scripts/tests/test_provider_pricing.sh
 tests/events/test-check-pr-emits-polling.sh
 tests/hooks/test_hook_events.sh
-tests/hooks/test_init_claim_stderr_and_modern_claim.sh
 tests/hooks/test_init_contested_steal_guard.sh
-tests/hooks/test_init_node_guard_tokenize.sh
 tests/hooks/test_inject_fno_agent_whoami.sh
 tests/hooks/test_reconcile_session_start.sh
-tests/hooks/test_size_profile.sh
 tests/smoke-megatron-e2e.sh
 tests/smoke-target-shim.sh
 tests/test-autolaunch-gate.sh
 tests/test-backlog-aliases.sh
 tests/test-backlog-triage.sh
 tests/test-graph-resolve.sh
-tests/test-worktree-inside-checkout-redirect.sh
 tests/test_emit_gate_transition.sh
 tests/test_provider_substrate_e2e.sh
-tests/test_register_task_provider_attribution.sh
 """.split())
 
 
