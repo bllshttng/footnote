@@ -213,6 +213,28 @@ fn prune_json_envelope_names_the_removed_set() {
         stdout.contains("\"key\":\"orphan\""),
         "json names the removed orphan: {stdout}"
     );
+    assert!(
+        stdout.contains("\"dry_run\":false"),
+        "a real prune reports dry_run false: {stdout}"
+    );
+}
+
+/// The receipt's `dry_run` flag reports the mode the caller asked for. It was
+/// fed the inverse (`applied`), so automation reading it saw every dry run as
+/// a real prune and every real prune as a rehearsal.
+#[test]
+fn prune_json_dry_run_flag_matches_the_mode() {
+    let s = Scratch::new("json-dryrun", ORPHAN_NAMED_SURVIVING);
+    let (ok, stdout, stderr) = s.run(&["prune", "--dry-run", "--json"], false);
+    assert!(ok, "dry-run json exited non-zero: {stderr}\n{stdout}");
+    assert!(
+        stdout.contains("\"dry_run\":true"),
+        "a dry run reports dry_run true: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"pruned_count\":1"),
+        "the dry run still names what it would remove: {stdout}"
+    );
 }
 
 #[test]

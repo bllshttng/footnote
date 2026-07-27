@@ -1316,7 +1316,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
     if json {
         render_prune_json(
             &removed,
-            applied,
+            dry_run,
             kept_unknown,
             skipped_named,
             kept_protected,
