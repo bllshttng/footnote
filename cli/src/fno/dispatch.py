@@ -180,12 +180,16 @@ def _lookup_node(node_ref: str) -> Optional[dict]:
 def _resolve_provider_id() -> Optional[str]:
     """The provider record a default dispatch would run on (the active one).
 
+    Routes through the SAME resolver `fno providers list` displays, so a managed
+    routing-active pointer the slot has moved past no longer evaluates one
+    account's headroom for a worker that spawns on another's credential.
+
     Best-effort: an unconfigured / unreadable providers block yields None, which
     reads as UNKNOWN headroom and proceeds (fail-open)."""
     try:
-        from fno.adapters.providers.loader import load_providers
+        from fno.adapters.providers.loader import effective_active
 
-        return load_providers().active
+        return effective_active()
     except Exception:  # noqa: BLE001 - a config read must never block a dispatch
         return None
 

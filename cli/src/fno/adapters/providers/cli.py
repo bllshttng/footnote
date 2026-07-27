@@ -17,7 +17,11 @@ import typer
 
 from fno.adapters.providers import managed
 from fno.adapters.providers.dispatch import dispatch_env
-from fno.adapters.providers.loader import load_providers, save_providers
+from fno.adapters.providers.loader import (
+    is_effective_active,
+    load_providers,
+    save_providers,
+)
 from fno.adapters.providers.model import (
     ProviderConfigError,
     ProviderNotFoundError,
@@ -81,16 +85,12 @@ def list_providers(
 ) -> None:
     """List all configured providers, marking the active one with *."""
     config = _load()
-    slot_active: dict[str, Optional[str]] = {}  # per-CLI slot occupant, read once
 
     def _is_active(record: ProviderRecord) -> bool:
-        # For managed accounts the meaningful "active" is which one is
-        # materialized in that CLI's slot; fall back to routing-active otherwise.
-        if record.auth == "managed":
-            if record.cli not in slot_active:
-                slot_active[record.cli] = managed.active_slot_id(record.cli)
-            return record.id == slot_active[record.cli]
-        return record.id == config.active
+        # One resolver, shared with the dispatch path: for a managed account the
+        # meaningful "active" is which one is materialized in that CLI's slot,
+        # falling back to routing-active otherwise.
+        return is_effective_active(record, config)
 
     if json_output:
         import json as _json

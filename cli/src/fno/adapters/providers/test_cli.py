@@ -1074,3 +1074,99 @@ class TestCombosUpdate:
         )
         new_hash = compute_providers_hash(("gemini-backup", "claude-primary"))
         assert read_cursor("main", new_hash) is None
+
+
+# ---------------------------------------------------------------------------
+# AC5-CON: routing-active and slot-active resolve through ONE function
+# ---------------------------------------------------------------------------
+
+
+def _managed_pair_config(active: str) -> dict:
+    return {
+        "config": {
+            "providers": {
+                "active": active,
+                "records": [
+                    {"id": "readyrule", "name": "readyrule", "cli": "claude",
+                     "auth": "managed", "priority": 10},
+                    {"id": "makers", "name": "makers", "cli": "claude",
+                     "auth": "managed", "priority": 20},
+                ],
+            }
+        }
+    }
+
+
+class TestEffectiveActive:
+    """`config.providers.active` and the slot occupant can disagree.
+
+    Live on the machine that motivated this: config said `readyrule` while the
+    shared slot held `makers`, so the display path marked one account and the
+    dispatch path evaluated the other's headroom.
+    """
+
+    @pytest.fixture()
+    def diverged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        _write_settings(tmp_path / ".fno" / "config.toml", _managed_pair_config("readyrule"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        from fno.adapters.providers import managed
+
+        managed.stamp_active_slot("claude", "makers")
+        return tmp_path
+
+    def test_resolver_returns_the_slot_occupant(self, diverged: Path) -> None:
+        from fno.adapters.providers.loader import effective_active
+
+        assert effective_active(repo_root=diverged) == "makers"
+
+    def test_dispatch_path_agrees_with_the_display_path(self, diverged: Path) -> None:
+        # The two paths must not disagree: one resolver, called from both.
+        from fno.adapters.providers.loader import (
+            effective_active,
+            is_effective_active,
+            load_providers,
+        )
+        from fno.dispatch import _resolve_provider_id
+
+        config = load_providers(repo_root=diverged)
+        marked = [r.id for r in config.records if is_effective_active(r, config)]
+        assert marked == ["makers"]
+        assert _resolve_provider_id() == effective_active(repo_root=diverged) == "makers"
+
+    def test_list_marks_the_slot_occupant_not_the_config_pointer(
+        self, diverged: Path
+    ) -> None:
+        result = _invoke(["list"], cwd=diverged, home=diverged)
+        assert result.exit_code == 0, result.output
+        starred = [ln for ln in result.output.splitlines() if ln.lstrip().startswith("*")]
+        assert len(starred) == 1
+        assert "makers" in starred[0]
+
+    def test_non_managed_active_still_reads_routing_active(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A record whose credential does NOT come from the shared slot keeps
+        # routing-active as its authority.
+        _write_settings(tmp_path / ".fno" / "config.toml", _two_record_config())
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        from fno.adapters.providers.loader import effective_active
+
+        assert effective_active(repo_root=tmp_path) == "claude-primary"
+
+    def test_managed_active_with_no_stamp_is_nobody(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No stamp means nothing is known to occupy the slot. Guessing
+        # routing-active here is how a dispatch ends up billing an account whose
+        # credential is not actually loaded.
+        _write_settings(tmp_path / ".fno" / "config.toml", _managed_pair_config("readyrule"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        from fno.adapters.providers.loader import effective_active
+
+        assert effective_active(repo_root=tmp_path) is None
