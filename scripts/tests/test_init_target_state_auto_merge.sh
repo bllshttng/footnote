@@ -49,11 +49,12 @@ run_init_in() {
     # and the "false when not set" defaults read whatever they have configured.
     local fake_home="$tmpdir/.home"
     mkdir -p "$fake_home"
-    # Run with explicit env vars only - no array expansion to avoid set -u issues
+    # Caller-supplied assignments come last so they override these defaults;
+    # env applies leading NAME=VALUE pairs left to right.
     (
       cd "$tmpdir"
       if [[ $# -gt 0 ]]; then
-        env "$@" HOME="$fake_home" TARGET_START=1 TARGET_INPUT="test feature" bash "$INIT_SCRIPT"
+        env HOME="$fake_home" TARGET_START=1 TARGET_INPUT="test feature" "$@" bash "$INIT_SCRIPT"
       else
         HOME="$fake_home" TARGET_START=1 TARGET_INPUT="test feature" bash "$INIT_SCRIPT"
       fi
@@ -105,6 +106,91 @@ run_init_in "$T" "TARGET_NO_MERGE=1"
 STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
 
 assert_contains "AC3-ERR: auto_merge_approved false with TARGET_NO_MERGE=1" "auto_merge_approved: false" "$STATE"
+
+rm -rf "$T"
+
+# ---- Test 3b: a `no-merge` token in TARGET_INPUT forces approved false ----
+# The dispatch template bakes `no-merge` into the command string
+# (harness_map._AUTONOMOUS_COMMAND), where it reaches init only as TARGET_INPUT
+# prose. Before this branch existed the config fallthrough granted merge
+# authority against that prohibition.
+
+echo ""
+echo "test_no_merge_token_in_input_forces_approved_false"
+
+T=$(setup_repo "[auto_merge]
+enabled = true")
+
+run_init_in "$T" "TARGET_INPUT=no-merge x-e938"
+STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
+
+assert_contains "no-merge token in input beats enabled=true" "auto_merge_approved: false" "$STATE"
+
+rm -rf "$T"
+
+# ---- Test 3c: the `auto-merge` grant token is deliberately inert ----
+# Asymmetric by design: honoring a prohibition found in prose fails safe,
+# honoring a grant found in prose would let arbitrary text manufacture
+# merge authority.
+
+echo ""
+echo "test_auto_merge_token_in_input_is_inert"
+
+# enabled=false is the load-bearing config here: it proves the token grants
+# nothing on its own. With enabled=true the result would be `true` either way
+# and the case would assert nothing.
+T=$(setup_repo "expertise = \"frontend\"")
+
+run_init_in "$T" "TARGET_INPUT=auto-merge x-e938"
+STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
+
+assert_contains "auto-merge token does NOT grant approval" "auto_merge_approved: false" "$STATE"
+
+rm -rf "$T"
+
+# ---- Test 3c2: the real dispatch string resolves to no-merge ----
+# harness_map._AUTONOMOUS_COMMAND is "/target no-merge {id}". This is the
+# verbatim shape every autonomous worker receives.
+
+echo "test_dispatch_command_string_forces_approved_false"
+
+T=$(setup_repo "[auto_merge]
+enabled = true")
+
+run_init_in "$T" "TARGET_INPUT=/target no-merge x-e938"
+STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
+
+assert_contains "verbatim dispatch string resolves to false" "auto_merge_approved: false" "$STATE"
+
+rm -rf "$T"
+
+# ---- Test 3d: explicit env still outranks the input string ----
+
+echo ""
+echo "test_env_auto_merge_beats_no_merge_token_in_input"
+
+T=$(setup_repo "[auto_merge]
+enabled = true")
+
+run_init_in "$T" "TARGET_AUTO_MERGE=1" "TARGET_INPUT=no-merge x-e938"
+STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
+
+assert_contains "TARGET_AUTO_MERGE=1 outranks input token" "auto_merge_approved: true" "$STATE"
+
+rm -rf "$T"
+
+# ---- Test 3e: an empty TARGET_INPUT must not match the token ----
+
+echo ""
+echo "test_empty_input_does_not_match_token"
+
+T=$(setup_repo "[auto_merge]
+enabled = true")
+
+run_init_in "$T" "TARGET_INPUT="
+STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
+
+assert_contains "empty input falls through to config" "auto_merge_approved: true" "$STATE"
 
 rm -rf "$T"
 
