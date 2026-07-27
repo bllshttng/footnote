@@ -222,6 +222,25 @@ def load_implementer_provider(
     Absent ledger / no matching row / any error -> ``"claude"`` (OQ1: assume
     claude). Never raises.
     """
+    return load_implementer_identity(session_id, ledger_path=ledger_path)[0]
+
+
+def load_implementer_identity(
+    session_id: str,
+    *,
+    ledger_path: Path | None = None,
+) -> tuple[str, bool]:
+    """Return ``(kind, established)`` for the implementer of ``session_id``.
+
+    ``established`` is True ONLY when a ledger row for the session carried a real
+    ``provider_id`` we could map to a kind. It is False when there is no session,
+    no matching ledger row, or any read error - i.e. the family is *unknown*, not
+    genuinely claude. Callers that must not confuse "known claude" with "unknown
+    -> defaulted claude" (the high-assurance gate) read this instead of
+    :func:`load_implementer_provider`. Never raises.
+    """
+    if not session_id:
+        return CLAUDE, False
     try:
         if ledger_path is None:
             from fno import paths as _paths
@@ -229,11 +248,11 @@ def load_implementer_provider(
             ledger_path = _paths.ledger_json()
         ledger_path = Path(ledger_path)
         if not ledger_path.is_file():
-            return CLAUDE
+            return CLAUDE, False
         data = json.loads(ledger_path.read_text(encoding="utf-8"))
         entries = data.get("entries") if isinstance(data, dict) else None
         if not isinstance(entries, list):
-            return CLAUDE
+            return CLAUDE, False
         provider_id: str | None = None
         for row in entries:
             if isinstance(row, dict) and row.get("session_id") == session_id:
@@ -241,11 +260,11 @@ def load_implementer_provider(
                 if isinstance(pid, str) and pid:
                     provider_id = pid  # latest match wins
         if not provider_id:
-            return CLAUDE
-        return _provider_id_to_kind(provider_id)
+            return CLAUDE, False
+        return _provider_id_to_kind(provider_id), True
     except Exception as exc:  # noqa: BLE001 - never let a bad ledger break review
         log.warning("cross-model: implementer-provider read failed: %s", exc)
-        return CLAUDE
+        return CLAUDE, False
 
 
 def _provider_id_to_kind(provider_id: str) -> str:
@@ -339,3 +358,33 @@ def available_provider_kinds(
         log.debug("cross-model: headroom reorder skipped: %s", exc)
 
     return kinds
+
+
+def exhausted_provider_kinds(*, repo_root: Path | None = None) -> set[str]:
+    """Return the dispatchable kinds whose provider records are ALL exhausted.
+
+    ``available_provider_kinds`` only *demotes* an exhausted kind (rotation
+    order); it stays selectable. The assurance gate needs the stronger signal -
+    a kind that cannot actually serve a review right now - so it excludes these
+    from what counts as different-family capacity. A kind with no record (e.g.
+    the ``claude`` local fallback) is UNKNOWN, never exhausted. Cache-only read,
+    fail-open (any error -> empty set, never over-reports exhaustion). Never
+    raises.
+    """
+    try:
+        from fno.adapters.providers.loader import load_providers
+        from fno.adapters.providers.runtime_state import HeadroomState, headroom
+
+        records = load_providers(repo_root).records
+        by_kind: dict[str, list[str]] = {}
+        for record in records:
+            if record.cli in DISPATCHABLE_PROVIDERS:
+                by_kind.setdefault(record.cli, []).append(record.id)
+        return {
+            kind
+            for kind, ids in by_kind.items()
+            if ids and all(headroom(pid).state is HeadroomState.EXHAUSTED for pid in ids)
+        }
+    except Exception as exc:  # noqa: BLE001 - a headroom read never blocks review
+        log.debug("cross-model: exhausted-kind read skipped: %s", exc)
+        return set()

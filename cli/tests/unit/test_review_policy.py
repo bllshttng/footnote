@@ -66,7 +66,7 @@ def test_one_subscription_portable_is_satisfied() -> None:
     """One subscription (claude-only) reviews via same-family fresh-context."""
     v = assess_assurance(
         ReviewPolicy.PORTABLE,
-        available_providers=["claude"],
+        effective_reviewer_kinds=["claude"],
         implementer_provider="claude",
     )
     assert v.satisfied is True
@@ -77,7 +77,7 @@ def test_full_sigma_with_one_subscription_still_satisfied() -> None:
     """Anti-paywall: a large change on one subscription is not blocked."""
     v = assess_assurance(
         ReviewPolicy.FULL_SIGMA,
-        available_providers=["claude"],
+        effective_reviewer_kinds=["claude"],
         implementer_provider="claude",
     )
     assert v.satisfied is True
@@ -87,7 +87,7 @@ def test_full_sigma_with_one_subscription_still_satisfied() -> None:
 def test_diverse_preferred_uses_different_family_when_available() -> None:
     v = assess_assurance(
         ReviewPolicy.DIVERSE_PREFERRED,
-        available_providers=["claude", "codex"],
+        effective_reviewer_kinds=["claude", "codex"],
         implementer_provider="claude",
     )
     assert v.satisfied is True
@@ -97,7 +97,7 @@ def test_diverse_preferred_uses_different_family_when_available() -> None:
 def test_diverse_preferred_degrades_to_portable_without_capacity() -> None:
     v = assess_assurance(
         ReviewPolicy.DIVERSE_PREFERRED,
-        available_providers=["claude"],
+        effective_reviewer_kinds=["claude"],
         implementer_provider="claude",
     )
     assert v.satisfied is True
@@ -110,7 +110,7 @@ def test_diverse_preferred_degrades_to_portable_without_capacity() -> None:
 def test_high_assurance_satisfied_with_different_family() -> None:
     v = assess_assurance(
         ReviewPolicy.HIGH_ASSURANCE,
-        available_providers=["claude", "codex"],
+        effective_reviewer_kinds=["claude", "codex"],
         implementer_provider="claude",
     )
     assert v.satisfied is True
@@ -121,7 +121,7 @@ def test_high_assurance_unresolved_when_only_same_family() -> None:
     """quota-exhausted/one-subscription: no different family -> unresolved (blocks)."""
     v = assess_assurance(
         ReviewPolicy.HIGH_ASSURANCE,
-        available_providers=["claude"],
+        effective_reviewer_kinds=["claude"],
         implementer_provider="claude",
     )
     assert v.satisfied is False
@@ -132,7 +132,7 @@ def test_high_assurance_unresolved_when_identity_unknown() -> None:
     """Unknown implementer family -> cannot guarantee diversity -> unresolved."""
     v = assess_assurance(
         ReviewPolicy.HIGH_ASSURANCE,
-        available_providers=["claude", "codex"],
+        effective_reviewer_kinds=["claude", "codex"],
         implementer_provider="claude",
         identity_known=False,
     )
@@ -147,7 +147,7 @@ def test_quota_exhausted_alternate_falls_back_for_soft_policy() -> None:
     # exhausted codex simply is not in the list the caller passes here.
     v = assess_assurance(
         ReviewPolicy.DIVERSE_PREFERRED,
-        available_providers=["claude"],
+        effective_reviewer_kinds=["claude"],
         implementer_provider="claude",
     )
     assert v.satisfied is True
@@ -182,3 +182,79 @@ def test_cli_assess_assurance_exits_0_when_satisfied() -> None:
             app, ["review", "--assess-assurance", "--policy-size", "S"]
         )
     assert result.exit_code == 0
+
+
+# ---- review_assurance accessor: assess the reviewer that will ACTUALLY run ----
+#
+# These lock the four review findings: the gate must not certify unused capacity
+# (disabled cross-model, exhausted quota) or a fabricated implementer identity.
+
+from types import SimpleNamespace  # noqa: E402
+
+from fno.worker import review as review_mod  # noqa: E402
+
+
+def _routing(**kinds) -> dict:
+    """A resolved-panel map: agent -> ResolvedProvider-like (provider, degraded)."""
+    return {
+        agent: SimpleNamespace(provider=prov, degraded=deg)
+        for agent, (prov, deg) in kinds.items()
+    }
+
+
+def test_review_assurance_high_assurance_passes_with_real_codex_reviewer() -> None:
+    with patch("fno.review.provider_resolution.load_implementer_identity", return_value=("claude", True)), patch(
+        "fno.review.provider_resolution.exhausted_provider_kinds", return_value=set()
+    ), patch.object(
+        review_mod, "panel_provider_routing", return_value=_routing(a=("codex", False))
+    ):
+        v = review_mod.review_assurance("sess", size="S", risk_surfaces=["merge-gate"])
+    assert v["satisfied"] is True
+    assert v["effective"] == "diverse"
+
+
+def test_review_assurance_blocks_when_cross_model_disabled() -> None:
+    """F2: a codex record exists but cross-model is off -> routing is all-claude."""
+    with patch("fno.review.provider_resolution.load_implementer_identity", return_value=("claude", True)), patch(
+        "fno.review.provider_resolution.exhausted_provider_kinds", return_value=set()
+    ), patch.object(review_mod, "panel_provider_routing", return_value={}):
+        v = review_mod.review_assurance("sess", size="S", risk_surfaces=["auth"])
+    assert v["satisfied"] is False
+    assert v["effective"] == "unresolved"
+
+
+def test_review_assurance_blocks_on_unknown_identity() -> None:
+    """F3: session id present but no ledger row -> family unestablished."""
+    with patch("fno.review.provider_resolution.load_implementer_identity", return_value=("claude", False)), patch(
+        "fno.review.provider_resolution.exhausted_provider_kinds", return_value=set()
+    ), patch.object(
+        review_mod, "panel_provider_routing", return_value=_routing(a=("codex", False))
+    ):
+        v = review_mod.review_assurance("sess", size="S", risk_surfaces=["migration"])
+    assert v["satisfied"] is False
+    assert v["effective"] == "unresolved"
+
+
+def test_review_assurance_blocks_when_diverse_kind_exhausted() -> None:
+    """F4: the only different family is out of quota -> not effective capacity."""
+    with patch("fno.review.provider_resolution.load_implementer_identity", return_value=("claude", True)), patch(
+        "fno.review.provider_resolution.exhausted_provider_kinds", return_value={"codex"}
+    ), patch.object(
+        review_mod, "panel_provider_routing", return_value=_routing(a=("codex", False))
+    ):
+        v = review_mod.review_assurance("sess", size="S", risk_surfaces=["secrets"])
+    assert v["satisfied"] is False
+    assert v["effective"] == "unresolved"
+    assert v["exhausted_kinds"] == ["codex"]
+
+
+def test_review_assurance_degraded_route_does_not_count_as_diverse() -> None:
+    """A degraded resolution ran on claude, so it is not different-family."""
+    with patch("fno.review.provider_resolution.load_implementer_identity", return_value=("claude", True)), patch(
+        "fno.review.provider_resolution.exhausted_provider_kinds", return_value=set()
+    ), patch.object(
+        review_mod, "panel_provider_routing", return_value=_routing(a=("claude", True))
+    ):
+        v = review_mod.review_assurance("sess", size="S", risk_surfaces=["payments"])
+    assert v["satisfied"] is False
+    assert v["effective"] == "unresolved"

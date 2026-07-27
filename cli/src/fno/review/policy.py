@@ -100,16 +100,19 @@ class AssuranceVerdict:
 
 
 def _has_diverse_capacity(
-    available_providers: Sequence[str], implementer_provider: str
+    effective_reviewer_kinds: Sequence[str], implementer_provider: str
 ) -> bool:
-    """True when a dispatchable provider kind differs from the implementer.
+    """True when a reviewer that will ACTUALLY run differs from the implementer.
 
-    Mirrors the ``alternate`` selection in ``resolve_agent_provider`` so the
-    policy layer's notion of "diverse capacity exists" cannot drift from what
-    the panel would actually dispatch.
+    ``effective_reviewer_kinds`` is what the panel will genuinely dispatch to -
+    already excluding degraded fallbacks and exhausted providers (the accessor
+    computes it from the resolved routing, not from raw capacity). This is the
+    fix for the "certifies unused capacity" failure: a codex record that exists
+    but is disabled, pinned away, or exhausted is NOT in this set, so it cannot
+    make a high-assurance verdict pass.
     """
     implementer = (implementer_provider or CLAUDE).strip().lower()
-    for candidate in available_providers:
+    for candidate in effective_reviewer_kinds:
         cand = str(candidate).strip().lower()
         if cand in DISPATCHABLE_PROVIDERS and cand != implementer:
             return True
@@ -119,20 +122,20 @@ def _has_diverse_capacity(
 def assess_assurance(
     policy: ReviewPolicy,
     *,
-    available_providers: Sequence[str],
+    effective_reviewer_kinds: Sequence[str],
     implementer_provider: str,
     identity_known: bool = True,
 ) -> AssuranceVerdict:
-    """Resolve ``policy`` against the capacity we actually have. Never raises.
+    """Resolve ``policy`` against the reviewer that will actually run. Never raises.
 
-    ``available_providers`` is the ordered, lockout-filtered kind list from
-    :func:`fno.review.provider_resolution.available_provider_kinds`;
-    ``implementer_provider`` the kind that wrote the code. ``identity_known`` is
-    False when we could not establish the implementer's versioned family - a
-    genuinely different reviewer cannot be guaranteed, which only high-assurance
-    treats as blocking.
+    ``effective_reviewer_kinds`` is the set of provider kinds a panel agent will
+    genuinely dispatch to for this run - degraded fallbacks collapsed to claude
+    and exhausted kinds removed - NOT the raw capacity list. ``implementer_provider``
+    is the kind that wrote the code; ``identity_known`` is False when that family
+    could not be established from real provenance (no ledger row), which only
+    high-assurance treats as blocking.
     """
-    diverse = _has_diverse_capacity(available_providers, implementer_provider)
+    diverse = _has_diverse_capacity(effective_reviewer_kinds, implementer_provider)
 
     if policy is ReviewPolicy.HIGH_ASSURANCE:
         if not identity_known:

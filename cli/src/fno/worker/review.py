@@ -437,22 +437,40 @@ def review_assurance(
 ) -> dict[str, Any]:
     """Classify this review's policy and resolve it against real capacity.
 
-    The production accessor behind ``fno review --assess-assurance``: it reuses
-    the SAME implementer/available reads the panel and ``--print-providers`` use
-    (no parallel capacity list), then applies the pure policy layer. A missing
-    session means the implementer family cannot be established, which the
-    ``high_assurance`` policy treats as unresolved. Never raises.
+    The production accessor behind ``fno review --assess-assurance``: it assesses
+    the policy against the reviewer that will ACTUALLY run, not raw capacity.
+
+    - implementer family + whether it was established come from real ledger
+      provenance (``load_implementer_identity``); a session id with no ledger row
+      is *unknown*, not defaulted-claude.
+    - the effective reviewer kinds are read off the SAME resolved routing the
+      panel dispatches (``panel_provider_routing``): cross-model OFF or an
+      all-claude pin yields only claude, degraded fallbacks collapse to claude,
+      and exhausted kinds are removed. So a codex record that is disabled,
+      pinned away, or out of quota cannot certify diversity.
+
+    Never raises.
     """
     from fno.review import provider_resolution as pr
     from fno.review.policy import assess_assurance, classify_review_policy
 
-    identity_known = bool(session_id)
-    implementer = pr.load_implementer_provider(session_id or "")
-    available = pr.available_provider_kinds()
+    implementer, identity_known = pr.load_implementer_identity(session_id or "")
+    exhausted = pr.exhausted_provider_kinds()
+
+    # What will genuinely dispatch. panel_provider_routing() honors cross_model
+    # on/off + per-agent pins; {} means all-claude. Degraded -> ran on claude.
+    resolved = panel_provider_routing(session_id)
+    effective_kinds: set[str] = {"claude"}  # local runtime is always effective
+    for rp in resolved.values():
+        kind = "claude" if rp.degraded else str(rp.provider).strip().lower()
+        if kind in exhausted:
+            continue
+        effective_kinds.add(kind)
+
     policy = classify_review_policy(size=size, risk_surfaces=risk_surfaces)
     verdict = assess_assurance(
         policy,
-        available_providers=available,
+        effective_reviewer_kinds=sorted(effective_kinds),
         implementer_provider=implementer,
         identity_known=identity_known,
     )
@@ -462,8 +480,9 @@ def review_assurance(
         "effective": verdict.effective,
         "reason": verdict.reason,
         "implementer_provider": implementer,
-        "available_providers": available,
         "identity_known": identity_known,
+        "effective_reviewer_kinds": sorted(effective_kinds),
+        "exhausted_kinds": sorted(exhausted),
     }
 
 
@@ -494,6 +513,25 @@ def _resolve_cross_model_runner(
         base_prompts=base_prompts,
         worker_pids=worker_pids,
     )
+
+
+def _resolve_node_size(state_path: Path) -> Optional[str]:
+    """Best-effort read of the bound node's size (S/M/L) from the graph. -> None."""
+    try:
+        from fno.worker.ship import _read_graph_node_id
+
+        node_id = _read_graph_node_id(state_path)
+        if not node_id:
+            return None
+        from fno.graph.store import read_graph
+
+        for node in read_graph():
+            if node.get("id") == node_id:
+                size = node.get("size")
+                return str(size) if size else None
+    except Exception:  # noqa: BLE001 - size is advisory; never break the panel
+        return None
+    return None
 
 
 def review(
@@ -541,6 +579,20 @@ def review(
     session_id = resolve_session_id(session_id, state_path)
     if not session_id:
         raise ValueError("session_id must be provided or present in state file")
+
+    # Classify assurance on EVERY panel run, not only under --assess-assurance,
+    # so a normal `fno review` cannot silently skip risk classification. This is
+    # advisory here (the block lives at /pr check Step 0c + the CLI exit code);
+    # emitting it means the classification always happens and travels in the
+    # result. Never raises.
+    assurance = review_assurance(session_id, size=_resolve_node_size(state_path))
+    if not assurance.get("satisfied", True):
+        print(
+            f"[review] assurance UNRESOLVED (policy={assurance['policy']}): "
+            f"{assurance['reason']} - the /pr check gate blocks this PR until a "
+            f"different-family reviewer is configured.",
+            file=sys.stderr,
+        )
 
     # Resolve artifacts directory
     if artifacts_dir is None:
@@ -623,6 +675,7 @@ def review(
                     "findings": len(kept_findings),
                     "artifact_path": str(artifact_path),
                     "cached": True,
+                    "assurance": assurance,
                 }
 
     # --- Cache miss: run the orchestrator ------------------------------------
@@ -689,6 +742,7 @@ def review(
         "findings": len(kept_findings),
         "artifact_path": str(artifact_path_final),
         "cached": False,
+        "assurance": assurance,
     }
 
 
