@@ -419,13 +419,20 @@ fn value_as_nudge_overrides(v: &toml::Value) -> Vec<NudgeOverride> {
         }
         if let Some(wm) = map.get("wait_minutes") {
             match wm.as_integer() {
-                Some(n) if n > 0 => ov.wait_minutes = Some(n),
-                _ => ov.malformed = true, // non-int or non-positive (AC8)
+                // Upper-bounded so `chrono::Duration::minutes` (which panics
+                // above i64::MAX/60) can never take the stop gate down on an
+                // absurd config value; anything out of range is malformed.
+                Some(n) if (1..=MAX_NUDGE_WAIT_MINUTES).contains(&n) => {
+                    ov.wait_minutes = Some(n)
+                }
+                _ => ov.malformed = true, // non-int, non-positive, or absurd (AC8)
             }
         }
         if let Some(c) = map.get("ceiling") {
             match c.as_integer() {
-                Some(n) if n > 0 => ov.ceiling = Some(n as usize),
+                Some(n) if (1..=MAX_NUDGE_CEILING).contains(&n) => {
+                    ov.ceiling = Some(n as usize)
+                }
                 _ => ov.malformed = true,
             }
         }
@@ -1557,6 +1564,12 @@ fn read_pr_info(
                     classify_bot_nudge(bot, review_comments, nudge_config_for(nudge_configs, bot), now)
                 })
                 .collect();
+            // The "empty bot_nudges = not classified = status quo" contract that
+            // async_wait_class and build_block_reason rely on holds only because
+            // this is an all-or-nothing map: bot_nudges is either empty or 1:1
+            // with missing_bots. A future partial classification would silently
+            // mis-idle, so pin the invariant here rather than let it drift.
+            debug_assert_eq!(bot_nudges.len(), info.missing_bots.len());
             let mut findings_bots: Vec<String> = required_bots.to_vec();
             for b in optional_bots {
                 if !findings_bots.iter().any(|x| x == b) {
@@ -2031,6 +2044,13 @@ fn logins_correspond(a: &str, b: &str) -> bool {
 /// ~45 minutes of *asked-for* waiting versus the unbounded budget burn today.
 const DEFAULT_NUDGE_WAIT_MINUTES: i64 = 15;
 const DEFAULT_NUDGE_CEILING: usize = 3;
+
+/// Sanity ceilings for `[review.nudge]` override integers (x-b167). A value
+/// beyond these is a typo, not a cadence: `wait_minutes` is bounded well under
+/// `i64::MAX/60` so `chrono::Duration::minutes` can never overflow-panic in the
+/// stop gate, and a nudge cadence past a week / 1000 asks is meaningless anyway.
+const MAX_NUDGE_WAIT_MINUTES: i64 = 7 * 24 * 60; // one week
+const MAX_NUDGE_CEILING: i64 = 1000;
 
 /// A nudgeable bot login with its resolved cadence: BOT_PROFILES defaults
 /// overlaid with `[review.nudge]` overrides. ONLY nudgeable logins appear here
@@ -8564,6 +8584,9 @@ mod tests {
             "[review.nudge]\n\"chatgpt-codex-connector\" = \"scalar\"\n",
             "[review.nudge]\n\"chatgpt-codex-connector\" = [1, 2]\n",
             "[review.nudge]\n\"chatgpt-codex-connector\" = { wait_minutes = \"soon\" }\n",
+            // An absurd wait_minutes would overflow chrono::Duration::minutes and
+            // panic the stop gate; it must degrade to non-nudgeable, not panic.
+            "[review.nudge]\n\"chatgpt-codex-connector\" = { wait_minutes = 9999999999999999 }\n",
         ] {
             let s = parse_settings(body);
             let cfgs = resolved_nudge_configs(&s);
