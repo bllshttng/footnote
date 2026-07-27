@@ -25,8 +25,10 @@ read -r -d '' payload <<'CLAUSE' || true
 Take node <id> through /fno:think.
 <the whole clause block above, verbatim>
 CLAUSE
-fno agents spawn --name <node-name> "$payload" --substrate pane --squad <s> --split <dir> --effort high
+fno agents spawn --name <node-name> "$payload" --substrate pane --at current --split <dir> --effort high
 ```
+
+The clause itself is substrate-independent - it rides every spawn payload, pane or not. Only the placement half of that command line is pane-only: drop `--at`, `--workspace`, and `--split` when the substrate is `bg` or `headless`, which refuse them, and let the graph carry the mission instead.
 
 The `<<'CLAUSE'` delimiter is quoted, so no backtick, `$`, or quote inside expands. `"$payload"` then hands the assembled text to spawn as one argument. The `|| true` is required: `read -d ''` returns exit 1 at EOF (it found no NUL terminator), which would abort the whole recipe under `set -e` before spawn ever runs.
 

@@ -61,8 +61,19 @@ A pass makes judgment calls (which wave, what to park, what to supersede) and th
 Grooming stays on a small model because it is daily and levers-only; a reign is rare and bounded, so the cost argument does not apply to it.
 
 ```bash
-fno agents spawn --name king-<epic> "<brief>" --effort high --model <your frontier model> --crown level=<N>,scope=<epic>
+fno agents spawn --name king-<epic> "<brief>" --effort high --model <your frontier model> \
+  --crown level=<N>,scope=<epic> --substrate pane --workspace <epic>
 ```
+
+`--substrate pane` is explicit here rather than assumed. `pane` is the built-in default, but `config.agents.defaults.substrate` sits above it and is injected whenever the flag is absent, so an operator who set `bg` there turns this command into a placement flag on a non-pane substrate, which exits 2 - the crowning fails on config you did not write and cannot see from here.
+
+**Place the king in the mission workspace too, and for a court that is not optional.** Court teammates anchor to the king's own pane, so wherever the king sits IS the court. Pass `--workspace <epic>` at coronation and again when you anoint a sub-king, and the naming stays legible; skip it and the court still coheres around you, just under a cwd-routed name. A pass does not need it at all, having abdicated before layout matters.
+
+**Coronating in place does not place you, and usually you should not care - if you are in a pane.** `fno agents crown <handle>` writes the crown onto an existing row and has no workspace option, so a session coronated where it already sits stays there. When that session IS a mux pane, this is fine: a workspace is an identity, not a location, so declare the one you are already in to be the mission workspace, name it in your opening line, and let teammates anchor to you with `--at current`. The court is then co-located with its king from whatever workspace you woke up in, which is the property that actually matters.
+
+**Check that you are in a pane before running a court this way.** `crown` accepts any registry row, including a `bg` or daemon-backed session that has no mux pane and no `FNO_PANE`, and there is nothing on that path to stop you. But `--at current` resolves the anchor from `FNO_PANE`, so from a paneless king every teammate spawn refuses and no court forms at all. If you hold a crown without a pane, place teammates with explicit `--workspace <epic> --split <dir>` instead and accept the focus race, or hand the court to a freshly spawned pane king and stay in pass.
+
+Relocation is possible but is not a one-flag move: `fno mux layout apply` rebinds a bound live pane into a target tab with its PTY intact, and it requires a full template or spec plus that template's whole slot set, not a lone `--slot`. If you genuinely must join a mission workspace a superior already opened, read [mux-layout-templates](../../docs/architecture/mux-layout-templates.md) and apply a real shape. Do it once at coronation before teammates exist, never mid-wave with a court arranged around you.
 
 What a reign actually requires is a frontier-class model at high reasoning effort, in a session that can run many steps.
 How you spell that depends on your provider, so take the requirement and not this line's defaults.
@@ -90,9 +101,17 @@ The crown model above is unchanged. What changes is *tenure*: the crown has two 
 
 **Resolve the shape, first match wins:**
 
-1. The crowning brief names monitoring, answering questions, or running a squad -> **court**.
+1. The crowning brief names monitoring, answering questions, or running a team -> **court**.
 2. The crown is bestowed autonomously (daemon, cron, another king) with no monitoring language -> **pass**.
-3. Ambiguous human crowning -> ask in your first reply; if unattended, default to **pass** (the conservative shape - it never burns frontier tokens idling).
+3. Ambiguous human crowning -> ask in your first reply; if unattended, default to **pass** - the shape that completes with nobody awake to carry it.
+
+**What court actually costs.**
+Not idle tokens.
+A worker waiting on a wake runs no inference and neither does a king, so "court burns frontier tokens idling" is false and is not a reason to pick pass.
+The cost is **per wake**: every time a court king is woken it re-reads context to act, and that re-read churns the prompt cache.
+Court is therefore dearer than pass by its number of wakes, not by its tenure, and the gap is narrower than the tenure makes it look.
+What the wakes buy is the class of wedge a pass structurally cannot catch, because a pass is gone before it could: a duplicate thread on a node someone already claimed, a report that landed `queued (durable)` and was never read, a green PR nobody merged.
+Pick pass when nothing needs to stay awake; pick court when something does.
 
 Court composes down the ladder: a VP runs a court over its Directors, a Director over its ICs, each over its direct reports only. Most reigns are a single Director over one epic, which is court mode over a handful of IC teammates.
 
@@ -108,6 +127,17 @@ Reach for these by need, not by reflex; most passes touch only the first group.
 `fno agents spawn --name <n> "<payload>" --model <m> --substrate pane|bg|headless` starts a worker.
 The payload decides what it does: free text is a verbatim **seed** (it opens a session, it does NOT build), a resolved node id is a **build**, a leading `/verb` is **passthrough**, and `--handoff <doc>` hands an in-flight thread to a fresh context.
 `fno backlog advance --epic <id>` is the graph-driven fan-out and needs `config.auto_continue.enabled`.
+
+**Placement is a pane-only concern, and it applies to both shapes.**
+`--workspace <name>` (short `-s`) sends a new pane into a named mux workspace, and `--split left|right|up|down` tiles it there.
+Both are refused outside `--substrate pane`: `bg` and `headless` have no mux geometry, so a `bg` example carrying `--workspace` is a command that exits nonzero rather than a stricter one.
+The consequence splits cleanly by substrate.
+A pass dispatching on `bg` or `headless` carries its mission in the graph and the spawn provenance, and names no placement flag at all.
+Which placement flag depends on whether you are already in the target workspace, and the two cases split by shape.
+A **court** teammate anchors to your own pane with `--at current --split <dir>`, never `--workspace --split` - see [the court spawn contract](#spawn-each-teammate-into-your-mission-workspace) for why aiming at a workspace races on focus.
+The **ad-hoc pane a pass launches mid-kickoff** has no king pane to anchor to, so it takes explicit `--workspace <mission-workspace> --split <dir>` and accepts that race, which is harmless for a one-off it never has to sit beside.
+You never create the workspace first: the first placement into a name creates it, and there is no create verb to run.
+A blank name is a CLI error, not an implicit default, and an ambiguous one is refused rather than silently picked.
 
 To reach a worker that is already running, mail it (below).
 `ask` and `discuss` were retired: a one-shot question is `spawn "<question>" headless`, and a conversation is just the default seed.
@@ -243,7 +273,7 @@ fno backlog advance --epic <epic> --max 2     # cap the fan-out
 fno backlog advance --epic <epic> --stop      # deactivate the mission
 ```
 
-This is what makes the mission render as a squad in the mux sideline.
+This is what makes the mission render as its own group in the mux sideline.
 
 **Check the prerequisite first.**
 `config.auto_continue.enabled` defaults to `false`, and `advance_epic` returns `disabled` *before* it sets `mission_active`.
@@ -263,27 +293,30 @@ Re-planning is a *new* pass with fresh context reading the map, which is the poi
 
 Everything above ships a pass. Court adds the duties below and runs them until the wave completes. The mechanics of every verb here - placement, injection, lifecycle, reads - are in [references/court-operations.md](references/court-operations.md); this section is the *contract*, that reference is the *operations manual*.
 
-The whole of court is three-quarters contract, because the hard plumbing already shipped: `fno agents spawn --substrate pane` accepts `--squad` and `--split left|right|up|down` end to end, with a min-size fallback to a same-squad tab. What follows is the contract that makes you use it.
+The whole of court is three-quarters contract, because the hard plumbing already shipped: `fno agents spawn --substrate pane` accepts `--workspace` and `--split left|right|up|down` end to end, with a min-size fallback to a tab in the same workspace. What follows is the contract that makes you use it.
 
 ### On crowning
 
-- Print your level, altitude (VP/Director/IC-court), scope, squad name, and your own mail handle in the opening line. Teammates address you by that handle.
+- Print your level, altitude (VP/Director/IC-court), scope, mission workspace name, and your own mail handle in the opening line. Teammates address you by that handle.
 - Register as a roster citizen if you are not already one, so a teammate's report can reach you.
 - Verify the merge machinery is alive (the pass's step-1 duty). A dead pr-watch is silent and wedges the wave gate behind unmerged green PRs; `done` is never proven until merged.
 
-### Spawn each teammate into your own squad
+### Spawn each teammate into your mission workspace
 
 ```bash
 read -r -d '' payload <<'CLAUSE' || true   # read -d '' exits 1 at EOF; absorb it so set -e does not abort
 Take node <id> through <phase verb: /fno:think, /fno:blueprint, or /fno:target>.
 <minion clause - paste verbatim from references/minion-clause.md>
 CLAUSE
-fno agents spawn --name <node-name> "$payload" --substrate pane --squad <own-squad> --split <dir> --effort <e>
+fno agents spawn --name <node-name> "$payload" --substrate pane --at current --split <dir> --effort <e>
 ```
 
-- **Squad.** Pass your own squad explicitly when you know its name (a mission squad is named for the epic; the crowning brief should state it). Omitted, placement resolves to the caller's owner squad - usually yours, but explicit `--squad` removes the dependence on where a human's focus happens to sit.
-- **Split.** First teammate `--split right`, subsequent teammates `--split down`, accreting quarters in your active tab so your viewport shows the whole squad. Exact sequencing is yours; the invariant is only same-squad placement.
-- **Overflow is the server's job.** A split that would violate pane min-size falls back to a new tab in the *same squad*. You do not implement a pane cap - the geometry is the cap - and you read the receipt rather than assuming geometry (a fallback is a tab, not a split, and the receipt says so).
+- **Anchor to your own pane, do not aim at the workspace.** `--workspace <name> --split <dir>` splits that workspace's *focused* pane, and focus is shared mutable state: another client can move it between the moment you build the command and the moment the server runs it, landing your teammate in a different tab from you. `--at current` pins the new pane to the calling pane - yours - by resolving `FNO_PANE`, so the court accretes around the king by construction rather than by hoping focus held. It is strict: if the anchor is gone or the split cannot fit, it refuses rather than minting a tab somewhere else, and the `--json` receipt reports the server-committed anchor and tab so you read where it actually landed. It requires `--split` and `--substrate pane`, and it only works from inside a mux pane.
+- **The workspace comes from where you are.** Because the teammate anchors to your pane, it inherits your workspace - which is the mission workspace, provided you were coronated with `--workspace <epic>` as above. That is why the king's own placement is load-bearing and not cosmetic. Use explicit `--workspace <name> --split <dir>` only when you must place into a workspace you are not in, and accept the focus race when you do. An older deprecated alias for that flag still resolves, so a stale command runs clean and teaches the wrong spelling anyway - see the migration note in [the spawn guide](../../docs/guides/fno-agents-spawn.md#place-a-pane-in-a-mux-workspace).
+- **Creation is implicit.** The first placement into a workspace name creates it. There is no create verb, and nothing to set up before the first spawn. A blank name is refused at the CLI boundary rather than falling back to a default.
+- **Split.** First teammate `--split right`, subsequent teammates `--split down`, accreting quarters in your active tab so your viewport shows the whole court. Exact sequencing is yours; the invariant is only that every teammate lands in the one mission workspace. Treat a split direction as a placement *intent* at spawn time: several teammates launching at once are laid out concurrently, so the direction says where each one goes in, not what the final tab arrangement will be.
+- **Overflow is a refusal you handle, not a silent fallback.** This is the price of `--at current`: strict placement means a split that cannot meet pane min-size **refuses and exits nonzero** rather than minting a tab somewhere. So a court big enough to run out of room does not quietly degrade, it fails the spawn - and a king that ignores the exit code stalls a wave believing it dispatched. Read it, and on refusal re-spawn the same teammate with explicit `--workspace <mission-workspace> --split <dir>`, which does allow the min-size fallback to a new tab in that workspace. You give up exact adjacency and keep the mission grouping, which is the right trade: the geometry is the cap, and the tab is what the cap overflows into. Either way read the receipt rather than assuming geometry - a fallback is a tab, not a split, and the receipt says so.
+- **Place it right at spawn, because moving it afterwards is a layout operation, not a nudge.** No `fno mux pane` verb migrates a pane between workspaces - `break` detaches one into a new tab, and that tab stays where it was. The one CLI path that does relocate a live pane is `fno mux layout apply`: applying a shape rebinds a live session's pane into the target tab with its PTY intact, detaching it from wherever it was. That is a real capability, not a workaround, but it needs a full template or spec plus that template's whole slot set (a lone `--slot` is a usage error), and it applies that whole layout to the destination tab. Reach for it when you mean to shape a tab, not to shuffle one worker, and get the invocation from [mux-layout-templates](../../docs/architecture/mux-layout-templates.md). A human at the keyboard has lighter options you do not: moving a pane, sending a tab to another workspace, and recruiting a running agent into a named workspace as a watch-only member. Default to adopting an already-running worker logically - it holds the node claim and reports to you by mail - and never kill a healthy one to improve layout. Placement also corrects itself for free at the next real handoff, because the successor is spawned into the mission workspace.
 
 ### The minion contract rides every spawn payload
 
@@ -300,7 +333,7 @@ Reporting is push-based - the completion mail live-injects into your pane and wa
 
 - **Every dispatched verb is plugin-qualified** (`/fno:think`, `/fno:blueprint`, `/fno:target`) in spawn payloads, routing mail, and `--dispatch-verb` values. A bare `/do` once resolved to a *different* plugin's `do` in a live reign and ran a foreign pipeline silently; qualification costs five characters and removes the whole failure class.
 - **The execution phase routes through `/fno:target <node>`, at every size.** Raw `/do` executes a plan with no node claim, no review gates, no ship phase, and no finalize record; `/fno:target` is the loop with external done-proof. A small PR earns no exemption - the gates are cheapest when the diff is small.
-- **The routing mail is your fan-in moment.** You are the only participant who sees every session, so sibling facts that bear on this node (a locked interface, a file another teammate owns, a merge-order constraint, a superseded decision) ride the mail explicitly. State `Cross-squad: none` when there are none; never leave it implied.
+- **The routing mail is your fan-in moment.** You are the only participant who sees every session, so sibling facts that bear on this node (a locked interface, a file another teammate owns, a merge-order constraint, a superseded decision) ride the mail explicitly. State `Cross-node: none` when there are none; never leave it implied.
 - **Every payload carries the `<fno_mail>` envelope, on every lane.** `fno mail send` wraps automatically, so a mailed ruling is already marked. If the crowning brief routes you through a pane-layer prompt verb instead of mail, wrap the text yourself - `<fno_mail from="<your-handle>" to="<teammate>">...ruling...</fno_mail>`. An injected prompt lands in the teammate's transcript as *user-role* text, and the envelope is the only marker distinguishing you from the human at the keyboard; an unwrapped ruling impersonates the maintainer. This holds for teammate-to-teammate messages too - agent-to-agent, always wrapped.
 
 ### One session per node, across phases
@@ -308,15 +341,34 @@ Reporting is push-based - the completion mail live-injects into your pane and wa
 The unit of continuity is the **node**, not the phase: one teammate session carries a node from think through blueprint through do. Mailing the next verb into the live pane IS the dispatch - no stop, no respawn, no re-explaining context the session already holds:
 
 ```bash
-fno mail send <teammate-handle> "Ruling: <approve/revise summary>. Cross-squad: <sibling facts, or 'none'>. Next: /fno:blueprint <node>." --from-self
+fno mail send <teammate-handle> "Ruling: <approve/revise summary>. Cross-node: <sibling facts, or 'none'>. Next: /fno:blueprint <node>." --from-self
 ```
 
-The one reason to mint a new session is **context pressure**. Every teammate report carries `context: NN% used`. At a phase boundary, if `NN >= config.target.handoff.used_pct_trigger` (default 50), hand off instead of reusing: spawn a fresh split-placed successor carrying the phase artifact and the minion clause with a generation suffix (`node-x-b3a8-g2`), and close the predecessor pane only after the successor's session is live (spawn receipt returned and the session header printed, not merely a pane ack). A teammate is a mux pane, so close it with `fno mux pane kill <session>:<pane_id>` (the `mux` ref is in `fno agents list --json`) - `fno agents stop` refuses a mux row, whose `short_id` is deliberately empty. This reuses the target-self-handoff generation cap (default 4); at the cap, refuse a fifth generation, emit `<help reason="handoff-chain-exhausted">`, and continue in-session. Below the threshold reuse is mandatory. If the probe is unreadable and no self-report arrived, degrade toward reuse - spawning is the expensive, continuity-losing branch.
+The one reason to mint a new session is **context pressure**. Every teammate report carries `context: NN% used`. At a phase boundary, if `NN >= config.target.handoff.used_pct_trigger` (default 50), hand off instead of reusing: spawn a fresh successor into the mission workspace with an explicit `--split`, carrying the phase artifact and the minion clause with a generation suffix (`node-x-b3a8-g2`), and close the predecessor pane only after the successor's session is live (spawn receipt returned and the session header printed, not merely a pane ack). A teammate is a mux pane, so close it with `fno mux pane kill <session>:<pane_id>` (the `mux` ref is in `fno agents list --json`) - `fno agents stop` refuses a mux row, whose `short_id` is deliberately empty. This reuses the target-self-handoff generation cap (default 4); at the cap, refuse a fifth generation, emit `<help reason="handoff-chain-exhausted">`, and continue in-session. Below the threshold reuse is mandatory. If the probe is unreadable and no self-report arrived, degrade toward reuse - spawning is the expensive, continuity-losing branch.
 
 ### Monitor: report first, sweep as backstop
 
-- **Primary signal is the teammate's report mail** (push). It wakes you the turn it lands.
-- **Backstop sweep on a heartbeat** (every wake, and at least every few minutes while any teammate is live): `fno agents top` (which panes are actually alive) and `fno agents peek <handle>` on any pane that has gone quiet - a `peek` is what tells you a silent pane finished, blocked, or died. The mux sideline shows the same as badges (`DoneUnseen`, `BlockedAnswerable`). `fno-agents needs --json` is a *different* signal - the loop-wedge fold (`review_wedged`, `budget_stop`) - so run it too, but it does NOT report pane completion; it complements the top/peek sweep, never replaces it. Push can miss - a report that lands `queued (durable)` was not delivered - and the sweep is what catches a finished-but-unreported or dead teammate.
+- **Primary signal is the teammate's report mail** (push). It wakes you the turn it lands. The minion clause is what makes this work: a teammate projects its own boundaries - a question, a block, a PR opened, a review verdict, merge readiness - so you are woken by events rather than hunting for them.
+- **Backstop sweep at boundaries, not on a repeating clock.** Sweep while you are already awake and at a boundary you can name: a report you just processed, a ruling you just issued, a wave-gate check. Do not run a heartbeat and do not treat elapsed minutes as a signal - a poll costs a context re-read every pass and tells you nothing a projected event would not have. When you do sweep: `fno agents top` (which panes are actually alive) and `fno agents peek <handle>` on any pane that has gone quiet - a `peek` is what tells you a silent pane finished, blocked, or died. The mux sideline shows the same as badges (`DoneUnseen`, `BlockedAnswerable`). `fno-agents needs --json` is a *different* signal - the loop-wedge fold (`review_wedged`, `budget_stop`) - so run it too, but it does NOT report pane completion; it complements the top/peek sweep, never replaces it.
+- **Never end a turn with a live teammate and no armed wait.** This is the one case where you arm your own wake, and it is the difference between a backstop and a poll. **An expected report is not coverage.** Push can miss: a report that lands `queued (durable)` was not delivered, and a pane that dies mid-unit reports nothing at all - so the teammate most likely to strand you is exactly the one you were counting on to write. A king that treats "it owes me a report" as a wake source waits forever on one that is never coming, and the wave wedges with nobody awake to notice; that is the failure the old heartbeat was covering. So the rule keys on reconciliation, not on what you expect: before you stop, arm one bounded wait for every live teammate **you have not yet reconciled**, whether or not it owes you a report.
+
+  Reconciled is the exact word, and `done` is not a synonym for it. A teammate that finished and whose row still reads `done` matches a `--state done` wait *immediately*, so re-arming on it spins you at full speed - the same failure as waiting on `idle`. Once you have reconciled a teammate (read the artifact, ruled, routed) it leaves the wait set: either its work is finished and its pane closes, or you routed it a next phase and it is working again, which makes a fresh `done` wait meaningful. The set is therefore "live and still owing me a transition", and it shrinks as you reconcile. When it empties and the wave is not complete, you are waiting on something that is not a teammate - go look at it rather than arming another wait.
+
+  The wait is a real command, not a resolution - `top` and `peek` return immediately and wake nobody, so ending a turn on them is the wedge:
+
+  ```bash
+  fno-agents wait --agent <teammate-name> --state done --timeout-ms 900000
+  ```
+
+  **Launch it as a harness-tracked task, and never append `&`.** A trailing `&` hands the command back to the shell, so the call returns instantly, your harness records it as finished, and *nothing is left waiting* - the court then sleeps through the very transition the wait exists to catch. Same detached-process trap that makes a `nohup`'d watcher useless.
+
+  **This wait does not cover `blocked`, and no wait does.** The verb takes one target and returns only on an exact match, and `blocked` is a state the inside-leg hook never emits - it is in the contract but has no Claude Code trigger wired, so the hook reports `working` and `done` only. A `--state blocked` wait on a claude or codex teammate therefore never fires, which is worth knowing before you reach for it. A blocked teammate reaches you two other ways: its own report mail, which the minion clause requires it to send on blocking, and your sweep, where it shows as a `BlockedAnswerable` badge. So a block whose mail was lost waits out this timeout. That is the design's slowest path and the honest bound on it.
+
+  **Always `done`, and never `idle`.** `idle` looks like the portable choice and is a trap: it is the *default* verdict, returned for a lapsed hook, an unrecognized screen state, and any live row with no screen state at all. So a wait on `idle` can return instantly while the teammate is still working, and since you re-arm every live teammate, that returns you to a tight wake-sweep-rearm loop burning context on every pass - worse than the heartbeat this replaced.
+
+  `done` is level-triggered on something that is actually terminal: the pane exited, or a live inside-leg hook reported completion. Only claude and codex wire that hook, so be clear-eyed about what you get elsewhere. **For a hookless teammate (gemini, opencode, agy) this wait is a death detector plus a timeout, not a completion signal** - it fires if the pane dies, otherwise it runs out the clock and you sweep then. That is still a bounded backstop and it never spins, which is the property that matters. The teammate's own report stays the primary signal, and it is a real reason to prefer a claude or codex pane for court work.
+
+  Arm it the way your harness tracks background work (on claude, a background Bash call): a detached process exits without waking anyone and the session idles forever. When it fires, sweep that teammate and either reconcile it or re-arm; if it timed out and the teammate is still live, re-arm. One armed wait per live teammate is a wake source. Re-running `top` on a timer while waits are already armed is the poll, and that is what costs context for nothing.
 - **Delivery truth:** treat any mail receipt other than `delivered (hosted)` as undelivered. `peek` the handle (both for liveness and to confirm the report did not already land - a busy-but-alive recipient must not be double-delivered), and only on a confirmed miss re-resolve it from `fno agents discovered-json` / `top` and re-send before processing the next report. Never park a miss as a "check later" note.
 - **Silence is not death.** Before declaring a teammate dead, `peek` the pane and check its node claim and open PRs - a worker once had shipped a PR unregistered, and a reflex respawn built a duplicate. Respawn only from the last graph-encoded artifact, or `<help>` if that artifact is missing.
 
