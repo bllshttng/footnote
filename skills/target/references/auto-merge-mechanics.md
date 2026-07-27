@@ -50,21 +50,20 @@ A `failed` outcome does NOT block the promise. The PR was created successfully; 
 
 When deciding whether to auto-merge, resolve in this order (first match wins):
 
-1. **CLI positional `no-merge`** - auto_merge_approved = false
-2. **CLI positional `auto-merge`** - auto_merge_approved = true
-3. **Local `.fno/config.toml`** - `config.auto_merge.enabled`
-4. **Global `~/.fno/config.toml`** - `config.auto_merge.enabled`
-5. **Default** - false
+1. **`TARGET_NO_MERGE=1`** - auto_merge_approved = false
+2. **`TARGET_AUTO_MERGE=1`** - auto_merge_approved = true
+3. **`no-merge` in the invocation string** - auto_merge_approved = false
+4. **Local `.fno/config.toml`** - `config.auto_merge.enabled`
+5. **Global `~/.fno/config.toml`** - `config.auto_merge.enabled`
+6. **Default** - false
 
-If both CLI modifiers are set (user typed both by mistake): `no-merge` wins (safer). The resolved value is recorded in `target-state.md` as `auto_merge_approved` and is the sole signal the global git-protection hook checks.
+`init-target-state.sh` implements this chain and is the only place it lives. The resolved value is recorded in `target-state.md` as `auto_merge_approved` and is the signal the git-protection hook, `fno pr merge`, and `worker/ship.py` all read.
 
 FORBIDDEN: auto-merging based on any inference other than this chain.
 
-To apply CLI modifiers, set env vars before calling `init-target-state.sh`:
-- `no-merge` positional - set `TARGET_NO_MERGE=1`
-- `auto-merge` positional - set `TARGET_AUTO_MERGE=1`
+**The chain is deliberately asymmetric.** Rung 3 honors a `no-merge` token found anywhere in the invocation string, because autonomous dispatch bakes exactly that token into its command (`harness_map._AUTONOMOUS_COMMAND`) and it arrives as prose no flag parser sees. There is no matching rung for `auto-merge`: honoring a *grant* discovered in free text would let arbitrary prose manufacture merge authority, whereas honoring a refusal fails safe. A positional `auto-merge` therefore grants nothing on its own and needs `TARGET_AUTO_MERGE=1` or `config.auto_merge.enabled`.
 
-If both are set, `TARGET_NO_MERGE=1` wins. The init script writes `auto_merge_approved` + source to `target-state.md`.
+If both tokens appear, `no-merge` wins, and any explicit env var outranks both.
 
 Log the resolved value + source at session start, e.g.:
 `target: auto_merge_approved=true (source: .fno/config.toml)`

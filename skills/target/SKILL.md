@@ -161,8 +161,8 @@ For a from-idea run, a multi-phase run, or any **M/L** ready node, the whole pha
 /target beast <node>                     # same thing (also accepts a mobile-autocorrected "beast mode")
 /target clean "feature"                  # run /simplify after execute
 /target adversarial "feature"            # add adversarial challenge
-/target auto-merge "feature"             # auto-merge after external approves
-/target no-merge "feature"               # disable auto-merge for this run
+/target auto-merge "feature"             # auto-merge after external approves (needs auto_merge.enabled or TARGET_AUTO_MERGE=1; the token alone grants nothing)
+/target no-merge "feature"               # disable auto-merge for this run (honored from the token alone)
 /target combo my-stack "feature"         # route via a provider combo (Plan B, ab-0e5a921e)
 
 # Controls
