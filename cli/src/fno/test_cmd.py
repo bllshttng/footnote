@@ -492,15 +492,16 @@ def _referenced_sh_files(steps: Sequence[tuple[str, str, str]]) -> set[str]:
 
 
 # Shell harnesses discover_shell_harnesses finds but smoke must not run yet.
-# 19 entries held, each verified empirically (2026-07-26 census plus a full
-# re-run of the drained set). 14 are RED (pre-existing rot; each its own
-# debugging session, out of scope here). 3 are slow-but-green at 134s/97s/72s:
-# draining them adds 303s to every CI run and every local preflight, so they
-# wait on smoke parallelism, not a repair. 2 are the graph-resolve tests, whose
-# assertions drifted from the modern resolve_id path: they expect the legacy
-# fallback's messages ("unknown id" / "falling back to legacy" / "partial-prefix")
-# that the active path no longer emits, so they fail and stay deferred pending
-# test repair.
+# 20 entries held. 14 are RED (pre-existing rot; each its own debugging session,
+# out of scope here). 3 are slow-but-green at 134s/97s/72s: draining them adds
+# 303s to every CI run, so they wait on smoke parallelism, not a repair. The
+# other 3 were drained then came back red in CI (each macOS-green, Linux-red):
+# the two graph-resolve tests, whose assertions drifted from the modern
+# resolve_id path (they expect the legacy fallback's messages it no longer
+# emits), and tests/hooks/test_hook_events.sh, whose perm check is non-portable
+# (`stat -f "%Lp" || stat -c "%a"` does not fail on GNU stat, so the Linux
+# fallback never runs and it reads filesystem stats as the mode). All three stay
+# deferred pending test repair.
 #
 # A green-fast harness here is silent coverage loss no file edit surfaces.
 # `fno test --census-deferred` runs every entry bounded and exits non-zero the
@@ -512,6 +513,7 @@ scripts/tests/test_graph_resolve.sh
 scripts/tests/test_megawalk_args.sh
 scripts/tests/test_provider_pricing.sh
 tests/events/test-check-pr-emits-polling.sh
+tests/hooks/test_hook_events.sh
 tests/hooks/test_init_claim_stderr_and_modern_claim.sh
 tests/hooks/test_init_node_guard_tokenize.sh
 tests/hooks/test_inject_fno_agent_whoami.sh
