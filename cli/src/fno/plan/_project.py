@@ -188,7 +188,15 @@ def project_graph_nodes(
                 # Not an epic: clear any stale epic-only derived fields a prior
                 # projection left behind (a --type feature demotion) so the doc
                 # stays graph-authoritative (codex).
-                for k in (*ROLLUP_KEYS, "waves"):
+                #
+                # `waves` is NOT cleared here, despite being written above. The
+                # key has two owners with two types: an int summary at epic
+                # altitude, and /blueprint's authored wave list on a plan (it is
+                # in BLUEPRINT_WRITE_ALLOWLIST). Clearing deleted that list from
+                # every non-epic plan on every projection. A demoted epic keeping
+                # a stale int is the cheaper wrong: the next /blueprint write
+                # corrects it, whereas an authored list is gone for good.
+                for k in ROLLUP_KEYS:
                     augmented[k] = None
             # A node's own stratum within its parent epic (mission or plain);
             # None (=> cleared) when it has no epic parent, e.g. after --parent

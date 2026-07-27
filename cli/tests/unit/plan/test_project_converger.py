@@ -250,8 +250,14 @@ def test_orphaning_child_clears_stale_wave(tmp_path):
     assert "wave" not in read_plan_file(child_doc)[1]
 
 
-def test_epic_demotion_clears_stale_waves_and_rollup(tmp_path):
-    """codex: demoting an epic to a feature clears its stale waves/rollup keys."""
+def test_epic_demotion_clears_stale_rollup_but_not_waves(tmp_path):
+    """codex: demoting an epic to a feature clears its stale rollup counters.
+
+    `waves` is deliberately exempt. The key has two owners - an int summary at
+    epic altitude, and /blueprint's authored wave list on a plan - so clearing
+    it deleted authored content from every non-epic plan. A demoted epic keeping
+    a stale int is the cheaper wrong; the next /blueprint write corrects it.
+    """
     epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN)
     entries = [
         {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": str(epic_doc), "status": "ready"},
@@ -260,10 +266,32 @@ def test_epic_demotion_clears_stale_waves_and_rollup(tmp_path):
     project_graph_nodes(entries, ["x-epic"], root=str(tmp_path))
     fields = read_plan_file(epic_doc)[1]
     assert fields.get("waves") == "1" and fields.get("children_total") == "1"
-    # Demote to feature -> derived epic keys clear.
+    # Demote to feature -> rollup counters clear, waves survives.
     entries[0]["type"] = "feature"
     project_graph_nodes(entries, ["x-epic"], root=str(tmp_path))
     fields2 = read_plan_file(epic_doc)[1]
-    assert "waves" not in fields2
+    assert fields2.get("waves") == "1"
     assert "children_total" not in fields2
     assert "progress" not in fields2
+
+
+def test_projection_never_deletes_a_plans_authored_wave_list(tmp_path):
+    """A non-epic plan's /blueprint-authored `waves` block survives projection.
+
+    `waves` is in BLUEPRINT_WRITE_ALLOWLIST, so the doc owns it on a plan. The
+    converger used to null it for every non-epic node, which deleted the block
+    on every projection.
+    """
+    plan = _plan(
+        tmp_path,
+        "child.md",
+        _PLAN.replace("---\n\n", "waves:\n  - wave: 1\n    mode: parallel\n---\n\n", 1),
+    )
+    assert "wave: 1" in plan.read_text(encoding="utf-8")
+    entries = [{"id": "x-c", "slug": "c", "type": "feature", "plan_path": str(plan),
+                "priority": "p0", "status": "ready"}]
+
+    assert project_graph_nodes(entries, ["x-c"], root=str(tmp_path)) == 1
+    text = plan.read_text(encoding="utf-8")
+    assert "waves:" in text and "wave: 1" in text  # the authored block survives
+    assert read_plan_file(plan)[1]["priority"] == "p0"  # projection still ran
