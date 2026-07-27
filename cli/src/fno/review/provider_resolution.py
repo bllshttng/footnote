@@ -220,8 +220,29 @@ def load_implementer_provider(
     looked up in ``config.providers.records`` by id and its ``cli`` is used.
 
     Absent ledger / no matching row / any error -> ``"claude"`` (OQ1: assume
-    claude). Never raises.
+    claude). Never raises. Do NOT use for a decision that must distinguish
+    known-claude from unknown-defaulted-claude (the high-assurance gate) - read
+    :func:`load_implementer_identity` for that, which returns the established flag.
     """
+    return load_implementer_identity(session_id, ledger_path=ledger_path)[0]
+
+
+def load_implementer_identity(
+    session_id: str,
+    *,
+    ledger_path: Path | None = None,
+) -> tuple[str, bool]:
+    """Return ``(kind, established)`` for the implementer of ``session_id``.
+
+    ``established`` is True ONLY when a ledger row for the session carried a real
+    ``provider_id`` we could map to a kind. It is False when there is no session,
+    no matching ledger row, or any read error - i.e. the family is *unknown*, not
+    genuinely claude. Callers that must not confuse "known claude" with "unknown
+    -> defaulted claude" (the high-assurance gate) read this instead of
+    :func:`load_implementer_provider`. Never raises.
+    """
+    if not session_id:
+        return CLAUDE, False
     try:
         if ledger_path is None:
             from fno import paths as _paths
@@ -229,11 +250,11 @@ def load_implementer_provider(
             ledger_path = _paths.ledger_json()
         ledger_path = Path(ledger_path)
         if not ledger_path.is_file():
-            return CLAUDE
+            return CLAUDE, False
         data = json.loads(ledger_path.read_text(encoding="utf-8"))
         entries = data.get("entries") if isinstance(data, dict) else None
         if not isinstance(entries, list):
-            return CLAUDE
+            return CLAUDE, False
         provider_id: str | None = None
         for row in entries:
             if isinstance(row, dict) and row.get("session_id") == session_id:
@@ -241,27 +262,37 @@ def load_implementer_provider(
                 if isinstance(pid, str) and pid:
                     provider_id = pid  # latest match wins
         if not provider_id:
-            return CLAUDE
+            return CLAUDE, False
+        # established only when the id mapped to a REAL kind; a rotated-out or
+        # unmappable id defaults to claude but is NOT an established family.
         return _provider_id_to_kind(provider_id)
     except Exception as exc:  # noqa: BLE001 - never let a bad ledger break review
         log.warning("cross-model: implementer-provider read failed: %s", exc)
-        return CLAUDE
+        return CLAUDE, False
 
 
-def _provider_id_to_kind(provider_id: str) -> str:
-    """Map a ledger provider_id to a dispatchable kind. Best-effort -> claude."""
+def _provider_id_to_kind(provider_id: str) -> tuple[str, bool]:
+    """Map a ledger provider_id to a dispatchable kind and whether it RESOLVED.
+
+    Returns ``(kind, resolved)``. ``resolved`` is False when the id could not be
+    mapped to a real dispatchable kind - an unknown/rotated-out id or a lookup
+    error - in which case ``kind`` is the best-effort ``claude`` fallback but the
+    caller must NOT treat it as an established family. Collapsing "unmappable id"
+    into a confident ``claude`` is exactly the seam that let a same-family
+    reviewer certify diversity, so the resolution signal is load-bearing.
+    """
     pid = provider_id.strip().lower()
     if pid in DISPATCHABLE_PROVIDERS:
-        return pid
+        return pid, True
     try:
         from fno.adapters.providers.loader import load_providers
 
         record = load_providers().by_id.get(provider_id)
         if record is not None and record.cli in DISPATCHABLE_PROVIDERS:
-            return record.cli
+            return record.cli, True
     except Exception as exc:  # noqa: BLE001
         log.warning("cross-model: provider_id->kind lookup failed: %s", exc)
-    return CLAUDE
+    return CLAUDE, False
 
 
 def available_provider_kinds(
@@ -339,3 +370,40 @@ def available_provider_kinds(
         log.debug("cross-model: headroom reorder skipped: %s", exc)
 
     return kinds
+
+
+def exhausted_provider_kinds(*, repo_root: Path | None = None) -> set[str] | None:
+    """Return the dispatchable kinds whose provider records are ALL exhausted.
+
+    ``available_provider_kinds`` only *demotes* an exhausted kind (rotation
+    order); it stays selectable. The assurance gate excludes an ALL-EXHAUSTED
+    kind from what counts as different-family capacity. Scope is deliberately
+    narrow: a kind is here only when every record reports ``EXHAUSTED``. A kind
+    that is merely UNKNOWN / unprobed (no fresh snapshot) is NOT excluded - the
+    preflight treats it as available, and whether it actually served
+    cross-family is the observed-runtime attestation's job, not this read's. A
+    kind with no record (e.g. the ``claude`` local fallback) is likewise UNKNOWN.
+
+    Returns the exhausted-kind set on a successful read, or ``None`` when the
+    headroom read FAILED entirely. ``None`` is not "nothing exhausted": for a
+    high-assurance gate, a total read failure must fail CLOSED (the caller cannot
+    trust that a non-claude kind can serve), which returning an empty set would
+    silently defeat. Cache-only read, never raises.
+    """
+    try:
+        from fno.adapters.providers.loader import load_providers
+        from fno.adapters.providers.runtime_state import HeadroomState, headroom
+
+        records = load_providers(repo_root).records
+        by_kind: dict[str, list[str]] = {}
+        for record in records:
+            if record.cli in DISPATCHABLE_PROVIDERS:
+                by_kind.setdefault(record.cli, []).append(record.id)
+        return {
+            kind
+            for kind, ids in by_kind.items()
+            if ids and all(headroom(pid).state is HeadroomState.EXHAUSTED for pid in ids)
+        }
+    except Exception as exc:  # noqa: BLE001 - a headroom read never raises; signals None
+        log.debug("cross-model: exhausted-kind read failed: %s", exc)
+        return None
