@@ -12,6 +12,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 INIT_SCRIPT="$REPO_ROOT/hooks/helpers/init-target-state.sh"
 
+# scripts/lib/config.sh reads dotted keys (auto_merge.enabled) through yq and
+# has no fallback, so without it every enabled-config case below fails for a
+# reason that has nothing to do with the code under test. Fail loud and name
+# the cause rather than emitting five misleading assertion failures.
+if ! command -v yq >/dev/null 2>&1; then
+    echo "FAIL: yq not installed - config.sh cannot read auto_merge.enabled," >&2
+    echo "      so the enabled-config assertions here cannot be meaningful." >&2
+    echo "      Install: brew install yq | apt install yq | mise use yq" >&2
+    exit 1
+fi
+
 PASS=0
 FAIL=0
 
