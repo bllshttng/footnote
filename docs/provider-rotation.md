@@ -47,16 +47,16 @@ at the correct credentials directory.
 
 ## Schema reference
 
-Provider records live under the top-level `[providers]` table in `config.toml`.
+Account records live under the top-level `[accounts]` table in `config.toml`. A pre-rename `[providers]` table is still read; the next account write migrates the file.
 
 ```toml
-[providers]
+[accounts]
 active = "claude-max-secondary"     # id of the active provider (optional)
 
-[[providers.records]]
+[[accounts.records]]
 id = "claude-max-secondary"
 name = "Secondary Claude Max"
-cli = "claude"
+harness = "claude"
 auth = "oauth_dir"
 credentials_source = "/Users/me/.claude.secondary"
 priority = 100
@@ -71,7 +71,7 @@ description = "Personal secondary subscription"
 |---|---|---|---|---|
 | `id` | string | yes | - | Unique identifier. Pattern: `[a-z][a-z0-9-]{0,63}`. |
 | `name` | string | yes | defaults to `id` | Human-readable label. |
-| `cli` | enum | yes | - | `claude` \| `gemini` \| `codex` \| `openclaw` \| `hermes` |
+| `harness` | enum | yes | - | `claude` \| `codex` \| `opencode` \| `agy` \| `trae` \| `openclaw` \| `hermes` \| `gemini` (pre-rename name: `cli`, still read) |
 | `auth` | enum | yes | - | `oauth_dir` \| `api_key` |
 | `priority` | integer | no | `100` | Lower = higher priority (reserved for future auto-selection). |
 | `credentials_source` | path | conditional | - | Required when `auth: oauth_dir`. Absolute path to the credentials directory. |
@@ -189,7 +189,7 @@ bounded indeterminate-state receipt before exiting with the interrupt status.
 ## env-value reference resolution
 
 Values in a record's `env` table support four syntaxes (shown here as the
-`env` inline table a `[[providers.records]]` entry carries):
+`env` inline table a `[[accounts.records]]` entry carries):
 
 **`${ENV:VAR_NAME}`** - Reads `VAR_NAME` from the current process environment.
 Raises `ProviderUnavailableError` if the variable is not set.
@@ -466,7 +466,7 @@ record, the account switch depends on the swapped-to record's `auth` strategy:
   emits `account_switched`. This slot mutation is **opt-in**:
 
 ```toml
-[providers]
+[accounts]
 auto_switch = true   # default false; arms managed-account materialization on auto-switch
 ```
 
@@ -485,23 +485,23 @@ exceeds the sub-cap, the stop hook trips BLOCKED with axis tagged as
 `per_provider`:
 
 ```toml
-[[providers.records]]
+[[accounts.records]]
 id = "claude-anthropic"
 name = "Claude Anthropic"
-cli = "claude"
+harness = "claude"
 auth = "oauth_dir"
 credentials_source = "~/.claude"
 cost_cap_usd_per_session = 30
 
-[[providers.records]]
+[[accounts.records]]
 id = "claude-openrouter"
 name = "Claude OpenRouter"
-cli = "claude"
+harness = "claude"
 auth = "api_key"
 env = { ANTHROPIC_API_KEY = "${KEYCHAIN:openrouter-key}" }
 cost_cap_usd_per_session = 30
 
-[providers.failover]
+[accounts.failover]
 max_swaps_per_phase = 5
 ```
 
@@ -583,27 +583,27 @@ the global active provider.
 ### Schema
 
 ```toml
-[providers]
+[accounts]
 active = "claude-anthropic"
 
-[[providers.records]]
+[[accounts.records]]
 id = "claude-anthropic"
 name = "Claude Anthropic"
-cli = "claude"
+harness = "claude"
 auth = "oauth_dir"
 credentials_source = "~/.claude"
 
-[[providers.records]]
+[[accounts.records]]
 id = "gemini-pro-1"
 name = "Gemini Pro 1"
-cli = "gemini"
+harness = "gemini"
 auth = "api_key"
 env = { GEMINI_API_KEY = "$GEMINI_KEY" }
 
-[[providers.records]]
+[[accounts.records]]
 id = "glm-zhipu"
 name = "GLM Zhipu"
-cli = "openclaw"
+harness = "openclaw"
 auth = "api_key"
 env = { OPENAI_API_KEY = "$GLM_KEY" }
 
@@ -815,24 +815,24 @@ Combos are named ordered provider lists with a rotation strategy. They sit on to
 ### Schema
 
 ```toml
-[providers]
+[accounts]
 active = "claude-primary"             # existing
 active_combo = "my-stack"             # NEW (optional; set via `fno config accounts combos use`)
 
-[[providers.records]]
+[[accounts.records]]
 id = "claude-key-a"
 name = "Claude Key A"
-cli = "claude"
+harness = "claude"
 auth = "oauth_dir"
 credentials_source = "~/.claude"
-# ... claude-key-b and claude-key-c are more [[providers.records]] entries, same shape
+# ... claude-key-b and claude-key-c are more [[accounts.records]] entries, same shape
 
-[providers.combos.my-stack]           # NEW
+[accounts.combos.my-stack]           # NEW
 strategy = "round_robin"              # or "fallback"
 sticky_limit = 3                      # ignored for fallback
 providers = ["claude-key-a", "claude-key-b", "claude-key-c"]
 
-[providers.combos.cheap-only]
+[accounts.combos.cheap-only]
 strategy = "fallback"
 providers = ["claude-key-c", "gemini-codex"]
 ```
@@ -1059,29 +1059,29 @@ code.
 Example combo that routes work across Claude, Codex, and Hermes:
 
 ```toml
-[providers.combos.multi-cli]
+[accounts.combos.multi-cli]
 strategy = "round_robin"
 providers = ["claude-anthropic", "codex-openai", "hermes-nous"]
 sticky_limit = 3
 
-[[providers.records]]
+[[accounts.records]]
 id = "claude-anthropic"
 name = "Claude Anthropic"
-cli = "claude"
+harness = "claude"
 auth = "oauth_dir"
 credentials_source = "~/.claude"
 
-[[providers.records]]
+[[accounts.records]]
 id = "codex-openai"
 name = "Codex OpenAI"
-cli = "codex"
+harness = "codex"
 auth = "oauth_dir"
 credentials_source = "~/.codex"
 
-[[providers.records]]
+[[accounts.records]]
 id = "hermes-nous"
 name = "Hermes Nous"
-cli = "hermes"
+harness = "hermes"
 auth = "oauth_dir"
 credentials_source = "~/.config/hermes"
 ```
@@ -1091,10 +1091,10 @@ credentials_source = "~/.config/hermes"
 A minimal Hermes provider record:
 
 ```toml
-[[providers.records]]
+[[accounts.records]]
 id = "hermes-nous"
 name = "Hermes Nous"
-cli = "hermes"
+harness = "hermes"
 auth = "oauth_dir"
 credentials_source = "~/.config/hermes"
 ```

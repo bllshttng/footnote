@@ -153,7 +153,18 @@ def _load_repo_post_merge(repo_root: Path):
                 local_parsed = tomllib.loads(local_path.read_text(encoding="utf-8"))
             else:
                 local_parsed = yaml.safe_load(local_path.read_text(encoding="utf-8")) or {}
-        except (tomllib.TOMLDecodeError, yaml.YAMLError):
+        except (tomllib.TOMLDecodeError, yaml.YAMLError) as exc:
+            # Deliberately non-fatal, UNLIKE `_read_flat` above, which raises so
+            # the caller can map it to `error`. This file only supplies the
+            # allowlisted worktree-local override (project.id), so a corrupt one
+            # must not take down a verdict the repo config can answer on its own.
+            # It is logged rather than dropped: silently ignoring it made the
+            # oracle look confident about a value it never read.
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "ignoring unparseable worktree-local override %s: %s", local_path, exc
+            )
             local_parsed = {}
         if isinstance(local_parsed, dict):
             override = _worktree_local_override(_unwrap_config_dict(local_parsed))

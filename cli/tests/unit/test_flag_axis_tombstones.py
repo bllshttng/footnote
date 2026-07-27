@@ -26,6 +26,22 @@ _RUNTIME_ROOTS = (_REPO / "cli" / "src" / "fno", _REPO / "crates")
 _SUFFIXES = (".py", ".rs")
 
 
+def _is_cargo_build_artifact(path: Path) -> bool:
+    """True only for `crates/<crate>/target/**` (cargo's build dir).
+
+    Deliberately NOT a bare `"target" in path.parts`: `cli/src/fno/target/`
+    is a real runtime package (it holds `orient.py`, the target orienter), so
+    the unanchored form silently drops five Python files from this scan - the
+    same over-exclusion trap the AGENTS.md pitfall corpus records, which this
+    guard fell into while fixing a different decorative guard.
+    """
+    try:
+        rel = path.relative_to(_REPO / "crates")
+    except ValueError:
+        return False
+    return len(rel.parts) > 1 and rel.parts[1] == "target"
+
+
 def test_no_runtime_string_promises_a_0_4_0_removal():
     """0.3.x is the long-term home, so a 0.4.0 date is a promise that will not
     be kept. No runtime help string may carry one, in either language."""
@@ -33,12 +49,17 @@ def test_no_runtime_string_promises_a_0_4_0_removal():
         p
         for root in _RUNTIME_ROOTS
         for p in root.rglob("*")
-        if p.suffix in _SUFFIXES and "target" not in p.parts
+        if p.suffix in _SUFFIXES and not _is_cargo_build_artifact(p)
     ]
     # A scan pointed at the wrong directory finds nothing and passes for the
     # wrong reason; anchor it so a moved test file fails loudly instead.
     assert len(sources) > 100, f"scan found only {len(sources)} files"
     assert any(p.suffix == ".rs" for p in sources), "Rust emitters not scanned"
+    # Positive control on the exclusion itself: the runtime package whose name
+    # collides with cargo's build dir must be IN scope.
+    assert any(
+        p.name == "orient.py" and p.parent.name == "target" for p in sources
+    ), "cli/src/fno/target/ was excluded; the exclusion is over-broad again"
     offenders = [
         f"{path.relative_to(_REPO)}:{n}"
         for path in sources
