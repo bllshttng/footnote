@@ -769,15 +769,19 @@ def schedule_shadow(
     # Slots already held by live lanes count AGAINST the cap: the real selector
     # calls acquire_lane_slot(cap), which grabs the first FREE of `cap` slots and
     # returns None once every slot is held. So a cap-two report with one lane
-    # already live can start only ONE more node. Deriving remaining capacity from
-    # the live slot claims (not a fresh count from zero) keeps the shadow frontier
-    # from overstating dispatch during fill-vacant-lanes runs - the exact evidence
-    # that gates live scheduling (codex P1 on PR #631).
-    from fno.claims.lanes import active_lane_count
+    # already live can start only ONE more node.
+    #
+    # Count only what acquire can actually collide with (indices < cap), not every
+    # live lane, because BOTH directions of that error corrupt the evidence this
+    # report exists to produce. Counting from zero overstates the frontier during
+    # fill-vacant-lanes runs; counting a lane parked in an out-of-range slot after
+    # a cap shrink understates it, since acquire would still hand out the free low
+    # slots that lane is not occupying.
+    from fno.claims.lanes import occupied_slot_count
 
     try:
-        occupied = active_lane_count(root=claims_root)
-    except Exception as exc:  # noqa: BLE001 - fail open, but visibly (this is the P1 capacity guard)
+        occupied = occupied_slot_count(effective_cap, root=claims_root)
+    except Exception as exc:  # noqa: BLE001 - fail open, but visibly (this is the capacity guard)
         _LOG.warning(
             "schedule shadow: live slot count unreadable, remaining_capacity "
             "may OVERSTATE the frontier: %s", exc,

@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from fno.backlog import advance
-from fno.claims.lanes import acquire_lane_slot
+from fno.claims.lanes import acquire_lane_slot, release_lane_slot
 
 
 def _nodes(*specs):
@@ -162,6 +162,30 @@ def test_all_slots_occupied_selects_nothing(monkeypatch, tmp_path):
     assert [d["reason"] for d in r["serialized"]] == ["cap-full", "cap-full"]
 
 
+def test_slot_above_the_cap_does_not_shrink_the_frontier(monkeypatch, tmp_path):
+    """A lane parked above the cap contends with nothing and must not be counted.
+
+    acquire_lane_slot(2, ...) only ever scans slots 0 and 1, so a lane still
+    holding lane-slot:2 after the cap shrank leaves BOTH low slots acquirable.
+    Counting it (as a plain live-lane count does) reports one remaining slot where
+    the live selector can take two, gating live scheduling on evidence a whole
+    dispatch short of the truth.
+    """
+    for lane in ("filler-0", "filler-1"):
+        acquire_lane_slot(max_lanes=3, lane_id=lane, root=tmp_path)
+    parked = acquire_lane_slot(max_lanes=3, lane_id="parked", root=tmp_path)
+    assert parked is not None and parked.key == "lane-slot:2"
+    for lane in ("filler-0", "filler-1"):
+        release_lane_slot(lane, root=tmp_path)
+
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs"), ("n-c", "infra")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert r["occupied_slots"] == 0
+    assert r["remaining_capacity"] == 2
+    assert [d["id"] for d in r["selected"]] == ["n-a", "n-b"]
+    assert [(d["id"], d["reason"]) for d in r["serialized"]] == [("n-c", "cap-full")]
+
+
 def test_oversized_ready_set_bounded_by_effective_cap(monkeypatch, tmp_path):
     _ready(monkeypatch, _nodes(
         ("n-a", "code"), ("n-b", "docs"), ("n-c", "infra"),
@@ -200,16 +224,16 @@ def test_healthy_run_reports_no_degradation(monkeypatch, tmp_path):
 
 
 def test_occupied_slot_read_failure_is_loud_not_silent(monkeypatch, tmp_path, caplog):
-    """The P1 capacity guard must not silently collapse: if active_lane_count
-    raises, occupied fails open to 0 (frontier may overstate), but the degrade is
-    logged AND surfaced in `degraded` so an operator gating on the JSON sees it.
+    """The capacity guard must not silently collapse: if the slot count raises,
+    occupied fails open to 0 (frontier may overstate), but the degrade is logged
+    AND surfaced in `degraded` so an operator gating on the JSON sees it.
     """
     import fno.claims.lanes as lanes
 
     def boom(*a, **k):
         raise RuntimeError("claims dir locked")
 
-    monkeypatch.setattr(lanes, "active_lane_count", boom)
+    monkeypatch.setattr(lanes, "occupied_slot_count", boom)
     _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs")))
     with caplog.at_level("WARNING"):
         r = advance.schedule_shadow(2, claims_root=tmp_path)

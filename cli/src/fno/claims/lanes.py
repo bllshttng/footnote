@@ -220,8 +220,31 @@ def active_lane_count(*, root: Optional[Path] = None) -> int:
 
     ``list_claims`` returns live claims only, so a crashed lane whose TTL has
     lapsed does not count against the cap and its slot is reclaimable.
+
+    Index-agnostic, so this is "how many lanes are alive", NOT "how much of the
+    cap is taken" - see :func:`occupied_slot_count` for the latter.
     """
     return len(list_claims(prefix=LANE_SLOT_PREFIX, root=root))
+
+
+def occupied_slot_count(max_lanes: int, *, root: Optional[Path] = None) -> int:
+    """Count live slots that CONTEND with ``acquire_lane_slot(max_lanes)``.
+
+    Mirrors acquire's scan range - indices ``0..max_lanes-1`` - and lives beside
+    it so the two cannot drift. After the cap shrinks a lane can still hold an
+    out-of-range slot (``lane-slot:2`` under a cap of two) while slots 0 and 1 are
+    free and acquirable by two fresh lanes; ``active_lane_count`` counts that lane
+    and so understates the remaining frontier by one. Anywhere a count stands in
+    for "how many more lanes can start", use this, never active_lane_count.
+    """
+    count = 0
+    for claim in list_claims(prefix=LANE_SLOT_PREFIX, root=root):
+        index = claim["key"][len(LANE_SLOT_PREFIX):]
+        # A non-numeric suffix is unacquirable by acquire_lane_slot, so it
+        # contends with nothing and must not be counted.
+        if index.isdigit() and int(index) < max_lanes:
+            count += 1
+    return count
 
 
 __all__ = [
@@ -232,5 +255,6 @@ __all__ = [
     "release_lane_slot",
     "reconcile_lane_slot",
     "active_lane_count",
+    "occupied_slot_count",
     "find_lane_slot",
 ]
