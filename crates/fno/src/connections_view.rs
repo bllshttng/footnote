@@ -559,7 +559,8 @@ impl ConnectionsView {
         self.acting = true;
         self.notice = None;
         ConnIntent::Run(vec![
-            "config".into(), "accounts".into(),
+            "config".into(),
+            "accounts".into(),
             "combos".into(),
             "update".into(),
             name,
@@ -591,7 +592,8 @@ impl ConnectionsView {
         self.acting = true;
         self.notice = None;
         ConnIntent::Run(vec![
-            "config".into(), "accounts".into(),
+            "config".into(),
+            "accounts".into(),
             "combos".into(),
             "use".into(),
             name,
@@ -610,7 +612,13 @@ impl ConnectionsView {
         let name = combo.name.clone();
         self.confirm = Some(PendingConfirm {
             label: format!("remove combo {name}? (Enter=yes, any key=no)"),
-            argv: vec!["config".into(), "accounts".into(), "combos".into(), "remove".into(), name],
+            argv: vec![
+                "config".into(),
+                "accounts".into(),
+                "combos".into(),
+                "remove".into(),
+                name,
+            ],
         });
         ConnIntent::Redraw
     }
@@ -654,7 +662,8 @@ impl ConnectionsView {
                     self.acting = true;
                     self.notice = None;
                     ConnIntent::Run(vec![
-                        "config".into(), "accounts".into(),
+                        "config".into(),
+                        "accounts".into(),
                         "combos".into(),
                         "add".into(),
                         ci.name,
@@ -753,7 +762,8 @@ impl ConnectionsView {
         // A pending row: finalize its login into a managed record.
         if let Some(p) = self.selected_pending().cloned() {
             let argv = vec![
-                "config".into(), "accounts".into(),
+                "config".into(),
+                "accounts".into(),
                 "register".into(),
                 p.id.clone(),
                 "--cli".into(),
@@ -779,7 +789,8 @@ impl ConnectionsView {
             return ConnIntent::Redraw;
         }
         let argv = vec![
-            "config".into(), "accounts".into(),
+            "config".into(),
+            "accounts".into(),
             "register".into(),
             acct.id.clone(),
             "--cli".into(),
@@ -935,7 +946,8 @@ impl ConnectionsView {
         self.acting = true;
         self.notice = None;
         ConnIntent::Run(vec![
-            "config".into(), "accounts".into(),
+            "config".into(),
+            "accounts".into(),
             "add".into(),
             w.id,
             "--cli".into(),
@@ -1527,7 +1539,12 @@ mod tests {
         let intent = v.on_key(b'u');
         assert_eq!(
             intent,
-            ConnIntent::Run(vec!["config".into(), "accounts".into(), "use".into(), "ccr".into()])
+            ConnIntent::Run(vec![
+                "config".into(),
+                "accounts".into(),
+                "use".into(),
+                "ccr".into()
+            ])
         );
         assert!(v.acting); // single-flight guard armed
     }
@@ -1564,7 +1581,12 @@ mod tests {
         let intent = v.on_key(b'\r');
         assert_eq!(
             intent,
-            ConnIntent::Run(vec!["config".into(), "accounts".into(), "remove".into(), "ccr".into()])
+            ConnIntent::Run(vec![
+                "config".into(),
+                "accounts".into(),
+                "remove".into(),
+                "ccr".into()
+            ])
         );
         assert!(v.confirm.is_none());
     }
@@ -1711,7 +1733,8 @@ mod tests {
             intent,
             ConnIntent::RunEnv {
                 argv: vec![
-                    "config".into(), "accounts".into(),
+                    "config".into(),
+                    "accounts".into(),
                     "register".into(),
                     "ccm2".into(),
                     "--cli".into(),
@@ -1808,7 +1831,8 @@ mod tests {
         assert_eq!(
             intent,
             ConnIntent::Run(vec![
-                "config".into(), "accounts".into(),
+                "config".into(),
+                "accounts".into(),
                 "combos".into(),
                 "update".into(),
                 "main".into(),
@@ -1855,7 +1879,8 @@ mod tests {
         assert_eq!(
             intent,
             ConnIntent::Run(vec![
-                "config".into(), "accounts".into(),
+                "config".into(),
+                "accounts".into(),
                 "combos".into(),
                 "use".into(),
                 "main".into()
@@ -1894,7 +1919,8 @@ mod tests {
         assert_eq!(
             intent,
             ConnIntent::Run(vec![
-                "config".into(), "accounts".into(),
+                "config".into(),
+                "accounts".into(),
                 "combos".into(),
                 "remove".into(),
                 "main".into()
@@ -1914,7 +1940,8 @@ mod tests {
         assert_eq!(
             intent,
             ConnIntent::Run(vec![
-                "config".into(), "accounts".into(),
+                "config".into(),
+                "accounts".into(),
                 "combos".into(),
                 "add".into(),
                 "backup".into(),
