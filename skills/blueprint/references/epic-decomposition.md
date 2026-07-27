@@ -177,10 +177,17 @@ is known):
    linked.
 
    **Which children do you own?** Decompose's report answers it - do not infer it
-   from wave numbers. Every child it dispatched a design worker for appears in the
-   `fanout` list with `owned: true`; those are the ONLY ones you skip. Everything
-   else is yours, including a child that appears in `fanout` with `owned: false`
-   (its spawn did not fire, so it fell back to you).
+   from wave numbers. It prints two lines when a fan-out ran:
+
+   ```
+     fan-out OWNS (do NOT inline-fill): <id>, <id>
+     fan-out did NOT claim (inline-fill these): <id>
+   ```
+
+   Skip exactly the first list. Everything else is yours, including any child on
+   the second list (its spawn did not fire, so it fell back to you) and every
+   child not mentioned at all. Under `--json` the same answer is the `owned`
+   field on each `fanout` entry.
 
    Ownership keys on the observed spawn receipt rather than on which wave a child
    landed in, and that is the whole point: a fan-out worker and this session must

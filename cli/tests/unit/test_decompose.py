@@ -1588,6 +1588,7 @@ def test_AC8_HP_wave0_fanout_off_by_default_is_byte_identical(
 
 def test_AC7_HP_wave0_fanout_selects_wave0_children_only(graph_env, monkeypatch):
     """Wave 0 = no intra-epic blocker. G2 is blocked by G1, so it is wave 1."""
+    g, read_entries = graph_env
     _wave0_on(monkeypatch)
     fanout, born = _spy_spawn(monkeypatch)
     groups = [
@@ -1598,7 +1599,15 @@ def test_AC7_HP_wave0_fanout_selects_wave0_children_only(graph_env, monkeypatch)
                       "--groups", _groups_json(groups)])
     assert result.exit_code == 0, result.output
 
+    # Assert the IDENTITY, not just the count: selecting exactly the WRONG
+    # child (wave 1 instead of wave 0) also yields len == 1, so a cardinality
+    # assertion passes a mutation that inverts the selector.
     assert len(fanout) == 1, f"expected only the wave-0 child, got {fanout}"
+    picked = fanout[0]["id"]
+    wave0_id = next(
+        r["id"] for r in read_entries() if r.get("group_slug") == "1"
+    )
+    assert picked == wave0_id, f"fanned out the wrong child: {picked} != {wave0_id}"
     assert born == []
 
 
@@ -1680,3 +1689,56 @@ def test_wave0_spawn_failure_never_wedges_the_committed_mutation(
     result = _invoke(["backlog", "decompose", "ab-epic0001",
                       "--groups", _groups_json(groups)])
     assert result.exit_code == 0, result.output
+
+
+def test_a_child_linked_to_an_idea_scaffold_is_still_a_design_candidate(
+    graph_env, monkeypatch, tmp_path
+):
+    """`_needs_design` reads the rung, not `plan_path` presence.
+
+    Every other fan-out test births children UNLINKED, so the rung check and the
+    old `child.get("plan_path")` presence check are indistinguishable in them -
+    swapping the implementation back leaves them all green. This constructs the
+    case that separates them: a child that IS linked, to a doc still at the
+    `idea` rung. Presence says "done, skip it"; the rung says "still undesigned".
+    """
+    from fno.graph.cli import _needs_design
+
+    scaffold = tmp_path / "child-scaffold.md"
+    scaffold.write_text("---\ntitle: G1\nstatus: idea\n---\n\n# G1\n")
+    linked_child = {"id": "x-linked1", "plan_path": str(scaffold)}
+    assert _needs_design(linked_child) is True, (
+        "a linked-but-undesigned child must remain a design candidate"
+    )
+
+    filled = tmp_path / "child-filled.md"
+    filled.write_text("---\ntitle: G1\nstatus: ready\n---\n\n# G1\n")
+    assert _needs_design({"id": "x-linked2", "plan_path": str(filled)}) is False
+
+    # ...and the unlinked case still holds, so the rung check is a superset.
+    assert _needs_design({"id": "x-unlinked"}) is True
+
+
+def test_starvation_receipt_names_a_linked_idea_child(graph_env, tmp_path):
+    """A backlog of only undesigned children must not print a bare `null`.
+
+    The persisted rung IS `idea` for the common linked-scaffold case, and
+    `selection_guards` is gated on persisted `ready`, so without a dedicated arm
+    the row falls through and is dropped from the receipt entirely.
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph.cli import _starvation_receipts
+
+    scaffold = tmp_path / "s.md"
+    scaffold.write_text("---\nstatus: idea\n---\n")
+    node = {
+        "id": "x-scaff01",
+        "status": "idea",
+        "plan_path": str(scaffold),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    out = _starvation_receipts(
+        [node], None, True, None, set(), datetime.now(timezone.utc), 21
+    )
+    assert out == [("x-scaff01", "idea")], f"receipt dropped the node: {out}"

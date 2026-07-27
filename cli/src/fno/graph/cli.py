@@ -1820,9 +1820,28 @@ def cmd_decompose(
             typer.echo(f"  {r['action']}: {r['id']} ({marker}){waves}{blk}{tier}")
         for f in scaffolded:
             typer.echo(f"  scaffolded plan: {f}")
+        # Ownership must reach the HUMAN receipt, not just `--json`. The
+        # blueprint session is told to skip children the fan-out owns
+        # (epic-decomposition.md step 7), and step 6 invokes decompose without
+        # `--json` - so a contract carried only in the JSON shape is a contract
+        # the reader never sees, and AC9-CON's no-double-write property would
+        # rest on a field the default invocation does not emit.
+        _owned = [fo["id"] for fo in fanout if fo.get("owned")]
         for fo in fanout:
             if fo["decision"] == "spawned":
                 typer.echo(f"  fan-out design pass dispatched: {fo['id']}")
+        if _owned:
+            typer.echo(
+                f"  fan-out OWNS (do NOT inline-fill): {', '.join(_owned)}"
+            )
+        _unowned_attempts = [
+            fo["id"] for fo in fanout if not fo.get("owned")
+        ]
+        if _unowned_attempts:
+            typer.echo(
+                f"  fan-out did NOT claim (inline-fill these): "
+                f"{', '.join(_unowned_attempts)}"
+            )
         if orphan_ids:
             typer.echo(
                 f"warning: {len(orphan_ids)} group child node(s) no longer in the spec, "
