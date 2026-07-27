@@ -143,37 +143,51 @@ else
 fi
 rm -rf "$SANDBOX"
 
-# --- AC5: worktree.policy = "never" -> REFUSE creation, do not relocate ------
-# A project whose working tree IS the product (an Obsidian vault) wants no
-# worktree at all. The autonomous path (`fno worktree ensure`) already honored
-# this; the hook did not, so `claude --worktree` created one anyway.
+# --- AC5: worktree.policy = "never" -> ABORT creation ------------------------
+# Refusal shape is load-bearing. Per the Contract at the top of the hook, a
+# NON-ZERO exit falls back to CC's default worktree flow - i.e. it creates the
+# worktree we are refusing. The supported abort is exit 0 with NOTHING on
+# stdout. CC also PRE-CREATES the worktree before firing the hook, so the
+# refusal must reap it or the stray remains.
+#
+# The worktree is pre-created here on purpose: an absent path makes the hook's
+# own `cd` fail first, so the guard is never reached and the case proves nothing.
 echo ""
-echo "--- AC5: policy=never refuses creation (not relocation) ---"
+echo "--- AC5: policy=never aborts creation and reaps the pre-created worktree ---"
 OUT=$(setup_canonical)
 SANDBOX=$(echo "$OUT" | sed -n '1p')
 CANON_REPO=$(echo "$OUT" | sed -n '2p')
 printf '[worktree]\npolicy = "never"\n' > "$CANON_REPO/.fno/config.toml"
-TARGET="$CANON_REPO/.claude/worktrees/feat-never"
-STDIN_JSON=$(printf '{"session_id":"s5","name":"feat-never","path":"%s","hook_event_name":"WorktreeCreate"}' "$TARGET")
-STDERR=$( cd "$CANON_REPO" && HOME="$SANDBOX" bash "$HOOK" <<<"$STDIN_JSON" 2>&1 >/dev/null )
-RC=$?
-if [[ $RC -ne 0 ]]; then
-    pass "AC5: hook exits non-zero (aborts creation)"
+TARGET="$CANON_REPO/.claude/worktrees/wt-a"
+git -C "$CANON_REPO" worktree add -q -b feature/wt-a "$TARGET" 2>/dev/null \
+    || fail "AC5" "could not pre-create the worktree CC would have made"
+STDIN_JSON=$(printf '{"session_id":"s5","name":"wt-a","path":"%s","hook_event_name":"WorktreeCreate"}' "$TARGET")
+AC5_OUT=$( cd "$CANON_REPO" && HOME="$SANDBOX" bash "$HOOK" <<<"$STDIN_JSON" 2>/tmp/ac5.err )
+AC5_RC=$?
+AC5_ERR="$(cat /tmp/ac5.err)"
+if [[ $AC5_RC -eq 0 ]]; then
+    pass "AC5: exits 0 (non-zero would fall back to CC's default flow)"
 else
-    fail "AC5" "hook exited 0; creation would proceed despite policy=never"
+    fail "AC5" "exit $AC5_RC - CC would fall back and create the worktree anyway"
 fi
-if [[ "$STDERR" == *"never"* ]]; then
+if [[ -z "$AC5_OUT" ]]; then
+    pass "AC5: no path on stdout (this is what aborts creation)"
+else
+    fail "AC5" "printed a worktree path '$AC5_OUT'; CC would accept it"
+fi
+# Assert the GUARD's own wording, not a substring the worktree name satisfies.
+if [[ "$AC5_ERR" == *"worktree.policy=never"* ]]; then
     pass "AC5: refusal names the policy"
 else
-    fail "AC5" "refusal did not mention the policy: $STDERR"
+    fail "AC5" "guard did not run; stderr was: $AC5_ERR"
 fi
 if [[ ! -d "$TARGET" ]]; then
-    pass "AC5: no worktree materialized"
+    pass "AC5: pre-created worktree reaped"
 else
-    fail "AC5" "worktree was created at $TARGET"
+    fail "AC5" "stray worktree left at $TARGET"
 fi
+rm -f /tmp/ac5.err
 rm -rf "$SANDBOX"
 
-echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]]

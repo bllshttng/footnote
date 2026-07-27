@@ -66,14 +66,18 @@ MAIN_REPO="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null |
 REPO_NAME="$(basename "$MAIN_REPO")"
 
 # Policy gate before any path decision: `never` means this project's working
-# tree IS the product, so the answer is no worktree at all. Non-zero aborts
-# creation per the hook contract. Fails open on anything but an affirmative
-# `never` - this is the interactive path and a stale fno must not break it.
+# tree IS the product, so the answer is no worktree at all.
+#
+# Refusal shape matters: a NON-ZERO exit makes Claude Code fall back to its
+# default worktree flow, which creates the worktree we are refusing. The
+# supported abort is exit 0 with NOTHING on stdout ("no successful output").
+# Fails open on anything but an affirmative `never` - this is the interactive
+# path and a stale fno must not break it.
 if command -v fno >/dev/null 2>&1; then
     WT_POLICY="$(fno worktree policy --repo "$MAIN_REPO" 2>/dev/null | head -1 | tr -d '[:space:]')"
     if [ "$WT_POLICY" = "never" ]; then
-        echo "Refusing to create a worktree: $REPO_NAME sets worktree.policy = \"never\"; work in place on the canonical checkout." >&2
-        exit 1
+        echo "worktree.policy=never for $REPO_NAME: refusing to create a worktree; work in place on the canonical checkout." >&2
+        exit 0
     fi
 fi
 

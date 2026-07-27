@@ -33,7 +33,9 @@ Precedence: per-project `work.workspaces.<slug>.projects[].worktree` > global `c
 
 The per-project policy outranks `worktrees_base`: setting the base alone does NOT relocate a claude default; you must also set `worktree.policy = "external"`. "conductor" is a `worktrees_base` value, not a policy value. A config parse error or out-of-enum value REFUSES creation (fail closed): ensure exits non-zero with empty stdout so the caller never auto-isolates on a misconfig.
 
-Both creation paths honor `never`: the `WorktreeCreate` hook resolves the policy through `fno worktree policy` (one resolver, no second precedence impl) and REFUSES creation with a non-zero exit, which aborts it per the hook contract. It fails open on anything but an affirmative `never`, since a stale `fno` must not break interactive `claude --worktree`.
+Both creation paths honor `never`: the `WorktreeCreate` hook resolves the policy through `fno worktree policy` (one resolver, no second precedence impl) and refuses.
+
+The refusal SHAPE is load-bearing and counter-intuitive. Per the hook contract, a **non-zero exit falls back to Claude Code's default worktree flow**, so exiting non-zero creates the very worktree you meant to block. The supported abort is **exit 0 with nothing on stdout**, which CC reports as "no successful output". Claude Code also PRE-CREATES the worktree before firing the hook, so the refusal reaps that directory too or the stray survives. The gate runs before the hook's own `cd`, because an absent path would fail there first and take the fallback branch. It fails open on anything but an affirmative `never`, since a stale `fno` must not break interactive `claude --worktree`.
 
 The paths still diverge on WHERE, when `worktrees_base` is set: autonomous dispatch (`fno worktree ensure`) stays harness-native unless `policy = "external"`, while the hook relocates off `worktrees_base` directly.
 
