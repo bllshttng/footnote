@@ -186,9 +186,7 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             // (x-a572) `mux workspace prune ...`: a bare verb is usage. `squad`
             // is the retired spelling, accepted but unadvertised (see
             // `mux_cli::workspace`).
-            Some("workspace" | "squad") if args.len() > 2 => {
-                Role::MuxWorkspace(args[2..].to_vec())
-            }
+            Some("workspace" | "squad") if args.len() > 2 => Role::MuxWorkspace(args[2..].to_vec()),
             // ls / doctor take no positional, an optional `--json` (US6).
             Some("ls") => match split_json(&args[2..]) {
                 Some((pos, json)) if pos.is_empty() => Role::MuxLs(json),
