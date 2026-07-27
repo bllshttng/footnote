@@ -358,3 +358,67 @@ def test_brief_without_verb_still_rides_env():
     out = _resolve(node_id="x-1", brief="ship carefully")
     assert out["command"] == "/target no-merge x-1"
     assert out["env"]["TARGET_BRIEF"] == "ship carefully"
+
+
+def _normalize_sh():
+    """Locate skills/agent/scripts/normalize.sh from this test's location."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve()
+    for _ in range(8):
+        cand = root / "skills/agent/scripts/normalize.sh"
+        if cand.exists():
+            return cand
+        root = root.parent
+    raise AssertionError("normalize.sh not found from test location")
+
+
+def test_normalize_reads_the_same_merge_posture_key_as_harness_map():
+    """Parity: the merge posture has TWO independent readers and nothing else
+    pins them together.
+
+    normalize.sh gates arbitrary `/fno:agent spawn` payloads, which never reach
+    resolve_dispatch, so it legitimately keeps its own read rather than being
+    deleted as a workaround (x-8e59). That independence is the hazard: if one
+    side is repointed at a renamed key and the other is not, the two silently
+    disagree about whether a worker may merge.
+
+    The sibling test above mirrors command_surface and slash_prefix. It does not
+    cover posture, which is how the pair went unpinned in the first place.
+    """
+    import re
+
+    text = _normalize_sh().read_text()
+    m = re.search(r"fno config get ([\w.]+)", text)
+    assert m, "normalize.sh no longer reads a config key for the merge posture"
+    assert m.group(1) == "dispatch.auto_merge", (
+        f"normalize.sh reads {m.group(1)!r} but harness_map._load_dispatch_cfg "
+        f"reads 'dispatch.auto_merge'"
+    )
+
+
+def test_both_merge_posture_readers_default_to_deny():
+    """Parity: no key, no grant - on BOTH sides.
+
+    Granting merge authority is the irreversible direction, so the default and
+    every error path must land on no-merge. normalize.sh states this as
+    `ALLOW_MERGE=0` before its config read (so `fno` absent or erroring degrades
+    to deny); harness_map states it as `is True`, which refuses a truthy
+    non-boolean. A change that flips either default to allow is the one drift
+    worth failing a build over.
+    """
+    import re
+
+    text = _normalize_sh().read_text()
+    # The assignment guarding the config read must be the deny value.
+    m = re.search(r"if \[\[ -z \"\$ALLOW_MERGE\" \]\]; then\s*\n\s*ALLOW_MERGE=(\d)", text)
+    assert m, "normalize.sh's ALLOW_MERGE default block changed shape; re-verify it still denies"
+    assert m.group(1) == "0", "normalize.sh now defaults to GRANTING merge"
+
+    # harness_map: absent key, and a truthy non-boolean, both deny.
+    assert resolve_dispatch(harness="claude", node_id="x-1", dispatch_cfg={})[
+        "command"
+    ] == "/target no-merge x-1"
+    assert resolve_dispatch(
+        harness="claude", node_id="x-1", dispatch_cfg={"auto_merge": "true"}
+    )["command"] == "/target no-merge x-1"
