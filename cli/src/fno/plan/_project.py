@@ -20,12 +20,16 @@ from fno.plan._stamp import read_plan_file, write_plan_file
 from fno.plan._status import project_plan_status
 from fno.plan._rollup import ROLLUP_KEYS, compute_rollup, compute_waves
 
-# Graph-authoritative fields mirrored into frontmatter. `type` is usually
-# already present; the projection keeps it in sync with the node. `parent_slug`
-# is not a native node field - the converger injects it (see project_graph_nodes).
+# Graph-authoritative fields mirrored into frontmatter. `parent_slug` is not a
+# native node field - the converger injects it (see project_graph_nodes).
+#
+# `type` is deliberately ABSENT: it is authoritative only on the birth paths
+# that expose `--type` (add/idea/update). `decompose` mints every child
+# "feature" with no way to say otherwise, so mirroring rewrote authored
+# `type: bug` docs to `type: feature`. `type` rejoins this tuple once every
+# birth path sets it from something observed rather than defaulted.
 MIRROR_KEYS: tuple[str, ...] = (
     "priority",
-    "type",
     "blocked_by",
     "tags",
     "project",
