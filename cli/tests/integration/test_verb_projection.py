@@ -83,6 +83,38 @@ def test_update_priority_repaints_doc(tmp_graph, tmp_path):
     assert fields["priority"] == "p0"
 
 
+def test_update_type_repaints_doc(tmp_graph, tmp_path):
+    """An operator-supplied `--type` reaches the doc.
+
+    The projection does not mirror `type` by default, because on the mint paths
+    it is a default nobody chose. `--type` is the case where the operator DID
+    choose, and leaving the doc stale there splits the authorities: the graph
+    rolls the node up as an epic while Obsidian's `type == "epic"` view, which
+    reads the doc, drops it.
+    """
+    plan = _plan(tmp_path)
+    _seed(tmp_graph, [_node(plan)])
+
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--type", "epic"])
+    assert res.exit_code == 0, res.output
+
+    _, fields, _ = read_plan_file(plan)
+    assert fields["type"] == "epic"
+
+
+def test_update_without_type_leaves_doc_type_alone(tmp_graph, tmp_path):
+    """A non-type update never drags the graph's stale `type` onto the doc."""
+    plan = _plan(tmp_path, _PLAN.replace("type: feature", "type: bug"))
+    _seed(tmp_graph, [_node(plan)])  # graph still says feature
+
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--priority", "p0"])
+    assert res.exit_code == 0, res.output
+
+    _, fields, _ = read_plan_file(plan)
+    assert fields["type"] == "bug"  # the doc's own value stands
+    assert fields["priority"] == "p0"
+
+
 def test_update_size_and_parent_repaint(tmp_graph, tmp_path):
     """AC3-HP end-to-end: --size/--parent flow through the verb into the doc."""
     plan = _plan(tmp_path)

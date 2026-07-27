@@ -23,11 +23,13 @@ from fno.plan._rollup import ROLLUP_KEYS, compute_rollup, compute_waves
 # Graph-authoritative fields mirrored into frontmatter. `parent_slug` is not a
 # native node field - the converger injects it (see project_graph_nodes).
 #
-# `type` is deliberately ABSENT: it is authoritative only on the birth paths
-# that expose `--type` (add/idea/update). `decompose` mints every child
-# "feature" with no way to say otherwise, so mirroring rewrote authored
-# `type: bug` docs to `type: feature`. `type` rejoins this tuple once every
-# birth path sets it from something observed rather than defaulted.
+# `type` is deliberately ABSENT: it is unconditionally mirrored by nothing,
+# because the graph's value is only sometimes observed. `decompose` mints every
+# child "feature" with no way to say otherwise, so an unconditional mirror
+# rewrote authored `type: bug` docs to `type: feature`. A caller that actually
+# supplied a type opts back in per call via `mirror_type=True`, which is the
+# distinction that matters: a defaulted type must never reach a doc, a
+# supplied one must.
 MIRROR_KEYS: tuple[str, ...] = (
     "priority",
     "blocked_by",
@@ -50,13 +52,20 @@ LIST_MIRROR_KEYS: frozenset[str] = frozenset({"blocked_by", "tags"})
 CLEARABLE_KEYS: frozenset[str] = frozenset({"size", "parent", "parent_slug"})
 
 
-def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
+def project_node_to_plan(
+    node: dict[str, Any], plan_path: Path, *, mirror_type: bool = False
+) -> bool:
     """Upsert the mirror fields from ``node`` into ``plan_path``'s frontmatter.
 
     Returns True if the file was rewritten (a mirrored value changed), False on
     a no-op or when the plan file is missing/unreadable. Never raises: a graph
     mutation must not fail because its projected doc is absent or unreadable
     (warns to stderr instead).
+
+    ``mirror_type`` opts this call into writing ``type`` as well. Only a caller
+    that took the type from the operator (``backlog update --type``) may set it;
+    every other path leaves the doc's own ``type`` alone, because the graph's
+    value there is a mint-time default nobody chose.
     """
     try:
         target, fields, rest = read_plan_file(plan_path)
@@ -67,7 +76,7 @@ def project_node_to_plan(node: dict[str, Any], plan_path: Path) -> bool:
         return False
 
     changed = False
-    for key in MIRROR_KEYS:
+    for key in (*MIRROR_KEYS, "type") if mirror_type else MIRROR_KEYS:
         if key not in node:
             continue
         value = node[key]
@@ -143,6 +152,8 @@ def project_graph_nodes(
     entries: list[dict[str, Any]],
     node_ids: list[str],
     root: str | None = None,
+    *,
+    mirror_type: bool = False,
 ) -> int:
     """Project each named node's mirror fields onto its linked plan.
 
@@ -207,7 +218,7 @@ def project_graph_nodes(
                     _wid = node.get("id")
                     wave_val = wave_map.get(_wid) if isinstance(_wid, str) else None
             augmented["wave"] = wave_val
-            if project_node_to_plan(augmented, p):
+            if project_node_to_plan(augmented, p, mirror_type=mirror_type):
                 rewritten += 1
         except Exception as e:  # noqa: BLE001 - per-node best-effort
             sys.stderr.write(f"warning: plan projection failed for {nid}: {e}\n")

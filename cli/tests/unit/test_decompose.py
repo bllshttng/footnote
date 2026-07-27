@@ -938,7 +938,7 @@ def _spy_spawn(monkeypatch):
     """Patch both spawn seams; return (fanout_calls, born_calls). Each fan-out
     call records a kwargs dict and returns a `spawned` result by default.
 
-    `on_node_born` is patched to prove decompose never reaches it (x-455e): the
+    `on_node_born` is patched to prove decompose never reaches it: the
     unflagged lane was deleted, so `needs_think` is the sole consent."""
     import fno.provenance.spawn_think as st
 
@@ -970,7 +970,7 @@ def test_flagged_group_forces_fanout_unflagged_silent(graph_env, monkeypatch, tm
     assert result.exit_code == 0, result.output
 
     # The flagged child took the fan-out lane with the gate + spawn forced on;
-    # the unflagged child reached no spawn seam at all (x-455e).
+    # the unflagged child reached no spawn seam at all.
     assert len(fanout) == 1 and born == []
     call = fanout[0]
     assert call["env"].get("FNO_THINK_SPAWN") == "1"
@@ -1022,7 +1022,7 @@ def test_fanout_raise_never_wedges_committed_mutation(graph_env, monkeypatch):
 
     Step 4a runs after the graph write commits, so its `except Exception` wrapper
     is what keeps a spawn crash from losing the decompose. Pinned here because
-    x-455e edits this block.
+    this change edits this block.
     """
     import fno.provenance.spawn_think as st
 
@@ -1066,7 +1066,7 @@ def test_json_mode_reports_fanout_outcome(graph_env, monkeypatch):
 def test_all_unflagged_spawns_nothing_even_with_gate_on(graph_env, monkeypatch):
     """AC3-HP: the reported case - gate enabled, autonomous session, no flags.
 
-    This is exactly the x-f6bb repro: `think_spawn.enabled: true` is the common
+    This is exactly the reported repro: `think_spawn.enabled: true` is the common
     install, and an autonomous decompose always classifies presence `away`, so
     the old unflagged lane's "offer" spawned instead of offering.
     """

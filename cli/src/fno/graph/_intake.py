@@ -1207,7 +1207,7 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "title": spec["title"],
         # Type flows doc->graph at intake, same as `size` below: the plan
         # frontmatter is where it is declared. Hardcoding "feature" here is what
-        # made the graph's `type` an invented default nobody set (x-455e).
+        # made the graph's `type` an invented default nobody set.
         "type": normalize_type(fm.get("type")),
         "project": project,
         "cwd": node_cwd,

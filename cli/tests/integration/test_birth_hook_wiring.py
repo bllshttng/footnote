@@ -4,7 +4,7 @@ cmd_idea wiring lives in test_idea_think_spawn_wiring.py and the retro path in
 test_retro_land.py. This covers the remaining named A1 paths - intake and add -
 proving each invokes the shared hook for a real birth.
 
-Decompose is NOT one of them (x-455e). It used to route unflagged children here,
+Decompose is NOT one of them. It used to route unflagged children here,
 which spawned a /think on every autonomous decompose rather than offering one;
 `needs_think` is now the sole consent for a decompose-time design pass, and the
 inverse is pinned below.
@@ -48,7 +48,7 @@ def capture_born(monkeypatch: pytest.MonkeyPatch):
     return seen
 
 
-# -- decompose child mint: deliberately NOT a birth-hook path (x-455e) --
+# -- decompose child mint: deliberately NOT a birth-hook path --
 
 _EPIC = {
     "id": "ab-epic0001", "parent": None, "title": "Epic", "type": "feature",

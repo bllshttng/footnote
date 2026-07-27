@@ -224,7 +224,7 @@ def test_empty_tags_clears_stale_mirror(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# `type` is NOT mirrored (x-455e): decompose mints every child "feature", so a
+# `type` is NOT mirrored by default: decompose mints every child "feature", so a
 # graph-authoritative mirror rewrote authored `type: bug` docs to `type: feature`.
 # ---------------------------------------------------------------------------
 
@@ -258,3 +258,26 @@ def test_type_absent_from_doc_is_not_added(tmp_path):
     assert project_node_to_plan({"type": "epic"}, plan) is False
     _, fields, _ = read_plan_file(plan)
     assert "type" not in fields
+
+
+def test_mirror_type_writes_an_operator_supplied_type(tmp_path):
+    """`backlog update --type` opts in, so an observed value reaches the doc.
+
+    Without this the graph and the doc disagree after an explicit --type: the
+    graph rolls the node up as an epic while Obsidian's `type == "epic"` view,
+    which reads the DOC, drops it.
+    """
+    plan = _write_plan(tmp_path, _PLAN.replace("type: feature", "type: bug"))
+
+    assert project_node_to_plan({"type": "epic"}, plan, mirror_type=True) is True
+    _, fields, _ = read_plan_file(plan)
+    assert fields["type"] == "epic"
+
+
+def test_mirror_type_default_off_keeps_the_doc_authoritative(tmp_path):
+    """The same node without the opt-in leaves the doc's `type` alone."""
+    plan = _write_plan(tmp_path, _PLAN.replace("type: feature", "type: bug"))
+
+    assert project_node_to_plan({"type": "epic"}, plan) is False
+    _, fields, _ = read_plan_file(plan)
+    assert fields["type"] == "bug"

@@ -1668,7 +1668,7 @@ def cmd_decompose(
     #         dispatch_conversational env-forcing); the caps still bound it. A spawn
     #         that does not fire leaves the child `idea` with its stub on disk.
     #       - unflagged group -> nothing. `needs_think` is the SOLE consent for a
-    #         decompose-time /think (x-455e): the born-with-why lane that used to
+    #         decompose-time /think: the born-with-why lane that used to
     #         run here spawned unconditionally on any autonomous decompose, because
     #         its OFFER branch needs presence == attended and an autonomous session
     #         always classifies `away`. The epic doc is a group child's design
@@ -2792,7 +2792,11 @@ def cmd_update(
             [
                 projected_node[0]["id"],
                 *([reparent_old_parent[0]] if reparent_old_parent[0] else []),
-            ]
+            ],
+            # The operator typed `--type`, so this value IS observed: write it
+            # through, or the graph and the doc disagree and Obsidian's
+            # `type == "epic"` view drops a node the graph is rolling up.
+            mirror_type=type_ is not None,
         )
 
 
@@ -5546,7 +5550,9 @@ def cmd_undefer(
 
 # -- done --
 
-def _project_plans_from_graph(node_ids: list[str]) -> None:
+def _project_plans_from_graph(
+    node_ids: list[str], *, mirror_type: bool = False
+) -> None:
     """Project each named node's mirror fields + forward status onto its plan.
 
     Re-reads the graph so every node carries its recomputed ``status`` (a claim
@@ -5554,6 +5560,10 @@ def _project_plans_from_graph(node_ids: list[str]) -> None:
     ``done_at``), then delegates to the shared converger. Covers cascade-closed
     epic parents that ``_stamp_and_graduate_plan`` never stamps. Best-effort per
     node: a missing or unreadable plan never fails the mutation.
+
+    ``mirror_type`` is set ONLY by the ``--type`` path, where the operator
+    supplied the value; everywhere else the graph's ``type`` is a mint-time
+    default and must not overwrite the doc's own.
     """
     ids = [i for i in dict.fromkeys(node_ids) if i]
     if not ids:
@@ -5566,7 +5576,7 @@ def _project_plans_from_graph(node_ids: list[str]) -> None:
     except Exception as e:  # noqa: BLE001 - additive; never wedge the mutation
         sys.stderr.write(f"warning: plan projection setup failed: {e}\n")
         return
-    project_graph_nodes(entries, ids)
+    project_graph_nodes(entries, ids, mirror_type=mirror_type)
 
 
 def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) -> None:

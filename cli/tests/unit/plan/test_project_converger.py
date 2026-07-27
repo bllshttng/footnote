@@ -270,7 +270,7 @@ def test_epic_demotion_clears_stale_waves_total_and_rollup(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# `waves` belongs to /blueprint, not to the projection (x-455e). The derived
+# `waves` belongs to /blueprint, not to the projection. The derived
 # epic summary is `waves_total`; while the two shared a name, the int destroyed
 # the authored list on epics and the clear deleted it on everything else.
 # ---------------------------------------------------------------------------
@@ -293,7 +293,7 @@ def test_projection_keeps_a_plans_authored_wave_list(tmp_path):
 def test_projection_keeps_an_epics_authored_wave_list(tmp_path):
     """The reported case: an epic's authored block is not replaced by the int.
 
-    cv-2c7aaa5c watched a blueprinted wave list become a bare scalar (0, then 4)
+    A blueprinted wave list was watched becoming a bare scalar (0, then 4)
     because the epic-altitude summary was written under the same key.
     """
     epic_doc = _plan(tmp_path, "epic.md", _EPIC_PLAN.replace("---\n\n", _WAVES_BLOCK + "---\n\n", 1))

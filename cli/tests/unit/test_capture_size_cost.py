@@ -81,7 +81,7 @@ def test_intake_no_size_frontmatter_leaves_null(tmp_path, monkeypatch):
     assert _entries(g)[0]["size"] is None
 
 
-# -- intake copies type doc->graph (x-455e) --------------------------------
+# -- intake copies type doc->graph ----------------------------------------
 #
 # Same shape as size above. `type` used to be hardcoded "feature" sixteen lines
 # from the size read, which is what made the graph hold 1441 `feature` nodes
