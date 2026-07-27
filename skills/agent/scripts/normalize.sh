@@ -69,7 +69,7 @@ YOLO=0             # 1 = full-auto (codex/gemini bypass); sandboxed default
 HANDOFF_MODE=0     # 1 = `handoff` verb: payload is a doc path -> continuation seed
 PROJECT=""         # cross-project target: a registry project name/short_name to
                    # resolve into a launch cwd (work.workspaces.*.projects)
-PROJECT_SET=0      # 1 = -P/--project was passed (empty value -> loud error, never
+PROJECT_SET=0      # 1 = -C/--project was passed (empty value -> loud error, never
                    # a silent caller-cwd launch when a cross-project hop was asked)
 FORCE=0            # 1 = -f/--force: let --project win over a node's own cwd
 PERMISSION_MODE="" # x-dfa4: forwarded to spawn.sh --permission-mode (provider-native, CLI fails closed)
@@ -103,7 +103,7 @@ while [[ $# -gt 0 ]]; do
   case "$tok" in
     --input)          INPUT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     -n|--name)        NAME="${2:-}"; NAME_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
-    --harness|--provider) PROVIDER="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    -P|--harness|--provider) PROVIDER="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;  # -P is the --provider shorthand (selects the harness here); never reuse it for --project
     --model)          MODEL="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --effort)         EFFORT="${2:-}"; EFFORT_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
@@ -121,7 +121,7 @@ while [[ $# -gt 0 ]]; do
     -i|--interactive) MODE="interactive"; shift ;;
     -Y|--yolo)        YOLO=1; shift ;;
     --handoff)        HANDOFF_MODE=1; shift ;;
-    -P|--project)     PROJECT="${2:-}"; PROJECT_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;
+    -C|--project)     PROJECT="${2:-}"; PROJECT_SET=1; [[ $# -ge 2 ]] && shift 2 || shift ;;  # -C, not -P (-P is --provider, per the fno agents spawn CLI)
     # -f here = override the node's own cwd with --project. NOT `fno agents spawn
     # -F/--force` (spawn-gate bypass: max_live + RAM floor). Different semantics;
     # do not plumb the CLI gate-bypass through as -f.
@@ -297,7 +297,7 @@ if [[ "$HANDOFF_MODE" -eq 0 ]] && { [[ "$msg" == /* ]] || printf '%s' "$_scan_ft
       "$ENDASH"*) scan_cano="--${scan_cano#"$ENDASH"}" ;;
     esac
     case "$scan_cano" in
-      -y|--yes|-m|--allow-merge|--no-merge|-n|--name|-i|--interactive|-Y|--yolo|--provider|--model|--effort|-P|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
+      -y|--yes|-m|--allow-merge|--no-merge|-n|--name|-i|--interactive|-Y|--yolo|--provider|-P|--model|--effort|-C|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
         emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the payload. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the task text."
         ;;
     esac
@@ -307,7 +307,7 @@ fi
 set +f
 
 # x-4391: merge posture is resolved AFTER cross-project cwd resolution (section
-# 2c below) so a `-P/--project` spawn reads the TARGET project's config, not the
+# 2c below) so a `-C/--project` spawn reads the TARGET project's config, not the
 # caller's (codex P2). See the resolution block just after RESOLVED_CWD.
 
 # ---- 2. node detection + resolution-tier classification ----------------------
@@ -360,8 +360,8 @@ elif printf '%s' "$msg" | grep -iqE '^[a-z0-9][a-z0-9-]*$'; then
   NODE_QUERY="$msg"
 fi
 
-# ---- 2c. cross-project cwd resolution (-P/--project) -------------------------
-# A free-text spawn launches in the caller's cwd by default. `-P/--project <name>`
+# ---- 2c. cross-project cwd resolution (-C/--project) -------------------------
+# A free-text spawn launches in the caller's cwd by default. `-C/--project <name>`
 # retargets it: resolve the registry name/short_name to its work-map root and emit
 # resolved_cwd, which the SKILL passes verbatim to `spawn.sh --cwd`. Resolution is
 # a PURE config lookup (work.workspaces.*.projects in settings.yaml) - no graph, no
@@ -369,13 +369,13 @@ fi
 # provider lookup, not in the SKILL (which owns the graph-needing slug/next tiers).
 # The `in <project>` / `as <project>` natural-language ergonomic is the SKILL's
 # model-judged job: it disambiguates a directive from task prose ("fix the bug in
-# etl") and calls this script with -P. normalize only ever sees the unambiguous flag.
+# etl") and calls this script with -C. normalize only ever sees the unambiguous flag.
 #
 # Node conflict: a backlog node carries its OWN project (its _resolved_cwd), so a
 # node + --project is contradictory. Refuse loud by default; -f/--force flips it to
 # a flag-win override (run the node's work in the forced repo). A slug candidate or
 # `next` pointer is an as-yet-unresolved node reference, so it conflicts too - the
-# SKILL re-runs normalize with the resolved ab-id (carrying -P/-f), and the conflict
+# SKILL re-runs normalize with the resolved ab-id (carrying -C/-f), and the conflict
 # fires deterministically there.
 #
 # Resolver is test-injectable via PROJECT_ROOT_RESOLVER (mirrors the provider and
@@ -426,11 +426,11 @@ if not path:
 print("ok\t%s\t%s" % (canon, path))' "$_proj" 2>/dev/null || { printf 'error\tproject resolver crashed\n'; return 0; }
 }
 
-# -P/--project was passed but its value is empty (a bare trailing `-P`, or an
-# explicit `-P ""`): the user asked for a cross-project hop, so refuse loud rather
+# -C/--project was passed but its value is empty (a bare trailing `-C`, or an
+# explicit `-C ""`): the user asked for a cross-project hop, so refuse loud rather
 # than silently launch in the caller's cwd (mirrors the empty --name guard below).
 if [[ "$PROJECT_SET" -eq 1 && -z "$PROJECT" ]]; then
-  emit_error "-P/--project requires a project name (got an empty value)"
+  emit_error "-C/--project requires a project name (got an empty value)"
 fi
 if [[ "$EFFORT_SET" -eq 1 && -z "$EFFORT" ]]; then
   emit_error "--effort requires a value (got an empty value)"
@@ -475,7 +475,7 @@ fi
 
 # x-4391: resolve merge posture when no explicit flag/word set it. Rung 2 =
 # config.dispatch.auto_merge; rung 3 = builtin no-merge. Read from the TARGET
-# project's cwd when a -P/--project cross-project spawn resolved one (RESOLVED_CWD),
+# project's cwd when a -C/--project cross-project spawn resolved one (RESOLVED_CWD),
 # so a caller repo's opt-in never leaks to a project that opted out, and vice
 # versa (codex P2). `fno config get` prints a Python bool (`True`/`False`) and has
 # no cwd flag, so cd in a subshell then lowercase before the exact-`true` compare.
@@ -841,7 +841,7 @@ printf 'node_bare=%s\n' "$NODE_BARE"
 printf 'node_query=%s\n' "$NODE_QUERY"
 printf 'spawn_next=%s\n' "$SPAWN_NEXT"
 printf 'next_scope=%s\n' "$NEXT_SCOPE"
-# Cross-project target (-P/--project). Both empty when no --project was passed.
+# Cross-project target (-C/--project). Both empty when no --project was passed.
 # project is the canonical registry name; resolved_cwd is its abs work-map root,
 # which the SKILL passes to `spawn.sh --cwd` and echoes in the REPORT receipt.
 printf 'project=%s\n' "$PROJECT_CANON"

@@ -221,8 +221,8 @@ path skips posture parsing.
 
 ```bash
 bash "${SKILL_DIR}/scripts/normalize.sh" --input "<raw payload [posture barewords]>" \
-  [--provider <p>] [-n <n>|--name <n>] [--model <m>] [--effort <e>] [-i] [--yolo] [--handoff] \
-  [-m|--allow-merge] [-y|--yes] [-P <project>|--project <project>] [-f|--force]
+  [--provider <p>|-P <p>] [-n <n>|--name <n>] [--model <m>] [--effort <e>] [-i] [--yolo] [--handoff] \
+  [-m|--allow-merge] [-y|--yes] [-C <project>|--project <project>] [-f|--force]
 ```
 
 It strips smart quotes, parses the trailing dashless posture run, canonicalizes a
@@ -230,7 +230,7 @@ token-initial em/en-dash to `--`,
 derives the agent name (`<verb>-<node-id>-<slug>` for a node, `<verb>-<slug>` for free text),
 resolves the provider (explicit -> `config.providers` via the shipped
 `resolve_dispatch_target` -> `claude`), detects the node id, resolves a
-`-P`/`--project` target to its work-map `resolved_cwd`, picks the payload
+`-C`/`--project` target to its work-map `resolved_cwd`, picks the payload
 mode, and assembles the provider-aware `message`. Read its `key=value` output
 line by line. Never `eval` it. Captured fields: `node`, `node_query`,
 `spawn_next`, `next_scope`, `name`, `provider`, `mode`, `yolo`,
@@ -238,20 +238,29 @@ line by line. Never `eval` it. Captured fields: `node`, `node_query`,
 The model-adjacent fields are `model` and `effort`; omit either downstream when
 empty so provider defaults remain unchanged.
 
-**Cross-project target (`-P`/`--project`).** By default a free-text spawn launches
-in the caller's cwd. `-P <project>` retargets it: normalize resolves the registry
+**Cross-project target (`-C`/`--project`).** By default a free-text spawn launches
+in the caller's cwd. `-C <project>` retargets it: normalize resolves the registry
 `name`/`short_name` (`config.work.workspaces.*.projects` in config.toml) to that
 project's work-map root and emits `resolved_cwd`, which you pass to
 `spawn.sh --cwd` (see SPAWN). A natural-language `in <project>` / `in the <project>
 repo` / `as <project>` is YOUR job to translate: when you judge the phrasing is a
 project directive (not task prose like "fix the bug in etl"), call normalize with
-`-P <project>`; the deterministic layer only ever sees the unambiguous flag.
+`-C <project>`; the deterministic layer only ever sees the unambiguous flag.
 Unknown project, or a mapped path missing on disk, is a loud `status=error` (no
-spawn). A backlog node carries its OWN project, so a node + `-P` is a refused
+spawn). A backlog node carries its OWN project, so a node + `-C` is a refused
 conflict UNLESS you also pass `-f`/`--force` (flag-win override: run the node's
 work in the forced repo). When you re-run normalize after resolving a slug/`next`
-to an ab-id (see RESOLVE), carry `-P`/`-f` through so the conflict check fires on
+to an ab-id (see RESOLVE), carry `-C`/`-f` through so the conflict check fires on
 the real node.
+
+`-P` is the **provider** shorthand (`-P <harness>`, identical to `--provider`):
+it selects the harness in this layer - the axis `--harness` shares, which spawn
+forwards as `--harness`. It is not the project flag: an earlier `-P`=`--project`
+mapping silently misrouted `-P zai` to a cross-project hop, so project moved to
+`-C`. Note this is the skill-layer provider/harness axis, not the separate
+model-vendor `--provider` the `fno agents spawn` CLI exposes (where `-H` selects
+the harness and `-P` the vendor); z.ai is a model route selected via
+`--model glm-5.2`, so `-P zai` errors here because z.ai is not a harness.
 
 - If `status=error`, STOP. Report the `error=` line. Do NOT spawn.
 - Otherwise capture every field for RESOLVE/VALIDATE/CONFIRM/SPAWN.
@@ -436,7 +445,7 @@ an empty `substrate` is the default `pane` (owned-PTY) and the flag is omitted.
 Pass `--node` whenever `node` is non-empty. Choose the `--cwd` source in this priority order, so launch cwd
 follows the work-map root:
 
-1. normalize's `resolved_cwd` when non-empty (a `-P`/`--project` target, including
+1. normalize's `resolved_cwd` when non-empty (a `-C`/`--project` target, including
    a `-f`/`--force` override of a node's own cwd) - it wins over the node's cwd;
 2. else the node's `_resolved_cwd` (from `fno backlog get "$node"`);
 3. else the caller's `cwd`.
@@ -500,7 +509,7 @@ or a cross-project resolution is visible post-hoc. (describe-it already confirme
 the handle before launch.)
 
 **Cross-project echo on the free-text path.** When the launch carried no node but
-normalize emitted a non-empty `resolved_cwd` (a `-P`/`--project` target), the
+normalize emitted a non-empty `resolved_cwd` (a `-C`/`--project` target), the
 receipt MUST lead with `project=<project> cwd=<resolved_cwd>` (both already in
 hand from normalize - no extra lookup). A free-text cross-project hop is then just
 as visible as a node one; no launch silently lands in a different repo.

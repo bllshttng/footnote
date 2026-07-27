@@ -193,6 +193,18 @@ out="$(run 'ab-99999999 hermes')"
 check_eq   'hermes not a spawn provider'       "$(field "$out" provider)" 'claude'
 check_contains 'hermes stays in message'       "$(field "$out" message)" 'hermes'
 
+# --- -P is the --provider shorthand (matches `fno agents spawn`: -P=provider,
+# -p=headless). It must NOT be read as --project (the cross-project hop, now -C):
+# a `-P <harness>` sets the provider identical to `--provider <harness>`, and
+# leaves project empty. Regression for the misroute that sent `-P zai` to a
+# cross-project hop instead of a provider selection.
+out="$(run 'ab-99999999' -P opencode)"
+check_eq   '-P opencode -> provider=opencode'  "$(field "$out" provider)" 'opencode'
+check_eq   '-P opencode leaves project empty'  "$(field "$out" project)"  ''
+out="$(run 'ab-99999999' -P codex)"
+check_eq   '-P codex -> provider=codex'        "$(field "$out" provider)" 'codex'
+check_eq   '-P codex leaves project empty'     "$(field "$out" project)"  ''
+
 # --- x-de43: per-harness native invocation (opencode /fno:verb, gemini refused)
 # run_nofno (defined at top) forces the STATIC fallback table so the rendered
 # surface is asserted against the in-tree mirror, not the installed fno (which
@@ -575,7 +587,7 @@ out="$(run 'quick question' --ask)"
 check_eq 'retired --ask is error'     "$(field "$out" status)" 'error'
 
 # ===========================================================================
-# Cross-project cwd resolution (-P/--project)  (cross-project-spawn)
+# Cross-project cwd resolution (-C/--project)  (cross-project-spawn)
 # ===========================================================================
 # Hermetic injectable resolver (mirrors DISPATCH_PROVIDER_RESOLVER): speaks the
 # `ok\t<canon>\t<path>` | `notfound\t<csv>` | `error\t<msg>` protocol so these
@@ -592,8 +604,8 @@ _proj_res="$(mktemp)"
 } > "$_proj_res"
 chmod +x "$_proj_res"
 
-# --- free-text + -P resolves: project + resolved_cwd emitted; free text seeds --
-out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'backend work' -P etl)"
+# --- free-text + -C resolves: project + resolved_cwd emitted; free text seeds --
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'backend work' -C etl)"
 check_eq   'proj resolve status'        "$(field "$out" status)"       'ok'
 check_eq   'proj resolve project'       "$(field "$out" project)"      'etl'
 check_eq   'proj resolve cwd'           "$(field "$out" resolved_cwd)" "$HERE"
@@ -601,49 +613,49 @@ check_eq   'proj resolve node empty'    "$(field "$out" node)"         ''
 check_eq   'proj resolve free text seeds' "$(field "$out" payload_mode)" 'seed'
 check_eq   'proj resolve seed verbatim'   "$(field "$out" message)"      'backend work'
 
-# --- --project long form is identical to -P ----------------------------------
+# --- --project long form is identical to -C ----------------------------------
 out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'backend work' --project etl)"
 check_eq   'proj long-form cwd' "$(field "$out" resolved_cwd)" "$HERE"
 
-# --- no -P: project + resolved_cwd are empty (default caller-cwd launch) -------
+# --- no -C: project + resolved_cwd are empty (default caller-cwd launch) -------
 out="$(run 'backend work')"
 check_eq   'no-proj project empty'      "$(field "$out" project)"      ''
 check_eq   'no-proj resolved_cwd empty' "$(field "$out" resolved_cwd)" ''
 
 # --- unknown project -> error with the known-names list -----------------------
-out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'backend work' -P bad)"
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'backend work' -C bad)"
 check_eq       'unknown proj status' "$(field "$out" status)" 'error'
 check_contains 'unknown proj lists known' "$(field "$out" error)" 'etl, fno'
 
 # --- project resolves but path is missing on disk -> error (early stat) --------
-out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'backend work' -P ghost)"
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'backend work' -C ghost)"
 check_eq       'missing-path status'   "$(field "$out" status)" 'error'
 check_contains 'missing-path names path' "$(field "$out" error)" '/no/such/dir/zzz'
 
-# --- node + -P conflicts (a node carries its own project) ---------------------
-out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'ab-12345678' -P etl)"
+# --- node + -C conflicts (a node carries its own project) ---------------------
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'ab-12345678' -C etl)"
 check_eq       'node+proj conflict status' "$(field "$out" status)" 'error'
 check_contains 'node+proj conflict hints force' "$(field "$out" error)" '--force'
 
 # ...but an id INFERRED from prose must not trigger it, or a cross-project seed
 # whose first word merely fits the id shape refuses before VALIDATE can fall
 # back to a verbatim seed.
-out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 're-added the auth check' -P etl)"
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 're-added the auth check' -C etl)"
 check_eq       'inferred node + proj does not conflict' "$(field "$out" status)" 'ok'
 check_not_contains 'inferred node + proj skips the conflict text' "$(field "$out" error)" 'carries its own project'
 
-# --- node + -P + -f forces the override (flag wins) ---------------------------
-out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'ab-12345678' -P etl -f)"
+# --- node + -C + -f forces the override (flag wins) ---------------------------
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'ab-12345678' -C etl -f)"
 check_eq   'forced override status'  "$(field "$out" status)"       'ok'
 check_eq   'forced override node'    "$(field "$out" node)"         'ab-12345678'
 check_eq   'forced override project' "$(field "$out" project)"      'etl'
 check_eq   'forced override cwd'     "$(field "$out" resolved_cwd)" "$HERE"
 
-# --- a slug candidate is an unresolved node ref -> also conflicts with -P ------
-out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'some-slug' -P etl)"
+# --- a slug candidate is an unresolved node ref -> also conflicts with -C ------
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'some-slug' -C etl)"
 check_eq   'slug+proj conflict status' "$(field "$out" status)" 'error'
 # ...and --force overrides that too
-out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'some-slug' -P etl -f)"
+out="$(PROJECT_ROOT_RESOLVER="$_proj_res" run 'some-slug' -C etl -f)"
 check_eq   'slug+proj force status' "$(field "$out" status)" 'ok'
 
 # --- a --project token in free-text PROSE is verbatim seed content (x-cbb0): a
@@ -654,13 +666,13 @@ out="$(run 'add a --project switch to the cli')"
 check_eq   'stray --project in a seed is verbatim, not an error' "$(field "$out" status)" 'ok'
 check_eq   'stray --project seed mode'  "$(field "$out" payload_mode)" 'seed'
 
-# --- -P with an empty value fails loud (codex P2): never a silent caller-cwd hop -
-out="$(run 'backend work' -P '')"
-check_eq       'empty -P value status' "$(field "$out" status)" 'error'
-check_contains 'empty -P value message' "$(field "$out" error)" 'requires a project name'
-# a bare trailing -P (no value token at all) is the same loud refusal
-out="$(bash "$NORM" --input 'backend work' -P)"
-check_eq       'bare trailing -P status' "$(field "$out" status)" 'error'
+# --- -C/--project with an empty value fails loud (codex P2): never a silent caller-cwd hop -
+out="$(run 'backend work' -C '')"
+check_eq       'empty -C value status' "$(field "$out" status)" 'error'
+check_contains 'empty -C value message' "$(field "$out" error)" 'requires a project name'
+# a bare trailing -C (no value token at all) is the same loud refusal
+out="$(bash "$NORM" --input 'backend work' -C)"
+check_eq       'bare trailing -C status' "$(field "$out" status)" 'error'
 
 rm -f "$_proj_res"
 
