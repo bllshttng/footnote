@@ -438,8 +438,27 @@ def test_AC4_ERR_unreadable_is_distinguished_from_status_less(tmp_path):
     undecodable = _undecodable(tmp_path)
 
     assert plan_rung(status_less) is not plan_rung(undecodable)
-    assert plan_rung(status_less) is Rung.IDEA
+    assert plan_rung(status_less) is Rung.READY
     assert plan_rung(undecodable) is Rung.UNREADABLE
+
+
+def test_an_absent_status_is_not_the_same_defect_as_a_stub_status(tmp_path):
+    """Silence stays READY; only a pre-design WORD demotes.
+
+    `status: stub` read as `ready` because it was in no vocabulary - that is the
+    bug. A doc with no `status:` at all is the older, legitimate shape (most of
+    a mature vault), and `fno backlog intake` on one must still yield a workable
+    node. Demoting silence too would empty the board to fix a bug it never had.
+    """
+    from fno.graph.ladder import Rung, is_dispatchable, plan_rung
+
+    silent = _plan(tmp_path, "---\ntitle: An older plan\n---\n\n# Body\n", "s.md")
+    stubbed = _plan(tmp_path, "---\nstatus: stub\n---\n", "t.md")
+
+    assert plan_rung(silent) is Rung.READY
+    assert is_dispatchable(silent) is True
+    assert plan_rung(stubbed) is Rung.IDEA
+    assert is_dispatchable(stubbed) is False
 
 
 def test_AC3_ERR_the_two_policies_disagree_on_unreadable(tmp_path):

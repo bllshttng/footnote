@@ -190,10 +190,19 @@ def plan_rung(entry: object) -> Rung:
     if not readable:
         return Rung.UNREADABLE
     if raw is None:
-        # Readable, but says nothing about its own rung. Not UNREADABLE - we
-        # read it fine - and not READY either: a doc that never claims to be
-        # blueprinted must not be dispatched on that silence.
-        return Rung.IDEA
+        # Readable, but declares no status. NOT ``UNREADABLE`` - we read it
+        # fine, and AC4-ERR exists to keep those two apart - and deliberately
+        # ``READY``, which is what every surface derived for it before this
+        # module existed.
+        #
+        # Treating silence as pre-design is tempting and wrong. The defect this
+        # module fixes is ``status: stub``, a WORD in no vocabulary that
+        # therefore read as ``ready``; an ABSENT status is a different thing.
+        # Most plan docs in a mature vault predate the status vocabulary
+        # entirely, and `fno backlog intake <plan.md>` on one of them must still
+        # produce a workable node - demoting them all to `idea` would empty the
+        # board to fix a bug they never had.
+        return Rung.READY
 
     from fno.plan._status import canonical_status
 
