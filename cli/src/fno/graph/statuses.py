@@ -37,6 +37,40 @@ STATUS_MIGRATION: dict[str, str] = {"claimed": "in_progress"}
 _LEGACY_DEFER_PREFIX = "deferred:"
 
 
+def _rung_to_graph_status() -> dict:
+    """Plan rung -> derived graph status. Total over ``Rung`` by construction.
+
+    Written as a function so the ``ladder`` import stays lazy (``store`` imports
+    this module function-locally too), and materialized once on first call.
+
+    Two mappings deserve their reasons stated:
+
+    ``UNREADABLE -> ready`` keeps the node visible and selectable, matching the
+    fail-open half of the policy split. Dispatch refuses it separately via
+    ``is_dispatchable``, which is where failing closed belongs - encoding the
+    refusal in the persisted status would hide the node instead of parking it.
+
+    The plan-side terminals (``IN_PROGRESS``/``IN_REVIEW``/``DONE``/
+    ``SUPERSEDED``) also map to ``ready`` rather than to their same-named graph
+    statuses. Graph truth for those rungs is ``completed_at`` / ``pr_number`` /
+    ``superseded_by``, which the precedence block above already consumed; a plan
+    doc must not be able to mark its own node merged by stamping itself.
+    """
+    from fno.graph.ladder import Rung
+
+    return {
+        Rung.NONE: "idea",  # no plan doc at all
+        Rung.IDEA: "idea",  # a doc exists but is undesigned (decompose scaffold)
+        Rung.DESIGN: "design",
+        Rung.READY: "ready",
+        Rung.IN_PROGRESS: "ready",
+        Rung.IN_REVIEW: "ready",
+        Rung.DONE: "ready",
+        Rung.SUPERSEDED: "ready",
+        Rung.UNREADABLE: "ready",
+    }
+
+
 def is_stale_lock(task: dict) -> bool:
     """Check if a feature's claim has expired (>TTL hours)."""
     lock_time_str = task.get("claimed_at")
@@ -65,8 +99,9 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
     # Reconcile the locked_by/session_id mirror first so derivation keys on the
     # canonical field even when called directly on legacy (session_id-only)
     # entries. Lazy import: store imports this module function-locally too.
-    from fno.graph.ladder import is_design_stage
+    from fno.graph.ladder import plan_rung
     from fno.graph.store import _normalize_lock_fields
+    rung_to_status = _rung_to_graph_status()
     _normalize_lock_fields(entries)
     # One-shot priority vocabulary backfill: migrate any legacy
     # high/medium/low values to the new p0/p1/p2/p3 vocabulary the first
@@ -164,19 +199,12 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             e["status"] = "blocked"
         elif e.get("locked_by"):
             e["status"] = "in_progress"
-        elif not e.get("plan_path"):
-            # Treat both None and empty string as "no plan" - matches the
-            # falsy check in triage._read_plan_excerpt so a graph row that
-            # was assigned `plan_path: ""` somewhere doesn't slip into ready.
-            e["status"] = "idea"
-        elif is_design_stage(e):
-            # Linked doc exists but is still a design doc, not a blueprint.
-            # Persisted so every reader sees the rung (boards, `backlog get`,
-            # the Rust mux). Selection does NOT trust this value - it re-probes
-            # the file live - so a stale `design` can never block dispatch.
-            e["status"] = "design"
         else:
-            e["status"] = "ready"
+            # One rung read answers the rest. Persisted so every reader sees it
+            # (boards, `backlog get`, the Rust mux). Selection does NOT trust
+            # this value - it re-probes the file live - so a stale `design` can
+            # never block dispatch.
+            e["status"] = rung_to_status[plan_rung(e)]
 
     return entries
 

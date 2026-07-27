@@ -95,6 +95,21 @@ def _is_batched_member(e: dict) -> bool:
     return bool(e.get("batch"))
 
 
+def _needs_design(e: dict) -> bool:
+    """True when a node still needs a design pass before it can be blueprinted.
+
+    Reads the rung rather than `plan_path` presence. The presence check was a
+    PROXY for "not ready": with `stub` in no vocabulary, a linked scaffold
+    derived `ready`, so withholding the link was the only lever that could say
+    "undesigned". `plan_rung` says it directly, which means a child linked to an
+    `idea`-rung scaffold is correctly still a design candidate instead of being
+    skipped as done.
+    """
+    from fno.graph.ladder import Rung, plan_rung
+
+    return plan_rung(e) in (Rung.NONE, Rung.IDEA)
+
+
 def _container_ids(entries: list[dict]) -> set[str]:
     """Ids of nodes that are some other node's ``parent`` - i.e. epics/containers.
 
@@ -1708,8 +1723,8 @@ def cmd_decompose(
             }
             for cid in spec_ids:
                 child = by_id.get(cid)
-                if child is None or child.get("plan_path"):
-                    continue  # already-linked children are done; nothing to design
+                if child is None or not _needs_design(child):
+                    continue  # already designed; nothing for a /think to add
                 if slug_by_id.get(cid) in flagged_slugs:
                     # chain_blueprint: the worker must continue /think -> /blueprint
                     # -> link, else the flagged child stays designless/idea forever

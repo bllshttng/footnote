@@ -246,3 +246,84 @@ def test_deferred_wins_over_pr_number():
     )
     result = recompute_statuses([e])
     assert result[0]["status"] == "deferred"
+
+
+# ---------------------------------------------------------------------------
+# Rung-derived status (x-3571 wave 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "status,derived",
+    [("idea", "idea"), ("stub", "idea"), ("design", "design")],
+)
+def test_AC2_EDGE_a_linked_pre_design_plan_never_derives_ready(
+    tmp_path, status, derived
+):
+    """The defect this wave exists to fix - the `stub` rows fail against main.
+
+    `stub` was in no vocabulary: `is_design_stage` read False for it and the
+    final `else` assigned `ready`, so a node pointing at an unfilled decompose
+    scaffold was fully dispatchable. `idea` is the same rung under a word every
+    gate can see.
+    """
+    from fno.graph.ladder import is_dispatchable
+
+    plan = tmp_path / f"{status}.md"
+    plan.write_text(f"---\nstatus: {status}\n---\n\n# Child\n")
+    e = _entry("ab-predsgn1", plan_path=str(plan))
+
+    assert recompute_statuses([e])[0]["status"] == derived
+    assert derived != "ready"
+    assert is_dispatchable(e) is False
+
+
+def test_a_blueprinted_plan_still_derives_ready(tmp_path):
+    """The other half of AC5-HP: nothing changes for a stamped, readable plan."""
+    plan = tmp_path / "r.md"
+    plan.write_text("---\nstatus: ready\n---\n\n# Plan\n")
+    e = _entry("ab-ready002", plan_path=str(plan))
+    assert recompute_statuses([e])[0]["status"] == "ready"
+
+
+def test_unresolvable_plan_path_stays_ready_not_idea():
+    """A declared-but-unanchorable plan_path is "cannot tell", not "no plan".
+
+    `resolve_plan_probe` returns None for a repo-relative path on a node with
+    no `cwd`, the same value it returns when there is no plan_path at all.
+    Folding those together would demote every foreign relative-path node to
+    `idea` and hide it from the board.
+    """
+    from fno.graph.ladder import Rung, is_selectable, plan_rung
+
+    e = _entry("ab-norelat1", plan_path="plans/somewhere.md")  # no cwd anchor
+    assert plan_rung(e) is Rung.UNREADABLE
+    assert is_selectable(e) is True
+    assert recompute_statuses([e])[0]["status"] == "ready"
+
+
+def test_no_plan_path_at_all_still_derives_idea():
+    assert recompute_statuses([_entry("ab-noplan01", plan_path=None)])[0]["status"] == "idea"
+    assert recompute_statuses([_entry("ab-noplan02", plan_path="")])[0]["status"] == "idea"
+
+
+def test_rung_to_status_table_is_total_over_the_enum():
+    """A new rung must not fall through to a KeyError inside the graph lock."""
+    from fno.graph.ladder import Rung
+    from fno.graph.statuses import VALID_STATUSES, _rung_to_graph_status
+
+    table = _rung_to_graph_status()
+    assert set(table) == set(Rung)
+    assert set(table.values()) <= VALID_STATUSES
+
+
+def test_a_plan_cannot_mark_its_own_node_done(tmp_path):
+    """Graph truth for the terminals is completed_at/pr_number, not the doc.
+
+    A plan doc stamped `done` while its node has no completed_at must not
+    self-certify; it derives `ready` and the real gates decide.
+    """
+    plan = tmp_path / "d.md"
+    plan.write_text("---\nstatus: done\n---\n")
+    e = _entry("ab-selfcert", plan_path=str(plan), completed_at=None)
+    assert recompute_statuses([e])[0]["status"] == "ready"

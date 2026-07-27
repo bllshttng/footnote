@@ -172,9 +172,19 @@ def plan_rung(entry: object) -> Rung:
     """
     if not isinstance(entry, dict):
         return Rung.NONE
+    plan_path = entry.get("plan_path")
+    if not (isinstance(plan_path, str) and plan_path):
+        return Rung.NONE
+
     probe = resolve_plan_probe(entry)
     if not probe:
-        return Rung.NONE
+        # A plan_path IS declared, we just cannot resolve it to a file - a
+        # repo-relative path on a node with no `cwd` to anchor it. That is
+        # "cannot tell", not "nothing on disk": `resolve_plan_probe` refuses to
+        # guess precisely so the caller can fail open here. Collapsing it into
+        # NONE would be the same two-failure-modes-one-value mistake this
+        # resolver exists to undo, one function upstream.
+        return Rung.UNREADABLE
 
     raw, readable = _read_status_scalar(probe)
     if not readable:
