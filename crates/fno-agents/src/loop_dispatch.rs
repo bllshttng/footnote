@@ -200,6 +200,52 @@ pub fn which_binary(name: &str) -> Option<PathBuf> {
     None
 }
 
+// ── launch-time headroom picking (x-7d45) ─────────────────────────────────────
+
+/// The single env var a picked account contributes to the driver's environment.
+const PICKED_ENV_KEY: &str = "CLAUDE_CONFIG_DIR";
+
+/// Interpret a `fno providers pick --print-env` result.
+///
+/// Pure, so the advisory contract is testable without a live `fno`: exit 0 with
+/// a parseable `CLAUDE_CONFIG_DIR=<path>` line is the only success, and every
+/// other shape yields the reason to log. The picker's non-zero exits (3 = every
+/// launchable candidate exhausted, 4 = no launchable candidate) are ordinary
+/// answers here, not errors.
+fn interpret_pick(ok: bool, stdout: &str, stderr: &str) -> Result<String, String> {
+    if !ok {
+        let reason = stderr
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .next_back()
+            .unwrap_or("no reason given");
+        return Err(reason.to_string());
+    }
+    match stdout.trim().split_once('=') {
+        Some((k, v)) if k == PICKED_ENV_KEY && !v.is_empty() => Ok(v.to_string()),
+        _ => Err(format!("unparseable pick output: {:?}", stdout.trim())),
+    }
+}
+
+/// Ask `fno providers pick` which account the next iteration should launch on.
+///
+/// Shells the verb rather than reimplementing the predicate: headroom, combo
+/// order and launchability have exactly one implementation, and it is not this
+/// one. Every failure mode - a stale `fno`, an absent `fno`, a refusal - is an
+/// `Err` the caller logs and ignores, so the loop cannot be wedged by it.
+fn pick_account_dir() -> Result<String, String> {
+    let out = Command::new("fno")
+        .args(["providers", "pick", "--print-env"])
+        .output()
+        .map_err(|e| format!("could not run `fno providers pick`: {e}"))?;
+    interpret_pick(
+        out.status.success(),
+        &String::from_utf8_lossy(&out.stdout),
+        &String::from_utf8_lossy(&out.stderr),
+    )
+}
+
 // ── ShelloutDispatcher ────────────────────────────────────────────────────────
 
 /// A live session wrapping a bash `driver_invoke` child process.
@@ -300,6 +346,27 @@ impl Dispatcher for ShelloutDispatcher {
             cmd.env(k, v);
         }
 
+        // Launch-time headroom picking. A fresh process is a fresh credential
+        // read, so the iteration boundary already IS the pre-emptive handoff
+        // moment - no threshold, watcher, or new trigger machinery needed. This
+        // is the ONE call site: every driver's harness process is a child of the
+        // bash spawned below, so all of them inherit the pick, whereas wiring it
+        // into `driver_invoke` would mean one copy per driver lib. An
+        // operator-pinned CLAUDE_CONFIG_DIR in the static env always wins, and a
+        // refusal is advisory - the iteration proceeds on today's env.
+        if !self.env.iter().any(|(k, _)| k == PICKED_ENV_KEY) {
+            let iter = ctx.iteration;
+            match pick_account_dir() {
+                Ok(dir) => {
+                    eprintln!("loop: iteration {iter} account picked -> {dir}");
+                    cmd.env(PICKED_ENV_KEY, dir);
+                }
+                Err(reason) => {
+                    eprintln!("loop: iteration {iter} account not picked ({reason})");
+                }
+            }
+        }
+
         let child = cmd
             .spawn()
             .map_err(|e| LoopError::Dispatch(format!("spawn bash driver_invoke: {e}")))?;
@@ -318,7 +385,64 @@ impl Dispatcher for ShelloutDispatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_driver_binary;
+    use super::{interpret_pick, resolve_driver_binary};
+
+    #[test]
+    fn a_picked_account_yields_its_config_dir() {
+        assert_eq!(
+            interpret_pick(true, "CLAUDE_CONFIG_DIR=/Users/x/.claude-alt\n", ""),
+            Ok("/Users/x/.claude-alt".to_string())
+        );
+    }
+
+    // AC13-ERR: a refusing picker is an answer, not a wedge. The reason reaches
+    // the log so an operator can tell "exhausted" from "not set up".
+    #[test]
+    fn a_refusal_surfaces_its_reason_instead_of_erroring_out() {
+        let stderr = "  readyrule: exhausted\npick: every launchable candidate is exhausted\n";
+        assert_eq!(
+            interpret_pick(false, "", stderr),
+            Err("pick: every launchable candidate is exhausted".to_string())
+        );
+        assert!(interpret_pick(false, "", "").is_err());
+    }
+
+    #[test]
+    fn unparseable_output_is_declined_rather_than_guessed() {
+        // A drifted verb must not have its stdout half-read into an env var.
+        assert!(interpret_pick(true, "readyrule\n", "").is_err());
+        assert!(interpret_pick(true, "CLAUDE_CONFIG_DIR=\n", "").is_err());
+        assert!(interpret_pick(true, "OTHER=/tmp\n", "").is_err());
+    }
+
+    // AC12-CON: one call site, all harnesses. A picker call inside any driver
+    // lib would be a second copy of one decision - the shape this wiring exists
+    // to avoid.
+    #[test]
+    fn no_driver_lib_calls_the_picker_itself() {
+        let lib_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/lib");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&lib_dir).expect("scripts/lib is readable") {
+            let path = entry.expect("dir entry").path();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            if !name.starts_with("driver-") || !name.ends_with(".sh") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("driver lib is readable");
+            assert!(
+                !body.contains("providers pick"),
+                "{name} calls the picker itself; the loop dispatcher is the one call site"
+            );
+            checked += 1;
+        }
+        // Positive control: a glob that stops matching would otherwise pass
+        // vacuously and report coverage it does not have.
+        assert!(checked >= 4, "expected the driver libs, scanned {checked}");
+    }
 
     // AC1-EDGE: opencode resolves to the `opencode` binary (loop-wrapper path,
     // x-6007). The loop-wrapper drivers have fixed binary names (no env/alias
