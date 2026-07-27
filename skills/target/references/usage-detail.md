@@ -79,7 +79,7 @@ Common overrides:
 | `--no-docs` | Skip docs (already off in S) |
 | `--no-external` | Skip external review (already off in S) |
 | `adversarial` (positional) | Add adversarial challenge (already on in L) |
-| `combo <name>` (positional, 2 tokens) | Route via a provider combo (Plan B, ab-0e5a921e). Validates the combo via `fno providers combos list`; sets `TARGET_COMBO=<name>` in the env so spawned loop and target subprocesses inherit the routing. Resolution priority (highest first): per-agent pin > skill modifier > env > settings active_combo > active provider. |
+| `combo <name>` (positional, 2 tokens) | Route via a provider combo (Plan B, ab-0e5a921e). Validates the combo via `fno config accounts combos list`; sets `TARGET_COMBO=<name>` in the env so spawned loop and target subprocesses inherit the routing. Resolution priority (highest first): per-agent pin > skill modifier > env > settings active_combo > active provider. |
 | `--no-browser` | Skip browser testing (already off in S, M) |
 | `--no-ship` | Skip PR creation (work stays local) |
 

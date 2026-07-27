@@ -160,10 +160,27 @@ def mutable_accounts_block(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(block, dict):
         # Pop, never copy: leaving the old key behind would keep the file
         # readable under both names forever and duplicate every subkey.
-        legacy = data.pop("providers", None)
-        if not isinstance(legacy, dict):
-            config = data.get("config")
-            legacy = config.pop("providers", None) if isinstance(config, dict) else None
+        #
+        # All FOUR locations the reader accepts, in its order. Checking only the
+        # three non-canonical-nested ones let a wrapped `config.accounts` file be
+        # read but not mutated: this installed a fresh empty top-level block, the
+        # caller's edit landed there, and `_flatten_config` then merged the
+        # untouched nested block over it - so a combo write or failover flip
+        # reported success against a file that never changed.
+        legacy = None
+        config = data.get("config")
+        config = config if isinstance(config, dict) else None
+        for source, key in (
+            (config, "accounts"),
+            (data, "providers"),
+            (config, "providers"),
+        ):
+            if source is None:
+                continue
+            found = source.pop(key, None)
+            if isinstance(found, dict):
+                legacy = found
+                break
         block = legacy if isinstance(legacy, dict) else {}
     data["accounts"] = block
     return block

@@ -1403,3 +1403,53 @@ class TestLoadAgents:
 
         assert set(result.agents) == {"reviewer"}
         assert result.agents["reviewer"].provider == "claude-primary"
+
+
+class TestMutableAccountsBlockShapes:
+    """The write helper must reach the block in every shape the READER accepts.
+
+    `_extract_accounts_block` accepts four: {flat,wrapped} x {accounts,providers}.
+    A writer that handles fewer does not fail loudly - it installs a fresh empty
+    top-level block, the caller's edit lands there, and `_flatten_config` then
+    merges the untouched original over it. The combo write or failover flip
+    reports success against a file that never changed.
+    """
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            pytest.param({"accounts": {"active": "a"}}, id="flat-canonical"),
+            pytest.param({"config": {"accounts": {"active": "a"}}}, id="wrapped-canonical"),
+            pytest.param({"providers": {"active": "a"}}, id="flat-legacy"),
+            pytest.param({"config": {"providers": {"active": "a"}}}, id="wrapped-legacy"),
+            pytest.param({"target": {"x": 1}}, id="absent"),
+        ],
+    )
+    def test_mutation_survives_the_flatten(self, raw):
+        from fno.adapters.providers.loader import (
+            _flatten_config,
+            mutable_accounts_block,
+        )
+
+        mutable_accounts_block(raw)["active_combo"] = "written"
+        flat = _flatten_config(raw)
+
+        assert flat["accounts"]["active_combo"] == "written"
+        # Moved, not copied: no pre-rename block survives to split the state.
+        assert "providers" not in flat
+        assert "providers" not in raw.get("config", {})
+
+    def test_preexisting_keys_are_preserved_not_replaced(self):
+        """The helper must adopt the existing block, never install a fresh one."""
+        from fno.adapters.providers.loader import (
+            _flatten_config,
+            mutable_accounts_block,
+        )
+
+        raw = {"config": {"accounts": {"active": "a", "records": [{"id": "keep"}]}}}
+        mutable_accounts_block(raw)["active_combo"] = "written"
+        flat = _flatten_config(raw)
+
+        assert flat["accounts"]["active"] == "a"
+        assert flat["accounts"]["records"] == [{"id": "keep"}]
+        assert flat["accounts"]["active_combo"] == "written"
