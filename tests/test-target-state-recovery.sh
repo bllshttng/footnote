@@ -24,9 +24,13 @@ unset CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID CODEX_SESSION_ID GEMINI_SESSION_ID 
 # Isolate HOME for the same reason: gemini_agents_opted_in falls back to
 # $HOME/.fno/config.toml, so a developer who opted in globally would get a
 # green gemini case no matter what the fixture says. With the env cleared
-# above, the fixture is now genuinely the only opt-in source; it reaches
-# config_flag_is_true via the legacy settings.yaml -> config.toml migration in
-# fno.config.writer.
+# above, the fixture is now genuinely the only opt-in source; the gemini case
+# seeds .fno/config.toml directly (the format config_flag_is_true reads), not
+# the legacy settings.yaml. Writing only settings.yaml made the case depend on
+# the settings.yaml -> config.toml migration firing as an init SIDE EFFECT,
+# which does not happen on this direct-script path (init shells no fno config
+# read), so under an isolated HOME the flag read false and the case flipped to
+# provider_mode: stable_fallback (codex P2 on PR #630).
 export HOME="$TMP_DIR/fake-home"
 mkdir -p "$HOME/.fno"
 
@@ -63,9 +67,8 @@ run_recovery_case "partial-frontmatter" $'---\nstatus: IN_PROGRESS\ncurrent_phas
 
 GEMINI_CASE_DIR="$TMP_DIR/gemini-upgrade"
 mkdir -p "$GEMINI_CASE_DIR/.fno" "$GEMINI_CASE_DIR/.gemini/agents"
-cat > "$GEMINI_CASE_DIR/.fno/settings.yaml" <<'EOF'
-config:
-  gemini_experimental_agents: true
+cat > "$GEMINI_CASE_DIR/.fno/config.toml" <<'EOF'
+gemini_experimental_agents = true
 EOF
 
 for agent in archer.md reviewer.md roadmap-generator.md verifier.md; do
