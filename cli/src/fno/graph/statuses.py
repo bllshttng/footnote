@@ -208,14 +208,18 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             # to persisted `ready` (graph/cli.py `allowed`), so a row whose doc
             # has since dropped a rung is caught, while a row persisted
             # `design`/`idea` whose doc has since been PROMOTED is filtered out
-            # before any live read. That row re-arms on the next recompute -
-            # any `locked_mutate_graph`, and the `reconcile` that auto-fires at
-            # SessionStart - not on the next selection pass.
+            # before any live read.
             #
-            # Stated plainly because the previous wording here ("Selection does
-            # NOT trust this value") claimed a symmetry that does not exist, and
-            # a comment that overstates a guard is the failure this module was
-            # written to remove.
+            # Such a row re-arms only when something calls `locked_mutate_graph`
+            # - i.e. any unrelated `fno backlog update`. NOT `reconcile`, which
+            # reads via `read_graph` and mutates only nodes whose PR has merged,
+            # so it never touches a stale rung. Until then the node is invisible
+            # to `backlog next`.
+            #
+            # Spelled out because the previous wording here ("Selection does NOT
+            # trust this value - it re-probes the file live") claimed a symmetry
+            # that does not exist, and a comment that overstates a guard is the
+            # same defect this module was written to remove.
             e["status"] = rung_to_status[plan_rung(e)]
 
     return entries
