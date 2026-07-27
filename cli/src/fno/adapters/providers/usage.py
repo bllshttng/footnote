@@ -92,7 +92,7 @@ class UsageSnapshot:
 
     ``windows`` may be empty (probe reached the source but it reported no
     windows); an empty tuple reads as UNKNOWN headroom, never OK. ``source``
-    records how the reading was obtained for the ``fno providers usage``
+    records how the reading was obtained for the ``fno config accounts usage``
     display and for debugging drift.
     """
 

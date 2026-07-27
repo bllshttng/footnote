@@ -710,7 +710,7 @@ def _switch_locked(
     except OSError as exc:
         raise ManagedStoreError(
             f"no credential snapshot for '{target.id}' at {stored} - run "
-            f"`fno providers register {target.id}` first"
+            f"`fno config accounts register {target.id}` first"
         ) from exc
     if not target_blob.strip():
         raise ManagedStoreError(f"credential snapshot for '{target.id}' is empty; refusing to materialize")

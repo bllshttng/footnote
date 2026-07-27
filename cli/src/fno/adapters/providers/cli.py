@@ -1,4 +1,4 @@
-"""Typer sub-app for fno providers commands.
+"""Typer sub-app for fno config accounts commands.
 
 Phase 02 of the provider rotation substrate (ab-256f6b6e).
 Provides: list, show, add, test, use, remove.
@@ -17,7 +17,11 @@ import typer
 
 from fno.adapters.providers import managed
 from fno.adapters.providers.dispatch import dispatch_env
-from fno.adapters.providers.loader import load_providers, save_providers
+from fno.adapters.providers.loader import (
+    load_providers,
+    mutable_accounts_block,
+    save_providers,
+)
 from fno.adapters.providers.model import (
     ProviderConfigError,
     ProviderNotFoundError,
@@ -117,7 +121,7 @@ def list_providers(
 
     if not config.records:
         typer.echo(
-            "No providers configured. Run `fno providers add` to add one."
+            "No accounts configured. Run `fno config accounts add` to add one."
         )
         return
     for record in config.records:
@@ -208,7 +212,7 @@ def usage_providers(
         return
 
     if not config.records:
-        typer.echo("No providers configured.")
+        typer.echo("No accounts configured.")
         return
     for record in config.records:
         entry = out[record.id]
@@ -788,7 +792,7 @@ def use_provider(
         if record.auth == "managed":
             typer.echo(
                 f"warning: slot switched to '{provider_id}' but saving the active "
-                f"routing pointer failed ({exc}); re-run `fno providers use "
+                f"routing pointer failed ({exc}); re-run `fno config accounts use "
                 f"{provider_id}` to persist it.",
                 err=True,
             )
@@ -899,7 +903,7 @@ def benchmarks_show() -> None:
     snapshot = load_snapshot()
     if snapshot is None:
         typer.echo(
-            "no benchmark snapshot; run `fno providers benchmarks refresh`",
+            "no benchmark snapshot; run `fno config accounts benchmarks refresh`",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -907,7 +911,7 @@ def benchmarks_show() -> None:
         age = staleness_seconds(snapshot) or 0
         typer.echo(
             f"WARNING: benchmark snapshot is {int(age // 86400)} days old (>14); "
-            "run `fno providers benchmarks refresh`",
+            "run `fno config accounts benchmarks refresh`",
             err=True,
         )
     typer.echo(f"source: {snapshot.get('source')}  fetched_at: {snapshot.get('fetched_at')}")
@@ -945,10 +949,7 @@ def combos_add(
     scope: str = typer.Option("project", "--scope", help="project | global"),
 ) -> None:
     """Add a new combo. Validates each provider exists; refuses if combo already exists."""
-    from fno.adapters.providers.loader import (
-        atomic_mutate_settings,
-        mutable_accounts_block,
-    )
+    from fno.adapters.providers.loader import atomic_mutate_settings
     from fno.adapters.providers.rotation import Combo
 
     providers_list = [p.strip() for p in providers_csv.split(",") if p.strip()]
@@ -982,8 +983,8 @@ def combos_add(
     target = _combos_settings_path(scope)
 
     def mutator(data: dict) -> dict:
-        providers_section = mutable_accounts_block(data)
-        combos_section = providers_section.setdefault("combos", {})
+        accounts_section = mutable_accounts_block(data)
+        combos_section = accounts_section.setdefault("combos", {})
         if name in combos_section:
             raise ValueError(
                 f"combo {name!r} already exists in {scope} settings; "
@@ -1033,7 +1034,7 @@ def combos_list(
             typer.echo("[]")
         else:
             typer.echo(
-                "No combos configured. Run `fno providers combos add` to add one."
+                "No combos configured. Run `fno config accounts combos add` to add one."
             )
         return
 
@@ -1073,23 +1074,20 @@ def combos_remove(
     scope: str = typer.Option("project", "--scope", help="project | global"),
 ) -> None:
     """Remove a combo. If the combo is the active_combo, also clears that field."""
-    from fno.adapters.providers.loader import (
-        atomic_mutate_settings,
-        mutable_accounts_block,
-    )
+    from fno.adapters.providers.loader import atomic_mutate_settings
 
     target = _combos_settings_path(scope)
     cleared_active = False
 
     def mutator(data: dict) -> dict:
         nonlocal cleared_active
-        providers_section = data.get("providers", {})
-        combos_section = providers_section.get("combos", {})
+        accounts_section = mutable_accounts_block(data)
+        combos_section = accounts_section.get("combos", {})
         if name not in combos_section:
             raise ValueError(f"combo {name!r} not found in {scope} settings")
         del combos_section[name]
-        if providers_section.get("active_combo") == name:
-            providers_section["active_combo"] = None
+        if accounts_section.get("active_combo") == name:
+            accounts_section["active_combo"] = None
             cleared_active = True
         return data
 
@@ -1116,7 +1114,7 @@ def combos_test(
 
     Config-only by design: does NOT issue API calls (smoke-testing every
     member multiplies cost). For an active liveness probe, run
-    `fno providers test <id> --smoke` per member.
+    `fno config accounts test <id> --smoke` per member.
     """
     from fno.adapters.providers.loader import load_combos
     from fno.adapters.providers.runtime_state import read_state
@@ -1188,8 +1186,8 @@ def combos_use(
     target = _combos_settings_path(scope)
 
     def mutator(data: dict) -> dict:
-        providers_section = mutable_accounts_block(data)
-        providers_section["active_combo"] = name
+        accounts_section = mutable_accounts_block(data)
+        accounts_section["active_combo"] = name
         return data
 
     try:
@@ -1227,10 +1225,7 @@ def combos_update(
     omitted, so a pure reorder (the UI's common case) never silently rewrites a
     round_robin combo to fallback/1.
     """
-    from fno.adapters.providers.loader import (
-        atomic_mutate_settings,
-        mutable_accounts_block,
-    )
+    from fno.adapters.providers.loader import atomic_mutate_settings
     from fno.adapters.providers.rotation import Combo
 
     providers_list = [p.strip() for p in providers_csv.split(",") if p.strip()]
@@ -1252,8 +1247,8 @@ def combos_update(
     applied: dict[str, object] = {}
 
     def mutator(data: dict) -> dict:
-        providers_section = mutable_accounts_block(data)
-        combos_section = providers_section.setdefault("combos", {})
+        accounts_section = mutable_accounts_block(data)
+        combos_section = accounts_section.setdefault("combos", {})
         existing = combos_section.get(name)
         if existing is None:
             raise ValueError(

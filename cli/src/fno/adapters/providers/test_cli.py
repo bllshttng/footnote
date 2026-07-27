@@ -102,10 +102,13 @@ def _two_record_config(active: str = "claude-primary") -> dict:
 
 class TestListEmpty:
     def test_list_empty_state_message(self, tmp_path: Path):
-        """AC02.3-CLI: fno providers list on empty config prints helpful message; exit 0."""
+        """AC02.3-CLI: accounts list on empty config prints helpful message; exit 0."""
         result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
         assert result.exit_code == 0
-        assert "No providers configured" in result.output
+        assert "No accounts configured" in result.output
+        # The remedy it names must be a verb that still exists (AC5 removed
+        # `fno providers`), or the empty state teaches a command that exits 2.
+        assert "fno config accounts add" in result.output
 
     def test_list_empty_state_exit_zero(self, tmp_path: Path):
         """AC02.3-CLI: exit code is 0 on empty state."""
@@ -701,7 +704,7 @@ class TestCombosAdd:
         assert "my-stack" in combos
         assert combos["my-stack"]["strategy"] == "round_robin"
         assert combos["my-stack"]["sticky_limit"] == 3
-        assert combos["my-stack"]["accounts"] == ["claude-primary", "gemini-backup"]
+        assert combos["my-stack"]["providers"] == ["claude-primary", "gemini-backup"]
 
     def test_add_unknown_provider_id_fails_without_mutation(
         self, combos_cli_env: Path
@@ -958,7 +961,7 @@ class TestCombosUpdate:
         data = tomllib.loads(
             (combos_cli_env / ".fno" / "config.toml").read_text()
         )
-        assert data["accounts"]["combos"]["main"]["accounts"] == [
+        assert data["accounts"]["combos"]["main"]["providers"] == [
             "gemini-backup", "claude-primary",
         ]
 
@@ -1014,7 +1017,7 @@ class TestCombosUpdate:
         )["accounts"]["combos"]["main"]
         assert combo["strategy"] == "round_robin"  # preserved
         assert combo["sticky_limit"] == 3           # preserved
-        assert combo["accounts"] == ["gemini-backup", "claude-primary"]
+        assert combo["providers"] == ["gemini-backup", "claude-primary"]
 
     def test_update_can_change_strategy(self, combos_cli_env: Path):
         """--strategy on update replaces the stored strategy."""

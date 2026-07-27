@@ -174,7 +174,7 @@ def resolve_account_overlay(
     if record.auth == "oauth_dir":
         if not verify_staged(record, root=providers_root):
             raise AccountResolutionError(
-                f"account {account_id!r} is not staged; run `fno providers "
+                f"account {account_id!r} is not staged; run `fno config accounts "
                 "register`/stage before spawning against it"
             )
         overlay = _env_for_oauth(record, providers_root)
@@ -223,7 +223,7 @@ def resolve_account_overlay(
             f"config_dir (e.g. --config-dir ~/.claude-{account_id}, a full "
             "second login) so the worker gets CLAUDE_CONFIG_DIR. The setup-token "
             "env lane bills the wrong account and is deliberately not used.\n"
-            f"  or make it active:  fno providers use {account_id}  (daemon-wide)"
+            f"  or make it active:  fno config accounts use {account_id}  (daemon-wide)"
         )
 
     # api_key claude record: resolve its env refs (e.g. a routed ANTHROPIC_*).

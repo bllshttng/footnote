@@ -74,7 +74,10 @@ class TestStormCap:
         assert ctrl.snapshot_state().swaps_this_phase == 1
         # Settings.yaml mutated
         loaded = tomllib.loads(settings_path.read_text())
-        assert loaded["providers"]["active"] == "bar"
+        # The seed writes the pre-rename [providers] block; the active-flip goes
+        # through mutable_accounts_block, so the write also migrates the file.
+        assert loaded["accounts"]["active"] == "bar"
+        assert "providers" not in loaded
 
     def test_hp2_multiple_swaps_within_budget(self, tmp_path: Path):
         from fno.adapters.providers.failover import (
