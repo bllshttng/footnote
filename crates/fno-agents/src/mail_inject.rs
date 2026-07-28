@@ -67,11 +67,11 @@ pub enum MailInjectProvider {
 
 /// Axis-rename tombstone (x-bab1): the harness axis was `--provider`, now
 /// `--harness/-H`. A model vendor routes only at spawn. Mirrors the Python
-/// `_flag_aliases.PROVIDER_AXIS_TOMBSTONE` (kept in lockstep). Removed at 0.4.0.
+/// `_flag_aliases.PROVIDER_AXIS_TOMBSTONE` (kept in lockstep).
 const PROVIDER_AXIS_TOMBSTONE: &str = concat!(
     "--provider was split at the axis rename: the CLI binary is --harness/-H; ",
     "a model vendor is only routable at spawn ",
-    "(`fno agents spawn --provider <vendor> --model <m>`). Removed at 0.4.0.",
+    "(`fno agents spawn --provider <vendor> --model <m>`).",
 );
 
 /// Parsed `mail-inject` flags. The turn TEXT is read from STDIN (sidesteps the

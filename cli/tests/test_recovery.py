@@ -602,10 +602,10 @@ class TestDefaultFailover:
 
         class _Snap:
             # Read AFTER the swap, so it is the swapped-to record: .id is the new
-            # active id, .cli its kind, .auth its auth strategy (US3: "managed"
+            # active id, .harness its kind, .auth its auth strategy (US3: "managed"
             # needs a credential materialization into the shared slot pre-redispatch).
             id = "claude-secondary"
-            cli = new_cli
+            harness = new_cli
         _Snap.auth = auth
 
         monkeypatch.setattr(fo_mod, "FailoverController", _Ctrl)
@@ -821,7 +821,7 @@ class TestMaterializeManagedSwitch:
 
     def _managed_record(self):
         from fno.adapters.providers.model import ProviderRecord
-        return ProviderRecord(id="claude-secondary", name="B", cli="claude", auth="managed")
+        return ProviderRecord(id="claude-secondary", name="B", harness="claude", auth="managed")
 
     def test_auto_switch_off_returns_false_without_touching_slot(self, monkeypatch):
         from fno.adapters.providers import loader as loader_mod
@@ -1301,7 +1301,7 @@ class TestReviveBgThread:
 
     def _snap(self, auth="oauth_dir"):
         from types import SimpleNamespace
-        return SimpleNamespace(id="claude-secondary", cli="claude", auth=auth)
+        return SimpleNamespace(id="claude-secondary", harness="claude", auth=auth)
 
     def test_no_uuid_falls_through_to_nudge(self, monkeypatch, tmp_path):
         # No resolvable session id: can't resume or build a command -> bounded nudge.

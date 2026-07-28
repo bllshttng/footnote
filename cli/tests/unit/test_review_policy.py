@@ -355,8 +355,8 @@ def test_load_implementer_identity_no_session_or_file(tmp_path) -> None:
     )
 
 
-def _rec(rid: str, cli: str):
-    return SimpleNamespace(id=rid, cli=cli)
+def _rec(rid: str, harness: str):
+    return SimpleNamespace(id=rid, harness=harness)
 
 
 def test_exhausted_provider_kinds_all_records_exhausted() -> None:

@@ -268,10 +268,16 @@ def scaffold_separate_plan(
 
     Seeded from the group's wave range, a transcribed ``## Why (from epic)``
     (US4), and stub markers for the concrete change/file/verify detail the
-    builder fills inline. Born ``status: stub`` (NOT ``ready``, x-edf7 US1): the
+    builder fills inline. Born ``status: idea`` (NOT ``ready``, x-edf7 US1): the
     validator refuses to link a child still carrying any :data:`STUB_MARKERS`, so
     a fresh-context worker never dispatches against an unfilled plan. The epic doc
     remains the design authority; this child carries its own execution plan.
+
+    ``idea`` replaced the earlier ``stub`` spelling: ``stub`` was in no status
+    vocabulary, so every readiness gate classified a linked scaffold as ``ready``
+    and the validator was the only thing standing between it and a dispatcher.
+    ``stub`` still parses via ``STATUS_ALIASES``, so scaffolds already on disk
+    need no migration.
     """
     # Escape so a title containing a double quote can't emit invalid YAML.
     yaml_title = group["title"].replace("\\", "\\\\").replace('"', '\\"')
@@ -279,7 +285,7 @@ def scaffold_separate_plan(
     return (
         f'---\n'
         f'title: "{yaml_title}"\n'
-        f'status: stub\n'
+        f'status: idea\n'
         f'kind: quick-plan\n'
         f'parent_epic: {epic_id}\n'
         f'source_doc: {source_doc}\n'

@@ -440,11 +440,24 @@ fn cfg_table(content: &str) -> Option<toml::Table> {
     content.parse::<toml::Table>().ok()
 }
 
-/// Global active provider: flat `providers.active`.
+/// The accounts block: canonical `accounts`, else the pre-rename `providers`.
+///
+/// The Rust side has its own config readers that never pass through the Python
+/// loader's `_extract_accounts_block`, so the rename needs the fallback here
+/// too. It matters more here than it looks: every accessor below is an Option
+/// chain, so reading only one spelling degrades to `None` SILENTLY - a config
+/// in the other spelling would read as "no accounts configured" rather than
+/// as an error.
+fn accounts_block(table: &toml::Table) -> Option<&toml::Table> {
+    table
+        .get("accounts")
+        .or_else(|| table.get("providers"))?
+        .as_table()
+}
+
+/// Global active account: flat `accounts.active` (pre-rename `providers.active`).
 fn parse_global_active(content: &str) -> Option<String> {
-    cfg_table(content)?
-        .get("providers")?
-        .as_table()?
+    accounts_block(&cfg_table(content)?)?
         .get("active")?
         .as_str()
         .map(str::to_string)
@@ -462,24 +475,26 @@ fn parse_agent_provider(content: &str, agent: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `cli` for the record whose `id == pid`, from a flat config.toml.
+/// `harness` for the record whose `id == pid`, from a flat config.toml.
 ///
-/// save_providers() serializes `providers.records` from a Python list, so it is
-/// a TOML array-of-tables (`[[providers.records]]` with an `id` field), NOT a
-/// table keyed by provider id. Reading it as a keyed table made `as_table()`
-/// return None for every real config, so codex/gemini providers went undetected
+/// save_providers() serializes `accounts.records` from a Python list, so it is
+/// a TOML array-of-tables (`[[accounts.records]]` with an `id` field), NOT a
+/// table keyed by account id. Reading it as a keyed table made `as_table()`
+/// return None for every real config, so codex/gemini accounts went undetected
 /// and the non-Claude evidence path was skipped (codex P2).
+///
+/// Both the block and the field were renamed, so both need the fallback: a
+/// config can carry `[[providers.records]]` with `cli` until its first write.
 fn parse_provider_cli(content: &str, pid: &str) -> Option<String> {
     let table = cfg_table(content)?;
-    let records = table
-        .get("providers")?
-        .as_table()?
-        .get("records")?
-        .as_array()?;
+    let records = accounts_block(&table)?.get("records")?.as_array()?;
     records.iter().find_map(|rec| {
         let t = rec.as_table()?;
         if t.get("id").and_then(|v| v.as_str()) == Some(pid) {
-            t.get("cli").and_then(|v| v.as_str()).map(str::to_string)
+            t.get("harness")
+                .or_else(|| t.get("cli"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
         } else {
             None
         }
@@ -1289,6 +1304,23 @@ mod tests {
             Some("codex-prov")
         );
         assert_eq!(parse_agent_provider(cfg, "other"), None);
+        assert_eq!(
+            parse_provider_cli(cfg, "codex-prov").as_deref(),
+            Some("codex")
+        );
+        assert_eq!(parse_provider_cli(cfg, "nonexistent"), None);
+    }
+
+    #[test]
+    fn canonical_accounts_block_and_harness_field_resolve_identically() {
+        // Same fixture as the two tests above in the post-rename spelling. Both
+        // the block (`providers` -> `accounts`) and the record field (`cli` ->
+        // `harness`) moved, and this reader parses the config.toml directly
+        // rather than through the Python loader, so it needs its own fallback.
+        // Every accessor here is an Option chain: an unknown spelling reads as
+        // None, which is indistinguishable from "not configured".
+        let cfg = "[agents.reviewer]\nprovider = \"codex-prov\"\n\n[accounts]\nactive = \"claude-main\"\n\n[[accounts.records]]\nid = \"codex-prov\"\nharness = \"codex\"\n";
+        assert_eq!(parse_global_active(cfg).as_deref(), Some("claude-main"));
         assert_eq!(
             parse_provider_cli(cfg, "codex-prov").as_deref(),
             Some("codex")

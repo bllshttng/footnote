@@ -8,14 +8,32 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 _RECOGNIZED_API_KEY_NAMES = frozenset(
     {"ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"}
 )
 
-_CLI_LITERAL = Literal["claude", "gemini", "codex", "openclaw", "hermes"]
+# The harness axis: the CLI binary an account's credential belongs to. Distinct
+# from the *provider* axis (the model vendor: anthropic, openai, zai, moonshot,
+# ...), which lives in config.model_routing.providers and routes at spawn. The
+# value sets overlap - `opencode` is a member of both - so nothing may infer the
+# axis from the token; only the position says which axis is meant.
+#
+# `gemini` stays admissible even though harness_map refuses it at dispatch (agy
+# is its successor): dropping it here would turn an existing record into a load
+# failure instead of the actionable dispatch-time refusal it gets today.
+_HARNESS_LITERAL = Literal[
+    "claude", "codex", "opencode", "agy", "trae", "openclaw", "hermes", "gemini"
+]
 _AUTH_LITERAL = Literal["oauth_dir", "api_key", "managed"]
 
 _ID_PATTERN = r"^[a-z][a-z0-9-]{0,63}$"
@@ -53,14 +71,27 @@ class AgentProviderBinding(BaseModel):
 
 
 class ProviderRecord(BaseModel):
-    """A single provider entry in config.providers.records."""
+    """A single account entry in config.accounts.records.
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    One record is one working *account* of one harness: what distinguishes two
+    records is which identity gets billed, not which vendor answers. Both live
+    records are `harness=claude` and differ only by account, which is exactly the
+    distinction the old `config.providers` name hid.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid", str_strip_whitespace=True, populate_by_name=True
+    )
 
     # Required fields
     id: str = Field(..., pattern=_ID_PATTERN)
     name: str
-    cli: _CLI_LITERAL
+    # Renamed from `cli`, which named the harness axis under a binary-ish word.
+    # The `cli` alias keeps a pre-rename config.toml loading; `extra="forbid"`
+    # means without it an unmigrated record would be rejected outright.
+    harness: _HARNESS_LITERAL = Field(
+        ..., validation_alias=AliasChoices("harness", "cli")
+    )
     auth: _AUTH_LITERAL
     priority: int = Field(default=100, ge=0)
 

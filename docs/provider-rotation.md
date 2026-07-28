@@ -1,6 +1,6 @@
 # Provider Rotation Substrate
 
-Reference doc for `fno providers` (Spec 1 of 4 in the provider rotation plan).
+Reference doc for `fno config accounts` (Spec 1 of 4 in the provider rotation plan).
 
 This substrate manages provider records, credential staging, and dispatch-env
 construction. It does NOT automate rotation, failover, or mid-session swapping.
@@ -8,14 +8,32 @@ See [What this substrate does NOT do](#what-this-substrate-does-not-do).
 
 ---
 
+## The four axes
+
+Four different things used to share the word `provider`.
+They are orthogonal, and no code path may infer which one is meant from a value: `opencode` is a legal member of both the harness set and the provider set, so only position disambiguates.
+
+| Axis | Values | Where it lives |
+|------|--------|----------------|
+| **harness** | `claude`, `codex`, `opencode`, `agy`, `trae`, `openclaw`, `hermes` | `--harness/-H`; each record's `harness` field |
+| **provider** | `anthropic`, `openai`, `zai`, `moonshot`, ... | `--provider/-P`, `--route`; `config.model_routing.providers` |
+| **model** | per-provider model names | `--model/-m` |
+| **account** | `readyrule`, `makers`, ... | `config.accounts.records`; `fno config accounts` |
+
+`provider` is a live axis naming the model **vendor**, and it keeps the word.
+What moved off it is the **account** axis: named, working instances of a harness, which is what this document's records are.
+Two accounts can name the same harness and the same vendor and still be different billing identities, which is exactly the distinction the old name hid.
+
 ## Concepts
 
-**Provider record** - A named configuration entry in `config.toml` describing
-one CLI account: which binary to use (`claude`, `gemini`, `codex`, etc.), how
-to authenticate (`oauth_dir` or `api_key`), and where credentials live on disk.
+**Account record** - A named configuration entry in `config.toml` describing
+one CLI account: which harness binary to use (`claude`, `codex`, etc.), how
+to authenticate (`oauth_dir`, `api_key`, or `managed`), and where credentials
+live on disk. The defining property is that the CLI tool *works*, not that
+there is a login per se.
 
 **Account** - The human-meaningful label for a subscription or API key
-(`account_id`). Defaults to the provider `id` when not set.
+(`account_id`). Defaults to the record `id` when not set.
 
 **Staged provider** - A provider whose credentials have been materialised into
 `~/.fno/providers/<id>/` as a directory or symlink. Staging is required
@@ -29,16 +47,16 @@ at the correct credentials directory.
 
 ## Schema reference
 
-Provider records live under the top-level `[providers]` table in `config.toml`.
+Account records live under the top-level `[accounts]` table in `config.toml`. A pre-rename `[providers]` table is still read; the next account write migrates the file.
 
 ```toml
-[providers]
+[accounts]
 active = "claude-max-secondary"     # id of the active provider (optional)
 
-[[providers.records]]
+[[accounts.records]]
 id = "claude-max-secondary"
 name = "Secondary Claude Max"
-cli = "claude"
+harness = "claude"
 auth = "oauth_dir"
 credentials_source = "/Users/me/.claude.secondary"
 priority = 100
@@ -53,7 +71,7 @@ description = "Personal secondary subscription"
 |---|---|---|---|---|
 | `id` | string | yes | - | Unique identifier. Pattern: `[a-z][a-z0-9-]{0,63}`. |
 | `name` | string | yes | defaults to `id` | Human-readable label. |
-| `cli` | enum | yes | - | `claude` \| `gemini` \| `codex` \| `openclaw` \| `hermes` |
+| `harness` | enum | yes | - | `claude` \| `codex` \| `opencode` \| `agy` \| `trae` \| `openclaw` \| `hermes` \| `gemini` (pre-rename name: `cli`, still read) |
 | `auth` | enum | yes | - | `oauth_dir` \| `api_key` |
 | `priority` | integer | no | `100` | Lower = higher priority (reserved for future auto-selection). |
 | `credentials_source` | path | conditional | - | Required when `auth: oauth_dir`. Absolute path to the credentials directory. |
@@ -99,9 +117,9 @@ Settings are read from two locations. Project-local wins over global:
 1. `.fno/config.toml` (project, committed or gitignored)
 2. `~/.fno/config.toml` (global, user-wide)
 
-`fno providers add --scope project` writes to the project file.
-`fno providers add --scope global` writes to the global file.
-`fno providers use` defaults to `--scope project`.
+`fno config accounts add --scope project` writes to the project file.
+`fno config accounts add --scope global` writes to the global file.
+`fno config accounts use` defaults to `--scope project`.
 
 ---
 
@@ -171,7 +189,7 @@ bounded indeterminate-state receipt before exiting with the interrupt status.
 ## env-value reference resolution
 
 Values in a record's `env` table support four syntaxes (shown here as the
-`env` inline table a `[[providers.records]]` entry carries):
+`env` inline table a `[[accounts.records]]` entry carries):
 
 **`${ENV:VAR_NAME}`** - Reads `VAR_NAME` from the current process environment.
 Raises `ProviderUnavailableError` if the variable is not set.
@@ -249,14 +267,14 @@ acquires no locks. Safe to call concurrently from a `ThreadPoolExecutor` or
 **Failure modes:**
 
 - `ProviderNotFoundError` (subclass of `KeyError`) - `provider_id` not present
-  in `config.providers.records`. The record was never configured.
+  in `config.accounts.records`. The record was never configured.
 - `ProviderUnavailableError` (subclass of `RuntimeError`) - the record exists
   but cannot be used right now. For `oauth_dir`: provider is not staged (call
   `staging.stage(record)` first). For `api_key`: an env reference cannot be
   resolved (missing env var, keychain item, or file).
 
 The distinction matters for callers: `ProviderNotFoundError` is a configuration
-error (stop, ask user to run `fno providers add`); `ProviderUnavailableError` is
+error (stop, ask user to run `fno config accounts add`); `ProviderUnavailableError` is
 a transient error (staging might fix it).
 
 ---
@@ -264,15 +282,15 @@ a transient error (staging might fix it).
 ## Migration from cc-switch
 
 The `cc-switch` tool swaps the active account by modifying which OAuth session
-Claude Code reads at session start. `fno providers` replaces that step with
+Claude Code reads at session start. `fno config accounts` replaces that step with
 explicit staging + `CLAUDE_CONFIG_DIR` isolation.
 
 ### Recipe 1: Swap accounts before the next session (manual)
 
 ```bash
 # One-time: register the secondary account
-fno providers add claude-max-secondary \
-    --cli claude --auth oauth_dir \
+fno config accounts add claude-max-secondary \
+    --harness claude --auth oauth_dir \
     --credentials-source ~/.claude.secondary \
     --scope global
 
@@ -285,7 +303,7 @@ stage(cfg.by_id['claude-max-secondary'])
 "
 
 # Activate it for the next session
-fno providers use claude-max-secondary --scope global
+fno config accounts use claude-max-secondary --scope global
 ```
 
 ### Recipe 2: Set up a secondary account from a backup credentials directory
@@ -294,8 +312,8 @@ If you keep a credentials backup (e.g., you copied `~/.claude/` to `~/.claude.ba
 
 ```bash
 # Register pointing at the backup dir
-fno providers add claude-backup \
-    --cli claude --auth oauth_dir \
+fno config accounts add claude-backup \
+    --harness claude --auth oauth_dir \
     --credentials-source ~/.claude.backup \
     --scope global \
     --account-id my-backup-account
@@ -325,10 +343,10 @@ print('staged:', verify_staged(rec))
 This is Spec 1 of 4. Specs 2-4 extend the substrate with automation:
 
 - **Reactive failover (Spec 2, planned):** no automatic switching when a provider
-  hits a rate limit or returns an error. You must run `fno providers use` manually.
+  hits a rate limit or returns an error. You must run `fno config accounts use` manually.
 - **Per-agent sigma-review routing (Spec 3):** sigma-review subagents can be
   routed to a different coding model (`codex` / `gemini`). The shipped path is
-  `config.review.cross_model` / `config.review.agent_providers`, resolved by the
+  `config.review.cross_model` / `config.review.agent_harnesses`, resolved by the
   same `provider_resolution` code both `fno review` and `/review sigma`
   (via `fno review --print-providers`) dispatch through. The Spec-3 design below
   named a `config.agents.<name>.provider` key that was never wired - use the
@@ -369,7 +387,7 @@ portable alternatives. If the item exists but `dispatch_env()` still raises
 `ProviderUnavailableError`, check that the calling process has Keychain access
 (interactive sessions have it automatically; headless scripts may not).
 
-**config.toml validation failure on `fno providers add`**
+**config.toml validation failure on `fno config accounts add`**
 
 The `add` command validates the record via Pydantic before writing. Common
 causes:
@@ -379,15 +397,15 @@ causes:
 - `auth: api_key` with `--env` values that contain no recognised API key name
   (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`).
 
-Run `fno providers show <id>` after adding to verify the stored record matches
+Run `fno config accounts show <id>` after adding to verify the stored record matches
 intent.
 
 **dispatch_env returns wrong env for the `claude` CLI kind**
 
-For `auth: oauth_dir` + `cli: claude`, `dispatch_env()` returns
+For `auth: oauth_dir` + `harness: claude`, `dispatch_env()` returns
 `{"CLAUDE_CONFIG_DIR": "..."}`. If the returned dict contains `HOME` instead,
 the record was added with a non-`claude` CLI value. Remove and re-add with
-`--cli claude`.
+`--harness claude`.
 
 For `auth: api_key`, `dispatch_env()` returns the resolved `env` dict directly.
 If `CLAUDE_CONFIG_DIR` is expected but absent, the record is using `oauth_dir`
@@ -420,7 +438,7 @@ trigger a swap.
 
 ### Swap Rules
 
-- **Storm-cap.** At most `config.providers.failover.max_swaps_per_phase`
+- **Storm-cap.** At most `config.accounts.failover.max_swaps_per_phase`
   swaps per phase, default 5. Beyond this, the controller writes
   `blocked_reason: stuck:failover_thrash` to `target-state.md` and the
   typed-blocker stop hook trips BLOCKED.
@@ -444,11 +462,11 @@ record, the account switch depends on the swapped-to record's `auth` strategy:
 - **`managed`** (single shared slot): the swap only flips the routing pointer;
   the shared slot still holds the exhausted account's credentials. The sweep
   materializes the new account into the slot (capture-before-overwrite +
-  live-pin gate, the same path as `fno providers use`) before redispatch, and
+  live-pin gate, the same path as `fno config accounts use`) before redispatch, and
   emits `account_switched`. This slot mutation is **opt-in**:
 
 ```toml
-[providers]
+[accounts]
 auto_switch = true   # default false; arms managed-account materialization on auto-switch
 ```
 
@@ -467,23 +485,23 @@ exceeds the sub-cap, the stop hook trips BLOCKED with axis tagged as
 `per_provider`:
 
 ```toml
-[[providers.records]]
+[[accounts.records]]
 id = "claude-anthropic"
 name = "Claude Anthropic"
-cli = "claude"
+harness = "claude"
 auth = "oauth_dir"
 credentials_source = "~/.claude"
 cost_cap_usd_per_session = 30
 
-[[providers.records]]
+[[accounts.records]]
 id = "claude-openrouter"
 name = "Claude OpenRouter"
-cli = "claude"
+harness = "claude"
 auth = "api_key"
 env = { ANTHROPIC_API_KEY = "${KEYCHAIN:openrouter-key}" }
 cost_cap_usd_per_session = 30
 
-[providers.failover]
+[accounts.failover]
 max_swaps_per_phase = 5
 ```
 
@@ -536,7 +554,7 @@ The sidecar feeds:
 - `fno.cost.compute_per_turn_attribution` - generic per-provider
   turn count
 - The stop hook's per-turn provider summary (logged at completion)
-- `fno providers list` per-session per-provider spend (deferred to 2.5)
+- `fno config accounts list` per-session per-provider spend (deferred to 2.5)
 
 ### State Files Owned by Spec 2
 
@@ -551,7 +569,7 @@ The sidecar feeds:
 ## Per-agent routing (Spec 3)
 
 > **Shipped path:** the wired cross-model routing for `/review sigma` and
-> `fno review` uses `config.review.cross_model` / `config.review.agent_providers`
+> `fno review` uses `config.review.cross_model` / `config.review.agent_harnesses`
 > (see `skills/review/references/sigma.md` -> "Cross-Model Review Routing"), resolved by
 > `cli/src/fno/review/provider_resolution.py`. The `config.agents.<name>.provider`
 > schema described in the rest of this section is the original Spec-3 design and
@@ -565,27 +583,27 @@ the global active provider.
 ### Schema
 
 ```toml
-[providers]
+[accounts]
 active = "claude-anthropic"
 
-[[providers.records]]
+[[accounts.records]]
 id = "claude-anthropic"
 name = "Claude Anthropic"
-cli = "claude"
+harness = "claude"
 auth = "oauth_dir"
 credentials_source = "~/.claude"
 
-[[providers.records]]
+[[accounts.records]]
 id = "gemini-pro-1"
 name = "Gemini Pro 1"
-cli = "gemini"
+harness = "gemini"
 auth = "api_key"
 env = { GEMINI_API_KEY = "$GEMINI_KEY" }
 
-[[providers.records]]
+[[accounts.records]]
 id = "glm-zhipu"
 name = "GLM Zhipu"
-cli = "openclaw"
+harness = "openclaw"
 auth = "api_key"
 env = { OPENAI_API_KEY = "$GLM_KEY" }
 
@@ -797,24 +815,24 @@ Combos are named ordered provider lists with a rotation strategy. They sit on to
 ### Schema
 
 ```toml
-[providers]
+[accounts]
 active = "claude-primary"             # existing
-active_combo = "my-stack"             # NEW (optional; set via `fno providers combos use`)
+active_combo = "my-stack"             # NEW (optional; set via `fno config accounts combos use`)
 
-[[providers.records]]
+[[accounts.records]]
 id = "claude-key-a"
 name = "Claude Key A"
-cli = "claude"
+harness = "claude"
 auth = "oauth_dir"
 credentials_source = "~/.claude"
-# ... claude-key-b and claude-key-c are more [[providers.records]] entries, same shape
+# ... claude-key-b and claude-key-c are more [[accounts.records]] entries, same shape
 
-[providers.combos.my-stack]           # NEW
+[accounts.combos.my-stack]           # NEW
 strategy = "round_robin"              # or "fallback"
 sticky_limit = 3                      # ignored for fallback
 providers = ["claude-key-a", "claude-key-b", "claude-key-c"]
 
-[providers.combos.cheap-only]
+[accounts.combos.cheap-only]
 strategy = "fallback"
 providers = ["claude-key-c", "gemini-codex"]
 ```
@@ -827,15 +845,15 @@ providers = ["claude-key-c", "gemini-codex"]
 ### CLI surface
 
 ```
-fno providers combos add <name> --strategy {fallback|round_robin} \
+fno config accounts combos add <name> --strategy {fallback|round_robin} \
   --sticky N --providers a,b,c [--scope project|global]
-fno providers combos list [--json]
-fno providers combos remove <name> [--scope project|global]
-fno providers combos test <name>      # config-only validation; reports per-member health
-fno providers combos use <name> [--scope project|global]
+fno config accounts combos list [--json]
+fno config accounts combos remove <name> [--scope project|global]
+fno config accounts combos test <name>      # config-only validation; reports per-member health
+fno config accounts combos use <name> [--scope project|global]
 ```
 
-`combos test` does NOT issue real API calls (smoke-pinging every member multiplies cost). For an active liveness probe, run `fno providers test <id> --smoke` per member.
+`combos test` does NOT issue real API calls (smoke-pinging every member multiplies cost). For an active liveness probe, run `fno config accounts test <id> --smoke` per member.
 
 ### Resolution priority
 
@@ -843,8 +861,8 @@ When a subagent dispatch needs to pick a provider, `sigma_dispatch.resolve_dispa
 
 1. `config.agents.<name>.provider`  (Spec 3 per-agent pin)
 2. `TARGET_COMBO` env var             (set by `--combo` CLI flag, skill modifier, or megatron manifest)
-3. `config.providers.active_combo`   (settings default)
-4. `config.providers.active`         (existing fall-through)
+3. `config.accounts.active_combo`   (settings default)
+4. `config.accounts.active`         (existing fall-through)
 
 Per-agent pins win over combos when both are configured for the same agent: combos compose with per-agent routing as additional fallback, not replacement.
 
@@ -911,7 +929,7 @@ All paths terminate in setting `TARGET_COMBO=<name>` in the environment of spawn
 - **Unknown provider id in `--providers`:** rejected before `config.toml` mutation.
 - **Combo deleted mid-dispatch:** `dispatch_with_combo` raises `ComboNotFoundError`; `sigma_dispatch.resolve_dispatch_target` catches its loader equivalent and falls through.
 - **All members in cooldown:** `dispatch_with_combo` returns `QueueExhausted(retry_after=...)` with the soonest cooldown-expiry hint.
-- **YAML round-trip via PyYAML loses comments:** documented limitation. Use `fno providers combos add/remove` for safe edits, or hand-edit and re-add.
+- **YAML round-trip via PyYAML loses comments:** documented limitation. Use `fno config accounts combos add/remove` for safe edits, or hand-edit and re-add.
 
 ## Runtime adapter documentation
 
@@ -1032,7 +1050,7 @@ follow-up).
 ### Plan B integration is automatic (Locked Decision 8)
 
 Plan B's `dispatch_with_combo("my-mixed-stack", fn)` calls
-`get_adapter(record.cli)` for each provider in the combo. Registering
+`get_adapter(record.harness)` for each provider in the combo. Registering
 `HermesCliAdapter` as `"hermes"` in
 `cli/src/fno/adapters/__init__.py` is the only change needed - no
 edits to `rotation.py`, `dispatch_with_combo`, or any combo-resolution
@@ -1041,29 +1059,29 @@ code.
 Example combo that routes work across Claude, Codex, and Hermes:
 
 ```toml
-[providers.combos.multi-cli]
+[accounts.combos.multi-cli]
 strategy = "round_robin"
 providers = ["claude-anthropic", "codex-openai", "hermes-nous"]
 sticky_limit = 3
 
-[[providers.records]]
+[[accounts.records]]
 id = "claude-anthropic"
 name = "Claude Anthropic"
-cli = "claude"
+harness = "claude"
 auth = "oauth_dir"
 credentials_source = "~/.claude"
 
-[[providers.records]]
+[[accounts.records]]
 id = "codex-openai"
 name = "Codex OpenAI"
-cli = "codex"
+harness = "codex"
 auth = "oauth_dir"
 credentials_source = "~/.codex"
 
-[[providers.records]]
+[[accounts.records]]
 id = "hermes-nous"
 name = "Hermes Nous"
-cli = "hermes"
+harness = "hermes"
 auth = "oauth_dir"
 credentials_source = "~/.config/hermes"
 ```
@@ -1073,10 +1091,10 @@ credentials_source = "~/.config/hermes"
 A minimal Hermes provider record:
 
 ```toml
-[[providers.records]]
+[[accounts.records]]
 id = "hermes-nous"
 name = "Hermes Nous"
-cli = "hermes"
+harness = "hermes"
 auth = "oauth_dir"
 credentials_source = "~/.config/hermes"
 ```
@@ -1154,18 +1172,18 @@ is absent or stale, behavior is byte-for-byte the reactive baseline.
 - **Lane routing** (review panel `alternate` selection): a kind whose records
   are all `EXHAUSTED` is stably demoted below kinds with headroom. Explicit
   per-agent pins and role→provider config mappings are never overridden.
-- **Promise-time warning** (`fno providers required-bot-check`): read-only,
+- **Promise-time warning** (`fno config accounts required-bot-check`): read-only,
   warns when a `config.review` required-bot's provider is `EXHAUSTED`, naming
   the reset, so a coming review-gate wedge surfaces immediately.
 
 ### CLI
 
-- `fno providers usage [--json/-J] [--refresh]` - per-provider windows (used %,
+- `fno config accounts usage [--json/-J] [--refresh]` - per-provider windows (used %,
   resets-in). `--refresh` forces a probe past the TTL cache.
-- `fno providers list` gains a compact `headroom=` column.
-- `fno providers required-bot-check [--json]` - the pre-promise early warning.
+- `fno config accounts list` gains a compact `headroom=` column.
+- `fno config accounts required-bot-check [--json]` - the pre-promise early warning.
 
-### Config (`config.providers.quota`)
+### Config (`config.accounts.quota`)
 
 | Key | Default | Meaning |
 |---|---|---|

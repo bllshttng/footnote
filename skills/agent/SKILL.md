@@ -228,7 +228,7 @@ bash "${SKILL_DIR}/scripts/normalize.sh" --input "<raw payload [posture bareword
 It strips smart quotes, parses the trailing dashless posture run, canonicalizes a
 token-initial em/en-dash to `--`,
 derives the agent name (`<verb>-<node-id>-<slug>` for a node, `<verb>-<slug>` for free text),
-resolves the provider (explicit -> `config.providers` via the shipped
+resolves the provider (explicit -> `config.accounts` via the shipped
 `resolve_dispatch_target` -> `claude`), detects the node id, resolves a
 `-C`/`--project` target to its work-map `resolved_cwd`, picks the payload
 mode, and assembles the provider-aware `message`. Read its `key=value` output

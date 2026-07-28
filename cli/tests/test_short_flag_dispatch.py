@@ -14,7 +14,7 @@ one short-vs-long parity proof per previously-untested risk):
 * ``--help`` registration smoke per Phase 2 surface (a malformed flag decl
   fails Click registration before any output).
 * ``backlog find`` short-vs-long parity (read-only graph path).
-* ``providers add`` short-vs-long parity (the one Phase 2 command with no
+* ``config accounts add`` short-vs-long parity (the one Phase 2 command with no
   prior CLI test of any kind).
 """
 from __future__ import annotations
@@ -43,7 +43,7 @@ PHASE2_HELP_SURFACES: dict[str, list[str]] = {
     "backlog-find": ["backlog", "find", "--help"],
     "backlog-capture-add": ["backlog", "capture", "add", "--help"],
     "mail-send": ["mail", "send", "--help"],
-    "providers-add": ["providers", "add", "--help"],
+    "config-accounts-add": ["config", "accounts", "add", "--help"],
     # gate-verify / gate-check removed: the `fno gate` sub-app was deleted by
     # the control-plane collapse wedge (ab-d0337fbc).
     "event-emit": ["event", "emit", "--help"],
@@ -101,11 +101,11 @@ def test_backlog_find_short_flags_match_long(tmp_graph: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Parity: providers add (no prior CLI coverage at all).
+# Parity: config accounts add (no prior CLI coverage at all).
 # --------------------------------------------------------------------------- #
 
 def _add_provider(monkeypatch, workdir: Path, argv: list[str]):
-    """Run `providers add` isolated to workdir (project scope, no global)."""
+    """Run `config accounts add` isolated to workdir (project scope, no global)."""
     workdir.mkdir(parents=True, exist_ok=True)
     # _resolve_cwd() and save_providers(scope="project") both honor $PWD;
     # /dev/null disables the real per-user global settings candidate.
@@ -114,22 +114,22 @@ def _add_provider(monkeypatch, workdir: Path, argv: list[str]):
     return runner.invoke(app, argv)
 
 
-def test_providers_add_short_flags_match_long(tmp_path, monkeypatch) -> None:
-    """AC4: `providers add -c/-a/-s/-p` writes the same record as the longs."""
+def test_accounts_add_short_flags_match_long(tmp_path, monkeypatch) -> None:
+    """AC4: `config accounts add -H/-a/-s/-p` writes the same record as the longs."""
     creds = tmp_path / "oauth"
     creds.mkdir()
     short_dir = tmp_path / "short"
     long_dir = tmp_path / "long"
 
     short_res = _add_provider(monkeypatch, short_dir, [
-        "providers", "add", "prov-x",
-        "-c", "claude", "-a", "oauth_dir",
+        "config", "accounts", "add", "prov-x",
+        "-H", "claude", "-a", "oauth_dir",
         "--credentials-source", str(creds),
         "-s", "project", "-p", "50",
     ])
     long_res = _add_provider(monkeypatch, long_dir, [
-        "providers", "add", "prov-x",
-        "--cli", "claude", "--auth", "oauth_dir",
+        "config", "accounts", "add", "prov-x",
+        "--harness", "claude", "--auth", "oauth_dir",
         "--credentials-source", str(creds),
         "--scope", "project", "--priority", "50",
     ])

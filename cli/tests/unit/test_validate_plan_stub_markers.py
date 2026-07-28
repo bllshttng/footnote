@@ -13,6 +13,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from fno.graph._decompose import scaffold_separate_plan, validate_groups
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -89,17 +91,23 @@ def test_validator_flags_empty_why_on_group_child(tmp_path):
     assert "empty '## Why (from epic)'" in result.stdout
 
 
-def test_validator_rejects_still_status_stub(tmp_path):
-    # A fully-filled plan that forgot to flip `status: stub` -> `ready` is rejected:
-    # `stub` is non-canonical and reconcile-status would archive the linked node.
+@pytest.mark.parametrize("status", ["stub", "idea"])
+def test_validator_rejects_a_pre_design_rung(tmp_path, status):
+    """A filled plan that forgot to flip its status to `ready` is rejected.
+
+    Both spellings: `idea` is the rung, `stub` is its retired spelling and still
+    parses. The reason changed with x-3571 - it is no longer "reconcile-status
+    would archive it" (the alias fixed that) but "the `idea` rung is
+    undispatchable, so nothing would ever pick this child up".
+    """
     plan = tmp_path / "big.group-1.md"
     plan.write_text(
-        "---\ntitle: G\nstatus: stub\nparent_epic: ab-epic0001\n---\n\n"
+        f"---\ntitle: G\nstatus: {status}\nparent_epic: ab-epic0001\n---\n\n"
         "# G\n\n## Why (from epic)\n\nreal why\n\n## Changes\n\nreal\n"
     )
     result = _run(plan)
     assert result.returncode == 1, result.stdout
-    assert "still 'status: stub'" in result.stdout
+    assert "'idea' rung" in result.stdout
 
 
 def test_validator_passes_filled_child(tmp_path):

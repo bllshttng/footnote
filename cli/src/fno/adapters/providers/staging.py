@@ -47,7 +47,7 @@ def _symlink_path(record: ProviderRecord, account_dir: Path) -> tuple[Path, Path
     The symlink *itself* lives at symlink_path. For CLIs that use a HOME
     override, the intermediate `home/` directory is created automatically.
     """
-    cli = record.cli
+    cli = record.harness
     if cli == "claude":
         return account_dir / ".claude", account_dir
     else:

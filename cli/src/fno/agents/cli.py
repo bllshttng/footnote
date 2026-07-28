@@ -1590,7 +1590,7 @@ def cmd_ask(
         "--provider",
         hidden=True,
         help="Retired: the harness axis is --harness/-H; a model vendor routes "
-        "only at spawn. Removed at 0.4.0.",
+        "only at spawn.",
     ),
     cwd: str | None = typer.Option(
         None, "--cwd", "-c", help="Working directory for the agent subprocess."
@@ -1754,7 +1754,7 @@ def cmd_list(
         None,
         "--provider",
         hidden=True,
-        help="Retired: filter by --harness. Removed at 0.4.0.",
+        help="Retired: filter by --harness.",
     ),
     status: AgentStatusFilter = typer.Option(
         None, "--status", help="Filter by liveness (live | orphaned | unknown)."
@@ -1813,7 +1813,7 @@ def cmd_discovered_json(
         None,
         "--provider",
         hidden=True,
-        help="Retired: filter by --harness. Removed at 0.4.0.",
+        help="Retired: filter by --harness.",
     ),
 ) -> None:
     """Internal: emit the discovered-live-sessions lane as JSON.

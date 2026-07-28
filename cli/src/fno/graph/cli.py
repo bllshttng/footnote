@@ -95,6 +95,21 @@ def _is_batched_member(e: dict) -> bool:
     return bool(e.get("batch"))
 
 
+def _needs_design(e: dict) -> bool:
+    """True when a node still needs a design pass before it can be blueprinted.
+
+    Reads the rung rather than `plan_path` presence. The presence check was a
+    PROXY for "not ready": with `stub` in no vocabulary, a linked scaffold
+    derived `ready`, so withholding the link was the only lever that could say
+    "undesigned". `plan_rung` says it directly, which means a child linked to an
+    `idea`-rung scaffold is correctly still a design candidate instead of being
+    skipped as done.
+    """
+    from fno.graph.ladder import Rung, plan_rung
+
+    return plan_rung(e) in (Rung.NONE, Rung.IDEA)
+
+
 def _container_ids(entries: list[dict]) -> set[str]:
     """Ids of nodes that are some other node's ``parent`` - i.e. epics/containers.
 
@@ -1694,7 +1709,11 @@ def cmd_decompose(
     spec_ids = [r["id"] for r in results]
     if spec_ids:
         try:
-            from fno.provenance.spawn_think import RunState, maybe_spawn_think
+            from fno.provenance.spawn_think import (
+                RunState,
+                maybe_spawn_think,
+                think_spawn_on_decompose_wave0,
+            )
 
             # Reuse the shared post-mutation re-read from 3c (by_id).
             born_rs = RunState()
@@ -1706,11 +1725,25 @@ def cmd_decompose(
                 "FNO_THINK_SPAWN": "1",
                 "FNO_THINK_SPAWN_ATTENDED": "spawn",
             }
+            # x-3571 wave-2 lane: opt-in, default OFF. Wave 0 means "no
+            # intra-epic blocker", which `compute_waves` already derives (and
+            # already projects as `wave:`), so there is nothing new to compute -
+            # only a second reason to spawn beside the `needs_think` flag.
+            # Restricted to wave 0 deliberately: those children are genuinely
+            # independent, which is the only case where handing design to a cold
+            # worker beats one warm context writing several coherent siblings.
+            wave0_ids: set[str] = set()
+            if think_spawn_on_decompose_wave0(project_root=Path(epic_cwd_box[0])
+                                              if epic_cwd_box[0] else None):
+                from fno.plan._rollup import compute_waves
+
+                wave_by_id, _ = compute_waves(epic_resolved_id, list(by_id.values()))
+                wave0_ids = {cid for cid, w in wave_by_id.items() if w == 0}
             for cid in spec_ids:
                 child = by_id.get(cid)
-                if child is None or child.get("plan_path"):
-                    continue  # already-linked children are done; nothing to design
-                if slug_by_id.get(cid) in flagged_slugs:
+                if child is None or not _needs_design(child):
+                    continue  # already designed; nothing for a /think to add
+                if slug_by_id.get(cid) in flagged_slugs or cid in wave0_ids:
                     # chain_blueprint: the worker must continue /think -> /blueprint
                     # -> link, else the flagged child stays designless/idea forever
                     # (a bare /think never links plan_path). why_digest keeps it
@@ -1723,17 +1756,41 @@ def cmd_decompose(
                         why_digest=why_digest,
                         project_root=Path(child_root) if child_root else None,
                     )
+                    # `owned` resolves the inline-fill handoff (Open Question 3)
+                    # and is the field step 7 reads. Ownership is keyed on the
+                    # OBSERVED spawn receipt, never on predicted wave
+                    # membership: if the spawn did not fire, the child is still
+                    # inline-fill's, so a spawn failure degrades to today's
+                    # behavior instead of leaving an orphan nobody fills.
+                    # That is also what makes double-writing impossible (AC9-CON)
+                    # - exactly one lane can see `owned: true` for a child.
+                    lane = "wave0" if cid in wave0_ids else "needs_think"
                     fanout.append({"id": cid, "decision": res.decision,
-                                   "reason": res.reason})
+                                   "reason": res.reason, "lane": lane,
+                                   "owned": res.decision == "spawned"})
                     if res.decision != "spawned" and not json_mode(ctx):
                         typer.echo(
                             f"fan-out /think for {cid} did not spawn "
-                            f"({res.reason}); run `/think {cid}` then `/blueprint` "
-                            f"to design it (child left idea with its stub)",
+                            f"({res.reason}); it stays yours to inline-fill "
+                            f"(or run `/think {cid}` then `/blueprint`)",
                             err=True,
                         )
-        except Exception:  # noqa: BLE001 - additive; never wedge the decompose
-            pass
+        except Exception as exc:  # noqa: BLE001 - additive; never wedge the decompose
+            # Non-fatal by design (the graph mutation already committed), but
+            # NOT silent: an empty `fanout` is indistinguishable from "no
+            # children needed designing", so a crash here would read as a clean
+            # no-op to both the operator and a --json consumer. Name it and say
+            # which children fell back to inline-fill.
+            _unowned = [c for c in spec_ids if not any(
+                f["id"] == c and f.get("owned") for f in fanout
+            )]
+            if not json_mode(ctx):
+                typer.echo(
+                    f"warning: design fan-out failed ({exc}); "
+                    f"{len(_unowned)} child(ren) stay yours to inline-fill"
+                    + (f": {', '.join(_unowned)}" if _unowned else ""),
+                    err=True,
+                )
 
     # 4b. Report what happened (AC1-UI).
     if json_mode(ctx):
@@ -1763,9 +1820,28 @@ def cmd_decompose(
             typer.echo(f"  {r['action']}: {r['id']} ({marker}){waves}{blk}{tier}")
         for f in scaffolded:
             typer.echo(f"  scaffolded plan: {f}")
+        # Ownership must reach the HUMAN receipt, not just `--json`. The
+        # blueprint session is told to skip children the fan-out owns
+        # (epic-decomposition.md step 7), and step 6 invokes decompose without
+        # `--json` - so a contract carried only in the JSON shape is a contract
+        # the reader never sees, and AC9-CON's no-double-write property would
+        # rest on a field the default invocation does not emit.
+        _owned = [fo["id"] for fo in fanout if fo.get("owned")]
         for fo in fanout:
             if fo["decision"] == "spawned":
                 typer.echo(f"  fan-out design pass dispatched: {fo['id']}")
+        if _owned:
+            typer.echo(
+                f"  fan-out OWNS (do NOT inline-fill): {', '.join(_owned)}"
+            )
+        _unowned_attempts = [
+            fo["id"] for fo in fanout if not fo.get("owned")
+        ]
+        if _unowned_attempts:
+            typer.echo(
+                f"  fan-out did NOT claim (inline-fill these): "
+                f"{', '.join(_unowned_attempts)}"
+            )
         if orphan_ids:
             typer.echo(
                 f"warning: {len(orphan_ids)} group child node(s) no longer in the spec, "
@@ -3085,12 +3161,18 @@ def _starvation_receipts(
             reason = "container"
         elif nid in claimed:
             reason = "claimed"
-        elif e.get("status") == "design":
+        elif e.get("status") in ("design", "idea"):
             # Read off the persisted rung, not the guard: the guard only fires
             # for the stale window (graph still says `ready`, doc since edited
-            # to design), so a node already ON the rung would fall through and
-            # report nothing at all.
-            reason = "design"
+            # down a rung), so a node already ON the rung would fall through to
+            # `selection_guards`, get None (it is gated on a persisted `ready`),
+            # and be dropped by the `continue` - reporting nothing at all.
+            #
+            # `idea` is the COMMON case for a linked decompose scaffold, since
+            # recomputation persists that rung directly; without this arm a
+            # backlog of nothing but undesigned children prints a bare `null`
+            # instead of naming what each one is waiting on.
+            reason = e["status"]
         elif e.get("status") == "ready" and (
             _has_unmerged_open_pr(e) or _is_batched_member(e)
         ):
@@ -3105,6 +3187,11 @@ def _starvation_receipts(
                 # Not starvation: planned but not blueprinted, so it reads as
                 # its own rung rather than the generic quarantine bucket.
                 reason = "design"
+            elif g == "idea-stage":
+                # Also not starvation: a linked-but-undesigned doc (a decompose
+                # scaffold, or a plan hand-edited back down). Named separately
+                # from `design` so the receipt says which pass it is waiting on.
+                reason = "idea"
             else:
                 reason = "quarantined"
         out.append((nid, reason))

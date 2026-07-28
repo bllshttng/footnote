@@ -1,4 +1,4 @@
-"""Typer sub-app for fno providers commands.
+"""Typer sub-app for fno config accounts commands.
 
 Phase 02 of the provider rotation substrate (ab-256f6b6e).
 Provides: list, show, add, test, use, remove.
@@ -17,7 +17,11 @@ import typer
 
 from fno.adapters.providers import managed
 from fno.adapters.providers.dispatch import dispatch_env
-from fno.adapters.providers.loader import load_providers, save_providers
+from fno.adapters.providers.loader import (
+    load_providers,
+    mutable_accounts_block,
+    save_providers,
+)
 from fno.adapters.providers.model import (
     ProviderConfigError,
     ProviderNotFoundError,
@@ -28,7 +32,7 @@ from fno.adapters.providers.model import (
 if TYPE_CHECKING:
     from fno.adapters.providers.model import ProvidersConfig
 
-cli = typer.Typer(name="providers", help="Manage provider records and active selection.")
+cli = typer.Typer(name="accounts", help="Manage account records and active selection.")
 
 
 def _resolve_home(env: dict[str, str] | None = None) -> Path:
@@ -79,7 +83,7 @@ def list_providers(
         False, "--json", "-J", help="Emit a JSON array of record rows (Connections UI)."
     ),
 ) -> None:
-    """List all configured providers, marking the active one with *."""
+    """List all configured accounts, marking the active one with *."""
     config = _load()
     slot_active: dict[str, Optional[str]] = {}  # per-CLI slot occupant, read once
 
@@ -87,9 +91,9 @@ def list_providers(
         # For managed accounts the meaningful "active" is which one is
         # materialized in that CLI's slot; fall back to routing-active otherwise.
         if record.auth == "managed":
-            if record.cli not in slot_active:
-                slot_active[record.cli] = managed.active_slot_id(record.cli)
-            return record.id == slot_active[record.cli]
+            if record.harness not in slot_active:
+                slot_active[record.harness] = managed.active_slot_id(record.harness)
+            return record.id == slot_active[record.harness]
         return record.id == config.active
 
     if json_output:
@@ -99,7 +103,7 @@ def list_providers(
             {
                 "id": record.id,
                 "name": record.name,
-                "cli": record.cli,
+                "harness": record.harness,
                 "auth": record.auth,
                 "priority": record.priority,
                 "active": _is_active(record),
@@ -117,14 +121,14 @@ def list_providers(
 
     if not config.records:
         typer.echo(
-            "No providers configured. Run `fno providers add` to add one."
+            "No accounts configured. Run `fno config accounts add` to add one."
         )
         return
     for record in config.records:
         marker = "*" if _is_active(record) else " "
         headroom_col = _headroom_label(record.id)
         line = (
-            f"{marker} {record.id}  [{record.cli}] {record.auth}  "
+            f"{marker} {record.id}  [{record.harness}] {record.auth}  "
             f"priority={record.priority}  headroom={headroom_col}"
         )
         if record.auth == "managed":
@@ -169,7 +173,7 @@ def usage_providers(
         False, "--json", "-J", help="Emit a one-line JSON object keyed by provider id."
     ),
 ) -> None:
-    """Show per-provider rate-limit windows: used % and reset time.
+    """Show per-account rate-limit windows: used % and reset time.
 
     A provider with no fresh snapshot (never probed, probe failed, or CLI
     without a probe) shows ``unknown`` and the command still exits 0 - probing
@@ -208,17 +212,17 @@ def usage_providers(
         return
 
     if not config.records:
-        typer.echo("No providers configured.")
+        typer.echo("No accounts configured.")
         return
     for record in config.records:
         entry = out[record.id]
         if entry == "unknown":
-            typer.echo(f"{record.id}  [{record.cli}]  unknown")
+            typer.echo(f"{record.id}  [{record.harness}]  unknown")
             continue
         assert isinstance(entry, dict)
         for w in entry["windows"]:  # type: ignore[index]
             typer.echo(
-                f"{record.id}  [{record.cli}]  {w['label']:<8} "
+                f"{record.id}  [{record.harness}]  {w['label']:<8} "
                 f"{w['used_pct']:5.1f}%  {_fmt_resets_in(w['resets_at'], now)}"
             )
 
@@ -267,7 +271,7 @@ def required_bot_headroom_check() -> list[dict]:
         config = load_providers(repo_root=_get_repo_root())
         by_cli: dict[str, list[str]] = {}
         for rec in config.records:
-            by_cli.setdefault(rec.cli, []).append(rec.id)
+            by_cli.setdefault(rec.harness, []).append(rec.id)
     except Exception:  # noqa: BLE001 - a promise-time read must never raise
         return []
 
@@ -359,15 +363,15 @@ def _resolve_time() -> float:
 
 @cli.command("show")
 def show_provider(provider_id: str = typer.Argument(...)) -> None:
-    """Show all fields of a single provider record."""
+    """Show all fields of a single account record."""
     config = _load()
     record = config.by_id.get(provider_id)
     if record is None:
-        typer.echo(f"error: provider '{provider_id}' not found", err=True)
+        typer.echo(f"error: account '{provider_id}' not found", err=True)
         raise typer.Exit(1)
     typer.echo(f"id:                  {record.id}")
     typer.echo(f"name:                {record.name}")
-    typer.echo(f"cli:                 {record.cli}")
+    typer.echo(f"harness:             {record.harness}")
     typer.echo(f"auth:                {record.auth}")
     typer.echo(f"priority:            {record.priority}")
     if record.credentials_source is not None:
@@ -391,7 +395,12 @@ def show_provider(provider_id: str = typer.Argument(...)) -> None:
 @cli.command("add")
 def add_provider(
     provider_id: str = typer.Argument(..., help="Unique provider id (lowercase alphanumeric + hyphens)"),
-    cli_name: str = typer.Option(..., "--cli", "-c", help="claude|gemini|codex|openclaw|hermes"),
+    harness_name: str = typer.Option(
+        ...,
+        "--harness",
+        "-H",
+        help="claude|codex|opencode|agy|trae|openclaw|hermes",
+    ),
     auth: str = typer.Option(..., "--auth", "-a", help="oauth_dir|api_key"),
     credentials_source: Optional[Path] = typer.Option(None, "--credentials-source"),
     env: list[str] = typer.Option([], "--env", help="KEY=VALUE pairs for api_key auth"),
@@ -401,7 +410,7 @@ def add_provider(
     scope: str = typer.Option("global", "--scope", "-s", help="global|project"),
     force: bool = typer.Option(False, "--force", "-F", help="Overwrite existing record"),
 ) -> None:
-    """Add a new provider record. Refuses to overwrite without --force.
+    """Add a new account record. Refuses to overwrite without --force.
 
     Phase 02 writes the settings.yaml record.
     # TODO(phase-03): wire up staging.stage(record) here
@@ -431,7 +440,7 @@ def add_provider(
         record = ProviderRecord(
             id=provider_id,
             name=record_name,
-            cli=cli_name,  # type: ignore[arg-type]
+            harness=harness_name,  # type: ignore[arg-type]
             auth=auth,  # type: ignore[arg-type]
             credentials_source=credentials_source,
             env=env_dict,
@@ -455,7 +464,7 @@ def add_provider(
     # Check for duplicate
     if record.id in config.by_id and not force:
         typer.echo(
-            f"error: provider '{record.id}' already exists. Use --force to overwrite.",
+            f"error: account '{record.id}' already exists. Use --force to overwrite.",
             err=True,
         )
         raise typer.Exit(1)
@@ -474,7 +483,7 @@ def add_provider(
         typer.echo(f"error: failed to write settings.yaml: {exc}", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Provider '{record.id}' added (scope={scope}).")
+    typer.echo(f"Account '{record.id}' added (scope={scope}).")
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +492,7 @@ def add_provider(
 
 def _register_config_dir_account(
     provider_id: str,
-    cli_name: str,
+    harness_name: str,
     priority: int,
     name: Optional[str],
     config_dir: str,
@@ -495,7 +504,7 @@ def _register_config_dir_account(
     resolver keys `spawn --account` off config_dir, so auth is a formality -
     managed (which rejects credentials_source/env) keeps the record minimal.
     """
-    if cli_name != "claude":
+    if harness_name != "claude":
         typer.echo("error: --config-dir accounts are claude-only", err=True)
         raise typer.Exit(1)
     cfg = Path(config_dir).expanduser()
@@ -508,7 +517,7 @@ def _register_config_dir_account(
         raise typer.Exit(1)
     try:
         record = ProviderRecord(
-            id=provider_id, name=name or provider_id, cli="claude",
+            id=provider_id, name=name or provider_id, harness="claude",
             auth="managed", priority=priority, config_dir=cfg,
         )
     except Exception as exc:  # noqa: BLE001 - surface pydantic validation receipts
@@ -539,7 +548,7 @@ def _register_config_dir_account(
 @cli.command("register")
 def register_provider(
     provider_id: str = typer.Argument(..., help="Unique account id (lowercase alphanumeric + hyphens)"),
-    cli_name: str = typer.Option("claude", "--cli", "-c", help="claude|codex"),
+    harness_name: str = typer.Option("claude", "--harness", "-H", help="claude|codex"),
     priority: int = typer.Option(100, "--priority", "-p"),
     name: Optional[str] = typer.Option(None, "--name"),
     config_dir: Optional[str] = typer.Option(
@@ -567,13 +576,13 @@ def register_provider(
     dir (a full second login). No shared-slot snapshot - the dir IS the account.
     """
     if config_dir is not None:
-        _register_config_dir_account(provider_id, cli_name, priority, name, config_dir, scope)
+        _register_config_dir_account(provider_id, harness_name, priority, name, config_dir, scope)
         return
     try:
         record = ProviderRecord(
             id=provider_id,
             name=name or provider_id,
-            cli=cli_name,  # type: ignore[arg-type]
+            harness=harness_name,  # type: ignore[arg-type]
             auth="managed",
             priority=priority,
         )
@@ -610,7 +619,7 @@ def register_provider(
     # stamp write failure is non-fatal (the record is saved) but must be loud,
     # not a raw traceback - it degrades to no active-marker + no first capture.
     try:
-        managed.stamp_active_slot(record.cli, record.id)
+        managed.stamp_active_slot(record.harness, record.id)
     except OSError as exc:
         typer.echo(f"warning: registered but could not stamp active slot: {exc}", err=True)
 
@@ -626,21 +635,21 @@ def test_provider(
     provider_id: str = typer.Argument(...),
     smoke: bool = typer.Option(False, "--smoke", help="Attempt a real CLI invocation (costs quota)"),
 ) -> None:
-    """Validate provider config: record lookup + binary on PATH + credentials_source exists.
+    """Validate account config: record lookup + binary on PATH + credentials_source exists.
 
     With --smoke, also attempt a real CLI invocation (not fully implemented in Phase 02).
     """
     config = _load()
     record = config.by_id.get(provider_id)
     if record is None:
-        typer.echo(f"error: provider '{provider_id}' not found", err=True)
+        typer.echo(f"error: account '{provider_id}' not found", err=True)
         raise typer.Exit(1)
 
     # Check CLI binary on PATH
-    binary = shutil.which(record.cli)
+    binary = shutil.which(record.harness)
     if binary is None:
         typer.echo(
-            f"error: CLI binary '{record.cli}' is not on PATH",
+            f"error: CLI binary '{record.harness}' is not on PATH",
             err=True,
         )
         raise typer.Exit(1)
@@ -671,7 +680,7 @@ def test_provider(
 
         try:
             smoke_result = subprocess.run(
-                [record.cli, "--help"],
+                [record.harness, "--help"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -679,7 +688,7 @@ def test_provider(
             )
             if smoke_result.returncode != 0:
                 typer.echo(
-                    f"smoke test: '{record.cli} --help' exited {smoke_result.returncode}",
+                    f"smoke test: '{record.harness} --help' exited {smoke_result.returncode}",
                     err=True,
                 )
                 raise typer.Exit(1)
@@ -687,7 +696,7 @@ def test_provider(
             typer.echo(f"smoke test error: {exc}", err=True)
             raise typer.Exit(1)
 
-    typer.echo(f"Provider '{provider_id}' looks OK.")
+    typer.echo(f"Account '{provider_id}' looks OK.")
 
 
 # ---------------------------------------------------------------------------
@@ -699,7 +708,7 @@ def use_provider(
     provider_id: str = typer.Argument(...),
     scope: str = typer.Option("project", "--scope", help="project|global"),
 ) -> None:
-    """Set the active provider (default scope: project)."""
+    """Set the active account (default scope: project)."""
     repo_root = _get_repo_root()
     try:
         config = load_providers(repo_root=repo_root)
@@ -708,7 +717,7 @@ def use_provider(
         raise typer.Exit(1)
 
     if provider_id not in config.by_id:
-        typer.echo(f"error: provider '{provider_id}' not found", err=True)
+        typer.echo(f"error: account '{provider_id}' not found", err=True)
         raise typer.Exit(1)
 
     record = config.by_id[provider_id]
@@ -744,7 +753,7 @@ def use_provider(
             for note in getattr(exc, "__notes__", ()):
                 typer.echo(f"switch interrupted: {note}", err=True)
             raise
-        if record.cli == "codex":
+        if record.harness == "codex":
             if not result.slot_changed:
                 typer.echo(
                     f"Managed Codex account '{result.active}' is already materialized "
@@ -764,7 +773,7 @@ def use_provider(
             typer.echo(f"Materialized managed account '{result.active}' into the slot (verified).")
         if result.pinned_by:
             typer.echo(
-                f"warning: swapped under {len(result.pinned_by)} live {record.cli} "
+                f"warning: swapped under {len(result.pinned_by)} live {record.harness} "
                 "session(s); they keep their in-memory auth, and a token refresh "
                 "from one may overwrite the slot",
                 err=True,
@@ -783,7 +792,7 @@ def use_provider(
         if record.auth == "managed":
             typer.echo(
                 f"warning: slot switched to '{provider_id}' but saving the active "
-                f"routing pointer failed ({exc}); re-run `fno providers use "
+                f"routing pointer failed ({exc}); re-run `fno config accounts use "
                 f"{provider_id}` to persist it.",
                 err=True,
             )
@@ -791,7 +800,7 @@ def use_provider(
             typer.echo(f"error: failed to write settings.yaml: {exc}", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Active provider set to '{provider_id}' (scope={scope}).")
+    typer.echo(f"Active account set to '{provider_id}' (scope={scope}).")
 
 
 # ---------------------------------------------------------------------------
@@ -804,7 +813,7 @@ def remove_provider(
     force: bool = typer.Option(False, "--force", "-F", help="Allow removing the active provider"),
     scope: str = typer.Option("global", "--scope", help="global|project"),
 ) -> None:
-    """Remove a provider record. Refuses to remove the active provider without --force."""
+    """Remove an account record. Refuses to remove the active account without --force."""
     repo_root = _get_repo_root()
     try:
         config = load_providers(repo_root=repo_root)
@@ -813,7 +822,7 @@ def remove_provider(
         raise typer.Exit(1)
 
     if provider_id not in config.by_id:
-        typer.echo(f"error: provider '{provider_id}' not found", err=True)
+        typer.echo(f"error: account '{provider_id}' not found", err=True)
         raise typer.Exit(1)
 
     if config.active == provider_id and not force:
@@ -835,7 +844,7 @@ def remove_provider(
         typer.echo(f"error: failed to write settings.yaml: {exc}", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Provider '{provider_id}' removed (scope={scope}).")
+    typer.echo(f"Account '{provider_id}' removed (scope={scope}).")
 
 
 # ---------------------------------------------------------------------------
@@ -847,7 +856,7 @@ def remove_provider(
 
 combos_cli = typer.Typer(
     name="combos",
-    help="Manage provider combos (named ordered lists with rotation strategies).",
+    help="Manage account combos (named ordered lists with rotation strategies).",
 )
 cli.add_typer(combos_cli, name="combos")
 
@@ -894,7 +903,7 @@ def benchmarks_show() -> None:
     snapshot = load_snapshot()
     if snapshot is None:
         typer.echo(
-            "no benchmark snapshot; run `fno providers benchmarks refresh`",
+            "no benchmark snapshot; run `fno config accounts benchmarks refresh`",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -902,7 +911,7 @@ def benchmarks_show() -> None:
         age = staleness_seconds(snapshot) or 0
         typer.echo(
             f"WARNING: benchmark snapshot is {int(age // 86400)} days old (>14); "
-            "run `fno providers benchmarks refresh`",
+            "run `fno config accounts benchmarks refresh`",
             err=True,
         )
     typer.echo(f"source: {snapshot.get('source')}  fetched_at: {snapshot.get('fetched_at')}")
@@ -940,9 +949,7 @@ def combos_add(
     scope: str = typer.Option("project", "--scope", help="project | global"),
 ) -> None:
     """Add a new combo. Validates each provider exists; refuses if combo already exists."""
-    from fno.adapters.providers.loader import (
-        atomic_mutate_settings,
-    )
+    from fno.adapters.providers.loader import atomic_mutate_settings
     from fno.adapters.providers.rotation import Combo
 
     providers_list = [p.strip() for p in providers_csv.split(",") if p.strip()]
@@ -976,8 +983,8 @@ def combos_add(
     target = _combos_settings_path(scope)
 
     def mutator(data: dict) -> dict:
-        providers_section = data.setdefault("providers", {})
-        combos_section = providers_section.setdefault("combos", {})
+        accounts_section = mutable_accounts_block(data)
+        combos_section = accounts_section.setdefault("combos", {})
         if name in combos_section:
             raise ValueError(
                 f"combo {name!r} already exists in {scope} settings; "
@@ -1027,7 +1034,7 @@ def combos_list(
             typer.echo("[]")
         else:
             typer.echo(
-                "No combos configured. Run `fno providers combos add` to add one."
+                "No combos configured. Run `fno config accounts combos add` to add one."
             )
         return
 
@@ -1074,13 +1081,13 @@ def combos_remove(
 
     def mutator(data: dict) -> dict:
         nonlocal cleared_active
-        providers_section = data.get("providers", {})
-        combos_section = providers_section.get("combos", {})
+        accounts_section = mutable_accounts_block(data)
+        combos_section = accounts_section.get("combos", {})
         if name not in combos_section:
             raise ValueError(f"combo {name!r} not found in {scope} settings")
         del combos_section[name]
-        if providers_section.get("active_combo") == name:
-            providers_section["active_combo"] = None
+        if accounts_section.get("active_combo") == name:
+            accounts_section["active_combo"] = None
             cleared_active = True
         return data
 
@@ -1107,7 +1114,7 @@ def combos_test(
 
     Config-only by design: does NOT issue API calls (smoke-testing every
     member multiplies cost). For an active liveness probe, run
-    `fno providers test <id> --smoke` per member.
+    `fno config accounts test <id> --smoke` per member.
     """
     from fno.adapters.providers.loader import load_combos
     from fno.adapters.providers.runtime_state import read_state
@@ -1179,8 +1186,8 @@ def combos_use(
     target = _combos_settings_path(scope)
 
     def mutator(data: dict) -> dict:
-        providers_section = data.setdefault("providers", {})
-        providers_section["active_combo"] = name
+        accounts_section = mutable_accounts_block(data)
+        accounts_section["active_combo"] = name
         return data
 
     try:
@@ -1240,8 +1247,8 @@ def combos_update(
     applied: dict[str, object] = {}
 
     def mutator(data: dict) -> dict:
-        providers_section = data.setdefault("providers", {})
-        combos_section = providers_section.setdefault("combos", {})
+        accounts_section = mutable_accounts_block(data)
+        combos_section = accounts_section.setdefault("combos", {})
         existing = combos_section.get(name)
         if existing is None:
             raise ValueError(

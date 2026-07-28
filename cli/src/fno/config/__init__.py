@@ -760,12 +760,17 @@ class ReviewBlock(BaseModel):
     # disabled (callers treat no entries / all-"none" as off). read by
     # skills/pr/scripts/list-reviewers.sh.
     external_reviewers: list[str] = Field(default_factory=list)
-    # Per-agent provider routing for the cross-model review panel (ab-6c8f4c61).
-    # Map of agent-name -> provider (claude | codex | gemini | alternate).
+    # Per-agent HARNESS routing for the cross-model review panel (ab-6c8f4c61).
+    # Map of agent-name -> harness (claude | codex | gemini | alternate).
     # Default empty: the curated correctness-subset default is computed in the
     # T2.1 resolver, NOT baked here, so an empty map stays a faithful empty map.
+    agent_harnesses: dict[str, str] = Field(default_factory=dict)
+    # Pre-rename spelling of `agent_harnesses`. The values are harnesses (which
+    # CLI binary the agent runs on), never the model vendor that `provider`
+    # names elsewhere, so the field carried the same conflation that was
+    # removed from `fno whoami`. Kept readable and synced by the validator below.
     agent_providers: dict[str, str] = Field(default_factory=dict)
-    # Full route tuple. Unlike agent_providers, each configured entry spends a
+    # Full route tuple. Unlike agent_harnesses, each configured entry spends a
     # separate named SessionStart and therefore remains explicit and opt-in.
     agent_routes: dict[str, AgentRouteBlock] = Field(default_factory=dict)
     cross_model: CrossModelBlock = Field(default_factory=CrossModelBlock)
@@ -1000,7 +1005,7 @@ class ReviewBlock(BaseModel):
         )
         return []
 
-    @field_validator("agent_providers", mode="before")
+    @field_validator("agent_harnesses", "agent_providers", mode="before")
     @classmethod
     def coerce_agent_providers(cls, v: object) -> object:
         """Fail-safe to an empty map on a non-mapping value.
@@ -1008,7 +1013,7 @@ class ReviewBlock(BaseModel):
         A scalar or list here is operator error; degrading to {} keeps the
         rest of the settings load succeeding and leaves cross-model OFF (no
         map = no opt-in signal), rather than raising out of the whole load.
-        Values are NOT validated here (an unknown provider literal is handled
+        Values are NOT validated here (an unknown harness literal is handled
         at resolution time with a warn+claude fallback, per Failure Modes).
         """
         if v is None:
@@ -1016,11 +1021,39 @@ class ReviewBlock(BaseModel):
         if isinstance(v, dict):
             return v
         _LOG.warning(
-            "settings.yaml: config.review.agent_providers is not a mapping "
+            "settings.yaml: config.review.agent_harnesses is not a mapping "
             "(%r); ignoring it (cross-model stays off)",
             v,
         )
         return {}
+
+    @model_validator(mode="after")
+    def resolve_agent_harnesses_alias(self) -> "ReviewBlock":
+        """`agent_providers` is the pre-rename alias for `agent_harnesses`.
+
+        Same contract as :meth:`resolve_github_apps_alias`: the canonical field
+        wins, a conflict warns rather than merging, and both stay readable and
+        equal afterwards so a reader of either spelling sees one map.
+
+        An empty map and an unset field are the same state here (both mean "no
+        opt-in signal"), so truthiness is the right test for "was this set" and
+        no None sentinel is needed.
+        """
+        if (
+            self.agent_harnesses
+            and self.agent_providers
+            and self.agent_harnesses != self.agent_providers
+        ):
+            _LOG.warning(
+                "settings.yaml: both config.review.agent_harnesses and the "
+                "pre-rename config.review.agent_providers are set and differ; "
+                "using agent_harnesses",
+            )
+        elif not self.agent_harnesses and self.agent_providers:
+            self.agent_harnesses = self.agent_providers
+        # Keep the alias readable and consistent with the canonical field.
+        self.agent_providers = self.agent_harnesses
+        return self
 
     @field_validator("agent_routes", mode="before")
     @classmethod
@@ -1689,13 +1722,28 @@ class ThinkSpawnBlock(BaseModel):
     on_work_start: bool = False
     on_retro: bool = False
     daily_cap: int = 20
+    # x-3571: a third trigger of the same shape - fire at `fno backlog
+    # decompose` for the epic's WAVE-0 children (those with no intra-epic
+    # blocker). Default OFF and deliberately not on by `enabled` alone: one warm
+    # context writing several coherent children is cheaper and more consistent
+    # than several cold sessions each re-deriving scope from the epic doc, so
+    # the fan-out earns its cost only when the epic is large enough that
+    # inline-fill blows the context budget. Inherits max_per_run and daily_cap;
+    # it adds no ceiling of its own.
+    on_decompose_wave0: bool = False
+    # Substrate for EVERY think spawn, not just the fan-out. `bg` (the previous
+    # hardcode at the shared choke point) is claude-only, so an install on
+    # another harness had no way to dispatch a /think at all.
+    substrate: str = "bg"
     # B (x-5d51): how an attended session handles a born node. ``offer`` (default,
     # byte-for-byte x-6a10) prints a copy-pasteable handoff line; ``spawn`` opts
     # into a real bg /think dispatch. Fail-safe to ``offer`` so a garbage value
     # never auto-spawns against operator intent.
     attended: str = "offer"
 
-    @field_validator("enabled", "on_work_start", "on_retro", mode="before")
+    @field_validator(
+        "enabled", "on_work_start", "on_retro", "on_decompose_wave0", mode="before"
+    )
     @classmethod
     def _coerce_enabled(cls, v: object) -> bool:
         """Fail-safe to disabled on any non-boolean value (AC4-ERR).
@@ -1762,6 +1810,20 @@ class ThinkSpawnBlock(BaseModel):
         if isinstance(v, str) and v.strip().lower() == "spawn":
             return "spawn"
         return "offer"
+
+    @field_validator("substrate", mode="before")
+    @classmethod
+    def _coerce_substrate(cls, v: object) -> str:
+        """Fail-safe to ``bg``: an unknown substrate would fail loud at spawn.
+
+        Unlike the boolean opt-ins, the dangerous direction here is not "on" -
+        it is dispatching onto a substrate `fno agents spawn` cannot host, which
+        surfaces as a spawn error rather than a silently wrong decision. So this
+        keeps the enum tight and falls back to the previous hardcoded value.
+        """
+        if isinstance(v, str) and v.strip().lower() in {"pane", "bg", "headless"}:
+            return v.strip().lower()
+        return "bg"
 
 
 def _coerce_affirmative(v: object, default: bool) -> bool:

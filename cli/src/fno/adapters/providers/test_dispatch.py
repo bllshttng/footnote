@@ -71,7 +71,7 @@ def test_dispatch_env_claude_oauth(
     record = ProviderRecord(
         id="claude-max-primary",
         name="Claude Max Primary",
-        cli="claude",
+        harness="claude",
         auth="oauth_dir",
         credentials_source=creds_source,
     )
@@ -91,7 +91,7 @@ def test_dispatch_env_gemini_oauth(
     record = ProviderRecord(
         id="gemini-pro-a",
         name="Gemini Pro A",
-        cli="gemini",
+        harness="gemini",
         auth="oauth_dir",
         credentials_source=creds_source,
     )
@@ -127,7 +127,7 @@ def test_dispatch_env_api_key_keychain(
     record = ProviderRecord(
         id="anthropic-api-via-openclaw",
         name="Anthropic API via OpenClaw",
-        cli="openclaw",
+        harness="openclaw",
         auth="api_key",
         env={"ANTHROPIC_API_KEY": "${KEYCHAIN:anthropic-api-key-default}"},
     )
@@ -168,7 +168,7 @@ def test_dispatch_env_unstaged_oauth_raises_unavailable(
     record = ProviderRecord(
         id="claude-unstaged",
         name="Claude Unstaged",
-        cli="claude",
+        harness="claude",
         auth="oauth_dir",
         credentials_source=creds_source,
     )
@@ -200,7 +200,7 @@ def test_dispatch_env_unresolvable_keychain_raises(
     record = ProviderRecord(
         id="anthropic-api-via-openclaw",
         name="Anthropic API via OpenClaw",
-        cli="openclaw",
+        harness="openclaw",
         auth="api_key",
         env={"ANTHROPIC_API_KEY": "${KEYCHAIN:does-not-exist}"},
     )
@@ -226,14 +226,14 @@ def test_dispatch_env_concurrency_safe(
     record_a = ProviderRecord(
         id="claude-a",
         name="Claude A",
-        cli="claude",
+        harness="claude",
         auth="oauth_dir",
         credentials_source=creds_source,
     )
     record_b = ProviderRecord(
         id="gemini-b",
         name="Gemini B",
-        cli="gemini",
+        harness="gemini",
         auth="oauth_dir",
         credentials_source=creds_source,
     )
@@ -344,7 +344,7 @@ class TestSpawnSnapshot:
                         {
                             "id": "claude-anthropic",
                             "name": "Claude Direct",
-                            "cli": "claude",
+                            "harness": "claude",
                             "auth": "oauth_dir",
                             "credentials_source": "~/.claude",
                             "base_url": "https://api.anthropic.com",
@@ -356,7 +356,7 @@ class TestSpawnSnapshot:
                         {
                             "id": "claude-openrouter",
                             "name": "OpenRouter Claude",
-                            "cli": "claude",
+                            "harness": "claude",
                             "auth": "api_key",
                             "env": {"ANTHROPIC_API_KEY": "sk-or-test"},
                             "base_url": "https://openrouter.ai/api/v1",
@@ -574,7 +574,7 @@ def test_dispatch_env_honors_config_dir(tmp_path: Path) -> None:
     """x-d012: a record with config_dir returns CLAUDE_CONFIG_DIR regardless of
     auth, so combo/failover never dispatches it on the ambient default account."""
     record = ProviderRecord(
-        id="readyrule", name="ReadyRule", cli="claude", auth="managed",
+        id="readyrule", name="ReadyRule", harness="claude", auth="managed",
         config_dir=Path("/x/.claude-alt"),
     )
     repo_root = _write_settings(tmp_path, [record.model_dump(mode="json", exclude_none=True)])

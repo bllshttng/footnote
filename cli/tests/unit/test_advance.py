@@ -1642,7 +1642,7 @@ def test_select_failover_not_configured_defers(monkeypatch):
 
 def test_select_failover_configured_picks_provider_and_cli(monkeypatch):
     """_select_exhaustion_failover: failover + a combo with a healthy provider ->
-    (record_id, cli, account_env); the record's cli becomes the harness and its
+    (record_id, harness, account_env); the record's harness is used directly and its
     dispatch_env becomes the spawn account env."""
     from fno.adapters.providers.rotation import Combo
     from fno.config import SettingsModel
@@ -1664,7 +1664,7 @@ def test_select_failover_configured_picks_provider_and_cli(monkeypatch):
     )
     monkeypatch.setattr(
         "fno.adapters.providers.loader.load_providers",
-        lambda *a, **k: SimpleNamespace(by_id={"ccr": SimpleNamespace(cli="codex")}),
+        lambda *a, **k: SimpleNamespace(by_id={"ccr": SimpleNamespace(harness="codex")}),
     )
     monkeypatch.setattr(
         "fno.adapters.providers.dispatch.dispatch_env",
@@ -1698,7 +1698,7 @@ def test_select_failover_unstaged_account_defers(monkeypatch):
     )
     monkeypatch.setattr(
         "fno.adapters.providers.loader.load_providers",
-        lambda *a, **k: SimpleNamespace(by_id={"ccr": SimpleNamespace(cli="claude")}),
+        lambda *a, **k: SimpleNamespace(by_id={"ccr": SimpleNamespace(harness="claude")}),
     )
 
     def boom(pid, repo_root=None):

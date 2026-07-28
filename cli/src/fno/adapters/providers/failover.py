@@ -37,9 +37,10 @@ from fno.adapters.providers.error_taxonomy import (
     classify_error,
 )
 from fno.adapters.providers.loader import (
-    _extract_providers_block,
+    _extract_accounts_block,
     _read_parsed,
     atomic_mutate_settings,
+    mutable_accounts_block,
 )
 from fno.adapters.providers.runtime_state import (
     reset_provider_health,
@@ -202,7 +203,7 @@ def _read_max_swaps_per_phase(settings_path: Path) -> int:
     if not settings_path.is_file():
         return DEFAULT_MAX_SWAPS_PER_PHASE
     data = _read_parsed(settings_path)
-    providers = _extract_providers_block(data) or {}
+    providers = _extract_accounts_block(data) or {}
     block = providers.get("failover", {})
     if not isinstance(block, dict):
         return DEFAULT_MAX_SWAPS_PER_PHASE
@@ -230,7 +231,7 @@ def _next_eligible_provider(
     if not settings_path.is_file():
         return None
     data = _read_parsed(settings_path)
-    providers = _extract_providers_block(data) or {}
+    providers = _extract_accounts_block(data) or {}
     raw_records = providers.get("records") or []
     candidates = [
         r for r in raw_records
@@ -418,11 +419,10 @@ class FailoverController:
                               reason="no_eligible_provider")
 
         # Mutate config.toml to flip active under exclusive lock. Flat shape:
-        # providers is top-level (atomic_mutate_settings flattens any legacy
+        # accounts is top-level (atomic_mutate_settings flattens any legacy
         # wrapper on write, so mutating the flat block preserves the records).
         def _mutator(d: dict[str, Any]) -> dict[str, Any]:
-            providers_block = d.setdefault("providers", {})
-            providers_block["active"] = candidate
+            mutable_accounts_block(d)["active"] = candidate
             return d
 
         atomic_mutate_settings(_mutator, settings_path=self._settings_path)
