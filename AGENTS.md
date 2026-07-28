@@ -58,6 +58,14 @@ Before concluding "no callers left", verify the search found something it should
 - graduates-to: a sweep helper that anchors its excludes (`!/target/**`) and fails when a search returns zero hits without a positive control.
 - added: 2026-07-27
 
+### Two paths emitting the same command variant can still disagree on the destination
+
+An equivalence test asserting that both paths produce the same enum variant proves the shape and says nothing about where the operation lands; compare the resolved address, not the tag. A row menu and a drag both emitted `MovePane` and read as parity while they disagreed on `target`, so the pane reshaped an off-screen tab instead of arriving in view - and the parity test stayed green through every wrong attempt.
+
+- specimens: `crates/fno/src/client.rs` row-menu/drag parity test (asserted only the `Command` variant; PR #650 took four addressing attempts and three external P1s to land the destination, each attempt green on that test).
+- graduates-to: a review rule, then a lint, treating an equivalence assertion over a payload-carrying enum as incomplete until the payload fields are compared too.
+- added: 2026-07-27
+
 ## Repository
 
 ```
