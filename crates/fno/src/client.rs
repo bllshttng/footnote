@@ -9130,16 +9130,24 @@ async fn execute_row_menu_action(
         // report "no pane in that direction" when it holds one pane) instead of
         // bringing the pane into view.
         MenuAction::MoveDir(dir) => match a.pane_id {
-            Some(pid) => write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::MovePane {
-                    mover: Some(pid),
-                    target: Some(view.layout.focus),
-                    dir,
-                }),
-            )
-            .await
-            .map_err(|e| format!("move send failed: {e}"))?,
+            Some(pid) => {
+                // ...except when the row IS the focused pane, where that target
+                // would equal the mover and the server would read an origin drop
+                // and do nothing. Unset is correct THERE and only there: the
+                // mover is in the viewed tab, so the server's navigate finds it
+                // and picks the neighbour - the keyboard-bind reshape.
+                let target = (pid != view.layout.focus).then_some(view.layout.focus);
+                write_msg(
+                    sock_w,
+                    &ClientMsg::Command(Command::MovePane {
+                        mover: Some(pid),
+                        target,
+                        dir,
+                    }),
+                )
+                .await
+                .map_err(|e| format!("move send failed: {e}"))?;
+            }
             None => view.set_notice("agent has no pane here".into()),
         },
         MenuAction::BreakOut => match a.pane_id {
@@ -16120,6 +16128,32 @@ mod tests {
                      to resolve inside the row's own (background) tab"
                 );
                 assert_eq!(dir, Dir::Up);
+            }
+            other => panic!("expected MovePane, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn row_menu_move_on_the_focused_row_leaves_the_target_unset() {
+        // codex P2: anchoring on the viewed focus is right for a row whose pane
+        // is elsewhere, but for the row that OWNS the focused pane it would send
+        // the same id as mover and target - an origin drop the server silently
+        // discards, so every Move entry would do nothing. Unset lets the server
+        // navigate to the neighbour, which is correct precisely because this
+        // mover IS in the viewed tab.
+        let mut v = view_with_agents(vec![]);
+        let focused = v.layout.focus;
+        let row = pane_hosted_row("p", focused);
+        v.layout.agents = vec![row.clone()];
+        v.row_menu = Some(build_row_menu(&row, Anchor::Center));
+        match menu_command_for(&mut v, super::MenuAction::MoveDir(Dir::Left)).await {
+            Command::MovePane { mover, target, dir } => {
+                assert_eq!(mover, Some(focused));
+                assert_eq!(
+                    target, None,
+                    "no origin drop; the server picks the neighbour"
+                );
+                assert_eq!(dir, Dir::Left);
             }
             other => panic!("expected MovePane, got {other:?}"),
         }
