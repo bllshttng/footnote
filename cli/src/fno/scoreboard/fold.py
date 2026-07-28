@@ -187,17 +187,28 @@ def read_graph_nodes(path: Path) -> list[dict]:
     """Best-effort graph read for the optional survival signal. A missing or
     unreadable graph is not fatal - survival just degrades to n/a.
 
-    Delegates to the canonical read seam so the scoreboard speaks the same
-    migrated vocabulary as everything else (it used to parse raw, so a row still
-    on disk as ``claimed`` never matched an ``in_progress`` comparison here).
-    ``read_graph`` already swallows corruption to ``[]``; OSError is the one case
-    it lets through, so an unreadable file is caught to keep this contract."""
-    from fno.graph.store import read_graph
+    Runs the canonical ``_apply_graph_defaults`` pass so the scoreboard speaks the
+    same migrated vocabulary as every other reader; it used to parse raw, so a row
+    still on disk as ``claimed`` never matched an ``in_progress`` comparison here.
+
+    Deliberately NOT ``read_graph``, though that is the same defaults pass: on a
+    corrupt graph ``read_graph`` copies a ``.bak`` and warns on stderr before
+    degrading to ``[]``. Correct for a command whose job IS the graph, wrong for
+    an optional display signal - a read-only scoreboard must not write files, and
+    the warning lands in the ``-J`` stream and breaks the JSON. The census row
+    asked for one MIGRATION seam, not one corruption policy."""
+    from fno.graph.store import _apply_graph_defaults
 
     try:
-        return read_graph(Path(path))
-    except OSError:  # unreadable / non-utf8; corruption already degrades to []
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # missing / unreadable / non-utf8 / bad json
         return []
+    nodes = data.get("entries", data.get("nodes", data)) if isinstance(data, dict) else data
+    if isinstance(nodes, dict):
+        nodes = list(nodes.values())
+    if not isinstance(nodes, list):  # valid JSON, junk shape (null / scalar / {"entries": null})
+        return []
+    return _apply_graph_defaults(nodes)
 
 
 def _parse_ts(raw) -> datetime | None:

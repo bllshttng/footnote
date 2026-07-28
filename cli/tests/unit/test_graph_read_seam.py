@@ -93,3 +93,26 @@ def test_missing_graph_is_empty_not_an_error(tmp_path: Path) -> None:
     absent = tmp_path / "nope.json"
     for reader in (read_graph, load_graph, read_graph_nodes):
         assert reader(absent) == [], f"{reader.__name__} did not degrade to []"
+
+
+def test_scoreboard_reader_stays_silent_and_writes_nothing_on_corruption(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The optional survival signal must not warn or leave a .bak behind.
+
+    Sharing the migration pass must not mean sharing `read_graph`'s corruption
+    POLICY. `read_graph` copies a .bak and warns on stderr before degrading to
+    [], which is right for a command whose job is the graph and wrong here: a
+    read-only scoreboard must not write files, and the warning lands in the `-J`
+    stream and makes the output unparseable as JSON.
+    """
+    p = tmp_path / "graph.json"
+    p.write_text("null", encoding="utf-8")  # corrupt-but-valid JSON
+
+    assert read_graph_nodes(p) == []
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == "", (
+        f"scoreboard reader emitted output on a corrupt graph: "
+        f"{captured.out!r} / {captured.err!r}"
+    )
+    assert list(tmp_path.glob("*.bak*")) == [], "read-only reader left a backup file"
