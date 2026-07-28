@@ -332,3 +332,52 @@ class TestVerbParity:
             assert flag in result.stdout, (
                 f"{flag} is not an option of `fno {' '.join(argv[:3])}`"
             )
+
+
+class TestDeferDoesNotStallWhenPickingCanReroute:
+    """Deferring is the floor, not the answer, once picking can reroute.
+
+    With both knobs armed, holding work because the ACTIVE account is exhausted
+    while another account has headroom is precisely the stall this feature
+    exists to delete.
+    """
+
+    def test_a_healthy_alternate_suppresses_the_defer(self, armed: Path) -> None:
+        from fno.dispatch import _healthy_alternate_exists
+
+        assert _healthy_alternate_exists() is True
+
+    def test_no_healthy_alternate_leaves_the_defer_standing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time as _time
+
+        _write_config(tmp_path, pick_on_launch=True)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rs.json"))
+        from fno.adapters.providers.runtime_state import write_usage_snapshot
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+        from fno.dispatch import _healthy_alternate_exists
+
+        now = _time.time()
+        for rid in ("readyrule", "makers"):
+            write_usage_snapshot(
+                UsageSnapshot(rid, (UsageWindow("5h", 100.0, now + 3600),), now, "t"),
+                now=now,
+            )
+        assert _healthy_alternate_exists() is False
+
+    def test_disarmed_picking_leaves_the_defer_standing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The defer knob and the pick knob are independent; picking being off
+        # must not quietly change deferral behaviour.
+        _write_config(tmp_path, pick_on_launch=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        from fno.dispatch import _healthy_alternate_exists
+
+        assert _healthy_alternate_exists() is False

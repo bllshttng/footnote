@@ -447,6 +447,14 @@ impl Dispatcher for ShelloutDispatcher {
                     );
                 }
                 Ok(picked) => {
+                    // Name the pin whatever it is. Reporting only on
+                    // CLAUDE_CONFIG_DIR would let an api_key account's overlay
+                    // change which account is billed with no receipt at all,
+                    // and an unannounced billing change is the one thing this
+                    // feature must never do.
+                    if let Some((key, value)) = picked.iter().find(|(_, v)| !v.is_empty()) {
+                        eprintln!("loop: iteration {iter} account picked -> {key}={value}");
+                    }
                     for (key, value) in &picked {
                         // An empty value is the verb saying "clear this": an
                         // inherited ANTHROPIC_API_KEY or routed base URL outranks
@@ -456,9 +464,6 @@ impl Dispatcher for ShelloutDispatcher {
                             cmd.env_remove(key);
                         } else {
                             cmd.env(key, value);
-                        }
-                        if key == PICKED_ENV_KEY {
-                            eprintln!("loop: iteration {iter} account picked -> {value}");
                         }
                     }
                 }

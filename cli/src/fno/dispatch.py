@@ -194,6 +194,20 @@ def _resolve_provider_id() -> Optional[str]:
         return None
 
 
+def _healthy_alternate_exists() -> bool:
+    """True when launch-time picking is armed AND has a live account to pick.
+
+    Best-effort and conservative: anything unreadable, or picking disarmed,
+    returns False so the existing defer stands. Only a positive answer - an
+    account the spawn seam could actually launch on - suppresses the defer."""
+    try:
+        from fno.adapters.providers.cli import pick_account
+
+        return pick_account(if_armed=True).account is not None
+    except Exception:  # noqa: BLE001 - a probe must never block a dispatch
+        return False
+
+
 def _emit_quota_deferred(node_id: str, provider: str, state: str, retry_at: Optional[float]) -> None:
     """Emit the single quota_deferred decision event. Non-fatal (AC1-UI)."""
     try:
@@ -260,6 +274,13 @@ def _dispatch_one(
         from fno.adapters.providers.runtime_state import evaluate_quota_defer
 
         decision = evaluate_quota_defer(_resolve_provider_id() or "", priority=priority)
+        if decision is not None and _healthy_alternate_exists():
+            # Deferring is the floor, not the answer, once launch-time picking
+            # can reroute: holding work because the ACTIVE account is exhausted
+            # while another account has headroom is the stall this feature
+            # exists to delete. The spawn seam does the actual picking; here we
+            # only decline to defer when it has somewhere to go.
+            decision = None
         if decision is not None:
             _emit_quota_deferred(
                 node_id, decision.provider_id, decision.state.value, decision.retry_at

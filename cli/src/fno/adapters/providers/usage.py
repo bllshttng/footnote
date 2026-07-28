@@ -35,7 +35,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from fno.adapters.providers.managed import _claude_slot_config_dir
 from fno.adapters.providers.model import ProviderRecord
 
 logger = logging.getLogger(__name__)
@@ -139,6 +138,18 @@ def _token_from_blob(blob: str | None) -> str | None:
     return None
 
 
+def _canonical_claude_slot_dir() -> Path:
+    """The shared claude slot, ``~/.claude``, ignoring any ambient pin.
+
+    Deliberately NOT ``managed._claude_slot_config_dir()``, which honors
+    ``CLAUDE_CONFIG_DIR``: that is right for a slot WRITE performed by an
+    operator verb, and wrong for an attribution read, because a worker pinned to
+    another account exports that variable and would make the probe read its
+    credential while the stamp names someone else.
+    """
+    return Path.home() / ".claude"
+
+
 def _record_credential_dir(record: ProviderRecord) -> Path | None:
     """The record's OWN credential dir, or None when it has no per-record source.
 
@@ -237,7 +248,13 @@ def _claude_bearer_candidates(record: ProviderRecord) -> list[str]:
             seen.add(tok)
             tokens.append(tok)
 
-    creds_dir = src if src is not None else _claude_slot_config_dir()
+    # The shared slot is the CANONICAL ~/.claude, never the ambient
+    # CLAUDE_CONFIG_DIR. A worker pinned to account B runs with B's dir exported,
+    # so honoring the env here would read B's credential while the slot stamp
+    # says A - and file B's usage under A's id, the exact lie this attribution
+    # rule exists to prevent. `resolve_account_overlay`'s managed-active lane
+    # pins the canonical path for the same reason.
+    creds_dir = src if src is not None else _canonical_claude_slot_dir()
     try:
         _add(_token_from_blob((creds_dir / ".credentials.json").read_text(encoding="utf-8")))
     except OSError:
