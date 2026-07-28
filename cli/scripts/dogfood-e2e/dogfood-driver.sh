@@ -120,7 +120,7 @@ log "--- Step 5: worker ship ---"
 if [[ "$DRY_RUN" == "true" ]]; then
   log "DRY-RUN: skipping real PR creation (mocking gh pr create via --dry-run)"
   fake_pr=9999
-  ship_out="{\"action\":\"pr_created\",\"pr_number\":$fake_pr,\"pr_url\":\"https://github.com/owner/repo/pull/$fake_pr\",\"dry_run\":true,\"auto_merge_armed\":false}"
+  ship_out="{\"action\":\"pr_created\",\"pr_number\":$fake_pr,\"pr_url\":\"https://github.com/owner/repo/pull/$fake_pr\",\"dry_run\":true}"
   log "ship (simulated): $ship_out"
   echo "SHIP: $ship_out" >> "$LOG_FILE"
   echo "SKILL_INVOCATIONS: 0 (dry-run)" >> "$LOG_FILE"

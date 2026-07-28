@@ -238,20 +238,28 @@ def test_explicit_preflight_exemption_does_not_require_receipt(tmp_path, monkeyp
     assert result["action"] == "pr_exists"
 
 
-# ---- AC4-HP: ship arms auto-merge when approved ----
+# ---- AC1-HP (x-1951): ship never pre-authorizes a merge ----
 
-def test_ac4_hp_ship_arms_automerge(tmp_path, monkeypatch):
-    """When auto_merge_approved=true, ship() sets merge flag in result."""
+def test_ac1_hp_ship_does_not_arm_automerge(tmp_path, monkeypatch):
+    """Even with auto_merge_approved=true, ship() must NOT call `gh pr merge`.
+
+    Arming at PR-creation time hands the merge timing to GitHub before any gate
+    has run, so a reviewer posting a blocking finding after CI greens loses the
+    race. The arming lives in `fno-agents finalize`'s DonePRGreen branch now.
+    """
     monkeypatch.chdir(tmp_path)
     state_path = _make_state(tmp_path, {"auto_merge_approved": True})
 
     mock_run = MagicMock()
-    # Calls: git rev-parse, gh pr list, gh pr create, gh pr merge
+    # Calls: git rev-parse, gh pr list, gh pr create. The trailing entry is a
+    # deliberate slack slot: without it a regression that re-arms would die on
+    # StopIteration, and this test would pass-by-accident for the wrong reason.
+    # With it, the regression runs to completion and trips the assertion below.
     mock_run.side_effect = [
         MagicMock(returncode=0, stdout="feature/test\n", stderr=""),  # git rev-parse
         MagicMock(returncode=0, stdout="[]", stderr=""),               # gh pr list
         MagicMock(returncode=0, stdout="https://github.com/owner/repo/pull/77", stderr=""),  # gh pr create
-        MagicMock(returncode=0, stdout="", stderr=""),                 # gh pr merge
+        MagicMock(returncode=0, stdout="", stderr=""),                 # unused slack
     ]
 
     with patch("subprocess.run", mock_run), patch(
@@ -267,7 +275,15 @@ def test_ac4_hp_ship_arms_automerge(tmp_path, monkeypatch):
             artifacts_dir=tmp_path / ".fno" / "artifacts",
         )
 
-    assert result.get("auto_merge_armed") is True
+    assert result["pr_number"] == 77
+    argvs = [call.args[0] for call in mock_run.call_args_list if call.args]
+    assert not any(
+        argv[:3] == ["gh", "pr", "merge"] for argv in argvs
+    ), f"ship must not arm auto-merge; saw {argvs}"
+    # The reporting keys went with the behavior - a permanently-false
+    # `auto_merge_armed` would read as "not armed" rather than "not armed here".
+    assert "auto_merge_armed" not in result
+    assert "auto_merge_error" not in result
 
 
 # ---- x-a166: ship stamps the backlog node <-> PR link ----

@@ -84,8 +84,6 @@ def ship(
         typer.echo(f"action: {result['action']}")
         typer.echo(f"pr_number: {result.get('pr_number')}")
         typer.echo(f"pr_url: {result.get('pr_url')}")
-        if result.get("auto_merge_armed"):
-            typer.echo("auto_merge: armed")
 
 
 @cli.command()

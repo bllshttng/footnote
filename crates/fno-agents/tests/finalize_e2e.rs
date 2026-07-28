@@ -683,3 +683,98 @@ fn finalize_skips_stamp_when_no_node() {
         "no node id -> no pr_number stamp call"
     );
 }
+
+// ── arm auto-merge at the green gate, not at PR creation (x-1951) ────────────
+// The unit tests cover the `should_arm_auto_merge` predicate; these prove the
+// WIRING - that a real finalize run actually reaches `gh pr merge --auto` on an
+// approved green terminal and never on any other. A predicate tested only in
+// isolation is the decorative-guard shape: correct, and never called.
+
+/// Like GH_PR_358 but records every argv, so a `pr merge` call is observable.
+const GH_PR_358_LOGGING: &str = "#!/bin/sh\n\
+     echo \"gh $*\" >> calls.log\n\
+     case \"$2\" in view) echo '{\"number\": 358, \"url\": \"https://github.com/o/r/pull/358\"}' ;; esac\n";
+
+/// Rewrite the manifest with an explicit merge posture, keeping the node id.
+fn set_posture(env: &Env, session_id: &str, approved: bool) {
+    fs::write(
+        &env.state,
+        format!(
+            "---\n\
+             session_id: {session_id}\n\
+             created_at: 2026-06-07T00:00:00Z\n\
+             input: \"ab-test feature\"\n\
+             plan_path: \"plan.md\"\n\
+             provider: claude\n\
+             auto_merge_approved: {approved}\n\
+             claude_transcript_id: tid-{session_id}\n\
+             ---\n\
+             # Target Session State\n\
+             graph_node_id: ab-testnode\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// AC2-HP: an approved posture on the one green-and-reviewed terminal arms
+/// GitHub's native auto-merge, at the gate rather than at PR creation.
+#[test]
+fn finalize_arms_auto_merge_on_approved_green_terminal() {
+    let env = setup("S-arm", false);
+    set_posture(&env, "S-arm", true);
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
+    assert!(
+        out.status.success(),
+        "arming must never raise the exit code"
+    );
+    let c = calls(&env);
+    assert!(
+        c.contains("gh pr merge 358 --auto --merge"),
+        "approved DonePRGreen must arm auto-merge: {c}"
+    );
+}
+
+/// AC6-EDGE: a refused posture is never overridden, so the human-merge path is
+/// not taxed at all. This is the assertion that catches an inverted gate.
+#[test]
+fn finalize_never_arms_auto_merge_when_posture_refuses() {
+    let env = setup("S-noarm", false);
+    set_posture(&env, "S-noarm", false);
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
+    assert!(out.status.success());
+    assert!(
+        !calls(&env).contains("gh pr merge"),
+        "a refused posture must never arm, even on a green terminal"
+    );
+}
+
+/// AC7-EDGE: a manifest with no posture key at all (minted before the field
+/// existed) defaults to refusing - absence must never manufacture a grant.
+#[test]
+fn finalize_never_arms_auto_merge_without_a_posture_key() {
+    let env = setup("S-nokey", false);
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
+    assert!(out.status.success());
+    assert!(
+        !calls(&env).contains("gh pr merge"),
+        "an absent auto_merge_approved must default to no grant"
+    );
+}
+
+/// The other terminals never arm, however approving the posture. `DoneAdvisory`
+/// is the other SHIP_REASONS member (a doc ship with no PR) and
+/// `DoneAwaitingMerge` is by definition a merge a human performs, so arming
+/// either would merge something no gate greened.
+#[test]
+fn finalize_never_arms_auto_merge_on_a_non_green_terminal() {
+    for reason in ["DoneAdvisory", "DoneAwaitingMerge", "Budget", "NoProgress"] {
+        let env = setup("S-other", false);
+        set_posture(&env, "S-other", true);
+        let out = run_finalize_shimmed(&env, reason, GH_PR_358_LOGGING);
+        assert!(out.status.success(), "{reason} must exit 0");
+        assert!(
+            !calls(&env).contains("gh pr merge"),
+            "{reason} must never arm auto-merge"
+        );
+    }
+}
