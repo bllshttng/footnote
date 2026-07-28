@@ -10,10 +10,15 @@
 //! read/parse failure: bounded never prompts, so a typo can never re-introduce
 //! the headless hang AND never silently drops the sandbox into a full bypass.
 //!
-//! Stage 3 (x-8526): the on-disk file is flat `config.toml`, parsed with the
-//! `toml` crate. A `config.toml`-only reader is safe because a Rust runtime is
-//! spawned by Python flows that auto-migrate a legacy settings.yaml on their
-//! first config load, so the flat file is already present by the time this runs.
+//! Stage 3: the on-disk file is flat `config.toml`, parsed with the `toml`
+//! crate. A `config.toml`-only reader is safe because a Rust runtime is spawned
+//! by Python flows that auto-migrate a legacy settings.yaml on their first
+//! config load, so the flat file is already present by the time this runs.
+//!
+//! That invariant has exactly one hole, and it is deliberate: `$FNO_CONFIG`
+//! pinning a `.yaml` path is never migrated (Python parses it by suffix
+//! instead), so this reader cannot see it. `warn_once_if_yaml` makes that case
+//! loud rather than silent; see its comment for why it is not parsed here.
 
 use std::path::{Path, PathBuf};
 
@@ -38,9 +43,19 @@ fn global_config_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml"))
 }
 
-/// Ordered config.toml read candidates, mirroring the Python loader precedence:
+/// Ordered config read candidates, mirroring the Python loader precedence:
 /// `$FNO_CONFIG` is the SOLE candidate when set (an explicit path, read as-is);
-/// otherwise `<cwd>/.fno/config.toml` then the global config.toml.
+/// otherwise `<cwd>/.fno/config.toml`, the CANONICAL checkout's config.toml, then
+/// the global one.
+///
+/// The canonical tier is load-bearing under this project's worktree-first
+/// default. `setup-worktree.sh` symlinks `.fno/config.toml` into a worktree only
+/// when it is run; a worktree made by `claude --worktree` or the harness
+/// EnterWorktree has no local copy, so without this tier every getter skips the
+/// project's real config and Rust silently disagrees with `fno config get`.
+/// Deduped when the canonical root IS the cwd, and dropped entirely by
+/// `FNO_NO_CANONICAL_CONFIG=1` (preflight's hermetic runner), exactly as Python
+/// does at `config/__init__.py`'s `_settings_yaml_locations`.
 fn config_candidates(cwd: &Path) -> Vec<PathBuf> {
     if let Some(explicit) = non_empty_env("FNO_CONFIG") {
         let path = PathBuf::from(explicit);
@@ -48,6 +63,17 @@ fn config_candidates(cwd: &Path) -> Vec<PathBuf> {
         return vec![path];
     }
     let mut out = vec![cwd.join(".fno/config.toml")];
+    // Exactly "1" suppresses, any other value inert, matching the Python check.
+    let suppress_canonical = std::env::var_os("FNO_NO_CANONICAL_CONFIG")
+        .is_some_and(|v| v == *std::ffi::OsStr::new("1"));
+    if !suppress_canonical {
+        if let Some(canonical) = crate::paths::canonical_repo_root(cwd)
+            .map(|root| root.join(".fno/config.toml"))
+            .filter(|c| !out.contains(c))
+        {
+            out.push(canonical);
+        }
+    }
     if let Some(g) = global_config_path() {
         out.push(g);
     }
@@ -712,6 +738,83 @@ mod tests {
             let cwd = write_project_settings("amd-on", body);
             assert!(auto_merge_delete_branch(&cwd), "affirmative: {body}");
         }
+    }
+
+    /// Build a main checkout + linked worktree, with `body` as the CANONICAL
+    /// config and nothing in the worktree. Returns the linked worktree path, or
+    /// None when git is unavailable (mirrors the skip in `paths.rs`).
+    fn linked_worktree_with_canonical_config(name: &str, body: &str) -> Option<PathBuf> {
+        fn git(dir: &Path, args: &[&str]) -> bool {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .ok()?;
+        let base = std::env::temp_dir().join(format!("fno-canon-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let main = base.join("main");
+        std::fs::create_dir_all(&main).ok()?;
+        git(&main, &["init", "-q"]).then_some(())?;
+        git(&main, &["config", "user.email", "t@t"]);
+        git(&main, &["config", "user.name", "t"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        std::fs::create_dir_all(main.join(".fno")).ok()?;
+        std::fs::write(main.join(".fno/config.toml"), body).ok()?;
+        let linked = base.join("wt");
+        git(
+            &main,
+            &["worktree", "add", "-q", linked.to_str()?, "-b", "feat"],
+        )
+        .then_some(())?;
+        // The whole point: the worktree has no config of its own.
+        assert!(!linked.join(".fno/config.toml").exists());
+        Some(linked)
+    }
+
+    #[test]
+    fn canonical_checkout_config_is_read_from_a_linked_worktree() {
+        // Worktree-first is this project's default and setup-worktree.sh only
+        // symlinks .fno/config.toml when it runs, so a `claude --worktree` tree
+        // has none. Without the canonical tier every getter here silently
+        // disagrees with `fno config get`, and a squash repo arms `--merge`.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let Some(linked) = linked_worktree_with_canonical_config(
+            "read",
+            "[auto_merge]\nmerge_strategy = \"squash\"\ndelete_branch_on_merge = false\n",
+        ) else {
+            return;
+        };
+        assert_eq!(auto_merge_strategy(&linked), "squash");
+        assert!(!auto_merge_delete_branch(&linked));
+    }
+
+    #[test]
+    fn canonical_checkout_config_is_dropped_by_the_suppress_env() {
+        // FNO_NO_CANONICAL_CONFIG=1 drops ONLY this tier (preflight's hermetic
+        // runner). Exactly "1"; the local and global tiers still apply.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let Some(linked) = linked_worktree_with_canonical_config(
+            "suppress",
+            "[auto_merge]\nmerge_strategy = \"squash\"\n",
+        ) else {
+            return;
+        };
+        std::env::set_var("FNO_NO_CANONICAL_CONFIG", "1");
+        let got = auto_merge_strategy(&linked);
+        std::env::remove_var("FNO_NO_CANONICAL_CONFIG");
+        assert_eq!(
+            got, "merge",
+            "suppressed canonical must fall to the default"
+        );
     }
 
     #[test]
