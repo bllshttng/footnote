@@ -46,7 +46,11 @@ make_nocoreutils_dir() {
     # shared helper, not because the cap needs it. This PATH controls for exactly
     # one thing - no timeout(1)/gtimeout(1) - and should not accidentally test
     # what a hook does on a host with no coreutils whatsoever.
-    for b in bash sleep dirname; do
+    # `cat` is needed only on the SUCCESS path (the hook's heredoc), which the
+    # hang cases never reach because they exit early on empty output. The control
+    # below is what surfaced it: without cat the hook exits 127 while every
+    # hang assertion still reported a holding cap.
+    for b in bash sleep dirname cat; do
         p="$(command -v "$b")" || fail "cannot build a coreutils-free PATH: $b not found"
         ln -s "$p" "$d/$b"
     done
@@ -170,6 +174,13 @@ hang_case() {
     [[ $rc -eq 0 ]] || fail "scenario 4 ($label): hook rc=$rc with hung fno, expected 0"
     [[ $elapsed -le 5000 ]] \
         || fail "scenario 4 ($label): hook took ${elapsed}ms with hung fno, expected <=5000ms (cap is 2s)"
+    # A FLOOR as well as a ceiling. An upper bound alone is satisfied by a hook
+    # that never reached the stub at all - a missing lib, an unresolvable
+    # HOOK_DIR, any early `exit 0` - which would report the cap holding in 30ms
+    # while proving nothing. That is the same shape of lie this node exists to
+    # remove, so the cap must be observed to actually WAIT.
+    [[ $elapsed -ge 1500 ]] \
+        || fail "scenario 4 ($label): hook returned in ${elapsed}ms, too fast to have run the 10s stub - it exited early and this case tested nothing"
     # Hung fno produces empty output; the hook short-circuits and emits nothing.
     [[ -z "$out" ]] || fail "scenario 4 ($label): hook emitted output with hung fno: $out"
     pass "scenario 4 ($label): 2s cap holds when fno hangs (elapsed=${elapsed}ms)"
@@ -181,6 +192,22 @@ NOCU_DIR=$(make_nocoreutils_dir)
 if ( PATH="$HANG_DIR:$NOCU_DIR"; command -v timeout || command -v gtimeout ) >/dev/null 2>&1; then
     fail "scenario 4: the coreutils-free PATH still resolves a timeout binary; that case would assert nothing"
 fi
+
+# Positive control for the PATH itself: prove the hook still FUNCTIONS on it,
+# using the fast stub, before asking a timing assertion to interpret silence.
+# Without this, any dependency missing from the constructed dir makes the hook
+# bail early and the hang case reports a holding cap having run nothing.
+TMP_CTL=$(mktemp -d -t fno-agent-whoami-nocu-ctl-XXXXXX)
+mkdir -p "$TMP_CTL/.fno"
+set +e
+OUT=$(cd "$TMP_CTL" && PATH="$STUB_DIR:$NOCU_DIR" bash "$HOOK" 2>&1)
+rc=$?
+set -e
+rm -rf "$TMP_CTL"
+[[ $rc -eq 0 ]] || fail "scenario 4 control: hook rc=$rc on the coreutils-free PATH, expected 0"
+echo "$OUT" | grep -q "project: /stub" \
+    || fail "scenario 4 control: hook produced no injection on the coreutils-free PATH, so the hang cases below would prove nothing. Output: $OUT"
+pass "scenario 4 control: the hook works on the coreutils-free PATH (so silence there means the cap)"
 
 hang_case "no coreutils on PATH" "$HANG_DIR:$NOCU_DIR"
 if [[ -n "$TIMEOUT_DIR" ]]; then

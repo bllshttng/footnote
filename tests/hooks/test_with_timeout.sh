@@ -102,6 +102,19 @@ rc=$?
     && pass "command's own exit status propagates (rc=3)" \
     || fail "expected rc=3 from the command, got rc=$rc"
 
+# 3b. A non-integer bound is refused, not silently turned into a kill at t=0.
+#     GNU timeout accepted `30m`; `sleep` on stock macOS does not, and the one
+#     operator-settable bound in the tree (EVAL_SWEEP_STAGE_TIMEOUT) sits two
+#     lines from a sibling knob that defaults to `30m`.
+badout=$(/bin/bash -c 'set -uo pipefail; source "$1"; export PATH="$2:$PATH"; with_timeout 30m fast 2>/dev/null' _ "$LIB" "$TMP" 2>/dev/null)
+badrc=$?
+[[ $badrc -eq 2 ]] \
+    && pass "non-integer bound refused (rc=2), not treated as an expired timer" \
+    || fail "expected rc=2 for a non-integer bound, got rc=$badrc"
+[[ -z "$badout" ]] \
+    && pass "refused bound runs nothing" \
+    || fail "a refused bound still ran the command: $badout"
+
 # 4. Nothing reaches the caller's stderr. An unwaited job killed by a signal
 #    makes bash announce "Terminated" on whoever sourced the helper.
 errfile="$TMP/err"
@@ -149,9 +162,13 @@ fi
 
 # A coreutils preference chain in front of the helper reintroduces the two-paths
 # defect: the bash path then goes untested on every host that has the binary.
-chain="$(grep -rlE 'command -v g?timeout' "$REPO_ROOT/hooks" "$REPO_ROOT/scripts/lib" --include='*.sh' 2>/dev/null | sort)"
+# Scoped to all of scripts/, not just scripts/lib/: check-event-schema-parity.sh
+# is a direct caller and lives in neither hooks/ nor scripts/lib/, so a narrower
+# sweep passes with a chain reintroduced in the one caller that has no
+# behavioral coverage of its bound.
+chain="$(grep -rlE 'command -v g?timeout' "$REPO_ROOT/hooks" "$REPO_ROOT/scripts" --include='*.sh' 2>/dev/null | sort)"
 if [[ -z "$chain" ]]; then
-    pass "no timeout/gtimeout preference chain remains in hooks/ or scripts/lib/"
+    pass "no timeout/gtimeout preference chain remains in hooks/ or scripts/"
 else
     fail "timeout preference chain reintroduced in: $chain"
 fi

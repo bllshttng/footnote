@@ -44,7 +44,11 @@ run_hook() { PATH="$TMP/bin:$PATH" bash "$HOOK" </dev/null; }
 # tested nothing.
 mkdir -p "$TMP/nocu"
 for b in bash sleep jq dirname; do
-  p="$(command -v "$b" 2>/dev/null)" && ln -sf "$p" "$TMP/nocu/$b"
+  # fail, do not skip: a binary silently missing from this dir makes the hook
+  # bail early, and the timing case below would then report a holding cap while
+  # having run nothing at all.
+  p="$(command -v "$b" 2>/dev/null)" || { fail "cannot build a coreutils-free PATH: $b not found"; continue; }
+  ln -sf "$p" "$TMP/nocu/$b"
 done
 NOCU_PATH="$TMP/bin:$TMP/nocu"
 run_hook_nocoreutils() { PATH="$NOCU_PATH" bash "$HOOK" </dev/null; }
@@ -80,11 +84,22 @@ if ( PATH="$NOCU_PATH"; command -v timeout || command -v gtimeout ) >/dev/null 2
 elif [[ ! -x "$TMP/nocu/jq" ]]; then
   fail "timeout: jq missing from the coreutils-free PATH; the hook would exit 0 before reaching the cap"
 else
+  # Positive control first: the hook must still WORK on this PATH. Otherwise any
+  # missing dependency makes it exit 0 in milliseconds and the timing assertion
+  # below reports a holding cap while nothing ran.
+  OUT="$(FNO_STUB_OUT='1 unread fno mail from alice: run `fno mail unread`' run_hook_nocoreutils 2>/dev/null)"
+  echo "$OUT" | jq -e '.hookSpecificOutput.hookEventName == "UserPromptSubmit"' >/dev/null 2>&1 \
+    && pass "timeout control: hook works on the coreutils-free PATH" \
+    || fail "timeout control: hook produced no envelope on the coreutils-free PATH, so the bound below proves nothing: $OUT"
+
   START=$(date +%s)
   OUT="$(FNO_STUB_SLEEP=10 FNO_STUB_OUT='late' run_hook_nocoreutils 2>/dev/null)"; RC=$?
   END=$(date +%s)
   [[ $RC -eq 0 ]] && pass "timeout: exit 0" || fail "timeout rc=$RC"
+  # Ceiling AND floor. `< 8` alone is satisfied by a hook that never reached the
+  # stub, which is how a cap assertion reports success having tested nothing.
   (( END - START < 8 )) && pass "timeout: bounded without coreutils (<8s, not 10s)" || fail "timeout: not bounded ($((END - START))s)"
+  (( END - START >= 1 )) && pass "timeout: actually waited for the cap (not an early exit)" || fail "timeout: returned in $((END - START))s, too fast to have run the 10s stub - it exited early and this case tested nothing"
   [[ -z "$OUT" ]] && pass "timeout: injects nothing when capped" || fail "timeout: unexpected output: $OUT"
 fi
 

@@ -18,6 +18,17 @@
 with_timeout() {
   local secs="$1"; shift
 
+  # SECS must be a bare integer. GNU `timeout` accepted suffixes like `30m` and
+  # `sleep` on stock macOS does not, so an operator-supplied bound in that form
+  # (EVAL_SWEEP_STAGE_TIMEOUT, whose sibling knob defaults to `30m`) would make
+  # the sleep exit instantly and kill the command at t=0 - a bound that looks
+  # like a timeout but is really a misconfiguration. Refuse instead.
+  case "$secs" in
+    '' | *[!0-9]*)
+      printf 'with_timeout: seconds must be a bare integer, got: %s\n' "$secs" >&2
+      return 2 ;;
+  esac
+
   # `set -m` spans BOTH launches, so each becomes its own process-group leader.
   # That is what makes the negative-pid kills below legal: without job control
   # both children share this shell's group and `kill -TERM -$pid` would signal
@@ -36,7 +47,12 @@ with_timeout() {
   # The >/dev/null is not cosmetic: the watchdog inherits that same capture
   # pipe, so without it a call that succeeds in 53ms still blocks for the full
   # SECS waiting on the sleep to release the pipe.
-  ( sleep "$secs"; kill -TERM -"$pid" ) >/dev/null 2>&1 &
+  # `&&`, not `;`: a sleep that fails for any reason must not fall through to an
+  # immediate kill, which would read as a fired bound at t=0.
+  # The `|| kill -TERM "$pid"` is a belt-and-braces fallback for a host where
+  # `set -m` did not take effect, so the group signal finds no such pgid: the
+  # direct child still gets signalled rather than the bound silently no-opping.
+  ( sleep "$secs" && { kill -TERM -"$pid" || kill -TERM "$pid"; } ) >/dev/null 2>&1 &
   local watchdog=$!
 
   set +m
