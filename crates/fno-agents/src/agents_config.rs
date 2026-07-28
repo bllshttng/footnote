@@ -43,13 +43,42 @@ fn global_config_path() -> Option<PathBuf> {
 /// otherwise `<cwd>/.fno/config.toml` then the global config.toml.
 fn config_candidates(cwd: &Path) -> Vec<PathBuf> {
     if let Some(explicit) = non_empty_env("FNO_CONFIG") {
-        return vec![PathBuf::from(explicit)];
+        let path = PathBuf::from(explicit);
+        warn_once_if_yaml(&path);
+        return vec![path];
     }
     let mut out = vec![cwd.join(".fno/config.toml")];
     if let Some(g) = global_config_path() {
         out.push(g);
     }
     out
+}
+
+/// The one config the Python loader reads and this one cannot.
+///
+/// A legacy `settings.yaml` at a STANDARD location is converted to a flat
+/// config.toml on first load (`_ensure_migrated`), after which Python, Rust and
+/// shell all see the same TOML. But that migration is skipped by design when
+/// `$FNO_CONFIG` pins an explicit path, so Python keeps parsing the handed file
+/// by suffix while this reader's TOML parse fails and EVERY getter silently
+/// takes its default. Say so once instead of diverging in silence: a config
+/// asking for `squash` that reads as `merge` is exactly the failure this module
+/// exists to stop.
+fn warn_once_if_yaml(path: &Path) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("yaml" | "yml")
+    ) {
+        WARNED.call_once(|| {
+            eprintln!(
+                "fno-agents: $FNO_CONFIG points at {}, which this reader parses as TOML \
+                 and cannot read; every config value falls back to its built-in default. \
+                 Point it at a config.toml, or unset it to use the migrated file.",
+                path.display()
+            );
+        });
+    }
 }
 
 /// Parse a flat config.toml body into a table; `None` on any parse error (a
@@ -93,9 +122,16 @@ fn table_mux_bool(t: &toml::Table, key: &str) -> Option<bool> {
 
 /// Normalize a scalar toml value to the raw string each caller re-coerces
 /// (mirrors the old scanner contract: strings lowercased, numbers stringified).
+///
+/// Trimmed as well as lowercased, matching Python's `_coerce_affirmative`, which
+/// does `v.strip().lower()`. Without the trim a padded `" yes "` reads as false
+/// here while `fno pr merge` reads it as true, and the numeric callers below
+/// fail their `parse()` on padding the Python side tolerates. Trimming in this
+/// one shared normalizer covers every caller; trimming per caller would leave
+/// the siblings diverged.
 fn scalar_to_string(v: &Value) -> Option<String> {
     match v {
-        Value::String(s) => Some(s.to_ascii_lowercase()),
+        Value::String(s) => Some(s.trim().to_ascii_lowercase()),
         Value::Integer(i) => Some(i.to_string()),
         Value::Float(f) => Some(f.to_string()),
         Value::Boolean(b) => Some(b.to_string()),
@@ -667,11 +703,26 @@ mod tests {
             "[auto_merge]\ndelete_branch_on_merge = true\n",
             "[auto_merge]\ndelete_branch_on_merge = \"yes\"\n",
             "[auto_merge]\ndelete_branch_on_merge = 1\n",
+            // Padded + upper: Python does `v.strip().lower()`, so this is a
+            // supported affirmative there. Untrimmed it read as false here,
+            // appending --delete-branch via `fno pr merge` but not via finalize.
+            "[auto_merge]\ndelete_branch_on_merge = \" YES \"\n",
         ] {
             clear_config_env();
             let cwd = write_project_settings("amd-on", body);
             assert!(auto_merge_delete_branch(&cwd), "affirmative: {body}");
         }
+    }
+
+    #[test]
+    fn auto_merge_strategy_tolerates_padding() {
+        // The sibling half of the trim above, pinned separately because this
+        // reader trims in its own extractor rather than via scalar_to_string.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd =
+            write_project_settings("ams-pad", "[auto_merge]\nmerge_strategy = \" squash \"\n");
+        assert_eq!(auto_merge_strategy(&cwd), "squash");
     }
 
     #[test]
