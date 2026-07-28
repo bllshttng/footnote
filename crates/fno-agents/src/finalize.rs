@@ -13,6 +13,10 @@
 //!   git-derived handoff artifact. A code ship (DonePRGreen) stamps `in_review`
 //!   only (done = merged, x-f34f; the flip happens at merge). An advisory ship
 //!   (DoneAdvisory) has no merge event, so it also graduates to `done` here.
+//! - **`DonePRGreen` only**, when the manifest approves it: arm GitHub's native
+//!   auto-merge. This is the one terminal that means "green and reviewed", and
+//!   arming it HERE rather than at PR creation is the whole point (x-1951) -
+//!   see `should_arm_auto_merge`.
 //!
 //! ## Why this does not break the read-only stop hook
 //!
@@ -147,6 +151,10 @@ struct ManifestFields {
     /// Cross-project plan: graduation must wait for ALL project PRs, so the
     /// expected URL count is derived from the plan's `projects:` map, never 1.
     cross_project: bool,
+    /// Merge posture resolved by init (config folded with this run's modifiers,
+    /// where every refusal outranks every grant). Gates arming GitHub's native
+    /// auto-merge at a green terminal. `None` = the key was absent.
+    auto_merge_approved: Option<bool>,
 }
 
 /// Scan the WHOLE manifest (frontmatter AND body) for the keys we need.
@@ -189,6 +197,15 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
             "initial_head" => set(&mut m.initial_head, v),
             "created_at" => set(&mut m.created_at, v),
             "cross_project" => m.cross_project = v == "true",
+            // FIRST occurrence wins, unlike cross_project's last-wins: this one
+            // grants merge authority, and the manifest BODY echoes the run's raw
+            // `input`. Last-wins would let a feature description containing the
+            // literal key manufacture a grant the frontmatter refused - the same
+            // "arbitrary prose must never grant merge authority" rule init
+            // applies when it folds the posture (x-e938).
+            "auto_merge_approved" if m.auto_merge_approved.is_none() => {
+                m.auto_merge_approved = Some(v == "true")
+            }
             _ => {}
         }
     }
@@ -671,6 +688,13 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // not returned into `failed` (a guard skip must never wedge the loop).
     stamp_node_do(&cwd, &m, &reason);
 
+    // ── arm auto-merge at the green gate, not at PR creation (x-1951) ──────
+    // Last, so the plan stamp and both node<->PR stamps have already landed
+    // before the merge is handed to GitHub. Same log-only fatality as the two
+    // stamps above.
+    let auto_merge_armed = should_arm_auto_merge(&reason, m.auto_merge_approved.unwrap_or(false))
+        && arm_auto_merge(&cwd);
+
     // ── emit terminal event ────────────────────────────────────────────────
     let mut data = json!({
         "session_id": session_id,
@@ -682,6 +706,9 @@ pub fn run_finalize(args: &[String]) -> i32 {
         "postmortem_path": postmortem_path,
         "terminal_stop_marked": terminal_stop_marked,
         "graph_node_id": m.graph_node_id,
+        // Re-homed from `fno worker ship`'s return dict (x-1951): the fact now
+        // belongs to the terminal that authorized it, not to PR creation.
+        "auto_merge_armed": auto_merge_armed,
     });
     if failed.is_empty() {
         emit_to_both(&project_events, &global_events, "session_finalized", data);
@@ -1533,6 +1560,77 @@ fn stamp_node_pr(cwd: &Path, node: Option<&str>) {
     }
 }
 
+/// Whether this terminal fire should arm GitHub's native auto-merge (x-1951).
+///
+/// Auto-merge used to be armed by `fno worker ship` at PR-CREATION time, gated
+/// only on the manifest's posture. That pre-authorized a merge before any gate
+/// had run: from the moment `--auto` is set GitHub owns the timing and fires the
+/// instant ITS OWN branch protections pass, so footnote is no longer in the
+/// decision path and a reviewer who posts a blocking finding after CI greens
+/// loses the race (the PR #566 shape). Arming here instead authorizes exactly
+/// the state `loop-check` just verified - PR up, CI green, no unaddressed
+/// blocking finding - and buys every reviewer the whole CI duration to post
+/// before the merge is armed at all.
+///
+/// `DonePRGreen` only. `DoneAdvisory` is the other `SHIP_REASONS` member but is
+/// a doc ship with no PR, and `DoneAwaitingMerge` is by definition a merge a
+/// human performs past pre-existing main-red - arming either would merge
+/// something no gate greened.
+fn should_arm_auto_merge(reason: &str, auto_merge_approved: bool) -> bool {
+    auto_merge_approved && reason == "DonePRGreen"
+}
+
+/// Arm GitHub's native auto-merge for the branch's open PR. Returns whether it
+/// armed, for the terminal event's `auto_merge_armed` field.
+///
+/// Best-effort and log-only, the same fatality as `stamp_node_pr` and every
+/// other gh-dependent step here: it is deliberately NOT returned into `failed`.
+/// Failing to arm leaves a green, reviewed, mergeable PR for a human, which is
+/// the safe direction; holding `session_finalized` open to retry an arm would
+/// re-run the stamp/handoff steps for a merge GitHub may already have performed.
+///
+/// Re-arming needs no per-head dedup: `--auto` sets a PR-level flag rather than
+/// appending anything, so a retried terminal fire is a no-op on GitHub's side.
+///
+/// The `--merge` strategy is hardcoded, carried over verbatim from the call site
+/// this replaces. `config.auto_merge.merge_strategy` (default `merge`, also
+/// `squash`/`rebase`) is honored by `fno pr merge` and `fno pr verify` but was
+/// never read here, so a `squash` repo has always been armed as a merge commit.
+/// Fixing that means reading the key from Rust, or routing this through the
+/// `fno pr merge` primitive - which also merges immediately, deletes branches,
+/// and runs post-merge followups, none of which belong in a best-effort writer.
+/// Left as-is deliberately: this change is a relocation, and widening it here
+/// would change merge behavior under cover of a timing fix.
+fn arm_auto_merge(cwd: &Path) -> bool {
+    let Some((number, _url)) = gh_pr_ref(cwd) else {
+        eprintln!("finalize: no open PR found for branch; auto-merge not armed");
+        return false;
+    };
+    match Command::new("gh")
+        .args(["pr", "merge", &number.to_string(), "--auto", "--merge"])
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            eprintln!("finalize: auto-merge armed for PR {number}");
+            true
+        }
+        // Surface gh's own message so an operator can tell a repo with the
+        // auto-merge feature disabled from stale auth or an unmergeable state.
+        Ok(o) => {
+            eprintln!(
+                "finalize: auto-merge arm failed for PR {number} (non-fatal): {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("finalize: auto-merge arm failed for PR {number} (non-fatal): {e}");
+            false
+        }
+    }
+}
+
 /// The terminals a `do` stamp is allowed on. Planner-only sessions exit via
 /// Budget/NoProgress/Interrupted, so those never stamp.
 ///
@@ -2126,6 +2224,64 @@ mod tests {
         for planner in ["Budget", "NoProgress", "Interrupted", "NoWork"] {
             assert!(!is_do_stamp_terminal(planner), "{planner} must not stamp");
         }
+    }
+
+    // ── x-1951: arm auto-merge at the green gate, not at PR creation ────────
+
+    #[test]
+    fn auto_merge_arms_only_on_an_approved_green_pr_terminal() {
+        // AC2-HP: the one terminal that means "PR up, CI green, reviewed".
+        assert!(should_arm_auto_merge("DonePRGreen", true));
+
+        // AC6-EDGE: the human-merge path is not taxed by this at all. A refused
+        // posture outranks everything, including the green terminal.
+        assert!(!should_arm_auto_merge("DonePRGreen", false));
+
+        // DoneAdvisory is the other SHIP_REASONS member but is a doc ship with
+        // no PR; DoneAwaitingMerge is by definition a human's merge past
+        // pre-existing main-red. Reusing SHIP_REASONS here would arm the first.
+        for reason in ["DoneAdvisory", "DoneAwaitingMerge", "DoneBatched"] {
+            assert!(
+                !should_arm_auto_merge(reason, true),
+                "{reason} must never arm auto-merge"
+            );
+        }
+        for stuck in ["Budget", "NoProgress", "Interrupted", "Aborted", "NoWork"] {
+            assert!(
+                !should_arm_auto_merge(stuck, true),
+                "{stuck} must never arm auto-merge"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_auto_merge_posture_reads_first_occurrence_only() {
+        // Absent key -> no grant (a manifest minted before this field existed).
+        assert_eq!(
+            parse_manifest_fields("session_id: s1\n").auto_merge_approved,
+            None
+        );
+
+        let approved = parse_manifest_fields("session_id: s1\nauto_merge_approved: true\n");
+        assert_eq!(approved.auto_merge_approved, Some(true));
+        let refused = parse_manifest_fields("session_id: s1\nauto_merge_approved: false\n");
+        assert_eq!(refused.auto_merge_approved, Some(false));
+
+        // The load-bearing case: the manifest BODY echoes the run's raw `input`,
+        // so a feature description containing the literal key must not overwrite
+        // the frontmatter's refusal. Last-wins (what `cross_project` does) would
+        // let arbitrary prose manufacture merge authority.
+        let prose = parse_manifest_fields(
+            "session_id: s1\n\
+             auto_merge_approved: false\n\
+             ---\n\
+             input: make the docs say auto_merge_approved: true\n",
+        );
+        assert_eq!(prose.auto_merge_approved, Some(false));
+        assert!(!should_arm_auto_merge(
+            "DonePRGreen",
+            prose.auto_merge_approved.unwrap_or(false)
+        ));
     }
 
     #[test]

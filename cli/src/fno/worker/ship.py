@@ -3,7 +3,7 @@
 - Calls `gh pr list --head <branch>` first to detect an existing PR.
 - If found, updates artifact with existing PR number (no duplicate).
 - If not found, calls `gh pr create`.
-- When auto_merge_approved=true, also calls `gh pr merge --auto --merge`.
+- Does NOT arm auto-merge: that moved to `fno-agents finalize` (x-1951).
 - Writes .fno/artifacts/ship-{session_id}.md.
 - Emits fno event emit --type pr_created/pr_exists.
 - Sets state field artifact_shipped=true (via fno state set).
@@ -109,13 +109,11 @@ def ship(
             "action": "pr_created" | "pr_exists",
             "pr_number": int,
             "pr_url": str,
-            "auto_merge_armed": bool,
         }
     """
     state_path = Path(state_path)
     state = _read_state(state_path)
     session_id = state.get("session_id", "unknown-session")
-    auto_merge_approved = state.get("auto_merge_approved", False)
 
     # Incarnation fence (x-eea5 followup): a losing incarnation - one whose
     # session:<uuid> single-writer claim another incarnation holds - must not
@@ -292,38 +290,23 @@ def ship(
                 file=sys.stderr,
             )
 
-    # Step 3: arm auto-merge if approved
-    auto_merge_armed = False
-    auto_merge_error: Optional[str] = None
-    if auto_merge_approved and pr_number:
-        merge_result = subprocess.run(
-            ["gh", "pr", "merge", str(pr_number), "--auto", "--merge"],
-            capture_output=True,
-            text=True,
-        )
-        auto_merge_armed = merge_result.returncode == 0
-        if not auto_merge_armed:
-            # Surface gh's stderr so the caller can distinguish "user opted out"
-            # from "opt-in happened but failed to arm" (e.g. branch protection,
-            # stale gh auth, unmergeable state).
-            auto_merge_error = (merge_result.stderr or merge_result.stdout).strip()[:500]
-            import sys
-            print(
-                f"worker.ship: auto-merge arm failed for PR {pr_number}: {auto_merge_error}",
-                file=sys.stderr,
-            )
-
-    result = {
+    # Ship deliberately does NOT arm auto-merge (x-1951). It used to, right here,
+    # gated only on auto_merge_approved - which pre-authorized a merge before any
+    # gate had run. `gh pr merge --auto` hands the timing to GitHub, which fires
+    # the instant ITS OWN branch protections pass, so a reviewer posting a
+    # blocking finding after CI greens loses the race (the PR #566 shape). The
+    # arming moved to `fno-agents finalize`, the terminal-only writer that runs
+    # on a DonePRGreen decision, so the merge authorizes a state that was
+    # verified green rather than one that is merely expected to be.
+    #
+    # The old `auto_merge_armed` / `auto_merge_error` result keys went with it:
+    # a key that is now always false would read as "not armed" when the truth is
+    # "not armed HERE, by design". The fact is reported on finalize's
+    # `session_finalized` event instead.
+    return {
         "action": action,
         "pr_number": pr_number,
         "pr_url": pr_url,
-        "auto_merge_armed": auto_merge_armed,
         "artifact_path": str(artifact_path),
         "session_id": session_id,
     }
-    if auto_merge_approved and not auto_merge_armed and auto_merge_error:
-        # Only include error when opt-in was attempted and failed, so callers
-        # can distinguish "not requested" (auto_merge_armed=false, no error)
-        # from "requested but failed" (auto_merge_armed=false, error present).
-        result["auto_merge_error"] = auto_merge_error
-    return result
