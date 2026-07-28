@@ -659,7 +659,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # GRAPH_JSON_PATH (config.sh's shell-stub) honors config.paths.graph_json; fall back to the default (as scripts/lib/graph-resolve.sh does).
   _GRAPH_FILE="${GRAPH_JSON_PATH:-${HOME}/.fno/graph.json}"
   _GUARD_NODE=""
-  _GUARD_MATCHES=""   # space-joined distinct id-shaped tokens found in the graph
+  _GUARD_MATCHES=""   # space-joined distinct id-shaped tokens that ARE graph nodes
   _GUARD_AMBIGUOUS=0
   # Tokenize INITIAL_INPUT so a modifier-prefixed input ("beast mode <id>")
   # still resolves its node, the way _resolve_plan_for_blast tokenizes. Each
@@ -668,16 +668,51 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # stays fail-safe to no node. Unquoted split is bash-3.2 set -u safe (empty
   # input => zero iterations, unlike an empty "${arr[@]}"); set -f keeps the
   # split from also glob-expanding a token like "5*" against the cwd.
+  #
+  # Presence comes from the verb, not from grepping the id out of graph.json: a
+  # quoted id also appears inside OTHER nodes (a blocked_by member, a nested
+  # `"id":` in an embedded decomposition list), so the grep counted
+  # merely-referenced ids as present, and two such hits set _GUARD_AMBIGUOUS and
+  # silently skipped the in_review refusal below.
+  #
+  # `--field _archived` is the probe because it answers presence AND liveness in
+  # ONE read: an absent node exits 1, an archived node prints True, a live node
+  # prints null. Reading `status` instead would count an archived node as present
+  # -- `backlog get` has a read-through fallback to graph-archive.json that
+  # `--strict` does not gate -- which the grep this replaced got right by
+  # accident, since it only ever saw the working graph.
+  #
+  # The exit code is load-bearing, not decoration: cli.py returns a distinct
+  # GRAPH_UNREADABLE_EXIT so a wedged graph cannot be mistaken for an absent
+  # node. Collapsing both to "not a node" is how the in_review refusal would go
+  # silently missing on the exact runs it exists for, so an unreadable graph
+  # fails open LOUDLY instead. Missing fno fails open too, this guard's stance
+  # everywhere else.
   set -f
+  # `if`, not `command -v fno && for ...`: an AND-OR list that short-circuits
+  # returns non-zero, and this script runs under `set -e`. An `if` condition is
+  # exempt; the one-liner would abort init on every host without fno.
+  if command -v fno >/dev/null 2>&1; then
   for _tok in $INITIAL_INPUT; do
-    if [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] \
-       && grep -q "\"${_tok}\"" "$_GRAPH_FILE" 2>/dev/null; then
-      case " $_GUARD_MATCHES " in
-        *" $_tok "*) ;;  # already counted this distinct id
-        *) _GUARD_MATCHES="${_GUARD_MATCHES:+$_GUARD_MATCHES }$_tok" ;;
-      esac
+    [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] || continue
+    case " $_GUARD_MATCHES " in
+      *" $_tok "*) continue ;;  # already counted this distinct id
+    esac
+    # `&& rc=0 || rc=$?` keeps this set -e safe: a bare failing assignment aborts.
+    _tok_probe="$(fno backlog get --strict "$_tok" --field _archived 2>/dev/null | tr -d '[:space:]')" \
+      && _probe_rc=0 || _probe_rc=$?
+    if [[ "$_probe_rc" -ne 0 ]]; then
+      # 1 is the only "read cleanly, node absent" code; anything else means the
+      # graph could not be read and the guard is running blind. Say so.
+      [[ "$_probe_rc" -eq 1 ]] || echo "target: WARNING: could not resolve '$_tok' against the graph (fno backlog get exit $_probe_rc); the in_review guard is not running for it" >&2
+      continue
     fi
+    # Archived is not live work: the node is gone from the working graph, so the
+    # claim and the graph_node_id stamp below would both point at nothing.
+    [[ "$_tok_probe" == "True" ]] && continue
+    _GUARD_MATCHES="${_GUARD_MATCHES:+$_GUARD_MATCHES }$_tok"
   done
+  fi
   set +f
   if [[ -n "$_GUARD_MATCHES" && "$_GUARD_MATCHES" != *" "* ]]; then
     _GUARD_NODE="$_GUARD_MATCHES"
@@ -688,6 +723,9 @@ if [[ ! -f "$STATE_FILE" ]]; then
     _GUARD_STATUS="$(fno backlog get --strict "$_GUARD_NODE" --field status 2>/dev/null | tr -d '[:space:]' || true)"
     if [[ "$_GUARD_STATUS" == "in_review" ]]; then
       _GUARD_PR="$(fno backlog get --strict "$_GUARD_NODE" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)"
+      # `--field` prints a literal "null" for an unset field, which ${x:+ #$x}
+      # reads as present and renders as "open PR #null".
+      [[ "$_GUARD_PR" == "null" ]] && _GUARD_PR=""
       cat >&2 <<EOF
 [init-target-state] REFUSED: node $_GUARD_NODE is in_review (open PR${_GUARD_PR:+ #$_GUARD_PR}).
 
@@ -1100,11 +1138,16 @@ PYEOF
       fi
     fi
     # graph_node_id written exactly once: the node id when a claim layer won and
-    # the node actually exists in the graph, else null (a missing graph.json or an
-    # ab-id not present in the graph stays null - the modern claim is just a lock
-    # and does not prove the backlog row exists).
-    if [[ "$_NODE_OWNED" -eq 1 && -f "$_GRAPH_FILE" ]] \
-         && grep -q "\"${_NODE_ID}\"" "$_GRAPH_FILE" 2>/dev/null; then
+    # the node actually exists in the graph, else null (the modern claim is just
+    # a lock and does not prove the backlog row exists).
+    #
+    # Existence is established upstream, so there is no presence check here: both
+    # ways _NODE_ID gets set prove it. The id-input path resolved it through
+    # `fno backlog get --strict`, and the plan_path path read the id back out of
+    # the graph. The grep this replaced could not tell a real node from an id
+    # merely referenced in some other node's blocked_by, so it stamped
+    # graph_node_id for nodes that do not exist.
+    if [[ "$_NODE_OWNED" -eq 1 && -n "$_NODE_ID" ]]; then
       echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
     else
       echo "graph_node_id: null" >> "$STATE_FILE"

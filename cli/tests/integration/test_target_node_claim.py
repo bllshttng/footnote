@@ -34,6 +34,12 @@ echo "ARGS:$* ROOT:${FNO_CLAIMS_ROOT:-UNSET}" >> "$MOCK_ABI_LOG"
 if [[ "$1" == "claim" && "$2" == "acquire" ]]; then
   exit "${MOCK_ABI_ACQUIRE_RC:-0}"
 fi
+# `backlog get` is how the node guard establishes that a token IS a graph node.
+# Delegating (rather than exiting 0 with no output, which reads as "not a node")
+# exercises real resolution against the fixture graph.
+if [[ "$1" == "backlog" && "$2" == "get" ]]; then
+  exec python3 "$MOCK_ABI_SHIM" "${@:2}"
+fi
 # The graph lock stamp is the one call whose EFFECT a test asserts, so swallowing
 # it as a bare success would hollow out the identity assertion. Delegate to the
 # real writer under the pinned python3; the shim exposes graph.cli directly, so

@@ -96,7 +96,9 @@ def load_graph(path: Path | None = None) -> list[dict]:
         path: Path to graph.json. Defaults to ~/.fno/graph.json.
 
     Returns:
-        List of graph entry dicts (raw, without defaults applied).
+        List of graph entry dicts with the canonical migration/defaults pass
+        applied (see :func:`_entries`) -- the same vocabulary ``read_graph``
+        returns, not the raw on-disk rows.
     """
     if path is None:
         path = GRAPH_JSON
@@ -146,17 +148,20 @@ def load_graph(path: Path | None = None) -> list[dict]:
 
 
 def _entries(data: object) -> list[dict]:
-    """Extract the entry list, folding the pre-rename `_status` key into `status`.
+    """Extract the entry list and run the canonical migration/defaults pass.
 
-    A key rename, not a default: raw callers here bypass ``_apply_graph_defaults``
-    but must still read a graph.json an older fno wrote.
+    One seam: this is the same ``_apply_graph_defaults`` ``read_graph`` uses, so
+    a row whose on-disk ``status`` predates a rename (``claimed`` -> ``in_progress``)
+    reads identically no matter which reader a caller reached for. A local fold of
+    only the ``_status`` key rename used to live here, and left the ~10 hash-validated
+    callers one migration behind the canonical readers.
+
+    Imported function-locally to keep this module free of a load-time dependency on
+    ``store`` (which is the write path), matching ``query_by_source_inbox_msg`` below.
     """
-    entries = data.get("entries", []) if isinstance(data, dict) else []
-    for e in entries:
-        if isinstance(e, dict) and "_status" in e:
-            e.setdefault("status", e["_status"])
-            del e["_status"]
-    return entries
+    from fno.graph.store import _apply_graph_defaults
+
+    return _apply_graph_defaults(data.get("entries", []) if isinstance(data, dict) else [])
 
 
 def query_by_source_inbox_msg(msg_id: str, path: Path | None = None) -> list[dict]:

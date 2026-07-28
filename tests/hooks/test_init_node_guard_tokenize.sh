@@ -140,4 +140,60 @@ if grep -qiE 'ambiguous|no backlog node resolved' "$ERRLOG"; then
 fi
 pass "AC3-ERR: empty input prints no guard-diagnostic line"
 
+# ── The same id twice is ONE match, not an ambiguous pair ─────────────────
+# The dedup arm is what keeps a repeated id from reading as two distinct
+# matches; without it "retry <id> now <id>" sets _GUARD_AMBIGUOUS, which claims
+# nothing and silently skips the in_review refusal for a plain single-node run.
+log "dedup: '<id> retry <id>' claims once, not ambiguous"
+
+make_repo TMP4b; _ALL_TMPS+=("$TMP4b")
+run_init "$TMP4b" "tst-aa00aa00 retry tst-aa00aa00"
+CK4b="$(claim_key_of "$STATE")"
+[[ "$CK4b" == "node:tst-aa00aa00" ]] \
+  || fail "dedup: a repeated id did not claim once (got '${CK4b}')"
+pass "dedup: a repeated id claims exactly once"
+if grep -qiE 'ambiguous' "$ERRLOG"; then
+  fail "dedup: a repeated id was reported ambiguous ($(cat "$ERRLOG"))"
+fi
+pass "dedup: a repeated id is not ambiguous"
+
+# ── An ARCHIVED node is not live work: no claim, no graph_node_id ──────────
+# `fno backlog get` has a read-through fallback to graph-archive.json that
+# --strict does not gate, so resolving the guard on `status` would count an
+# archived id as present and claim a node absent from the working graph. The
+# grep this guard replaced got that right only by accident (it read the working
+# graph alone), so the probe reads `_archived` to keep the property on purpose.
+log "archived: an id present ONLY in graph-archive.json claims nothing"
+
+make_repo TMP5; _ALL_TMPS+=("$TMP5")
+cat > "${TMP5}/home/.fno/graph-archive.json" <<'JSON'
+{"entries":[
+  {"id":"tst-cc00cc00","title":"archived node","status":"done","session_id":null}
+]}
+JSON
+run_init "$TMP5" "tst-cc00cc00"
+CK5="$(claim_key_of "$STATE")"
+[[ -z "$CK5" ]] \
+  || fail "archived: claimed an archived-only node ('${CK5}') - it is absent from the working graph"
+pass "archived: archived-only id acquires no claim"
+
+_GN5="$(grep '^graph_node_id:' "$STATE" | sed 's/^graph_node_id:[[:space:]]*//' | tr -d '"\r')"
+[[ "$_GN5" == "null" ]] \
+  || fail "archived: graph_node_id stamped '${_GN5}' for a node no backlog reader will find"
+pass "archived: graph_node_id stays null"
+
+# The live node in the SAME graph must still resolve, so the probe is not just
+# refusing everything.
+make_repo TMP6; _ALL_TMPS+=("$TMP6")
+cat > "${TMP6}/home/.fno/graph-archive.json" <<'JSON'
+{"entries":[
+  {"id":"tst-cc00cc00","title":"archived node","status":"done","session_id":null}
+]}
+JSON
+run_init "$TMP6" "tst-aa00aa00"
+CK6="$(claim_key_of "$STATE")"
+[[ "$CK6" == "node:tst-aa00aa00" ]] \
+  || fail "archived: a live node stopped resolving when an archive exists (got '${CK6}')"
+pass "archived: a live node still resolves alongside an archive"
+
 log "All node-guard tokenize scenarios passed"

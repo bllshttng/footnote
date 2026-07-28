@@ -48,6 +48,15 @@ fn node_status(e: &serde_json::Value) -> Option<&str> {
 /// idea / deferred / superseded are not actionable queue work). Authoritative
 /// on `status` alone: a claimed node with a stale `blocked_by` is in-flight,
 /// not blocked.
+///
+/// Every status in the Python vocabulary gets an explicit arm, including the
+/// ones that drop, so the `_` catch-all means "a status this reader has never
+/// heard of" rather than doubling as the drop bucket for known-but-unlisted
+/// ones. That distinction is what makes the drift check possible:
+/// `cli/tests/unit/test_graph_status_vocabulary.py` asserts this match names
+/// every member of `VALID_STATUSES` + `STATUS_MIGRATION`, so a status added on
+/// the Python side fails CI here until someone decides where it belongs.
+/// Extra arms are fine (they carry legacy spellings the Python set has dropped).
 fn classify(status: &str) -> Option<CardState> {
     match status {
         "claimed" | "in-progress" | "in_progress" => Some(CardState::InFlight),
@@ -58,6 +67,9 @@ fn classify(status: &str) -> Option<CardState> {
         // Ready would advertise work the dispatcher will never pick up. Drops
         // alongside `idea`, the rung below it.
         "design" => None,
+        // Terminal or pre-queue rungs: real statuses, deliberately not cards.
+        // `in_review` is work that has already left the queue for a PR.
+        "idea" | "in_review" | "done" | "deferred" | "superseded" => None,
         _ => None,
     }
 }

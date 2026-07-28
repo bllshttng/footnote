@@ -46,6 +46,13 @@ if [[ "${1:-}" == "backlog" && "${2:-}" == "get" ]]; then
     field=""; prev=""
     for a in "$@"; do [[ "$prev" == "--field" ]] && field="$a"; prev="$a"; done
     case "$field" in
+        _archived)
+            # The guard's presence probe. The real verb exits 1 for an absent
+            # node, prints True for an archived one, and null for a live one;
+            # STUB_ARCHIVED_RC forces the third case the guard must treat as
+            # "could not read the graph" rather than as "not a node".
+            [[ -n "${STUB_ARCHIVED_RC:-}" ]] && exit "$STUB_ARCHIVED_RC"
+            printf '%s\n' "${STUB_ARCHIVED:-null}"; exit 0;;
         status)
             [[ -n "${STUB_MARKER:-}" ]] && : > "$STUB_MARKER"
             [[ "${STUB_STATUS:-}" == "__fail__" ]] && exit 1
@@ -90,7 +97,7 @@ run_init() {
     (
         cd "$cwd"
         unset TARGET_START TARGET_INPUT TARGET_PLAN_PATH TARGET_ALLOW_IN_REVIEW \
-              TARGET_SIZE STUB_STATUS STUB_PR STUB_MARKER
+              TARGET_SIZE STUB_STATUS STUB_PR STUB_MARKER STUB_ARCHIVED STUB_ARCHIVED_RC
         env TARGET_START=1 CLAUDE_PLUGIN_ROOT="$REPO_ROOT" HOME="$cwd" \
             PATH="$STUB_BIN:$PATH" "$@" bash "$INIT_SCRIPT" 2>&1
     )
@@ -171,6 +178,38 @@ OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_STATUS=in_review STUB_MARKER="$MK"
 [[ $EC -eq 0 ]] && pass "AC5-FR(resume): exit 0" || fail "AC5-FR(resume): expected exit 0, got $EC. Output: $OUT"
 ! grep -q "REFUSED" <<<"$OUT" && pass "AC5-FR(resume): no refusal on resume" || fail "AC5-FR(resume): guard fired on resume. Got: $OUT"
 [[ ! -f "$MK" ]] && pass "AC5-FR(resume): guard never probed on resume" || fail "AC5-FR(resume): guard probed status on resume"
+
+# --- an UNREADABLE graph must fail open LOUDLY, not silently ----------------
+# The probe exits 1 for "read cleanly, node absent" and a distinct code for
+# "could not read the graph". Collapsing the second into the first is how the
+# refusal below goes missing on exactly the runs it exists for.
+echo ""
+echo "--- probe failure: warns, and does not abort init ---"
+T="$TMP_BASE/probe-fail"; make_repo "$T"
+OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_ARCHIVED_RC=3 STUB_STATUS=in_review STUB_PR=999); EC=$?
+[[ $EC -eq 0 ]] && pass "probe-fail: init still exits 0 (fails open under set -e)" || fail "probe-fail: expected exit 0, got $EC. Output: $OUT"
+grep -q "could not resolve .* against the graph" <<<"$OUT" && pass "probe-fail: names the unresolvable token" || fail "probe-fail: no warning emitted. Got: $OUT"
+grep -q "exit 3" <<<"$OUT" && pass "probe-fail: reports the probe exit code" || fail "probe-fail: exit code not named. Got: $OUT"
+grep -q "in_review guard is not running" <<<"$OUT" && pass "probe-fail: says the guard is off" || fail "probe-fail: does not say the guard is off. Got: $OUT"
+
+# An absent node (the honest exit 1) must stay quiet -- it is not a failure.
+echo ""
+echo "--- absent node: no probe-failure warning ---"
+T="$TMP_BASE/probe-absent"; make_repo "$T"
+OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_ARCHIVED_RC=1); EC=$?
+[[ $EC -eq 0 ]] && pass "probe-absent: exit 0" || fail "probe-absent: expected exit 0, got $EC"
+! grep -q "could not resolve .* against the graph" <<<"$OUT" && pass "probe-absent: exit 1 stays quiet" || fail "probe-absent: absent node warned like a read failure. Got: $OUT"
+
+# --- an in_review node with no pr_number must not say "#null" --------------
+# `--field` prints a literal "null" for an unset field, which ${x:+ #$x} reads
+# as present.
+echo ""
+echo "--- in_review with no PR number: no '#null' ---"
+T="$TMP_BASE/pr-null"; make_repo "$T"
+OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_STATUS=in_review STUB_PR=null); EC=$?
+[[ $EC -ne 0 ]] && pass "pr-null: still refuses" || fail "pr-null: expected refusal, got exit 0. Output: $OUT"
+! grep -q "#null" <<<"$OUT" && pass "pr-null: refusal does not render '#null'" || fail "pr-null: refusal rendered a literal '#null'. Got: $OUT"
+grep -q "REFUSED: node $NODE is in_review" <<<"$OUT" && pass "pr-null: refusal still names the node" || fail "pr-null: refusal message missing. Got: $OUT"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

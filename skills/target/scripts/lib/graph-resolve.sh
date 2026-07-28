@@ -59,21 +59,25 @@ resolve_arg() {
 
     local result rc
     result=$(GRAPH_JSON="$GRAPH_JSON" QUERY="$arg" python3 - <<'PYEOF'
-import json, os, sys
+import os, sys
+from pathlib import Path
 try:
     from fno.graph.fuzzy import resolve_id
+    from fno.graph.store import read_graph_strict
 except ImportError as e:
-    sys.stderr.write(f"[graph-resolve] fno.graph.fuzzy import failed: {e}\n")
+    sys.stderr.write(f"[graph-resolve] fno.graph import failed: {e}\n")
     sys.exit(5)
 graph_path = os.environ["GRAPH_JSON"]
 query = os.environ["QUERY"]
 try:
-    with open(graph_path) as f:
-        data = json.load(f)
+    # The canonical read seam, not a local json.load: resolve_id prefers
+    # non-done entries, so it reads `status` and must see the migrated
+    # vocabulary. `_strict` keeps "graph unreadable" (exit 2) distinguishable
+    # from "node absent" (exit 1), which the plain reader folds together.
+    entries = read_graph_strict(Path(graph_path))
 except Exception as e:
     sys.stderr.write(f"[graph-resolve] failed to read {graph_path}: {e}\n")
     sys.exit(2)
-entries = data.get("entries", [])
 match = resolve_id(query, entries)
 if match.kind in ("exact", "fuzzy") and match.candidates:
     # candidates[0] is the matched entry; resolve_id already did the

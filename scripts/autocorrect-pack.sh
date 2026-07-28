@@ -167,10 +167,24 @@ sort -u "$IMPLICATED_LIST" > "$UNIQ_IMPLICATED"
 # -------------------------------------------------------------------
 GRAPH_BLOCKED="$TMPDIR_PACK/graph-blocked.yaml"
 : > "$GRAPH_BLOCKED"
+# "no blocked nodes" and "the probe never ran" are different facts, and the
+# packet's reader is a model. Rendering both as `[]` is what made the
+# .nodes/.entries bug read as good news for its whole life.
+GRAPH_BLOCKED_STATUS=unavailable
 if [[ -f "$GRAPH_PATH" ]] && command -v jq >/dev/null 2>&1; then
   # Select nodes where status == "blocked" OR blocked_count > 0.
+  #
+  # The entry list lives under `.entries`; this read asked for `.nodes` and so
+  # selected from an empty list on every run since it was written, shipping an
+  # empty BLOCKED section that looked like "nothing is blocked". jq's stderr is
+  # no longer discarded for the same reason -- silencing it is what let a read
+  # that never matched anything pass for a read that found nothing.
+  #
+  # Stays jq rather than a verb: no `fno backlog` verb lists by status without a
+  # query, and nothing selected here (`blocked`, blocked_count) is a field the
+  # migration pass rewrites.
   jq -r '
-    .nodes // [] | .[] |
+    .entries // [] | .[] |
     select((.status // ._status) == "blocked" or (.blocked_count // 0) > 0) |
     {
       node_id: .id,
@@ -182,7 +196,7 @@ if [[ -f "$GRAPH_PATH" ]] && command -v jq >/dev/null 2>&1; then
     "    title: " + (.title | tojson) + "\n" +
     "    blocked_count: " + (.blocked_count | tostring) + "\n" +
     "    last_blocked_reason: " + (.last_blocked_reason | tojson)
-  ' "$GRAPH_PATH" 2>/dev/null >> "$GRAPH_BLOCKED" || true
+  ' "$GRAPH_PATH" >> "$GRAPH_BLOCKED" && GRAPH_BLOCKED_STATUS=ok || GRAPH_BLOCKED_STATUS=failed
 fi
 
 # -------------------------------------------------------------------
@@ -225,8 +239,10 @@ OUTPUT="$TMPDIR_PACK/packet.yaml"
   emit "graph_blocked_state:"
   if [[ -s "$GRAPH_BLOCKED" ]]; then
     cat "$GRAPH_BLOCKED"
+  elif [[ "$GRAPH_BLOCKED_STATUS" == "ok" ]]; then
+    emit "  []  # read succeeded; no blocked nodes"
   else
-    emit "  []"
+    emit "  []  # NOT READ ($GRAPH_BLOCKED_STATUS): graph.json missing, jq absent, or the query failed"
   fi
   emit ""
   emit "git_log_claude_dir: |"

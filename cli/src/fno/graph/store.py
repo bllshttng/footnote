@@ -391,7 +391,23 @@ def _create_backup(path: Path) -> None:
 
 
 def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
-    """Apply lazy migration defaults to graph entries (ab- IDs)."""
+    """Apply lazy migration defaults to graph entries (ab- IDs).
+
+    The one migration seam: every reader routes through here, so a row whose
+    on-disk vocabulary predates a rename reads the same no matter which reader
+    a caller reached for.
+    """
+    # A junk row (scalar, list, null) in an otherwise parseable graph is dropped
+    # here rather than at each call site: every field access below assumes a
+    # dict, so a non-dict entry used to surface as a bare AttributeError, which
+    # breaks read_graph's "swallow corruption, never crash the terminal"
+    # contract.
+    #
+    # Silent HERE on purpose: this runs on every read, including the scoreboard's
+    # optional signal, whose -J output a stray stderr line would make unparseable
+    # (the bug read_graph_nodes exists to avoid). Dropping is only destructive on
+    # the WRITE path, so locked_mutate_graph announces it there instead.
+    entries = [e for e in entries if isinstance(e, dict)]
     # In-memory legacy priority backfill so read-only commands (ready,
     # next, status, tree, triage context) sort correctly *before* the
     # first write triggers recompute_statuses' on-disk backfill. The
@@ -405,14 +421,18 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         if "_status" in e:
             e.setdefault("status", e["_status"])
             del e["_status"]
+        # `in <dict>` hashes the key, so a row carrying an unhashable value (a
+        # hand-mangled `"priority": []`) would raise TypeError. Every reader now
+        # routes through here, including ones documented as never-fatal, so the
+        # type check belongs here rather than in each caller's except clause.
         old_priority = e.get("priority")
-        if old_priority in PRIORITY_MIGRATION:
+        if isinstance(old_priority, str) and old_priority in PRIORITY_MIGRATION:
             e["priority"] = PRIORITY_MIGRATION[old_priority]
         # Same idea for the renamed `claimed` -> `in_progress` status: the read
         # path must speak the current vocabulary even for a row whose on-disk
         # `status` predates the rename and has not been re-mutated yet.
         old_status = e.get("status")
-        if old_status in STATUS_MIGRATION:
+        if isinstance(old_status, str) and old_status in STATUS_MIGRATION:
             e["status"] = STATUS_MIGRATION[old_status]
     for e in entries:
         e.setdefault("parent", None)
@@ -604,7 +624,16 @@ def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     """
     if not path.exists():
         return []
-    raw = path.read_text()
+    # Inside the guard: this function's contract is that anything unreadable
+    # surfaces as GraphUnreadableError, and callers branch on that to tell a
+    # wedged graph from an absent node. A bare read_text() let a directory, a
+    # permission error, or non-UTF-8 bytes escape as OSError/UnicodeDecodeError,
+    # past the caller's `except GraphUnreadableError` and out as a generic exit 1
+    # -- the code that means "read cleanly, node absent".
+    try:
+        raw = path.read_text()
+    except (OSError, UnicodeDecodeError) as e:
+        raise GraphUnreadableError(f"{path} could not be read: {e}") from e
     if raw.strip() == "":
         raise GraphUnreadableError(f"{path} is empty (zero bytes)")
     try:
@@ -660,6 +689,20 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
                   f"Restore from backup or delete before proceeding.", file=sys.stderr)
             sys.exit(1)
         entries = _apply_graph_defaults(raw)
+        # The defaults pass drops rows that are not JSON objects so no reader
+        # crashes on them. On this path that drop is PERSISTED by the
+        # _write_json below, so say it out loud: silently deleting a row from
+        # the user's graph is not something a `backlog update` should do without
+        # a word. The prior content survives in the .bak _create_backup takes
+        # just before the write (the on-disk file is untouched until then).
+        _dropped = len(raw) - len(entries)
+        if _dropped > 0:
+            print(
+                f"Warning: dropping {_dropped} malformed graph "
+                f"{'entry' if _dropped == 1 else 'entries'} (not a JSON object) "
+                f"from {path}; prior content is preserved in the .bak sibling",
+                file=sys.stderr,
+            )
         entries = mutator(entries)
         # Slug assignment (ab-f82e8083). Runs on EVERY persisted mutation so any
         # node-creating path (intake / add / idea / decompose / advance) and any
