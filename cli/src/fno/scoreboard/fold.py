@@ -208,7 +208,11 @@ def read_graph_nodes(path: Path) -> list[dict]:
         nodes = list(nodes.values())
     if not isinstance(nodes, list):  # valid JSON, junk shape (null / scalar / {"entries": null})
         return []
-    return _apply_graph_defaults(nodes)
+    # Filtered HERE rather than in the shared pass: this is a display signal, so
+    # a malformed row is nothing but noise. Other readers count those rows as
+    # evidence the graph is corrupt, which is why the migration pass skips them
+    # without removing them.
+    return _apply_graph_defaults([n for n in nodes if isinstance(n, dict)])
 
 
 def _parse_ts(raw) -> datetime | None:

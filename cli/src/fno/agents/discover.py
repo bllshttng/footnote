@@ -1580,7 +1580,11 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
     except ImportError:
         return [], False
     try:
-        entries = load_graph()
+        # The one caller that WANTS malformed rows: the loop below counts them
+        # to report "graph unreadable" rather than "this token names nothing".
+        # Every other load_graph caller takes the filtered default, so no other
+        # consumer has to guard against a row it cannot index.
+        entries = load_graph(keep_malformed=True)
     except (OSError, ValueError, GraphCorruptionError):
         # Corrupt, torn, or hash-mismatched: unreadable, NOT empty. Reporting
         # empty here would let a graph problem masquerade as "this token names
