@@ -51,11 +51,14 @@ fi
 
 # Emit a one-time warning when yq is absent and a dotted key is requested.
 # Printed to stderr; suppressed after the first call per shell session.
+# The key argument is optional: domain-profile callers have no single key to
+# name. Keep this the ONLY definition in this file - a second one further down
+# silently shadows it for every caller, since sourcing runs both.
 _YQ_MISSING_WARNED=0
 _warn_no_yq_once() {
-    local key="$1"
+    local key="${1:-}"
     if [[ "$_YQ_MISSING_WARNED" -eq 0 ]]; then
-        echo "[fno/config] warn: yq not found - nested key '${key}' (and other dotted keys like auto_merge.*) cannot be read from config.toml. Install yq via: brew install yq  |  apt install yq  |  mise use yq" >&2
+        echo "[fno/config] warn: yq not found - ${key:+nested key '${key}' and other }dotted keys (auto_merge.*, domain profiles) cannot be read from config.toml. Install yq via: brew install yq  |  apt install yq  |  mise use yq" >&2
         _YQ_MISSING_WARNED=1
     fi
 }
@@ -316,13 +319,6 @@ get_auto_merge_conflict_resolution() {
 # Read domain profiles from settings.yaml `domains:` section.
 # Domain profiles define what skill/command runs at each pipeline phase.
 # Undeclared phases inherit from code defaults.
-
-# Warn once when yq is missing and a non-code domain is queried
-_warn_no_yq_once() {
-    [[ -n "${_YQ_WARNED:-}" ]] && return
-    echo "WARNING: yq not installed — domain profile features degraded (falling back to code defaults)" >&2
-    _YQ_WARNED=1
-}
 
 # Code defaults: the implicit "code" domain phase mapping
 # Associative arrays require bash 4+ — use function lookup for bash 3.2 compat
