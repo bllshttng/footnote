@@ -533,11 +533,16 @@ get_provider_pricing() {
             continue
         fi
         _warn_no_yq_once "accounts.records[].pricing.${key}"
-        # Flat config.toml array-of-tables: each record is an [[accounts.records]]
-        # block with an id, and its pricing is an [accounts.records.pricing] sub-table.
-        value=$(awk -v target="$provider_id" -v want="$key" '
-            /^\[\[(accounts|providers)\.records\]\]/ { cur_id=""; in_pricing=0; next }
-            /^\[(accounts|providers)\.records\.pricing\]/ { in_pricing = (cur_id == target); next }
+        # ONE block, canonical-first, exactly as the yq `//` does: an alternation
+        # matching both leaks pricing from a shadowed legacy block (the two paths
+        # must not disagree on which block is authoritative).
+        local blk=providers
+        grep -q '^\[\[accounts\.records\]\]' "$file" 2>/dev/null && blk=accounts
+        # Flat config.toml array-of-tables: each record is an [[<blk>.records]]
+        # block with an id, its pricing an [<blk>.records.pricing] sub-table.
+        value=$(awk -v target="$provider_id" -v want="$key" -v blk="$blk" '
+            $0 ~ ("^\\[\\[" blk "\\.records\\]\\]") { cur_id=""; in_pricing=0; next }
+            $0 ~ ("^\\[" blk "\\.records\\.pricing\\]") { in_pricing = (cur_id == target); next }
             /^\[/ { in_pricing=0; next }
             cur_id == "" && /^[[:space:]]*id[[:space:]]*=/ {
                 cur_id=$0; sub(/^[^=]*=[[:space:]]*/, "", cur_id)

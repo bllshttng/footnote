@@ -196,6 +196,28 @@ val=$(get_provider_pricing readyrule input)
 [[ "$val" == "15.0" ]] && pass "canonical accounts block" || fail "canonical accounts block (got '$val')"
 teardown_tmp_home
 
+# ---- Test 8: a shadowed legacy block must not leak pricing ----
+# The yq and awk paths must agree on WHICH block is authoritative. An awk
+# alternation matching both scans the shadowed legacy block too, so a record
+# living only there returns a price no reader can see.
+setup_tmp_home
+cat > "$TMP_HOME/.fno/config.toml" <<'TOML'
+[[accounts.records]]
+id = "real"
+[accounts.records.pricing]
+input_per_million_usd = 1.0
+
+[[providers.records]]
+id = "ghost"
+[providers.records.pricing]
+input_per_million_usd = 99.0
+TOML
+val=$(get_provider_pricing real input)
+[[ "$val" == "1.0" ]] && pass "canonical block resolves" || fail "canonical block (got '$val')"
+val=$(get_provider_pricing ghost input)
+[[ -z "$val" ]] && pass "shadowed legacy block does not leak" || fail "shadowed leak (got '$val')"
+teardown_tmp_home
+
 echo ""
 echo "Result: ${PASS} pass, ${FAIL} fail"
 [[ "$FAIL" == 0 ]]
