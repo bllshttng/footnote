@@ -1050,7 +1050,7 @@ follow-up).
 ### Plan B integration is automatic (Locked Decision 8)
 
 Plan B's `dispatch_with_combo("my-mixed-stack", fn)` calls
-`get_adapter(record.cli)` for each provider in the combo. Registering
+`get_adapter(record.harness)` for each provider in the combo. Registering
 `HermesCliAdapter` as `"hermes"` in
 `cli/src/fno/adapters/__init__.py` is the only change needed - no
 edits to `rotation.py`, `dispatch_with_combo`, or any combo-resolution

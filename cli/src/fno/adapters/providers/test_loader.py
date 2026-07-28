@@ -1497,3 +1497,38 @@ class TestMutableAccountsBlockCompetingBlocks:
         assert "providers" not in flat
         assert "accounts" not in raw.get("config", {})
         assert "providers" not in raw.get("config", {})
+
+
+class TestShadowedAccountBlockIsAnnounced:
+    """Draining a shadowed block is correct; doing it silently is not.
+
+    The sharp case is an EMPTY canonical block shadowing a populated duplicate:
+    the empty one wins on precedence (it is a dict) and the records go with it.
+    """
+
+    def test_empty_canonical_shadowing_populated_nested_warns(self, caplog):
+        from fno.adapters.providers.loader import mutable_accounts_block
+
+        raw = {"accounts": {}, "config": {"accounts": {"records": [{"id": "a"}]}}}
+        with caplog.at_level("WARNING", logger="fno.adapters.providers.loader"):
+            mutable_accounts_block(raw)
+        assert "discarding shadowed account block" in caplog.text
+
+    def test_no_competitor_is_silent(self, caplog):
+        from fno.adapters.providers.loader import mutable_accounts_block
+
+        raw = {"accounts": {"active": "a"}}
+        with caplog.at_level("WARNING", logger="fno.adapters.providers.loader"):
+            mutable_accounts_block(raw)
+        assert "discarding shadowed" not in caplog.text
+
+    def test_adopted_legacy_block_is_not_reported_as_discarded(self, caplog):
+        """A legacy block that gets MOVED onto the canonical key is kept, not
+        dropped, so warning about it would be a lie."""
+        from fno.adapters.providers.loader import mutable_accounts_block
+
+        raw = {"providers": {"records": [{"id": "a"}]}}
+        with caplog.at_level("WARNING", logger="fno.adapters.providers.loader"):
+            block = mutable_accounts_block(raw)
+        assert block["records"] == [{"id": "a"}]
+        assert "discarding shadowed" not in caplog.text

@@ -170,7 +170,7 @@ def mutable_accounts_block(data: dict[str, Any]) -> dict[str, Any]:
     # Draining is also what the READER already does in effect: it returns the
     # first match in this precedence order and ignores the rest, so the blocks
     # removed here were never being read.
-    fallback = None
+    drained: list[tuple[str, dict[str, Any]]] = []
     for source, key in (
         (config, "accounts"),
         (data, "providers"),
@@ -179,14 +179,29 @@ def mutable_accounts_block(data: dict[str, Any]) -> dict[str, Any]:
         if source is None:
             continue
         found = source.pop(key, None)
-        if isinstance(found, dict) and fallback is None:
-            fallback = found
+        if isinstance(found, dict):
+            drained.append((key, found))
 
     block = data.get("accounts")
     if not isinstance(block, dict):
         # Adopt (never copy) the highest-precedence survivor, so the pre-rename
         # block is MOVED onto the canonical key rather than duplicated.
-        block = fallback if isinstance(fallback, dict) else {}
+        block = drained[0][1] if drained else {}
+
+    # Everything drained but not adopted loses to a higher-precedence block and
+    # is therefore already unreadable - every reader is first-match-wins in this
+    # same order. Dropping it is correct; dropping it SILENTLY is not, since the
+    # pre-rename shape at least sat visibly on disk. The sharp case is an EMPTY
+    # canonical block shadowing a populated duplicate: it wins on precedence and
+    # the records go with no receipt.
+    for key, discarded in drained:
+        if discarded and discarded is not block:
+            logger.warning(
+                "discarding shadowed account block %r (%d key(s)); a "
+                "higher-precedence block already provides config.accounts",
+                key,
+                len(discarded),
+            )
     data["accounts"] = block
     return block
 
