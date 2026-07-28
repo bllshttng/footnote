@@ -1453,3 +1453,47 @@ class TestMutableAccountsBlockShapes:
         assert flat["accounts"]["active"] == "a"
         assert flat["accounts"]["records"] == [{"id": "keep"}]
         assert flat["accounts"]["active_combo"] == "written"
+
+
+class TestMutableAccountsBlockCompetingBlocks:
+    """A transitional file can hold more than one account block at once.
+
+    The canonical-present fast path used to return before draining the others,
+    which is not inert: a surviving `config.accounts` is merged OVER the edited
+    top-level block by `_flatten_config` (the write is lost while the caller
+    reports success), and a surviving `providers` splits the state.
+    """
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            pytest.param(
+                {"accounts": {"active": "top"}, "config": {"accounts": {"active": "nested"}}},
+                id="canonical-flat-plus-canonical-wrapped",
+            ),
+            pytest.param(
+                {"accounts": {"active": "top"}, "providers": {"active": "legacy"}},
+                id="canonical-flat-plus-legacy-flat",
+            ),
+            pytest.param(
+                {"accounts": {"active": "top"}, "config": {"providers": {"active": "legacy"}}},
+                id="canonical-flat-plus-legacy-wrapped",
+            ),
+        ],
+    )
+    def test_competitors_are_drained_so_the_write_survives(self, raw):
+        from fno.adapters.providers.loader import (
+            _flatten_config,
+            mutable_accounts_block,
+        )
+
+        mutable_accounts_block(raw)["active_combo"] = "written"
+        flat = _flatten_config(raw)
+
+        assert flat["accounts"]["active_combo"] == "written"
+        # The canonical top-level block still wins on precedence, matching the
+        # reader, and no competitor survives to shadow or split it.
+        assert flat["accounts"]["active"] == "top"
+        assert "providers" not in flat
+        assert "accounts" not in raw.get("config", {})
+        assert "providers" not in raw.get("config", {})

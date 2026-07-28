@@ -156,32 +156,37 @@ def mutable_accounts_block(data: dict[str, Any]) -> dict[str, Any]:
     pre-rename block is migrated (moved, not copied) on first mutation, exactly
     as ``save_providers`` does, and there is one place that knows both spellings.
     """
+    config = data.get("config")
+    config = config if isinstance(config, dict) else None
+
+    # Drain the three non-canonical locations UNCONDITIONALLY, even when the
+    # canonical top-level block is already present. Popping only when it is
+    # absent leaves a competitor behind, and a competitor is not inert:
+    #   - a surviving `config.accounts` is merged OVER the edited top-level
+    #     block by `_flatten_config`, so a combo write or failover's active-flip
+    #     reports success against a file that never changed;
+    #   - a surviving `providers` keeps the file readable under both names and
+    #     splits the state, which is exactly what this helper exists to prevent.
+    # Draining is also what the READER already does in effect: it returns the
+    # first match in this precedence order and ignores the rest, so the blocks
+    # removed here were never being read.
+    fallback = None
+    for source, key in (
+        (config, "accounts"),
+        (data, "providers"),
+        (config, "providers"),
+    ):
+        if source is None:
+            continue
+        found = source.pop(key, None)
+        if isinstance(found, dict) and fallback is None:
+            fallback = found
+
     block = data.get("accounts")
     if not isinstance(block, dict):
-        # Pop, never copy: leaving the old key behind would keep the file
-        # readable under both names forever and duplicate every subkey.
-        #
-        # All FOUR locations the reader accepts, in its order. Checking only the
-        # three non-canonical-nested ones let a wrapped `config.accounts` file be
-        # read but not mutated: this installed a fresh empty top-level block, the
-        # caller's edit landed there, and `_flatten_config` then merged the
-        # untouched nested block over it - so a combo write or failover flip
-        # reported success against a file that never changed.
-        legacy = None
-        config = data.get("config")
-        config = config if isinstance(config, dict) else None
-        for source, key in (
-            (config, "accounts"),
-            (data, "providers"),
-            (config, "providers"),
-        ):
-            if source is None:
-                continue
-            found = source.pop(key, None)
-            if isinstance(found, dict):
-                legacy = found
-                break
-        block = legacy if isinstance(legacy, dict) else {}
+        # Adopt (never copy) the highest-precedence survivor, so the pre-rename
+        # block is MOVED onto the canonical key rather than duplicated.
+        block = fallback if isinstance(fallback, dict) else {}
     data["accounts"] = block
     return block
 
