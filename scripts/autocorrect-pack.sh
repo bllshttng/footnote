@@ -169,8 +169,18 @@ GRAPH_BLOCKED="$TMPDIR_PACK/graph-blocked.yaml"
 : > "$GRAPH_BLOCKED"
 if [[ -f "$GRAPH_PATH" ]] && command -v jq >/dev/null 2>&1; then
   # Select nodes where status == "blocked" OR blocked_count > 0.
+  #
+  # The entry list lives under `.entries`; this read asked for `.nodes` and so
+  # selected from an empty list on every run since it was written, shipping an
+  # empty BLOCKED section that looked like "nothing is blocked". jq's stderr is
+  # no longer discarded for the same reason -- silencing it is what let a read
+  # that never matched anything pass for a read that found nothing.
+  #
+  # Stays jq rather than a verb: no `fno backlog` verb lists by status without a
+  # query, and nothing selected here (`blocked`, blocked_count) is a field the
+  # migration pass rewrites.
   jq -r '
-    .nodes // [] | .[] |
+    .entries // [] | .[] |
     select((.status // ._status) == "blocked" or (.blocked_count // 0) > 0) |
     {
       node_id: .id,
@@ -182,7 +192,7 @@ if [[ -f "$GRAPH_PATH" ]] && command -v jq >/dev/null 2>&1; then
     "    title: " + (.title | tojson) + "\n" +
     "    blocked_count: " + (.blocked_count | tostring) + "\n" +
     "    last_blocked_reason: " + (.last_blocked_reason | tojson)
-  ' "$GRAPH_PATH" 2>/dev/null >> "$GRAPH_BLOCKED" || true
+  ' "$GRAPH_PATH" >> "$GRAPH_BLOCKED" || true
 fi
 
 # -------------------------------------------------------------------
