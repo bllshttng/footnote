@@ -249,6 +249,26 @@ fn interpret_pick(ok: bool, stdout: &str, stderr: &str) -> Result<PickedEnv, Str
     Ok(env)
 }
 
+/// True when applying `picked` would silently undo a route this run pins.
+///
+/// A loop launched with an explicit provider route (an `ANTHROPIC_BASE_URL` +
+/// `ANTHROPIC_AUTH_TOKEN` pair for a non-Anthropic endpoint, or a pinned model
+/// tier) is already committed. The overlay's clear-list names exactly those
+/// vars, so a static env that sets one is a deliberate routing decision the pick
+/// would scrub mid-flight - moving the run to a claude account while its receipt
+/// claimed only to have picked one. Deriving the check FROM the clear-list is
+/// what keeps it from becoming a second, drifting copy of that list here.
+///
+/// The mirror of the Python seam declining to pick for a `--route`/`--role`
+/// spawn, for the same reason: endpoint, auth and model are one route, and
+/// half-composing it is what bills the wrong account.
+fn pick_would_undo_a_route(picked: &[(String, String)], static_env: &[(String, String)]) -> bool {
+    picked
+        .iter()
+        .filter(|(_, v)| v.is_empty())
+        .any(|(k, _)| static_env.iter().any(|(ek, _)| ek == k))
+}
+
 /// Ask `fno providers pick` which account the next iteration should launch on.
 ///
 /// Shells the verb rather than reimplementing the predicate: headroom, combo
@@ -381,6 +401,20 @@ impl Dispatcher for ShelloutDispatcher {
         if !self.env.iter().any(|(k, _)| k == PICKED_ENV_KEY) {
             let iter = ctx.iteration;
             match pick_account_env() {
+                // A loop launched with an explicit route (ANTHROPIC_BASE_URL +
+                // ANTHROPIC_AUTH_TOKEN for a non-Anthropic endpoint, or a pinned
+                // model tier) is already committed to a provider. Applying a
+                // pick would scrub exactly those vars and silently move the run
+                // to a claude account mid-flight. The verb's own clear-list is
+                // what identifies them, so there is no second copy of it here -
+                // the mirror of the Python seam declining to pick for a --route
+                // or --role spawn.
+                Ok(picked) if pick_would_undo_a_route(&picked, &self.env) => {
+                    eprintln!(
+                        "loop: iteration {iter} account not picked \
+                         (this run pins its own provider route)"
+                    );
+                }
                 Ok(picked) => {
                     for (key, value) in &picked {
                         // An empty value is the verb saying "clear this": an
@@ -421,7 +455,51 @@ impl Dispatcher for ShelloutDispatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpret_pick, resolve_driver_binary};
+    use super::{interpret_pick, pick_would_undo_a_route, resolve_driver_binary};
+
+    fn pair(k: &str, v: &str) -> (String, String) {
+        (k.to_string(), v.to_string())
+    }
+
+    // A GLM/zai loop pins ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN. The pick
+    // would scrub both and pin a claude config dir, silently moving the run to a
+    // different provider mid-flight while claiming only to have picked an
+    // account.
+    #[test]
+    fn a_pick_that_would_scrub_a_pinned_route_is_declined() {
+        let picked = vec![
+            pair("ANTHROPIC_BASE_URL", ""),
+            pair("ANTHROPIC_AUTH_TOKEN", ""),
+            pair("CLAUDE_CONFIG_DIR", "/alt"),
+        ];
+        let routed = vec![
+            pair(
+                "ANTHROPIC_BASE_URL",
+                "https://open.bigmodel.cn/api/anthropic",
+            ),
+            pair("OUTPUT_FILE", "/tmp/out"),
+        ];
+        assert!(pick_would_undo_a_route(&picked, &routed));
+    }
+
+    #[test]
+    fn an_unrouted_loop_still_gets_its_pick() {
+        let picked = vec![
+            pair("ANTHROPIC_BASE_URL", ""),
+            pair("CLAUDE_CONFIG_DIR", "/alt"),
+        ];
+        let plain = vec![pair("OUTPUT_FILE", "/tmp/out"), pair("CLI", "claude")];
+        assert!(!pick_would_undo_a_route(&picked, &plain));
+    }
+
+    #[test]
+    fn only_the_clear_list_blocks_a_pick_not_the_pin_itself() {
+        // CLAUDE_CONFIG_DIR arrives with a VALUE, so it is not part of the
+        // clear-list and must not make every pick look like a route conflict.
+        let picked = vec![pair("CLAUDE_CONFIG_DIR", "/alt")];
+        let same_key = vec![pair("CLAUDE_CONFIG_DIR", "/other")];
+        assert!(!pick_would_undo_a_route(&picked, &same_key));
+    }
 
     #[test]
     fn a_picked_account_yields_its_config_dir() {
