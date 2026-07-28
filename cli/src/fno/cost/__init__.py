@@ -257,9 +257,24 @@ def _append_to_ledger(ledger_path: Path, entry: dict[str, Any]) -> None:
         os.replace(tmp_path, ledger_path)
 
 
-def upsert_cost_session(
-    node: dict[str, Any], session_id: str, cost_usd: float, *, ndigits: int = 4
-) -> None:
+_COST_NDIGITS = 4
+
+
+def _as_cost(value: Any) -> float:
+    """Coerce a stored cost to a float; junk reads as 0.0 rather than raising.
+
+    Costs come off disk, so bool/None/str all reach the sum. `graph/triage.py`
+    excludes bools for the same reason: `float(True)` is a silent 1.0.
+    """
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def upsert_cost_session(node: dict[str, Any], session_id: str, cost_usd: float) -> None:
     """Record one session's cost on a graph node, replacing any prior row.
 
     A session's cost is a LEVEL that gets re-reported (a resumed run, a second
@@ -268,17 +283,22 @@ def upsert_cost_session(
     replaced in place when it already exists. `cost_usd` is then re-derived
     from the rows, never incremented.
 
-    `ndigits` rounds both this row and the recomputed node total: 4 for
-    internal accounting, 2 for the `fno graph cost` command whose receipt
-    prints cents. Passing different values for one node across writers leaves
-    the total's last digits dependent on which wrote last.
+    Rounding is fixed for every writer. A per-caller precision made one node's
+    total depend on which surface wrote it last; a receipt wanting cents formats
+    its own output instead of changing what is stored.
+
+    Legacy and hand-edited graphs carry a non-list `cost_sessions`, non-dict
+    rows, and string costs - `graph/triage.py` defends against those same shapes
+    on the read side. Drop what cannot be a cost row rather than raising: this
+    runs at session finalize, where an exception loses the attribution entirely.
     """
+    rows = node.get("cost_sessions")
+    rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
     row = {
         "session_id": session_id,
-        "cost_usd": round(float(cost_usd), ndigits),
+        "cost_usd": round(_as_cost(cost_usd), _COST_NDIGITS),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    rows = node.get("cost_sessions") or []
     for existing in rows:
         if existing.get("session_id") == session_id:
             existing.update(row)
@@ -286,7 +306,7 @@ def upsert_cost_session(
     else:
         rows.append(row)
     node["cost_sessions"] = rows
-    node["cost_usd"] = round(sum(float(r.get("cost_usd") or 0) for r in rows), ndigits)
+    node["cost_usd"] = round(sum(_as_cost(r.get("cost_usd")) for r in rows), _COST_NDIGITS)
 
 
 def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd: float) -> bool:
@@ -307,6 +327,13 @@ def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd
     from fno.graph.store import locked_mutate_graph
 
     if not graph_path.exists():
+        # The likeliest cause is a worktree whose `.fno/` symlink was never
+        # healed by setup-worktree.sh, so say it rather than skipping in silence.
+        print(
+            f"cost._update_graph_node: no graph at {graph_path}; "
+            "cost not attributed",
+            file=sys.stderr,
+        )
         return False
 
     found = False
@@ -329,6 +356,17 @@ def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd
         # on stderr, and it leaves the file untouched.
         print(
             f"cost._update_graph_node: graph unreadable at {graph_path}; "
+            "cost attribution skipped for this session",
+            file=sys.stderr,
+        )
+        return False
+    except Exception as exc:
+        # locked_mutate_graph does far more than the mutator after it returns
+        # (backup, atomic write, sidecar, md render, status recompute), and any
+        # of it can raise on a full disk or a read-only .fno. "Best-effort" has
+        # to mean every failure, or the promise above is one the code breaks.
+        print(
+            f"cost._update_graph_node: {type(exc).__name__} writing {graph_path}: {exc}; "
             "cost attribution skipped for this session",
             file=sys.stderr,
         )

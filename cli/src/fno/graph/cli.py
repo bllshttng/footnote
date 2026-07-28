@@ -4919,7 +4919,7 @@ def cmd_cost(
 
         for e in entries:
             if e.get("id") == task_id:
-                upsert_cost_session(e, session, amount_f, ndigits=2)
+                upsert_cost_session(e, session, amount_f)
                 return entries
         typer.echo(f"Error: feature {task_id} not found", err=True)
         raise typer.Exit(code=1)
