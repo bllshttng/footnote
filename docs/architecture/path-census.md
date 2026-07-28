@@ -103,11 +103,18 @@ The dispatcher is reachable, so this PR does not partially delete it or `scripts
 | 6b | `autocorrect-pack.sh` blocked-state read | `autocorrect-pack.sh:183` | CLOSED; read `.entries`, not `.nodes` | this PR |
 | 6c | plan_path -> node lookup heredocs | `autolaunch-on-ready.sh:108`, `init-target-state.sh:921` | OPEN, deliberately parked | OPEN |
 
-Row 4 deviates from the original disposition. A version stamp needs a writer change plus an integer someone must remember to bump, and the only sane failure action for a display surface is to keep rendering, which it already does. `classify` now names every status explicitly (including the ones it drops), so `_ => None` means "unknown" rather than doubling as the drop bucket, and `cli/tests/unit/test_graph_status_vocabulary.py` compares that set against `VALID_STATUSES` + `STATUS_MIGRATION`. Same drift caught, no new field on disk.
+Row 4 deviates from the original disposition.
+A version stamp needs a writer change plus an integer someone must remember to bump, and the only sane failure action for a display surface is to keep rendering, which it already does.
+`classify` now names every status explicitly (including the ones it drops), so `_ => None` means "unknown" rather than doubling as the drop bucket, and `cli/tests/unit/test_graph_status_vocabulary.py` compares that set against `VALID_STATUSES` + `STATUS_MIGRATION`.
+Same drift caught, no new field on disk.
 
-Row 5 deviates too. The census said to call `fno backlog get --strict`, but the two resolvers are not ordered by capability: `get` uses `resolve_node`, which resolves a bare hex `ff6f96e0` that `resolve_id` misses and misses a partial `ab-ff6f96` that `resolve_id` resolves. Swapping trades one tested capability for another and drops the `RESOLVE_FUZZY` title-match path. What was actually the landmine -- the hand-rolled `json.load` -- is gone.
+Row 5 deviates too.
+The census said to call `fno backlog get --strict`, but the two resolvers are not ordered by capability: `get` uses `resolve_node`, which resolves a bare hex `ff6f96e0` that `resolve_id` misses and misses a partial `ab-ff6f96` that `resolve_id` resolves.
+Swapping trades one tested capability for another and drops the `RESOLVE_FUZZY` title-match path.
+What was actually the landmine -- the hand-rolled `json.load` -- is gone.
 
-Row 6c stays open on purpose: two heredocs resolve a node by `plan_path`, no verb does that, and minting one to serve two shell callers is more surface than the duplication costs. Neither reads a field `_apply_graph_defaults` rewrites, so neither is a drift landmine; they are ordinary duplication for a later sweep.
+Row 6c stays open on purpose: two heredocs resolve a node by `plan_path`, no verb does that, and minting one to serve two shell callers is more surface than the duplication costs.
+Neither reads a field `_apply_graph_defaults` rewrites, so neither is a drift landmine; they are ordinary duplication for a later sweep.
 
 ## Census 8: worktree creation
 

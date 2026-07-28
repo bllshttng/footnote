@@ -96,7 +96,9 @@ def load_graph(path: Path | None = None) -> list[dict]:
         path: Path to graph.json. Defaults to ~/.fno/graph.json.
 
     Returns:
-        List of graph entry dicts (raw, without defaults applied).
+        List of graph entry dicts with the canonical migration/defaults pass
+        applied (see :func:`_entries`) -- the same vocabulary ``read_graph``
+        returns, not the raw on-disk rows.
     """
     if path is None:
         path = GRAPH_JSON

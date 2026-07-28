@@ -417,14 +417,18 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         if "_status" in e:
             e.setdefault("status", e["_status"])
             del e["_status"]
+        # `in <dict>` hashes the key, so a row carrying an unhashable value (a
+        # hand-mangled `"priority": []`) would raise TypeError. Every reader now
+        # routes through here, including ones documented as never-fatal, so the
+        # type check belongs here rather than in each caller's except clause.
         old_priority = e.get("priority")
-        if old_priority in PRIORITY_MIGRATION:
+        if isinstance(old_priority, str) and old_priority in PRIORITY_MIGRATION:
             e["priority"] = PRIORITY_MIGRATION[old_priority]
         # Same idea for the renamed `claimed` -> `in_progress` status: the read
         # path must speak the current vocabulary even for a row whose on-disk
         # `status` predates the rename and has not been re-mutated yet.
         old_status = e.get("status")
-        if old_status in STATUS_MIGRATION:
+        if isinstance(old_status, str) and old_status in STATUS_MIGRATION:
             e["status"] = STATUS_MIGRATION[old_status]
     for e in entries:
         e.setdefault("parent", None)
@@ -616,7 +620,16 @@ def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     """
     if not path.exists():
         return []
-    raw = path.read_text()
+    # Inside the guard: this function's contract is that anything unreadable
+    # surfaces as GraphUnreadableError, and callers branch on that to tell a
+    # wedged graph from an absent node. A bare read_text() let a directory, a
+    # permission error, or non-UTF-8 bytes escape as OSError/UnicodeDecodeError,
+    # past the caller's `except GraphUnreadableError` and out as a generic exit 1
+    # -- the code that means "read cleanly, node absent".
+    try:
+        raw = path.read_text()
+    except (OSError, UnicodeDecodeError) as e:
+        raise GraphUnreadableError(f"{path} could not be read: {e}") from e
     if raw.strip() == "":
         raise GraphUnreadableError(f"{path} is empty (zero bytes)")
     try:

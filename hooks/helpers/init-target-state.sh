@@ -661,7 +661,6 @@ if [[ ! -f "$STATE_FILE" ]]; then
   _GUARD_NODE=""
   _GUARD_MATCHES=""   # space-joined distinct id-shaped tokens that ARE graph nodes
   _GUARD_AMBIGUOUS=0
-  _GUARD_STATUS=""
   # Tokenize INITIAL_INPUT so a modifier-prefixed input ("beast mode <id>")
   # still resolves its node, the way _resolve_plan_for_blast tokenizes. Each
   # token keeps the same anchored id shape + graph presence, so free text still
@@ -674,9 +673,21 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # quoted id also appears inside OTHER nodes (a blocked_by member, a nested
   # `"id":` in an embedded decomposition list), so the grep counted
   # merely-referenced ids as present, and two such hits set _GUARD_AMBIGUOUS and
-  # silently skipped the in_review refusal below. The status read below wanted
-  # the same call, so the common single-id input costs no extra process.
-  # Missing fno fails open, this guard's stance everywhere else.
+  # silently skipped the in_review refusal below.
+  #
+  # `--field _archived` is the probe because it answers presence AND liveness in
+  # ONE read: an absent node exits 1, an archived node prints True, a live node
+  # prints null. Reading `status` instead would count an archived node as present
+  # -- `backlog get` has a read-through fallback to graph-archive.json that
+  # `--strict` does not gate -- which the grep this replaced got right by
+  # accident, since it only ever saw the working graph.
+  #
+  # The exit code is load-bearing, not decoration: cli.py returns a distinct
+  # GRAPH_UNREADABLE_EXIT so a wedged graph cannot be mistaken for an absent
+  # node. Collapsing both to "not a node" is how the in_review refusal would go
+  # silently missing on the exact runs it exists for, so an unreadable graph
+  # fails open LOUDLY instead. Missing fno fails open too, this guard's stance
+  # everywhere else.
   set -f
   # `if`, not `command -v fno && for ...`: an AND-OR list that short-circuits
   # returns non-zero, and this script runs under `set -e`. An `if` condition is
@@ -687,10 +698,19 @@ if [[ ! -f "$STATE_FILE" ]]; then
     case " $_GUARD_MATCHES " in
       *" $_tok "*) continue ;;  # already counted this distinct id
     esac
-    _tok_status="$(fno backlog get --strict "$_tok" --field status 2>/dev/null | tr -d '[:space:]' || true)"
-    [[ -n "$_tok_status" ]] || continue
+    # `&& rc=0 || rc=$?` keeps this set -e safe: a bare failing assignment aborts.
+    _tok_probe="$(fno backlog get --strict "$_tok" --field _archived 2>/dev/null | tr -d '[:space:]')" \
+      && _probe_rc=0 || _probe_rc=$?
+    if [[ "$_probe_rc" -ne 0 ]]; then
+      # 1 is the only "read cleanly, node absent" code; anything else means the
+      # graph could not be read and the guard is running blind. Say so.
+      [[ "$_probe_rc" -eq 1 ]] || echo "target: WARNING: could not resolve '$_tok' against the graph (fno backlog get exit $_probe_rc); the in_review guard is not running for it" >&2
+      continue
+    fi
+    # Archived is not live work: the node is gone from the working graph, so the
+    # claim and the graph_node_id stamp below would both point at nothing.
+    [[ "$_tok_probe" == "True" ]] && continue
     _GUARD_MATCHES="${_GUARD_MATCHES:+$_GUARD_MATCHES }$_tok"
-    _GUARD_STATUS="$_tok_status"
   done
   fi
   set +f
@@ -700,8 +720,12 @@ if [[ ! -f "$STATE_FILE" ]]; then
     _GUARD_AMBIGUOUS=1
   fi
   if [[ -n "$_GUARD_NODE" && "${TARGET_ALLOW_IN_REVIEW:-}" != "1" ]]; then
+    _GUARD_STATUS="$(fno backlog get --strict "$_GUARD_NODE" --field status 2>/dev/null | tr -d '[:space:]' || true)"
     if [[ "$_GUARD_STATUS" == "in_review" ]]; then
       _GUARD_PR="$(fno backlog get --strict "$_GUARD_NODE" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)"
+      # `--field` prints a literal "null" for an unset field, which ${x:+ #$x}
+      # reads as present and renders as "open PR #null".
+      [[ "$_GUARD_PR" == "null" ]] && _GUARD_PR=""
       cat >&2 <<EOF
 [init-target-state] REFUSED: node $_GUARD_NODE is in_review (open PR${_GUARD_PR:+ #$_GUARD_PR}).
 
