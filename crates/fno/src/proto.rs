@@ -1117,12 +1117,13 @@ pub enum Command {
     /// the same `navigate` geometry [`Command::FocusDir`] uses.
     ///
     /// `mover: Some` with `target: None` is the third form and the one to be
-    /// careful with: it means "this pane, one place `dir`-ward OF ITSELF", and
-    /// the server resolves it by navigating from the mover. It is therefore only
-    /// meaningful when the mover is in the tab the resolution runs against. A
-    /// caller naming a pane in some OTHER tab must supply a `target`, or the
-    /// move silently reshapes a tab nobody is looking at. The sideline row menu
-    /// picks between the two forms on exactly that test.
+    /// careful with: it means "this pane, one place `dir`-ward of itself", and
+    /// the server resolves it by navigating from the mover WITHIN THE VIEWED
+    /// TAB. It is therefore only meaningful for a mover that is in that tab. A
+    /// caller naming a pane in some other tab has `navigate` bail on a pane the
+    /// viewed tree does not hold, so the move is refused with a "no pane in that
+    /// direction" notice and goes nowhere; such a caller must name a `target`.
+    /// The sideline row menu picks between the two forms on exactly that test.
     ///
     /// One verb rather than two: both forms end in the same relocation, and
     /// only the addressing differs.

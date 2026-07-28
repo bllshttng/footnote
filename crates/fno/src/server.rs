@@ -11831,6 +11831,53 @@ mod tests {
     }
 
     #[test]
+    fn pane_break_carries_a_name_only_when_it_empties_the_source_tab() {
+        // Breaking out a pane that is ALONE in its tab rebuilds that tab around
+        // the same pane, so dropping the operator's name is data loss. Breaking
+        // one pane out of several is a genuinely new tab and stays unnamed.
+        let mut core = two_tab_core(); // tab 20 = "bee", a single leaf 3
+        let new_tid = core.pane_break(3, None).expect("break a solo pane");
+        let sq = core.session.squad(1).unwrap();
+        assert_eq!(
+            sq.tabs
+                .iter()
+                .find(|t| t.id == new_tid)
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("bee"),
+            "the emptied tab's name carries to the tab rebuilt around its pane"
+        );
+        assert!(
+            sq.tabs.iter().all(|t| t.id != 20),
+            "the emptied source tab is gone, so no two tabs share the name"
+        );
+
+        // Tab 10 holds [1, 2]: breaking 1 out leaves 2 behind, so the source
+        // survives and keeps its name while the new tab gets none.
+        let mut core = two_tab_core();
+        core.session
+            .squad_mut(1)
+            .unwrap()
+            .tabs
+            .iter_mut()
+            .find(|t| t.id == 10)
+            .unwrap()
+            .name = Some("keep".into());
+        let new_tid = core.pane_break(1, None).expect("break one of two panes");
+        let sq = core.session.squad(1).unwrap();
+        assert_eq!(
+            sq.tabs.iter().find(|t| t.id == new_tid).unwrap().name,
+            None,
+            "a surviving source tab keeps its name; the break-out is a new tab"
+        );
+        assert_eq!(
+            sq.tabs.iter().find(|t| t.id == 10).unwrap().name.as_deref(),
+            Some("keep")
+        );
+    }
+
+    #[test]
     fn move_pane_cross_tab_grafts_into_viewed_tab_and_empties_the_source() {
         // AC3-HP: a sideline-row drop names a mover (pane 3) living in tab 20,
         // not the viewed tab 10 where target pane 2 lives. The cross-tab branch
