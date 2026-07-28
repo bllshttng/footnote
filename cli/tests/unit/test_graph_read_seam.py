@@ -73,35 +73,61 @@ def test_every_reader_returns_identical_entries(graph: Path) -> None:
     assert read_graph_nodes(graph) == canonical
 
 
-def test_junk_rows_are_skipped_for_migration_but_never_removed(tmp_path: Path) -> None:
-    """A non-dict row must not crash the pass, and must not vanish from it.
+def test_malformed_rows_survive_where_they_are_evidence_and_are_filtered_where_they_are_noise(
+    tmp_path: Path,
+) -> None:
+    """Two different callers need two different answers about a junk row.
 
-    Skipping is what the pass owes callers: every field access assumes a dict,
-    so a scalar row used to raise a bare AttributeError. KEEPING it is the
-    subtler half. `locked_mutate_graph` feeds this result straight to
-    `_write_json`, so a dropped row is deleted from disk on the next mutation;
-    and `agents/discover.py::_reachable_from_graph` COUNTS non-dict rows to
-    report "graph unreadable" instead of "token names nothing" -- filtering here
-    removes the evidence it looks for and turns a corrupt graph into a confident
-    miss, which its own comment says would drop the mail.
+    `agents/discover.py::_reachable_from_graph` COUNTS non-dict rows via
+    `load_graph` to report "graph unreadable" instead of "token names nothing"
+    -- its own comment says reporting empty there would drop the mail. So the
+    migration pass skips those rows without removing them, and `load_graph`
+    hands them through.
+
+    Ordinary readers are the opposite case: `read_graph`'s contract is to
+    swallow corruption rather than crash a terminal, and its consumers index
+    entries as dicts (`cmd_tree` builds `{e["id"]: e ...}`, `resolve_node`
+    calls `e.get`). Handing one a scalar trades a clean degrade for a
+    TypeError, so the filter lives at that boundary.
     """
     p = tmp_path / "graph.json"
     p.write_text(json.dumps({"entries": [42, None, {"id": "x-0004"}]}), encoding="utf-8")
 
-    for reader in (read_graph, load_graph):
-        rows = reader(p)
-        assert [e for e in rows if isinstance(e, dict)] == [
-            e for e in rows if isinstance(e, dict)
-        ]
-        assert any(not isinstance(e, dict) for e in rows), (
-            f"{reader.__name__} removed the malformed rows that corruption "
-            f"detection depends on"
-        )
-        assert [e["id"] for e in rows if isinstance(e, dict)] == ["x-0004"]
+    # Evidence preserved for the caller that detects corruption.
+    raw = load_graph(p)
+    assert any(not isinstance(e, dict) for e in raw), (
+        "load_graph removed the malformed rows corruption detection depends on"
+    )
+    assert [e["id"] for e in raw if isinstance(e, dict)] == ["x-0004"]
 
-    # The scoreboard is a display surface and filters for itself, so it is the
-    # one reader that legitimately returns only well-formed rows.
-    assert [e["id"] for e in read_graph_nodes(p)] == ["x-0004"]
+    # Filtered for the callers that index dicts.
+    for reader in (read_graph, read_graph_nodes):
+        rows = reader(p)
+        assert all(isinstance(e, dict) for e in rows), (
+            f"{reader.__name__} handed a non-dict row to a caller that indexes dicts"
+        )
+        assert [e["id"] for e in rows] == ["x-0004"]
+
+    # The strict reader is a resolution boundary, so it filters too.
+    from fno.graph.store import read_graph_strict
+
+    assert all(isinstance(e, dict) for e in read_graph_strict(p))
+
+
+def test_ordinary_read_commands_survive_a_malformed_row(tmp_path: Path) -> None:
+    """The shapes the P1 named: dict-indexing consumers must not raise.
+
+    `read_graph`'s documented job is that `status` and `ready` do not crash on a
+    wedged graph. These are the two access patterns cited as breaking.
+    """
+    p = tmp_path / "graph.json"
+    p.write_text(json.dumps({"entries": [42, {"id": "x-0004"}]}), encoding="utf-8")
+
+    entries = read_graph(p)
+    # cmd_tree's shape.
+    assert {e["id"]: e for e in entries}.keys() == {"x-0004"}
+    # resolve_node's shape.
+    assert [e.get("id") for e in entries] == ["x-0004"]
 
 
 def test_a_mutation_never_silently_deletes_a_malformed_row(tmp_path: Path) -> None:

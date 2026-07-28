@@ -576,9 +576,19 @@ def read_graph(path: Path = GRAPH_JSON) -> list[dict]:
     Swallows corruption on the read path -- commands like `status` and `ready`
     should not crash a user's terminal when graph.json is wedged. Write paths
     (locked_mutate_graph) surface the error instead.
+
+    That contract is why a malformed ROW is filtered here rather than in
+    ``_apply_graph_defaults``: ordinary consumers index these entries as dicts
+    (``cmd_tree`` builds ``{e["id"]: e ...}``, ``resolve_node`` calls
+    ``e.get``), so handing one a scalar trades a clean degrade for a
+    TypeError. The pass keeps such rows because two callers need them --
+    ``locked_mutate_graph`` must not delete what it cannot migrate, and
+    ``load_graph``'s discovery caller counts them as evidence the graph is
+    unreadable -- but neither of those is an ordinary read.
     """
     try:
-        return _apply_graph_defaults(_read_json(path))
+        entries = _apply_graph_defaults(_read_json(path))
+        return [e for e in entries if isinstance(e, dict)]
     except GraphCorruptError:
         return []
 
@@ -661,7 +671,11 @@ def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
         raise GraphUnreadableError(
             f"{path} 'entries' is not a list (got {type(entries).__name__})"
         )
-    return _apply_graph_defaults(entries)
+    # Same reader-boundary filter as read_graph: a resolution caller indexes
+    # these as dicts, and this function's job is to distinguish "graph
+    # unreadable" (it raises) from "node absent" -- not to hand back rows no
+    # caller can use.
+    return [e for e in _apply_graph_defaults(entries) if isinstance(e, dict)]
 
 
 def _graph_lock_path(path: Path) -> Path:
