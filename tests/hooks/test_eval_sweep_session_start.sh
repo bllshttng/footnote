@@ -159,6 +159,10 @@ elapsed=$(( $(date +%s) - start ))
 # Two slow `observer sweep` stages, each bounded to 1s, plus two instant ticks:
 # well under the unbounded 60s. Generous ceiling to avoid CI flake.
 (( elapsed < 15 )) || fail "stages not bounded: elapsed ${elapsed}s (expected < 15)"
+# Floor too: a ceiling alone is satisfied by stages that never RAN, which is what
+# a refused bound or a broken stub looks like. Two 1s-bounded slow stages cannot
+# finish in under a second.
+(( elapsed >= 1 )) || fail "stages returned in ${elapsed}s, too fast to have run the slow stub - they were skipped and this case tested nothing"
 pass "US3: a wedged stage is killed at the bound (elapsed ${elapsed}s)"
 
 [[ -f "$LOG" ]] || fail "log file not written"

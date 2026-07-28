@@ -47,7 +47,13 @@ cat > "$TMP/fast" <<'EOF'
 echo "ok-payload"
 exit 3
 EOF
-chmod +x "$TMP/hang" "$TMP/wrapped" "$TMP/fast"
+# Ignores SIGTERM and keeps running, so only the KILL escalation can end it.
+cat > "$TMP/stubborn" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do sleep 0.2; done
+EOF
+chmod +x "$TMP/hang" "$TMP/wrapped" "$TMP/fast" "$TMP/stubborn"
 
 # Each case runs in its own /bin/bash so `set -m` state cannot leak between them.
 # stdout carries "elapsed|rc|output"; stderr is kept separate so an assertion can
@@ -102,42 +108,71 @@ rc=$?
     && pass "command's own exit status propagates (rc=3)" \
     || fail "expected rc=3 from the command, got rc=$rc"
 
+# A regression in the bound HANGS rather than fails, and a hanging test in CI is
+# its own outage, so the cases below need a deadline of their own. probe() writes
+# its result to a sentinel file and we poll for the FILE, never for the pid:
+# `kill -0` on an unreaped background job succeeds indefinitely, and signalling
+# the job to stop waiting makes bash announce "Terminated" on this script's
+# stderr - noise in a suite whose whole subject is a helper that keeps stderr
+# clean. Sets `probe_rc` and `probe_ms`, or returns 1 if it never finished.
+probe_bounded() {
+    local bound="$1" cmd="$2" out="$TMP/probe-result" i=0 pid
+    rm -f "$out"
+    /bin/bash -c '
+        set -uo pipefail
+        source "$1"; export PATH="$2:$PATH"
+        s=$(python3 -c "import time; print(int(time.time()*1000))")
+        with_timeout "$3" "$4" >/dev/null 2>&1
+        rc=$?
+        e=$(python3 -c "import time; print(int(time.time()*1000))")
+        printf "%s %s\n" "$rc" "$((e - s))" > "$5"
+    ' _ "$LIB" "$TMP" "$bound" "$cmd" "$out" >/dev/null 2>&1 &
+    pid=$!
+    while (( i < 30 )); do
+        [[ -f "$out" ]] && break
+        sleep 0.5
+        i=$(( i + 1 ))
+    done
+    if [[ ! -f "$out" ]]; then
+        kill -KILL "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+        pkill -KILL -f "$TMP/stubborn" >/dev/null 2>&1
+        return 1
+    fi
+    wait "$pid" 2>/dev/null
+    read -r probe_rc probe_ms < "$out"
+}
+
 # 2b. A child that IGNORES SIGTERM is still bounded. TERM alone is not a cap:
 #     `wait` has no remaining deadline after it, so such a child leaves the
-#     caller stuck forever, which is worse than no cap at all. This is the one
-#     case that must be bounded externally too, because a regression here hangs
-#     rather than fails, and a hanging test in CI is its own outage.
-cat > "$TMP/stubborn" <<'EOF'
-#!/usr/bin/env bash
-trap '' TERM
-while :; do sleep 0.2; done
-EOF
-chmod +x "$TMP/stubborn"
-
-/bin/bash -c '
-    set -uo pipefail
-    source "$1"
-    export PATH="$2:$PATH"
-    s=$(python3 -c "import time; print(int(time.time()*1000))")
-    with_timeout 2 stubborn >/dev/null 2>&1
-    e=$(python3 -c "import time; print(int(time.time()*1000))")
-    printf "%s\n" "$((e - s))" > "$3"
-' _ "$LIB" "$TMP" "$TMP/stubborn-ms" >/dev/null 2>&1 &
-probe_pid=$!
-( sleep 12; kill -KILL "$probe_pid" 2>/dev/null ) >/dev/null 2>&1 &
-guard_pid=$!
-wait "$probe_pid" 2>/dev/null; probe_rc=$?
-kill -TERM -"$guard_pid" 2>/dev/null; wait "$guard_pid" 2>/dev/null
+#     caller stuck forever - worse than no cap, because the caller is stuck
+#     rather than merely slow.
+if ! probe_bounded 2 stubborn; then
+    fail "a SIGTERM-ignoring child was never bounded: with_timeout did not return and the external deadline had to kill it"
+    kill_rc=""
+else
+    kill_rc="$probe_rc"
+    if [[ "$probe_ms" -ge 1500 && "$probe_ms" -le 8000 ]]; then
+        pass "SIGTERM-ignoring child escalated to KILL and bounded (${probe_ms}ms)"
+    else
+        fail "SIGTERM-ignoring child returned in ${probe_ms}ms, outside the 2s bound plus grace"
+    fi
+fi
 pkill -KILL -f "$TMP/stubborn" >/dev/null 2>&1
 
-stubborn_ms="$(cat "$TMP/stubborn-ms" 2>/dev/null || echo "")"
-if [[ -z "$stubborn_ms" ]]; then
-    fail "a SIGTERM-ignoring child was never bounded (rc=$probe_rc): with_timeout did not return and the external guard had to kill it"
-elif [[ "$stubborn_ms" -ge 1500 && "$stubborn_ms" -le 8000 ]]; then
-    pass "SIGTERM-ignoring child escalated to KILL and bounded (${stubborn_ms}ms)"
+# 2c. A fired bound reports ONE status regardless of whether TERM or the KILL
+#     escalation ended it. A caller forced to distinguish 143 from 137 is a
+#     caller coupled to this file's internals, which is how the frontdoor hook
+#     came to nag users about a front door they already had.
+if probe_bounded 2 hang; then
+    term_rc="$probe_rc"
 else
-    fail "SIGTERM-ignoring child returned in ${stubborn_ms}ms, outside the 2s bound plus grace"
+    fail "the plain hang case never returned"
+    term_rc=""
 fi
+[[ "$term_rc" == "124" && "$kill_rc" == "124" ]] \
+    && pass "a fired bound reports 124 on both the TERM and the KILL path" \
+    || fail "fired bound must report 124 on both paths, got TERM=${term_rc:-none} KILL=${kill_rc:-none}"
 
 # 3b. A non-integer bound is refused, not silently turned into a kill at t=0.
 #     GNU timeout accepted `30m`; `sleep` on stock macOS does not, and the one
@@ -173,6 +208,15 @@ fi
 #    scripts/lib/eval-sweep-throttle.sh was written to prevent; the bound here is
 #    deliberately long so a surviving watchdog sleep is unmistakable.
 if command -v pgrep >/dev/null 2>&1; then
+    # Positive control first. A `0` from pgrep means both "reaped correctly" and
+    # "this pattern never matches anything", and this is the one assertion
+    # covering the orphan incident, so it must not be the second.
+    sleep 47 & ctl_sleep=$!
+    ctl_found="$(pgrep -f 'sleep 47' 2>/dev/null | wc -l | tr -d ' ')"
+    kill "$ctl_sleep" 2>/dev/null; wait "$ctl_sleep" 2>/dev/null
+    [[ "$ctl_found" != "0" ]] \
+        || fail "orphan control: pgrep -f 'sleep 47' cannot see a sleep 47 that IS running, so the survivor count below proves nothing"
+
     /bin/bash -c 'set -uo pipefail; source "$1"; export PATH="$2:$PATH"; with_timeout 47 fast >/dev/null 2>&1' _ "$LIB" "$TMP"
     survivors="$(pgrep -f 'sleep 47' 2>/dev/null | wc -l | tr -d ' ')"
     if [[ "$survivors" == "0" ]]; then
@@ -192,7 +236,11 @@ fi
 #    absence - an empty search result is a claim (AGENTS.md).
 defs="$(grep -rlE '^[[:space:]]*(_?with_timeout|_timeout)\(\)' "$REPO_ROOT/hooks" "$REPO_ROOT/scripts" --include='*.sh' 2>/dev/null | sort)"
 if [[ "$defs" == "$REPO_ROOT/scripts/lib/with-timeout.sh" ]]; then
-    pass "exactly one timeout implementation, and it is the shared lib"
+    # Scope named honestly: this proves uniqueness across hooks/ and scripts/,
+    # NOT the whole repo. Self-contained skill scripts under skills/ carry their
+    # own bounds by design and cannot source scripts/lib/; routing them through
+    # skill-bundles.yaml is separate work.
+    pass "exactly one timeout implementation in hooks/ and scripts/, and it is the shared lib"
 else
     fail "expected only scripts/lib/with-timeout.sh to define the bound, found: ${defs:-<nothing, so this grep is broken>}"
 fi

@@ -22,14 +22,14 @@ source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 if command -v fno >/dev/null 2>&1; then
   with_timeout 3 fno mux ls --json >/dev/null 2>&1
   probe_rc=$?
-  # 143 means our own bound fired. A wedged socket still PROVES the Rust front
+  # 124 means our own bound fired. A wedged socket still PROVES the Rust front
   # door is present: `fno-py` has no `mux` verb and fails fast with a usage
-  # error, it cannot hang here. Treating 143 as "not the front door" would nag a
+  # error, it cannot hang here. Treating that as "not the front door" would nag a
   # user to install what they already have, every session, for as long as the
   # socket stays wedged. Now that the cap actually fires on every host rather
   # than only where Homebrew supplied timeout(1), that misread is reachable
   # everywhere, so it has to be distinguished from a real probe failure.
-  if [[ $probe_rc -eq 0 || $probe_rc -eq 143 ]]; then
+  if [[ $probe_rc -eq 0 || $probe_rc -eq 124 ]]; then
     exit 0 # `fno` on PATH IS the Rust mux front door - nothing to remind
   fi
 fi

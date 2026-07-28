@@ -12,9 +12,14 @@
 
 # with_timeout SECS CMD [ARGS...]
 #
-# Runs CMD, killing it after SECS wall-clock. Returns CMD's exit status, or its
-# signal status (143) when the bound fires. Safe under `OUTPUT=$(with_timeout
-# ...)`, which is how every caller uses it.
+# Runs CMD, killing it after SECS wall-clock. Returns CMD's own exit status, or
+# 124 when the bound fired - one value, following GNU timeout's convention, so a
+# caller never compares against a signal number that depends on whether TERM or
+# the KILL escalation happened to land. Returns 2 for a malformed SECS.
+# A command killed by an unrelated external TERM/KILL also reports 124; from a
+# caller's side it was terminated rather than completed, which is the same
+# decision either way.
+# Safe under `OUTPUT=$(with_timeout ...)`, which is how every caller uses it.
 with_timeout() {
   local secs="$1"; shift
 
@@ -75,12 +80,36 @@ with_timeout() {
   local rc=0
   wait "$pid" 2>/dev/null || rc=$?
 
+  # A terminated child collapses to ONE status. 143 is the TERM path and 137 the
+  # KILL escalation; which one lands is an implementation detail of this file and
+  # must not become a condition in a caller.
+  case $rc in
+    143 | 137 )
+      rc=124
+      # `wait` returns the moment the DIRECT child dies, which cancels the
+      # watchdog below and with it the pending escalation. A group member that
+      # outlived the TERM while holding the caller's capture pipe would then keep
+      # `OUTPUT=$(...)` open forever - an unbounded hang, worse than the slow
+      # path this helper replaced. So finish the group off here, where we already
+      # know our bound is what stopped the command.
+      #
+      # Only on this path. An unconditional group kill would also reap a
+      # daemon the command legitimately started (`fno mux ls` autostarts one),
+      # turning a successful call into a side effect.
+      kill -KILL -"$pid" 2>/dev/null || true ;;
+  esac
+
   # Group-kill the watchdog so its `sleep` dies with it. Killing the subshell
   # alone reparents that sleep to pid 1, which is the orphan-process incident
   # scripts/lib/eval-sweep-throttle.sh was written to stop. Doing it by group
   # also drops that helper's `pkill -P` dependency, which it notes is absent on
   # a minimal image.
-  kill -TERM -"$watchdog" 2>/dev/null || true
+  #
+  # Same single-pid fallback as the child kills above, and for the same reason:
+  # without it, a host where `set -m` did not take effect leaves the watchdog and
+  # its sleep alive, and the `wait` below then blocks for the FULL bound on an
+  # otherwise fast call.
+  kill -TERM -"$watchdog" 2>/dev/null || kill -TERM "$watchdog" 2>/dev/null || true
 
   # Reap it as well. An unwaited job that died by signal makes bash print
   # "Terminated: 15 ( sleep ... )" at the next command boundary, on the CALLER's

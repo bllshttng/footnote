@@ -32,6 +32,9 @@ source "$_EVAL_SWEEP_LIB_DIR/with-timeout.sh" 2>/dev/null || return 0
 # Throttle window in seconds (default 24h). Overridable for tests.
 EVAL_SWEEP_THROTTLE_SECONDS="${EVAL_SWEEP_THROTTLE_SECONDS:-86400}"
 # Hard per-stage time bound (default 300s). A wedged sweep dies at this bound.
+# BARE INTEGER SECONDS ONLY. Unlike EVAL_SWEEP_CLAIM_TTL just below, a suffixed
+# value like `30m` is refused by with_timeout and every stage is skipped: the
+# bound is a `sleep`, not GNU timeout, and `sleep 30m` is not portable.
 EVAL_SWEEP_STAGE_TIMEOUT="${EVAL_SWEEP_STAGE_TIMEOUT:-300}"
 # Singleton claim TTL: self-frees a crashed run within this window.
 EVAL_SWEEP_CLAIM_TTL="${EVAL_SWEEP_CLAIM_TTL:-30m}"
