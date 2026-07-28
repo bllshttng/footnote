@@ -169,13 +169,33 @@ pub enum MissionDispatch {
 /// `cargo test` a sibling thread's freshly-written stub) makes the spawn fail,
 /// and `let _ =` swallows it, so a tripped breaker silently never defers its
 /// node and re-dispatches it into the same crash loop.
-fn defer_node(fno_bin: &str, cwd: &Path, node: &str, reason: &str) {
-    let _ = retry_etxtbsy(|| {
+/// Returns whether the defer actually landed, so the caller's `parked` journal
+/// row states what happened rather than asserting it. Retrying the spawn is only
+/// half the fix: exhausted retries, any other spawn error, and a NON-ZERO exit
+/// from `fno backlog defer` (unresolvable id, graph lock contention) all still
+/// produce the silent re-dispatch loop described above, and `breaker.reset` runs
+/// either way.
+fn defer_node(fno_bin: &str, cwd: &Path, node: &str, reason: &str) -> bool {
+    match retry_etxtbsy(|| {
         fno_cmd(fno_bin)
             .current_dir(cwd)
             .args(["backlog", "defer", node, "--reason", reason])
             .output()
-    });
+    }) {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            eprintln!(
+                "active-backlog: defer of {node} failed (exit {:?}): {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("active-backlog: defer of {node} could not run: {e}");
+            false
+        }
+    }
 }
 
 /// Does the node carry a PR reference in graph state? Read through `fno backlog
@@ -317,11 +337,15 @@ fn map_outcome(
                     "auto-failure: {} consecutive failed drains",
                     cfg.failure_limit
                 );
-                defer_node(&cfg.fno_bin, &cfg.cwd, &node, &reason_str);
+                // Recorded, not asserted: `breaker.reset` below hands the node a
+                // fresh streak allowance either way, so a `parked` row claiming
+                // a defer that never landed is what an operator debugging a
+                // re-dispatch loop would be misled by.
+                let deferred = defer_node(&cfg.fno_bin, &cfg.cwd, &node, &reason_str);
                 breaker.reset(&node);
                 let _ = journal.append(
                     "active_backlog_parked",
-                    json!({"node_id": node, "consecutive_failures": cfg.failure_limit, "detail": detail}),
+                    json!({"node_id": node, "consecutive_failures": cfg.failure_limit, "detail": detail, "deferred": deferred}),
                 );
                 DrainOutcome::Parked {
                     node,

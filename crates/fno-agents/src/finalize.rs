@@ -157,16 +157,29 @@ struct ManifestFields {
     auto_merge_approved: Option<bool>,
 }
 
-/// Does this line close a double-quoted YAML scalar? True when it ends in a `"`
-/// that is not backslash-escaped. `init-target-state.sh` escapes inner quotes as
-/// `\"`, so a quote the user typed never terminates the scalar early - which is
-/// what would otherwise let crafted input resume forging manifest keys.
+/// Does this line close the double-quoted scalar `init-target-state.sh` opened?
+///
+/// The rule is NOT backslash parity. The writer escapes quotes and NOT
+/// backslashes (`${INITIAL_INPUT//\"/\\\"}`, init:811), so the manifest is not
+/// backslash-escaped YAML and a parity rule is wrong in both directions: user
+/// text ending in `\"` arrives as `\\"`, which parity reads as even and closes
+/// the scalar early, handing the forgery back.
+///
+/// What that escaping DOES guarantee is one-directional and enough: every quote
+/// the user typed gets exactly one `\` prepended, so a user quote is ALWAYS
+/// immediately preceded by a backslash, however many backslashes they typed. A
+/// closing quote with no backslash before it therefore cannot have come from the
+/// user, and is the terminator.
+///
+/// The residual ambiguity is input ending in a lone `\`, whose real terminator
+/// does carry a preceding backslash and so reads as unterminated. That direction
+/// is safe by construction - see `parse_manifest_fields`, where an unterminated
+/// scalar only ever withholds trust, never grants it.
 fn ends_quoted_scalar(line: &str) -> bool {
     let Some(rest) = line.strip_suffix('"') else {
         return false;
     };
-    // Even number of trailing backslashes -> the quote itself is unescaped.
-    rest.bytes().rev().take_while(|b| *b == b'\\').count() % 2 == 0
+    !rest.ends_with('\\')
 }
 
 /// Scan the WHOLE manifest (frontmatter AND body) for the keys we need.
@@ -174,26 +187,29 @@ fn ends_quoted_scalar(line: &str) -> bool {
 /// frontmatter-only parse (like loop-check's) would miss them.
 fn parse_manifest_fields(content: &str) -> ManifestFields {
     let mut m = ManifestFields::default();
-    // The one field carrying untrusted text: init writes the run's raw argument
-    // as `input: "<...>"` (init-target-state.sh:839), escaping only inner double
-    // quotes - so a MULTI-LINE argument spills real newlines into the manifest
-    // and every continuation line reaches this loop looking like a `key: value`
-    // pair. `input` is written BEFORE the canonical fields (auto_merge_approved
-    // at :886), so a pasted spec containing `auto_merge_approved: true` would be
-    // read as the posture and outrank the real refusal below it.
+    // Init writes the run's raw argument as `input: "<...>"` (init:839), so a
+    // MULTI-LINE argument spills real newlines into the manifest and every
+    // continuation line reaches this loop looking like a `key: value` pair.
+    // `input` is written BEFORE the canonical `auto_merge_approved` (init:886),
+    // so a pasted spec containing that key would be read as the merge posture
+    // and outrank the real refusal below it.
     //
-    // Skipping the scalar's continuation lines is the root-cause fix: it keeps
-    // untrusted text from forging ANY key, rather than hardening one key and
-    // leaving the next one added here exposed.
-    let mut in_input_scalar = false;
+    // Lines inside that scalar are tracked as UNTRUSTED rather than skipped.
+    // Skipping them is what an earlier cut of this did, and it silently ate
+    // `plan_path`: the scalar's terminator is ambiguous for input ending in a
+    // lone backslash (see `ends_quoted_scalar`), and an over-long skip swallowed
+    // the very next line - dropping the plan stamp with no error. Only the merge
+    // posture is withheld here, so every other field parses exactly as it did
+    // before this guard existed and an ambiguous scalar costs nothing.
+    //
+    // That asymmetry is the whole safety argument: an unterminated scalar marks
+    // MORE lines untrusted, and untrusted only ever withholds the grant, leaving
+    // `auto_merge_approved` as `None` -> no arming. Both directions fail closed.
+    let mut untrusted = false;
     for line in content.lines() {
         let line = line.trim();
-        if in_input_scalar {
-            // The scalar ends on the first line closing it with an unescaped
-            // quote. Inner quotes arrive as \" so they never terminate early.
-            if ends_quoted_scalar(line) {
-                in_input_scalar = false;
-            }
+        if untrusted && ends_quoted_scalar(line) {
+            untrusted = false;
             continue;
         }
         // Skip markdown headings and frontmatter fences; a `key: value` match
@@ -208,8 +224,12 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
         let raw = v.trim();
         // A multi-line `input` opens a quoted scalar here; everything up to its
         // closing quote is the user's text, not manifest keys.
-        if k == "input" && raw.starts_with('"') && !(raw.len() >= 2 && ends_quoted_scalar(raw)) {
-            in_input_scalar = true;
+        if !untrusted
+            && k == "input"
+            && raw.starts_with('"')
+            && !(raw.len() >= 2 && ends_quoted_scalar(raw))
+        {
+            untrusted = true;
         }
         let v = raw.trim_matches(|c| c == '"' || c == '\'');
         // First non-empty wins (frontmatter precedes body); never overwrite a
@@ -235,13 +255,14 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
             "initial_head" => set(&mut m.initial_head, v),
             "created_at" => set(&mut m.created_at, v),
             "cross_project" => m.cross_project = v == "true",
-            // FIRST occurrence wins, unlike cross_project's last-wins: this one
-            // grants merge authority, and the manifest BODY echoes the run's raw
-            // `input`. Last-wins would let a feature description containing the
-            // literal key manufacture a grant the frontmatter refused - the same
+            // The merge-authority read, and the only key that consults
+            // `untrusted`. First occurrence wins, unlike cross_project's
+            // last-wins, so a trailing line cannot overwrite the canonical one
+            // either. A line inside the `input` scalar is ignored outright: the
             // "arbitrary prose must never grant merge authority" rule init
-            // applies when it folds the posture (x-e938).
-            "auto_merge_approved" if m.auto_merge_approved.is_none() => {
+            // applies when it folds the posture (x-e938) has to hold here too,
+            // or the fold is decorative.
+            "auto_merge_approved" if !untrusted && m.auto_merge_approved.is_none() => {
                 m.auto_merge_approved = Some(v == "true")
             }
             _ => {}
@@ -730,8 +751,16 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // Last, so the plan stamp and both node<->PR stamps have already landed
     // before the merge is handed to GitHub. Same log-only fatality as the two
     // stamps above.
-    let auto_merge_armed = should_arm_auto_merge(&reason, m.auto_merge_approved.unwrap_or(false))
-        && arm_auto_merge(&cwd);
+    let approved = m.auto_merge_approved.unwrap_or(false);
+    let auto_merge_armed = should_arm_auto_merge(&reason, approved) && arm_auto_merge(&cwd);
+    // Without this, "approved but this terminal is ineligible" and "never
+    // approved" are the same silence, and the event's `auto_merge_armed: false`
+    // cannot tell them apart either.
+    if approved && !should_arm_auto_merge(&reason, approved) {
+        eprintln!(
+            "finalize: auto-merge approved but {reason} is not an arming terminal; not armed"
+        );
+    }
 
     // ── emit terminal event ────────────────────────────────────────────────
     let mut data = json!({
@@ -2353,6 +2382,51 @@ mod tests {
              auto_merge_approved: false\n",
         );
         assert_eq!(escaped.auto_merge_approved, Some(false));
+
+        // sigma P1: a line ENDING in a user-typed `\"`. The writer escapes the
+        // quote and NOT the backslash (init:811), so it lands as `\\"` - which a
+        // backslash-PARITY rule reads as even, closes the scalar, and hands the
+        // forgery back. Only "no backslash immediately before the quote" holds.
+        let trailing_escaped_quote = parse_manifest_fields(
+            "session_id: s1\n\
+             input: \"snippet ending in \\\\\"\n\
+             auto_merge_approved: true\n\
+             rest of spec\"\n\
+             plan_path: real.md\n\
+             auto_merge_approved: false\n",
+        );
+        assert_eq!(
+            trailing_escaped_quote.auto_merge_approved,
+            Some(false),
+            "a line ending in an escaped quote must not close the scalar"
+        );
+
+        // sigma P2, the other direction: input ending in a lone `\` makes the
+        // real terminator ambiguous, so the scalar reads as never closing. That
+        // must cost only TRUST, never data - `plan_path` still parses (an
+        // earlier cut skipped these lines and silently dropped the plan stamp),
+        // and the posture falls back to no-grant.
+        let trailing_backslash = parse_manifest_fields(
+            "session_id: s1\n\
+             input: \"fix the C:\\\\path\\\\\"\n\
+             plan_path: real.md\n\
+             graph_node_id: x-1a2b\n\
+             auto_merge_approved: true\n",
+        );
+        assert_eq!(
+            trailing_backslash.plan_path.as_deref(),
+            Some("real.md"),
+            "an ambiguous scalar must never swallow a load-bearing field"
+        );
+        assert_eq!(trailing_backslash.graph_node_id.as_deref(), Some("x-1a2b"));
+        assert_eq!(
+            trailing_backslash.auto_merge_approved, None,
+            "an unterminated scalar withholds the grant rather than honoring it"
+        );
+        assert!(!should_arm_auto_merge(
+            "DonePRGreen",
+            trailing_backslash.auto_merge_approved.unwrap_or(false)
+        ));
     }
 
     #[test]

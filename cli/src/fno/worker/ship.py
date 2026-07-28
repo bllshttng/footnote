@@ -290,19 +290,11 @@ def ship(
                 file=sys.stderr,
             )
 
-    # Ship deliberately does NOT arm auto-merge (x-1951). It used to, right here,
-    # gated only on auto_merge_approved - which pre-authorized a merge before any
-    # gate had run. `gh pr merge --auto` hands the timing to GitHub, which fires
-    # the instant ITS OWN branch protections pass, so a reviewer posting a
-    # blocking finding after CI greens loses the race (the PR #566 shape). The
-    # arming moved to `fno-agents finalize`, the terminal-only writer that runs
-    # on a DonePRGreen decision, so the merge authorizes a state that was
-    # verified green rather than one that is merely expected to be.
-    #
-    # The old `auto_merge_armed` / `auto_merge_error` result keys went with it:
-    # a key that is now always false would read as "not armed" when the truth is
-    # "not armed HERE, by design". The fact is reported on finalize's
-    # `session_finalized` event instead.
+    # Arming auto-merge here would pre-authorize a merge before any gate ran, so
+    # it moved to `fno-agents finalize` (see the module docstring). The
+    # `auto_merge_armed` / `auto_merge_error` keys went with it rather than
+    # staying permanently false, which would read as "not armed" instead of "not
+    # armed here"; finalize's `session_finalized` event carries the fact now.
     return {
         "action": action,
         "pr_number": pr_number,
