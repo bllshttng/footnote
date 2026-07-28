@@ -2835,19 +2835,50 @@ fn make_fingerprint(
     format!("{head_sha}|{pr_state}|{ci_conclusion}|{latest_ts}")
 }
 
+/// Default debounce window: an unchanged fingerprint seen again inside this many
+/// seconds is the SAME observation, not a new one. The streak counts independent
+/// observations of an unchanged world, not stop-hook fires -- a session taking
+/// short turns used to burn a 5-fire backstop in 109 seconds while its CI run
+/// still had 7 minutes to go, which no external wait can outrun. The effective
+/// floor becomes `(backstop_n - 1) * gap`: 10 minutes unattended, 20 attended.
+/// Override with `FNO_LOOPCHECK_MIN_FIRE_GAP_SECS` (0 restores fire counting).
+const MIN_FIRE_GAP_SECS: i64 = 300;
+
+/// Resolve the debounce window from the env seam, falling back to the default.
+/// Mirrors the `FNO_LOOPCHECK_GH_BIN` / `_NO_NOTIFY` / `_NO_COMMENT` seams.
+fn min_fire_gap_secs() -> i64 {
+    std::env::var("FNO_LOOPCHECK_MIN_FIRE_GAP_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(MIN_FIRE_GAP_SECS)
+}
+
 /// Count prior loop_check events for this session_id in the project events file.
-/// Returns (total_fires, consecutive_unchanged_count, last_fingerprint_in_log).
+/// Returns (total_fires, consecutive_unchanged_count, last_fingerprint_in_log,
+/// streak_window_secs).
 ///
 /// `current_fp` is the fingerprint computed this fire (used for streak matching).
 /// `last_fp` is the most recent fingerprint recorded in the events log for this
 /// session -- used for carry-forward when the gh pre-read fails this fire.
+/// `streak_window_secs` is the span from the oldest COUNTED fire to `now`; it is
+/// what makes a streak count falsifiable from the events log.
+///
+/// The streak is debounced by `min_gap_secs`: walking backwards from `now`, a
+/// matching fire closer than the gap to the last counted one is skipped
+/// TRANSPARENTLY and does not advance the cursor, so a burst collapses to a
+/// single observation. The asymmetry is deliberate and load-bearing: a CHANGED
+/// fingerprint breaks the streak at any spacing, because real progress is real
+/// progress at any speed -- only the *absence* of change needs time to be
+/// credible.
 fn read_prior_fires(
     events_path: &Path,
     session_id: &str,
     current_fp: &str,
-) -> (u64, u64, Option<String>) {
+    now: DateTime<Utc>,
+    min_gap_secs: i64,
+) -> (u64, u64, Option<String>, i64) {
     let Ok(content) = std::fs::read_to_string(events_path) else {
-        return (0, 0, None);
+        return (0, 0, None, 0);
     };
 
     let mut total: u64 = 0;
@@ -2866,9 +2897,13 @@ fn read_prior_fires(
     }
 
     // Calculate consecutive streak from the end (how many recent fires share current_fp)
-    // and capture the most recent fp recorded.
+    // and capture the most recent fp recorded. `next_ts` is the cursor: it starts
+    // at `now` and only moves to a fire that was COUNTED, which is what collapses
+    // a rapid burst into one observation.
     let mut consecutive: u64 = 0;
     let mut last_fp: Option<String> = None;
+    let mut next_ts = now;
+    let mut oldest_counted_ts: Option<DateTime<Utc>> = None;
     for line in content.lines().rev() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -2898,14 +2933,37 @@ fn read_prior_fires(
         if last_fp.is_none() && !fp.is_empty() {
             last_fp = Some(fp.to_string());
         }
-        if fp == current_fp {
-            consecutive += 1;
-        } else {
+        // A CHANGED fingerprint breaks the streak at ANY spacing - progress is
+        // never debounced. This check precedes the gap check on purpose.
+        if fp != current_fp {
             break;
         }
+        // Debounce. A fire we cannot place in time is skipped transparently
+        // rather than counted: giving up on a parse error must fail AWAY from
+        // an irreversible NoProgress, matching classify_bot_nudge's precedent.
+        let Some(ts) = val
+            .get("ts")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+        else {
+            continue;
+        };
+        let gap = (next_ts - ts).num_seconds();
+        // gap < 0 means clock skew (a fire stamped after `now`); count it rather
+        // than invent a debounce from a bad clock - status quo, no crash.
+        if gap < 0 || gap >= min_gap_secs {
+            consecutive += 1;
+            next_ts = ts;
+            oldest_counted_ts = Some(ts);
+        }
+        // else: same observation seen twice; skip WITHOUT advancing next_ts.
     }
 
-    (total, consecutive, last_fp)
+    let streak_window_secs = oldest_counted_ts
+        .map(|t| (now - t).num_seconds().max(0))
+        .unwrap_or(0);
+
+    (total, consecutive, last_fp, streak_window_secs)
 }
 
 // ── event emission ────────────────────────────────────────────────────────────
@@ -3739,8 +3797,14 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
     // Read prior fires. We pass the tentative_fp for streak counting; if the gh
     // read failed we'll override the fingerprint with the carried-forward value below.
-    let (prior_fires, consecutive_unchanged, last_recorded_fp) =
-        read_prior_fires(&project_events, &session_id, &tentative_fp);
+    let min_fire_gap = min_fire_gap_secs();
+    let (prior_fires, consecutive_unchanged, last_recorded_fp, streak_window) = read_prior_fires(
+        &project_events,
+        &session_id,
+        &tentative_fp,
+        now,
+        min_fire_gap,
+    );
 
     // If the pre-read gh call hard-failed, carry forward the prior fingerprint
     // (so the streak continues) rather than resetting to "none|none|none".
@@ -3752,12 +3816,18 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
     // Recount consecutive streak with the (possibly carried-forward) fingerprint.
     // We already counted against the tentative_fp; if different, recount from the log.
-    let consecutive_unchanged = if fp_read_failed {
+    let (consecutive_unchanged, streak_window) = if fp_read_failed {
         // Re-read the streak against the carried-forward fingerprint.
-        let (_, streak, _) = read_prior_fires(&project_events, &session_id, &fingerprint);
-        streak
+        let (_, streak, _, window) = read_prior_fires(
+            &project_events,
+            &session_id,
+            &fingerprint,
+            now,
+            min_fire_gap,
+        );
+        (streak, window)
     } else {
-        consecutive_unchanged
+        (consecutive_unchanged, streak_window)
     };
 
     let this_fire = prior_fires + 1;
@@ -3827,6 +3897,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     "fingerprint": fingerprint,
                     "fires": this_fire,
                     "consecutive_unchanged": consecutive_after,
+                    "streak_window_secs": streak_window,
                     "decision": "allow",
                     "intent": "aborted",
                     "intent_source": intent_source,
@@ -3870,6 +3941,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     "fingerprint": fingerprint,
                     "fires": this_fire,
                     "consecutive_unchanged": consecutive_after,
+                    "streak_window_secs": streak_window,
                     "decision": "block",
                     "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
                     "intent_source": intent_source,
@@ -3907,6 +3979,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     "fingerprint": fingerprint,
                     "fires": this_fire,
                     "consecutive_unchanged": consecutive_after,
+                    "streak_window_secs": streak_window,
                     "decision": "allow",
                     "intent": "promise",
                     "intent_source": intent_source,
@@ -3945,6 +4018,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     "fingerprint": fingerprint,
                     "fires": this_fire,
                     "consecutive_unchanged": consecutive_after,
+                    "streak_window_secs": streak_window,
                     "decision": "allow",
                     "intent": "promise",
                     "intent_source": intent_source,
@@ -3992,6 +4066,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     "fingerprint": fingerprint,
                     "fires": this_fire,
                     "consecutive_unchanged": consecutive_after,
+                    "streak_window_secs": streak_window,
                     "decision": "allow",
                     "intent": "promise",
                     "intent_source": intent_source,
@@ -4039,7 +4114,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // none|none components would leak into done_fp and manufacture
                 // a fingerprint change on a fire US4 declares transparent
                 // (sigma-review finding on this branch).
-                let (fingerprint, consecutive_after) = if !fp_read_failed {
+                let (fingerprint, consecutive_after, streak_window) = if !fp_read_failed {
                     let done_fp = make_fingerprint(
                         &head_sha,
                         fp_pr_state.as_str(),
@@ -4047,14 +4122,19 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         &max_ts(&fp_review_ts, &pr_info.latest_review_ts),
                     );
                     if done_fp != fingerprint {
-                        let (_, streak, _) =
-                            read_prior_fires(&project_events, &session_id, &done_fp);
-                        (done_fp, streak + 1)
+                        let (_, streak, _, window) = read_prior_fires(
+                            &project_events,
+                            &session_id,
+                            &done_fp,
+                            now,
+                            min_fire_gap,
+                        );
+                        (done_fp, streak + 1, window)
                     } else {
-                        (fingerprint, consecutive_after)
+                        (fingerprint, consecutive_after, streak_window)
                     }
                 } else {
-                    (fingerprint, consecutive_after)
+                    (fingerprint, consecutive_after, streak_window)
                 };
                 let backstop_tripped = consecutive_after >= backstop_n;
 
@@ -4158,6 +4238,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                             "fingerprint": fingerprint,
                             "fires": this_fire,
                             "consecutive_unchanged": consecutive_after,
+                            "streak_window_secs": streak_window,
                             "decision": "allow",
                             "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
                             "intent_source": intent_source,
@@ -4245,6 +4326,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                                         "fingerprint": fingerprint,
                                         "fires": this_fire,
                                         "consecutive_unchanged": consecutive_after,
+                                        "streak_window_secs": streak_window,
                                         "decision": "allow",
                                         "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
                                         "intent_source": intent_source,
@@ -4342,6 +4424,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                                     "fingerprint": fingerprint,
                                     "fires": this_fire,
                                     "consecutive_unchanged": consecutive_after,
+                                    "streak_window_secs": streak_window,
                                     "decision": "allow",
                                     "intent": "watching",
                                     "intent_source": intent_source,
@@ -4409,8 +4492,9 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     let noprogress_msg = match nudge_giveup {
                         Some(n) => nudge_giveup_message(n),
                         None => format!(
-                            "fingerprint unchanged for {} consecutive fires; PR not done",
-                            consecutive_after
+                            "fingerprint unchanged for {} consecutive fires over {}m; PR not done",
+                            consecutive_after,
+                            streak_window / 60
                         ),
                     };
                     if let Some(n) = nudge_giveup {
@@ -4438,6 +4522,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                             "fingerprint": fingerprint,
                             "fires": this_fire,
                             "consecutive_unchanged": consecutive_after,
+                            "streak_window_secs": streak_window,
                             "decision": "allow",
                             "intent": "backstop",
                             "intent_source": intent_source,
@@ -4453,8 +4538,9 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     let return_msg = match nudge_giveup {
                         Some(_) => noprogress_msg.clone(),
                         None => format!(
-                            "fingerprint unchanged for {} fires; HEAD={}, PR={}, CI={}, reviewed={}",
+                            "fingerprint unchanged for {} fires over {}m; HEAD={}, PR={}, CI={}, reviewed={}",
                             consecutive_after,
+                            streak_window / 60,
                             short_sha(&head_sha),
                             pr_info.state.as_str(),
                             pr_info.ci_conclusion.render(),
@@ -4491,6 +4577,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         "fingerprint": fingerprint,
                         "fires": this_fire,
                         "consecutive_unchanged": consecutive_after,
+                        "streak_window_secs": streak_window,
                         "decision": "block",
                         "intent": if intent == Intent::Promise { "promise" } else { "none" },
                         "intent_source": intent_source,
@@ -4532,6 +4619,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         "fingerprint": fingerprint,
                         "fires": this_fire,
                         "consecutive_unchanged": consecutive_after,
+                        "streak_window_secs": streak_window,
                         "decision": "block",
                         "intent": if intent == Intent::Promise { "promise" } else { "none" },
                         "intent_source": intent_source,
@@ -4563,6 +4651,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
             "fingerprint": fingerprint,
             "fires": this_fire,
             "consecutive_unchanged": consecutive_after,
+            "streak_window_secs": streak_window,
             "decision": "block",
             "intent": "none",
             "intent_source": intent_source,
@@ -5543,6 +5632,135 @@ mod tests {
     /// move the gate.
     fn reviewers_all_attested(events_path: &Path, reviewers: &[String], head_sha: &str) -> bool {
         unattested_reviewers(events_path, reviewers, head_sha).is_empty()
+    }
+
+    // ── streak debounce (x-6231) ─────────────────────────────────────────────
+    //
+    // These drive `read_prior_fires` with an explicit `now` and gap, so they need
+    // no env var and are parallel-safe -- unlike the integration suite, which
+    // pins FNO_LOOPCHECK_MIN_FIRE_GAP_SECS=0 process-wide.
+
+    const FP: &str = "FP";
+    const NOW: &str = "2026-06-05T12:00:00Z";
+
+    fn at(ts: &str) -> DateTime<Utc> {
+        ts.parse().unwrap()
+    }
+
+    /// Write a loop_check events log from (ts, fingerprint) pairs, oldest first.
+    fn write_fire_log(path: &Path, fires: &[(String, &str)]) {
+        let mut out = String::new();
+        for (ts, fp) in fires {
+            out.push_str(
+                &serde_json::json!({
+                    "ts": ts, "type": "loop_check", "source": "hook",
+                    "data": { "session_id": "sess", "fingerprint": fp },
+                })
+                .to_string(),
+            );
+            out.push('\n');
+        }
+        std::fs::write(path, out).unwrap();
+    }
+
+    /// Count the streak over prior fires given as SECONDS BEFORE `now`, oldest
+    /// first, all sharing FP. Returns (streak, streak_window_secs).
+    fn streak_ago(secs_before_now: &[i64], gap: i64) -> (u64, i64) {
+        let now = at(NOW);
+        let fires: Vec<(String, &str)> = secs_before_now
+            .iter()
+            .map(|s| {
+                (
+                    (now - chrono::Duration::seconds(*s))
+                        .format("%Y-%m-%dT%H:%M:%SZ")
+                        .to_string(),
+                    FP,
+                )
+            })
+            .collect();
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("events.jsonl");
+        write_fire_log(&p, &fires);
+        let (_, streak, _, window) = read_prior_fires(&p, "sess", FP, now, gap);
+        (streak, window)
+    }
+
+    /// The streak rules. `consecutive_after` is streak + 1, so a streak of 4 is
+    /// what trips the attended backstop of 5.
+    #[test]
+    fn debounce_streak_counting_rules() {
+        // (case, prior fires as seconds before now (oldest first), gap, streak, window)
+        #[rustfmt::skip]
+        let cases: &[(&str, &[i64], i64, u64, i64)] = &[
+            // AC1-HP: the triggering shape - four fires inside 60s are ONE
+            // observation (the current fire), nowhere near backstop_n.
+            ("rapid burst collapses to one observation", &[49, 33, 16, 0], 300, 0, 0),
+            // AC2-HP: a genuinely stalled session is still reaped.
+            ("fires 6 minutes apart still trip the backstop", &[1440, 1080, 720, 360], 300, 4, 1440),
+            // AC3-FR: a skip must NOT advance the cursor. This fire is 330s
+            // before `now` but only 270s before the burst's oldest member, so it
+            // counts ONLY because the burst left the cursor parked at `now`.
+            ("a skip does not advance the cursor", &[330, 60, 30, 10], 300, 1, 330),
+            // AC6-FR: gap 0 is byte-identical to the old fire counting, which is
+            // what lets the integration suite pin the seam and keep every
+            // backstop assertion it already had.
+            ("gap 0 restores fire counting exactly", &[49, 33, 16], 0, 3, 49),
+            // Clock skew must not invent a debounce from a bad clock.
+            ("a fire stamped after `now` counts, not crashes", &[1200, -600], 300, 2, 1200),
+            // AC8-REG: the recorded sequence behind the false terminal - session
+            // 20260727T203203Z, five fires in 109 seconds with CI still PENDING.
+            ("the false-NoProgress incident now blocks", &[109, 93, 76, 17], 300, 0, 0),
+        ];
+        for (case, fires, gap, want_streak, want_window) in cases {
+            let (streak, window) = streak_ago(fires, *gap);
+            assert_eq!(streak, *want_streak, "streak: {case}");
+            assert_eq!(window, *want_window, "window: {case}");
+        }
+    }
+
+    /// AC4-CON: progress is never debounced - a CHANGED fingerprint breaks the
+    /// streak however fast it arrived.
+    #[test]
+    fn debounce_changed_fingerprint_breaks_streak_at_any_speed() {
+        let now = at(NOW);
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("events.jsonl");
+        write_fire_log(
+            &p,
+            &[
+                ("2026-06-05T11:40:00Z".to_string(), FP),
+                ("2026-06-05T11:50:00Z".to_string(), FP),
+                ("2026-06-05T11:59:58Z".to_string(), "DIFFERENT"),
+            ],
+        );
+        let (_, streak, _, _) = read_prior_fires(&p, "sess", FP, now, 300);
+        assert_eq!(streak, 0, "a 2-second-old change still resets the streak");
+    }
+
+    /// AC5-ERR: a fire we cannot place in time is transparent - it neither counts
+    /// toward nor breaks the streak, and never panics. Failing this way biases
+    /// away from an irreversible NoProgress.
+    #[test]
+    fn debounce_untimestamped_fire_is_transparent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("events.jsonl");
+        let lines = [
+            r#"{"ts":"2026-06-05T11:40:00Z","type":"loop_check","source":"hook","data":{"session_id":"sess","fingerprint":"FP"}}"#,
+            r#"{"ts":"not-a-timestamp","type":"loop_check","source":"hook","data":{"session_id":"sess","fingerprint":"FP"}}"#,
+            r#"{"type":"loop_check","source":"hook","data":{"session_id":"sess","fingerprint":"FP"}}"#,
+        ];
+        std::fs::write(&p, lines.join("\n") + "\n").unwrap();
+
+        let (_, streak, last_fp, _) = read_prior_fires(&p, "sess", FP, at(NOW), 300);
+        assert_eq!(
+            streak, 1,
+            "unplaceable fires skip; the good one still counts"
+        );
+        assert_eq!(
+            last_fp.as_deref(),
+            Some(FP),
+            "carry-forward still reads the newest recorded fp"
+        );
     }
 
     #[test]

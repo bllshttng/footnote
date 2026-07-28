@@ -250,6 +250,16 @@ fn isolate_settings(cwd: &Path) {
     // calls never spawn `fno agents nudge-peek` (latency + real-bus side
     // effects). Idempotent set; never unset, so it is parallel-safe.
     std::env::set_var("FNO_NUDGE_DISABLED", "1");
+    // Pin the streak debounce OFF so this suite keeps counting FIRES, which is
+    // what every backstop assertion here was written against: these tests drive
+    // decide() in-process and fire within the same second, so the production
+    // 300s gap would collapse each burst to a single observation and no
+    // backstop could ever trip. The gap logic itself is covered by the
+    // read_prior_fires unit tests in src/loopcheck.rs, which pass `now` and the
+    // gap explicitly and so need no env at all. Same idempotent-set,
+    // never-unset discipline as FNO_NUDGE_DISABLED above: every test in this
+    // binary sets the identical value, so parallel execution is deterministic.
+    std::env::set_var("FNO_LOOPCHECK_MIN_FIRE_GAP_SECS", "0");
     fs::write(
         cwd.join(".fno/config.toml"),
         "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
@@ -1104,6 +1114,70 @@ fn no_ship_advisory_terminates() {
 
     assert_eq!(d.decision, "allow");
     assert_eq!(d.termination_reason.as_deref(), Some("DoneAdvisory"));
+}
+
+/// AC7-OBS (x-6231): every emitted loop_check event carries `streak_window_secs`
+/// beside `consecutive_unchanged`. Without it a "streak=5" line is unfalsifiable
+/// from the log, which is how the fire-counting defect survived 127 terminations.
+/// Asserted on EVERY loop_check record so a new emit site cannot quietly omit it.
+#[test]
+fn streak_window_secs_is_emitted_on_every_loop_check_event() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let events_path = cwd.join(".fno/events.jsonl");
+
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-window", "2026-06-05T00:00:00Z", false),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_empty()).unwrap();
+
+    let mock = MockBins::no_pr();
+    let args = [
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+        "--events",
+        events_path.to_str().unwrap(),
+    ];
+
+    // Two fires so both the first-fire and the has-priors path emit.
+    fire(&args);
+    fire(&args);
+
+    let content = fs::read_to_string(&events_path).unwrap();
+    let mut seen = 0;
+    for line in content.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        if v.get("type").and_then(|t| t.as_str()) != Some("loop_check") {
+            continue;
+        }
+        seen += 1;
+        assert!(
+            v.pointer("/data/streak_window_secs")
+                .and_then(|w| w.as_i64())
+                .is_some(),
+            "loop_check event missing streak_window_secs: {line}"
+        );
+    }
+    assert!(
+        seen >= 2,
+        "expected at least 2 loop_check events, got {seen}"
+    );
 }
 
 /// AC2-HP: N=3 consecutive identical fingerprints (unattended) -> NoProgress.
