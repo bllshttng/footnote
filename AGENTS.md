@@ -50,6 +50,14 @@ A subprocess seeing only a tail of structured signals makes wrong calls with ful
 - graduates-to: a check that refuses to route a judgment call to a headless or bg subprocess.
 - added: 2026-07-23
 
+### An empty search result is a claim, and `rg` globs silently over-exclude
+
+Before concluding "no callers left", verify the search found something it should have. A ripgrep `--glob '!target/**'` is unanchored and matches at ANY depth, so it also excludes `skills/target/` - the most-referenced skill dir in this repo. Truncated match lists ("43 matches in 9 files", ~20 shown) read as complete and are not. Cross-check a load-bearing sweep with `grep -rn` over explicit trees, and confirm a known-present hit appears before trusting an empty result.
+
+- specimens: `skills/target/references/pre-promise.md:125` and `usage-detail.md:82` (two live `fno providers` callers that survived every `rg` sweep of a rename that removed the verb, caught only by an external reviewer).
+- graduates-to: a sweep helper that anchors its excludes (`!/target/**`) and fails when a search returns zero hits without a positive control.
+- added: 2026-07-27
+
 ## Repository
 
 ```
@@ -161,7 +169,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **`fno target start <node>`** - one-verb worktree cold-start (worktree ensure off `origin/main` -> heal `.fno` symlink -> `fno target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
 - **Spawn substrate axis** - `fno agents spawn --substrate <pane|bg|headless>`: `pane` (default), `bg` (`claude --bg`, claude-only), `headless` (one-shot `-p`/`--exec`). Never default to `-p`; it is reachable only via explicit `headless`.
 - **`fno doctor`** - detects stale deployed `fno` vs source; `--fix` delegates to `fno update`. Compares against merged source only. [installed-fno-staleness](docs/architecture/installed-fno-staleness.md).
-- **Provider rotation** - `fno providers`: records, failover, lockout, routing, combos. [provider-rotation](docs/provider-rotation.md) · [cross-model-review](docs/architecture/cross-model-review.md) · [role-based routing](docs/architecture/role-based-model-routing.md).
+- **Accounts + rotation** - `fno config accounts`: records, failover, lockout, routing, combos. Four axes share one neighbourhood and must not be confused: **harness** (the CLI binary, `--harness/-H`), **provider** (the model vendor, `--provider/-P`, `config.model_routing.providers`), **model** (`--model/-m`), and **account** (a named working instance of a harness, `config.accounts.records`). `opencode` is a legal harness AND a legal provider, so never infer the axis from a value. [provider-rotation](docs/provider-rotation.md) · [cross-model-review](docs/architecture/cross-model-review.md) · [role-based routing](docs/architecture/role-based-model-routing.md).
 - **Curated CLI menu** - `fno --help` shows ~9 verbs; most commands are hidden but invocable. `fno help --all` / `fno help <group> --all` list everything. New verbs default hidden; `fno lint menu-caps` gates the advertised surface (10 top-level / 12 per sub-app).
 - **Control-plane LOC ratchet** - positive executable-LOC delta across control-plane paths fails CI unless the PR body has a `loc-exception:` line AND a matching trajectory entry. [loc-ratchet](docs/architecture/loc-ratchet.md).
 - **Post-merge ritual** - `/fno:pr merged` runs reconcile + retro, writes follow-ups to `config.post_merge.parking_lot_path`. [auto-post-merge-ritual](docs/architecture/auto-post-merge-ritual.md).

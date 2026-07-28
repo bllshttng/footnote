@@ -482,21 +482,29 @@ def is_stale_ready(entry: dict, now: datetime, staleness_days: int) -> bool:
       never starve live work; the untimestamped abandoned node is instead left
       for a human via the propose-only maintain leg + triage pile.
 
-    A design-stage node is likewise never stale: it is gated by being pre-ready,
+    An UNDESIGNED node is likewise never stale: it is gated by being pre-ready,
     not abandoned, so it accrues none of the movement signals autonomous
     dispatch used to supply and would otherwise be quarantined for sitting
     exactly where it belongs. Lives in the predicate rather than in
     ``detect_stale_ready`` so every caller inherits it - the detector, the
     selection guard, and the under-lock recheck in ``maintain --apply``.
 
+    Keys on the rung against ``UNSELECTABLE_RUNGS``, not on ``is_design_stage``.
+    A DESIGN-only probe exempted the design rung and left ``idea`` exposed, so
+    ``maintain --apply`` stamped ``deferred_at`` on a linked-but-undesigned
+    scaffold and quarantined it off the board - and two of this predicate's
+    three callers (``detect_stale_ready``, the under-lock recheck) never pass
+    through ``selection_guards``, so fixing it there alone would have been a
+    guard on one of N paths.
+
     Caller guarantees the entry is ready-status; this does not re-check
     ``status`` so it stays reusable by the selection guard AND the maintain leg.
     """
-    from fno.graph.ladder import is_design_stage
+    from fno.graph.ladder import UNSELECTABLE_RUNGS, plan_rung
 
     if entry.get("blocked_by"):
         return False  # was gated by a dependency, not abandoned
-    if is_design_stage(entry):
+    if plan_rung(entry) in UNSELECTABLE_RUNGS:
         return False  # gated by being pre-ready, not abandoned
     if node_has_movement(entry, now, staleness_days):
         return False

@@ -1492,12 +1492,12 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             // is --harness/-H everywhere now, and -p/--headless is a spawn-only
             // one-shot, so -p is a loud tombstone here - never silently bound to
             // headless (the arm below) or to a harness. This arm must precede the
-            // headless one, which also matches "-p". Removed at 0.4.0.
+            // headless one, which also matches "-p".
             "-p" if verb != "spawn" => {
                 return Err(format!(
                     "-p is not valid here; the one-shot short (--headless) is spawn-only, \
                      and the CLI binary is --harness/-H. \
-                     (--provider/-p was split at the axis rename.) Removed at 0.4.0."
+                     (--provider/-p was split at the axis rename.)"
                 ));
             }
             "--workspace" | "--squad" | "-s" => {
@@ -1747,7 +1747,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         return Err(format!(
             "--provider/-P was split at the axis rename: the CLI binary is --harness/-H; \
              a model vendor is only routable at spawn \
-             (`fno agents spawn --provider {v} --model <m>`). Removed at 0.4.0."
+             (`fno agents spawn --provider {v} --model <m>`)."
         ));
     }
     if let Some(v) = harness_val {

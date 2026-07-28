@@ -70,13 +70,18 @@ def _derive_status(data: dict) -> str:
     # the store normalize) that still carries only the legacy session_id.
     if data.get("locked_by") or data.get("session_id"):
         return "in_progress"
-    if not data.get("plan_path"):
-        return "idea"
-    from fno.graph.ladder import is_design_stage
+    # Same rung table `recompute_statuses` uses - NOT a second derivation. This
+    # was a `plan_path`-presence + `is_design_stage` cascade, which was
+    # equivalent only while `idea` had no plan-side rung. Once a linked scaffold
+    # could sit at `idea`, this copy reported `ready` for it: the exact
+    # "linked, unfilled scaffold is dispatchable" bug the consolidation exists
+    # to kill, surviving on the pydantic read path. It also made every such load
+    # emit a spurious `graph_status_drift` event, since computed `ready` vs
+    # persisted `idea` falls past the blocked-only suppression below.
+    from fno.graph.ladder import plan_rung
+    from fno.graph.statuses import _rung_to_graph_status
 
-    if is_design_stage(data):
-        return "design"
-    return "ready"
+    return _rung_to_graph_status()[plan_rung(data)]
 
 
 class Entry(BaseModel):

@@ -285,19 +285,29 @@ if [ ! -f "$PLAN_PATH" ]; then
   exit "$_EXIT_PARKED"
 fi
 
-# plan frontmatter status: ready|in_progress|in_review (treat unknown as refuse).
-# `shipped` is the retired spelling of in_review, still accepted on read (x-3ad5).
+# Is this plan dispatchable? `fno plan rung` is the single readiness authority;
+# this script does not classify statuses of its own. Exit 0 means dispatchable,
+# and ANY non-zero exit parks - an unclassifiable plan, an unknown status word,
+# or a missing `fno` (127) all land in the same fail-closed branch this block
+# has always had. That policy is now named in fno.graph.ladder rather than
+# implied by a case arm here.
 set +o pipefail
-PLAN_STATUS="$(grep -E "^status:[[:space:]]" "$PLAN_PATH" 2>/dev/null \
-  | head -1 | sed 's/^status:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d ' ' || true)"
+_RUNG_OUT="$(fno plan rung "$PLAN_PATH" 2>/dev/null)"
+_RUNG_EC=$?
 set -o pipefail
-case "$PLAN_STATUS" in
-  ready|in_progress|in_review|shipped) ;;
-  *)
-    echo "parked $NODE_ID reason=\"plan status '$PLAN_STATUS' is not ready/in_progress/in_review\""
-    exit "$_EXIT_PARKED"
-    ;;
-esac
+if [ "$_RUNG_EC" -ne 0 ]; then
+  _RUNG="$(printf '%s' "$_RUNG_OUT" | sed -n 's/^rung=//p' | head -1)"
+  if [ -z "$_RUNG" ]; then
+    # No `rung=` line at all: the verb did not answer. An installed fno older
+    # than this verb exits 2 the same way a usage error does, so name the
+    # likely cause - a bare "rung 'unknown'" would send the operator hunting
+    # through the plan for a problem that is in their PATH.
+    echo "parked $NODE_ID reason=\"'fno plan rung' did not answer; installed fno may predate it - run 'fno update' or 'fno doctor --fix'\""
+  else
+    echo "parked $NODE_ID reason=\"plan rung '$_RUNG' is not dispatchable\""
+  fi
+  exit "$_EXIT_PARKED"
+fi
 
 # graph_node_id was already validated and guarded at Step 0; NODE_ID is not
 # reassigned between there and here, so no second missing-id check is needed.

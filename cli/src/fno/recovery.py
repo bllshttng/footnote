@@ -927,7 +927,7 @@ def _default_failover(candidate: "Candidate", error) -> str:
             return "rotated-no-worker"
         # Autonomous /target only bg-runs on claude; a non-claude target cannot
         # be bg-redispatched (the Rust client rejects --substrate bg for it).
-        if snap.cli != "claude":
+        if snap.harness != "claude":
             return "rotated-no-worker"
         repo_root = getattr(candidate, "cwd", None)
         managed = getattr(snap, "auth", None) == "managed"

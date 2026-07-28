@@ -381,3 +381,304 @@ def test_starvation_receipt_names_design_not_quarantined(tmp_path):
         [node], None, True, None, set(), datetime.now(timezone.utc), 21
     )
     assert out == [("x-aaaa", "design")]
+
+
+# ---------------------------------------------------------------------------
+# plan_rung + the two named policies (x-3571 wave 1)
+# ---------------------------------------------------------------------------
+
+
+def _undecodable(tmp_path, name: str = "bin.md"):
+    target = tmp_path / name
+    target.write_bytes(b"\xff\xfe\x00\x80not utf-8 at all")
+    return {"id": "x-test", "plan_path": str(target)}
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        ("idea", "IDEA"),
+        ("stub", "IDEA"),  # retired spelling, still on disk in old scaffolds
+        ("design", "DESIGN"),
+        ("ready", "READY"),
+        ("in_progress", "IN_PROGRESS"),
+        ("in_review", "IN_REVIEW"),
+        ("shipped", "IN_REVIEW"),  # retired spelling
+        ("done", "DONE"),
+        ("superseded", "SUPERSEDED"),
+        ("archived", "SUPERSEDED"),  # retired spelling
+    ],
+)
+def test_every_vocabulary_word_maps_to_its_rung(tmp_path, status, expected):
+    from fno.graph.ladder import Rung, plan_rung
+
+    entry = _plan(tmp_path, f"---\nstatus: {status}\n---\n")
+    assert plan_rung(entry) is getattr(Rung, expected)
+
+
+def test_no_plan_path_is_NONE_not_IDEA(tmp_path):
+    """Distinct on purpose: only NONE means there is nothing on disk to fill."""
+    from fno.graph.ladder import Rung, plan_rung
+
+    assert plan_rung({"id": "x-test"}) is Rung.NONE
+    assert plan_rung({"id": "x-test", "plan_path": ""}) is Rung.NONE
+    assert plan_rung(_plan(tmp_path, "---\nstatus: idea\n---\n")) is Rung.IDEA
+
+
+def test_AC4_ERR_unreadable_is_distinguished_from_status_less(tmp_path):
+    """The collapse `plan_rung` must not inherit.
+
+    `_read_plan_frontmatter` returns {} for missing, unreadable, malformed AND
+    status-less alike. Those last two must route to opposite failure policies,
+    so a resolver built on it would be unable to tell them apart at all.
+    """
+    from fno.graph.ladder import Rung, plan_rung
+
+    status_less = _plan(tmp_path, "---\ntitle: a plan\n---\n\n# Doc\n", name="q.md")
+    undecodable = _undecodable(tmp_path)
+
+    assert plan_rung(status_less) is not plan_rung(undecodable)
+    assert plan_rung(status_less) is Rung.READY
+    assert plan_rung(undecodable) is Rung.UNREADABLE
+
+
+def test_an_absent_status_is_not_the_same_defect_as_a_stub_status(tmp_path):
+    """Silence stays READY; only a pre-design WORD demotes.
+
+    `status: stub` read as `ready` because it was in no vocabulary - that is the
+    bug. A doc with no `status:` at all is the older, legitimate shape (most of
+    a mature vault), and `fno backlog intake` on one must still yield a workable
+    node. Demoting silence too would empty the board to fix a bug it never had.
+    """
+    from fno.graph.ladder import Rung, is_dispatchable, plan_rung
+
+    silent = _plan(tmp_path, "---\ntitle: An older plan\n---\n\n# Body\n", "s.md")
+    stubbed = _plan(tmp_path, "---\nstatus: stub\n---\n", "t.md")
+
+    assert plan_rung(silent) is Rung.READY
+    assert is_dispatchable(silent) is True
+    assert plan_rung(stubbed) is Rung.IDEA
+    assert is_dispatchable(stubbed) is False
+
+
+def test_AC3_ERR_the_two_policies_disagree_on_unreadable(tmp_path):
+    """Permanent, deliberate disagreement - a future merge must fail here.
+
+    Selection fails OPEN because plans live in a symlinked vault and demoting
+    on a read failure would quarantine the backlog on unmount. Dispatch fails
+    CLOSED because building against an unreadable plan is worse than parking.
+    """
+    from fno.graph.ladder import Rung, is_dispatchable, is_selectable, plan_rung
+
+    entry = _undecodable(tmp_path)
+    assert plan_rung(entry) is Rung.UNREADABLE
+    assert is_selectable(entry) is True
+    assert is_dispatchable(entry) is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "---\nstatus: design\n",  # frontmatter opened, never closed
+        "---\nstatus: [unclosed\n---\n",  # malformed YAML
+        "---\njust a scalar\n---\n",  # not a mapping
+        "---\nstatus: brand_new_word\n---\n",  # newer vocabulary, or corrupt
+    ],
+)
+def test_uncertain_documents_park_but_stay_selectable(tmp_path, body):
+    from fno.graph.ladder import Rung, is_dispatchable, is_selectable, plan_rung
+
+    entry = _plan(tmp_path, body)
+    assert plan_rung(entry) is Rung.UNREADABLE
+    assert is_selectable(entry) is True
+    assert is_dispatchable(entry) is False
+
+
+def test_missing_file_is_unreadable_and_stays_selectable(tmp_path):
+    from fno.graph.ladder import Rung, is_dispatchable, is_selectable, plan_rung
+
+    entry = {"id": "x-test", "plan_path": str(tmp_path / "gone.md")}
+    assert plan_rung(entry) is Rung.UNREADABLE
+    assert is_selectable(entry) is True
+    assert is_dispatchable(entry) is False
+
+
+@pytest.mark.parametrize("status", ["idea", "stub", "design"])
+def test_AC2_EDGE_a_linked_pre_design_plan_is_not_dispatchable(tmp_path, status):
+    """The case that read `ready` before this change."""
+    from fno.graph.ladder import is_dispatchable, is_selectable
+
+    entry = _plan(tmp_path, f"---\nstatus: {status}\n---\n")
+    assert is_dispatchable(entry) is False
+    assert is_selectable(entry) is False
+
+
+@pytest.mark.parametrize("status", ["ready", "in_progress", "in_review", "shipped"])
+def test_dispatchable_set_matches_the_handoff_vocabulary(tmp_path, status):
+    """Exactly what handoff.sh accepted before it delegated to the verb."""
+    from fno.graph.ladder import is_dispatchable
+
+    assert is_dispatchable(_plan(tmp_path, f"---\nstatus: {status}\n---\n")) is True
+
+
+@pytest.mark.parametrize("status", ["done", "superseded"])
+def test_terminal_plans_are_not_dispatchable(tmp_path, status):
+    from fno.graph.ladder import is_dispatchable
+
+    assert is_dispatchable(_plan(tmp_path, f"---\nstatus: {status}\n---\n")) is False
+
+
+def test_plan_rung_never_raises_on_a_malformed_entry():
+    from fno.graph.ladder import Rung, plan_rung
+
+    for entry in (None, "a string", 42, [], {"plan_path": 7}):
+        assert plan_rung(entry) in set(Rung)
+
+
+def test_is_design_stage_is_now_one_rung_of_the_table(tmp_path):
+    """The old name survives so its four callers do not churn."""
+    from fno.graph.ladder import Rung, is_design_stage, plan_rung
+
+    entry = _plan(tmp_path, DESIGN_FM)
+    assert is_design_stage(entry) is (plan_rung(entry) is Rung.DESIGN) is True
+
+
+# selection re-probes every undesigned rung, not just `design` (codex P1) ------
+
+
+def _ready_row(plan_path: str) -> dict:
+    """A graph row PERSISTED as `ready` whose doc may say otherwise."""
+    from datetime import datetime, timezone
+
+    return {
+        "id": "x-stale01",
+        "status": "ready",
+        "plan_path": plan_path,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [("design", "design-stage"), ("idea", "idea-stage"), ("stub", "idea-stage")],
+)
+def test_a_stale_ready_row_is_re_probed_for_every_undesigned_rung(
+    tmp_path, status, expected
+):
+    """The persisted status can lie; the live doc decides.
+
+    `read_graph` does not recompute, so a doc rewritten down to `idea` (or an
+    old scaffold still spelled `stub`) sits behind a `ready` row. A DESIGN-only
+    probe waved those straight through to dispatch.
+    """
+    from datetime import datetime, timezone
+
+    from fno.backlog.advance import selection_guards
+
+    plan = tmp_path / "p.md"
+    plan.write_text(f"---\nstatus: {status}\n---\n")
+    node = _ready_row(str(plan))
+    verdict = selection_guards(
+        node, {node["id"]: node}, datetime.now(timezone.utc)
+    )
+    assert verdict == expected
+
+
+def test_a_stale_ready_row_with_a_real_plan_still_selects(tmp_path):
+    """The guard must not hold back a genuinely ready node."""
+    from datetime import datetime, timezone
+
+    from fno.backlog.advance import selection_guards
+
+    plan = tmp_path / "r.md"
+    plan.write_text("---\nstatus: ready\n---\n")
+    node = _ready_row(str(plan))
+    assert selection_guards(
+        node, {node["id"]: node}, datetime.now(timezone.utc)
+    ) is None
+
+
+def test_an_unreadable_plan_stays_selectable_through_the_guard(tmp_path):
+    """Fail-open survives the rewrite: a vault unmount must not quarantine."""
+    from datetime import datetime, timezone
+
+    from fno.backlog.advance import selection_guards
+
+    node = _ready_row(str(tmp_path / "gone.md"))
+    assert selection_guards(
+        node, {node["id"]: node}, datetime.now(timezone.utc)
+    ) is None
+
+
+def test_the_policy_set_is_the_one_selection_uses():
+    """One definition of "undesigned", shared by the bool and the reason path."""
+    from fno.graph.ladder import UNSELECTABLE_RUNGS, Rung
+
+    assert UNSELECTABLE_RUNGS == frozenset({Rung.IDEA, Rung.DESIGN})
+
+
+# every readiness path re-probes the rung, not just `design` (sigma panel) -----
+
+
+def test_maintain_never_quarantines_an_undesigned_node(tmp_path):
+    """`maintain --apply` must not defer a scaffold off the board.
+
+    `is_stale_ready` exempted DESIGN only, so an `idea`-rung row aged into
+    stale-quarantine and got `deferred_at` stamped. Two of its three callers
+    never pass through `selection_guards`, so the rung probe has to live here.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from fno.graph.maintain import is_stale_ready
+
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=572)).isoformat()
+    for status in ("idea", "stub", "design"):
+        plan = tmp_path / f"{status}.md"
+        plan.write_text(f"---\nstatus: {status}\n---\n")
+        node = {
+            "id": f"x-{status[:4]}",
+            "status": "ready",
+            "plan_path": str(plan),
+            "created_at": old,
+        }
+        assert is_stale_ready(node, now, 21) is False, status
+
+
+def test_entry_status_uses_the_same_rung_table_as_recompute(tmp_path):
+    """`types._derive_status` was a second derivation and had gone divergent.
+
+    It reported `ready` for a linked `idea` scaffold - the very bug this node
+    removes, surviving on the pydantic read path - and made every such load emit
+    a spurious `graph_status_drift` event.
+    """
+    from fno.graph.statuses import recompute_statuses
+    from fno.graph.types import _derive_status
+
+    for status, expected in (("idea", "idea"), ("stub", "idea"),
+                             ("design", "design"), ("ready", "ready")):
+        plan = tmp_path / f"{status}.md"
+        plan.write_text(f"---\nstatus: {status}\n---\n")
+        row = {
+            "id": "x-derive1",
+            "title": "t",
+            "plan_path": str(plan),
+            "blocked_by": [],
+            "completed_at": None,
+            "session_id": None,
+            "claimed_at": None,
+            "status": "ready",
+        }
+        assert _derive_status(row) == expected, status
+        assert recompute_statuses([dict(row)])[0]["status"] == _derive_status(row)
+
+
+def test_an_empty_plan_file_is_unreadable_not_ready(tmp_path):
+    """A truncated write must not read as a plan that predates the vocabulary."""
+    from fno.graph.ladder import Rung, is_dispatchable, plan_rung
+
+    empty = tmp_path / "e.md"
+    empty.write_text("")
+    entry = {"id": "x-empty01", "plan_path": str(empty)}
+    assert plan_rung(entry) is Rung.UNREADABLE
+    assert is_dispatchable(entry) is False

@@ -1870,7 +1870,7 @@ def _account_id_for_env(account_env: Optional[Mapping[str, str]]) -> Optional[st
         from fno.agents.account_env import resolve_account_overlay
 
         for record in load_providers().records:
-            if record.cli != "claude":
+            if record.harness != "claude":
                 continue
             try:
                 if dict(resolve_account_overlay(record.id).env) == dict(account_env):

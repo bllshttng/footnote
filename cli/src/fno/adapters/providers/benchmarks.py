@@ -1,6 +1,6 @@
 """OpenRouter benchmark snapshot + model reachability for tier-based routing.
 
-``fno providers benchmarks refresh`` caches OpenRouter's coding benchmark scores
+``fno config accounts benchmarks refresh`` caches OpenRouter's coding benchmark scores
 to ``benchmarks.json`` (resolved via :func:`fno.paths.benchmarks_json`); ``show``
 renders it with a staleness warning. The snapshot is the single routing source of
 truth: tier resolution (a separate step) reads it, never the network, so a stale

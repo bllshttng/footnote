@@ -18,6 +18,7 @@ spawning ``python3 -m fno.plan._stamp`` directly.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from enum import Enum
@@ -395,6 +396,57 @@ def folder_audit(
 
     if non_terminal and len(owners) > 0:
         raise typer.Exit(code=1)
+
+
+@plan_app.command(
+    "rung",
+    hidden=True,
+    help=(
+        "Print a plan's readiness rung and both policy verdicts. Exit 0 when the "
+        "plan is dispatchable, 1 when it is not (including unreadable), 2 on a "
+        "usage error. The single readiness authority for shell callers."
+    ),
+)
+def rung(
+    plan_path: str = typer.Argument(..., help="Path to the plan .md file."),
+) -> None:
+    """The shell-facing face of ``fno.graph.ladder``.
+
+    Born hidden: `fno plan` sits at its 12-subcommand menu-caps ceiling and
+    AGENTS.md defaults new verbs to hidden. Its audience is three shell scripts,
+    not the `--help` reader.
+
+    Takes a PATH, not a node id. Every caller already holds a path, and node-id
+    resolution would cost a graph read to answer a question the path answers -
+    Open Question 1, resolved by the callers rather than by preference.
+
+    Output is `key=value` lines so a caller can grep one field without a JSON
+    dependency; the exit code carries the dispatchable verdict so the common
+    case stays a one-liner with no parsing at all.
+    """
+    from fno.graph.ladder import Rung, is_dispatchable, is_selectable, plan_rung
+
+    if not plan_path:
+        typer.echo("fno plan rung: a plan path is required", err=True)
+        raise typer.Exit(code=2)
+
+    # `plan_rung` resolves a relative path against the ENTRY's cwd, not the
+    # process's, because the daemon probes foreign nodes. A path typed at a
+    # shell means the shell's cwd, so say so explicitly rather than letting the
+    # resolver refuse to guess and report UNREADABLE.
+    entry = {"id": "-", "plan_path": plan_path, "cwd": os.getcwd()}
+
+    r = plan_rung(entry)
+    typer.echo(f"rung={r.value}")
+    typer.echo(f"selectable={'true' if is_selectable(entry) else 'false'}")
+    typer.echo(f"dispatchable={'true' if is_dispatchable(entry) else 'false'}")
+    if r is Rung.UNREADABLE:
+        typer.echo(
+            f"fno plan rung: cannot classify {plan_path} (missing, undecodable, "
+            "malformed frontmatter, or a status this binary does not know)",
+            err=True,
+        )
+    raise typer.Exit(code=0 if is_dispatchable(entry) else 1)
 
 
 @plan_app.command(

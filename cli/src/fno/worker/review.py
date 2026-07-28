@@ -252,7 +252,7 @@ def _read_cross_model_config() -> tuple[dict[str, str], bool]:
         from fno.config import load_settings
 
         review_cfg = load_settings().review
-        return dict(review_cfg.agent_providers or {}), bool(review_cfg.cross_model.enabled)
+        return dict(review_cfg.agent_harnesses or {}), bool(review_cfg.cross_model.enabled)
     except Exception as exc:  # noqa: BLE001 - never let config break review
         print(
             f"[review] cross-model config read failed; running all-claude: {exc}",
@@ -283,7 +283,7 @@ def _warn_unknown_agent_keys(agent_providers: dict[str, str]) -> None:
     unknown = [k for k in agent_providers if k not in AGENT_NAMES]
     if unknown:
         print(
-            "[review] cross-model: config.review.agent_providers names unknown "
+            "[review] cross-model: config.review.agent_harnesses names unknown "
             f"agent(s) {unknown}; ignoring (known agents: {list(AGENT_NAMES)})",
             file=sys.stderr,
         )

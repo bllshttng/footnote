@@ -12,6 +12,7 @@ Run: cd cli && uv run pytest tests/unit/test_launch_pick.py -v
 """
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -33,9 +34,9 @@ def _write_config(tmp_path: Path, *, pick_on_launch: bool) -> None:
                 "active": "readyrule",
                 "quota": {"pick_on_launch": pick_on_launch},
                 "records": [
-                    {"id": "readyrule", "name": "readyrule", "cli": "claude",
+                    {"id": "readyrule", "name": "readyrule", "harness": "claude",
                      "auth": "managed", "config_dir": str(alt)},
-                    {"id": "makers", "name": "makers", "cli": "claude",
+                    {"id": "makers", "name": "makers", "harness": "claude",
                      "auth": "managed", "config_dir": str(main)},
                 ],
             }
@@ -104,7 +105,7 @@ class TestPickAtLaunch:
             tomli_w.dumps({"providers": {
                 "active": "solo",
                 "quota": {"pick_on_launch": True},
-                "records": [{"id": "solo", "name": "solo", "cli": "claude",
+                "records": [{"id": "solo", "name": "solo", "harness": "claude",
                              "auth": "managed"}],
             }}),
             encoding="utf-8",
@@ -279,3 +280,55 @@ class TestPaneSeam:
                 account_env=explicit,
             )
         assert seen["account_env"] == explicit
+
+
+class TestVerbParity:
+    """The Rust loop shells a verb by name; nothing else proves it exists.
+
+    Every failure on that path is deliberately advisory, so a renamed verb does
+    not fail loudly once - it degrades silently forever. This actually happened:
+    the verb was `fno providers pick` until the surface became
+    `fno config accounts`, and only a live check caught it.
+    """
+
+    def test_the_argv_the_loop_shells_resolves_to_a_real_command(self) -> None:
+        import re
+        import shutil
+        import subprocess
+
+        rs = (
+            Path(__file__).resolve().parents[3]
+            / "crates" / "fno-agents" / "src" / "loop_dispatch.rs"
+        )
+        if not rs.is_file():
+            pytest.skip("rust crate not present in this checkout")
+        src = rs.read_text(encoding="utf-8")
+        match = re.search(r"PICK_ARGV:\s*\[&str;\s*\d+\]\s*=\s*\[([^\]]*)\]", src)
+        assert match, "PICK_ARGV not found in loop_dispatch.rs"
+        argv = re.findall(r'"([^"]+)"', match.group(1))
+        assert argv, "PICK_ARGV parsed empty"
+
+        fno = shutil.which("fno-py")
+        if fno is None:
+            pytest.skip("fno-py console script not on PATH")
+
+        def run(args: list[str]) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [fno, *args, "--help"],
+                capture_output=True, text=True, timeout=120,
+                env={**os.environ, "COLUMNS": "240", "NO_COLOR": "1", "TERM": "dumb"},
+            )
+
+        # Positive control: a nonsense verb must fail, or a CLI that exits 0 on
+        # everything would make the real assertion vacuous.
+        assert run(["config", "accounts", "nope-verb"]).returncode != 0
+
+        result = run(list(argv[:3]))
+        assert result.returncode == 0, (
+            f"the loop shells `fno {' '.join(argv)}` but that command does not "
+            f"resolve:\n{result.stdout}{result.stderr}"
+        )
+        for flag in argv[3:]:
+            assert flag in result.stdout, (
+                f"{flag} is not an option of `fno {' '.join(argv[:3])}`"
+            )

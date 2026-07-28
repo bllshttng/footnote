@@ -66,7 +66,21 @@ def test_tier2_done_with_signal():
 
 def test_quoting_and_case_normalized_before_lookup():
     assert target_status('"design"', lambda: True) is None  # already canonical
-    assert target_status("Idea", lambda: False) == "design"
+    # `idea` is a canonical rung, so the sweep leaves it. Reaching that verdict
+    # from "Idea" is the proof the case fold ran: an unnormalized token would
+    # miss KNOWN_STATUSES and fall to tier 2.
+    assert target_status("Idea", lambda: False) is None
+
+
+def test_stub_is_canonical_not_swept_to_superseded():
+    """A decompose scaffold is left alone, not archived out from under its node.
+
+    `stub` was in no vocabulary, so it fell past KNOWN_STATUSES and _TIER1 into
+    tier 2 and was rewritten to `superseded` (or `done` on signal) - the sweep
+    archived live, still-fillable scaffolds. It now aliases to `idea`.
+    """
+    assert target_status("stub", lambda: False) is None
+    assert target_status("stub", lambda: True) is None
 
 
 # ---------------------------------------------------------------------------

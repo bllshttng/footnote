@@ -58,7 +58,7 @@ _If no project goals defined: "No project goals defined in config.toml — skipp
 ### Recommendations
 - **medium** - [Description] — `agent: <agent-name>` `provider: <provider_id>`
 
-_`provider` is the id from `config.providers.records[]` for the agent that produced this
+_`provider` is the id from `config.accounts.records[]` for the agent that produced this
 finding. Forensics-only — does not affect verdict or severity._
 
 ---

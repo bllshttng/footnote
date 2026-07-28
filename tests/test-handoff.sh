@@ -32,6 +32,16 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$REPO_ROOT/skills/target/scripts/handoff.sh"
 CONTEXT_PROBE="$REPO_ROOT/skills/target/scripts/context-probe.sh"
 
+# The `fno` stub delegates `plan rung` to the real CLI (see the stub body), so
+# it needs this checkout's sources and an interpreter that can import them.
+# Prefer the worktree venv; a bare python3 works when the deps are present.
+export FNO_SRC="$REPO_ROOT/cli/src"
+if [ -x "$REPO_ROOT/cli/.venv/bin/python" ]; then
+  export FNO_PYTHON="$REPO_ROOT/cli/.venv/bin/python"
+else
+  export FNO_PYTHON="$(command -v python3 || command -v python)"
+fi
+
 pass=0
 fail=0
 
@@ -316,6 +326,13 @@ case "$subcmd1 $subcmd2" in
     ;;
   "agents rm")
     exit 0
+    ;;
+  "plan rung")
+    # Delegate to the REAL implementation instead of stubbing a verdict. This
+    # gate's entire contract IS the rung vocabulary, so a stub that re-derived
+    # it would test the stub - and a second copy of the vocabulary is the exact
+    # thing `fno plan rung` exists to delete.
+    exec env PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -m fno.cli plan rung "${3:-}"
     ;;
   *)
     # Any other fno command: succeed silently
@@ -1162,6 +1179,46 @@ rm -f "$SBX/$PLAN_REL.bak"
 CALL_LOG="$SBX/call-log"
 HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
 check_contains "x-3ad5: an unknown status is still parked" "parked" "$output"
+
+# ---------------------------------------------------------------------------
+# Scenario 6b: x-3571 - the gate delegates to `fno plan rung`
+#
+# The gate no longer parses `^status:` itself. Two things follow that the
+# vocabulary scenarios above cannot show: a pre-design rung parks (it used to
+# derive `ready` and dispatch), and a stale `fno` that lacks the verb parks with
+# a reason naming the binary rather than blaming the plan.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 6b: x-3571 rung delegation ==="
+
+for st in idea stub; do
+  SBX="$(make_sandbox "s6b-$st")"
+  sed -i.bak "s/^status: ready$/status: $st/" "$SBX/$PLAN_REL"
+  rm -f "$SBX/$PLAN_REL.bak"
+  CALL_LOG="$SBX/call-log"
+  HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
+  check_contains "x-3571: pre-design rung '$st' parks" "parked" "$output"
+  check_contains "x-3571: '$st' parks naming the rung" "rung 'idea'" "$output"
+done
+
+# A stale fno (no `rung` verb) must park loudly, not pass silently and not
+# blame the plan. Overwrite the stub so `plan rung` fails the way an older
+# installed binary does: exit 2, nothing on stdout.
+SBX="$(make_sandbox s6b-stale)"
+CALL_LOG="$SBX/call-log"
+cat > "$SBX/stub-bin/fno" <<'STALEEOF'
+#!/usr/bin/env bash
+echo "fno $*" >> "${CALL_LOG:-/dev/null}"
+if [ "${1:-} ${2:-}" = "plan rung" ]; then
+  echo "No such command 'rung'." >&2
+  exit 2
+fi
+exit 0
+STALEEOF
+chmod +x "$SBX/stub-bin/fno"
+HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
+check_contains "x-3571: a stale fno parks" "parked" "$output"
+check_contains "x-3571: the park reason names the binary, not the plan" "predate" "$output"
 
 # ---------------------------------------------------------------------------
 # Summary

@@ -102,14 +102,108 @@ def _read_candidates(path: Path) -> list[Path]:
     return [path]
 
 
-def _extract_providers_block(data: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the providers dict from a flat config.toml (top-level ``providers``)
-    or a legacy wrapped file (``config.providers``); None if absent/invalid."""
-    providers = data.get("providers")
-    if not isinstance(providers, dict):
-        config = data.get("config")
-        providers = config.get("providers") if isinstance(config, dict) else None
-    return providers if isinstance(providers, dict) else None
+#: Set once per process when a config was read under the pre-rename
+#: ``providers`` key, so the notice is a one-liner rather than per-load noise.
+_LEGACY_BLOCK_WARNED = False
+
+
+def _extract_accounts_block(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the accounts dict, canonical key first, pre-rename key second.
+
+    Looks for ``accounts`` then ``providers``, each at the top level of a flat
+    config.toml and then under a legacy ``config:`` wrapper; None if absent or
+    invalid.
+
+    This function - NOT ``fno.config._alias_legacy_keys`` - is the choke point
+    for the rename. ``load_providers`` reads the config file through its own
+    bootstrap reader (see ``_global_settings_path``) and never passes through
+    ``fno.config``, so an alias placed there would sit on a path this data never
+    takes. Every reader of account records arrives here.
+
+    ``providers`` keeps working indefinitely: the fallback is a dict lookup, not
+    a shim with a schedule, and nothing promises a removal. The file itself
+    migrates on the first ``save_providers`` write.
+    """
+    global _LEGACY_BLOCK_WARNED
+    config = data.get("config")
+    config = config if isinstance(config, dict) else {}
+    for key in ("accounts", "providers"):
+        for source in (data, config):
+            block = source.get(key)
+            if isinstance(block, dict):
+                if key == "providers" and not _LEGACY_BLOCK_WARNED:
+                    _LEGACY_BLOCK_WARNED = True
+                    logger.warning(
+                        "config.providers is the pre-rename name for "
+                        "config.accounts; the next account write migrates it"
+                    )
+                return block
+    return None
+
+
+def mutable_accounts_block(data: dict[str, Any]) -> dict[str, Any]:
+    """Return the accounts block of a raw settings dict, ready for in-place edit.
+
+    The mutator counterpart to :func:`_extract_accounts_block`, for the callers
+    that edit the parsed dict directly under ``atomic_mutate_settings`` (combo
+    add/remove/use/update, failover's active-flip) rather than going through
+    ``save_providers``.
+
+    Every such caller used to do ``data.setdefault("providers", {})``. Left
+    alone after the rename that would create a SECOND, empty block beside the
+    real ``accounts`` one and silently split the state in two - the combo would
+    land somewhere nothing reads. Routing them all through here means the
+    pre-rename block is migrated (moved, not copied) on first mutation, exactly
+    as ``save_providers`` does, and there is one place that knows both spellings.
+    """
+    config = data.get("config")
+    config = config if isinstance(config, dict) else None
+
+    # Drain the three non-canonical locations UNCONDITIONALLY, even when the
+    # canonical top-level block is already present. Popping only when it is
+    # absent leaves a competitor behind, and a competitor is not inert:
+    #   - a surviving `config.accounts` is merged OVER the edited top-level
+    #     block by `_flatten_config`, so a combo write or failover's active-flip
+    #     reports success against a file that never changed;
+    #   - a surviving `providers` keeps the file readable under both names and
+    #     splits the state, which is exactly what this helper exists to prevent.
+    # Draining is also what the READER already does in effect: it returns the
+    # first match in this precedence order and ignores the rest, so the blocks
+    # removed here were never being read.
+    drained: list[tuple[str, dict[str, Any]]] = []
+    for source, key in (
+        (config, "accounts"),
+        (data, "providers"),
+        (config, "providers"),
+    ):
+        if source is None:
+            continue
+        found = source.pop(key, None)
+        if isinstance(found, dict):
+            drained.append((key, found))
+
+    block = data.get("accounts")
+    if not isinstance(block, dict):
+        # Adopt (never copy) the highest-precedence survivor, so the pre-rename
+        # block is MOVED onto the canonical key rather than duplicated.
+        block = drained[0][1] if drained else {}
+
+    # Everything drained but not adopted loses to a higher-precedence block and
+    # is therefore already unreadable - every reader is first-match-wins in this
+    # same order. Dropping it is correct; dropping it SILENTLY is not, since the
+    # pre-rename shape at least sat visibly on disk. The sharp case is an EMPTY
+    # canonical block shadowing a populated duplicate: it wins on precedence and
+    # the records go with no receipt.
+    for key, discarded in drained:
+        if discarded and discarded is not block:
+            logger.warning(
+                "discarding shadowed account block %r (%d key(s)); a "
+                "higher-precedence block already provides config.accounts",
+                key,
+                len(discarded),
+            )
+    data["accounts"] = block
+    return block
 
 
 def _extract_agents_block(data: dict[str, Any]) -> dict[str, Any] | None:
@@ -283,7 +377,7 @@ def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
 
     for path in candidates:
         data = _read_parsed(path)
-        block = _extract_providers_block(data)
+        block = _extract_accounts_block(data)
         if block is None:
             continue
         combos_raw = block.get("combos")
@@ -343,7 +437,7 @@ def load_active_combo(repo_root: Path | None = None) -> str | None:
         repo_root = Path(os.environ.get("PWD", os.getcwd()))
 
     for path in (repo_root / ".fno" / "config.toml", _global_settings_path()):
-        block = _extract_providers_block(_read_parsed(path))
+        block = _extract_accounts_block(_read_parsed(path))
         if block is None:
             continue
         ac = block.get("active_combo")
@@ -370,7 +464,7 @@ def load_quota_config(repo_root: Path | None = None) -> QuotaConfig:
     ]
     for path in candidates:
         data = _read_parsed(path)
-        block = _extract_providers_block(data)
+        block = _extract_accounts_block(data)
         if block is None:
             continue
         quota_raw = block.get("quota")
@@ -416,7 +510,7 @@ def load_providers(repo_root: Path | None = None) -> ProvidersConfig:
 
     for path in candidates:
         data = _read_parsed(path)
-        block = _extract_providers_block(data)
+        block = _extract_accounts_block(data)
         if block is None:
             continue
         # Found a providers block; also read the sibling agents block from the
@@ -454,7 +548,7 @@ def _active_id_for(
         from fno.adapters.providers.managed import active_slot_id
 
         try:
-            return active_slot_id(record.cli, root)
+            return active_slot_id(record.harness, root)
         except Exception:  # noqa: BLE001 - an unreadable store must not break display
             return None
     return config.active
@@ -539,21 +633,28 @@ def save_providers(
     if config.auto_switch:
         providers_block["auto_switch"] = True
 
-    # Flat config.toml: providers lives at the top level (whole-block replace).
+    # Flat config.toml: accounts lives at the top level (whole-block replace).
     # If existing was read from a legacy wrapped file, lift its config.* keys up
     # so the written config.toml is single-shape (never a mixed config: + flat).
     existing = _flatten_config(existing)
-    # Preserve provider subkeys this write path does not rebuild (quota, combos,
+    # Preserve account subkeys this write path does not rebuild (quota, combos,
     # failover, agents, ...). Rebuilding providers_block from only records+active
-    # would otherwise silently drop them, so e.g. `fno providers use` after an
-    # operator set config.providers.quota.defer_dispatch would turn quota
+    # would otherwise silently drop them, so e.g. `fno config accounts use` after
+    # an operator set config.accounts.quota.defer_dispatch would turn quota
     # deferral back off (x-5d3e review). Rebuilt keys win; everything else rides.
-    old_providers = existing.get("providers")
-    if isinstance(old_providers, dict):
-        for key, val in old_providers.items():
+    #
+    # Read the pre-rename `providers` block too, and pop it: this write IS the
+    # migration. Carrying both keys forward would leave the file readable under
+    # either name forever and the subkeys duplicated in two places.
+    old_accounts = existing.get("accounts")
+    if not isinstance(old_accounts, dict):
+        old_accounts = existing.get("providers")
+    if isinstance(old_accounts, dict):
+        for key, val in old_accounts.items():
             if key not in ("records", "active"):
                 providers_block.setdefault(key, val)
-    existing["providers"] = providers_block
+    existing.pop("providers", None)
+    existing["accounts"] = providers_block
 
     target.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(target, tomli_w.dumps(_strip_none(existing)))
@@ -665,7 +766,7 @@ class ActiveProviderSnapshot:
     """
 
     id: str
-    cli: str
+    harness: str
     auth: str
     credential_ref: str | None
     base_url: str | None
@@ -685,7 +786,7 @@ def read_active_provider_atomic(*, settings_path: Path) -> ActiveProviderSnapsho
             default) - same rationale as atomic_mutate_settings.
 
     Returns:
-        Frozen ``ActiveProviderSnapshot`` with id, cli, auth, optional
+        Frozen ``ActiveProviderSnapshot`` with id, harness, auth, optional
         credential_ref/base_url/pricing.
 
     Raises:
@@ -704,15 +805,15 @@ def read_active_provider_atomic(*, settings_path: Path) -> ActiveProviderSnapsho
         finally:
             fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
-    block = _extract_providers_block(settings)
+    block = _extract_accounts_block(settings)
     if block is None:
         raise MissingActiveProvider(
-            "config.providers block is absent or invalid"
+            "config.accounts block is absent or invalid"
         )
     active_id = block.get("active")
     if not active_id:
         raise MissingActiveProvider(
-            "config.providers.active is unset (None or empty)"
+            "config.accounts.active is unset (None or empty)"
         )
     raw_records = block.get("records") or []
     record = next((r for r in raw_records if isinstance(r, dict) and r.get("id") == active_id), None)
@@ -723,7 +824,10 @@ def read_active_provider_atomic(*, settings_path: Path) -> ActiveProviderSnapsho
 
     return ActiveProviderSnapshot(
         id=str(active_id),
-        cli=str(record.get("cli", "")),
+        # Read both spellings: `harness` is canonical, `cli` is the pre-rename
+        # key that an unmigrated config.toml still carries. A plain get("cli")
+        # would silently yield "" for every migrated record.
+        harness=str(record.get("harness") or record.get("cli") or ""),
         auth=str(record.get("auth", "")),
         credential_ref=record.get("credential_ref") if isinstance(record.get("credential_ref"), str) else None,
         base_url=record.get("base_url") if isinstance(record.get("base_url"), str) else None,

@@ -126,8 +126,12 @@ pub fn parse_isolated_dirs(
     let Ok(t) = toml_body.parse::<toml::Table>() else {
         return Vec::new();
     };
+    // Canonical `accounts`, else the pre-rename `providers`. Reading only one
+    // spelling degrades to an empty Vec here, so a config in the other spelling
+    // would silently report no isolated dirs at all.
     let records = t
-        .get("providers")
+        .get("accounts")
+        .or_else(|| t.get("providers"))
         .and_then(|p| p.get("records"))
         .and_then(|r| r.as_array());
     let mut out = Vec::new();
@@ -2178,6 +2182,35 @@ auth = "managed"
 [[providers.records]]
 id = "alt"
 cli = "claude"
+config_dir = "~/.claude-alt"
+"#;
+        let home = std::ffi::OsString::from("/home/u");
+        let dirs = parse_isolated_dirs(body, Some(home.as_os_str()));
+        assert_eq!(
+            dirs,
+            vec![("alt".to_string(), PathBuf::from("/home/u/.claude-alt"))]
+        );
+    }
+
+    #[test]
+    fn parse_isolated_dirs_reads_the_canonical_accounts_block() {
+        // The test above is the same fixture under the pre-rename `providers`
+        // spelling, so the pair pins both: a config migrated to `accounts` and
+        // one not yet written since the rename must resolve identically. This
+        // reader is outside the Python loader's choke point, and every miss
+        // here degrades to an empty Vec rather than an error - a config in the
+        // spelling this reader does not know would silently report no isolated
+        // dirs at all.
+        let body = r#"
+[accounts]
+active = "home"
+[[accounts.records]]
+id = "home"
+harness = "claude"
+auth = "managed"
+[[accounts.records]]
+id = "alt"
+harness = "claude"
 config_dir = "~/.claude-alt"
 "#;
         let home = std::ffi::OsString::from("/home/u");

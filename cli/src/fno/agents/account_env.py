@@ -140,16 +140,16 @@ def resolve_account_overlay(
 
     record = by_id.get(account_id)
     if record is None:
-        claude_ids = sorted(r.id for r in config.records if r.cli == "claude")
+        claude_ids = sorted(r.id for r in config.records if r.harness == "claude")
         listing = ", ".join(claude_ids) or "(none registered)"
         raise AccountResolutionError(
             f"account {account_id!r} is not a registered provider. "
             f"claude accounts: {listing}"
         )
 
-    if record.cli != "claude":
+    if record.harness != "claude":
         raise AccountResolutionError(
-            f"account {account_id!r} is a {record.cli}/{record.auth} record; "
+            f"account {account_id!r} is a {record.harness}/{record.auth} record; "
             "--account is claude-only (codex has its own CODEX_HOME slot)"
         )
 
@@ -174,7 +174,7 @@ def resolve_account_overlay(
     if record.auth == "oauth_dir":
         if not verify_staged(record, root=providers_root):
             raise AccountResolutionError(
-                f"account {account_id!r} is not staged; run `fno providers "
+                f"account {account_id!r} is not staged; run `fno config accounts "
                 "register`/stage before spawning against it"
             )
         overlay = _env_for_oauth(record, providers_root)
@@ -223,7 +223,7 @@ def resolve_account_overlay(
             f"config_dir (e.g. --config-dir ~/.claude-{account_id}, a full "
             "second login) so the worker gets CLAUDE_CONFIG_DIR. The setup-token "
             "env lane bills the wrong account and is deliberately not used.\n"
-            f"  or make it active:  fno providers use {account_id}  (daemon-wide)"
+            f"  or make it active:  fno config accounts use {account_id}  (daemon-wide)"
         )
 
     # api_key claude record: resolve its env refs (e.g. a routed ANTHROPIC_*).

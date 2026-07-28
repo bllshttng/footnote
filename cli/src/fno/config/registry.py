@@ -183,7 +183,12 @@ FIELD_META: dict[str, Meta] = {
         "always", "Which AI reviewers /pr requests a review from (the INVOCATION list).",
         question="Which external reviewer(s) should review your PRs (gemini/codex/none)?",
     ),
-    "review.agent_providers": Meta("never", "Per-agent provider routing for the cross-model review panel."),
+    "review.agent_harnesses": Meta(
+        "never", "Per-agent harness routing (claude/codex/gemini) for the cross-model review panel. Legacy alias: agent_providers.",
+    ),
+    "review.agent_providers": Meta(
+        "never", "Legacy alias for config.review.agent_harnesses (a straight rename); agent_harnesses wins if both are set.",
+    ),
     "review.agent_routes": Meta("never", "Opt-in per-agent harness/provider/model routes for named sigma sessions."),
     "review.cross_model.enabled": Meta("advanced", "Enable cross-model (codex/gemini) second-opinion review."),
     # --- config.target.* ---
@@ -252,6 +257,16 @@ FIELD_META: dict[str, Meta] = {
     ),
     "think_spawn.attended": Meta(
         "advanced", "Attended born-with-why behavior: 'offer' (default, handoff line) or 'spawn' (real bg /think)."
+    ),
+    "think_spawn.on_decompose_wave0": Meta(
+        "advanced",
+        "Dispatch a /think for each WAVE-0 child at `fno backlog decompose` (default OFF; "
+        "inherits max_per_run and daily_cap). Worth it only when the epic is large enough "
+        "that inline-filling every child blows one session's context budget.",
+    ),
+    "think_spawn.substrate": Meta(
+        "advanced",
+        "Substrate for every /think spawn: 'bg' (default, claude-only), 'pane', or 'headless'.",
     ),
     # --- config.active_backlog.* ---
     "active_backlog.enabled": Meta(

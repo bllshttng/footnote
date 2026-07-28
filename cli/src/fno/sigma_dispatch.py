@@ -886,8 +886,12 @@ def resolve_dispatch_target(
     ]):
         if not candidate.is_file():
             continue
-        providers = read_config_flat(candidate).get("providers")
-        ac = providers.get("active_combo") if isinstance(providers, dict) else None
+        flat = read_config_flat(candidate)
+        # Canonical `accounts`, else the pre-rename `providers`. Bootstrap read,
+        # so it never reaches the providers loader's choke point; a miss yields
+        # active_combo=None, which silently degrades routing rather than erroring.
+        block = flat.get("accounts") or flat.get("providers")
+        ac = block.get("active_combo") if isinstance(block, dict) else None
         if ac:
             active_combo = ac
             break  # project-local wins; do not consult global

@@ -1345,3 +1345,194 @@ def test_over_budget_provenance_identity_fails_closed_instead_of_shaving():
     with pytest.raises(AgentNameError) as exc:
         st._worker_agent_name(long_id, "slug", st.REASON_WORK_START, "sessaaaa")
     assert long_id in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# think_spawn.substrate + on_decompose_wave0 (x-3571 wave 2)
+# ---------------------------------------------------------------------------
+
+
+def _write_config(root: Path, body: str) -> None:
+    (root / ".fno").mkdir(parents=True, exist_ok=True)
+    (root / ".fno" / "config.toml").write_text(body)
+
+
+def test_AC10_HP_absent_substrate_key_still_yields_bg(monkeypatch, tmp_path):
+    """The historical hardcode is the default, so nothing changes unconfigured."""
+    cap = _capture_spawn_cmd(monkeypatch)
+    st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "bg"
+
+
+def test_AC10_HP_configured_substrate_reaches_every_spawn(monkeypatch, tmp_path):
+    """Set at the shared choke point, so it applies to ALL think spawns."""
+    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"headless\"\n")
+    cap = _capture_spawn_cmd(monkeypatch)
+    st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "headless"
+
+
+def test_a_garbage_substrate_falls_back_to_bg(monkeypatch, tmp_path):
+    """An unknown substrate would fail loud at spawn; keep the enum tight."""
+    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"quantum\"\n")
+    cap = _capture_spawn_cmd(monkeypatch)
+    st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "bg"
+
+
+def test_AC8_HP_wave0_fanout_is_off_by_default(tmp_path, monkeypatch):
+    """No key present -> off, byte-identical to the flagged-only lane."""
+    monkeypatch.delenv("FNO_THINK_SPAWN_WAVE0", raising=False)
+    assert st.think_spawn_on_decompose_wave0(project_root=tmp_path) is False
+
+
+def test_wave0_needs_its_own_flag_not_just_enabled(tmp_path, monkeypatch):
+    """Same shape as on_work_start / on_retro: `enabled` alone never arms it.
+
+    Read off the settings block rather than through `think_spawn_enabled`:
+    conftest pins FNO_THINK_SPAWN=0 process-wide so no test can spawn a real
+    worker, and that override outranks config by design.
+    """
+    monkeypatch.delenv("FNO_THINK_SPAWN_WAVE0", raising=False)
+    _write_config(tmp_path, "[think_spawn]\nenabled = true\n")
+    from fno.config import load_settings_for_repo
+
+    block = load_settings_for_repo(tmp_path).think_spawn
+    assert block.enabled is True
+    assert block.on_decompose_wave0 is False
+    assert st.think_spawn_on_decompose_wave0(project_root=tmp_path) is False
+
+
+def test_wave0_arms_when_its_own_flag_is_set(tmp_path, monkeypatch):
+    monkeypatch.delenv("FNO_THINK_SPAWN_WAVE0", raising=False)
+    _write_config(tmp_path, "[think_spawn]\non_decompose_wave0 = true\n")
+    assert st.think_spawn_on_decompose_wave0(project_root=tmp_path) is True
+
+
+def test_wave0_env_override_wins(tmp_path, monkeypatch):
+    _write_config(tmp_path, "[think_spawn]\non_decompose_wave0 = true\n")
+    assert st.think_spawn_on_decompose_wave0(
+        project_root=tmp_path, env={"FNO_THINK_SPAWN_WAVE0": "0"}
+    ) is False
+    assert st.think_spawn_on_decompose_wave0(
+        project_root=Path("/nonexistent"), env={"FNO_THINK_SPAWN_WAVE0": "1"}
+    ) is True
+
+
+def test_wave0_fails_safe_on_a_malformed_block(tmp_path, monkeypatch):
+    """A spurious fan-out spends real tokens on cold sessions; fail to off."""
+    monkeypatch.delenv("FNO_THINK_SPAWN_WAVE0", raising=False)
+    _write_config(tmp_path, "[think_spawn]\non_decompose_wave0 = \"maybe\"\n")
+    assert st.think_spawn_on_decompose_wave0(project_root=tmp_path) is False
+
+
+def test_wave0_adds_no_new_ceiling(tmp_path):
+    """It inherits max_per_run and daily_cap rather than inventing parallel caps."""
+    _write_config(tmp_path, "[think_spawn]\non_decompose_wave0 = true\n")
+    from fno.config import load_settings_for_repo
+
+    block = load_settings_for_repo(tmp_path).think_spawn
+    assert block.max_per_run == 5
+    assert block.daily_cap == 20
+    assert not [f for f in type(block).model_fields if "wave0_cap" in f]
+
+
+# non-bg spawn receipts (codex P1) --------------------------------------------
+
+
+def _capture_with_stdout(monkeypatch, stdout: str) -> dict:
+    """Patch subprocess.run with a scripted receipt; return the captured cmd."""
+    captured: dict = {}
+
+    class _Proc:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        p = _Proc()
+        p.stdout = stdout
+        return p
+
+    monkeypatch.setattr(st.subprocess, "run", fake_run)
+    return captured
+
+
+def test_a_pane_receipt_without_short_id_is_still_a_launch(monkeypatch, tmp_path):
+    """The pane receipt carries mux_session/pane_id, never short_id.
+
+    Raising here reported `skipped` for a worker that IS running, so decompose
+    marked the child unowned and inline-filled it out from under a live pane
+    worker - the exact double-write the ownership receipt prevents.
+    """
+    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"pane\"\n")
+    _capture_with_stdout(
+        monkeypatch, '{"status":"live","mux_session":"m1","pane_id":"%1"}\n'
+    )
+    handle = st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    assert handle, "a launched pane worker must return an addressable handle"
+
+
+def test_a_headless_reply_launches_but_stamps_no_session_pointer(
+    monkeypatch, tmp_path
+):
+    """The headless `once` path writes the provider reply verbatim, not JSON.
+
+    It must NOT raise (the work happened), and must NOT invent a session id: the
+    one-shot has already torn down, so a handle here would be stamped into
+    `think_session_id` and resolve to nothing on every successful spawn. Empty
+    is the honest answer; the `think_spawned` event still carries `agent_name`.
+    """
+    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"headless\"\n")
+    _capture_with_stdout(monkeypatch, "I have finished the design pass.\n")
+    handle = st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    assert handle == ""
+
+
+def test_an_empty_session_is_not_stamped_over_the_node(monkeypatch, tmp_path):
+    """A pointer that resolves to nothing is worse than no pointer."""
+    captured: dict = {}
+
+    def fake_mutate(path, mutator, **kw):
+        entries = [{"id": "x-1", "think_session_id": "prior"}]
+        captured["out"] = mutator(entries)
+
+    monkeypatch.setattr(
+        "fno.graph.store.locked_mutate_graph", fake_mutate, raising=False
+    )
+    st._stamp_forward("x-1", "", None, output_path="/tmp/doc.md")
+    if "out" in captured:
+        assert captured["out"][0]["think_session_id"] == "prior"
+        assert captured["out"][0]["think_output_path"] == "/tmp/doc.md"
+
+
+def test_the_non_bg_handle_is_the_agent_name_not_a_fabricated_id(
+    monkeypatch, tmp_path
+):
+    """It must address a real worker: `fno agents logs <name>` has to work."""
+    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"pane\"\n")
+    cap = _capture_with_stdout(monkeypatch, '{"pane_id":"%1"}\n')
+    handle = st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    assert handle == cap["cmd"][cap["cmd"].index("--name") + 1]
+
+
+def test_bg_still_REQUIRES_a_short_id_receipt(monkeypatch, tmp_path):
+    """Unchanged where the receipt contract holds - no blanket loosening."""
+    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"bg\"\n")
+    _capture_with_stdout(monkeypatch, "some banner with no receipt\n")
+    with pytest.raises(st.SpawnError):
+        st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+
+
+def test_a_nonzero_exit_still_raises_on_every_substrate(monkeypatch, tmp_path):
+    """Exit 0 is the launch signal; a real failure must still surface."""
+    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"pane\"\n")
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "substrate unavailable"
+
+    monkeypatch.setattr(st.subprocess, "run", lambda cmd, **kw: _Proc())
+    with pytest.raises(st.SpawnError):
+        st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")

@@ -856,10 +856,12 @@ def test_canonical_child_plan_path_corrupt_created_at_degrades(capsys):
 # scaffold_separate_plan shape (US1 stub-proof + US4 why) ----------------------
 
 
-def test_scaffold_born_stub_not_ready():
-    # US1: the scaffold is born `status: stub`, never `ready` - the whole point.
+def test_scaffold_born_undesigned_not_ready():
+    # US1: the scaffold is born at a pre-design rung, never `ready` - the whole
+    # point. The rung is spelled `idea` now; `stub` was the same rung under a
+    # word no status vocabulary knew.
     text = scaffold_separate_plan(_grp(), "ab-epic0001", "big.md", why_digest="the why")
-    assert "status: stub\n" in text
+    assert "status: idea\n" in text
     assert "status: ready" not in text
 
 
@@ -1330,7 +1332,7 @@ def test_plans_separate_scaffolds_files_and_repoints(tmp_path, monkeypatch):
         assert f.name.endswith(f"-{c['group_slug']}-{c['id']}.md")
         assert not Path(separate_plan_path(str(doc), c["group_slug"])).exists()
         body = f.read_text()
-        assert "status: stub" in body       # born stub, never ready
+        assert "status: idea" in body       # born undesigned, never ready
         assert "kind: quick-plan" in body
         assert "parent_epic: ab-epic0001" in body
 
@@ -1558,3 +1560,185 @@ def test_ac3_edge_already_linked_child_not_rescaffolded(tmp_path, monkeypatch):
     assert child_after["plan_path"] == str(filled)      # unchanged
     assert not _canonical(child_after).exists()          # no stub minted
     assert filled.read_text() == "# real filled plan\n"  # not clobbered
+
+
+# wave-0 design fan-out (x-3571 wave 2) ---------------------------------------
+
+
+def _wave0_on(monkeypatch, on: bool = True):
+    """Arm/disarm the wave-0 lane through its env seam."""
+    monkeypatch.setenv("FNO_THINK_SPAWN_WAVE0", "1" if on else "0")
+
+
+def test_AC8_HP_wave0_fanout_off_by_default_is_byte_identical(
+    graph_env, monkeypatch
+):
+    """No key, no env: only `needs_think` spawns, exactly as before."""
+    monkeypatch.delenv("FNO_THINK_SPAWN_WAVE0", raising=False)
+    fanout, born = _spy_spawn(monkeypatch)
+    groups = [
+        {"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []},
+        {"slug": "2", "title": "G2", "waves": "2", "blocked_by_groups": ["1"]},
+    ]
+    result = _invoke(["backlog", "decompose", "ab-epic0001",
+                      "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+    assert fanout == [] and born == []
+
+
+def test_AC7_HP_wave0_fanout_selects_wave0_children_only(graph_env, monkeypatch):
+    """Wave 0 = no intra-epic blocker. G2 is blocked by G1, so it is wave 1."""
+    g, read_entries = graph_env
+    _wave0_on(monkeypatch)
+    fanout, born = _spy_spawn(monkeypatch)
+    groups = [
+        {"slug": "1", "title": "G1 foundation", "waves": "1", "blocked_by_groups": []},
+        {"slug": "2", "title": "G2 dependent", "waves": "2", "blocked_by_groups": ["1"]},
+    ]
+    result = _invoke(["backlog", "decompose", "ab-epic0001",
+                      "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+
+    # Assert the IDENTITY, not just the count: selecting exactly the WRONG
+    # child (wave 1 instead of wave 0) also yields len == 1, so a cardinality
+    # assertion passes a mutation that inverts the selector.
+    assert len(fanout) == 1, f"expected only the wave-0 child, got {fanout}"
+    picked = fanout[0]["id"]
+    wave0_id = next(
+        r["id"] for r in read_entries() if r.get("group_slug") == "1"
+    )
+    assert picked == wave0_id, f"fanned out the wrong child: {picked} != {wave0_id}"
+    assert born == []
+
+
+def test_wave0_fanout_covers_every_independent_child(graph_env, monkeypatch):
+    """Two children with no blocker are both wave 0, so both fan out."""
+    _wave0_on(monkeypatch)
+    fanout, _ = _spy_spawn(monkeypatch)
+    groups = [
+        {"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []},
+        {"slug": "2", "title": "G2", "waves": "1", "blocked_by_groups": []},
+        {"slug": "3", "title": "G3", "waves": "2", "blocked_by_groups": ["1", "2"]},
+    ]
+    result = _invoke(["backlog", "decompose", "ab-epic0001",
+                      "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+    assert len(fanout) == 2
+
+
+def test_wave0_lane_still_chains_blueprint(graph_env, monkeypatch):
+    """A fanned-out child must be designed AND linked, not left at `design`."""
+    _wave0_on(monkeypatch)
+    fanout, _ = _spy_spawn(monkeypatch)
+    groups = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []}]
+    _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)])
+    assert fanout[0]["chain_blueprint"] is True
+
+
+def test_AC9_CON_ownership_is_keyed_on_the_spawn_receipt(graph_env, monkeypatch):
+    """Exactly one lane may own a child, and a failed spawn owns nothing.
+
+    Resolves Open Question 3: the fan-out claims a child only when its spawn
+    actually fired. Predicting ownership from wave membership instead would
+    orphan a child whose spawn failed - nobody would inline-fill it.
+    """
+    import fno.provenance.spawn_think as st
+    _wave0_on(monkeypatch)
+
+    def fake_maybe(node, *, run_state=None, env=None, quiet=False, **k):
+        return st.ThinkSpawnResult("skipped", "think_skipped", node_id=node.get("id"))
+
+    monkeypatch.setattr(st, "maybe_spawn_think", fake_maybe)
+    groups = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []}]
+    result = _invoke(["backlog", "--json", "decompose", "ab-epic0001",
+                      "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.output)
+    entries = payload.get("fanout") or []
+    assert entries, "a wave-0 attempt must still be reported"
+    for e in entries:
+        assert e["decision"] != "spawned"
+        assert e["owned"] is False, "a failed spawn must leave the child to inline-fill"
+
+
+def test_wave0_receipt_names_the_lane_and_claims_ownership(graph_env, monkeypatch):
+    _wave0_on(monkeypatch)
+    _spy_spawn(monkeypatch)
+    groups = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []}]
+    result = _invoke(["backlog", "--json", "decompose", "ab-epic0001",
+                      "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+    entries = json.loads(result.output)["fanout"]
+    assert entries[0]["lane"] == "wave0"
+    assert entries[0]["owned"] is True
+
+
+def test_wave0_spawn_failure_never_wedges_the_committed_mutation(
+    graph_env, monkeypatch
+):
+    """The graph mutation already committed; a fan-out fault must not undo it."""
+    import fno.provenance.spawn_think as st
+    _wave0_on(monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("spawn substrate unavailable")
+
+    monkeypatch.setattr(st, "maybe_spawn_think", boom)
+    groups = [{"slug": "1", "title": "G1", "waves": "1", "blocked_by_groups": []}]
+    result = _invoke(["backlog", "decompose", "ab-epic0001",
+                      "--groups", _groups_json(groups)])
+    assert result.exit_code == 0, result.output
+
+
+def test_a_child_linked_to_an_idea_scaffold_is_still_a_design_candidate(
+    graph_env, monkeypatch, tmp_path
+):
+    """`_needs_design` reads the rung, not `plan_path` presence.
+
+    Every other fan-out test births children UNLINKED, so the rung check and the
+    old `child.get("plan_path")` presence check are indistinguishable in them -
+    swapping the implementation back leaves them all green. This constructs the
+    case that separates them: a child that IS linked, to a doc still at the
+    `idea` rung. Presence says "done, skip it"; the rung says "still undesigned".
+    """
+    from fno.graph.cli import _needs_design
+
+    scaffold = tmp_path / "child-scaffold.md"
+    scaffold.write_text("---\ntitle: G1\nstatus: idea\n---\n\n# G1\n")
+    linked_child = {"id": "x-linked1", "plan_path": str(scaffold)}
+    assert _needs_design(linked_child) is True, (
+        "a linked-but-undesigned child must remain a design candidate"
+    )
+
+    filled = tmp_path / "child-filled.md"
+    filled.write_text("---\ntitle: G1\nstatus: ready\n---\n\n# G1\n")
+    assert _needs_design({"id": "x-linked2", "plan_path": str(filled)}) is False
+
+    # ...and the unlinked case still holds, so the rung check is a superset.
+    assert _needs_design({"id": "x-unlinked"}) is True
+
+
+def test_starvation_receipt_names_a_linked_idea_child(graph_env, tmp_path):
+    """A backlog of only undesigned children must not print a bare `null`.
+
+    The persisted rung IS `idea` for the common linked-scaffold case, and
+    `selection_guards` is gated on persisted `ready`, so without a dedicated arm
+    the row falls through and is dropped from the receipt entirely.
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph.cli import _starvation_receipts
+
+    scaffold = tmp_path / "s.md"
+    scaffold.write_text("---\nstatus: idea\n---\n")
+    node = {
+        "id": "x-scaff01",
+        "status": "idea",
+        "plan_path": str(scaffold),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    out = _starvation_receipts(
+        [node], None, True, None, set(), datetime.now(timezone.utc), 21
+    )
+    assert out == [("x-scaff01", "idea")], f"receipt dropped the node: {out}"

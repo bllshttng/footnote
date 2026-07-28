@@ -17,7 +17,7 @@ from typer.testing import CliRunner
 
 from fno.adapters.providers import managed
 from fno.adapters.providers.cli import cli as providers_app
-from fno.adapters.providers.model import _CLI_LITERAL, ProviderRecord, ProvidersConfig
+from fno.adapters.providers.model import _HARNESS_LITERAL, ProviderRecord, ProvidersConfig
 
 runner = CliRunner()
 
@@ -39,8 +39,8 @@ def _codex_blob(token: str) -> str:
     )
 
 
-def _rec(id_: str, cli: _CLI_LITERAL = "claude") -> ProviderRecord:
-    return ProviderRecord(id=id_, name=id_, cli=cli, auth="managed")
+def _rec(id_: str, harness: _HARNESS_LITERAL = "claude") -> ProviderRecord:
+    return ProviderRecord(id=id_, name=id_, harness=harness, auth="managed")
 
 
 @pytest.fixture()
@@ -72,7 +72,7 @@ class TestRegister:
         assert blob_path.read_text() == _blob("A0")
         assert stat.S_IMODE(blob_path.stat().st_mode) == 0o600
         meta = managed.read_meta("work-a", root=tmp_path)
-        assert meta["cli"] == "claude" and meta["account_id"] == "work-a"
+        assert meta["harness"] == "claude" and meta["account_id"] == "work-a"
 
     def test_snapshot_refuses_when_no_login(self, fake_slot, tmp_path):
         """US1 boundary: never store an empty blob when there is no current login."""
@@ -356,19 +356,19 @@ class TestManagedRecordValidation:
 
         with pytest.raises(ValueError, match="auth=managed"):
             ProviderRecord(
-                id="bad", name="bad", cli="claude", auth="managed",
+                id="bad", name="bad", harness="claude", auth="managed",
                 credentials_source=Path("/tmp/x"),
             )
 
     def test_managed_rejects_env(self):
         with pytest.raises(ValueError, match="auth=managed"):
             ProviderRecord(
-                id="bad", name="bad", cli="claude", auth="managed",
+                id="bad", name="bad", harness="claude", auth="managed",
                 env={"ANTHROPIC_API_KEY": "x"},
             )
 
     def test_managed_bare_record_ok(self):
-        rec = ProviderRecord(id="ok", name="ok", cli="claude", auth="managed")
+        rec = ProviderRecord(id="ok", name="ok", harness="claude", auth="managed")
         assert rec.auth == "managed" and rec.account_id == "ok"
 
 
@@ -444,7 +444,7 @@ def _register_codex_pair(tmp_path, monkeypatch):
     auth = tmp_path / ".codex" / "auth.json"
     monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
     monkeypatch.setattr(managed, "codex_pinning_sessions", lambda auth_path=None: [])
-    a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
+    a, b = _rec("cx-a", harness="codex"), _rec("cx-b", harness="codex")
     managed._write_slot_blob("codex", _codex_blob("A0"))
     managed.snapshot_current(a, root=tmp_path)
     managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
@@ -853,7 +853,7 @@ class TestCodexFileBackend:
     def test_codex_already_active_is_probe_free(self, tmp_path, monkeypatch):
         auth = tmp_path / ".codex" / "auth.json"
         monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
-        target = _rec("cx-a", cli="codex")
+        target = _rec("cx-a", harness="codex")
         managed._write_slot_blob("codex", _codex_blob("A0"))
         managed.snapshot_current(target, root=tmp_path)
         managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
@@ -874,7 +874,7 @@ class TestCodexFileBackend:
         names the session, and mutates nothing - claude parity for codex."""
         auth = tmp_path / ".codex" / "auth.json"
         monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
-        a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
+        a, b = _rec("cx-a", harness="codex"), _rec("cx-b", harness="codex")
         managed._write_slot_blob("codex", _codex_blob("A0"))
         managed.snapshot_current(a, root=tmp_path)
         managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
@@ -899,7 +899,7 @@ class TestCodexFileBackend:
         auth.json rewritten under the session that started mid-switch."""
         auth = tmp_path / ".codex" / "auth.json"
         monkeypatch.setattr(managed, "_codex_slot_auth_path", lambda: auth)
-        a, b = _rec("cx-a", cli="codex"), _rec("cx-b", cli="codex")
+        a, b = _rec("cx-a", harness="codex"), _rec("cx-b", harness="codex")
         managed._write_slot_blob("codex", _codex_blob("A0"))
         managed.snapshot_current(a, root=tmp_path)
         managed._atomic_write_private(managed._active_stamp_path("codex", tmp_path), "cx-a")
@@ -1157,7 +1157,7 @@ def _cli_slot(monkeypatch):
 
 class TestCliSurface:
     def _invoke_codex_use(self, monkeypatch, result):
-        config = ProvidersConfig(records=[_rec("cx-a", cli="codex")], active="cx-a")
+        config = ProvidersConfig(records=[_rec("cx-a", harness="codex")], active="cx-a")
         monkeypatch.setattr(
             "fno.adapters.providers.cli.load_providers",
             lambda repo_root=None: config,
@@ -1261,7 +1261,7 @@ class TestCliSurface:
         assert "slot-already-active" in response.output
 
     def test_use_codex_interrupt_surfaces_rollback_receipt(self, monkeypatch):
-        config = ProvidersConfig(records=[_rec("cx-a", cli="codex")], active="cx-a")
+        config = ProvidersConfig(records=[_rec("cx-a", harness="codex")], active="cx-a")
         monkeypatch.setattr(
             "fno.adapters.providers.cli.load_providers",
             lambda repo_root=None: config,

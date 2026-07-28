@@ -159,7 +159,9 @@ reviewer_registry = {}
 reviewers = []
 # Which AI reviewers /pr requests a review from (the INVOCATION list).
 external_reviewers = []
-# Per-agent provider routing for the cross-model review panel.
+# Per-agent harness routing (claude/codex/gemini) for the cross-model review panel. Legacy alias: agent_providers.
+agent_harnesses = {}
+# Legacy alias for config.review.agent_harnesses (a straight rename); agent_harnesses wins if both are set.
 agent_providers = {}
 # Opt-in per-agent harness/provider/model routes for named sigma sessions.
 agent_routes = {}
@@ -281,6 +283,10 @@ on_work_start = false
 on_retro = false
 # Per-install per-day ceiling on /think spawns (firehose guard; 0 = off).
 daily_cap = 20
+# Dispatch a /think for each WAVE-0 child at `fno backlog decompose` (default OFF; inherits max_per_run and daily_cap). Worth it only when the epic is large enough that inline-filling every child blows one session's context budget.
+on_decompose_wave0 = false
+# Substrate for every /think spawn: 'bg' (default, claude-only), 'pane', or 'headless'.
+substrate = "bg"
 # Attended born-with-why behavior: 'offer' (default, handoff line) or 'spawn' (real bg /think).
 attended = "offer"
 

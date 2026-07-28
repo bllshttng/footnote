@@ -62,3 +62,27 @@ Both are read-only, side-effect-free, and idempotent.
 4. **Run the check.** `bash scripts/check-event-schema-parity.sh` must print `parity OK`. If you renamed a field or changed the envelope shape, bump the schema major version (`events-v3` -> `events-v4`) and release both languages together.
 
 > Known limitation: `KNOWN_EVENT_KINDS` is a hand-maintained list, so it can drift from the actual `.emit()` call sites. A source-scanning completeness test (or a `schemars`-derived schema) would make this drift caught automatically; tracked as follow-up.
+
+## Not everything cross-language needs parity: plan readiness
+
+`document-and-guard` is this doc's answer for a contract with **two implementations**. Plan readiness looked like a member of that class and is not, which is worth recording so the next design does not re-derive the wrong plan.
+
+A node's plan sits on a rung (`idea` -> `design` -> `ready` -> `in_progress` -> `in_review`, plus the `done`/`superseded` terminals). One Python function classifies it: `plan_rung` in `cli/src/fno/graph/ladder.py`, which also owns the two deliberately-opposite policies (`is_selectable` fails open, `is_dispatchable` fails closed). Bash asks it through `fno plan rung`. **Rust never parses it.**
+
+That last sentence is the finding. It reads as though `crates/fno-agents/src/loopcheck.rs` parses plan-frontmatter status, and it does parse a `status:` key - but out of `.fno/target-state.md`, whose vocabulary is `COMPLETE | BLOCKED | ABORTED`, a different axis entirely. Reading the rest of the Rust surface:
+
+| Rust site | What it actually does |
+|---|---|
+| `loopcheck.rs`, `loop_target.rs` | parse `.fno/target-state.md` (session manifest vocabulary) |
+| `finalize.rs` | shells out to `fno plan validate` / `fno plan stamp` |
+| `loop_megawalk.rs` | takes `plan_path` from `fno backlog next` JSON, whose status Python already derived |
+| `kill_criteria.rs` | opens the plan document, extracts the `kill_criteria:` block only |
+| `backlog_view.rs` | renders the derived graph status; consumes, never re-derives |
+
+So there is no second implementation. A fixture-corpus parity harness would have frozen a contract with one participant, and its green would have meant nothing.
+
+What can actually regress is someone **adding** a Rust plan-status reader, so that is what `scripts/ci/check-plan-rung-authority.sh` guards: it freezes the set of Rust sources that open a plan document (`kill_criteria.rs` alone), asserts that file never grows a frontmatter `status` extraction, asserts the rung table lives in exactly one Python module, asserts both named policies still exist, and fails on any shell script that classifies a plan status itself.
+
+**The rule this generalizes to:** before writing a parity check, enumerate the implementations. Parity is for two or more that must agree. One implementation plus N delegating callers needs a *uniqueness* guard instead - it is a cheaper artifact and it fails for the right reason.
+
+> The check reads its file set from `git ls-files`, never a directory walk. ripgrep layers `.gitignore`, `~/.ignore` and `.rgignore` over any traversal, and a global `target/` rule for build output also swallows `skills/target/` - the single most important directory the check covers. That version passed, silently searching nothing.

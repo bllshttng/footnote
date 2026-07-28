@@ -205,11 +205,20 @@ pub fn which_binary(name: &str) -> Option<PathBuf> {
 /// The single env var a picked account contributes to the driver's environment.
 const PICKED_ENV_KEY: &str = "CLAUDE_CONFIG_DIR";
 
+/// The exact verb this file shells, as one named constant.
+///
+/// It is a constant so a cross-language test can assert this argv still resolves
+/// to a real command. That check is not ceremony: this verb was spelled
+/// `fno providers pick` until the surface was renamed to `fno config accounts`,
+/// and because every failure here is advisory the loop would have degraded
+/// silently forever rather than failing loudly once.
+pub const PICK_ARGV: [&str; 5] = ["config", "accounts", "pick", "--if-armed", "--print-env"];
+
 /// One picked account's complete env overlay: `(key, value)` pairs where an
 /// EMPTY value means "clear this variable in the child".
 type PickedEnv = Vec<(String, String)>;
 
-/// Interpret a `fno providers pick --if-armed --print-env` result.
+/// Interpret a `fno config accounts pick --if-armed --print-env` result.
 ///
 /// Pure, so the advisory contract is testable without a live `fno`. Success is
 /// exit 0 plus at least one `CLAUDE_CONFIG_DIR=<non-empty>` line; the verb also
@@ -291,7 +300,7 @@ fn pick_would_undo_a_route(picked: &[(String, String)], static_env: &[(String, S
     })
 }
 
-/// Ask `fno providers pick` which account the next iteration should launch on.
+/// Ask `fno config accounts pick` which account the next iteration should launch on.
 ///
 /// Shells the verb rather than reimplementing the predicate: headroom, combo
 /// order, launchability AND the `pick_on_launch` opt-in have exactly one
@@ -302,9 +311,9 @@ fn pick_would_undo_a_route(picked: &[(String, String)], static_env: &[(String, S
 /// so the loop cannot be wedged by it.
 fn pick_account_env() -> Result<PickedEnv, String> {
     let out = Command::new("fno")
-        .args(["providers", "pick", "--if-armed", "--print-env"])
+        .args(PICK_ARGV)
         .output()
-        .map_err(|e| format!("could not run `fno providers pick`: {e}"))?;
+        .map_err(|e| format!("could not run `fno config accounts pick`: {e}"))?;
     interpret_pick(
         out.status.success(),
         &String::from_utf8_lossy(&out.stdout),

@@ -93,7 +93,7 @@ class UsageSnapshot:
 
     ``windows`` may be empty (probe reached the source but it reported no
     windows); an empty tuple reads as UNKNOWN headroom, never OK. ``source``
-    records how the reading was obtained for the ``fno providers usage``
+    records how the reading was obtained for the ``fno config accounts usage``
     display and for debugging drift.
     """
 
@@ -105,7 +105,7 @@ class UsageSnapshot:
 
 # ---------------------------------------------------------------------------
 # Per-CLI probes. Each returns a snapshot or None (unknown). Registered by
-# record.cli, mirroring the runtime adapter dispatch. A CLI with no probe
+# record.harness, mirroring the runtime adapter dispatch. A CLI with no probe
 # (gemini, glm, openclaw, hermes, api_key records) is UNKNOWN in v1.
 # ---------------------------------------------------------------------------
 
@@ -161,7 +161,7 @@ def _is_active_slot_occupant(record: ProviderRecord) -> bool:
     the slot since this stamp was written", so the stamp is no longer proof of
     what the credential is - and reading it anyway would file account B's usage
     under account A's id, the one thing this attribution rule exists to prevent.
-    `fno providers doctor` reports the taint; until it is cleared the record is
+    `fno config accounts doctor` reports the taint; until it is cleared the record is
     UNKNOWN, which is the honest answer rather than a confident wrong one.
 
     Any store read failure is False too: an unreadable stamp must never let a
@@ -174,9 +174,9 @@ def _is_active_slot_occupant(record: ProviderRecord) -> bool:
             store_root,
         )
 
-        if record.id != active_slot_id(record.cli):
+        if record.id != active_slot_id(record.harness):
             return False
-        return not slot_tainted(record.cli, store_root())
+        return not slot_tainted(record.harness, store_root())
     except Exception:  # noqa: BLE001 - an unreadable store is "not attributable"
         return False
 
@@ -504,7 +504,7 @@ _PROBES: dict[str, Callable[[ProviderRecord, float], "UsageSnapshot | None"]] = 
 def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapshot | None:
     """Return a fresh usage snapshot for ``record``, or None if unknown.
 
-    Dispatches by ``record.cli``. NEVER raises: any exception inside a per-CLI
+    Dispatches by ``record.harness``. NEVER raises: any exception inside a per-CLI
     probe is contained here (AC1-FR), logged once at debug, and mapped to None
     so a dispatch decision proceeds fail-open. api_key records and CLIs without
     a probe (gemini, glm, openclaw, hermes) return None in v1.
@@ -513,14 +513,14 @@ def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapsh
     credential provably its own is resolvable (see
     :func:`_attributed_credential_dir`). The old ``auth != "oauth_dir"`` refusal
     made every ``managed`` account permanently UNKNOWN - the whole reason
-    ``fno providers usage`` printed ``unknown`` at exit 0 while the endpoint,
+    ``fno config accounts usage`` printed ``unknown`` at exit 0 while the endpoint,
     the bearer discovery, and the parser all worked.
     """
     if now is None:
         now = time.time()
     if not _attributed_credential_dir(record)[0]:
         return None
-    probe = _PROBES.get(record.cli)
+    probe = _PROBES.get(record.harness)
     if probe is None:
         return None
     try:

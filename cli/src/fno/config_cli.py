@@ -11,7 +11,26 @@ from typing import Literal, Optional, Union
 
 import typer
 
-app = typer.Typer(help="Config inspection and diagnostics")
+from fno._lazy_group import make_lazy_group_cls
+
+# Mounted as ``fno config accounts``: accounts ARE config
+# (``config.accounts.records``), so the verb path mirrors the config path. This
+# replaced the top-level ``fno providers``, which was hidden and therefore
+# discoverable by nobody; as a `fno config` subcommand it shows up in
+# `fno config --help` and gets its own page.
+#
+# Lazy for the same reason the top-level map is: the sub-app drags in the
+# provider loader (~68ms), and `fno config get` is called from shell dozens of
+# times per phase. `providers` used to be a top-level LAZY_SUBCOMMANDS entry, so
+# mounting it eagerly here would have moved that cost onto every `fno config`.
+_LAZY_SUBCOMMANDS = {
+    "accounts": ("fno.adapters.providers.cli:cli", "Manage account records."),
+}
+
+app = typer.Typer(
+    help="Config inspection and diagnostics",
+    cls=make_lazy_group_cls(_LAZY_SUBCOMMANDS),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +153,18 @@ def _load_repo_post_merge(repo_root: Path):
                 local_parsed = tomllib.loads(local_path.read_text(encoding="utf-8"))
             else:
                 local_parsed = yaml.safe_load(local_path.read_text(encoding="utf-8")) or {}
-        except (tomllib.TOMLDecodeError, yaml.YAMLError):
+        except (tomllib.TOMLDecodeError, yaml.YAMLError) as exc:
+            # Deliberately non-fatal, UNLIKE `_read_flat` above, which raises so
+            # the caller can map it to `error`. This file only supplies the
+            # allowlisted worktree-local override (project.id), so a corrupt one
+            # must not take down a verdict the repo config can answer on its own.
+            # It is logged rather than dropped: silently ignoring it made the
+            # oracle look confident about a value it never read.
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "ignoring unparseable worktree-local override %s: %s", local_path, exc
+            )
             local_parsed = {}
         if isinstance(local_parsed, dict):
             override = _worktree_local_override(_unwrap_config_dict(local_parsed))

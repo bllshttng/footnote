@@ -258,10 +258,10 @@ def verify_slot(record: ProviderRecord, expected_blob: str) -> bool:
     and it carries a parseable token. Catches a silently half-applied write
     (scoped/unscoped mismatch). US3 auto-switch strengthens this to a live
     network probe; a manual `use` re-reads what the CLI would read."""
-    got = _read_slot_blob(record.cli)
+    got = _read_slot_blob(record.harness)
     if got is None or got.strip() != expected_blob.strip():
         return False
-    if record.cli == "codex":
+    if record.harness == "codex":
         return _codex_auth_present(got)
     return _token_present(got)
 
@@ -523,10 +523,10 @@ def snapshot_current(record: ProviderRecord, root: Path | None = None) -> Path:
     Used by register (first snapshot) and by capture-before-overwrite (re-snapshot
     the outgoing account before a switch). Raises when no login exists to capture
     (US1 boundary: never store an empty blob)."""
-    blob = _read_slot_blob(record.cli)
+    blob = _read_slot_blob(record.harness)
     if blob is None or not blob.strip():
         raise ManagedStoreError(
-            f"no current {record.cli} login to snapshot for '{record.id}' "
+            f"no current {record.harness} login to snapshot for '{record.id}' "
             "(sign in first, then register)"
         )
     try:
@@ -535,10 +535,10 @@ def snapshot_current(record: ProviderRecord, root: Path | None = None) -> Path:
         os.chmod(adir, 0o700)
         _atomic_write_private(_blob_path(record.id, root), blob)
         meta = {
-            "cli": record.cli,
+            "harness": record.harness,
             "account_id": record.account_id or record.id,
             "captured_at": _utc_now_iso(),
-            "kind": "keychain" if (record.cli == "claude" and sys.platform == "darwin") else "file",
+            "kind": "keychain" if (record.harness == "claude" and sys.platform == "darwin") else "file",
         }
         _atomic_write_private(_meta_path(record.id, root), json.dumps(meta, indent=2))
     except OSError as exc:
@@ -576,7 +576,7 @@ def credential_expiry(blob: Optional[str]) -> Optional[float]:
 
     Claude Code stores it in milliseconds; a value in that range is scaled here
     so no caller has to guess the unit. A stored blob whose expiry has passed is
-    a dead credential: `fno providers use` would materialize it and the next
+    a dead credential: `fno config accounts use` would materialize it and the next
     session would prompt for a login.
     """
     if not blob:
@@ -611,16 +611,16 @@ def duplicate_credential_holder(
 ) -> Optional[str]:
     """The id of an existing account whose stored blob holds the SAME credential.
 
-    ``fno providers register`` snapshots whatever the shared slot holds at
+    ``fno config accounts register`` snapshots whatever the shared slot holds at
     capture time. Two captures taken while the same account was signed in store
     one credential under two ids, and every later per-account decision - usage
-    attribution, headroom, `fno providers use` - is then arithmetic on a
+    attribution, headroom, `fno config accounts use` - is then arithmetic on a
     duplicate. Comparing digests at register time is what turns that into a
     refusal instead of a silent records defect discovered days later.
 
     Returns None when ``blob`` carries no identifiable credential (nothing to
     compare) or when no other account matches. Also consumed by
-    ``fno providers doctor`` to report stores that predate this guard.
+    ``fno config accounts doctor`` to report stores that predate this guard.
     """
     target = credential_digest(blob)
     if target is None:
@@ -802,12 +802,12 @@ def _switch_locked(
     except OSError as exc:
         raise ManagedStoreError(
             f"no credential snapshot for '{target.id}' at {stored} - run "
-            f"`fno providers register {target.id}` first"
+            f"`fno config accounts register {target.id}` first"
         ) from exc
     if not target_blob.strip():
         raise ManagedStoreError(f"credential snapshot for '{target.id}' is empty; refusing to materialize")
 
-    outgoing_id = active_slot_id(target.cli, root)  # this CLI's slot occupant
+    outgoing_id = active_slot_id(target.harness, root)  # this CLI's slot occupant
     if outgoing_id == target.id and verify_slot(target, target_blob):
         # Stamp says target AND the slot actually reads back target's blob:
         # a true no-op. If the slot was changed out-of-band (manual /login,
@@ -816,19 +816,19 @@ def _switch_locked(
         return SwitchResult(
             active=target.id,
             slot_changed=False,
-            reason="slot-already-active" if target.cli == "codex" else None,
+            reason="slot-already-active" if target.harness == "codex" else None,
         )
 
     # Pin gate inside the critical section (mutex held across check + write).
     # claude "warn" proceeds — the same rewrite a manual /login performs;
     # codex always defers (its TOCTOU re-scan assumes an unpinned slot).
-    pins = pinning_sessions_for(target.cli)
+    pins = pinning_sessions_for(target.harness)
     pinned_by: tuple[int, ...] = ()
     if pins:
-        if pin_policy == "defer" or target.cli == "codex":
+        if pin_policy == "defer" or target.harness == "codex":
             names = ", ".join(f"pid {p.pid}" for p in pins)
             raise SwitchDeferred(
-                f"slot is pinned by a live {target.cli} session ({names}); stop it or retry",
+                f"slot is pinned by a live {target.harness} session ({names}); stop it or retry",
                 sessions=pins,
             )
         pinned_by = tuple(p.pid for p in pins)
@@ -838,8 +838,8 @@ def _switch_locked(
     # A tainted stamp (written under live pins) means the slot may hold a
     # DIFFERENT account's creds by now: skip capture rather than poison the
     # stamped account's snapshot with them.
-    rollback_blob: Optional[str] = _read_slot_blob(target.cli)
-    if outgoing_id and outgoing_id in by_id and not slot_tainted(target.cli, root):
+    rollback_blob: Optional[str] = _read_slot_blob(target.harness)
+    if outgoing_id and outgoing_id in by_id and not slot_tainted(target.harness, root):
         try:
             snapshot_current(by_id[outgoing_id], root)
         except KeychainError:
@@ -852,15 +852,15 @@ def _switch_locked(
             # to capture, so nothing to lose. Proceed.
             pass
 
-    _write_slot_blob(target.cli, target_blob)
+    _write_slot_blob(target.harness, target_blob)
 
     if not verify_slot(target, target_blob):
         # Verification failed: roll the slot back to the captured outgoing blob.
         # Tell the truth about the resulting slot state - operators act on it.
-        if target.cli == "codex":
+        if target.harness == "codex":
             tail, _ = _rollback_codex_slot(rollback_blob, root)
         else:
-            tail, _ = _rollback_materialized_slot(target.cli, rollback_blob)
+            tail, _ = _rollback_materialized_slot(target.harness, rollback_blob)
         raise ManagedStoreError(
             f"switch to '{target.id}' failed verification (stored token may be "
             f"stale/revoked); {tail}"
@@ -874,31 +874,31 @@ def _switch_locked(
     # is best-effort, not a full fix: a launch in the tiny write->recheck gap is
     # irreducible without a lease the external codex binary honors. claude keeps
     # G1's single pre-write check (this arm only, by request).
-    if target.cli == "codex":
-        late_pins = pinning_sessions_for(target.cli)
+    if target.harness == "codex":
+        late_pins = pinning_sessions_for(target.harness)
         if late_pins:
             names = ", ".join(f"pid {p.pid}" for p in late_pins)
             tail, rolled_back = _rollback_codex_slot(rollback_blob, root)
             if not rolled_back:
                 if rollback_blob:
                     raise ManagedStoreError(
-                        f"a live {target.cli} session started mid-switch; {tail}; "
+                        f"a live {target.harness} session started mid-switch; {tail}; "
                         f"slot may hold '{target.id}' under a live session"
                     )
                 raise SwitchDeferred(
-                    f"a live {target.cli} session ({names}) started during the switch "
+                    f"a live {target.harness} session ({names}) started during the switch "
                     f"({tail}); retry once it exits",
                     sessions=late_pins,
                 )
             raise SwitchDeferred(
-                f"a live {target.cli} session ({names}) started during the switch; "
+                f"a live {target.harness} session ({names}) started during the switch; "
                 "slot rolled back to the previous account, retry once it exits",
                 sessions=late_pins,
             )
 
     verification = "structural"
     verification_reason: Optional[str] = None
-    if target.cli == "codex":
+    if target.harness == "codex":
         try:
             login = _codex_login_ok()
         except ManagedStoreError as exc:
@@ -924,15 +924,15 @@ def _switch_locked(
     # stamp naming the previous account while the slot holds target. Rare and
     # self-correcting on the next successful switch; journaling is not worth it
     # for a manual v1 (US3's daemon path can revisit if a postmortem shows it).
-    stamp_active_slot(target.cli, target.id, root)
-    _set_slot_taint(target.cli, root, bool(pinned_by))
+    stamp_active_slot(target.harness, target.id, root)
+    _set_slot_taint(target.harness, root, bool(pinned_by))
     if emit_fn is not None:
         event: dict[str, object] = {
             "provider": target.id,
             "account_id": target.account_id or target.id,
             "outgoing": outgoing_id or "",
         }
-        if target.cli == "codex":
+        if target.harness == "codex":
             event.update(
                 slot_changed=True,
                 verification=verification,

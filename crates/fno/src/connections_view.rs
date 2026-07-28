@@ -1,6 +1,6 @@
 //! The mux Connections modal (x-84d7): a stateful overlay listing managed
 //! provider accounts + combos, driving register/use/remove/add and combo-order
-//! edits through the `fno providers` CLI. The UI is a thin wrapper over that CLI
+//! edits through the `fno config accounts` CLI. The UI is a thin wrapper over that CLI
 //! - it never writes provider records, combos, or runtime state directly (one
 //! writer). Opened from the sideline MENU (`AuxAction::OpenConnections`).
 //!
@@ -23,13 +23,18 @@ use crate::server::fno_bin;
 /// never blocks the UI loop.
 const READ_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// One provider record, as emitted by `fno providers list -J` (task 1.1).
+/// One account record, as emitted by `fno config accounts list -J` (task 1.1).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Account {
     pub id: String,
     #[serde(default)]
     pub name: String,
-    pub cli: String,
+    /// The harness (CLI binary) this account is an instance of. `-J` emits
+    /// `harness`; the alias keeps a pre-rename `fno` on PATH deserializable,
+    /// since this struct is a wire contract with a separately-deployed binary
+    /// and the two are not upgraded atomically.
+    #[serde(rename = "harness", alias = "cli")]
+    pub harness: String,
     pub auth: String,
     #[serde(default)]
     pub priority: i64,
@@ -48,7 +53,7 @@ fn unknown_headroom() -> String {
     "unknown".to_string()
 }
 
-/// One combo, as emitted by `fno providers combos list -J` (task 1.1 added the
+/// One combo, as emitted by `fno config accounts combos list -J` (task 1.1 added the
 /// `active` field).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ComboRow {
@@ -559,7 +564,8 @@ impl ConnectionsView {
         self.acting = true;
         self.notice = None;
         ConnIntent::Run(vec![
-            "providers".into(),
+            "config".into(),
+            "accounts".into(),
             "combos".into(),
             "update".into(),
             name,
@@ -591,7 +597,8 @@ impl ConnectionsView {
         self.acting = true;
         self.notice = None;
         ConnIntent::Run(vec![
-            "providers".into(),
+            "config".into(),
+            "accounts".into(),
             "combos".into(),
             "use".into(),
             name,
@@ -610,7 +617,13 @@ impl ConnectionsView {
         let name = combo.name.clone();
         self.confirm = Some(PendingConfirm {
             label: format!("remove combo {name}? (Enter=yes, any key=no)"),
-            argv: vec!["providers".into(), "combos".into(), "remove".into(), name],
+            argv: vec![
+                "config".into(),
+                "accounts".into(),
+                "combos".into(),
+                "remove".into(),
+                name,
+            ],
         });
         ConnIntent::Redraw
     }
@@ -654,7 +667,8 @@ impl ConnectionsView {
                     self.acting = true;
                     self.notice = None;
                     ConnIntent::Run(vec![
-                        "providers".into(),
+                        "config".into(),
+                        "accounts".into(),
                         "combos".into(),
                         "add".into(),
                         ci.name,
@@ -691,7 +705,7 @@ impl ConnectionsView {
         let id = acct.id.clone();
         self.acting = true;
         self.notice = None;
-        ConnIntent::Run(vec!["providers".into(), "use".into(), id])
+        ConnIntent::Run(vec!["config".into(), "accounts".into(), "use".into(), id])
     }
 
     /// `s`: set the selected account as the session-local active account for
@@ -709,7 +723,7 @@ impl ConnectionsView {
         // provider="claude", and `resolve_account_overlay` is claude-only, so a
         // codex/gemini selection would reject every spawn until cleared (codex
         // P2). Refuse it here with visible feedback instead.
-        if acct.cli != "claude" {
+        if acct.harness != "claude" {
             self.notice = Some(format!("{} is not a claude account", acct.id));
             return ConnIntent::Redraw;
         }
@@ -738,7 +752,7 @@ impl ConnectionsView {
         let id = acct.id.clone();
         self.confirm = Some(PendingConfirm {
             label: format!("remove account {id}? (Enter=yes, any key=no)"),
-            argv: vec!["providers".into(), "remove".into(), id],
+            argv: vec!["config".into(), "accounts".into(), "remove".into(), id],
         });
         ConnIntent::Redraw
     }
@@ -753,10 +767,11 @@ impl ConnectionsView {
         // A pending row: finalize its login into a managed record.
         if let Some(p) = self.selected_pending().cloned() {
             let argv = vec![
-                "providers".into(),
+                "config".into(),
+                "accounts".into(),
                 "register".into(),
                 p.id.clone(),
-                "--cli".into(),
+                "--harness".into(),
                 p.cli.clone(),
             ];
             self.acting = true;
@@ -779,11 +794,12 @@ impl ConnectionsView {
             return ConnIntent::Redraw;
         }
         let argv = vec![
-            "providers".into(),
+            "config".into(),
+            "accounts".into(),
             "register".into(),
             acct.id.clone(),
-            "--cli".into(),
-            acct.cli.clone(),
+            "--harness".into(),
+            acct.harness.clone(),
         ];
         self.acting = true;
         self.notice = None;
@@ -935,10 +951,11 @@ impl ConnectionsView {
         self.acting = true;
         self.notice = None;
         ConnIntent::Run(vec![
-            "providers".into(),
+            "config".into(),
+            "accounts".into(),
             "add".into(),
             w.id,
-            "--cli".into(),
+            "--harness".into(),
             "claude".into(),
             "--auth".into(),
             "api_key".into(),
@@ -1037,7 +1054,7 @@ impl ConnectionsView {
             out.push(format!(
                 "{cursor}{badge}{spawn} {id}  [{cli}] {auth}  {headroom}{snap}",
                 id = a.id,
-                cli = a.cli,
+                cli = a.harness,
                 auth = a.auth,
                 headroom = a.headroom,
             ));
@@ -1175,13 +1192,13 @@ fn pad_block(mut lines: Vec<String>) -> Vec<String> {
 
 // ── async reads (fail-open shell-outs, the needs_overlay idiom) ─────────────
 
-/// Parse `fno providers list -J` stdout. `None` on unparseable output (torn
+/// Parse `fno config accounts list -J` stdout. `None` on unparseable output (torn
 /// stdout degrades the read rather than crashing the modal).
 pub fn parse_accounts(stdout: &[u8]) -> Option<Vec<Account>> {
     serde_json::from_slice(stdout).ok()
 }
 
-/// Parse `fno providers combos list -J` stdout.
+/// Parse `fno config accounts combos list -J` stdout.
 pub fn parse_combos(stdout: &[u8]) -> Option<Vec<ComboRow>> {
     serde_json::from_slice(stdout).ok()
 }
@@ -1192,15 +1209,15 @@ pub fn parse_combos(stdout: &[u8]) -> Option<Vec<ComboRow>> {
 /// partial render would be a silent lie.
 pub async fn load_all() -> ReadOutcome {
     let (acc, com) = tokio::join!(
-        read_json(&["providers", "list", "-J"]),
-        read_json(&["providers", "combos", "list", "-J"]),
+        read_json(&["config", "accounts", "list", "-J"]),
+        read_json(&["config", "accounts", "combos", "list", "-J"]),
     );
     let accounts = match acc {
         Ok(bytes) => match parse_accounts(&bytes) {
             Some(v) => v,
-            None => return ReadOutcome::Degraded("providers list: unparseable output".into()),
+            None => return ReadOutcome::Degraded("accounts list: unparseable output".into()),
         },
-        Err(e) => return ReadOutcome::Degraded(format!("providers list: {e}")),
+        Err(e) => return ReadOutcome::Degraded(format!("accounts list: {e}")),
     };
     let combos = match com {
         Ok(bytes) => match parse_combos(&bytes) {
@@ -1313,6 +1330,25 @@ mod tests {
             ]"#,
         )
         .expect("valid accounts json")
+    }
+
+    /// The wire contract with `fno config accounts list -J`, which today emits
+    /// `harness`. `sample_accounts` above still sends the pre-rename `cli` and
+    /// must keep parsing: this struct and the `fno` binary are deployed
+    /// separately, so a mixed pair is a real state, not a hypothetical.
+    ///
+    /// `parse_accounts` returns `None` on a mismatch and `load_all` renders that
+    /// as "unparseable", so a broken field name degrades the whole Connections
+    /// modal without any error naming the field. That silence is why both
+    /// spellings are asserted rather than assumed.
+    #[test]
+    fn parse_accounts_reads_canonical_harness_key_and_legacy_cli() {
+        let canonical = parse_accounts(
+            br#"[{"id":"ccm","name":"CCM","harness":"claude","auth":"managed","priority":10,"active":true,"headroom":"ok","snapshot":"2h"}]"#,
+        )
+        .expect("canonical `harness` key must parse");
+        assert_eq!(canonical[0].harness, "claude");
+        assert_eq!(sample_accounts()[0].harness, "claude");
     }
 
     fn sample_combos() -> Vec<ComboRow> {
@@ -1527,7 +1563,12 @@ mod tests {
         let intent = v.on_key(b'u');
         assert_eq!(
             intent,
-            ConnIntent::Run(vec!["providers".into(), "use".into(), "ccr".into()])
+            ConnIntent::Run(vec![
+                "config".into(),
+                "accounts".into(),
+                "use".into(),
+                "ccr".into()
+            ])
         );
         assert!(v.acting); // single-flight guard armed
     }
@@ -1564,7 +1605,12 @@ mod tests {
         let intent = v.on_key(b'\r');
         assert_eq!(
             intent,
-            ConnIntent::Run(vec!["providers".into(), "remove".into(), "ccr".into()])
+            ConnIntent::Run(vec![
+                "config".into(),
+                "accounts".into(),
+                "remove".into(),
+                "ccr".into()
+            ])
         );
         assert!(v.confirm.is_none());
     }
@@ -1711,10 +1757,11 @@ mod tests {
             intent,
             ConnIntent::RunEnv {
                 argv: vec![
-                    "providers".into(),
+                    "config".into(),
+                    "accounts".into(),
                     "register".into(),
                     "ccm2".into(),
-                    "--cli".into(),
+                    "--harness".into(),
                     "claude".into()
                 ],
                 env: vec![("CLAUDE_CONFIG_DIR".into(), "~/.claude-ccm2".into())],
@@ -1753,7 +1800,7 @@ mod tests {
         let intent = v.on_key(b'\r');
         match intent {
             ConnIntent::Run(argv) => {
-                assert_eq!(argv[0..2], ["providers", "add"]);
+                assert_eq!(argv[0..3], ["config", "accounts", "add"]);
                 assert!(argv.contains(&"api_key".to_string()));
                 assert!(argv.iter().any(|a| a.contains("ANTHROPIC_BASE_URL=")));
                 assert!(argv.iter().any(|a| a == "ANTHROPIC_API_KEY=sk-abc"));
@@ -1808,7 +1855,8 @@ mod tests {
         assert_eq!(
             intent,
             ConnIntent::Run(vec![
-                "providers".into(),
+                "config".into(),
+                "accounts".into(),
                 "combos".into(),
                 "update".into(),
                 "main".into(),
@@ -1855,7 +1903,8 @@ mod tests {
         assert_eq!(
             intent,
             ConnIntent::Run(vec![
-                "providers".into(),
+                "config".into(),
+                "accounts".into(),
                 "combos".into(),
                 "use".into(),
                 "main".into()
@@ -1894,7 +1943,8 @@ mod tests {
         assert_eq!(
             intent,
             ConnIntent::Run(vec![
-                "providers".into(),
+                "config".into(),
+                "accounts".into(),
                 "combos".into(),
                 "remove".into(),
                 "main".into()
@@ -1914,7 +1964,8 @@ mod tests {
         assert_eq!(
             intent,
             ConnIntent::Run(vec![
-                "providers".into(),
+                "config".into(),
+                "accounts".into(),
                 "combos".into(),
                 "add".into(),
                 "backup".into(),
