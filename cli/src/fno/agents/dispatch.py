@@ -1768,11 +1768,40 @@ def _pick_account_env(
     combine the two axes the CLI just refused, and would print an account
     receipt for a worker the route intends to bill elsewhere.
     """
+    picked = pick_account_id(role=role, route_env=route_env)
+    if picked is None:
+        return None
+    try:
+        from fno.agents.account_env import resolve_account_overlay
+
+        return resolve_account_overlay(picked).env
+    except Exception as exc:  # noqa: BLE001 - picking is advisory; never block a spawn
+        print(f"account: default (pick unavailable: {exc})", file=sys.stderr)
+        return None
+
+
+def pick_account_id(
+    *,
+    role: Optional[str] = None,
+    route_env: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    """The account id a spawn that named none should launch on, or None.
+
+    THE picking decision, with two consumers: the in-process spawn seams turn it
+    into an env overlay, and the runtime seam turns it into an injected
+    ``--account`` flag so the Rust client inherits the same choice. One decision,
+    so those two can never disagree about which account a worker is billing.
+
+    Advisory in every direction: opt-in via ``providers.quota.pick_on_launch``,
+    and any refusal or failure returns None so the spawn proceeds exactly as it
+    does today. A routed spawn is never picked for - `fno agents spawn` refuses
+    `--account` together with `--route` / `--role` because the route's ANTHROPIC_*
+    overrides the account's CLAUDE_CONFIG_DIR and silently mis-bills.
+    """
     if route_env or role is not None:
         return None
     try:
         from fno.adapters.providers.cli import PICK_EXIT_NOT_ARMED, pick_account
-        from fno.agents.account_env import resolve_account_overlay
 
         # `--if-armed` so the opt-in is read in exactly ONE place, the same call
         # the Rust loop makes. Checking `pick_on_launch` here as well would be a
@@ -1787,12 +1816,11 @@ def _pick_account_env(
                 file=sys.stderr,
             )
             return None
-        overlay = resolve_account_overlay(verdict.account)
         print(
             f"account: {verdict.account} (picked, {_picked_headroom_note(verdict.account)})",
             file=sys.stderr,
         )
-        return overlay.env
+        return verdict.account
     except Exception as exc:  # noqa: BLE001 - picking is advisory; never block a spawn
         print(f"account: default (pick unavailable: {exc})", file=sys.stderr)
         return None
@@ -1825,18 +1853,30 @@ def note_quota_death(account_env: Optional[Mapping[str, str]], tail: str | None)
 
 
 def _account_id_for_env(account_env: Optional[Mapping[str, str]]) -> Optional[str]:
-    """Which record an overlay pinned, by matching its CLAUDE_CONFIG_DIR."""
+    """Which record an overlay pinned, by asking each what its overlay would be.
+
+    Matching on ``config_dir`` alone missed two real shapes: an ``oauth_dir``
+    record's overlay names its STAGED dir, not a config_dir, and an api_key
+    record's overlay has no directory at all. Both would fall through to
+    ``effective_active()`` and record a quota death against the wrong account -
+    poisoning an account that is fine while leaving the dead one pickable.
+    Comparing the resolved overlay covers every lane, and only runs when a worker
+    has already died, so the extra resolutions are not on any hot path.
+    """
     if not account_env:
-        return None
-    config_dir = account_env.get("CLAUDE_CONFIG_DIR")
-    if not config_dir:
         return None
     try:
         from fno.adapters.providers.loader import load_providers
+        from fno.agents.account_env import resolve_account_overlay
 
         for record in load_providers().records:
-            if record.config_dir is not None and str(record.config_dir) == config_dir:
-                return record.id
+            if record.cli != "claude":
+                continue
+            try:
+                if dict(resolve_account_overlay(record.id).env) == dict(account_env):
+                    return record.id
+            except Exception:  # noqa: BLE001 - an unresolvable record is not a match
+                continue
     except Exception:  # noqa: BLE001
         return None
     return None

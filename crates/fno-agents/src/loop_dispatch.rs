@@ -233,7 +233,7 @@ fn interpret_pick(ok: bool, stdout: &str, stderr: &str) -> Result<PickedEnv, Str
     for line in stdout.lines().map(str::trim).filter(|l| !l.is_empty()) {
         match line.split_once('=') {
             Some((k, v)) if !k.is_empty() => {
-                if k == PICKED_ENV_KEY && !v.is_empty() {
+                if !v.is_empty() {
                     pinned = true;
                 }
                 env.push((k.to_string(), v.to_string()));
@@ -242,11 +242,29 @@ fn interpret_pick(ok: bool, stdout: &str, stderr: &str) -> Result<PickedEnv, Str
         }
     }
     if !pinned {
-        // A drifted verb must never have its output half-applied: without the
-        // config dir there is no pinned account, only a scrubbed environment.
-        return Err(format!("pick output pinned no {PICKED_ENV_KEY}"));
+        // A drifted verb must never have its output half-applied: with nothing
+        // but clear-lines there is no account, only a scrubbed environment.
+        // The pin is ANY value-carrying key, not CLAUDE_CONFIG_DIR specifically
+        // - a claude api_key record's overlay is an ANTHROPIC_API_KEY and is
+        // just as valid an account, and requiring the config dir would have the
+        // loop reject an overlay Python accepts.
+        return Err("pick output carried no account pin".to_string());
     }
     Ok(env)
+}
+
+/// True when this dispatcher drives `claude`, the only harness that reads
+/// `CLAUDE_CONFIG_DIR`.
+///
+/// An opencode / hermes / openclaw loop would gain nothing from a claude
+/// account pin, and applying the overlay would still CLEAR that run's inherited
+/// Anthropic credentials while logging "account picked" - a receipt describing
+/// something that did not happen, to a worker that cannot act on it.
+fn drives_claude(driver_lib: &Path) -> bool {
+    driver_lib
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "driver-claude-code.sh")
 }
 
 /// True when applying `picked` would silently undo a route this run pins.
@@ -263,10 +281,14 @@ fn interpret_pick(ok: bool, stdout: &str, stderr: &str) -> Result<PickedEnv, Str
 /// spawn, for the same reason: endpoint, auth and model are one route, and
 /// half-composing it is what bills the wrong account.
 fn pick_would_undo_a_route(picked: &[(String, String)], static_env: &[(String, String)]) -> bool {
-    picked
-        .iter()
-        .filter(|(_, v)| v.is_empty())
-        .any(|(k, _)| static_env.iter().any(|(ek, _)| ek == k))
+    picked.iter().filter(|(_, v)| v.is_empty()).any(|(k, _)| {
+        // The static passthrough list is only half the picture: a loop started
+        // from a shell that already exported ANTHROPIC_BASE_URL inherits it
+        // through the process environment without it ever appearing here, and
+        // clearing it would move that run to a different provider just the same.
+        static_env.iter().any(|(ek, _)| ek == k)
+            || std::env::var_os(k).is_some_and(|v| !v.is_empty())
+    })
 }
 
 /// Ask `fno providers pick` which account the next iteration should launch on.
@@ -398,7 +420,7 @@ impl Dispatcher for ShelloutDispatcher {
         // into `driver_invoke` would mean one copy per driver lib. An
         // operator-pinned CLAUDE_CONFIG_DIR in the static env always wins, and a
         // refusal is advisory - the iteration proceeds on today's env.
-        if !self.env.iter().any(|(k, _)| k == PICKED_ENV_KEY) {
+        if drives_claude(&self.driver_lib) && !self.env.iter().any(|(k, _)| k == PICKED_ENV_KEY) {
             let iter = ctx.iteration;
             match pick_account_env() {
                 // A loop launched with an explicit route (ANTHROPIC_BASE_URL +

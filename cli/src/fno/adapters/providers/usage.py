@@ -154,16 +154,29 @@ def _record_credential_dir(record: ProviderRecord) -> Path | None:
 
 
 def _is_active_slot_occupant(record: ProviderRecord) -> bool:
-    """True when ``record`` is the account materialized in its CLI's shared slot.
+    """True when ``record`` is provably the account in its CLI's shared slot.
 
-    The slot's credential provably belongs to the stamped account, so reading it
-    under that record's id is attributable. Any store read failure is False -
-    an unreadable stamp must never let a record borrow another's numbers.
+    A TAINTED slot fails this check even when the stamp names ``record``. The
+    taint marker exists precisely to say "a pinned session may have overwritten
+    the slot since this stamp was written", so the stamp is no longer proof of
+    what the credential is - and reading it anyway would file account B's usage
+    under account A's id, the one thing this attribution rule exists to prevent.
+    `fno providers doctor` reports the taint; until it is cleared the record is
+    UNKNOWN, which is the honest answer rather than a confident wrong one.
+
+    Any store read failure is False too: an unreadable stamp must never let a
+    record borrow another's numbers.
     """
     try:
-        from fno.adapters.providers.managed import active_slot_id
+        from fno.adapters.providers.managed import (
+            active_slot_id,
+            slot_tainted,
+            store_root,
+        )
 
-        return record.id == active_slot_id(record.cli)
+        if record.id != active_slot_id(record.cli):
+            return False
+        return not slot_tainted(record.cli, store_root())
     except Exception:  # noqa: BLE001 - an unreadable store is "not attributable"
         return False
 
