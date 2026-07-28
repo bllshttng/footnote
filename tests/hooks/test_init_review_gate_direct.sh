@@ -45,7 +45,9 @@ bash -n "$INIT" || fail "bash -n rejected $INIT (syntax error)"
 pass "init script passes bash -n"
 
 _ALL_TMPS=()
-trap 'rm -rf "${_ALL_TMPS[@]}"' EXIT
+# The +"${...}" guard keeps an EMPTY array from tripping `set -u` on bash 3.2
+# (macOS /bin/bash), which the two pre-append exits above can still reach.
+trap 'rm -rf ${_ALL_TMPS[@]+"${_ALL_TMPS[@]}"}' EXIT
 
 # ── Helper: isolated repo + a stub `fno` that logs every invocation ──
 # The stub answers ONLY `target check-review-gate` with $2; every other fno

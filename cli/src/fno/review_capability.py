@@ -590,8 +590,9 @@ def resolve_github_apps(
                 AppVerdict(
                     login,
                     "unverifiable",
-                    "could not check whether this App has acted here (no repo remote, "
-                    "token scope, or rate limit); proceeding",
+                    "could not check whether this App has acted here (no repo "
+                    "remote, token scope, rate limit, or a login GitHub does "
+                    "not resolve as an account); proceeding",
                 )
             )
     return out

@@ -220,7 +220,7 @@ Quick summary:
   - **Unattended / headless** (`attended: false`, or no interactive surface): do NOT prompt. Rely on the `init-target-state.sh` refusal backstop. A bg `/target` self-creates its worktree before building, so it inits from inside a worktree and the verdict is `ok`.
   - **Refusal backstop:** `init-target-state.sh` itself refuses a canonical-protected branch and prints the worktree / `git checkout -b feature/<slug>` / `TARGET_LOCATION_OK=main-acknowledged` options. See backlog ab-efcde945.
 - **MANDATORY:** Bootstrap the session with `fno target init --input "<original arg>"` (add `--plan-path <path>` for plan inputs). This discoverable verb wraps the canonical `hooks/helpers/init-target-state.sh` (with `TARGET_START=1` + `TARGET_INPUT`/`TARGET_PLAN_PATH`), records the `owner_cwd` worktree binding, and REFUSES to write a stub. Do NOT substitute `fno state init` - it writes an empty stub the stop hook archives (and will redirect you here). If `fno` is unavailable, run `hooks/helpers/init-target-state.sh` directly with `TARGET_START=1` and `TARGET_INPUT` set.
-  This is a DEGRADED path, and the degrade is not free - the wrapper does seven things the script does not, listed here so the cost is stated once where you decide to take it:
+  This is a DEGRADED path, and the degrade is not free - the wrapper does eight things the script does not do on its own, two of which the script now delegates back to `fno`, leaving six genuinely uncovered. All eight are listed so the cost is stated once where you decide to take it:
 
   | Wrapper-only behavior | Covered on the direct path |
   |---|---|

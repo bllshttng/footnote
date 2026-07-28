@@ -750,8 +750,26 @@ def test_the_script_reads_the_marker_this_module_writes():
     script = repo_root / "hooks" / "helpers" / "init-target-state.sh"
     if not script.is_file():  # bare `pip install fno` ships no hooks/
         pytest.skip("plugin hooks/ not present in this install")
-    assert "FNO_TARGET_INIT_GATED" in script.read_text(encoding="utf-8")
-    assert "target check-review-gate" in script.read_text(encoding="utf-8")
+    text = script.read_text(encoding="utf-8")
+
+    # Anchored to the EXECUTABLE forms, not the bare names. Both names also
+    # occur in this block's comments and in its note string, so a whole-file
+    # grep for them stays green after the invocation is deleted outright -
+    # which is exactly what a mutation run proved.
+    assert '"${FNO_TARGET_INIT_GATED:-}" != "1"' in text, (
+        "init-target-state.sh must still READ the marker, not merely mention it"
+    )
+    assert "fno target check-review-gate && _RG_RC=0" in text, (
+        "init-target-state.sh must still INVOKE the gate, not merely name it"
+    )
+    # And the NUMERAL. Bash cannot import the constant, so it restates it as a
+    # literal; without this, changing REVIEW_GATE_REFUSED leaves both suites
+    # green (these tests use the symbol, the shell test stubs its own exit code)
+    # while every real refusal falls into the note-and-proceed branch instead.
+    assert f"-eq {REVIEW_GATE_REFUSED} ]]" in text, (
+        f"init-target-state.sh must test for -eq {REVIEW_GATE_REFUSED}; "
+        "the shell literal and REVIEW_GATE_REFUSED have drifted apart"
+    )
 
 
 def test_refusal_code_is_one_click_can_never_produce(

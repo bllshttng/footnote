@@ -681,9 +681,13 @@ def check_review_gate() -> None:
         _refuse_unsatisfiable_reviewers()
         _refuse_unreachable_github_apps()
     except typer.Exit as exc:
-        # The helpers speak `init`'s vocabulary (2). Re-stamp it as this verb's,
-        # so the shell caller can tell a refusal from a usage error.
-        if exc.exit_code == 0:
+        # The helpers speak `init`'s vocabulary: 2 and only 2 means refused.
+        # Re-stamp that one code as this verb's, so the shell caller can tell a
+        # refusal from a usage error. Anything else propagates untouched - the
+        # caller reads a code it does not recognize as a BROKEN gate and
+        # proceeds, so widening this to "any non-zero refuses" would turn a
+        # future unrelated failure into a hard bootstrap refusal.
+        if exc.exit_code != 2:
             raise
         raise typer.Exit(code=REVIEW_GATE_REFUSED) from None
 
