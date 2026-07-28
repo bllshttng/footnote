@@ -29,9 +29,18 @@ command -v python3 &>/dev/null || skip "python3 not on PATH"
 # Scenario 4 (timeout-cap behavior) requires timeout(1) or gtimeout(1).
 # The hook degrades gracefully when neither is available, but then the cap
 # itself can't be observed. Detect once and skip scenario 4 specifically.
+#
+# Record the binary's DIRECTORY, not just its presence: scenario 4 runs the
+# hook under a constructed minimal PATH, and detecting here while the hook
+# looks there is how this check silently measured the uncapped fallback
+# instead of the cap. On Linux that is /usr/bin and the two agree by luck;
+# on a Mac with Homebrew coreutils it is /opt/homebrew/bin and they do not.
 TIMEOUT_AVAILABLE=0
-if command -v timeout &>/dev/null || command -v gtimeout &>/dev/null; then
+TIMEOUT_DIR=""
+_timeout_bin="$(command -v timeout || command -v gtimeout || true)"
+if [[ -n "$_timeout_bin" ]]; then
     TIMEOUT_AVAILABLE=1
+    TIMEOUT_DIR="$(cd "$(dirname "$_timeout_bin")" && pwd)"
 fi
 [[ -f "$HOOK"       ]] || fail "hook not found at $HOOK"
 [[ -x "$HOOK"       ]] || fail "hook not executable at $HOOK"
@@ -135,7 +144,7 @@ HANGEOF
 
     start_ms=$(python3 -c 'import time; print(int(time.time()*1000))')
     set +e
-    OUT=$(cd "$TMP4" && PATH="$HANG_DIR:/usr/bin:/bin" bash "$HOOK" 2>&1)
+    OUT=$(cd "$TMP4" && PATH="$HANG_DIR:${TIMEOUT_DIR}:/usr/bin:/bin" bash "$HOOK" 2>&1)
     rc=$?
     set -e
     end_ms=$(python3 -c 'import time; print(int(time.time()*1000))')
