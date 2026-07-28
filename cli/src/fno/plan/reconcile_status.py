@@ -43,7 +43,6 @@ _TIER1: dict[str, str] = {
     "draft": "design",
     "planned": "design",
     "pending": "design",
-    "idea": "design",
     "ready-for-blueprint": "design",
     "design-locked": "ready",
     "reviewing": "in_review",  # pruned axis states (x-f34f) fold into in_review

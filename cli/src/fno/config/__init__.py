@@ -1689,13 +1689,28 @@ class ThinkSpawnBlock(BaseModel):
     on_work_start: bool = False
     on_retro: bool = False
     daily_cap: int = 20
+    # x-3571: a third trigger of the same shape - fire at `fno backlog
+    # decompose` for the epic's WAVE-0 children (those with no intra-epic
+    # blocker). Default OFF and deliberately not on by `enabled` alone: one warm
+    # context writing several coherent children is cheaper and more consistent
+    # than several cold sessions each re-deriving scope from the epic doc, so
+    # the fan-out earns its cost only when the epic is large enough that
+    # inline-fill blows the context budget. Inherits max_per_run and daily_cap;
+    # it adds no ceiling of its own.
+    on_decompose_wave0: bool = False
+    # Substrate for EVERY think spawn, not just the fan-out. `bg` (the previous
+    # hardcode at the shared choke point) is claude-only, so an install on
+    # another harness had no way to dispatch a /think at all.
+    substrate: str = "bg"
     # B (x-5d51): how an attended session handles a born node. ``offer`` (default,
     # byte-for-byte x-6a10) prints a copy-pasteable handoff line; ``spawn`` opts
     # into a real bg /think dispatch. Fail-safe to ``offer`` so a garbage value
     # never auto-spawns against operator intent.
     attended: str = "offer"
 
-    @field_validator("enabled", "on_work_start", "on_retro", mode="before")
+    @field_validator(
+        "enabled", "on_work_start", "on_retro", "on_decompose_wave0", mode="before"
+    )
     @classmethod
     def _coerce_enabled(cls, v: object) -> bool:
         """Fail-safe to disabled on any non-boolean value (AC4-ERR).
@@ -1762,6 +1777,20 @@ class ThinkSpawnBlock(BaseModel):
         if isinstance(v, str) and v.strip().lower() == "spawn":
             return "spawn"
         return "offer"
+
+    @field_validator("substrate", mode="before")
+    @classmethod
+    def _coerce_substrate(cls, v: object) -> str:
+        """Fail-safe to ``bg``: an unknown substrate would fail loud at spawn.
+
+        Unlike the boolean opt-ins, the dangerous direction here is not "on" -
+        it is dispatching onto a substrate `fno agents spawn` cannot host, which
+        surfaces as a spawn error rather than a silently wrong decision. So this
+        keeps the enum tight and falls back to the previous hardcoded value.
+        """
+        if isinstance(v, str) and v.strip().lower() in {"pane", "bg", "headless"}:
+            return v.strip().lower()
+        return "bg"
 
 
 def _coerce_affirmative(v: object, default: bool) -> bool:

@@ -36,7 +36,50 @@ error() { echo "  ERROR: $*"; ((ERRORS++)) || true; }
 warn()  { echo "  WARN:  $*"; ((WARNINGS++)) || true; }
 ok()    { echo "  OK:    $*"; }
 
-_semantic_validate() {
+# Echo a plan's readiness rung, or `!<reason>` when the verb could not answer.
+# Never classifies statuses itself; the single authority is `fno plan rung`
+# (fno.graph.ladder).
+#
+# The reason rides in the return VALUE rather than a global, because every
+# caller reads this through `$(...)` - a global set inside that subshell dies
+# with it, and the caller silently prints an empty reason.
+#
+# Silence is reported, never swallowed. An installed `fno` predating the verb
+# exits 2 with no `rung=` line, indistinguishable from any other non-answer at
+# this layer - and a check that quietly passes on a stale binary is exactly the
+# decorative guard this consolidation exists to remove.
+#
+# SOURCE FIRST, for the same reason `_semantic_validate` resolves that way: an
+# installed `fno` older than this checkout does not have verbs this source
+# defines. CI is exactly that case - it runs the repo's scripts against whatever
+# `fno` is on PATH - so an installed-only lookup degrades to a warning there and
+# the check never actually runs. Falls back to the installed binary so the
+# script still works from a plugin install with no source tree.
+_plan_rung() {
+    local _out="" _src=""
+    _src="$(_fno_source_python)"
+    set +o pipefail
+    if [[ -n "$_src" ]]; then
+        local _py="${_src%%|*}" _root="${_src##*|}"
+        _out="$(PYTHONPATH="$_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
+            "$_py" -m fno.cli plan rung "$1" 2>/dev/null \
+            | sed -n 's/^rung=//p' | head -1)"
+    fi
+    if [[ -z "$_out" ]] && command -v fno >/dev/null 2>&1; then
+        _out="$(fno plan rung "$1" 2>/dev/null | sed -n 's/^rung=//p' | head -1)"
+    fi
+    set -o pipefail
+    if [[ -z "$_out" ]]; then
+        printf "!no fno CLI could answer 'plan rung' (installed fno may predate it; run 'fno update' or 'fno doctor --fix')"
+        return 0
+    fi
+    printf '%s' "$_out"
+}
+
+# Echo `<python>|<source_root>` for a checkout that can import the fno CLI, or
+# nothing. Shared by _plan_rung and _semantic_validate so the "which fno runs?"
+# question has ONE answer here rather than two that can drift apart.
+_fno_source_python() {
     local repo_root="" script_dir="" source_root="" candidate="" python_bin=""
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
     script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -49,16 +92,41 @@ _semantic_validate() {
             break
         fi
     done
+    [[ -z "$source_root" ]] && return 0
+    if [[ -n "${FNO_PYTHON:-}" && -x "${FNO_PYTHON}" ]]; then
+        python_bin="$FNO_PYTHON"
+    elif [[ -x "$source_root/cli/.venv/bin/python" ]]; then
+        python_bin="$source_root/cli/.venv/bin/python"
+    elif command -v python3 >/dev/null 2>&1; then
+        python_bin=$(command -v python3)
+    elif command -v python >/dev/null 2>&1; then
+        python_bin=$(command -v python)
+    fi
+    [[ -z "$python_bin" ]] && return 0
+    printf '%s|%s' "$python_bin" "$source_root"
+}
+
+_semantic_validate() {
+    local source_root="" python_bin="" _src=""
+    # Same resolver `_plan_rung` uses - one answer to "which fno runs?".
+    _src="$(_fno_source_python)"
+    if [[ -n "$_src" ]]; then
+        python_bin="${_src%%|*}"
+        source_root="${_src##*|}"
+    else
+        # No usable interpreter, but a source tree may still exist; the uv arm
+        # below can still run it, and the refusal message names the root.
+        local script_dir candidate repo_root
+        repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+        script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+        for candidate in "$repo_root" "$script_dir/.." "$script_dir/../../.."; do
+            if [[ -n "$candidate" && -d "$candidate/cli/src/fno" ]]; then
+                source_root=$(cd "$candidate" && pwd)
+                break
+            fi
+        done
+    fi
     if [[ -n "$source_root" ]]; then
-        if [[ -n "${FNO_PYTHON:-}" && -x "${FNO_PYTHON}" ]]; then
-            python_bin="$FNO_PYTHON"
-        elif [[ -x "$source_root/cli/.venv/bin/python" ]]; then
-            python_bin="$source_root/cli/.venv/bin/python"
-        elif command -v python3 >/dev/null 2>&1; then
-            python_bin=$(command -v python3)
-        elif command -v python >/dev/null 2>&1; then
-            python_bin=$(command -v python)
-        fi
         # A source checkout whose interpreter lacks the CLI deps (a fresh
         # worktree has no cli/.venv, so this lands on a bare python3) would
         # otherwise surface an ImportError traceback as a plan violation.
@@ -164,12 +232,13 @@ fi
 # Check 1b: Group-child stub markers + why-digest (x-edf7 US1/US4)
 # -------------------------------------------------------------------
 # A `blueprint decompose` child is scaffolded with placeholder stub markers and
-# an empty-why sentinel; it is born `status: stub` and MUST be inline-filled (or
-# designed by a fan-out /think pass) before its plan_path is linked - a linked
-# child derives `ready` and dispatchers launch fresh-context workers against it.
-# This check refuses to pass a plan still carrying any stub marker, so the link
-# step (skill body) and this validator agree on "filled". Keep STUB_MARKERS in
-# sync with cli/src/fno/graph/_decompose.py.
+# an empty-why sentinel; it is born `status: idea` and MUST be inline-filled (or
+# designed by a fan-out /think pass) before it can be dispatched. Linking it is
+# no longer the thing that arms it - the `idea` rung is undispatchable on every
+# surface now - but an unfilled scaffold that reaches a builder is still wasted
+# work, so this check refuses to pass one and the link step (skill body) and
+# this validator agree on "filled". Keep STUB_MARKERS in sync with
+# cli/src/fno/graph/_decompose.py.
 echo ""
 echo "--- Stub Markers (decompose child) ---"
 if [[ -f "$PLAN_DIR" ]]; then
@@ -187,14 +256,16 @@ if [[ -f "$PLAN_DIR" ]]; then
         fi
     done
 
-    # A born scaffold carries `status: stub`, which is OUTSIDE the canonical
-    # PlanStatus vocabulary - `fno plan reconcile-status` would later archive a
-    # linked-but-still-stub plan off the board. So refuse to pass a plan still
-    # frontmatter-stamped `status: stub`: the fill step must flip it to `ready`.
-    if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-            | grep -E '^[[:space:]]*status:[[:space:]]*["'"'"']?stub' >/dev/null; then
-        error "$(basename "$PLAN_DIR") is still 'status: stub'; set 'status: ready' after filling (a non-canonical status is archived by reconcile-status)"
+    # A born scaffold sits at the `idea` rung (spelled `stub` before x-3571, still
+    # read as `idea`). Refuse to pass one: the fill step must flip it to `ready`,
+    # or the linked node derives `idea` and no dispatcher will ever pick it up.
+    # The rung comes from `fno plan rung` - this script does not parse `status:`.
+    _RUNG="$(_plan_rung "$PLAN_DIR")"
+    if [[ "$_RUNG" == "idea" ]]; then
+        error "$(basename "$PLAN_DIR") is still at the 'idea' rung; set 'status: ready' after filling"
         _found_stub=1
+    elif [[ "$_RUNG" == \!* ]]; then
+        warn "plan rung not checked: ${_RUNG#!}"
     fi
 
     # A group-child plan (frontmatter carries `parent_epic:`) must also carry a
@@ -888,11 +959,20 @@ if [[ -f "$PLAN_DIR" && "$PLAN_DIR" == *.md ]]; then
 fi
 
 if [[ -n "$target_file" ]]; then
-    # Scope to frontmatter only: extract lines between the first two --- delimiters.
-    FRONTMATTER=$(awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$target_file")
-    STATUS_FM=$(echo "$FRONTMATTER" | grep -oE "^status:[[:space:]]*(done|in_review|shipped)" 2>/dev/null | head -1 | sed 's/status:[[:space:]]*//' || true)
-    if [[ -n "$STATUS_FM" ]]; then
-        ok "INFO: plan is already shipped (status: $STATUS_FM) - stamp fields present and accepted"
+    # "Already shipped" is a rung question, so ask the rung authority rather than
+    # re-listing the terminal spellings here. The old grep hardcoded
+    # `done|in_review|shipped`, which silently rots every time a spelling
+    # retires - `shipped` is itself a retired spelling of `in_review`, and
+    # `fno plan rung` resolves it through the same alias table the Python side
+    # uses instead of a second copy that has to be remembered.
+    STATUS_FM="$(_plan_rung "$target_file")"
+    if [[ "$STATUS_FM" == \!* ]]; then
+        # The verb could not answer. Saying "not yet shipped" here would be an
+        # affirmative claim built on a non-answer; the same reason is already
+        # warned about above, so keep this line honest and short.
+        ok "Stamp fields not checked (rung unavailable)"
+    elif [[ "$STATUS_FM" == "in_review" || "$STATUS_FM" == "done" ]]; then
+        ok "INFO: plan is already shipped (rung: $STATUS_FM) - stamp fields present and accepted"
     else
         ok "No stamp fields detected (plan not yet shipped)"
     fi

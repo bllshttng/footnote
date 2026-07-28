@@ -281,6 +281,10 @@ on_work_start = false
 on_retro = false
 # Per-install per-day ceiling on /think spawns (firehose guard; 0 = off).
 daily_cap = 20
+# Dispatch a /think for each WAVE-0 child at `fno backlog decompose` (default OFF; inherits max_per_run and daily_cap). Worth it only when the epic is large enough that inline-filling every child blows one session's context budget.
+on_decompose_wave0 = false
+# Substrate for every /think spawn: 'bg' (default, claude-only), 'pane', or 'headless'.
+substrate = "bg"
 # Attended born-with-why behavior: 'offer' (default, handoff line) or 'spawn' (real bg /think).
 attended = "offer"
 

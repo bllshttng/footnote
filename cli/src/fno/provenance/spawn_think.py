@@ -227,6 +227,43 @@ def _daily_cap(project_root: Optional[Path]) -> int:
         return 20
 
 
+def _think_spawn_substrate(node_cwd: Optional[str]) -> str:
+    """Spawn substrate from the NODE's repo config, fail-safe to ``bg``.
+
+    ``bg`` was the hardcoded value before this was configurable, so the fallback
+    is byte-for-byte the old behavior on any settings read failure.
+    """
+    try:
+        root = Path(node_cwd) if node_cwd else None
+        return str(_settings_for(root).think_spawn.substrate) or "bg"
+    except Exception:  # noqa: BLE001 - fail-safe to the historical hardcode
+        return "bg"
+
+
+def think_spawn_on_decompose_wave0(
+    *,
+    project_root: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> bool:
+    """Is the wave-0 design fan-out armed for this repo?
+
+    Its own sub-flag, like ``on_work_start`` / ``on_retro``: ``enabled`` alone
+    never turns it on. ``FNO_THINK_SPAWN_WAVE0`` overrides for tests and for a
+    one-off run, mirroring the ``FNO_THINK_SPAWN`` seam.
+
+    Fail-safe to False: a spurious fan-out spends real tokens on cold sessions.
+    """
+    environ = os.environ if env is None else env
+    override = environ.get("FNO_THINK_SPAWN_WAVE0")
+    if override is not None:
+        return override.strip().lower() in _TRUTHY
+    try:
+        return bool(_settings_for(project_root).think_spawn.on_decompose_wave0)
+    except Exception as exc:  # noqa: BLE001 - fail-safe to disabled
+        _LOG.debug("on_decompose_wave0: settings read failed, defaulting off: %s", exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Per-day firehose ceiling (Locked Decision 3) - global across projects/nodes
 # ---------------------------------------------------------------------------
@@ -699,13 +736,33 @@ def _spawn_think_worker(
     """
     agent_name = _worker_agent_name(node_id, node_slug, reason, invocation_suffix)
     # x-2c27: a conversational /think handoff is a DETACHED thread, so route it
-    # to the `claude --bg` substrate explicitly (the x-3ab8 default `pane` would
-    # land an owned-PTY pane that stalls a fire-and-forget dispatch).
-    # provider defaults to claude (the bg substrate is claude-only); a dispatch
+    # off the x-3ab8 default `pane`, which would land an owned-PTY pane that
+    # stalls a fire-and-forget dispatch.
+    # provider defaults to claude (the `bg` substrate is claude-only); a dispatch
     # flag overriding it rides through and fails loud downstream if the substrate
     # cannot host it, rather than being silently dropped.
-    prov = (provider or "").strip() or "claude"
-    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--harness", prov, "--substrate", "bg"]
+    #
+    # x-3571: `bg` was hardcoded here, which is the shared choke point for EVERY
+    # think spawn - so an install on a harness without `bg` had no way to
+    # dispatch a /think at all. Now `config.think_spawn.substrate`, read here so
+    # every spawn path gains the knob at once rather than growing a
+    # caller-local override each time one is needed.
+    prov = (provider or "").strip()
+    substrate = _think_spawn_substrate(node_cwd)
+    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn"]
+    # An explicit node pin always wins. Absent one, only `bg` implies claude -
+    # that substrate IS claude-only, which is why the default was hardcoded here
+    # before it was configurable. Carrying that default onto `pane`/`headless`
+    # would defeat the point of making substrate configurable: a codex or gemini
+    # install choosing a substrate its own harness supports would still be
+    # dispatched at `--harness claude` and fail every spawn when claude is not
+    # installed. Omitting the flag lets `fno agents spawn` resolve the invoking
+    # harness itself.
+    if not prov and substrate == "bg":
+        prov = "claude"
+    if prov:
+        cmd += ["--harness", prov]
+    cmd += ["--substrate", substrate]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
@@ -741,12 +798,34 @@ def _spawn_think_worker(
             f"{(stderr or proc.stdout or '').strip()[:200]}"
         )
     short_id = _parse_short_id(proc.stdout or "")
-    if not short_id:
-        raise SpawnError(
-            f"fno agents spawn exit 0 but no short_id receipt: "
-            f"{(proc.stdout or proc.stderr or '').strip()[:200]}"
-        )
-    return short_id
+    if short_id:
+        return short_id
+    # Only the bg receipt carries `short_id`. The pane receipt is a mux handle
+    # (`mux_session`/`pane_id`, agents/cli.py) and the headless `once` path
+    # writes the provider's reply verbatim - not JSON at all. Exit 0 on those
+    # substrates means the worker really launched, so raising would report
+    # `skipped` for work that IS happening: decompose would then mark the child
+    # unowned and inline-fill it out from under a live pane worker, the exact
+    # double-write the ownership receipt exists to prevent.
+    #
+    # What comes back differs by substrate, because a session pointer must
+    # RESOLVE or it is worse than absent:
+    #   pane     -> `agent_name`. The worker is live and registered, so the name
+    #               is addressable (`fno agents logs <name>` / `peek`).
+    #   headless -> "". The one-shot has already completed and torn down; there
+    #               is no session to point at. Returning the name here would
+    #               stamp `think_session_id` with a handle that resolves to
+    #               nothing - a fabricated provenance pointer on every
+    #               successful headless spawn. The `think_spawned` event still
+    #               carries `agent_name` separately, so nothing is lost.
+    if substrate == "pane":
+        return agent_name
+    if substrate == "headless":
+        return ""
+    raise SpawnError(
+        f"fno agents spawn exit 0 but no short_id receipt: "
+        f"{(proc.stdout or proc.stderr or '').strip()[:200]}"
+    )
 
 
 def _parse_short_id(stdout: str) -> str:
@@ -843,7 +922,13 @@ def _stamp_forward(
         def mutator(entries):
             for e in entries:
                 if e.get("id") == node_id:
-                    e["think_session_id"] = think_session
+                    # Empty means the substrate exposes no resolvable session
+                    # (a completed headless one-shot). Leave the field alone
+                    # rather than blanking or faking it: a pointer that resolves
+                    # to nothing is worse than no pointer, and `output_path`
+                    # below is the durable artifact link that still works.
+                    if think_session:
+                        e["think_session_id"] = think_session
                     if output_path:
                         e["think_output_path"] = output_path
                     break

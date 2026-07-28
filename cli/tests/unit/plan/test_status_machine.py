@@ -12,7 +12,10 @@ from fno.plan._status import (
 class TestStatusProgression:
     def test_progression_contains_all_expected_statuses(self):
         # reviewing/shipping pruned (x-f34f): zero consumers, no graph state.
+        # `idea` sits below design: a decompose scaffold is a plan doc at a
+        # pre-design rung, which the old axis had no word for.
         assert STATUS_PROGRESSION == (
+            "idea",
             "design",
             "ready",
             "in_progress",
@@ -163,6 +166,53 @@ class TestRetiredSpellings:
         # ...and an identity move through the alias is still an identity move.
         with pytest.raises(StatusTransitionError):
             validate_transition("shipped", "in_review")
+
+    def test_stub_is_the_retired_spelling_of_idea(self):
+        """Scaffolds already on disk keep parsing; no migration pass ships."""
+        from fno.plan._status import KNOWN_STATUSES, canonical_status
+
+        assert canonical_status("stub") == "idea"
+        assert canonical_status(' "Stub"  ') == "idea"
+        assert "stub" in KNOWN_STATUSES
+        assert coerce_status_from_yaml("stub") == "idea"
+
+    def test_stub_never_written_back_over_the_doc_that_supplied_it(self):
+        """Read-alias only: `stub` is absent from every write-side vocabulary."""
+        from fno.plan._status import GRAPH_TO_PLAN_STATUS, STATUS_PROGRESSION
+
+        assert "stub" not in STATUS_PROGRESSION
+        assert "stub" not in GRAPH_TO_PLAN_STATUS.values()
+
+
+class TestIdeaRung:
+    """`idea` below `design`: the rung a decompose scaffold actually sits at."""
+
+    def test_idea_is_never_a_projection_target(self):
+        """Rank -1 keeps the axis monotonic - graph `idea` demotes no doc.
+
+        A doc that has moved on to design/ready/in_progress must not be walked
+        back when the graph momentarily derives `idea` (an unlinked node, or one
+        whose plan probe failed).
+        """
+        from fno.plan._status import project_plan_status
+
+        for cur in ("idea", "design", "ready", "in_progress", "in_review"):
+            assert project_plan_status(cur, "idea") is None
+        # ...including a doc carrying no status at all: `.get(cur, -1)` floors at
+        # the same rank, so the `<=` comparison still refuses.
+        assert project_plan_status("", "idea") is None
+
+    def test_graph_idea_is_identity_not_a_promotion_to_design(self):
+        """The row that used to lie: graph `idea` claimed the doc was designed."""
+        from fno.plan._status import GRAPH_TO_PLAN_STATUS
+
+        assert GRAPH_TO_PLAN_STATUS["idea"] == "idea"
+
+    def test_idea_advances_forward_to_every_later_rung(self):
+        for target in ("design", "ready", "in_progress", "in_review"):
+            validate_transition("idea", target)  # does not raise
+        with pytest.raises(StatusTransitionError):
+            validate_transition("design", "idea")
 
 
 class TestProjectionRankSurvivesTheRename:

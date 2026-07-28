@@ -260,18 +260,32 @@ def selection_guards(
             steps += 1
 
         from fno.graph import maintain as _maintain
-        from fno.graph.ladder import is_design_stage
+        from fno.graph.ladder import UNSELECTABLE_RUNGS, Rung, plan_rung
 
         if now is None:
             now = datetime.now(timezone.utc)
 
-        # BEFORE the stale check: a design node is unarmed by design, so it
+        # BEFORE the stale check: an undesigned node is unarmed by design, so it
         # accrues none of the movement signals (sessions, pr_number, claims)
         # that dispatch used to supply, and would age into `stale-quarantine` -
         # reporting the wrong reason and letting `maintain --apply` auto-defer
         # a perfectly healthy design doc off the board.
-        if entry.get("status") == "ready" and is_design_stage(entry):
-            return "design-stage"
+        #
+        # Keys on the RUNG, not on `is_design_stage`, because the persisted
+        # `ready` above it can be stale: a plan doc is external mutable state
+        # that `/blueprint` (or a hand edit) rewrites without touching the graph,
+        # and `read_graph` does not recompute. A doc rewritten down to `idea` -
+        # or an old scaffold still spelled `stub` - therefore sits behind a
+        # `ready` row, and a DESIGN-only probe waves it straight through to
+        # dispatch. Re-probing live is the whole reason this guard exists; it has
+        # to ask about every undesigned rung, not just one of them.
+        #
+        # One `plan_rung` call, shared with the policy set, so the reason stays
+        # rung-specific without a second filesystem read per candidate.
+        if entry.get("status") == "ready":
+            rung = plan_rung(entry)
+            if rung in UNSELECTABLE_RUNGS:
+                return "design-stage" if rung is Rung.DESIGN else "idea-stage"
 
         if entry.get("status") == "ready" and _maintain.is_stale_ready(
             entry, now, staleness_days

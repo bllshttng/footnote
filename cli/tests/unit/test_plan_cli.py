@@ -222,3 +222,71 @@ def test_plan_path_verb_prints_rendered_path():
     out = result.stdout.strip()
     assert out.endswith("-dark-mode-x-8af8.md")
     assert "/" not in out
+
+
+# ---------------------------------------------------------------------------
+# `fno plan rung` - the shell-facing readiness authority (x-3571)
+# ---------------------------------------------------------------------------
+
+
+def _rung(tmp_path, body: str, name: str = "p.md"):
+    p = tmp_path / name
+    p.write_text(body)
+    return CliRunner().invoke(app, ["plan", "rung", str(p)])
+
+
+def test_rung_is_hidden_from_the_plan_menu():
+    """`fno plan` sits at its menu-caps ceiling; new verbs default hidden."""
+    out = CliRunner().invoke(app, ["plan", "--help"]).output
+    assert "rung" not in out
+
+
+def test_AC1_HP_cli_verdict_matches_the_python_verdict(tmp_path):
+    """The CLI is a face on plan_rung, not a second classifier."""
+    from fno.graph.ladder import is_dispatchable, is_selectable, plan_rung
+
+    for status in ("idea", "stub", "design", "ready", "in_review", "done"):
+        p = tmp_path / f"{status}.md"
+        p.write_text(f"---\nstatus: {status}\n---\n")
+        entry = {"id": "-", "plan_path": str(p)}
+        res = CliRunner().invoke(app, ["plan", "rung", str(p)])
+
+        assert f"rung={plan_rung(entry).value}" in res.output
+        assert f"selectable={'true' if is_selectable(entry) else 'false'}" in res.output
+        assert f"dispatchable={'true' if is_dispatchable(entry) else 'false'}" in res.output
+        assert res.exit_code == (0 if is_dispatchable(entry) else 1)
+
+
+def test_AC1_HP_absent_and_unreadable_plans_agree_too(tmp_path):
+    from fno.graph.ladder import plan_rung
+
+    missing = tmp_path / "gone.md"
+    assert plan_rung({"id": "-", "plan_path": str(missing)}).value == "unreadable"
+    res = CliRunner().invoke(app, ["plan", "rung", str(missing)])
+    assert "rung=unreadable" in res.output
+    assert res.exit_code == 1
+
+    binary = tmp_path / "b.md"
+    binary.write_bytes(b"\xff\xfe\x00\x80")
+    res = CliRunner().invoke(app, ["plan", "rung", str(binary)])
+    assert "rung=unreadable" in res.output
+    assert res.exit_code == 1
+
+
+def test_exit_code_carries_the_dispatchable_verdict(tmp_path):
+    """So each shell caller stays a one-liner with no parsing at all."""
+    assert _rung(tmp_path, "---\nstatus: ready\n---\n").exit_code == 0
+    assert _rung(tmp_path, "---\nstatus: idea\n---\n", "b.md").exit_code == 1
+
+
+def test_a_relative_path_resolves_against_the_shell_cwd(tmp_path, monkeypatch):
+    """plan_rung anchors on the ENTRY's cwd; a typed path means the shell's.
+
+    Without the explicit cwd the resolver refuses to guess and reports
+    UNREADABLE, which would park every relative-path caller.
+    """
+    (tmp_path / "p.md").write_text("---\nstatus: ready\n---\n")
+    monkeypatch.chdir(tmp_path)
+    res = CliRunner().invoke(app, ["plan", "rung", "p.md"])
+    assert "rung=ready" in res.output
+    assert res.exit_code == 0
