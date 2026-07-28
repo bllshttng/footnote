@@ -25,6 +25,13 @@ if [[ -z "${CONFIG_FILE:-}" ]] && command -v fno >/dev/null 2>&1; then
     [[ -f "$_PATHS_SH" ]] && source "$_PATHS_SH" 2>/dev/null || true
     unset _PATHS_SH
 fi
+# GLOBAL_SETTINGS and LOCAL_SETTINGS are set-once by design: they are the
+# env-override seam, so `${VAR:-...}` keeps any value already exported.
+# Re-sourcing this file therefore does NOT re-derive them from a changed $HOME.
+# A test harness that swaps $HOME must `unset LOCAL_SETTINGS GLOBAL_SETTINGS`
+# first, or every case after the first reads the previous run's (usually
+# deleted) temp path and passes vacuously on any rc=1 assertion.
+#
 # GLOBAL_SETTINGS is the per-user global config and must NEVER alias CONFIG_FILE
 # (the ACTIVE config = the project-local file when one exists; aliasing it hid
 # every global-only key from bash consumers - ab-5d6c3d47). Honor
@@ -488,70 +495,3 @@ domain_exists() {
 # domains.{name}.allow_claw: true          # Allow autonomous mode (default: true)
 #
 # CLI shorthand: -DEBH = --lean/--quick (skip all optional phases)
-
-# ── Provider rate-card getters (Phase 02 of provider rotation failover) ──
-# Read pricing.* fields from a specific record under config.providers.records.
-# v0 surfaces only the four named rates; the math that consumes them lives
-# in the cost ledger (Spec 2.5 follow-up).
-#
-# Usage: get_provider_pricing <provider_id> <rate>
-#   <rate> ∈ input | output | cache_read | cache_write
-# Returns: float on stdout, empty string + rc=1 if absent/unknown.
-
-get_provider_pricing() {
-    local provider_id="${1:?provider_id required}"
-    local rate="${2:?rate required (input|output|cache_read|cache_write)}"
-    local key
-    case "$rate" in
-        input)       key="input_per_million_usd" ;;
-        output)      key="output_per_million_usd" ;;
-        cache_read)  key="cache_read_per_million_usd" ;;
-        cache_write) key="cache_write_per_million_usd" ;;
-        *)
-            echo "get_provider_pricing: unknown rate '$rate' (want input|output|cache_read|cache_write)" >&2
-            return 1
-            ;;
-    esac
-
-    local file
-    for file in "$LOCAL_SETTINGS" "$GLOBAL_SETTINGS"; do
-        [[ -f "$file" ]] || continue
-        local value
-        # Prefer yq for robust YAML parsing (handles arbitrary indentation,
-        # quoted ids, flow-style maps). Fall back to awk if yq is missing -
-        # the awk path assumes 4-space indentation under records[].
-        if command -v yq &>/dev/null; then
-            value=$(yq -p toml -r \
-                ".providers.records[] | select(.id == \"$provider_id\") | .pricing.${key} // \"\"" \
-                "$file" 2>/dev/null)
-            # yq prints "null" when a path is absent without `// \"\"`; guard anyway.
-            [[ "$value" == "null" ]] && value=""
-            if [[ -n "$value" ]]; then
-                echo "$value"
-                return 0
-            fi
-            continue
-        fi
-        _warn_no_yq_once "providers.records[].pricing.${key}"
-        # Flat config.toml array-of-tables: each record is a [[providers.records]]
-        # block with an id, and its pricing is a [providers.records.pricing] sub-table.
-        value=$(awk -v target="$provider_id" -v want="$key" '
-            /^\[\[providers\.records\]\]/ { cur_id=""; in_pricing=0; next }
-            /^\[providers\.records\.pricing\]/ { in_pricing = (cur_id == target); next }
-            /^\[/ { in_pricing=0; next }
-            cur_id == "" && /^[[:space:]]*id[[:space:]]*=/ {
-                cur_id=$0; sub(/^[^=]*=[[:space:]]*/, "", cur_id)
-                gsub(/["'\'' ]/, "", cur_id); next
-            }
-            in_pricing && $0 ~ ("^[[:space:]]*" want "[[:space:]]*=") {
-                v=$0; sub(/^[^=]*=[[:space:]]*/, "", v)
-                gsub(/["'\'' ]/, "", v); print v; exit
-            }
-        ' "$file" 2>/dev/null)
-        if [[ -n "$value" ]]; then
-            echo "$value"
-            return 0
-        fi
-    done
-    return 1
-}
