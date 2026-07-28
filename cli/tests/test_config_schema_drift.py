@@ -3,20 +3,24 @@
 Mirrors the repo's `fno bundle check` pattern: the model is the single source
 of truth, and these tests fail CI the moment a derived artifact drifts.
 
-Four guards:
+Five guards:
   1. registry completeness  - every model leaf has exactly one registry entry.
   2. docs freshness         - docs/configuration-guide.md matches the generator.
   3. wizard-key existence   - every wizard-surfaced path is a real model leaf.
   4. bash-default equality  - each `get_config "K" "D"` whose config.K is a
                               modeled leaf has D equal to the model default.
+  5. rust allowlist parity  - the merge_strategy allowlist re-stated in Rust
+                              matches AutoMergeBlock's.
 """
 from __future__ import annotations
 
+import inspect
 import re
 from pathlib import Path
 
 import pytest
 
+from fno.config import AutoMergeBlock
 from fno.config import registry as _registry
 from fno.config import schema_gen
 
@@ -154,3 +158,28 @@ def test_bash_get_config_defaults_match_model() -> None:
                     )
     assert checked > 0, "no modeled get_config defaults found to check (guard inert?)"
     assert not mismatches, "bash/model default drift:\n" + "\n".join(mismatches)
+
+
+def test_rust_merge_strategy_allowlist_matches_model() -> None:
+    """Rust is the third reader of `auto_merge.merge_strategy`, after Python and
+    bash, and it cannot import the model.
+
+    `fno-agents` arms auto-merge from `finalize`, so it re-states the allowlist
+    as a `matches!` arm. Adding a fourth strategy to `AutoMergeBlock` without
+    touching Rust would coerce it back to `merge` on the arming path only - the
+    exact one-key-honored-on-two-of-three-paths bug this guard exists to stop.
+    Source-to-source, same shape as the bash guard above.
+    """
+    rs = _repo_root() / "crates" / "fno-agents" / "src" / "agents_config.rs"
+    m = re.search(r"matches!\(v\.as_str\(\),([^)]*)\)", rs.read_text(encoding="utf-8"))
+    assert m, f"merge_strategy allowlist not found in {rs.name} (guard inert?)"
+    rust = set(re.findall(r'"([a-z]+)"', m.group(1)))
+
+    py = re.search(r"in \{([^}]*)\}", inspect.getsource(AutoMergeBlock._coerce_strategy))
+    assert py, "AutoMergeBlock._coerce_strategy allowlist not found (guard inert?)"
+    model = set(re.findall(r'"([a-z]+)"', py.group(1)))
+
+    assert rust, "empty rust allowlist (regex matched the wrong thing?)"
+    assert rust == model, (
+        f"{rs.name} allows {sorted(rust)} but AutoMergeBlock allows {sorted(model)}"
+    )
