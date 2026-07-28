@@ -211,7 +211,10 @@ def _rollup_from_ledger(plan_path: Optional[str]) -> dict:
             "timestamp": le.get("completed") or le.get("started"),
         })
 
-    # Latest session: pick the most-recent-completed ledger entry's last UUID.
+    # Latest session: the most-recent-completed ledger entry, resolved to the
+    # SAME scalar the cost row above keys on. Taking the last alias instead put
+    # a session id on the node that owns no cost row whenever the alias order
+    # does not end on the scalar, which the metrics backfills cross-reference.
     def _sort_key(le: dict) -> str:
         return (le.get("completed") or le.get("started") or "") or ""
 
@@ -219,7 +222,11 @@ def _rollup_from_ledger(plan_path: Optional[str]) -> dict:
     latest_sessions = latest.get("sessions")
     if not isinstance(latest_sessions, list):
         latest_sessions = []
-    session_id = latest_sessions[-1] if latest_sessions else None
+    session_id = (
+        latest.get("fno_id")
+        or latest.get("session_id")
+        or (latest_sessions[-1] if latest_sessions else None)
+    )
 
     # Points: first non-null points field across matching entries. Sometimes
     # ledger has points and graph doesn't (intake-time lookup missed the ledger).
@@ -262,6 +269,14 @@ def _apply_rollup(
     re-stamped at a later recording time passes as distinct too. The alias half
     is handled upstream in `_rollup_from_ledger`; the timestamp-drift half is
     still guarded ad hoc on the reconcile path in graph/cli.py.
+
+    That upstream fix reaches NEW rows only. A node already stamped under the
+    old divided-alias model keeps its split breakdown forever, including under
+    `--force-overwrite`: the scalar run id was one of the aliases and carries
+    the same timestamp, so the corrected full-cost row collides with the row
+    already there and is dropped as a duplicate. Totals stay correct either way
+    (an even split sums back), which is why this ships without a migration -
+    but do not read `--force-overwrite` as a repair for those breakdowns.
     """
     tags: list[str] = []
 

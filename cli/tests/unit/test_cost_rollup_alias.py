@@ -125,7 +125,7 @@ def test_row_with_aliases_but_no_scalar_keys_on_the_first_alias(ledger):
 def test_totals_unchanged_across_every_row_shape(ledger):
     """The load-bearing invariant: the rollup total equals the ledger sum."""
     rows = [
-        # alias pair (the x-24f7 shape)
+        # alias pair: transcript uuid + scalar run id
         {"plan_path": "/p", "cost_usd": 18.22, "fno_id": "R1", "sessions": ["U", "R1"]},
         # three aliases of one run
         {"plan_path": "/p", "cost_usd": 10.0, "fno_id": "R2", "sessions": ["U1", "U2", "R2"]},
@@ -293,3 +293,112 @@ def test_graph_cost_command_replaces_an_existing_session_row(tmp_path, monkeypat
     assert len(node["cost_sessions"]) == 1
     assert node["cost_sessions"][0]["cost_usd"] == 9.0
     assert node["cost_usd"] == 9.0
+
+
+# -- the node's session_id must name a row that exists --
+
+
+def test_node_session_id_names_a_cost_row_it_actually_owns(ledger):
+    """`sessions[]` order need not end on the scalar.
+
+    `_register.py` appends (caller id, run id, harness id, ...), so the scalar
+    sits mid-list whenever the harness reports an id of its own. Resolving the
+    node's session_id as "the last alias" then named a session owning no cost
+    row, which is exactly what the metrics backfills cross-reference on.
+    """
+    _seed(ledger, [{
+        "plan_path": "/p",
+        "cost_usd": 12.00,
+        "fno_id": "R",
+        "sessions": ["U", "R", "HARNESS"],
+        "completed": "2026-07-27T09:07:20.801626",
+    }])
+    rollup = _rollup()
+    keys = [r["session_id"] for r in rollup["cost_sessions"]]
+    assert keys == ["R"]
+    assert rollup["session_id"] in keys
+
+
+# -- upsert survives the graph shapes the read side already defends against --
+
+
+def test_upsert_drops_rows_that_cannot_be_cost_rows():
+    from fno.cost import upsert_cost_session
+
+    node = {"id": "ab-1", "cost_sessions": [{"session_id": "S1", "cost_usd": 2.0}, "junk", None]}
+    upsert_cost_session(node, "S2", 3.0)
+    assert [r["session_id"] for r in node["cost_sessions"]] == ["S1", "S2"]
+    assert node["cost_usd"] == 5.0
+
+
+def test_upsert_treats_a_non_list_cost_sessions_as_empty():
+    from fno.cost import upsert_cost_session
+
+    node = {"id": "ab-1", "cost_sessions": {"S1": 2.0}}
+    upsert_cost_session(node, "S2", 3.0)
+    assert node["cost_sessions"] == [
+        {"session_id": "S2", "cost_usd": 3.0, "timestamp": node["cost_sessions"][0]["timestamp"]}
+    ]
+    assert node["cost_usd"] == 3.0
+
+
+def test_upsert_scores_a_junk_cost_as_zero_rather_than_raising():
+    from fno.cost import upsert_cost_session
+
+    node = {"id": "ab-1", "cost_sessions": [
+        {"session_id": "S1", "cost_usd": "not-a-number"},
+        {"session_id": "S2", "cost_usd": True},
+    ]}
+    upsert_cost_session(node, "S3", 4.0)
+    assert node["cost_usd"] == 4.0
+
+
+def test_both_production_writers_agree_on_one_nodes_precision(tmp_path, monkeypatch):
+    """`fno graph cost` and the internal cost writer share one node.
+
+    They used to round it to different places (2 and 4), so the stored total's
+    last digits depended on which wrote last. Drives both real call sites
+    rather than the helper, because the helper alone cannot disagree with
+    itself - the defect lived in what the callers asked for.
+    """
+    from typer.testing import CliRunner
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+    from fno.graph.cli import cli
+    from fno.cost import _update_graph_node
+
+    graph_path = _graph(tmp_path)
+    monkeypatch.setattr(gc, "GRAPH_JSON", graph_path)
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setattr(gs, "GRAPH_JSON", graph_path)
+
+    _update_graph_node(graph_path, "ab-12345678", "S1", 1.005)
+    result = CliRunner().invoke(
+        cli, ["cost", "ab-12345678", "--amount", "2.004", "--session-id", "S2"]
+    )
+    assert result.exit_code == 0, result.stdout
+
+    node = _node(graph_path)
+    assert node["cost_usd"] == pytest.approx(1.005 + 2.004)
+
+
+def test_cost_update_degrades_when_the_graph_write_raises(tmp_path, monkeypatch, capsys):
+    """"Best-effort" has to cover every failure, not just the SystemExit one."""
+    import fno.graph.store as gs
+    from fno.cost import _update_graph_node
+
+    graph_path = _graph(tmp_path)
+
+    def boom(*a, **k):
+        raise OSError("read-only .fno")
+
+    monkeypatch.setattr(gs, "locked_mutate_graph", boom)
+    assert _update_graph_node(graph_path, "ab-12345678", "S1", 4.0) is False
+    assert "read-only .fno" in capsys.readouterr().err
+
+
+def test_cost_update_says_so_when_there_is_no_graph(tmp_path, capsys):
+    from fno.cost import _update_graph_node
+
+    assert _update_graph_node(tmp_path / "absent.json", "ab-12345678", "S1", 4.0) is False
+    assert "no graph at" in capsys.readouterr().err
