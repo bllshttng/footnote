@@ -1674,7 +1674,10 @@ event_types:
           description: "Total stop-hook fires for this session (including this one)."
         consecutive_unchanged:
           type: integer
-          description: "Consecutive fires with an identical fingerprint (including this one). Reaches N -> backstop."
+          description: "Consecutive OBSERVATIONS of an identical fingerprint (including this one). Not a fire count: fires closer together than the debounce gap (FNO_LOOPCHECK_MIN_FIRE_GAP_SECS, default 300s) collapse into a single observation, so reaching N implies at least (N-1)*gap seconds of unchanged world. A changed fingerprint breaks the streak at any spacing. Reaches N -> backstop."
+        streak_window_secs:
+          type: integer
+          description: "Elapsed seconds from the oldest COUNTED fire in the streak to now; 0 when no prior fire was counted. Makes consecutive_unchanged falsifiable from the log - without it a streak count cannot be distinguished from a rapid burst."
         decision:
           type: string
           enum: [allow, block]
