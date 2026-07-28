@@ -397,17 +397,23 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
     on-disk vocabulary predates a rename reads the same no matter which reader
     a caller reached for.
     """
-    # A junk row (scalar, list, null) in an otherwise parseable graph is dropped
-    # here rather than at each call site: every field access below assumes a
-    # dict, so a non-dict entry used to surface as a bare AttributeError, which
-    # breaks read_graph's "swallow corruption, never crash the terminal"
-    # contract.
+    # A junk row (scalar, list, null) is SKIPPED for migration but kept in the
+    # returned list. Skipping is what this function owes its callers: every field
+    # access below assumes a dict, so a non-dict entry used to surface as a bare
+    # AttributeError. Keeping it is what it owes them too, and is the subtler
+    # half -- dropping it here would be a silent edit of the caller's data:
     #
-    # Silent HERE on purpose: this runs on every read, including the scoreboard's
-    # optional signal, whose -J output a stray stderr line would make unparseable
-    # (the bug read_graph_nodes exists to avoid). Dropping is only destructive on
-    # the WRITE path, so locked_mutate_graph announces it there instead.
-    entries = [e for e in entries if isinstance(e, dict)]
+    #   * locked_mutate_graph feeds this result straight to _write_json, and
+    #     cmd_archive does the same for graph-archive.json, so a dropped row is
+    #     deleted from disk on the next mutation rather than merely skipped once.
+    #   * agents/discover.py::_reachable_from_graph counts non-dict rows to
+    #     report "graph unreadable" instead of "token names nothing" -- its own
+    #     comment says reporting empty there would "drop the mail". Filtering
+    #     here removes the evidence it looks for, turning a corrupt graph into a
+    #     confident miss.
+    #
+    # A reader that wants only well-formed rows filters for itself; that is a
+    # per-caller display choice, not something the migration pass gets to make.
     # In-memory legacy priority backfill so read-only commands (ready,
     # next, status, tree, triage context) sort correctly *before* the
     # first write triggers recompute_statuses' on-disk backfill. The
@@ -416,6 +422,8 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
     from fno.graph._constants import PRIORITY_MIGRATION
     from fno.graph.statuses import STATUS_MIGRATION
     for e in entries:
+        if not isinstance(e, dict):
+            continue  # skipped, not dropped -- see the note above
         # Key rename `_status` -> `status`: a pre-rename row still carries the
         # underscore key, so fold it in before anything reads `status`.
         if "_status" in e:
@@ -435,6 +443,8 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
         if isinstance(old_status, str) and old_status in STATUS_MIGRATION:
             e["status"] = STATUS_MIGRATION[old_status]
     for e in entries:
+        if not isinstance(e, dict):
+            continue
         e.setdefault("parent", None)
         e.setdefault("tags", [])
         e.setdefault("type", "feature")
@@ -689,20 +699,6 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
                   f"Restore from backup or delete before proceeding.", file=sys.stderr)
             sys.exit(1)
         entries = _apply_graph_defaults(raw)
-        # The defaults pass drops rows that are not JSON objects so no reader
-        # crashes on them. On this path that drop is PERSISTED by the
-        # _write_json below, so say it out loud: silently deleting a row from
-        # the user's graph is not something a `backlog update` should do without
-        # a word. The prior content survives in the .bak _create_backup takes
-        # just before the write (the on-disk file is untouched until then).
-        _dropped = len(raw) - len(entries)
-        if _dropped > 0:
-            print(
-                f"Warning: dropping {_dropped} malformed graph "
-                f"{'entry' if _dropped == 1 else 'entries'} (not a JSON object) "
-                f"from {path}; prior content is preserved in the .bak sibling",
-                file=sys.stderr,
-            )
         entries = mutator(entries)
         # Slug assignment (ab-f82e8083). Runs on EVERY persisted mutation so any
         # node-creating path (intake / add / idea / decompose / advance) and any

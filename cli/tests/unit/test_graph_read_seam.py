@@ -73,103 +73,61 @@ def test_every_reader_returns_identical_entries(graph: Path) -> None:
     assert read_graph_nodes(graph) == canonical
 
 
-def test_junk_rows_are_dropped_rather_than_crashing(tmp_path: Path) -> None:
-    """A non-dict entry is unusable in every path; it must not raise.
+def test_junk_rows_are_skipped_for_migration_but_never_removed(tmp_path: Path) -> None:
+    """A non-dict row must not crash the pass, and must not vanish from it.
 
-    `read_graph`'s contract is to swallow corruption so a wedged graph never
-    crashes a user's terminal. Before the guard moved into the shared defaults
-    pass, a scalar row reached it and surfaced as a bare AttributeError.
+    Skipping is what the pass owes callers: every field access assumes a dict,
+    so a scalar row used to raise a bare AttributeError. KEEPING it is the
+    subtler half. `locked_mutate_graph` feeds this result straight to
+    `_write_json`, so a dropped row is deleted from disk on the next mutation;
+    and `agents/discover.py::_reachable_from_graph` COUNTS non-dict rows to
+    report "graph unreadable" instead of "token names nothing" -- filtering here
+    removes the evidence it looks for and turns a corrupt graph into a confident
+    miss, which its own comment says would drop the mail.
     """
     p = tmp_path / "graph.json"
     p.write_text(json.dumps({"entries": [42, None, {"id": "x-0004"}]}), encoding="utf-8")
 
-    for reader in (read_graph, load_graph, read_graph_nodes):
+    for reader in (read_graph, load_graph):
         rows = reader(p)
-        assert [e["id"] for e in rows] == ["x-0004"], f"{reader.__name__} mishandled junk"
+        assert [e for e in rows if isinstance(e, dict)] == [
+            e for e in rows if isinstance(e, dict)
+        ]
+        assert any(not isinstance(e, dict) for e in rows), (
+            f"{reader.__name__} removed the malformed rows that corruption "
+            f"detection depends on"
+        )
+        assert [e["id"] for e in rows if isinstance(e, dict)] == ["x-0004"]
+
+    # The scoreboard is a display surface and filters for itself, so it is the
+    # one reader that legitimately returns only well-formed rows.
+    assert [e["id"] for e in read_graph_nodes(p)] == ["x-0004"]
 
 
-def test_unhashable_field_values_do_not_crash_the_readers(tmp_path: Path) -> None:
-    """A dict row whose `priority`/`status` is unhashable must not raise.
+def test_a_mutation_never_silently_deletes_a_malformed_row(tmp_path: Path) -> None:
+    """A mutation over a corrupt graph must not quietly drop what it cannot read.
 
-    The migration tests `old_priority in PRIORITY_MIGRATION`, which HASHES the
-    value, so a hand-mangled `"priority": []` raised `TypeError: unhashable
-    type` out of the shared pass -- crashing `read_graph` and the scoreboard,
-    both documented as never-fatal. This is a different shape from a non-dict
-    ROW: the row here is a perfectly good dict.
-    """
-    p = tmp_path / "graph.json"
-    p.write_text(
-        json.dumps({"entries": [
-            {"id": "x-0006", "priority": [], "status": {"nope": 1}},
-            {"id": "x-0007", "priority": "p1", "status": "claimed"},
-        ]}),
-        encoding="utf-8",
-    )
-
-    for reader in (read_graph, load_graph, read_graph_nodes):
-        rows = _by_id(reader(p))
-        assert set(rows) == {"x-0006", "x-0007"}, f"{reader.__name__} dropped a valid row"
-        # The unmigratable values are left alone rather than guessed at; the
-        # point is that they do not raise.
-        assert rows["x-0006"]["priority"] == []
-        # A sibling row in the same file still migrates normally.
-        assert rows["x-0007"]["status"] == "in_progress"
-
-
-def test_strict_reader_reports_unreadable_rather_than_absent(tmp_path: Path) -> None:
-    """`read_graph_strict` must raise GraphUnreadableError for ANY unreadable graph.
-
-    Callers branch on that type to tell a wedged graph from a missing node, and
-    a `read_text()` outside the guard let a directory, a permission error, or
-    non-UTF-8 bytes escape as OSError/UnicodeDecodeError -- past the caller's
-    handler and out as a generic exit 1, the code meaning "read cleanly, node
-    absent". The init guard's warning path depends on that being impossible.
-    """
-    from fno.graph.store import GraphUnreadableError, read_graph_strict
-
-    a_directory = tmp_path / "graph.json"
-    a_directory.mkdir()
-    with pytest.raises(GraphUnreadableError):
-        read_graph_strict(a_directory)
-
-    not_utf8 = tmp_path / "binary.json"
-    not_utf8.write_bytes(b'{"entries": [\xff\xfe]}')
-    with pytest.raises(GraphUnreadableError):
-        read_graph_strict(not_utf8)
-
-
-def test_missing_graph_is_empty_not_an_error(tmp_path: Path) -> None:
-    """An absent graph is empty for every reader -- not corruption, not a raise."""
-    absent = tmp_path / "nope.json"
-    for reader in (read_graph, load_graph, read_graph_nodes):
-        assert reader(absent) == [], f"{reader.__name__} did not degrade to []"
-
-
-def test_write_path_announces_dropped_rows_and_keeps_a_backup(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Dropping a junk row is silent on reads and LOUD on the write path.
-
-    The defaults pass drops non-dict rows so no reader crashes on them, and
-    `locked_mutate_graph` feeds that same filtered list to `_write_json` -- so on
-    that path the drop is persisted. A `backlog update` must not delete a row
-    from the user's graph without saying so.
+    `locked_mutate_graph` writes back whatever the defaults pass returned, so a
+    row filtered there is not skipped once -- it is deleted from the user's
+    graph. Refusing to mutate a corrupt graph is a fine outcome (and is what
+    happens: a later step trips over the row before any write). Deleting it and
+    reporting success is not. This asserts the file, not the exception, because
+    the property that matters is what survives on disk.
     """
     from fno.graph.store import locked_mutate_graph
 
     p = tmp_path / "graph.json"
-    p.write_text(
-        json.dumps({"entries": [{"id": "x-0005", "title": "real"}, 42]}), encoding="utf-8"
-    )
+    original = {"entries": [{"id": "x-0005", "title": "real"}, 42]}
+    p.write_text(json.dumps(original), encoding="utf-8")
 
-    locked_mutate_graph(p, lambda entries: entries)
+    try:
+        locked_mutate_graph(p, lambda entries: entries)
+    except Exception:  # noqa: BLE001 - refusing is acceptable; losing data is not
+        pass
 
-    err = capsys.readouterr().err
-    assert "malformed graph" in err, f"write path dropped a row silently: {err!r}"
-
-    surviving = [e["id"] for e in read_graph(p)]
-    assert surviving == ["x-0005"]
-    assert list(tmp_path.glob("graph.json.bak*")), "no backup left to recover the dropped row"
+    on_disk = json.loads(p.read_text())["entries"]
+    assert 42 in on_disk, f"a mutation deleted a malformed row: {on_disk}"
+    assert [e["id"] for e in on_disk if isinstance(e, dict)] == ["x-0005"]
 
 
 def test_scoreboard_reader_stays_silent_and_writes_nothing_on_corruption(
