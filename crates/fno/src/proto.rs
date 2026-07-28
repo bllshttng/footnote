@@ -1127,8 +1127,10 @@ pub enum Command {
     /// [`ControlVerb::PaneBreak`] script path sends (one tree-mutation site); the
     /// interactive path additionally repoints the acting client's focus to the
     /// new tab, which the script path never does (Locked Decision 3). `pane` is
-    /// named from the drag source, a leaf in the sender's current tab; a stale id
-    /// is refused fail-closed by the server, like `MovePane`.
+    /// named by the sender and resolved session-wide, so it need NOT live in the
+    /// sender's current tab - a sideline row menu breaks out a pane in a
+    /// background tab, and the focus repoint then pulls the viewer to it. A
+    /// stale id is refused fail-closed by the server, like `MovePane`.
     BreakPane {
         pane: u64,
     },

@@ -1184,10 +1184,12 @@ enum MenuAction {
     /// Attach a bg agent as a directional split of the current tab.
     Split(Dir),
     /// Relocate a pane-hosted row's LIVE pane `dir`-ward (`Command::MovePane`,
-    /// PTY intact). Deliberately not reusing `Split`/`AttachAgent`: attaching an
-    /// already-attached session reaps and respawns its pane, so the menu emits
-    /// the same non-destructive command `commit_row_drag` already commits for a
-    /// `RowSource::Pane` - one gesture, one meaning.
+    /// PTY intact). Not `Split`/`AttachAgent`: on a session that already holds a
+    /// live pane, `AttachAgent` reconciles to an idempotent focus of that pane
+    /// ("already attached; focused existing pane") and so cannot relocate
+    /// anything. `MovePane` is the only command that moves a live leaf, and it
+    /// is what `commit_row_drag` already sends for a `RowSource::Pane` - one
+    /// gesture, one meaning.
     MoveDir(Dir),
     /// Break a pane-hosted row's live pane out into its own tab
     /// (`Command::BreakPane`) - the menu twin of dragging its grip to the strip.
@@ -1251,10 +1253,11 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
             PopupRow::FullWidth("▭ New Tab".into()),
             &[MenuAction::BreakOut],
         );
-        // In a single-pane tab every direction resolves to "no pane in that
-        // direction" server-side. Left live rather than gated on pane count:
-        // the fail-closed notice is the same feedback path the paneless branch
-        // already relies on for its own unresolvable case.
+        // Ungated by pane count. A row whose pane is on screen and has no
+        // neighbour `dir`-ward gets the server's "no pane in that direction"
+        // notice, the same fail-closed feedback the paneless branch relies on;
+        // a row whose pane is off screen always has somewhere to land (the
+        // current view), so gating on the source tab would be wrong anyway.
         add(
             PopupRow::Grid(vec![cell("◧", "Move Left"), cell("◨", "Move Right")]),
             &[
@@ -9121,22 +9124,25 @@ async fn execute_row_menu_action(
             .await
             .map_err(|e| format!("attach send failed: {e}"))?;
         }
-        // Anchor on the VIEWED tab's focus - the same "current route" the
-        // paneless branch's Split entries place against, and the same kind of
-        // destination `commit_row_drag` names from its drop zone. Leaving
-        // `target` unset would NOT mean "here": a row's pane usually lives in a
-        // BACKGROUND tab, and the server resolves an unset target by navigating
-        // from the mover, so the move would reshape that off-screen tab (or
-        // report "no pane in that direction" when it holds one pane) instead of
-        // bringing the pane into view.
+        // Where the pane already IS decides what "move it `dir`" can mean, so
+        // the destination is chosen on that and nothing else.
         MenuAction::MoveDir(dir) => match a.pane_id {
             Some(pid) => {
-                // ...except when the row IS the focused pane, where that target
-                // would equal the mover and the server would read an origin drop
-                // and do nothing. Unset is correct THERE and only there: the
-                // mover is in the viewed tab, so the server's navigate finds it
-                // and picks the neighbour - the keyboard-bind reshape.
-                let target = (pid != view.layout.focus).then_some(view.layout.focus);
+                // On screen: step one place `dir`-ward from the pane itself, so
+                // leave `target` unset and let the server navigate from the
+                // mover - the geometry the keyboard bind uses. Naming the focus
+                // here would instead teleport the pane across any panes between
+                // them, and whenever it already sits `dir`-ward of the focus the
+                // reshape is identical to the current tree, which `move_leaf`
+                // reports as an origin drop and the server discards WITHOUT a
+                // notice - a menu entry that does nothing and says nothing.
+                //
+                // Off screen: there is no meaningful in-tab neighbour to step
+                // toward, so name the viewed focus and let the server graft the
+                // pane into the current view (the cross-tab arm). That is the
+                // destination `commit_row_drag` names from its drop zone.
+                let on_screen = view.layout.panes.iter().any(|(id, _)| *id == pid);
+                let target = (!on_screen).then_some(view.layout.focus);
                 write_msg(
                     sock_w,
                     &ClientMsg::Command(Command::MovePane {
@@ -16109,11 +16115,10 @@ mod tests {
 
     #[tokio::test]
     async fn row_menu_move_relocates_the_live_pane() {
-        // A Move cell sends MovePane naming the row's own pane as `mover` and
-        // the VIEWED tab's focus as the destination, so the pane lands in the
-        // current view the way the paneless branch's Split entries do. Notably
-        // NOT AttachAgent, which would reap and respawn the pane instead of
-        // relocating it.
+        // An OFF-SCREEN row names the viewed focus, so the server grafts the
+        // pane into the current view the way the paneless branch's Split entries
+        // place a new one. (Not AttachAgent: on an already-attached session that
+        // reconciles to an idempotent focus and moves nothing.)
         let row = pane_hosted_row("p", 7);
         let mut v = view_with_agents(vec![row.clone()]);
         v.row_menu = Some(build_row_menu(&row, Anchor::Center));
@@ -16133,30 +16138,90 @@ mod tests {
         }
     }
 
+    /// Every ON-SCREEN row leaves `target` unset, whether or not it is the
+    /// focused one. Naming the focus for an on-screen pane sends an origin drop
+    /// whenever the pane already sits `dir`-ward of it, and `move_leaf` reports
+    /// that two ways: `mover == target` for the focused row, and a `same_shape`
+    /// result for any other on-screen row. The server discards BOTH in silence,
+    /// so the entry would do nothing and say nothing. Unset avoids the whole
+    /// class, because navigate never returns the mover itself.
     #[tokio::test]
-    async fn row_menu_move_on_the_focused_row_leaves_the_target_unset() {
-        // codex P2: anchoring on the viewed focus is right for a row whose pane
-        // is elsewhere, but for the row that OWNS the focused pane it would send
-        // the same id as mover and target - an origin drop the server silently
-        // discards, so every Move entry would do nothing. Unset lets the server
-        // navigate to the neighbour, which is correct precisely because this
-        // mover IS in the viewed tab.
-        let mut v = view_with_agents(vec![]);
-        let focused = v.layout.focus;
-        let row = pane_hosted_row("p", focused);
-        v.layout.agents = vec![row.clone()];
-        v.row_menu = Some(build_row_menu(&row, Anchor::Center));
-        match menu_command_for(&mut v, super::MenuAction::MoveDir(Dir::Left)).await {
-            Command::MovePane { mover, target, dir } => {
-                assert_eq!(mover, Some(focused));
-                assert_eq!(
-                    target, None,
-                    "no origin drop; the server picks the neighbour"
-                );
-                assert_eq!(dir, Dir::Left);
+    async fn row_menu_move_on_an_onscreen_row_leaves_the_target_unset() {
+        let v0 = view_with_agents(vec![]);
+        let focused = v0.layout.focus;
+        let onscreen_unfocused = v0
+            .layout
+            .panes
+            .iter()
+            .map(|(id, _)| *id)
+            .find(|id| *id != focused)
+            .expect("fixture has a second on-screen pane");
+        for pid in [focused, onscreen_unfocused] {
+            let mut v = view_with_agents(vec![]);
+            let row = pane_hosted_row("p", pid);
+            v.layout.agents = vec![row.clone()];
+            v.row_menu = Some(build_row_menu(&row, Anchor::Center));
+            match menu_command_for(&mut v, super::MenuAction::MoveDir(Dir::Left)).await {
+                Command::MovePane { mover, target, dir } => {
+                    assert_eq!(mover, Some(pid));
+                    assert_eq!(
+                        target, None,
+                        "pane {pid} is on screen; naming the focus risks an origin \
+                         drop the server discards in silence"
+                    );
+                    assert_eq!(dir, Dir::Left);
+                }
+                other => panic!("expected MovePane, got {other:?}"),
             }
-            other => panic!("expected MovePane, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn row_menu_move_cells_send_the_direction_on_their_label() {
+        // The rows and the actions are two parallel lists joined only by
+        // position, so a transposed pair would put "Move Left" over Dir::Right
+        // and every other test would still pass - they all locate an entry BY
+        // action, never by what the operator reads. Walk the menu's targets in
+        // the order `popup.sel` indexes them and pin label to Dir.
+        let row = pane_hosted_row("p", 7);
+        let menu = build_row_menu(&row, Anchor::Center);
+        let labels: Vec<String> = menu
+            .popup
+            .targets()
+            .iter()
+            .map(|(ri, ci)| match &menu.popup.rows[*ri] {
+                PopupRow::Grid(cells) => cells[*ci].label.clone(),
+                PopupRow::Entry { label, .. } => label.clone(),
+                PopupRow::FullWidth(l) => l.clone(),
+                PopupRow::Header(_) | PopupRow::Rule => unreachable!("not a target"),
+            })
+            .collect();
+        assert_eq!(
+            labels.len(),
+            menu.actions.len(),
+            "one action per selectable cell"
+        );
+        for (want_label, want_dir) in [
+            ("Move Left", Dir::Left),
+            ("Move Right", Dir::Right),
+            ("Move Up", Dir::Up),
+            ("Move Down", Dir::Down),
+        ] {
+            let i = labels
+                .iter()
+                .position(|l| l == want_label)
+                .unwrap_or_else(|| panic!("menu has a {want_label} cell"));
+            assert_eq!(
+                menu.actions[i],
+                super::MenuAction::MoveDir(want_dir),
+                "the cell reading {want_label:?} must send {want_dir:?}"
+            );
+        }
+        let i = labels
+            .iter()
+            .position(|l| l.contains("New Tab"))
+            .expect("menu has a New Tab cell");
+        assert_eq!(menu.actions[i], super::MenuAction::BreakOut);
     }
 
     #[tokio::test]
