@@ -9121,17 +9121,20 @@ async fn execute_row_menu_action(
             .await
             .map_err(|e| format!("attach send failed: {e}"))?;
         }
-        // `target: None` is the "resolve it server-side" form MovePane already
-        // documents for the keyboard bind: a menu knows WHICH pane moves (the
-        // row carries it) but names no drop slot, so the server runs the same
-        // `navigate` geometry FocusDir uses. Identical command to the one
-        // `commit_row_drag` sends for a RowSource::Pane - see the parity test.
+        // Anchor on the VIEWED tab's focus - the same "current route" the
+        // paneless branch's Split entries place against, and the same kind of
+        // destination `commit_row_drag` names from its drop zone. Leaving
+        // `target` unset would NOT mean "here": a row's pane usually lives in a
+        // BACKGROUND tab, and the server resolves an unset target by navigating
+        // from the mover, so the move would reshape that off-screen tab (or
+        // report "no pane in that direction" when it holds one pane) instead of
+        // bringing the pane into view.
         MenuAction::MoveDir(dir) => match a.pane_id {
             Some(pid) => write_msg(
                 sock_w,
                 &ClientMsg::Command(Command::MovePane {
                     mover: Some(pid),
-                    target: None,
+                    target: Some(view.layout.focus),
                     dir,
                 }),
             )
@@ -16098,18 +16101,24 @@ mod tests {
 
     #[tokio::test]
     async fn row_menu_move_relocates_the_live_pane() {
-        // A Move cell sends MovePane naming the row's own pane as `mover` and NO
-        // target: a menu knows WHICH pane moves but names no drop slot, so the
-        // server resolves the neighbour with the same `navigate` geometry the
-        // keyboard bind uses. Notably NOT AttachAgent, which would reap and
-        // respawn the pane instead of relocating it.
+        // A Move cell sends MovePane naming the row's own pane as `mover` and
+        // the VIEWED tab's focus as the destination, so the pane lands in the
+        // current view the way the paneless branch's Split entries do. Notably
+        // NOT AttachAgent, which would reap and respawn the pane instead of
+        // relocating it.
         let row = pane_hosted_row("p", 7);
         let mut v = view_with_agents(vec![row.clone()]);
         v.row_menu = Some(build_row_menu(&row, Anchor::Center));
+        let focus = v.layout.focus;
         match menu_command_for(&mut v, super::MenuAction::MoveDir(Dir::Up)).await {
             Command::MovePane { mover, target, dir } => {
                 assert_eq!(mover, Some(7), "moves the row's own pane");
-                assert_eq!(target, None, "no drop slot - the server resolves it");
+                assert_eq!(
+                    target,
+                    Some(focus),
+                    "anchored on the viewed tab's focus, NOT left for the server \
+                     to resolve inside the row's own (background) tab"
+                );
                 assert_eq!(dir, Dir::Up);
             }
             other => panic!("expected MovePane, got {other:?}"),
@@ -16131,17 +16140,17 @@ mod tests {
     async fn row_menu_move_is_the_same_operation_as_the_row_drag() {
         // Invariant (AGENTS.md "a guard on one of N reachable paths is
         // decorative"): re-placing a pane-hosted row is reachable by menu AND by
-        // drag, and the two must stay ONE operation. They agree today because
-        // both emit MovePane; this fails the moment one path grows a second
-        // semantic. Only the addressing differs - a drag has a drop point and
-        // names `target`, a menu has none and leaves the server to resolve it -
-        // so the assertion is on the variant, not the fields. That the unnamed
-        // half resolves correctly is NOT covered here (a variant match cannot
-        // see it): server.rs::move_pane_resolves_direction_in_the_movers_own_tab
-        // owns it.
+        // drag, and the two must stay ONE operation. Compare DESTINATION, not
+        // just the command variant: an earlier cut of this agreed on MovePane
+        // while the menu left `target` unset, which sent the pane wandering
+        // inside its own background tab instead of into the current view. The
+        // exact target ids differ by construction (a drag names the pane its
+        // drop zone touched, a menu names the viewed focus), so what is pinned
+        // here is that BOTH name a concrete in-view destination.
         let row = pane_hosted_row("p", 99);
         let mut v = view_with_agents(vec![row.clone()]);
         v.row_menu = Some(build_row_menu(&row, Anchor::Center));
+        let in_view: Vec<u64> = v.layout.panes.iter().map(|(id, _)| *id).collect();
         let via_menu = menu_command_for(&mut v, super::MenuAction::MoveDir(Dir::Right)).await;
 
         let mut dragged = three_pane_view();
@@ -16151,9 +16160,28 @@ mod tests {
         let via_drag = dragged.commit_row_drag().expect("a drop in a zone commits");
 
         match (via_menu, via_drag) {
-            (Command::MovePane { mover: m, .. }, Command::MovePane { mover: d, .. }) => {
+            (
+                Command::MovePane {
+                    mover: m,
+                    target: mt,
+                    ..
+                },
+                Command::MovePane {
+                    mover: d,
+                    target: dt,
+                    ..
+                },
+            ) => {
                 assert_eq!(m, Some(99));
                 assert_eq!(d, m, "both name the clicked/dragged pane as the mover");
+                assert!(
+                    mt.is_some_and(|t| in_view.contains(&t)),
+                    "the menu names a destination in the VIEWED tab, got {mt:?}"
+                );
+                assert!(
+                    dt.is_some(),
+                    "the drag names its drop-zone pane, got {dt:?}"
+                );
             }
             (m, d) => panic!("both paths must relocate via MovePane: menu={m:?} drag={d:?}"),
         }
