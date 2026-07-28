@@ -28,9 +28,9 @@ AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read to pr
 
 ### A guard placed on one of N reachable paths is decorative
 
-Before trusting a guard, enumerate every path a caller can reach (in-process test, exec'd binary, skill layer, direct CLI, spawned worker); a guard on only one reads as protection and ships green while the other paths stay broken. Behavior that lives only in skill prose is the same defect, since a direct CLI call or a non-Claude worker skips the skill layer and the rule never runs.
+Before trusting a guard, enumerate every path a caller can reach (in-process test, exec'd binary, skill layer, direct CLI, spawned worker); a guard on only one reads as protection and ships green while the other paths stay broken. Behavior that lives only in skill prose is the same defect, since a direct CLI call or a non-Claude worker skips the skill layer and the rule never runs. A TEST can be the decorative guard: an equivalence assertion over a payload-carrying enum pins the tag and says nothing about the destination.
 
-- specimens: `crates/fno/src/squad_store.rs:36` (`#[cfg(test)]` isolation protects in-process tests; the exec'd binary is `cfg(not(test))` and writes the live squads file, 124 orphaned squads with no surviving origin), `cli/tests/unit/test_pr_ritual.py` (`_bare()` constructs `Ritual` bypassing `__init__`, so the one wrong line shipped non-functional and green, PR #575 fixed by #577), `skills/agent/scripts/normalize.sh` (`--yolo` and slash-verb translation skipped by a direct `fno agents spawn`).
+- specimens: `crates/fno/src/squad_store.rs:36` (`#[cfg(test)]` isolation protects in-process tests; the exec'd binary is `cfg(not(test))` and writes the live squads file, 124 orphaned squads with no surviving origin), `cli/tests/unit/test_pr_ritual.py` (`_bare()` constructs `Ritual` bypassing `__init__`, so the one wrong line shipped non-functional and green, PR #575 fixed by #577), `skills/agent/scripts/normalize.sh` (`--yolo` and slash-verb translation skipped by a direct `fno agents spawn`), `crates/fno/src/client.rs` row-menu/drag parity test (asserted only the `Command` variant, so both paths agreed on the tag while disagreeing on `target` and the pane reshaped an off-screen tab; four addressing attempts stayed green on it).
 - graduates-to: the path-uniqueness lint that treats N reachable implementations of one operation as a CI failure, not a review catch.
 - added: 2026-07-23
 
@@ -56,14 +56,6 @@ Before concluding "no callers left", verify the search found something it should
 
 - specimens: `skills/target/references/pre-promise.md:125` and `usage-detail.md:82` (two live `fno providers` callers that survived every `rg` sweep of a rename that removed the verb, caught only by an external reviewer).
 - graduates-to: a sweep helper that anchors its excludes (`!/target/**`) and fails when a search returns zero hits without a positive control.
-- added: 2026-07-27
-
-### Two paths emitting the same command variant can still disagree on the destination
-
-An equivalence test asserting that both paths produce the same enum variant proves the shape and says nothing about where the operation lands; compare the resolved address, not the tag. A row menu and a drag both emitted `MovePane` and read as parity while they disagreed on `target`, so the pane reshaped an off-screen tab instead of arriving in view - and the parity test stayed green through every wrong attempt.
-
-- specimens: `crates/fno/src/client.rs` row-menu/drag parity test (asserted only the `Command` variant; PR #650 took four addressing attempts and three external P1s to land the destination, each attempt green on that test).
-- graduates-to: a review rule, then a lint, treating an equivalence assertion over a payload-carrying enum as incomplete until the payload fields are compared too.
 - added: 2026-07-27
 
 ## Repository
