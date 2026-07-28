@@ -25,6 +25,13 @@ if [[ -z "${CONFIG_FILE:-}" ]] && command -v fno >/dev/null 2>&1; then
     [[ -f "$_PATHS_SH" ]] && source "$_PATHS_SH" 2>/dev/null || true
     unset _PATHS_SH
 fi
+# GLOBAL_SETTINGS and LOCAL_SETTINGS are set-once by design: they are the
+# env-override seam, so `${VAR:-...}` keeps any value already exported.
+# Re-sourcing this file therefore does NOT re-derive them from a changed $HOME.
+# A test harness that swaps $HOME must `unset LOCAL_SETTINGS GLOBAL_SETTINGS`
+# first, or every case after the first reads the previous run's (usually
+# deleted) temp path and passes vacuously on any rc=1 assertion.
+#
 # GLOBAL_SETTINGS is the per-user global config and must NEVER alias CONFIG_FILE
 # (the ACTIVE config = the project-local file when one exists; aliasing it hid
 # every global-only key from bash consumers - ab-5d6c3d47). Honor
@@ -44,11 +51,14 @@ fi
 
 # Emit a one-time warning when yq is absent and a dotted key is requested.
 # Printed to stderr; suppressed after the first call per shell session.
+# The key argument is optional: domain-profile callers have no single key to
+# name. Keep this the ONLY definition in this file - a second one further down
+# silently shadows it for every caller, since sourcing runs both.
 _YQ_MISSING_WARNED=0
 _warn_no_yq_once() {
-    local key="$1"
+    local key="${1:-}"
     if [[ "$_YQ_MISSING_WARNED" -eq 0 ]]; then
-        echo "[fno/config] warn: yq not found - nested key '${key}' (and other dotted keys like auto_merge.*) cannot be read from config.toml. Install yq via: brew install yq  |  apt install yq  |  mise use yq" >&2
+        echo "[fno/config] warn: yq not found - ${key:+nested key '${key}' and other }dotted keys (auto_merge.*, domain profiles) cannot be read from config.toml. Install yq via: brew install yq  |  apt install yq  |  mise use yq" >&2
         _YQ_MISSING_WARNED=1
     fi
 }
@@ -310,13 +320,6 @@ get_auto_merge_conflict_resolution() {
 # Domain profiles define what skill/command runs at each pipeline phase.
 # Undeclared phases inherit from code defaults.
 
-# Warn once when yq is missing and a non-code domain is queried
-_warn_no_yq_once() {
-    [[ -n "${_YQ_WARNED:-}" ]] && return
-    echo "WARNING: yq not installed — domain profile features degraded (falling back to code defaults)" >&2
-    _YQ_WARNED=1
-}
-
 # Code defaults: the implicit "code" domain phase mapping
 # Associative arrays require bash 4+ — use function lookup for bash 3.2 compat
 _code_default_phase() {
@@ -488,75 +491,3 @@ domain_exists() {
 # domains.{name}.allow_claw: true          # Allow autonomous mode (default: true)
 #
 # CLI shorthand: -DEBH = --lean/--quick (skip all optional phases)
-
-# ── Provider rate-card getters (Phase 02 of provider rotation failover) ──
-# Read pricing.* fields from a specific record under config.accounts.records.
-# v0 surfaces only the four named rates; the math that consumes them lives
-# in the cost ledger (Spec 2.5 follow-up).
-#
-# Usage: get_provider_pricing <provider_id> <rate>
-#   <rate> ∈ input | output | cache_read | cache_write
-# Returns: float on stdout, empty string + rc=1 if absent/unknown.
-
-get_provider_pricing() {
-    local provider_id="${1:?provider_id required}"
-    local rate="${2:?rate required (input|output|cache_read|cache_write)}"
-    local key
-    case "$rate" in
-        input)       key="input_per_million_usd" ;;
-        output)      key="output_per_million_usd" ;;
-        cache_read)  key="cache_read_per_million_usd" ;;
-        cache_write) key="cache_write_per_million_usd" ;;
-        *)
-            echo "get_provider_pricing: unknown rate '$rate' (want input|output|cache_read|cache_write)" >&2
-            return 1
-            ;;
-    esac
-
-    local file
-    for file in "$LOCAL_SETTINGS" "$GLOBAL_SETTINGS"; do
-        [[ -f "$file" ]] || continue
-        local value
-        # Canonical `accounts`, else pre-rename `providers`; never reaches the
-        # Python loader's choke point, and a miss is SILENT (empty + rc=1). Prefer
-        # yq; the awk fallback assumes 4-space indentation under records[].
-        if command -v yq &>/dev/null; then
-            value=$(yq -p toml -r \
-                "(.accounts // .providers).records[] | select(.id == \"$provider_id\") | .pricing.${key} // \"\"" \
-                "$file" 2>/dev/null)
-            # yq prints "null" when a path is absent without `// \"\"`; guard anyway.
-            [[ "$value" == "null" ]] && value=""
-            if [[ -n "$value" ]]; then
-                echo "$value"
-                return 0
-            fi
-            continue
-        fi
-        _warn_no_yq_once "accounts.records[].pricing.${key}"
-        # ONE block, canonical-first, exactly as the yq `//` does: an alternation
-        # matching both leaks pricing from a shadowed legacy block (the two paths
-        # must not disagree on which block is authoritative).
-        local blk=providers
-        grep -q '^\[\[accounts\.records\]\]' "$file" 2>/dev/null && blk=accounts
-        # Flat config.toml array-of-tables: each record is an [[<blk>.records]]
-        # block with an id, its pricing an [<blk>.records.pricing] sub-table.
-        value=$(awk -v target="$provider_id" -v want="$key" -v blk="$blk" '
-            $0 ~ ("^\\[\\[" blk "\\.records\\]\\]") { cur_id=""; in_pricing=0; next }
-            $0 ~ ("^\\[" blk "\\.records\\.pricing\\]") { in_pricing = (cur_id == target); next }
-            /^\[/ { in_pricing=0; next }
-            cur_id == "" && /^[[:space:]]*id[[:space:]]*=/ {
-                cur_id=$0; sub(/^[^=]*=[[:space:]]*/, "", cur_id)
-                gsub(/["'\'' ]/, "", cur_id); next
-            }
-            in_pricing && $0 ~ ("^[[:space:]]*" want "[[:space:]]*=") {
-                v=$0; sub(/^[^=]*=[[:space:]]*/, "", v)
-                gsub(/["'\'' ]/, "", v); print v; exit
-            }
-        ' "$file" 2>/dev/null)
-        if [[ -n "$value" ]]; then
-            echo "$value"
-            return 0
-        fi
-    done
-    return 1
-}

@@ -76,7 +76,7 @@ footnote/
 ### Conventions
 
 - **Worktrees:** worktree-first for all repo work. `claude --worktree <name>` is intercepted by `hooks/worktree-setup.sh`; after creation run `bash scripts/setup/setup-worktree.sh`. Full contract: [.claude/rules/worktrees.md](.claude/rules/worktrees.md).
-- **Search:** prefer `rg` / Grep over `grep -r` (which descends into nested worktrees). Scope any `grep -r` to a path.
+- **Search:** prefer `rg` / Grep over `grep -r` (which descends into nested worktrees). Scope any `grep -r` to a path. Before concluding "no callers" from a sweep, re-run it with `rg -uu`: a `--glob=!target` in a personal `ripgreprc` (a common Rust default, since `crates/` builds into `target/`) silently hides all of `skills/target/`, and bundled copies live under `skills/*/scripts/`, so a plain `rg` can report zero hits for a symbol that exists twice.
 - **Markdown prose:** one full sentence per physical line (semantic line breaks); never wrap a sentence across lines. Governs prose paragraphs, not bullets/fences/tables.
 - **Multi-CLI:** skills are portable; orchestration needs per-CLI hook config. See [docs/HARNESSES.md](docs/HARNESSES.md), [docs/architecture/multi-cli-hooks.md](docs/architecture/multi-cli-hooks.md), [docs/SKILL-COMPAT-MATRIX.md](docs/SKILL-COMPAT-MATRIX.md).
 
