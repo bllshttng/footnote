@@ -390,30 +390,27 @@ def _create_backup(path: Path) -> None:
             pass
 
 
-def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
+def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) -> list[dict]:
     """Apply lazy migration defaults to graph entries (ab- IDs).
 
     The one migration seam: every reader routes through here, so a row whose
     on-disk vocabulary predates a rename reads the same no matter which reader
     a caller reached for.
     """
-    # A junk row (scalar, list, null) is SKIPPED for migration but kept in the
-    # returned list. Skipping is what this function owes its callers: every field
-    # access below assumes a dict, so a non-dict entry used to surface as a bare
-    # AttributeError. Keeping it is what it owes them too, and is the subtler
-    # half -- dropping it here would be a silent edit of the caller's data:
+    # A junk row (scalar, list, null) is always SKIPPED for migration -- every
+    # field access below assumes a dict -- and by default is also DROPPED from
+    # the result, because almost every caller then indexes what it gets back
+    # (`{e["id"]: e ...}`, `e.get(...)`) and the write path additionally feeds
+    # it to ensure_slugs / recompute_statuses / canonicalize_entries, none of
+    # which tolerate a scalar. Preserving one there does not merely skip a row,
+    # it wedges the graph: the only code that could rewrite the file is the code
+    # that crashes on it, so there is no self-healing path back.
     #
-    #   * locked_mutate_graph feeds this result straight to _write_json, and
-    #     cmd_archive does the same for graph-archive.json, so a dropped row is
-    #     deleted from disk on the next mutation rather than merely skipped once.
-    #   * agents/discover.py::_reachable_from_graph counts non-dict rows to
-    #     report "graph unreadable" instead of "token names nothing" -- its own
-    #     comment says reporting empty there would "drop the mail". Filtering
-    #     here removes the evidence it looks for, turning a corrupt graph into a
-    #     confident miss.
-    #
-    # A reader that wants only well-formed rows filters for itself; that is a
-    # per-caller display choice, not something the migration pass gets to make.
+    # `keep_malformed=True` is the single exception, for a caller that treats a
+    # junk row as EVIDENCE rather than as data: agents/discover.py's
+    # _reachable_from_graph counts them to report "graph unreadable" instead of
+    # "this token names nothing", and its own comment notes that reporting empty
+    # there would drop the mail. Filtering would remove the very signal it reads.
     # In-memory legacy priority backfill so read-only commands (ready,
     # next, status, tree, triage context) sort correctly *before* the
     # first write triggers recompute_statuses' on-disk backfill. The
@@ -515,6 +512,8 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
     # status derivation see the canonical field. Runs last so the key-presence
     # rule still sees a pre-rename node's missing locked_by key.
     _normalize_lock_fields(entries)
+    if not keep_malformed:
+        entries = [e for e in entries if isinstance(e, dict)]
     return entries
 
 
@@ -587,8 +586,7 @@ def read_graph(path: Path = GRAPH_JSON) -> list[dict]:
     unreadable -- but neither of those is an ordinary read.
     """
     try:
-        entries = _apply_graph_defaults(_read_json(path))
-        return [e for e in entries if isinstance(e, dict)]
+        return _apply_graph_defaults(_read_json(path))
     except GraphCorruptError:
         return []
 
@@ -675,7 +673,7 @@ def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     # these as dicts, and this function's job is to distinguish "graph
     # unreadable" (it raises) from "node absent" -- not to hand back rows no
     # caller can use.
-    return [e for e in _apply_graph_defaults(entries) if isinstance(e, dict)]
+    return _apply_graph_defaults(entries)
 
 
 def _graph_lock_path(path: Path) -> Path:
@@ -713,6 +711,21 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
                   f"Restore from backup or delete before proceeding.", file=sys.stderr)
             sys.exit(1)
         entries = _apply_graph_defaults(raw)
+        # The pass drops rows it cannot migrate, and on THIS path that drop is
+        # persisted by the _write_json below. Dropping is still the right call
+        # here -- ensure_slugs / recompute_statuses / canonicalize_entries below
+        # all assume dicts, so keeping one would wedge every future write with
+        # no way back -- but deleting from the user's graph is not something a
+        # `backlog update` should do without a word. The prior content survives
+        # in the .bak _create_backup takes just before the write.
+        _dropped = len(raw) - len(entries)
+        if _dropped > 0:
+            print(
+                f"Warning: dropping {_dropped} malformed graph "
+                f"{'entry' if _dropped == 1 else 'entries'} (not a JSON object) "
+                f"from {path}; prior content is preserved in the .bak sibling",
+                file=sys.stderr,
+            )
         entries = mutator(entries)
         # Slug assignment (ab-f82e8083). Runs on EVERY persisted mutation so any
         # node-creating path (intake / add / idea / decompose / advance) and any

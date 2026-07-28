@@ -73,49 +73,40 @@ def test_every_reader_returns_identical_entries(graph: Path) -> None:
     assert read_graph_nodes(graph) == canonical
 
 
-def test_malformed_rows_survive_where_they_are_evidence_and_are_filtered_where_they_are_noise(
+def test_malformed_rows_are_evidence_for_one_caller_and_noise_for_the_rest(
     tmp_path: Path,
 ) -> None:
-    """Two different callers need two different answers about a junk row.
+    """Exactly one reader keeps a junk row; everything else drops it.
 
     `agents/discover.py::_reachable_from_graph` COUNTS non-dict rows via
     `load_graph` to report "graph unreadable" instead of "token names nothing"
-    -- its own comment says reporting empty there would drop the mail. So the
-    migration pass skips those rows without removing them, and `load_graph`
-    hands them through.
+    -- its own comment says reporting empty there would drop the mail. That is
+    the sole caller treating a junk row as evidence, so it is the sole caller
+    passing `keep_malformed=True`.
 
-    Ordinary readers are the opposite case: `read_graph`'s contract is to
-    swallow corruption rather than crash a terminal, and its consumers index
-    entries as dicts (`cmd_tree` builds `{e["id"]: e ...}`, `resolve_node`
-    calls `e.get`). Handing one a scalar trades a clean degrade for a
-    TypeError, so the filter lives at that boundary.
+    Every other consumer indexes what it gets back, so the default drops.
     """
     p = tmp_path / "graph.json"
     p.write_text(json.dumps({"entries": [42, None, {"id": "x-0004"}]}), encoding="utf-8")
 
-    # Evidence preserved for the caller that detects corruption.
     raw = load_graph(p)
     assert any(not isinstance(e, dict) for e in raw), (
         "load_graph removed the malformed rows corruption detection depends on"
     )
     assert [e["id"] for e in raw if isinstance(e, dict)] == ["x-0004"]
 
-    # Filtered for the callers that index dicts.
-    for reader in (read_graph, read_graph_nodes):
+    from fno.graph.store import read_graph_strict
+
+    for reader in (read_graph, read_graph_strict, read_graph_nodes):
         rows = reader(p)
         assert all(isinstance(e, dict) for e in rows), (
             f"{reader.__name__} handed a non-dict row to a caller that indexes dicts"
         )
         assert [e["id"] for e in rows] == ["x-0004"]
 
-    # The strict reader is a resolution boundary, so it filters too.
-    from fno.graph.store import read_graph_strict
-
-    assert all(isinstance(e, dict) for e in read_graph_strict(p))
-
 
 def test_ordinary_read_commands_survive_a_malformed_row(tmp_path: Path) -> None:
-    """The shapes the P1 named: dict-indexing consumers must not raise.
+    """The shapes the review named: dict-indexing consumers must not raise.
 
     `read_graph`'s documented job is that `status` and `ready` do not crash on a
     wedged graph. These are the two access patterns cited as breaking.
@@ -124,36 +115,48 @@ def test_ordinary_read_commands_survive_a_malformed_row(tmp_path: Path) -> None:
     p.write_text(json.dumps({"entries": [42, {"id": "x-0004"}]}), encoding="utf-8")
 
     entries = read_graph(p)
-    # cmd_tree's shape.
-    assert {e["id"]: e for e in entries}.keys() == {"x-0004"}
-    # resolve_node's shape.
-    assert [e.get("id") for e in entries] == ["x-0004"]
+    assert {e["id"]: e for e in entries}.keys() == {"x-0004"}   # cmd_tree's shape
+    assert [e.get("id") for e in entries] == ["x-0004"]         # resolve_node's shape
 
 
-def test_a_mutation_never_silently_deletes_a_malformed_row(tmp_path: Path) -> None:
-    """A mutation over a corrupt graph must not quietly drop what it cannot read.
+def test_node_lookup_tolerates_the_rows_load_graph_preserves(tmp_path: Path) -> None:
+    """`_find_node` is where every load_graph caller resolves, so it must guard.
 
-    `locked_mutate_graph` writes back whatever the defaults pass returned, so a
-    row filtered there is not skipped once -- it is deleted from the user's
-    graph. Refusing to mutate a corrupt graph is a fine outcome (and is what
-    happens: a later step trips over the row before any write). Deleting it and
-    reporting success is not. This asserts the file, not the exception, because
-    the property that matters is what survives on disk.
+    Preserving junk for the corruption detector puts those rows in front of the
+    shared lookup helper; without the guard `fno backlog update --pr-number`
+    raises AttributeError before the lock is even taken.
+    """
+    from fno.graph._intake import _find_node
+
+    entries = load_graph(_write(tmp_path, [42, {"id": "x-0004", "title": "real"}]))
+    assert _find_node(entries, "x-0004")["title"] == "real"
+    assert _find_node(entries, "x-nope") is None
+
+
+def _write(tmp_path: Path, entries: list) -> Path:
+    p = tmp_path / "graph.json"
+    p.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    return p
+
+
+def test_a_mutation_announces_what_it_drops_and_keeps_a_backup(tmp_path: Path) -> None:
+    """The write path drops junk rows -- it must not do so silently.
+
+    Keeping them here is not an option: ensure_slugs, recompute_statuses and
+    canonicalize_entries all assume dicts, so a preserved row wedges every
+    future write with no self-healing path (the only code that could rewrite the
+    file is the code that crashes on it). Dropping is correct; dropping quietly
+    is not.
     """
     from fno.graph.store import locked_mutate_graph
 
-    p = tmp_path / "graph.json"
-    original = {"entries": [{"id": "x-0005", "title": "real"}, 42]}
-    p.write_text(json.dumps(original), encoding="utf-8")
+    p = _write(tmp_path, [{"id": "x-0005", "title": "real"}, 42])
 
-    try:
-        locked_mutate_graph(p, lambda entries: entries)
-    except Exception:  # noqa: BLE001 - refusing is acceptable; losing data is not
-        pass
+    locked_mutate_graph(p, lambda entries: entries)   # must not raise
 
     on_disk = json.loads(p.read_text())["entries"]
-    assert 42 in on_disk, f"a mutation deleted a malformed row: {on_disk}"
-    assert [e["id"] for e in on_disk if isinstance(e, dict)] == ["x-0005"]
+    assert [e["id"] for e in on_disk] == ["x-0005"]
+    assert list(tmp_path.glob("graph.json.bak*")), "no backup left to recover the dropped row"
 
 
 def test_scoreboard_reader_stays_silent_and_writes_nothing_on_corruption(

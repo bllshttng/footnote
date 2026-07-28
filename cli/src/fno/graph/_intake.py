@@ -86,7 +86,10 @@ def _find_node(entries: list[dict], node_id: str) -> dict | None:
                 f"{candidate_ids}\n"
             )
         return None
-    return next((e for e in entries if e.get("id") == node_id), None)
+    # isinstance guard: load_graph preserves malformed rows for the corruption
+    # detector in agents/discover.py, and every one of its callers resolves
+    # through here, so this is the one place that has to tolerate them.
+    return next((e for e in entries if isinstance(e, dict) and e.get("id") == node_id), None)
 
 
 def _find_dependents(entries: list[dict], node_id: str) -> list[str]:

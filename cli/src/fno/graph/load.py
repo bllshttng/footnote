@@ -161,7 +161,10 @@ def _entries(data: object) -> list[dict]:
     """
     from fno.graph.store import _apply_graph_defaults
 
-    return _apply_graph_defaults(data.get("entries", []) if isinstance(data, dict) else [])
+    return _apply_graph_defaults(
+        data.get("entries", []) if isinstance(data, dict) else [],
+        keep_malformed=True,
+    )
 
 
 def query_by_source_inbox_msg(msg_id: str, path: Path | None = None) -> list[dict]:
