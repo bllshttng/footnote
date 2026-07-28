@@ -401,8 +401,12 @@ def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
     # here rather than at each call site: every field access below assumes a
     # dict, so a non-dict entry used to surface as a bare AttributeError, which
     # breaks read_graph's "swallow corruption, never crash the terminal"
-    # contract. Nothing downstream -- read or write -- can do anything with such
-    # a row, and the write path has already taken its .bak by this point.
+    # contract.
+    #
+    # Silent HERE on purpose: this runs on every read, including the scoreboard's
+    # optional signal, whose -J output a stray stderr line would make unparseable
+    # (the bug read_graph_nodes exists to avoid). Dropping is only destructive on
+    # the WRITE path, so locked_mutate_graph announces it there instead.
     entries = [e for e in entries if isinstance(e, dict)]
     # In-memory legacy priority backfill so read-only commands (ready,
     # next, status, tree, triage context) sort correctly *before* the
@@ -685,6 +689,20 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
                   f"Restore from backup or delete before proceeding.", file=sys.stderr)
             sys.exit(1)
         entries = _apply_graph_defaults(raw)
+        # The defaults pass drops rows that are not JSON objects so no reader
+        # crashes on them. On this path that drop is PERSISTED by the
+        # _write_json below, so say it out loud: silently deleting a row from
+        # the user's graph is not something a `backlog update` should do without
+        # a word. The prior content survives in the .bak _create_backup takes
+        # just before the write (the on-disk file is untouched until then).
+        _dropped = len(raw) - len(entries)
+        if _dropped > 0:
+            print(
+                f"Warning: dropping {_dropped} malformed graph "
+                f"{'entry' if _dropped == 1 else 'entries'} (not a JSON object) "
+                f"from {path}; prior content is preserved in the .bak sibling",
+                file=sys.stderr,
+            )
         entries = mutator(entries)
         # Slug assignment (ab-f82e8083). Runs on EVERY persisted mutation so any
         # node-creating path (intake / add / idea / decompose / advance) and any

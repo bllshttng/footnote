@@ -45,8 +45,15 @@ def _classify_body() -> str:
 
 
 def _named_statuses() -> set[str]:
-    """Every string literal the classify match arms name."""
-    return set(re.findall(r'"([a-z_-]+)"', _classify_body()))
+    """Every string literal that is actually a classify match arm.
+
+    Anchored on the `=>` rather than matching any quoted token in the body: a
+    status name mentioned in an in-body comment would otherwise count as
+    "named", certifying a gap that is not closed. Today's comments use backticks
+    so nothing is mis-counted, but that is a style convention nothing enforces.
+    """
+    arms = re.findall(r'((?:"[a-z_-]+"\s*\|\s*)*"[a-z_-]+")\s*=>', _classify_body())
+    return {lit for arm in arms for lit in re.findall(r'"([a-z_-]+)"', arm)}
 
 
 @pytest.mark.parametrize(

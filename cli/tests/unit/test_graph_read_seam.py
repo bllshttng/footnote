@@ -95,6 +95,33 @@ def test_missing_graph_is_empty_not_an_error(tmp_path: Path) -> None:
         assert reader(absent) == [], f"{reader.__name__} did not degrade to []"
 
 
+def test_write_path_announces_dropped_rows_and_keeps_a_backup(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Dropping a junk row is silent on reads and LOUD on the write path.
+
+    The defaults pass drops non-dict rows so no reader crashes on them, and
+    `locked_mutate_graph` feeds that same filtered list to `_write_json` -- so on
+    that path the drop is persisted. A `backlog update` must not delete a row
+    from the user's graph without saying so.
+    """
+    from fno.graph.store import locked_mutate_graph
+
+    p = tmp_path / "graph.json"
+    p.write_text(
+        json.dumps({"entries": [{"id": "x-0005", "title": "real"}, 42]}), encoding="utf-8"
+    )
+
+    locked_mutate_graph(p, lambda entries: entries)
+
+    err = capsys.readouterr().err
+    assert "malformed graph" in err, f"write path dropped a row silently: {err!r}"
+
+    surviving = [e["id"] for e in read_graph(p)]
+    assert surviving == ["x-0005"]
+    assert list(tmp_path.glob("graph.json.bak*")), "no backup left to recover the dropped row"
+
+
 def test_scoreboard_reader_stays_silent_and_writes_nothing_on_corruption(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
