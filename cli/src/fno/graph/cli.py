@@ -4884,7 +4884,16 @@ def cmd_validate(
 @cli.command("cost", hidden=True)
 def cmd_cost(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
-    session: Optional[str] = typer.Option(None, "--session-id", help="Session ID"),
+    session: Optional[str] = typer.Option(
+        None,
+        "--session-id",
+        help=(
+            "Run id owning this cost. Recording twice for one id REPLACES the "
+            "row (a session's cost is a level, not an increment), so pass the "
+            "unique fno run id - a shared harness/thread id would let a second "
+            "attempt overwrite the first."
+        ),
+    ),
     session_legacy: Optional[str] = typer.Option(
         None, "--session", hidden=True, help="[DEPRECATED] alias for --session-id."
     ),
