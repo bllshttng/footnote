@@ -25,6 +25,9 @@ BACKFILL = REPO_ROOT / "scripts" / "metrics" / "backfill-cost-recompute.py"
 
 UUID_ALIVE = "11111111-2222-3333-4444-555555555555"
 UUID_GONE = "99999999-8888-7777-6666-555555555555"
+# An alias pair: one run recorded under its transcript uuid AND its fno run id.
+UUID_ALIAS = "22222222-3333-4444-5555-666666666666"
+RUN_ID = "20260727T144023Z-cl92505-ad9f91"
 
 # Per unique message: $1.25 at opus-4.8 rates
 USAGE = {
@@ -59,6 +62,13 @@ def _make_fixture(home: Path, *, live_claim: bool = False, pid_claim: str | None
         for _ in range(3):
             lines.append(_assistant_line(f"msg_{i}", f"req_{i}"))
     (proj / f"{UUID_ALIVE}.jsonl").write_text("\n".join(lines) + "\n")
+    # Separate transcript for the alias-pair entry: distinct message ids, so
+    # `entry_seen` cannot zero it out against the entry above.
+    alias_lines = []
+    for i in range(2):
+        for _ in range(3):
+            alias_lines.append(_assistant_line(f"alias_msg_{i}", f"alias_req_{i}"))
+    (proj / f"{UUID_ALIAS}.jsonl").write_text("\n".join(alias_lines) + "\n")
 
     fno = home / ".fno"
     fno.mkdir(parents=True)
@@ -92,6 +102,13 @@ def _make_fixture(home: Path, *, live_claim: bool = False, pid_claim: str | None
                 "tokens": 100,
                 "cost_usd": 1.23,
                 "timestamp": "2026-06-04T00:00:00",
+            },
+            {
+                "title": "one run under two aliases",
+                "model": "claude-opus-4-8",
+                "sessions": [UUID_ALIAS, RUN_ID],
+                "session_id": RUN_ID,
+                "cost_usd": 77.0,
             },
         ]
     }
@@ -447,3 +464,26 @@ def _main() -> int:
 
 if __name__ == "__main__":
     sys.exit(_main())
+
+
+def test_alias_pair_recomputes_from_the_alias_that_has_a_transcript():
+    """A run recorded under its uuid AND its run id is still recomputable.
+
+    `sessions` is an alias set for one run, and `find_transcript` resolves a
+    uuid only, so requiring every alias to resolve skipped any row carrying its
+    own run id - almost all of them.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        home = Path(td)
+        fx = _make_fixture(home)
+        result = _run(home, fx, "--apply")
+        assert result.returncode == 0, result.stderr
+
+        entry = next(
+            e for e in _entries(fx["ledger"]) if e.get("title") == "one run under two aliases"
+        )
+        assert entry["cost_usd"] == round(2 * COST_PER_MSG, 2), entry
+        assert entry["cost_backfill"] == "recomputed", entry
+        # The run id is an alias, never rewritten into a session of its own.
+        assert entry["sessions"] == [UUID_ALIAS, RUN_ID]
+        assert entry["session_id"] == RUN_ID

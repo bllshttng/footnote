@@ -564,7 +564,7 @@ def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
                     )
                     return
 
-        # Collapse rule (x-88df): a full-fidelity row supersedes reconcile's
+        # Collapse rule: a full-fidelity row supersedes reconcile's
         # backstop floor for the same node. Before appending a row that carries a
         # graph_node_id, drop any existing `backstop: true` row with that id so a
         # node never carries both. The backstop has no fno_id, so finalize's
@@ -605,7 +605,7 @@ def upsert_ledger_pr(
 ) -> str:
     """Stamp or create a ledger row for a merged node, keyed on ``graph_node_id``.
 
-    Reconcile-side backstop (x-88df Part 2) for the transcript-gone tail: the
+    Reconcile-side backstop for the transcript-gone tail: the
     merge event knows ``(node, pr, project, merged_at)`` but no ``finalize`` ran.
     Under the SAME ``/tmp/fno-ledger.lock`` flock the register path uses:
 

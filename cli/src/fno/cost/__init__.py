@@ -176,11 +176,19 @@ def update(
         if fallback_error is not None:
             raise fallback_error
 
-    # Update graph node if provided
+    # Update graph node if provided. `graph_updated` is None when no node was
+    # named; False means the ledger row landed but the node did not get it, a
+    # difference the caller could not previously see.
+    graph_updated = None
     if graph_path and node_id:
-        _update_graph_node(Path(graph_path), node_id, session_id, cost_usd)
+        graph_updated = _update_graph_node(Path(graph_path), node_id, session_id, cost_usd)
 
-    return {"ok": True, "ledger_path": str(ledger_path), "entry": entry}
+    return {
+        "ok": True,
+        "ledger_path": str(ledger_path),
+        "entry": entry,
+        "graph_updated": graph_updated,
+    }
 
 
 def _append_to_ledger(ledger_path: Path, entry: dict[str, Any]) -> None:
@@ -249,63 +257,128 @@ def _append_to_ledger(ledger_path: Path, entry: dict[str, Any]) -> None:
         os.replace(tmp_path, ledger_path)
 
 
-def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd: float) -> None:
-    """Append cost session to graph node and update cumulative cost_usd."""
-    from filelock import FileLock
-    import tempfile
-    import os
+_COST_NDIGITS = 4
+
+
+def _as_cost(value: Any) -> float:
+    """Coerce a stored cost to a float; junk reads as 0.0 rather than raising.
+
+    Costs come off disk, so bool/None/str all reach the sum. `graph/triage.py`
+    excludes bools for the same reason: `float(True)` is a silent 1.0.
+    """
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def upsert_cost_session(node: dict[str, Any], session_id: str, cost_usd: float) -> None:
+    """Record one session's cost on a graph node, replacing any prior row.
+
+    A session's cost is a LEVEL that gets re-reported (a resumed run, a second
+    `fno cost` call for the same session), not an increment to accumulate.
+    Appending and re-summing double-counts it, so the row for `session_id` is
+    replaced in place when it already exists. `cost_usd` is then re-derived
+    from the rows, never incremented.
+
+    Rounding is fixed for every writer. A per-caller precision made one node's
+    total depend on which surface wrote it last; a receipt wanting cents formats
+    its own output instead of changing what is stored.
+
+    Legacy and hand-edited graphs carry a non-list `cost_sessions`, non-dict
+    rows, and string costs - `graph/triage.py` defends against those same shapes
+    on the read side. Drop what cannot be a cost row rather than raising: this
+    runs at session finalize, where an exception loses the attribution entirely.
+    """
+    rows = node.get("cost_sessions")
+    rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+    row = {
+        "session_id": session_id,
+        "cost_usd": round(_as_cost(cost_usd), _COST_NDIGITS),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    for existing in rows:
+        if existing.get("session_id") == session_id:
+            existing.update(row)
+            break
+    else:
+        rows.append(row)
+    node["cost_sessions"] = rows
+    node["cost_usd"] = round(sum(_as_cost(r.get("cost_usd")) for r in rows), _COST_NDIGITS)
+
+
+def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd: float) -> bool:
+    """Record this session's cost on the graph node (upsert, not append).
+
+    Returns True when the cost landed on the node, False when it was skipped.
+    Cost attribution is best-effort and must never abort the caller, so every
+    failure degrades to stderr plus a False rather than an exception.
+
+    Goes through locked_mutate_graph rather than writing graph.json directly.
+    A hand-rolled writer here took a DIFFERENT lockfile than the canonical one
+    (which resolves symlinks first, and footnote's worktree setup symlinks
+    `.fno/`), so the two writers did not mutually exclude; it also rewrote a
+    legacy root-list graph.json as an empty `{"entries": []}` and left the
+    sha256 sidecar stale, which made the next reader raise and every later cost
+    attribution silently skip.
+    """
+    from fno.graph.store import locked_mutate_graph
 
     if not graph_path.exists():
-        return
+        # The likeliest cause is a worktree whose `.fno/` symlink was never
+        # healed by setup-worktree.sh, so say it rather than skipping in silence.
+        print(
+            f"cost._update_graph_node: no graph at {graph_path}; "
+            "cost not attributed",
+            file=sys.stderr,
+        )
+        return False
 
-    lock_path = str(graph_path) + ".lock"
-    with FileLock(lock_path, timeout=10):
-        try:
-            from fno.graph.load import load_graph, GraphCorruptionError
-            entries = load_graph(graph_path)
-            raw = {"entries": entries}
-        except GraphCorruptionError as e:
-            # Hash mismatch -- surface it but do not abort cost attribution entirely.
-            print(
-                f"cost._update_graph_node: {e}; "
-                "cost attribution skipped for this session",
-                file=sys.stderr,
-            )
-            return
-        except (json.JSONDecodeError, ValueError):
-            # Surface parse failure to stderr so corruption does not silently
-            # drop cost attribution. Do not overwrite the file.
-            print(
-                f"cost._update_graph_node: graph.json parse failed at {graph_path}; "
-                "cost attribution skipped for this session",
-                file=sys.stderr,
-            )
-            return
+    found = False
 
+    def mutator(entries):
+        nonlocal found
         for node in entries:
-            if not isinstance(node, dict):
-                continue
-            if node.get("id") == node_id:
-                sessions = node.get("cost_sessions", [])
-                sessions.append({
-                    "session_id": session_id,
-                    "cost_usd": round(float(cost_usd), 4),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-                node["cost_sessions"] = sessions
-                node["cost_usd"] = round(sum(s["cost_usd"] for s in sessions), 4)
+            if isinstance(node, dict) and node.get("id") == node_id:
+                upsert_cost_session(node, session_id, cost_usd)
+                found = True
                 break
+        return entries
 
-        raw["entries"] = entries
-        content = json.dumps(raw, indent=2)
-        with tempfile.NamedTemporaryFile(
-            mode="w", dir=graph_path.parent,
-            prefix=f".{graph_path.name}.", suffix=".tmp",
-            delete=False, encoding="utf-8",
-        ) as tmp:
-            tmp.write(content)
-            tmp_path = Path(tmp.name)
-        os.replace(tmp_path, graph_path)
+    try:
+        locked_mutate_graph(graph_path, mutator)
+    except SystemExit:
+        # locked_mutate_graph exits on an unreadable graph. That is right for a
+        # backlog command and wrong here: a corrupt graph must not take down the
+        # session whose cost we are recording. It has already explained itself
+        # on stderr, and it leaves the file untouched.
+        print(
+            f"cost._update_graph_node: graph unreadable at {graph_path}; "
+            "cost attribution skipped for this session",
+            file=sys.stderr,
+        )
+        return False
+    except Exception as exc:
+        # locked_mutate_graph does far more than the mutator after it returns
+        # (backup, atomic write, sidecar, md render, status recompute), and any
+        # of it can raise on a full disk or a read-only .fno. "Best-effort" has
+        # to mean every failure, or the promise above is one the code breaks.
+        print(
+            f"cost._update_graph_node: {type(exc).__name__} writing {graph_path}: {exc}; "
+            "cost attribution skipped for this session",
+            file=sys.stderr,
+        )
+        return False
+
+    if not found:
+        print(
+            f"cost._update_graph_node: node {node_id} not found in {graph_path}; "
+            "cost not attributed",
+            file=sys.stderr,
+        )
+    return found
 
 
 # ---- check_budget ----

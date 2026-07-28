@@ -175,15 +175,32 @@ def live_claims(claims_dir: Path) -> list[str]:
 def recompute_entry(entry: dict, entry_seen: set) -> tuple[object, dict[str, float]] | None:
     """Recompute an entry's metrics from its surviving transcripts.
 
-    Returns (combined SessionMetrics, {session_id: cost_usd}) or None when
-    any of the entry's sessions lacks a transcript (a partial recompute
-    would silently drop the missing sessions' cost - never guess).
+    Returns (combined SessionMetrics, {session_id: cost_usd}) or None when the
+    entry has no surviving transcript at all.
+
+    `sessions` is an ALIAS SET for one run, not a list of runs: `_register.py`
+    records the minted run id beside the transcript uuid, and `find_transcript`
+    resolves a uuid only. Requiring EVERY alias to resolve therefore skipped any
+    row that carried its own run id - 437 of 453 rows on the ledger this was
+    measured against, 397 of them holding a uuid that resolves fine. Drop the
+    aliases that name no transcript and recompute from the ones that do; that
+    is not the partial recompute this guard was written to prevent, because the
+    dropped names are other spellings of a run already counted.
     """
     sessions = entry.get("sessions") or []
     if not sessions:
         return None
-    paths = [(sid, session_cost.find_transcript(sid)) for sid in sessions]
-    if any(path is None for _, path in paths):
+    # Two aliases of one run can resolve to the same transcript; parse it once
+    # rather than relying on `entry_seen` to zero out the duplicate.
+    paths: list[tuple[str, str]] = []
+    seen_paths: set[str] = set()
+    for sid in sessions:
+        path = session_cost.find_transcript(sid)
+        if path is None or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        paths.append((sid, path))
+    if not paths:
         return None
 
     branch = entry.get("branch")
